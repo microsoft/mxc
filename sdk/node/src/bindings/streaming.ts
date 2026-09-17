@@ -17,7 +17,7 @@ import {
 } from './native-error.js';
 import type {
   SandboxProcessBinding,
-  SandboxProcessWaitResult,
+  SandboxWaitResult,
   SandboxReadableBinding,
   SandboxWritableBinding,
 } from './streaming-types.js';
@@ -44,8 +44,8 @@ interface StreamingApi {
   id(handle: Pointer): number;
   warnings(handle: Pointer): string[];
   outputMetadata(handle: Pointer): unknown | undefined;
-  tryWait(handle: Pointer): SandboxProcessWaitResult & { running: boolean };
-  wait(handle: Pointer): SandboxProcessWaitResult;
+  tryWait(handle: Pointer): SandboxWaitResult & { running: boolean };
+  wait(handle: Pointer): SandboxWaitResult;
   kill(handle: Pointer): void;
   freeSandbox(handle: Pointer): void;
   read: ReadFunction;
@@ -337,7 +337,7 @@ function takeReadable(
 function readTryWait(
   native: BoundStreamingFunctions,
   sandbox: Pointer,
-): SandboxProcessWaitResult & { running: boolean } {
+): SandboxWaitResult & { running: boolean } {
   const exitCode = [0];
   const running = [0];
   const timedOut = [0];
@@ -355,7 +355,7 @@ function readTryWait(
 function readWait(
   native: BoundStreamingFunctions,
   sandbox: Pointer,
-): SandboxProcessWaitResult {
+): SandboxWaitResult {
   const exitCode = [0];
   const timedOut = [0];
   throwIfFailed(
@@ -543,10 +543,15 @@ class StreamingProcessBinding implements SandboxProcessBinding {
     private readonly api: StreamingApi,
     private readonly handle: Pointer,
     readonly id: number,
-    readonly warnings: readonly string[],
   ) {}
 
+  warnings(): readonly string[] {
+    this.ensureLive();
+    return this.api.warnings(this.handle);
+  }
+
   takeStdin(): SandboxWritableBinding | null {
+    this.ensureLive();
     if (this.stdinTaken) return null;
     this.stdinTaken = true;
     const stream = this.api.takeStdin(this.handle);
@@ -554,6 +559,7 @@ class StreamingProcessBinding implements SandboxProcessBinding {
   }
 
   takeStdout(): SandboxReadableBinding | null {
+    this.ensureLive();
     if (this.stdoutTaken) return null;
     this.stdoutTaken = true;
     const stream = this.api.takeStdout(this.handle);
@@ -561,25 +567,30 @@ class StreamingProcessBinding implements SandboxProcessBinding {
   }
 
   takeStderr(): SandboxReadableBinding | null {
+    this.ensureLive();
     if (this.stderrTaken) return null;
     this.stderrTaken = true;
     const stream = this.api.takeStderr(this.handle);
     return stream === null ? null : new StreamingReadableBinding(this.api, stream.stream, stream.closer, 'stderr');
   }
 
-  tryWait(): SandboxProcessWaitResult & { running: boolean } {
+  tryWait(): SandboxWaitResult & { running: boolean } {
+    this.ensureLive();
     return this.api.tryWait(this.handle);
   }
 
-  wait(): SandboxProcessWaitResult {
+  wait(): SandboxWaitResult {
+    this.ensureLive();
     return this.api.wait(this.handle);
   }
 
   outputMetadata(): unknown | undefined {
+    this.ensureLive();
     return this.api.outputMetadata(this.handle);
   }
 
   kill(): void {
+    this.ensureLive();
     this.api.kill(this.handle);
   }
 
@@ -587,6 +598,10 @@ class StreamingProcessBinding implements SandboxProcessBinding {
     if (this.freed) return;
     this.freed = true;
     this.api.freeSandbox(this.handle);
+  }
+
+  private ensureLive(): void {
+    if (this.freed) throw new Error('sandbox process binding has been freed');
   }
 }
 
@@ -611,7 +626,6 @@ export function spawnStreamingProcessBinding(
       api,
       outHandle[0],
       api.id(outHandle[0]),
-      api.warnings(outHandle[0]),
     );
   } catch (errorValue) {
     if (outHandle[0] !== null) api.freeSandbox(outHandle[0]);

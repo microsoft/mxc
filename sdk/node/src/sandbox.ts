@@ -683,30 +683,28 @@ export interface SandboxSpawnOptions {
   skipPlatformCheck?: boolean;
 
   /**
-   * PTY options to pass to node-pty (only used by spawnSandbox)
+   * Executor-only PTY options. In-process APIs reject this option.
    */
   ptyOptions?: pty.IPtyForkOptions;
 
   /**
-   * Dry run mode: parse and validate config without executing.
-   * The native binary validates the config then exits.
+   * Executor-only dry-run mode. In-process APIs reject this option.
    */
   dryRun?: boolean;
 
   /**
-   * Directory for diagnostic log files
+   * Executor-only diagnostic log directory. In-process APIs reject this option.
    */
   logDir?: string;
 
   /**
-   * When false, uses child_process.spawn instead of node-pty.
-   * Provides reliable exit codes and separate stdout/stderr streams.
-   * Defaults to true (uses PTY).
+   * Executor-only PTY selection. In-process APIs always use separate pipes and
+   * reject this option.
    */
   usePty?: boolean;
 
   /**
-   * Optional cancellation signal. Live in-process execution kills the
+   * Optional cancellation signal. Streaming in-process execution kills the
    * sandbox when the signal aborts.
    *
    * Cancellation is best-effort: killing the executor mid-call leaves
@@ -740,7 +738,10 @@ function wireAbortToProcess(
   proc._registerCleanup(() => signal.removeEventListener('abort', onAbort));
 }
 
-function unsupportedInProcessRunOption(options: SandboxSpawnOptions): string | undefined {
+function unsupportedInProcessRunOption(
+  options: SandboxSpawnOptions,
+  supportsSignal = false,
+): string | undefined {
   if (options.debug === true) return 'debug';
   if (options.allowTestingFeatures === true) return 'allowTestingFeatures';
   if (options.skipPlatformCheck === true) return 'skipPlatformCheck';
@@ -748,8 +749,8 @@ function unsupportedInProcessRunOption(options: SandboxSpawnOptions): string | u
   if (options.ptyOptions !== undefined) return 'ptyOptions';
   if (options.dryRun === true) return 'dryRun';
   if (options.logDir !== undefined) return 'logDir';
-  if (options.usePty === true) return 'usePty';
-  if (options.signal !== undefined) return 'signal';
+  if (options.usePty !== undefined) return 'usePty';
+  if (!supportsSignal && options.signal !== undefined) return 'signal';
   return undefined;
 }
 
@@ -874,7 +875,7 @@ function spawnConfig(
   workingDirectory?: string,
   env?: { [key: string]: string | undefined },
 ): MxcSandboxProcess {
-  const unsupportedOption = unsupportedInProcessRunOption(options);
+  const unsupportedOption = unsupportedInProcessRunOption(options, true);
   if (unsupportedOption !== undefined) {
     throw new MxcError(
       'malformed_request',
@@ -899,7 +900,7 @@ function spawnConfig(
  * Spawn a sandboxed process through the native runtime.
  *
  * This preserves the existing policy-based entry point while replacing its
- * executor-backed implementation with a live pipe process.
+ * executor-backed implementation with a streaming pipe process.
  */
 export function spawnSandbox(
   script: string,

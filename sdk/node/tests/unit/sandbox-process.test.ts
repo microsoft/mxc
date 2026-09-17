@@ -29,6 +29,51 @@ class FakeReadable implements SandboxReadableBinding {
   }
 }
 
+class DeferredReadable implements SandboxReadableBinding {
+  private releaseRead?: () => void;
+  private delivered = false;
+
+  read(buffer: Buffer): Promise<number> {
+    if (this.delivered) return Promise.resolve(0);
+    return new Promise((resolve) => {
+      this.releaseRead = () => {
+        this.delivered = true;
+        const chunk = Buffer.from('trailing');
+        chunk.copy(buffer);
+        resolve(chunk.length);
+      };
+    });
+  }
+
+  release(): void {
+    this.releaseRead?.();
+  }
+
+  close(): void {}
+  free(): void {}
+}
+
+class CloseableBlockedReadable implements SandboxReadableBinding {
+  closed = false;
+  freed = false;
+  private completeRead?: (count: number) => void;
+
+  read(): Promise<number> {
+    return new Promise((resolve) => {
+      this.completeRead = resolve;
+    });
+  }
+
+  close(): void {
+    this.closed = true;
+    this.completeRead?.(0);
+  }
+
+  free(): void {
+    this.freed = true;
+  }
+}
+
 class FakeWritable implements SandboxWritableBinding {
   readonly writes: string[] = [];
   flushed = false;
@@ -48,12 +93,14 @@ class FakeWritable implements SandboxWritableBinding {
 }
 
 class FakeBinding implements SandboxProcessBinding {
-  readonly warnings = ['relaxed'];
+  warningValues = ['relaxed'];
+  warningReads = 0;
+  outputMetadataReads = 0;
   readonly stdoutEvents: string[] = [];
   readonly stderrEvents: string[] = [];
   readonly stdin = new FakeWritable();
-  readonly stdout = new FakeReadable([Buffer.from('out'), null], this.stdoutEvents);
-  readonly stderr = new FakeReadable([Buffer.from('err'), null], this.stderrEvents);
+  stdout: SandboxReadableBinding = new FakeReadable([Buffer.from('out'), null], this.stdoutEvents);
+  stderr: SandboxReadableBinding = new FakeReadable([Buffer.from('err'), null], this.stderrEvents);
   killed = false;
   freed = false;
   waitCalls = 0;
@@ -66,6 +113,10 @@ class FakeBinding implements SandboxProcessBinding {
     private readonly metadata: unknown = { tag: 'done' },
   ) {}
 
+  warnings(): readonly string[] {
+    this.warningReads += 1;
+    return this.warningValues;
+  }
   takeStdin(): SandboxWritableBinding | null {
     return this.stdin;
   }
@@ -88,6 +139,7 @@ class FakeBinding implements SandboxProcessBinding {
     return this.waitResult;
   }
   outputMetadata(): unknown {
+    this.outputMetadataReads += 1;
     return this.metadata;
   }
   kill(): void {
@@ -161,8 +213,8 @@ describe('native streaming spawn APIs', () => {
   it('surfaces stdout as a Node readable stream', async () => {
     const proc = _createMxcSandboxProcess(new FakeBinding(8, 0));
     const chunks: Buffer[] = [];
-    proc.stdout!.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
-    await once(proc.stdout!, 'end');
+    proc.standardOutput!.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+    await once(proc.standardOutput!, 'end');
 
     assert.strictEqual(Buffer.concat(chunks).toString('utf8'), 'out');
     proc.dispose();
@@ -171,36 +223,162 @@ describe('native streaming spawn APIs', () => {
   it('writes to stdin and exposes terminal metadata after wait', async () => {
     const binding = new FakeBinding(9, 1);
     const proc = _createMxcSandboxProcess(binding);
-    proc.stdin!.end('hello');
-    await once(proc.stdin!, 'finish');
+    proc.standardInput!.end('hello');
+    await once(proc.standardInput!, 'finish');
 
     assert.deepStrictEqual(binding.stdin.writes, ['hello']);
     assert.strictEqual(binding.stdin.flushed, true);
-    assert.deepStrictEqual(await proc.wait(), { exitCode: 7, timedOut: false });
+    assert.deepStrictEqual(await proc.waitAsync(), { exitCode: 7, timedOut: false });
     assert.deepStrictEqual(proc.outputMetadata, { tag: 'done' });
+    assert.strictEqual(binding.freed, true);
+  });
+
+  it('refreshes warnings before releasing the terminal handle', async () => {
+    const binding = new FakeBinding(12, 0);
+    const proc = _createMxcSandboxProcess(binding);
+    assert.deepStrictEqual(proc.warnings, ['relaxed']);
+    binding.warningValues = ['relaxed', 'cleanup warning'];
+
+    await proc.waitAsync();
+
+    assert.deepStrictEqual(proc.warnings, ['relaxed', 'cleanup warning']);
+    assert.strictEqual(binding.freed, true);
   });
 
   it('drains untaken output streams while waiting', async () => {
     const binding = new FakeBinding(5, 1);
     const proc = _createMxcSandboxProcess(binding);
 
-    await proc.wait();
+    await proc.waitAsync();
     await new Promise((resolve) => setImmediate(resolve));
 
-    assert.throws(() => proc.stdout, /drained internally by wait/);
+    assert.throws(() => proc.standardOutput, /drained internally by wait/);
     assert.ok(binding.stdoutEvents.includes('free-read'));
     assert.ok(binding.stderrEvents.includes('free-read'));
+  });
+
+  it('waits for an owned output stream to deliver its final chunk', async () => {
+    const binding = new FakeBinding(16, 0);
+    const deferred = new DeferredReadable();
+    binding.stdout = deferred;
+    const proc = _createMxcSandboxProcess(binding);
+    let output = '';
+    proc.standardOutput!.on('data', (chunk) => {
+      output += chunk.toString();
+    });
+    let settled = false;
+    const wait = proc.waitAsync().then((result) => {
+      settled = true;
+      return result;
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.strictEqual(settled, false);
+    deferred.release();
+
+    assert.deepStrictEqual(await wait, { exitCode: 7, timedOut: false });
+    assert.strictEqual(output, 'trailing');
+  });
+
+  it('bounds terminal output draining when an inherited handle never reaches EOF', async () => {
+    const binding = new FakeBinding(19, 0);
+    const blocked = new CloseableBlockedReadable();
+    binding.stdout = blocked;
+    const proc = _createMxcSandboxProcess(binding);
+    proc.standardOutput!.resume();
+
+    assert.deepStrictEqual(await proc.waitAsync(), { exitCode: 7, timedOut: false });
+    assert.strictEqual(blocked.closed, true);
+    assert.strictEqual(blocked.freed, true);
+  });
+
+  it('does not access the native process handle after disposal races finalization', async () => {
+    const binding = new FakeBinding(20, 0);
+    const deferred = new DeferredReadable();
+    binding.stdout = deferred;
+    const proc = _createMxcSandboxProcess(binding);
+    proc.standardOutput!.resume();
+    const wait = proc.waitAsync();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    proc.dispose();
+    deferred.release();
+
+    await assert.rejects(wait, /disposed/);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.strictEqual(binding.warningReads, 1);
+    assert.strictEqual(binding.outputMetadataReads, 0);
+    assert.strictEqual(binding.freed, true);
   });
 
   it('enforces the policy timeout by killing before the final wait', async () => {
     const binding = new FakeBinding(3, Number.MAX_SAFE_INTEGER, { exitCode: -1, timedOut: false });
     const proc = _createMxcSandboxProcess(binding, 0.001);
 
-    const result = await proc.wait();
+    const result = await proc.waitAsync();
 
     assert.deepStrictEqual(result, { exitCode: -1, timedOut: true });
     assert.strictEqual(binding.killed, true);
     assert.strictEqual(binding.waitCalls, 1);
+  });
+
+  it('does not report a timeout when completion wins the deadline recheck', async () => {
+    class DeadlineRaceBinding extends FakeBinding {
+      override tryWait() {
+        this.polls += 1;
+        return {
+          running: this.polls < 2,
+          exitCode: 0,
+          timedOut: false,
+        };
+      }
+    }
+    const binding = new DeadlineRaceBinding(13, 0, { exitCode: 0, timedOut: false });
+    const proc = _createMxcSandboxProcess(binding, 0.001);
+
+    const result = await proc.waitAsync();
+
+    assert.deepStrictEqual(result, { exitCode: 0, timedOut: false });
+    assert.strictEqual(binding.killed, false);
+  });
+
+  it('accepts an empty stdin write without calling the native binding', async () => {
+    const binding = new FakeBinding(14, 0);
+    const proc = _createMxcSandboxProcess(binding);
+
+    proc.standardInput!.write(Buffer.alloc(0));
+    proc.standardInput!.end();
+    await once(proc.standardInput!, 'finish');
+
+    assert.deepStrictEqual(binding.stdin.writes, []);
+    proc.dispose();
+  });
+
+  it('rejects stream acquisition after disposal', () => {
+    const proc = _createMxcSandboxProcess(new FakeBinding(15, 0));
+    proc.dispose();
+
+    assert.throws(() => proc.standardInput, /disposed/);
+    assert.throws(() => proc.standardOutput, /disposed/);
+    assert.throws(() => proc.standardError, /disposed/);
+  });
+
+  it('rejects new native operations after terminal handle release', async () => {
+    const proc = _createMxcSandboxProcess(new FakeBinding(17, 0));
+    await proc.waitAsync();
+
+    assert.throws(() => proc.standardInput, /terminal completion/);
+    assert.throws(() => proc.kill(), /terminal completion/);
+  });
+
+  it('releases the native handle when initial warning retrieval fails', () => {
+    const binding = new FakeBinding(18, 0);
+    binding.warnings = () => {
+      throw new Error('warning retrieval failed');
+    };
+
+    assert.throws(() => _createMxcSandboxProcess(binding), /warning retrieval failed/);
+    assert.strictEqual(binding.freed, true);
   });
 
   it('removes the abort listener after terminal completion', async () => {
@@ -215,7 +393,7 @@ describe('native streaming spawn APIs', () => {
     );
     assert.strictEqual(getEventListeners(controller.signal, 'abort').length, 1);
 
-    await proc.wait();
+    await proc.waitAsync();
 
     assert.strictEqual(getEventListeners(controller.signal, 'abort').length, 0);
     proc.dispose();
