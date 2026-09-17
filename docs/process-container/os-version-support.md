@@ -159,13 +159,17 @@ The release matrix describes the legacy schema 0.6/0.7 implementation.
 Notes:
 - Capability- and firewall-based network enforcement is an AppContainer
   primitive and works on every release.
-- General host-loopback communication for ProcessContainer requires the
-  Windows OS support for unrestricted loopback access. It is available in
-  the Windows 11 Insider Release Preview builds 26100.9539 and 26200.9539,
-  released September 10, 2026, through KB5124010. Microsoft is rolling this
-  update out in phases. Rollout to supported Windows 11 24H2 and later systems
-  is expected to begin during the week of September 22, 2026; replace
-  this note with the final servicing KB when Microsoft publishes it.
+> [!NOTE]
+> General host-loopback communication for ProcessContainer requires the
+> Windows OS support for unrestricted loopback access. It is available in
+> the Windows 11 Insider Release Preview builds 26100.9539 and 26200.9539,
+> released September 10, 2026, through KB5124010. Microsoft is rolling this
+> update out in phases. Rollout to supported Windows 11 24H2 and later systems
+> is expected to begin during the week of September 22, 2026. This document
+> will be updated with the correct servicing KB numbers when Microsoft
+> publishes them. See the [Windows release health dashboard][windows-release-health]
+> and [Windows 11 release information][windows-release-information] for the
+> latest rollout status and update history.
 - This capability is distinct from the connection-scoped loopback permission
   used by `runtimeConfig.networkProxy`. `ingress.hostLoopback: "allow"` is
   general host-loopback communication and can permit unsolicited inbound
@@ -235,3 +239,6 @@ and later (`MIN_BUILD_FOR_INJECTION_LIMIT`) and is therefore unavailable on
 - FlatBuffer contract: `external/windows-sdk/BaseContainerSpecification.fbs`
 - Product support floor: [README](../../README.md#platforms),
   [SDK README](../../sdk/node/README.md)
+
+[windows-release-health]: https://learn.microsoft.com/en-us/windows/release-health/
+[windows-release-information]: https://learn.microsoft.com/en-us/windows/release-health/windows11-release-information
