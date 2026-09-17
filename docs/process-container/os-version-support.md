@@ -163,8 +163,8 @@ Notes:
   Windows OS support for unrestricted loopback access. It is available in
   the Windows 11 Insider Release Preview builds 26100.9539 and 26200.9539,
   released September 10, 2026, through KB5124010. Microsoft is rolling this
-  update out in phases. Broad availability for supported Windows 11 24H2 and
-  later systems is expected during the week of September 22, 2026; replace
+  update out in phases. Rollout to supported Windows 11 24H2 and later systems
+  is expected to begin during the week of September 22, 2026; replace
   this note with the final servicing KB when Microsoft publishes it.
 - This capability is distinct from the connection-scoped loopback permission
   used by `runtimeConfig.networkProxy`. `ingress.hostLoopback: "allow"` is
