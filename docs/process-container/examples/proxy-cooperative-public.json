@@ -1,0 +1,34 @@
+{
+  "_comment": "This direct cooperative proxy example uses one public documentation IP and port. Replace 203.0.113.10 with the permitted public proxy address before use; public proxy addresses are not supported by runtimeConfig.networkProxy.",
+  "version": "0.8.0-alpha",
+  "containerId": "ProcessContainerPublicProxy",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"$env:HTTP_PROXY='http://203.0.113.10:8080'; $env:HTTPS_PROXY='http://203.0.113.10:8080'; curl.exe --fail --show-error --silent https://www.example.com/\"",
+    "timeout": 30000
+  },
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [
+            {
+              "cidr": "203.0.113.10/32"
+            }
+          ],
+          "ports": [
+            {
+              "protocol": "tcp",
+              "port": 8080
+            }
+          ]
+        }
+      ]
+    },
+    "ingress": {
+      "default": "deny",
+      "hostLoopback": "deny"
+    }
+  }
+}

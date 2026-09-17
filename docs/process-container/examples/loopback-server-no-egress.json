@@ -1,7 +1,7 @@
 {
-  "_comment": "This container intentionally exposes a TCP listener on host loopback and permits unrestricted outbound traffic. The egress default can be changed to deny when the server does not need internet access; see loopback-server-no-egress.json.",
+  "_comment": "This container intentionally exposes a TCP listener on host loopback but denies outbound traffic. Use loopback-server.json when the server also needs unrestricted internet egress.",
   "version": "0.8.0-alpha",
-  "containerId": "ProcessContainerLoopbackServer",
+  "containerId": "ProcessContainerLoopbackServerNoEgress",
   "containment": "processcontainer",
   "process": {
     "commandLine": "powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"$listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Any, 8081); $listener.Start(); Write-Output 'LISTENING=http://127.0.0.1:8081/'; $client = $listener.AcceptTcpClient(); $stream = $client.GetStream(); $buffer = [byte[]]::new(4096); $null = $stream.Read($buffer, 0, $buffer.Length); $response = [Text.Encoding]::ASCII.GetBytes('HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\nConnection: close\\r\\n\\r\\nOK'); $stream.Write($response, 0, $response.Length); $stream.Flush(); $client.Dispose(); $listener.Stop()\"",
@@ -9,7 +9,7 @@
   },
   "network": {
     "egress": {
-      "default": "allow"
+      "default": "deny"
     },
     "ingress": {
       "default": "deny",
