@@ -2,7 +2,7 @@
     "473" = @{
         FriendlyName = "Packaged App Launch"
         Script = "test_cases\Invoke-Issue473-PackagedApp.ps1"
-        ExpectedTierSupport = @("appcontainer-bfs", "appcontainer-dacl", "base-container-psec", "base-container-sbox")
+        ExpectedTierSupport = @("appcontainer-bfs", "appcontainer-dacl", "base-container-psec")
         Prerequisites = @("wxc-exec", "MSIX packaged Notepad")
         HarnessArguments = "Default"
         Destructive = $false
@@ -10,7 +10,7 @@
     "483" = @{
         FriendlyName = "Bun Runtime Launch"
         Script = "test_cases\Invoke-Issue483-BunAndSparsePath.ps1"
-        ExpectedTierSupport = @("appcontainer-bfs", "appcontainer-dacl", "base-container-psec", "base-container-sbox")
+        ExpectedTierSupport = @("appcontainer-bfs", "appcontainer-dacl", "base-container-psec")
         Prerequisites = @("wxc-exec", "Bun")
         Dependencies = @(
             @{
@@ -58,7 +58,7 @@
     "785" = @{
         FriendlyName = "Capture Probe Agreement"
         Script = "test_cases\Invoke-Issue785-ProbeCaptureDenials.ps1"
-        ExpectedTierSupport = @("appcontainer-bfs", "appcontainer-dacl", "base-container-sbox")
+        ExpectedTierSupport = @("appcontainer-bfs", "appcontainer-dacl", "base-container-psec")
         Prerequisites = @("wxc-exec", "captureDenials support")
         HarnessArguments = "Default"
         Destructive = $false
@@ -66,7 +66,7 @@
     "825" = @{
         FriendlyName = "PowerShell Provider Location"
         Script = "test_cases\Invoke-Issue825-PowerShellProviderLocation.ps1"
-        ExpectedTierSupport = @("appcontainer-bfs", "appcontainer-dacl", "base-container-psec", "base-container-sbox")
+        ExpectedTierSupport = @("appcontainer-bfs", "appcontainer-dacl", "base-container-psec")
         Prerequisites = @("wxc-exec", "secondary NTFS volume", "PowerShell")
         HarnessArguments = "SecondaryDrive"
         Destructive = $false
@@ -74,7 +74,7 @@
     "902" = @{
         FriendlyName = "Relative Working Directory"
         Script = "test_cases\Invoke-Issue902-RelativeWorkingDirectory.ps1"
-        ExpectedTierSupport = @("appcontainer-bfs", "appcontainer-dacl", "base-container-psec", "base-container-sbox")
+        ExpectedTierSupport = @("appcontainer-bfs", "appcontainer-dacl", "base-container-psec")
         Prerequisites = @("wxc-exec")
         HarnessArguments = "Default"
         Destructive = $false
@@ -82,7 +82,7 @@
     "1061" = @{
         FriendlyName = "MSYS Object Namespace"
         Script = "test_cases\Invoke-Issue1061-MsysBaseNamedObjects.ps1"
-        ExpectedTierSupport = @("appcontainer-bfs", "appcontainer-dacl", "base-container-psec", "base-container-sbox")
+        ExpectedTierSupport = @("appcontainer-bfs", "appcontainer-dacl", "base-container-psec")
         Prerequisites = @("wxc-exec", "Git Bash or MSYS2")
         Dependencies = @(
             @{
@@ -99,7 +99,7 @@
     "1102" = @{
         FriendlyName = "Default PATH Inheritance"
         Script = "test_cases\Invoke-Issue1102-DefaultPath.ps1"
-        ExpectedTierSupport = @("appcontainer-bfs", "appcontainer-dacl", "base-container-psec", "base-container-sbox")
+        ExpectedTierSupport = @("appcontainer-bfs", "appcontainer-dacl", "base-container-psec")
         Prerequisites = @("wxc-exec")
         HarnessArguments = "Default"
         Destructive = $false
@@ -107,16 +107,16 @@
     "1109" = @{
         FriendlyName = "Volume Root Grant"
         Script = "test_cases\Invoke-Issue1109-BaseContainerVolumeRoot.ps1"
-        ExpectedTierSupport = @("base-container-psec", "base-container-sbox")
+        ExpectedTierSupport = @("base-container-psec")
         Prerequisites = @("wxc-exec", "BaseContainer-capable host")
         HarnessArguments = "Default"
         Destructive = $false
     }
     "1130" = @{
-        FriendlyName = "SBOX Environment Fallback"
+        FriendlyName = "PSEC Sparse Environment Rejection"
         Script = "test_cases\Invoke-Issue1130-SboxSparseEnvironment.ps1"
-        ExpectedTierSupport = @("base-container-sbox")
-        Prerequisites = @("wxc-exec", "SBOX-capable host")
+        ExpectedTierSupport = @("base-container-psec")
+        Prerequisites = @("wxc-exec", "PSEC BaseContainer-capable host")
         HarnessArguments = "Default"
         Destructive = $false
     }

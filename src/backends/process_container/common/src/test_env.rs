@@ -104,7 +104,7 @@ impl Drop for BcUsableGuard {
 
 /// Forces both BaseContainer usability and native-capture availability while
 /// holding the shared environment lock. This distinguishes native PSEC/V2
-/// capture from legacy SBOX + guarded-WPR selection in dispatcher tests.
+/// capture from AppContainer + guarded-WPR selection in dispatcher tests.
 pub(crate) struct CaptureCapabilityGuard {
     _lock: MutexGuard<'static, ()>,
 }

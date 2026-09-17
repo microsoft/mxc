@@ -52,8 +52,7 @@ impl FileSystemBfsManager {
     ///
     /// Unlike `remove_configuration`, this does not check whether `configure()`
     /// was called first -- it always runs `bfscfg.exe --clearpolicy`. Use this
-    /// for cleanup of externally-created sandboxes (e.g., BaseContainer profiles
-    /// created by the OS via `CreateProcessInSandbox`).
+    /// for cleanup of externally-created AppContainer profiles.
     pub fn clear_policy(app_container_name: &str, logger: &mut Logger) {
         let bfscfg_path = crate::fallback_detector::find_bfscfg_exe().unwrap_or(None);
         let mut mgr = Self::new(app_container_name.to_string(), bfscfg_path);

@@ -258,8 +258,8 @@ pub struct ProcessContainerNetwork {
 /// Windows denial-capture settings. The presence of the `captureDenials`
 /// object enables capture; all fields are optional. Native capture requires
 /// the complete compatible PSEC plus V2 Learning Mode API set. Requests that
-/// native capture cannot represent use guarded WPR with a compatible legacy
-/// SBOX or AppContainer containment tier.
+/// native capture cannot represent use guarded WPR with a compatible
+/// AppContainer containment tier.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

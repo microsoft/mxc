@@ -216,7 +216,7 @@ vector is overkill for a menu.
 
 The named tier is  the strongest isolation the host is capable
 of. A real request can still end up **lower**: some policy options force a
-weaker tier (e.g. `deniedPaths` on a host without `SANDBOX_CAP_FS_DENY`
+weaker tier (e.g. `deniedPaths` on a host without `PSE_SUPPORT_FS_DENY`
 support, or `preferBaseContainer=false`). 
 
 ### 7.4 Which tier gets named is based on precedence, not policy

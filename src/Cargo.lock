@@ -91,7 +91,6 @@ dependencies = [
  "learning_mode_core",
  "learning_mode_windows",
  "process_security_environment_spec",
- "sandbox_spec",
  "serde",
  "serde_json",
  "tempfile",
@@ -2065,13 +2064,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
-]
-
-[[package]]
-name = "sandbox_spec"
-version = "0.8.0"
-dependencies = [
- "flatbuffers",
 ]
 
 [[package]]

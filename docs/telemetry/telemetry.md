@@ -575,7 +575,7 @@ vocabulary distinguishes the causes:
 
 | Reason code | Security-relevant? | Meaning |
 |---|---|---|
-| `base_container_deny_unsupported` | **Yes** | The OS does not advertise `SANDBOX_CAP_FS_DENY`, so `deniedPaths` cannot be enforced natively at Tier 1. |
+| `base_container_deny_unsupported` | **Yes** | PSEC does not advertise `PSE_SUPPORT_FS_DENY`, so `deniedPaths` cannot be enforced natively at Tier 1. |
 | `dacl_augmentation_required` | **Yes** | Enforcement depends on mutating host DACLs rather than on native containment. |
 | `host_prep_system_drive_missing` | **Yes** | The system-drive ACEs `wxc-host-prep prepare-system-drive` stamps are not in effect. |
 | `host_prep_null_device_missing` | **Yes** | The `\Device\Null` descriptor is not in effect (the kernel resets it every boot). |

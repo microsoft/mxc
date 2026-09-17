@@ -3,9 +3,9 @@
 
 //! Dependency-injection boundary for the guarded WPR capture fallback.
 //!
-//! `appcontainer_common` implements the legacy containment tiers (BaseContainer
-//! SBOX, AppContainer + BFS, AppContainer + DACL) that a host without the
-//! native V2 PSEC + Learning Mode APIs still needs `captureDenials` on.
+//! `appcontainer_common` implements the AppContainer + BFS and AppContainer +
+//! DACL tiers that a host without the native V2 PSEC + Learning Mode APIs still
+//! needs `captureDenials` on.
 //! Elevated WPR capture lives in `plm` (the host's guarded PLM tool), and
 //! `appcontainer_common` MUST NOT depend on `plm` directly: `plm` links the
 //! Windows ETL decoder (`learning_mode_windows`) and elevation/pipe machinery
