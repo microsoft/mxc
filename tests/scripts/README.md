@@ -60,7 +60,7 @@ Linux / macOS (`.sh`):
 | `run_seatbelt_all_tests.sh` | All Seatbelt tests; missing prerequisites are failures rather than skips | macOS, `mxc-exec-mac`, unprivileged user, backend prerequisites |
 
 Individual `run_bwrap_*.sh`, `run_lxc_*.sh`, and `run_seatbelt_*.sh` scripts
-run one case each; the aggregate scripts above are what CI dispatches to.
+run focused backend suites; the aggregate scripts above are what CI dispatches to.
 
 Not every script runs in CI: several depend on local OS features such as
 Windows Sandbox, WHP, proxy setup, or stress-test duration. The ones CI does
