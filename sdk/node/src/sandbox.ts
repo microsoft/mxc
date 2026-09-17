@@ -15,7 +15,10 @@ import {
 import { prepareSpawn, diagLogVersion, applyLinuxNetworkPolicy } from './helper.js';
 import { diagLog } from './diagnostic.js';
 import { MxcError } from './errors.js';
-import { prepareRequestSpec } from './bindings/request.js';
+import {
+  prepareRequestSpec,
+  validateBindingPolicy,
+} from './bindings/request.js';
 import {
   runBindingRequestAsync,
   type BindingRunResult,
@@ -995,15 +998,7 @@ export async function spawnSandboxAsync(
       `spawnSandboxAsync does not support executor-only option '${unsupportedOption}'`,
     );
   }
-  const authoredEnforcementMode = (
-    policy.network as Record<string, unknown> | undefined
-  )?.enforcementMode;
-  if (authoredEnforcementMode !== undefined) {
-    throw new MxcError(
-      'malformed_request',
-      'spawnSandboxAsync does not support network.enforcementMode',
-    );
-  }
+  validateBindingPolicy(policy);
 
   const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
   // Legacy policy construction derives an executor-specific enforcement mode.

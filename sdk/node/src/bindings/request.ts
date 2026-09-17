@@ -10,6 +10,7 @@ import type {
   NetworkConfig,
   PortMapping,
   ProcessContainerConfig,
+  SandboxPolicy,
   SeatbeltConfig,
   WslcConfig,
 } from '../types.js';
@@ -138,6 +139,18 @@ const SUPPORTED_REQUEST_CONTAINMENTS = new Set<string>([
   'seatbelt',
   'isolation_session',
 ]);
+
+export function validateBindingPolicy(policy: SandboxPolicy): void {
+  const enforcementMode = (
+    policy.network as Record<string, unknown> | undefined
+  )?.enforcementMode;
+  if (enforcementMode !== undefined) {
+    throw new MxcError(
+      'malformed_request',
+      'spawnSandboxAsync does not support network.enforcementMode',
+    );
+  }
+}
 
 export function bindingRequestUnsupportedReason(config: ContainerConfig): string | null {
   if (config.network?.proxy !== undefined && 'builtinTestServer' in config.network.proxy) {
