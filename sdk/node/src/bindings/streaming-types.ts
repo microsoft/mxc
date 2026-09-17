@@ -4,7 +4,7 @@
 // Internal contracts between the native handle adapter and the Node stream
 // facade. These types contain no Koffi-specific declarations.
 
-export interface SandboxProcessWaitResult {
+export interface SandboxWaitResult {
   exitCode: number;
   timedOut: boolean;
 }
@@ -23,12 +23,12 @@ export interface SandboxWritableBinding {
 
 export interface SandboxProcessBinding {
   readonly id: number;
-  readonly warnings: readonly string[];
+  warnings(): readonly string[];
   takeStdin(): SandboxWritableBinding | null;
   takeStdout(): SandboxReadableBinding | null;
   takeStderr(): SandboxReadableBinding | null;
-  tryWait(): SandboxProcessWaitResult & { running: boolean };
-  wait(): SandboxProcessWaitResult;
+  tryWait(): SandboxWaitResult & { running: boolean };
+  wait(): SandboxWaitResult;
   outputMetadata(): unknown | undefined;
   kill(): void;
   free(): void;

@@ -83,7 +83,7 @@ export {
 
 export {
   MxcSandboxProcess,
-  SandboxProcessWaitResult,
+  SandboxWaitResult,
 } from './sandbox-process.js';
 
 // Export policy discovery functions
