@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Build script for wxc — embeds Windows VersionInfo and copies NanVix binaries.
+//! Build script for wxc — embeds Windows VersionInfo and stages backend artifacts.
 
 fn main() {
     mxc_build_common::embed_version_info("MXC sandbox executor", "wxc-exec.exe");
@@ -11,6 +11,9 @@ fn main() {
 
     #[cfg(all(windows, feature = "microvm"))]
     copy_nanvix_binaries();
+
+    #[cfg(all(windows, feature = "nvx"))]
+    copy_nvx_binaries();
 
     // Delay-load winhvplatform.dll so WHP-less hosts don't crash before main().
     // CARGO_CFG_TARGET_* (not #[cfg]) because build.rs cfg gates are host, not target.
@@ -95,4 +98,16 @@ fn copy_nanvix_binaries() {
     // of the staging logic (target-dir derivation, snapshot trust, copy/purge,
     // rerun emission) lives in the build-only `nanvix_build_common` crate.
     nanvix_build_common::stage_artifacts_next_to_exe(Path::new(&nanvix_bin_dir));
+}
+
+#[cfg(all(windows, feature = "nvx"))]
+fn copy_nvx_binaries() {
+    use std::path::Path;
+
+    let nvx_bin_dir = std::env::var("DEP_NVX_BINARIES_BIN_DIR").unwrap_or_else(|error| {
+        panic!("wxc build.rs: DEP_NVX_BINARIES_BIN_DIR is required for the nvx feature: {error}")
+    });
+
+    nvx_build_common::stage_artifacts_next_to_exe(Path::new(&nvx_bin_dir))
+        .unwrap_or_else(|error| panic!("wxc build.rs: failed to stage NVX artifacts: {error}"));
 }

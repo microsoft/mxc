@@ -3223,6 +3223,8 @@ dependencies = [
  "mxc_engine",
  "nanvix_binaries",
  "nanvix_build_common",
+ "nvx_binaries",
+ "nvx_build_common",
  "plm",
  "serde_json",
  "tempfile",

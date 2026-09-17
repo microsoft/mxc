@@ -153,7 +153,12 @@ pub fn stage_artifacts_next_to_exe(nvx_bin_dir: &Path) -> io::Result<()> {
                     ),
                 ))
             }
-            Err(std::env::VarError::NotPresent) => false,
+            Err(std::env::VarError::NotPresent) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "DEP_NVX_BINARIES_WORKLOAD_IMAGES_AVAILABLE is not set",
+                ))
+            }
             Err(error) => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -213,7 +218,7 @@ mod tests {
     }
 
     #[test]
-    fn staging_preserves_release_layout_without_optional_images() {
+    fn copy_artifacts_preserves_release_layout() {
         let source = tempfile::tempdir().expect("failed to create source directory");
         let target = tempfile::tempdir().expect("failed to create target directory");
         for relative_path in WINDOWS_PLATFORM_ARTIFACTS {
