@@ -16,8 +16,10 @@ import { prepareSpawn, diagLogVersion, applyLinuxNetworkPolicy } from './helper.
 import { diagLog } from './diagnostic.js';
 import { MxcError } from './errors.js';
 import { prepareRequestSpec } from './bindings/request.js';
-import { runBindingRequestAsync } from './bindings/run-worker.js';
-import type { BindingRunResult } from './bindings/run.js';
+import {
+  runBindingRequestAsync,
+  type BindingRunResult,
+} from './bindings/run.js';
 
 const MIN_VERSION = '0.6.0-alpha';
 const SUPPORTED_VERSION = '0.9.0-alpha';
@@ -716,6 +718,7 @@ export interface SandboxSpawnOptions {
 function unsupportedInProcessRunOption(options: SandboxSpawnOptions): string | undefined {
   if (options.debug === true) return 'debug';
   if (options.allowTestingFeatures === true) return 'allowTestingFeatures';
+  if (options.skipPlatformCheck === true) return 'skipPlatformCheck';
   if (options.executablePath !== undefined) return 'executablePath';
   if (options.ptyOptions !== undefined) return 'ptyOptions';
   if (options.dryRun === true) return 'dryRun';

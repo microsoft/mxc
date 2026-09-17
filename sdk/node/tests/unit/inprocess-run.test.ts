@@ -2,42 +2,26 @@
 // Licensed under the MIT License.
 
 import assert from 'node:assert';
-import { EventEmitter } from 'node:events';
 import { afterEach, describe, it } from 'node:test';
 import { MxcError } from '../../src/errors.js';
 import { spawnSandboxAsync } from '../../src/sandbox.js';
-import {
-  _setBindingRunWorkerFactory,
-  type BindingRunWorkerLike,
-  type BindingRunWorkerMessage,
-} from '../../src/bindings/run-worker.js';
+import { _setBindingRunAsyncImplementation } from '../../src/bindings/run.js';
 import type { RequestSpec } from '../../src/bindings/request.js';
 
-class FakeWorker extends EventEmitter implements BindingRunWorkerLike {
-  reply(message: BindingRunWorkerMessage): void {
-    queueMicrotask(() => this.emit('message', message));
-  }
-}
-
-afterEach(() => _setBindingRunWorkerFactory());
+afterEach(() => _setBindingRunAsyncImplementation());
 
 describe('in-process async run routing', () => {
   it('converts the existing config flow at the native boundary', async () => {
     let bindingRequest: RequestSpec | undefined;
-    _setBindingRunWorkerFactory((data) => {
-      bindingRequest = data.request;
-      const worker = new FakeWorker();
-      worker.reply({
-        ok: true,
-        result: {
-          stdout: 'out',
-          stderr: 'err',
-          exitCode: 7,
-          timedOut: false,
-          warnings: [],
-        },
-      });
-      return worker;
+    _setBindingRunAsyncImplementation(async (request) => {
+      bindingRequest = request;
+      return {
+        stdout: 'out',
+        stderr: 'err',
+        exitCode: 7,
+        timedOut: false,
+        warnings: [],
+      };
     });
 
     const result = await spawnSandboxAsync(
@@ -63,6 +47,7 @@ describe('in-process async run routing', () => {
     for (const options of [
       { usePty: true },
       { dryRun: true },
+      { skipPlatformCheck: true },
       { executablePath: 'wxc-exec.exe' },
       { signal: new AbortController().signal },
     ]) {
@@ -74,23 +59,16 @@ describe('in-process async run routing', () => {
   });
 
   it('surfaces buffered diagnostics', async () => {
-    _setBindingRunWorkerFactory(() => {
-      const worker = new FakeWorker();
-      worker.reply({
-        ok: true,
-        result: {
-          stdout: '',
-          stderr: 'native stderr',
-          exitCode: 0,
-          timedOut: false,
-          warnings: ['policy was relaxed'],
-          outputMetadata: {
-            captureDenials: { kind: 'captureDenials', outputPath: 'denials.json' },
-          },
-        },
-      });
-      return worker;
-    });
+    _setBindingRunAsyncImplementation(async () => ({
+      stdout: '',
+      stderr: 'native stderr',
+      exitCode: 0,
+      timedOut: false,
+      warnings: ['policy was relaxed'],
+      outputMetadata: {
+        captureDenials: { kind: 'captureDenials', outputPath: 'denials.json' },
+      },
+    }));
 
     const result = await spawnSandboxAsync('echo hello', { version: '0.9.0-alpha' });
     assert.strictEqual(
@@ -101,20 +79,13 @@ describe('in-process async run routing', () => {
   });
 
   it('rejects timed-out execution', async () => {
-    _setBindingRunWorkerFactory(() => {
-      const worker = new FakeWorker();
-      worker.reply({
-        ok: true,
-        result: {
-          stdout: '',
-          stderr: '',
-          exitCode: -1,
-          timedOut: true,
-          warnings: [],
-        },
-      });
-      return worker;
-    });
+    _setBindingRunAsyncImplementation(async () => ({
+      stdout: '',
+      stderr: '',
+      exitCode: -1,
+      timedOut: true,
+      warnings: [],
+    }));
 
     await assert.rejects(
       spawnSandboxAsync('sleep 30', { version: '0.9.0-alpha', timeoutMs: 1 }),
@@ -122,6 +93,34 @@ describe('in-process async run routing', () => {
         error instanceof MxcError
         && error.code === 'backend_error'
         && error.message.includes('timed out'),
+    );
+  });
+
+  it('preserves typed native errors', async () => {
+    _setBindingRunAsyncImplementation(async () => {
+      throw new MxcError('unsupported_containment', 'LXC is executor-only');
+    });
+
+    await assert.rejects(
+      spawnSandboxAsync('echo hello', { version: '0.9.0-alpha' }),
+      (error: unknown) =>
+        error instanceof MxcError
+        && error.code === 'unsupported_containment'
+        && error.message === 'LXC is executor-only',
+    );
+  });
+
+  it('wraps Koffi invocation failures as backend errors', async () => {
+    _setBindingRunAsyncImplementation(async () => {
+      throw new Error('native invocation failed');
+    });
+
+    await assert.rejects(
+      spawnSandboxAsync('echo hello', { version: '0.9.0-alpha' }),
+      (error: unknown) =>
+        error instanceof MxcError
+        && error.code === 'backend_error'
+        && error.message === 'native invocation failed',
     );
   });
 
