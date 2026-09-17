@@ -68,13 +68,13 @@ Set-StrictMode -Version Latest
 
 . (Join-Path $PSScriptRoot 'lib\WinProcessContainer.Common.ps1')
 
-# Area registry: key -> the script that owns it. The keys are the contract with
-# scripts\ci\run_backend_validation_tests.ps1 and are unchanged from the
+# Area registry: key -> the script that owns it. The keys are unchanged from the
 # pre-split harness's phase names, so an existing -Phases list keeps working.
 $AreaScripts = [ordered]@{
     'Probes'                   = 'run_processcontainer_probes_test.ps1'
     'T3Forced'                 = 'run_processcontainer_filesystem_matrix_test.ps1'
     'T1DenyForced'             = 'run_processcontainer_denied_paths_test.ps1'
+    'FsEnumerate'              = 'run_processcontainer_filesystem_enumerate_test.ps1'
     'UiMitigationMatrix'       = 'run_processcontainer_ui_mitigations_test.ps1'
     'UiPolicyMatrix'           = 'run_processcontainer_ui_policy_matrix_test.ps1'
     'Capabilities'             = 'run_processcontainer_capabilities_test.ps1'

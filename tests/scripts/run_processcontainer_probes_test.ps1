@@ -52,6 +52,13 @@ function Phase-Probes {
         Record-Result -Phase 'P1' -Name "empty policy probe is repeatable -> tier=$($Script:ExpectedTier)" -Pass ($probeEmpty.tier -eq $Script:ExpectedTier) -Detail "tier=$($probeEmpty.tier); consistency check, not tier validation -- use -RequireTier for that"
         $expAugEmpty = Get-ExpectedDaclAug -HasDenied:$false
         Record-Result -Phase 'P1' -Name "empty policy probe -> needsDaclAugmentation=$expAugEmpty" -Pass ($probeEmpty.needsDaclAugmentation -eq $expAugEmpty) -Detail "needsDaclAugmentation=$($probeEmpty.needsDaclAugmentation)"
+        # The capability the FsEnumerate area gates on. It is the raw host
+        # capability, not a per-request verdict, so it must be present on every
+        # build regardless of tier -- an absent key would silently downgrade
+        # that area to its refusal branch instead of failing here.
+        Record-Result -Phase 'P1' -Name 'probe reports baseContainerSupportsEnumeratePaths' `
+            -Pass ([bool]$probeEmpty.probes.PSObject.Properties['baseContainerSupportsEnumeratePaths']) `
+            -Detail "value=$($Script:Caps.BaseContainerSupportsEnumeratePaths); supportsEnumeratePaths=$($Script:Caps.SupportsEnumeratePaths)"
     }
 
     $cfgRw = New-Config -Name 'probe-rw' -CommandLine 'cmd /c exit 0' -ReadWrite @($rw)

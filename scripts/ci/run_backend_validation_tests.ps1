@@ -118,33 +118,7 @@ function Invoke-ProcessContainerTests {
     $script = Join-Path $testScriptRoot 'run_processcontainer_all_tests.ps1'
     # -KeepArtifacts stops the suite deleting its scratch tree on a clean run,
     # so a passing job still uploads its per-area logs, configs, and result
-    # documents. These keys must stay in sync with $AreaScripts in the entry
-    # script, which validates them and fails fast on an unknown name.
-    $areas = @(
-        'Probes',
-        'T3Forced',
-        'T1DenyForced',
-        'UiMitigationMatrix',
-        'UiPolicyMatrix',
-        'Capabilities',
-        'CaptureDenials',
-        'Lifecycle',
-        'Privilege',
-        'GlobalAtomIsolation',
-        'DaclDisabled',
-        'CrashRecovery',
-        # Schema 0.8 directional networking, the documented reject surface, and
-        # the legacy 0.7 lane (including firewall-rule teardown).
-        'NetworkCapabilityMatrix',
-        'NetworkModel3Equivalence',
-        'NetworkEgressRules',
-        'NetworkHostLoopback',
-        'NetworkProxy',
-        'NetworkRejections',
-        'NetworkLegacy07',
-        'PathAliasing',
-        'ProcessPlumbing'
-    )
+    # documents.
     $global:LASTEXITCODE = 0
     & $script `
         -SkipBuild `
@@ -153,8 +127,7 @@ function Invoke-ProcessContainerTests {
         -WxcRelease (Join-Path $releaseDirectory 'wxc-exec.exe') `
         -UiProbeDebug (Join-Path $debugDirectory 'wxc-ui-probe.exe') `
         -UiProbeRelease (Join-Path $releaseDirectory 'wxc-ui-probe.exe') `
-        -KeepArtifacts `
-        -Areas $areas | Out-Null
+        -KeepArtifacts | Out-Null
     return $LASTEXITCODE
 }
 

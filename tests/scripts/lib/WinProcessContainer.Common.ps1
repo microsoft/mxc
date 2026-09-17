@@ -212,6 +212,11 @@ function Confirm-Scratch {
         # `alias` holds the path-aliasing fixtures: the same object reached
         # via `..`, an 8.3 short name, and the \\?\ prefix.
         'alias'
+        # `enumerate` is granted enumeration-only access; `enumerate-control`
+        # is named by no policy, so it proves the listing came from the grant
+        # rather than from ambient access.
+        'enumerate'
+        'enumerate-control'
         # Per-child result documents, merged by the entry script.
         'results'
     )) {
@@ -347,6 +352,12 @@ function Get-HostCapabilities {
     $denyBit = if ($p.probes.PSObject.Properties['baseContainerSupportsDenyPaths']) {
         [bool]$p.probes.baseContainerSupportsDenyPaths
     } else { $false }
+    # Same for baseContainerSupportsEnumeratePaths. The probe reports the raw
+    # host capability (PSEC usable AND PSE_SUPPORT_FS_ENUMERATE) rather than a
+    # per-request verdict, so an empty-policy probe answers it correctly.
+    $enumBit = if ($p.probes.PSObject.Properties['baseContainerSupportsEnumeratePaths']) {
+        [bool]$p.probes.baseContainerSupportsEnumeratePaths
+    } else { $false }
     # uiCapabilities is absent on older binaries / when the detector errored.
     $canInject = $false
     if ($p.probes.PSObject.Properties['uiCapabilities'] -and
@@ -370,6 +381,13 @@ function Get-HostCapabilities {
         # PSE_SUPPORT_FS_DENY or a usable SBOX contract's SANDBOX_CAP_DENY_PATHS.
         # Detected at runtime so denied tests auto-enable when it ships.
         SupportsDeniedPaths            = (($tier -eq 'appcontainer-dacl') -or $denyBit)
+        BaseContainerSupportsEnumeratePaths = $enumBit
+        # enumeratePaths has NO fallback: it needs PSEC 1.1 plus
+        # PSE_SUPPORT_FS_ENUMERATE, and the detector refuses the request
+        # outright on every AppContainer tier (FallbackError::
+        # EnumeratePathsUnsupported). So it is available only where the host
+        # both selects base-container and advertises the capability.
+        SupportsEnumeratePaths         = (($tier -eq 'base-container') -and $enumBit)
     }
 }
 
@@ -475,6 +493,9 @@ function Record-UiTelemetryResult {
 # express network intent and no doc describes mixing the two in one config.
 $Script:SchemaVersion       = '0.8.0-alpha'
 $Script:LegacySchemaVersion = '0.7.0-alpha'
+# processContainer.filesystem.enumeratePaths landed at 0.9; the 0.8 contract is
+# closed, so authoring it at the suite default is itself a rejection case.
+$Script:EnumerateSchemaVersion = '0.9.0-alpha'
 
 # Write a config object verbatim. Used by the rejection phase for shapes the
 # typed generator deliberately cannot produce (an explicitly empty `to: []`,
@@ -555,6 +576,10 @@ function New-Config {
         [string[]]$Capabilities             = @(),
         [Nullable[bool]]$LeastPrivilege     = $null,
         [Nullable[bool]]$LearningMode       = $null,
+        # processContainer.filesystem.enumeratePaths — enumeration-only access
+        # (FindFirstFile/FindNextFile) without content read. Supplying it
+        # defaults the schema version to 0.9, where the field was introduced.
+        [string[]]$EnumeratePaths           = @(),
         # processContainer.captureDenials.*
         [ValidateSet('block', 'allow')] [string]$CaptureDenialsMode = $null,
         [string]$CaptureDenialsOutputPath   = $null,
@@ -580,8 +605,10 @@ function New-Config {
         [System.Collections.Specialized.OrderedDictionary]$RawNetwork = $null
     )
 
+    $hasEnumerate = ($null -ne $EnumeratePaths -and $EnumeratePaths.Count -gt 0)
+    $defaultVersion = if ($hasEnumerate) { $Script:EnumerateSchemaVersion } else { $Script:SchemaVersion }
     $obj = [ordered]@{
-        version     = $(if ($SchemaVersion) { $SchemaVersion } else { $Script:SchemaVersion })
+        version     = $(if ($SchemaVersion) { $SchemaVersion } else { $defaultVersion })
         containerId = "MxcWinPC-$Name"
         # `appcontainer` is not in the stable containment enum at 0.7 or 0.8;
         # `processcontainer` is the concrete Windows backend on both.
@@ -655,6 +682,7 @@ function New-Config {
     if ($Capabilities.Count -gt 0)  { $pc['capabilities']  = @($Capabilities) }
     if ($null -ne $LeastPrivilege)  { $pc['leastPrivilege'] = [bool]$LeastPrivilege }
     if ($null -ne $LearningMode)    { $pc['learningMode']   = [bool]$LearningMode }
+    if ($hasEnumerate) { $pc['filesystem'] = [ordered]@{ enumeratePaths = @($EnumeratePaths) } }
     if ($CaptureDenialsMode -or $CaptureDenialsOutputPath -or $null -ne $CaptureDenialsRetainEtl) {
         $cd = [ordered]@{}
         if ($CaptureDenialsMode)       { $cd['mode']       = $CaptureDenialsMode }
@@ -1265,9 +1293,10 @@ function Initialize-WpcContext {
     }
 
     if ($Fresh) {
-        Write-Host ("Host capabilities: expectedTier={0} baseContainerUsable={1} apiPresent={2} bfscfgPresent={3} bfsCompiledIn={4} supportsDeniedPaths={5}" -f `
+        Write-Host ("Host capabilities: expectedTier={0} baseContainerUsable={1} apiPresent={2} bfscfgPresent={3} bfsCompiledIn={4} supportsDeniedPaths={5} supportsEnumeratePaths={6}" -f `
             $Script:Caps.BaselineTier, $Script:Caps.BaseContainerUsable, $Script:Caps.BaseContainerApiPresent, `
-            $Script:Caps.BfscfgPresent, $Script:Caps.BfsCompiledIn, $Script:Caps.SupportsDeniedPaths) -ForegroundColor Cyan
+            $Script:Caps.BfscfgPresent, $Script:Caps.BfsCompiledIn, $Script:Caps.SupportsDeniedPaths, `
+            $Script:Caps.SupportsEnumeratePaths) -ForegroundColor Cyan
     }
 }
 
