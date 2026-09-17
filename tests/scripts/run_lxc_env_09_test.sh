@@ -60,28 +60,40 @@ DEFAULT_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 # it must hold for a request that never mentions the variable.
 export MXC_LEAK_PROBE="LXC_HOST_ENV_LEAKED"
 
+# PATH is only ever asserted present, never absent. `lxc-attach` injects its own
+# baseline PATH into every process it attaches -- and that baseline is
+# byte-for-byte DEFAULT_PATH -- so the container always reports one whether or
+# not MXC supplied it. HOME and TERM are not injected, so they are what
+# witnesses the default block. That `resolved_env` is exactly empty is asserted
+# directly by `an_explicitly_empty_env_stays_empty` /
+# `a_supplied_env_is_used_verbatim` in `lxc_runner.rs`, which reads the env MXC
+# builds instead of the container's.
+
 run_config lxc_env_09_default_block.json
 expect_ok "an omitted env gets the default PATH" "PATH=[$DEFAULT_PATH]"
 expect_ok "an omitted env gets HOME" "HOME=[/tmp]"
 expect_ok "an omitted env gets TERM" "TERM=[xterm-256color]"
-expect_absent "a host environment variable does not leak in" "LXC_HOST_ENV_LEAKED"
+expect_ok "a host environment variable does not leak in" "LEAK=[]"
+expect_absent "the host value itself does not appear" "LXC_HOST_ENV_LEAKED"
 
 # Unlike bwrap and Seatbelt, an empty env is not a wholly empty environment:
 # `lxc-attach` injects its own baseline under everything MXC supplies. What
 # 0.9 guarantees is that MXC adds nothing on top of it.
 run_config lxc_env_09_empty.json
 expect_ok "an empty env runs" "ENV_PROBE_DONE"
-expect_absent "an empty env suppresses the default PATH" "PATH=[$DEFAULT_PATH]"
-expect_absent "an empty env suppresses the default TERM" "TERM=[xterm-256color]"
+expect_ok "an empty env suppresses the default HOME" "HOME=[]"
+expect_ok "an empty env suppresses the default TERM" "TERM=[]"
+expect_ok "an empty env inherits nothing from the host" "LEAK=[]"
 
 run_config lxc_env_09_verbatim.json
 expect_ok "a supplied env is honored" "FOO=[bar]"
-expect_absent "a supplied env is verbatim, with no default PATH" "PATH=[$DEFAULT_PATH]"
+expect_ok "a supplied env adds no default HOME" "HOME=[]"
+expect_ok "a supplied env adds no default TERM" "TERM=[]"
 
 run_config lxc_env_09_inherit.json
 expect_ok "inheritDefaultEnv keeps the default PATH" "PATH=[$DEFAULT_PATH]"
 expect_ok "inheritDefaultEnv keeps the default HOME" "HOME=[/tmp]"
 expect_ok "inheritDefaultEnv adds the caller's variable" "FOO=[bar]"
-expect_ok "a caller entry overrides the same-named default" "TERM=[dumb]"
+expect_ok "a caller entry overrides the same-named default" "TERM=[vt100]"
 
 echo "All $PASS_COUNT LXC environment assertions passed."

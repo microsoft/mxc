@@ -422,6 +422,10 @@ The child gets a default block of `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`),
 | `["FOO=bar"]` | `false` (default) | `FOO` only — **no `PATH`** |
 | `["FOO=bar"]` | `true` | the default block plus `FOO`; a same-named entry wins |
 
+The table is the environment MXC hands the child. macOS `/bin/sh` assigns its
+own `PATH` and `TERM` when it starts without them, so neither reads back as
+empty from inside the workload.
+
 > ⚠️ **Behavior change.** Before 0.9 a supplied `process.env` was layered onto
 > the baseline `PATH`. At 0.9 it is used verbatim. Set
 > `"inheritDefaultEnv": true` to get the old behavior, or supply `PATH`

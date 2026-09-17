@@ -198,6 +198,11 @@ resolved working directory, else `/tmp`), and `TERM` (`xterm-256color`):
 | `["FOO=bar"]` | `false` (default) | `FOO` only — **no `PATH`** |
 | `["FOO=bar"]` | `true` | the default block plus `FOO`; a same-named entry wins |
 
+The table is the environment MXC hands the child. A shell started without a
+`PATH` assigns its own compiled-in fallback, so `$PATH` read from inside the
+workload is never empty — on Debian that fallback happens to be the default
+block's value.
+
 **Before 0.9** the child got only what `process.env` supplied — with no `PATH`,
 command resolution fell through to the shell's compiled-in default, which
 matches the value above on Debian and Ubuntu but omits the `sbin` directories

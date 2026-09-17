@@ -62,26 +62,37 @@ DEFAULT_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 # it must hold for a request that never mentions it.
 export MXC_LEAK_PROBE="BWRAP_HOST_ENV_LEAKED"
 
+# The cases below that supply no PATH assert HOME and TERM rather than PATH. A
+# shell started without a PATH assigns its own fallback, so `$PATH` reports the
+# shell's default rather than what MXC passed -- and on Debian that fallback is
+# byte-for-byte DEFAULT_PATH, so neither its presence nor its absence proves
+# anything. HOME and TERM are not fabricated, so they are what witnesses the
+# default block. That `resolved_env` is exactly empty is asserted directly by
+# `an_explicitly_empty_env_stays_empty` / `a_supplied_env_is_used_verbatim` in
+# `bwrap_command.rs`, which reads the env MXC builds instead of the child's.
+
 run_config bwrap_env_09_default_block.json
 expect_ok "an omitted env gets the default PATH" "PATH=[$DEFAULT_PATH]"
 expect_ok "an omitted env gets HOME" "HOME=[/tmp]"
 expect_ok "an omitted env gets TERM" "TERM=[xterm-256color]"
-expect_absent "a host environment variable does not leak in" "BWRAP_HOST_ENV_LEAKED"
+expect_ok "a host environment variable does not leak in" "LEAK=[]"
+expect_absent "the host value itself does not appear" "BWRAP_HOST_ENV_LEAKED"
 
 run_config bwrap_env_09_empty.json
 expect_ok "an empty env runs" "ENV_PROBE_DONE"
-expect_ok "an empty env suppresses the default PATH" "PATH=[]"
 expect_ok "an empty env suppresses HOME" "HOME=[]"
 expect_ok "an empty env suppresses TERM" "TERM=[]"
+expect_ok "an empty env inherits nothing from the host" "LEAK=[]"
 
 run_config bwrap_env_09_verbatim.json
 expect_ok "a supplied env is honored" "FOO=[bar]"
-expect_ok "a supplied env is verbatim, with no implicit PATH" "PATH=[]"
+expect_ok "a supplied env adds no default HOME" "HOME=[]"
+expect_ok "a supplied env adds no default TERM" "TERM=[]"
 
 run_config bwrap_env_09_inherit.json
 expect_ok "inheritDefaultEnv keeps the default PATH" "PATH=[$DEFAULT_PATH]"
 expect_ok "inheritDefaultEnv keeps the default HOME" "HOME=[/tmp]"
 expect_ok "inheritDefaultEnv adds the caller's variable" "FOO=[bar]"
-expect_ok "a caller entry overrides the same-named default" "TERM=[dumb]"
+expect_ok "a caller entry overrides the same-named default" "TERM=[vt100]"
 
 echo "All $PASS_COUNT Bubblewrap environment assertions passed."
