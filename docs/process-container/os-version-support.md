@@ -154,10 +154,23 @@ The release matrix describes the legacy schema 0.6/0.7 implementation.
 | Capabilities (`internetClient`) | ✅ | ✅ | ✅ | ✅ |
 | Firewall rules (`netsh advfirewall`, needs admin) | ✅ | ✅ | ✅ | ✅ |
 | Proxy | ✅ (AppContainer compatibility) | ✅ (AppContainer compatibility) | ✅ (AppContainer compatibility) | ✅ (legacy T1 or AppContainer compatibility) |
+| General host-loopback communication (`ingress.hostLoopback: "allow"`) | ❌ | ⚠️ available with the Windows update described below | ⚠️ available with the Windows update described below | ✅ when the corresponding OS contract is enabled |
 
 Notes:
 - Capability- and firewall-based network enforcement is an AppContainer
   primitive and works on every release.
+- General host-loopback communication for ProcessContainer requires the
+  Windows OS support for unrestricted loopback access. It is available in
+  the Windows 11 Insider Release Preview builds 26100.9539 and 26200.9539,
+  released September 10, 2026, through KB5124010. Microsoft is rolling this
+  update out in phases. Broad availability for supported Windows 11 24H2 and
+  later systems is expected during the week of September 22, 2026; replace
+  this note with the final servicing KB when Microsoft publishes it.
+- This capability is distinct from the connection-scoped loopback permission
+  used by `runtimeConfig.networkProxy`. `ingress.hostLoopback: "allow"` is
+  general host-loopback communication and can permit unsolicited inbound
+  loopback connections. ProcessContainer currently has no ingress source-CIDR
+  or destination-port rules to narrow that access.
 - OS-configured WinHTTP proxy (passed in the FlatBuffer spec to
   `CreateProcessInSandbox`) is used only on legacy query-less T1 hosts. The
   capability-aware model-2 contract requires a package-family or
@@ -173,7 +186,8 @@ Schema 0.8 support is selected by runtime contract rather than Windows release:
 |---|:---:|:---:|:---:|
 | Directional defaults represented by capabilities | ✅ | ✅ when the capability mapping preserves the request | ✅ when the capability mapping preserves the request |
 | Explicit egress IP/CIDR/port/protocol rules | ✅ WFP | ❌ | ❌ |
-| `allowedProxyPeer` or `ingress.hostLoopback: "allow"` | ✅ | ❌ | ❌ |
+| `allowedProxyPeer` | ✅ | ❌ | ❌ |
+| General `ingress.hostLoopback: "allow"` | ✅ only when the OS contract supports it | ❌ | ❌ |
 | `runtimeConfig.networkProxy` | ✅ | ❌ | ❌ |
 
 PSEC owns the WFP policy lifetime through workload completion. SBOX exposes no

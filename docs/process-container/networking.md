@@ -111,11 +111,6 @@ loopback address and port in `runtimeConfig.networkProxy`. Code that needs a pub
 endpoints, or multiple local loopback ports must use a direct-egress policy instead of
 `runtimeConfig.networkProxy`.
 
-For direct-egress policies, MXC passes `ingress.default` and `ingress.hostLoopback` through the PSEC ingress contract.
-Proxy policies use the proxy-specific PSEC representation, including the configured endpoint and either the selected
-peer identity or the unrestricted-loopback peer. Requests fail rather than fall back to a contract that would drop
-these restrictions.
-
 Complete configurations are available in the
 [ProcessContainer schema 0.8 examples](examples/0.8.0-schema.md):
 
