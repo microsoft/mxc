@@ -250,16 +250,96 @@ describe('native binding request', () => {
 
   });
 
-  it('rejects configurations the native one-shot contract cannot represent', () => {
-    assert.match(
-      bindingRequestUnsupportedReason({
+  it('moves Unix backend configuration onto tagged containment', () => {
+    const seatbelt = prepareRequestSpec({
+      version: '0.9.0-alpha',
+      containment: 'seatbelt',
+      process: { commandLine: 'echo hello' },
+      seatbelt: {
+        profileOverride: '(version 1)',
+        guiAccess: true,
+        nestedPty: false,
+        keychainAccess: true,
+        extraMachLookups: ['com.example.service'],
+      },
+    });
+    assert.deepStrictEqual(seatbelt.containment, {
+      type: 'seatbelt',
+      profileOverride: '(version 1)',
+      guiAccess: true,
+      nestedPty: false,
+      keychainAccess: true,
+      extraMachLookups: ['com.example.service'],
+    });
+
+    const lxc = prepareRequestSpec({
+      version: '0.9.0-alpha',
+      containment: 'lxc',
+      process: { commandLine: 'echo hello' },
+      lxc: {
+        containerName: 'node-sdk-test',
+        distribution: 'ubuntu',
+        release: '24.04',
+        destroyOnExit: true,
+      },
+    });
+    assert.deepStrictEqual(lxc.containment, {
+      type: 'lxc',
+      distribution: 'ubuntu',
+      release: '24.04',
+    });
+    assert.strictEqual(lxc.containerName, 'node-sdk-test');
+
+    const bubblewrap = prepareRequestSpec({
+      version: '0.9.0-alpha',
+      containment: 'bubblewrap',
+      process: { commandLine: 'echo hello' },
+    });
+    assert.deepStrictEqual(bubblewrap.containment, { type: 'bubblewrap' });
+
+    const isolationSession = prepareRequestSpec({
+      version: '0.9.0-alpha',
+      containment: 'isolation_session',
+      process: { commandLine: 'echo hello' },
+    }, { experimental: true });
+    assert.deepStrictEqual(isolationSession.containment, {
+      type: 'isolationSession',
+    });
+  });
+
+  it('rejects Unix backend settings under another containment', () => {
+    assert.throws(
+      () => prepareRequestSpec({
+        version: '0.9.0-alpha',
+        containment: 'process',
+        process: { commandLine: 'echo hello' },
+        seatbelt: { nestedPty: false },
+      }),
+      /require containment 'seatbelt'/,
+    );
+
+    assert.throws(
+      () => prepareRequestSpec({
+        version: '0.9.0-alpha',
+        containment: 'process',
+        process: { commandLine: 'echo hello' },
+        lxc: { distribution: 'ubuntu' },
+      }),
+      /require containment 'lxc'/,
+    );
+
+    assert.throws(
+      () => prepareRequestSpec({
         version: '0.9.0-alpha',
         containment: 'lxc',
         process: { commandLine: 'echo hello' },
-      })!,
-      /containment 'lxc' is not supported/,
+        lxc: { destroyOnExit: false },
+      }),
+      /destroyOnExit=false is not supported/,
     );
+  });
 
+  it('rejects configurations the native one-shot contract cannot represent', () => {
     const config = {
       version: '0.9.0-alpha',
       process: { commandLine: 'echo hello' },
