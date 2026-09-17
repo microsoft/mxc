@@ -1548,6 +1548,7 @@ dependencies = [
  "learning_mode_core",
  "lxc_common",
  "nanvix_runner",
+ "nvx_runner",
  "plm",
  "seatbelt_common",
  "serde",
@@ -1705,6 +1706,14 @@ version = "0.8.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "nvx_runner"
+version = "0.8.0"
+dependencies = [
+ "nvx_binaries",
+ "wxc_common",
 ]
 
 [[package]]

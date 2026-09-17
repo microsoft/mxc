@@ -267,6 +267,27 @@ mod tests {
         }
     }
 
+    fn assert_nvx_backend_is_omitted() {
+        assert!(
+            available_backends()
+                .iter()
+                .all(|backend| backend.backend != "nvx"),
+            "available_backends must not advertise NVX while runtime is incomplete"
+        );
+    }
+
+    #[cfg(not(feature = "nvx"))]
+    #[test]
+    fn nvx_is_not_advertised_without_feature() {
+        assert_nvx_backend_is_omitted();
+    }
+
+    #[cfg(feature = "nvx")]
+    #[test]
+    fn nvx_is_not_advertised_with_feature_enabled() {
+        assert_nvx_backend_is_omitted();
+    }
+
     /// Every backend the probe can emit, across all platforms/features — derived
     /// from `ContainmentBackend` (the same source as the `push` calls) so the
     /// emitted names can't be typo'd, and checked against the `wire::Containment`

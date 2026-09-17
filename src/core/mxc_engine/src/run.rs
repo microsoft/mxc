@@ -35,6 +35,21 @@ use wxc_common::script_runner::ScriptRunner;
 
 use crate::error::Error;
 
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+const ERR_NVX_EXPERIMENTAL_OPT_IN_REQUIRED: &str =
+    "NVX is an experimental feature. Use --experimental flag.";
+#[cfg(all(
+    not(feature = "nvx"),
+    any(target_os = "windows", target_os = "linux", target_os = "macos")
+))]
+const ERR_NVX_FEATURE_REQUIRED: &str = "NVX backend not compiled in (build with --features nvx)";
+#[cfg(all(
+    feature = "nvx",
+    any(target_os = "windows", target_os = "linux", target_os = "macos")
+))]
+const ERR_NVX_RUNTIME_IMPLEMENTATION_MISSING: &str =
+    "NVX runtime implementation is not present in this build";
+
 /// A backend runner resolved for an [`ExecutionRequest`], ready to run.
 ///
 /// On Windows, `dacl_manager` — when present — is the guard for the
@@ -243,9 +258,7 @@ fn resolve_runner_inner_windows(
         ContainmentBackend::Vm => Err(MxcError::unsupported_containment(
             "VM backend not yet implemented",
         )),
-        ContainmentBackend::Nvx => Err(MxcError::unsupported_containment(
-            "NVX backend not yet available",
-        )),
+        ContainmentBackend::Nvx => resolve_nvx_backend(request),
         ContainmentBackend::MicroVm => {
             if !request.experimental_enabled {
                 return Err(MxcError::malformed_request(
@@ -344,9 +357,7 @@ fn resolve_runner_inner(
                 ))
             }
         }
-        ContainmentBackend::Nvx => Err(MxcError::unsupported_containment(
-            "NVX backend not yet available",
-        )),
+        ContainmentBackend::Nvx => resolve_nvx_backend(request),
         ContainmentBackend::Bubblewrap => Ok(ResolvedRunner::without_guard(Box::new(Runner::new(
             bwrap_common::bwrap_runner::BubblewrapScriptRunner::new(),
         )))),
@@ -384,6 +395,10 @@ fn resolve_runner_inner(
 ) -> Result<ResolvedRunner, MxcError> {
     use wxc_common::sandbox_process::Runner;
 
+    if request.containment == ContainmentBackend::Nvx {
+        return resolve_nvx_backend(request);
+    }
+
     if request.containment != ContainmentBackend::Seatbelt {
         logger.log_line("Note: Overriding containment backend to Seatbelt on macOS.");
     }
@@ -404,6 +419,39 @@ fn resolve_runner_inner(
     Err(MxcError::unsupported_containment(
         "the mxc engine has no run-to-completion backend for this host OS \
          (supported: Windows, Linux, macOS)",
+    ))
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+fn resolve_nvx_backend(request: &ExecutionRequest) -> Result<ResolvedRunner, MxcError> {
+    if !request.experimental_enabled {
+        return Err(MxcError::malformed_request(
+            ERR_NVX_EXPERIMENTAL_OPT_IN_REQUIRED,
+        ));
+    }
+
+    #[cfg(feature = "nvx")]
+    {
+        return resolve_nvx_backend_with_preflight(nvx_runner::preflight);
+    }
+
+    #[cfg(not(feature = "nvx"))]
+    {
+        Err(MxcError::unsupported_containment(ERR_NVX_FEATURE_REQUIRED))
+    }
+}
+
+#[cfg(all(
+    feature = "nvx",
+    any(target_os = "windows", target_os = "linux", target_os = "macos")
+))]
+fn resolve_nvx_backend_with_preflight<F>(preflight: F) -> Result<ResolvedRunner, MxcError>
+where
+    F: FnOnce() -> Result<(), MxcError>,
+{
+    preflight()?;
+    Err(MxcError::backend_unavailable(
+        ERR_NVX_RUNTIME_IMPLEMENTATION_MISSING,
     ))
 }
 
@@ -461,9 +509,10 @@ mod tests {
         }
     }
 
-    fn nvx_request() -> ExecutionRequest {
+    fn nvx_request(experimental_enabled: bool) -> ExecutionRequest {
         ExecutionRequest {
             containment: ContainmentBackend::Nvx,
+            experimental_enabled,
             ..Default::default()
         }
     }
@@ -507,8 +556,23 @@ mod tests {
     }
 
     #[test]
-    fn nvx_backend_returns_typed_unsupported_containment() {
-        let request = nvx_request();
+    fn nvx_without_experimental_opt_in_is_rejected_as_malformed_request() {
+        let request = nvx_request(false);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let err = match resolve_runner_inner_windows(&request, &mut logger) {
+            Ok(_) => panic!("expected malformed_request"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.code, MxcErrorCode::MalformedRequest);
+        assert_eq!(err.message, ERR_NVX_EXPERIMENTAL_OPT_IN_REQUIRED);
+    }
+
+    #[cfg(not(feature = "nvx"))]
+    #[test]
+    fn nvx_without_feature_returns_typed_unsupported_containment() {
+        let request = nvx_request(true);
         let mut logger = Logger::new(Mode::Buffer);
 
         let err = match resolve_runner_inner_windows(&request, &mut logger) {
@@ -517,26 +581,72 @@ mod tests {
         };
 
         assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
-        assert_eq!(err.message, "NVX backend not yet available");
+        assert_eq!(err.message, ERR_NVX_FEATURE_REQUIRED);
+    }
+
+    #[cfg(feature = "nvx")]
+    #[test]
+    fn nvx_with_feature_propagates_preflight_backend_unavailable() {
+        let request = nvx_request(true);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let err = match resolve_runner_inner_windows(&request, &mut logger) {
+            Ok(_) => panic!("expected backend_unavailable"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.code, MxcErrorCode::BackendUnavailable);
+        assert_eq!(
+            err.message,
+            nvx_runner::ERR_WORKLOAD_IMAGE_ASSET_UNAVAILABLE
+        );
+    }
+
+    #[cfg(feature = "nvx")]
+    #[test]
+    fn nvx_without_runtime_returns_backend_unavailable_even_if_preflight_succeeds() {
+        let err = match resolve_nvx_backend_with_preflight(|| Ok(())) {
+            Ok(_) => panic!("runtime stub must not resolve a runner"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.code, MxcErrorCode::BackendUnavailable);
+        assert_eq!(err.message, ERR_NVX_RUNTIME_IMPLEMENTATION_MISSING);
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
     use wxc_common::logger::Mode;
     use wxc_common::mxc_error::MxcErrorCode;
 
-    fn nvx_request() -> ExecutionRequest {
+    fn nvx_request(experimental_enabled: bool) -> ExecutionRequest {
         ExecutionRequest {
             containment: ContainmentBackend::Nvx,
+            experimental_enabled,
             ..Default::default()
         }
     }
 
     #[test]
-    fn nvx_backend_returns_typed_unsupported_containment() {
-        let request = nvx_request();
+    fn nvx_without_experimental_opt_in_is_rejected_as_malformed_request() {
+        let request = nvx_request(false);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let err = match resolve_runner_inner(&request, &mut logger) {
+            Ok(_) => panic!("expected malformed_request"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.code, MxcErrorCode::MalformedRequest);
+        assert_eq!(err.message, ERR_NVX_EXPERIMENTAL_OPT_IN_REQUIRED);
+    }
+
+    #[cfg(not(feature = "nvx"))]
+    #[test]
+    fn nvx_without_feature_returns_typed_unsupported_containment() {
+        let request = nvx_request(true);
         let mut logger = Logger::new(Mode::Buffer);
 
         let err = match resolve_runner_inner(&request, &mut logger) {
@@ -545,6 +655,36 @@ mod tests {
         };
 
         assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
-        assert_eq!(err.message, "NVX backend not yet available");
+        assert_eq!(err.message, ERR_NVX_FEATURE_REQUIRED);
+    }
+
+    #[cfg(feature = "nvx")]
+    #[test]
+    fn nvx_with_feature_propagates_preflight_backend_unavailable() {
+        let request = nvx_request(true);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let err = match resolve_runner_inner(&request, &mut logger) {
+            Ok(_) => panic!("expected backend_unavailable"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.code, MxcErrorCode::BackendUnavailable);
+        assert_eq!(
+            err.message,
+            nvx_runner::ERR_WORKLOAD_IMAGE_ASSET_UNAVAILABLE
+        );
+    }
+
+    #[cfg(feature = "nvx")]
+    #[test]
+    fn nvx_without_runtime_returns_backend_unavailable_even_if_preflight_succeeds() {
+        let err = match resolve_nvx_backend_with_preflight(|| Ok(())) {
+            Ok(_) => panic!("runtime stub must not resolve a runner"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.code, MxcErrorCode::BackendUnavailable);
+        assert_eq!(err.message, ERR_NVX_RUNTIME_IMPLEMENTATION_MISSING);
     }
 }

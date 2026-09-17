@@ -16,6 +16,7 @@ serde_json = { workspace = true }
 # MicroVM runner — used by the Windows and Linux run-to-completion bodies under
 # the `microvm` feature. Never built on hosts/features that don't select it.
 nanvix_runner = { workspace = true, optional = true }
+nvx_runner = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 hyperlight_common = { workspace = true, optional = true }
@@ -50,6 +51,7 @@ default = []
 # live in one place. The build-time binary-staging that some backends also need
 # (e.g. NanVix's `nanvix_binaries`) stays with the executor crates.
 microvm = ["dep:nanvix_runner"]
+nvx = ["dep:nvx_runner", "nvx_runner/nvx"]
 wslc = ["dep:wslc_common", "wslc_common/link-wslcsdk"]
 hyperlight = ["dep:hyperlight_common", "hyperlight_common/hyperlight"]
 isolation_session = [

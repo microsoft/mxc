@@ -211,6 +211,29 @@ mod tests {
         }
     }
 
+    fn assert_nvx_method_is_omitted() {
+        let support = platform_support();
+        assert!(
+            support
+                .available_methods
+                .iter()
+                .all(|method| method != "nvx"),
+            "platform_support must not advertise NVX while runtime is incomplete"
+        );
+    }
+
+    #[cfg(not(feature = "nvx"))]
+    #[test]
+    fn nvx_is_not_advertised_without_feature() {
+        assert_nvx_method_is_omitted();
+    }
+
+    #[cfg(feature = "nvx")]
+    #[test]
+    fn nvx_is_not_advertised_with_feature_enabled() {
+        assert_nvx_method_is_omitted();
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_support_reports_bubblewrap_when_probe_succeeds() {
