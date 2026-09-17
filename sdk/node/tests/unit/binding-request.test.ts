@@ -7,6 +7,7 @@ import {
   bindingRequestUnsupportedReason,
   prepareRequestSpec,
 } from '../../src/bindings/request.js';
+import { MxcError } from '../../src/errors.js';
 import type { ContainerConfig } from '../../src/types.js';
 
 describe('native binding request', () => {
@@ -187,6 +188,18 @@ describe('native binding request', () => {
     });
 
     assert.strictEqual(request.policy.ui!.allowWindows, false);
+    assert.strictEqual(request.policy.ui!.allowInputInjection, false);
+    assert.strictEqual(request.policy.ui!.clipboard, 'read');
+  });
+
+  it('projects an omitted Seatbelt section as empty backend settings', () => {
+    const request = prepareRequestSpec({
+      version: '0.9.0-alpha',
+      containment: 'seatbelt',
+      process: { commandLine: 'echo hello' },
+    });
+
+    assert.deepStrictEqual(request.containment, { type: 'seatbelt' });
   });
 
   it('moves ProcessContainer configuration onto tagged containment', () => {
@@ -348,6 +361,17 @@ describe('native binding request', () => {
     assert.match(
       bindingRequestUnsupportedReason(config)!,
       /not supported by the in-process Node SDK/,
+    );
+    assert.throws(
+      () => prepareRequestSpec(config),
+      (error) => error instanceof MxcError && error.code === 'malformed_request',
+    );
+  });
+
+  it('uses a typed malformed-request error when the command is absent', () => {
+    assert.throws(
+      () => prepareRequestSpec({ version: '0.9.0-alpha' }),
+      (error) => error instanceof MxcError && error.code === 'malformed_request',
     );
   });
 });

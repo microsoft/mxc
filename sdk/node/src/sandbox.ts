@@ -716,6 +716,7 @@ function unsupportedInProcessRunOption(options: SandboxSpawnOptions): string | u
   if (options.dryRun === true) return 'dryRun';
   if (options.logDir !== undefined) return 'logDir';
   if (options.usePty === true) return 'usePty';
+  if (options.signal !== undefined) return 'signal';
   return undefined;
 }
 
