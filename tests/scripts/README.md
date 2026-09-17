@@ -43,7 +43,7 @@ Linux / macOS (`.sh`):
 | `run_windows_sandbox_state_aware_tests.ps1` | Windows Sandbox state-aware lifecycle E2E (single VM held across provision/start/exec*/stop/deprovision) | Windows Sandbox enabled |
 | `run_isolation_session_tests.ps1` | IsolationSession one-shot E2E suite | Interactive local session; OS-side IsolationSession service |
 | `run_isolation_session_state_aware_tests.ps1` | IsolationSession provision/start/exec/stop/deprovision E2E suite | Interactive local session; OS-side IsolationSession service |
-| `run_wslc_all_tests.ps1` | All WSLC one-shot and state-aware E2E tests | WSL2, WSLC SDK, staged daemon, pre-pulled images |
+| `run_wslc_all_tests.ps1` | All WSLC one-shot and state-aware E2E tests | WSL2, WSLC SDK, staged daemon, and network access for image setup (or pre-pulled images with `-SkipSetup`) |
 | `run_processcontainer_proxy_tests.ps1` | Process container proxy tests | `wxc-exec.exe` |
 | `WinProcessContainer-Tests.ps1` | Process container (AppContainer / BaseContainer) primitives suite — tier probes, rw/ro/denied matrix, UI mitigations, DACL restore, crash recovery | `wxc-exec.exe`, `wxc-ui-probe.exe` |
 | `T3-Workloads.ps1` | Real workloads (pwsh, git, node, python, cmd) on top of the T3 primitives. A missing interpreter is reported as a skip, not a failure | `wxc-exec.exe`; `pwsh` / `git` / `node` / `python` each optional, gating their own cases |
