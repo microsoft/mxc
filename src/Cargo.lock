@@ -1682,6 +1682,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "nvx_binaries"
+version = "0.8.0"
+dependencies = [
+ "nvx_build_common",
+ "nvx_common",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "nvx_build_common"
+version = "0.8.0"
+dependencies = [
+ "nvx_common",
+ "tempfile",
+]
+
+[[package]]
+name = "nvx_common"
+version = "0.8.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "oci-spec"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

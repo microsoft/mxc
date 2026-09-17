@@ -1,0 +1,12 @@
+[package]
+name = "nvx_build_common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Build-only helpers for staging NVX artifacts"
+
+[dependencies]
+nvx_common = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

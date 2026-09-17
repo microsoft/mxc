@@ -11,6 +11,9 @@ members = [
     "backends/nanvix/build_common",
     "backends/nanvix/common",
     "backends/nanvix/runner",
+    "backends/nvx/binaries",
+    "backends/nvx/build_common",
+    "backends/nvx/common",
     "backends/seatbelt/common",
     "backends/windows_sandbox/common",
     "backends/windows_sandbox/daemon",
@@ -88,6 +91,8 @@ mxc-sdk = { path = "core/mxc-sdk" }
 mxc_telemetry = { path = "mxc_telemetry" }
 nanvix_runner = { path = "backends/nanvix/runner" }
 nix = { version = "0.29", features = ["fs", "mount", "sched", "signal", "net", "process", "user", "term"] }
+nvx_build_common = { path = "backends/nvx/build_common" }
+nvx_common = { path = "backends/nvx/common" }
 process_security_environment_spec = { path = "core/generated/process_security_environment_specification" }
 plm = { path = "host/plm" }
 quick-xml = "0.41"

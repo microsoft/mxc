@@ -1,0 +1,255 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! Build-only helpers for locating and staging NVX artifacts.
+
+use std::io;
+use std::path::{Path, PathBuf};
+
+use nvx_common::{WINDOWS_PLATFORM_ARTIFACTS, WORKLOAD_IMAGE_ARTIFACTS};
+
+/// Category of an NVX release artifact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ArtifactKind {
+    /// OpenVMM and guest boot artifacts.
+    Platform,
+    /// Optional workload filesystem images.
+    WorkloadImage,
+}
+
+/// Returns every relative path in a complete NVX artifact bundle.
+pub fn artifact_rel_paths() -> impl Iterator<Item = (ArtifactKind, &'static str)> {
+    WINDOWS_PLATFORM_ARTIFACTS
+        .into_iter()
+        .map(|path| (ArtifactKind::Platform, path))
+        .chain(
+            WORKLOAD_IMAGE_ARTIFACTS
+                .into_iter()
+                .map(|path| (ArtifactKind::WorkloadImage, path)),
+        )
+}
+
+/// Returns the artifacts required by the currently configured release.
+pub fn available_artifact_rel_paths(
+    workload_images_available: bool,
+) -> impl Iterator<Item = &'static str> {
+    artifact_rel_paths().filter_map(move |(kind, path)| {
+        (kind == ArtifactKind::Platform
+            || (kind == ArtifactKind::WorkloadImage && workload_images_available))
+            .then_some(path)
+    })
+}
+
+/// Resolves the artifact cache, honouring the `NVX_BIN` offline override.
+///
+/// The returned boolean is `true` when the caller supplied `NVX_BIN`.
+pub fn resolve_bin_dir(out_dir: &Path) -> io::Result<(PathBuf, bool)> {
+    let prefetched = std::env::var_os("NVX_BIN")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+
+    if let Some(dir) = prefetched {
+        if !dir.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "NVX_BIN is set to '{}', but that directory does not exist",
+                    dir.display()
+                ),
+            ));
+        }
+        return std::path::absolute(&dir).map(|absolute| (absolute, true));
+    }
+
+    let dir = out_dir.join("nvx-binaries");
+    std::fs::create_dir_all(&dir)?;
+    Ok((dir, false))
+}
+
+/// Copies selected artifacts while preserving their release-relative paths.
+///
+/// Missing artifacts and copy failures are returned as explicit errors. The
+/// destination file is removed after a failed copy so a partial artifact is
+/// never left staged.
+pub fn copy_artifact_paths<'a>(
+    src_dir: &Path,
+    target_dir: &Path,
+    relative_paths: impl IntoIterator<Item = &'a str>,
+) -> io::Result<()> {
+    let relative_paths: Vec<&str> = relative_paths.into_iter().collect();
+    for relative_path in &relative_paths {
+        let source = src_dir.join(relative_path);
+        if !source.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("required NVX artifact '{}' is missing", source.display()),
+            ));
+        }
+    }
+
+    for relative_path in relative_paths {
+        let source = src_dir.join(relative_path);
+        let destination = target_dir.join(relative_path);
+        let parent = destination.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "NVX artifact '{}' has no destination parent",
+                    destination.display()
+                ),
+            )
+        })?;
+        std::fs::create_dir_all(parent)?;
+
+        if let Err(error) = std::fs::copy(&source, &destination) {
+            let _ = std::fs::remove_file(&destination);
+            return Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "failed to copy NVX artifact '{}' to '{}': {error}",
+                    source.display(),
+                    destination.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Stages all artifacts available in the configured release.
+pub fn copy_artifacts_to_target(
+    src_dir: &Path,
+    target_dir: &Path,
+    workload_images_available: bool,
+) -> io::Result<()> {
+    copy_artifact_paths(
+        src_dir,
+        target_dir,
+        available_artifact_rel_paths(workload_images_available),
+    )
+}
+
+/// Emits Cargo change tracking for every artifact available in this release.
+pub fn emit_rerun_for_artifacts(src_dir: &Path, workload_images_available: bool) {
+    for relative_path in available_artifact_rel_paths(workload_images_available) {
+        println!(
+            "cargo:rerun-if-changed={}",
+            src_dir.join(relative_path).display()
+        );
+    }
+}
+
+/// Stages NVX artifacts beside the consuming executable.
+pub fn stage_artifacts_next_to_exe(nvx_bin_dir: &Path) -> io::Result<()> {
+    let workload_images_available =
+        match std::env::var("DEP_NVX_BINARIES_WORKLOAD_IMAGES_AVAILABLE").as_deref() {
+            Ok("1") => true,
+            Ok("0") => false,
+            Ok(value) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "DEP_NVX_BINARIES_WORKLOAD_IMAGES_AVAILABLE has invalid value '{value}'"
+                    ),
+                ))
+            }
+            Err(std::env::VarError::NotPresent) => false,
+            Err(error) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("cannot read DEP_NVX_BINARIES_WORKLOAD_IMAGES_AVAILABLE: {error}"),
+                ))
+            }
+        };
+    let out_dir = PathBuf::from(
+        std::env::var_os("OUT_DIR")
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "OUT_DIR is not set"))?,
+    );
+    let target_dir = out_dir
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "cannot determine target directory from '{}'",
+                    out_dir.display()
+                ),
+            )
+        })?;
+
+    copy_artifacts_to_target(nvx_bin_dir, target_dir, workload_images_available)?;
+    emit_rerun_for_artifacts(nvx_bin_dir, workload_images_available);
+    println!("cargo:rerun-if-env-changed=DEP_NVX_BINARIES_BIN_DIR");
+    println!("cargo:rerun-if-env-changed=DEP_NVX_BINARIES_WORKLOAD_IMAGES_AVAILABLE");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_artifact(root: &Path, relative_path: &str, contents: &[u8]) {
+        let path = root.join(relative_path);
+        std::fs::create_dir_all(path.parent().expect("artifact must have a parent"))
+            .expect("failed to create artifact parent");
+        std::fs::write(path, contents).expect("failed to write artifact");
+    }
+
+    #[test]
+    fn artifact_paths_cover_complete_bundle_in_release_order() {
+        assert_eq!(
+            artifact_rel_paths().collect::<Vec<_>>(),
+            vec![
+                (ArtifactKind::Platform, "bin/openvmm.exe"),
+                (ArtifactKind::Platform, "guest/vmlinux"),
+                (ArtifactKind::Platform, "guest/initramfs.cpio.gz"),
+                (ArtifactKind::WorkloadImage, "images/distro.erofs"),
+                (ArtifactKind::WorkloadImage, "images/runtime.erofs"),
+                (ArtifactKind::WorkloadImage, "images/scratch.ext4"),
+            ]
+        );
+    }
+
+    #[test]
+    fn staging_preserves_release_layout_without_optional_images() {
+        let source = tempfile::tempdir().expect("failed to create source directory");
+        let target = tempfile::tempdir().expect("failed to create target directory");
+        for relative_path in WINDOWS_PLATFORM_ARTIFACTS {
+            write_artifact(source.path(), relative_path, relative_path.as_bytes());
+        }
+
+        copy_artifacts_to_target(source.path(), target.path(), false)
+            .expect("platform-only staging failed");
+
+        for relative_path in WINDOWS_PLATFORM_ARTIFACTS {
+            assert_eq!(
+                std::fs::read(target.path().join(relative_path))
+                    .expect("staged artifact is missing"),
+                relative_path.as_bytes()
+            );
+        }
+        for relative_path in WORKLOAD_IMAGE_ARTIFACTS {
+            assert!(!target.path().join(relative_path).exists());
+        }
+    }
+
+    #[test]
+    fn complete_bundle_requires_every_workload_image() {
+        let source = tempfile::tempdir().expect("failed to create source directory");
+        let target = tempfile::tempdir().expect("failed to create target directory");
+        for relative_path in WINDOWS_PLATFORM_ARTIFACTS {
+            write_artifact(source.path(), relative_path, b"platform");
+        }
+
+        let error = copy_artifacts_to_target(source.path(), target.path(), true)
+            .expect_err("missing workload images must fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert!(error.to_string().contains("images/distro.erofs"));
+        for relative_path in WINDOWS_PLATFORM_ARTIFACTS {
+            assert!(!target.path().join(relative_path).exists());
+        }
+    }
+}
