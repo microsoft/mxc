@@ -93,11 +93,10 @@ where
 /// Mirrors the SDK's `getPlatformSupport`, restricted to the backends the
 /// `mxc-sdk` library can actually run. On Windows the isolation tier and UI
 /// capabilities come from the in-process fallback probe rather than a
-/// `wxc-exec --probe` subprocess, and `wslc` is reported when the host meets
-/// the backend's minimum Windows version and has the WSL Container runtime
-/// (requires the `wslc` feature). The broader host-capability set (backends the
-/// host can run but the SDK cannot launch) is reported separately by
-/// [`available_backends`](crate::available_backends).
+/// `wxc-exec --probe` subprocess, and `wslc` is reported when the host has the
+/// WSL Container runtime (requires the `wslc` feature). The broader
+/// host-capability set (backends the host can run but the SDK cannot launch) is
+/// reported separately by [`available_backends`](crate::available_backends).
 pub fn platform_support() -> PlatformSupport {
     #[cfg(target_os = "macos")]
     {

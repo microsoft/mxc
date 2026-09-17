@@ -746,14 +746,6 @@ impl WSLContainerRunner {
     /// The returned `WslcSdk` holds raw function pointers loaded from `wslcsdk.dll`;
     /// callers must keep it alive for the duration of all SDK use.
     unsafe fn init_and_load_sdk(logger: &mut Logger) -> Result<&'static WslcSdk, ScriptResponse> {
-        // A host below the floor cannot have the WSL runtime at all, so the
-        // missing-component guidance below would tell the user to run an
-        // update that cannot help them.
-        if let Err(e) = crate::host_requirements::check_windows_version() {
-            let _ = writeln!(logger, "[WSLC] {e}");
-            return Err(WslcError::Unavailable(e).into_response());
-        }
-
         // Accept exactly what `ComApartment` accepts, so a probe and a spawn on
         // the same thread can never disagree: an STA caller
         // (`RPC_E_CHANGED_MODE`) reuses its existing apartment rather than
