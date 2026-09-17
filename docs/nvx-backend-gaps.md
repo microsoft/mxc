@@ -76,6 +76,65 @@ them for this backend:
 | `_comment` | Accepted as descriptive metadata; it does not change runtime behavior. |
 | Omitted optional parent sections | Accepted; their absence does not create unsupported policy or change the supported defaults. |
 
+## Schema changes
+
+The only required new public identifier is `containment: "nvx"`. The
+`experimental.nvx.provision` section is necessary only if images remain caller-configurable.
+
+Example state-aware provision request:
+
+```json
+{
+  "$schema": "https://aka.ms/mxc/schemas/0.9.0-alpha.json",
+  "version": "0.9.0-alpha",
+  "phase": "provision",
+  "containment": "nvx",
+  "filesystem": {
+    "readonlyPaths": [
+      "C:\\workspace\\source"
+    ],
+    "readwritePaths": [
+      "C:\\workspace\\output"
+    ],
+    "deniedPaths": []
+  },
+  "network": {
+    "egress": {
+      "default": "deny"
+    },
+    "ingress": {
+      "default": "deny",
+      "hostLoopback": "deny"
+    }
+  },
+  "experimental": {
+    "nvx": {
+      "provision": {
+        "layers": [
+          {
+            "role": "distro",
+            "path": "C:\\nvx\\images\\distro.erofs",
+            "uuid": "11111111-1111-1111-1111-111111111111"
+          },
+          {
+            "role": "runtime",
+            "path": "C:\\nvx\\images\\runtime.erofs",
+            "uuid": "22222222-2222-2222-2222-222222222222"
+          }
+        ],
+        "scratchPath": "C:\\nvx\\images\\scratch.ext4"
+      }
+    }
+  }
+}
+```
+
+- `distro` is the read-only base operating-system and userspace layer.
+- `runtime` is an optional read-only layer containing the workload runtime and
+  supporting files.
+- `scratchPath` is the writable ext4 image used for changes made while the
+  sandbox is running.
+
 ## Binary acquisition and packaging
 
 NVX replaces the existing NanVix microVM runtime and its `--with-microvm`
