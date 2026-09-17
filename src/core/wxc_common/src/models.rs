@@ -44,9 +44,8 @@ pub enum ContainmentBackend {
     /// is "Seatbelt"); selected on the wire as `"seatbelt"`.
     Seatbelt,
     /// Bubblewrap — unprivileged Linux sandboxing via user namespaces.
-    /// Experimental — requires `--experimental` flag. Uses `bwrap` to
-    /// create namespace-isolated processes without root privileges.
-    /// Selected on the wire as `"bubblewrap"`.
+    /// Uses `bwrap` to create namespace-isolated processes without root
+    /// privileges. Selected on the wire as `"bubblewrap"`.
     Bubblewrap,
 }
 
@@ -835,6 +834,7 @@ pub struct ContainerPolicy {
     pub capabilities: Vec<String>,
     pub readwrite_paths: Vec<String>,
     pub readonly_paths: Vec<String>,
+    pub enumerate_paths: Vec<String>,
     pub denied_paths: Vec<String>,
     pub fallback: FallbackPolicy,
     pub default_network_policy: NetworkPolicy,

@@ -32,6 +32,8 @@ pub mod job_object;
 #[cfg(target_os = "windows")]
 pub mod launch_diagnostics;
 #[cfg(target_os = "windows")]
+mod native_capture;
+#[cfg(target_os = "windows")]
 pub mod network_manager;
 #[cfg(target_os = "windows")]
 mod network_policy_helpers;
@@ -43,6 +45,17 @@ pub mod process_mitigation;
 pub mod proxy_coordinator;
 #[cfg(target_os = "windows")]
 pub mod sandbox_tracking;
+#[cfg(target_os = "windows")]
+mod secenv;
+#[cfg(target_os = "windows")]
+pub use native_capture::CaptureSession;
+#[cfg(target_os = "windows")]
+pub use secenv::{
+    is_security_environment_api_available, probe_security_environment_exports,
+    ProcessSecurityEnvironment, SecurityEnvironmentApi as ProcessSecurityEnvironmentApi,
+    SecurityEnvironmentExportReport, SecurityEnvironmentStartupInfo,
+    PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+};
 /// Working-directory resolution for both Windows launch paths. Deliberately
 /// **not** `cfg`-gated: the mapping is pure, and keeping it portable means its
 /// regression tests (notably "never resolve to a `NULL` cwd") run on every CI

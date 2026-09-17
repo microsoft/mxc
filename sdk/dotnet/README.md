@@ -275,7 +275,8 @@ and disposes both output streams; their contents cannot be collected later.
 
 `ProcessContainerContainment` exposes the Rust SDK's backend-specific options:
 least-privilege creation, learning mode, AppContainer capabilities, denial
-capture, BaseProcessContainer UI isolation, and runtime-proxy peer identity.
+capture, BaseProcessContainer UI isolation, enumeration-only filesystem access,
+and runtime-proxy peer identity.
 For example:
 
 ```csharp
@@ -288,12 +289,22 @@ request.Containment = new ProcessContainerContainment
         Isolation = ProcessContainerUiIsolation.Container,
         SystemSettings = ProcessContainerSystemSettings.None,
     },
+    Filesystem = new ProcessContainerFilesystemPolicy
+    {
+        EnumeratePaths = { @"C:\tools" },
+    },
     Network = new ProcessContainerNetworkPolicy
     {
         AllowedProxyPeer = "Contoso.Proxy_123",
     },
 };
 ```
+
+With schema `0.9.0-alpha`,
+`ProcessContainerContainment.Filesystem.EnumeratePaths` requests directory-query
+and listing access without granting file-content reads. This is supported only
+by Windows BaseContainer hosts advertising PSEC 1.1 `fs_enumerate`; unsupported
+hosts fail rather than broadening the policy.
 
 Capability names and backend combinations are validated by the native SDK.
 `LearningMode`, denial capture, and ProcessContainer directional networking

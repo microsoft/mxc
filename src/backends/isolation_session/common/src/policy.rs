@@ -88,6 +88,7 @@ pub(super) fn validate_post_provision_policy(
 fn reject_filesystem_policy(request: &ExecutionRequest) -> Result<(), IsolationSessionError> {
     if !request.policy.readwrite_paths.is_empty()
         || !request.policy.readonly_paths.is_empty()
+        || !request.policy.enumerate_paths.is_empty()
         || !request.policy.denied_paths.is_empty()
     {
         return Err(IsolationSessionError::Policy(
@@ -209,6 +210,21 @@ mod tests {
         let request = ExecutionRequest {
             policy: ContainerPolicy {
                 readonly_paths: vec!["C:\\data".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_policy_err_contains(
+            validate_provision_policy(&request).unwrap_err(),
+            ERR_FILESYSTEM_POLICY,
+        );
+    }
+
+    #[test]
+    fn provision_policy_rejects_enumerate_paths() {
+        let request = ExecutionRequest {
+            policy: ContainerPolicy {
+                enumerate_paths: vec!["C:\\data".to_string()],
                 ..Default::default()
             },
             ..Default::default()

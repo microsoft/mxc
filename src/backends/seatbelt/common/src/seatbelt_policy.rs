@@ -54,8 +54,8 @@ pub fn egress_allowed(policy: &ContainerPolicy) -> bool {
 }
 
 /// Effective inbound posture. Seatbelt maps `network.ingress.default` onto its
-/// `(allow network-inbound (local ip))` rule; `hostLoopback` must match
-/// `default` (checked by the backend), so it plays no part here.
+/// `(allow network-inbound (local ip))` rule; `hostLoopback` is enforced
+/// separately on the container-to-host direction, so it plays no part here.
 pub fn local_network_allowed(policy: &ContainerPolicy) -> bool {
     match policy.network_ingress.as_ref() {
         Some(ingress) => ingress.default == NetworkAction::Allow,
@@ -160,27 +160,25 @@ pub fn validate_seatbelt_network_policy(policy: &ContainerPolicy) -> Result<(), 
         );
     }
 
-    // `hostLoopback` is bidirectional, but Seatbelt can only enforce its
-    // outbound half (see `write_host_loopback_rules`): an inbound filter scoped
-    // to loopback is either a no-op or breaks `bind()` outright. Requiring it to
-    // match `ingress.default` -- which drives the one `network-inbound` rule --
-    // keeps the inbound half consistent instead of enforcing one direction and
-    // silently ignoring the other.
+    // `hostLoopback` is bidirectional and Seatbelt can only enforce its
+    // container-to-host half (see `write_host_loopback_rules`): an inbound
+    // filter cannot be scoped by peer, so there is no rule that admits a
+    // loopback peer while refusing a LAN one. Only `hostLoopback: "allow"`
+    // under `default: "deny"` is inexpressible -- the blanket
+    // `network-inbound` grant that would carry it is exactly what
+    // `default: "deny"` withholds -- so only that pair is refused.
     if let Some(ingress) = policy.network_ingress.as_ref() {
-        if ingress.host_loopback != ingress.default {
-            let name = |action: NetworkAction| match action {
-                NetworkAction::Allow => "allow",
-                NetworkAction::Deny => "deny",
-            };
-            return Err(format!(
-                "macOS Seatbelt cannot enforce a network.ingress.hostLoopback \
-                 posture ('{}') that differs from network.ingress.default \
-                 ('{}'): the inbound half is not expressible in a Seatbelt \
-                 profile. Set both to the same value. Note that an omitted \
-                 'hostLoopback' is 'deny', not an inherit of 'default'.",
-                name(ingress.host_loopback),
-                name(ingress.default),
-            ));
+        if ingress.host_loopback == NetworkAction::Allow && ingress.default == NetworkAction::Deny {
+            return Err(
+                "macOS Seatbelt cannot enforce network.ingress.hostLoopback='allow' \
+                 alongside network.ingress.default='deny': the inbound half of \
+                 host loopback rides the same Seatbelt rule as the inbound \
+                 default, so it cannot be granted while that default denies it. \
+                 Set network.ingress.default='allow' as well, or set \
+                 hostLoopback='deny'. Note that an omitted 'hostLoopback' is \
+                 'deny', not an inherit of 'default'."
+                    .to_string(),
+            );
         }
     }
 

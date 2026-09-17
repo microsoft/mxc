@@ -23,19 +23,12 @@
 //! Because the exports only exist on feature-enabled OS builds, this crate resolves
 //! them at runtime via `LoadLibrary`/`GetProcAddress` behind the [`is_learning_mode_api_available`]
 //! capability probe. The crate compiles on every platform: the capability probe returns
-//! `false` on non-Windows targets, while the loader and capture lifecycle types are
-//! exported only on Windows.
+//! `false` on non-Windows targets, while the loader and trace-handle types are exported
+//! only on Windows.
 
 use thiserror::Error;
 
 pub mod guarded_wpr_protocol;
-
-#[cfg(target_os = "windows")]
-mod ffi;
-#[cfg(target_os = "windows")]
-mod lifecycle;
-#[cfg(target_os = "windows")]
-mod secenv;
 
 #[cfg(target_os = "windows")]
 mod capability_dacl;
@@ -47,6 +40,8 @@ mod etl_decode;
 mod etl_filter;
 #[cfg(target_os = "windows")]
 mod extractors;
+#[cfg(target_os = "windows")]
+mod ffi;
 #[cfg(target_os = "windows")]
 mod path_norm;
 #[cfg(target_os = "windows")]
@@ -65,22 +60,13 @@ pub use extractors::DecodedEventParts;
 #[cfg(target_os = "windows")]
 pub use ffi::{is_learning_mode_api_available, LearningModeApi, LearningModeTraceHandle};
 #[cfg(target_os = "windows")]
-pub use lifecycle::CaptureSession;
-#[cfg(target_os = "windows")]
 pub use process_lifetime::{
     JobMembershipSnapshot, JobProcessMembership, MAX_JOB_PROCESS_LIFETIMES,
-};
-#[cfg(target_os = "windows")]
-pub use secenv::{
-    is_security_environment_api_available, probe_security_environment_exports,
-    ProcessSecurityEnvironment, SecurityEnvironmentApi, SecurityEnvironmentExportReport,
-    SecurityEnvironmentStartupInfo, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
 };
 
 /// Errors surfaced while loading or invoking the Learning Mode trace API.
 ///
-/// `Clone` is derived so that [`crate::LearningModeApi::load`] and
-/// [`crate::SecurityEnvironmentApi::load`] can memoize a failed load and hand
+/// `Clone` is derived so runtime API loaders can memoize a failed load and hand
 /// every caller an owned, typed copy of the original diagnostic. Every variant
 /// already owns its data (`&'static str`, `String`, or plain integers), so the
 /// clone preserves the full message and source information without erasing it

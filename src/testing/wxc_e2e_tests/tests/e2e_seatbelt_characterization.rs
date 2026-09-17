@@ -422,7 +422,7 @@ fn egress_probe(loopback_port: u16) -> String {
 ///
 /// The allow variant states `ingress` explicitly: an omitted `hostLoopback` is
 /// `deny`, which would close the loopback endpoint this probe uses as its
-/// control. Seatbelt requires `hostLoopback` to equal `default`.
+/// control.
 fn directional_config(label: &str, port: u16, default: &str) -> serde_json::Value {
     let mut cfg = json!({
         "version": "0.8.0-alpha",

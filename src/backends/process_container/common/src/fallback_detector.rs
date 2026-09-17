@@ -163,6 +163,14 @@ pub struct TierDecision {
     pub reasons: Vec<DegradationReason>,
 }
 
+/// Request-specific BaseContainer capabilities used for tier selection.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BaseContainerRequestCapabilities {
+    pub(crate) usable: bool,
+    pub(crate) supports_deny_paths: bool,
+    pub(crate) supports_enumerate_paths: bool,
+}
+
 impl TierDecision {
     /// Whether enforcement was degraded relative to the preferred tier — the
     /// condition under which `mxc.EnforcementDegraded` fires. A clean Tier 1
@@ -232,6 +240,13 @@ pub enum FallbackError {
         /// Human-readable description of why resolution failed.
         reason: String,
     },
+
+    /// Enumeration-only access cannot be represented by AppContainer fallback tiers.
+    #[error(
+        "processContainer.filesystem.enumeratePaths is not supported by this version of Windows; \
+         enumeration-only access requires native ProcessContainer support"
+    )]
+    EnumeratePathsUnsupported,
 }
 
 /// Decide which isolation tier to use for a run.
@@ -271,11 +286,16 @@ pub fn detect(
     policy: &ContainerPolicy,
     prefer_base_container: bool,
 ) -> Result<TierDecision, FallbackError> {
+    let supports_enumerate_paths = policy.enumerate_paths.is_empty()
+        || crate::base_container_runner::BaseContainerRunner::supports_enumerate_paths();
     detect_with_base_container_capabilities(
         policy,
         prefer_base_container,
-        is_base_container_usable(),
-        base_container_supports_deny_paths(),
+        BaseContainerRequestCapabilities {
+            usable: is_base_container_usable(),
+            supports_deny_paths: base_container_supports_deny_paths(),
+            supports_enumerate_paths,
+        },
     )
 }
 
@@ -285,12 +305,20 @@ pub fn detect(
 pub(crate) fn detect_with_base_container_capabilities(
     policy: &ContainerPolicy,
     prefer_base_container: bool,
-    base_container_usable: bool,
-    base_container_supports_deny_paths: bool,
+    capabilities: BaseContainerRequestCapabilities,
 ) -> Result<TierDecision, FallbackError> {
     let denied = !policy.denied_paths.is_empty();
-    let has_fs_policy =
-        !policy.readwrite_paths.is_empty() || !policy.readonly_paths.is_empty() || denied;
+    let enumerate = !policy.enumerate_paths.is_empty();
+    let has_fs_policy = !policy.readwrite_paths.is_empty()
+        || !policy.readonly_paths.is_empty()
+        || enumerate
+        || denied;
+
+    if enumerate
+        && !(prefer_base_container && capabilities.usable && capabilities.supports_enumerate_paths)
+    {
+        return Err(FallbackError::EnumeratePathsUnsupported);
+    }
 
     // Test-executor injection seam. An invalid value is silently ignored and
     // we proceed with the real probe chain.
@@ -309,11 +337,11 @@ pub(crate) fn detect_with_base_container_capabilities(
     let mut reasons: Vec<DegradationReason> = Vec::new();
 
     // Tier 1 — BaseContainer
-    if prefer_base_container && base_container_usable {
+    if prefer_base_container && capabilities.usable {
         // Keep deny on Tier 1 only with native deny-path support from the
         // selected PSEC or SBOX contract. T1 applies no host DACL, so
         // otherwise fall through to a DACL-enforcing tier.
-        if !denied || base_container_supports_deny_paths {
+        if !denied || capabilities.supports_deny_paths {
             return Ok(TierDecision {
                 tier: IsolationTier::BaseContainer,
                 needs_dacl_augmentation: false,

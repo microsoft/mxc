@@ -65,8 +65,20 @@ jobs:
         suffix: ${{ parameters.packageName }} 
  
   steps:
+  - checkout: self
+    path: lock-check
+
   - checkout: ${{ parameters.checkoutRepo }}
     path: s
+
+  - task: NodeTool@1
+    displayName: Use Node.js 22
+    inputs:
+      version: '22.x'
+
+  - script: node "$(Pipeline.Workspace)/lock-check/scripts/versioning/check-package-lock-integrity.js"
+    displayName: 'Check package locks use npmjs and SHA-512 integrity'
+    workingDirectory: $(Pipeline.Workspace)/s
 
   - powershell: |
       Copy-Item `
@@ -145,11 +157,6 @@ jobs:
   # Build the SDK and integration tests so the Node E2E suite can be
   # included in the test bundle.  The SDK has a native dep (node-pty)
   # that requires node-gyp; the windows-2022 image has VS build tools.
-  - task: NodeTool@1
-    displayName: Use Node.js 22
-    inputs:
-      version: '22.x'
-
   # Populate sdk/node/bin/x64 with the freshly-built wxc-exec.exe so the SDK
   # resolves its binary at runtime.  (build.bat does this; the pipeline
   # must replicate it since we only build wxc-exec, not the full repo.)

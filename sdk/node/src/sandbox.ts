@@ -289,6 +289,9 @@ function buildProcessBaseContainerConfig(
             systemSettings: "none",
             ime: false,
         },
+        filesystem: policy.processContainer?.filesystem?.enumeratePaths?.length
+            ? { enumeratePaths: [...policy.processContainer.filesystem.enumeratePaths] }
+            : undefined,
         network: policy.processContainer?.network?.allowedProxyPeer !== undefined
             ? { allowedProxyPeer: policy.processContainer.network.allowedProxyPeer }
             : undefined,
@@ -356,6 +359,12 @@ function buildMicroVmConfig(
             deniedPaths: policy.filesystem?.deniedPaths,
         };
     }
+    if (policy.processContainer?.filesystem?.enumeratePaths?.length) {
+        throw new Error(
+            'The microvm backend does not support processContainer.filesystem.enumeratePaths. ' +
+            'Remove it or use the Windows ProcessContainer backend.'
+        );
+    }
     config.containment = 'microvm';
     return config;
 }
@@ -399,6 +408,7 @@ export function createConfigFromPolicy(
     validateContainmentVersion(policy.version, containment, platform);
     validateTelemetryVersion(policy);
     const directionalNetwork = selectDirectionalNetwork(policy);
+    const enumeratePaths = policy.processContainer?.filesystem?.enumeratePaths;
 
     const containerId = containerName ?? generateRandomContainerName();
 
@@ -423,11 +433,34 @@ export function createConfigFromPolicy(
         return buildMicroVmConfig(config, policy);
     }
 
+    if (enumeratePaths?.length) {
+        if (policy.version !== '0.9.0-alpha') {
+            throw new Error(
+                'processContainer.filesystem.enumeratePaths requires schema version 0.9.0-alpha.'
+            );
+        }
+        const targetsWindowsProcessContainer =
+            platform === 'win32' && (containment === 'process' || containment === 'processcontainer');
+        if (!targetsWindowsProcessContainer) {
+            throw new Error(
+                'processContainer.filesystem.enumeratePaths is supported only by the Windows ' +
+                'ProcessContainer backend.'
+            );
+        }
+    }
+
     config.filesystem = {
         readwritePaths: [...(policy.filesystem?.readwritePaths ?? [])],
         readonlyPaths: [...(policy.filesystem?.readonlyPaths ?? [])],
         deniedPaths: [...(policy.filesystem?.deniedPaths ?? [])],
     };
+    if (enumeratePaths?.length) {
+        config.processContainer = {
+            filesystem: {
+                enumeratePaths: [...enumeratePaths],
+            },
+        };
+    }
 
     // UI mapping (cross-platform)
     config.ui = {
@@ -451,6 +484,7 @@ export function createConfigFromPolicy(
         }
         if (policy.processContainer?.network?.allowedProxyPeer !== undefined) {
             config.processContainer = {
+                ...config.processContainer,
                 network: {
                     allowedProxyPeer: policy.processContainer.network.allowedProxyPeer,
                 },

@@ -1,48 +1,21 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Drift guard: the bash network scripts must derive the firewall chain name at
-//! run time rather than hard-coding it.
-//!
-//! This is deliberately not a unit test. It reads the repository from disk, so
-//! it crosses Feathers' file-system line, and it lives in its own file so that
-//! `chain_name_spec.rs` stays filesystem- and dependency-free.
-//!
-//! Why it exists rather than more `chain_name_for` cases: on the day
-//! `run_lxc_network_enforcement_test.sh` was asserting against
-//! `MXC-CLI-LXC-Net-Deny`, every one of the twenty naming tests in
-//! `chain_name_spec.rs` was green. They cover what the function returns, and
-//! the defect was in what the scripts believed it returned. A chain name is a
-//! digest of the container name, so a literal in a script names a chain that
-//! cannot exist: `iptables -S <that name>` always fails, the cleanup assertion
-//! reads that failure as "the chain was removed", and the test passes without
-//! examining anything. Catching that class requires reading the scripts.
-
 use lxc_common::network_iptables::chain_name_for;
 use std::fs;
 use std::path::PathBuf;
 
-/// Repository `tests/scripts/` directory.
-///
-/// `CARGO_MANIFEST_DIR` is `src/backends/lxc/common/` during `cargo test`.
 fn scripts_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent() // src/backends/lxc
-        .and_then(|p| p.parent()) // src/backends
-        .and_then(|p| p.parent()) // src
-        .and_then(|p| p.parent()) // repo root
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
         .expect("could not determine repo root")
         .join("tests")
         .join("scripts")
 }
 
-/// The network scripts that make assertions about MXC-owned chains, and so must
-/// derive the chain name instead of naming one.
-///
-/// Enumerated rather than discovered: a glob would silently shrink to zero on a
-/// rename or a path change and still report success, which is the same
-/// vacuous-pass defect this file exists to catch. A new network script that
-/// asserts on chains belongs in this list.
 const CHAIN_ASSERTING_SCRIPTS: &[&str] = &[
     "run_lxc_network_cidr_boundary_test.sh",
     "run_lxc_network_deny_precedence_test.sh",
@@ -52,10 +25,6 @@ const CHAIN_ASSERTING_SCRIPTS: &[&str] = &[
     "run_lxc_network_ipv6_cidr_test.sh",
 ];
 
-/// Read every `run_lxc_network_*.sh` as (file name, contents).
-///
-/// A missing directory or an empty match is a hard failure: a drift guard that
-/// finds nothing to check is indistinguishable from one that passes.
 fn network_scripts() -> Vec<(String, String)> {
     let dir = scripts_dir();
     let entries =
@@ -83,15 +52,6 @@ fn network_scripts() -> Vec<(String, String)> {
     scripts
 }
 
-/// Every `MXC-<something>` on a line of a network script.
-///
-/// A hard-coded chain name is vacuous wherever it appears, not only in an
-/// assignment: `assert_no_forward_reference "MXC-CLI-LXC-Net-Deny"` names a
-/// chain that can never exist, and so asserts nothing about the real one.
-///
-/// The legitimate idioms -- the shape check and the chain-enumerating `sed`
-/// program -- live in `lib/chain_name.sh`, which this never scans, so there is
-/// nothing here to exempt.
 fn illegal_mxc_literals(line: &str) -> Vec<String> {
     if line.trim_start().starts_with('#') {
         return Vec::new();
@@ -135,15 +95,8 @@ fn no_network_script_names_a_specific_chain() {
     );
 }
 
-/// The chain shape [`matches_documented_shape`] models.
-///
-/// Not a second copy of the scripts' check: the scripts apply exactly one
-/// pattern, in `lib/chain_name.sh`, and the test below reads it from there.
-/// This is the tripwire that fires when that pattern changes and the
-/// hand-rolled recognizer no longer models it.
 const MODELED_SHAPE_ERE: &str = "^MXC-([A-Za-z0-9_-]{1,7}-)?[a-z2-7]{16}$";
 
-/// The chain shape the scripts actually check, read from the shared helper.
 fn helper_shape_ere() -> String {
     let path = scripts_dir().join("lib").join("chain_name.sh");
     let body = fs::read_to_string(&path)
@@ -162,12 +115,6 @@ fn helper_shape_ere() -> String {
     );
 }
 
-/// Recognizer for [`MODELED_SHAPE_ERE`], hand-rolled to keep this suite free
-/// of a regex dependency, matching the convention in `chain_name_spec.rs`.
-///
-/// The 16-character base32 hash is a fixed-width suffix, so the separator (when
-/// a slug is present) is always the byte immediately before it, which makes the
-/// parse unambiguous even though `-` is legal inside the slug.
 fn matches_documented_shape(chain: &str) -> bool {
     if !chain.is_ascii() {
         return false;
@@ -205,8 +152,6 @@ fn the_shape_the_scripts_check_accepts_the_names_the_code_produces() {
          proves nothing about the scripts. Update both together."
     );
 
-    // Representative of what the scripts feed it: ordinary names, names whose
-    // slug is exhausted or absent, and a name long enough to be truncated.
     for input in [
         "lxc-network-enforcement-deny",
         "lxc_network_deny_precedence_control",
@@ -241,9 +186,6 @@ fn every_chain_asserting_script_derives_the_name_it_asserts_on() {
                 )
             });
 
-        // Either idiom reads the name back from the run rather than assuming
-        // it: `mxc_chains` enumerates the chains a tool actually holds, and
-        // `derive_chain_name` parses the name out of this run's --debug output.
         assert!(
             body.contains("mxc_chains") || body.contains("derive_chain_name"),
             "{expected} asserts on MXC chains but never derives a chain name. \

@@ -248,6 +248,16 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::OneShotReques
                     contract,
                     process_container.ui.as_ref().map(map_process_container_ui)
                 ),
+                filesystem: optional!(
+                    contract,
+                    process_container.filesystem.as_ref().map(|filesystem| {
+                        contract::ProcessContainerFilesystem {
+                            enumerate_paths: contract::OptionalField::present(
+                                filesystem.enumerate_paths.clone(),
+                            ),
+                        }
+                    })
+                ),
                 network: optional!(
                     contract,
                     process_container.network.as_ref().and_then(|network| {

@@ -67,6 +67,8 @@ pub struct ProcessContainer {
     pub capture_denials: Option<CaptureDenials>,
     /// Optional BaseProcessContainer user-interface settings.
     pub ui: Option<ProcessContainerUi>,
+    /// Optional ProcessContainer-specific filesystem settings.
+    pub filesystem: Option<ProcessContainerFilesystem>,
     /// Optional ProcessContainer-specific network settings.
     pub network: Option<ProcessContainerNetwork>,
 }
@@ -79,9 +81,18 @@ impl Default for ProcessContainer {
             capabilities: Vec::new(),
             capture_denials: None,
             ui: Some(ProcessContainerUi::default()),
+            filesystem: None,
             network: None,
         }
     }
+}
+
+/// ProcessContainer-specific filesystem settings.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ProcessContainerFilesystem {
+    /// Paths that may be enumerated without granting file-content reads.
+    pub enumerate_paths: Vec<String>,
 }
 
 /// ProcessContainer-specific network settings.
@@ -191,6 +202,16 @@ pub(crate) fn apply(
             ));
         }
     }
+    if process_container
+        .filesystem
+        .as_ref()
+        .is_some_and(|filesystem| !filesystem.enumerate_paths.is_empty())
+        && policy.version != "0.9.0-alpha"
+    {
+        return Err(wxc_common::mxc_error::MxcError::malformed_request(
+            "processContainer.filesystem.enumeratePaths requires schema version 0.9.0-alpha",
+        ));
+    }
 
     let mut capabilities = process_container.capabilities.clone();
     if let Some(net) = &policy.network {
@@ -238,6 +259,13 @@ pub(crate) fn apply(
             "systemSettings": ui.system_settings.wire(),
             "ime": ui.ime,
         });
+    }
+    if let Some(filesystem) = &process_container.filesystem {
+        if !filesystem.enumerate_paths.is_empty() {
+            config["processContainer"]["filesystem"] = json!({
+                "enumeratePaths": filesystem.enumerate_paths,
+            });
+        }
     }
     if let Some(allowed_proxy_peer) = process_container
         .network
@@ -313,13 +341,16 @@ mod tests {
                 system_settings: ProcessContainerSystemSettings::Parameters,
                 ime: true,
             }),
+            filesystem: Some(ProcessContainerFilesystem {
+                enumerate_paths: vec!["C:\\tools".to_string()],
+            }),
             network: Some(ProcessContainerNetwork {
                 allowed_proxy_peer: Some("Contoso.Proxy_123".to_string()),
             }),
         };
 
         let config = build_wire_config(
-            &policy(None),
+            &policy_for_version("0.9.0-alpha", None),
             &crate::policy::Containment::ProcessContainer(process_container),
             TEST_COMMAND,
             Some("sdk-test"),
@@ -337,6 +368,10 @@ mod tests {
         assert_eq!(
             config["processContainer"]["ui"]["systemSettings"],
             "parameters"
+        );
+        assert_eq!(
+            config["processContainer"]["filesystem"]["enumeratePaths"],
+            serde_json::json!(["C:\\tools"])
         );
         assert_eq!(
             config["processContainer"]["network"]["allowedProxyPeer"],

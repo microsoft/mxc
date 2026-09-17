@@ -35,3 +35,4 @@ learning_mode_core = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+learning_mode_windows = { workspace = true, features = ["test-support"] }

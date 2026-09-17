@@ -93,14 +93,33 @@ assert_enforcement_not_skipped() {
     fi
 }
 
+# A policy that permits nothing is served by keeping the container off the
+# network entirely, so no chain is created and there is none to inspect.
+assert_no_chain_installed() {
+    if echo "$1" | grep -Eq "Creating iptables/ip6tables chain:|Programmed [a-z0-9]* rule:"; then
+        fail "a policy permitting nothing installed a firewall chain, so the container was put on the network and then filtered instead of being left off it."
+    fi
+}
+
+# Each case names the posture its policy should reach. Reading the posture back
+# out of the run instead would let a filtered policy that installed nothing pass
+# as an isolated one, which is the silent-unenforced case worth catching.
 run_case() {
-    local label="$1" config="$2" output="" 
+    local label="$1" config="$2" posture="${3:-filtered}" output=""
     echo "--- $label ---"
     MXC_CHAINS_BEFORE_V4="$(mxc_chains iptables)"
     MXC_CHAINS_BEFORE_V6="$(mxc_chains ip6tables)"
     output=$("$LXC_EXEC" --debug "$config" 2>&1 || true)
     echo "$output"
     CASE_OUTPUT="$output"
+
+    if [ "$posture" = isolated ]; then
+        assert_no_chain_installed "$output"
+        assert_no_new_mxc_chains iptables "$MXC_CHAINS_BEFORE_V4"
+        assert_no_new_mxc_chains ip6tables "$MXC_CHAINS_BEFORE_V6"
+        return
+    fi
+
     assert_enforcement_not_skipped "$output"
     derive_chain_name "$output"
     assert_no_forward_reference "$CHAIN_NAME"
@@ -215,8 +234,11 @@ done
 
 echo "Running LXC schema 0.8 egress enforcement test..."
 
-run_case "deny case: egress.default deny, no rules" "$DENY_CONFIG"
-assert_blocked "egress succeeded under egress.default deny with no allow rules. The chain is not filtering this container's traffic."
+# An egress-only config is the shape a backend claiming only the two egress
+# bits would reject outright, which makes any verdict here a test of the
+# support declaration.
+run_case "deny case: egress.default deny, no rules" "$DENY_CONFIG" isolated
+assert_blocked "egress succeeded under egress.default deny with no allow rules, so a container that should never have reached the network reached it."
 
 run_case "allow case: same default, destination allowed on tcp/443" "$ALLOW_CONFIG"
 assert_allowed "an explicitly allowed destination was unreachable. The policy is over-blocking, so the deny case above proves nothing."
@@ -224,8 +246,8 @@ assert_allowed "an explicitly allowed destination was unreachable. The policy is
 run_case "wrong-port case: same destination allowed on tcp/444" "$WRONG_PORT_CONFIG"
 assert_blocked "traffic to tcp/443 succeeded while the policy allowed only tcp/444. The port selector is being dropped, so the allow case above proves only that the destination matched."
 
-run_case "dns-denied case: egress.default deny, DNS probe to an external resolver" "$DNS_DENIED_CONFIG"
-assert_blocked "a DNS query to 8.8.8.8 succeeded under egress.default deny with no allow rules. The legacy unconditional port 53 accept is still being emitted into a directional chain, which leaves this container a DNS-tunnel path out of a deny-all policy."
+run_case "dns-denied case: egress.default deny, DNS probe to an external resolver" "$DNS_DENIED_CONFIG" isolated
+assert_blocked "a DNS query to 8.8.8.8 succeeded under egress.default deny with no allow rules, which leaves this container a DNS-tunnel path out of a policy that permits nothing."
 
 run_case "dns-allowed case: same probe, resolver allowed on udp/53" "$DNS_ALLOWED_CONFIG"
 assert_allowed "a DNS query to an explicitly allowed resolver was unreachable. DNS is over-blocked, so the dns-denied case above proves only that this container has no DNS at all."

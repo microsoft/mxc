@@ -20,7 +20,7 @@ use wxc_common::models::{
     NetworkPort, NetworkProtocol, NetworkRule,
 };
 
-use crate::network_policy_helpers::add_default_network_capabilities;
+use crate::network_policy_helpers::{add_default_network_capabilities, ensure_capability};
 
 pub(super) const LOOPBACK_NETWORK_PEER: &str = "MXC-Loopback";
 
@@ -34,7 +34,9 @@ pub(super) enum PsecContract {
 
 impl PsecContract {
     pub(super) fn for_request(request: &ExecutionRequest) -> Self {
-        if unrestricted_host_loopback_allowed(&request.policy) {
+        if unrestricted_host_loopback_allowed(&request.policy)
+            || !request.policy.enumerate_paths.is_empty()
+        {
             Self::V1_1
         } else {
             Self::V1_0
@@ -47,9 +49,28 @@ impl PsecContract {
             Self::V1_1 => SchemaVersionT { major: 1, minor: 1 },
         }
     }
+}
 
-    fn supports_ingress(self) -> bool {
-        self == Self::V1_1
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ResolvedPsecContract {
+    pub(super) contract: PsecContract,
+    pub(super) supports_network_ingress: bool,
+}
+
+impl ResolvedPsecContract {
+    pub(super) fn baseline() -> Self {
+        Self {
+            contract: PsecContract::V1_0,
+            supports_network_ingress: false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_all_contract_capabilities(request: &ExecutionRequest) -> Self {
+        Self {
+            contract: PsecContract::for_request(request),
+            supports_network_ingress: PsecContract::for_request(request) == PsecContract::V1_1,
+        }
     }
 }
 
@@ -66,10 +87,18 @@ pub(super) fn has_conflicting_proxy_identity(policy: &ContainerPolicy) -> bool {
     policy.allowed_proxy_peer.is_some() && unrestricted_host_loopback_allowed(policy)
 }
 
-pub(super) fn build_psec_spec(request: &ExecutionRequest) -> Vec<u8> {
+pub(super) fn build_psec_spec(
+    request: &ExecutionRequest,
+    resolution: ResolvedPsecContract,
+) -> Vec<u8> {
     let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
-    let contract = PsecContract::for_request(request);
-    let capabilities = effective_capabilities(&request.policy);
+    let mut capabilities = effective_capabilities(&request.policy);
+    if request.policy.network_proxy.is_enabled()
+        && unrestricted_host_loopback_allowed(&request.policy)
+    {
+        // Proxy mode cannot carry the native ingress table that grants loopback.
+        ensure_capability(&mut capabilities, "networkLoopback");
+    }
     let ui_restrictions = crate::job_object::to_job_object_uilimit_mask(
         &wxc_common::ui_policy::resolve_ui_restrictions(
             &request.policy.ui,
@@ -78,16 +107,17 @@ pub(super) fn build_psec_spec(request: &ExecutionRequest) -> Vec<u8> {
     ) as u64;
 
     let mut spec = PsecProcessSecurityEnvironment::default();
-    spec.version = contract.version();
+    spec.version = resolution.contract.version();
     spec.capabilities = (!capabilities.is_empty()).then(|| capabilities.join(","));
     spec.disallow_win32k_system_calls = request.policy.ui.disable;
     spec.ui_restrictions = ui_restrictions;
     spec.fs_read_write = non_empty_paths(&request.policy.readwrite_paths);
     spec.fs_read_only = non_empty_paths(&request.policy.readonly_paths);
     spec.fs_deny = non_empty_paths(&request.policy.denied_paths);
+    spec.fs_enumerate = non_empty_paths(&request.policy.enumerate_paths);
     spec.network_policy = Some(Box::new(build_psec_network_policy(
         &request.policy,
-        contract,
+        resolution.supports_network_ingress,
     )));
     let spec = spec.pack(&mut builder);
     finish_process_security_environment_buffer(&mut builder, spec);
@@ -157,7 +187,7 @@ fn build_legacy_sbox_network_policy(policy: &ContainerPolicy) -> SboxNetworkPoli
 
 fn build_psec_network_policy(
     policy: &ContainerPolicy,
-    contract: PsecContract,
+    supports_network_ingress: bool,
 ) -> PsecNetworkPolicy {
     let mut network = PsecNetworkPolicy::default();
     if policy.network_proxy.is_enabled() {
@@ -183,19 +213,19 @@ fn build_psec_network_policy(
         }
         network.egress = Some(Box::new(egress));
     }
-    let ingress_policy = if contract.supports_ingress() {
+    // Proxy mode uses the private-network capability and peer for ingress.
+    // PSEC rejects a proxy combined with the native ingress table.
+    let ingress_policy = if supports_network_ingress && !policy.network_proxy.is_enabled() {
         policy.network_ingress.as_ref()
     } else {
         None
     };
+    network.allowed_appcontainer_peer = allowed_appcontainer_peer(policy);
     if let Some(ingress_policy) = ingress_policy {
-        network.allowed_appcontainer_peer = policy.allowed_proxy_peer.clone();
         let mut ingress = PsecIngressPolicy::default();
         ingress.default_action = psec_filter_action(ingress_policy.default);
         ingress.host_loopback = psec_filter_action(ingress_policy.host_loopback);
         network.ingress = Some(Box::new(ingress));
-    } else {
-        network.allowed_appcontainer_peer = allowed_appcontainer_peer(policy);
     }
     network
 }
@@ -217,7 +247,7 @@ fn effective_egress_default(policy: &ContainerPolicy) -> NetworkAction {
     )
 }
 
-fn unrestricted_host_loopback_allowed(policy: &ContainerPolicy) -> bool {
+pub(super) fn unrestricted_host_loopback_allowed(policy: &ContainerPolicy) -> bool {
     policy
         .network_ingress
         .as_ref()
@@ -325,3 +355,6 @@ fn psec_endpoint_rules(rules: &[NetworkRule]) -> Vec<PsecEndpointRuleT> {
     }
     endpoints
 }
+
+#[cfg(test)]
+mod tests;

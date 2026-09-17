@@ -187,6 +187,43 @@ describe('buildSandboxPayload', () => {
       }
     });
 
+    it('should reject ProcessContainer enumeration policy before schema 0.9', () => {
+      mockWindows();
+      try {
+        assert.throws(
+          () => createConfigFromPolicy({
+            version: '0.8.0-alpha',
+            processContainer: { filesystem: { enumeratePaths: ['C:\\tools'] } },
+          }),
+          { message: /requires schema version 0\.9\.0-alpha/ },
+        );
+      } finally {
+        restore();
+      }
+    });
+
+    it('should reject ProcessContainer enumeration policy for non-ProcessContainer targets', () => {
+      const policy: SandboxPolicy = {
+        version: '0.9.0-alpha',
+        processContainer: { filesystem: { enumeratePaths: ['C:\\tools'] } },
+      };
+      for (const [platform, containment] of [
+        ['linux', 'process'],
+        ['darwin', 'process'],
+        ['win32', 'wslc'],
+      ] as const) {
+        mockPlatform(platform);
+        try {
+          assert.throws(
+            () => createConfigFromPolicy(policy, containment),
+            { message: /supported only by the Windows ProcessContainer backend/ },
+          );
+        } finally {
+          restore();
+        }
+      }
+    });
+
     it('should reject an unregistered version within the supported range', () => {
       mockWindows();
       try {
@@ -627,6 +664,29 @@ describe('buildSandboxPayload', () => {
       }
     });
 
+    it('should reject ProcessContainer enumeration policy for microvm', () => {
+      mockWindows();
+      try {
+        assert.throws(
+          () => buildSandboxPayload(
+            'print(42)',
+            {
+              version: '0.9.0-alpha',
+              processContainer: {
+                filesystem: { enumeratePaths: ['C:\\tools'] },
+              },
+            },
+            undefined,
+            undefined,
+            'microvm',
+          ),
+          { message: /does not support processContainer\.filesystem\.enumeratePaths/ },
+        );
+      } finally {
+        restore();
+      }
+    });
+
     it('should reject microvm on non-Windows platforms', () => {
       const orig = Object.getOwnPropertyDescriptor(process, 'platform');
       Object.defineProperty(process, 'platform', { value: 'linux' });
@@ -724,6 +784,29 @@ describe('createConfigFromPolicy', () => {
     assert.deepStrictEqual(config.filesystem!.readwritePaths, ['/workspace']);
     assert.deepStrictEqual(config.filesystem!.readonlyPaths, ['/tools']);
     assert.deepStrictEqual(config.filesystem!.deniedPaths, ['/secrets']);
+  });
+
+  it('should pass enumerate-only filesystem paths through for 0.9', () => {
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    try {
+      const config = createConfigFromPolicy({
+        version: '0.9.0-alpha',
+        processContainer: {
+          filesystem: {
+            enumeratePaths: ['C:\\tools'],
+          },
+        },
+      });
+      assert.deepStrictEqual(
+        config.processContainer!.filesystem!.enumeratePaths,
+        ['C:\\tools'],
+      );
+    } finally {
+      if (originalPlatform) {
+        Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    }
   });
 
   it('should map UI fields correctly', () => {
