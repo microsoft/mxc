@@ -205,11 +205,19 @@ middle rows provide different protections and are not ordered relative to each o
 | Unpackaged non-AppContainer | Omit | **Least:** no proxy identity or isolation; PSEC loopback capability |
 
 For identity-scoped proxies, the scoped peer rule and `privateNetworkClientServer` do not bypass Windows
-Firewall's block-inbound-to-non-allowed-apps policy. A packaged AppContainer proxy uses the package-owned firewall
-declaration shown in the [schema 0.8 examples](examples/0.8.0-schema.md); its application entry uses
-`uap10:RuntimeBehavior="packagedClassicApp"` with `uap10:TrustLevel="appContainer"`. An unpackaged AppContainer proxy
-requires its installer or administrator to own an equivalent rule scoped to the AppContainer profile SID, proxy
-executable, and configured port.
+Firewall's block-inbound-to-non-allowed-apps policy on the 8D servicing baselines. On those builds, the proxy
+installer or administrator must add an inbound firewall rule for the proxy package, AppContainer profile, or proxy
+executable and configured port. A packaged AppContainer proxy uses the package-owned firewall declaration shown in
+the [schema 0.8 examples](examples/0.8.0-schema.md); its application entry uses
+`uap10:RuntimeBehavior="packagedClassicApp"` with `uap10:TrustLevel="appContainer"`. An unpackaged AppContainer
+proxy requires its installer or administrator to own an equivalent rule scoped to the AppContainer profile SID,
+proxy executable, and configured port.
+
+The 8D references are [KB5120996 for Windows 11 26H1](https://support.microsoft.com/en-us/servicing/os/windows-11/2026/08/kb5120996-windows-11-26h1-update)
+and [KB5120998 for Windows 11 24H2 and 25H2](https://support.microsoft.com/en-us/servicing/os/windows-11/2026/08/kb5120998-windows-11-24h2-25h2-update).
+On the 9D retail servicing baseline for Windows 11 24H2 and later, this additional inbound firewall rule is no longer
+required for the supported proxy identity configurations. Keep the rule when targeting 8D or mixed-version
+deployments; it is harmless on 9D.
 See
 [CreateAppContainerProfile](https://learn.microsoft.com/windows/win32/api/userenv/nf-userenv-createappcontainerprofile)
 for unpackaged profile creation.
