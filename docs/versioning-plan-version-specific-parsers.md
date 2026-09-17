@@ -1,10 +1,22 @@
 # MXC Version-Specific Config Parsers
 
-Status: implementation plan and decision record. Phases 1-9 are merged through
-PRs #807, #816, #835, #838, #907, #912, #909, #910, #929, #941, #949, #966,
-#968, #1027, #969, #1091, #1096, #1097, #1099, and #1104. The legacy
-rolling-model v0.8 release shipped from tag `v0.8.0`; Phase 6.5 reconstructed
-its exact Rust contract and advanced exact development to `0.9.0-alpha`.
+Status: historical implementation plan and decision record. Phases 1-9 are
+merged through PRs #807, #816, #835, #838, #907, #912, #909, #910, #929,
+#941, #949, #966, #968, #1027, #969, #1091, #1096, #1097, #1099, and #1104.
+The legacy rolling-model v0.8 release shipped from tag `v0.8.0`; Phase 6.5
+reconstructed its exact Rust contract and advanced exact development to
+`0.9.0-alpha`.
+
+Current Phase 12-14 decisions and execution status are maintained in
+[`version-aware-stack-plan.md`](version-aware-stack-plan.md). The active work is
+split into two independent session plans:
+
+- [`version-aware-stack-non-wslc-session-plan.md`](version-aware-stack-non-wslc-session-plan.md)
+- [`version-aware-stack-wslc-session-plan.md`](version-aware-stack-wslc-session-plan.md)
+
+This document remains authoritative for the history and rationale through
+Phase 11, but its old Phase 11b-11d execution sequence is superseded by those
+plans.
 
 Phase 9.5, both Phase 10 pull requests, and Phase 11a remain open. "Complete"
 below means implemented and locally verified, not merged. Native Unix
@@ -1820,6 +1832,17 @@ the v0.10-to-v1.0 development line. They are intentionally outside the v0.9
 publication critical path, but must be enforced before v1.0 publishes.
 Phase 7.5 is maintained on the dedicated plan branch rather than adding this
 planning document to an implementation PR.
+
+The current continuation uses two mutually exclusive three-PR stacks:
+
+| Alternative | Phase 12 | Phase 13 core | Phase 13 follow-ups |
+| --- | --- | --- | --- |
+| Non-WSLC | #1184 | #1185 | #1186 |
+| WSLC-inclusive | #1187 | #1188 | #1189 |
+
+Only one Phase 12 alternative may merge because each publishes a different
+immutable v0.9 surface. Phase 13 branches remain unchanged until their own
+Phase 12 PR passes CI, after which each stack is restacked independently.
 
 ## 3. Detailed implementation plans and records
 
