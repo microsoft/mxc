@@ -995,8 +995,22 @@ export async function spawnSandboxAsync(
       `spawnSandboxAsync does not support executor-only option '${unsupportedOption}'`,
     );
   }
+  const authoredEnforcementMode = (
+    policy.network as Record<string, unknown> | undefined
+  )?.enforcementMode;
+  if (authoredEnforcementMode !== undefined) {
+    throw new MxcError(
+      'malformed_request',
+      'spawnSandboxAsync does not support network.enforcementMode',
+    );
+  }
 
   const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
+  // Legacy policy construction derives an executor-specific enforcement mode.
+  // The native policy builder derives its own mode from the portable fields.
+  if (config.network !== undefined) {
+    delete config.network.enforcementMode;
+  }
   const request = prepareRequestSpec(config, {
     inheritDefaultEnv: options.inheritDefaultEnv,
     experimental: options.experimental,

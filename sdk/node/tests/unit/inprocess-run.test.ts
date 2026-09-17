@@ -7,6 +7,7 @@ import { MxcError } from '../../src/errors.js';
 import { spawnSandboxAsync } from '../../src/sandbox.js';
 import { _setBindingRunAsyncImplementation } from '../../src/bindings/run.js';
 import type { RequestSpec } from '../../src/bindings/request.js';
+import type { SandboxPolicy } from '../../src/types.js';
 
 afterEach(() => _setBindingRunAsyncImplementation());
 
@@ -56,6 +57,46 @@ describe('in-process async run routing', () => {
         /does not support executor-only option/,
       );
     }
+  });
+
+  it('rejects an explicitly authored network enforcement mode', async () => {
+    const policy = {
+      version: '0.8.0-alpha',
+      network: { enforcementMode: 'firewall' },
+    } as SandboxPolicy & { network: { enforcementMode: 'firewall' } };
+
+    await assert.rejects(
+      spawnSandboxAsync('echo hello', policy),
+      (error: unknown) =>
+        error instanceof MxcError
+        && error.code === 'malformed_request'
+        && error.message.includes('network.enforcementMode'),
+    );
+  });
+
+  it('lets the native builder derive legacy network enforcement', async () => {
+    let bindingRequest: RequestSpec | undefined;
+    _setBindingRunAsyncImplementation(async (request) => {
+      bindingRequest = request;
+      return {
+        stdout: '',
+        stderr: '',
+        exitCode: 0,
+        timedOut: false,
+        warnings: [],
+      };
+    });
+
+    await spawnSandboxAsync('echo hello', {
+      version: '0.8.0-alpha',
+      network: { allowOutbound: true, allowedHosts: ['example.com'] },
+    });
+
+    assert.strictEqual(bindingRequest?.policy.network?.allowOutbound, true);
+    assert.deepStrictEqual(
+      bindingRequest?.policy.network?.allowedHosts,
+      ['example.com'],
+    );
   });
 
   it('surfaces buffered diagnostics', async () => {
