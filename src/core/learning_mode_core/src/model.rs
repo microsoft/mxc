@@ -11,7 +11,7 @@
 //!
 //! The types stay tiny and cross-platform so the wire format never
 //! accidentally encodes a Windows-only assumption. The Windows ETL
-//! decoder lives in the `learning_mode_windows` backend crate and maps
+//! decoder lives in the `learning_mode_windows` platform-support crate and maps
 //! its ETW-intermediate events into these types.
 
 use serde::{Deserialize, Serialize};

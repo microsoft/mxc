@@ -9,8 +9,8 @@
 //! Elevated WPR capture lives in `plm` (the host's guarded PLM tool), and
 //! `appcontainer_common` MUST NOT depend on `plm` directly: `plm` links the
 //! Windows ETL decoder (`learning_mode_windows`) and elevation/pipe machinery
-//! that is unrelated to this crate's job, and the crate-layering rule
-//! (backend-support crates don't cross-depend on one another) forbids it.
+//! that is unrelated to this crate's job. Depending on that host utility would
+//! invert the engine-to-host-tool layering.
 //!
 //! Instead, this module defines the minimal traits a legacy-tier runner needs
 //! to start and stop a guarded WPR capture scoped to its own sandboxed process
