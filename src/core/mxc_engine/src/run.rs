@@ -432,7 +432,7 @@ fn resolve_nvx_backend(request: &ExecutionRequest) -> Result<ResolvedRunner, Mxc
 
     #[cfg(feature = "nvx")]
     {
-        return resolve_nvx_backend_with_preflight(nvx_runner::preflight);
+        resolve_nvx_backend_with_preflight(nvx_runner::preflight)
     }
 
     #[cfg(not(feature = "nvx"))]
