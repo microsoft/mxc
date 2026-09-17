@@ -35,10 +35,9 @@ const config = createConfigFromPolicy({
 config.process!.commandLine = 'python -c "print(\'hello from sandbox\')"';
 
 const sandbox = spawnSandboxFromConfig(config);
-sandbox.stdout?.on('data', (data) => process.stdout.write(data));
-const status = await sandbox.wait();
+sandbox.standardOutput?.on('data', (data) => process.stdout.write(data));
+const status = await sandbox.waitAsync();
 console.log('exit:', status.exitCode);
-sandbox.dispose();
 ```
 
 ---
@@ -174,7 +173,7 @@ It is reported **fail closed**: if the probe cannot run, the result is `'unsuppo
 
 The SDK provides three entry points. **Prefer the config-based path**
 (`createConfigFromPolicy` + `spawnSandboxFromConfig`) when you need backend
-selection or backend-specific tuning. The live APIs return separate Node.js
+selection or backend-specific tuning. The streaming APIs return separate Node.js
 stdin, stdout, and stderr streams.
 
 ### 1. Config-based — recommended
@@ -205,17 +204,16 @@ const config = createConfigFromPolicy(
 config.process!.commandLine = 'python script.py';
 
 const sandbox = spawnSandboxFromConfig(config);
-sandbox.stdout?.on('data', (data) => process.stdout.write(data));
-sandbox.stderr?.on('data', (data) => process.stderr.write(data));
-const status = await sandbox.wait();
+sandbox.standardOutput?.on('data', (data) => process.stdout.write(data));
+sandbox.standardError?.on('data', (data) => process.stderr.write(data));
+const status = await sandbox.waitAsync();
 console.log('exit:', status.exitCode);
-sandbox.dispose();
 ```
 
 ### 2. `spawnSandbox(script, policy, ...)` — convenience
 
 Quick path for **process-isolation only** (`processcontainer` on Windows, `lxc`
-on Linux, `seatbelt` on macOS). Returns an `MxcSandboxProcess` with live,
+on Linux, `seatbelt` on macOS). Returns an `MxcSandboxProcess` with streaming,
 separate stdin, stdout, and stderr streams.
 
 ```typescript
@@ -239,11 +237,10 @@ const sandbox = spawnSandbox('python script.py', {
 }, undefined, undefined, {
   APP_MODE: 'development',
 });
-sandbox.stdout?.on('data', (data) => process.stdout.write(data));
-sandbox.stderr?.on('data', (data) => process.stderr.write(data));
-const status = await sandbox.wait();
+sandbox.standardOutput?.on('data', (data) => process.stdout.write(data));
+sandbox.standardError?.on('data', (data) => process.stderr.write(data));
+const status = await sandbox.waitAsync();
 console.log('exit:', status.exitCode);
-sandbox.dispose();
 ```
 
 An explicitly supplied environment is used verbatim by default. Set
@@ -318,7 +315,7 @@ Experimental backends require `{ experimental: true }` in `SandboxSpawnOptions`:
 const config = createConfigFromPolicy(policy, 'vm'); // → windows_sandbox on Windows
 config.process!.commandLine = 'cmd /c whoami';
 const sandbox = spawnSandboxFromConfig(config, { experimental: true });
-const status = await sandbox.wait();
+const status = await sandbox.waitAsync();
 sandbox.dispose();
 ```
 
@@ -339,7 +336,7 @@ const config: ContainerConfig = {
 };
 
 const sandbox = spawnSandboxFromConfig(config, { experimental: true });
-const status = await sandbox.wait();
+const status = await sandbox.waitAsync();
 sandbox.dispose();
 ```
 
@@ -514,16 +511,17 @@ const config = createConfigFromPolicy({
 config.process!.commandLine = 'powershell.exe -NoProfile -Command "Get-Date"';
 
 const sandbox = spawnSandboxFromConfig(config);
-const status = await sandbox.wait();
-sandbox.dispose();
+const status = await sandbox.waitAsync();
 ```
 
 ### PTY support is removed starting with the 0.9 Node SDK
 
 `spawnSandbox` and `spawnSandboxFromConfig` now return an
 `MxcSandboxProcess` backed by `mxc_ffi` pipes instead of a `node-pty` `IPty`.
-Read `sandbox.stdout` and `sandbox.stderr` separately, write to
-`sandbox.stdin`, and use `await sandbox.wait()` for the exit status.
+Read `sandbox.standardOutput` and `sandbox.standardError` separately, write to
+`sandbox.standardInput`, and use `await sandbox.waitAsync()` for the exit status. A terminal
+wait releases the native sandbox handle automatically; call `dispose()` only
+when abandoning a process without waiting.
 
 Programs receive ordinary pipes rather than a terminal. Interactive shells,
 terminal editors, curses applications, terminal resize, and terminal-mode
