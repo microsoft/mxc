@@ -1,5 +1,5 @@
 {
-  "_comment": "This runtime proxy example supports one local loopback address and port. It does not expose container listeners to unsolicited host-loopback connections.",
+  "_comment": "Runtime proxy for an unpackaged host process. It supports one local loopback address and port and does not expose container listeners to unsolicited host-loopback connections.",
   "version": "0.8.0-alpha",
   "containerId": "ProcessContainerUnpackagedHostProxy",
   "containment": "processcontainer",

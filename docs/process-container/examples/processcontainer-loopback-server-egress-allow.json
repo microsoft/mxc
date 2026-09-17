@@ -1,5 +1,5 @@
 {
-  "_comment": "This container intentionally exposes a TCP listener on host loopback and permits unrestricted outbound traffic. The egress default can be changed to deny when the server does not need internet access; see loopback-server-no-egress.json.",
+  "_comment": "Loopback server with unrestricted outbound traffic. The container intentionally exposes a TCP listener on host loopback; use processcontainer-loopback-server-egress-deny.json when it does not need internet access.",
   "version": "0.8.0-alpha",
   "containerId": "ProcessContainerLoopbackServer",
   "containment": "processcontainer",

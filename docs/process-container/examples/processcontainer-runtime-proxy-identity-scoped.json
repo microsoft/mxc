@@ -1,5 +1,5 @@
 {
-  "_comment": "Replace allowedProxyPeer with the exact installed Package Family Name or AppContainer profile that owns the loopback proxy. hostLoopback deny keeps proxy access identity-scoped.",
+  "_comment": "Runtime proxy with identity-scoped access. Replace allowedProxyPeer with the exact installed Package Family Name or AppContainer profile that owns the loopback proxy. hostLoopback deny keeps proxy access identity-scoped.",
   "version": "0.8.0-alpha",
   "containerId": "ProcessContainerIdentityScopedProxy",
   "containment": "processcontainer",

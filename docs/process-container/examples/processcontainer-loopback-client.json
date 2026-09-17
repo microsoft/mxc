@@ -1,5 +1,5 @@
 {
-  "_comment": "This client uses a direct egress rule limited to the loopback server port. The server container must opt into hostLoopback allow.",
+  "_comment": "Loopback client with direct egress limited to the server port. The server container must opt into hostLoopback allow.",
   "version": "0.8.0-alpha",
   "containerId": "ProcessContainerLoopbackClient",
   "containment": "processcontainer",

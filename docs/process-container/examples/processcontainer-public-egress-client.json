@@ -1,5 +1,5 @@
 {
-  "_comment": "This client is limited to one public documentation IP and TCP port. Replace 203.0.113.10 with the permitted public destination before use; the TEST-NET-3 address is not routable.",
+  "_comment": "Public direct-egress client limited to one documentation IP and TCP port. Replace 203.0.113.10 with the permitted public destination before use; the TEST-NET-3 address is not routable.",
   "version": "0.8.0-alpha",
   "containerId": "ProcessContainerPublicClient",
   "containment": "processcontainer",
