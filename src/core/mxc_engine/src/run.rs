@@ -243,6 +243,9 @@ fn resolve_runner_inner_windows(
         ContainmentBackend::Vm => Err(MxcError::unsupported_containment(
             "VM backend not yet implemented",
         )),
+        ContainmentBackend::Nvx => Err(MxcError::unsupported_containment(
+            "NVX backend not yet available",
+        )),
         ContainmentBackend::MicroVm => {
             if !request.experimental_enabled {
                 return Err(MxcError::malformed_request(
@@ -341,6 +344,9 @@ fn resolve_runner_inner(
                 ))
             }
         }
+        ContainmentBackend::Nvx => Err(MxcError::unsupported_containment(
+            "NVX backend not yet available",
+        )),
         ContainmentBackend::Bubblewrap => Ok(ResolvedRunner::without_guard(Box::new(Runner::new(
             bwrap_common::bwrap_runner::BubblewrapScriptRunner::new(),
         )))),
