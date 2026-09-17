@@ -47,6 +47,9 @@ impl CommandLineContext {
             | ContainmentBackend::Vm
             | ContainmentBackend::MicroVm
             | ContainmentBackend::Hyperlight => Self::WindowsCreateProcess,
+            ContainmentBackend::Nvx => {
+                unreachable!("NVX command-line context is not implemented yet")
+            }
         }
     }
 }

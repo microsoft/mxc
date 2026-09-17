@@ -28,6 +28,8 @@ pub enum ContainmentBackend {
     /// MicroVM isolation via Windows Hypervisor Platform (internally powered by NanVix).
     #[serde(rename = "microvm")]
     MicroVm,
+    /// NVX Linux micro-VM hosted by OpenVMM.
+    Nvx,
     /// MicroVM isolation via Hyperlight + Unikraft, using an embedded
     /// warmed-up CPython snapshot. ~100 ms cold start per invocation,
     /// hermetic via snapshot restore. Experimental — requires
@@ -59,6 +61,7 @@ impl ContainmentBackend {
             ContainmentBackend::Lxc => "lxc",
             ContainmentBackend::Vm => "vm",
             ContainmentBackend::MicroVm => "microvm",
+            ContainmentBackend::Nvx => "nvx",
             ContainmentBackend::Hyperlight => "hyperlight",
             ContainmentBackend::WindowsSandbox => "windows_sandbox",
             ContainmentBackend::IsolationSession => "isolation_session",
@@ -81,6 +84,7 @@ impl ContainmentBackend {
             ContainmentBackend::Bubblewrap
             | ContainmentBackend::Hyperlight
             | ContainmentBackend::MicroVm
+            | ContainmentBackend::Nvx
             | ContainmentBackend::Vm => None,
         }
     }
@@ -125,8 +129,7 @@ impl From<crate::wire::Containment> for ContainmentBackend {
             W::WindowsSandbox => Self::WindowsSandbox,
             W::Lxc => Self::Lxc,
             W::Microvm => Self::MicroVm,
-            // NVX still shares the existing micro-VM runtime path for now.
-            W::Nvx => Self::MicroVm,
+            W::Nvx => Self::Nvx,
             W::Hyperlight => Self::Hyperlight,
             W::Wslc => Self::Wslc,
             W::Seatbelt => Self::Seatbelt,

@@ -4892,6 +4892,15 @@ mod tests {
     }
 
     #[test]
+    fn containment_nvx_accepted() {
+        let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"/bin/true"},"containment":"nvx"}"#;
+        let mut logger = test_logger();
+
+        let req = load_request_from_json(json, &mut logger).unwrap();
+        assert_eq!(req.containment, ContainmentBackend::Nvx);
+    }
+
+    #[test]
     fn unknown_top_level_field_rejected() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "bogusField": true}"#;
         let encoded = base64_encode(json.as_bytes());
