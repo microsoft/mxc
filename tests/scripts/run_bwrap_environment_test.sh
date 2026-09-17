@@ -62,14 +62,19 @@ DEFAULT_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 # it must hold for a request that never mentions it.
 export MXC_LEAK_PROBE="BWRAP_HOST_ENV_LEAKED"
 
-# The cases below that supply no PATH assert HOME and TERM rather than PATH. A
-# shell started without a PATH assigns its own fallback, so `$PATH` reports the
-# shell's default rather than what MXC passed -- and on Debian that fallback is
-# byte-for-byte DEFAULT_PATH, so neither its presence nor its absence proves
-# anything. HOME and TERM are not fabricated, so they are what witnesses the
-# default block. That `resolved_env` is exactly empty is asserted directly by
-# `an_explicitly_empty_env_stays_empty` / `a_supplied_env_is_used_verbatim` in
-# `bwrap_command.rs`, which reads the env MXC builds instead of the child's.
+# The cases below that supply no PATH assert HOME rather than PATH or TERM.
+# Bubblewrap runs the workload under the *host's* `/bin/sh`, which differs by
+# distro, and a shell started without these assigns its own: dash (Debian,
+# Ubuntu) fabricates a PATH that is byte-for-byte DEFAULT_PATH, while bash
+# (RHEL) fabricates both a shorter PATH -- `/usr/local/bin:/usr/bin`, the very
+# gap issue #1153 is about -- and `TERM=dumb`. So neither reports what MXC
+# passed, and neither their presence nor their absence proves anything. HOME is
+# not fabricated by either, so it is what witnesses the default block. Where a
+# case must still show the default block was not added, it asserts the block's
+# own TERM value is absent, which no shell fabricates. That `resolved_env` is
+# exactly empty is asserted directly by `an_explicitly_empty_env_stays_empty` /
+# `a_supplied_env_is_used_verbatim` in `bwrap_command.rs`, which reads the env
+# MXC builds instead of the child's.
 
 run_config bwrap_env_09_default_block.json
 expect_ok "an omitted env gets the default PATH" "PATH=[$DEFAULT_PATH]"
@@ -81,16 +86,16 @@ expect_absent "the host value itself does not appear" "BWRAP_HOST_ENV_LEAKED"
 run_config bwrap_env_09_empty.json
 expect_ok "an empty env runs" "ENV_PROBE_DONE"
 expect_ok "an empty env suppresses HOME" "HOME=[]"
-expect_ok "an empty env suppresses TERM" "TERM=[]"
+expect_absent "an empty env adds no default TERM" "TERM=[xterm-256color]"
 expect_ok "an empty env inherits nothing from the host" "LEAK=[]"
 
 run_config bwrap_env_09_verbatim.json
 expect_ok "a supplied env is honored" "FOO=[bar]"
 expect_ok "a supplied env adds no default HOME" "HOME=[]"
-expect_ok "a supplied env adds no default TERM" "TERM=[]"
-# The one provable PATH claim: a supplied PATH reaches the child verbatim and
-# replaces the default outright, so no fragment of the default survives. (The
-# default block's own PATH cannot be asserted -- see the note above.)
+expect_absent "a supplied env adds no default TERM" "TERM=[xterm-256color]"
+# A supplied PATH is the one case no shell can fabricate over: the variable is
+# set, so the child reports exactly what MXC passed and no fragment of the
+# default block's PATH survives.
 expect_ok "a supplied PATH is used verbatim" "PATH=[/mxc-probe/bin:/usr/bin:/bin]"
 expect_absent "a supplied PATH is not merged with the default" "PATH=[$DEFAULT_PATH"
 

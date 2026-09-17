@@ -42,6 +42,8 @@ expect_ok "process.env can supply HOME" "HOME=[/private/tmp]"
 # its own `TERM=dumb` when it starts without them, so neither reports what MXC
 # passed. HOME is not fabricated, so it is what witnesses the default block --
 # and the leak probe distinguishes a fabricated value from an inherited one.
+# Where a case must still show the default block was not added, it asserts the
+# block's own TERM value is absent, which no shell fabricates.
 # That `resolved_env` is exactly empty is asserted directly by
 # `an_explicitly_empty_env_stays_empty` / `a_supplied_env_is_used_verbatim` in
 # `default_env.rs`, which reads the env MXC builds instead of the child's.
@@ -56,11 +58,13 @@ expect_absent "0.9: the host value itself does not appear" "SEATBELT_HOST_ENV_LE
 run_config "$(render seatbelt_env_09_empty.json)"
 expect_ok "0.9: an empty env runs" "ENV_PROBE_DONE"
 expect_ok "0.9: an empty env suppresses HOME" "HOME=[]"
+expect_absent "0.9: an empty env adds no default TERM" "TERM=[xterm-256color]"
 expect_marker "0.9: an empty env inherits nothing from the host" "LEAK=[]"
 
 run_config "$(render seatbelt_env_09_verbatim.json)"
 expect_ok "0.9: a supplied env is honored" "FOO=[bar]"
 expect_ok "0.9: a supplied env adds no default HOME" "HOME=[]"
+expect_absent "0.9: a supplied env adds no default TERM" "TERM=[xterm-256color]"
 expect_marker "0.9: a supplied env inherits nothing from the host" "LEAK=[]"
 # A supplied PATH replaces the default block's PATH outright rather than being
 # merged with it, so no fragment of the default survives.

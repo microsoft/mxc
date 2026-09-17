@@ -199,10 +199,12 @@ directory the child is started in — `process.cwd`, else `/tmp`), and `TERM`
 | `["FOO=bar"]` | `false` (default) | `FOO` only — **no `PATH`** |
 | `["FOO=bar"]` | `true` | the default block plus `FOO`; a same-named entry wins |
 
-The table is the environment MXC hands the child. A shell started without a
-`PATH` assigns its own compiled-in fallback, so `$PATH` read from inside the
-workload is never empty — on Debian that fallback happens to be the default
-block's value.
+The table is the environment MXC hands the child. Bubblewrap runs the workload
+under the host's `/bin/sh`, and a shell started without these assigns its own:
+dash (Debian, Ubuntu) fabricates a `PATH` that happens to equal the default
+block's value, while bash (RHEL) fabricates a shorter `/usr/local/bin:/usr/bin`
+plus `TERM=dumb`. So neither reads back as empty from inside the workload,
+whatever MXC passed.
 
 **Before 0.9** the child got only what `process.env` supplied — with no `PATH`,
 command resolution fell through to the shell's compiled-in default, which

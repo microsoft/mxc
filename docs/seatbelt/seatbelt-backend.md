@@ -419,9 +419,15 @@ it:
 | `process.env` | `inheritDefaultEnv` | Result |
 | --- | --- | --- |
 | omitted | — | the default block |
-| `[]` | — | nothing at all |
+| `[]` | — | nothing else at all |
 | `["FOO=bar"]` | `false` (default) | `FOO` only — **no `PATH`** |
 | `["FOO=bar"]` | `true` | the default block plus `FOO`; a same-named entry wins |
+
+`PWD` sits outside the table: it is always exported, set to the resolved
+working directory. It is applied *after* everything above. It exists so the 
+child's `getcwd()` takes its fast `$PWD` path
+instead of walking parent directories the sandbox may not let it read, which
+would otherwise leak a "getcwd: … Operation not permitted" line onto stderr.
 
 The table is the environment MXC hands the child. macOS `/bin/sh` assigns its
 own `PATH` and `TERM` when it starts without them, so neither reads back as
