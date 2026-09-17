@@ -747,27 +747,17 @@ fn spawn_error(error: &std::io::Error) -> String {
     }
 }
 
-/// Resolve the working directory for the sandboxed child.
-///
-/// Delegates the precedence rule (explicit `working_directory`, else the first
-/// filesystem-policy grant that is an existing directory) to the shared
-/// [`ExecutionRequest::resolved_working_directory_with`], then layers the two
-/// Seatbelt-specific concerns on top:
-///
-/// * `~`/`~/…` policy paths are expanded exactly as the sandbox profile expands
-///   them — both when probing a candidate and in the returned value, so
-///   `Command::current_dir` never receives a literal `~` (which would fail).
-/// * When nothing is granted we fall back to `/`, which the baseline profile
-///   always allows, rather than inheriting the host process's cwd: under the
-///   deny-by-default profile that directory may be unreadable and make
-///   `getcwd()` fail, leaking a "getcwd: … Operation not permitted" line onto
-///   the child's stderr.
-/// The directory a child is started in when the request resolves none. `HOME`
-/// deliberately does not share it: `/` is not writable.
+/// Where a child is started when the request resolves no directory. The
+/// baseline profile always allows `/`, unlike the host process's cwd, which
+/// under the deny-by-default profile may be unreadable and make `getcwd()`
+/// fail, leaking a "getcwd: … Operation not permitted" line onto the child's
+/// stderr. `HOME` deliberately does not follow it here: `/` is not writable.
 const UNRESOLVED_WORKING_DIRECTORY: &str = "/";
 
-/// The directory the child is started in, or `None` when the request resolves
-/// none. Both launch paths resolve through here and hand the same value to the
+/// Resolve the working directory for the sandboxed child, or `None` when the
+/// request resolves none.
+///
+/// Both launch paths resolve through here and hand the same value to the
 /// environment, so the default `HOME` cannot name a directory the child never
 /// entered — re-deriving it separately would also miss the `~` expansion.
 fn resolved_working_directory_opt(request: &ExecutionRequest) -> Option<String> {
