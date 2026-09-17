@@ -64,6 +64,7 @@ describe('in-process async run routing', () => {
       { usePty: true },
       { dryRun: true },
       { executablePath: 'wxc-exec.exe' },
+      { signal: new AbortController().signal },
     ]) {
       await assert.rejects(
         spawnSandboxAsync('echo hello', policy, options),

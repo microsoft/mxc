@@ -14,6 +14,7 @@ import type {
   WslcConfig,
 } from '../types.js';
 import { LegacyContainmentAliases } from '../types.js';
+import { MxcError } from '../errors.js';
 
 export interface RequestSpecOptions {
   workingDirectory?: string;
@@ -217,8 +218,8 @@ function projectUi(config: ContainerConfig): RequestSpecPolicy['ui'] {
   }
   return {
     allowWindows: config.ui.disable === false,
-    clipboard: config.ui.clipboard,
-    allowInputInjection: config.ui.injection,
+    clipboard: config.ui.clipboard ?? 'none',
+    allowInputInjection: config.ui.injection ?? false,
   };
 }
 
@@ -282,7 +283,7 @@ function projectContainment(
     return { type: 'processContainer', ...settings };
   }
   if (containmentName === 'seatbelt') {
-    return { type: 'seatbelt', ...config.seatbelt };
+    return { type: 'seatbelt', ...(config.seatbelt ?? {}) };
   }
   if (containmentName === 'lxc') {
     return {
@@ -324,12 +325,13 @@ export function prepareRequestSpec(
 ): RequestSpec {
   const unsupported = bindingRequestUnsupportedReason(config);
   if (unsupported !== null) {
-    throw new Error(unsupported);
+    throw new MxcError('malformed_request', unsupported);
   }
 
   if (!config.process?.commandLine) {
-    throw new Error(
-      'script is required. Set process.commandLine on the config or pass a script to a spawn function.',
+    throw new MxcError(
+      'malformed_request',
+      'script is required. Set process.commandLine on the config or pass a script to spawnSandbox.',
     );
   }
 

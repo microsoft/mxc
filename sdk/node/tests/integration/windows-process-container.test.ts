@@ -159,7 +159,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
         `Write-Output ('PROXY_RESPONSE: ' + $h.ResponseText)"`;
       const result = await new Promise<{ stdout: string; stderr: string; exitCode: number }>(
         (resolve) => {
-          const process = sdk.spawnSandbox(
+          const sandboxProcess = sdk.spawnSandbox(
             script,
             policy,
             { debug: true, allowTestingFeatures: true },
@@ -167,8 +167,8 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
             `proxy-builtin-${schemaVersion}`,
           );
           let stdout = '';
-          process.onData((data: string) => { stdout += data; });
-          process.onExit(({ exitCode }: { exitCode: number }) => {
+          sandboxProcess.onData((data: string) => { stdout += data; });
+          sandboxProcess.onExit(({ exitCode }: { exitCode: number }) => {
             resolve({ stdout, stderr: '', exitCode });
           });
         },
