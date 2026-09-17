@@ -14,7 +14,8 @@ use super::super::{
     NetworkProtocol, NetworkRuleSection, UiSection, WslcSection,
 };
 use super::{
-    error, non_empty_port, normalized_capabilities, selected_process_container, PreparedInput,
+    error, non_empty_port, normalized_capabilities, selected_process_container, selected_seatbelt,
+    PreparedInput,
 };
 
 fn map_ui(ui: &UiSection) -> contract::Ui {
@@ -206,17 +207,20 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::OneShotReques
         }
         _ => Default::default(),
     };
-    let seatbelt = if cfg!(target_os = "macos") && matches!(containment, Containment::Process) {
-        contract::OptionalField::present(contract::Seatbelt {
-            profile_override: Default::default(),
-            gui_access: Default::default(),
-            nested_pty: Default::default(),
-            keychain_access: Default::default(),
-            extra_mach_lookups: Default::default(),
+    let selected_seatbelt = selected_seatbelt(containment);
+    let seatbelt = selected_seatbelt
+        .as_ref()
+        .map(|seatbelt| contract::Seatbelt {
+            profile_override: optional!(contract, seatbelt.profile_override.clone()),
+            gui_access: contract::OptionalField::present(seatbelt.gui_access),
+            nested_pty: contract::OptionalField::present(seatbelt.nested_pty),
+            keychain_access: contract::OptionalField::present(seatbelt.keychain_access),
+            extra_mach_lookups: contract::OptionalField::present(
+                seatbelt.extra_mach_lookups.clone(),
+            ),
         })
-    } else {
-        Default::default()
-    };
+        .map(contract::OptionalField::present)
+        .unwrap_or_default();
     let process_container = process_container
         .as_ref()
         .map(|process_container| {
@@ -286,20 +290,19 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::OneShotReques
         comment: Default::default(),
         version: contract::Version::V0_9_0Alpha,
         container_id: contract::OptionalField::present(input.container_id.clone()),
-        containment: contract::OptionalField::present(
-            if cfg!(target_os = "macos") && matches!(containment, Containment::Process) {
-                contract::OneShotContainment::Seatbelt
-            } else {
-                match containment {
-                    Containment::Process => contract::OneShotContainment::Process,
-                    Containment::ProcessContainer(_) => {
-                        contract::OneShotContainment::ProcessContainer
-                    }
-                    Containment::Wslc(_) => contract::OneShotContainment::Wslc,
-                    Containment::IsolationSession => contract::OneShotContainment::IsolationSession,
-                }
-            },
-        ),
+        containment: contract::OptionalField::present(if selected_seatbelt.is_some() {
+            contract::OneShotContainment::Seatbelt
+        } else {
+            match containment {
+                Containment::Process => contract::OneShotContainment::Process,
+                Containment::ProcessContainer(_) => contract::OneShotContainment::ProcessContainer,
+                Containment::Seatbelt(_) => contract::OneShotContainment::Seatbelt,
+                Containment::Lxc(_) => contract::OneShotContainment::Lxc,
+                Containment::Bubblewrap => contract::OneShotContainment::Bubblewrap,
+                Containment::Wslc(_) => contract::OneShotContainment::Wslc,
+                Containment::IsolationSession => contract::OneShotContainment::IsolationSession,
+            }
+        }),
         lifecycle: contract::OptionalField::present(contract::Lifecycle {
             destroy_on_exit: contract::OptionalField::present(true),
             preserve_policy: contract::OptionalField::present(
@@ -344,7 +347,13 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::OneShotReques
         network,
         ui: optional!(contract, policy.ui.as_ref().map(map_ui)),
         process_container: optional!(contract, process_container),
-        lxc: Default::default(),
+        lxc: optional!(
+            contract,
+            super::selected_lxc(containment).map(|lxc| contract::Lxc {
+                distribution: lxc.distribution,
+                release: lxc.release,
+            })
+        ),
         seatbelt,
         runtime_config: optional!(
             contract,

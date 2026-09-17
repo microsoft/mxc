@@ -169,7 +169,7 @@ pub struct SeatbeltConfig {
     /// read/write/ioctl on `/dev/ptmx`. Set to `false` for the tightest
     /// possible sandbox when the inner command does not need to allocate
     /// new ttys.
-    #[serde(rename = "nestedPty", default = "default_true")]
+    #[serde(rename = "nestedPty", default = "default_nested_pty")]
     pub nested_pty: bool,
 
     /// Allow Mach IPC + filesystem access required for `keytar` /
@@ -196,7 +196,7 @@ pub struct SeatbeltConfig {
     pub extra_mach_lookups: Vec<String>,
 }
 
-fn default_true() -> bool {
+fn default_nested_pty() -> bool {
     true
 }
 

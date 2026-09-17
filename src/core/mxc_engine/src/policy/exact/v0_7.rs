@@ -11,7 +11,7 @@ use crate::configs::{
 use super::super::{ClipboardPolicy, Containment, ProxySpec, UiSection};
 use super::{
     error, legacy_enforcement, non_empty_port, normalized_capabilities, selected_process_container,
-    LegacyEnforcement, PreparedInput,
+    selected_seatbelt, LegacyEnforcement, PreparedInput,
 };
 
 fn map_proxy(proxy: &ProxySpec) -> Result<contract::NetworkProxy, MxcError> {
@@ -122,34 +122,37 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::Request, MxcE
         }
     }
     let enforcement = legacy_enforcement(policy, containment, process_container.is_some());
-    let seatbelt = if cfg!(target_os = "macos") && matches!(containment, Containment::Process) {
-        contract::OptionalField::present(contract::Seatbelt {
-            profile_override: Default::default(),
-            gui_access: Default::default(),
+    let selected_seatbelt = selected_seatbelt(containment);
+    let seatbelt = selected_seatbelt
+        .as_ref()
+        .map(|seatbelt| contract::Seatbelt {
+            profile_override: optional!(contract, seatbelt.profile_override.clone()),
+            gui_access: contract::OptionalField::present(seatbelt.gui_access),
             launch_method: Default::default(),
-            nested_pty: Default::default(),
-            keychain_access: Default::default(),
-            extra_mach_lookups: Default::default(),
+            nested_pty: contract::OptionalField::present(seatbelt.nested_pty),
+            keychain_access: contract::OptionalField::present(seatbelt.keychain_access),
+            extra_mach_lookups: contract::OptionalField::present(
+                seatbelt.extra_mach_lookups.clone(),
+            ),
         })
-    } else {
-        Default::default()
-    };
+        .map(contract::OptionalField::present)
+        .unwrap_or_default();
     Ok(contract::Request {
         schema: Default::default(),
         comment: Default::default(),
         version: contract::Version::V0_7_0Alpha,
         container_id: contract::OptionalField::present(input.container_id.clone()),
-        containment: contract::OptionalField::present(
-            if cfg!(target_os = "macos") && matches!(containment, Containment::Process) {
-                contract::Containment::Seatbelt
-            } else {
-                match containment {
-                    Containment::Process => contract::Containment::Process,
-                    Containment::ProcessContainer(_) => contract::Containment::ProcessContainer,
-                    _ => unreachable!("unsupported containment checked above"),
-                }
-            },
-        ),
+        containment: contract::OptionalField::present(if selected_seatbelt.is_some() {
+            contract::Containment::Seatbelt
+        } else {
+            match containment {
+                Containment::Process => contract::Containment::Process,
+                Containment::ProcessContainer(_) => contract::Containment::ProcessContainer,
+                Containment::Lxc(_) => contract::Containment::Lxc,
+                Containment::Bubblewrap => contract::Containment::Bubblewrap,
+                _ => unreachable!("unsupported containment checked above"),
+            }
+        }),
         lifecycle: contract::OptionalField::present(contract::Lifecycle {
             destroy_on_exit: contract::OptionalField::present(true),
             preserve_policy: contract::OptionalField::present(
@@ -245,7 +248,13 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::Request, MxcE
                 }
             })
         ),
-        lxc: Default::default(),
+        lxc: optional!(
+            contract,
+            super::selected_lxc(containment).map(|lxc| contract::Lxc {
+                distribution: lxc.distribution,
+                release: lxc.release,
+            })
+        ),
         seatbelt,
     })
 }

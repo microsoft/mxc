@@ -59,11 +59,15 @@ struct BwrapProbe<F>(F);
 #[cfg(target_os = "linux")]
 struct ProxyEnforcementProbe<G>(G);
 
+/// The LXC availability gate, injected so Linux support reporting is testable.
 #[cfg(target_os = "linux")]
-fn linux_platform_support_with<F, G>(
+struct LxcProbe<H>(H);
+
+#[cfg(target_os = "linux")]
+fn probe_bubblewrap_with<F, G>(
     bwrap: BwrapProbe<F>,
     proxy_enforcement: ProxyEnforcementProbe<G>,
-) -> PlatformSupport
+) -> Result<BubblewrapNetworkSupport, bwrap_common::bwrap_version::BwrapUnavailable>
 where
     F: FnOnce() -> Result<
         bwrap_common::bwrap_version::BwrapVersion,
@@ -71,20 +75,51 @@ where
     >,
     G: FnOnce() -> Result<(), String>,
 {
-    match (bwrap.0)() {
-        Ok(_) => PlatformSupport {
-            is_supported: true,
-            available_methods: vec!["bubblewrap".to_string()],
-            // Walked only once `bwrap` itself is usable: the network
-            // dependencies say nothing on a host that cannot run the backend,
-            // and the walk costs several subprocess spawns.
-            bubblewrap_network: Some(bubblewrap_network_support((proxy_enforcement.0)())),
-            ..Default::default()
-        },
-        Err(err) => PlatformSupport {
-            reason: Some(err.to_string()),
-            ..Default::default()
-        },
+    (bwrap.0)()?;
+    Ok(bubblewrap_network_support((proxy_enforcement.0)()))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_platform_support_with<F, G, H>(
+    bwrap: BwrapProbe<F>,
+    proxy_enforcement: ProxyEnforcementProbe<G>,
+    lxc: LxcProbe<H>,
+) -> PlatformSupport
+where
+    F: FnOnce() -> Result<
+        bwrap_common::bwrap_version::BwrapVersion,
+        bwrap_common::bwrap_version::BwrapUnavailable,
+    >,
+    G: FnOnce() -> Result<(), String>,
+    H: FnOnce() -> bool,
+{
+    let mut available_methods = Vec::with_capacity(2);
+    let bubblewrap = probe_bubblewrap_with(bwrap, proxy_enforcement);
+    let lxc_available = (lxc.0)();
+
+    let bubblewrap_network = if let Ok(network) = &bubblewrap {
+        available_methods.push("bubblewrap".to_string());
+        Some(network.clone())
+    } else {
+        None
+    };
+
+    if lxc_available {
+        available_methods.push("lxc".to_string());
+    }
+
+    let is_supported = !available_methods.is_empty();
+    let reason = if is_supported {
+        None
+    } else {
+        bubblewrap.err().map(|error| error.to_string())
+    };
+
+    PlatformSupport {
+        is_supported,
+        reason,
+        available_methods,
+        bubblewrap_network,
     }
 }
 
@@ -120,12 +155,11 @@ pub fn platform_support() -> PlatformSupport {
     {
         // Presence alone is not enough: `bwrap` must also be new enough for
         // every flag the argument builder emits (see
-        // `bwrap_common::bwrap_version::MIN_BWRAP_VERSION`). `lxc` is a
-        // host-capability backend the SDK can't launch, so it is reported by
-        // `available_backends()` rather than here.
+        // `bwrap_common::bwrap_version::MIN_BWRAP_VERSION`).
         linux_platform_support_with(
             BwrapProbe(bwrap_common::bwrap_version::probe_bwrap),
             ProxyEnforcementProbe(bwrap_common::proxy_network::probe_proxy_enforcement),
+            LxcProbe(lxc_common::availability::is_lxc_available),
         )
     }
 
@@ -227,7 +261,9 @@ mod tests {
     use super::linux_platform_support_with;
     use super::platform_support;
     #[cfg(target_os = "linux")]
-    use super::{bubblewrap_network_support, BwrapProbe, ProxyEnforcement, ProxyEnforcementProbe};
+    use super::{
+        bubblewrap_network_support, BwrapProbe, LxcProbe, ProxyEnforcement, ProxyEnforcementProbe,
+    };
     #[cfg(target_os = "linux")]
     use bwrap_common::bwrap_version::{BwrapUnavailable, BwrapVersion, MIN_BWRAP_VERSION};
     use wxc_common::wire::Containment;
@@ -327,6 +363,7 @@ mod tests {
         let support = linux_platform_support_with(
             BwrapProbe(|| Ok(MIN_BWRAP_VERSION)),
             ProxyEnforcementProbe(|| Ok(())),
+            LxcProbe(|| false),
         );
         assert!(support.is_supported);
         assert_eq!(support.reason, None);
@@ -350,6 +387,7 @@ mod tests {
             ProxyEnforcementProbe(|| {
                 panic!("the network walk must not run without a usable bwrap")
             }),
+            LxcProbe(|| false),
         );
         assert!(!support.is_supported);
         assert_eq!(support.reason.as_deref(), Some(expected.as_str()));
@@ -365,6 +403,7 @@ mod tests {
         let support = linux_platform_support_with(
             BwrapProbe(|| Ok(MIN_BWRAP_VERSION)),
             ProxyEnforcementProbe(|| Err("slirp4netns not found".to_string())),
+            LxcProbe(|| false),
         );
         assert!(support.is_supported);
         assert_eq!(support.available_methods, ["bubblewrap"]);
@@ -373,5 +412,35 @@ mod tests {
             .expect("network support is reported alongside a usable bwrap");
         assert_eq!(network.proxy_enforcement, ProxyEnforcement::Unsupported);
         assert_eq!(network.warnings, ["slirp4netns not found".to_string()]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_support_reports_lxc_alongside_bubblewrap() {
+        let support = linux_platform_support_with(
+            BwrapProbe(|| Ok(MIN_BWRAP_VERSION)),
+            ProxyEnforcementProbe(|| Ok(())),
+            LxcProbe(|| true),
+        );
+
+        assert!(support.is_supported);
+        assert_eq!(support.available_methods, ["bubblewrap", "lxc"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_support_reports_lxc_when_bubblewrap_is_unavailable() {
+        let support = linux_platform_support_with(
+            BwrapProbe(|| Err(BwrapUnavailable::TooOld(BwrapVersion::new(0, 4, 1)))),
+            ProxyEnforcementProbe(|| {
+                panic!("the network walk must not run without a usable bwrap")
+            }),
+            LxcProbe(|| true),
+        );
+
+        assert!(support.is_supported);
+        assert_eq!(support.reason, None);
+        assert_eq!(support.available_methods, ["lxc"]);
+        assert!(support.bubblewrap_network.is_none());
     }
 }
