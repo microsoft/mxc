@@ -157,22 +157,18 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
         `$h.Open('GET','https://api.github.com/zen',$false); ` +
         `$h.Send(); ` +
         `Write-Output ('PROXY_RESPONSE: ' + $h.ResponseText)"`;
-      const result = await new Promise<{ stdout: string; stderr: string; exitCode: number }>(
-        (resolve) => {
-          const sandboxProcess = sdk.spawnSandbox(
-            script,
-            policy,
-            { debug: true, allowTestingFeatures: true },
-            undefined,
-            `proxy-builtin-${schemaVersion}`,
-          );
-          let stdout = '';
-          sandboxProcess.onData((data: string) => { stdout += data; });
-          sandboxProcess.onExit(({ exitCode }: { exitCode: number }) => {
-            resolve({ stdout, stderr: '', exitCode });
-          });
-        },
+      const sandboxProcess = sdk.spawnSandbox(
+        script,
+        policy,
+        { experimental: true },
+        undefined,
+        `proxy-builtin-${schemaVersion}`,
       );
+      let stdout = '';
+      let stderr = '';
+      sandboxProcess.standardOutput?.on('data', (data: Buffer) => { stdout += data.toString(); });
+      sandboxProcess.standardError?.on('data', (data: Buffer) => { stderr += data.toString(); });
+      const result = { ...await sandboxProcess.waitAsync(), stdout, stderr };
 
       assert.strictEqual(result.exitCode, 0, `[${schemaVersion}] Expected exit 0: ${result.stderr}`);
       assert.ok(result.stdout.includes('PROXY_RESPONSE:'));
