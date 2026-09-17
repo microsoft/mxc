@@ -18,6 +18,7 @@ pub mod daemon_client;
 pub mod daemon_protocol;
 pub mod daemon_record;
 pub mod error;
+pub mod host_requirements;
 pub mod policy;
 pub mod policy_mapping;
 pub mod sandbox;
@@ -29,4 +30,4 @@ pub mod wslcsdk_sys;
 
 pub use state_aware::WslcStateAwareRunner;
 pub use wsl_container_runner::WSLContainerRunner;
-pub use wslc_bindings::is_available;
+pub use wslc_bindings::{availability, is_available};

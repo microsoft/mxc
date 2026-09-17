@@ -665,6 +665,14 @@ pub const KEEPALIVE_SCRIPT: &str = "while true; do sleep 86400; done";
 /// resolvable. The returned [`WslcSdk`] holds raw function pointers; keep it
 /// alive for the duration of all SDK use.
 pub unsafe fn load_sdk_checked(logger: &mut Logger) -> Result<WslcSdk, ScriptResponse> {
+    // A host below the floor cannot have the WSL runtime at all, so the
+    // missing-component guidance below would tell the user to run an update
+    // that cannot help them.
+    if let Err(e) = crate::host_requirements::check_windows_version() {
+        let _ = writeln!(logger, "[WSLC][daemon] {e}");
+        return Err(WslcError::Unavailable(e).into_response());
+    }
+
     let sdk = WslcSdk::load().map_err(|e| WslcError::Unavailable(e).into_response())?;
 
     let mut missing = WslcComponentFlags::WSLC_COMPONENT_FLAG_NONE;

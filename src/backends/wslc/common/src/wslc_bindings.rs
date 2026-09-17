@@ -18,7 +18,7 @@
 //!   [`WslcProcessGuard`]) that release their handle on drop.
 //! - [`check_hresult`] and the [`S_OK`] sentinel.
 //! - [`WslcSdk::shared`] — the process-wide, never-unloaded SDK instance.
-//! - [`ComApartment`] and [`is_available`] — per-call COM apartment handling
+//! - [`ComApartment`] and [`availability`] — per-call COM apartment handling
 //!   and the host-capability probe behind `platform_support()`.
 
 pub use crate::wslcsdk_sys::*;
@@ -298,31 +298,42 @@ impl Drop for ComApartment {
     }
 }
 
-/// Whether this host can run the WSLC backend: `wslcsdk.dll` loads next to the
-/// running executable and the runtime reports no missing components (WSL2 and
-/// the WSLC runtime installed).
+/// Whether this host can run the WSLC backend: the OS meets the backend's
+/// minimum Windows version, `wslcsdk.dll` loads next to the running executable,
+/// and the runtime reports no missing components (WSL2 and the WSLC runtime
+/// installed).
 ///
 /// Used for host capability reporting. A `false` here is exactly the condition
 /// under which the runner's own preflight would fail.
 pub fn is_available() -> bool {
+    availability().is_ok()
+}
+
+/// [`is_available`] with the reason the host cannot run the backend.
+pub fn availability() -> Result<(), String> {
+    crate::host_requirements::check_windows_version()?;
     // Without an apartment the probe can't be trusted, so fail closed rather
     // than advertise a backend we may not be able to drive.
-    let Ok(_com) = ComApartment::enter() else {
-        return false;
-    };
+    let _com = ComApartment::enter()?;
     probe_components()
 }
 
 /// Load the SDK and ask it whether any prerequisite component is missing.
-fn probe_components() -> bool {
-    let Ok(sdk) = WslcSdk::shared() else {
-        return false;
-    };
+fn probe_components() -> Result<(), String> {
+    let sdk = WslcSdk::shared()?;
     let mut missing = WslcComponentFlags::WSLC_COMPONENT_FLAG_NONE;
     // SAFETY: `sdk` holds valid function pointers for the life of the process,
     // and `missing` is a valid out-param for the call.
     let hr = unsafe { sdk.WslcGetMissingComponents(&mut missing) };
-    hr == S_OK && !missing.any_missing()
+    if hr != S_OK {
+        return Err(format!("WslcGetMissingComponents failed: 0x{hr:08X}"));
+    }
+    if missing.any_missing() {
+        return Err(crate::wsl_container_runner::wslc_prerequisite_error(
+            missing,
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
