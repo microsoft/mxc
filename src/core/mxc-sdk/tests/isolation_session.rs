@@ -817,8 +817,7 @@ fn exec_runs_as_the_isolated_agent_user() {
     assert_eq!(
         account_of(&captured),
         started.agent_user_name.to_lowercase(),
-        "the workload ran as {captured:?}, not as agent user {:?}",
-        started.agent_user_name
+        "the workload did not run as the isolated agent user; actual account: {captured:?}"
     );
 }
 

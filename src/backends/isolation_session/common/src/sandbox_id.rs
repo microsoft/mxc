@@ -70,14 +70,17 @@ pub(super) const APP_ID_MAX_CHARS: usize = 256;
 
 /// The decoded `sandboxId` payload.
 ///
-/// `agent_user_name` is the OS-assigned account name and the addressing key for
-/// every post-provision phase. `app_id` is the caller-supplied value forwarded
-/// to the provisioning call and retained here so later phases can recover it.
+/// `runtime_identity` is the OS-assigned account name and the opaque addressing
+/// key for every post-provision phase. It retains the existing
+/// `agentUserName` wire key for compatibility. `app_id` is the caller-supplied
+/// value forwarded to the provisioning call and retained here so later phases
+/// can recover it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SandboxIdPayload {
     pub version: u32,
-    pub agent_user_name: String,
+    #[serde(rename = "agentUserName")]
+    pub runtime_identity: String,
     /// Absent key means absent. An explicitly-supplied empty string is a
     /// *distinct* value from absent and round-trips as such — a future OS API
     /// may assign meaning to the empty string, so MXC does not collapse the
@@ -87,10 +90,10 @@ pub(super) struct SandboxIdPayload {
 }
 
 impl SandboxIdPayload {
-    pub(super) fn new(agent_user_name: impl Into<String>, app_id: Option<String>) -> Self {
+    pub(super) fn new(runtime_identity: impl Into<String>, app_id: Option<String>) -> Self {
         Self {
             version: CURRENT_VERSION,
-            agent_user_name: agent_user_name.into(),
+            runtime_identity: runtime_identity.into(),
             app_id,
         }
     }
@@ -207,7 +210,7 @@ pub(super) fn decode(sandbox_id: &str) -> Result<SandboxIdPayload, MxcError> {
     // `malformed_id`, never `policy_validation`: a caller-supplied id being
     // wrong is an id problem, and the phases that consume an id accept no
     // policy for a policy error to belong to.
-    if payload.agent_user_name.is_empty() {
+    if payload.runtime_identity.is_empty() {
         return Err(MxcError::malformed_id(format!(
             "sandbox_id payload has an empty `agentUserName`: {sandbox_id:?}"
         )));
@@ -247,7 +250,7 @@ mod tests {
     #[test]
     fn round_trips_with_an_app_id() {
         let got = round_trip("_iso_abc_123", Some("PFN:Contoso.App_8wekyb3d8bbwe"));
-        assert_eq!(got.agent_user_name, "_iso_abc_123");
+        assert_eq!(got.runtime_identity, "_iso_abc_123");
         assert_eq!(got.app_id.as_deref(), Some("PFN:Contoso.App_8wekyb3d8bbwe"));
         assert_eq!(got.version, CURRENT_VERSION);
     }
@@ -255,7 +258,7 @@ mod tests {
     #[test]
     fn round_trips_without_an_app_id() {
         let got = round_trip("_iso_abc_123", None);
-        assert_eq!(got.agent_user_name, "_iso_abc_123");
+        assert_eq!(got.runtime_identity, "_iso_abc_123");
         assert_eq!(got.app_id, None);
     }
 
@@ -322,7 +325,7 @@ mod tests {
         ] {
             let got = round_trip(agent, None);
             assert_eq!(
-                got.agent_user_name, agent,
+                got.runtime_identity, agent,
                 "agent {agent:?} did not round-trip"
             );
         }
@@ -534,7 +537,7 @@ mod tests {
         );
         let id = format!("iso:{}", URL_SAFE_NO_PAD.encode(json.as_bytes()));
         let got = decode(&id).expect("unknown keys must be ignored, not rejected");
-        assert_eq!(got.agent_user_name, "a");
+        assert_eq!(got.runtime_identity, "a");
         assert_eq!(got.app_id.as_deref(), Some("x"));
     }
 

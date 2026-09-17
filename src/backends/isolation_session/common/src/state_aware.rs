@@ -46,13 +46,12 @@ pub struct IsolationSessionProvisionMetadata {
     pub ephemeral_workspace_path: String,
 }
 
-/// Parses a state-aware sandbox_id into its decoded payload, returning the
-/// `agentUserName` — the opaque, OS-assigned account name minted at provision
-/// and the addressing key for every post-provision phase. Format mismatches
-/// surface as `MxcError::MalformedId`; see [`super::sandbox_id`] for the
-/// format and its rationale.
-fn extract_agent_user_name(sandbox_id: &str) -> Result<String, MxcError> {
-    Ok(sandbox_id::decode(sandbox_id)?.agent_user_name)
+/// Parses a state-aware sandbox id and returns its opaque runtime identity.
+///
+/// The value is serialized under the historical `agentUserName` wire key, but
+/// post-provision code treats it only as the backend addressing key.
+fn extract_runtime_identity(sandbox_id: &str) -> Result<String, MxcError> {
+    Ok(sandbox_id::decode(sandbox_id)?.runtime_identity)
 }
 
 /// Whether this exec should ask the OS API to set up a ConPTY.
@@ -132,9 +131,9 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         _request: &ExecutionRequest,
         _config: Option<()>,
     ) -> Result<StartResult<()>, MxcError> {
-        let agent_user_name = extract_agent_user_name(sandbox_id)?;
+        let runtime_identity = extract_runtime_identity(sandbox_id)?;
         let manager =
-            IsolationSessionManager::new(&agent_user_name).map_err(map_lifecycle_error)?;
+            IsolationSessionManager::new(&runtime_identity).map_err(map_lifecycle_error)?;
         manager.start_session().map_err(map_lifecycle_error)?;
         Ok(StartResult { metadata: None })
     }
@@ -145,13 +144,13 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         _request: &ExecutionRequest,
         _config: Option<()>,
     ) -> Result<StopResult<()>, MxcError> {
-        let agent_user_name = extract_agent_user_name(sandbox_id)?;
+        let runtime_identity = extract_runtime_identity(sandbox_id)?;
         let manager =
-            IsolationSessionManager::new(&agent_user_name).map_err(map_lifecycle_error)?;
+            IsolationSessionManager::new(&runtime_identity).map_err(map_lifecycle_error)?;
         let stopped = manager.stop_session();
         log_sandbox_torn_down(
             &mut Logger::inherit_thread_diagnostic_sink(),
-            &agent_user_name,
+            &runtime_identity,
             "stop",
             TeardownOutcome {
                 session_stopped: Some(stopped.is_ok()),
@@ -169,13 +168,13 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         _request: &ExecutionRequest,
         _config: Option<()>,
     ) -> Result<DeprovisionResult<()>, MxcError> {
-        let agent_user_name = extract_agent_user_name(sandbox_id)?;
+        let runtime_identity = extract_runtime_identity(sandbox_id)?;
         let manager =
-            IsolationSessionManager::new(&agent_user_name).map_err(map_lifecycle_error)?;
+            IsolationSessionManager::new(&runtime_identity).map_err(map_lifecycle_error)?;
         let deprovisioned = manager.deprovision_agent_user();
         log_sandbox_torn_down(
             &mut Logger::inherit_thread_diagnostic_sink(),
-            &agent_user_name,
+            &runtime_identity,
             "deprovision",
             TeardownOutcome {
                 agent_user_deprovisioned: Some(deprovisioned.is_ok()),
@@ -221,7 +220,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
         // Decode to reject a malformed id before any OS call.
-        extract_agent_user_name(sandbox_id)?;
+        extract_runtime_identity(sandbox_id)?;
         validate_post_provision_policy(request).map_err(map_lifecycle_error)
     }
 
@@ -237,7 +236,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         request: &ExecutionRequest,
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
-        extract_agent_user_name(sandbox_id)?;
+        extract_runtime_identity(sandbox_id)?;
         validate_post_provision_policy(request).map_err(map_lifecycle_error)
     }
 
@@ -247,7 +246,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         request: &ExecutionRequest,
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
-        extract_agent_user_name(sandbox_id)?;
+        extract_runtime_identity(sandbox_id)?;
         validate_post_provision_policy(request).map_err(map_lifecycle_error)
     }
 
@@ -257,7 +256,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         request: &ExecutionRequest,
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
-        extract_agent_user_name(sandbox_id)?;
+        extract_runtime_identity(sandbox_id)?;
         validate_post_provision_policy(request).map_err(map_lifecycle_error)
     }
 
@@ -299,9 +298,9 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         _config: Option<()>,
         stdio: ExecStdio,
     ) -> Result<ExecHandle, MxcError> {
-        let agent_user_name = extract_agent_user_name(sandbox_id)?;
+        let runtime_identity = extract_runtime_identity(sandbox_id)?;
         let manager =
-            IsolationSessionManager::new(&agent_user_name).map_err(map_lifecycle_error)?;
+            IsolationSessionManager::new(&runtime_identity).map_err(map_lifecycle_error)?;
 
         match stdio {
             ExecStdio::Relayed => {
@@ -414,7 +413,7 @@ mod tests {
 
     // `ID_PREFIX` is the `<prefix>:<agentUserName>` tag the dispatcher
     // matches against in `backend_from_prefix`. Indirectly covered by
-    // every `extract_agent_user_name_*` test that uses an `"iso:..."`
+    // every `extract_runtime_identity_*` test that uses an `"iso:..."`
     // literal; pinned explicitly here so the dependence is visible.
     #[test]
     fn id_prefix_matches_wire_format() {
@@ -566,32 +565,32 @@ mod tests {
     }
 
     #[test]
-    fn extract_agent_user_name_recovers_the_encoded_agent_user_name() {
+    fn extract_runtime_identity_recovers_the_encoded_agent_user_name() {
         let id = sandbox_id::encode(&SandboxIdPayload::new("wxc-abcd1234", None)).unwrap();
-        assert_eq!(extract_agent_user_name(&id).unwrap(), "wxc-abcd1234");
+        assert_eq!(extract_runtime_identity(&id).unwrap(), "wxc-abcd1234");
     }
 
     #[test]
-    fn extract_agent_user_name_recovers_a_name_containing_a_colon() {
+    fn extract_runtime_identity_recovers_a_name_containing_a_colon() {
         let id = sandbox_id::encode(&SandboxIdPayload::new("has:a:colon", None)).unwrap();
-        assert_eq!(extract_agent_user_name(&id).unwrap(), "has:a:colon");
+        assert_eq!(extract_runtime_identity(&id).unwrap(), "has:a:colon");
     }
 
     #[test]
-    fn extract_agent_user_name_rejects_other_prefix() {
-        let err = extract_agent_user_name("wsb:abc").unwrap_err();
+    fn extract_runtime_identity_rejects_other_prefix() {
+        let err = extract_runtime_identity("wsb:abc").unwrap_err();
         assert_eq!(err.code, MxcErrorCode::MalformedId);
     }
 
     #[test]
-    fn extract_agent_user_name_rejects_missing_colon() {
-        let err = extract_agent_user_name("no-colon").unwrap_err();
+    fn extract_runtime_identity_rejects_missing_colon() {
+        let err = extract_runtime_identity("no-colon").unwrap_err();
         assert_eq!(err.code, MxcErrorCode::MalformedId);
     }
 
     #[test]
-    fn extract_agent_user_name_rejects_empty_payload() {
-        let err = extract_agent_user_name("iso:").unwrap_err();
+    fn extract_runtime_identity_rejects_empty_payload() {
+        let err = extract_runtime_identity("iso:").unwrap_err();
         assert_eq!(err.code, MxcErrorCode::MalformedId);
     }
 
