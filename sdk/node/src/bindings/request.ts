@@ -51,8 +51,9 @@ export interface RequestSpecPolicy {
 };
 
 /**
- * Containment variants currently reachable through the native one-shot API.
- * This mirrors the tagged JSON contract consumed by `mxc_ffi::RequestSpec`.
+ * Containment variants represented by the shared native request contract.
+ * Runtime availability is enforced by `mxc-sdk`; LXC is currently modeled
+ * here for parity but rejected by the in-process run API.
  */
 export type RequestContainment =
   | { type: 'process' }
