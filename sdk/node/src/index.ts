@@ -32,9 +32,9 @@
  *     network: { allowOutbound: true },
  *   };
  *
- *   const process = spawnSandbox('python -c "print(\'Hello from sandbox\')"', policy);
- *   process.stdout?.on('data', (data) => console.log(data.toString()));
- *   console.log('Exit code:', (await process.wait()).exitCode);
+ *   const sandboxProcess = spawnSandbox('python -c "print(\'Hello from sandbox\')"', policy);
+ *   sandboxProcess.standardOutput?.on('data', (data) => console.log(data.toString()));
+ *   console.log('Exit code:', (await sandboxProcess.waitAsync()).exitCode);
  * }
  * ```
  *

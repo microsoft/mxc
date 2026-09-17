@@ -309,15 +309,12 @@ The abstract `process` intent therefore requires `0.7.0-alpha` on macOS,
 where it resolves to Seatbelt, but retains the `0.6.0-alpha` floor on Windows
 and Linux. The abstract `vm` intent requires `0.9.0-alpha`.
 
-Experimental backends require `{ experimental: true }` in `SandboxSpawnOptions`:
-
-```typescript
-const config = createConfigFromPolicy(policy, 'vm'); // → windows_sandbox on Windows
-config.process!.commandLine = 'cmd /c whoami';
-const sandbox = spawnSandboxFromConfig(config, { experimental: true });
-const status = await sandbox.waitAsync();
-sandbox.dispose();
-```
+The in-process streaming APIs support ProcessContainer, Bubblewrap, Seatbelt,
+WSLC, and IsolationSession. LXC supports buffered execution only. Windows
+Sandbox, MicroVM, and Hyperlight do not currently expose the native streaming
+contract and are rejected by `spawnSandbox` and `spawnSandboxFromConfig`.
+Experimental supported backends require `{ experimental: true }` in
+`SandboxSpawnOptions`.
 
 IsolationSession one-shot execution uses the explicit configuration path and
 requires the standard directional all-allow network posture:

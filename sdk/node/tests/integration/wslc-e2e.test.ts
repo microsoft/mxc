@@ -228,14 +228,9 @@ srv.handle_request()
       { windowsPort: 39000, containerPort: 9000, protocol: 'udp' as unknown as 'tcp' },
     ];
 
-    const result = await collectSandbox(config);
-    const exitCode = result.exitCode;
-    const combined = result.stdout + result.stderr;
-
-    assert.notStrictEqual(exitCode, 0, `expected non-zero exit when UDP is requested; output=${combined}`);
-    assert.ok(
-      /udp/i.test(combined) && /not supported|not implemented/i.test(combined),
-      `expected SDK-limitation message mentioning UDP; output=${combined}`,
+    await assert.rejects(
+      collectSandbox(config),
+      /WSLC port mappings support only protocol 'tcp'/,
     );
   });
 });
