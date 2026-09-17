@@ -143,6 +143,9 @@ export function bindingRequestUnsupportedReason(config: ContainerConfig): string
   if (config.network?.proxy !== undefined && 'builtinTestServer' in config.network.proxy) {
     return 'network.proxy.builtinTestServer is not supported by the in-process Node SDK; use localhost or url';
   }
+  if (config.network?.enforcementMode !== undefined) {
+    return 'network.enforcementMode is not supported by the in-process Node SDK';
+  }
   const processContainer = config.processContainer ?? config.appContainer;
   const containment = resolveNodeContainment(config, processContainer);
   if (!SUPPORTED_REQUEST_CONTAINMENTS.has(containment)) {

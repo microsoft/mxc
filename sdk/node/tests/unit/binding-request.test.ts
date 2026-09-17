@@ -110,6 +110,20 @@ describe('native binding request', () => {
     assert.strictEqual(request.experimental, false);
   });
 
+  it('rejects network enforcement mode instead of silently dropping it', () => {
+    assert.throws(
+      () => prepareRequestSpec({
+        version: '0.8.0-alpha',
+        process: { commandLine: 'echo hello' },
+        network: { enforcementMode: 'firewall' },
+      }),
+      (error: unknown) =>
+        error instanceof MxcError
+        && error.code === 'malformed_request'
+        && error.message.includes('network.enforcementMode'),
+    );
+  });
+
   it('preserves lifecycle policy through the request policy projection', () => {
     const request = prepareRequestSpec({
       version: '0.9.0-alpha',
