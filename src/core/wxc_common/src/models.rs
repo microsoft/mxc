@@ -125,6 +125,8 @@ impl From<crate::wire::Containment> for ContainmentBackend {
             W::WindowsSandbox => Self::WindowsSandbox,
             W::Lxc => Self::Lxc,
             W::Microvm => Self::MicroVm,
+            // NVX still shares the existing micro-VM runtime path for now.
+            W::Nvx => Self::MicroVm,
             W::Hyperlight => Self::Hyperlight,
             W::Wslc => Self::Wslc,
             W::Seatbelt => Self::Seatbelt,

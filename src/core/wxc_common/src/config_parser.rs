@@ -818,6 +818,7 @@ fn requested_sandbox_kind(c: Option<&wire::Containment>) -> &'static str {
         Some(wire::Containment::WindowsSandbox) => "windows_sandbox",
         Some(wire::Containment::Lxc) => "lxc",
         Some(wire::Containment::Microvm) => "microvm",
+        Some(wire::Containment::Nvx) => "nvx",
         Some(wire::Containment::Hyperlight) => "hyperlight",
         Some(wire::Containment::Wslc) => "wslc",
         Some(wire::Containment::Seatbelt) => "seatbelt",

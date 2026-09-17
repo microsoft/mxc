@@ -141,6 +141,8 @@ pub enum Containment {
     Lxc,
     /// NanVix micro-VM (experimental).
     Microvm,
+    /// NVX micro-VM (experimental).
+    Nvx,
     /// Hyperlight micro-VM (experimental).
     Hyperlight,
     /// WSL container (experimental).

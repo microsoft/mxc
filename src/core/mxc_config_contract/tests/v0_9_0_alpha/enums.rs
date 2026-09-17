@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 use crate::common::{assert_invalid, assert_valid};
+use mxc_config_contract::dev::{OneShotContainment, OneShotRequest, Version};
 
 // Enum value tests
 #[test]
@@ -15,6 +16,7 @@ fn accepts_every_containment_value() {
         "vm",
         "windows_sandbox",
         "microvm",
+        "nvx",
         "hyperlight",
         "isolation_session",
         "wslc",
@@ -202,8 +204,6 @@ fn rejects_invalid_capture_denials_mode_value() {
     );
 }
 
-use mxc_config_contract::dev::{OneShotContainment, OneShotRequest};
-
 #[test]
 fn appcontainer_containment_value_alias_maps_to_process_container() {
     let json = r#"{
@@ -238,4 +238,24 @@ fn macos_sandbox_containment_value_alias_maps_to_seatbelt() {
         request.containment.as_ref(),
         Some(OneShotContainment::Seatbelt)
     ));
+}
+
+#[test]
+fn nvx_is_an_exact_v09_containment() {
+    let json = r#"{
+        "version": "0.9.0-alpha",
+        "containment": "nvx",
+        "process": {
+            "commandLine": "/bin/true"
+        }
+    }"#;
+
+    let request: OneShotRequest = serde_json::from_str(json).unwrap();
+
+    assert!(matches!(request.version, Version::V0_9_0Alpha));
+    assert!(matches!(
+        request.containment.as_ref(),
+        Some(OneShotContainment::Nvx)
+    ));
+    assert_eq!(request.process.command_line.as_str(), "/bin/true");
 }
