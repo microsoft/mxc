@@ -94,29 +94,22 @@ environment variables do not leak into the container.
 
 ### Default environment (schema 0.9+)
 
-The backend supplies `PATH`
+By default, the backend supplies `PATH`
 (`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`), `HOME` (the
 directory the child is started in, else `/tmp`), and `TERM`
-(`xterm-256color`), overriding the `lxc-attach` baseline so command resolution
-is the same on every image.
+(`xterm-256color`).
 
 | `process.env` | `inheritDefaultEnv` | Result |
 |---------------|---------------------|--------|
 | omitted | — | the default block |
-| `[]` | — | the `lxc-attach` baseline only |
+| `[]` | — | nothing | 
 | `["FOO=bar"]` | `false` (default) | `FOO` only |
 | `["FOO=bar"]` | `true` | the default block plus `FOO`; a same-named entry wins |
 
 Below 0.9 only `process.env` is passed through and `inheritDefaultEnv` is
 rejected.
 
-"Overriding" is exact, not additive: under `--clear-env` liblxc seeds its own
-baseline `PATH` and `container=lxc` first, then applies MXC's entries last with
-`putenv`, which replaces a whole value.  A supplied `PATH` therefore supersedes
-the baseline outright rather than being appended to it.  The converse is that
-an empty `process.env` is not a wholly empty environment: liblxc's baseline
-`PATH` and `container=lxc` remain underneath, and what 0.9 guarantees is that
-MXC adds nothing on top of them.
+Since liblxc always supplies a baseline `PATH` when one is omitted - there is no way to get a truly empty environment when setting `process.env`. Shells like bash also have a fallback `PATH`. Setting a non-empty `PATH` in `process.env` will overwrite liblxc's baseline. 
 
 ## Network Policy
 

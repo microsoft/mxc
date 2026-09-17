@@ -433,20 +433,13 @@ empty from inside the workload.
 > yourself.
 
 Tools installed outside the default `PATH` need both an env entry **and** a
-`readonlyPaths` grant — e.g. Homebrew on Apple silicon needs
+`readonlyPaths` grant — e.g. Homebrew ons Apple silicon needs
 `"PATH=/opt/homebrew/bin:…"` plus `readonlyPaths: ["/opt/homebrew"]`.
 
 ### Before schema 0.9
 
 `PATH` defaults to `/usr/bin:/bin:/usr/sbin:/sbin` and each `process.env` entry
 adds to or overrides that baseline. `inheritDefaultEnv` is rejected.
-
-> ⚠️ **`$HOME` is unset inside the sandbox unless you set it.** Policy paths
-> still accept `~` (expanded against the *host's* `$HOME` when the config is
-> parsed), but a script running inside the sandbox cannot use `~` — the shell
-> expands it to an empty string. `getpwuid()` doesn't help either, since
-> directory services aren't reachable. Pass `"HOME=…"` in `process.env` if your
-> command needs it.
 
 ## Working directory
 
