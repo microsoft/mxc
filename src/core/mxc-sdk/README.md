@@ -99,6 +99,7 @@ access, and additional Mach service lookups:
 use mxc_sdk::{
     build_request_with_containment,
     configs::Seatbelt,
+    policy::UiSection,
     Containment, SandboxPolicy,
 };
 
@@ -106,7 +107,10 @@ let policy = SandboxPolicy {
     version: "0.8.0-alpha".to_string(),
     filesystem: None,
     network: None,
-    ui: None,
+    ui: Some(UiSection {
+        allow_windows: true,
+        ..Default::default()
+    }),
     timeout_ms: None,
 };
 let mut seatbelt = Seatbelt::default();
