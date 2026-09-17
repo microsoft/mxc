@@ -197,8 +197,18 @@ switch ($Backend) {
         }
     }
     'isolation-session' {
-        Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_isolation_session_tests.ps1') -Arguments @{
-            WxcExePath = $wxc
+        $global:LASTEXITCODE = 0
+        & (Join-Path $testScriptRoot 'run_isolation_session_tests.ps1') -WxcExePath $wxc
+        $oneShot = $LASTEXITCODE
+
+        $global:LASTEXITCODE = 0
+        & (Join-Path $testScriptRoot 'run_isolation_session_state_aware_tests.ps1') -WxcExePath $wxc
+        $stateAware = $LASTEXITCODE
+
+        Write-Host "isolation-session suites finished: one-shot exit=$oneShot, state-aware exit=$stateAware"
+
+        if ($oneShot -ne 0 -or $stateAware -ne 0) {
+            throw 'isolation-session tests failed; see the exit codes above.'
         }
     }
     'windows-sandbox' {

@@ -3,7 +3,8 @@
 The LXC backend provides Linux container isolation using [LXC (Linux Containers)](https://linuxcontainers.org/lxc/).
 
 For exact `0.9.0-alpha`, networking is directional-only: use `network.egress`
-and `network.ingress`, with proxy runtime values under `runtimeConfig`.
+and `network.ingress`. LXC rejects `runtimeConfig.networkProxy`, so a v0.9 LXC
+request has no proxy surface at all — see [Proxy](#proxy) below.
 Legacy host lists and enforcement-mode fields in older examples are not
 accepted in v0.9. Preserve their original published contract when reproducing
 legacy behavior; do not relabel an old request as v0.9 without migrating its
@@ -103,6 +104,26 @@ container keeps running; stopping or destroying it takes them with it.  A
 partially installed chain from a failed run is torn down regardless.
 
 If using the legacy network shape, `enforcementMode` cannot be `capabilities`.
+
+### Proxy
+
+**LXC does not support proxied egress (`runtimeConfig.networkProxy`) today.**
+A request carrying that field is rejected at validation, before any container is
+created, with an error naming the field and the backend. The field exists only
+in schema 0.8 and later; on 0.6 and 0.7 it is not part of the contract, so a
+request carrying it is rejected earlier as an unknown field.
+
+The field must name a loopback endpoint, and an LXC container has its own
+network namespace, so `127.0.0.1` there is the container rather than the host.
+MXC ships no component that relays a host loopback proxy into that namespace.
+
+On schemas 0.6 through 0.8, LXC accepts the legacy `network.proxy.url` form
+pointed at an address routable from inside the container, such as the bridge
+address `http://10.0.3.1:3128`. The loopback spellings of that field are
+rejected by the parser for the reason above: `network.proxy.localhost`,
+`network.proxy.builtinTestServer`, and a `network.proxy.url` naming
+`127.0.0.0/8`, `::1`, or `localhost`. Schema 0.9 removes the legacy
+`network.proxy` property entirely, which leaves v0.9 with no proxy path.
 
 The `url` must not carry credentials.
 

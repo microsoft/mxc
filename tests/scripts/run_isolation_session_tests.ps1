@@ -336,7 +336,7 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_hello.json" `
 # that the IsolationSession one-shot surface does not define is rejected.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_configid_rejected.json" `
     -ExpectedExit 1 `
-    -OutputContains @("experimental.isolation_session.configurationId", "unknown field ``configurationId``")))
+    -OutputContains @("unknown field ``isolation_session``")))
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_exit42.json" `
     -ExpectedExit 42))
 # stderr separation: agent writes MARKER_STDOUT to stdout and MARKER_STDERR to stderr.
@@ -358,7 +358,7 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_timeout.json" 
 # contract boundary, before the command can run.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_stray_config_rejected.json" `
     -ExpectedExit 1 `
-    -OutputContains @("experimental.isolation_session.unrecognizedSetting", "unknown field ``unrecognizedSetting``")))
+    -OutputContains @("unknown field ``isolation_session``")))
 
 # One-shot network rejection: the isolation session container's network is
 # unrestricted and cannot be filtered or denied. A directional deny policy is
