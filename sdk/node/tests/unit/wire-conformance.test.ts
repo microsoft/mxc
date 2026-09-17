@@ -250,10 +250,10 @@ type _ProcessContainerWireKeys = AssertTrue<
   Equivalent<OnlyInWire<ProcessContainerConfig, WireProcessContainer>, never>
 >;
 
-// `seatbelt.guiAccess` and `seatbelt.launchMethod` are wire fields the one-shot
-// `SeatbeltConfig` does not expose today.
+// `SeatbeltConfig` now exposes `guiAccess` because RequestSpec carries it.
+// `launchMethod` was removed from the exact 0.9 contract and remains wire-only.
 type _SeatbeltWireKeys = AssertTrue<
-  Equivalent<OnlyInWire<SeatbeltConfig, WireSeatbelt>, 'guiAccess' | 'launchMethod'>
+  Equivalent<OnlyInWire<SeatbeltConfig, WireSeatbelt>, 'launchMethod'>
 >;
 type _TelemetryWireKeys = AssertTrue<Equivalent<OnlyInWire<TelemetryConfig, WireTelemetry>, never>>;
 

@@ -539,6 +539,8 @@ export interface SeatbeltConfig {
    * Optional override of the generated TinyScheme sandbox profile.
    */
   profileOverride?: string;
+  /** Allow GUI applications to access the macOS WindowServer and related services. */
+  guiAccess?: boolean;
   /**
    * Allow the inner process to allocate its own pseudo-terminals via
    * `posix_openpt` (needed by tests, `git`, `gh`, REPLs, and any tool

@@ -6,9 +6,11 @@
 
 import type {
   ContainerConfig,
+  LxcConfig,
   NetworkConfig,
   PortMapping,
   ProcessContainerConfig,
+  SeatbeltConfig,
   WslcConfig,
 } from '../types.js';
 import { LegacyContainmentAliases } from '../types.js';
@@ -25,7 +27,7 @@ export interface RequestSpecOptions {
  * This private shape is derived from the public ContainerConfig at the native
  * transport boundary.
  */
-export interface RequestPolicy {
+export interface RequestSpecPolicy {
   version: string;
   filesystem?: ContainerConfig['filesystem'];
   network?: {
@@ -54,6 +56,12 @@ export interface RequestPolicy {
 export type RequestContainment =
   | { type: 'process' }
   | ({ type: 'processContainer' } & Omit<ProcessContainerConfig, 'name'>)
+  | ({ type: 'seatbelt' } & SeatbeltConfig)
+  | ({
+      type: 'lxc';
+    } & Pick<LxcConfig, 'distribution' | 'release'>)
+  | { type: 'bubblewrap' }
+  | { type: 'isolationSession' }
   | ({
       type: 'wslc';
     } & Omit<WslcConfig, 'targetOs' | 'portMappings'> & {
@@ -61,7 +69,7 @@ export type RequestContainment =
     });
 
 export interface RequestSpec {
-  policy: RequestPolicy;
+  policy: RequestSpecPolicy;
   command: string;
   containment: RequestContainment;
   containerName?: string;
@@ -109,10 +117,19 @@ function resolveContainmentName(
   return LegacyContainmentAliases[rawContainment] ?? rawContainment;
 }
 
-function hasCustomSeatbeltSettings(config: ContainerConfig): boolean {
-  return config.seatbelt !== undefined
-    && Object.keys(config.seatbelt).length > 0;
+function hasSettings(value: object | undefined): boolean {
+  return value !== undefined && Object.keys(value).length > 0;
 }
+
+const SUPPORTED_REQUEST_CONTAINMENTS = new Set<string>([
+  'process',
+  'processcontainer',
+  'wslc',
+  'bubblewrap',
+  'lxc',
+  'seatbelt',
+  'isolation_session',
+]);
 
 export function bindingRequestUnsupportedReason(config: ContainerConfig): string | null {
   if (config.network?.proxy !== undefined && 'builtinTestServer' in config.network.proxy) {
@@ -120,14 +137,8 @@ export function bindingRequestUnsupportedReason(config: ContainerConfig): string
   }
   const processContainer = config.processContainer ?? config.appContainer;
   const containment = resolveContainmentName(config, processContainer);
-  if (
-    containment !== 'process'
-    && containment !== 'processcontainer'
-    && containment !== 'wslc'
-    && containment !== 'bubblewrap'
-    && containment !== 'seatbelt'
-  ) {
-    return `containment '${containment}' is not supported by the in-process Node SDK; use the portable 'process' intent`;
+  if (!SUPPORTED_REQUEST_CONTAINMENTS.has(containment)) {
+    return `containment '${containment}' is not supported by the in-process Node SDK`;
   }
   if (config.processContainer !== undefined && config.appContainer !== undefined) {
     return 'processContainer and its legacy appContainer alias cannot both be specified';
@@ -142,15 +153,19 @@ export function bindingRequestUnsupportedReason(config: ContainerConfig): string
   ) {
     return "ProcessContainer-specific settings require containment 'processcontainer'";
   }
-  // The native RequestSpec has no Seatbelt payload and rejects unknown fields.
-  // Refuse custom settings here rather than silently running a weaker policy.
-  if (hasCustomSeatbeltSettings(config)) {
-    return 'custom seatbelt settings cannot be represented by the native request contract';
+  if (containment !== 'seatbelt' && hasSettings(config.seatbelt)) {
+    return "Seatbelt-specific settings require containment 'seatbelt'";
+  }
+  if (containment !== 'lxc' && hasSettings(config.lxc)) {
+    return "LXC-specific settings require containment 'lxc'";
+  }
+  if (containment === 'lxc' && config.lxc?.destroyOnExit === false) {
+    return 'lxc.destroyOnExit=false is not supported by one-shot in-process execution';
   }
   return null;
 }
 
-function projectNetwork(config: ContainerConfig): RequestPolicy['network'] {
+function projectNetwork(config: ContainerConfig): RequestSpecPolicy['network'] {
   if (config.network === undefined && config.runtimeConfig === undefined) {
     return undefined;
   }
@@ -185,7 +200,7 @@ function resolveClearPolicyOnExit(config: ContainerConfig): boolean | undefined 
   return undefined;
 }
 
-function projectFilesystem(config: ContainerConfig): RequestPolicy['filesystem'] {
+function projectFilesystem(config: ContainerConfig): RequestSpecPolicy['filesystem'] {
   const clearPolicyOnExit = resolveClearPolicyOnExit(config);
   if (config.filesystem === undefined && clearPolicyOnExit === undefined) {
     return undefined;
@@ -196,7 +211,7 @@ function projectFilesystem(config: ContainerConfig): RequestPolicy['filesystem']
   };
 }
 
-function projectUi(config: ContainerConfig): RequestPolicy['ui'] {
+function projectUi(config: ContainerConfig): RequestSpecPolicy['ui'] {
   if (config.ui === undefined) {
     return undefined;
   }
@@ -245,8 +260,8 @@ function resolveInheritDefaultEnv(
 function projectContainment(
   config: ContainerConfig,
   processContainer: ProcessContainerConfig | undefined,
+  containmentName: string,
 ): RequestContainment {
-  const containmentName = resolveContainmentName(config, processContainer);
   if (containmentName === 'wslc') {
     const {
       targetOs: _targetOs,
@@ -266,7 +281,36 @@ function projectContainment(
     const { name: _legacyName, ...settings } = processContainer ?? {};
     return { type: 'processContainer', ...settings };
   }
+  if (containmentName === 'seatbelt') {
+    return { type: 'seatbelt', ...config.seatbelt };
+  }
+  if (containmentName === 'lxc') {
+    return {
+      type: 'lxc',
+      distribution: config.lxc?.distribution,
+      release: config.lxc?.release,
+    };
+  }
+  if (containmentName === 'bubblewrap') {
+    return { type: 'bubblewrap' };
+  }
+  if (containmentName === 'isolation_session') {
+    return { type: 'isolationSession' };
+  }
   return { type: 'process' };
+}
+
+function resolveContainerName(
+  config: ContainerConfig,
+  containmentName: string,
+): string | undefined {
+  if (config.containerId !== undefined) {
+    return config.containerId;
+  }
+  if (containmentName === 'lxc') {
+    return config.lxc?.containerName;
+  }
+  return undefined;
 }
 
 /**
@@ -289,7 +333,7 @@ export function prepareRequestSpec(
     );
   }
 
-  const policy: RequestPolicy = {
+  const policy: RequestSpecPolicy = {
     version: config.version,
     filesystem: projectFilesystem(config),
     network: projectNetwork(config),
@@ -299,13 +343,14 @@ export function prepareRequestSpec(
   };
 
   const processContainer = config.processContainer ?? config.appContainer;
+  const containmentName = resolveContainmentName(config, processContainer);
   const inheritDefaultEnv = resolveInheritDefaultEnv(config, options);
 
   return {
     policy,
     command: config.process.commandLine,
-    containment: projectContainment(config, processContainer),
-    containerName: config.containerId,
+    containment: projectContainment(config, processContainer, containmentName),
+    containerName: resolveContainerName(config, containmentName),
     workingDirectory: options.workingDirectory ?? config.process.cwd,
     environment: projectEnvironment(config, options, inheritDefaultEnv),
     inheritDefaultEnv,
