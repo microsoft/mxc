@@ -237,6 +237,7 @@ describe('native binding request', () => {
       },
       network: { allowedProxyPeer: 'proxy' },
     });
+    assert.strictEqual(request.containerName, 'legacy-name');
   });
 
   it('moves WSLC configuration onto tagged containment', () => {
@@ -261,6 +262,38 @@ describe('native binding request', () => {
       portMappings: [{ windowsPort: 8080, containerPort: 80 }],
     });
 
+  });
+
+  it('rejects unsupported WSLC protocol and foreign backend settings', () => {
+    assert.throws(
+      () => prepareRequestSpec({
+        version: '0.9.0-alpha',
+        containment: 'wslc',
+        process: { commandLine: 'echo hello' },
+        experimental: {
+          wslc: {
+            portMappings: [{
+              windowsPort: 8080,
+              containerPort: 80,
+              protocol: 'udp' as unknown as 'tcp',
+            }],
+          },
+        },
+      }, { experimental: true }),
+      /support only protocol 'tcp'/,
+    );
+
+    assert.throws(
+      () => prepareRequestSpec({
+        version: '0.9.0-alpha',
+        containment: 'process',
+        process: { commandLine: 'echo hello' },
+        experimental: {
+          wslc: { image: 'alpine:latest' },
+        },
+      }, { experimental: true }),
+      /require containment 'wslc'/,
+    );
   });
 
   it('moves Unix backend configuration onto tagged containment', () => {
