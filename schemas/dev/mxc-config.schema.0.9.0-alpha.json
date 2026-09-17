@@ -1051,6 +1051,10 @@
           "$ref": "#/definitions/CaptureDenials",
           "description": "Optional capture-denials policy."
         },
+        "filesystem": {
+          "$ref": "#/definitions/ProcessContainerFilesystem",
+          "description": "Optional ProcessContainer-specific filesystem policy."
+        },
         "learningMode": {
           "description": "Optional learning-mode (deny-and-record)",
           "type": "boolean"
@@ -1073,6 +1077,20 @@
     "ProcessContainerCapability": {
       "pattern": "^(?![\\s\\S]*,)(?!(?:[lL][eE][aA][rR][nN][iI][nN][gG][mM][oO][dD][eE][lL][oO][gG][gG][iI][nN][gG]|[pP][eE][rR][mM][iI][sS][sS][iI][vV][eE][lL][eE][aA][rR][nN][iI][nN][gG][mM][oO][dD][eE])$)[\\s\\S]*$",
       "type": "string"
+    },
+    "ProcessContainerFilesystem": {
+      "additionalProperties": false,
+      "description": "ProcessContainer-specific filesystem policy.",
+      "properties": {
+        "enumeratePaths": {
+          "description": "Optional paths that may be queried or enumerated without granting file-content reads.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
     },
     "ProcessContainerNetwork": {
       "additionalProperties": false,

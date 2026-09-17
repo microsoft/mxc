@@ -471,6 +471,7 @@ public class MxcSandboxTests
     [Theory]
     [InlineData("captureDenials", BackendCapability.CaptureDenials)]
     [InlineData("filesystemDeniedPaths", BackendCapability.FilesystemDeniedPaths)]
+    [InlineData("filesystemEnumeratePaths", BackendCapability.FilesystemEnumeratePaths)]
     [InlineData("ingressHostLoopbackAllow", BackendCapability.IngressHostLoopbackAllow)]
     [InlineData("proxyEnforcement", BackendCapability.ProxyEnforcement)]
     public void Discovery_MapsEveryNativeCapability(
@@ -478,6 +479,17 @@ public class MxcSandboxTests
         BackendCapability expected)
     {
         Assert.Equal(expected, MxcSandbox.ParseBackendCapability(wireName));
+    }
+
+    [Fact]
+    public void BackendCapability_PreservesReleasedNumericValues()
+    {
+        Assert.Equal(0, (int)BackendCapability.Unknown);
+        Assert.Equal(1, (int)BackendCapability.CaptureDenials);
+        Assert.Equal(2, (int)BackendCapability.ProxyEnforcement);
+        Assert.Equal(3, (int)BackendCapability.FilesystemDeniedPaths);
+        Assert.Equal(4, (int)BackendCapability.IngressHostLoopbackAllow);
+        Assert.Equal(5, (int)BackendCapability.FilesystemEnumeratePaths);
     }
 
     [Theory]
@@ -593,6 +605,35 @@ public class MxcSandboxTests
         Assert.Equal("read", root.GetProperty("ui").GetProperty("clipboard").GetString());
         Assert.True(root.GetProperty("ui").GetProperty("allowWindows").GetBoolean());
         Assert.False(root.TryGetProperty("captureDenials", out _));
+    }
+
+    [Fact]
+    public void SandboxPolicy_SerializesEnumeratePaths()
+    {
+        var policy = new SandboxPolicy
+        {
+            Version = "0.9.0-alpha",
+        };
+        var request = new SandboxRequest(policy, "echo parity")
+        {
+            Containment = new ProcessContainerContainment
+            {
+                Filesystem = new ProcessContainerFilesystemPolicy
+                {
+                    EnumeratePaths = [@"C:\input"],
+                },
+            },
+        };
+
+        using var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
+
+        Assert.Equal(
+            @"C:\input",
+            doc.RootElement
+                .GetProperty("containment")
+                .GetProperty("filesystem")
+                .GetProperty("enumeratePaths")[0]
+                .GetString());
     }
 
     [Fact]

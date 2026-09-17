@@ -111,13 +111,16 @@ BaseContainer and continue to the AppContainer fallback; older query-less hosts
 retain the legacy SBOX proxy path. Similarly, `filesystem.deniedPaths` uses
 PSEC only when `QueryProcessSecurityEnvironmentSupport` advertises
 `PSE_SUPPORT_FS_DENY`; otherwise MXC continues through the SBOX/AppContainer
-fallback chain.
+fallback chain. `processContainer.filesystem.enumeratePaths` is PSEC-only: it requires contract
+version 1.1 plus `PSE_SUPPORT_FS_ENUMERATE`, and fails rather than falling back
+to a tier that would broaden enumeration-only access.
 
 ## Filesystem policy
 
 | Aspect | 23H2 | 24H2 | 25H2 | 25H2+ |
 |--------|:--:|:--:|:--:|:--:|
 | `readwritePaths` / `readonlyPaths` grants | ✅ (T3 DACL) | ✅ (T3 DACL) | ✅ (T3 DACL) | ✅ (T1 native, or T3 DACL) |
+| `processContainer.filesystem.enumeratePaths` | ❌ | ❌ | ❌ | ⚠️ PSEC 1.1 only when `PSE_SUPPORT_FS_ENUMERATE` is reported |
 | `deniedPaths` | ✅ (T3 DENY ACE) | ✅ (T3 DENY ACE) | ✅ (T3 DENY ACE) | ✅ (T3; T1 only when PSEC reports `PSE_SUPPORT_FS_DENY` or SBOX reports `SANDBOX_CAP_DENY_PATHS`, otherwise rejected at launch and dispatched to T3) |
 | BFS brokering (T2) | ❌ | ⚠️ disabled in shipping builds | ⚠️ disabled in shipping builds | ⚠️ disabled in shipping builds |
 
@@ -132,6 +135,13 @@ Notes:
   (`BaseContainerRunner::supports_native_denied_paths()`); when neither contract
   reports deny support, `deniedPaths` is rejected and the run relies on
   default-deny plus explicit grants (or T3 DENY ACEs).
+- `processContainer.filesystem.enumeratePaths` maps to PSEC 1.1 `fs_enumerate`. It permits directory
+  queries and listing under the caller's user access without granting file
+  content reads. SBOX, BFS, and DACL fallback tiers cannot represent this
+  distinction, so MXC rejects the request when the PSEC capability is absent.
+  It is also incompatible with `processContainer.leastPrivilege`, which requires
+  the legacy SBOX path; MXC rejects that combination instead of broadening access
+  through fallback.
 - On 23H2, 24H2, and 25H2 (and on 25H2+ hosts where T1 is unavailable), all
   filesystem policy — grants **and** denies — is enforced by T3 host-path DACLs.
 

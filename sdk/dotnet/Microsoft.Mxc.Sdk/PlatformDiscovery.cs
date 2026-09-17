@@ -56,23 +56,28 @@ public enum IsolationTier
 public enum BackendCapability
 {
     /// <summary>A capability introduced by a newer native library.</summary>
-    Unknown,
+    Unknown = 0,
 
     /// <summary>Windows ProcessContainer denial capture.</summary>
-    CaptureDenials,
+    CaptureDenials = 1,
 
     /// <summary>Bubblewrap proxy-only egress in a private network namespace.</summary>
-    ProxyEnforcement,
+    ProxyEnforcement = 2,
 
     /// <summary>
     /// Native filesystem denied-path enforcement at the reported tier.
     /// </summary>
-    FilesystemDeniedPaths,
+    FilesystemDeniedPaths = 3,
 
     /// <summary>
     /// Host-loopback allow enforcement at the reported tier.
     /// </summary>
-    IngressHostLoopbackAllow,
+    IngressHostLoopbackAllow = 4,
+
+    /// <summary>
+    /// Native filesystem enumeration-only access at the reported tier.
+    /// </summary>
+    FilesystemEnumeratePaths = 5,
 }
 
 /// <summary>One host-available backend and its probed capabilities.</summary>

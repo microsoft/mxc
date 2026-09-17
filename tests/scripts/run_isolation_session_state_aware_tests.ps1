@@ -715,7 +715,9 @@ try {
             "error.message identifies the missing network field (got '$msg')"
     } | Out-Null
 
-    foreach ($phase in @('start', 'exec', 'stop', 'deprovision')) {
+    # exec is absent: its request root defines `network`, so the field is
+    # structurally accepted there and rejected by policy instead (test 3c).
+    foreach ($phase in @('start', 'stop', 'deprovision')) {
         Run-StateAwareTest "$phase (network redeclaration rejected structurally)" {
             $req = @{
                 phase = $phase
@@ -725,7 +727,6 @@ try {
                     ingress = @{ default = 'allow'; hostLoopback = 'allow' }
                 }
             }
-            if ($phase -eq 'exec') { $req.process = @{ commandLine = 'echo NETWORK_MUST_NOT_RUN' } }
             $r = Invoke-StateAware -Request $req -Experimental -DryRun
             Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
             $envObj = Parse-Envelope -Stdout $r.Stdout
@@ -867,10 +868,10 @@ try {
             Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
             $envObj = Parse-Envelope -Stdout $r.Stdout
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-            Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+            Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
             $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
-            Assert-True ($msg -match 'at `network`.*unknown field `network`') `
-                "error.message identifies the closed exec network field (got '$msg')"
+            Assert-True ($msg -match 'network policy is fixed at provision') `
+                "error.message identifies the immutable post-provision network policy (got '$msg')"
         } | Out-Null
     }
 

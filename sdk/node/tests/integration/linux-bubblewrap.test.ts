@@ -43,8 +43,7 @@ describe(`Linux Bubblewrap (schema ${schemaVersion})`, {
 }, () => {
   it('should default to Bubblewrap when containment is omitted (silent default)', async () => {
     // spawnSandboxAsync routes through abstract `containment: 'process'`,
-    // which on Linux resolves to Bubblewrap in the binary. No --experimental
-    // flag is required for this path.
+    // which on Linux resolves to Bubblewrap in the binary.
     const result = await sdk.spawnSandboxAsync(
       BWRAP_PROBE,
       { version: schemaVersion.raw },
@@ -69,9 +68,7 @@ describe(`Linux Bubblewrap (schema ${schemaVersion})`, {
     assert.ok(result.stdout.includes('OK: under bubblewrap'), `[${schemaVersion}] ${result.stdout}`);
   });
 
-  it('should select Bubblewrap for explicit containment="bubblewrap" with experimental flag', async () => {
-    // Explicit "bubblewrap" still requires `experimental: true` per the SDK
-    // gate in helper.ts (`ExperimentalBackends`).
+  it('should select Bubblewrap for explicit containment="bubblewrap"', async () => {
     const config = sdk.createConfigFromPolicy(
       { version: schemaVersion.raw },
       'bubblewrap',
@@ -79,7 +76,7 @@ describe(`Linux Bubblewrap (schema ${schemaVersion})`, {
     );
     config.process!.commandLine = BWRAP_PROBE;
     assert.strictEqual(config.containment, 'bubblewrap', 'wire-format containment should be "bubblewrap"');
-    const result = await spawnFromConfigAsync(config, { ...debugSpawnOptions, experimental: true });
+    const result = await spawnFromConfigAsync(config, debugSpawnOptions);
     assert.strictEqual(result.exitCode, 0, `[${schemaVersion}] explicit Bubblewrap probe failed: ${result.stdout}`);
     assert.ok(result.stdout.includes('OK: under bubblewrap'), `[${schemaVersion}] ${result.stdout}`);
   });

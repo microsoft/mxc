@@ -186,6 +186,17 @@ function Invoke-RegressionTestCase {
         $arguments += @("-WxcExec", $WxcExec)
     }
 
+    if ($Metadata.CapabilityPreflight) {
+        & $Shell @arguments -CheckPrerequisites | Out-Host
+        $preflightExitCode = $LASTEXITCODE
+        if ($preflightExitCode -eq 77) {
+            return New-RegressionTestResult $Issue $Metadata "Skipped" "Host capability prerequisite is unavailable" $null
+        }
+        if ($preflightExitCode -ne 0) {
+            return New-RegressionTestResult $Issue $Metadata "Failed" "Capability prerequisite check failed" $preflightExitCode
+        }
+    }
+
     Write-Host "`n=== Issue #${Issue}: $($Metadata.ExpectedTierSupport -join ', ') ===" -ForegroundColor Cyan
     & $Shell @arguments | Out-Host
     $exitCode = $LASTEXITCODE

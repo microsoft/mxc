@@ -251,6 +251,9 @@ impl std::fmt::Display for DispatchError {
                 "Could not resolve the Windows system directory while probing for bfscfg.exe \
                  ({reason}). This indicates a corrupted or unsupported OS configuration."
             ),
+            DispatchError::Fallback(error @ FallbackError::EnumeratePathsUnsupported) => {
+                write!(f, "{error}")
+            }
             DispatchError::Dacl { error, .. } => write!(f, "Failed to apply DACL ACEs: {error}"),
             DispatchError::Sid(e) => write!(f, "Failed to derive AppContainer SID: {e}"),
             DispatchError::CaptureDenialsUnsupported { tier } => write!(
@@ -443,14 +446,13 @@ fn select_backend_with_fallback(
     // BaseContainerRunner prefers PSEC whenever it is available and compatible,
     // otherwise uses the transitional SBOX contract. If neither BaseContainer
     // contract is usable, detection continues to the AppContainer tiers.
-    let prefer_base_container = BaseContainerRunner::is_usable_for_request(request);
+    let capabilities = BaseContainerRunner::capabilities_for_request(request);
+    let prefer_base_container = capabilities.usable;
     let uses_native_capture = BaseContainerRunner::uses_native_capture_for_request(request);
-    let supports_deny_paths = BaseContainerRunner::supports_deny_paths_for_request(request);
     let decision = fallback_detector::detect_with_base_container_capabilities(
         &request.policy,
         prefer_base_container,
-        prefer_base_container,
-        supports_deny_paths,
+        capabilities,
     )?;
     let guarded_capture_required = request.policy.capture_denials.is_some()
         && (decision.tier != IsolationTier::BaseContainer || !uses_native_capture);

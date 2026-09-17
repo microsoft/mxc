@@ -39,8 +39,10 @@ use wxc_common::validator::NetworkPolicySupport;
 use crate::policy_mapping::validate_denied_path_overlap;
 
 const ERR_FILESYSTEM_IMMUTABLE: &str =
-    "filesystem policy (readwritePaths / readonlyPaths / deniedPaths) is bound to the provision \
+    "filesystem policy (readwritePaths / readonlyPaths / deniedPaths and processContainer.filesystem.enumeratePaths) is bound to the provision \
      phase and cannot be changed by the WSLc backend after provisioning";
+const ERR_ENUMERATE_PATHS: &str =
+    "processContainer.filesystem.enumeratePaths is not supported by the WSLc backend";
 const ERR_HOST_FILTERING: &str =
     "per-host network filtering (allowedHosts / blockedHosts) is not supported by the WSLc backend";
 const ERR_NETWORK_IMMUTABLE: &str =
@@ -131,6 +133,9 @@ pub(crate) fn validate_directional_network(request: &ExecutionRequest) -> Result
 /// mode; both are honoured here. Everything else in the module table is
 /// rejected.
 pub(crate) fn validate_provision_policy(request: &ExecutionRequest) -> Result<(), MxcError> {
+    if !request.policy.enumerate_paths.is_empty() {
+        return Err(MxcError::policy_validation(ERR_ENUMERATE_PATHS));
+    }
     validate_denied_path_overlap(
         &request.policy.readwrite_paths,
         &request.policy.readonly_paths,
@@ -194,6 +199,7 @@ pub(crate) fn exec_proxy_url(request: &ExecutionRequest) -> Option<&str> {
 fn reject_filesystem_policy(request: &ExecutionRequest) -> Result<(), MxcError> {
     if !request.policy.readwrite_paths.is_empty()
         || !request.policy.readonly_paths.is_empty()
+        || !request.policy.enumerate_paths.is_empty()
         || !request.policy.denied_paths.is_empty()
     {
         return Err(MxcError::policy_validation(ERR_FILESYSTEM_IMMUTABLE));
@@ -332,6 +338,19 @@ mod tests {
             parsed(r#"{"version":"0.9.0-alpha","phase":"provision","containment":"wslc"}"#);
         assert!(network_is_isolated(&defaults));
         validate_provision_policy(&defaults).unwrap();
+    }
+
+    #[test]
+    fn provision_rejects_enumerate_paths() {
+        let request = request_with_policy(ContainerPolicy {
+            enumerate_paths: vec!["C:\\tools".to_string()],
+            ..Default::default()
+        });
+
+        assert_policy_validation(
+            validate_provision_policy(&request).unwrap_err(),
+            ERR_ENUMERATE_PATHS,
+        );
     }
 
     #[test]

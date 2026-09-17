@@ -516,6 +516,11 @@ No `network` field → no network. No `readwritePaths` → process can't write `
 
 Setting `cwd` (or the `workingDirectory` argument) does **not** add that path to the policy. Add it to `readonlyPaths` / `readwritePaths` explicitly.
 
+For Windows ProcessContainer requests using schema `0.9.0-alpha`,
+`processContainer.filesystem.enumeratePaths` permits directory listing without
+granting file content reads. It requires a BaseContainer host with PSEC 1.1
+`fs_enumerate` support and does not fall back to AppContainer.
+
 ---
 
 ## Troubleshooting

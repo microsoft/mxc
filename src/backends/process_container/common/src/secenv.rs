@@ -58,6 +58,7 @@ const SECURITY_ENVIRONMENT_API_SET_NAME: &str = "api-win-appmodel-processmodel~s
 const SECURITY_ENVIRONMENT_API_SET: &core::ffi::CStr =
     c"api-win-appmodel-processmodel~securityenvironment";
 const PSE_SUPPORT_FS_DENY: u64 = 0x0000_0000_0000_0001;
+const PSE_SUPPORT_FS_ENUMERATE: u64 = 0x0000_0000_0000_0004;
 const PSE_SUPPORT_NETWORK_INGRESS: u64 = 0x0000_0000_0000_0008;
 
 /// No special behaviour when creating the security environment
@@ -471,32 +472,13 @@ impl SecurityEnvironmentApi {
     }
 
     /// Whether the official V2 API supports native deny paths.
-    ///
-    /// The answer is a fixed host capability, so for the real (cacheable) API the
-    /// result — including a typed error — is memoized once per process. Non-cacheable
-    /// test fakes always query directly and never touch the process-wide cache.
     pub fn supports_deny_paths(&self) -> Result<bool, LearningModeError> {
-        if self.cacheable {
-            static CACHE: OnceLock<Result<bool, LearningModeError>> = OnceLock::new();
-            self.supports_deny_paths_cached(&CACHE)
-        } else {
-            self.query_deny_paths_support()
-        }
-    }
-
-    fn supports_deny_paths_cached(
-        &self,
-        cache: &OnceLock<Result<bool, LearningModeError>>,
-    ) -> Result<bool, LearningModeError> {
-        cache
-            .get_or_init(|| self.query_deny_paths_support())
-            .clone()
-    }
-
-    /// Query `QueryProcessSecurityEnvironmentSupport` for the native-deny-path bit,
-    /// without consulting or populating the process-wide cache.
-    fn query_deny_paths_support(&self) -> Result<bool, LearningModeError> {
         self.query_support(PSE_SUPPORT_FS_DENY)
+    }
+
+    /// Whether the official PSEC API supports enumeration-only filesystem paths.
+    pub fn supports_enumerate_paths(&self) -> Result<bool, LearningModeError> {
+        self.query_support(PSE_SUPPORT_FS_ENUMERATE)
     }
 
     /// Whether the official PSEC API supports the ingress policy table.
@@ -514,6 +496,41 @@ impl SecurityEnvironmentApi {
     }
 
     fn query_support(&self, capability: u64) -> Result<bool, LearningModeError> {
+        self.support_flags()
+            .map(|support_flags| support_flags & capability != 0)
+    }
+
+    #[cfg(test)]
+    fn query_support_cached(
+        &self,
+        capability: u64,
+        cache: &OnceLock<Result<u64, LearningModeError>>,
+    ) -> Result<bool, LearningModeError> {
+        self.support_flags_cached(cache)
+            .map(|support_flags| support_flags & capability != 0)
+    }
+
+    /// Return the immutable support flags advertised by the official PSEC API.
+    ///
+    /// The real API is process-wide and immutable, so both successful flags and
+    /// typed failures are memoized. Injected test surfaces remain uncached.
+    fn support_flags(&self) -> Result<u64, LearningModeError> {
+        if self.cacheable {
+            static CACHE: OnceLock<Result<u64, LearningModeError>> = OnceLock::new();
+            self.support_flags_cached(&CACHE)
+        } else {
+            self.query_support_flags()
+        }
+    }
+
+    fn support_flags_cached(
+        &self,
+        cache: &OnceLock<Result<u64, LearningModeError>>,
+    ) -> Result<u64, LearningModeError> {
+        cache.get_or_init(|| self.query_support_flags()).clone()
+    }
+
+    fn query_support_flags(&self) -> Result<u64, LearningModeError> {
         let mut support_flags = 0u64;
         // SAFETY: `query_support` matches the official V2 declaration and
         // `support_flags` is a valid out-pointer.
@@ -524,7 +541,7 @@ impl SecurityEnvironmentApi {
                 code: result.0,
             });
         }
-        Ok(support_flags & capability != 0)
+        Ok(support_flags)
     }
 
     /// Create a process security environment from a PSEC FlatBuffer
@@ -858,11 +875,19 @@ mod tests {
         reset_query_fakes();
         QUERY_FLAGS.store(PSE_SUPPORT_FS_DENY, Ordering::SeqCst);
         assert!(api.supports_deny_paths().unwrap());
+        assert!(!api.supports_enumerate_paths().unwrap());
+        assert!(!api.supports_network_ingress().unwrap());
+
+        reset_query_fakes();
+        QUERY_FLAGS.store(PSE_SUPPORT_FS_ENUMERATE, Ordering::SeqCst);
+        assert!(!api.supports_deny_paths().unwrap());
+        assert!(api.supports_enumerate_paths().unwrap());
         assert!(!api.supports_network_ingress().unwrap());
 
         reset_query_fakes();
         QUERY_FLAGS.store(PSE_SUPPORT_NETWORK_INGRESS, Ordering::SeqCst);
         assert!(!api.supports_deny_paths().unwrap());
+        assert!(!api.supports_enumerate_paths().unwrap());
         assert!(api.supports_network_ingress().unwrap());
     }
 
@@ -926,7 +951,7 @@ mod tests {
     }
 
     #[test]
-    fn cacheable_api_memoizes_support_query() {
+    fn cacheable_api_memoizes_support_flags_across_capabilities() {
         let _guard = QUERY_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -936,10 +961,15 @@ mod tests {
             SecurityEnvironmentApi::from_raw_parts_cacheable(fake_create, fake_query, fake_close);
         let cache = OnceLock::new();
 
-        let first = api.supports_deny_paths_cached(&cache).unwrap();
-        let second = api.supports_deny_paths_cached(&cache).unwrap();
-        assert_eq!(first, second);
-        // The result is memoized for the process: the query runs at most once.
+        assert!(api
+            .query_support_cached(PSE_SUPPORT_FS_DENY, &cache)
+            .unwrap());
+        assert!(!api
+            .query_support_cached(PSE_SUPPORT_FS_ENUMERATE, &cache)
+            .unwrap());
+        assert!(!api
+            .query_support_cached(PSE_SUPPORT_NETWORK_INGRESS, &cache)
+            .unwrap());
         assert_eq!(QUERY_CALLS.load(Ordering::SeqCst), 1);
     }
 }

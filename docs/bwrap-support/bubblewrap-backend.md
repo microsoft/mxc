@@ -5,7 +5,7 @@ The Bubblewrap backend provides **unprivileged Linux sandboxing** using
 Linux user namespaces to create isolated sandbox environments without
 requiring root privileges or a container runtime.
 
-> **Status:** Experimental — requires the `--experimental` CLI flag.
+> **Status:** Stable — the default Linux backend.
 
 > **Exact v0.9:** author `network.egress` / `network.ingress` and, for proxy
 > requests, `runtimeConfig.networkProxy`. Legacy `defaultPolicy`,
@@ -111,12 +111,12 @@ requiring root privileges or a container runtime.
 
 Run with:
 ```bash
-lxc-exec --experimental --config bubblewrap_hello.json
+lxc-exec --config bubblewrap_hello.json
 ```
 
 Or via base64:
 ```bash
-lxc-exec --experimental --config-base64 "$(base64 -w0 bubblewrap_hello.json)"
+lxc-exec --config-base64 "$(base64 -w0 bubblewrap_hello.json)"
 ```
 
 ## How It Works
@@ -860,8 +860,7 @@ so a Node caller keeps the first answer it received.
 - **`builtinTestServer` is testing-only**: gated behind `--allow-testing-features`
   and never to be used as a real production proxy. It has no auth, no
   body-size limits, and minimal hop-by-hop header handling. Use a real
-  HTTP proxy for production deployments. (Selecting the Bubblewrap backend
-  itself still also requires `--experimental`.)
+  HTTP proxy for production deployments.
 - **HTTPS via CONNECT**: the proxy uses HTTP `CONNECT` tunnels for TLS, so
   certificate validation continues to work end-to-end (the proxy does not
   see plaintext).
@@ -917,7 +916,6 @@ Test configs are in `tests/configs/bubblewrap_*.json`.
 
 ## Limitations
 
-- **Experimental** — requires `--experimental` flag
 - **Linux only** — Bubblewrap requires Linux kernel namespaces
 - **Deny-by-default filesystem** — the sandbox sees a minimal allowlist
   of host paths (system binaries, libs, `/etc`, DNS stub-resolver dirs)

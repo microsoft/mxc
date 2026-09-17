@@ -191,6 +191,8 @@ The reported `tier` is a **ceiling** — the strongest isolation the host can
 reach for that backend; a policy can still force a weaker tier at dispatch.
 `capabilities` lists optional features supported by that tier.
 `FilesystemDeniedPaths` covers native `filesystem.deniedPaths`.
+`FilesystemEnumeratePaths` indicates native support for
+`processContainer.filesystem.enumeratePaths` without granting file-content reads.
 `IngressHostLoopbackAllow` covers
 `network.ingress.hostLoopback = "allow"`. Missing capabilities are unavailable
 or could not be detected. Use `wxc-exec --probe` for detailed machine facts.

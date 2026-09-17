@@ -203,6 +203,15 @@ pub fn validate_common(request: &ExecutionRequest) -> Result<(), ScriptResponse>
         ));
     }
 
+    if !request.policy.enumerate_paths.is_empty()
+        && request.containment != crate::models::ContainmentBackend::ProcessContainer
+    {
+        return Err(ScriptResponse::error(
+            "processContainer.filesystem.enumeratePaths is supported only by the Windows \
+             ProcessContainer backend",
+        ));
+    }
+
     Ok(())
 }
 
@@ -243,6 +252,33 @@ mod tests {
             ..Default::default()
         };
         assert!(validate_common(&req).is_ok());
+    }
+
+    #[test]
+    fn enumerate_paths_reject_non_process_container_one_shot_backends() {
+        for containment in [
+            crate::models::ContainmentBackend::Bubblewrap,
+            crate::models::ContainmentBackend::Lxc,
+            crate::models::ContainmentBackend::Wslc,
+        ] {
+            let req = ExecutionRequest {
+                script_code: "echo hello".to_string(),
+                containment: containment.clone(),
+                policy: crate::models::ContainerPolicy {
+                    enumerate_paths: vec!["C:\\tools".to_string()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            let error = validate_common(&req).expect_err("backend must not ignore enumeratePaths");
+
+            assert!(
+                error.error_message.contains("Windows ProcessContainer"),
+                "{containment:?}: {}",
+                error.error_message
+            );
+        }
     }
 
     #[test]

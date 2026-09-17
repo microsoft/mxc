@@ -1,0 +1,15 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-LXC-Reuse-Loosen",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "sh -c \"nc -z -w 5 140.82.114.6 443 >/dev/null 2>&1 && echo MXC_NET_ALLOWED || echo MXC_NET_BLOCKED\""
+  },
+  "lifecycle": {
+    "destroyOnExit": false
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  }
+}
