@@ -1,12 +1,15 @@
 # Version-Aware Stack Plan
 
-Status: revised implementation plan and decision record.
+Status: active implementation plan and decision record. Execution is split
+between independent non-WSLC and WSLC sessions.
 
-Date: September 15, 2026.
+Date: September 17, 2026.
 
-Base:
-`origin/main` at `50a6abf4`
-(`Complete the v0.9 directional networking cutover (#1145)`).
+Current implementation base:
+`ca1ada8a` (`Regenerate the IsolationSession Preview bindings (#1194)`).
+
+Current `origin/main` observed while updating this plan:
+`dd589b41` (`[CI] Run state aware tests for isolation session (#1201)`).
 
 ## 1. Purpose
 
@@ -30,10 +33,18 @@ The remaining stack:
 6. starts the v1.0 contract and SDK work, with v1.0 expected to remain close to
    v0.9 unless a deliberate breaking change is required.
 
-The implementation uses three substantive phases/pull requests: Phase 12,
-Phase 13, and Phase 14. A later v1.0
-publication pull request may be added if the v1.0 candidate needs a separate
-validation period.
+The implementation uses Phase 12, Phase 13 core, and Phase 13 follow-up pull
+requests before Phase 14. Two alternative three-PR stacks exist because the
+decision to publish WSLC in v0.9 must be made at the immutable Phase 12
+boundary. Only one stack may merge.
+
+Execution is now split across two independent sessions:
+
+- [Non-WSLC stack session plan](version-aware-stack-non-wslc-session-plan.md)
+- [WSLC-inclusive stack session plan](version-aware-stack-wslc-session-plan.md)
+
+Each session owns only its named branches. Neither session rebases or pushes
+its Phase 13 branches until its Phase 12 PR is fully green.
 
 ## 2. Core decisions
 
@@ -172,21 +183,37 @@ Node SandboxPolicy
 
 Raw Node configuration APIs continue to expose the exact version.
 
-## 4. Phase and pull request stack
+## 4. Phase and pull request stacks
 
 ```text
-origin/main (50a6abf4)
+                                  origin/main
+                                       |
+                    +------------------+------------------+
+                    |                                     |
+             non-WSLC alternative                  WSLC alternative
+             #1184 Phase 12                        #1187 Phase 12
+                    |                                     |
+             #1185 Phase 13                       #1188 Phase 13
+                    |                                     |
+           #1186 follow-ups                     #1189 follow-ups
+
+After one alternative merges:
+
+selected Phase 13 follow-ups
         |
-        +-- Phase 12 / PR 1: Publish v0.9 and graduate IsolationSession
-        |
-        +-- Phase 13 / PR 2: Collapse parser and runtime representations
-        |
-        `-- Phase 14 / PR 3: Establish the v1 SDK and v1.0 contract candidate
+        `-- Phase 14: establish the v1 SDK and v1.0 contract candidate
                   |
-                  `-- optional: mechanical v1.0 publication
+                  `-- optional mechanical v1.0 publication
 ```
 
-These are the minimum sensible boundaries:
+The two alternatives are mutually exclusive because both publish the immutable
+v0.9 contract:
+
+- #1184 publishes v0.9 with IsolationSession but leaves WSLC on v0.10.
+- #1187 publishes v0.9 with both IsolationSession and WSLC.
+
+The three PR boundaries within either alternative remain the minimum sensible
+boundaries:
 
 - Phase 12 intentionally changes the published contract and product support,
   and removes equivalence scaffolding for the parser architecture that has
@@ -198,6 +225,32 @@ These are the minimum sensible boundaries:
 
 Combining these boundaries would make it difficult to distinguish publication
 errors, refactoring regressions, and intended v1 API changes.
+
+### 4.1 Current execution state
+
+| Stack | Phase 12 | Phase 13 core | Phase 13 follow-ups |
+| --- | --- | --- | --- |
+| Non-WSLC | #1184, `4d26fab7` | #1185, `82f62e94` | #1186, `fc5d4514` |
+| WSLC-inclusive | #1187, `eb88b090` | #1188, `54496529` | #1189, `1d76e9ce` |
+
+The Phase 12 heads include the CI and Copilot-review repairs discovered after
+the initial publication:
+
+- Windows all-feature lint no longer reports unnecessary mutable bindings.
+- Hyperlight and MicroVM active callers use v0.10 where those development
+  containments are registered.
+- The Hyperlight migration harness, snapshot warmup, and inline filesystem E2E
+  requests agree on v0.10.
+- The non-WSLC stack moves Windows Sandbox and WSLC state-aware callers to
+  v0.10 and permanent top-level backend sections.
+- The WSLC stack keeps one-shot and lifecycle runtime fixtures on published
+  v0.9 and moves inline provision settings to top-level `wslc.provision`.
+- The C# examples use directional networking.
+
+The Phase 13 and follow-up branches deliberately remain at their previously
+published remote tips. They must not be rewritten until the corresponding
+Phase 12 CI run is green. This prevents repeated restacks while Phase 12 is
+still changing.
 
 ## 5. Phase 12 / PR 1: Publish v0.9 and graduate IsolationSession
 
