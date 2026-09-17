@@ -63,13 +63,16 @@ validation and enforcement live with each backend.
 
 ## Request flow
 
-```text
-JSON or base64 configuration
-  -> version-specific contract
-  -> parsing and normalization in wxc_common
-  -> ExecutionRequest
-  -> backend selection in mxc_engine
-  -> backend implementation
+```mermaid
+flowchart LR
+    config["JSON or base64 configuration"]
+    contract["Version-specific contract"]
+    common["Parsing and normalization<br/>wxc_common"]
+    request["ExecutionRequest"]
+    engine["Backend selection<br/>mxc_engine"]
+    backend["Backend implementation"]
+
+    config --> contract --> common --> request --> engine --> backend
 ```
 
 Production parsing selects an exact registered contract. The rolling wire model
@@ -94,11 +97,23 @@ surface to the selected backend.
 
 ## SDK and binding paths
 
-```text
-TypeScript SDK -> platform executor -> mxc_engine
-C# SDK         -> mxc_ffi -> mxc-sdk -> mxc_engine
-Rust SDK       -> mxc-sdk -> mxc_engine
-CLI            -> platform executor -> mxc_engine
+```mermaid
+flowchart LR
+    typescript["TypeScript SDK"]
+    cli["CLI"]
+    csharp["C# SDK"]
+    rust["Rust SDK"]
+    executor["Platform executor"]
+    ffi["mxc_ffi"]
+    sdk["mxc-sdk"]
+    engine["mxc_engine"]
+
+    typescript --> executor
+    cli --> executor
+    csharp --> ffi --> sdk
+    rust --> sdk
+    executor --> engine
+    sdk --> engine
 ```
 
 `mxc_ffi` is the C ABI used by the C# SDK. Its generated C# P/Invoke file is
