@@ -7,6 +7,7 @@
 import koffi, { type KoffiFunc } from 'koffi';
 import { loadMxcFfi, type MxcNativeLibrary } from '../native-library.js';
 import type { RequestSpec } from './request.js';
+import { bindNativeFunction } from './native-function.js';
 import {
   AbiErrorDetailType,
   decodeString,
@@ -68,37 +69,82 @@ type NativeLibraryHandle = MxcNativeLibrary['handle'];
 
 // Sandbox creation, status, metadata, and terminal lifecycle.
 function bindSandboxFunctions(handle: NativeLibraryHandle) {
-  const spawn = handle.func('mxc_spawn_request', 'int32_t', [
-    'const char *',
-    koffi.out(koffi.pointer(AbiSandbox, 2)),
-    koffi.out(koffi.pointer(AbiErrorDetailType)),
-  ]) as SpawnFunction;
-  const tryWait = handle.func('mxc_sandbox_try_wait', 'int32_t', [
-    koffi.pointer(AbiSandbox),
-    koffi.out(koffi.pointer('int32_t')),
-    koffi.out(koffi.pointer('int32_t')),
-    koffi.out(koffi.pointer('int32_t')),
-  ]) as (sandbox: Pointer, exitCode: number[], running: number[], timedOut: number[]) => number;
-  const wait = handle.func('mxc_sandbox_wait', 'int32_t', [
-    koffi.pointer(AbiSandbox),
-    koffi.out(koffi.pointer('int32_t')),
-    koffi.out(koffi.pointer('int32_t')),
-  ]) as (sandbox: Pointer, exitCode: number[], timedOut: number[]) => number;
-  const id = handle.func('mxc_sandbox_id', 'uint32_t', [koffi.pointer(AbiSandbox)]) as (sandbox: Pointer) => number;
-  const kill = handle.func('mxc_sandbox_kill', 'int32_t', [koffi.pointer(AbiSandbox)]) as (sandbox: Pointer) => number;
-  const warningsJson = handle.func('mxc_sandbox_warnings_json', 'int32_t', [
-    koffi.pointer(AbiSandbox),
-    koffi.out(koffi.pointer('char', 2)),
-  ]) as (sandbox: Pointer, out: Pointer[]) => number;
-  const outputJson = handle.func('mxc_sandbox_output_metadata_json', 'int32_t', [
-    koffi.pointer(AbiSandbox),
-    koffi.out(koffi.pointer('char', 2)),
-  ]) as (sandbox: Pointer, out: Pointer[]) => number;
-  const freeSandbox = handle.func(
-    'mxc_sandbox_free',
-    'void',
-    [koffi.pointer(AbiSandbox)],
-  ) as (sandbox: Pointer) => void;
+  const spawn = bindNativeFunction<
+    (request: string, sandbox: Pointer[], error: AbiErrorDetail) => number
+  >(handle, {
+    symbol: 'mxc_spawn_request',
+    result: 'int32_t',
+    parameters: [
+      'const char *',
+      koffi.out(koffi.pointer(AbiSandbox, 2)),
+      koffi.out(koffi.pointer(AbiErrorDetailType)),
+    ],
+  });
+
+  const tryWait = bindNativeFunction<
+    (sandbox: Pointer, exitCode: number[], running: number[], timedOut: number[]) => number
+  >(handle, {
+    symbol: 'mxc_sandbox_try_wait',
+    result: 'int32_t',
+    parameters: [
+      koffi.pointer(AbiSandbox),
+      koffi.out(koffi.pointer('int32_t')),
+      koffi.out(koffi.pointer('int32_t')),
+      koffi.out(koffi.pointer('int32_t')),
+    ],
+  });
+
+  const wait = bindNativeFunction<
+    (sandbox: Pointer, exitCode: number[], timedOut: number[]) => number
+  >(handle, {
+    symbol: 'mxc_sandbox_wait',
+    result: 'int32_t',
+    parameters: [
+      koffi.pointer(AbiSandbox),
+      koffi.out(koffi.pointer('int32_t')),
+      koffi.out(koffi.pointer('int32_t')),
+    ],
+  });
+
+  const id = bindNativeFunction<(sandbox: Pointer) => number>(handle, {
+    symbol: 'mxc_sandbox_id',
+    result: 'uint32_t',
+    parameters: [koffi.pointer(AbiSandbox)],
+  });
+
+  const kill = bindNativeFunction<(sandbox: Pointer) => number>(handle, {
+    symbol: 'mxc_sandbox_kill',
+    result: 'int32_t',
+    parameters: [koffi.pointer(AbiSandbox)],
+  });
+
+  const warningsJson = bindNativeFunction<
+    (sandbox: Pointer, out: Pointer[]) => number
+  >(handle, {
+    symbol: 'mxc_sandbox_warnings_json',
+    result: 'int32_t',
+    parameters: [
+      koffi.pointer(AbiSandbox),
+      koffi.out(koffi.pointer('char', 2)),
+    ],
+  });
+
+  const outputJson = bindNativeFunction<
+    (sandbox: Pointer, out: Pointer[]) => number
+  >(handle, {
+    symbol: 'mxc_sandbox_output_metadata_json',
+    result: 'int32_t',
+    parameters: [
+      koffi.pointer(AbiSandbox),
+      koffi.out(koffi.pointer('char', 2)),
+    ],
+  });
+
+  const freeSandbox = bindNativeFunction<(sandbox: Pointer) => void>(handle, {
+    symbol: 'mxc_sandbox_free',
+    result: 'void',
+    parameters: [koffi.pointer(AbiSandbox)],
+  });
 
   return {
     spawn,
@@ -114,28 +160,101 @@ function bindSandboxFunctions(handle: NativeLibraryHandle) {
 
 // Pipe acquisition, asynchronous I/O, interruption, and disposal.
 function bindStreamFunctions(handle: NativeLibraryHandle) {
-  const takeStdin = handle.func('mxc_sandbox_take_stdin', koffi.pointer(AbiWriteStream), [koffi.pointer(AbiSandbox)]) as (sandbox: Pointer) => Pointer | null;
-  const takeStdout = handle.func('mxc_sandbox_take_stdout', koffi.pointer(AbiReadStream), [koffi.pointer(AbiSandbox)]) as (sandbox: Pointer) => Pointer | null;
-  const takeStderr = handle.func('mxc_sandbox_take_stderr', koffi.pointer(AbiReadStream), [koffi.pointer(AbiSandbox)]) as (sandbox: Pointer) => Pointer | null;
-  const stdoutCloser = handle.func('mxc_sandbox_stdout_closer', koffi.pointer(AbiStreamCloser), [koffi.pointer(AbiSandbox)]) as (sandbox: Pointer) => Pointer | null;
-  const stderrCloser = handle.func('mxc_sandbox_stderr_closer', koffi.pointer(AbiStreamCloser), [koffi.pointer(AbiSandbox)]) as (sandbox: Pointer) => Pointer | null;
-  const read = handle.func('mxc_stream_read', 'int32_t', [
-    koffi.pointer(AbiReadStream),
-    'uint8_t *',
-    'size_t',
-    koffi.out(koffi.pointer('size_t')),
-  ]) as ReadFunction;
-  const write = handle.func('mxc_stream_write', 'int32_t', [
-    koffi.pointer(AbiWriteStream),
-    'const uint8_t *',
-    'size_t',
-    koffi.out(koffi.pointer('size_t')),
-  ]) as WriteFunction;
-  const flush = handle.func('mxc_stream_flush', 'int32_t', [koffi.pointer(AbiWriteStream)]) as FlushFunction;
-  const closeCloser = handle.func('mxc_stream_closer_close', 'int32_t', [koffi.pointer(AbiStreamCloser)]) as (closer: Pointer) => number;
-  const freeRead = handle.func('mxc_read_stream_free', 'void', [koffi.pointer(AbiReadStream)]) as (stream: Pointer) => void;
-  const freeWrite = handle.func('mxc_write_stream_free', 'void', [koffi.pointer(AbiWriteStream)]) as (stream: Pointer) => void;
-  const freeCloser = handle.func('mxc_stream_closer_free', 'void', [koffi.pointer(AbiStreamCloser)]) as (closer: Pointer) => void;
+  const takeStdin = bindNativeFunction<
+    (sandbox: Pointer) => Pointer | null
+  >(handle, {
+    symbol: 'mxc_sandbox_take_stdin',
+    result: koffi.pointer(AbiWriteStream),
+    parameters: [koffi.pointer(AbiSandbox)],
+  });
+
+  const takeStdout = bindNativeFunction<
+    (sandbox: Pointer) => Pointer | null
+  >(handle, {
+    symbol: 'mxc_sandbox_take_stdout',
+    result: koffi.pointer(AbiReadStream),
+    parameters: [koffi.pointer(AbiSandbox)],
+  });
+
+  const takeStderr = bindNativeFunction<
+    (sandbox: Pointer) => Pointer | null
+  >(handle, {
+    symbol: 'mxc_sandbox_take_stderr',
+    result: koffi.pointer(AbiReadStream),
+    parameters: [koffi.pointer(AbiSandbox)],
+  });
+
+  const stdoutCloser = bindNativeFunction<
+    (sandbox: Pointer) => Pointer | null
+  >(handle, {
+    symbol: 'mxc_sandbox_stdout_closer',
+    result: koffi.pointer(AbiStreamCloser),
+    parameters: [koffi.pointer(AbiSandbox)],
+  });
+
+  const stderrCloser = bindNativeFunction<
+    (sandbox: Pointer) => Pointer | null
+  >(handle, {
+    symbol: 'mxc_sandbox_stderr_closer',
+    result: koffi.pointer(AbiStreamCloser),
+    parameters: [koffi.pointer(AbiSandbox)],
+  });
+
+  const read = bindNativeFunction<
+    (stream: Pointer, buffer: Buffer, cap: number, outRead: number[]) => number
+  >(handle, {
+    symbol: 'mxc_stream_read',
+    result: 'int32_t',
+    parameters: [
+      koffi.pointer(AbiReadStream),
+      'uint8_t *',
+      'size_t',
+      koffi.out(koffi.pointer('size_t')),
+    ],
+  });
+
+  const write = bindNativeFunction<
+    (stream: Pointer, buffer: Buffer, len: number, outWritten: number[]) => number
+  >(handle, {
+    symbol: 'mxc_stream_write',
+    result: 'int32_t',
+    parameters: [
+      koffi.pointer(AbiWriteStream),
+      'const uint8_t *',
+      'size_t',
+      koffi.out(koffi.pointer('size_t')),
+    ],
+  });
+
+  const flush = bindNativeFunction<(stream: Pointer) => number>(handle, {
+    symbol: 'mxc_stream_flush',
+    result: 'int32_t',
+    parameters: [koffi.pointer(AbiWriteStream)],
+  });
+
+  const closeCloser = bindNativeFunction<(closer: Pointer) => number>(handle, {
+    symbol: 'mxc_stream_closer_close',
+    result: 'int32_t',
+    parameters: [koffi.pointer(AbiStreamCloser)],
+  });
+
+  const freeRead = bindNativeFunction<(stream: Pointer) => void>(handle, {
+    symbol: 'mxc_read_stream_free',
+    result: 'void',
+    parameters: [koffi.pointer(AbiReadStream)],
+  });
+
+  const freeWrite = bindNativeFunction<(stream: Pointer) => void>(handle, {
+    symbol: 'mxc_write_stream_free',
+    result: 'void',
+    parameters: [koffi.pointer(AbiWriteStream)],
+  });
+
+  const freeCloser = bindNativeFunction<(closer: Pointer) => void>(handle, {
+    symbol: 'mxc_stream_closer_free',
+    result: 'void',
+    parameters: [koffi.pointer(AbiStreamCloser)],
+  });
 
   return {
     takeStdin,
@@ -155,16 +274,17 @@ function bindStreamFunctions(handle: NativeLibraryHandle) {
 
 // Deallocators for values whose ownership crosses the native boundary.
 function bindOwnedValueFunctions(handle: NativeLibraryHandle) {
-  const errorFree = handle.func(
-    'mxc_error_detail_free',
-    'void',
-    [koffi.pointer(AbiErrorDetailType)],
-  ) as (error: AbiErrorDetail) => void;
-  const stringFree = handle.func(
-    'mxc_string_free',
-    'void',
-    ['char *'],
-  ) as (value: Pointer) => void;
+  const errorFree = bindNativeFunction<(error: AbiErrorDetail) => void>(handle, {
+    symbol: 'mxc_error_detail_free',
+    result: 'void',
+    parameters: [koffi.pointer(AbiErrorDetailType)],
+  });
+
+  const stringFree = bindNativeFunction<(value: Pointer) => void>(handle, {
+    symbol: 'mxc_string_free',
+    result: 'void',
+    parameters: ['char *'],
+  });
 
   return { errorFree, stringFree };
 }
