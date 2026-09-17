@@ -449,7 +449,7 @@ explicit `provision` / `deprovision` phases rather than by per-run flags.
 | Error | Cause | Fix |
 |---|---|---|
 | `WSLC backend not compiled` | Binary built without `--features wslc` | Rebuild with `build.bat --with-wslc` |
-| `WSLc requires Windows 10 ...; this host is build <n>` | The host is below WSL 2's minimum Windows version for its architecture | Upgrade Windows. Updating WSL cannot clear this, and `getPlatformSupport` / `--available-backends` omit `wslc` on such a host |
+| `WSLc requires Windows 10 ...; this host is build <n>` | The host is below WSL 2's minimum Windows version for its architecture | Upgrade Windows. Updating WSL cannot clear this, and the platform-support APIs (Rust `platform_support()`, C# `GetPlatformSupport()`) omit `wslc` on such a host |
 | `Failed to load wslcsdk.dll` | DLL not in same directory as `wxc-exec.exe` | Copy `wslcsdk.dll` next to the binary |
 | `WSLC runtime unavailable` | WSL runtime package is missing, older than 2.9.9, or the Virtual Machine Platform optional component is disabled | Update WSL with `wsl --update --pre-release`, verify the installed version with `wsl --version`, and enable the Virtual Machine Platform optional component if required. The WSLC SDK DLL is a separate dependency and does not replace the WSL runtime package. |
 | `WSLC runtime unavailable. Missing components: SdkNeedsUpdate` | The opposite direction: your installed WSL is **newer** than the WSLc SDK this MXC build ships (pinned by `WSLC_SDK_VERSION` in `src/backends/wslc/common/build.rs`) | Update MXC to a build with a newer pinned SDK. Do **not** update WSL — it is already ahead, and updating it further will not clear this. |
