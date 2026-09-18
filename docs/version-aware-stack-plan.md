@@ -1,15 +1,14 @@
 # Version-Aware Stack Plan
 
-Status: active implementation plan and decision record. Execution is split
-between independent non-WSLC and WSLC sessions.
+Status: active implementation plan and decision record. The non-WSLC
+implementation stack is finalized; the WSLC-inclusive alternative requires a
+base refresh and fix port before it is merge-ready.
 
-Date: September 17, 2026.
-
-Current implementation base:
-`ca1ada8a` (`Regenerate the IsolationSession Preview bindings (#1194)`).
+Date: September 18, 2026.
 
 Current `origin/main` observed while updating this plan:
-`dd589b41` (`[CI] Run state aware tests for isolation session (#1201)`).
+`4bb804c0` (`[LXC] [Test/docs] State the network chains' limits, and test that
+inbound default-deny drops packets (#1211)`).
 
 ## 1. Purpose
 
@@ -45,6 +44,50 @@ Execution is now split across two independent sessions:
 
 Each session owns only its named branches. Neither session rebases or pushes
 its Phase 13 branches until its Phase 12 PR is fully green.
+
+### 1.1 Current implementation progress
+
+The non-WSLC stack is finalized, pushed, and internally consistent:
+
+| PR | Branch | Remote tip | Parent | Status |
+| --- | --- | --- | --- | --- |
+| #1184 | `user/gudge/version_specific_config_parsers_phase12` | `11d09229` | `4bb804c0` | One commit; all review threads resolved |
+| #1185 | `user/gudge/version_specific_config_parsers_phase13` | `6fa9ba0d` | `11d09229` | One commit; all review threads resolved |
+| #1186 | `user/gudge/version_specific_config_parsers_phase13_followups` | `f89c574d` | `6fa9ba0d` | One commit; all review threads resolved |
+
+The final follow-up work preserved version-dependent network enforcement for
+direct typed SDK requests: v0.6/v0.7 remain `LegacyCompatible`, v0.8 and later
+remain `Strict`, source-contract attribution is hash-neutral, and effective
+network compatibility is hash-significant. Exact code-generation now derives
+specialized fixture checks from registered roots and fails with controlled
+errors when registry renderability metadata is inconsistent.
+
+The WSLC-inclusive alternative is not current:
+
+| PR | Current remote tip | Current topology | Required action |
+| --- | --- | --- | --- |
+| #1187 | `d8cab425` | One commit on `d20511e7`; GitHub reports `DIRTY` | Rebase onto `4bb804c0`, integrate #1211, and port applicable Phase 12 fixes |
+| #1188 | `54496529` | Its parent is old WSLC publication `ef52be43`, not current #1187 | Replay only the Phase 13 change onto rewritten #1187 and port Phase 13 fixes |
+| #1189 | `1d76e9ce` | One commit on current #1188 | Replay onto rewritten #1188 and port follow-up fixes |
+
+Applicable ports from the finalized stack are:
+
+- #1187: emit v0.10 from the playground's Windows Sandbox, MicroVM, and
+  Hyperlight raw builder; remove the stale claim that Bubblewrap remains
+  experimental; document the permanent `wslc` root-key conformance exception.
+- #1188: preserve v0.6/v0.7 `LegacyCompatible` behavior for typed SDK inputs;
+  exclude source attribution from policy identity while including normalized
+  enforcement compatibility; correct the corresponding versioning
+  documentation.
+- #1189: derive the malformed-exec diagnostic fixture from registered roots;
+  return a controlled schema-generator error for inconsistent renderability
+  metadata; keep legacy non-renderable request roots empty; retain the
+  parser-backed backend-name and probe hardening.
+
+The port must retain the WSLC alternative's deliberate differences: WSLC is
+published in v0.9, needs no runtime experimental authorization, and
+`WslcProvisionRequest` remains a v0.9 request root. Non-WSLC changes that move
+WSLC to v0.10 or describe it as experimental do not apply.
 
 ## 2. Core decisions
 
