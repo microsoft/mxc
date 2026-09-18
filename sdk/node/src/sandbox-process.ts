@@ -253,6 +253,7 @@ export class MxcSandboxProcess {
     if (this.disposed) return Promise.reject(new Error('sandbox process disposed'));
     if (this.waitPromise !== undefined) return this.waitPromise;
 
+    this.closeUntakenStdin();
     this.ensureDrain('stdout');
     this.ensureDrain('stderr');
     this.waitPromise = new Promise((resolve, reject) => {
@@ -388,6 +389,14 @@ export class MxcSandboxProcess {
       callback();
     }
     this.cleanupCallbacks.clear();
+  }
+
+  private closeUntakenStdin(): void {
+    if (this.stdinTaken) return;
+    const stream = this.binding.takeStdin();
+    this.stdinTaken = true;
+    this.stdinValue = null;
+    stream?.free();
   }
 
   private takeReadable(which: 'stdout' | 'stderr'): Readable | null {

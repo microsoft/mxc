@@ -231,6 +231,16 @@ describe('native streaming process', () => {
     assert.ok(binding.stderrEvents.includes('free-read'));
   });
 
+  it('closes untaken stdin before waiting for process exit', async () => {
+    const binding = new FakeBinding(25, 1);
+    const proc = _createMxcSandboxProcess(binding);
+
+    await proc.waitAsync();
+
+    assert.strictEqual(binding.stdin.freed, true);
+    assert.strictEqual(proc.standardInput, null);
+  });
+
   it('waits for an owned output stream to deliver its final chunk', async () => {
     const binding = new FakeBinding(16, 0);
     const deferred = new DeferredReadable();
@@ -321,7 +331,7 @@ describe('native streaming process', () => {
     const wait = proc.waitAsync();
     await new Promise((resolve) => setImmediate(resolve));
 
-    assert.throws(() => proc.standardInput, /terminal completion is finalizing/);
+    assert.strictEqual(proc.standardInput, null);
     assert.throws(() => proc.kill(), /terminal completion is finalizing/);
 
     binding.releaseWait();
@@ -405,7 +415,7 @@ describe('native streaming process', () => {
     const proc = _createMxcSandboxProcess(new FakeBinding(17, 0));
     await proc.waitAsync();
 
-    assert.throws(() => proc.standardInput, /terminal completion/);
+    assert.strictEqual(proc.standardInput, null);
     assert.throws(() => proc.kill(), /terminal completion/);
   });
 
