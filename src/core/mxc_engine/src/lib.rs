@@ -20,6 +20,8 @@
 //!   port of the SDK's `createConfigFromPolicy`), for the host's native
 //!   containment or an explicitly selected [`Containment`] backend.
 //! - [`spawn`] — spawn a streaming [`SandboxProcess`] handle for a request.
+//! - [`spawn_io`] — wrap streaming execution in bounded native I/O coordination
+//!   for event-loop language bindings.
 //! - [`run`] / [`resolve_runner`] (Windows) — run-to-completion backend
 //!   selection and execution.
 //! - [`run_state_aware`] — state-aware lifecycle backend resolution + dispatch.
@@ -34,6 +36,7 @@ mod dispatch;
 mod error;
 #[cfg(target_os = "windows")]
 mod guarded_capture;
+mod io_coordinator;
 mod platform;
 pub mod policy;
 mod probe;
@@ -44,6 +47,9 @@ mod state_aware;
 mod verbose_telemetry;
 
 pub use error::{Error, ErrorCode};
+pub use io_coordinator::{
+    spawn_io, IoCoordinator, IoCoordinatorError, IoProcessStatus, IoReadState,
+};
 #[cfg(all(target_os = "windows", feature = "isolation_session"))]
 pub use platform::isolation_session_available;
 pub use platform::{platform_support, BubblewrapNetworkSupport, PlatformSupport, ProxyEnforcement};
