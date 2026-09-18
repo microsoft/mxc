@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 use super::*;
-use crate::config_parser::load_mxc_request_from_json;
+use crate::config_parser::load_state_aware_request_from_json_with_options;
 use crate::logger::{Logger, Mode};
 use crate::mxc_error::MxcErrorCode;
 use crate::state_aware_backend::{
@@ -12,7 +12,6 @@ use crate::state_aware_backend::{
 use crate::state_aware_dispatch::{
     dispatch_state_aware, dispatch_state_aware_exec, DispatchOutcome,
 };
-use crate::state_aware_request::MxcRequest;
 use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::marker::PhantomData;
@@ -315,7 +314,6 @@ fn unit(config: Option<&()>) -> Config {
 fn input<C: Case>(phase: Phase) -> Value {
     let mut value = json!({
         "version": "0.9.0-alpha",
-        "phase": phase.as_str(),
         "telemetry": {"enabled": false},
     });
     if phase == Phase::Provision {
@@ -326,31 +324,45 @@ fn input<C: Case>(phase: Phase) -> Value {
                 "ingress": {"default": "allow", "hostLoopback": "allow"}
             });
         }
-    } else {
-        value["sandboxId"] = json!(format!("{}:test-id", C::PREFIX));
-        if phase == Phase::Exec {
-            value["process"] = json!({
-                "commandLine": "echo typed",
-                "env": ["TYPED_BINDING=preserved"],
-                "timeout": 7,
-            });
-        }
+    } else if phase == Phase::Exec {
+        value["process"] = json!({
+            "commandLine": "echo typed",
+            "env": ["TYPED_BINDING=preserved"],
+            "timeout": 7,
+        });
     }
     value
 }
 
-fn parse(input: &Value) -> ParsedStateAwareRequest {
-    let parsed =
-        load_mxc_request_from_json(&input.to_string(), &mut Logger::new(Mode::Buffer)).unwrap();
-    let MxcRequest::StateAware(parsed) = parsed else {
-        panic!("expected lifecycle request");
-    };
-    parsed
+fn parse_for_phase(input: &Value, phase: Phase) -> ParsedStateAwareRequest {
+    let sandbox_id = (phase != Phase::Provision).then(|| {
+        let prefix = match input
+            .get("_testBackend")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+        {
+            "isolation_session" => "iso",
+            "windows_sandbox" => "wsb",
+            "wslc" => "wslc",
+            _ => panic!("missing test backend"),
+        };
+        format!("{prefix}:test-id")
+    });
+    let mut document = input.clone();
+    document.as_object_mut().unwrap().remove("_testBackend");
+    load_state_aware_request_from_json_with_options(
+        &document.to_string(),
+        &mut Logger::new(Mode::Buffer),
+        phase,
+        sandbox_id.as_deref(),
+        &[],
+    )
+    .unwrap()
 }
 
-fn assert_dispatch<C: Case>(input: &Value, expected_config: Config) {
+fn assert_dispatch<C: Case>(input: &Value, phase: Phase, expected_config: Config) {
     for (dry_run, reject_validation) in [(false, false), (true, false), (false, true)] {
-        let parsed = parse(input);
+        let parsed = parse_for_phase(input, phase);
         let phase = parsed.phase();
         let id = parsed.sandbox_id().map(str::to_owned);
         let common = common_snapshot(parsed.request());
@@ -400,9 +412,10 @@ fn lifecycle_matrix<C: Case>() {
         Phase::Deprovision,
     ] {
         let mut value = input::<C>(phase);
-        assert_dispatch::<C>(&value, Config::Absent);
+        value["_testBackend"] = json!(C::BACKEND);
+        assert_dispatch::<C>(&value, phase, Config::Absent);
         value["experimental"] = json!({});
-        assert_dispatch::<C>(&value, Config::Absent);
+        assert_dispatch::<C>(&value, phase, Config::Absent);
     }
 }
 
@@ -414,10 +427,31 @@ fn every_backend_and_phase_preserves_validation_execution_and_dry_run_order() {
 }
 
 #[test]
+fn non_provision_operations_reject_backend_experimental_config() {
+    for phase in [Phase::Start, Phase::Exec, Phase::Stop, Phase::Deprovision] {
+        let mut value = input::<Isolation>(phase);
+        value["experimental"] = json!({"isolation_session": {}});
+        let error = load_state_aware_request_from_json_with_options(
+            &value.to_string(),
+            &mut Logger::new(Mode::Buffer),
+            phase,
+            Some("iso:test-id"),
+            &[],
+        )
+        .unwrap_err();
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("experimental.isolation_session is not accepted"),
+            "{message}"
+        );
+    }
+}
+
+#[test]
 fn isolation_provision_preserves_each_backend_observable_configuration() {
     let mut value = input::<Isolation>(Phase::Provision);
     value["experimental"] = json!({"isolation_session": {}});
-    assert_dispatch::<Isolation>(&value, Config::Absent);
+    assert_dispatch::<Isolation>(&value, Phase::Provision, Config::Isolation(None));
     for (config, expected) in [
         (json!({}), Config::Isolation(None)),
         (json!({"appId": ""}), Config::Isolation(Some(String::new()))),
@@ -426,8 +460,8 @@ fn isolation_provision_preserves_each_backend_observable_configuration() {
             Config::Isolation(Some("PFN:example".into())),
         ),
     ] {
-        value["experimental"] = json!({"isolation_session": {"provision": config}});
-        assert_dispatch::<Isolation>(&value, expected);
+        value["experimental"] = json!({"isolation_session": config});
+        assert_dispatch::<Isolation>(&value, Phase::Provision, expected);
     }
 }
 
@@ -435,7 +469,7 @@ fn isolation_provision_preserves_each_backend_observable_configuration() {
 fn wslc_provision_preserves_each_backend_observable_configuration() {
     let mut value = input::<Wslc>(Phase::Provision);
     value["experimental"] = json!({"wslc": {}});
-    assert_dispatch::<Wslc>(&value, Config::Absent);
+    assert_dispatch::<Wslc>(&value, Phase::Provision, Config::Wslc(None, None));
     for (config, expected) in [
         (json!({}), Config::Wslc(None, None)),
         (
@@ -455,14 +489,16 @@ fn wslc_provision_preserves_each_backend_observable_configuration() {
             Config::Wslc(Some(String::new()), Some(String::new())),
         ),
     ] {
-        value["experimental"] = json!({"wslc": {"provision": config}});
-        assert_dispatch::<Wslc>(&value, expected);
+        value["experimental"] = json!({"wslc": config});
+        assert_dispatch::<Wslc>(&value, Phase::Provision, expected);
     }
 }
 
 fn streaming_matrix<C: Case>() {
     for reject_validation in [false, true] {
-        let parsed = parse(&input::<C>(Phase::Exec));
+        let mut value = input::<C>(Phase::Exec);
+        value["_testBackend"] = json!(C::BACKEND);
+        let parsed = parse_for_phase(&value, Phase::Exec);
         let common = common_snapshot(parsed.request());
         let mut backend = Recording::<C>::new(reject_validation);
         let result = dispatch_state_aware_exec(&mut backend, C::bind(parsed).unwrap());
@@ -492,9 +528,15 @@ fn streaming_matrix<C: Case>() {
         Phase::Deprovision,
     ] {
         let mut backend = Recording::<C>::new(false);
-        let error =
-            dispatch_state_aware_exec(&mut backend, C::bind(parse(&input::<C>(phase))).unwrap())
-                .unwrap_err();
+        let error = {
+            let mut value = input::<C>(phase);
+            value["_testBackend"] = json!(C::BACKEND);
+            dispatch_state_aware_exec(
+                &mut backend,
+                C::bind(parse_for_phase(&value, phase)).unwrap(),
+            )
+        }
+        .unwrap_err();
         assert_eq!(error.code, MxcErrorCode::MalformedRequest);
         assert_eq!(
             error.message,
@@ -519,7 +561,9 @@ fn mismatch<C: Case, Other: Case>() {
         Phase::Stop,
         Phase::Deprovision,
     ] {
-        let error = C::bind(parse(&input::<Other>(phase))).unwrap_err();
+        let mut value = input::<Other>(phase);
+        value["_testBackend"] = json!(Other::BACKEND);
+        let error = C::bind(parse_for_phase(&value, phase)).unwrap_err();
         assert_eq!(error.code, MxcErrorCode::MalformedRequest);
         assert!(error.message.contains("incompatible"));
     }

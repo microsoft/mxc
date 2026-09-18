@@ -70,7 +70,7 @@ export async function provisionSandbox<C extends StateAwareContainmentBackend>(
   const result = await nonExecCall<{
     sandboxId: string;
     metadata?: ProvisionMetadataFor<C>;
-  }>(envelope, options);
+  }>(envelope, options, 'provision');
   return {
     sandboxId: result.sandboxId as SandboxId<C>,
     metadata: result.metadata,
@@ -90,10 +90,9 @@ export async function startSandbox<C extends StateAwareContainmentBackend>(
   const envelope = buildStateAwareEnvelope({
     phase: 'start',
     backendKey,
-    sandboxId,
     config: config as Record<string, unknown> | undefined,
   });
-  return nonExecCall<StartResult<C>>(envelope, options);
+  return nonExecCall<StartResult<C>>(envelope, options, 'start', sandboxId);
 }
 
 /**
@@ -112,10 +111,14 @@ export function execInSandbox<C extends StateAwareContainmentBackend>(
   const envelope = buildStateAwareEnvelope({
     phase: 'exec',
     backendKey,
-    sandboxId,
     config: config as unknown as Record<string, unknown>,
   });
-  const { executablePath, args } = resolveBinaryAndCommonArgs(JSON.stringify(envelope), options);
+  const { executablePath, args } = resolveBinaryAndCommonArgs(
+    JSON.stringify(envelope),
+    options,
+    'exec',
+  );
+  args.push('--sandbox-id', sandboxId);
   diagLog(`state-aware: spawning exec via PTY`);
   const ptyProcess = pty.spawn(executablePath, args, {
     name: 'xterm-color',
@@ -152,10 +155,14 @@ export async function execInSandboxAsync<C extends StateAwareContainmentBackend>
   const envelope = buildStateAwareEnvelope({
     phase: 'exec',
     backendKey,
-    sandboxId,
     config: config as unknown as Record<string, unknown>,
   });
-  const { stdout, stderr, exitCode } = await spawnAndCollect(envelope, options);
+  const { stdout, stderr, exitCode } = await spawnAndCollect(
+    envelope,
+    options,
+    'exec',
+    sandboxId,
+  );
 
   if (exitCode !== 0) {
     const errorEnvelope = tryParseErrorEnvelope(stdout);
@@ -180,10 +187,9 @@ export async function stopSandbox<C extends StateAwareContainmentBackend>(
   const envelope = buildStateAwareEnvelope({
     phase: 'stop',
     backendKey,
-    sandboxId,
     config: config as Record<string, unknown> | undefined,
   });
-  return nonExecCall<StopResult<C>>(envelope, options);
+  return nonExecCall<StopResult<C>>(envelope, options, 'stop', sandboxId);
 }
 
 /**
@@ -199,8 +205,12 @@ export async function deprovisionSandbox<C extends StateAwareContainmentBackend>
   const envelope = buildStateAwareEnvelope({
     phase: 'deprovision',
     backendKey,
-    sandboxId,
     config: config as Record<string, unknown> | undefined,
   });
-  return nonExecCall<DeprovisionResult<C>>(envelope, options);
+  return nonExecCall<DeprovisionResult<C>>(
+    envelope,
+    options,
+    'deprovision',
+    sandboxId,
+  );
 }

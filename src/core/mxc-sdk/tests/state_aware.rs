@@ -1,53 +1,62 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Host-independent tests for the `mxc-sdk` state-aware lifecycle surface
-//! (`run_state_aware_json` / `exec_sandbox`).
-//!
-//! These exercise request parsing, phase routing, and error mapping without a
-//! live host backend. All three state-aware backends — IsolationSession, WSLc
-//! and Windows Sandbox — are Windows-only, and IsolationSession additionally
-//! needs the OS-side IsoSessionOps service, so the real lifecycle paths are
-//! exercised by the executor E2E suites instead.
-//!
-//! Those suites drive the `ExecStdio::Relayed` path. The
-//! `ExecStdio::Piped` path [`exec_sandbox`] uses is covered end-to-end by
-//! `tests/isolation_session.rs`, which is gated on a host running the OS-side
-//! service. So the assertions here deliberately stop at the facade's contract:
-//! parse, reject one-shot, reject non-dry-run exec, surface unsupported_phase
-//! for a backend without a state-aware impl, and honour the experimental opt-in
-//! — which stays host-independent because the gate runs before backend dispatch.
-
-use mxc_sdk::{exec_sandbox, run_state_aware_json, ErrorCode};
+use mxc_sdk::sandbox::{exec, provision, start, stop};
+use mxc_sdk::ErrorCode;
 
 #[test]
-fn run_state_aware_json_rejects_one_shot_config() {
-    // No `phase` field => one-shot config, not a lifecycle request.
-    let json = r#"{"version":"0.8.0-alpha","process":{"commandLine":"echo hi"}}"#;
-    let err = run_state_aware_json(json, false, false).expect_err("one-shot must be rejected");
-    assert_eq!(err.code, ErrorCode::MalformedRequest);
+fn operation_specific_functions_take_routing_out_of_band() {
+    let start_error = start(
+        "nosuchbackend:abc123",
+        r#"{"version":"0.9.0-alpha"}"#,
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(start_error.code, ErrorCode::UnsupportedContainment);
+
+    let stop_error = stop("no-prefix", r#"{"version":"0.9.0-alpha"}"#, false).unwrap_err();
+    assert_eq!(stop_error.code, ErrorCode::MalformedId);
+
+    match exec(
+        "wsb:0a1b2c3d",
+        r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"}}"#,
+        false,
+    ) {
+        Ok(_) => panic!("the experimental gate must reject exec"),
+        Err(error) => assert_eq!(error.code, ErrorCode::BackendUnavailable),
+    }
 }
 
 #[test]
-fn run_state_aware_json_rejects_non_dry_run_exec() {
-    // A non-dry-run exec streams; it must be routed through exec_sandbox, not
-    // the envelope entry point.
-    let json = r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"isolationsession:abc","process":{"commandLine":"echo hi"}}"#;
-    let err =
-        run_state_aware_json(json, false, false).expect_err("non-dry-run exec must be rejected");
-    assert_eq!(err.code, ErrorCode::MalformedRequest);
-    assert!(err.message.contains("exec"));
+fn legacy_dispatch_fields_are_rejected() {
+    for json in [
+        r#"{"version":"0.9.0-alpha","phase":"provision","containment":"wslc"}"#,
+        r#"{"version":"0.9.0-alpha","containment":"wslc","sandboxId":"wslc:abc"}"#,
+    ] {
+        let error = provision(json, true).unwrap_err();
+        assert_eq!(error.code, ErrorCode::MalformedRequest);
+        assert!(error.message.contains("unknown field"));
+    }
 }
 
 #[test]
-fn run_state_aware_json_malformed_json_is_malformed_request() {
-    let err =
-        run_state_aware_json("{ not json", false, false).expect_err("bad JSON must be rejected");
-    assert_eq!(err.code, ErrorCode::MalformedRequest);
+fn provision_does_not_require_a_process() {
+    let json = r#"{"version":"0.9.0-alpha","containment":"windows_sandbox"}"#;
+    if let Err(error) = provision(json, true) {
+        assert_ne!(error.code, ErrorCode::MalformedRequest, "{}", error.message);
+    }
 }
 
 #[test]
-fn exact_provision_payload_diagnostics_survive_the_sdk_boundary() {
+fn exec_requires_process_command_line() {
+    match exec("wsb:0a1b2c3d", r#"{"version":"0.9.0-alpha"}"#, true) {
+        Ok(_) => panic!("exec without process.commandLine must fail"),
+        Err(error) => assert_eq!(error.code, ErrorCode::MalformedRequest),
+    }
+}
+
+#[test]
+fn direct_provision_payload_diagnostics_survive_the_sdk_boundary() {
     for fields in [
         r#""appId":null"#,
         r#""appId":17"#,
@@ -55,173 +64,24 @@ fn exact_provision_payload_diagnostics_survive_the_sdk_boundary() {
         r#""appIdd":"typo""#,
     ] {
         let json = format!(
-            "{{\n  \"version\":\"0.9.0-alpha\",\n  \"phase\":\"provision\",\n  \
+            "{{\n  \"version\":\"0.9.0-alpha\",\n  \
              \"containment\":\"isolation_session\",\n  \
-             \"_comment\":\"typed payload diagnostic\",\n  \
-             \"experimental\":{{\"isolation_session\":{{\"provision\":{{{fields}}}}}}}\n}}"
+             \"experimental\":{{\"isolation_session\":{{{fields}}}}}\n}}"
         );
-        let error = run_state_aware_json(&json, true, true).unwrap_err();
+        let error = provision(&json, true).unwrap_err();
         assert_eq!(error.code, ErrorCode::MalformedRequest, "{fields}");
-        assert!(error
-            .message
-            .contains("experimental.isolation_session.provision"));
+        assert!(error.message.contains("experimental.isolation_session"));
         assert!(error.message.contains("line "));
         assert!(error.message.contains("column "));
-        assert!(error.operation.is_none());
-        assert!(error.native_code.is_none());
-    }
-}
-
-#[cfg(all(target_os = "windows", feature = "isolation_session"))]
-#[test]
-fn typed_provision_payload_is_validated_without_running_a_lifecycle() {
-    for app_id in ["", "example"] {
-        let json = serde_json::json!({
-            "version": "0.9.0-alpha",
-            "phase": "provision",
-            "containment": "isolation_session",
-            "network": {"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},
-            "experimental": {"isolation_session": {"provision": {
-                "appId": app_id
-            }}},
-        })
-        .to_string();
-        let result = run_state_aware_json(&json, true, true).unwrap();
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&result).unwrap(),
-            serde_json::json!({"result": {}})
-        );
-    }
-    let json = serde_json::json!({
-        "version": "0.9.0-alpha",
-        "phase": "provision",
-        "containment": "isolation_session",
-        "network": {"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},
-        "experimental": {"isolation_session": {"provision": {
-            "appId": "x".repeat(257)
-        }}},
-    })
-    .to_string();
-    let error = run_state_aware_json(&json, true, true).unwrap_err();
-    assert_eq!(error.code, ErrorCode::PolicyValidation);
-    assert_eq!(
-        error.message,
-        "appId must be at most 256 characters (got 257)"
-    );
-    assert!(error.operation.is_none());
-    assert!(error.native_code.is_none());
-}
-
-#[test]
-fn exec_sandbox_rejects_non_exec_phase() {
-    let json = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session"}"#;
-    // `Sandbox` is not `Debug`, so match rather than `expect_err`.
-    match exec_sandbox(json, false) {
-        Ok(_) => panic!("a provision request is not an exec"),
-        Err(err) => assert_eq!(err.code, ErrorCode::MalformedRequest),
     }
 }
 
 #[test]
-fn exec_sandbox_rejects_one_shot_config() {
-    let json = r#"{"version":"0.8.0-alpha","process":{"commandLine":"echo hi"}}"#;
-    match exec_sandbox(json, false) {
-        Ok(_) => panic!("one-shot must be rejected"),
-        Err(err) => assert_eq!(err.code, ErrorCode::MalformedRequest),
-    }
-}
-
-// A non-provision phase resolves the backend from the `sandbox_id` prefix, so an
-// unregistered prefix deterministically yields `unsupported_containment` —
-// independent of build features (`isolation_session` on/off) and host
-// capability, and with no backend side effects. (A real `isolation_session`
-// provision is intentionally avoided here: its outcome varies by feature/host —
-// unsupported_phase / backend_unavailable / an actual provisioned sandbox — so
-// it is neither deterministic nor side-effect-free. Real lifecycle runs are
-// covered by the host-gated executor E2E suites.)
-#[test]
-fn unregistered_backend_prefix_is_unsupported_containment() {
-    let json = r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"nosuchbackend:abc123"}"#;
-    let err = run_state_aware_json(json, false, false)
-        .expect_err("an unregistered sandbox-id prefix has no backend");
-    assert_eq!(err.code, ErrorCode::UnsupportedContainment);
-}
-
-/// Without the opt-in, an experimental backend is refused — and the refusal is
-/// host- and feature-independent, because `require_experimental_optin` runs
-/// before backend dispatch on every platform.
-#[test]
-fn experimental_backend_is_refused_without_the_optin() {
-    let json = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
-    let err = run_state_aware_json(json, true, false)
-        .expect_err("an experimental backend without the opt-in must be refused");
-    assert_eq!(err.code, ErrorCode::BackendUnavailable);
-    assert!(
-        err.message.contains("experimental"),
-        "the refusal should say what is missing, got: {}",
-        err.message
-    );
-}
-
-/// With the opt-in, the same request gets **past** the gate.
-///
-/// The assertion is deliberately "not `BackendUnavailable`" rather than a
-/// specific success: what happens next varies by host and build features (a dry
-/// run on Windows, `unsupported_phase` elsewhere), and pinning that would make
-/// this a host test. What it discriminates is the thing this change adds — if
-/// the parameter were dropped on the way down, the gate would still refuse and
-/// this fails. A dry run keeps it side-effect-free.
-#[test]
-fn the_optin_admits_an_experimental_backend() {
-    let json = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
-    if let Err(err) = run_state_aware_json(json, true, true) {
-        assert_ne!(
-            err.code,
-            ErrorCode::BackendUnavailable,
-            "the opt-in was passed, so the experimental gate must not refuse: {}",
-            err.message
-        );
-    }
-}
-
-/// The gate's refusal names no failing call, because no platform API is in
-/// flight when it fires — the same shape a malformed request produces. It
-/// offers no hint either.
-#[test]
-fn the_refusal_carries_no_api_call_detail() {
-    let json = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
-    let err = run_state_aware_json(json, true, false).expect_err("must be refused");
-    assert_eq!(err.operation, None);
-    assert_eq!(err.native_code, None);
-    assert_eq!(err.remediation, None);
-}
-
-/// The **streaming** entry point honours the opt-in too, not just the envelope
-/// one.
-///
-/// Both are needed: they take separate paths to the same gate, so a change that
-/// hardcoded the flag in only one of them would leave the other's tests green.
-/// A `wsb:` id routes to Windows Sandbox, which has no streaming-exec arm — so
-/// once past the gate it lands on `unsupported_phase`, and the two outcomes are
-/// distinguishable without a host, a feature, or any backend work. (A `wslc:`
-/// id would not discriminate: its feature-off arm also answers
-/// `backend_unavailable`, which is the very code the gate returns.)
-#[test]
-fn exec_honours_the_optin_on_its_own_path() {
-    let json = r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wsb:0a1b2c3d","process":{"commandLine":"echo hi"}}"#;
-
-    match exec_sandbox(json, false) {
-        Ok(_) => panic!("without the opt-in the gate must refuse"),
-        Err(err) => assert_eq!(err.code, ErrorCode::BackendUnavailable),
-    }
-
-    match exec_sandbox(json, true) {
-        Ok(_) => panic!("windows_sandbox serves no streaming exec"),
-        Err(err) => assert_ne!(
-            err.code,
-            ErrorCode::BackendUnavailable,
-            "the opt-in was passed, so the gate must not refuse: {}",
-            err.message
-        ),
-    }
+fn experimental_backend_is_refused_without_optin() {
+    let error = provision(
+        r#"{"version":"0.9.0-alpha","containment":"windows_sandbox"}"#,
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::BackendUnavailable);
 }

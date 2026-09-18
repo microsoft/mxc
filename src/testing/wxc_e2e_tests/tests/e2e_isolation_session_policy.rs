@@ -132,19 +132,24 @@ fn one_shot_refuses_destroy_on_exit_false() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn state_aware_provision_refuses_ui_policy_at_the_exact_contract_boundary() {
+fn state_aware_provision_refuses_ui_policy_at_the_lifecycle_boundary() {
     if !cached_has_wxc_exe() {
         return;
     }
 
     let request = json!({
         "version": "0.9.0-alpha",
-        "phase": "provision",
         "containment": "isolation_session",
         "network": {"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},
         "ui": { "disable": true }
     });
-    let result = run_wxc_state_aware("iso provision + ui", &request, &["--experimental"]);
+    let result = run_wxc_state_aware(
+        "iso provision + ui",
+        "provision",
+        None,
+        &request,
+        &["--experimental"],
+    );
     if skipped_not_compiled(&result) {
         return;
     }
@@ -159,8 +164,10 @@ fn state_aware_provision_refuses_ui_policy_at_the_exact_contract_boundary() {
         code, result.stdout
     );
     assert!(
-        result.stdout.contains("unknown field `ui`"),
-        "expected the exact contract diagnostic, got stdout={:?}",
+        result
+            .stdout
+            .contains("ui are not accepted by the provision operation"),
+        "expected the lifecycle provision diagnostic, got stdout={:?}",
         result.stdout
     );
 }
@@ -177,12 +184,13 @@ fn state_aware_provision_accepts_canonical_request_shape() {
     // without it alike.
     let request = json!({
         "version": "0.9.0-alpha",
-        "phase": "provision",
         "containment": "isolation_session",
         "network": {"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}
     });
     let result = run_wxc_state_aware(
         "iso provision canonical (dry-run)",
+        "provision",
+        None,
         &request,
         &["--experimental", "--dry-run"],
     );

@@ -3,11 +3,11 @@
 
 //! State-aware lifecycle C ABI over the MXC public Rust SDK.
 //!
-//! Three entry points mirror the SDK's [`mxc_sdk::run_state_aware_json`],
-//! [`mxc_sdk::exec_attached`] and [`mxc_sdk::exec_sandbox`]:
+//! Three entry points mirror the SDK's lifecycle operation,
+//! [`mxc_sdk::sandbox::exec_attached`], and [`mxc_sdk::sandbox::exec`] surfaces:
 //!
-//! - [`mxc_state_aware`] drives the **envelope phases** (`provision` / `start` /
-//!   `stop` / `deprovision`, and a dry run of any phase): JSON request in, JSON
+//! - [`mxc_state_aware`] drives lifecycle operations (`provision` / `start` /
+//!   `stop` / `deprovision`, and a dry run of any operation): JSON request in, JSON
 //!   response envelope out, filled into an [`MxcStateAwareResult`].
 //! - [`mxc_state_aware_exec_attached`] drives the **exec phase attached to this
 //!   process's stdio** — what an embedding console application needs for an
@@ -17,9 +17,9 @@
 //!   as [`mxc_spawn_request`](crate::mxc_spawn_request) — so the caller reuses the
 //!   `mxc_stream_*` / `mxc_sandbox_*` externs to read/write/wait/kill.
 //!
-//! The two exec entry points take the **same** request JSON and differ only in
-//! where the workload's stdio goes: relayed onto this process's console, or
-//! handed back as pipes.
+//! The two exec entry points take the **same** operation-neutral request JSON
+//! and sandbox ID and differ only in where the workload's stdio goes: relayed
+//! onto this process's console, or handed back as pipes.
 //!
 //! As elsewhere in this crate, every entry point is [`catch_unwind`]-wrapped,
 //! strings in/out are UTF-8 NUL-terminated, and owned out-pointers must be
@@ -35,13 +35,31 @@ use std::ffi::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
-use mxc_sdk::{exec_attached, exec_sandbox, run_state_aware_json, WaitOutcome};
+use mxc_sdk::sandbox::{exec, exec_attached};
+use mxc_sdk::{run_lifecycle_operation, LifecycleOperation, WaitOutcome};
 
 use crate::streaming::MxcSandbox;
 use crate::{
     alloc_cstring, cstr_to_str, free_cstr, status_from_error_code, MxcErrorDetail,
     MXC_STATUS_INVALID_UTF8, MXC_STATUS_NULL_ARGUMENT, MXC_STATUS_PANIC, MXC_STATUS_SUCCESS,
 };
+
+pub const MXC_LIFECYCLE_OPERATION_PROVISION: i32 = 0;
+pub const MXC_LIFECYCLE_OPERATION_START: i32 = 1;
+pub const MXC_LIFECYCLE_OPERATION_EXEC: i32 = 2;
+pub const MXC_LIFECYCLE_OPERATION_STOP: i32 = 3;
+pub const MXC_LIFECYCLE_OPERATION_DEPROVISION: i32 = 4;
+
+fn lifecycle_operation(value: i32) -> Option<LifecycleOperation> {
+    match value {
+        MXC_LIFECYCLE_OPERATION_PROVISION => Some(LifecycleOperation::Provision),
+        MXC_LIFECYCLE_OPERATION_START => Some(LifecycleOperation::Start),
+        MXC_LIFECYCLE_OPERATION_EXEC => Some(LifecycleOperation::Exec),
+        MXC_LIFECYCLE_OPERATION_STOP => Some(LifecycleOperation::Stop),
+        MXC_LIFECYCLE_OPERATION_DEPROVISION => Some(LifecycleOperation::Deprovision),
+        _ => None,
+    }
+}
 
 /// The result of an [`mxc_state_aware`] call.
 ///
@@ -121,6 +139,8 @@ impl MxcStateAwareResult {
 #[no_mangle]
 pub unsafe extern "C" fn mxc_state_aware(
     request_json_utf8: *const c_char,
+    operation: i32,
+    sandbox_id_utf8: *const c_char,
     dry_run: i32,
     experimental: i32,
     out: *mut MxcStateAwareResult,
@@ -130,7 +150,13 @@ pub unsafe extern "C" fn mxc_state_aware(
     }
 
     let result = catch_unwind(AssertUnwindSafe(|| {
-        state_aware_inner(request_json_utf8, dry_run != 0, experimental != 0)
+        state_aware_inner(
+            request_json_utf8,
+            operation,
+            sandbox_id_utf8,
+            dry_run != 0,
+            experimental != 0,
+        )
     }))
     .unwrap_or_else(|panic| {
         crate::report_panic("mxc_state_aware", &*panic);
@@ -146,6 +172,8 @@ pub unsafe extern "C" fn mxc_state_aware(
 
 fn state_aware_inner(
     request_json_utf8: *const c_char,
+    operation: i32,
+    sandbox_id_utf8: *const c_char,
     dry_run: bool,
     experimental: bool,
 ) -> MxcStateAwareResult {
@@ -163,7 +191,27 @@ fn state_aware_inner(
         }
     };
 
-    match run_state_aware_json(request_json, dry_run, experimental) {
+    let Some(operation) = lifecycle_operation(operation) else {
+        return MxcStateAwareResult::error(
+            crate::MXC_STATUS_MALFORMED_REQUEST,
+            "invalid lifecycle operation",
+        );
+    };
+    let sandbox_id = if sandbox_id_utf8.is_null() {
+        None
+    } else {
+        match unsafe { cstr_to_str(sandbox_id_utf8) } {
+            Some(value) => Some(value),
+            None => {
+                return MxcStateAwareResult::error(
+                    MXC_STATUS_INVALID_UTF8,
+                    "sandbox ID is not UTF-8",
+                )
+            }
+        }
+    };
+
+    match run_lifecycle_operation(request_json, operation, sandbox_id, dry_run, experimental) {
         Ok(response_json) => MxcStateAwareResult {
             status: MXC_STATUS_SUCCESS,
             response_json_utf8: alloc_cstring(response_json.as_bytes()),
@@ -194,7 +242,7 @@ pub unsafe extern "C" fn mxc_state_aware_result_free(r: *mut MxcStateAwareResult
 
 /// Run the `exec` phase of a state-aware request as a **live streaming** process.
 ///
-/// Parses `request_json_utf8` (an `exec`-phase request with a `sandboxId`),
+/// Parses `request_json_utf8` for an exec operation against `sandbox_id_utf8`,
 /// spawns the process, and on success writes an opaque
 /// [`MxcSandbox`](crate::MxcSandbox) handle to `*out_handle` (drive it with the
 /// `mxc_stream_*` / `mxc_sandbox_*` externs, free it with `mxc_sandbox_free`).
@@ -222,6 +270,7 @@ pub unsafe extern "C" fn mxc_state_aware_result_free(r: *mut MxcStateAwareResult
 #[no_mangle]
 pub unsafe extern "C" fn mxc_state_aware_exec(
     request_json_utf8: *const c_char,
+    sandbox_id_utf8: *const c_char,
     experimental: i32,
     out_handle: *mut *mut MxcSandbox,
     out_error: *mut MxcErrorDetail,
@@ -257,7 +306,22 @@ pub unsafe extern "C" fn mxc_state_aware_exec(
                 ))
             }
         };
-        exec_sandbox(request_json, experimental != 0).map_err(|e| {
+        let sandbox_id = match unsafe { cstr_to_str(sandbox_id_utf8) } {
+            Some(value) => value,
+            None if sandbox_id_utf8.is_null() => {
+                return Err((
+                    MXC_STATUS_NULL_ARGUMENT,
+                    MxcErrorDetail::from_message("sandbox ID pointer is null"),
+                ))
+            }
+            None => {
+                return Err((
+                    MXC_STATUS_INVALID_UTF8,
+                    MxcErrorDetail::from_message("sandbox ID is not UTF-8"),
+                ))
+            }
+        };
+        exec(sandbox_id, request_json, experimental != 0).map_err(|e| {
             (
                 status_from_error_code(e.code),
                 MxcErrorDetail::from_error(&e),
@@ -334,6 +398,7 @@ fn exec_outcome_to_abi(outcome: WaitOutcome) -> MxcExecOutcome {
 #[no_mangle]
 pub unsafe extern "C" fn mxc_state_aware_exec_attached(
     request_json_utf8: *const c_char,
+    sandbox_id_utf8: *const c_char,
     experimental: i32,
     out_outcome: *mut MxcExecOutcome,
     out_error: *mut MxcErrorDetail,
@@ -365,7 +430,22 @@ pub unsafe extern "C" fn mxc_state_aware_exec_attached(
                 ))
             }
         };
-        exec_attached(request_json, experimental != 0).map_err(|e| {
+        let sandbox_id = match unsafe { cstr_to_str(sandbox_id_utf8) } {
+            Some(value) => value,
+            None if sandbox_id_utf8.is_null() => {
+                return Err((
+                    MXC_STATUS_NULL_ARGUMENT,
+                    MxcErrorDetail::from_message("sandbox ID pointer is null"),
+                ))
+            }
+            None => {
+                return Err((
+                    MXC_STATUS_INVALID_UTF8,
+                    MxcErrorDetail::from_message("sandbox ID is not UTF-8"),
+                ))
+            }
+        };
+        exec_attached(sandbox_id, request_json, experimental != 0).map_err(|e| {
             (
                 status_from_error_code(e.code),
                 MxcErrorDetail::from_error(&e),
@@ -407,16 +487,76 @@ mod tests {
     use super::*;
     use std::ffi::CString;
 
+    fn legacy_test_request(json: &str) -> (CString, i32, Option<CString>) {
+        let mut value: serde_json::Value = serde_json::from_str(json).unwrap();
+        let object = value.as_object_mut().unwrap();
+        let operation = match object
+            .remove("phase")
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .as_deref()
+        {
+            Some("start") => MXC_LIFECYCLE_OPERATION_START,
+            Some("exec") => MXC_LIFECYCLE_OPERATION_EXEC,
+            Some("stop") => MXC_LIFECYCLE_OPERATION_STOP,
+            Some("deprovision") => MXC_LIFECYCLE_OPERATION_DEPROVISION,
+            _ => MXC_LIFECYCLE_OPERATION_PROVISION,
+        };
+        let sandbox_id = object
+            .remove("sandboxId")
+            .and_then(|value| value.as_str().map(CString::new))
+            .transpose()
+            .unwrap();
+        if operation == MXC_LIFECYCLE_OPERATION_PROVISION {
+            if let Some(experimental) = object
+                .get_mut("experimental")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                for backend in ["isolation_session", "wslc"] {
+                    if let Some(config) = experimental.get_mut(backend) {
+                        if let Some(provision) = config
+                            .as_object_mut()
+                            .and_then(|config| config.remove("provision"))
+                        {
+                            *config = provision;
+                        }
+                    }
+                }
+            }
+        }
+        (
+            CString::new(serde_json::to_string(&value).unwrap()).unwrap(),
+            operation,
+            sandbox_id,
+        )
+    }
+
     fn call(json: &str, dry_run: bool) -> MxcStateAwareResult {
         call_opt(json, dry_run, false)
     }
 
     fn call_opt(json: &str, dry_run: bool, experimental: bool) -> MxcStateAwareResult {
-        let j = CString::new(json).unwrap();
+        let (j, operation, sandbox_id) =
+            if json.contains("\"phase\"") || json.contains("\"sandboxId\"") {
+                legacy_test_request(json)
+            } else {
+                (
+                    CString::new(json).unwrap(),
+                    MXC_LIFECYCLE_OPERATION_PROVISION,
+                    None,
+                )
+            };
         let mut out = MxcStateAwareResult::empty();
         // SAFETY: valid string and out pointer.
-        let status =
-            unsafe { mxc_state_aware(j.as_ptr(), dry_run as i32, experimental as i32, &mut out) };
+        let status = unsafe {
+            mxc_state_aware(
+                j.as_ptr(),
+                operation,
+                sandbox_id.as_ref().map_or(ptr::null(), |id| id.as_ptr()),
+                dry_run as i32,
+                experimental as i32,
+                &mut out,
+            )
+        };
         assert_eq!(status, out.status);
         out
     }
@@ -483,10 +623,10 @@ mod tests {
             r#""appIdd":"typo""#,
         ] {
             let json = format!(
-                "{{\n  \"version\":\"0.9.0-alpha\",\n  \"phase\":\"provision\",\n  \
+                "{{\n  \"version\":\"0.9.0-alpha\",\n  \
                  \"containment\":\"isolation_session\",\n  \
                  \"_comment\":\"typed payload diagnostic\",\n  \
-                 \"experimental\":{{\"isolation_session\":{{\"provision\":{{{fields}}}}}}}\n}}"
+                 \"experimental\":{{\"isolation_session\":{{{fields}}}}}\n}}"
             );
             let mut out = call_opt(&json, true, true);
             assert_eq!(out.status, crate::MXC_STATUS_MALFORMED_REQUEST, "{fields}");
@@ -497,7 +637,7 @@ mod tests {
                 .to_str()
                 .unwrap();
             assert!(
-                message.contains("experimental.isolation_session.provision"),
+                message.contains("experimental.isolation_session"),
                 "{message}"
             );
             assert!(message.contains("line "), "{message}");
@@ -568,7 +708,16 @@ mod tests {
     fn null_request_reports_null_argument() {
         let mut out = MxcStateAwareResult::empty();
         // SAFETY: null request is explicitly handled; valid out pointer.
-        let status = unsafe { mxc_state_aware(ptr::null(), 0, 0, &mut out) };
+        let status = unsafe {
+            mxc_state_aware(
+                ptr::null(),
+                MXC_LIFECYCLE_OPERATION_PROVISION,
+                ptr::null(),
+                0,
+                0,
+                &mut out,
+            )
+        };
         assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
         assert!(!out.error.message_utf8.is_null());
         // SAFETY: filled by `mxc_state_aware`.
@@ -582,30 +731,39 @@ mod tests {
         )
         .unwrap();
         // SAFETY: valid string, deliberately-null out.
-        let status = unsafe { mxc_state_aware(j.as_ptr(), 0, 0, ptr::null_mut()) };
+        let status = unsafe {
+            mxc_state_aware(
+                j.as_ptr(),
+                MXC_LIFECYCLE_OPERATION_PROVISION,
+                ptr::null(),
+                0,
+                0,
+                ptr::null_mut(),
+            )
+        };
         assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
     }
 
     #[test]
     fn exec_null_out_handle_is_null_argument() {
-        let j =
-            CString::new(r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"x:y"}"#).unwrap();
+        let j = CString::new(r#"{"version":"0.9.0-alpha"}"#).unwrap();
+        let id = CString::new("x:y").unwrap();
         // SAFETY: valid string, deliberately-null out_handle.
-        let status =
-            unsafe { mxc_state_aware_exec(j.as_ptr(), 0, ptr::null_mut(), ptr::null_mut()) };
+        let status = unsafe {
+            mxc_state_aware_exec(j.as_ptr(), id.as_ptr(), 0, ptr::null_mut(), ptr::null_mut())
+        };
         assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
     }
 
     #[test]
     fn exec_non_exec_phase_reports_error_and_null_handle() {
-        let j = CString::new(
-            r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session"}"#,
-        )
-        .unwrap();
+        let j = CString::new(r#"{"version":"0.9.0-alpha"}"#).unwrap();
+        let id = CString::new("isolation_session:test").unwrap();
         let mut handle: *mut MxcSandbox = ptr::null_mut();
         let mut err = MxcErrorDetail::none();
         // SAFETY: valid string and out pointers.
-        let status = unsafe { mxc_state_aware_exec(j.as_ptr(), 0, &mut handle, &mut err) };
+        let status =
+            unsafe { mxc_state_aware_exec(j.as_ptr(), id.as_ptr(), 0, &mut handle, &mut err) };
         assert_eq!(status, crate::MXC_STATUS_MALFORMED_REQUEST);
         assert!(handle.is_null());
         assert!(!err.message_utf8.is_null());
@@ -656,17 +814,17 @@ mod tests {
     /// backend.
     #[test]
     fn exec_honours_the_optin_on_its_own_path() {
-        let j = CString::new(
-            r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wsb:0a1b2c3d","process":{"commandLine":"echo hi"}}"#,
-        )
-        .unwrap();
+        let j = CString::new(r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"}}"#)
+            .unwrap();
+        let id = CString::new("wsb:0a1b2c3d").unwrap();
 
         for (experimental, expect_refused) in [(0, true), (1, false)] {
             let mut handle: *mut MxcSandbox = ptr::null_mut();
             let mut err = MxcErrorDetail::none();
             // SAFETY: valid string and out pointers.
-            let status =
-                unsafe { mxc_state_aware_exec(j.as_ptr(), experimental, &mut handle, &mut err) };
+            let status = unsafe {
+                mxc_state_aware_exec(j.as_ptr(), id.as_ptr(), experimental, &mut handle, &mut err)
+            };
             assert!(handle.is_null(), "no handle is produced either way");
             if expect_refused {
                 assert_eq!(status, crate::MXC_STATUS_BACKEND_UNAVAILABLE);
@@ -681,7 +839,7 @@ mod tests {
     // ===== mxc_state_aware_exec_attached =====
 
     fn attached(json: &str, experimental: bool) -> (i32, MxcExecOutcome, MxcErrorDetail) {
-        let j = CString::new(json).unwrap();
+        let (j, _, sandbox_id) = legacy_test_request(json);
         let mut outcome = MxcExecOutcome {
             timed_out: -1,
             exit_code: -1,
@@ -689,7 +847,13 @@ mod tests {
         let mut err = MxcErrorDetail::none();
         // SAFETY: valid string and out pointers.
         let status = unsafe {
-            mxc_state_aware_exec_attached(j.as_ptr(), experimental as i32, &mut outcome, &mut err)
+            mxc_state_aware_exec_attached(
+                j.as_ptr(),
+                sandbox_id.as_ref().map_or(ptr::null(), |id| id.as_ptr()),
+                experimental as i32,
+                &mut outcome,
+                &mut err,
+            )
         };
         (status, outcome, err)
     }
@@ -702,8 +866,9 @@ mod tests {
         };
         let mut err = MxcErrorDetail::none();
         // SAFETY: null request is the case under test; out pointers are valid.
-        let status =
-            unsafe { mxc_state_aware_exec_attached(ptr::null(), 1, &mut outcome, &mut err) };
+        let status = unsafe {
+            mxc_state_aware_exec_attached(ptr::null(), ptr::null(), 1, &mut outcome, &mut err)
+        };
         assert_eq!(status, crate::MXC_STATUS_NULL_ARGUMENT);
         assert!(!err.message_utf8.is_null());
         // SAFETY: filled above and not yet freed.
@@ -713,27 +878,24 @@ mod tests {
     #[test]
     fn attached_rejects_a_null_outcome_before_running_anything() {
         let j = CString::new(
-            r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"isolationsession:x",
-            "process":{"commandLine":"cmd.exe /c echo hi"}}"#,
+            r#"{"version":"0.9.0-alpha","process":{"commandLine":"cmd.exe /c echo hi"}}"#,
         )
         .unwrap();
+        let id = CString::new("isolationsession:x").unwrap();
         let mut err = MxcErrorDetail::none();
         // SAFETY: null outcome storage is the case under test.
-        let status =
-            unsafe { mxc_state_aware_exec_attached(j.as_ptr(), 1, ptr::null_mut(), &mut err) };
+        let status = unsafe {
+            mxc_state_aware_exec_attached(j.as_ptr(), id.as_ptr(), 1, ptr::null_mut(), &mut err)
+        };
         assert_eq!(status, crate::MXC_STATUS_NULL_ARGUMENT);
         // SAFETY: zeroed above; freeing a none-detail is a no-op.
         unsafe { crate::mxc_error_detail_free(&mut err) };
     }
 
     #[test]
-    fn attached_rejects_a_non_exec_phase() {
-        // The phase check precedes the terminal and single-flight checks, so
-        // this is independent of the test binary's stdio. The message assertion
-        // discriminates it from the other refusals, which share this status.
+    fn attached_requires_an_exec_process() {
         let (status, outcome, mut err) = attached(
-            r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
-                "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#,
+            r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wsb:0123abcd"}"#,
             true,
         );
         assert_eq!(status, crate::MXC_STATUS_MALFORMED_REQUEST);
@@ -744,8 +906,8 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         assert!(
-            message.contains("exec phase"),
-            "the refusal must name the phase requirement, got: {message}"
+            message.contains("process"),
+            "the refusal must name the missing process, got: {message}"
         );
         // SAFETY: filled by the call and not yet freed.
         unsafe { crate::mxc_error_detail_free(&mut err) };
@@ -766,11 +928,20 @@ mod tests {
 
     #[test]
     fn managed_state_aware_goldens_are_accepted_by_native_contract() {
-        for fixture in [
-            include_str!("../../../../tests/policy/state-aware-wslc-provision.json"),
-            include_str!("../../../../tests/policy/state-aware-wslc-exec.json"),
+        for (fixture, operation, sandbox_id) in [
+            (
+                include_str!("../../../../tests/policy/state-aware-wslc-provision.json"),
+                LifecycleOperation::Provision,
+                None,
+            ),
+            (
+                include_str!("../../../../tests/policy/state-aware-wslc-exec.json"),
+                LifecycleOperation::Exec,
+                Some("wslc:0123456789abcdef0123456789abcdef"),
+            ),
         ] {
-            if let Err(error) = run_state_aware_json(fixture, true, true) {
+            if let Err(error) = run_lifecycle_operation(fixture, operation, sandbox_id, true, true)
+            {
                 assert_eq!(
                     error.code,
                     mxc_sdk::ErrorCode::BackendUnavailable,

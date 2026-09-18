@@ -1,6 +1,5 @@
 {
   "version": "0.9.0-alpha",
-  "phase": "provision",
   "containment": "wslc",
   "filesystem": {
     "readwritePaths": ["C:\\work"],
@@ -13,10 +12,8 @@
   },
   "experimental": {
     "wslc": {
-      "provision": {
-        "image": "alpine:3.20",
-        "imageTarPath": "C:\\images\\alpine.tar"
-      }
+      "image": "alpine:3.20",
+      "imageTarPath": "C:\\images\\alpine.tar"
     }
   }
 }

@@ -21,5 +21,3 @@ mod optional_fields;
 mod request;
 #[path = "v0_9_0_alpha/seatbelt.rs"]
 mod seatbelt;
-#[path = "v0_9_0_alpha/state_aware.rs"]
-mod state_aware;

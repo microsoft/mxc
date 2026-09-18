@@ -235,8 +235,9 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
 describe('IsolationSession state-aware request validation', { skip: policyValidationSkipReason }, () => {
   // The TypeScript type makes `network` required (and pins its value) at
   // provision, but a plain-JS caller can bypass that. The exact contract must
-  // still reject missing or non-canonical acknowledgments before backend
-  // dispatch — the public boundary must not rely on the compile-time type.
+  // still reject non-canonical acknowledgments. Because operation is supplied
+  // out of band, the contract cannot require `network` only for IsolationSession
+  // provision; the backend's semantic validation rejects an omission.
   type UntypedProvision = (
     containment: 'isolation_session',
     config: unknown,
@@ -244,10 +245,15 @@ describe('IsolationSession state-aware request validation', { skip: policyValida
   ) => Promise<unknown>;
   const provisionUntyped = provisionSandbox as unknown as UntypedProvision;
 
-  it('exact contract rejects a provision that omits the network acknowledgment', async () => {
+  it('backend validation rejects a provision that omits the network acknowledgment', async () => {
     await assert.rejects(
       () => provisionUntyped('isolation_session', {}, { experimental: true }),
-      (err: unknown) => err instanceof MxcError && err.code === 'malformed_request',
+      (err: unknown) => {
+        assert.ok(err instanceof MxcError, `expected MxcError, got ${String(err)}`);
+        assert.strictEqual(err.code, 'policy_validation');
+        assert.match(err.message, /network is unrestricted and cannot be filtered or denied/);
+        return true;
+      },
     );
   });
 

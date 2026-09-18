@@ -34,7 +34,7 @@ Three versionless files under `tests/policy` are intentionally absent from this 
 ## Post-migration disposition
 
 After exact-contract dispatch became authoritative, version migration removed
-118 of the 125 recorded divergences. The remaining seven now characterize only
+119 of the 125 recorded divergences. The remaining six now characterize only
 the test-scoped rolling parser; authoritative public loading rejects every
 document through its exact contract:
 
@@ -47,17 +47,12 @@ document through its exact contract:
   a non-canonical network posture. Their E2E assertions now expect
   `malformed_request` from the request-specific 0.9 root. Direct
   `isolation_session_common::policy` tests preserve backend validation.
-- `wslc_state_aware_exec_rejected_filesystem.json` exercises immutable
-  post-provision policy. Its E2E assertion now expects structural rejection
-  from the 0.9 exec root, while `wslc_common::policy` retains direct backend
-  validation coverage.
-
-The differential harness records seven exact-stricter results so later contract
+The differential harness records six exact-stricter results so later contract
 changes cannot accidentally weaken the exact boundary. It also compares every
 corpus document through the public loader and the exact parser oracle. After
 the development-contract cutover moved three formerly convergent documents
 into the explicit removal inventory, the retained rolling characterization now
-converges across Windows and Linux at 331 equivalent accepts and 14 shared
+converges across Windows and Linux at 303 equivalent accepts and 14 shared
 rejections. The accept count dropped by one when the 0.9 removal of
 `seatbelt.launchMethod` retired `tests/examples/27_mac_terminal_sandboxed.json`,
 the only corpus document that exercised `launchMethod: "open"`, and rose by two
@@ -278,20 +273,6 @@ versioning test discovery directory.
 | `tests/configs/isolation_session_one_shot_stray_config_rejected.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_one_shot_ui_rejected.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_powershell_interactive.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/isolation_session_state_aware_deprovision.json` | state-aware deprovision | MissingVersion | `(missing)` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/isolation_session_state_aware_exec_basic.json` | state-aware exec | MissingVersion | `(missing)` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/isolation_session_state_aware_exec_cwd.json` | state-aware exec | MissingVersion | `(missing)` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/isolation_session_state_aware_exec_env_absent.json` | state-aware exec | MissingVersion | `(missing)` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/isolation_session_state_aware_exec_env_initial.json` | state-aware exec | MissingVersion | `(missing)` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/isolation_session_state_aware_exec_env_modified.json` | state-aware exec | MissingVersion | `(missing)` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/isolation_session_state_aware_exec_exit_0.json` | state-aware exec | MissingVersion | `(missing)` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/isolation_session_state_aware_exec_exit_1.json` | state-aware exec | MissingVersion | `(missing)` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/isolation_session_state_aware_exec_exit_2.json` | state-aware exec | MissingVersion | `(missing)` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/isolation_session_state_aware_exec_read_marker.json` | state-aware exec | MissingVersion | `(missing)` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/isolation_session_state_aware_exec_read_persist.json` | state-aware exec | MissingVersion | `(missing)` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/isolation_session_state_aware_exec_setx_initial.json` | state-aware exec | MissingVersion | `(missing)` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/isolation_session_state_aware_exec_setx_modified.json` | state-aware exec | MissingVersion | `(missing)` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/isolation_session_state_aware_exec_write_marker.json` | state-aware exec | MissingVersion | `(missing)` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_state_aware_provision.json` | state-aware provision | MissingVersion | `(missing)` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_state_aware_provision_appid.json` | state-aware provision | MissingVersion | `(missing)` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_state_aware_provision_appid_control.json` | state-aware provision | MissingVersion | `(missing)` | `0.9.0-alpha` | (none) | backend/config test |
@@ -301,8 +282,6 @@ versioning test discovery directory.
 | `tests/configs/isolation_session_state_aware_provision_rejected_network.json` | state-aware provision | MissingVersion | `(missing)` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_state_aware_provision_rejected_ui.json` | state-aware provision | MissingVersion | `(missing)` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_state_aware_provision_with_filesystem.json` | state-aware provision | MissingVersion | `(missing)` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/isolation_session_state_aware_start.json` | state-aware start | MissingVersion | `(missing)` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/isolation_session_state_aware_stop.json` | state-aware stop | MissingVersion | `(missing)` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_stderr.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_stdout_stderr_interleaved.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/isolation_session_streaming_smoke.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
@@ -350,25 +329,12 @@ versioning test discovery directory.
 | `tests/configs/wslc_python_hello.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/wslc_python_stdlib.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/wslc_readonly_mount.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/wslc_state_aware_deprovision.json` | state-aware deprovision | PublishedStateAware | `0.8.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/wslc_state_aware_exec_basic.json` | state-aware exec | PublishedStateAware | `0.8.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/wslc_state_aware_exec_drip.json` | state-aware exec | PublishedStateAware | `0.8.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/wslc_state_aware_exec_env.json` | state-aware exec | PublishedStateAware | `0.8.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/wslc_state_aware_exec_exit_0.json` | state-aware exec | PublishedStateAware | `0.8.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/wslc_state_aware_exec_exit_1.json` | state-aware exec | PublishedStateAware | `0.8.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/wslc_state_aware_exec_exit_7.json` | state-aware exec | PublishedStateAware | `0.8.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/wslc_state_aware_exec_proxy.json` | state-aware exec | PublishedStateAware | `0.8.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/wslc_state_aware_exec_read_marker.json` | state-aware exec | PublishedStateAware | `0.8.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/wslc_state_aware_exec_rejected_filesystem.json` | state-aware exec | PublishedStateAware | `0.8.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/wslc_state_aware_exec_write_marker.json` | state-aware exec | PublishedStateAware | `0.8.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/wslc_state_aware_provision.json` | state-aware provision | PublishedStateAware | `0.8.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/wslc_state_aware_provision_bridged.json` | state-aware provision | PublishedStateAware | `0.8.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/wslc_state_aware_provision_rejected_denied.json` | state-aware provision | PublishedStateAware | `0.8.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/wslc_state_aware_provision_rejected_hosts.json` | state-aware provision | PublishedStateAware | `0.8.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/wslc_state_aware_provision_rejected_proxy.json` | state-aware provision | PublishedStateAware | `0.8.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/wslc_state_aware_provision_with_filesystem.json` | state-aware provision | PublishedStateAware | `0.8.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/wslc_state_aware_start.json` | state-aware start | PublishedStateAware | `0.8.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
-| `tests/configs/wslc_state_aware_stop.json` | state-aware stop | PublishedStateAware | `0.8.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/wslc_stderr.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/wslc_tar_import_docker_save.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |
 | `tests/configs/wslc_tar_import_rootfs.json` | one-shot | PublishedDevelopmentContainment | `0.6.0-alpha` | `0.9.0-alpha` | (none) | backend/config test |

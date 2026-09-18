@@ -11,6 +11,7 @@ import { findWxcExecutable, findLxcExecutable, findSeatbeltExecutable, getPlatfo
 import { SandboxSpawnOptions } from './sandbox.js';
 import { diagLog } from './diagnostic.js';
 import { mxcErrorFromCode } from './errors.js';
+import type { Phase } from './state-aware-types.js';
 
 /** SDK version read from package.json at module load time. */
 export const SDK_VERSION: string = (() => {
@@ -157,6 +158,7 @@ export function applyLinuxNetworkPolicy(config: ContainerConfig): void {
 export function resolveBinaryAndCommonArgs(
   envelopeJson: string,
   options: SandboxSpawnOptions,
+  phase?: Phase,
 ): { executablePath: string; args: string[] } {
   const platformSupport = getPlatformSupport();
   if (!platformSupport.isSupported && !options.skipPlatformCheck) {
@@ -201,6 +203,7 @@ export function resolveBinaryAndCommonArgs(
   const envelopeBase64 = Buffer.from(envelopeJson, 'utf-8').toString('base64');
   args.push('--config-base64', envelopeBase64);
 
+  if (phase) args.push('--operation', phase);
   if (options.dryRun) args.push('--dry-run');
   if (options.debug) args.push('--debug');
   if (options.experimental) args.push('--experimental');

@@ -227,12 +227,9 @@ mod request;
 #[cfg(feature = "schema-gen")]
 mod schema;
 mod stable;
-/// The development `0.9.0-alpha` state-aware configuration contract.
-mod state_aware;
-
 pub use experimental::{
-    OneShotExperimental, OneShotWindowsSandbox, OneShotWslc, PortMapping, TestFeature,
-    TransportProtocol,
+    IsolationSession, OneShotExperimental, OneShotWindowsSandbox, OneShotWslc, PortMapping,
+    TestFeature, TransportProtocol,
 };
 pub use network::{
     Network, NetworkAction, NetworkEgress, NetworkIngress, NetworkPeer, NetworkPort,
@@ -240,7 +237,9 @@ pub use network::{
 };
 pub use one_shot::{Containment as OneShotContainment, Request as OneShotRequest};
 pub use primitives::{NonEmptyString, NonEmptyVec, OptionalField, True};
-pub use request::{parse_request, validate_one_shot_request, Request, RequestParseError};
+pub use request::{
+    parse_operation_request, parse_request, validate_one_shot_request, Request, RequestParseError,
+};
 #[cfg(feature = "schema-gen")]
 pub use schema::development_schema;
 pub use stable::{
@@ -248,23 +247,4 @@ pub use stable::{
     ProcessContainer, ProcessContainerCapability, ProcessContainerFilesystem,
     ProcessContainerNetwork, ProcessContainerUi, ProcessContainerUiIsolation, RuntimeConfig,
     Seatbelt, Telemetry, Ui, UiClipboard,
-};
-pub use state_aware::{probe_containment, Containment, ContainmentProbeError};
-pub use state_aware::{probe_phase, Phase, PhaseProbeError};
-pub use state_aware::{DeprovisionExperimental, DeprovisionPhase, DeprovisionRequest};
-pub use state_aware::{ExecExperimental, ExecPhase, ExecRequest};
-pub use state_aware::{
-    IsolationSessionContainment, IsolationSessionNetwork, IsolationSessionNetworkAllow,
-    IsolationSessionNetworkEgress, IsolationSessionNetworkIngress, IsolationSessionProvision,
-    IsolationSessionProvisionExperimental, IsolationSessionProvisionRequest,
-    StateAwareIsolationSession,
-};
-pub use state_aware::{ProvisionPhase, ProvisionRequest};
-pub use state_aware::{StartExperimental, StartPhase, StartRequest};
-pub use state_aware::{
-    StateAwareWslc, WslcContainment, WslcProvision, WslcProvisionExperimental, WslcProvisionRequest,
-};
-pub use state_aware::{StopExperimental, StopPhase, StopRequest};
-pub use state_aware::{
-    WindowsSandboxContainment, WindowsSandboxExperimental, WindowsSandboxProvisionRequest,
 };

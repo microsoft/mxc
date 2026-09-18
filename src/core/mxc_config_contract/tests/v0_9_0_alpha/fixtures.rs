@@ -1,11 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use mxc_config_contract::dev::{
-    parse_request, DeprovisionRequest, ExecRequest, IsolationSessionProvisionRequest, Request,
-    StartRequest, StopRequest, WindowsSandboxProvisionRequest, WslcProvisionRequest,
-};
-use serde::de::DeserializeOwned;
+use mxc_config_contract::dev::{parse_request, Request};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -59,23 +55,6 @@ fn read_fixtures(root: &str, kind: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-fn assert_root_fixtures<T>(root: &str)
-where
-    T: DeserializeOwned,
-{
-    for (name, json) in read_fixtures(root, "valid") {
-        serde_json::from_str::<T>(&json)
-            .unwrap_or_else(|error| panic!("valid fixture '{root}/valid/{name}' failed: {error}"));
-    }
-
-    for (name, json) in read_fixtures(root, "invalid") {
-        assert!(
-            serde_json::from_str::<T>(&json).is_err(),
-            "invalid fixture '{root}/invalid/{name}' was accepted"
-        );
-    }
-}
-
 fn assert_one_shot_fixtures() {
     for (name, json) in read_fixtures("one_shot", "valid") {
         assert!(
@@ -93,11 +72,4 @@ fn assert_one_shot_fixtures() {
 #[test]
 fn accepts_and_rejects_every_discovered_fixture() {
     assert_one_shot_fixtures();
-    assert_root_fixtures::<WindowsSandboxProvisionRequest>("windows_sandbox_provision");
-    assert_root_fixtures::<IsolationSessionProvisionRequest>("isolation_session_provision");
-    assert_root_fixtures::<WslcProvisionRequest>("wslc_provision");
-    assert_root_fixtures::<StartRequest>("start");
-    assert_root_fixtures::<ExecRequest>("exec");
-    assert_root_fixtures::<StopRequest>("stop");
-    assert_root_fixtures::<DeprovisionRequest>("deprovision");
 }

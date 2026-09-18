@@ -109,34 +109,32 @@
 //!
 //! |             | one-shot            | state-aware                           | Stdio                                    |
 //! |-------------|---------------------|---------------------------------------|------------------------------------------|
-//! | **capture** | [`run`]             | `exec_sandbox(…)?.wait_with_output()` | captured                                 |
-//! | **handle**  | [`spawn_sandbox`]   | [`exec_sandbox`]                      | live pipes (stream, kill); no TTY        |
-//! | **attach**  | *not available*     | [`exec_attached`]                     | this process's stdio; TTY if it has one  |
+//! | **capture** | [`run`]             | `sandbox::exec(…)?.wait_with_output()` | captured                              |
+//! | **handle**  | [`spawn_sandbox`]   | [`sandbox::exec`]                   | live pipes (stream, kill); no TTY        |
+//! | **attach**  | *not available*     | [`sandbox::exec_attached`]           | this process's stdio; TTY if it has one  |
 //!
-//! [`run_state_aware_json`] sits alongside these and drives the *other*
-//! state-aware phases — `provision`, `start`, `stop`, `deprovision`, and a dry
-//! run of any phase — taking the wire-format request JSON and returning the
-//! response-envelope JSON. The crate README covers which backends implement the
-//! lifecycle and how each is compiled in.
+//! The explicit sandbox lifecycle methods drive provision, start, exec, stop,
+//! and deprovision. Operation and sandbox identity are API arguments rather
+//! than fields in the configuration JSON.
 //!
 //! **IsolationSession is refused from a single-threaded apartment.**
 //!
 //! ## Pty allocation
 //!
-//! Every entry point except [`exec_attached`] wires the child's stdio to
+//! Every entry point except [`sandbox::exec_attached`] wires the child's stdio to
 //! ordinary pipes and allocates no pty. [`run`] captures both streams; with
-//! [`spawn_sandbox`] or [`exec_sandbox`], stream the handle's
+//! [`spawn_sandbox`] or [`sandbox::exec`], stream the handle's
 //! `take_stdout`/`take_stderr`, or let [`wait`](Sandbox::wait) drain and
 //! discard any untaken stream.
 //!
-//! Under [`exec_attached`], IsolationSession allocates a pseudo-console and
+//! Under [`sandbox::exec_attached`], IsolationSession allocates a pseudo-console and
 //! forwards stdin, so interactive shells render and resize. A pseudo-console
 //! has one output stream, so the sandbox's stderr arrives merged into stdout.
 //!
-//! [`exec_attached`] is verified against IsolationSession only.
+//! [`sandbox::exec_attached`] is verified against IsolationSession only.
 //!
 //! Policy and operational warnings are available through [`Sandbox::warnings`]
-//! and [`Output::warnings`]. [`exec_attached`] has no returned handle, so it
+//! and [`Output::warnings`]. [`sandbox::exec_attached`] has no returned handle, so it
 //! writes those warnings to the host stderr that the caller explicitly attached.
 //! These include security warnings, network rules that cannot carry traffic,
 //! and operational warnings such as unavailable telemetry routing.
@@ -148,12 +146,15 @@
 //! `mxc-sdk` re-exports the curated surface and wraps the engine's streaming
 //! handle in [`Sandbox`].
 
-mod sandbox;
+pub mod sandbox;
+mod sandbox_operations;
 
 pub mod telemetry;
 
 pub use mxc_engine::configs;
 pub use mxc_engine::policy;
+#[doc(hidden)]
+pub use mxc_engine::LifecycleOperation;
 pub use mxc_engine::{
     available_backends, available_tools_policy, build_request, build_request_with_containment,
     platform_support, temporary_files_policy, user_profile_policy, AvailableBackend,
@@ -202,72 +203,20 @@ pub fn run(request: SandboxRequest) -> Result<Output, Error> {
     })
 }
 
-/// Run a **state-aware lifecycle** request (as a JSON string) and return the
-/// response-envelope JSON string.
-///
-/// Handles the envelope phases — `provision`, `start`, `stop`, `deprovision` —
-/// and a dry run of any phase. A non-dry-run `exec` produces no envelope, so it
-/// is rejected here; run it through an exec entry point instead:
-/// [`exec_attached`] to attach the workload to this process's stdio, or
-/// [`exec_sandbox`] to drive the pipes yourself.
-///
-/// The request JSON is the same wire format the executor accepts (an object with
-/// a `phase` field). Errors (malformed request, unsupported phase, backend
-/// failures) come back as an [`Error`] with the matching [`ErrorCode`].
-///
-/// `experimental` is the in-process equivalent of the executor's
-/// `--experimental` flag. The experimental backends — WindowsSandbox,
-/// IsolationSession and WSLc — are refused with
-/// [`ErrorCode::BackendUnavailable`] unless it is set, before any work is done.
-/// It is an API parameter rather than a field in the request JSON so that a
-/// config cannot grant itself experimental access.
-pub fn run_state_aware_json(
+/// Workspace-internal lifecycle bridge used by generated language bindings.
+#[doc(hidden)]
+pub fn run_lifecycle_operation(
     request_json: &str,
+    operation: LifecycleOperation,
+    sandbox_id: Option<&str>,
     dry_run: bool,
     experimental: bool,
 ) -> Result<String, Error> {
-    mxc_engine::run_state_aware_json(request_json, dry_run, experimental)
-}
-
-/// Run the `exec` phase of a state-aware request (as a JSON string) as a **live
-/// streaming** process, returning a [`Sandbox`] handle for bidirectional stdio,
-/// waiting, and termination — exactly like [`spawn_sandbox`].
-///
-/// The request JSON must be an `exec`-phase state-aware request (with a
-/// `sandboxId` identifying a started sandbox). No pty is allocated.
-///
-/// **IsolationSession is the only backend that serves this**, and only with this
-/// crate's `isolation_session` feature; the others cannot hand back pipes and
-/// refuse. `experimental` opts in to the experimental backends, as for
-/// [`run_state_aware_json`].
-///
-/// [`Sandbox::kill`] reaches only the foreground process here; a descendant the
-/// workload backgrounded is reclaimed when the sandbox is stopped and
-/// deprovisioned.
-pub fn exec_sandbox(request_json: &str, experimental: bool) -> Result<Sandbox, Error> {
-    mxc_engine::exec_state_aware_json(request_json, experimental).map(Sandbox::new)
-}
-
-/// Run the `exec` phase of a state-aware request **attached to this process's
-/// stdio**, blocking until the sandboxed process exits.
-///
-/// The backend relays the workload's output onto this process's stdout and
-/// stderr; see *Pty allocation* for which backends also forward stdin and
-/// allocate a pseudo-console.
-///
-/// **This process's stdout and stdin must both be terminals**, or the call is
-/// refused with [`ErrorCode::MalformedRequest`] and nothing is run.
-///
-/// A spent `scriptTimeout` arrives as [`WaitOutcome::Exited`]: a backend
-/// relaying to a caller's stdio reports an exit code, and the relay rejects
-/// anything else.
-///
-/// `experimental` opts in to the experimental backends, as for
-/// [`run_state_aware_json`].
-pub fn exec_attached(request_json: &str, experimental: bool) -> Result<WaitOutcome, Error> {
-    use wxc_common::state_aware_backend::ExecOutcome;
-    mxc_engine::exec_state_aware_attached(request_json, experimental).map(|outcome| match outcome {
-        ExecOutcome::Exited(code) => WaitOutcome::Exited(code),
-        ExecOutcome::TimedOut => WaitOutcome::TimedOut,
-    })
+    mxc_engine::run_state_aware_operation_json(
+        request_json,
+        operation,
+        sandbox_id,
+        dry_run,
+        experimental,
+    )
 }

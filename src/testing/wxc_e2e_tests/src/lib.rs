@@ -480,11 +480,13 @@ pub fn run_wxc_example(config_file: &str, extra_args: &[&str]) -> CommandResult 
     run_executable(config_file, &exe, args)
 }
 
-/// Run `wxc-exec.exe` with a state-aware request envelope. The JSON value is
-/// serialised, base64-encoded, and passed via `--config-base64`. Used by the
-/// state-aware smoke tests.
+/// Run `wxc-exec.exe` with a state-aware policy and out-of-band lifecycle
+/// arguments. The JSON value is serialised, base64-encoded, and passed via
+/// `--config-base64`.
 pub fn run_wxc_state_aware(
     label: &str,
+    operation: &str,
+    sandbox_id: Option<&str>,
     request: &serde_json::Value,
     extra_args: &[&str],
 ) -> CommandResult {
@@ -493,6 +495,12 @@ pub fn run_wxc_state_aware(
     let encoded = STANDARD.encode(json.as_bytes());
 
     let mut args: Vec<String> = extra_args.iter().map(|s| (*s).to_string()).collect();
+    args.push("--operation".to_string());
+    args.push(operation.to_string());
+    if let Some(sandbox_id) = sandbox_id {
+        args.push("--sandbox-id".to_string());
+        args.push(sandbox_id.to_string());
+    }
     args.push("--config-base64".to_string());
     args.push(encoded);
 

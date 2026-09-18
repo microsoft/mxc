@@ -27,14 +27,21 @@ use std::ffi::{CStr, CString};
 use mxc_ffi::{
     mxc_error_detail_free, mxc_state_aware, mxc_state_aware_exec_attached,
     mxc_state_aware_result_free, MxcErrorDetail, MxcExecOutcome, MxcStateAwareResult,
+    MXC_LIFECYCLE_OPERATION_DEPROVISION, MXC_LIFECYCLE_OPERATION_PROVISION,
+    MXC_LIFECYCLE_OPERATION_START, MXC_LIFECYCLE_OPERATION_STOP,
 };
 
 /// Runs one envelope phase and returns its response JSON.
 ///
 /// Panics on failure: this is an operator driver, and a failed phase means the
 /// scenario cannot continue.
-fn phase(request: &str) -> String {
+fn operation(request: &str, operation: i32, sandbox_id: Option<&str>) -> String {
     let json = CString::new(request).expect("request holds no interior NUL");
+    let sandbox_id =
+        sandbox_id.map(|id| CString::new(id).expect("sandbox id holds no interior NUL"));
+    let sandbox_id_ptr = sandbox_id
+        .as_ref()
+        .map_or(std::ptr::null(), |id| id.as_ptr());
     // A C caller writes `MxcStateAwareResult r = {0};`. Zeroing is the faithful
     // equivalent, and the ABI requires the detail to start empty.
     // SAFETY: every field is a pointer or an integer, for which zero is valid.
@@ -42,7 +49,8 @@ fn phase(request: &str) -> String {
 
     // SAFETY: valid NUL-terminated request, and `result` is live writable
     // storage holding no detail yet.
-    let status = unsafe { mxc_state_aware(json.as_ptr(), 0, 1, &mut result) };
+    let status =
+        unsafe { mxc_state_aware(json.as_ptr(), operation, sandbox_id_ptr, 0, 1, &mut result) };
     if status != 0 {
         let message = if result.error.message_utf8.is_null() {
             String::from("(no message)")
@@ -76,11 +84,14 @@ impl Drop for Teardown {
         eprintln!("\n[driver] tearing down…");
         // Best-effort: a failed stop must not prevent the deprovision that
         // releases the account.
-        let stop = format!(r#"{{"version":"0.9.0-alpha","phase":"stop","sandboxId":"{id}"}}"#);
-        let _ = std::panic::catch_unwind(move || phase(&stop));
-        let deprovision =
-            format!(r#"{{"version":"0.9.0-alpha","phase":"deprovision","sandboxId":"{id}"}}"#);
-        match std::panic::catch_unwind(move || phase(&deprovision)) {
+        let request = r#"{"version":"0.9.0-alpha"}"#;
+        let stop_id = id.clone();
+        let _ = std::panic::catch_unwind(move || {
+            operation(request, MXC_LIFECYCLE_OPERATION_STOP, Some(&stop_id))
+        });
+        match std::panic::catch_unwind(move || {
+            operation(request, MXC_LIFECYCLE_OPERATION_DEPROVISION, Some(&id))
+        }) {
             Ok(_) => eprintln!("[driver] deprovisioned."),
             Err(_) => eprintln!("[driver] WARNING: deprovision failed, account may leak"),
         }
@@ -94,9 +105,11 @@ fn run() -> i32 {
         .nth(1)
         .unwrap_or_else(|| "powershell.exe -NoLogo".into());
 
-    let provisioned = phase(
-        r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
+    let provisioned = operation(
+        r#"{"version":"0.9.0-alpha","containment":"isolation_session",
             "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#,
+        MXC_LIFECYCLE_OPERATION_PROVISION,
+        None,
     );
     // The sandbox id is opaque by contract — carried verbatim, never parsed.
     let sandbox_id = provisioned
@@ -113,18 +126,21 @@ fn run() -> i32 {
     let _teardown = Teardown(sandbox_id.clone());
     eprintln!("[driver] provisioned.");
 
-    phase(&format!(
-        r#"{{"version":"0.9.0-alpha","phase":"start","sandboxId":"{sandbox_id}"}}"#
-    ));
+    operation(
+        r#"{"version":"0.9.0-alpha"}"#,
+        MXC_LIFECYCLE_OPERATION_START,
+        Some(&sandbox_id),
+    );
     eprintln!("[driver] started. Running: {command}");
     eprintln!("[driver] everything below runs inside the isolation session.\n");
 
     let escaped = command.replace('\\', "\\\\").replace('"', "\\\"");
     let exec = CString::new(format!(
-        r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"{sandbox_id}",
+        r#"{{"version":"0.9.0-alpha",
             "process":{{"commandLine":"{escaped}","timeout":3600000}}}}"#
     ))
     .expect("request holds no interior NUL");
+    let sandbox_id = CString::new(sandbox_id).expect("sandbox id holds no interior NUL");
 
     let mut outcome = MxcExecOutcome {
         timed_out: -1,
@@ -134,8 +150,15 @@ fn run() -> i32 {
     let mut error: MxcErrorDetail = unsafe { std::mem::zeroed() };
     // SAFETY: valid request string; both out-parameters are live writable
     // storage holding no detail yet. Blocks until the workload exits.
-    let status =
-        unsafe { mxc_state_aware_exec_attached(exec.as_ptr(), 1, &mut outcome, &mut error) };
+    let status = unsafe {
+        mxc_state_aware_exec_attached(
+            exec.as_ptr(),
+            sandbox_id.as_ptr(),
+            1,
+            &mut outcome,
+            &mut error,
+        )
+    };
 
     if status == 0 {
         println!(

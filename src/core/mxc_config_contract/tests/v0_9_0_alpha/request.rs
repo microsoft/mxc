@@ -2,30 +2,77 @@
 // Licensed under the MIT License.
 
 use mxc_config_contract::dev::{
-    parse_request, ContainmentProbeError, PhaseProbeError, ProvisionRequest, Request,
-    RequestParseError,
+    parse_operation_request, parse_request, Request, RequestParseError,
 };
 
 #[test]
-fn no_phase_selects_one_shot_request() {
-    let json = r#"{
-        "version": "0.9.0-alpha",
-        "process": {"commandLine": "echo"}
-    }"#;
+fn one_shot_request_requires_process() {
+    let error = parse_request(r#"{"version":"0.9.0-alpha"}"#).unwrap_err();
+    assert!(matches!(
+        error,
+        RequestParseError::InvalidCombination {
+            contract: "one-shot",
+            message: "one-shot execution requires process.commandLine",
+        }
+    ));
+}
 
-    assert!(matches!(parse_request(json).unwrap(), Request::OneShot(_)));
+#[test]
+fn one_shot_request_with_process_is_accepted() {
+    let request =
+        parse_request(r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo"}}"#).unwrap();
+    assert!(matches!(request, Request::OneShot(_)));
+}
+
+#[test]
+fn operation_request_may_omit_process() {
+    parse_operation_request(r#"{"version":"0.9.0-alpha","containment":"wslc"}"#).unwrap();
+}
+
+#[test]
+fn operation_request_accepts_direct_backend_configuration() {
+    parse_operation_request(
+        r#"{
+            "version":"0.9.0-alpha",
+            "containment":"wslc",
+            "experimental":{"wslc":{"image":"alpine:latest"}}
+        }"#,
+    )
+    .unwrap();
+    parse_operation_request(
+        r#"{
+            "version":"0.9.0-alpha",
+            "containment":"isolation_session",
+            "experimental":{"isolation_session":{"appId":"PFN:example"}}
+        }"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn lifecycle_dispatch_fields_are_rejected() {
+    for field in [r#""phase":"provision""#, r#""sandboxId":"wslc:abcd1234""#] {
+        let json = format!(r#"{{"version":"0.9.0-alpha",{field}}}"#);
+        let error = parse_operation_request(&json).unwrap_err();
+        let RequestParseError::InvalidRequest { source, .. } = error else {
+            panic!("expected an invalid request");
+        };
+        assert!(source.to_string().contains("unknown field"));
+    }
 }
 
 #[test]
 fn isolation_session_one_shot_requires_network() {
-    let json = r#"{
-        "version": "0.9.0-alpha",
-        "containment": "isolation_session",
-        "process": {"commandLine": "echo"}
-    }"#;
-
+    let error = parse_request(
+        r#"{
+            "version":"0.9.0-alpha",
+            "containment":"isolation_session",
+            "process":{"commandLine":"echo"}
+        }"#,
+    )
+    .unwrap_err();
     assert!(matches!(
-        parse_request(json).unwrap_err(),
+        error,
         RequestParseError::InvalidCombination {
             contract: "one-shot",
             message: "IsolationSession requires an explicit network policy",
@@ -34,263 +81,22 @@ fn isolation_session_one_shot_requires_network() {
 }
 
 #[test]
-fn isolation_session_one_shot_accepts_directional_network() {
-    let json = r#"{
-        "version": "0.9.0-alpha",
-        "containment": "isolation_session",
-        "process": {"commandLine": "echo"},
-        "network": {
-            "egress": {"default": "allow"},
-            "ingress": {"default": "allow", "hostLoopback": "allow"}
-        }
-    }"#;
-
-    assert!(matches!(parse_request(json).unwrap(), Request::OneShot(_)));
-}
-
-#[test]
-fn invalid_one_shot_root_returns_invalid_request() {
-    let json = r#"{
-        "version": "0.9.0-alpha"
-    }"#;
-
+fn isolation_session_lifecycle_config_is_rejected_by_one_shot() {
+    let error = parse_request(
+        r#"{
+            "version":"0.9.0-alpha",
+            "containment":"isolation_session",
+            "process":{"commandLine":"echo"},
+            "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},
+            "experimental":{"isolation_session":{"appId":"PFN:example"}}
+        }"#,
+    )
+    .unwrap_err();
     assert!(matches!(
-        parse_request(json).unwrap_err(),
-        RequestParseError::InvalidRequest {
+        error,
+        RequestParseError::InvalidCombination {
             contract: "one-shot",
-            ..
-        }
-    ));
-}
-
-#[test]
-fn unknown_phase_returns_phase_error() {
-    let json = r#"{
-        "version": "0.9.0-alpha",
-        "phase": "restart"
-    }"#;
-
-    assert!(matches!(
-        parse_request(json).unwrap_err(),
-        RequestParseError::Phase(PhaseProbeError::UnsupportedPhase(phase))
-            if phase == "restart"
-    ));
-}
-
-#[test]
-fn non_string_phase_returns_phase_error() {
-    for phase in ["42", "true", "{}", "[]"] {
-        let json = format!(
-            r#"{{
-                "version": "0.9.0-alpha",
-                "phase": {phase},
-                "containment": "wslc"
-            }}"#
-        );
-        assert!(matches!(
-            parse_request(json.as_str()).unwrap_err(),
-            RequestParseError::Phase(PhaseProbeError::InvalidDeclaration(_))
-        ));
-    }
-}
-
-#[test]
-fn missing_provision_containment_returns_containment_error() {
-    let json = r#"{
-        "version": "0.9.0-alpha",
-        "phase": "provision"
-    }"#;
-
-    assert!(matches!(
-        parse_request(json).unwrap_err(),
-        RequestParseError::Containment(ContainmentProbeError::InvalidDeclaration(_))
-    ));
-}
-
-#[test]
-fn unsupported_provision_containment_returns_containment_error() {
-    let json = r#"{
-        "version": "0.9.0-alpha",
-        "phase": "provision",
-        "containment": "somevalue"
-    }"#;
-
-    assert!(matches!(
-        parse_request(json).unwrap_err(),
-        RequestParseError::Containment(ContainmentProbeError::UnsupportedContainment(_))
-    ));
-}
-
-#[test]
-fn provision_phase_with_isolation_session_containment_selects_isolation_session_provision_request()
-{
-    let json = r#"{
-            "version": "0.9.0-alpha",
-            "phase": "provision",
-            "containment": "isolation_session",
-            "network": {"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}
-    }"#;
-
-    assert!(matches!(
-        parse_request(json).unwrap(),
-        Request::Provision(ProvisionRequest::IsolationSession(_))
-    ));
-}
-
-#[test]
-fn provision_phase_with_windows_sandbox_containment_selects_windows_sandbox_provision_request() {
-    let json = r#"{
-            "version": "0.9.0-alpha",
-            "phase": "provision",
-            "containment": "windows_sandbox"
-    }"#;
-
-    assert!(matches!(
-        parse_request(json).unwrap(),
-        Request::Provision(ProvisionRequest::WindowsSandbox(_))
-    ));
-}
-
-#[test]
-fn provision_phase_with_wslc_containment_selects_wslc_provision_request() {
-    let json = r#"{
-            "version": "0.9.0-alpha",
-            "phase": "provision",
-            "containment": "wslc"
-    }"#;
-
-    assert!(matches!(
-        parse_request(json).unwrap(),
-        Request::Provision(ProvisionRequest::Wslc(_))
-    ));
-}
-
-#[test]
-fn invalid_provision_phase_isolation_session_root_returns_invalid_request() {
-    let json = r#"{
-            "version": "0.9.0-alpha",
-            "phase": "provision",
-            "containment": "isolation_session"
-    }"#;
-
-    assert!(matches!(
-        parse_request(json).unwrap_err(),
-        RequestParseError::InvalidRequest {
-            contract: "IsolationSession provision",
-            ..
-        }
-    ));
-}
-
-#[test]
-fn deprovision_phase_selects_deprovision_request() {
-    let json = r#"{
-        "version": "0.9.0-alpha",
-        "phase": "deprovision",
-        "sandboxId": "test123456"
-    }"#;
-
-    assert!(matches!(
-        parse_request(json).unwrap(),
-        Request::Deprovision(_)
-    ));
-}
-
-#[test]
-fn invalid_deprovision_phase_root_returns_invalid_request() {
-    let json = r#"{
-        "version": "0.9.0-alpha",
-        "phase": "deprovision"
-    }"#;
-
-    assert!(matches!(
-        parse_request(json).unwrap_err(),
-        RequestParseError::InvalidRequest {
-            contract: "deprovision",
-            ..
-        }
-    ));
-}
-
-#[test]
-fn exec_phase_selects_exec_request() {
-    let json = r#"{
-        "version": "0.9.0-alpha",
-        "phase": "exec",
-        "sandboxId": "test123456",
-        "process": {"commandLine": "echo"}
-    }"#;
-
-    assert!(matches!(parse_request(json).unwrap(), Request::Exec(_)));
-}
-
-#[test]
-fn invalid_exec_phase_root_returns_invalid_request() {
-    let json = r#"{
-        "version": "0.9.0-alpha",
-        "phase": "exec",
-        "sandboxId": "test123456"
-    }"#;
-
-    assert!(matches!(
-        parse_request(json).unwrap_err(),
-        RequestParseError::InvalidRequest {
-            contract: "exec",
-            ..
-        }
-    ));
-}
-
-#[test]
-fn start_phase_selects_start_request() {
-    let json = r#"{
-        "version": "0.9.0-alpha",
-        "phase": "start",
-        "sandboxId": "test123456"
-    }"#;
-
-    assert!(matches!(parse_request(json).unwrap(), Request::Start(_)));
-}
-
-#[test]
-fn invalid_start_phase_root_returns_invalid_request() {
-    let json = r#"{
-        "version": "0.9.0-alpha",
-        "phase": "start"
-    }"#;
-
-    assert!(matches!(
-        parse_request(json).unwrap_err(),
-        RequestParseError::InvalidRequest {
-            contract: "start",
-            ..
-        }
-    ));
-}
-
-#[test]
-fn stop_phase_selects_stop_request() {
-    let json = r#"{
-        "version": "0.9.0-alpha",
-        "phase": "stop",
-        "sandboxId": "test123456"
-    }"#;
-
-    assert!(matches!(parse_request(json).unwrap(), Request::Stop(_)));
-}
-
-#[test]
-fn invalid_stop_phase_root_returns_invalid_request() {
-    let json = r#"{
-        "version": "0.9.0-alpha",
-        "phase": "stop"
-    }"#;
-
-    assert!(matches!(
-        parse_request(json).unwrap_err(),
-        RequestParseError::InvalidRequest {
-            contract: "stop",
-            ..
+            message: "experimental.isolation_session is accepted only by lifecycle provision",
         }
     ));
 }

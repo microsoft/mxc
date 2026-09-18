@@ -41,6 +41,11 @@ public static class MxcLifecycle
     public const string WslcContainment = "wslc";
 
     private const int ExperimentalOptIn = 1;
+    private const int ProvisionOperation = 0;
+    private const int StartOperation = 1;
+    private const int ExecOperation = 2;
+    private const int StopOperation = 3;
+    private const int DeprovisionOperation = 4;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -59,7 +64,11 @@ public static class MxcLifecycle
         StateAwareContainment containment,
         StateAwareProvisionOptions? options = null)
     {
-        var result = RunEnvelopePhase(BuildProvisionEnvelope(containment, options), dryRun: false)
+        var result = RunEnvelopePhase(
+                BuildProvisionEnvelope(containment, options),
+                ProvisionOperation,
+                sandboxId: null,
+                dryRun: false)
             ?? throw new MxcException(
                 ErrorCode.BackendError,
                 "provision response carried no result object");
@@ -90,7 +99,11 @@ public static class MxcLifecycle
         StateAwareContainment containment,
         StateAwareProvisionOptions? options = null)
     {
-        RunEnvelopePhase(BuildProvisionEnvelope(containment, options), dryRun: true);
+        RunEnvelopePhase(
+            BuildProvisionEnvelope(containment, options),
+            ProvisionOperation,
+            sandboxId: null,
+            dryRun: true);
     }
 
     internal static JsonObject BuildProvisionEnvelope(
@@ -99,9 +112,7 @@ public static class MxcLifecycle
     {
         ValidateProvisionOptions(containment, options);
         var backend = ContainmentKey(containment);
-        var envelope = NewEnvelope(
-            "provision",
-            ResolveVersion(containment, options?.Version));
+        var envelope = NewEnvelope(ResolveVersion(containment, options?.Version));
         envelope["containment"] = backend;
 
         switch (options)
@@ -111,7 +122,6 @@ public static class MxcLifecycle
                 SetOptionalBackendConfig(
                     envelope,
                     backend,
-                    "provision",
                     "appId",
                     isolation.AppId);
                 break;
@@ -123,13 +133,11 @@ public static class MxcLifecycle
                 SetOptionalBackendConfig(
                     envelope,
                     backend,
-                    "provision",
                     "image",
                     wslc.Image);
                 SetOptionalBackendConfig(
                     envelope,
                     backend,
-                    "provision",
                     "imageTarPath",
                     wslc.ImageTarPath);
                 break;
@@ -143,13 +151,13 @@ public static class MxcLifecycle
     /// <summary>Start a provisioned sandbox.</summary>
     public static void StartSandbox(SandboxId id, StateAwarePhaseOptions? options = null)
     {
-        RunEnvelopePhase(BuildStartEnvelope(id, options), dryRun: false);
+        RunEnvelopePhase(BuildStartEnvelope(id, options), StartOperation, id, dryRun: false);
     }
 
     /// <summary>Validate a start request without starting the sandbox.</summary>
     public static void DryRunStartSandbox(SandboxId id, StateAwarePhaseOptions? options = null)
     {
-        RunEnvelopePhase(BuildStartEnvelope(id, options), dryRun: true);
+        RunEnvelopePhase(BuildStartEnvelope(id, options), StartOperation, id, dryRun: true);
     }
 
     internal static JsonObject BuildStartEnvelope(
@@ -157,7 +165,7 @@ public static class MxcLifecycle
         StateAwarePhaseOptions? options = null)
     {
         ValidateNonExecOptions("start", options);
-        var envelope = BuildIdEnvelope("start", id, options?.Version);
+        var envelope = BuildIdEnvelope(id, options?.Version);
         ApplyTelemetry(envelope, options?.Telemetry, options?.Version);
         return envelope;
     }
@@ -175,15 +183,17 @@ public static class MxcLifecycle
         ArgumentNullException.ThrowIfNull(command);
         var requestJson = BuildExecEnvelope(id, command, options).ToJsonString();
         var requestBuf = ToNullTerminatedUtf8(requestJson);
+        var sandboxIdBuf = ToNullTerminatedUtf8(id.Value);
 
         unsafe
         {
             fixed (byte* requestPtr = requestBuf)
+            fixed (byte* sandboxIdPtr = sandboxIdBuf)
             {
                 NativeSandbox* handle = null;
                 MxcErrorDetail error = default;
                 var status = NativeMethods.mxc_state_aware_exec(
-                    requestPtr, ExperimentalOptIn, &handle, &error);
+                    requestPtr, sandboxIdPtr, ExperimentalOptIn, &handle, &error);
                 if (status != (int)ErrorCode.Success)
                 {
                     try
@@ -213,15 +223,17 @@ public static class MxcLifecycle
         ArgumentNullException.ThrowIfNull(command);
         var requestJson = BuildExecEnvelope(id, command, options).ToJsonString();
         var requestBuf = ToNullTerminatedUtf8(requestJson);
+        var sandboxIdBuf = ToNullTerminatedUtf8(id.Value);
 
         unsafe
         {
             fixed (byte* requestPtr = requestBuf)
+            fixed (byte* sandboxIdPtr = sandboxIdBuf)
             {
                 MxcExecOutcome outcome = default;
                 MxcErrorDetail error = default;
                 var status = NativeMethods.mxc_state_aware_exec_attached(
-                    requestPtr, ExperimentalOptIn, &outcome, &error);
+                    requestPtr, sandboxIdPtr, ExperimentalOptIn, &outcome, &error);
                 if (status != (int)ErrorCode.Success)
                 {
                     try
@@ -251,7 +263,7 @@ public static class MxcLifecycle
         StateAwareExecOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(command);
-        RunEnvelopePhase(BuildExecEnvelope(id, command, options), dryRun: true);
+        RunEnvelopePhase(BuildExecEnvelope(id, command, options), ExecOperation, id, dryRun: true);
     }
 
     internal static JsonObject BuildExecEnvelope(
@@ -266,7 +278,7 @@ public static class MxcLifecycle
         {
             version = InheritDefaultEnvironmentVersion;
         }
-        var envelope = BuildIdEnvelope("exec", id, version);
+        var envelope = BuildIdEnvelope(id, version);
         var process = new JsonObject { ["commandLine"] = command };
         if (options?.WorkingDirectory is { } cwd)
         {
@@ -377,13 +389,13 @@ public static class MxcLifecycle
     /// <summary>Stop a running sandbox.</summary>
     public static void StopSandbox(SandboxId id, StateAwarePhaseOptions? options = null)
     {
-        RunEnvelopePhase(BuildStopEnvelope(id, options), dryRun: false);
+        RunEnvelopePhase(BuildStopEnvelope(id, options), StopOperation, id, dryRun: false);
     }
 
     /// <summary>Validate a stop request without stopping the sandbox.</summary>
     public static void DryRunStopSandbox(SandboxId id, StateAwarePhaseOptions? options = null)
     {
-        RunEnvelopePhase(BuildStopEnvelope(id, options), dryRun: true);
+        RunEnvelopePhase(BuildStopEnvelope(id, options), StopOperation, id, dryRun: true);
     }
 
     internal static JsonObject BuildStopEnvelope(
@@ -391,7 +403,7 @@ public static class MxcLifecycle
         StateAwarePhaseOptions? options = null)
     {
         ValidateNonExecOptions("stop", options);
-        var envelope = BuildIdEnvelope("stop", id, options?.Version);
+        var envelope = BuildIdEnvelope(id, options?.Version);
         ApplyTelemetry(envelope, options?.Telemetry, options?.Version);
         return envelope;
     }
@@ -401,7 +413,11 @@ public static class MxcLifecycle
         SandboxId id,
         StateAwarePhaseOptions? options = null)
     {
-        RunEnvelopePhase(BuildDeprovisionEnvelope(id, options), dryRun: false);
+        RunEnvelopePhase(
+            BuildDeprovisionEnvelope(id, options),
+            DeprovisionOperation,
+            id,
+            dryRun: false);
     }
 
     /// <summary>Validate a deprovision request without destroying the sandbox.</summary>
@@ -409,7 +425,11 @@ public static class MxcLifecycle
         SandboxId id,
         StateAwarePhaseOptions? options = null)
     {
-        RunEnvelopePhase(BuildDeprovisionEnvelope(id, options), dryRun: true);
+        RunEnvelopePhase(
+            BuildDeprovisionEnvelope(id, options),
+            DeprovisionOperation,
+            id,
+            dryRun: true);
     }
 
     internal static JsonObject BuildDeprovisionEnvelope(
@@ -417,7 +437,7 @@ public static class MxcLifecycle
         StateAwarePhaseOptions? options = null)
     {
         ValidateNonExecOptions("deprovision", options);
-        var envelope = BuildIdEnvelope("deprovision", id, options?.Version);
+        var envelope = BuildIdEnvelope(id, options?.Version);
         ApplyTelemetry(envelope, options?.Telemetry, options?.Version);
         return envelope;
     }
@@ -442,23 +462,15 @@ public static class MxcLifecycle
         }
     }
 
-    private static JsonObject BuildIdEnvelope(
-        string phase,
-        SandboxId id,
-        string? version)
+    private static JsonObject BuildIdEnvelope(SandboxId id, string? version)
     {
         var containment = ContainmentForId(id);
-        var envelope = NewEnvelope(
-            phase,
-            ResolveVersion(containment, version));
-        envelope["sandboxId"] = id.Value;
-        return envelope;
+        return NewEnvelope(ResolveVersion(containment, version));
     }
 
-    private static JsonObject NewEnvelope(string phase, string version) => new()
+    private static JsonObject NewEnvelope(string version) => new()
     {
         ["version"] = version,
-        ["phase"] = phase,
     };
 
     // Stable, top-level telemetry request for this phase. Consent and
@@ -654,20 +666,18 @@ public static class MxcLifecycle
     private static void SetOptionalBackendConfig(
         JsonObject envelope,
         string backend,
-        string phase,
         string key,
         string? value)
     {
         if (value is not null)
         {
-            SetBackendConfig(envelope, backend, phase, key, value);
+            SetBackendConfig(envelope, backend, key, value);
         }
     }
 
     private static void SetBackendConfig(
         JsonObject envelope,
         string backend,
-        string phase,
         string key,
         JsonNode? value)
     {
@@ -681,25 +691,30 @@ public static class MxcLifecycle
             backendConfig = new JsonObject();
             experimental[backend] = backendConfig;
         }
-        if (backendConfig[phase] is not JsonObject phaseConfig)
-        {
-            phaseConfig = new JsonObject();
-            backendConfig[phase] = phaseConfig;
-        }
-        phaseConfig[key] = value;
+        backendConfig[key] = value;
     }
 
-    private static JsonObject? RunEnvelopePhase(JsonObject envelope, bool dryRun)
+    private static JsonObject? RunEnvelopePhase(
+        JsonObject envelope,
+        int operation,
+        SandboxId? sandboxId,
+        bool dryRun)
     {
         var requestBuf = ToNullTerminatedUtf8(envelope.ToJsonString());
+        var sandboxIdBuf = sandboxId is null
+            ? null
+            : ToNullTerminatedUtf8(sandboxId.Value.Value);
 
         unsafe
         {
             fixed (byte* requestPtr = requestBuf)
+            fixed (byte* sandboxIdPtr = sandboxIdBuf)
             {
                 MxcStateAwareResult result = default;
                 var status = NativeMethods.mxc_state_aware(
                     requestPtr,
+                    operation,
+                    sandboxIdPtr,
                     dryRun ? 1 : 0,
                     ExperimentalOptIn,
                     &result);

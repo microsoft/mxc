@@ -15,12 +15,20 @@ public readonly struct SandboxId : IEquatable<SandboxId>
     public string Value { get; }
 
     /// <summary>Wrap a raw identifier string (e.g. one persisted between calls).</summary>
-    /// <exception cref="ArgumentException"><paramref name="value"/> is null or empty.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="value"/> is null, empty, or contains an embedded NUL character.
+    /// </exception>
     public SandboxId(string value)
     {
         if (string.IsNullOrEmpty(value))
         {
             throw new ArgumentException("sandbox id must be a non-empty string", nameof(value));
+        }
+        if (value.Contains('\0'))
+        {
+            throw new ArgumentException(
+                "sandbox id must not contain embedded NUL characters",
+                nameof(value));
         }
         Value = value;
     }

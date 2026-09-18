@@ -56,10 +56,15 @@ fn state_aware_unknown_containment_emits_error_envelope_on_stdout() {
     // the wire-format error contract.
     let request = json!({
         "version": "0.9.0-alpha",
-        "containment": "totally_made_up",
-        "phase": "provision"
+        "containment": "totally_made_up"
     });
-    let result = run_wxc_state_aware("state-aware unknown containment", &request, &[]);
+    let result = run_wxc_state_aware(
+        "state-aware unknown containment",
+        "provision",
+        None,
+        &request,
+        &[],
+    );
     let code = assert_error_envelope_on_stdout(&result);
     // Parser-level rejection surfaces as malformed_request per the design's
     // wire-format error model.
@@ -83,10 +88,15 @@ fn state_aware_provision_rejects_a_non_state_aware_containment_structurally() {
     // state_aware_dispatch unit tests.
     let request = json!({
         "version": "0.9.0-alpha",
-        "containment": "processcontainer",
-        "phase": "provision"
+        "containment": "processcontainer"
     });
-    let result = run_wxc_state_aware("state-aware non-stateful backend", &request, &[]);
+    let result = run_wxc_state_aware(
+        "state-aware non-stateful backend",
+        "provision",
+        None,
+        &request,
+        &[],
+    );
     let code = assert_error_envelope_on_stdout(&result);
     assert_eq!(
         code, "malformed_request",
@@ -96,7 +106,7 @@ fn state_aware_provision_rejects_a_non_state_aware_containment_structurally() {
     assert!(
         result
             .stdout
-            .contains("Unsupported containment for provision phase"),
+            .contains("does not support lifecycle provision"),
         "expected the exact provision-containment diagnostic; stdout={:?}",
         result.stdout
     );

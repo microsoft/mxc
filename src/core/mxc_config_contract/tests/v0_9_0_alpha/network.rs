@@ -8,27 +8,7 @@ fn every_removed_property_is_rejected_from_every_request_root() {
     use mxc_config_contract::dev::parse_request;
     use serde_json::{json, Map, Value};
 
-    let roots = [
-        json!({"process": {"commandLine": "echo"}}),
-        json!({
-            "phase": "exec",
-            "sandboxId": "wslc:id",
-            "process": {"commandLine": "echo"}
-        }),
-        json!({"phase": "provision", "containment": "wslc"}),
-        json!({"phase": "provision", "containment": "windows_sandbox"}),
-        json!({
-            "phase": "provision",
-            "containment": "isolation_session",
-            "network": {
-                "egress": {"default": "allow"},
-                "ingress": {"default": "allow", "hostLoopback": "allow"}
-            }
-        }),
-        json!({"phase": "start", "sandboxId": "iso:id"}),
-        json!({"phase": "stop", "sandboxId": "iso:id"}),
-        json!({"phase": "deprovision", "sandboxId": "iso:id"}),
-    ];
+    let roots = [json!({"process": {"commandLine": "echo"}})];
     for mut valid in roots {
         valid
             .as_object_mut()
@@ -71,13 +51,13 @@ fn exec_runtime_proxy_is_a_closed_optional_string_surface() {
         r#"{"networkProxy":"first","networkProxy":"second"}"#,
     ] {
         let source = format!(
-            r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wslc:id","process":{{"commandLine":"echo"}},"runtimeConfig":{runtime}}}"#
+            r#"{{"version":"0.9.0-alpha","process":{{"commandLine":"echo"}},"runtimeConfig":{runtime}}}"#
         );
         assert!(parse_request(&source).is_err(), "{source}");
     }
     for runtime in [r#"{}"#, r#"{"networkProxy":"http://proxy.example:8080"}"#] {
         let source = format!(
-            r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wslc:id","process":{{"commandLine":"echo"}},"runtimeConfig":{runtime}}}"#
+            r#"{{"version":"0.9.0-alpha","process":{{"commandLine":"echo"}},"runtimeConfig":{runtime}}}"#
         );
         assert!(parse_request(&source).is_ok(), "{source}");
     }
