@@ -1,21 +1,21 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::config_contract_adapters::dev::{adapt_request, AdaptedWireRequest};
+use crate::config_contract_adapters::dev::{adapt_request, AdaptedConfigRequest};
+use crate::state_aware_input::StateAwareInput;
 use crate::state_aware_operation::StateAwareOperation;
-use crate::state_aware_wire::StateAwareInput;
 use crate::wire;
 use mxc_config_contract::dev as contract;
 
-pub(super) fn adapt(source: &str) -> (wire::MxcConfig, StateAwareOperation) {
-    let AdaptedWireRequest::StateAware(input) =
+pub(super) fn adapt(source: &str) -> (crate::config_input::ConfigInput, StateAwareOperation) {
+    let AdaptedConfigRequest::StateAware(input) =
         adapt_request(contract::parse_request(source).unwrap()).unwrap()
     else {
         panic!("expected state-aware request");
     };
     input.into_parts()
 }
-pub(super) fn assert_clean_common(common: &wire::MxcConfig) {
+pub(super) fn assert_clean_common(common: &crate::config_input::ConfigInput) {
     assert!(common.phase.is_none());
     assert!(common.sandbox_id.is_none());
     assert!(common.containment.is_none());
@@ -32,18 +32,34 @@ pub(super) fn assert_clean_common(common: &wire::MxcConfig) {
 #[test]
 fn controlled_input_rejects_every_routing_and_one_shot_field() {
     for field in [
-        r#""phase":"start""#,
-        r#""sandboxId":"""#,
-        r#""containment":"wslc""#,
-        r#""experimental":{}"#,
-        r#""containerId":"container""#,
-        r#""fallback":{}"#,
-        r#""seatbelt":{}"#,
-        r#""processContainer":{}"#,
-        r#""lxc":{}"#,
-        r#""lifecycle":{}"#,
+        "phase",
+        "sandboxId",
+        "containment",
+        "experimental",
+        "containerId",
+        "fallback",
+        "seatbelt",
+        "processContainer",
+        "lxc",
+        "lifecycle",
     ] {
-        let common = serde_json::from_str(&format!("{{{field}}}")).unwrap();
+        let (mut common, _) =
+            adapt(r#"{"version":"0.10.0-alpha","phase":"start","sandboxId":"iso:example"}"#);
+        match field {
+            "phase" => common.phase = Some(wire::Phase::Start),
+            "sandboxId" => common.sandbox_id = Some(String::new()),
+            "containment" => common.containment = Some(wire::Containment::Wslc),
+            "experimental" => common.experimental = Some(serde_json::from_str("{}").unwrap()),
+            "containerId" => common.container_id = Some("container".to_string()),
+            "fallback" => common.fallback = Some(serde_json::from_str("{}").unwrap()),
+            "seatbelt" => common.seatbelt = Some(serde_json::from_str("{}").unwrap()),
+            "processContainer" => {
+                common.process_container = Some(serde_json::from_str("{}").unwrap())
+            }
+            "lxc" => common.lxc = Some(serde_json::from_str("{}").unwrap()),
+            "lifecycle" => common.lifecycle = Some(serde_json::from_str("{}").unwrap()),
+            _ => unreachable!(),
+        }
         assert!(
             StateAwareInput::new(
                 common,
@@ -82,7 +98,10 @@ pub(super) fn assert_no_config_phase(phase: &str) {
             assert!(common.process.is_none());
             assert!(common.filesystem.is_none());
             assert!(common.network.is_none());
-            assert_eq!(common.version.as_deref(), Some("0.10.0-alpha"));
+            assert_eq!(
+                common.source_contract,
+                mxc_config_contract::ContractVersion::V0_10_0Alpha
+            );
             if fields.contains("$schema") {
                 assert_eq!(common.schema.as_deref(), Some("https://example.com/schema"));
                 assert_eq!(common.comment, Some(serde_json::json!("comment")));

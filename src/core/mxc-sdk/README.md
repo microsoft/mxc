@@ -39,8 +39,8 @@ Ok(())
 [Live stdio + kill](#live-stdio--kill-streaming) below).
 
 [`build_request`] resolves the host's default containment backend (see
-[Supported backends](#supported-backends)), builds the rolling wire config, and
-runs it through the shared production parser. The command is supplied to
+[Supported backends](#supported-backends)), constructs the selected exact
+contract, and adapts it through the shared normalization path. The command is supplied to
 [`build_request`], so the returned [`SandboxRequest`] is complete; optionally
 adjust its working directory or environment before spawning.
 

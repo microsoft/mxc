@@ -54,6 +54,7 @@ fn non_empty_port(value: u16, field: &str) -> Result<NonZeroU16, MxcError> {
 fn validate_common(
     policy: &SandboxPolicy,
     containment: &Containment,
+    version: ContractVersion,
 ) -> Result<NetworkFormat, MxcError> {
     let has_process_container_network = match containment {
         Containment::ProcessContainer(process_container) => process_container
@@ -64,7 +65,7 @@ fn validate_common(
         _ => false,
     };
     let network_format = select_network_format(
-        &policy.version,
+        version,
         policy.network.as_ref(),
         has_process_container_network,
     )?;
@@ -211,7 +212,7 @@ pub(super) fn build_request(
         containment,
         script,
         container_id: container_id(container_name),
-        network_format: validate_common(policy, containment)?,
+        network_format: validate_common(policy, containment, version)?,
     };
     let contract = match version {
         ContractVersion::V0_6_0Alpha => {
@@ -231,9 +232,11 @@ pub(super) fn build_request(
         }
     };
     let mut logger = Logger::new(Mode::Buffer);
-    let inner = load_one_shot_request_from_contract(contract, &mut logger).map_err(|error| {
-        MxcError::malformed_request(format!("failed to build request: {error}"))
-    })?;
+    let mut inner =
+        load_one_shot_request_from_contract(contract, &mut logger).map_err(|error| {
+            MxcError::malformed_request(format!("failed to build request: {error}"))
+        })?;
+    inner.source_contract = None;
     Ok(SandboxRequest {
         inner,
         requested_sandbox_kind: containment.telemetry_kind(),

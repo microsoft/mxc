@@ -3,13 +3,8 @@
 
 //! TypeScript emitter for the SDK wire types.
 //!
-//! Walks the generated JSON Schema as a `serde_json::Value` — built from the
-//! `MxcConfig` wire model, the same value that
-//! [`crate::render_root_ordered`] renders to JSON text — and emits
-//! the SDK's wire TypeScript types, with no third-party generator.
-//! The result is `sdk/node/src/generated/wire.ts`, a drift oracle that the SDK's
-//! hand-written public types are asserted to conform to (and that a CI gate
-//! regenerates + diffs).
+//! Walks an exact contract's generated JSON Schema as a `serde_json::Value` and
+//! emits the SDK's versioned TypeScript oracle with no third-party generator.
 //!
 //! Only the JSON Schema constructs the MXC schema actually uses are handled:
 //! enums (`oneOf` of single-value `enum`s, or a direct `enum` array), closed and
@@ -20,24 +15,14 @@
 
 use serde_json::Value;
 
-const LEGACY_BANNER: &str = "\
+#[cfg(test)]
+const TEST_BANNER: &str = "\
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
 /* eslint-disable */
 /**
- * GENERATED FILE — DO NOT EDIT BY HAND.
- *
- * Emitted from the generated JSON Schema (itself generated from the Rust wire
- * model `wxc_common::wire`) by the `mxc_schema_gen types --legacy-wire`
- * TypeScript emitter (`mxc_schema_support`). This is a drift oracle, not public
- * API: it is never
- * exported from the SDK. The conformance test asserts the hand-written public
- * types in `../types.ts` still match these. CI gate:
- * `scripts/versioning/check-sdk-types-codegen.js`.
- *
- * Regenerate with:
- *   cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- types --legacy-wire --out sdk/node/src/generated/wire.ts
+ * GENERATED TEST OUTPUT.
  */
 ";
 
@@ -46,8 +31,9 @@ const LEGACY_BANNER: &str = "\
 const ROOT_NAME: &str = "MXCConfiguration";
 
 /// Emit the full `wire.ts` content for the given schema root value.
+#[cfg(test)]
 pub(crate) fn emit_ts(schema: &Value) -> String {
-    emit_ts_with_banner(schema, LEGACY_BANNER)
+    emit_ts_with_banner(schema, TEST_BANNER)
 }
 
 pub(crate) fn emit_contract_ts(schema: &Value, version: &str) -> String {

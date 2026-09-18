@@ -486,13 +486,16 @@ fn run_state_aware_main(
         wxc_common::telemetry::log_policy_hash(
             &identity,
             &policy_hash,
-            &parsed.request().schema_version,
+            parsed.request().source_contract_version(),
         );
         if diagnostics_active {
             let record = AuditEvent::new(AuditEventName::PolicyHash)
                 .str("backend", backend)
                 .str("policy_hash", &policy_hash)
-                .str("config_schema_version", &parsed.request().schema_version);
+                .str(
+                    "config_schema_version",
+                    parsed.request().source_contract_version(),
+                );
             logger.log_audit_event(&record);
         }
     }

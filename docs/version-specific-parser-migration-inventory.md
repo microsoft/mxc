@@ -33,16 +33,13 @@ Three versionless files under `tests/policy` are intentionally absent from this 
 
 ## Post-migration disposition
 
-After exact-contract dispatch became authoritative, version migration removed
-118 of the 125 recorded divergences. The remaining seven now characterize only
-the test-scoped rolling parser; authoritative public loading rejects every
-document through its exact contract:
+Exact-contract dispatch resolves every recorded migration case through its
+registered contract. Seven negative documents remain in the corpus because
+they protect exact structural or backend-policy rejection:
 
 - `isolation_session_configid_rejected.json` and
-  `isolation_session_one_shot_stray_config_rejected.json` retain the rolling
-  parser's historical parse-and-ignore behavior as a differential
-  characterization. The public one-shot surface now expects structural
-  rejection from the closed 0.9 contract.
+  `isolation_session_one_shot_stray_config_rejected.json` protect structural
+  rejection from the closed v0.9 contract.
 - Four IsolationSession provision rejection fixtures carry filesystem, UI, or
   a non-canonical network posture. Their E2E assertions now expect
   `malformed_request` from the request-specific 0.9 root. Direct
@@ -52,37 +49,28 @@ document through its exact contract:
   from the 0.9 exec root, while `wslc_common::policy` retains direct backend
   validation coverage.
 
-The differential harness records seven exact-stricter results so later contract
-changes cannot accidentally weaken the exact boundary. It also compares every
-corpus document through the public loader and the exact parser oracle. After
-the development-contract cutover moved three formerly convergent documents
-into the explicit removal inventory, the retained rolling characterization now
-converges across Windows and Linux at 331 equivalent accepts and 14 shared
-rejections. The accept count dropped by one when the 0.9 removal of
-`seatbelt.launchMethod` retired `tests/examples/27_mac_terminal_sandboxed.json`,
-the only corpus document that exercised `launchMethod: "open"`, and rose by two
-when the Seatbelt directional-ingress fixtures
+Exact fixture tests and repository config validation protect these cases
+without a second whole-request parser or divergence classification. The v0.9
+removal of `seatbelt.launchMethod` also retired
+`tests/examples/27_mac_terminal_sandboxed.json`, the only corpus document that
+used `launchMethod: "open"`. The Seatbelt directional-ingress fixtures
 `seatbelt_net_egress_deny_ingress_allow.json` and
-`seatbelt_net_ingress_allow_loopback_deny.json` joined the corpus. Both parsers
-accept each of those two and build identical runtime models, so they add no
-shared rejection. Both retain no
-exact-looser acceptance and no accepted-model mismatch. Assertion failures list
-the shared-rejection files so future platform-specific movement is attributable
-rather than represented only by aggregate counts.
+`seatbelt_net_ingress_allow_loopback_deny.json` subsequently joined the corpus
+as ordinary exact-contract acceptance cases.
 
 ## Validation
 
 The full-suite validation below ran on 2026-09-04 after exact dispatch became
-authoritative. The config-corpus count was refreshed on 2026-09-11 after the
-producer-migration rebase:
+authoritative. The config-corpus count was refreshed on 2026-09-16 after the
+Seatbelt contract rebase:
 
 - Rust formatting, workspace check, and workspace clippy completed without
   warnings.
 - The Rust workspace passed 4,148 tests with 23 ignored.
 - The Node SDK passed its build and 304 tests, with 19 skipped.
 - The .NET SDK passed 118 tests, with 24 skipped.
-- The config validator examined 349 documents: 341 validated successfully and
-  eight were confirmed as intentionally invalid exemptions.
+- The config validator examined 348 documents: 334 validated successfully and
+  14 were confirmed as intentionally invalid exemptions.
 - Schema-version, exact-contract codegen, SDK wire-type codegen, and package
   version-sync gates passed.
 - The seven residual fixtures at that checkpoint were exercised through the rebuilt
@@ -92,11 +80,10 @@ producer-migration rebase:
 ## Typed-payload acceptance
 
 The typed-payload migration replaces production raw state-aware payloads with
-typed operations and checked backend binding. The
-independent rolling request/extraction reference remains test-only; its
-accepted-value comparisons, explicit presence expectations, and classified
-exact-stricter rejections are retained. No registered contract, corpus request,
-or generated artifact changes as part of the typed-payload migration.
+typed operations and checked backend binding. Exact fixture tests retain
+accepted-value comparisons, explicit presence expectations, and structural
+rejections. No registered contract, corpus request, or generated artifact
+changes as part of the typed-payload migration.
 
 Local implementation evidence:
 
@@ -111,7 +98,7 @@ Local implementation evidence:
 | Windows `isolation_session,wslc` | Engine 24, FFI 18, Rust SDK 12 passed |
 | Backend state-aware unit tests | IsolationSession 31, Windows Sandbox 52, WSLC 30 passed, including backend-owned defaulting and piped-exec refusals |
 | Format and lint | `cargo fmt --all -- --check`; affected packages' `cargo clippy --all-targets -- -D warnings` passed in all four separate Windows configurations and for all three backend crates |
-| Artifacts | `check-contract-codegen.js`, `check-schema-codegen.js`, and `check-sdk-types-codegen.js` passed unchanged |
+| Artifacts | Exact contract codegen and fixture validation passed unchanged |
 | Linux/macOS default | Common, engine, Rust SDK, and FFI cross-compiled with `--all-targets` for `x86_64-unknown-linux-gnu` and `x86_64-apple-darwin`; only the pre-existing telemetry-consent dead-code warnings also observed before cutover remain |
 
 The engine/FFI commands select `--lib state_aware`; the Rust SDK command selects
@@ -160,7 +147,7 @@ Local evidence for the public integration:
 | C# lifecycle/native-boundary tests | 51 passed in each of the four Windows feature configurations |
 | Native CLI | Dry runs covered one-shot/provision legacy and directional forms plus missing/empty/restrictive cases; no sandbox was created |
 | Generated schema | Twenty-six new-form acceptance/rejection cases passed through the existing AJV validator |
-| Artifacts/corpus | Exact/rolling/SDK codegen and schema-version gates passed; schema validation covered 349 configs, and the differential corpus covered 354 documents |
+| Artifacts/corpus | Exact contract and SDK codegen plus schema-version gates passed; schema validation covered 348 configs |
 | Linux/macOS | Default cross-target checks passed, with existing telemetry-consent warnings; native tests were not executed locally |
 
 The native CI build jobs now explicitly select the common/contract and
@@ -217,11 +204,9 @@ omissions:
   does not accept exec-only `runtimeConfig`; it is not a valid provision
   template.
 
-The retained rolling model remains a test/reference and compatibility
-representation, not an alternate production parser. Native Unix execution and
-live lifecycle/enforcement evidence are distinct from local compile, unit,
-schema, and dry-run results; unsupported hosts and skipped cases must not be
-reported as successful E2E runs.
+Native Unix execution and live lifecycle/enforcement evidence are distinct
+from local compile, unit, schema, and dry-run results; unsupported hosts and
+skipped cases must not be reported as successful E2E runs.
 
 ### Cutover verification
 
@@ -239,7 +224,7 @@ fixes, with actual exit codes retained for each command:
 | Node SDK | Build and integration type-check passed; 343 unit tests passed, 19 skipped |
 | Managed SDK | 64 lifecycle and 81 sandbox tests passed in each of the four native-feature configurations |
 | Versioning logic | 70 tests passed through the existing CI `npm test` command, including the recursive cutover guard |
-| Generated artifacts / corpus | Exact, rolling, SDK-type, version and corpus gates passed; 277 raw configs validated with 11 explicit negatives |
+| Generated artifacts / corpus | Exact contract, SDK-type, version and corpus gates passed; 277 raw configs validated with 11 explicit negatives |
 | Native CLI boundaries | 23 contract/WSLC/IsolationSession dry runs and eight NanVix posture dry runs passed without lifecycle execution |
 | Cross-target checks | Linux/macOS checks passed; native Unix tests and live backend runs were not performed |
 
