@@ -92,6 +92,25 @@ Any combination that lxc-create supports.
 If `process.env` has a value, `lxc-attach` is run with `--clear-env` so host
 environment variables do not leak into the container.
 
+### Default environment (schema 0.9+)
+
+By default, the backend supplies `PATH`
+(`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`), `HOME` (the
+directory the child is started in, else `/tmp`), and `TERM`
+(`xterm-256color`).
+
+| `process.env` | `inheritDefaultEnv` | Result |
+|---------------|---------------------|--------|
+| omitted | — | the default block |
+| `[]` | — | nothing | 
+| `["FOO=bar"]` | `false` (default) | `FOO` only |
+| `["FOO=bar"]` | `true` | the default block plus `FOO`; a same-named entry wins |
+
+Below 0.9 only `process.env` is passed through and `inheritDefaultEnv` is
+rejected.
+
+Since liblxc always supplies a baseline `PATH` when one is omitted - there is no way to get a truly empty environment when setting `process.env`. Shells like bash also have a fallback `PATH`. Setting a non-empty `PATH` in `process.env` will overwrite liblxc's baseline. 
+
 ## Network Policy
 
 A legacy deny-default policy that names `allowedHosts` opens port 53

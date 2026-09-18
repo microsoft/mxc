@@ -182,6 +182,35 @@ bypass kernel DAC.
 Bubblewrap uses the shared cross-backend configuration fields. No
 backend-specific config block is needed.
 
+### Process environment
+
+The host environment is never inherited — the sandbox is built with
+`--clearenv`, so host secrets can't leak into untrusted code.
+
+**From schema 0.9** the child gets a default block of `PATH`
+(`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`), `HOME` (the
+directory the child is started in — `process.cwd`, else `/tmp`), and `TERM`
+(`xterm-256color`):
+
+| `process.env` | `inheritDefaultEnv` | Result |
+| --- | --- | --- |
+| omitted | — | the default block |
+| `[]` | — | nothing at all |
+| `["FOO=bar"]` | `false` (default) | `FOO` only — **no `PATH`** |
+| `["FOO=bar"]` | `true` | the default block plus `FOO`; a same-named entry wins |
+
+The table is the environment MXC hands the child. Bubblewrap runs the workload
+under the host's `/bin/sh`, and a shell started without these assigns its own:
+dash (Debian, Ubuntu) fabricates a `PATH` that happens to equal the default
+block's value, while bash (RHEL) fabricates a shorter `/usr/local/bin:/usr/bin`
+plus `TERM=dumb`. So neither reads back as empty from inside the workload,
+whatever MXC passed.
+
+**Before 0.9** the child got only what `process.env` supplied — with no `PATH`,
+command resolution fell through to the shell's compiled-in default, which
+matches the value above on Debian and Ubuntu but omits the `sbin` directories
+on RHEL. `inheritDefaultEnv` is rejected below 0.9.
+
 ### Filesystem Policy
 
 | Field | bwrap Mapping | Description |

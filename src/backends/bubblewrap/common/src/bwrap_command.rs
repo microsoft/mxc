@@ -559,6 +559,90 @@ pub(crate) fn local_network_diagnostic_for_mode(
     }
 }
 
+/// `PATH` for the sandboxed child, from schema 0.9.
+///
+/// `--clearenv` leaves the child with no `PATH`, so resolution fell through to
+/// the shell's compiled-in default. That value varies: it matches this one on
+/// Debian and Ubuntu, so nothing changes there, but on RHEL it omitted the
+/// `sbin` directories. Setting it explicitly removes the dependency.
+const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/// `HOME` when the request resolves no working directory. `build_args` always
+/// mounts a fresh tmpfs at `/tmp`, so this is always writable.
+const FALLBACK_HOME: &str = "/tmp";
+
+/// `TERM` for the sandboxed child. Curses-based tools error out when it is
+/// unset; it does not make a tool believe it has a terminal, which is `isatty`.
+const DEFAULT_TERM: &str = "xterm-256color";
+
+/// Whether this schema version supplies a default environment.
+fn supports_default_env(version: &str) -> bool {
+    semver::Version::parse(version).is_ok_and(|v| v.major > 0 || v.minor >= 9)
+}
+
+/// The directory the child is actually started in, if any.
+///
+/// [`build_args_classified_with_mode`] emits `--chdir` for exactly this value
+/// and [`default_env`] points `HOME` at it, so the two cannot name different
+/// directories. A policy grant is deliberately *not* consulted: bwrap enters
+/// one only when `process.cwd` names it, so treating it as the start directory
+/// would put `HOME` somewhere the child never went.
+fn start_directory(request: &ExecutionRequest) -> Option<&str> {
+    Some(request.working_directory.as_str()).filter(|dir| !dir.is_empty())
+}
+
+/// The default environment: `PATH`, `HOME`, and `TERM`.
+///
+/// `HOME` names the directory the child actually runs in, so it is a path the
+/// sandbox can reach rather than the launching user's real home, which the
+/// bind-mount policy would not have made visible. With no start directory it
+/// is [`FALLBACK_HOME`], which `build_args` always mounts as a fresh tmpfs.
+fn default_env(request: &ExecutionRequest) -> Vec<(String, String)> {
+    let home = start_directory(request)
+        .unwrap_or(FALLBACK_HOME)
+        .to_string();
+
+    vec![
+        ("PATH".to_string(), DEFAULT_PATH.to_string()),
+        ("HOME".to_string(), home),
+        ("TERM".to_string(), DEFAULT_TERM.to_string()),
+    ]
+}
+
+/// The entries the child should get, as `KEY=VALUE` strings.
+///
+/// From schema 0.9 the four states of `process.env` stay distinct: omitted
+/// takes the default, `[]` is empty, a supplied environment is used verbatim,
+/// and `inheritDefaultEnv` layers a supplied environment over the default.
+/// Below 0.9 the caller's entries are passed through untouched.
+fn resolved_env(request: &ExecutionRequest) -> Vec<String> {
+    if !supports_default_env(&request.schema_version) {
+        return request.env_entries().to_vec();
+    }
+
+    let entries = match (&request.env, request.inherit_default_env) {
+        (None, _) => default_env(request),
+        (Some(supplied), false) => return supplied.clone(),
+        (Some(supplied), true) => {
+            let mut entries = default_env(request);
+            // A caller entry replaces the same-named default rather than
+            // being appended: `--setenv` would otherwise be passed twice.
+            for (key, value) in supplied.iter().filter_map(|kv| kv.split_once('=')) {
+                match entries.iter_mut().find(|(name, _)| name == key) {
+                    Some(slot) => *slot = (key.to_string(), value.to_string()),
+                    None => entries.push((key.to_string(), value.to_string())),
+                }
+            }
+            entries
+        }
+    };
+
+    entries
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect()
+}
+
 /// Build the complete `bwrap` argument list, masking **every** denied path as a
 /// directory (`--tmpfs`).
 ///
@@ -692,15 +776,15 @@ pub(crate) fn build_args_classified_with_mode(
     }
 
     // -- Working directory -------------------------------------------------
-    if !request.working_directory.is_empty() {
-        args.extend(["--chdir".into(), request.working_directory.clone()]);
+    if let Some(dir) = start_directory(request) {
+        args.extend(["--chdir".into(), dir.to_string()]);
     }
 
     // -- Environment -------------------------------------------------------
     // Clear the inherited environment, then set only the vars from the
     // request so the sandbox has a minimal, predictable environment.
     args.push("--clearenv".into());
-    for env_str in request.env_entries() {
+    for env_str in resolved_env(request) {
         if let Some((key, value)) = env_str.split_once('=') {
             // When the proxy is active, drop any caller-supplied proxy env
             // entries so they cannot override the values we set below.
@@ -745,6 +829,160 @@ mod tests {
             script_code: "echo hello".into(),
             working_directory: "/home/user".into(),
             ..Default::default()
+        }
+    }
+
+    /// `process.env` resolution, which schema 0.9 gave a default block.
+    mod env {
+        use super::*;
+
+        fn request(version: &str) -> ExecutionRequest {
+            ExecutionRequest {
+                schema_version: version.into(),
+                ..Default::default()
+            }
+        }
+
+        fn value<'a>(entries: &'a [String], key: &str) -> Option<&'a str> {
+            entries
+                .iter()
+                .find_map(|kv| kv.strip_prefix(&format!("{key}=")))
+        }
+
+        #[test]
+        fn below_0_9_nothing_is_supplied() {
+            // The pre-0.9 behavior this backend shipped: --clearenv and no
+            // PATH, so command resolution fell through to the shell default.
+            for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha", "bogus"] {
+                let mut r = request(version);
+                r.env = None;
+                assert!(
+                    resolved_env(&r).is_empty(),
+                    "{version} must not gain a default environment"
+                );
+            }
+        }
+
+        #[test]
+        fn an_omitted_env_gets_the_default_block() {
+            let mut r = request("0.9.0-alpha");
+            r.env = None;
+            let entries = resolved_env(&r);
+            assert_eq!(value(&entries, "PATH"), Some(DEFAULT_PATH));
+            assert_eq!(value(&entries, "HOME"), Some(FALLBACK_HOME));
+            assert_eq!(value(&entries, "TERM"), Some(DEFAULT_TERM));
+        }
+
+        #[test]
+        fn the_default_path_covers_sbin() {
+            // The RHEL failure this default exists to prevent.
+            for dir in ["/usr/sbin", "/sbin", "/usr/bin", "/bin"] {
+                assert!(
+                    DEFAULT_PATH.split(':').any(|entry| entry == dir),
+                    "{dir} must be on the default PATH"
+                );
+            }
+        }
+
+        #[test]
+        fn an_explicitly_empty_env_stays_empty() {
+            let mut r = request("0.9.0-alpha");
+            r.env = Some(vec![]);
+            assert!(resolved_env(&r).is_empty());
+        }
+
+        #[test]
+        fn a_supplied_env_is_used_verbatim() {
+            let mut r = request("0.9.0-alpha");
+            r.env = Some(vec!["FOO=bar".into()]);
+            assert_eq!(resolved_env(&r), vec!["FOO=bar".to_string()]);
+        }
+
+        #[test]
+        fn inherit_default_env_layers_over_the_default_block() {
+            let mut r = request("0.9.0-alpha");
+            r.env = Some(vec!["FOO=bar".into(), "PATH=/only/mine".into()]);
+            r.inherit_default_env = true;
+            let entries = resolved_env(&r);
+
+            assert_eq!(value(&entries, "FOO"), Some("bar"));
+            assert_eq!(value(&entries, "TERM"), Some(DEFAULT_TERM));
+            // Replaced, not appended: --setenv twice for one name is
+            // order-dependent.
+            assert_eq!(value(&entries, "PATH"), Some("/only/mine"));
+            assert_eq!(
+                entries.iter().filter(|kv| kv.starts_with("PATH=")).count(),
+                1
+            );
+        }
+
+        #[test]
+        fn home_follows_the_directory_the_child_starts_in() {
+            let mut r = request("0.9.0-alpha");
+            r.env = None;
+            r.working_directory = "/workspace".into();
+            assert_eq!(value(&resolved_env(&r), "HOME"), Some("/workspace"));
+        }
+
+        /// A policy grant is not a working directory: bwrap emits `--chdir`
+        /// only for `process.cwd`, so a granted directory the child never
+        /// enters must not become its `HOME`.
+        #[test]
+        fn a_policy_grant_alone_does_not_become_home() {
+            let mut r = request("0.9.0-alpha");
+            r.env = None;
+            r.working_directory = String::new();
+            // A real directory, so the shared resolver's `is_dir` probe would
+            // accept it if `HOME` consulted the policy.
+            r.policy.readwrite_paths = vec![std::env::temp_dir().display().to_string()];
+
+            assert_eq!(value(&resolved_env(&r), "HOME"), Some(FALLBACK_HOME));
+            let args = build_args(&r, None);
+            assert!(
+                !args.iter().any(|a| a == "--chdir"),
+                "a policy grant must not chdir the child: {args:?}"
+            );
+        }
+
+        /// `HOME` and `--chdir` come from one resolution, so they cannot name
+        /// different directories.
+        #[test]
+        fn home_and_chdir_agree() {
+            for cwd in ["", "/workspace"] {
+                let mut r = request("0.9.0-alpha");
+                r.env = None;
+                r.working_directory = cwd.into();
+                let args = build_args(&r, None);
+
+                let chdir = args
+                    .windows(2)
+                    .find(|w| w[0] == "--chdir")
+                    .map(|w| w[1].clone());
+                let home = value(&resolved_env(&r), "HOME").map(str::to_string);
+                assert_eq!(
+                    home,
+                    Some(chdir.unwrap_or_else(|| FALLBACK_HOME.to_string())),
+                    "HOME must name the directory the child starts in (cwd {cwd:?})"
+                );
+            }
+        }
+
+        #[test]
+        fn the_default_block_reaches_the_argument_list() {
+            let mut r = base_request();
+            r.schema_version = "0.9.0-alpha".into();
+            r.env = None;
+            let args = build_args(&r, None);
+
+            let pos = args
+                .windows(3)
+                .position(|w| w[0] == "--setenv" && w[1] == "PATH" && w[2] == DEFAULT_PATH);
+            assert!(pos.is_some(), "PATH must be set via --setenv: {args:?}");
+            let clearenv = args.iter().position(|a| a == "--clearenv").unwrap();
+            assert!(
+                pos.unwrap() > clearenv,
+                "--setenv must follow --clearenv, else it is wiped"
+            );
         }
     }
 
