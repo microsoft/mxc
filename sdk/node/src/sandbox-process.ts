@@ -166,8 +166,7 @@ class WritePipe extends Writable {
 }
 
 /**
- * Streaming pipe-based sandbox process returned by `spawnSandbox()` and
- * `spawnSandboxFromConfig()`.
+ * Internal stream facade over the native `mxc_ffi` streaming handles.
  *
  * If you take `standardOutput` or `standardError`, keep draining them while the
  * sandbox runs. Untaken output streams are drained internally during
@@ -460,6 +459,9 @@ export class MxcSandboxProcess {
 
   private ensureHandleAvailable(stream: string): void {
     this.ensureNotDisposed();
+    if (this.finalizing) {
+      throw new Error(`sandbox ${stream} is unavailable while terminal completion is finalizing`);
+    }
     if (this.handleFreed) {
       throw new Error(`sandbox ${stream} is unavailable after terminal completion`);
     }

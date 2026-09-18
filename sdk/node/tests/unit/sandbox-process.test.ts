@@ -294,6 +294,19 @@ describe('native streaming process', () => {
     assert.strictEqual(binding.freed, true);
   });
 
+  it('rejects native handle operations while terminal completion is finalizing', async () => {
+    const binding = new DeferredWaitBinding(23, 0);
+    const proc = _createMxcSandboxProcess(binding);
+    const wait = proc.waitAsync();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.throws(() => proc.standardInput, /terminal completion is finalizing/);
+    assert.throws(() => proc.kill(), /terminal completion is finalizing/);
+
+    binding.releaseWait();
+    assert.deepStrictEqual(await wait, { exitCode: 7, timedOut: false });
+  });
+
   it('enforces the policy timeout by killing before the final wait', async () => {
     const binding = new FakeBinding(3, Number.MAX_SAFE_INTEGER, { exitCode: -1, timedOut: false });
     const proc = _createMxcSandboxProcess(binding, 0.001);
