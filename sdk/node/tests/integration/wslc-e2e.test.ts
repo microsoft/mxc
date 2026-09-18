@@ -245,4 +245,45 @@ srv.handle_request()
       `expected SDK-limitation message mentioning UDP; output=${combined}`,
     );
   });
+
+  it('should reject a cwd that does not map into the container', { timeout: 60_000 }, async () => {
+    // A UNC path is absolute on Windows, so it clears the shared schema-0.9
+    // check and is refused by WSLc itself: one-shot reads `process.cwd` as a
+    // host path it maps into the container, and a UNC path has no such
+    // equivalent. That refusal is not version-gated, so it must reach the SDK
+    // with the same `policy_validation` classification.
+    const policy = {
+      version: '0.9.0-alpha',
+      network: {
+        egress: { default: 'allow' as const },
+        ingress: { default: 'allow' as const, hostLoopback: 'allow' as const },
+      },
+      filesystem: {},
+    };
+    const config = sdk.createConfigFromPolicy(policy, 'wslc');
+    config.process!.commandLine = 'echo unreachable';
+    config.process!.cwd = '\\\\server\\share';
+    config.experimental!.wslc!.image = 'alpine:latest';
+
+    const { exitCode, combined } = await new Promise<{ exitCode: number; combined: string }>((resolve, reject) => {
+      const child = sdk.spawnSandboxFromConfig(config, { experimental: true, debug: true, usePty: false }) as ChildProcess;
+      let combined = '';
+      const onData = (d: Buffer) => { combined += d.toString(); };
+      child.stdout?.on('data', onData);
+      child.stderr?.on('data', onData);
+      child.on('error', reject);
+      child.on('close', (code: number | null) => resolve({ exitCode: code ?? -1, combined }));
+    });
+
+    assert.notStrictEqual(exitCode, 0, `expected a non-zero exit for an untranslatable cwd; output=${combined}`);
+    const envelope = combined
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith('{'))
+      .map((line) => { try { return JSON.parse(line); } catch { return undefined; } })
+      .find((parsed) => parsed && typeof parsed === 'object' && 'error' in parsed);
+    assert.ok(envelope, `expected a JSON error envelope; output=${combined}`);
+    assert.strictEqual(envelope.error.code, 'policy_validation', `envelope=${JSON.stringify(envelope)}`);
+    assert.match(envelope.error.message, /maps into the container/);
+  });
 });

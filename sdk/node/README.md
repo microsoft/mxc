@@ -514,7 +514,7 @@ No `network` field → no network. No `readwritePaths` → process can't write `
 
 ### `process.cwd`
 
-Setting `cwd` (or the `workingDirectory` argument) does **not** add that path to the policy. Add it to `readonlyPaths` / `readwritePaths` explicitly. On `0.9.0-alpha` it must also be absolute — `C:\workspace` for the Windows backends, `/workspace` for the Unix ones.
+Setting `cwd` (or the `workingDirectory` argument) does **not** add that path to the policy. Add it to `readonlyPaths` / `readwritePaths` explicitly. On `0.9.0-alpha` it must also be absolute — `C:\workspace` for the Windows backends, `/workspace` for the Unix ones. WSL Container splits the two: a one-shot run takes the Windows host path (`C:\workspace`, which the backend translates), while a state-aware `exec` takes the in-container path (`/workspace`).
 
 For Windows ProcessContainer requests using schema `0.9.0-alpha`,
 `processContainer.filesystem.enumeratePaths` permits directory listing without

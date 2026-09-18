@@ -267,7 +267,10 @@ that can be executed independently.
 
 `process.cwd` is optional. When it is set, it is passed to the backend
 verbatim — an unusable value fails the launch rather than being silently
-replaced.
+replaced. The one exception is the WSL Container backend's one-shot surface,
+which reads the value as a Windows host path and translates it to the matching
+in-container path (`C:\workspace` → `/mnt/c/workspace`); a value with no such
+equivalent is rejected.
 
 **From schema `0.9.0-alpha` on, a set value must be absolute**, since a relative
 path would resolve against the launching process's working directory. Absolute
@@ -278,7 +281,7 @@ means absolute for the target the path reaches, not for the host MXC runs on:
 | Windows ProcessContainer / Windows Sandbox / IsolationSession | `C:\workspace`, `C:/workspace`, or a UNC path. `C:workspace` and `\workspace` are relative. |
 | WSL Container | One-shot: the Windows host path (`C:\workspace`), which the backend translates. State-aware `exec`: the in-container path (`/workspace`). |
 | Seatbelt (macOS) | `/workspace`. A `~` path is rejected: MXC would expand it from the launching host's `HOME`, and falls back to a literal `~` when that is unset. |
-| LXC / Bubblewrap | `/workspace`. `~` is not expanded. |
+| LXC / Bubblewrap | `/workspace`. A `~` path is rejected; it is not expanded. |
 | MicroVM (NanVix) / Hyperlight | n/a — these backends reject any working directory. |
 
 When `process.cwd` is **omitted**, backends do not simply inherit the launcher's

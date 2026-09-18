@@ -2,7 +2,8 @@
 // Licensed under the MIT License.
 
 use crate::logger::Logger;
-use crate::models::{ExecutionRequest, ScriptResponse};
+use crate::models::{ExecutionRequest, FailurePhase, ScriptResponse};
+use crate::mxc_error::MxcErrorCode;
 use crate::validator::{validate_common, validate_network_policy_support, NetworkPolicySupport};
 
 /// Trait for executing scripts within a containment backend.
@@ -86,9 +87,16 @@ pub fn emit_backend_error_envelope(response: &ScriptResponse) {
         return;
     }
 
+    // Every caller writes `standard_err` immediately before this. A backend
+    // message that does not end in a newline would leave the envelope glued to
+    // its tail, where the line-oriented parsers the SDKs use cannot find it.
+    if !response.standard_err.is_empty() && !response.standard_err.ends_with('\n') {
+        eprintln!();
+    }
+
     let mut envelope = serde_json::json!({
         "error": {
-            "code": "backend_error",
+            "code": envelope_error_code(&response.failure_phase).as_str(),
             "message": response.error_message,
         }
     });
@@ -98,6 +106,20 @@ pub fn emit_backend_error_envelope(response: &ScriptResponse) {
     }
     if let Ok(json) = serde_json::to_string(&envelope) {
         eprintln!("{json}");
+    }
+}
+
+/// Classify a one-shot failure for the wire envelope.
+///
+/// A rejected request is caller-fixable, so it carries the same
+/// `policy_validation` code the native streaming and state-aware paths give it
+/// (`mxc_engine`'s `map_spawn_error`). Reporting it as `backend_error` would
+/// classify the same refusal differently depending on which surface the caller
+/// happened to use.
+fn envelope_error_code(phase: &FailurePhase) -> MxcErrorCode {
+    match phase {
+        FailurePhase::Rejected => MxcErrorCode::PolicyValidation,
+        _ => MxcErrorCode::BackendError,
     }
 }
 
@@ -144,5 +166,30 @@ mod tests {
             extended_error: "WIN32_ERROR(1920)".to_string(),
             ..Default::default()
         });
+    }
+
+    #[test]
+    fn a_rejected_request_is_classified_as_policy_validation() {
+        use crate::models::FailurePhase;
+        use crate::mxc_error::MxcErrorCode;
+
+        assert_eq!(
+            super::envelope_error_code(&FailurePhase::Rejected),
+            MxcErrorCode::PolicyValidation
+        );
+        for phase in [
+            FailurePhase::None,
+            FailurePhase::LaunchFailed,
+            FailurePhase::PostLaunchFailed,
+            FailurePhase::ProcessExited,
+            FailurePhase::Timeout,
+            FailurePhase::BackendUnavailable,
+        ] {
+            assert_eq!(
+                super::envelope_error_code(&phase),
+                MxcErrorCode::BackendError,
+                "{phase:?} must keep the infrastructure classification"
+            );
+        }
     }
 }
