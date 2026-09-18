@@ -42,6 +42,8 @@ DNS_ALLOWED_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_dns_allowed.js
 DENY_RULE_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_deny_rule.json"
 EXCEPT_EXCLUDED_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_except_excluded.json"
 EXCEPT_SIBLING_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_except_sibling.json"
+EXCEPT_SHADOW_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_except_shadow.json"
+EXCEPT_SHADOW_CONTROL_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_except_shadow_control.json"
 
 fail() {
     echo "FAIL: $1"
@@ -223,11 +225,13 @@ PY
 
 # Drift guard: the tcp/443 fixtures must target this peer, or the run would
 # probe a stale address and prove nothing.
-for cfg in "$DENY_CONFIG" "$ALLOW_CONFIG" "$WRONG_PORT_CONFIG"; do
+for cfg in "$DENY_CONFIG" "$ALLOW_CONFIG" "$WRONG_PORT_CONFIG" "$EXCEPT_SHADOW_CONFIG" \
+    "$EXCEPT_SHADOW_CONTROL_CONFIG"; do
     grep -Fq "$PEER_IP" "$cfg" \
         || fail "fixture ${cfg##*/} no longer targets the peer $PEER_IP; script and fixture drifted."
 done
-for cfg in "$ALLOW_CONFIG" "$WRONG_PORT_CONFIG"; do
+for cfg in "$ALLOW_CONFIG" "$WRONG_PORT_CONFIG" "$EXCEPT_SHADOW_CONFIG" \
+    "$EXCEPT_SHADOW_CONTROL_CONFIG"; do
     grep -Fq "$PEER_CIDR" "$cfg" \
         || fail "fixture ${cfg##*/} no longer allows $PEER_CIDR; script and fixture drifted."
 done
@@ -261,5 +265,13 @@ assert_blocked "an address named in except was reachable through the rule that e
 run_case "except case: same policy, probe an address the exclusion does not cover" "$EXCEPT_SIBLING_CONFIG"
 assert_allowed "an address inside the allowed range but outside except was unreachable. The exclusion is over-blocking, so the case above proves only that the whole rule failed to install."
 
-echo "PASS: schema 0.8 egress rules filtered by destination, by port, by resolver, by deny rule, and by exclusion."
+# The chain is first-match-wins, so a carve-out programmed as its own accept
+# rule would answer for the peer before the second rule's deny is reached.
+run_case "shadow case: deny the peer's range except the peer, then deny the peer outright" "$EXCEPT_SHADOW_CONFIG"
+assert_blocked "a destination denied by its own rule was reachable because an earlier rule excluded it. An except carve-out is escaping the rule that declared it and accepting traffic a later deny names, which turns a deny into an allow."
+
+run_case "shadow-control case: the same first rule with no second deny" "$EXCEPT_SHADOW_CONTROL_CONFIG"
+assert_allowed "an address excluded from a deny was unreachable under egress.default allow. The exclusion is not narrowing its own rule, so the shadow case above proves only that everything was blocked."
+
+echo "PASS: schema 0.8 egress rules filtered by destination, by port, by resolver, by deny rule, and by exclusion, and no exclusion answered for a destination a later rule denied."
 echo "LXC schema 0.8 egress enforcement test complete."

@@ -226,7 +226,7 @@ Egress peer and port fields (used in `egress.allow[]` / `egress.deny[]`; not sho
 | Field | Type | Notes |
 |---|---|---|
 | `to[].cidr` | IPv4 / IPv6 CIDR, or 0.0.0.0/0 / ::/0 for any | Single CIDR string (CNI/Kubernetes style), replacing separate address + prefix length. |
-| `to[].except` | list of CIDRs, optional | Exclusions within the peer's CIDR (Kubernetes `ipBlock.except` style). Expressible on Windows process containers (WFP) and the Linux backends (iptables) as additional deny rules; not supported on Seatbelt (no destination filtering). |
+| `to[].except` | list of CIDRs, optional | Exclusions within the peer's CIDR (Kubernetes `ipBlock.except` style). An exclusion narrows the rule that carries it and nothing else: it never states a verdict of its own, so an address it removes is decided by the remaining rules and the direction default. Windows process containers pass the exclusion to the platform (WFP); the Linux backends subtract it from the peer and program the covering blocks that remain, because an `iptables` rule cannot carry an exclusion and a separate rule would leak into later ones. Not supported on Seatbelt (no destination filtering). |
 | `ports[].protocol` | tcp / udp / icmp / any | `any` matches at minimum TCP, UDP, and ICMPv4/6; a backend may match more. Enforced on Windows process containers (WFP) and the Linux backends (iptables); not supported on Seatbelt. |
 | `ports[].port` | uint16, optional | Destination port. Omit `ports` to match all ports/protocols. |
 | `ports[].endPort` | uint16, optional | End of a port range (Kubernetes `endPort` style); requires numeric port. Supported on Windows process containers (WFP) and the Linux backends (iptables); not supported on Seatbelt. |
