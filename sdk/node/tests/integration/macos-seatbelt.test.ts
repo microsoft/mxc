@@ -272,10 +272,16 @@ describe('macOS Seatbelt Container', {
     config.seatbelt = { profileOverride: '(version 1)\n(allow default)' };
     config.containerId = 'seatbelt-profile-override';
 
-    const sandbox = sdk.spawnSandboxFromConfig(config, seatbeltSpawnOptions);
-    let stdout = '';
-    sandbox.standardOutput?.on('data', (data: Buffer) => { stdout += data.toString(); });
-    const result = { ...await sandbox.waitAsync(), stdout };
+    const result = await new Promise<{ exitCode: number; stdout: string }>((resolve, reject) => {
+      const ptyProcess = sdk.spawnSandboxFromConfig(config, seatbeltSpawnOptions);
+      let stdout = '';
+      const timer = setTimeout(() => reject(new Error('Test timed out waiting for onExit')), 25_000);
+      ptyProcess.onData((data: string) => { stdout += data; });
+      ptyProcess.onExit((event: { exitCode: number }) => {
+        clearTimeout(timer);
+        resolve({ exitCode: event.exitCode, stdout });
+      });
+    });
     assert.strictEqual(result.exitCode, 0, `Expected exit 0: ${result.stdout}`);
     assert.ok(result.stdout.includes('profile override works'));
   });

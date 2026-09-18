@@ -4,10 +4,10 @@
 import assert from 'node:assert';
 import { describe, it } from 'node:test';
 import os from 'os';
-import type { SandboxSpawnOptions } from '@microsoft/mxc-sdk';
 import {
   sdk,
   supportedVersions,
+  assertDryRunResult,
   debugSpawnOptions,
 } from './test-helpers.js';
 
@@ -20,7 +20,6 @@ describe('Platform support', () => {
 });
 
 const platformSupport = sdk.getPlatformSupport();
-const executorDryRun = { dryRun: true } as unknown as SandboxSpawnOptions;
 
 // The exact 0.6 contract predates Seatbelt, which is the native macOS backend.
 const platformVersions = os.platform() === 'darwin'
@@ -48,34 +47,62 @@ for (const schemaVersion of platformVersions) {
       timeoutMs: 30000,
     };
 
-    it('should reject executor-only dry-run via spawnSandboxFromConfig', () => {
+    it('should dry-run via spawnSandboxFromConfig with usePty: false', async () => {
       const config = sdk.createConfigFromPolicy(policy);
       config.process = config.process ?? { commandLine: '' };
       config.process.commandLine = 'cmd.exe /c echo test';
       config.containerId = `dryrun-npty-${schemaVersion}`;
 
-      assert.throws(
-        () => sdk.spawnSandboxFromConfig(config, { ...executorDryRun, ...debugSpawnOptions }),
-        /does not support executor-only option 'dryRun'/,
-      );
+      const result = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve, reject) => {
+        const child = sdk.spawnSandboxFromConfig(config, { dryRun: true, usePty: false, ...debugSpawnOptions });
+        let stdout = '';
+        let stderr = '';
+        child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
+        child.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
+        child.on('close', (code: number) => resolve({ code, stdout, stderr }));
+        child.on('error', reject);
+      });
+      assertDryRunResult(result.stdout, result.code, schemaVersion.raw);
     });
 
     it('should reject executor-only dry-run via spawnSandboxAsync', async () => {
       await assert.rejects(
         sdk.spawnSandboxAsync(
-          'cmd.exe /c echo test', policy, executorDryRun, undefined, `dryrun-async-${schemaVersion}`,
+          'cmd.exe /c echo test', policy, { dryRun: true }, undefined, `dryrun-async-${schemaVersion}`,
         ),
         /does not support executor-only option 'dryRun'/,
       );
     });
 
-    it('should reject executor-only dry-run via spawnSandbox', () => {
-      assert.throws(
-        () => sdk.spawnSandbox(
-          'cmd.exe /c echo test', policy, { ...executorDryRun, ...debugSpawnOptions }, undefined, `dryrun-streaming-${schemaVersion}`,
-        ),
-        /does not support executor-only option 'dryRun'/,
-      );
+    it('should dry-run via spawnSandboxFromConfig', async () => {
+      const config = sdk.createConfigFromPolicy(policy);
+      config.process = config.process ?? { commandLine: '' };
+      config.process.commandLine = 'cmd.exe /c echo test';
+      config.containerId = `dryrun-fromcfg-${schemaVersion}`;
+
+      const result = await new Promise<{ exitCode: number; stdout: string }>((resolve) => {
+        const ptyProcess = sdk.spawnSandboxFromConfig(config, { dryRun: true, ...debugSpawnOptions });
+        let stdout = '';
+        ptyProcess.onData((data: string) => { stdout += data; });
+        ptyProcess.onExit((event: { exitCode: number }) => {
+          resolve({ exitCode: event.exitCode, stdout });
+        });
+      });
+      assertDryRunResult(result.stdout, result.exitCode, schemaVersion.raw);
+    });
+
+    it('should dry-run via spawnSandbox (PTY)', async () => {
+      const result = await new Promise<{ exitCode: number; stdout: string }>((resolve) => {
+        const ptyProcess = sdk.spawnSandbox(
+          'cmd.exe /c echo test', policy, { dryRun: true, ...debugSpawnOptions }, undefined, `dryrun-pty-${schemaVersion}`,
+        );
+        let stdout = '';
+        ptyProcess.onData((data: string) => { stdout += data; });
+        ptyProcess.onExit((event: { exitCode: number }) => {
+          resolve({ exitCode: event.exitCode, stdout });
+        });
+      });
+      assertDryRunResult(result.stdout, result.exitCode, schemaVersion.raw);
     });
   });
 }
