@@ -14,6 +14,13 @@ import * as path from 'path';
 // is understood.
 const isLinux = process.platform === 'linux';
 
+// `isSystemCriticalPath` resolves `%WINDIR%` from `process.env` and normalizes
+// with the *host's* path flavor, so the write-path filter can only be exercised
+// truthfully on a real Windows host — mocking `process.platform` does not turn
+// the imported `path` module into `path.win32`.
+const isWindowsHost = process.platform === 'win32';
+const getWinDir = (): string => process.env['WINDIR'] || process.env['windir'] || 'C:\\Windows';
+
 describe('getAvailableToolsPolicy - PowerShell discovery', () => {
     let originalPlatform: PropertyDescriptor | undefined;
     let tmpDir: string | undefined;
@@ -120,6 +127,29 @@ describe('getAvailableToolsPolicy - PowerShell discovery', () => {
         );
         assert.strictEqual(result.readwritePaths.length, 0,
             'readwritePaths should be empty without USERPROFILE',
+        );
+    });
+
+    it('should not grant write access under %WINDIR% (SYSTEM profile)', { skip: !isWindowsHost }, () => {
+        const pwshDir = createFakePwshDir();
+        const env = {
+            PATH: pwshDir,
+            // The SYSTEM account's profile legitimately lives under %WINDIR%.
+            USERPROFILE: path.join(getWinDir(), 'System32', 'config', 'systemprofile'),
+        };
+        const result = getAvailableToolsPolicy(env);
+        assert.deepStrictEqual(result.readwritePaths, [],
+            'A PSReadLine write grant must never land beneath %WINDIR%',
+        );
+    });
+
+    it('should keep the PSReadLine grant when the directory does not exist yet', { skip: !isWindowsHost }, () => {
+        const pwshDir = createFakePwshDir();
+        const env = { PATH: pwshDir, USERPROFILE: 'C:\\Users\\mxc-nonexistent-profile' };
+        const result = getAvailableToolsPolicy(env);
+        assert.ok(
+            result.readwritePaths.some(p => p.includes('PSReadLine')),
+            'PowerShell creates the history directory on first use, so it need not pre-exist',
         );
     });
 });

@@ -363,9 +363,21 @@ pub fn available_tools_policy(env: Option<&[(String, String)]>) -> FilesystemPol
 
     let pwsh = powershell_policy(&path_dirs, env);
 
+    // The write paths are held to the same system-critical bar as the read
+    // paths: `USERPROFILE` can legitimately sit under `%WINDIR%` (the SYSTEM
+    // account's profile is `C:\Windows\System32\config\systemprofile`), and a
+    // *write* grant there would be strictly worse than the read grant this
+    // discovery no longer emits. They are deliberately NOT existence-filtered:
+    // PowerShell creates the PSReadLine history directory on first use, so
+    // requiring it to pre-exist would silently drop a legitimate grant.
+    let pwsh_readwrite: Vec<String> = deduplicate_paths(&pwsh.readwrite_paths)
+        .into_iter()
+        .filter(|dir| !is_system_critical_path(dir))
+        .collect();
+
     FilesystemPolicyResult {
         readonly_paths: deduplicate_paths(&filtered),
-        readwrite_paths: deduplicate_paths(&pwsh.readwrite_paths),
+        readwrite_paths: pwsh_readwrite,
     }
 }
 
@@ -1681,6 +1693,89 @@ mod tests {
             }),
             "no drive root may be granted: {:?}",
             result.readonly_paths
+        );
+    }
+
+    /// `USERPROFILE` can legitimately sit under `%WINDIR%` — the SYSTEM
+    /// account's profile is `C:\Windows\System32\config\systemprofile`. A
+    /// read-write PSReadLine grant there would breach the same system-critical
+    /// boundary the read paths are held to, so it must be filtered out.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn tool_paths_never_grant_write_access_under_windir() {
+        use super::available_tools_policy;
+        use std::fs;
+
+        let unique = format!(
+            "mxc_pwsh_rw_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let ps_home = std::env::temp_dir().join(unique);
+        fs::create_dir_all(&ps_home).expect("create temp $PSHOME");
+        fs::write(ps_home.join("pwsh.exe"), b"").expect("create fake pwsh.exe");
+
+        let win_dir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".to_string());
+        let env = vec![
+            ("PATH".to_string(), ps_home.to_string_lossy().into_owned()),
+            (
+                "USERPROFILE".to_string(),
+                format!("{win_dir}\\System32\\config\\systemprofile"),
+            ),
+        ];
+        let result = available_tools_policy(Some(&env));
+
+        let _ = fs::remove_dir_all(&ps_home);
+
+        assert!(
+            result.readwrite_paths.is_empty(),
+            "no write grant may land under %WINDIR%: {:?}",
+            result.readwrite_paths
+        );
+    }
+
+    /// The write-path filter must not require the directory to exist:
+    /// PowerShell creates the PSReadLine history directory on first use.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn psreadline_write_grant_survives_when_the_directory_is_absent() {
+        use super::available_tools_policy;
+        use std::fs;
+
+        let unique = format!(
+            "mxc_pwsh_rw_keep_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let ps_home = std::env::temp_dir().join(unique);
+        fs::create_dir_all(&ps_home).expect("create temp $PSHOME");
+        fs::write(ps_home.join("pwsh.exe"), b"").expect("create fake pwsh.exe");
+
+        // A profile that does not exist on disk and is not system-critical.
+        let env = vec![
+            ("PATH".to_string(), ps_home.to_string_lossy().into_owned()),
+            (
+                "USERPROFILE".to_string(),
+                "C:\\Users\\mxc-nonexistent-profile".to_string(),
+            ),
+        ];
+        let result = available_tools_policy(Some(&env));
+
+        let _ = fs::remove_dir_all(&ps_home);
+
+        assert!(
+            result
+                .readwrite_paths
+                .iter()
+                .any(|p| p.contains("PSReadLine")),
+            "PSReadLine grant must survive a not-yet-created directory: {:?}",
+            result.readwrite_paths
         );
     }
 

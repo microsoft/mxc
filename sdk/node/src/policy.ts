@@ -312,9 +312,19 @@ export function getAvailableToolsPolicy(
     // Merge PowerShell-specific paths when pwsh.exe is available
     const pwshPolicy = getPowerShellPolicy(pathDirs, environment);
 
+    // The write paths are held to the same system-critical bar as the read
+    // paths: `USERPROFILE` can legitimately sit under `%WINDIR%` (the SYSTEM
+    // account's profile is `C:\Windows\System32\config\systemprofile`), and a
+    // *write* grant there would be strictly worse than the read grant this
+    // discovery no longer emits. They are deliberately NOT existence-filtered:
+    // PowerShell creates the PSReadLine history directory on first use, so
+    // requiring it to pre-exist would silently drop a legitimate grant.
+    const pwshWritePaths = deduplicatePaths(pwshPolicy.readwritePaths)
+        .filter(dirPath => !isSystemCriticalPath(dirPath));
+
     return {
         readonlyPaths: deduplicatePaths(filtered),
-        readwritePaths: deduplicatePaths([...pwshPolicy.readwritePaths]),
+        readwritePaths: pwshWritePaths,
     };
 }
 
