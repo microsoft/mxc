@@ -8,7 +8,7 @@
   "network": {
     "defaultPolicy": "block",
     "enforcementMode": "firewall",
-    "allowedHosts": ["1.1.1.0/24"],
+    "allowedHosts": ["10.0.2.2/32", "1.1.1.0/24"],
     "blockedHosts": ["1.1.1.1/32"]
   }
 }
