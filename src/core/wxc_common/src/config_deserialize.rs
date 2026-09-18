@@ -9,7 +9,8 @@ use serde::{Deserialize, Deserializer};
 use serde_json::error::Category;
 #[cfg(test)]
 use serde_json::Value;
-use unicode_general_category::{get_general_category, GeneralCategory};
+
+use crate::diagnostic_text;
 
 /// Field-name substrings that mark a value as secret-bearing. Matched anywhere
 /// within a single path segment, so `token` catches `apiToken`, `secret`
@@ -168,7 +169,7 @@ impl fmt::Display for ConfigDeserializeError {
             Some((line, column)) => rewrite_trailing_location(&source, line, column),
             None => source,
         };
-        let source = escape_control_characters(&source);
+        let source = diagnostic_text::escape(&source);
         match self.source.classify() {
             Category::Syntax | Category::Eof => {
                 write!(formatter, "Invalid JSON syntax: {source}")
@@ -177,7 +178,7 @@ impl fmt::Display for ConfigDeserializeError {
                 Some(path) => write!(
                     formatter,
                     "Invalid configuration at `{}`: {source}",
-                    escape_control_characters(path)
+                    diagnostic_text::escape(path)
                 ),
                 None => write!(formatter, "Invalid configuration: {source}"),
             },
@@ -310,45 +311,12 @@ pub(crate) fn remap_error_to_source(
     err.with_source_location(global_line, global_column)
 }
 
-fn escape_control_characters(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        if character.is_control() {
-            escaped.extend(character.escape_default());
-        } else if is_diagnostic_format_character(character) {
-            escaped.extend(character.escape_unicode());
-        } else {
-            escaped.push(character);
-        }
-    }
-    escaped
-}
-
 /// Escape control and invisible-format characters in free-form, user-controlled
 /// text before it reaches a diagnostic sink. Shared with the manual
 /// (non-serde) semantic validators so every user-derived diagnostic honors the
 /// same "no raw control/format bytes in diagnostics" guarantee.
 pub(crate) fn escape_diagnostic_text(value: &str) -> String {
-    escape_control_characters(value)
-}
-
-/// Invisible Unicode formatting characters (general category `Cf`) and the
-/// line/paragraph separators (`Zl`/`Zp`) that `char::is_control()` does **not**
-/// cover. Escaping these is a deliberate security control, not incidental
-/// hardening: escaping bidirectional overrides/isolates (U+202A–U+202E,
-/// U+2066–U+2069, category `Cf`) defends against "Trojan Source"
-/// (CVE-2021-42574) visual-spoofing of diagnostics, escaping the line/paragraph
-/// separators (U+2028/U+2029) prevents forging hard line breaks that some
-/// terminals/log viewers honor, and escaping zero-width / joiner / interlinear
-/// characters (also `Cf`) prevents concealing or forging log and error-envelope
-/// content rendered in a terminal or editor.
-fn is_diagnostic_format_character(character: char) -> bool {
-    matches!(
-        get_general_category(character),
-        GeneralCategory::Format
-            | GeneralCategory::LineSeparator
-            | GeneralCategory::ParagraphSeparator
-    )
+    diagnostic_text::escape(value)
 }
 
 impl std::error::Error for ConfigDeserializeError {

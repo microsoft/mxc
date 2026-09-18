@@ -1,0 +1,9 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-Bubblewrap-Cwd-Root",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "if [ \"$(pwd -P)\" = / ]; then echo CWD_ROOT_OK; else echo CWD_ROOT_BAD:$(pwd -P); fi",
+    "cwd": "/"
+  }
+}

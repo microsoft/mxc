@@ -1,0 +1,12 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-Bubblewrap-Cwd-DeniedParent",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "if [ \"$(pwd -P)\" = /tmp/mxc_bwrap_cwd/denied-parent ]; then echo CWD_DENIED_PARENT_OK; else echo CWD_DENIED_PARENT_BAD:$(pwd -P); fi",
+    "cwd": "/tmp/mxc_bwrap_cwd/denied-parent"
+  },
+  "filesystem": {
+    "deniedPaths": ["/tmp/mxc_bwrap_cwd/denied-parent/secret"]
+  }
+}

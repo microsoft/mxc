@@ -161,8 +161,29 @@ Common consequences of this default:
   not readable from the sandbox.
 - `/opt` and `/usr/local` tooling is not on PATH; list either path under
   `readonlyPaths` if the script depends on it.
-- `working_directory` must live under the baseline or a policy path — a
-  `cwd` of `~/project` without a matching `readonlyPaths` entry will fail.
+- An absolute `process.cwd` must resolve inside the baseline or filesystem
+  policy. The runner rejects paths that are provably uncovered and returns an
+  actionable error naming `filesystem.readonlyPaths` /
+  `filesystem.readwritePaths`. Symlinked paths and paths containing `..` are
+  advisory: the runner records that it cannot decide conclusively and leaves
+  Bubblewrap as the authority, avoiding false rejection of a valid namespace
+  path. Relative values remain passed through to `bwrap` unchanged.
+- The synthetic roots `/`, `/tmp`, and `/var` exist without a policy mount, but
+  arbitrary descendants below `/tmp` or `/var` do not. `/dev` and `/proc` are
+  mounted virtual filesystems. Every policy operation, including a denied mask,
+  creates its destination's synthetic parent directories. Most-specific-path-
+  wins policy still determines whether the cwd itself is allowed.
+- The baseline creates `/var/run` as a symlink to `/run`. Cwd values that
+  name `/var/run` or one of its descendants are evaluated against the
+  corresponding `/run` namespace path, independently of whether the host uses
+  the same symlink while that synthetic link remains active. A policy mount at
+  `/var/run` or one of its ancestors shadows the link; preflight then evaluates
+  the host-backed `/var` topology instead, conservatively deferring when its
+  symlinks cannot be modeled. Later policy mounts retain their normal order.
+  Parent traversal and other host-symlink ambiguity are left to Bubblewrap. A
+  clear denied-path conflict is rejected and names the covering `deniedPaths`
+  entry; remove or narrow that entry rather than adding an equal or shallower
+  allow path.
 - DNS works on systemd-resolved, NetworkManager, and resolvconf hosts
   because the corresponding `/run/...` directories are bound. The common
   symlink targets *outside* `/run` are covered too: `/var/run/...`-routed
@@ -170,7 +191,13 @@ Common consequences of this default:
   compat symlink, and WSL's `/mnt/wsl/resolv.conf` is bound directly.
   Neither exposes host `/var` or `/mnt` contents. Hosts that point
   `/etc/resolv.conf` at some other custom location still need that target
-  listed in `readonlyPaths`.
+  listed in `readonlyPaths`; the runner identifies the required policy field
+  without returning the resolved host path. Inspect `/etc/resolv.conf` on the
+  host (for example with `readlink -f`) to identify the target.
+- If the runner cannot inspect `/etc/resolv.conf` or resolve its symlink
+  target, it emits a separate warning. Repair the host resolver path before
+  retrying; a filesystem grant cannot correct an unreadable or broken host
+  symlink.
 
 Files in `/etc` that contain secrets (`/etc/shadow`, `/etc/sudoers`,
 `/etc/ssh/ssh_host_*_key`) are mode `0400` / `0640` `root` and remain

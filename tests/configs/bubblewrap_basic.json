@@ -3,6 +3,7 @@
   "containerId": "CLI-Bubblewrap-Hello-World",
   "containment": "bubblewrap",
   "process": {
-    "commandLine": "echo 'Hello from Bubblewrap' && id && cat /etc/os-release | head -2"
+    "commandLine": "if [ \"$(pwd)\" = /etc ]; then echo CWD_BASELINE_OK; else echo CWD_BASELINE_BAD:$(pwd); fi; echo 'Hello from Bubblewrap' && id && cat /etc/os-release | head -2",
+    "cwd": "/etc"
   }
 }

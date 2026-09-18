@@ -1,0 +1,9 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-Bubblewrap-Cwd-MountBoundary",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "if [ \"$(pwd -P)\" = /etc ]; then echo CWD_MOUNT_BOUNDARY_OK; else echo CWD_MOUNT_BOUNDARY_BAD:$(pwd -P); fi",
+    "cwd": "/bin/../etc"
+  }
+}

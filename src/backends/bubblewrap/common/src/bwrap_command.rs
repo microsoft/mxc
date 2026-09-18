@@ -62,7 +62,7 @@ pub(crate) const COMMAND_TAIL: [&str; 3] = ["--", "sh", "-c"];
 ///   (`/etc/shadow`, `/etc/sudoers`, `/etc/ssh/ssh_host_*_key`) are mode
 ///   `0400` / `0640` root and remain unreadable to a non-root caller —
 ///   user-namespace UID mapping does not bypass kernel DAC.
-const BASELINE_RO_BIND_PATHS: &[&str] = &[
+pub(crate) const BASELINE_RO_BIND_PATHS: &[&str] = &[
     // Top-level executable / library dirs (symlinks under /usr on
     // merged-usr distros, real directories on Alpine and older Debian).
     "/bin",
@@ -96,6 +96,16 @@ const BASELINE_RO_BIND_PATHS: &[&str] = &[
     // because the baseline is emitted via `--ro-bind-try`.
     "/mnt/wsl/resolv.conf",
 ];
+
+/// Fixed paths created by the Bubblewrap baseline.
+///
+/// The argument builder and filesystem preflight both consume these constants
+/// so a topology change cannot silently update one without the other.
+pub(crate) const DEV_PATH: &str = "/dev";
+pub(crate) const PROC_PATH: &str = "/proc";
+pub(crate) const TMP_PATH: &str = "/tmp";
+pub(crate) const VAR_RUN_COMPAT_TARGET: &str = "/run";
+pub(crate) const VAR_RUN_COMPAT_LINK: &str = "/var/run";
 
 /// The networking behavior Bubblewrap applies for one execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -645,47 +655,29 @@ pub(crate) fn build_args_classified_with_mode(
     for path in BASELINE_RO_BIND_PATHS {
         args.extend(["--ro-bind-try".into(), (*path).into(), (*path).into()]);
     }
+    args.extend([
+        "--symlink".into(),
+        VAR_RUN_COMPAT_TARGET.into(),
+        VAR_RUN_COMPAT_LINK.into(),
+    ]);
+    args.extend(["--dev".into(), DEV_PATH.into()]);
+    args.extend(["--proc".into(), PROC_PATH.into()]);
+    args.extend(["--tmpfs".into(), TMP_PATH.into()]);
 
-    // Recreate the standard `/var/run -> /run` compatibility symlink. Some
-    // distros (older RHEL/CentOS-era, some container images) write
-    // `/etc/resolv.conf` as a symlink routed through `/var/run/...` (e.g.
-    // `/var/run/NetworkManager/resolv.conf`). We never mount `/var`, so that
-    // intermediate path would dangle inside the sandbox and DNS would
-    // silently fail. The symlink rescues the whole `/var/run/...` family and
-    // pulls no host `/var` contents in (bwrap synthesises an empty `/var`).
-    args.extend(["--symlink".into(), "/run".into(), "/var/run".into()]);
-
-    // Standard virtual filesystems (applied before policy mounts so policy
-    // paths under /dev, /proc, or /tmp survive).
-    args.extend(["--dev".into(), "/dev".into()]);
-    args.extend(["--proc".into(), "/proc".into()]);
-    args.extend(["--tmpfs".into(), "/tmp".into()]);
-
-    // Policy mounts, emitted in most-specific-path-wins order so a deeper path
-    // always overrides a shallower ancestor with a different intent regardless
-    // of which policy list it came from (e.g. `readwritePaths: ["/data/secrets"]`
-    // must survive `deniedPaths: ["/data"]`). bwrap applies mounts in order and
-    // the last at a path wins, so walking the specificity-ordered list last —
-    // after the baseline + virtual filesystems above — gives the intended
-    // precedence. `resolve_mount_order` assumes object normalization already ran
-    // (it does, in the runner before `build_args`), so exact same-path conflicts
-    // are already collapsed to the strictest intent.
+    // Policy mounts are emitted shallow-to-deep so the most specific path wins.
     for mount in wxc_common::filesystem_resolve::resolve_mount_order(&request.policy) {
         match mount.intent {
-            // Read-write: override the base ro-bind and any standard mount.
             FsIntent::ReadWrite => {
-                args.extend(["--bind".into(), mount.path.clone(), mount.path.clone()]);
+                args.extend(["--bind".into(), mount.path.clone(), mount.path]);
             }
-            // Read-only: already covered by the base ro-bind, but listed
-            // explicitly so the intent is clear and it overrides any rw parent.
             FsIntent::ReadOnly => {
-                args.extend(["--ro-bind".into(), mount.path.clone(), mount.path.clone()]);
+                args.extend(["--ro-bind".into(), mount.path.clone(), mount.path]);
             }
             FsIntent::Denied => {
                 if denied_files.contains(&mount.path) {
-                    args.extend(["--ro-bind".into(), "/dev/null".into(), mount.path.clone()]);
+                    args.extend(["--ro-bind".into(), "/dev/null".into(), mount.path]);
                 } else {
-                    args.extend(["--tmpfs".into(), mount.path.clone()]);
+                    args.extend(["--tmpfs".into(), mount.path]);
                 }
             }
         }

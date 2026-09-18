@@ -51,6 +51,7 @@ echo "$OUTPUT"
 
 fail() { echo "FAIL: $1"; exit 1; }
 
+echo "$OUTPUT" | grep -q "CWD_READONLY_OK" || fail "process.cwd under readonlyPaths was not honored."
 echo "$OUTPUT" | grep -q "READ_OK" || fail "read-only path was not readable (mount missing?)."
 echo "$OUTPUT" | grep -q "WRITE_DENIED_OK" || fail "a write to a readonlyPaths entry was not denied."
 echo "$OUTPUT" | grep -q "CREATE_DENIED_OK" || fail "file creation under a readonlyPaths entry was not denied."
