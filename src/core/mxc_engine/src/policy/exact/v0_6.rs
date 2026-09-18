@@ -81,7 +81,9 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::Request, MxcE
             "network egress/ingress/runtimeConfig and processContainer.network require schema version 0.8 or later",
         ));
     }
-    if cfg!(target_os = "macos") && matches!(containment, Containment::Process) {
+    if matches!(containment, Containment::Seatbelt(_))
+        || cfg!(target_os = "macos") && matches!(containment, Containment::Process)
+    {
         return Err(error(
             "Seatbelt containment requires schema version 0.7.0-alpha or later",
         ));
@@ -133,6 +135,8 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::Request, MxcE
         containment: contract::OptionalField::present(match containment {
             Containment::Process => contract::Containment::Process,
             Containment::ProcessContainer(_) => contract::Containment::ProcessContainer,
+            Containment::Lxc(_) => contract::Containment::Lxc,
+            Containment::Bubblewrap => contract::Containment::Bubblewrap,
             _ => unreachable!("unsupported containment checked above"),
         }),
         lifecycle: contract::OptionalField::present(contract::Lifecycle {
@@ -230,6 +234,12 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::Request, MxcE
                 }
             })
         ),
-        lxc: contract::OptionalField::default(),
+        lxc: optional!(
+            contract,
+            super::selected_lxc(containment).map(|lxc| contract::Lxc {
+                distribution: lxc.distribution,
+                release: lxc.release,
+            })
+        ),
     })
 }

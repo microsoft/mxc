@@ -6,8 +6,8 @@
 use std::collections::BTreeMap;
 
 use mxc_sdk::configs::{
-    CaptureDenials, ProcessContainer, ProcessContainerFilesystem, ProcessContainerNetwork,
-    ProcessContainerSystemSettings, ProcessContainerUi, ProcessContainerUiIsolation,
+    CaptureDenials, Lxc, ProcessContainer, ProcessContainerFilesystem, ProcessContainerNetwork,
+    ProcessContainerSystemSettings, ProcessContainerUi, ProcessContainerUiIsolation, Seatbelt,
 };
 use mxc_sdk::policy::{FilesystemSection, NetworkSection, UiSection};
 use mxc_sdk::{
@@ -142,6 +142,25 @@ enum RequestContainment {
         #[serde(default)]
         network: Option<ProcessContainerNetworkSpec>,
     },
+    Seatbelt {
+        #[serde(default, rename = "profileOverride")]
+        profile_override: Option<String>,
+        #[serde(default, rename = "guiAccess")]
+        gui_access: bool,
+        #[serde(default = "default_nested_pty", rename = "nestedPty")]
+        nested_pty: bool,
+        #[serde(default, rename = "keychainAccess")]
+        keychain_access: bool,
+        #[serde(default, rename = "extraMachLookups")]
+        extra_mach_lookups: Vec<String>,
+    },
+    Lxc {
+        #[serde(default = "default_lxc_distribution")]
+        distribution: String,
+        #[serde(default = "default_lxc_release")]
+        release: String,
+    },
+    Bubblewrap {},
     Wslc {
         #[serde(default = "default_wslc_image")]
         image: String,
@@ -234,6 +253,18 @@ fn default_wslc_image() -> String {
     "alpine:latest".to_string()
 }
 
+fn default_lxc_distribution() -> String {
+    "alpine".to_string()
+}
+
+fn default_lxc_release() -> String {
+    "3.23".to_string()
+}
+
+fn default_nested_pty() -> bool {
+    true
+}
+
 impl RequestContainment {
     // These public SDK configuration types are `#[non_exhaustive]`, so a
     // downstream binding crate must start from `Default` and assign fields
@@ -262,6 +293,31 @@ impl RequestContainment {
                 process_container.network = network.map(ProcessContainerNetworkSpec::into_sdk);
                 Containment::ProcessContainer(process_container)
             }
+            Self::Seatbelt {
+                profile_override,
+                gui_access,
+                nested_pty,
+                keychain_access,
+                extra_mach_lookups,
+            } => {
+                let mut seatbelt = Seatbelt::default();
+                seatbelt.profile_override = profile_override;
+                seatbelt.gui_access = gui_access;
+                seatbelt.nested_pty = nested_pty;
+                seatbelt.keychain_access = keychain_access;
+                seatbelt.extra_mach_lookups = extra_mach_lookups;
+                Containment::Seatbelt(seatbelt)
+            }
+            Self::Lxc {
+                distribution,
+                release,
+            } => {
+                let mut lxc = Lxc::default();
+                lxc.distribution = distribution;
+                lxc.release = release;
+                Containment::Lxc(lxc)
+            }
+            Self::Bubblewrap {} => Containment::Bubblewrap,
             Self::Wslc {
                 image,
                 image_tar_path,
@@ -956,6 +1012,72 @@ mod tests {
         assert!(config.gpu);
         assert_eq!(config.storage_path.as_deref(), Some(r"C:\wslc"));
         assert_eq!(config.port_mappings, [(8080, 80)]);
+    }
+
+    #[test]
+    fn seatbelt_options_map_to_the_sdk_type() {
+        let json = r#"{
+                "type": "seatbelt",
+                "profileOverride": "(version 1)",
+                "guiAccess": true,
+                "nestedPty": false,
+                "keychainAccess": true,
+                "extraMachLookups": ["com.example.service"]
+            }"#;
+        let containment: RequestContainment =
+            serde_json::from_str(json).expect("request containment parses");
+
+        let Containment::Seatbelt(config) = containment.into_sdk() else {
+            panic!("expected Seatbelt");
+        };
+        assert_eq!(config.profile_override.as_deref(), Some("(version 1)"));
+        assert!(config.gui_access);
+        assert!(!config.nested_pty);
+        assert!(config.keychain_access);
+        assert_eq!(config.extra_mach_lookups, ["com.example.service"]);
+
+        build_request_from_json(&format!(
+            r#"{{
+                "policy": {{ "version": "0.8.0-alpha" }},
+                "command": "echo hi",
+                "containment": {json}
+            }}"#
+        ))
+        .expect("Seatbelt binding request builds through the public Rust SDK");
+    }
+
+    #[test]
+    fn lxc_options_map_to_the_sdk_type() {
+        let json = r#"{
+                "type": "lxc",
+                "distribution": "ubuntu",
+                "release": "24.04"
+            }"#;
+        let containment: RequestContainment =
+            serde_json::from_str(json).expect("request containment parses");
+
+        let Containment::Lxc(config) = containment.into_sdk() else {
+            panic!("expected LXC");
+        };
+        assert_eq!(config.distribution, "ubuntu");
+        assert_eq!(config.release, "24.04");
+
+        build_request_from_json(&format!(
+            r#"{{
+                "policy": {{ "version": "0.8.0-alpha" }},
+                "command": "echo hi",
+                "containment": {json}
+            }}"#
+        ))
+        .expect("LXC binding request builds through the public Rust SDK");
+    }
+
+    #[test]
+    fn bubblewrap_selects_the_backend_from_its_wire_spelling() {
+        let containment: RequestContainment = serde_json::from_str(r#"{ "type": "bubblewrap" }"#)
+            .expect("request containment parses");
+
+        assert!(matches!(containment.into_sdk(), Containment::Bubblewrap));
     }
 
     /// The discriminator is derived from the enum's `rename_all`, not written by

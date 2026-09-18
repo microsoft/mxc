@@ -8,7 +8,7 @@ use wxc_common::config_parser::{load_one_shot_request_from_contract, ExactOneSho
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::mxc_error::MxcError;
 
-use crate::configs::ProcessContainer;
+use crate::configs::{Lxc, ProcessContainer, Seatbelt};
 
 use super::network::{select_network_format, NetworkFormat};
 use super::{Containment, NetworkAction, ProxySpec, SandboxPolicy, SandboxRequest};
@@ -78,6 +78,8 @@ fn validate_common(
         let accepts_host_rules_without_outbound = match containment {
             Containment::Process => cfg!(any(target_os = "linux", target_os = "macos")),
             Containment::ProcessContainer(_) => false,
+            Containment::Seatbelt(_) => true,
+            Containment::Lxc(_) | Containment::Bubblewrap => true,
             Containment::Wslc(_) => true,
             Containment::IsolationSession => false,
         };
@@ -98,6 +100,21 @@ fn selected_process_container(containment: &Containment) -> Option<ProcessContai
     match containment {
         Containment::ProcessContainer(process_container) => Some(process_container.clone()),
         Containment::Process if cfg!(target_os = "windows") => Some(ProcessContainer::default()),
+        _ => None,
+    }
+}
+
+fn selected_seatbelt(containment: &Containment) -> Option<Seatbelt> {
+    match containment {
+        Containment::Seatbelt(seatbelt) => Some(seatbelt.clone()),
+        Containment::Process if cfg!(target_os = "macos") => Some(Seatbelt::default()),
+        _ => None,
+    }
+}
+
+fn selected_lxc(containment: &Containment) -> Option<Lxc> {
+    match containment {
+        Containment::Lxc(lxc) => Some(lxc.clone()),
         _ => None,
     }
 }
@@ -156,7 +173,10 @@ fn legacy_enforcement(
         });
     }
     if cfg!(target_os = "linux")
-        && matches!(containment, Containment::Process)
+        && matches!(
+            containment,
+            Containment::Process | Containment::Lxc(_) | Containment::Bubblewrap
+        )
         && has_host_rules
         && network.proxy.is_none()
     {

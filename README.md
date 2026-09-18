@@ -53,6 +53,9 @@ tests/      Test collateral (configs, examples, scripts)
 scripts/    Build and utility scripts
 ```
 
+See [Repository architecture](docs/architecture.md) for the Rust workspace
+layout, crate responsibilities, dependency direction, and execution surfaces.
+
 ### Full Build
 
 #### Windows
@@ -131,6 +134,9 @@ npm run test:integration     # Integration tests
 # E2E (from src/)
 cargo test -p wxc_e2e_tests
 ```
+
+Host-dependent backend suites and their prerequisites are documented in
+[`tests/scripts/README.md`](tests/scripts/README.md).
 
 ## Usage
 
@@ -295,9 +301,12 @@ Privacy information can be found at https://privacy.microsoft.com and in the Mic
 
 | Document | Description |
 |----------|-------------|
+| [docs/architecture.md](docs/architecture.md) | Repository layout, crate boundaries, and execution surfaces |
 | [docs/schema.md](docs/schema.md) | Full JSON configuration schema reference |
 | [docs/versioning.md](docs/versioning.md) | Schema versioning and experimental feature lifecycle |
 | [docs/examples.md](docs/examples.md) | Annotated configuration examples |
+| [docs/ci-validation-infrastructure.md](docs/ci-validation-infrastructure.md) | Scheduled backend validation matrix and CI dispatch |
+| [tests/scripts/README.md](tests/scripts/README.md) | Local and CI backend test suites |
 | [docs/host-prep.md](docs/host-prep.md) | Windows host preparation (`wxc-host-prep.exe`) |
 | [docs/diagnostics.md](docs/diagnostics.md) | Diagnostic logging and ETW |
 | [docs/sandbox-policy/0.7.0/policy.md](docs/sandbox-policy/0.7.0/policy.md) | Sandbox policy 0.7.0 specification |

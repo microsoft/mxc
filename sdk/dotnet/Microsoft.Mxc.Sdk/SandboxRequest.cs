@@ -79,6 +79,9 @@ public sealed class SandboxRequest
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "type")]
 [JsonDerivedType(typeof(ProcessContainment), "process")]
 [JsonDerivedType(typeof(ProcessContainerContainment), "processContainer")]
+[JsonDerivedType(typeof(SeatbeltContainment), "seatbelt")]
+[JsonDerivedType(typeof(LxcContainment), "lxc")]
+[JsonDerivedType(typeof(BubblewrapContainment), "bubblewrap")]
 [JsonDerivedType(typeof(WslcContainment), "wslc")]
 [JsonDerivedType(typeof(IsolationSessionContainment), "isolationSession")]
 public abstract class SandboxContainment;
@@ -95,6 +98,45 @@ public sealed class ProcessContainment : SandboxContainment;
 /// </summary>
 /// <remarks>Requires <see cref="SandboxRequest.Experimental"/>.</remarks>
 public sealed class IsolationSessionContainment : SandboxContainment;
+
+/// <summary>Explicit macOS Seatbelt configuration.</summary>
+public sealed class SeatbeltContainment : SandboxContainment
+{
+    /// <summary>Replace the generated sandbox profile entirely.</summary>
+    [JsonPropertyName("profileOverride")]
+    public string? ProfileOverride { get; set; }
+
+    /// <summary>Allow GUI applications to reach WindowServer and related services.</summary>
+    [JsonPropertyName("guiAccess")]
+    public bool GuiAccess { get; set; }
+
+    /// <summary>Allow the contained process to allocate nested pseudo-terminals.</summary>
+    [JsonPropertyName("nestedPty")]
+    public bool NestedPty { get; set; } = true;
+
+    /// <summary>Allow access to the macOS Keychain.</summary>
+    [JsonPropertyName("keychainAccess")]
+    public bool KeychainAccess { get; set; }
+
+    /// <summary>Additional Mach service global names the process may resolve.</summary>
+    [JsonPropertyName("extraMachLookups")]
+    public List<string> ExtraMachLookups { get; set; } = new();
+}
+
+/// <summary>Explicit Linux LXC configuration.</summary>
+public sealed class LxcContainment : SandboxContainment
+{
+    /// <summary>Linux distribution for the container root filesystem.</summary>
+    [JsonPropertyName("distribution")]
+    public string Distribution { get; set; } = "alpine";
+
+    /// <summary>Distribution release version.</summary>
+    [JsonPropertyName("release")]
+    public string Release { get; set; } = "3.23";
+}
+
+/// <summary>Explicit Linux Bubblewrap configuration.</summary>
+public sealed class BubblewrapContainment : SandboxContainment;
 
 /// <summary>Explicit Windows ProcessContainer configuration.</summary>
 public sealed class ProcessContainerContainment : SandboxContainment

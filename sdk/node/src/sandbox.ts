@@ -14,7 +14,15 @@ import {
 } from './types.js';
 import { prepareSpawn, diagLogVersion, applyLinuxNetworkPolicy } from './helper.js';
 import { diagLog } from './diagnostic.js';
-import { MxcError, mxcErrorFromEnvelope } from './errors.js';
+import { MxcError } from './errors.js';
+import {
+  prepareRequestSpec,
+  validateBindingPolicy,
+} from './bindings/request.js';
+import {
+  runBindingRequestAsync,
+  type BindingRunResult,
+} from './bindings/run.js';
 
 const MIN_VERSION = '0.6.0-alpha';
 const SUPPORTED_VERSION = '0.9.0-alpha';
@@ -149,6 +157,11 @@ function usesDirectionalNetwork(policy: SandboxPolicy): boolean {
     const network = policy.network;
     return (network !== undefined && hasDirectionalNetworkFields(network)) ||
         policy.runtimeConfig?.networkProxy !== undefined ||
+        policy.processContainer?.network?.allowedProxyPeer !== undefined;
+}
+
+function hasProcessContainerPolicy(policy: SandboxPolicy): boolean {
+    return Boolean(policy.processContainer?.filesystem?.enumeratePaths?.length) ||
         policy.processContainer?.network?.allowedProxyPeer !== undefined;
 }
 
@@ -462,7 +475,7 @@ export function createConfigFromPolicy(
         };
     }
 
-    // UI mapping (cross-platform)
+    // SandboxPolicy defaults are fail-closed, so omission still emits lockdown.
     config.ui = {
         disable: !(policy.ui?.allowWindows ?? false),
         clipboard: policy.ui?.clipboard ?? "none",
@@ -575,7 +588,11 @@ export function createConfigFromPolicy(
             return buildDarwinProcessConfig(config);
         }
         diagLog(`createConfigFromPolicy: containment=process (BaseContainer), id=${containerId}`);
-        return buildProcessBaseContainerConfig(config, policy);
+        const processConfig = buildProcessBaseContainerConfig(config, policy);
+        if (hasProcessContainerPolicy(policy)) {
+            processConfig.containment = 'processcontainer';
+        }
+        return processConfig;
     }
 
     throw new Error(`Containment type '${containment}' is not yet supported.`);
@@ -699,6 +716,44 @@ export interface SandboxSpawnOptions {
    * (or its equivalent) to clean up an orphaned sandbox after an abort.
    */
   signal?: AbortSignal;
+}
+
+function unsupportedInProcessRunOption(options: SandboxSpawnOptions): string | undefined {
+  if (options.debug === true) return 'debug';
+  if (options.allowTestingFeatures === true) return 'allowTestingFeatures';
+  if (options.skipPlatformCheck === true) return 'skipPlatformCheck';
+  if (options.executablePath !== undefined) return 'executablePath';
+  if (options.ptyOptions !== undefined) return 'ptyOptions';
+  if (options.dryRun === true) return 'dryRun';
+  if (options.logDir !== undefined) return 'logDir';
+  if (options.usePty === true) return 'usePty';
+  if (options.signal !== undefined) return 'signal';
+  return undefined;
+}
+
+function appendDiagnosticLine(output: string, line: string): string {
+  const prefix = output.length === 0 || output.endsWith('\n') ? output : `${output}\n`;
+  return `${prefix}${line}\n`;
+}
+
+// Preserve diagnostics that the executor CLI previously emitted on stderr.
+function bufferedStderr(result: BindingRunResult): string {
+  let stderr = result.stderr;
+  for (const warning of result.warnings) {
+    stderr = appendDiagnosticLine(stderr, warning);
+  }
+
+  if (
+    result.outputMetadata !== null
+    && typeof result.outputMetadata === 'object'
+    && !Array.isArray(result.outputMetadata)
+  ) {
+    const captureDenials = (result.outputMetadata as Record<string, unknown>).captureDenials;
+    if (captureDenials !== undefined) {
+      stderr = appendDiagnosticLine(stderr, JSON.stringify(captureDenials));
+    }
+  }
+  return stderr;
 }
 
 /**
@@ -907,7 +962,7 @@ export function spawnSandboxFromConfig(
 
 /**
  * Spawn a sandboxed process and return a promise that resolves with output.
- * Convenience wrapper around spawnSandbox for non-interactive use cases.
+ * Runs non-interactive workloads through the native runtime.
  *
  * @param script The command line script to execute
  * @param policy The sandbox policy
@@ -929,66 +984,41 @@ export function spawnSandboxFromConfig(
  * console.log('Exit code:', result.exitCode);
  * ```
  */
-export function spawnSandboxAsync(
+export async function spawnSandboxAsync(
   script: string,
   policy: SandboxPolicy,
   options: SandboxSpawnOptions = {},
   workingDirectory?: string,
   containerName?: string,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  return new Promise((resolve, reject) => {
-    try {
-      const ptyProcess = spawnSandbox(script, policy, options, workingDirectory, containerName);
-      let output = '';
-
-      ptyProcess.onData((data: string) => {
-        output += data;
-      });
-
-      ptyProcess.onExit((event: { exitCode: number; signal?: number }) => {
-        // Note: wxc-exec doesn't separate stdout/stderr when using PTY
-        // All output is combined
-        //
-        // Check for structured error envelopes from wxc-exec on failure.
-        if (event.exitCode !== 0) {
-          const mxcError = tryParseErrorEnvelopeFromLines(output);
-          if (mxcError) {
-            reject(mxcError);
-            return;
-          }
-        }
-        resolve({
-          stdout: output,
-          stderr: '',
-          exitCode: event.exitCode
-        });
-      });
-    } catch (error) {
-      reject(error);
-    }
-  });
-}
-
-/**
- * Scans a multi-line string for a JSON error envelope emitted by wxc-exec
- * on stderr. Returns the first matching envelope, or null if none found.
- * The envelope format is: `{"error": {"code": "...", "message": "...", ...}}`
- */
-function tryParseErrorEnvelopeFromLines(output: string): MxcError | null {
-  for (const line of output.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith('{')) continue;
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (parsed && typeof parsed === 'object' && 'error' in parsed) {
-        const env = parsed.error;
-        if (env && typeof env.code === 'string' && typeof env.message === 'string') {
-          return mxcErrorFromEnvelope(env);
-        }
-      }
-    } catch {
-      // Not valid JSON on this line, continue scanning.
-    }
+  const unsupportedOption = unsupportedInProcessRunOption(options);
+  if (unsupportedOption !== undefined) {
+    throw new MxcError(
+      'malformed_request',
+      `spawnSandboxAsync does not support executor-only option '${unsupportedOption}'`,
+    );
   }
-  return null;
+  validateBindingPolicy(policy);
+
+  const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
+  // Legacy policy construction derives an executor-specific enforcement mode.
+  // The native policy builder derives its own mode from the portable fields.
+  if (config.network !== undefined) {
+    delete config.network.enforcementMode;
+  }
+  const request = prepareRequestSpec(config, {
+    inheritDefaultEnv: options.inheritDefaultEnv,
+    experimental: options.experimental,
+  });
+  const result = await runBindingRequestAsync(request);
+  if (result.timedOut) {
+    throw new MxcError('backend_error', 'sandbox execution timed out', {
+      timedOut: true,
+    });
+  }
+  return {
+    stdout: result.stdout,
+    stderr: bufferedStderr(result),
+    exitCode: result.exitCode,
+  };
 }

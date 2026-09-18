@@ -309,14 +309,14 @@ fn resolve_runner_inner_windows(
 }
 
 // ---------------------------------------------------------------------------
-// Linux: mirrors `lxc-exec` — Bubblewrap (default), LXC, and the experimental
-// Hyperlight / MicroVM backends. Any other containment falls back to LXC.
+// Linux: Bubblewrap, LXC, and the experimental Hyperlight / MicroVM backends.
+// A concrete backend selected for another host must fail closed.
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "linux")]
 fn resolve_runner_inner(
     request: &ExecutionRequest,
-    logger: &mut Logger,
+    _logger: &mut Logger,
 ) -> Result<ResolvedRunner, MxcError> {
     use wxc_common::sandbox_process::Runner;
 
@@ -351,39 +351,86 @@ fn resolve_runner_inner(
                 &request.lifecycle,
             ),
         ))),
-        ref other => {
-            logger.log_line(&format!(
-                "Note: containment {other:?} unsupported on lxc-exec; falling back to LXC."
-            ));
-            Ok(ResolvedRunner::without_guard(Box::new(
-                lxc_common::lxc_runner::LxcScriptRunner::new(
-                    &request.lxc_config,
-                    &request.container_id,
-                    &request.lifecycle,
-                ),
-            )))
-        }
+        ref other => Err(MxcError::unsupported_containment(format!(
+            "the '{}' backend is not available on Linux",
+            other.wire_name()
+        ))),
     }
 }
 
 // ---------------------------------------------------------------------------
-// macOS: always Seatbelt (the SDK selects it on darwin; be lenient and log a
-// note if the request asked for something else).
+// macOS: Seatbelt only. A concrete backend selected for another host must fail
+// closed rather than silently weakening or changing the requested containment.
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "macos")]
 fn resolve_runner_inner(
     request: &ExecutionRequest,
-    logger: &mut Logger,
+    _logger: &mut Logger,
 ) -> Result<ResolvedRunner, MxcError> {
     use wxc_common::sandbox_process::Runner;
 
     if request.containment != ContainmentBackend::Seatbelt {
-        logger.log_line("Note: Overriding containment backend to Seatbelt on macOS.");
+        return Err(MxcError::unsupported_containment(format!(
+            "the '{}' backend is not available on macOS",
+            request.containment.wire_name()
+        )));
     }
     Ok(ResolvedRunner::without_guard(Box::new(Runner::new(
         seatbelt_common::seatbelt_runner::SeatbeltScriptRunner::new(),
     ))))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_tests {
+    use super::*;
+    use wxc_common::logger::Mode;
+
+    #[test]
+    fn cross_platform_backend_is_rejected_instead_of_falling_back_to_lxc() {
+        let request = ExecutionRequest {
+            containment: ContainmentBackend::Seatbelt,
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let error = match resolve_runner_inner(&request, &mut logger) {
+            Ok(_) => panic!("Seatbelt must not fall back to LXC on Linux"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.code,
+            wxc_common::mxc_error::MxcErrorCode::UnsupportedContainment
+        );
+        assert!(error.message.contains("seatbelt"));
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::*;
+    use wxc_common::logger::Mode;
+
+    #[test]
+    fn cross_platform_backend_is_rejected_instead_of_falling_back_to_seatbelt() {
+        let request = ExecutionRequest {
+            containment: ContainmentBackend::Lxc,
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let error = match resolve_runner_inner(&request, &mut logger) {
+            Ok(_) => panic!("LXC must not fall back to Seatbelt on macOS"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.code,
+            wxc_common::mxc_error::MxcErrorCode::UnsupportedContainment
+        );
+        assert!(error.message.contains("lxc"));
+    }
 }
 
 // ---------------------------------------------------------------------------

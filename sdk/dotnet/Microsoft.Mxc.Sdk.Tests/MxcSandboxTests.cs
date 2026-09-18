@@ -941,6 +941,74 @@ public class MxcSandboxTests
     }
 
     [Fact]
+    public void SandboxRequest_SerializesSeatbeltOptions()
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy { Version = "0.8.0-alpha" },
+            "echo hi")
+        {
+            Containment = new SeatbeltContainment
+            {
+                ProfileOverride = "(version 1)",
+                GuiAccess = true,
+                NestedPty = false,
+                KeychainAccess = true,
+                ExtraMachLookups = { "com.example.service" },
+            },
+        };
+
+        using var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
+        var containment = doc.RootElement.GetProperty("containment");
+
+        Assert.Equal("seatbelt", containment.GetProperty("type").GetString());
+        Assert.Equal("(version 1)", containment.GetProperty("profileOverride").GetString());
+        Assert.True(containment.GetProperty("guiAccess").GetBoolean());
+        Assert.False(containment.GetProperty("nestedPty").GetBoolean());
+        Assert.True(containment.GetProperty("keychainAccess").GetBoolean());
+        Assert.Equal(
+            "com.example.service",
+            containment.GetProperty("extraMachLookups")[0].GetString());
+    }
+
+    [Fact]
+    public void SandboxRequest_SerializesLxcOptions()
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy { Version = "0.8.0-alpha" },
+            "echo hi")
+        {
+            Containment = new LxcContainment
+            {
+                Distribution = "ubuntu",
+                Release = "24.04",
+            },
+        };
+
+        using var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
+        var containment = doc.RootElement.GetProperty("containment");
+
+        Assert.Equal("lxc", containment.GetProperty("type").GetString());
+        Assert.Equal("ubuntu", containment.GetProperty("distribution").GetString());
+        Assert.Equal("24.04", containment.GetProperty("release").GetString());
+    }
+
+    [Fact]
+    public void SandboxRequest_SerializesBubblewrapContainment()
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy { Version = "0.8.0-alpha" },
+            "echo hi")
+        {
+            Containment = new BubblewrapContainment(),
+        };
+
+        using var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
+        var containment = doc.RootElement.GetProperty("containment");
+
+        Assert.Equal("bubblewrap", containment.GetProperty("type").GetString());
+    }
+
+    [Fact]
     public void SandboxRequest_SerializesIsolationSessionContainment()
     {
         var request = new SandboxRequest(

@@ -16,7 +16,6 @@ import {
   createTempDir,
   withToolPaths,
   startTestProxy,
-  debugSpawnOptions,
   pythonCommand,
   pythonSkipReason,
 } from './test-helpers.js';
@@ -38,7 +37,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     const result = await sdk.spawnSandboxAsync(
       'cmd.exe /c echo Container test successful',
       { version: schemaVersion.raw },
-      debugSpawnOptions,
+      {},
       undefined,
       `test-1-${schemaVersion}`,
     );
@@ -50,7 +49,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     const result = await sdk.spawnSandboxAsync(
       "powershell.exe -NoProfile -Command Write-Output 'PowerShell test successful'",
       { version: schemaVersion.raw, ui: { allowWindows: true } },
-      debugSpawnOptions,
+      {},
       undefined,
       `test-2-${schemaVersion}`,
     );
@@ -63,7 +62,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     const result = await sdk.spawnSandboxAsync(
       `${pythonCommand} -c "print('Python test successful')"`,
       policy,
-      debugSpawnOptions,
+      {},
       undefined,
       `test-3-${schemaVersion}`,
     );
@@ -84,7 +83,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     const result = await sdk.spawnSandboxAsync(
       `${pythonCommand} ${scriptFile}`,
       policy,
-      debugSpawnOptions,
+      {},
       tempDir,
       `test-4-${schemaVersion}`,
     );
@@ -104,7 +103,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     const result = await sdk.spawnSandboxAsync(
       `cmd.exe /c type ${inputFile}`,
       policy,
-      debugSpawnOptions,
+      {},
       tempDir,
       `test-5-${schemaVersion}`,
     );
@@ -116,7 +115,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     const result = await sdk.spawnSandboxAsync(
       'cmd.exe /c echo version ok',
       { version: schemaVersion.raw },
-      debugSpawnOptions,
+      {},
       undefined,
       `test-ver-${schemaVersion}`,
     );
@@ -158,8 +157,21 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
         `$h.Open('GET','https://api.github.com/zen',$false); ` +
         `$h.Send(); ` +
         `Write-Output ('PROXY_RESPONSE: ' + $h.ResponseText)"`;
-      const result = await sdk.spawnSandboxAsync(
-        script, policy, { debug: true, allowTestingFeatures: true }, undefined, `proxy-builtin-${schemaVersion}`,
+      const result = await new Promise<{ stdout: string; stderr: string; exitCode: number }>(
+        (resolve) => {
+          const sandboxProcess = sdk.spawnSandbox(
+            script,
+            policy,
+            { debug: true, allowTestingFeatures: true },
+            undefined,
+            `proxy-builtin-${schemaVersion}`,
+          );
+          let stdout = '';
+          sandboxProcess.onData((data: string) => { stdout += data; });
+          sandboxProcess.onExit(({ exitCode }: { exitCode: number }) => {
+            resolve({ stdout, stderr: '', exitCode });
+          });
+        },
       );
 
       assert.strictEqual(result.exitCode, 0, `[${schemaVersion}] Expected exit 0: ${result.stderr}`);
@@ -184,7 +196,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
         `$h.Send(); ` +
         `Write-Output ('PROXY_RESPONSE: ' + $h.ResponseText)"`;
       const result = await sdk.spawnSandboxAsync(
-        script, policy, { debug: true }, undefined, `proxy-ext-${schemaVersion}`,
+        script, policy, {}, undefined, `proxy-ext-${schemaVersion}`,
       );
 
       assert.strictEqual(result.exitCode, 0, `[${schemaVersion}] Expected exit 0: ${result.stderr}`);

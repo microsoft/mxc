@@ -305,8 +305,8 @@ The ProcessContainer-only `processContainer.filesystem` section contains:
 On Windows, `deniedPaths` is enforced by one of two mechanisms depending on the
 containment tier selected at runtime:
 
-- **BaseContainer (Tier 1):** enforced natively by the OS when the build advertises
-  the `SANDBOX_CAP_FS_DENY` capability. No host filesystem changes are made.
+- **BaseContainer (Tier 1):** enforced natively by the OS when PSEC advertises
+  `PSE_SUPPORT_FS_DENY`. No host filesystem changes are made.
 - **AppContainer (Tier 2/3):** enforced by host-filesystem DENY ACEs, applied before
   the run and removed on exit. This path is gated by `allowDaclMutation`, requires
   `WRITE_DAC` on each denied path, and temporarily modifies host security descriptors.

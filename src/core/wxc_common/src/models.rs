@@ -13,7 +13,7 @@ pub enum ContainmentBackend {
     #[default]
     /// Windows process-level containment. Resolves at runtime to either
     /// AppContainer (legacy OS API) or BaseContainer (newer Windows
-    /// sandbox API exposed via `Experimental_CreateProcessInSandbox`)
+    /// process security environment API)
     /// based purely on host capability — BaseContainer is preferred when
     /// the OS supports it, AppContainer is the downlevel fallback. The
     /// schema version does not influence this choice.
@@ -169,7 +169,7 @@ pub struct SeatbeltConfig {
     /// read/write/ioctl on `/dev/ptmx`. Set to `false` for the tightest
     /// possible sandbox when the inner command does not need to allocate
     /// new ttys.
-    #[serde(rename = "nestedPty", default = "default_true")]
+    #[serde(rename = "nestedPty", default = "default_nested_pty")]
     pub nested_pty: bool,
 
     /// Allow Mach IPC + filesystem access required for `keytar` /
@@ -196,7 +196,7 @@ pub struct SeatbeltConfig {
     pub extra_mach_lookups: Vec<String>,
 }
 
-fn default_true() -> bool {
+fn default_nested_pty() -> bool {
     true
 }
 
@@ -1185,7 +1185,7 @@ pub struct ScriptResponse {
     pub standard_err: String,
     pub error_message: String,
     /// Raw system/API error detail intended for developers and diagnostics
-    /// (e.g. "Experimental_CreateProcessInSandbox failed: WIN32_ERROR(1920)").
+    /// (e.g. "CreateProcessSecurityEnvironment failed: HRESULT(...)").
     /// Kept separate from `error_message` which holds user-friendly text.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub extended_error: String,

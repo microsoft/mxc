@@ -500,6 +500,12 @@ pub enum Containment {
     /// Windows ProcessContainer with explicit AppContainer/BaseContainer
     /// settings.
     ProcessContainer(ProcessContainer),
+    /// macOS Seatbelt with explicit backend-specific settings.
+    Seatbelt(crate::configs::Seatbelt),
+    /// Linux LXC with explicit distribution settings.
+    Lxc(crate::configs::Lxc),
+    /// Linux Bubblewrap backend.
+    Bubblewrap,
     /// WSL Container backend: a Linux container on a Windows host, via the WSLC
     /// SDK, configured by the carried [`WslcSection`]
     /// (`WslcSection::default()` matches the SDK's defaults).
@@ -520,6 +526,9 @@ impl Containment {
         match self {
             Self::Process => "process",
             Self::ProcessContainer(_) => "processcontainer",
+            Self::Seatbelt(_) => "seatbelt",
+            Self::Lxc(_) => "lxc",
+            Self::Bubblewrap => "bubblewrap",
             Self::Wslc(_) => "wslc",
             Self::IsolationSession => "isolation_session",
         }
@@ -942,6 +951,8 @@ fn build_wire_config_with_network_format(
     let accepts_host_rules_without_outbound = match containment {
         Containment::Process => cfg!(any(target_os = "linux", target_os = "macos")),
         Containment::ProcessContainer(_) => false,
+        Containment::Seatbelt(_) => true,
+        Containment::Lxc(_) | Containment::Bubblewrap => true,
         Containment::Wslc(_) => true,
         Containment::IsolationSession => false,
     };
@@ -1042,6 +1053,30 @@ fn build_wire_config_with_network_format(
             network_format,
             "processcontainer",
         )?,
+        Containment::Seatbelt(seatbelt) => {
+            config["containment"] = json!("seatbelt");
+            config["seatbelt"] = json!({
+                "profileOverride": seatbelt.profile_override.as_deref(),
+                "guiAccess": seatbelt.gui_access,
+                "nestedPty": seatbelt.nested_pty,
+                "keychainAccess": seatbelt.keychain_access,
+                "extraMachLookups": &seatbelt.extra_mach_lookups,
+            });
+        }
+        Containment::Lxc(lxc) => {
+            config["containment"] = json!("lxc");
+            config["lxc"] = json!({
+                "distribution": &lxc.distribution,
+                "release": &lxc.release,
+            });
+            #[cfg(target_os = "linux")]
+            apply_linux_network_policy(&mut config);
+        }
+        Containment::Bubblewrap => {
+            config["containment"] = json!("bubblewrap");
+            #[cfg(target_os = "linux")]
+            apply_linux_network_policy(&mut config);
+        }
         Containment::Wslc(wslc) => apply_wslc_backend(&mut config, wslc),
         Containment::IsolationSession => {
             config["containment"] = serde_json::json!("isolation_session");
@@ -2008,6 +2043,78 @@ mod tests {
         assert!(cfg
             .extra_mach_lookups
             .contains(&"com.example.service".to_string()));
+    }
+
+    #[test]
+    fn explicit_seatbelt_configuration_reaches_the_request() {
+        use crate::configs::Seatbelt;
+
+        let policy = SandboxPolicy {
+            version: "0.8.0-alpha".to_string(),
+            filesystem: None,
+            network: None,
+            ui: None,
+            timeout_ms: None,
+        };
+        let seatbelt = Seatbelt {
+            profile_override: Some("(version 1)".to_string()),
+            gui_access: true,
+            nested_pty: false,
+            keychain_access: true,
+            extra_mach_lookups: vec!["com.example.service".to_string()],
+        };
+
+        let request = build_request_with_containment(
+            &policy,
+            &Containment::Seatbelt(seatbelt),
+            TEST_COMMAND,
+            None,
+        )
+        .expect("explicit Seatbelt request builds");
+        let config = request
+            .inner
+            .seatbelt
+            .expect("explicit Seatbelt config is preserved");
+
+        assert_eq!(config.profile_override.as_deref(), Some("(version 1)"));
+        assert!(config.gui_access);
+        assert!(!config.nested_pty);
+        assert!(config.keychain_access);
+        assert_eq!(config.extra_mach_lookups, ["com.example.service"]);
+    }
+
+    #[test]
+    fn explicit_lxc_configuration_reaches_the_request() {
+        use crate::configs::Lxc;
+
+        let lxc = Lxc {
+            distribution: "ubuntu".to_string(),
+            release: "24.04".to_string(),
+        };
+        let request = build_request_with_containment(
+            &minimal_policy(),
+            &Containment::Lxc(lxc),
+            TEST_COMMAND,
+            None,
+        )
+        .expect("explicit LXC request builds");
+
+        assert_eq!(request.inner.containment, ContainmentBackend::Lxc);
+        assert_eq!(request.inner.lxc_config.distribution, "ubuntu");
+        assert_eq!(request.inner.lxc_config.release, "24.04");
+    }
+
+    #[test]
+    fn explicit_bubblewrap_configuration_reaches_the_request() {
+        let request = build_request_with_containment(
+            &minimal_policy(),
+            &Containment::Bubblewrap,
+            TEST_COMMAND,
+            None,
+        )
+        .expect("explicit Bubblewrap request builds");
+
+        assert_eq!(request.inner.containment, ContainmentBackend::Bubblewrap);
     }
 
     #[cfg(target_os = "windows")]

@@ -98,9 +98,9 @@ A legacy deny-default policy that names `allowedHosts` opens port 53
 unconditionally, so it cannot block DNS.  The directional `network.egress`
 rules carry no such exemption and govern port 53 like any other destination.
 
-`preservePolicy` leaves the egress chains in place after the run.  The chains
-live in the container's network namespace, so they last only as long as the
-container keeps running; stopping or destroying it takes them with it.  A
+`preservePolicy` leaves the inbound and outbound chains in place after the run.
+The chains live in the container's network namespace, so they last only as long
+as the container keeps running; stopping or destroying it takes them with it.  A
 partially installed chain from a failed run is torn down regardless.
 
 If using the legacy network shape, `enforcementMode` cannot be `capabilities`.
@@ -182,3 +182,29 @@ pty.onExit((e) => console.log('Exit:', e.exitCode));
 # Rust only
 ./build.sh --rust-only
 ```
+
+## Limitations
+
+- **Default-deny is not a containment boundary against the workload.** Both the
+  inbound and outbound chains live in the container's own network namespace, and
+  container init keeps `CAP_NET_ADMIN` there, so a process running as root inside
+  the container can flush or delete them. The command MXC runs is attached with
+  `CAP_NET_ADMIN` dropped from its bounding set whenever chains are installed, so
+  it cannot. Default-deny closes external reachability for a container that does
+  not deliberately tear it down, including services the workload itself starts.
+- **Raw sockets bypass egress filtering.** `CAP_NET_RAW` is retained so that an
+  explicit `protocol: "icmp"` allow works. It also permits `AF_PACKET` sockets,
+  which write link-layer frames straight to the interface without traversing the
+  filter chain.
+- **Policy is not in force while the container starts.** The chains are installed
+  after the container has started and its address has settled, so container init
+  and anything it starts run unfiltered in both directions for that interval. The
+  requested command is attached afterwards. A connection opened during that window
+  keeps working once the rules land, because the chains accept established flows.
+- **A filtered container cannot renew a DHCP lease.** The chains permit loopback,
+  established flows, and DNS, with no carve-out for DHCP. A container that
+  outlives its lease loses its address; one that finishes within the lease period
+  is unaffected.
+- **No proxied egress.** See [Proxy](#proxy).
+- **No state-aware lifecycle.** LXC implements `ScriptRunner` only (one-shot),
+  not `StatefulSandboxBackend`. A state-aware request is rejected.

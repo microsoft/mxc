@@ -310,6 +310,45 @@ Capability names and backend combinations are validated by the native SDK.
 `LearningMode`, denial capture, and ProcessContainer directional networking
 require schema `0.8.0-alpha` or later.
 
+#### Seatbelt options
+
+`SeatbeltContainment` explicitly selects the macOS Seatbelt backend and carries
+the backend-specific profile, GUI, nested-pty, Keychain, and Mach
+service settings:
+
+```csharp
+request.Containment = new SeatbeltContainment
+{
+    GuiAccess = true,
+    NestedPty = true,
+    KeychainAccess = true,
+    ExtraMachLookups = { "com.example.service" },
+};
+```
+
+`ProfileOverride` replaces the generated profile entirely, so use it only as
+an advanced escape hatch.
+
+#### Linux containment options
+
+`BubblewrapContainment` explicitly selects Bubblewrap. It has no
+backend-specific settings; filesystem, network, and UI policy remain on
+`SandboxPolicy`.
+
+`LxcContainment` explicitly selects LXC and carries its distribution settings:
+
+```csharp
+request.Containment = new LxcContainment
+{
+    Distribution = "ubuntu",
+    Release = "24.04",
+};
+```
+
+The managed SDK can represent LXC settings, but its in-process `Run`,
+`RunAsync`, and `Spawn` surfaces reject LXC because the backend does not expose
+captured pipe-based execution. Use the standalone `lxc-exec` binary for LXC.
+
 #### WSL Container options
 
 `WslcContainment` selects the experimental WSLC backend and carries its image,

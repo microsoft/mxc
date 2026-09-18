@@ -2,8 +2,7 @@
 // Licensed under the MIT License.
 
 //! Working-directory resolution shared by the two Windows ProcessContainer
-//! launch paths (`AppContainerScriptRunner` -> `CreateProcessW` and
-//! `BaseContainerRunner` -> `Experimental_CreateProcessInSandbox`).
+//! launch paths.
 //!
 //! Both launch APIs treat a `NULL` current directory as "inherit the parent's
 //! cwd". Under a deny-by-default sandbox token that directory is usually not
@@ -66,8 +65,7 @@ impl LaunchWorkingDirectory {
 ///
 /// Precedence: explicit `process.cwd`, else the first filesystem-policy grant
 /// that is an existing directory, else the system drive root. The result is
-/// never empty — passing `NULL` to `CreateProcessW` /
-/// `Experimental_CreateProcessInSandbox` would silently relocate the child.
+/// never empty — passing `NULL` to `CreateProcessW` would silently relocate the child.
 pub fn launch_working_directory(request: &ExecutionRequest) -> LaunchWorkingDirectory {
     launch_working_directory_with(
         request,

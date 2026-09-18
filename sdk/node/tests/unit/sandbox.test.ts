@@ -798,10 +798,28 @@ describe('createConfigFromPolicy', () => {
           },
         },
       });
+
+      assert.strictEqual(config.containment, 'processcontainer');
       assert.deepStrictEqual(
         config.processContainer!.filesystem!.enumeratePaths,
         ['C:\\tools'],
       );
+    } finally {
+      if (originalPlatform) {
+        Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    }
+  });
+
+  it('should not select ProcessContainer for an empty processContainer policy', () => {
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    try {
+      const config = createConfigFromPolicy({
+        version: '0.9.0-alpha',
+        processContainer: {},
+      });
+      assert.strictEqual(config.containment, 'process');
     } finally {
       if (originalPlatform) {
         Object.defineProperty(process, 'platform', originalPlatform);
@@ -1017,6 +1035,7 @@ describe('createConfigFromPolicy', () => {
           },
         });
 
+        assert.strictEqual(config.containment, 'processcontainer');
         assert.deepStrictEqual(config.network, {
           egress: { default: 'deny' },
           ingress: { default: 'allow', hostLoopback: 'deny' },
