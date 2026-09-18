@@ -453,7 +453,7 @@ mod tests {
     // this deserialization path; common recording-backend tests cover delivery.
 
     #[test]
-    fn wire_model_nests_config_only_for_phases_that_take_one() {
+    fn wire_model_contains_only_supported_provision_config() {
         // Field-by-field construction is deliberate: adding a per-phase field
         // to the wire struct breaks this test's compilation, forcing a
         // decision about whether the backend honors it.
@@ -471,8 +471,8 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["provision"],
-            "wire model nests a per-phase config for a phase the backend takes none for"
+            ["appId", "provision"],
+            "wire model contains an unexpected configuration field"
         );
     }
 
