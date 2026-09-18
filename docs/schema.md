@@ -80,6 +80,27 @@ schema 0.6 and 0.7. During the additive schema 0.8 transition, requests may
 continue to use those legacy fields or use the directional fields above, but
 cannot mix both formats in one request.
 
+#### Legacy network host-list semantics
+
+Legacy host lists refine `defaultPolicy`; they do not replace it. Shared
+validation rejects a list that cannot refine the selected default before the
+backend executes.
+
+| `defaultPolicy` | `allowedHosts` | `blockedHosts` | Result |
+| --- | --- | --- | --- |
+| `block` | empty | empty | Valid: no egress |
+| `block` | non-empty | empty | Valid: allow only listed destinations |
+| `block` | empty | non-empty | Invalid: a blocklist cannot refine a block default without an allowlist |
+| `block` | non-empty | non-empty | Valid shared policy: explicit blocks override allowed destinations; backends may reject if they cannot represent both lists |
+| `allow` | empty | empty | Valid: unrestricted egress |
+| `allow` | empty | non-empty | Valid: allow all except listed destinations |
+| `allow` | non-empty | empty | Invalid: an allowlist cannot refine an allow default |
+| `allow` | non-empty | non-empty | Invalid: `allowedHosts` cannot be used with an allow default |
+
+For the valid block-default combination containing both lists, explicit blocks
+take precedence over allowed destinations. A backend that cannot represent both
+lists must reject the combination rather than dropping either list.
+
 ### IsolationSession unrestricted networking (0.9)
 
 IsolationSession cannot restrict networking. Exact v0.9 requests must describe

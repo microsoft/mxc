@@ -58,11 +58,34 @@ impl std::ops::BitOr for NetworkPolicySupport {
     }
 }
 
+fn validate_legacy_host_lists(request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+    let policy = &request.policy;
+
+    if policy.default_network_policy == NetworkPolicy::Block
+        && policy.allowed_hosts.is_empty()
+        && !policy.blocked_hosts.is_empty()
+    {
+        return Err(ScriptResponse::error(
+            "blockedHosts requires allowedHosts when network.defaultPolicy='block'",
+        ));
+    }
+
+    if policy.default_network_policy == NetworkPolicy::Allow && !policy.allowed_hosts.is_empty() {
+        return Err(ScriptResponse::error(
+            "allowedHosts requires network.defaultPolicy='block'",
+        ));
+    }
+
+    Ok(())
+}
+
 /// Reject network policy features that the selected backend cannot enforce.
 pub fn validate_network_policy_support(
     request: &ExecutionRequest,
     support: NetworkPolicySupport,
 ) -> Result<(), ScriptResponse> {
+    validate_legacy_host_lists(request)?;
+
     let directional_posture_supplied = request.policy.network_mode_specified
         || (request.policy.network_egress.is_some() && request.policy.network_proxy.is_enabled());
 
@@ -231,8 +254,8 @@ pub fn validate_exec_common(request: &ExecutionRequest) -> Result<(), MxcError> 
 mod tests {
     use super::*;
     use crate::models::{
-        ExecutionRequest, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkRule,
-        ProxyAddress, ProxyConfig,
+        ContainerPolicy, ExecutionRequest, NetworkAction, NetworkEgressPolicy,
+        NetworkIngressPolicy, NetworkRule, ProxyAddress, ProxyConfig,
     };
     use crate::mxc_error::MxcErrorCode;
 
@@ -348,6 +371,81 @@ mod tests {
         req.testing_features_enabled = true;
 
         assert!(validate_common(&req).is_ok());
+    }
+
+    #[test]
+    fn network_support_accepts_valid_legacy_host_list_combinations() {
+        for (default_network_policy, allowed_hosts, blocked_hosts) in [
+            (NetworkPolicy::Block, vec![], vec![]),
+            (
+                NetworkPolicy::Block,
+                vec!["203.0.113.7".to_string()],
+                vec![],
+            ),
+            (
+                NetworkPolicy::Block,
+                vec!["203.0.113.0/24".to_string()],
+                vec!["203.0.113.7".to_string()],
+            ),
+            (NetworkPolicy::Allow, vec![], vec![]),
+            (
+                NetworkPolicy::Allow,
+                vec![],
+                vec!["203.0.113.7".to_string()],
+            ),
+        ] {
+            let request = ExecutionRequest {
+                policy: ContainerPolicy {
+                    default_network_policy,
+                    allowed_hosts,
+                    blocked_hosts,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            assert!(validate_network_policy_support(&request, NetworkPolicySupport::ALL).is_ok());
+        }
+    }
+
+    #[test]
+    fn network_support_rejects_legacy_lists_that_do_not_refine_the_default() {
+        let cases = [
+            (
+                NetworkPolicy::Block,
+                vec![],
+                vec!["203.0.113.7".to_string()],
+                "blockedHosts requires allowedHosts when network.defaultPolicy='block'",
+            ),
+            (
+                NetworkPolicy::Allow,
+                vec!["203.0.113.7".to_string()],
+                vec![],
+                "allowedHosts requires network.defaultPolicy='block'",
+            ),
+            (
+                NetworkPolicy::Allow,
+                vec!["203.0.113.7".to_string()],
+                vec!["203.0.113.8".to_string()],
+                "allowedHosts requires network.defaultPolicy='block'",
+            ),
+        ];
+
+        for (default_network_policy, allowed_hosts, blocked_hosts, expected) in cases {
+            let request = ExecutionRequest {
+                policy: ContainerPolicy {
+                    default_network_policy,
+                    allowed_hosts,
+                    blocked_hosts,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            let error =
+                validate_network_policy_support(&request, NetworkPolicySupport::ALL).unwrap_err();
+            assert_eq!(error.error_message, expected);
+        }
     }
 
     #[test]
