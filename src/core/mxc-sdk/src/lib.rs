@@ -55,10 +55,10 @@
 //! [`ErrorCode::UnsupportedContainment`] because LXC does not expose captured
 //! pipe-based execution. Use the standalone `lxc-exec` binary for LXC.
 //!
-//! WSLC and IsolationSession are **experimental**: build with the crate's
-//! `wslc` / `isolation_session` feature, and call
+//! WSLC is **experimental**: build with the crate's `wslc` feature and call
 //! [`SandboxRequest::set_experimental(true)`](SandboxRequest::set_experimental)
-//! on the request. WSLC's container has no stdin (the WSLC SDK exposes no
+//! on the request. IsolationSession requires the `isolation_session` build
+//! feature but no runtime experimental opt-in. WSLC's container has no stdin (the WSLC SDK exposes no
 //! process-input API), so [`Sandbox::take_stdin`] returns `None` for it.
 //! IsolationSession is also reachable through the state-aware lifecycle below,
 //! which additionally serves an attached, pseudo-console exec.
@@ -94,7 +94,7 @@
 //! };
 //!
 //! # let policy = SandboxPolicy {
-//! #     version: "0.9.0-alpha".to_string(),
+//! #     version: "0.10.0-alpha".to_string(),
 //! #     filesystem: None, network: None, ui: None, timeout_ms: None,
 //! # };
 //! // Run a command inside a WSL container (Windows, --features wslc).
@@ -216,8 +216,8 @@ pub fn run(request: SandboxRequest) -> Result<Output, Error> {
 /// failures) come back as an [`Error`] with the matching [`ErrorCode`].
 ///
 /// `experimental` is the in-process equivalent of the executor's
-/// `--experimental` flag. The experimental backends — WindowsSandbox,
-/// IsolationSession and WSLc — are refused with
+/// `--experimental` flag. The experimental backends — WindowsSandbox and
+/// WSLc — are refused with
 /// [`ErrorCode::BackendUnavailable`] unless it is set, before any work is done.
 /// It is an API parameter rather than a field in the request JSON so that a
 /// config cannot grant itself experimental access.

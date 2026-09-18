@@ -276,7 +276,7 @@ fn resolve_runner_inner_windows(
                 {
                     let _ = writeln!(
                         logger,
-                        "warning: experimental.windows_sandbox.idleTimeoutMs and daemonPipeName \
+                        "warning: windowsSandbox.idleTimeoutMs and daemonPipeName \
                          are ignored by the one-shot backend; each invocation launches and tears \
                          down a fresh VM"
                     );
@@ -289,11 +289,6 @@ fn resolve_runner_inner_windows(
         ContainmentBackend::IsolationSession => {
             #[cfg(feature = "isolation_session")]
             {
-                if !request.experimental_enabled {
-                    return Err(MxcError::malformed_request(
-                        "Isolation Session is an experimental feature. Use --experimental flag.",
-                    ));
-                }
                 Ok(ResolvedRunner::without_guard(Box::new(
                     isolation_session_common::IsolationSessionRunner::new(),
                 )))

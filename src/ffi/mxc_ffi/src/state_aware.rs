@@ -111,8 +111,9 @@ impl MxcStateAwareResult {
 /// same reason.
 ///
 /// `experimental` is non-zero to opt in to the experimental backends
-/// (WindowsSandbox, IsolationSession, WSLc); with zero they are refused with
-/// `backend_unavailable` before any work is done.
+/// (WindowsSandbox and WSLc); with zero they are refused with
+/// `backend_unavailable` before any work is done. IsolationSession requires no
+/// runtime experimental opt-in.
 ///
 /// # Safety
 /// - `request_json_utf8` must be null or a valid NUL-terminated UTF-8 C string.
@@ -203,8 +204,9 @@ pub unsafe extern "C" fn mxc_state_aware_result_free(r: *mut MxcStateAwareResult
 /// with [`mxc_error_detail_free`](crate::mxc_error_detail_free));
 /// `*out_handle` is set to null.
 ///
-/// `experimental` opts in to the experimental backends, as for
-/// [`mxc_state_aware`].
+/// `experimental` opts in to WindowsSandbox and WSLc, as for
+/// [`mxc_state_aware`]. IsolationSession requires no runtime experimental
+/// opt-in.
 ///
 /// # Safety
 /// - `request_json_utf8` must be null or a valid NUL-terminated UTF-8 C string.
@@ -407,6 +409,9 @@ mod tests {
     use super::*;
     use std::ffi::CString;
 
+    const WINDOWS_SANDBOX_PROVISION_REQUEST: &str =
+        r#"{"version":"0.10.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
+
     fn call(json: &str, dry_run: bool) -> MxcStateAwareResult {
         call_opt(json, dry_run, false)
     }
@@ -486,7 +491,7 @@ mod tests {
                 "{{\n  \"version\":\"0.9.0-alpha\",\n  \"phase\":\"provision\",\n  \
                  \"containment\":\"isolation_session\",\n  \
                  \"_comment\":\"typed payload diagnostic\",\n  \
-                 \"experimental\":{{\"isolation_session\":{{\"provision\":{{{fields}}}}}}}\n}}"
+                 \"isolationSession\":{{\"provision\":{{{fields}}}}}\n}}"
             );
             let mut out = call_opt(&json, true, true);
             assert_eq!(out.status, crate::MXC_STATUS_MALFORMED_REQUEST, "{fields}");
@@ -496,10 +501,7 @@ mod tests {
             let message = unsafe { std::ffi::CStr::from_ptr(out.error.message_utf8) }
                 .to_str()
                 .unwrap();
-            assert!(
-                message.contains("experimental.isolation_session.provision"),
-                "{message}"
-            );
+            assert!(message.contains("isolationSession.provision"), "{message}");
             assert!(message.contains("line "), "{message}");
             assert!(message.contains("column "), "{message}");
             assert!(out.error.operation_utf8.is_null());
@@ -517,9 +519,9 @@ mod tests {
             "phase": "provision",
             "containment": "isolation_session",
             "network": {"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},
-            "experimental": {"isolation_session": {"provision": {
+            "isolationSession": {"provision": {
                 "appId": "x".repeat(257)
-            }}},
+            }},
         })
         .to_string();
         let mut out = call_opt(&json, true, true);
@@ -618,11 +620,7 @@ mod tests {
     /// flight when the gate fired.
     #[test]
     fn experimental_backend_is_refused_without_the_optin() {
-        let mut out = call_opt(
-            r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
-            true,
-            false,
-        );
+        let mut out = call_opt(WINDOWS_SANDBOX_PROVISION_REQUEST, true, false);
         assert_eq!(out.status, crate::MXC_STATUS_BACKEND_UNAVAILABLE);
         assert!(!out.error.message_utf8.is_null());
         assert!(out.error.operation_utf8.is_null());
@@ -638,12 +636,17 @@ mod tests {
     /// down; the dry run keeps it side-effect-free.
     #[test]
     fn the_optin_admits_an_experimental_backend() {
-        let mut out = call_opt(
-            r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
-            true,
-            true,
+        let mut out = call_opt(WINDOWS_SANDBOX_PROVISION_REQUEST, true, true);
+        assert_ne!(
+            out.status,
+            crate::MXC_STATUS_BACKEND_UNAVAILABLE,
+            "the opt-in must pass the experimental-backend gate"
         );
-        assert_ne!(out.status, crate::MXC_STATUS_BACKEND_UNAVAILABLE);
+        assert_ne!(
+            out.status,
+            crate::MXC_STATUS_MALFORMED_REQUEST,
+            "the exact request must reach backend dispatch"
+        );
         // SAFETY: filled by `mxc_state_aware`.
         unsafe { mxc_state_aware_result_free(&mut out) };
     }

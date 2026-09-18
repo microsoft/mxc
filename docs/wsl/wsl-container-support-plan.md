@@ -134,6 +134,7 @@ portMappings. `ContainerConfig` struct and `container_config` field on
 **Example config (current format):**
 ```json
 {
+  "version": "0.10.0-alpha",
   "containment": "wslc",
   "process": {
     "commandLine": "python3 -c \"print('hello')\"",
@@ -145,7 +146,10 @@ portMappings. `ContainerConfig` struct and `container_config` field on
     "memoryMb": 4096
   },
   "filesystem": { "readwritePaths": ["C:\\workspace"] },
-  "network": { "defaultPolicy": "block" }
+  "network": {
+    "egress": { "default": "deny" },
+    "ingress": { "default": "deny", "hostLoopback": "deny" }
+  }
 }
 ```
 
@@ -304,11 +308,11 @@ Filesystem mapping:
 **Path mapping rule:** Windows paths are converted to Linux mount points using the WSL2 convention: strip the drive letter, lowercase it, and prefix with `/mnt/`. For example, `C:\Projects\my-app` → `/mnt/c/Projects/my-app`, `D:\data` → `/mnt/d/data`. This means scripts running inside the container must use `/mnt/c/...` style paths. A future iteration could support explicit `{ windowsPath, containerPath }` pairs for custom mount points.
 
 Network mapping:
-| SandboxPolicy field | WSLC SDK equivalent |
+| Exact v0.10 policy | WSLC SDK equivalent |
 |---|---|
-| `defaultPolicy: "block"` | `WslcSetContainerSettingsNetworkingMode(WSLC_CONTAINER_NETWORKING_MODE_NONE)` |
-| `defaultPolicy: "allow"` | `WslcSetContainerSettingsNetworkingMode(WSLC_CONTAINER_NETWORKING_MODE_BRIDGED)` |
-| `allowedHosts / blockedHosts` | **Not supported — rejected at config-parse time** (and by the backend's `validate_runner`). Per-host filtering would need in-container iptables, but the container has no `CAP_NET_ADMIN` (the `Privileged` flag does not grant it) and MXC has no VM-level enforcement hook (WSLc cannot expose one without breaking other security promises such as MDE). Only the all-or-nothing `defaultPolicy` applies. |
+| `egress.default`, `ingress.default`, and `ingress.hostLoopback` all `deny` | `WslcSetContainerSettingsNetworkingMode(WSLC_CONTAINER_NETWORKING_MODE_NONE)` |
+| All three directional values `allow` | `WslcSetContainerSettingsNetworkingMode(WSLC_CONTAINER_NETWORKING_MODE_BRIDGED)` |
+| Mixed postures or egress allow/deny rules | **Not supported — rejected before container creation.** The container has no `CAP_NET_ADMIN`, and MXC has no VM-level enforcement hook. |
 
 Port mapping (new capability enabled by WSLC SDK):
 | Config field | WSLC SDK equivalent |
@@ -395,13 +399,15 @@ from the config:
 
 ```json
 {
+  "version": "0.10.0-alpha",
   "containment": "wslc",
   "process": { "commandLine": "echo hello" },
-  "network": { "defaultPolicy": "block" },
-  "experimental": {
-    "wslc": {
-      "image": "alpine:latest"
-    }
+  "network": {
+    "egress": { "default": "deny" },
+    "ingress": { "default": "deny", "hostLoopback": "deny" }
+  },
+  "wslc": {
+    "image": "alpine:latest"
   }
 }
 ```
@@ -419,13 +425,15 @@ future WSLC SDK release.
 
 ```json
 {
+  "version": "0.10.0-alpha",
   "containment": "wslc",
   "process": { "commandLine": "cat /etc/os-release" },
-  "network": { "defaultPolicy": "allow" },
-  "experimental": {
-    "wslc": {
-      "image": "mcr.microsoft.com/cbl-mariner/base/core:2.0"
-    }
+  "network": {
+    "egress": { "default": "allow" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
+  },
+  "wslc": {
+    "image": "mcr.microsoft.com/cbl-mariner/base/core:2.0"
   }
 }
 ```
@@ -441,7 +449,7 @@ local Docker daemon is needed — the WSLC SDK handles the pull internally.
 > **Note on storage path:** the setup script and the runner must share
 > the same `storage_path`. The runner default is
 > `%TEMP%\mxc-wslc-sessions`; if your config sets
-> `experimental.wslc.storagePath`, pass the same path to the setup
+> `wslc.storagePath`, pass the same path to the setup
 > script with `-StoragePath`.
 
 ### 3. Import from a local tar file
@@ -453,14 +461,16 @@ format is auto-detected.
 
 ```json
 {
+  "version": "0.10.0-alpha",
   "containment": "wslc",
   "process": { "commandLine": "echo 'Hello from tar!'" },
-  "network": { "defaultPolicy": "block" },
-  "experimental": {
-    "wslc": {
-      "image": "my-image:latest",
-      "imageTarPath": "C:\\workspace\\alpine.tar"
-    }
+  "network": {
+    "egress": { "default": "deny" },
+    "ingress": { "default": "deny", "hostLoopback": "deny" }
+  },
+  "wslc": {
+    "image": "my-image:latest",
+    "imageTarPath": "C:\\workspace\\alpine.tar"
   }
 }
 ```
@@ -569,6 +579,7 @@ wxc-exec.exe --debug windows-app.json
 Config file (`app-policy.json`):
 ```json
 {
+  "version": "0.10.0-alpha",
   "containment": "wslc",
   "process": {
     "commandLine": "python3 /mnt/c/Projects/my-app/app.py",
@@ -582,16 +593,18 @@ Config file (`app-policy.json`):
     "readonlyPaths": ["C:\\Projects\\shared-data"]
   },
   "network": {
-    "defaultPolicy": "allow",
-    "blockedHosts": ["internal.corp.net"]
+    "egress": { "default": "allow" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
   }
 }
 ```
 
 Run with: `wxc-exec.exe --experimental --debug app-policy.json`
 
-This mounts `C:\Projects\my-app` as `/mnt/c/Projects/my-app` (read-write) inside the Linux container, gives it network access (except to `internal.corp.net`), runs `app.py` with Python 3.12, and kills the container after 60 seconds
-if it hasn't exited.
+This mounts `C:\Projects\my-app` as `/mnt/c/Projects/my-app` (read-write)
+inside the Linux container, gives it unrestricted bridged network access, runs
+`app.py` with Python 3.12, and kills the container after 60 seconds if it has
+not exited. WSLC does not support per-host filtering.
 
 ## Supported Workloads
 

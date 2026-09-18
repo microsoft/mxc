@@ -256,16 +256,14 @@ describe('native binding request', () => {
 
   it('moves WSLC configuration onto tagged containment', () => {
     const request = prepareRequestSpec({
-      version: '0.9.0-alpha',
+      version: '0.10.0-alpha',
       containment: 'wslc',
       process: { commandLine: 'echo hello' },
-      experimental: {
-        wslc: {
-          image: 'alpine:latest',
-          targetOs: 'linux',
-          cpuCount: 2,
-          portMappings: [{ windowsPort: 8080, containerPort: 80, protocol: 'tcp' }],
-        },
+      wslc: {
+        image: 'alpine:latest',
+        targetOs: 'linux',
+        cpuCount: 2,
+        portMappings: [{ windowsPort: 8080, containerPort: 80, protocol: 'tcp' }],
       },
     }, { experimental: true });
 
@@ -281,17 +279,15 @@ describe('native binding request', () => {
   it('rejects unsupported WSLC protocol and foreign backend settings', () => {
     assert.throws(
       () => prepareRequestSpec({
-        version: '0.9.0-alpha',
+        version: '0.10.0-alpha',
         containment: 'wslc',
         process: { commandLine: 'echo hello' },
-        experimental: {
-          wslc: {
-            portMappings: [{
-              windowsPort: 8080,
-              containerPort: 80,
-              protocol: 'udp' as unknown as 'tcp',
-            }],
-          },
+        wslc: {
+          portMappings: [{
+            windowsPort: 8080,
+            containerPort: 80,
+            protocol: 'udp' as unknown as 'tcp',
+          }],
         },
       }, { experimental: true }),
       /support only protocol 'tcp'/,
@@ -299,12 +295,10 @@ describe('native binding request', () => {
 
     assert.throws(
       () => prepareRequestSpec({
-        version: '0.9.0-alpha',
+        version: '0.10.0-alpha',
         containment: 'process',
         process: { commandLine: 'echo hello' },
-        experimental: {
-          wslc: { image: 'alpine:latest' },
-        },
+        wslc: { image: 'alpine:latest' },
       }, { experimental: true }),
       /require containment 'wslc'/,
     );
