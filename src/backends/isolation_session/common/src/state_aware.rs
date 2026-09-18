@@ -445,34 +445,6 @@ mod tests {
         );
     }
 
-    // ====== Wire-model / backend config parity ======
-
-    // Shared adapter DTOs retain the one-shot/state-aware nesting shape.
-    // These tests characterize their configuration compatibility independently
-    // of the exact adapter. Production dispatch uses checked typed binding, not
-    // this deserialization path; common recording-backend tests cover delivery.
-
-    #[test]
-    fn wire_model_nests_config_only_for_phases_that_take_one() {
-        // Field-by-field construction is deliberate: adding a per-phase field
-        // to the wire struct breaks this test's compilation, forcing a
-        // decision about whether the backend honors it.
-        let wire = wxc_common::wire::IsolationSession { provision: None };
-        let value = serde_json::to_value(&wire).unwrap();
-        let mut keys: Vec<&str> = value
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        keys.sort_unstable();
-        assert_eq!(
-            keys,
-            ["provision"],
-            "wire model nests a per-phase config for a phase the backend takes none for"
-        );
-    }
-
     #[test]
     fn phases_without_a_config_reject_a_payload() {
         type StartConfig = <IsolationSessionRunner as StatefulSandboxBackend>::StartConfig;

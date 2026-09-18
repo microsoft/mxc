@@ -2,23 +2,24 @@
 // Licensed under the MIT License.
 
 use super::common::{
-    assert_invalid as assert_invalid_request, assert_valid as assert_valid_request,
+    assert_invalid as assert_invalid_request, assert_valid as assert_valid_request, StopRequest,
 };
-use mxc_config_contract::dev::StartRequest;
 
 fn assert_valid(json: &str) {
-    assert_valid_request::<StartRequest>(json);
+    let json = crate::exact_test_support::with_contract_version(json, crate::CONTRACT_VERSION);
+    assert_valid_request::<StopRequest>(&json);
 }
 
 fn assert_invalid(json: &str) {
-    assert_invalid_request::<StartRequest>(json);
+    let json = crate::exact_test_support::with_contract_version(json, crate::CONTRACT_VERSION);
+    assert_invalid_request::<StopRequest>(&json);
 }
 
 fn request_with_additional_fields(additional_fields: &str) -> String {
     format!(
         r#"{{
-            "version": "0.10.0-alpha",
-            "phase": "start",
+            "version": "0.9.0-alpha",
+            "phase": "stop",
             "sandboxId": "test123456",
             {additional_fields}
         }}"#
@@ -26,22 +27,22 @@ fn request_with_additional_fields(additional_fields: &str) -> String {
 }
 
 #[test]
-fn accepts_minimal_start_request() {
+fn accepts_minimal_stop_request() {
     let json = r#"{
-        "version": "0.10.0-alpha",
-        "phase": "start",
+        "version": "0.9.0-alpha",
+        "phase": "stop",
         "sandboxId": "test123456"
     }"#;
     assert_valid(json);
 }
 
 #[test]
-fn accepts_start_request_with_optional_fields() {
+fn accepts_stop_request_with_optional_fields() {
     let json = r#"{
-        "$schema": "https://example.com/start.schema.json",
+        "$schema": "https://example.com/stop.schema.json",
         "_comment": "This is a comment",
-        "version": "0.10.0-alpha",
-        "phase": "start",
+        "version": "0.9.0-alpha",
+        "phase": "stop",
         "sandboxId": "test123456",
         "telemetry": {
                 "enabled": true
@@ -51,10 +52,10 @@ fn accepts_start_request_with_optional_fields() {
 }
 
 #[test]
-fn accepts_empty_start_telemetry_object() {
+fn accepts_empty_stop_telemetry_object() {
     let json = r#"{
-        "version": "0.10.0-alpha",
-        "phase": "start",
+        "version": "0.9.0-alpha",
+        "phase": "stop",
         "sandboxId": "test123456",
         "telemetry": {}
     }"#;
@@ -62,12 +63,12 @@ fn accepts_empty_start_telemetry_object() {
 }
 
 #[test]
-fn accepts_start_telemetry_enabled_values() {
+fn accepts_stop_telemetry_enabled_values() {
     for enabled in [true, false] {
         let json = format!(
             r#"{{
-                "version": "0.10.0-alpha",
-                "phase": "start",
+                "version": "0.9.0-alpha",
+                "phase": "stop",
                 "sandboxId": "test123456",
                 "telemetry": {{
                     "enabled": {enabled}
@@ -81,19 +82,19 @@ fn accepts_start_telemetry_enabled_values() {
 #[test]
 fn accepts_empty_sandbox_id_structurally() {
     let json = r#"{
-        "version": "0.10.0-alpha",
-        "phase": "start",
+        "version": "0.9.0-alpha",
+        "phase": "stop",
         "sandboxId": ""
     }"#;
     assert_valid(json);
 }
 
 #[test]
-fn start_phase_accepts_exact_and_escaped_spelling() {
-    for phase in ["start", "st\\u0061rt"] {
+fn stop_phase_accepts_exact_and_escaped_spelling() {
+    for phase in ["stop", "sto\\u0070"] {
         let json = format!(
             r#"{{
-                "version": "0.10.0-alpha",
+                "version": "0.9.0-alpha",
                 "phase": "{}",
                 "sandboxId": "test123456"
             }}"#,
@@ -104,11 +105,11 @@ fn start_phase_accepts_exact_and_escaped_spelling() {
 }
 
 #[test]
-fn start_request_rejects_other_phases() {
-    for phase in ["provision", "exec", "stop", "deprovision"] {
+fn stop_request_rejects_other_phases() {
+    for phase in ["provision", "start", "exec", "deprovision"] {
         let json = format!(
             r#"{{
-                "version": "0.10.0-alpha",
+                "version": "0.9.0-alpha",
                 "phase": "{}",
                 "sandboxId": "test123456"
             }}"#,
@@ -119,22 +120,22 @@ fn start_request_rejects_other_phases() {
 }
 
 #[test]
-fn rejects_missing_required_start_fields() {
+fn rejects_missing_required_stop_fields() {
     let json = r#"{
-        "version": "0.10.0-alpha",
-        "phase": "start"
+        "version": "0.9.0-alpha",
+        "phase": "stop"
     }"#;
     assert_invalid(json);
 
     let json = r#"{
-        "version": "0.10.0-alpha",
+        "version": "0.9.0-alpha",
         "sandboxId": "test123456"
     }"#;
 
     assert_invalid(json);
 
     let json = r#"{
-        "phase": "start",
+        "phase": "stop",
         "sandboxId": "test123456"
     }"#;
 
@@ -142,16 +143,16 @@ fn rejects_missing_required_start_fields() {
 }
 
 #[test]
-fn rejects_null_required_start_fields() {
+fn rejects_null_required_stop_fields() {
     let json = r#"{
         "version": null,
-        "phase": "start",
+        "phase": "stop",
         "sandboxId": "test123456"
     }"#;
     assert_invalid(json);
 
     let json = r#"{
-        "version": "0.10.0-alpha",
+        "version": "0.9.0-alpha",
         "phase": null,
         "sandboxId": "test123456"
     }"#;
@@ -159,8 +160,8 @@ fn rejects_null_required_start_fields() {
     assert_invalid(json);
 
     let json = r#"{
-        "version": "0.10.0-alpha",
-        "phase": "start",
+        "version": "0.9.0-alpha",
+        "phase": "stop",
         "sandboxId": null
     }"#;
 
@@ -172,7 +173,7 @@ fn rejects_non_string_phase_field() {
     for phase in ["123", "true", "false", "[]", "{}"] {
         let json = format!(
             r#"{{
-                "version": "0.10.0-alpha",
+                "version": "0.9.0-alpha",
                 "phase": {phase},
                 "sandboxId": "test123456"
             }}"#
@@ -186,8 +187,8 @@ fn rejects_non_string_sandbox_id_field() {
     for sandbox_id in ["123", "true", "false", "[]", "{}"] {
         let json = format!(
             r#"{{
-                "version": "0.10.0-alpha",
-                "phase": "start",
+                "version": "0.9.0-alpha",
+                "phase": "stop",
                 "sandboxId": {sandbox_id}
             }}"#
         );
@@ -200,8 +201,8 @@ fn rejects_non_boolean_experimental_telemetry_enabled_field() {
     for enabled in ["123", "\"true\"", "\"false\"", "[]", "{}"] {
         let json = format!(
             r#"{{
-                "version": "0.10.0-alpha",
-                "phase": "start",
+                "version": "0.9.0-alpha",
+                "phase": "stop",
                 "sandboxId": "test123456",
                 "telemetry": {{
                     "enabled": {enabled}
@@ -226,10 +227,10 @@ fn rejects_null_optional_fields() {
 }
 
 #[test]
-fn rejects_unknown_start_fields() {
+fn rejects_unknown_stop_fields() {
     let json = r#"{
-        "version": "0.10.0-alpha",
-        "phase": "start",
+        "version": "0.9.0-alpha",
+        "phase": "stop",
         "sandboxId": "test123456",
         "unknownField": "value"
     }"#;
@@ -237,10 +238,10 @@ fn rejects_unknown_start_fields() {
 }
 
 #[test]
-fn rejects_unknown_start_experimental_fields() {
+fn rejects_unknown_stop_experimental_fields() {
     let json = r#"{
-        "version": "0.10.0-alpha",
-        "phase": "start",
+        "version": "0.9.0-alpha",
+        "phase": "stop",
         "sandboxId": "test123456",
         "experimental": {
             "unknownField": "value"
@@ -250,10 +251,10 @@ fn rejects_unknown_start_experimental_fields() {
 }
 
 #[test]
-fn rejects_unknown_start_experimental_telemetry_fields() {
+fn rejects_unknown_stop_experimental_telemetry_fields() {
     let json = r#"{
-        "version": "0.10.0-alpha",
-        "phase": "start",
+        "version": "0.9.0-alpha",
+        "phase": "stop",
         "sandboxId": "test123456",
         "telemetry": {
                 "unknownField": "value"
@@ -299,12 +300,12 @@ fn rejects_backend_experimental_fields() {
 }
 
 #[test]
-fn rejects_duplicate_start_fields() {
+fn rejects_duplicate_stop_fields() {
     for fields in [
         r#""$schema": "first", "$schema": "second""#,
         r#""_comment": "first", "_comment": "second""#,
-        r#""version": "0.10.0-alpha""#,
-        r#""phase": "start""#,
+        r#""version": "0.9.0-alpha""#,
+        r#""phase": "stop""#,
         r#""sandboxId": "other""#,
         r#""correlationVector": "first", "correlationVector": "second""#,
         r#""experimental": {}, "experimental": {}"#,
@@ -314,7 +315,7 @@ fn rejects_duplicate_start_fields() {
 }
 
 #[test]
-fn rejects_duplicate_start_experimental_fields() {
+fn rejects_duplicate_stop_experimental_fields() {
     for experimental in [
         r#""telemetry": {}, "telemetry": {}"#,
         r#""telemetry": {"enabled": true, "enabled": false}"#,
@@ -339,7 +340,7 @@ fn rejects_invalid_version_field() {
         let json = format!(
             r#"{{
                 "version": {version},
-                "phase": "start",
+                "phase": "stop",
                 "sandboxId": "test123456"
             }}"#
         );
@@ -350,7 +351,7 @@ fn rejects_invalid_version_field() {
 #[test]
 fn rejects_unknown_phase_value() {
     let json = r#"{
-        "version": "0.10.0-alpha",
+        "version": "0.9.0-alpha",
         "phase": "restart",
         "sandboxId": "test123456"
     }"#;

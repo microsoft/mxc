@@ -230,7 +230,20 @@ mod tests {
     use super::{bubblewrap_network_support, BwrapProbe, ProxyEnforcement, ProxyEnforcementProbe};
     #[cfg(target_os = "linux")]
     use bwrap_common::bwrap_version::{BwrapUnavailable, BwrapVersion, MIN_BWRAP_VERSION};
-    use wxc_common::wire::Containment;
+    use wxc_common::models::ContainmentBackend;
+
+    const CANONICAL_BACKEND_NAMES: &[(ContainmentBackend, &str)] = &[
+        (ContainmentBackend::ProcessContainer, "processcontainer"),
+        (ContainmentBackend::Wslc, "wslc"),
+        (ContainmentBackend::Lxc, "lxc"),
+        (ContainmentBackend::Vm, "vm"),
+        (ContainmentBackend::MicroVm, "microvm"),
+        (ContainmentBackend::Hyperlight, "hyperlight"),
+        (ContainmentBackend::WindowsSandbox, "windows_sandbox"),
+        (ContainmentBackend::IsolationSession, "isolation_session"),
+        (ContainmentBackend::Seatbelt, "seatbelt"),
+        (ContainmentBackend::Bubblewrap, "bubblewrap"),
+    ];
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -268,51 +281,27 @@ mod tests {
         );
     }
 
-    fn wire_name(containment: &Containment) -> String {
-        serde_json::to_string(containment)
-            .expect("Containment serializes")
-            .trim_matches('"')
-            .to_string()
+    fn all_containment_names() -> Vec<String> {
+        CANONICAL_BACKEND_NAMES
+            .iter()
+            .map(|(_, name)| (*name).to_string())
+            .collect()
     }
 
-    fn all_wire_names() -> Vec<String> {
-        [
-            Containment::Process,
-            Containment::ProcessContainer,
-            Containment::Vm,
-            Containment::WindowsSandbox,
-            Containment::Lxc,
-            Containment::Microvm,
-            Containment::Hyperlight,
-            Containment::Wslc,
-            Containment::Seatbelt,
-            Containment::IsolationSession,
-            Containment::Bubblewrap,
-        ]
-        .iter()
-        .map(wire_name)
-        .collect()
-    }
-
-    /// Guards the reported string literals against drift from the `Containment`
-    /// serde wire names.
+    /// Guards the reported string literals against drift from canonical runtime
+    /// backend names.
     #[test]
     fn reported_method_names_match_the_containment_wire_names() {
-        assert_eq!(wire_name(&Containment::Lxc), "lxc");
-        assert_eq!(wire_name(&Containment::WindowsSandbox), "windows_sandbox");
-        assert_eq!(
-            wire_name(&Containment::ProcessContainer),
-            "processcontainer"
-        );
-        assert_eq!(wire_name(&Containment::Bubblewrap), "bubblewrap");
-        assert_eq!(wire_name(&Containment::Seatbelt), "seatbelt");
+        for (backend, expected) in CANONICAL_BACKEND_NAMES {
+            assert_eq!(backend.wire_name(), *expected, "{backend:?}");
+        }
     }
 
     /// Exercises the live per-target arm, catching a typo'd literal (e.g.
     /// `"wsb"`) that the assertions above would miss.
     #[test]
     fn every_reported_method_is_a_real_wire_name() {
-        let known = all_wire_names();
+        let known = all_containment_names();
         for method in platform_support().available_methods {
             assert!(
                 known.contains(&method),
