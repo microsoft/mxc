@@ -116,7 +116,7 @@ but its client cannot reach the host proxy.
 The public ingress policy remains required, and host-loopback allow retains the PSEC 1.1 host requirement.
 Requests that do not allow host loopback use the
 PSEC 1.0 capability mapping; `hostLoopback: "allow"` is rejected when the PSEC 1.1 ingress contract is unavailable.
-The legacy SBOX path remains eligible only when its capability mapping can preserve the request.
+Requests the PSEC contract cannot preserve continue to an AppContainer tier.
 
 **Unresolved ingress limitation:** on Windows build 26691.1002, this proxy mapping permits unprivileged connections
 to the configured proxy and blocks direct loopback bypasses, but host-to-container listener connections still time
@@ -261,31 +261,21 @@ usable process-creation contract through runtime probing.
 **Preferred selection:** Use PSEC (`CreateProcessSecurityEnvironment`) when its complete export set and runtime support
 probe succeed. PSEC is the only ProcessContainer path that receives schema 0.8 egress filters, proxy peer identity, or
 host-loopback configuration because it owns the corresponding policy lifetime through workload completion. When PSEC
-is unavailable or incompatible with another requested policy, fall back temporarily to the legacy SBOX contract
-through CPIS. SBOX is eligible only when it can represent the request without dropping PSEC-only networking features;
-otherwise selection continues to AppContainer, where unsupported policy is rejected.
+is unavailable or incompatible, selection continues to AppContainer, where unsupported policy is rejected.
 
-SBOX retains its legacy network contract. It receives only the effective egress default and legacy `network.proxy`
-configuration; schema 0.8 allow/deny filters, `allowedProxyPeer`, and host-loopback configuration are never serialized
-into its FlatBuffer. The SBOX creation API supplies no policy-lifetime handle or workload-completion cleanup contract,
-so MXC cannot safely install and later remove schema 0.8 WFP filters through that path. A valid schema 0.8 runtime proxy
-requires either peer identity or unrestricted host loopback and is therefore rejected when PSEC is unavailable.
-
-**Downlevel behavior:** When PSEC is unavailable, compatible requests use CPIS or the AppContainer fallback.
+**Downlevel behavior:** When PSEC is unavailable, compatible requests use the AppContainer fallback.
 `egress.default: "allow"` grants `internetClient`; `ingress.default: "allow"` grants the bidirectional
 `privateNetworkClientServer` capability. This is the documented ProcessContainer mapping on every tier, not a
 downlevel weakening. Legacy proxy requests retain their existing compatibility behavior; schema 0.8 runtime proxy
-requests do not fall back because neither SBOX nor AppContainer can preserve their peer or host-loopback requirements.
+requests do not fall back because AppContainer cannot preserve their peer or host-loopback requirements.
 
 The AppContainer fallback is selected only when its capability mapping preserves the request. Explicit egress rules,
 proxy peer identity, and host-loopback allow fail with a typed unsupported-policy error when PSEC cannot enforce them.
 
 ## 3. WFP enforcement
 
-PSEC applies outbound WFP filters in the OS's elevated context and owns their lifetime. SBOX does not expose the
-equivalent teardown handle, so using it to install those filters could leave policy behind after the workload exits.
-Downlevel WFP installation, elevation, and reliable cleanup are future work and are not part of the initial schema 0.8
-downlevel support.
+PSEC applies outbound WFP filters in the OS's elevated context and owns their lifetime. AppContainer fallback does not
+install schema 0.8 WFP filters.
 
 WFP implements `egress` rules for public and private destinations. `internetClient` enables public-network access.
 `privateNetworkClientServer`, selected through `ingress.default`, is the prerequisite for private-network access and

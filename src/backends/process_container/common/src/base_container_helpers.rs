@@ -11,10 +11,6 @@ use process_security_environment_spec::process_security_environment_layout::{
     PortRuleT as PsecPortRuleT, ProcessSecurityEnvironmentT as PsecProcessSecurityEnvironment,
     ProxyInfoT as PsecProxyInfo, SchemaVersionT,
 };
-use sandbox_spec::base_container_layout::{
-    endpoint_policyT, finish_sandbox_spec_buffer, proxy_infoT, FilterAction as SboxFilterAction,
-    IntegrityLevel, NetworkPolicyT as SboxNetworkPolicy, SandboxSpecT,
-};
 use wxc_common::models::{
     ContainerPolicy, ExecutionRequest, NetworkAction, NetworkCidr, NetworkPeer, NetworkPolicy,
     NetworkPort, NetworkProtocol, NetworkRule,
@@ -23,8 +19,6 @@ use wxc_common::models::{
 use crate::network_policy_helpers::{add_default_network_capabilities, ensure_capability};
 
 pub(super) const LOOPBACK_NETWORK_PEER: &str = "MXC-Loopback";
-
-const SANDBOX_SPEC_VERSION: &str = "0.1.0";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PsecContract {
@@ -74,15 +68,6 @@ impl ResolvedPsecContract {
     }
 }
 
-pub(super) fn requires_psec_networking(policy: &ContainerPolicy) -> bool {
-    policy
-        .network_egress
-        .as_ref()
-        .is_some_and(|egress| !egress.allow.is_empty() || !egress.deny.is_empty())
-        || policy.allowed_proxy_peer.is_some()
-        || unrestricted_host_loopback_allowed(policy)
-}
-
 pub(super) fn has_conflicting_proxy_identity(policy: &ContainerPolicy) -> bool {
     policy.allowed_proxy_peer.is_some() && unrestricted_host_loopback_allowed(policy)
 }
@@ -124,33 +109,6 @@ pub(super) fn build_psec_spec(
     builder.finished_data().to_vec()
 }
 
-pub(super) fn build_sbox_spec(request: &ExecutionRequest) -> Vec<u8> {
-    let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
-    let capabilities = effective_capabilities(&request.policy);
-    let ui_restrictions = crate::job_object::to_job_object_uilimit_mask(
-        &wxc_common::ui_policy::resolve_ui_restrictions(
-            &request.policy.ui,
-            &request.policy.base_process_ui,
-        ),
-    ) as u64;
-
-    let mut spec = SandboxSpecT::default();
-    spec.version = SANDBOX_SPEC_VERSION.to_string();
-    spec.app_container = true;
-    spec.disallow_win32k_system_calls = request.policy.ui.disable;
-    spec.ui_restrictions = ui_restrictions;
-    spec.least_privilege = request.policy.least_privilege_mode;
-    spec.capabilities = (!capabilities.is_empty()).then(|| capabilities.join(","));
-    spec.fs_read_write = non_empty_paths(&request.policy.readwrite_paths);
-    spec.fs_read_only = non_empty_paths(&request.policy.readonly_paths);
-    spec.network_policy = Some(Box::new(build_legacy_sbox_network_policy(&request.policy)));
-    spec.integrity = IntegrityLevel::system_default;
-    spec.fs_deny = non_empty_paths(&request.policy.denied_paths);
-    let spec = spec.pack(&mut builder);
-    finish_sandbox_spec_buffer(&mut builder, spec);
-    builder.finished_data().to_vec()
-}
-
 fn effective_capabilities(policy: &ContainerPolicy) -> Vec<String> {
     let mut capabilities: Vec<_> = policy
         .capabilities
@@ -164,25 +122,6 @@ fn effective_capabilities(policy: &ContainerPolicy) -> Vec<String> {
 
 fn non_empty_paths(paths: &[String]) -> Option<Vec<String>> {
     (!paths.is_empty()).then(|| paths.to_vec())
-}
-
-fn build_legacy_sbox_network_policy(policy: &ContainerPolicy) -> SboxNetworkPolicy {
-    let mut network = SboxNetworkPolicy::default();
-    if policy.network_proxy.is_enabled() {
-        network.proxy = policy.network_proxy.address.as_ref().map(|address| {
-            let mut proxy = proxy_infoT::default();
-            proxy.url = Some(address.to_url());
-            Box::new(proxy)
-        });
-    } else {
-        let mut egress = endpoint_policyT::default();
-        egress.default_action = match effective_egress_default(policy) {
-            NetworkAction::Allow => SboxFilterAction::allow,
-            NetworkAction::Deny => SboxFilterAction::deny,
-        };
-        network.egress = Some(Box::new(egress));
-    }
-    network
 }
 
 fn build_psec_network_policy(

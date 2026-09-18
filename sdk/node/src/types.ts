@@ -583,7 +583,7 @@ export type SandboxingMethod = ContainmentType | ContainmentBackend;
 /**
  * Isolation tier selected by the runtime fallback detector.
  *
- * - `base-container`: full BaseContainer (Experimental_CreateProcessInSandbox)
+ * - `base-container`: full BaseContainer (process security environment)
  * - `appcontainer-bfs`: AppContainer + BFS filesystem isolation
  * - `appcontainer-dacl`: AppContainer + host DACL augmentation (last-resort fallback)
  */

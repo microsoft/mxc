@@ -507,7 +507,11 @@ management is the caller's responsibility.
 
 ## Prerequisites for End Users
 
-- Windows 11 or Windows Server 2022/2025
+- Windows 10 version 1903 (build 18362.1049) or later on x64, or Windows 10
+  version 2004 (build 19041) or later on ARM64 — WSL 2's own floor. MXC does not
+  check it; an unsupported host reports as a missing WSL package via
+  `WslcGetMissingComponents`, and the version verdict comes from `wsl --update`
+  or the SDK's `WSL_E_OS_NOT_SUPPORTED` (`0x80040327`)
 - WSL2 enabled (VM Platform optional component)
 - WSLC SDK MSI installed (`wsl.2.9.9.0.x64.msi` or ARM64 variant from the
   self-host package)

@@ -41,7 +41,7 @@ pub struct ProbeOutput {
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ProbeFacts {
-    /// `Experimental_CreateProcessInSandbox` is resolvable.
+    /// The process security environment API set is resolvable.
     pub base_container_api_present: bool,
     /// Whether the preferred native PSEC plus Learning Mode capture path is usable.
     ///
@@ -67,7 +67,7 @@ pub struct ProbeFacts {
     /// 11 25H2 where `bfscfg.exe` locks `bfs.sys`) should refuse to
     /// run a binary that reports `true` here.
     pub bfs_compiled_in: bool,
-    /// Whether PSEC or SBOX can enforce `filesystem.deniedPaths` at Tier 1.
+    /// Whether PSEC can enforce `filesystem.deniedPaths` at Tier 1.
     pub base_container_supports_deny_paths: bool,
     /// Whether PSEC 1.1 can enforce `processContainer.filesystem.enumeratePaths` at Tier 1.
     pub base_container_supports_enumerate_paths: bool,

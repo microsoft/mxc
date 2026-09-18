@@ -11,8 +11,8 @@
 //! [`DaclManager`] augmentation when the chosen tier requires it.
 //!
 //! Filesystem-policy enforcement under T1 is delegated entirely to
-//! BaseContainer's own `Experimental_CreateProcessInSandbox` API
-//! (`deniedPaths` via the SandboxSpec `fs_deny` field); the dispatcher
+//! BaseContainer's PSEC API
+//! (`deniedPaths` via the process-security-environment specification); the dispatcher
 //! does **not** apply host DACLs in T1. When the OS advertises native
 //! deny support the OS enforces `deniedPaths` itself; when it does not,
 //! a denied-paths policy never reaches T1 (the detector falls through to
@@ -443,9 +443,8 @@ fn select_backend_with_fallback(
     capture_factory: Option<&Arc<dyn GuardedCaptureFactory>>,
 ) -> Result<BackendPlan, DispatchError> {
     // Keep the established tier fallback behavior for every schema version.
-    // BaseContainerRunner prefers PSEC whenever it is available and compatible,
-    // otherwise uses the transitional SBOX contract. If neither BaseContainer
-    // contract is usable, detection continues to the AppContainer tiers.
+    // BaseContainerRunner uses PSEC whenever it is available and compatible.
+    // Otherwise detection continues to the AppContainer tiers.
     let capabilities = BaseContainerRunner::capabilities_for_request(request);
     let prefer_base_container = capabilities.usable;
     let uses_native_capture = BaseContainerRunner::uses_native_capture_for_request(request);
@@ -481,13 +480,7 @@ fn select_backend_with_fallback(
             // here: the detector only routes a denied-paths policy to T1
             // when the OS enforces `fs_deny` natively, so there is nothing
             // for a host DACL to add.
-            let runner = if guarded_capture_required {
-                BaseContainerRunner::new().with_guarded_capture_factory(Arc::clone(
-                    capture_factory.expect("guarded capture factory checked above"),
-                ))
-            } else {
-                BaseContainerRunner::new()
-            };
+            let runner = BaseContainerRunner::new();
             (SelectedBackend::BaseContainer(runner), None)
         }
         IsolationTier::AppContainerBfs => {
@@ -1033,38 +1026,6 @@ mod tests {
     }
 
     #[test]
-    fn capture_denials_selects_legacy_sbox_with_guarded_factory() {
-        let _guard = CaptureCapabilityGuard::set(true, false);
-        let mut policy = empty_policy();
-        policy.capture_denials = Some(Default::default());
-        let request = test_request(policy);
-        let factory: Arc<dyn GuardedCaptureFactory> = Arc::new(FakeGuardedCaptureFactory);
-
-        let dispatched = dispatch_with_fallback_and_capture(&request, Some(factory))
-            .expect("legacy SBOX should pair with guarded WPR");
-
-        assert!(matches!(dispatched.tier, IsolationTier::BaseContainer));
-        assert!(!dispatched.has_dacl_guard());
-    }
-
-    #[test]
-    fn capture_denials_rejects_legacy_sbox_without_guarded_factory() {
-        let _guard = CaptureCapabilityGuard::set(true, false);
-        let mut policy = empty_policy();
-        policy.capture_denials = Some(Default::default());
-        let request = test_request(policy);
-
-        let result = dispatch_with_fallback(&request);
-
-        assert!(matches!(
-            result,
-            Err(DispatchError::CaptureDenialsUnsupported {
-                tier: IsolationTier::BaseContainer
-            })
-        ));
-    }
-
-    #[test]
     fn spawn_with_fallback_and_capture_none_matches_legacy_rejection() {
         // `spawn_with_fallback_and_capture(..., None)` must fail closed the
         // same way the run-to-completion entrypoint does.
@@ -1097,23 +1058,6 @@ mod tests {
             dispatched.has_dacl_guard(),
             "ordinary requests retain AppContainer + DACL fallback"
         );
-    }
-
-    #[test]
-    fn proxy_keeps_base_container_on_legacy_sbox_hosts() {
-        let _g = BcUsableGuard::set(true);
-        let mut policy = empty_policy();
-        policy.network_proxy = ProxyConfig {
-            address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
-            builtin_test_server: false,
-        };
-        let req = test_request(policy);
-
-        let plan = select_backend_with_fallback(&req, None).expect("SBOX should remain eligible");
-        let (backend, dacl, tier) = (plan.backend, plan.dacl_manager, plan.tier);
-        assert!(matches!(tier, IsolationTier::BaseContainer));
-        assert!(matches!(backend, SelectedBackend::BaseContainer(_)));
-        assert!(dacl.is_none());
     }
 
     #[test]
