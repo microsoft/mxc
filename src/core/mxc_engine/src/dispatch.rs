@@ -47,11 +47,9 @@ fn ensure_host_supported() -> Result<(), MxcError> {
 
 /// Spawn a [`SandboxProcess`] handle for `request` on the current host.
 ///
-/// Spawns the sandboxed process with callback-driven stdio and returns a handle
-/// the caller can write to, read from, wait on, and kill. LXC exposes a pty
-/// (with stderr merged into stdout); the other native paths expose pipes.
-/// Backends without a streaming implementation return
-/// [`MxcError::unsupported_containment`].
+/// Spawns the sandboxed process with piped stdio and returns a handle the caller
+/// can write to, read from, wait on, and kill. Backends without a streaming
+/// implementation return [`MxcError::unsupported_containment`].
 pub fn spawn_runner(
     request: &ExecutionRequest,
     logger: &mut Logger,
@@ -429,6 +427,28 @@ mod tests {
         };
         assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
         assert!(err.message.contains("lxc"), "got: {}", err.message);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn streaming_dispatches_lxc_validation_without_starting_a_container() {
+        let mut request =
+            build_request(&minimal_policy(), "echo hello", None).expect("build_request");
+        request.inner.containment = ContainmentBackend::Lxc;
+        request.inner.policy.runtime_network_proxy_specified = true;
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let err = match spawn_runner(&request.inner, &mut logger) {
+            Ok(_) => panic!("unsupported LXC runtime proxy must be rejected"),
+            Err(error) => error,
+        };
+
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+        assert!(err.message.contains("runtimeConfig.networkProxy"));
+        assert!(
+            !logger.get_buffer().contains("Container name:"),
+            "dispatch validation must fail before container preparation"
+        );
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]

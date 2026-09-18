@@ -168,12 +168,16 @@ const policy: SandboxPolicy = {
 };
 
 // On Linux, the SDK streams through mxc_engine directly; it does not spawn lxc-exec.
-// The inner workload still receives a real LXC-attached pseudo-terminal, so
-// stderr is merged into the PTY output and stdin remains interactive.
-const pty = spawnSandbox('echo hello', policy);
-pty.onData((data) => console.log(data));
-pty.onExit((e) => console.log('Exit:', e.exitCode));
+// Native streaming uses ordinary pipes: stdin EOF is independent, and stdout
+// and stderr remain separate.
+const sandbox = spawnSandbox('echo hello', policy);
+sandbox.onData((data) => console.log(data));
+sandbox.onExit((e) => console.log('Exit:', e.exitCode));
 ```
+
+The attached execution path retains terminal semantics and runs `lxc-attach`
+through `mxc_pty::run_with_pty`. Native handle-based streaming does not allocate
+a PTY.
 
 ## Building
 

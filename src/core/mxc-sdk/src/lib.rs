@@ -47,16 +47,16 @@
 //! | Backend | Host | Selected by |
 //! |---------|------|-------------|
 //! | Bubblewrap | Linux | [`Containment::Process`] or [`Containment::Bubblewrap`] |
+//! | LXC | Linux | [`Containment::Lxc`] |
 //! | Seatbelt | macOS | [`Containment::Process`] or [`Containment::Seatbelt`] |
 //! | ProcessContainer (AppContainer / BaseContainer) | Windows | [`Containment::Process`] |
 //! | Explicit ProcessContainer configuration | Windows | [`Containment::ProcessContainer`] |
 //! | WSLC (WSL Container) | Windows | [`Containment::Wslc`] |
 //! | IsolationSession | Windows | [`Containment::IsolationSession`] |
 //!
-//! [`Containment::Lxc`] models explicit LXC settings, but the in-process
-//! [`run`] and [`spawn_sandbox`] APIs return
-//! [`ErrorCode::UnsupportedContainment`] because LXC does not expose captured
-//! pipe-based execution. Use the standalone `lxc-exec` binary for LXC.
+//! [`Containment::Lxc`] carries explicit LXC settings. [`run`] and
+//! [`spawn_sandbox`] use independent pipes, while [`run_attached`] retains the
+//! LXC PTY path for terminal-oriented execution.
 //!
 //! WSLC and IsolationSession are **experimental**: build with the crate's
 //! `wslc` / `isolation_session` feature, and call
@@ -114,7 +114,7 @@
 //! |-------------|---------------------|---------------------------------------|------------------------------------------|
 //! | **capture** | [`run`]             | `exec_sandbox(…)?.wait_with_output()` | captured                                 |
 //! | **handle**  | [`spawn_sandbox`]   | [`exec_sandbox`]                      | live pipes (stream, kill); no TTY        |
-//! | **attach**  | *not available*     | [`exec_attached`]                     | this process's stdio; TTY if it has one  |
+//! | **attach**  | [`run_attached`]    | [`exec_attached`]                     | this process's stdio; TTY if it has one  |
 //!
 //! [`run_state_aware_json`] sits alongside these and drives the *other*
 //! state-aware phases — `provision`, `start`, `stop`, `deprovision`, and a dry
@@ -126,15 +126,16 @@
 //!
 //! ## Pty allocation
 //!
-//! Every entry point except [`exec_attached`] wires the child's stdio to
-//! ordinary pipes and allocates no pty. [`run`] captures both streams; with
-//! [`spawn_sandbox`] or [`exec_sandbox`], stream the handle's
-//! `take_stdout`/`take_stderr`, or let [`wait`](Sandbox::wait) drain and
-//! discard any untaken stream.
+//! [`run`], [`spawn_sandbox`], and [`exec_sandbox`] wire the child's stdio to
+//! ordinary pipes and allocate no pty. LXC keeps stdout and stderr separate,
+//! and dropping the stdin writer delivers EOF. Stream a handle's
+//! `take_stdout`/`take_stderr`, or let [`wait`](Sandbox::wait) drain and discard
+//! any untaken stream.
 //!
-//! Under [`exec_attached`], IsolationSession allocates a pseudo-console and
-//! forwards stdin, so interactive shells render and resize. A pseudo-console
-//! has one output stream, so the sandbox's stderr arrives merged into stdout.
+//! [`run_attached`] retains LXC's `mxc_pty::run_with_pty` path. Under
+//! [`exec_attached`], IsolationSession allocates a pseudo-console and forwards
+//! stdin, so interactive shells render and resize. A pseudo-console has one
+//! output stream, so the sandbox's stderr arrives merged into stdout.
 //!
 //! [`exec_attached`] is verified against IsolationSession only.
 //!
@@ -174,10 +175,9 @@ pub use sandbox::{
 /// Spawn a sandbox from a [`SandboxRequest`] built by [`build_request`] (with
 /// the command, and any working directory / env, filled in).
 ///
-/// Returns a [`Sandbox`] handle for live bidirectional stdio and termination;
-/// most backends expose pipes, while LXC exposes its required pty with stderr
-/// merged into stdout. Any output stream the caller does not `take_*` is drained
-/// and discarded by [`wait`](Sandbox::wait).
+/// Returns a [`Sandbox`] handle for live bidirectional pipe stdio and
+/// termination. Any stdout/stderr stream the caller does not `take_*` is
+/// drained and discarded by [`wait`](Sandbox::wait).
 pub fn spawn_sandbox(request: SandboxRequest) -> Result<Sandbox, Error> {
     mxc_engine::spawn(&request).map(Sandbox::new)
 }
@@ -189,7 +189,8 @@ pub fn spawn_sandbox(request: SandboxRequest) -> Result<Sandbox, Error> {
 /// spawns the sandboxed process, waits for it to exit (honouring the request's
 /// `scriptTimeout`), and returns the captured stdout/stderr plus the
 /// [`WaitOutcome`]. Both streams are drained concurrently, so an output-heavy
-/// child can't deadlock. LXC's pty output is captured entirely as stdout.
+/// child can't deadlock. The attached execution surface is separate and may
+/// allocate a terminal for backends such as LXC.
 ///
 /// Use [`spawn_sandbox`] instead when you need to stream stdio live, feed
 /// stdin, or kill the process while it runs.

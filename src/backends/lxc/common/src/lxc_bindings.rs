@@ -155,6 +155,18 @@ fn confine_network_capabilities(command: &mut std::process::Command) {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn configure_attach_spawn(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartNetwork {
     FromContainerConfig,
@@ -417,7 +429,7 @@ impl LxcContainer {
         }
     }
 
-    /// Spawn an attached command behind a real pty and return its live handle.
+    /// Spawn an attached command with independent standard-I/O pipes.
     #[cfg(target_os = "linux")]
     pub fn attach_spawn(
         &self,
@@ -426,18 +438,13 @@ impl LxcContainer {
         env: &[String],
         force_clear_env: bool,
         firewall: ContainerFirewall,
-    ) -> Result<mxc_pty::PtyChild, String> {
-        use mxc_pty::Signal;
-
-        // This process can block these for the executor cleanup watchdog. A
-        // library process normally does not, but unblocking is harmless and
-        // keeps both launch paths equivalent.
-        const UNBLOCK: &[Signal] = &[Signal::SIGHUP, Signal::SIGTERM, Signal::SIGINT];
-
-        mxc_pty::spawn_with_pty(
-            self.attach_command(command, working_directory, env, force_clear_env, firewall),
-            UNBLOCK,
-        )
+    ) -> Result<std::process::Child, String> {
+        let mut command =
+            self.attach_command(command, working_directory, env, force_clear_env, firewall);
+        configure_attach_spawn(&mut command);
+        command
+            .spawn()
+            .map_err(|error| format!("Failed to spawn lxc-attach: {error}"))
     }
 
     #[cfg(target_os = "linux")]
@@ -488,7 +495,7 @@ impl LxcContainer {
         _env: &[String],
         _force_clear_env: bool,
         _firewall: ContainerFirewall,
-    ) -> Result<mxc_pty::PtyChild, String> {
+    ) -> Result<std::process::Child, String> {
         Err("LxcContainer::attach_spawn is only supported on Linux".to_string())
     }
 
@@ -1194,6 +1201,74 @@ mod tests {
             args.iter().any(|a| a == "--set-var=PATH=/usr/bin"),
             "PATH must survive the proxy-env merge; got {args:?}"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn attach_command_carries_container_args_environment_and_working_directory() {
+        let container = LxcContainer::new("stream-test", Some("/var/lib/mxc-test"));
+        let command = container.attach_command(
+            "printf '%s' \"$PWD\"",
+            "/work dir",
+            &["FOO=bar".to_string()],
+            true,
+            ContainerFirewall::Absent,
+        );
+
+        assert_eq!(command.get_program(), "lxc-attach");
+        assert_eq!(
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec![
+                "-P",
+                "/var/lib/mxc-test",
+                "-n",
+                "stream-test",
+                "--clear-env",
+                "--set-var=FOO=bar",
+                "--",
+                "/bin/sh",
+                "-c",
+                "cd -- \"$1\" && exec /bin/sh -c \"$2\"",
+                "_",
+                "/work dir",
+                "printf '%s' \"$PWD\"",
+            ]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn streaming_spawn_uses_independent_pipes_and_stdin_drop_delivers_eof() {
+        use std::io::Read;
+
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("cat; printf stdout-done; printf stderr-done >&2");
+        configure_attach_spawn(&mut command);
+
+        let mut child = command.spawn().expect("spawn pipe seam");
+        let pid = child.id() as libc::pid_t;
+        // SAFETY: `pid` names the live child and `getpgid` has no side effects.
+        assert_eq!(unsafe { libc::getpgid(pid) }, pid);
+
+        let stdin = child.stdin.take().expect("piped stdin");
+        let mut stdout = child.stdout.take().expect("piped stdout");
+        let mut stderr = child.stderr.take().expect("piped stderr");
+        drop(stdin);
+
+        let status = child.wait().expect("wait for EOF-driven exit");
+        let mut stdout_bytes = Vec::new();
+        let mut stderr_bytes = Vec::new();
+        stdout.read_to_end(&mut stdout_bytes).expect("read stdout");
+        stderr.read_to_end(&mut stderr_bytes).expect("read stderr");
+
+        assert!(status.success());
+        assert_eq!(stdout_bytes, b"stdout-done");
+        assert_eq!(stderr_bytes, b"stderr-done");
     }
 
     // The conditional in `attach_run` exists because of this: the drop is a

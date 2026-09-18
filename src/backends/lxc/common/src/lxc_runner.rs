@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "linux")]
 use std::io::{Read, Write as IoWrite};
 #[cfg(target_os = "linux")]
-use wxc_common::interruptible_reader::{InterruptibleReader, ReadCanceller};
+use std::process::{Child, ChildStdin};
+#[cfg(target_os = "linux")]
+use wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use wxc_common::logger::Logger;
 use wxc_common::models::{
     ContainerPolicy, ExecutionRequest, LifecycleConfig, LxcConfig, NetworkEnforcementMode,
@@ -703,55 +705,52 @@ impl LxcScriptRunner {
         let mut prepared = self.prepare(&request, logger, false)?;
         let environment = Self::execution_environment(&request);
         let _ = writeln!(logger, "Executing script inside container...");
-        let mut pty = match prepared.container.attach_spawn(
+        let mut child = match prepared.container.attach_spawn(
             &request.script_code,
             &request.working_directory,
             &environment,
             true,
             prepared.firewall,
         ) {
-            Ok(pty) => pty,
+            Ok(child) => child,
             Err(error) => {
                 prepared.cleanup(logger);
                 return Err(ScriptResponse::error(&format!("Execution failed: {error}")));
             }
         };
 
-        let stdin = pty.take_stdin();
-        let stdout_file = match pty.take_stdout() {
-            Some(stdout) => stdout,
-            None => {
-                if terminate_and_reap_pty(&mut pty) {
-                    prepared.cleanup(logger);
-                } else {
-                    std::mem::forget(prepared);
-                }
-                return Err(ScriptResponse::error(
-                    "Execution failed: LXC pty did not expose stdout",
-                ));
+        let stdin = child.stdin.take();
+        let pipes = match (
+            wrap_pipe(child.stdout.take()),
+            wrap_pipe(child.stderr.take()),
+        ) {
+            (Ok((stdout, stdout_canceller)), Ok((stderr, stderr_canceller))) => {
+                (stdout, stdout_canceller, stderr, stderr_canceller)
             }
-        };
-        let stdout = match InterruptibleReader::new_blocking(stdout_file.into()) {
-            Ok(stdout) => stdout,
-            Err(error) => {
-                if terminate_and_reap_pty(&mut pty) {
+            (stdout_result, stderr_result) => {
+                let reaped = terminate_and_reap_child(&mut child);
+                if reaped {
                     prepared.cleanup(logger);
                 } else {
                     std::mem::forget(prepared);
                 }
+                let error = stdout_result.err().or(stderr_result.err());
                 return Err(ScriptResponse::error(&format!(
-                    "Execution failed: could not make LXC pty output interruptible: {error}"
+                    "Execution failed: could not wrap LXC stdio pipes: {}",
+                    error.map_or_else(|| "unknown error".to_string(), |error| error.to_string())
                 )));
             }
         };
-        let stdout_canceller = stdout.canceller();
+        let (stdout, stdout_canceller, stderr, stderr_canceller) = pipes;
         let timeout = (request.script_timeout != 0)
             .then(|| Duration::from_millis(u64::from(request.script_timeout)));
         Ok(Box::new(LxcSandboxProcess {
-            pty,
+            child,
             stdin,
-            stdout: Some(PtyOutput(stdout)),
-            stdout_canceller: Some(stdout_canceller),
+            stdout,
+            stderr,
+            stdout_canceller,
+            stderr_canceller,
             timeout,
             teardown: Some(prepared),
             warnings: Vec::new(),
@@ -809,30 +808,14 @@ impl LxcScriptRunner {
 }
 
 #[cfg(target_os = "linux")]
-struct PtyOutput(InterruptibleReader);
-
-#[cfg(target_os = "linux")]
-impl Read for PtyOutput {
-    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        match self.0.read(buffer) {
-            Err(error) if is_pty_eof(&error) => Ok(0),
-            result => result,
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn is_pty_eof(error: &std::io::Error) -> bool {
-    error.raw_os_error() == Some(libc::EIO)
-}
-
-#[cfg(target_os = "linux")]
-fn terminate_and_reap_pty(pty: &mut mxc_pty::PtyChild) -> bool {
-    match pty.child_mut().try_wait() {
+fn terminate_and_reap_child(child: &mut Child) -> bool {
+    match child.try_wait() {
         Ok(Some(_)) => true,
         Ok(None) => {
-            let _ = group_kill(pty.child_mut());
-            pty.child_mut().wait().is_ok()
+            if group_kill(child).is_err() && child.kill().is_err() {
+                return false;
+            }
+            child.wait().is_ok()
         }
         Err(_) => false,
     }
@@ -840,10 +823,12 @@ fn terminate_and_reap_pty(pty: &mut mxc_pty::PtyChild) -> bool {
 
 #[cfg(target_os = "linux")]
 struct LxcSandboxProcess {
-    pty: mxc_pty::PtyChild,
-    stdin: Option<mxc_pty::PtyStdin>,
-    stdout: Option<PtyOutput>,
+    child: Child,
+    stdin: Option<ChildStdin>,
+    stdout: Option<InterruptibleReader>,
+    stderr: Option<InterruptibleReader>,
     stdout_canceller: Option<ReadCanceller>,
+    stderr_canceller: Option<ReadCanceller>,
     timeout: Option<Duration>,
     teardown: Option<PreparedLxc>,
     warnings: Vec<String>,
@@ -883,40 +868,43 @@ impl SandboxProcess for LxcSandboxProcess {
     }
 
     fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
-        None
+        take_boxed_read(&mut self.stderr)
     }
 
     fn stdout_closer(&self) -> Option<Box<dyn StreamCloser>> {
         boxed_closer(&self.stdout_canceller)
     }
 
+    fn stderr_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        boxed_closer(&self.stderr_canceller)
+    }
+
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
         Ok(self
-            .pty
-            .child_mut()
+            .child
             .try_wait()?
             .map(|status| status.code().unwrap_or(-1)))
     }
 
     fn id(&self) -> u32 {
-        self.pty.id()
+        self.child.id()
     }
 
     fn kill(&mut self) -> std::io::Result<()> {
-        if self.pty.child_mut().try_wait()?.is_some() {
+        if self.child.try_wait()?.is_some() {
             return Ok(());
         }
-        group_kill(self.pty.child_mut())
+        group_kill(&mut self.child)
     }
 
     fn wait(&mut self) -> std::io::Result<i32> {
         self.stdin.take();
         let stdout_thread = spawn_discard(self.stdout.take());
-        let (result, reaped) = match wait_with_timeout(self.pty.child_mut(), self.timeout) {
+        let stderr_thread = spawn_discard(self.stderr.take());
+        let (result, reaped) = match wait_with_timeout(&mut self.child, self.timeout) {
             Ok(status) => (Ok(status.code().unwrap_or(-1)), true),
             Err(WaitError::Timeout) => {
-                let _ = self.kill();
-                let reaped = self.pty.child_mut().wait().is_ok();
+                let reaped = terminate_and_reap_child(&mut self.child);
                 (
                     Err(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
@@ -926,20 +914,24 @@ impl SandboxProcess for LxcSandboxProcess {
                 )
             }
             Err(WaitError::Io(error)) => {
-                let _ = self.kill();
-                let reaped = self.pty.child_mut().wait().is_ok();
+                let reaped = terminate_and_reap_child(&mut self.child);
                 (
                     Err(std::io::Error::other(format!("LXC: wait failed: {error}"))),
                     reaped,
                 )
             }
         };
-        cancel_and_join_discard(stdout_thread, &self.stdout_canceller);
         if reaped {
+            // Releasing the container terminates descendants that escaped the
+            // attach process group (for example by calling setsid) while the
+            // firewall is still owned. Their pipe handles then reach natural
+            // EOF for callers that took the output streams.
             self.cleanup_after_exit();
         } else {
             self.retain_teardown_on_uncertain_exit();
         }
+        cancel_and_join_discard(stdout_thread, &self.stdout_canceller);
+        cancel_and_join_discard(stderr_thread, &self.stderr_canceller);
         result
     }
 }
@@ -948,12 +940,14 @@ impl SandboxProcess for LxcSandboxProcess {
 impl Drop for LxcSandboxProcess {
     fn drop(&mut self) {
         self.stdin.take();
-        let _ = self.kill();
-        if self.pty.child_mut().wait().is_ok() {
+        if terminate_and_reap_child(&mut self.child) {
+            self.cleanup_after_exit();
             if let Some(canceller) = &self.stdout_canceller {
                 canceller.close();
             }
-            self.cleanup_after_exit();
+            if let Some(canceller) = &self.stderr_canceller {
+                canceller.close();
+            }
         } else {
             self.retain_teardown_on_uncertain_exit();
         }
@@ -1128,6 +1122,28 @@ mod tests {
     }
 
     #[test]
+    fn failed_destroy_retains_policy_ownership() {
+        let policy_released = Rc::new(RefCell::new(false));
+        let callback_state = Rc::clone(&policy_released);
+
+        let result = release_before_policy_teardown(
+            true,
+            true,
+            |release| {
+                assert!(matches!(release, ContainerRelease::Destroy));
+                Err("destroy verification failed".to_string())
+            },
+            move || *callback_state.borrow_mut() = true,
+        );
+
+        assert!(result.is_err());
+        assert!(
+            !*policy_released.borrow(),
+            "policy ownership must be retained until destroy is verified"
+        );
+    }
+
+    #[test]
     fn preserved_policy_keeps_reusable_container_running() {
         let release_called = Rc::new(RefCell::new(false));
         let callback_state = Rc::clone(&release_called);
@@ -1151,6 +1167,72 @@ mod tests {
             policy,
             ..Default::default()
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn local_pipe_sandbox(script: &str, timeout: Option<Duration>) -> LxcSandboxProcess {
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        let mut child = command.spawn().expect("spawn local pipe process");
+        let stdin = child.stdin.take();
+        let (stdout, stdout_canceller) = wrap_pipe(child.stdout.take()).expect("wrap stdout");
+        let (stderr, stderr_canceller) = wrap_pipe(child.stderr.take()).expect("wrap stderr");
+
+        LxcSandboxProcess {
+            child,
+            stdin,
+            stdout,
+            stderr,
+            stdout_canceller,
+            stderr_canceller,
+            timeout,
+            teardown: None,
+            warnings: Vec::new(),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn lxc_process_owns_stdin_once_and_keeps_output_streams_separate() {
+        let mut process =
+            local_pipe_sandbox("cat; printf stdout-done; printf stderr-done >&2", None);
+        let stdin = process.take_stdin().expect("first stdin take");
+        assert!(process.take_stdin().is_none(), "stdin is single-owner");
+        let mut stdout = process.take_stdout().expect("stdout pipe");
+        let mut stderr = process.take_stderr().expect("stderr pipe");
+
+        drop(stdin);
+        assert_eq!(process.wait().expect("wait after stdin EOF"), 0);
+
+        let mut stdout_bytes = Vec::new();
+        let mut stderr_bytes = Vec::new();
+        stdout.read_to_end(&mut stdout_bytes).expect("read stdout");
+        stderr.read_to_end(&mut stderr_bytes).expect("read stderr");
+        assert_eq!(stdout_bytes, b"stdout-done");
+        assert_eq!(stderr_bytes, b"stderr-done");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn lxc_process_timeout_kills_and_reaps_the_attach_group() {
+        let mut process = local_pipe_sandbox("sleep 30", Some(Duration::from_millis(50)));
+
+        let error = process.wait().expect_err("the process must time out");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            process.try_wait().expect("query reaped child").is_some(),
+            "the attach process must be reaped before timeout returns"
+        );
     }
 
     #[test]

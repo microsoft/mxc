@@ -6,11 +6,9 @@ An importable Rust library for starting [MXC](../../../README.md) sandboxes
 Build a `SandboxRequest` from a [`SandboxPolicy`], then either **run it to
 completion** with [`run`] (capturing stdout/stderr in one call) or hand it to
 [`spawn_sandbox`] for a live handle you can stream, feed stdin, and kill.
-Either way it selects the right containment backend for the host and runs the
-sandboxed process over live callback I/O. Most backends use ordinary pipes;
-LXC exposes a pty so the inner workload remains terminal-attached. The
-state-aware [`exec_attached`] path can also allocate a terminal — see *Pty
-allocation*.
+Either way it selects the right containment backend for the host. Streaming
+uses ordinary pipes with independent stdout and stderr. Attached execution can
+allocate a terminal — see *Pty allocation*.
 
 ## Usage
 
@@ -159,8 +157,8 @@ let request = build_request_with_containment(
 ```
 
 The in-process `run` and `spawn_sandbox` APIs execute this request natively
-through `mxc_engine`, without spawning `lxc-exec`. LXC exposes its pty as live
-stdin and stdout; stderr is merged into stdout.
+through `mxc_engine`, without spawning `lxc-exec`. `spawn_sandbox` exposes
+independent stdin, stdout, and stderr pipes.
 
 Filesystem-policy discovery helpers are also available to feed a policy:
 [`available_tools_policy`] (PATH + tool/SDK environment directories),
@@ -331,10 +329,9 @@ now-empty per-run parent directory.
 
 ## Live stdio + kill (streaming)
 
-[`spawn_sandbox`] returns a [`Sandbox`] you can drive
-while it runs — persistent bidirectional stdio plus termination. Most backends
-expose ordinary pipes. LXC exposes the primary side of its required pty, with
-stderr merged into stdout.
+[`spawn_sandbox`] returns a [`Sandbox`] you can drive while it runs —
+persistent bidirectional pipe stdio plus termination. LXC keeps stdout and
+stderr separate, and dropping its stdin writer delivers EOF independently.
 
 ```rust,no_run
 use std::error::Error;
@@ -642,14 +639,13 @@ It never fails: any unreadable or unrecognized value reads back as
 
 ## Pty allocation
 
-Most entry points wire the child's stdio to ordinary pipes. LXC one-shot
-execution instead allocates a pty for `lxc-attach`, exposes live stdin and
-merged stdout/stderr through the same `Sandbox` handle, and drains output the
-caller does not take during `wait()`.
+Streaming entry points wire the child's stdio to ordinary pipes. LXC launches
+`lxc-attach` directly with independent stdin, stdout, and stderr pipes.
 
-Under `exec_attached`, IsolationSession allocates a pseudo-console and forwards
-stdin, so interactive shells render and resize. A pseudo-console has one output
-stream, so the sandbox's stderr arrives merged into stdout.
+Attached execution remains the terminal-oriented path. LXC uses
+`mxc_pty::run_with_pty` there, while IsolationSession allocates a pseudo-console
+and forwards stdin, so interactive shells render and resize. A pseudo-console
+has one output stream, so the sandbox's stderr arrives merged into stdout.
 
 `exec_attached` refuses with `MalformedRequest` unless this process's stdout and
 stdin are both terminals; use `exec_sandbox` for a workload with no terminal.
