@@ -59,7 +59,7 @@ use wxc_common::process_util::{
 };
 use wxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, spawn_discard, take_boxed_read, take_boxed_write,
-    SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
+    NativeStdio, SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
 };
 use wxc_common::script_runner::get_timeout_milliseconds;
 use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
@@ -2096,6 +2096,35 @@ impl AppContainerSandboxProcess {
 impl SandboxProcess for AppContainerSandboxProcess {
     fn output_metadata(&self) -> Option<&SandboxOutputMetadata> {
         self.output_metadata.as_ref()
+    }
+
+    fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+        let stdio = NativeStdio {
+            stdin: self
+                .stdin
+                .as_ref()
+                .map(|stream| stream.try_clone_owned_handle())
+                .transpose()?,
+            stdout: self
+                .stdout
+                .as_ref()
+                .map(|stream| stream.try_clone_owned_handle())
+                .transpose()?,
+            stderr: self
+                .stderr
+                .as_ref()
+                .map(|stream| stream.try_clone_owned_handle())
+                .transpose()?,
+        };
+        if stdio.is_empty() {
+            return Ok(None);
+        }
+        self.stdin.take();
+        self.stdout.take();
+        self.stderr.take();
+        self.stdout_canceller.take();
+        self.stderr_canceller.take();
+        Ok(Some(stdio))
     }
 
     fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {

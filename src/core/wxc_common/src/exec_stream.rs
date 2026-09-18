@@ -49,7 +49,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use crate::mxc_error::MxcError;
-use crate::sandbox_process::{boxed_closer, cancel_and_join_discard, SandboxProcess, StreamCloser};
+use crate::sandbox_process::{
+    boxed_closer, cancel_and_join_discard, NativeStdio, OwnedPipe, SandboxProcess, StreamCloser,
+};
 use crate::state_aware_backend::{ExecHandle, ExecOutcome, PipeHandle};
 
 /// The platform's closer for a cancellable read — fired to make an in-flight
@@ -120,6 +122,13 @@ struct PreparedStreams {
     stdin_closer: Option<StdinCloser>,
 }
 
+#[derive(Clone, Copy)]
+struct NativeStdioSource {
+    stdin: Option<isize>,
+    stdout: Option<isize>,
+    stderr: Option<isize>,
+}
+
 /// A streaming [`SandboxProcess`] backed by a state-aware [`ExecHandle`].
 pub struct ExecSandboxProcess {
     stdout: Option<Box<dyn Read + Send>>,
@@ -139,6 +148,9 @@ pub struct ExecSandboxProcess {
     /// Kills the process tree. Taken by the first [`kill`](SandboxProcess::kill)
     /// or by `Drop`.
     terminator: Option<Box<dyn FnOnce() -> Result<(), MxcError> + Send>>,
+    /// Backend-owned handles retained only as sources for caller-owned
+    /// duplicates. The backend continues to own and close the originals.
+    native_stdio: Option<NativeStdioSource>,
     /// The waiter's outcome once joined, so repeat waits are idempotent. Holds
     /// the outcome rather than a code because a timeout has no code.
     exit: Option<ExecOutcome>,
@@ -201,6 +213,11 @@ impl ExecSandboxProcess {
             ));
         }
 
+        let native_stdio = NativeStdioSource {
+            stdin: native_pipe_source(stdin),
+            stdout: native_pipe_source(stdout),
+            stderr: native_pipe_source(stderr),
+        };
         let stdin_closer = stdin_closer.map(|close| StdinCloser(Arc::new(Mutex::new(Some(close)))));
         let streams = wrap_cancellable_read_checked(stdout, "stdout").and_then(|out| {
             let err = wrap_cancellable_read_checked(stderr, "stderr")?;
@@ -218,7 +235,9 @@ impl ExecSandboxProcess {
             })
         });
 
-        Self::from_prepared_streams(streams, waiter, terminator)
+        let mut process = Self::from_prepared_streams(streams, waiter, terminator)?;
+        process.native_stdio = Some(native_stdio);
+        Ok(process)
     }
 
     /// Build the handle from already-classified streams.
@@ -301,6 +320,7 @@ impl ExecSandboxProcess {
             stderr_canceller,
             waiter: Some(waiter_thread),
             terminator: Some(terminator),
+            native_stdio: None,
             exit: None,
             kill_refused: false,
         })
@@ -471,6 +491,34 @@ fn spawn_discard_checked(
 }
 
 impl SandboxProcess for ExecSandboxProcess {
+    fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+        let Some(source) = self.native_stdio else {
+            return Ok(None);
+        };
+        if (source.stdin.is_some() && self.stdin.is_none())
+            || (source.stdout.is_some() && self.stdout.is_none())
+            || (source.stderr.is_some() && self.stderr.is_none())
+        {
+            return Err(std::io::Error::other(
+                "native stdio must be taken before taking individual streams",
+            ));
+        }
+
+        let stdio = NativeStdio {
+            stdin: duplicate_native_pipe(source.stdin, "stdin")?,
+            stdout: duplicate_native_pipe(source.stdout, "stdout")?,
+            stderr: duplicate_native_pipe(source.stderr, "stderr")?,
+        };
+        self.native_stdio.take();
+        self.stdin.take();
+        self.stdout.take();
+        self.stderr.take();
+        self.stdin_closer.take();
+        self.stdout_canceller.take();
+        self.stderr_canceller.take();
+        Ok(Some(stdio))
+    }
+
     fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
         self.stdin.take()
     }
@@ -677,6 +725,31 @@ fn dup_handle_to_file(handle: PipeHandle) -> Option<std::fs::File> {
     dup_handle_to_owned(handle).map(std::fs::File::from)
 }
 
+#[cfg(target_os = "windows")]
+fn native_pipe_source(handle: PipeHandle) -> Option<isize> {
+    (!is_null_pipe(handle)).then_some(handle.0 as isize)
+}
+
+#[cfg(target_os = "windows")]
+fn duplicate_native_pipe(
+    source: Option<isize>,
+    stream: &str,
+) -> std::io::Result<Option<OwnedPipe>> {
+    use std::os::windows::io::BorrowedHandle;
+    let Some(raw) = source else {
+        return Ok(None);
+    };
+    // SAFETY: `NativeStdioSource` retains backend-owned handles only while the
+    // backend process object is alive; this call duplicates, never adopts, it.
+    let borrowed = unsafe { BorrowedHandle::borrow_raw(raw as _) };
+    borrowed.try_clone_to_owned().map(Some).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("failed to duplicate the exec {stream} pipe handle: {error}"),
+        )
+    })
+}
+
 #[cfg(not(target_os = "windows"))]
 fn wrap_read(handle: PipeHandle) -> Option<Box<dyn Read + Send>> {
     dup_fd_to_file(handle).map(|f| Box::new(f) as Box<dyn Read + Send>)
@@ -771,6 +844,38 @@ fn dup_fd_to_file(handle: PipeHandle) -> Option<std::fs::File> {
     // duplicate it (dup) and never take ownership of the original.
     let borrowed = unsafe { BorrowedFd::borrow_raw(handle) };
     borrowed.try_clone_to_owned().ok().map(std::fs::File::from)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn native_pipe_source(handle: PipeHandle) -> Option<isize> {
+    (!is_null_pipe(handle)).then_some(handle as isize)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn duplicate_native_pipe(
+    source: Option<isize>,
+    stream: &str,
+) -> std::io::Result<Option<OwnedPipe>> {
+    use std::os::fd::BorrowedFd;
+    let Some(raw) = source else {
+        return Ok(None);
+    };
+    let handle = i32::try_from(raw).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("the exec {stream} pipe fd is out of range"),
+        )
+    })?;
+    // SAFETY: `NativeStdioSource` retains backend-owned descriptors only while
+    // the backend process object is alive; this call duplicates, never adopts,
+    // the descriptor.
+    let borrowed = unsafe { BorrowedFd::borrow_raw(handle) };
+    borrowed.try_clone_to_owned().map(Some).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("failed to duplicate the exec {stream} pipe fd: {error}"),
+        )
+    })
 }
 
 #[cfg(test)]

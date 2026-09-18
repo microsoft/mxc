@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 use std::os::windows::ffi::OsStringExt;
+use std::os::windows::io::{BorrowedHandle, OwnedHandle as StdOwnedHandle};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -68,6 +69,10 @@ impl PipeReader {
     /// Take ownership of `handle` (invalidating the source `OwnedHandle`).
     pub fn new(mut handle: OwnedHandle) -> Self {
         Self(SendOwnedHandle::take(&mut handle))
+    }
+
+    pub fn try_clone_owned_handle(&self) -> std::io::Result<StdOwnedHandle> {
+        self.0.try_clone_owned_handle()
     }
 }
 
@@ -156,6 +161,10 @@ impl InterruptiblePipeReader {
     /// reader's lifetime.
     pub fn canceller(&self) -> PipeReadCanceller {
         PipeReadCanceller(Arc::downgrade(&self.0))
+    }
+
+    pub fn try_clone_owned_handle(&self) -> std::io::Result<StdOwnedHandle> {
+        self.0.handle.try_clone_owned_handle()
     }
 }
 
@@ -253,6 +262,10 @@ impl PipeWriter {
     pub fn new(mut handle: OwnedHandle) -> Self {
         Self(SendOwnedHandle::take(&mut handle))
     }
+
+    pub fn try_clone_owned_handle(&self) -> std::io::Result<StdOwnedHandle> {
+        self.0.try_clone_owned_handle()
+    }
 }
 
 impl std::io::Write for PipeWriter {
@@ -299,6 +312,13 @@ impl SendOwnedHandle {
 
     pub fn get(&self) -> HANDLE {
         HANDLE(self.0 as *mut core::ffi::c_void)
+    }
+
+    fn try_clone_owned_handle(&self) -> std::io::Result<StdOwnedHandle> {
+        // SAFETY: this wrapper owns a valid process-wide handle for the
+        // duration of the borrow; `try_clone_to_owned` duplicates it.
+        let borrowed = unsafe { BorrowedHandle::borrow_raw(self.get().0) };
+        borrowed.try_clone_to_owned()
     }
 }
 

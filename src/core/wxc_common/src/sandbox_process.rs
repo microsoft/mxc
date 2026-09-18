@@ -22,6 +22,29 @@ use crate::models::{ExecutionRequest, FailurePhase, SandboxOutputMetadata, Scrip
 use crate::script_runner::ScriptRunner;
 use crate::validator::{validate_common, validate_network_policy_support, NetworkPolicySupport};
 
+#[cfg(unix)]
+pub type OwnedPipe = std::os::fd::OwnedFd;
+#[cfg(windows)]
+pub type OwnedPipe = std::os::windows::io::OwnedHandle;
+
+/// Owned native endpoints for a sandbox process.
+///
+/// Taking these endpoints transfers stream ownership to the caller. The
+/// process retains only lifecycle control; its normal `take_*` methods return
+/// `None` afterward.
+#[derive(Debug)]
+pub struct NativeStdio {
+    pub stdin: Option<OwnedPipe>,
+    pub stdout: Option<OwnedPipe>,
+    pub stderr: Option<OwnedPipe>,
+}
+
+impl NativeStdio {
+    pub fn is_empty(&self) -> bool {
+        self.stdin.is_none() && self.stdout.is_none() && self.stderr.is_none()
+    }
+}
+
 /// A handle to a running sandboxed process.
 ///
 /// Modelled on [`std::process::Child`]: the caller may `take_*` the std
@@ -83,6 +106,13 @@ pub trait SandboxProcess: Send {
     /// state and backend teardown has completed.
     fn output_metadata(&self) -> Option<&SandboxOutputMetadata> {
         None
+    }
+
+    /// Transfer owned native stdio endpoints to the caller.
+    ///
+    /// Backends that cannot expose OS pipe endpoints return `Ok(None)`.
+    fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+        Ok(None)
     }
 
     /// Take ownership of the child's stdin so the caller can write to it.

@@ -103,6 +103,32 @@ pub struct MxcStreamCloser {
     inner: StreamCloser,
 }
 
+/// Caller-owned native stdio endpoints.
+///
+/// Values are Win32 `HANDLE`s on Windows and file descriptors on Unix.
+/// Absent endpoints are `0` on Windows and `-1` on Unix.
+#[repr(C)]
+pub struct MxcNativeStdio {
+    pub stdin_handle: isize,
+    pub stdout_handle: isize,
+    pub stderr_handle: isize,
+}
+
+impl MxcNativeStdio {
+    const fn invalid() -> Self {
+        #[cfg(target_os = "windows")]
+        const INVALID: isize = 0;
+        #[cfg(not(target_os = "windows"))]
+        const INVALID: isize = -1;
+
+        Self {
+            stdin_handle: INVALID,
+            stdout_handle: INVALID,
+            stderr_handle: INVALID,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Spawn
 // ---------------------------------------------------------------------------
@@ -252,6 +278,96 @@ pub unsafe extern "C" fn mxc_sandbox_take_stdout(handle: *mut MxcSandbox) -> *mu
 #[no_mangle]
 pub unsafe extern "C" fn mxc_sandbox_take_stderr(handle: *mut MxcSandbox) -> *mut MxcReadStream {
     take_read_stream(handle, |s| s.inner.take_stderr())
+}
+
+/// Transfer the child's native stdio endpoints to the caller.
+///
+/// On success, each non-sentinel endpoint is owned by the caller and must be
+/// adopted by the language runtime or closed with [`mxc_native_pipe_close`].
+///
+/// # Safety
+/// - `handle` must be null or a live handle from [`mxc_spawn_request`].
+/// - `out_stdio` must point to writable storage for one [`MxcNativeStdio`].
+#[no_mangle]
+pub unsafe extern "C" fn mxc_sandbox_take_native_stdio(
+    handle: *mut MxcSandbox,
+    out_stdio: *mut MxcNativeStdio,
+) -> i32 {
+    if out_stdio.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+    // SAFETY: caller-guaranteed writable storage. Initialize before fallible
+    // work so failure never exposes stale handles.
+    unsafe { ptr::write(out_stdio, MxcNativeStdio::invalid()) };
+    if handle.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+
+    catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: non-null live handle per the caller contract.
+        let sandbox = unsafe { &mut *handle };
+        match sandbox.inner.take_native_stdio() {
+            Ok(Some(stdio)) => {
+                let result = MxcNativeStdio {
+                    stdin_handle: native_pipe_into_raw(stdio.stdin),
+                    stdout_handle: native_pipe_into_raw(stdio.stdout),
+                    stderr_handle: native_pipe_into_raw(stdio.stderr),
+                };
+                // SAFETY: non-null writable output per the caller contract.
+                unsafe { ptr::write(out_stdio, result) };
+                MXC_STATUS_SUCCESS
+            }
+            Ok(None) | Err(_) => MXC_STATUS_BACKEND_ERROR,
+        }
+    }))
+    .unwrap_or_else(|panic| {
+        crate::report_panic("mxc_sandbox_take_native_stdio", &*panic);
+        MXC_STATUS_PANIC
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn native_pipe_into_raw(pipe: Option<std::os::windows::io::OwnedHandle>) -> isize {
+    use std::os::windows::io::IntoRawHandle;
+    pipe.map_or(0, |handle| handle.into_raw_handle() as isize)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn native_pipe_into_raw(pipe: Option<std::os::fd::OwnedFd>) -> isize {
+    use std::os::fd::IntoRawFd;
+    pipe.map_or(-1, |fd| fd.into_raw_fd() as isize)
+}
+
+/// Close a native endpoint that the caller could not adopt.
+///
+/// # Safety
+/// `handle` must be an owned endpoint returned by
+/// [`mxc_sandbox_take_native_stdio`] and must not have been closed or adopted.
+#[no_mangle]
+pub unsafe extern "C" fn mxc_native_pipe_close(handle: isize) {
+    if let Err(panic) = catch_unwind(AssertUnwindSafe(|| close_native_pipe(handle))) {
+        crate::report_panic("mxc_native_pipe_close", &*panic);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn close_native_pipe(handle: isize) {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    if handle != 0 {
+        // SAFETY: caller transfers one live owned handle to this function.
+        drop(unsafe { OwnedHandle::from_raw_handle(handle as _) });
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn close_native_pipe(handle: isize) {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    if let Ok(fd) = i32::try_from(handle) {
+        if fd >= 0 {
+            // SAFETY: caller transfers one live owned descriptor to this function.
+            drop(unsafe { OwnedFd::from_raw_fd(fd) });
+        }
+    }
 }
 
 /// Return a closer that unblocks reads on stdout without killing the child.
