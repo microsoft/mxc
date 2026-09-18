@@ -389,7 +389,7 @@ export interface NetworkRule {
 
 export type NonEmptyString = string;
 
-export type OneShotContainment = "process" | "processcontainer" | "appcontainer" | "lxc" | "bubblewrap" | "seatbelt" | "macos_sandbox" | "vm" | "windows_sandbox" | "microvm" | "hyperlight" | "wslc" | "isolation_session";
+export type OneShotContainment = "process" | "processcontainer" | "appcontainer" | "lxc" | "bubblewrap" | "seatbelt" | "macos_sandbox" | "vm" | "windows_sandbox" | "microvm" | "nvx" | "hyperlight" | "wslc" | "isolation_session";
 
 /**
  * Experimental settings.

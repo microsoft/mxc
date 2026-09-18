@@ -838,6 +838,13 @@
           "type": "string"
         },
         {
+          "description": "Nvx",
+          "enum": [
+            "nvx"
+          ],
+          "type": "string"
+        },
+        {
           "description": "Hyperlight",
           "enum": [
             "hyperlight"

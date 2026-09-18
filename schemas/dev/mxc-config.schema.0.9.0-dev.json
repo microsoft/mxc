@@ -151,6 +151,13 @@
           "type": "string"
         },
         {
+          "description": "NVX micro-VM (experimental).",
+          "enum": [
+            "nvx"
+          ],
+          "type": "string"
+        },
+        {
           "description": "Hyperlight micro-VM (experimental).",
           "enum": [
             "hyperlight"

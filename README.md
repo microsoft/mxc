@@ -62,7 +62,22 @@ build.bat                  # Release build for current architecture
 build.bat --debug          # Debug build
 build.bat --all            # Release build for both x64 and ARM64
 build.bat --with-microvm   # Include NanVix micro-VM binaries
+build.bat --with-nvx       # Include the incomplete NVX foundation (Windows x64)
 ```
+
+`--with-nvx` is additive to the existing `--with-microvm` path. It acquires the
+pinned NVX platform archive at build time and verifies every staged file by
+SHA-256; sandbox launches never download artifacts. Set `NVX_BIN` to a
+pre-fetched, checksum-verifiable bundle directory for an offline build. The
+current pin, `v0.1.0-dev.5c86da3dff02`, contains only `openvmm.exe`, the guest
+kernel, and the guest initramfs, not the workload-image bundle.
+
+This foundation adds `containment: "nvx"` to the development schema while
+retaining `microvm`. An NVX-enabled binary parses the new value, but execution
+returns a typed backend-unavailable error and capability probes do not advertise
+NVX. Runtime work remains blocked on NVX-produced distro/runtime EROFS images
+and scratch image, a proven combined managed-sandbox/virtio-fs contract, and the
+required WHP runner.
 
 #### Linux
 

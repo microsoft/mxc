@@ -6,6 +6,11 @@ The original NVX prototype accepted a real MXC `0.9.0-dev` JSON, validated it
 against the schema, and adapted supported fields into typed NVX launch plans.
 The prototype first exercised those plans on Windows through OpenVMM and WHP.
 
+The current MXC foundation is additive: `containment: "nvx"` parses while the
+existing `microvm` backend remains available. An NVX-enabled build returns a
+typed backend-unavailable error for execution, and capability probes do not
+advertise NVX while the runtime is incomplete.
+
 ## Current architecture
 
 The intended MXC integration uses a direct ownership boundary:
@@ -78,8 +83,11 @@ them for this backend:
 
 ## Schema changes
 
-The only required new public identifier is `containment: "nvx"`. The
-`experimental.nvx.provision` section is necessary only if images remain caller-configurable.
+The rolling `0.9.0-dev` and exact `0.9.0-alpha` development contracts now
+include `containment: "nvx"` in their generated schemas and TypeScript wire
+types. The existing `microvm` identifier remains in both artifact sets. No
+stable schema is changed. An `experimental.nvx.provision` section is necessary
+only if images remain caller-configurable.
 
 Example state-aware provision request:
 
@@ -137,63 +145,35 @@ Example state-aware provision request:
 
 ## Binary acquisition and packaging
 
-NVX replaces the existing NanVix microVM runtime and its `--with-microvm`
-packaging path. A new `--with-nvx` build option should reuse the existing
-NanVix artifact-acquisition implementation rather than introduce a second
-download system:
+`build.bat --with-nvx` enables the incomplete x64 Windows/WHP foundation. This
+path is additive and does not replace the existing `--with-microvm` packaging
+path.
 
-- pin an exact `microsoft/nvx` release tag, platform asset name, and SHA-256
-  checksums in the repository;
-- download and verify the release during the build, never when a sandbox is
-  launched;
-- cache verified artifacts under Cargo's build output and avoid downloading
-  them again when the pinned files are already present;
-- support `NVX_BIN` as an offline override containing a pre-fetched and
-  checksum-verifiable NVX bundle;
-- stage `openvmm`, the guest kernel, and the guest initramfs beside the MXC
-  executor and copy them into the matching Node and .NET SDK runtime package;
-- fail the NVX-enabled build if an expected artifact is absent, corrupt, or
-  does not match the selected platform.
+The build pins the exact `microsoft/nvx` release tag, platform asset name, and
+per-file SHA-256 checksums in the repository. It downloads and verifies the
+platform archive during the build, reuses the verified Cargo-output cache, and
+stages the files beside the MXC executor. Sandbox execution never downloads
+artifacts. `NVX_BIN` is an offline override for a pre-fetched bundle directory;
+its files must pass the same checksum validation.
 
-The existing `nanvix_binaries` and `nanvix_build_common` mechanisms should be
-renamed and adapted for NVX, preserving their pinned-version manifest,
-checksum verification, offline-prefetch, cache, and SDK-staging behavior.
-The obsolete NanVix release definitions and binaries should be removed rather
-than retained alongside NVX.
-
-`--with-nvx` selects the WHP bundle on Windows and the KVM bundle by default on
-Linux. Linux MSHV packaging requires an additional explicit build selection;
-the build must not infer the desired release bundle from the capabilities of
-the machine performing the build.
-
-The current `microsoft/nvx` prerelease
-`v0.1.0-dev.142587bbceae` has the following package sizes:
-
-| Release bundle | Compressed download | Expanded runtime |
-| --- | ---: | ---: |
-| Windows WHP | 22.73 MiB | 51.41 MiB |
-| Linux KVM | 130.95 MiB | 486.69 MiB |
-| Linux MSHV | 125.35 MiB | 489.11 MiB |
-
-The expanded Windows runtime consists primarily of `openvmm.exe` (22.05 MiB),
-`vmlinux` (21.84 MiB), and `initramfs.cpio.gz` (7.42 MiB). The Linux bundles
-use the same kernel and initramfs, but their OpenVMM executables are currently
-approximately 457-460 MiB before archive compression.
+The current published pin is `v0.1.0-dev.5c86da3dff02`. Its Windows/WHP asset
+contains only the platform files (`openvmm.exe`, `vmlinux`, and
+`initramfs.cpio.gz`); it does not contain the distro/runtime EROFS images or
+writable scratch image required to run a workload.
 
 ## Remaining MXC integration work
 
-The following work belongs primarily in the MXC repository. It is separate
-from the remaining NVX runtime policy gaps above.
+The schema/wire, policy/model, typed-unavailable dispatch, and pinned Windows
+artifact-acquisition foundations are now present without replacing NanVix.
+PR2/runtime remains blocked on all of the following:
 
-| Workstream | Estimate |
-| --- | ---: |
-| Add `nvx` containment, schema, wire, and policy/model types | 2-3 engineer-days |
-| Implement state-aware and one-shot engine dispatch that owns OpenVMM | 7-10 engineer-days |
-| Adapt guest streams, terminal outcomes, cancellation, and typed errors | 3-5 engineer-days |
-| Expose NVX through applicable Rust, TypeScript, C#, and FFI surfaces | 4-6 engineer-days |
-| Replace the NanVix artifact pipeline with pinned NVX acquisition, packaging, discovery, and capability probing | 3-5 engineer-days |
-| Add MXC-native E2E automation and CI coverage | 5-8 engineer-days |
-| **Total** | **24-37 engineer-days** |
+- NVX-produced distro and runtime EROFS images plus a writable scratch image;
+- a proven combined managed-sandbox/virtio-fs contract; and
+- the required WHP runner.
+
+After those inputs are available, MXC still needs the state-aware and one-shot
+OpenVMM runtime, guest streams and lifecycle outcomes, applicable SDK/FFI
+surfaces, capability advertisement, and MXC-native E2E/CI coverage.
 
 
 ### E2E testing plan
