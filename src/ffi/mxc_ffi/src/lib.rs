@@ -5,7 +5,8 @@
 //!
 //! This is the flat, panic-safe C surface loaded by language bindings.
 //!
-//! - **Run to completion** — [`mxc_run_request`] accepts a binding request.
+//! - **Run to completion** — [`mxc_run_request`] captures output, while
+//!   [`mxc_run_request_attached`] inherits the caller's standard streams.
 //! - **Host discovery** — [`mxc_available_backends_json`] reports every
 //!   host-available backend, while [`mxc_platform_support_json`] reports the
 //!   subset this SDK can launch.
@@ -59,7 +60,10 @@ use std::panic::catch_unwind;
 use std::ptr;
 use std::sync::OnceLock;
 
-use mxc_sdk::{available_backends, platform_support, run, ErrorCode, SandboxRequest, WaitOutcome};
+use mxc_sdk::{
+    available_backends, platform_support, run, run_attached, ErrorCode, SandboxOutputMetadata,
+    SandboxRequest, WaitOutcome,
+};
 
 mod error_detail;
 mod io_coordinator;
@@ -219,13 +223,14 @@ pub(crate) fn status_from_error_code(code: ErrorCode) -> i32 {
 // Result struct
 // ---------------------------------------------------------------------------
 
-/// The result of an [`mxc_run_request`] call.
+/// The result of a run-to-completion request.
 ///
 /// On success (`status == 0`), `exit_code` / `timed_out` describe how the
-/// process finished and `stdout_utf8` / `stderr_utf8` carry its captured output
-/// (every field of `error` is null). On failure, `error` carries the message
-/// and, when an API call was in flight, which call failed and with what
-/// platform status; the output fields are null.
+/// process finished. [`mxc_run_request`] fills `stdout_utf8` / `stderr_utf8`
+/// with captured output, while [`mxc_run_request_attached`] leaves them null
+/// because output uses the caller's standard streams. On failure, `error`
+/// carries the message and, when an API call was in flight, which call failed
+/// and with what platform status.
 ///
 /// All non-null pointers — including those inside `error` — are owned by the
 /// caller and must be released with [`mxc_run_result_free`].
@@ -368,6 +373,37 @@ pub unsafe extern "C" fn mxc_run_request(
     status
 }
 
+/// Run a one-shot request with the workload attached to this process's stdio.
+///
+/// This entry point is intended for a helper process whose standard streams
+/// are already connected to a PTY. The selected backend inherits those
+/// handles, preserving terminal semantics without an MXC executor binary.
+///
+/// # Safety
+/// - `request_json_utf8` must be null or valid NUL-terminated UTF-8.
+/// - `out` must be null or point to writable [`MxcRunResult`]-sized storage.
+/// - On success the caller must release `*out` with [`mxc_run_result_free`].
+#[no_mangle]
+pub unsafe extern "C" fn mxc_run_request_attached(
+    request_json_utf8: *const c_char,
+    out: *mut MxcRunResult,
+) -> i32 {
+    if out.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+
+    let result =
+        catch_unwind(|| run_attached_request_inner(request_json_utf8)).unwrap_or_else(|panic| {
+            report_panic("mxc_run_request_attached", &*panic);
+            MxcRunResult::error(MXC_STATUS_PANIC, "the mxc engine panicked")
+        });
+
+    let status = result.status;
+    // SAFETY: `out` is non-null and caller-guaranteed writable.
+    unsafe { ptr::write(out, result) };
+    status
+}
+
 fn run_request_inner(request_json_utf8: *const c_char) -> MxcRunResult {
     // SAFETY: caller contract on `mxc_run_request`; borrowed only within scope.
     let request_json = match unsafe { cstr_to_str(request_json_utf8) } {
@@ -384,6 +420,48 @@ fn run_request_inner(request_json_utf8: *const c_char) -> MxcRunResult {
     execute_request(request)
 }
 
+fn run_attached_request_inner(request_json_utf8: *const c_char) -> MxcRunResult {
+    // SAFETY: caller contract on `mxc_run_request_attached`; borrowed only within scope.
+    let request_json = match unsafe { cstr_to_str(request_json_utf8) } {
+        Some(value) => value,
+        None if request_json_utf8.is_null() => {
+            return MxcRunResult::error(MXC_STATUS_NULL_ARGUMENT, "request JSON pointer is null")
+        }
+        None => return MxcRunResult::error(MXC_STATUS_INVALID_UTF8, "request JSON is not UTF-8"),
+    };
+    let request = match request::build_request_from_json(request_json) {
+        Ok(request) => request,
+        Err(error) => return MxcRunResult::from_sdk_error(&error),
+    };
+    execute_attached_request(request)
+}
+
+fn serialize_outputs(
+    output_metadata: Option<&SandboxOutputMetadata>,
+    warnings: &[String],
+) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>), MxcRunResult> {
+    let output_metadata_json = output_metadata
+        .map(serde_json::to_vec)
+        .transpose()
+        .map_err(|error| {
+            MxcRunResult::error(
+                MXC_STATUS_BACKEND_ERROR,
+                format!("failed to serialize sandbox output metadata: {error}"),
+            )
+        })?;
+    let warnings_json = if warnings.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_vec(warnings).map_err(|error| {
+            MxcRunResult::error(
+                MXC_STATUS_BACKEND_ERROR,
+                format!("failed to serialize sandbox warnings: {error}"),
+            )
+        })?)
+    };
+    Ok((output_metadata_json, warnings_json))
+}
+
 fn execute_request(request: SandboxRequest) -> MxcRunResult {
     match run(request) {
         Ok(output) => {
@@ -393,33 +471,11 @@ fn execute_request(request: SandboxRequest) -> MxcRunResult {
             };
             // Serialize both JSON payloads before allocating any C string, so a
             // failure on the second one can't leak the first.
-            let output_metadata_json = match output
-                .output_metadata
-                .as_ref()
-                .map(serde_json::to_vec)
-                .transpose()
-            {
-                Ok(json) => json,
-                Err(error) => {
-                    return MxcRunResult::error(
-                        MXC_STATUS_BACKEND_ERROR,
-                        format!("failed to serialize sandbox output metadata: {error}"),
-                    )
-                }
-            };
-            let warnings_json = if output.warnings.is_empty() {
-                None
-            } else {
-                match serde_json::to_vec(&output.warnings) {
-                    Ok(json) => Some(json),
-                    Err(error) => {
-                        return MxcRunResult::error(
-                            MXC_STATUS_BACKEND_ERROR,
-                            format!("failed to serialize sandbox warnings: {error}"),
-                        )
-                    }
-                }
-            };
+            let (output_metadata_json, warnings_json) =
+                match serialize_outputs(output.output_metadata.as_ref(), &output.warnings) {
+                    Ok(json) => json,
+                    Err(result) => return result,
+                };
             MxcRunResult {
                 status: MXC_STATUS_SUCCESS,
                 exit_code,
@@ -437,8 +493,33 @@ fn execute_request(request: SandboxRequest) -> MxcRunResult {
     }
 }
 
+fn execute_attached_request(request: SandboxRequest) -> MxcRunResult {
+    match run_attached(request) {
+        Ok(output) => {
+            let (output_metadata_json, warnings_json) =
+                match serialize_outputs(output.output_metadata.as_ref(), &output.warnings) {
+                    Ok(json) => json,
+                    Err(result) => return result,
+                };
+            MxcRunResult {
+                status: MXC_STATUS_SUCCESS,
+                exit_code: output.exit_code,
+                timed_out: i32::from(output.timed_out),
+                stdout_utf8: ptr::null_mut(),
+                stderr_utf8: ptr::null_mut(),
+                error: MxcErrorDetail::none(),
+                output_metadata_json_utf8: output_metadata_json
+                    .map_or(ptr::null_mut(), |json| alloc_cstring(&json)),
+                warnings_json_utf8: warnings_json
+                    .map_or(ptr::null_mut(), |json| alloc_cstring(&json)),
+            }
+        }
+        Err(e) => MxcRunResult::from_sdk_error(&e),
+    }
+}
+
 /// Free the owned out-strings of an [`MxcRunResult`] produced by
-/// [`mxc_run_request`].
+/// [`mxc_run_request`] or [`mxc_run_request_attached`].
 ///
 /// Safe to call once per result. The result struct itself is caller-owned
 /// (typically stack storage); this frees only the heap strings it points to and
@@ -446,7 +527,7 @@ fn execute_request(request: SandboxRequest) -> MxcRunResult {
 ///
 /// # Safety
 /// `r` must be null or point to an [`MxcRunResult`] previously filled by
-/// [`mxc_run_request`], not already freed.
+/// [`mxc_run_request`] or [`mxc_run_request_attached`], not already freed.
 #[no_mangle]
 pub unsafe extern "C" fn mxc_run_result_free(r: *mut MxcRunResult) {
     if r.is_null() {
@@ -877,6 +958,15 @@ mod tests {
         out
     }
 
+    fn run_attached_with(request_json: &str) -> MxcRunResult {
+        let request = CString::new(request_json).unwrap();
+        let mut out = MxcRunResult::empty();
+        // SAFETY: a valid CString and out pointer.
+        let status = unsafe { mxc_run_request_attached(request.as_ptr(), &mut out) };
+        assert_eq!(status, out.status);
+        out
+    }
+
     #[test]
     fn shared_request_builder_propagates_telemetry_enablement() {
         for (request_json, expected) in [
@@ -912,6 +1002,17 @@ mod tests {
         // SAFETY: `out` was filled by `mxc_run_request`.
         unsafe { mxc_run_result_free(&mut out) };
         assert!(out.error.message_utf8.is_null());
+    }
+
+    #[test]
+    fn attached_malformed_request_reports_without_running() {
+        let mut out = run_attached_with("{ not json");
+        assert_eq!(out.status, MXC_STATUS_MALFORMED_REQUEST);
+        assert!(!out.error.message_utf8.is_null());
+        assert!(out.stdout_utf8.is_null());
+        assert!(out.stderr_utf8.is_null());
+        // SAFETY: `out` was filled by `mxc_run_request_attached`.
+        unsafe { mxc_run_result_free(&mut out) };
     }
 
     #[test]
@@ -993,6 +1094,9 @@ mod tests {
             CString::new(r#"{"policy":{"version":"0.7.0-alpha"},"command":"echo hi"}"#).unwrap();
         // SAFETY: valid string, deliberately-null out pointer.
         let status = unsafe { mxc_run_request(request.as_ptr(), ptr::null_mut()) };
+        assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
+        // SAFETY: valid string, deliberately-null out pointer.
+        let status = unsafe { mxc_run_request_attached(request.as_ptr(), ptr::null_mut()) };
         assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
     }
 
