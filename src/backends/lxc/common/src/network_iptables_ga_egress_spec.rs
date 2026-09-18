@@ -1137,3 +1137,131 @@ fn an_unresolvable_directional_deny_is_tolerated_under_a_deny_egress_default() {
         "input=egress.default=deny with an unresolvable deny, legacy default_network_policy=allow; expected no refusal, since the closing DROP already covers what the deny could not program",
     );
 }
+
+fn lowering_error(policy: &ContainerPolicy) -> String {
+    let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+    NetworkIptablesManager::build_policy_rules_logged("MXC-test", policy, true, &mut logger)
+        .expect_err("expected the policy to be refused")
+}
+
+fn allow_peer_policy(peers: Vec<NetworkPeer>) -> ContainerPolicy {
+    directional_policy(
+        NetworkAction::Deny,
+        vec![rule(peers, Vec::new())],
+        Vec::new(),
+    )
+}
+
+#[test]
+fn an_ipv6_peer_whose_exclusion_splits_the_mapped_range_is_refused() {
+    let policy = allow_peer_policy(vec![peer("::/0", &["::ffff:10.0.0.0/104"])]);
+    let error = lowering_error(&policy);
+
+    assert!(
+        error.contains("IPv4-mapped"),
+        "input=allow.to=[{{cidr:::/0, except:[::ffff:10.0.0.0/104]}}]; subtracting inside the mapped range leaves blocks that are programmed as IPv4, so the IPv6 peer would open IPv4 it never named; got: {error}"
+    );
+}
+
+#[test]
+fn an_ipv6_peer_whose_exclusion_neighbours_the_mapped_range_is_refused() {
+    // The exclusion is outside the mapped range, but removing it still splits
+    // `::/0` down to a `::ffff:0:0/96` sibling, which renders as `0.0.0.0/0`.
+    let policy = allow_peer_policy(vec![peer("::/0", &["::fffe:0:0/96"])]);
+    let error = lowering_error(&policy);
+
+    assert!(
+        error.contains("IPv4-mapped"),
+        "input=allow.to=[{{cidr:::/0, except:[::fffe:0:0/96]}}]; an exclusion beside the mapped range still yields the whole mapped block, which is programmed as 0.0.0.0/0; got: {error}"
+    );
+}
+
+#[test]
+fn an_ipv6_peer_far_from_the_mapped_range_still_subtracts() {
+    let policy = allow_peer_policy(vec![peer("2001:db8::/32", &["2001:db8:1::/48"])]);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+
+    assert!(
+        rules.ipv4.is_empty(),
+        "input=allow.to=[{{cidr:2001:db8::/32, except:[2001:db8:1::/48]}}]; no block is inside the mapped range, so nothing may reach the IPv4 chain; output={:?}",
+        rules.ipv4
+    );
+    assert_eq!(
+        chain_verdict(
+            &rules.ipv6,
+            NetworkAction::Deny,
+            packet_address("2001:db8:2::1"),
+            "tcp",
+            Some(443)
+        ),
+        "ACCEPT",
+        "input=as above, packet=2001:db8:2::1; the guard must not refuse an ordinary IPv6 subtraction; output={:?}",
+        rules.ipv6
+    );
+}
+
+#[test]
+fn an_ipv6_catch_all_without_an_exclusion_is_untouched_by_the_guard() {
+    let policy = allow_peer_policy(vec![peer("::/0", &[])]);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+
+    assert!(
+        rules.ipv4.is_empty(),
+        "input=allow.to=[{{cidr:::/0}}]; a wildcard with no exclusion emits one IPv6 block and must not reach the IPv4 chain; output={:?}",
+        rules.ipv4
+    );
+    assert_eq!(
+        chain_verdict(
+            &rules.ipv6,
+            NetworkAction::Deny,
+            packet_address("2001:db8::1"),
+            "tcp",
+            Some(443)
+        ),
+        "ACCEPT",
+        "input=as above; the guard must not refuse a bare IPv6 wildcard; output={:?}",
+        rules.ipv6
+    );
+}
+
+#[test]
+fn an_exclusion_with_a_prefix_past_its_family_is_refused() {
+    let policy = allow_peer_policy(vec![NetworkPeer {
+        cidr: NetworkCidr {
+            address: packet_address("10.0.0.0"),
+            prefix_length: 8,
+        },
+        except: vec![NetworkCidr {
+            address: packet_address("10.10.0.0"),
+            prefix_length: 40,
+        }],
+    }]);
+    let error = lowering_error(&policy);
+
+    assert!(
+        error.contains("wider than its address family"),
+        "input=allow.to=[{{cidr:10.0.0.0/8, except:[10.10.0.0/40]}}]; discarding the malformed exclusion would accept the whole /8 it was written to narrow; got: {error}"
+    );
+}
+
+#[test]
+fn an_other_family_exclusion_is_validated_before_it_is_filtered_out() {
+    // The peer's family drops this entry, so an unvalidated prefix would never
+    // be seen at all.
+    let policy = allow_peer_policy(vec![NetworkPeer {
+        cidr: NetworkCidr {
+            address: packet_address("10.0.0.0"),
+            prefix_length: 8,
+        },
+        except: vec![NetworkCidr {
+            address: packet_address("2001:db8::"),
+            prefix_length: 200,
+        }],
+    }]);
+    let error = lowering_error(&policy);
+
+    assert!(
+        error.contains("wider than its address family"),
+        "input=allow.to=[{{cidr:10.0.0.0/8, except:[2001:db8::/200]}}]; got: {error}"
+    );
+}

@@ -109,6 +109,13 @@ struct DestinationBlock {
     prefix: u8,
 }
 
+/// `::ffff:0:0/96`, the range a destination is rewritten out of and programmed
+/// as IPv4 in.
+const IPV4_MAPPED_BLOCK: DestinationBlock = DestinationBlock {
+    base: 0xffff_0000_0000,
+    prefix: 96,
+};
+
 /// Ceiling on the blocks one peer may expand into.
 ///
 /// Subtracting an exclusion splits the surrounding block once per prefix level,
@@ -865,6 +872,14 @@ impl NetworkIptablesManager {
         }
     }
 
+    /// Lower the egress policy for its refusals alone, discarding the rules.
+    pub(crate) fn validate_egress_lowering(
+        policy: &ContainerPolicy,
+        uses_directional_keys: bool,
+    ) -> Result<(), String> {
+        Self::lower_egress(policy, uses_directional_keys).map(|_| ())
+    }
+
     fn lower_egress(
         policy: &ContainerPolicy,
         uses_directional_keys: bool,
@@ -966,6 +981,25 @@ impl NetworkIptablesManager {
             return Ok(vec![Self::cidr_destination(&peer.cidr)]);
         };
 
+        // Checked against each entry's own family, before the peer's family
+        // selects which ones apply: dropping a malformed exclusion would widen
+        // the rule it was written to narrow.
+        for excluded in &peer.except {
+            let excluded_width = Self::family_width(match excluded.address {
+                IpAddr::V4(_) => IpFamily::V4,
+                IpAddr::V6(_) => IpFamily::V6,
+            });
+            if excluded.prefix_length > excluded_width {
+                return Err(format!(
+                    "network.egress peer '{}' carries the 'except' entry '{}/{}', whose prefix \
+                     is wider than its address family (max /{excluded_width}).",
+                    Self::cidr_destination(&peer.cidr),
+                    excluded.address,
+                    excluded.prefix_length
+                ));
+            }
+        }
+
         // Blocks carry no family, so an exclusion from the other one would be
         // compared against the peer as a meaningless integer.
         let exclusions: Vec<DestinationBlock> = peer
@@ -978,6 +1012,27 @@ impl NetworkIptablesManager {
         let mut blocks = Vec::new();
         let mut remaining = MAX_BLOCKS_PER_PEER;
         Self::subtract_blocks(block, &exclusions, width, &mut blocks, &mut remaining)?;
+
+        // A destination inside `::ffff:0:0/96` is programmed as IPv4. A peer
+        // inside that range resolves to IPv4 as a whole, which is the caller's
+        // own writing; a peer outside it must not have subtraction hand back a
+        // piece that crosses over and opens IPv4 the peer never named.
+        if family == IpFamily::V6 && !Self::block_contains(IPV4_MAPPED_BLOCK, block, width) {
+            if let Some(crossing) = blocks
+                .iter()
+                .find(|candidate| Self::block_contains(IPV4_MAPPED_BLOCK, **candidate, width))
+            {
+                return Err(format!(
+                    "network.egress peer '{}' cannot carry an 'except' that splits the \
+                     IPv4-mapped range: removing it leaves '{}', which is programmed as IPv4 \
+                     and would open addresses this IPv6 peer never named. State the IPv4 \
+                     range as its own peer instead.",
+                    Self::cidr_destination(&peer.cidr),
+                    Self::block_destination(*crossing, family)
+                ));
+            }
+        }
+
         Ok(blocks
             .into_iter()
             .map(|block| Self::block_destination(block, family))
