@@ -778,6 +778,10 @@ impl SandboxProcess for DaclGuardedProcess {
         self.inner.take_stdin()
     }
 
+    fn stdin_closer(&self) -> Option<Box<dyn wxc_common::sandbox_process::StreamCloser>> {
+        self.inner.stdin_closer()
+    }
+
     fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
         self.inner.take_stdout()
     }
@@ -796,6 +800,10 @@ impl SandboxProcess for DaclGuardedProcess {
 
     fn kill(&mut self) -> std::io::Result<()> {
         self.inner.kill()
+    }
+
+    fn kill_for_timeout(&mut self) -> std::io::Result<()> {
+        self.inner.kill_for_timeout()
     }
 
     fn wait(&mut self) -> std::io::Result<i32> {
@@ -1389,6 +1397,9 @@ mod tests {
             }
             fn kill(&mut self) -> std::io::Result<()> {
                 self.killed = true;
+                Err(std::io::Error::other("ordinary kill"))
+            }
+            fn kill_for_timeout(&mut self) -> std::io::Result<()> {
                 Ok(())
             }
             fn wait(&mut self) -> std::io::Result<i32> {
@@ -1415,7 +1426,11 @@ mod tests {
         );
         assert!(matches!(guarded.wait(), Ok(7)), "wait() must delegate");
         assert!(guarded.take_stdin().is_none(), "take_stdin() must delegate");
-        assert!(guarded.kill().is_ok(), "kill() must delegate");
+        assert!(guarded.kill().is_err(), "kill() must delegate");
+        assert!(
+            guarded.kill_for_timeout().is_ok(),
+            "kill_for_timeout() must delegate"
+        );
         assert!(
             guarded.output_metadata().is_some(),
             "output_metadata() must delegate"

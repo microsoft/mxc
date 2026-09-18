@@ -89,6 +89,13 @@ pub trait SandboxProcess: Send {
     /// Returns `None` if already taken. Drop the writer to send EOF.
     fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>>;
 
+    /// A closer that interrupts the stdin stream returned by
+    /// [`take_stdin`](SandboxProcess::take_stdin), including an in-flight
+    /// blocking write. The default returns `None`.
+    fn stdin_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        None
+    }
+
     /// Take ownership of the child's stdout for live reading. Returns `None`
     /// if already taken. A taken stream is **not** drained by
     /// [`wait`](SandboxProcess::wait).
@@ -119,6 +126,15 @@ pub trait SandboxProcess: Send {
     /// object the child is assigned to. Reaping happens in
     /// [`wait`](SandboxProcess::wait).
     fn kill(&mut self) -> std::io::Result<()>;
+
+    /// Request termination because the execution deadline elapsed.
+    ///
+    /// The default uses the same process-tree termination primitive as
+    /// [`kill`](SandboxProcess::kill). Wrappers may override this to preserve
+    /// timeout-specific reporting while delegating the actual termination.
+    fn kill_for_timeout(&mut self) -> std::io::Result<()> {
+        self.kill()
+    }
 
     /// Block until the child exits (honouring the request's `scriptTimeout`,
     /// where `0` means wait forever) and return its exit code.

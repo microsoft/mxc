@@ -102,22 +102,25 @@ flowchart LR
     typescript["TypeScript SDK"]
     cli["CLI"]
     csharp["C# SDK"]
-    rust["Rust SDK"]
+    rust["Rust SDK (mxc-sdk crate)"]
     executor["Platform executor"]
     ffi["mxc_ffi"]
-    sdk["mxc-sdk"]
     engine["mxc_engine"]
 
     typescript --> executor
+    typescript -. "internal native streaming" .-> ffi
     cli --> executor
-    csharp --> ffi --> sdk
-    rust --> sdk
+    csharp --> ffi
+    ffi -->|"existing SDK APIs"| rust
+    ffi -->|"callback streaming"| engine
     executor --> engine
-    sdk --> engine
+    rust --> engine
 ```
 
-`mxc_ffi` is the C ABI used by the C# SDK. Its generated C# P/Invoke file is
-created during the C# build. Generated TypeScript wire types come from the
+`mxc_ffi` is the C ABI used by the C# SDK and by internal event-loop binding
+paths. The callback streaming entry points call `mxc_engine` directly and are
+not included in the generated C# P/Invoke surface. The generated C# P/Invoke
+file is created during the C# build. Generated TypeScript wire types come from the
 schema tooling.
 
 ## Tests

@@ -20,6 +20,9 @@
 //!   port of the SDK's `createConfigFromPolicy`), for the host's native
 //!   containment or an explicitly selected [`Containment`] backend.
 //! - [`spawn`] — spawn a streaming [`SandboxProcess`] handle for a request.
+//! - [`spawn_io`] / [`coordinate_io`] — wrap one-shot or already-spawned
+//!   streaming execution in bounded native I/O coordination for event-loop
+//!   language bindings.
 //! - [`run`] / [`resolve_runner`] (Windows) — run-to-completion backend
 //!   selection and execution.
 //! - [`run_state_aware`] — state-aware lifecycle backend resolution + dispatch.
@@ -34,6 +37,7 @@ mod dispatch;
 mod error;
 #[cfg(target_os = "windows")]
 mod guarded_capture;
+mod io_coordinator;
 mod platform;
 pub mod policy;
 mod probe;
@@ -44,6 +48,9 @@ mod state_aware;
 mod verbose_telemetry;
 
 pub use error::{Error, ErrorCode};
+pub use io_coordinator::{
+    coordinate_io, spawn_io, IoCoordinator, IoCoordinatorError, IoProcessStatus, IoReadState,
+};
 #[cfg(all(target_os = "windows", feature = "isolation_session"))]
 pub use platform::isolation_session_available;
 pub use platform::{platform_support, BubblewrapNetworkSupport, PlatformSupport, ProxyEnforcement};
@@ -518,6 +525,10 @@ impl SandboxProcess for TelemetryProcess {
         self.inner.take_stdin()
     }
 
+    fn stdin_closer(&self) -> Option<Box<dyn wxc_common::sandbox_process::StreamCloser>> {
+        self.inner.stdin_closer()
+    }
+
     fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
         self.inner.take_stdout()
     }
@@ -559,6 +570,17 @@ impl SandboxProcess for TelemetryProcess {
         let result = self.inner.kill();
         if result.is_ok() {
             self.emit_cancellation();
+        }
+        result
+    }
+
+    fn kill_for_timeout(&mut self) -> std::io::Result<()> {
+        let result = self.inner.kill_for_timeout();
+        if result.is_ok() {
+            self.emit(&Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "sandbox execution timed out",
+            )));
         }
         result
     }
@@ -624,6 +646,10 @@ impl SandboxProcess for ProcessWithWarnings {
         self.inner.take_stdin()
     }
 
+    fn stdin_closer(&self) -> Option<Box<dyn wxc_common::sandbox_process::StreamCloser>> {
+        self.inner.stdin_closer()
+    }
+
     fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
         self.inner.take_stdout()
     }
@@ -642,6 +668,10 @@ impl SandboxProcess for ProcessWithWarnings {
 
     fn kill(&mut self) -> std::io::Result<()> {
         self.inner.kill()
+    }
+
+    fn kill_for_timeout(&mut self) -> std::io::Result<()> {
+        self.inner.kill_for_timeout()
     }
 
     fn wait(&mut self) -> std::io::Result<i32> {
@@ -777,6 +807,12 @@ mod telemetry_process_tests {
         assert!(!killed.active);
         assert_eq!(killed.wait().unwrap(), 0);
         assert!(!killed.active);
+
+        let mut timed_out_by_coordinator = wrapped(TryWaitResult::Running);
+        timed_out_by_coordinator.kill_for_timeout().unwrap();
+        assert!(!timed_out_by_coordinator.active);
+        assert_eq!(timed_out_by_coordinator.wait().unwrap(), 0);
+        assert!(!timed_out_by_coordinator.active);
 
         let mut exited = wrapped(TryWaitResult::Exited(7));
         assert_eq!(exited.try_wait().unwrap(), Some(7));

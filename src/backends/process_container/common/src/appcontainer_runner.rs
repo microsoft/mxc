@@ -1865,6 +1865,7 @@ struct AppContainerSandboxProcess {
     filesystem_mode: FilesystemMode,
     preserve_policy: bool,
     timeout_ms: u32,
+    coordinator_timed_out: bool,
     teardown_result: Option<Result<(), String>>,
     /// Live guarded WPR capture session, moved from the `SpawnedChild`.
     /// Stopped and analyzed in `run_teardown` once the child has exited and
@@ -1933,6 +1934,7 @@ impl AppContainerSandboxProcess {
             filesystem_mode,
             preserve_policy: request.lifecycle.preserve_policy,
             timeout_ms: child.timeout_ms,
+            coordinator_timed_out: false,
             teardown_result: None,
             capture_session: child.capture_session.take(),
             capture_output_path: child.capture_output_path.take(),
@@ -1973,6 +1975,24 @@ impl AppContainerSandboxProcess {
                 .i64("error_code", error.code().0 as i64);
             self.audit_logger.log_audit_event(&record);
         }
+    }
+
+    fn timeout_result(&mut self) -> std::io::Result<i32> {
+        wxc_common::telemetry::log_process_event(
+            &self.identity,
+            self.pid,
+            wxc_common::telemetry::ProcessEvent::TimedOut(self.timeout_ms as u64),
+        );
+        if self.audit_enabled() {
+            let record = self
+                .audit(AuditEventName::ProcessTimedOut)
+                .u64("timeout_ms", self.timeout_ms as u64);
+            self.audit_logger.log_audit_event(&record);
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("script timed out after {}ms", self.timeout_ms),
+        ))
     }
 
     fn run_teardown(&mut self, allow_trace_transfer: bool) -> std::io::Result<()> {
@@ -2147,6 +2167,11 @@ impl SandboxProcess for AppContainerSandboxProcess {
         }
     }
 
+    fn kill_for_timeout(&mut self) -> std::io::Result<()> {
+        self.coordinator_timed_out = true;
+        self.kill()
+    }
+
     fn wait(&mut self) -> std::io::Result<i32> {
         // Close our copy of any not-taken stdin so the child sees EOF and can
         // exit reliably (an interactive command would otherwise block waiting
@@ -2163,6 +2188,8 @@ impl SandboxProcess for AppContainerSandboxProcess {
                 let mut code: u32 = 0;
                 if unsafe { GetExitCodeProcess(self.process.get(), &mut code) }.is_err() {
                     Err(std::io::Error::other("GetExitCodeProcess failed"))
+                } else if self.coordinator_timed_out {
+                    self.timeout_result()
                 } else {
                     let exit_code = code as i32;
                     wxc_common::telemetry::log_process_event(
@@ -2179,23 +2206,7 @@ impl SandboxProcess for AppContainerSandboxProcess {
                     Ok(exit_code)
                 }
             }
-            WAIT_TIMEOUT => {
-                wxc_common::telemetry::log_process_event(
-                    &self.identity,
-                    self.pid,
-                    wxc_common::telemetry::ProcessEvent::TimedOut(self.timeout_ms as u64),
-                );
-                if self.audit_enabled() {
-                    let record = self
-                        .audit(AuditEventName::ProcessTimedOut)
-                        .u64("timeout_ms", self.timeout_ms as u64);
-                    self.audit_logger.log_audit_event(&record);
-                }
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!("script timed out after {}ms", self.timeout_ms),
-                ))
-            }
+            WAIT_TIMEOUT => self.timeout_result(),
             _ => Err(std::io::Error::other("WaitForSingleObject failed")),
         };
 
