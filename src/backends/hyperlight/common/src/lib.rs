@@ -309,7 +309,10 @@ impl HyperlightScriptRunner {
         if !request.working_directory.is_empty() {
             return Err(PyhlError::Preflight(ERR_WORKDIR.to_string()));
         }
-        if !request.policy.allowed_hosts.is_empty() && !request.policy.blocked_hosts.is_empty() {
+        if request.policy.default_network_policy == NetworkPolicy::Block
+            && !request.policy.allowed_hosts.is_empty()
+            && !request.policy.blocked_hosts.is_empty()
+        {
             return Err(PyhlError::Preflight(
                 "allowedHosts and blockedHosts are mutually exclusive".to_string(),
             ));
@@ -339,12 +342,7 @@ impl HyperlightScriptRunner {
         Ok(())
     }
 
-    /// Translate MXC's network policy fields into a pyhl `NetworkPolicy`.
-    ///
-    /// - `allowed_hosts` non-empty → `AllowList` (only listed hosts reachable)
-    /// - `blocked_hosts` non-empty → `BlockList` (listed hosts denied, rest allowed)
-    /// - `default_network_policy == Block`, no host lists → `None` (networking disabled)
-    /// - `default_network_policy == Allow`, no host lists → `AllowAll`
+    /// Translate validated legacy network policy fields into a pyhl `NetworkPolicy`.
     fn network_policy_from_request(
         request: &ExecutionRequest,
     ) -> Result<Option<hyperlight_unikraft::NetworkPolicy>, PyhlError> {
@@ -362,10 +360,11 @@ impl HyperlightScriptRunner {
                 block_list,
             )));
         }
-        if request.policy.default_network_policy == NetworkPolicy::Block {
-            return Ok(None);
+        if request.policy.default_network_policy == NetworkPolicy::Allow {
+            Ok(Some(hyperlight_unikraft::NetworkPolicy::AllowAll))
+        } else {
+            Ok(None)
         }
-        Ok(Some(hyperlight_unikraft::NetworkPolicy::AllowAll))
     }
 
     /// Translate `ContainerPolicy.{readwrite,readonly}Paths` into
@@ -858,6 +857,7 @@ mod tests {
     fn network_policy_blocklist_from_blocked_hosts() {
         let request = ExecutionRequest {
             policy: ContainerPolicy {
+                default_network_policy: NetworkPolicy::Allow,
                 blocked_hosts: vec!["127.0.0.1".to_string()],
                 ..Default::default()
             },
@@ -868,6 +868,41 @@ mod tests {
             policy,
             Some(hyperlight_unikraft::NetworkPolicy::BlockList(_))
         ));
+    }
+
+    #[test]
+    fn policy_rejects_blocklist_without_allowlist_under_block_default() {
+        let request = ExecutionRequest {
+            policy: ContainerPolicy {
+                blocked_hosts: vec!["127.0.0.1".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let error = runner().validate_runner(&request).unwrap_err();
+        assert_eq!(
+            error.error_message,
+            "blockedHosts requires allowedHosts when network.defaultPolicy='block'"
+        );
+    }
+
+    #[test]
+    fn policy_rejects_allowlist_under_allow_default() {
+        let request = ExecutionRequest {
+            policy: ContainerPolicy {
+                default_network_policy: NetworkPolicy::Allow,
+                allowed_hosts: vec!["127.0.0.1".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let error = runner().validate_runner(&request).unwrap_err();
+        assert_eq!(
+            error.error_message,
+            "allowedHosts requires network.defaultPolicy='block'"
+        );
     }
 
     #[test]

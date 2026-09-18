@@ -684,7 +684,7 @@ request fails if its private namespace cannot be configured.
     "commandLine": "curl -fsSL https://api.github.com/zen && echo OK"
   },
   "network": {
-    "defaultPolicy": "allow",
+    "defaultPolicy": "block",
     "proxy": { "builtinTestServer": true },
     "allowedHosts": ["api.github.com"]
   }

@@ -506,11 +506,18 @@ export function createConfigFromPolicy(
                 );
             }
         }
-        // Unix backends accept host lists without allowOutbound. Bubblewrap and
-        // LXC enforce them; WSLC does not (per-host filtering is non-functional —
-        // no in-kernel iptables + no CAP_NET_ADMIN — and is rejected at parse
-        // time); Seatbelt accepts them for SDK compatibility and leaves its
-        // limitations to native validation.
+        if (
+            policy.network.blockedHosts?.length &&
+            !policy.network.allowedHosts?.length &&
+            !policy.network.allowOutbound
+        ) {
+            throw new Error(
+                "blockedHosts requires allowedHosts when network.defaultPolicy='block'",
+            );
+        }
+        // Unix backends accept allowlists without allowOutbound. Bubblewrap and
+        // LXC enforce them under a block default; WSLC and Seatbelt leave their
+        // backend-specific limitations to native validation.
         const acceptsHostRulesWithoutOutbound =
             containment === 'wslc' ||
             containment === 'seatbelt' ||
@@ -525,7 +532,10 @@ export function createConfigFromPolicy(
         }
 
         config.network = {
-            defaultPolicy: policy.network.allowOutbound ? 'allow' : 'block',
+            defaultPolicy:
+                policy.network.allowOutbound && !policy.network.allowedHosts?.length
+                    ? 'allow'
+                    : 'block',
             allowLocalNetwork: policy.network.allowLocalNetwork,
             allowedHosts: policy.network.allowedHosts,
             blockedHosts: policy.network.blockedHosts,

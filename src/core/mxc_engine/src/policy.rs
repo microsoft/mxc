@@ -939,15 +939,10 @@ fn build_wire_config_with_network_format(
         });
     }
 
-    // Mirror the SDK's host-rule validation: Unix backends accept host lists
-    // without `allowOutbound`; only Windows ProcessContainer requires it. WSLC
-    // skips this gate so the config parser can reject its (unenforceable)
-    // per-host filtering with a precise message instead of the generic
-    // require-`allowOutbound` error here.
-    // NB: Seatbelt can't actually enforce hostnames (`profile_builder` degrades a
-    // non-empty `allowedHosts` to allow-all outbound), but we accept it on macOS
-    // anyway to stay consistent with the SDK rather than diverging — keeping the
-    // two ports reconciled matters more than being stricter here.
+    // Unix builders do not impose the Windows-only `allowOutbound` requirement.
+    // Shared list/default validity and backend representability are enforced when
+    // the resolved backend validates the completed request. WSLC also skips this
+    // gate so its backend can report the precise unsupported-filtering error.
     let accepts_host_rules_without_outbound = match containment {
         Containment::Process => cfg!(any(target_os = "linux", target_os = "macos")),
         Containment::ProcessContainer(_) => false,
@@ -1027,7 +1022,7 @@ fn build_wire_config_with_network_format(
         NetworkFormat::Legacy => {
             if let Some(net) = &policy.network {
                 let mut network = json!({
-                    "defaultPolicy": if net.allow_outbound { "allow" } else { "block" },
+                    "defaultPolicy": if network::legacy_default_allows(net) { "allow" } else { "block" },
                     "allowLocalNetwork": net.allow_local_network,
                     "allowedHosts": net.allowed_hosts,
                     "blockedHosts": net.blocked_hosts,
@@ -1677,13 +1672,11 @@ mod tests {
         );
     }
 
-    // Accept `allowedHosts` with or without `allowOutbound`, even though
-    // Seatbelt cannot enforce the host list.
+    // Construction preserves host-list inputs for macOS. Shared list/default
+    // validity and Seatbelt representability are checked during backend validation.
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_allowed_hosts_without_outbound_is_accepted() {
-        // The SDK accepts allowedHosts without allowOutbound on Seatbelt, so the
-        // Rust port must too (the guard only applies to Windows ProcessContainer).
+    fn macos_allowed_hosts_without_outbound_can_be_built() {
         let policy = policy_with_network(NetworkSection {
             allow_outbound: false,
             allowed_hosts: vec!["192.0.2.10".to_string()],
@@ -1691,15 +1684,13 @@ mod tests {
         });
         assert!(
             build_request(&policy, TEST_COMMAND, None).is_ok(),
-            "macOS must accept allowedHosts without allowOutbound, matching the SDK"
+            "macOS request construction must defer backend representability to validation"
         );
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_allowed_hosts_with_outbound_is_accepted() {
-        // allowOutbound=true is the caller explicitly allowing outbound, so it
-        // builds (allowedHosts simply isn't enforceable on Seatbelt).
+    fn macos_allowed_hosts_with_outbound_can_be_built() {
         let policy = policy_with_network(NetworkSection {
             allow_outbound: true,
             allowed_hosts: vec!["192.0.2.10".to_string()],
@@ -1707,7 +1698,7 @@ mod tests {
         });
         assert!(
             build_request(&policy, TEST_COMMAND, None).is_ok(),
-            "outbound-allowed host filter should build"
+            "macOS request construction must preserve allowlists for backend validation"
         );
     }
 
@@ -1967,7 +1958,31 @@ mod tests {
             .policy
             .blocked_hosts
             .contains(&"198.51.100.10".to_string()));
+        assert_eq!(
+            request.inner.policy.default_network_policy,
+            wxc_common::models::NetworkPolicy::Block
+        );
         assert!(request.inner.policy.allow_local_network);
+    }
+
+    #[test]
+    fn build_request_maps_blocklist_only_to_allow_default() {
+        let policy = policy_with_network(NetworkSection {
+            allow_outbound: true,
+            blocked_hosts: vec!["198.51.100.10".to_string()],
+            ..Default::default()
+        });
+        let request = build_request(&policy, TEST_COMMAND, None)
+            .expect("build_request should preserve blocklist-only outbound policy");
+
+        assert_eq!(
+            request.inner.policy.default_network_policy,
+            wxc_common::models::NetworkPolicy::Allow
+        );
+        assert_eq!(
+            request.inner.policy.blocked_hosts,
+            vec!["198.51.100.10".to_string()]
+        );
     }
 
     #[test]
