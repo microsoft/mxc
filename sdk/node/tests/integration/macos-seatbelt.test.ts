@@ -16,6 +16,7 @@ import {
 } from './test-helpers.js';
 
 const seatbeltSpawnOptions = { ...debugSpawnOptions, experimental: true };
+const inProcessSeatbeltOptions = { experimental: true };
 
 // Seatbelt first appears in the exact 0.7 contract.
 const schemaVersion = '0.7.0-alpha';
@@ -61,7 +62,7 @@ describe('macOS Seatbelt Container', {
     const result = await sdk.spawnSandboxAsync(
       "echo 'Hello from seatbelt'",
       { version: schemaVersion },
-      seatbeltSpawnOptions,
+      { experimental: true },
       undefined,
       'seatbelt-hello',
     );
@@ -73,7 +74,7 @@ describe('macOS Seatbelt Container', {
     const result = await sdk.spawnSandboxAsync(
       'exit 42',
       { version: schemaVersion },
-      seatbeltSpawnOptions,
+      inProcessSeatbeltOptions,
       undefined,
       'seatbelt-exit-code',
     );
@@ -96,11 +97,11 @@ describe('macOS Seatbelt Container', {
     const result = await sdk.spawnSandboxAsync(
       script,
       { version: schemaVersion },
-      seatbeltSpawnOptions,
+      inProcessSeatbeltOptions,
       undefined,
       'seatbelt-child-signal',
     );
-    // `spawnSandboxAsync` merges PTY output into `stdout`; `stderr` is always ''.
+    // The in-process path returns stdout and stderr separately.
     assert.strictEqual(result.exitCode, 0, `Expected exit 0: ${result.stdout}`);
   });
 
@@ -109,7 +110,7 @@ describe('macOS Seatbelt Container', {
     const result = await sdk.spawnSandboxAsync(
       'ls /Users 2>&1 || true',
       { version: schemaVersion },
-      seatbeltSpawnOptions,
+      inProcessSeatbeltOptions,
       undefined,
       'seatbelt-filesystem-deny',
     );
@@ -129,7 +130,7 @@ describe('macOS Seatbelt Container', {
     const result = await sdk.spawnSandboxAsync(
       "curl --max-time 5 --fail --silent --show-error https://example.com 2>&1; echo CURL_EXIT=$?",
       policy,
-      seatbeltSpawnOptions,
+      inProcessSeatbeltOptions,
       undefined,
       'seatbelt-network-deny',
     );
@@ -148,7 +149,7 @@ describe('macOS Seatbelt Container', {
     const result = await sdk.spawnSandboxAsync(
       `RESULT=$(curl --max-time 10 --fail --silent '${NETWORK_TEST_URL}') && echo 'NETWORK_OK'`,
       policy,
-      seatbeltSpawnOptions,
+      inProcessSeatbeltOptions,
       undefined,
       'seatbelt-network-allow',
     );
@@ -164,7 +165,7 @@ describe('macOS Seatbelt Container', {
     const result = await sdk.spawnSandboxAsync(
       "echo test_clip | pbcopy 2>&1 && pbpaste 2>&1",
       policy,
-      seatbeltSpawnOptions,
+      inProcessSeatbeltOptions,
       undefined,
       'seatbelt-clipboard-deny',
     );
@@ -181,7 +182,7 @@ describe('macOS Seatbelt Container', {
     const result = await sdk.spawnSandboxAsync(
       `echo '${uniqueToken}' | pbcopy && pbpaste`,
       policy,
-      seatbeltSpawnOptions,
+      inProcessSeatbeltOptions,
       undefined,
       'seatbelt-clipboard-allow',
     );
@@ -205,7 +206,7 @@ describe('macOS Seatbelt Container', {
         sdk.spawnSandboxAsync(
           'echo should-not-run',
           policy,
-          seatbeltSpawnOptions,
+          inProcessSeatbeltOptions,
           undefined,
           'seatbelt-blocked-hosts',
         ),
@@ -226,7 +227,7 @@ describe('macOS Seatbelt Container', {
     const result = await sdk.spawnSandboxAsync(
       "echo 'step 1' && uname -s && echo 'step 2' && whoami && echo 'Pipeline complete'",
       { version: schemaVersion },
-      seatbeltSpawnOptions,
+      inProcessSeatbeltOptions,
       undefined,
       'seatbelt-pipeline',
     );
@@ -248,7 +249,7 @@ describe('macOS Seatbelt Container', {
         sdk.spawnSandboxAsync(
           'sleep 30',
           policy,
-          seatbeltSpawnOptions,
+          inProcessSeatbeltOptions,
           undefined,
           'seatbelt-timeout',
         ),

@@ -376,11 +376,10 @@ Stage 3: probe host capability → select backend tier
         │  (ProcessContainer: BaseContainer if usable, else AppContainer)
         │
         ▼
-For the BaseContainer tier: translate policy → flat buffer
-        │        (fixed SANDBOX_SPEC_VERSION)
+For the BaseContainer tier: translate policy → PSEC flat buffer
         │
         ▼
-Launch (Experimental_CreateProcessInSandbox(flatbuffer))
+Create process security environment, then launch with CreateProcessW
         │
         ▼
 Process runs in sandbox
@@ -491,22 +490,19 @@ Stage 3 — Host-capability negotiate (runtime probe, no version input)
   tier: …"). This capability fallback is the ONLY fallback.
 ```
 
-For the BaseContainer tier, Stage 3 translates the policy into a FlatBuffer and
-invokes the OS sandbox API. Today MXC builds the FlatBuffer at a fixed spec
-version (`SANDBOX_SPEC_VERSION`, `base_container_runner.rs`) and calls
-`Experimental_CreateProcessInSandbox` directly:
+For the BaseContainer tier, Stage 3 translates the policy into a PSEC
+FlatBuffer, creates a process security environment, and supplies it to
+`CreateProcessW`:
 
 ```
-translate policy → FlatBuffer (fixed SANDBOX_SPEC_VERSION)
-  → Experimental_CreateProcessInSandbox(flatbuffer) → success or typed error
+translate policy → PSEC FlatBuffer
+  → CreateProcessSecurityEnvironment(flatbuffer)
+  → CreateProcessW(PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT)
+  → success or typed error
 ```
 
-> **Forward-looking:** the design anticipates a spec-version *handshake* — the OS
-> advertising the spec versions it supports (`EnumerateSandboxSpecVersionInfo`)
-> and MXC selecting the best one for the policy's features before translating —
-> so that a single binary can target multiple OS sandbox revisions. That
-> enumerate/select step is **not implemented yet**; the current code uses the
-> fixed spec version above.
+PSEC compatibility is runtime-probed. MXC selects this tier only when the
+installed contract supports the complete requested policy.
 
 **Backend selection is capability-driven, not version-driven** (Stage 3 takes no
 version input), and **security policy never fuzzy-falls-back**: if the selected
@@ -516,22 +512,20 @@ with a typed, actionable error rather than silently weakening enforcement (see
 
 ## OS APIs
 
-The BaseContainer tier calls the OS sandbox API to launch the child:
+The BaseContainer tier creates a process security environment and attaches it
+to the child launch:
 
 ```c
-// Execute with the translated policy (current).
-HRESULT Experimental_CreateProcessInSandbox(
-    BYTE* flatbuffer,
-    UINT32 flatbufferSize,
-    PROCESS_INFORMATION* processInfo
+HRESULT CreateProcessSecurityEnvironment(
+    BYTE* specification,
+    UINT32 specificationSize,
+    HANDLE* securityEnvironment
 );
 
-// Forward-looking (not yet implemented): query the spec versions the OS
-// supports so a single binary can target multiple sandbox revisions.
-HRESULT EnumerateSandboxSpecVersionInfo(
-    UINT32 highestMajor,
-    SANDBOX_VERSION_INFO** versions,
-    UINT32* count
+BOOL CreateProcessW(
+    ...,
+    LPPROC_THREAD_ATTRIBUTE_LIST attributeList,
+    ...
 );
 ```
 
@@ -628,20 +622,15 @@ Document the removal in the schema bump that drops it.
 
 ## Open Questions
 
-1. **Experimental features on the OS side:** Does
-   `EnumerateSandboxSpecVersionInfo` distinguish between stable and experimental
-   OS capabilities? If the OS itself has experimental features, how does MXC
-   discover and target them?
-
-2. **Security of the experimental flag:** Should `--experimental` require
+1. **Security of the experimental flag:** Should `--experimental` require
    additional privilege or be restricted to debug builds? A malicious caller could
    pass `--experimental` to enable a feature that weakens the sandbox boundary.
 
-3. **Conflicting experimental features:** If two experimental features have
+2. **Conflicting experimental features:** If two experimental features have
    conflicting requirements (e.g., one denies a namespace, another relaxes it),
    how are conflicts resolved? First-wins, last-wins, or error?
 
-4. **Per-feature vs global experimental flag:** Should `--experimental` be a
+3. **Per-feature vs global experimental flag:** Should `--experimental` be a
    global toggle (all experimental features on/off), or per-feature
    (`--experimental compartments --experimental gpu-isolation`)? Per-feature
    gives more control but adds complexity to the executor and SDK interfaces.

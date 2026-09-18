@@ -90,7 +90,7 @@ pub struct TrackingEntry {
 /// Write a registry tracking entry for a newly-created sandbox.
 ///
 /// Creates the key tree and volatile `Active` subkey. Should be called
-/// immediately before launching `CreateProcessInSandbox` so the entry exists
+/// immediately before launching the sandboxed process so the entry exists
 /// even if the process creation itself crashes the host.
 ///
 /// Returns `Ok(())` on success. Errors are non-fatal (logged but not blocking).

@@ -43,12 +43,17 @@
 //!
 //! | Backend | Host | Selected by |
 //! |---------|------|-------------|
-//! | Bubblewrap | Linux | [`Containment::Process`] |
-//! | Seatbelt | macOS | [`Containment::Process`] |
+//! | Bubblewrap | Linux | [`Containment::Process`] or [`Containment::Bubblewrap`] |
+//! | Seatbelt | macOS | [`Containment::Process`] or [`Containment::Seatbelt`] |
 //! | ProcessContainer (AppContainer / BaseContainer) | Windows | [`Containment::Process`] |
 //! | Explicit ProcessContainer configuration | Windows | [`Containment::ProcessContainer`] |
 //! | WSLC (WSL Container) | Windows | [`Containment::Wslc`] |
 //! | IsolationSession | Windows | [`Containment::IsolationSession`] |
+//!
+//! [`Containment::Lxc`] models explicit LXC settings, but the in-process
+//! [`run`] and [`spawn_sandbox`] APIs return
+//! [`ErrorCode::UnsupportedContainment`] because LXC does not expose captured
+//! pipe-based execution. Use the standalone `lxc-exec` binary for LXC.
 //!
 //! WSLC and IsolationSession are **experimental**: build with the crate's
 //! `wslc` / `isolation_session` feature, and call
@@ -58,9 +63,8 @@
 //! IsolationSession is also reachable through the state-aware lifecycle below,
 //! which additionally serves an attached, pseudo-console exec.
 //!
-//! Backends with no [`Containment`] variant return an [`Error`] with
-//! [`ErrorCode::UnsupportedContainment`]; drive the standalone executor
-//! binaries for those.
+//! A concrete backend selected on another host returns an [`Error`] with
+//! [`ErrorCode::UnsupportedContainment`].
 //!
 //! # Diagnosing a failure
 //!

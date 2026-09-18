@@ -7,8 +7,7 @@
 //! runtime probes, produces a [`TierDecision`]. Tiers are described in
 //! `docs/proposals/downlevel_support/basecontainer-fallback-plan-v2.md`:
 //!
-//! 1. **Tier 1 — BaseContainer** (PSEC preferred whenever available, with
-//!    transitional `Experimental_CreateProcessInSandbox` fallback)
+//! 1. **Tier 1 — BaseContainer** (PSEC)
 //! 2. **Tier 2 — AppContainer + BFS** (`bfscfg.exe`-driven filesystem policy)
 //! 3. **Tier 3 — AppContainer + DACL** (host-side DACL ACE augmentation)
 //!
@@ -86,7 +85,7 @@ isolation_tiers! {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DegradationReason {
     /// BaseContainer was preferred and usable, but the OS does not advertise
-    /// `SANDBOX_CAP_FS_DENY`, so a `deniedPaths` policy cannot be enforced
+    /// PSEC's native deny-path capability, so a `deniedPaths` policy cannot be enforced
     /// natively at Tier 1.
     BaseContainerDenyUnsupported,
     /// BaseContainer was not selected — either it was not preferred, or the
@@ -339,7 +338,7 @@ pub(crate) fn detect_with_base_container_capabilities(
     // Tier 1 — BaseContainer
     if prefer_base_container && capabilities.usable {
         // Keep deny on Tier 1 only with native deny-path support from the
-        // selected PSEC or SBOX contract. T1 applies no host DACL, so
+        // selected PSEC contract. T1 applies no host DACL, so
         // otherwise fall through to a DACL-enforcing tier.
         if !denied || capabilities.supports_deny_paths {
             return Ok(TierDecision {
@@ -654,7 +653,7 @@ pub fn is_base_container_usable() -> bool {
 }
 
 /// Whether the OS advertises native deny-paths enforcement
-/// (`SANDBOX_CAP_FS_DENY`, i.e. it honors the SandboxSpec `fs_deny` field).
+/// (`PSE_SUPPORT_FS_DENY`).
 /// [`detect`] uses this to keep deny on Tier 1; otherwise it falls through to a
 /// DACL-enforcing tier. Probed once and cached for the process lifetime.
 pub fn base_container_supports_deny_paths() -> bool {
@@ -666,7 +665,7 @@ pub fn base_container_supports_deny_paths() -> bool {
 
     static SUPPORTED: OnceLock<bool> = OnceLock::new();
     *SUPPORTED.get_or_init(
-        crate::base_container_runner::BaseContainerRunner::base_container_supports_deny_paths,
+        crate::base_container_runner::BaseContainerRunner::supports_native_denied_paths,
     )
 }
 
@@ -977,7 +976,7 @@ mod tests {
     }
 
     /// Tier 1 keeps a denied-paths policy (native `fs_deny`, no host DACL) when
-    /// `SANDBOX_CAP_FS_DENY` is advertised.
+    /// PSEC deny-path support is advertised.
     #[test]
     fn denied_paths_stay_on_t1_when_capability_present() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -998,7 +997,7 @@ mod tests {
         assert!(!d.needs_dacl_augmentation);
     }
 
-    /// Without `SANDBOX_CAP_FS_DENY`, deny must not stay on Tier 1; it falls
+    /// Without PSEC deny-path support, deny must not stay on Tier 1; it falls
     /// through to a DACL-enforcing AppContainer tier.
     #[test]
     fn denied_paths_fall_through_when_capability_absent() {

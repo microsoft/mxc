@@ -90,6 +90,75 @@ let request = build_request_with_containment(
 # Ok::<(), mxc_sdk::Error>(())
 ```
 
+Configure macOS Seatbelt explicitly with
+`Containment::Seatbelt(Seatbelt::default())`. The typed configuration carries
+the profile override, GUI access, nested-pty access, Keychain
+access, and additional Mach service lookups:
+
+```rust,no_run
+use mxc_sdk::{
+    build_request_with_containment,
+    configs::Seatbelt,
+    policy::UiSection,
+    Containment, SandboxPolicy,
+};
+
+let policy = SandboxPolicy {
+    version: "0.8.0-alpha".to_string(),
+    filesystem: None,
+    network: None,
+    ui: Some(UiSection {
+        allow_windows: true,
+        ..Default::default()
+    }),
+    timeout_ms: None,
+};
+let mut seatbelt = Seatbelt::default();
+seatbelt.gui_access = true;
+seatbelt.keychain_access = true;
+seatbelt.extra_mach_lookups = vec!["com.example.service".to_string()];
+let request = build_request_with_containment(
+    &policy,
+    &Containment::Seatbelt(seatbelt),
+    "echo hello",
+    None,
+)?;
+# Ok::<(), mxc_sdk::Error>(())
+```
+
+Select Linux Bubblewrap explicitly with `Containment::Bubblewrap`. Select LXC
+with `Containment::Lxc(Lxc::default())`; its typed configuration carries the
+distribution and release:
+
+```rust,no_run
+use mxc_sdk::{
+    build_request_with_containment,
+    configs::Lxc,
+    Containment, SandboxPolicy,
+};
+
+let policy = SandboxPolicy {
+    version: "0.8.0-alpha".to_string(),
+    filesystem: None,
+    network: None,
+    ui: None,
+    timeout_ms: None,
+};
+let mut lxc = Lxc::default();
+lxc.distribution = "ubuntu".to_string();
+lxc.release = "24.04".to_string();
+let request = build_request_with_containment(
+    &policy,
+    &Containment::Lxc(lxc),
+    "echo hello",
+    None,
+)?;
+# Ok::<(), mxc_sdk::Error>(())
+```
+
+This models the LXC request for configuration parity. The in-process `run` and
+`spawn_sandbox` APIs reject it; execute LXC requests with `lxc-exec`.
+
 Filesystem-policy discovery helpers are also available to feed a policy:
 [`available_tools_policy`] (PATH + tool/SDK environment directories),
 [`user_profile_policy`], and [`temporary_files_policy`].
@@ -147,10 +216,10 @@ questions:
 - [`platform_support`] — the Rust port of `getPlatformSupport`. Reports whether
   MXC is supported on this host and the backends **this SDK can actually
   launch** (the subset in [Supported backends](#supported-backends)). Use it to
-  decide whether `run` / `spawn_sandbox` will work before building a request.
+  decide whether `run` will work before building a request.
 - [`available_backends`] — a broader **host-capability** probe. Reports every
   containment backend the *host* can run, including ones this SDK cannot drive
-  one-shot — LXC and Windows Sandbox — each with its effective isolation
+  one-shot — such as Windows Sandbox — each with its effective isolation
   **tier**.
 
 ```rust,no_run
@@ -431,8 +500,8 @@ default):
 
 | Host    | Backend(s)                                      | Selected by                      |
 |---------|-------------------------------------------------|----------------------------------|
-| Linux   | Bubblewrap                                      | `Containment::Process`           |
-| macOS   | Seatbelt                                        | `Containment::Process`           |
+| Linux   | Bubblewrap                                      | `Containment::Process` or `Containment::Bubblewrap` |
+| macOS   | Seatbelt                                        | `Containment::Process` or `Containment::Seatbelt` |
 | Windows | ProcessContainer (AppContainer + BaseContainer) | `Containment::Process`           |
 | Windows | Explicit ProcessContainer configuration         | `Containment::ProcessContainer`  |
 | Windows | WSLC (WSL Container)                            | `Containment::Wslc`              |
@@ -449,9 +518,13 @@ dropping the handle tears the session down synchronously rather than in the
 background. Reach its multi-call lifecycle through
 `run_state_aware_json` plus `exec_attached` or `exec_sandbox`.
 
-Backends with no variant at all — Windows Sandbox, MicroVM, Hyperlight, LXC —
+Backends with no variant at all — Windows Sandbox, MicroVM, and Hyperlight —
 cannot be named from this crate; use the executor binaries. Windows Sandbox is
 still reachable here through the state-aware lifecycle.
+
+`Containment::Lxc` models explicit LXC distribution settings, but `run` and
+`spawn_sandbox` reject it because the LXC backend does not expose captured
+pipe-based execution. Use the standalone `lxc-exec` binary for LXC.
 
 ### WSLC (experimental)
 

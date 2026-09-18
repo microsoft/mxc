@@ -2642,7 +2642,6 @@ mod tests {
         assert!(message.contains("CreateProcessW failed"));
         assert!(message.contains(r"working directory: C:\work"));
         assert!(!message.contains("BaseContainer"));
-        assert!(!message.contains("Experimental_CreateProcessInSandbox"));
     }
 
     #[test]

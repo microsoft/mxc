@@ -248,7 +248,13 @@ implicitly copies `process.env` into the child.
 
 ### 3. `spawnSandboxAsync(script, policy, ...)` — promise-style
 
-The `await`-friendly version of `spawnSandbox`. Same arguments, same restriction (process-isolation only), but resolves with `{ stdout, stderr, exitCode }` instead of returning an `IPty`. `stderr` is always `''` because the underlying PTY merges streams.
+The `await`-friendly API runs the abstract `process` containment intent and
+resolves with `{ stdout, stderr, exitCode }`. That intent maps to the native
+process backend for each host and selects Windows ProcessContainer when the
+policy contains ProcessContainer-specific settings. Requests run in-process
+through `mxc_ffi`, with separate stdout and stderr. Executor-only options such
+as `dryRun`, `executablePath`, and testing-only proxy support are rejected; the
+API never falls back to an executor.
 
 ```typescript
 import {
@@ -500,9 +506,9 @@ config.process!.commandLine = 'powershell.exe -NoProfile -Command "Get-Date"';
 const child = spawnSandboxFromConfig(config, { usePty: false });
 ```
 
-### PTY APIs merge stdout and stderr
+### Buffered output keeps stdout and stderr separate
 
-`spawnSandbox` and `spawnSandboxAsync` use a PTY, so `stderr` is always empty in their result. Use `spawnSandboxFromConfig(config, { usePty: false })` for separated streams.
+`spawnSandboxAsync` returns separate `stdout` and `stderr` strings.
 
 ### `createConfigFromPolicy` leaves `commandLine` empty
 
@@ -535,7 +541,7 @@ granting file content reads. It requires a BaseContainer host with PSEC 1.1
 | `Invalid containment value '<x>'` | `containment` field doesn't match the parser's accepted values. | Use one of the abstract intents (`process`, `vm`, `microvm`) or a concrete backend listed in [Choosing a Backend](#choosing-a-backend). |
 | `'<x>' containment requires experimental mode` | A `windows_sandbox` / `wslc` / `microvm` / `isolation_session` / `hyperlight` backend was selected without the flag. | Pass `{ experimental: true }` in `SandboxSpawnOptions`. |
 | `process.commandLine starts with an unquoted Windows path containing a space` | `wxc-exec` rejects unquoted paths with spaces at parse time. | Quote the executable: `'"C:\\Program Files\\…\\foo.exe" args'`. |
-| `Experimental_CreateProcessInSandbox failed: WIN32_ERROR(...)` | Native sandbox API returned an OS-level error, e.g. `448` = device feature not supported (Windows build / WIP feature not enabled). Note `120` (call not implemented / BaseContainer disabled) is now handled automatically — the default `process` backend falls back to AppContainer+DACL, so it no longer surfaces here. | Check the Windows build / WIP requirements for the backend you selected. |
+| `CreateProcessW(PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT) failed: ...` | The process security environment launch returned an OS-level error. Backend-unavailable failures automatically fall through to an AppContainer tier during selection. | Check the Windows build requirements for the backend you selected. |
 | Process exits `-1` / `4294967295` with no stdout | Native binary terminated abnormally. | Re-run with `options.debug: true` (or `options.logDir: '<dir>'`) to capture diagnostic logs. |
 | `Policy version '<x>' is older than supported` / `newer than supported` | Version is outside the supported version lines. | Use an exact registered version: `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, or `0.9.0-alpha`. See [Compatibility](#compatibility). |
 | `Policy version '<x>' is not a registered schema contract` / `Unsupported contract version` | The declaration is not registered, even if it falls between supported versions (for example, `0.6.1-alpha`). | Use an exact version from [Compatibility](#compatibility); state-aware and development-only requests require `0.9.0-alpha`. |

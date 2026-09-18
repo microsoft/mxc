@@ -188,7 +188,7 @@ pub fn supported_ui_restrictions() -> EffectiveUiRestrictions {
 
 /// Encode platform-agnostic UI restrictions as the `JOB_OBJECT_UILIMIT_*`
 /// bitmask consumed by `SetInformationJobObject(JobObjectBasicUIRestrictions)`
-/// and by the BaseContainer SandboxSpec `ui_restrictions` field.
+/// and by the BaseContainer PSEC UI-restrictions field.
 pub fn to_job_object_uilimit_mask(r: &EffectiveUiRestrictions) -> u32 {
     let mut mask: u32 = 0;
     if r.block_external_ui_objects {

@@ -141,7 +141,7 @@ ungranted access is handled while it is recorded:
 > `QueryProcessSecurityEnvironmentSupport`, and
 > `CloseProcessSecurityEnvironment`. When that set is unavailable or cannot
 > fully honor the requested policy, MXC retains the highest compatible legacy
-> containment tier (SBOX, AppContainer+BFS, or AppContainer+DACL) and pairs it
+> AppContainer containment tier (AppContainer+BFS or AppContainer+DACL) and pairs it
 > with the guarded WPR capture provider. Unsupported hosts return
 > `backend_unavailable` only when neither path can preserve the full policy.
 >
@@ -152,18 +152,18 @@ ungranted access is handled while it is recorded:
 >
 > Native PSEC capture cannot represent `processContainer.leastPrivilege`
 > because the process security-environment API does not expose an LPAC token
-> option. MXC therefore retains a compatible legacy containment tier and uses
-> guarded WPR instead of weakening or rejecting the requested policy.
+> option. MXC therefore uses a compatible AppContainer tier with guarded WPR
+> instead of weakening or rejecting the requested policy.
 >
 > Native PSEC capture represents `runtimeConfig.networkProxy` with the PSEC
 > proxy endpoint and either the requested proxy AppContainer peer identity or
-> MXC's reserved unrestricted-loopback sentinel. Legacy proxy policies remain
-> on a compatible legacy tier with guarded WPR capture.
+> MXC's reserved unrestricted-loopback sentinel. Other proxy policies remain
+> on a compatible AppContainer tier with guarded WPR capture.
 >
 > Native capture uses `filesystem.deniedPaths` only when
 > `QueryProcessSecurityEnvironmentSupport` advertises `PSE_SUPPORT_FS_DENY`.
-> Otherwise MXC selects a compatible legacy SBOX, AppContainer+BFS, or
-> AppContainer+DACL tier and uses guarded WPR.
+> Otherwise MXC selects a compatible AppContainer+BFS or AppContainer+DACL tier
+> and uses guarded WPR.
 
 - `mode: "block"` (default) maps onto `learningModeLogging`
   (deny-and-record) — the app / user-configurable flow.

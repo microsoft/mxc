@@ -58,7 +58,7 @@ mod windows_impl {
     use windows_core::{PCWSTR, PWSTR};
 
     /// Build a minimal PSEC 1.0 FlatBuffer carrying the learning-mode capability.
-    fn build_sandbox_spec() -> Vec<u8> {
+    fn build_psec_spec() -> Vec<u8> {
         let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(256);
         let version = SchemaVersion::new(1, 0);
         // `permissiveLearningMode` is the capability the SandboxEngine functest uses to
@@ -102,7 +102,7 @@ mod windows_impl {
             }
         };
 
-        let spec = build_sandbox_spec();
+        let spec = build_psec_spec();
         println!("built sandbox spec: {} bytes", spec.len());
 
         let session = match CaptureSession::begin(
