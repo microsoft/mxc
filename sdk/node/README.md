@@ -212,7 +212,7 @@ console.log('exit:', status.exitCode);
 
 ### 2. `spawnSandbox(script, policy, ...)` — convenience
 
-Quick path for **process-isolation only** (`processcontainer` on Windows, `lxc`
+Quick path for **process-isolation only** (`processcontainer` on Windows, `bubblewrap`
 on Linux, `seatbelt` on macOS). Returns an `MxcSandboxProcess` with streaming,
 separate stdin, stdout, and stderr streams.
 

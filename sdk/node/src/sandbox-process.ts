@@ -264,13 +264,13 @@ export class MxcSandboxProcess {
           if (this.disposed) throw new Error('sandbox process disposed');
           const status = this.binding.tryWait();
           if (!status.running) {
-            void this.finishWait(this.binding.wait()).then(resolve, reject);
+            this.completeWait(() => this.binding.wait(), resolve, reject);
             return;
           }
           if (this.timeoutMs !== undefined && performance.now() - this.startedAt >= this.timeoutMs) {
             const deadlineStatus = this.binding.tryWait();
             if (!deadlineStatus.running) {
-              void this.finishWait(this.binding.wait()).then(resolve, reject);
+              this.completeWait(() => this.binding.wait(), resolve, reject);
               return;
             }
             try {
@@ -278,18 +278,18 @@ export class MxcSandboxProcess {
             } catch (error) {
               const racedStatus = this.binding.tryWait();
               if (!racedStatus.running) {
-                void this.finishWait(this.binding.wait()).then(resolve, reject);
+                this.completeWait(() => this.binding.wait(), resolve, reject);
                 return;
               }
               throw error;
             }
-            void this.finishWait({ ...this.binding.wait(), timedOut: true }).then(resolve, reject);
+            this.completeWait(() => this.binding.wait(), resolve, reject, true);
             return;
           }
           this.waitTimer = setTimeout(step, pollMs);
           pollMs = Math.min(pollMs * 2, MAX_POLL_MS);
         } catch (error) {
-          reject(error);
+          this.failWait(error, reject);
         }
       };
       queueMicrotask(step);
@@ -352,6 +352,35 @@ export class MxcSandboxProcess {
       this.runCleanups();
       this.freeHandle();
     }
+  }
+
+  private completeWait(
+    wait: () => Promise<SandboxWaitResult>,
+    resolve: (result: SandboxWaitResult) => void,
+    reject: (reason?: unknown) => void,
+    timedOut = false,
+  ): void {
+    this.finalizing = true;
+    let waitPromise: Promise<SandboxWaitResult>;
+    try {
+      waitPromise = wait();
+    } catch (error) {
+      this.finalizing = false;
+      this.failWait(error, reject);
+      return;
+    }
+    void waitPromise
+      .then((result) => this.finishWait(timedOut ? { ...result, timedOut: true } : result))
+      .then(resolve, (error) => {
+        this.finalizing = false;
+        this.failWait(error, reject);
+      });
+  }
+
+  private failWait(error: unknown, reject: (reason?: unknown) => void): void {
+    this.waitReject = undefined;
+    this.dispose();
+    reject(error);
   }
 
   private runCleanups(): void {

@@ -28,7 +28,7 @@ export interface SandboxProcessBinding {
   takeStdout(): SandboxReadableBinding | null;
   takeStderr(): SandboxReadableBinding | null;
   tryWait(): SandboxWaitResult & { running: boolean };
-  wait(): SandboxWaitResult;
+  wait(): Promise<SandboxWaitResult>;
   outputMetadata(): unknown | undefined;
   kill(): void;
   free(): void;
