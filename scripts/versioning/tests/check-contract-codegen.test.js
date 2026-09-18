@@ -5,9 +5,7 @@ const assert = require("node:assert/strict");
 const { test } = require("node:test");
 const { assertDirectionalNetworkOnly } = require("../check-contract-codegen.js");
 
-const roots = ["OneShotRequest", "WindowsSandboxProvisionRequest",
-  "IsolationSessionProvisionRequest", "WslcProvisionRequest", "StartRequest",
-  "ExecRequest", "StopRequest", "DeprovisionRequest"];
+const roots = ["Request"];
 const removed = ["defaultPolicy", "enforcementMode", "allowedHosts",
   "blockedHosts", "allowLocalNetwork", "proxy"];
 
@@ -54,7 +52,7 @@ test("data strings and unreachable legacy definitions do not authorize fields", 
 
 test("missing roots and dangling or external references fail closed", () => {
   const value = schema();
-  delete value.definitions.ExecRequest;
+  delete value.definitions.Request;
   assert.throws(() => assertDirectionalNetworkOnly(value), /Missing exact request root/);
   for (const reference of ["#/definitions/Absent", "https://example.com/unknown"]) {
     const broken = schema();
