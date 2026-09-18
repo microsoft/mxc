@@ -332,11 +332,11 @@ $HostWhoami = (& whoami).Trim()
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_hello.json" `
     -OutputContains @("MYVAR=IsolationSessionTest", "CWD=C:\mxc_workdir_test") `
     -OutputLineNotEqual @($HostWhoami)))
-# Exact one-shot contracts are recursively closed, so backend configuration
-# that the IsolationSession one-shot surface does not define is rejected.
+# The exact one-shot contract has no IsolationSession-specific configuration
+# object, so the unsupported object is rejected at its root.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_configid_rejected.json" `
     -ExpectedExit 1 `
-    -OutputContains @("isolationSession.configurationId", "unknown field ``configurationId``")))
+    -OutputContains @("at ``isolationSession``", "unknown field ``isolationSession``")))
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_exit42.json" `
     -ExpectedExit 42))
 # stderr separation: agent writes MARKER_STDOUT to stdout and MARKER_STDERR to stderr.
@@ -354,30 +354,29 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_stdout_stderr_
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_timeout.json" `
     -ExpectedExitAnyOf 1, -1))
 
-# A nested unknown backend payload is rejected at the same closed exact
+# Any IsolationSession-specific object is rejected at the same closed exact
 # contract boundary, before the command can run.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_stray_config_rejected.json" `
     -ExpectedExit 1 `
-    -OutputContains @("isolationSession.unrecognizedSetting", "unknown field ``unrecognizedSetting``")))
+    -OutputContains @("at ``isolationSession``", "unknown field ``isolationSession``")))
 
-# One-shot network rejection: the isolation session container's network is
-# unrestricted and cannot be filtered or denied. A directional deny policy is
-# therefore rejected.
+# IsolationSession requires the exact all-allow directional network posture.
+# A directional deny policy is therefore rejected during request validation.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_network_rejected.json" `
-    -ExpectedExit -1 `
-    -OutputContains @("network is unrestricted")))
+    -ExpectedExit 1 `
+    -OutputContains @("IsolationSession requires an explicit network policy")))
 
 # Inbound axis: allowing egress does not make an ingress/host-loopback deny
 # enforceable. A process inside can listen on a localhost-reachable port.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_network_rejected_no_local.json" `
-    -ExpectedExit -1 `
-    -OutputContains @("network is unrestricted")))
+    -ExpectedExit 1 `
+    -OutputContains @("IsolationSession requires an explicit network policy")))
 
 # Per-destination rules remain unsupported.
 # The fixture uses a documentation CIDR, not a DNS-derived hostname mapping.
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_network_rejected_hosts.json" `
-    -ExpectedExit -1 `
-    -OutputContains @("network is unrestricted")))
+    -ExpectedExit 1 `
+    -OutputContains @("IsolationSession requires an explicit network policy")))
 
 # Every legacy Network member is rejected by exact v0.9 parsing, including
 # semantically neutral values. These requests must never launch their command.
