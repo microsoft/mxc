@@ -4,13 +4,11 @@
 import assert from 'node:assert';
 import { describe, it } from 'node:test';
 import os from 'os';
-import type { SandboxSpawnOptions } from '@microsoft/mxc-sdk';
 import {
   sdk,
   supportedVersions,
+  assertDryRunResult,
   debugSpawnOptions,
-  isLinuxBubblewrap,
-  sandboxSkipReason,
 } from './test-helpers.js';
 
 describe('Platform support', () => {
@@ -22,7 +20,6 @@ describe('Platform support', () => {
 });
 
 const platformSupport = sdk.getPlatformSupport();
-const executorDryRun = { dryRun: true } as unknown as SandboxSpawnOptions;
 
 // The exact 0.6 contract predates Seatbelt, which is the native macOS backend.
 const platformVersions = os.platform() === 'darwin'
@@ -50,93 +47,62 @@ for (const schemaVersion of platformVersions) {
       timeoutMs: 30000,
     };
 
-    it('should reject executor-only dry-run via spawnSandboxFromConfig', () => {
+    it('should dry-run via spawnSandboxFromConfig with usePty: false', async () => {
       const config = sdk.createConfigFromPolicy(policy);
       config.process = config.process ?? { commandLine: '' };
       config.process.commandLine = 'cmd.exe /c echo test';
       config.containerId = `dryrun-npty-${schemaVersion}`;
 
-      assert.throws(
-        () => sdk.spawnSandboxFromConfig(config, { ...executorDryRun, ...debugSpawnOptions }),
-        /does not support executor-only option 'dryRun'/,
-      );
+      const result = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve, reject) => {
+        const child = sdk.spawnSandboxFromConfig(config, { dryRun: true, usePty: false, ...debugSpawnOptions });
+        let stdout = '';
+        let stderr = '';
+        child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
+        child.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
+        child.on('close', (code: number) => resolve({ code, stdout, stderr }));
+        child.on('error', reject);
+      });
+      assertDryRunResult(result.stdout, result.code, schemaVersion.raw);
     });
 
     it('should reject executor-only dry-run via spawnSandboxAsync', async () => {
       await assert.rejects(
         sdk.spawnSandboxAsync(
-          'cmd.exe /c echo test', policy, executorDryRun, undefined, `dryrun-async-${schemaVersion}`,
+          'cmd.exe /c echo test', policy, { dryRun: true }, undefined, `dryrun-async-${schemaVersion}`,
         ),
         /does not support executor-only option 'dryRun'/,
       );
     });
 
-    it('should reject executor-only dry-run via spawnSandbox', () => {
-      assert.throws(
-        () => sdk.spawnSandbox(
-          'cmd.exe /c echo test', policy, { ...executorDryRun, ...debugSpawnOptions }, undefined, `dryrun-streaming-${schemaVersion}`,
-        ),
-        /does not support executor-only option 'dryRun'/,
-      );
+    it('should dry-run via spawnSandboxFromConfig', async () => {
+      const config = sdk.createConfigFromPolicy(policy);
+      config.process = config.process ?? { commandLine: '' };
+      config.process.commandLine = 'cmd.exe /c echo test';
+      config.containerId = `dryrun-fromcfg-${schemaVersion}`;
+
+      const result = await new Promise<{ exitCode: number; stdout: string }>((resolve) => {
+        const ptyProcess = sdk.spawnSandboxFromConfig(config, { dryRun: true, ...debugSpawnOptions });
+        let stdout = '';
+        ptyProcess.onData((data: string) => { stdout += data; });
+        ptyProcess.onExit((event: { exitCode: number }) => {
+          resolve({ exitCode: event.exitCode, stdout });
+        });
+      });
+      assertDryRunResult(result.stdout, result.exitCode, schemaVersion.raw);
+    });
+
+    it('should dry-run via spawnSandbox (PTY)', async () => {
+      const result = await new Promise<{ exitCode: number; stdout: string }>((resolve) => {
+        const ptyProcess = sdk.spawnSandbox(
+          'cmd.exe /c echo test', policy, { dryRun: true, ...debugSpawnOptions }, undefined, `dryrun-pty-${schemaVersion}`,
+        );
+        let stdout = '';
+        ptyProcess.onData((data: string) => { stdout += data; });
+        ptyProcess.onExit((event: { exitCode: number }) => {
+          resolve({ exitCode: event.exitCode, stdout });
+        });
+      });
+      assertDryRunResult(result.stdout, result.exitCode, schemaVersion.raw);
     });
   });
 }
-
-const streamingSchemaVersion = platformVersions.at(-1)!;
-const streamingSkipReason =
-  sandboxSkipReason ??
-  (!platformSupport.isSupported ? `Platform not supported: ${platformSupport.reason}` : undefined) ??
-  (os.platform() === 'linux' && !isLinuxBubblewrap
-    ? 'Native streaming requires Bubblewrap on Linux'
-    : undefined);
-
-describe(`Native streaming (schema ${streamingSchemaVersion})`, {
-  skip: streamingSkipReason,
-}, () => {
-  it('should deliver output before the sandbox exits', { timeout: 30000 }, async () => {
-    const command = os.platform() === 'win32'
-      ? 'powershell.exe -NoProfile -Command "Write-Output STREAM_FIRST; ' +
-        'Start-Sleep -Milliseconds 500; Write-Output STREAM_SECOND; ' +
-        '[Console]::Error.WriteLine(\'STREAM_ERROR\')"'
-      : 'sh -c "printf \'STREAM_FIRST\\n\'; sleep 0.5; ' +
-        'printf \'STREAM_SECOND\\n\'; printf \'STREAM_ERROR\\n\' >&2"';
-    const policy = {
-      version: streamingSchemaVersion.raw,
-      ...(os.platform() === 'win32' ? { ui: { allowWindows: true } } : {}),
-    };
-    const sandbox = sdk.spawnSandbox(command, policy, debugSpawnOptions);
-    assert.ok(sandbox.standardOutput, 'streaming stdout should be available');
-    assert.ok(sandbox.standardError, 'streaming stderr should be available');
-
-    let stdout = '';
-    let stderr = '';
-    let resolveFirstChunk: (() => void) | undefined;
-    const firstChunk = new Promise<void>((resolve) => {
-      resolveFirstChunk = resolve;
-    });
-    sandbox.standardOutput.on('data', (data: Buffer) => {
-      stdout += data.toString();
-      if (stdout.includes('STREAM_FIRST')) {
-        resolveFirstChunk?.();
-      }
-    });
-    sandbox.standardError.on('data', (data: Buffer) => {
-      stderr += data.toString();
-    });
-
-    let completed = false;
-    const wait = sandbox.waitAsync().then((result) => {
-      completed = true;
-      return result;
-    });
-
-    await firstChunk;
-    assert.strictEqual(completed, false, 'first output should arrive before process completion');
-
-    const result = await wait;
-    assert.strictEqual(result.exitCode, 0, stderr);
-    assert.ok(stdout.includes('STREAM_FIRST'));
-    assert.ok(stdout.includes('STREAM_SECOND'));
-    assert.ok(stderr.includes('STREAM_ERROR'));
-  });
-});

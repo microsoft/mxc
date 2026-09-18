@@ -23,8 +23,6 @@ import {
   runBindingRequestAsync,
   type BindingRunResult,
 } from './bindings/run.js';
-import { spawnBindingSandboxProcess } from './bindings/streaming.js';
-import type { MxcSandboxProcess } from './sandbox-process.js';
 
 const MIN_VERSION = '0.6.0-alpha';
 const SUPPORTED_VERSION = '0.9.0-alpha';
@@ -683,29 +681,34 @@ export interface SandboxSpawnOptions {
   skipPlatformCheck?: boolean;
 
   /**
-   * Executor-only PTY options. In-process APIs reject this option.
+   * PTY options to pass to node-pty (only used by spawnSandbox)
    */
   ptyOptions?: pty.IPtyForkOptions;
 
   /**
-   * Executor-only dry-run mode. In-process APIs reject this option.
+   * Dry run mode: parse and validate config without executing.
+   * The native binary validates the config then exits.
    */
   dryRun?: boolean;
 
   /**
-   * Executor-only diagnostic log directory. In-process APIs reject this option.
+   * Directory for diagnostic log files
    */
   logDir?: string;
 
   /**
-   * Executor-only PTY selection. In-process APIs always use separate pipes and
-   * reject this option.
+   * When false, uses child_process.spawn instead of node-pty.
+   * Provides reliable exit codes and separate stdout/stderr streams.
+   * Defaults to true (uses PTY).
    */
   usePty?: boolean;
 
   /**
-   * Optional cancellation signal. Streaming in-process execution kills the
-   * sandbox when the signal aborts.
+   * Optional cancellation signal. When it aborts, the SDK kills the
+   * spawned executor process and rejects any pending result promise with
+   * the signal's reason. Honored by the state-aware lifecycle functions;
+   * one-shot spawn currently ignores it (kill the returned IPty /
+   * ChildProcess directly instead).
    *
    * Cancellation is best-effort: killing the executor mid-call leaves
    * any backend-side state (e.g. a partially-provisioned IsolationSession)
@@ -715,33 +718,7 @@ export interface SandboxSpawnOptions {
   signal?: AbortSignal;
 }
 
-function wireAbortToProcess(
-  proc: MxcSandboxProcess,
-  options: SandboxSpawnOptions,
-): void {
-  const signal = options.signal;
-  if (!signal) {
-    return;
-  }
-  const onAbort = () => {
-    try {
-      proc.kill();
-    } catch {
-      // Best-effort cancellation only.
-    }
-  };
-  if (signal.aborted) {
-    onAbort();
-    return;
-  }
-  signal.addEventListener('abort', onAbort, { once: true });
-  proc._registerCleanup(() => signal.removeEventListener('abort', onAbort));
-}
-
-function unsupportedInProcessRunOption(
-  options: SandboxSpawnOptions,
-  supportsSignal = false,
-): string | undefined {
+function unsupportedInProcessRunOption(options: SandboxSpawnOptions): string | undefined {
   if (options.debug === true) return 'debug';
   if (options.allowTestingFeatures === true) return 'allowTestingFeatures';
   if (options.skipPlatformCheck === true) return 'skipPlatformCheck';
@@ -749,8 +726,8 @@ function unsupportedInProcessRunOption(
   if (options.ptyOptions !== undefined) return 'ptyOptions';
   if (options.dryRun === true) return 'dryRun';
   if (options.logDir !== undefined) return 'logDir';
-  if (options.usePty !== undefined) return 'usePty';
-  if (!supportsSignal && options.signal !== undefined) return 'signal';
+  if (options.usePty === true) return 'usePty';
+  if (options.signal !== undefined) return 'signal';
   return undefined;
 }
 
@@ -869,38 +846,28 @@ function spawnWithConfig(
   }
 }
 
-function spawnConfig(
-  config: ContainerConfig,
-  options: SandboxSpawnOptions,
-  workingDirectory?: string,
-  env?: { [key: string]: string | undefined },
-): MxcSandboxProcess {
-  const unsupportedOption = unsupportedInProcessRunOption(options, true);
-  if (unsupportedOption !== undefined) {
-    throw new MxcError(
-      'malformed_request',
-      `sandbox execution does not support executor-only option '${unsupportedOption}'`,
-    );
-  }
-
-  const proc = spawnBindingSandboxProcess(
-    prepareRequestSpec(config, {
-      workingDirectory,
-      env,
-      inheritDefaultEnv: options.inheritDefaultEnv,
-      experimental: options.experimental,
-    }),
-    config.process?.timeout,
-  );
-  wireAbortToProcess(proc, options);
-  return proc;
-}
-
 /**
- * Spawn a sandboxed process through the native runtime.
+ * Spawn a sandboxed process using wxc-exec with a PTY (node-pty) for
+ * interactive terminal I/O (colors, input forwarding).
  *
- * This preserves the existing policy-based entry point while replacing its
- * executor-backed implementation with a streaming pipe process.
+ * @param script The command line script to execute
+ * @param policy The sandbox policy
+ * @param options - Spawn options
+ * @param workingDirectory Optional working directory path
+ * @param containerName Optional container name; if not provided, a random name will be generated
+ * @param env Optional environment variables
+ * @returns IPty object for interacting with the sandboxed process
+ * @throws Error if platform is not supported or wxc-exec is not found
+ *
+ * @example
+ * ```typescript
+ * const script = 'python -c "import sys; print(sys.version)"';
+ * const policy: SandboxPolicy = { version: '0.6.0-alpha' };
+ *
+ * const ptyProcess = spawnSandbox(script, policy);
+ * ptyProcess.onData((data) => console.log(data));
+ * ptyProcess.onExit((e) => console.log('Exit code:', e.exitCode));
+ * ```
  */
 export function spawnSandbox(
   script: string,
@@ -909,28 +876,88 @@ export function spawnSandbox(
   workingDirectory?: string,
   containerName?: string,
   env?: { [key: string]: string | undefined },
-): MxcSandboxProcess {
-  return spawnConfig(
-    buildSandboxPayload(script, policy, workingDirectory, containerName),
-    options,
-    workingDirectory,
-    env,
-  );
+): pty.IPty {
+  const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
+  return spawnWithConfig(config, options, workingDirectory, env);
 }
 
 /**
- * Spawn a sandboxed process from an existing ContainerConfig.
+ * Spawn a sandboxed process from a pre-built ContainerConfig.
  *
- * The config is converted to the private native request only at the binding
- * boundary so callers retain the established config customization flow.
+ * Use with `createConfigFromPolicy()` when you need to modify
+ * backend-specific settings before spawning. The config must have
+ * `process.commandLine` already set.
+ *
+ * @param config The container configuration (from createConfigFromPolicy)
+ * @param options - Spawn options
+ * @param workingDirectory Optional working directory path
+ * @returns IPty when usePty is true or unset; ChildProcess when usePty is false
+ *
+ * @example
+ * ```typescript
+ * const config = createConfigFromPolicy(policy, "process");
+ * config.process!.commandLine = 'echo hello';
+ * config.processContainer!.ui!.isolation = "atoms";
+ *
+ * // PTY mode (default) — returns IPty:
+ * const ptyProcess = spawnSandboxFromConfig(config);
+ *
+ * // Non-PTY mode — returns ChildProcess with reliable exit codes:
+ * const child = spawnSandboxFromConfig(config, { usePty: false });
+ * child.stdout?.on('data', (data) => console.log(data.toString()));
+ * ```
  */
+export function spawnSandboxFromConfig(
+  config: ContainerConfig,
+  options: SandboxSpawnOptions & { usePty: false },
+  workingDirectory?: string,
+  env?: { [key: string]: string | undefined }
+): ChildProcess;
+export function spawnSandboxFromConfig(
+  config: ContainerConfig,
+  options?: SandboxSpawnOptions,
+  workingDirectory?: string,
+  env?: { [key: string]: string | undefined }
+): pty.IPty;
 export function spawnSandboxFromConfig(
   config: ContainerConfig,
   options: SandboxSpawnOptions = {},
   workingDirectory?: string,
-  env?: { [key: string]: string | undefined },
-): MxcSandboxProcess {
-  return spawnConfig(config, options, workingDirectory, env);
+  env?: { [key: string]: string | undefined }
+): pty.IPty | ChildProcess {
+  if (options.usePty === false) {
+    // Inject env vars into config.process.env so they are passed explicitly to
+    // the sandboxed child via the JSON config (not via process inheritance).
+    if (env) {
+      injectEnvIntoConfig(config, env);
+    }
+    applyInheritDefaultEnv(config, options);
+
+    const { executablePath, args, logger, startTime } = prepareSpawn(config, options);
+    try {
+      const child = spawn(executablePath, args, {
+        cwd: workingDirectory || process.cwd(),
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      child.on('close', (code) => {
+        logger?.log('info', 'mxc.spawn.exit', {
+          exitCode: code ?? -1,
+          durationMs: Date.now() - startTime,
+        });
+        logger?.close();
+      });
+      child.on('error', () => {
+        logger?.close();
+      });
+      return child;
+    } catch (err) {
+      logger?.close();
+      throw err;
+    }
+  }
+
+  diagLogVersion();
+  return spawnWithConfig(config, options, workingDirectory, env);
 }
 
 /**

@@ -2,17 +2,14 @@
 // Licensed under the MIT License.
 
 import assert from 'node:assert';
-import { getEventListeners, once } from 'node:events';
-import { afterEach, describe, it } from 'node:test';
-import { spawnSandbox, spawnSandboxFromConfig } from '../../src/sandbox.js';
+import { once } from 'node:events';
+import { describe, it } from 'node:test';
 import {
   _createMxcSandboxProcess,
   type SandboxProcessBinding,
   type SandboxReadableBinding,
   type SandboxWritableBinding,
 } from '../../src/sandbox-process.js';
-import { _setBindingSandboxProcessFactory } from '../../src/bindings/streaming.js';
-import type { RequestSpec } from '../../src/bindings/request.js';
 
 class FakeReadable implements SandboxReadableBinding {
   constructor(private readonly chunks: (Buffer | null)[], private readonly events: string[]) {}
@@ -180,66 +177,7 @@ class DeferredWaitBinding extends FakeBinding {
   }
 }
 
-afterEach(() => _setBindingSandboxProcessFactory());
-
-describe('native streaming spawn APIs', () => {
-  it('routes the existing policy entry point through the binding request adapter', () => {
-    let seen: RequestSpec | undefined;
-    _setBindingSandboxProcessFactory((request) => {
-      seen = request;
-      return _createMxcSandboxProcess(new FakeBinding(42, 0));
-    });
-
-    const proc = spawnSandbox('echo hello', { version: '0.9.0-alpha' }, { experimental: true }, 'C:\\work', 'sample');
-
-    assert.strictEqual(proc.id, 42);
-    assert.deepStrictEqual(proc.warnings, ['relaxed']);
-    assert.strictEqual(seen?.policy.version, '0.9.0-alpha');
-    assert.strictEqual(seen?.command, 'echo hello');
-    assert.deepStrictEqual(seen?.containment, { type: 'process' });
-    assert.strictEqual(seen?.containerName, 'sample');
-    assert.strictEqual(seen?.workingDirectory, 'C:\\work');
-    assert.strictEqual(seen?.environment, undefined);
-    assert.strictEqual(seen?.inheritDefaultEnv, false);
-    assert.strictEqual(seen?.experimental, true);
-    proc.dispose();
-  });
-
-  it('routes the existing config entry point through the binding request adapter', () => {
-    let seen: RequestSpec | undefined;
-    _setBindingSandboxProcessFactory((request) => {
-      seen = request;
-      return _createMxcSandboxProcess(new FakeBinding(43, 0));
-    });
-
-    const proc = spawnSandboxFromConfig({
-      version: '0.9.0-alpha',
-      containment: 'wslc',
-      process: {
-        commandLine: 'echo configured',
-        env: ['FROM_CONFIG=value', 'OVERRIDE=old'],
-      },
-    }, {
-      experimental: true,
-      inheritDefaultEnv: true,
-    }, 'C:\\work', {
-      FROM_CALLER: 'yes',
-      OVERRIDE: 'new',
-    });
-
-    assert.strictEqual(proc.id, 43);
-    assert.strictEqual(seen?.command, 'echo configured');
-    assert.strictEqual(seen?.containment.type, 'wslc');
-    assert.strictEqual(seen?.workingDirectory, 'C:\\work');
-    assert.deepStrictEqual(seen?.environment, {
-      FROM_CONFIG: 'value',
-      FROM_CALLER: 'yes',
-      OVERRIDE: 'new',
-    });
-    assert.strictEqual(seen?.inheritDefaultEnv, true);
-    proc.dispose();
-  });
-
+describe('native streaming process', () => {
   it('surfaces stdout as a Node readable stream', async () => {
     const proc = _createMxcSandboxProcess(new FakeBinding(8, 0));
     const chunks: Buffer[] = [];
@@ -447,27 +385,8 @@ describe('native streaming spawn APIs', () => {
     assert.strictEqual(binding.freed, true);
   });
 
-  it('removes the abort listener after terminal completion', async () => {
-    const controller = new AbortController();
-    _setBindingSandboxProcessFactory(() =>
-      _createMxcSandboxProcess(new FakeBinding(4, 0)));
-
-    const proc = spawnSandbox(
-      'echo hello',
-      { version: '0.9.0-alpha' },
-      { signal: controller.signal },
-    );
-    assert.strictEqual(getEventListeners(controller.signal, 'abort').length, 1);
-
-    await proc.waitAsync();
-
-    assert.strictEqual(getEventListeners(controller.signal, 'abort').length, 0);
-    proc.dispose();
-  });
-
   for (const failurePoint of ['tryWait', 'kill', 'wait'] as const) {
     it(`releases resources when ${failurePoint} fails`, async () => {
-      const controller = new AbortController();
       const binding = new FakeBinding(
         21,
         failurePoint === 'kill' ? Number.MAX_SAFE_INTEGER : 0,
@@ -489,18 +408,13 @@ describe('native streaming spawn APIs', () => {
       } else {
         binding.wait = () => Promise.reject(expected);
       }
-      _setBindingSandboxProcessFactory(() =>
-        _createMxcSandboxProcess(binding, failurePoint === 'kill' ? 0.001 : undefined));
-
-      const proc = spawnSandbox(
-        'echo hello',
-        { version: '0.9.0-alpha' },
-        { signal: controller.signal },
+      const proc = _createMxcSandboxProcess(
+        binding,
+        failurePoint === 'kill' ? 0.001 : undefined,
       );
 
       await assert.rejects(proc.waitAsync(), (error) => error === expected);
       assert.strictEqual(binding.freed, true);
-      assert.strictEqual(getEventListeners(controller.signal, 'abort').length, 0);
     });
   }
 });

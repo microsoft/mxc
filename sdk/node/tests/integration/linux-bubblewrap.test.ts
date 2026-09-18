@@ -127,7 +127,7 @@ describe('Linux Bubblewrap network proxy (schema 0.6.0-alpha)', {
     assert.ok(result.stdout.includes('PROXY_OK'), `missing PROXY_OK in: ${result.stdout}`);
   });
 
-  it('should reject the executor-only builtinTestServer proxy form', () => {
+  it('should launch a builtinTestServer proxy and route traffic through it', async () => {
     const config = sdk.createConfigFromPolicy(
       { version: PROXY_SCHEMA },
       'bubblewrap',
@@ -138,20 +138,15 @@ describe('Linux Bubblewrap network proxy (schema 0.6.0-alpha)', {
     config.network = {
       ...(config.network ?? {}),
       defaultPolicy: 'allow',
-      proxy: { builtinTestServer: true } as unknown as { localhost: number },
+      proxy: { builtinTestServer: true },
     };
 
-    assert.throws(
-      () => sdk.spawnSandboxFromConfig(config, { ...debugSpawnOptions, experimental: true }),
-      /builtinTestServer|proxy/i,
-    );
+    const result = await spawnFromConfigAsync(config, { ...debugSpawnOptions, experimental: true, allowTestingFeatures: true });
+    assert.strictEqual(result.exitCode, 0, `builtin-proxy run failed: ${result.stdout}`);
+    assert.ok(result.stdout.includes('BUILTIN_OK'), `missing BUILTIN_OK in: ${result.stdout}`);
   });
 
   it('should enforce allowedHosts at the proxy layer', async () => {
-    const { port, proxyProcess } = startUnixTestProxy(tmpDir, {
-      allowHosts: ['pkgs.dev.azure.com'],
-    });
-    proxies.push(proxyProcess);
     const config = sdk.createConfigFromPolicy(
       { version: PROXY_SCHEMA },
       'bubblewrap',
@@ -171,11 +166,11 @@ describe('Linux Bubblewrap network proxy (schema 0.6.0-alpha)', {
     config.network = {
       ...(config.network ?? {}),
       defaultPolicy: 'allow',
-      proxy: { localhost: port },
+      proxy: { builtinTestServer: true },
       allowedHosts: ['pkgs.dev.azure.com'],
     };
 
-    const result = await spawnFromConfigAsync(config, { ...debugSpawnOptions, experimental: true });
+    const result = await spawnFromConfigAsync(config, { ...debugSpawnOptions, experimental: true, allowTestingFeatures: true });
     assert.strictEqual(result.exitCode, 0, `allowlist run failed: ${result.stdout}`);
     assert.ok(result.stdout.includes('SENTINEL_OK'), `missing SENTINEL_OK in: ${result.stdout}`);
     assert.ok(result.stdout.includes('BLOCKED_OK'), `disallowed host was not blocked: ${result.stdout}`);
