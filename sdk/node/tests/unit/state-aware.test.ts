@@ -27,8 +27,8 @@ import { MxcError } from '../../src/errors.js';
 import { SandboxId } from '../../src/state-aware-types.js';
 import {
   _createMxcSandboxProcess,
-  type SandboxProcessBinding,
-  type SandboxReadableBinding,
+  type NativeStreamingDriver,
+  type NativeStreamingEvent,
 } from '../../src/sandbox-process.js';
 import { ffiTestOptions, platformSkip } from './test-helpers.js';
 
@@ -70,88 +70,88 @@ function installStateAwareError(
   });
 }
 
-class FakeExecReadable implements SandboxReadableBinding {
-  constructor(
-    private readonly chunks: (Buffer | null)[],
-    private readonly events: string[],
-  ) {}
-
-  read(buffer: Buffer): Promise<number> {
-    const next = this.chunks.shift() ?? null;
-    if (next !== null) {
-      next.copy(buffer);
-    }
-    return Promise.resolve(next === null ? 0 : next.length);
-  }
-
-  close(): void {
-    this.events.push('close');
-  }
-
-  free(): void {
-    this.events.push('free');
-  }
-}
-
-class FakeStateAwareExecBinding implements SandboxProcessBinding {
-  readonly warnings: readonly string[];
-  readonly stdoutEvents: string[] = [];
-  readonly stderrEvents: string[] = [];
+class FakeStateAwareExecBinding implements NativeStreamingDriver {
+  readonly hasStdin = false;
+  readonly hasStdout = true;
+  readonly hasStderr = true;
   killed = false;
   freed = false;
   polls = 0;
+  private handler?: (event: NativeStreamingEvent) => void;
+  private stdoutSent = false;
+  private stderrSent = false;
 
   constructor(
     readonly id: number,
-    stdout: string,
-    stderr: string,
+    private readonly stdout: string,
+    private readonly stderr: string,
     private readonly runningPolls = 0,
     private readonly waitResult = { exitCode: 0, timedOut: false },
-    warnings: readonly string[] = [],
-  ) {
-    this.warnings = warnings;
-    this.stdoutBinding = new FakeExecReadable([Buffer.from(stdout), null], this.stdoutEvents);
-    this.stderrBinding = new FakeExecReadable([Buffer.from(stderr), null], this.stderrEvents);
+    private readonly warningValues: readonly string[] = [],
+  ) {}
+
+  setEventHandler(handler: (event: NativeStreamingEvent) => void): void {
+    this.handler = handler;
+    this.scheduleExit();
   }
 
-  private readonly stdoutBinding: SandboxReadableBinding;
-  private readonly stderrBinding: SandboxReadableBinding;
-
-  takeStdin() {
-    return null;
+  requestRead(stream: 'stdout' | 'stderr'): void {
+    if (stream === 'stdout') {
+      if (!this.stdoutSent) {
+        this.stdoutSent = true;
+        queueMicrotask(() => this.handler?.({ type: 'stdout', data: Buffer.from(this.stdout) }));
+      } else {
+        queueMicrotask(() => this.handler?.({ type: 'stdout-eof' }));
+      }
+    } else if (!this.stderrSent) {
+      this.stderrSent = true;
+      queueMicrotask(() => this.handler?.({ type: 'stderr', data: Buffer.from(this.stderr) }));
+    } else {
+      queueMicrotask(() => this.handler?.({ type: 'stderr-eof' }));
+    }
   }
 
-  takeStdout() {
-    return this.stdoutBinding;
+  startWrite(): number {
+    throw new Error('stdin is unavailable');
   }
 
-  takeStderr() {
-    return this.stderrBinding;
+  startFlush(): number {
+    throw new Error('stdin is unavailable');
   }
 
-  tryWait() {
-    this.polls += 1;
-    return {
-      running: this.polls <= this.runningPolls,
-      exitCode: 0,
-      timedOut: false,
-    };
-  }
+  closeStdin(): void {}
 
-  wait() {
-    return this.waitResult;
-  }
+  closeOutput(): void {}
 
   outputMetadata() {
     return undefined;
   }
 
-  kill(): void {
-    this.killed = true;
+  warnings() {
+    return this.warningValues;
   }
 
-  free(): void {
+  kill(): void {
+    this.killed = true;
+    queueMicrotask(() => this.handler?.({ type: 'exit', result: this.waitResult }));
+  }
+
+  shutdown(): void {
     this.freed = true;
+    queueMicrotask(() => this.handler?.({ type: 'shutdown' }));
+  }
+
+  private scheduleExit(): void {
+    if (this.runningPolls === Number.MAX_SAFE_INTEGER) return;
+    const poll = () => {
+      this.polls += 1;
+      if (this.polls <= this.runningPolls) {
+        setImmediate(poll);
+      } else {
+        this.handler?.({ type: 'exit', result: this.waitResult });
+      }
+    };
+    setImmediate(poll);
   }
 }
 
@@ -165,7 +165,7 @@ function installStateAwareExecBinding(
     requestJson = request;
     timeoutMs = timeout;
     binding = createBinding();
-    return _createMxcSandboxProcess(binding, timeout);
+    return _createMxcSandboxProcess(binding);
   });
   return {
     binding: () => {
@@ -780,8 +780,8 @@ describe('execInSandboxProcess', { skip: platformSkip }, () => {
     try {
       assert.strictEqual(proc.id, 22);
       assert.deepStrictEqual(proc.warnings, ['warning']);
-      assert.strictEqual(await readStreamText(proc.stdout), 'live\n');
-      assert.deepStrictEqual(await proc.wait(), { exitCode: 0, timedOut: false });
+      assert.strictEqual(await readStreamText(proc.standardOutput), 'live\n');
+      assert.deepStrictEqual(await proc.waitAsync(), { exitCode: 0, timedOut: false });
       assert.deepStrictEqual(exec.request().process, { commandLine: 'echo live', timeout: 123 });
       assert.strictEqual(exec.timeout(), 123);
     } finally {
@@ -809,7 +809,7 @@ describe('execInSandboxProcess', { skip: platformSkip }, () => {
     );
     assert.strictEqual(getEventListeners(controller.signal, 'abort').length, 1);
 
-    await proc.wait();
+    await proc.waitAsync();
 
     assert.strictEqual(getEventListeners(controller.signal, 'abort').length, 0);
     proc.dispose();

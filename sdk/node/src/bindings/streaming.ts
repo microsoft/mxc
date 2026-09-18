@@ -209,7 +209,11 @@ let sandboxProcessFactory:
   | ((request: RequestSpec) => MxcSandboxProcess)
   | undefined;
 let stateAwareSandboxProcessFactory:
-  | ((requestJson: string, experimental: boolean) => MxcSandboxProcess)
+  | ((
+      requestJson: string,
+      experimental: boolean,
+      timeoutMs?: number,
+    ) => MxcSandboxProcess)
   | undefined;
 
 function getNative(): NativeCoordinator {
@@ -473,7 +477,11 @@ export function _setBindingSandboxProcessFactory(
 }
 
 export function _setStateAwareBindingSandboxProcessFactory(
-  factory?: (requestJson: string, experimental: boolean) => MxcSandboxProcess,
+  factory?: (
+    requestJson: string,
+    experimental: boolean,
+    timeoutMs?: number,
+  ) => MxcSandboxProcess,
 ): void {
   stateAwareSandboxProcessFactory = factory;
 }
@@ -499,9 +507,10 @@ export function spawnBindingSandboxProcess(
 export function spawnStateAwareBindingSandboxProcess(
   requestJson: string,
   experimental: boolean,
+  timeoutMs?: number,
 ): MxcSandboxProcess {
   if (stateAwareSandboxProcessFactory !== undefined) {
-    return stateAwareSandboxProcessFactory(requestJson, experimental);
+    return stateAwareSandboxProcessFactory(requestJson, experimental, timeoutMs);
   }
   return _createMxcSandboxProcess(spawnDriver(
     (native, callback, outHandle, error) => native.stateAwareExec(

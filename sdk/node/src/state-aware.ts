@@ -401,9 +401,9 @@ export async function execInSandboxAsync<C extends StateAwareContainmentBackend>
   }
 
   const proc = execInSandboxProcess(sandboxId, config, { ...options, signal: undefined });
-  const stdoutPromise = collectStream(proc.stdout);
-  const stderrPromise = collectStream(proc.stderr);
-  const waitPromise = Promise.all([proc.wait(), stdoutPromise, stderrPromise]);
+  const stdoutPromise = collectStream(proc.standardOutput);
+  const stderrPromise = collectStream(proc.standardError);
+  const waitPromise = Promise.all([proc.waitAsync(), stdoutPromise, stderrPromise]);
   const abort = createAbortPromise(proc, options.signal);
 
   try {
