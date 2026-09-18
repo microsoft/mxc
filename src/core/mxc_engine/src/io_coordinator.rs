@@ -516,10 +516,14 @@ impl IoCoordinator {
 pub fn spawn_io(request: &SandboxRequest) -> Result<IoCoordinator, Error> {
     let timeout_ms = (request.inner.script_timeout > 0).then_some(request.inner.script_timeout);
     let process = spawn(request)?;
-    Ok(start_coordinator(process, timeout_ms))
+    Ok(coordinate_io(process, timeout_ms))
 }
 
-fn start_coordinator(
+/// Wrap an already-spawned sandbox process in native I/O coordination.
+///
+/// State-aware exec and one-shot execution use the same process/stream
+/// ownership once their backend-specific dispatch has produced a handle.
+pub fn coordinate_io(
     mut process: Box<dyn SandboxProcess>,
     timeout_ms: Option<u32>,
 ) -> IoCoordinator {
