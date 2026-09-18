@@ -200,6 +200,11 @@ export function bindingRequestUnsupportedReason(config: ContainerConfig): string
   return null;
 }
 
+export function isLxcBindingRequest(config: ContainerConfig): boolean {
+  const processContainer = config.processContainer ?? config.appContainer;
+  return resolveNodeContainment(config, processContainer) === 'lxc';
+}
+
 function projectNetwork(config: ContainerConfig): RequestSpecPolicy['network'] {
   if (config.network === undefined && config.runtimeConfig === undefined) {
     return undefined;

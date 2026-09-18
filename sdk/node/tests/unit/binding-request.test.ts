@@ -5,6 +5,7 @@ import assert from 'node:assert';
 import { describe, it } from 'node:test';
 import {
   bindingRequestUnsupportedReason,
+  isLxcBindingRequest,
   prepareRequestSpec,
 } from '../../src/bindings/request.js';
 import { MxcError } from '../../src/errors.js';
@@ -349,6 +350,11 @@ describe('native binding request', () => {
       release: '24.04',
     });
     assert.strictEqual(lxc.containerName, 'node-sdk-test');
+    assert.strictEqual(isLxcBindingRequest({
+      version: '0.9.0-alpha',
+      containment: 'lxc',
+      process: { commandLine: 'echo hello' },
+    }), true);
 
     const bubblewrap = prepareRequestSpec({
       version: '0.9.0-alpha',

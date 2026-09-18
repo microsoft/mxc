@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+import { EventEmitter } from 'node:events';
 import { Readable, Writable } from 'node:stream';
 
 export interface SandboxWaitResult {
@@ -43,19 +44,26 @@ const MAX_WRITE_CHUNK = 64 * 1024;
 class NativeReadable extends Readable {
   private requested = false;
   private ended = false;
+  private nativeEnded = false;
   private completed = false;
   private activityVersion = 0;
   private readonly completedPromise: Promise<void>;
   private complete!: () => void;
+  private readonly nativeCompletedPromise: Promise<void>;
+  private completeNative!: () => void;
 
   constructor(
     private readonly driver: NativeStreamingDriver,
     private readonly stream: 'stdout' | 'stderr',
+    private readonly deferEnd = false,
   ) {
     super({ autoDestroy: true });
     this.on('error', () => {});
     this.completedPromise = new Promise((resolve) => {
       this.complete = resolve;
+    });
+    this.nativeCompletedPromise = new Promise((resolve) => {
+      this.completeNative = resolve;
     });
     this.once('end', () => this.finish());
     this.once('close', () => this.finish());
@@ -67,6 +75,10 @@ class NativeReadable extends Readable {
 
   get activity(): number {
     return this.activityVersion;
+  }
+
+  get nativeCompletion(): Promise<void> {
+    return this.nativeCompletedPromise;
   }
 
   override _read(): void {
@@ -88,10 +100,22 @@ class NativeReadable extends Readable {
   }
 
   endNative(): void {
-    if (this.ended || this.destroyed) return;
+    if (this.nativeEnded || this.destroyed) return;
     this.requested = false;
-    this.ended = true;
+    this.nativeEnded = true;
     this.activityVersion += 1;
+    this.completeNative();
+    if (!this.deferEnd) this.finishDeferredEnd();
+  }
+
+  appendDiagnostic(line: string): void {
+    if (this.ended || this.destroyed) return;
+    this.push(Buffer.from(`${line}\n`, 'utf8'));
+  }
+
+  finishDeferredEnd(): void {
+    if (this.ended || this.destroyed) return;
+    this.ended = true;
     this.push(null);
   }
 
@@ -100,6 +124,10 @@ class NativeReadable extends Readable {
     callback: (error?: Error | null) => void,
   ): void {
     this.ended = true;
+    if (!this.nativeEnded) {
+      this.nativeEnded = true;
+      this.completeNative();
+    }
     try {
       this.driver.closeOutput(this.stream);
     } catch (closeError) {
@@ -232,7 +260,7 @@ class NativeWritable extends Writable {
 type ReadState = 'untaken' | 'owned' | 'draining' | 'missing';
 
 /** Internal live process returned by the native Node binding. */
-export class MxcSandboxProcess {
+export class MxcSandboxProcess extends EventEmitter {
   private warningsValue: readonly string[];
   private outputMetadataValue?: unknown;
   private outputMetadataReady = false;
@@ -252,8 +280,18 @@ export class MxcSandboxProcess {
   private disposed = false;
   private finalizing = false;
   private shutdownRequested = false;
+  private compatibilityWaitStarted = false;
+  private compatibilityDrainScheduled = false;
+  private compatibilityErrorEmitted = false;
 
   private constructor(private readonly driver: NativeStreamingDriver) {
+    super();
+    super.on('newListener', (eventName) => {
+      if (eventName === 'exit' || eventName === 'close') {
+        this.compatibilityWaitStarted = true;
+        this.scheduleCompatibilityDrain();
+      }
+    });
     this.warningsValue = driver.warnings();
     driver.setEventHandler((event) => this.onNativeEvent(event));
   }
@@ -276,6 +314,11 @@ export class MxcSandboxProcess {
     return this.warningsValue;
   }
 
+  /** ChildProcess-compatible exit status, or null while still running. */
+  get exitCode(): number | null {
+    return this.waitResult?.exitCode ?? this.nativeExitResult?.exitCode ?? null;
+  }
+
   get standardInput(): Writable | null {
     this.ensureAvailable('standard input');
     if (this.stdinTaken) return this.stdinValue ?? null;
@@ -292,6 +335,21 @@ export class MxcSandboxProcess {
 
   get standardError(): Readable | null {
     return this.takeReadable('stderr');
+  }
+
+  /** ChildProcess-compatible alias for {@link standardInput}. */
+  get stdin(): Writable | null {
+    return this.standardInput;
+  }
+
+  /** ChildProcess-compatible alias for {@link standardOutput}. */
+  get stdout(): Readable | null {
+    return this.standardOutput;
+  }
+
+  /** ChildProcess-compatible alias for {@link standardError}. */
+  get stderr(): Readable | null {
+    return this.standardError;
   }
 
   get outputMetadata(): unknown | undefined {
@@ -317,9 +375,11 @@ export class MxcSandboxProcess {
     return this.waitPromise;
   }
 
-  kill(): void {
+  kill(_signal?: NodeJS.Signals | number): boolean {
     this.ensureAvailable('process');
+    if (_signal === 0) return true;
     this.driver.kill();
+    return true;
   }
 
   /** @internal Register cleanup tied to terminal completion or disposal. */
@@ -368,10 +428,12 @@ export class MxcSandboxProcess {
         break;
       case 'exit':
         this.nativeExitResult = event.result;
-        if (this.waitPromise !== undefined) void this.finishWait(event.result);
+        setImmediate(() => {
+          void this.finishWait(event.result);
+        });
         break;
       case 'error':
-        this.fail(event.error);
+        setImmediate(() => this.fail(event.error));
         break;
     }
   }
@@ -380,14 +442,24 @@ export class MxcSandboxProcess {
     if (this.finalizing || this.waitResult !== undefined) return;
     this.finalizing = true;
     try {
+      if (this.compatibilityWaitStarted) {
+        this.ensureDrain('stdout');
+        this.ensureDrain('stderr');
+      }
       await this.finishOutputStreams();
       this.stdinValue?.destroy();
       if (this.disposed || this.failure !== undefined) return;
       this.outputMetadataValue = this.driver.outputMetadata();
       this.outputMetadataReady = true;
       this.warningsValue = this.driver.warnings();
+      this.appendCompatibilityDiagnostics();
+      this.stderrValue?.finishDeferredEnd();
       this.waitResult = result;
       this.waitResolve?.(result);
+      if (this.compatibilityWaitStarted) {
+        this.emit('exit', result.exitCode, null);
+        this.emit('close', result.exitCode, null);
+      }
     } catch (error) {
       this.fail(error as Error);
     } finally {
@@ -407,6 +479,13 @@ export class MxcSandboxProcess {
     this.stderrValue?.destroy(error);
     this.waitReject?.(error);
     this.waitReject = undefined;
+    if (!this.compatibilityErrorEmitted && this.listenerCount('error') > 0) {
+      this.compatibilityErrorEmitted = true;
+      this.emit('error', error);
+    }
+    if (this.compatibilityWaitStarted) {
+      this.emit('close', null, null);
+    }
     this.runCleanups();
     this.shutdown();
   }
@@ -424,13 +503,16 @@ export class MxcSandboxProcess {
     if (state === 'owned') return existing ?? null;
     if (state === 'missing') return null;
     if (state === 'draining') {
-      throw new Error(`sandbox ${which} is being drained internally by waitAsync()`);
+      this.ensureAvailable(which);
+      return existing ?? null;
     }
     this.ensureAvailable(which);
     const available = which === 'stdout'
       ? this.driver.hasStdout
       : this.driver.hasStderr;
-    const stream = available ? new NativeReadable(this.driver, which) : null;
+    const stream = available
+      ? new NativeReadable(this.driver, which, which === 'stderr')
+      : null;
     this.setReadable(which, stream === null ? 'missing' : 'owned', stream);
     return stream;
   }
@@ -445,7 +527,7 @@ export class MxcSandboxProcess {
       this.setReadable(which, 'missing', null);
       return;
     }
-    const stream = new NativeReadable(this.driver, which);
+    const stream = new NativeReadable(this.driver, which, which === 'stderr');
     stream.on('error', () => {});
     stream.resume();
     this.setReadable(which, 'draining', stream);
@@ -477,7 +559,7 @@ export class MxcSandboxProcess {
       const activity = stream.activity;
       let timer: NodeJS.Timeout | undefined;
       const completed = await Promise.race([
-        stream.completion.then(() => true),
+        stream.nativeCompletion.then(() => true),
         new Promise<false>((resolve) => {
           timer = setTimeout(() => resolve(false), OUTPUT_DRAIN_GRACE_MS);
         }),
@@ -491,6 +573,26 @@ export class MxcSandboxProcess {
     }
   }
 
+  private appendCompatibilityDiagnostics(): void {
+    const stderr = this.stderrValue;
+    if (stderr === null || stderr === undefined) return;
+    for (const warning of this.warningsValue) {
+      stderr.appendDiagnostic(warning);
+    }
+    if (
+      this.outputMetadataValue !== null
+      && typeof this.outputMetadataValue === 'object'
+      && !Array.isArray(this.outputMetadataValue)
+    ) {
+      const captureDenials = (
+        this.outputMetadataValue as Record<string, unknown>
+      ).captureDenials;
+      if (captureDenials !== undefined) {
+        stderr.appendDiagnostic(JSON.stringify(captureDenials));
+      }
+    }
+  }
+
   private shutdown(): void {
     if (this.shutdownRequested) return;
     this.shutdownRequested = true;
@@ -500,6 +602,23 @@ export class MxcSandboxProcess {
   private runCleanups(): void {
     for (const callback of this.cleanupCallbacks) callback();
     this.cleanupCallbacks.clear();
+  }
+
+  private scheduleCompatibilityDrain(): void {
+    if (this.compatibilityDrainScheduled) return;
+    this.compatibilityDrainScheduled = true;
+    setImmediate(() => {
+      if (
+        this.disposed
+        || this.finalizing
+        || this.failure !== undefined
+        || this.waitResult !== undefined
+      ) {
+        return;
+      }
+      this.ensureDrain('stdout');
+      this.ensureDrain('stderr');
+    });
   }
 
   private ensureAvailable(stream: string): void {

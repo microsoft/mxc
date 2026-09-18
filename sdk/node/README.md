@@ -204,12 +204,20 @@ const pty = spawnSandboxFromConfig(config);
 pty.onData((d) => process.stdout.write(d));
 pty.onExit(({ exitCode }) => console.log('exit:', exitCode));
 
-// Pipe mode — ChildProcess with separated stdout/stderr + reliable exit codes
+// Pipe mode — MxcSandboxProcess with separated stdout/stderr
 const child = spawnSandboxFromConfig(config, { usePty: false });
 child.stdout!.on('data', (d) => process.stdout.write(d));
 child.stderr!.on('data', (d) => process.stderr.write(d));
 child.on('close', (code) => console.log('exit:', code));
 ```
+
+Supported requests call the native MXC library directly. PTY mode starts a
+private Node helper under `node-pty` so the blocking attached call has a real
+terminal; the helper contains no backend or policy logic. Pipe mode returns
+`MxcSandboxProcess`, whose bounded native queues automatically slow input and
+output when either side cannot keep up. Configurations or compatibility options
+that the private native request cannot represent retain the existing executor
+path instead of losing backend support.
 
 ### 2. `spawnSandbox(script, policy, ...)` — convenience
 
@@ -553,12 +561,12 @@ granting file content reads. It requires a BaseContainer host with PSEC 1.1
 | Error | Cause | Fix |
 | --- | --- | --- |
 | `MXC is not supported on this platform` | `getPlatformSupport()` returned `isSupported: false`. On Linux, neither LXC nor a usable Bubblewrap 0.5.0+ installation is available. On macOS, the Seatbelt platform probe could not find `/usr/bin/sandbox-exec`. | Inspect `support.reason`. On Linux, also inspect `support.unavailableReasons` and install LXC or Bubblewrap 0.5.0+. On macOS, verify that `/usr/bin/sandbox-exec` exists; its absence indicates an incomplete or unsupported macOS installation. |
-| `wxc-exec.exe not found` / `lxc-exec not found` | The SDK couldn't locate the native binary. | Set `MXC_BIN_DIR=<dir>` so `<dir>/<arch>/wxc-exec.exe` (or `lxc-exec`) exists, or pass `options.executablePath` explicitly. |
+| Native MXC library not found | The SDK could not load the packaged `mxc_ffi` library. | Reinstall the package or set `MXC_FFI_DIR` to a directory containing the library for the current platform and architecture. |
 | `Invalid containment value '<x>'` | `containment` field doesn't match the parser's accepted values. | Use one of the abstract intents (`process`, `vm`, `microvm`) or a concrete backend listed in [Choosing a Backend](#choosing-a-backend). |
 | `'<x>' containment requires experimental mode` | A `windows_sandbox` / `wslc` / `microvm` / `isolation_session` / `hyperlight` backend was selected without the flag. | Pass `{ experimental: true }` in `SandboxSpawnOptions`. |
 | `process.commandLine starts with an unquoted Windows path containing a space` | `wxc-exec` rejects unquoted paths with spaces at parse time. | Quote the executable: `'"C:\\Program Files\\…\\foo.exe" args'`. |
 | `CreateProcessW(PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT) failed: ...` | The process security environment launch returned an OS-level error. Backend-unavailable failures automatically fall through to an AppContainer tier during selection. | Check the Windows build requirements for the backend you selected. |
-| Process exits `-1` / `4294967295` with no stdout | Native binary terminated abnormally. | Re-run with `options.debug: true` (or `options.logDir: '<dir>'`) to capture diagnostic logs. |
+| Process exits with no stdout | The native backend failed before producing workload output. | Enable the diagnostic environment variables documented in [Diagnostics](../../docs/diagnostics.md) and inspect stderr or the resulting log. |
 | `Policy version '<x>' is older than supported` / `newer than supported` | Version is outside the supported version lines. | Use an exact registered version: `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, or `0.9.0-alpha`. See [Compatibility](#compatibility). |
 | `Policy version '<x>' is not a registered schema contract` / `Unsupported contract version` | The declaration is not registered, even if it falls between supported versions (for example, `0.6.1-alpha`). | Use an exact version from [Compatibility](#compatibility); state-aware and development-only requests require `0.9.0-alpha`. |
 | `Schema <x> does not support containment '<backend>'` | The selected backend was introduced after the declared schema version. | Use the backend's minimum version from [Choosing a Backend](#choosing-a-backend). Seatbelt requires `0.7.0-alpha`; experimental backends require `0.9.0-alpha`. |
@@ -577,10 +585,10 @@ For backend-specific errors, see the per-backend guide linked from the [Choosing
 ```typescript
 // Spawn — config-based (recommended)
 createConfigFromPolicy(policy, containment?, containerName?) → ContainerConfig
-spawnSandboxFromConfig(config, options?, workingDirectory?, env?) → IPty | ChildProcess
+spawnSandboxFromConfig(config, options?, workingDirectory?, env?) → IPty | MxcSandboxProcess | ChildProcess
 
 // Spawn — convenience (process containment only)
-spawnSandbox(script, policy, options?, workingDirectory?, containerName?, env?) → IPty
+spawnSandbox(script, policy, options?, workingDirectory?, containerName?, env?) → IPty | MxcSandboxProcess | ChildProcess
 spawnSandboxAsync(script, policy, ...) → Promise<{ stdout, stderr, exitCode }>
 
 // State-aware lifecycle (currently `isolation_session`, `windows_sandbox`, and `wslc` — all Windows-only)
