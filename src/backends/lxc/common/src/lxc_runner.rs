@@ -46,30 +46,39 @@ enum ContainerRelease {
     Stop,
 }
 
-fn release_before_policy_teardown<R, T>(
+fn release_container_once<R, T>(
+    container_released: &mut bool,
     cleanup_policy: bool,
     destroy_on_exit: bool,
+    force_stop: bool,
     mut release: R,
-    mut policy_teardown: T,
+    mut retain_enforcement: T,
 ) -> Result<(), String>
 where
     R: FnMut(ContainerRelease) -> Result<(), String>,
     T: FnMut(),
 {
-    if !cleanup_policy && !destroy_on_exit {
+    if *container_released {
         return Ok(());
     }
 
     let release_kind = if destroy_on_exit {
         ContainerRelease::Destroy
-    } else {
+    } else if cleanup_policy || force_stop {
         ContainerRelease::Stop
+    } else {
+        return Ok(());
     };
-    release(release_kind)?;
-    if cleanup_policy {
-        policy_teardown();
+
+    let result = release(release_kind);
+    // A failed release must leave enforcement installed. A verified release
+    // removed the network namespace, so its former init PID must never be used
+    // for teardown after it can be recycled.
+    retain_enforcement();
+    if result.is_ok() {
+        *container_released = true;
     }
-    Ok(())
+    result
 }
 
 pub struct LxcScriptRunner {
@@ -87,6 +96,7 @@ struct PreparedLxc {
     firewall: ContainerFirewall,
     cleanup_policy: bool,
     destroy_on_exit: bool,
+    container_released: bool,
     cleaned_up: bool,
 }
 
@@ -106,13 +116,8 @@ impl PreparedLxc {
         self.cleaned_up = true;
     }
 
-    fn cleanup(&mut self, logger: &mut Logger) -> Vec<String> {
-        if self.cleaned_up {
-            return Vec::new();
-        }
-        self.cleaned_up = true;
+    fn clear_proxy_host_pin(&mut self, logger: &mut Logger) -> Vec<String> {
         let mut warnings = Vec::new();
-
         if self.pinned && self.cleanup_policy {
             let command = LxcScriptRunner::build_hosts_unpin_command();
             let result = self.container.attach_run(
@@ -132,51 +137,69 @@ impl PreparedLxc {
                 let warning = format!("failed to clear the proxy host pin: {reason}");
                 let _ = writeln!(logger, "Warning: {warning}");
                 warnings.push(warning);
+            } else {
+                self.pinned = false;
             }
         }
+        warnings
+    }
 
-        if self.cleanup_policy || self.destroy_on_exit {
+    fn release_container(&mut self, force_stop: bool) -> Result<(), String> {
+        let container = &self.container;
+        let fw_manager = &mut self.fw_manager;
+        let ingress_manager = &mut self.ingress_manager;
+        let result = release_container_once(
+            &mut self.container_released,
+            self.cleanup_policy,
+            self.destroy_on_exit,
+            force_stop,
+            |release| match release {
+                ContainerRelease::Destroy => container.destroy_and_verify(),
+                ContainerRelease::Stop => container.stop_and_verify(),
+            },
+            || {
+                fw_manager.set_preserve_policy(true);
+                if let Some(manager) = ingress_manager.as_mut() {
+                    manager.set_preserve_policy(true);
+                }
+            },
+        );
+        if self.container_released {
+            // A failed pre-release unpin was already reported. Once the
+            // container is gone there is no safe process left to retry it in.
+            self.pinned = false;
+        }
+        result
+    }
+
+    fn cleanup(&mut self, logger: &mut Logger) -> Vec<String> {
+        if self.cleaned_up {
+            return Vec::new();
+        }
+        let mut warnings = self.clear_proxy_host_pin(logger);
+
+        if !self.container_released && (self.cleanup_policy || self.destroy_on_exit) {
             let action = if self.destroy_on_exit {
                 "Destroying"
             } else {
                 "Stopping"
             };
             let _ = writeln!(logger, "{action} container...");
-            let container = &self.container;
-            let fw_manager = &mut self.fw_manager;
-            let ingress_manager = &mut self.ingress_manager;
-            if let Err(error) = release_before_policy_teardown(
-                self.cleanup_policy,
-                self.destroy_on_exit,
-                |release| match release {
-                    ContainerRelease::Destroy => container.destroy_and_verify(),
-                    ContainerRelease::Stop => container.stop_and_verify(),
-                },
-                || {
-                    // The chains lived in the container's network namespace,
-                    // which the verified release removed. Do not nsenter the
-                    // former init PID: it may already identify another process.
-                    fw_manager.set_preserve_policy(true);
-                    if let Some(manager) = ingress_manager.as_mut() {
-                        manager.set_preserve_policy(true);
-                    }
-                },
-            ) {
-                let verb = if self.destroy_on_exit {
-                    "destroy"
-                } else {
-                    "stop"
-                };
-                let warning = format!(
-                    "failed to {verb} and verify container before releasing network policy: \
-                     {error}; firewall enforcement was retained"
-                );
-                let _ = writeln!(logger, "Warning: {warning}");
-                warnings.push(warning);
-                self.preserve_firewall_ownership();
-                return warnings;
-            }
         }
+        if let Err(error) = self.release_container(false) {
+            let verb = if self.destroy_on_exit {
+                "destroy"
+            } else {
+                "stop"
+            };
+            let warning = format!(
+                "failed to {verb} and verify container before releasing network policy: \
+                 {error}; firewall enforcement was retained"
+            );
+            let _ = writeln!(logger, "Warning: {warning}");
+            warnings.push(warning);
+        }
+        self.cleaned_up = true;
         warnings
     }
 }
@@ -596,6 +619,7 @@ impl LxcScriptRunner {
             firewall,
             cleanup_policy: self.cleanup_policy,
             destroy_on_exit: self.destroy_on_exit,
+            container_released: false,
             cleaned_up: false,
         };
 
@@ -891,10 +915,28 @@ impl SandboxProcess for LxcSandboxProcess {
     }
 
     fn kill(&mut self) -> std::io::Result<()> {
-        if self.child.try_wait()?.is_some() {
-            return Ok(());
+        if let Some(teardown) = self.teardown.as_mut() {
+            // A workload can setsid() out of lxc-attach's process group. The
+            // verified container release is the tree-kill boundary for LXC.
+            let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+            self.warnings
+                .extend(teardown.clear_proxy_host_pin(&mut logger));
+            let verb = if teardown.destroy_on_exit {
+                "destroy"
+            } else {
+                "stop"
+            };
+            return teardown.release_container(true).map_err(|error| {
+                std::io::Error::other(format!(
+                    "LXC: failed to {verb} and verify the container: {error}; \
+                     firewall enforcement was retained"
+                ))
+            });
         }
-        group_kill(&mut self.child)
+        if self.child.try_wait()?.is_none() {
+            group_kill(&mut self.child)?;
+        }
+        Ok(())
     }
 
     fn wait(&mut self) -> std::io::Result<i32> {
@@ -1083,9 +1125,12 @@ mod tests {
         let events = Rc::new(RefCell::new(Vec::new()));
         let release_events = Rc::clone(&events);
         let teardown_events = Rc::clone(&events);
+        let mut released = false;
 
-        release_before_policy_teardown(
+        release_container_once(
+            &mut released,
             true,
+            false,
             false,
             move |release| {
                 assert!(matches!(release, ContainerRelease::Stop));
@@ -1097,15 +1142,19 @@ mod tests {
         .expect("verified stop");
 
         assert_eq!(&*events.borrow(), &["stop", "policy"]);
+        assert!(released);
     }
 
     #[test]
     fn failed_reusable_stop_retains_policy_ownership() {
-        let policy_released = Rc::new(RefCell::new(false));
-        let callback_state = Rc::clone(&policy_released);
+        let enforcement_retained = Rc::new(RefCell::new(false));
+        let callback_state = Rc::clone(&enforcement_retained);
+        let mut released = false;
 
-        let result = release_before_policy_teardown(
+        let result = release_container_once(
+            &mut released,
             true,
+            false,
             false,
             |release| {
                 assert!(matches!(release, ContainerRelease::Stop));
@@ -1116,19 +1165,23 @@ mod tests {
 
         assert!(result.is_err());
         assert!(
-            !*policy_released.borrow(),
-            "policy ownership must be retained until stop is verified"
+            *enforcement_retained.borrow(),
+            "failed release must retain firewall ownership"
         );
+        assert!(!released);
     }
 
     #[test]
     fn failed_destroy_retains_policy_ownership() {
-        let policy_released = Rc::new(RefCell::new(false));
-        let callback_state = Rc::clone(&policy_released);
+        let enforcement_retained = Rc::new(RefCell::new(false));
+        let callback_state = Rc::clone(&enforcement_retained);
+        let mut released = false;
 
-        let result = release_before_policy_teardown(
+        let result = release_container_once(
+            &mut released,
             true,
             true,
+            false,
             |release| {
                 assert!(matches!(release, ContainerRelease::Destroy));
                 Err("destroy verification failed".to_string())
@@ -1138,17 +1191,21 @@ mod tests {
 
         assert!(result.is_err());
         assert!(
-            !*policy_released.borrow(),
-            "policy ownership must be retained until destroy is verified"
+            *enforcement_retained.borrow(),
+            "failed release must retain firewall ownership"
         );
+        assert!(!released);
     }
 
     #[test]
     fn preserved_policy_keeps_reusable_container_running() {
         let release_called = Rc::new(RefCell::new(false));
         let callback_state = Rc::clone(&release_called);
+        let mut released = false;
 
-        release_before_policy_teardown(
+        release_container_once(
+            &mut released,
+            false,
             false,
             false,
             move |_release| {
@@ -1160,6 +1217,98 @@ mod tests {
         .expect("nothing to release");
 
         assert!(!*release_called.borrow());
+        assert!(!released);
+    }
+
+    #[test]
+    fn kill_forces_preserved_reusable_container_to_stop() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let release_events = Rc::clone(&events);
+        let retain_events = Rc::clone(&events);
+        let mut released = false;
+
+        release_container_once(
+            &mut released,
+            false,
+            false,
+            true,
+            move |release| {
+                assert!(matches!(release, ContainerRelease::Stop));
+                release_events.borrow_mut().push("stop");
+                Ok(())
+            },
+            move || retain_events.borrow_mut().push("retain"),
+        )
+        .expect("kill must synchronously stop a reusable container");
+
+        assert_eq!(&*events.borrow(), &["stop", "retain"]);
+        assert!(released);
+    }
+
+    #[test]
+    fn successful_kill_release_is_idempotent() {
+        let release_count = Rc::new(RefCell::new(0));
+        let callback_count = Rc::clone(&release_count);
+        let mut released = false;
+
+        for _ in 0..2 {
+            release_container_once(
+                &mut released,
+                true,
+                true,
+                true,
+                |release| {
+                    assert!(matches!(release, ContainerRelease::Destroy));
+                    *callback_count.borrow_mut() += 1;
+                    Ok(())
+                },
+                || {},
+            )
+            .expect("repeated release");
+        }
+
+        assert_eq!(*release_count.borrow(), 1);
+        assert!(released);
+    }
+
+    #[test]
+    fn failed_kill_release_can_be_retried_without_dropping_enforcement() {
+        let release_attempts = Rc::new(RefCell::new(0));
+        let callback_attempts = Rc::clone(&release_attempts);
+        let retained = Rc::new(RefCell::new(0));
+        let retained_callbacks = Rc::clone(&retained);
+        let mut released = false;
+
+        let first = release_container_once(
+            &mut released,
+            true,
+            false,
+            true,
+            |_| {
+                *callback_attempts.borrow_mut() += 1;
+                Err("stop failed".to_string())
+            },
+            || *retained_callbacks.borrow_mut() += 1,
+        );
+        assert!(first.is_err());
+        assert!(!released);
+
+        release_container_once(
+            &mut released,
+            true,
+            false,
+            true,
+            |_| {
+                *release_attempts.borrow_mut() += 1;
+                Ok(())
+            },
+            || *retained.borrow_mut() += 1,
+        )
+        .expect("a later wait or drop can retry container release");
+
+        assert!(released);
+        assert_eq!(*release_attempts.borrow(), 2);
+        assert_eq!(*retained.borrow(), 2);
     }
 
     fn request_with_policy(policy: ContainerPolicy) -> ExecutionRequest {
