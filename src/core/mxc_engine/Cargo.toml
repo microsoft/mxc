@@ -48,10 +48,10 @@ seatbelt_common = { workspace = true }
 
 [features]
 default = []
-# Enables constructing the run-to-completion runner for each experimental
-# backend. Mirrors the executor binaries' feature set so backend selection can
-# live in one place. The build-time binary-staging that some backends also need
-# (e.g. NanVix's `nanvix_binaries`) stays with the executor crates.
+# Enables constructing the run-to-completion runner for optional backends.
+# Mirrors the executor binaries' feature set so backend selection can live in
+# one place. The build-time binary-staging that some backends also need (e.g.
+# NanVix's `nanvix_binaries`) stays with the executor crates.
 microvm = ["dep:nanvix_runner"]
 wslc = ["dep:wslc_common", "wslc_common/link-wslcsdk"]
 hyperlight = ["dep:hyperlight_common", "hyperlight_common/hyperlight"]

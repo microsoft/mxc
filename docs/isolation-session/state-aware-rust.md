@@ -12,11 +12,11 @@ concurrency story, and error mapping.
 ### In scope
 
 - The Rust layer of state-aware IsolationSession in `wxc-exec.exe`, behind
-  the `--features isolation_session` Cargo feature and the `--experimental`
-  CLI flag.
+  the `--features isolation_session` Cargo feature. The published v0.9
+  surface requires no runtime experimental opt-in.
 - The wire format consumed by `wxc-exec.exe` for state-aware requests
   (top-level `phase` discriminator, `sandboxId`,
-  `experimental.isolation_session.provision` typed configuration).
+  `isolationSession.provision` typed configuration).
 - Mapping from the OS-side service's HRESULTs to the wire-format `MxcError`
   codes.
 
@@ -52,8 +52,8 @@ Requirements on an in-process caller:
   drop. A UI application must marshal onto a background thread.
   `mxc-sdk/examples/sta_probe.rs` measures this against a live host.
 
-The **one-shot** surface is served in-process with piped stdio: `mxc_sdk::run`
-and `spawn_sandbox`, behind the experimental opt-in.
+The **one-shot** surface is served in-process with piped stdio:
+`mxc_sdk::run` and `spawn_sandbox`, without a runtime experimental opt-in.
 
 ### Out of scope (for v1)
 
@@ -85,7 +85,7 @@ without metadata use `()`.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `appId` | string \| absent | absent | Optional identifier for the calling application, associating the provisioned agent user with its owning app. **A packaged application must supply its Package Family Name in the form `PFN:<packageFamilyName>`** (for example `PFN:Contoso.App_8wekyb3d8bbwe`). An unpackaged application may pass any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it. Validated **structurally only** (no control characters; at most 256 characters) — MXC does not judge what a valid application identity looks like. Whitespace and case are preserved. An explicitly supplied empty string remains distinct from omission; exact JSON input rejects `null`. Backend semantic rejections surface as `policy_validation` before any OS call. The wire path is `experimental.isolation_session.provision.appId`. |
+| `appId` | string \| absent | absent | Optional identifier for the calling application, associating the provisioned agent user with its owning app. **A packaged application must supply its Package Family Name in the form `PFN:<packageFamilyName>`** (for example `PFN:Contoso.App_8wekyb3d8bbwe`). An unpackaged application may pass any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it. Validated **structurally only** (no control characters; at most 256 characters) — MXC does not judge what a valid application identity looks like. Whitespace and case are preserved. An explicitly supplied empty string remains distinct from omission; exact JSON input rejects `null`. Backend semantic rejections surface as `policy_validation` before any OS call. The wire path is `isolationSession.provision.appId`. |
 The top-level `network` field is required and must use the standard directional
 all-allow posture.
 
@@ -293,10 +293,10 @@ meaning for this backend.
 | `containerId` | accepted, no effect | rejected | rejected | rejected | rejected | rejected |
 | `process.commandLine` | **honored** | rejected | rejected | **honored** | rejected | rejected |
 | `process.{cwd,env,timeout}` | **honored** | rejected | rejected | **honored** | rejected | rejected |
-| `experimental.isolation_session.provision.appId` | rejected | **honored** | n/a | n/a | n/a | n/a |
-| `experimental.isolation_session.<another phase>.*` | rejected | rejected | rejected | rejected | rejected | rejected |
+| `isolationSession.provision.appId` | rejected | **honored** | n/a | n/a | n/a | n/a |
+| `isolationSession.<another phase>.*` | rejected | rejected | rejected | rejected | rejected | rejected |
 | `processContainer` / `lxc` / `seatbelt` (stable sections) | rejected | rejected | rejected | rejected | rejected | rejected |
-| another backend's `experimental.<backend>` section | rejected | rejected | rejected | rejected | rejected | rejected |
+| another backend's top-level backend section | rejected | rejected | rejected | rejected | rejected | rejected |
 
 Notes on the rows that are not a simple accept/reject:
 
@@ -316,7 +316,7 @@ Notes on the rows that are not a simple accept/reject:
   separately.
 - **Foreign or mis-slotted experimental payloads** are rejected by the exact
   request root, not silently ignored. Only provision defines the
-  `experimental.isolation_session.provision` input. Exact adaptation carries
+  `isolationSession.provision` input. Exact adaptation carries
   its runtime configuration directly to checked engine binding; the dispatcher
   does not navigate or reparse experimental JSON.
 - **`containerId`** is not part of the exact state-aware roots. Lifecycle
@@ -372,9 +372,9 @@ whole section for every backend. See the matrix notes above.
 
 - `phase` — the discriminator. Required for state-aware; absent for one-shot.
 - `sandboxId` — required for non-provision phases.
-- `experimental.isolation_session.provision` — optional provision configuration;
+- `isolationSession.provision` — optional provision configuration;
   `start` / `exec` / `stop` / `deprovision` carry no backend config.
-- `experimental.isolation_session.provision.appId` — the calling application's
+- `isolationSession.provision.appId` — the calling application's
   identifier. Honoured here and not accepted by the one-shot surface;
   supplying it there is rejected as `malformed_request`.
 

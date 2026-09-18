@@ -68,7 +68,7 @@ try {
     Set-Content (Join-Path $SecretDir "inner.txt") "DIR_SECRET"
 
     Write-Host "Running WSLC denied-path masking test (denied sibling file + dir left unmounted)..."
-    $wxcArgs = @("--experimental")
+    $wxcArgs = @()
     if ($Debug) { $wxcArgs += "--debug" }
     $wxcArgs += $ConfigPath
 

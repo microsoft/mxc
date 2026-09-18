@@ -57,7 +57,7 @@ if (-not $WxcExec -or -not (Test-Path $WxcExec)) {
 Write-Host "Running WSLC cooperative proxy functional test..."
 Write-Host "Binary: $WxcExec" -ForegroundColor Gray
 
-$wxcArgs = @("--experimental")
+$wxcArgs = @()
 if ($Debug) { $wxcArgs += "--debug" }
 $wxcArgs += $ConfigPath
 

@@ -1,10 +1,27 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::common::{assert_invalid, assert_valid};
+use crate::common::assert_invalid;
 
 #[test]
-fn accepts_experimental_section() {
+fn rejects_ungraduated_development_fields() {
+    for field in [
+        r#""test": {"message": "this is a message"}"#,
+        r#""windowsSandbox": {}"#,
+    ] {
+        let json = format!(
+            r#"{{
+                "version": "0.9.0-alpha",
+                "process": {{"commandLine": "echo"}},
+                {field}
+            }}"#
+        );
+        assert_invalid(&json);
+    }
+}
+
+#[test]
+fn rejects_legacy_experimental_section() {
     let json = r#"{
         "version": "0.9.0-alpha",
         "process": {"commandLine": "echo"},
@@ -13,24 +30,11 @@ fn accepts_experimental_section() {
         }
     }"#;
 
-    assert_valid(json);
-}
-
-#[test]
-fn rejects_unknown_experimental_field() {
-    let json = r#"{
-        "version": "0.9.0-alpha",
-        "process": {"commandLine": "echo"},
-        "experimental": {
-            "unknown": "value"
-        }
-    }"#;
-
     assert_invalid(json);
 }
 
 #[test]
-fn rejects_null_experimental_section() {
+fn rejects_null_legacy_experimental_section() {
     let json = r#"{
         "version": "0.9.0-alpha",
         "process": {"commandLine": "echo"},
@@ -73,18 +77,17 @@ fn rejects_moved_experimental_seatbelt_sections() {
 
 #[test]
 fn rejects_state_aware_experimental_sections() {
-    for field in [
-        r#""isolation_session": {"provision": {}}"#,
-        r#""wslc": {"provision": {}}"#,
-    ] {
-        let json = format!(
-            r#"{{
-                "version": "0.9.0-alpha",
-                "process": {{"commandLine": "echo"}},
-                "experimental": {{{field}}}
-            }}"#
-        );
+    let isolation_session = r#"{
+        "version": "0.9.0-alpha",
+        "process": {"commandLine": "echo"},
+        "isolationSession": {"provision": {}}
+    }"#;
+    let wslc = r#"{
+        "version": "0.9.0-alpha",
+        "process": {"commandLine": "echo"},
+        "wslc": {"provision": {}}
+    }"#;
 
-        assert_invalid(&json);
-    }
+    assert_invalid(isolation_session);
+    assert_invalid(wslc);
 }

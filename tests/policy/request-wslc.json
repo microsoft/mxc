@@ -18,6 +18,5 @@
       }
     ]
   },
-  "containerName": "golden-wslc",
-  "experimental": true
+  "containerName": "golden-wslc"
 }

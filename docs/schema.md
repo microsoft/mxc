@@ -2,9 +2,9 @@
 ## Configuration Schema
 
 MXC uses a JSON configuration file. The current stable schema is at
-[`schemas/stable/mxc-config.schema.0.8.0-alpha.json`](../schemas/stable/mxc-config.schema.0.8.0-alpha.json).
-For development, the dev schema at
-[`schemas/dev/mxc-config.schema.0.9.0-alpha.json`](../schemas/dev/mxc-config.schema.0.9.0-alpha.json)
+[`schemas/stable/mxc-config.schema.0.9.0-alpha.json`](../schemas/stable/mxc-config.schema.0.9.0-alpha.json).
+For development, the exact schema at
+[`schemas/dev/mxc-config.schema.0.10.0-alpha.json`](../schemas/dev/mxc-config.schema.0.10.0-alpha.json)
 includes experimental features and may change without notice.
 
 Editors that support JSON Schema will provide autocomplete and validation when
@@ -13,10 +13,10 @@ production configs and the dev schema when working on experimental features:
 
 ```json
 // Production
-"$schema": "./schemas/stable/mxc-config.schema.0.8.0-alpha.json"
+"$schema": "./schemas/stable/mxc-config.schema.0.9.0-alpha.json"
 
 // Development (experimental features)
-"$schema": "./schemas/dev/mxc-config.schema.0.9.0-alpha.json"
+"$schema": "./schemas/dev/mxc-config.schema.0.10.0-alpha.json"
 ```
 
 ### Schema 0.8 networking
@@ -116,7 +116,7 @@ that can be executed independently.
 
 ```json
 {
-    "version": "0.9.0-alpha",              // Schema version (semver). Minimum supported: "0.6.0-alpha"; current stable: "0.8.0-alpha".
+    "version": "0.9.0-alpha",              // Exact schema version. Minimum supported: "0.6.0-alpha"; current stable: "0.9.0-alpha".
     "containerId": "my-container",         // Externally assigned container ID
     "containment": "processcontainer",     // Backend (see table below)
 
@@ -239,18 +239,16 @@ that can be executed independently.
                                            // and a permitting administrative policy are also required
     },
 
-    "experimental": {                      // Experimental features (requires --experimental)
-        "wslc": {                          // WSL Container settings
-            "image": "alpine:latest",      // Container image name
-            "imageTarPath": "C:\\images\\alpine.tar",  // Import image from local tar file
-            "cpuCount": 4,                 // CPU count for WSLC session
-            "memoryMb": 2048,              // Memory in MB for WSLC session
-            "gpu": false,                  // GPU passthrough
-            "storagePath": "C:\\wslc-storage",  // Image store path
-            "portMappings": [              // Host<->container port forwarding. TCP only -- the WSLC SDK runtime returns E_NOTIMPL for UDP, so the parser hard-rejects "udp" entries with a clear message.
-                { "windowsPort": 8080, "containerPort": 80, "protocol": "tcp" }
-            ]
-        }
+    "wslc": {                              // WSL Container settings (v0.9+)
+        "image": "alpine:latest",          // Container image name
+        "imageTarPath": "C:\\images\\alpine.tar",  // Import image from local tar file
+        "cpuCount": 4,                     // CPU count for WSLC session
+        "memoryMb": 2048,                  // Memory in MB for WSLC session
+        "gpu": false,                      // GPU passthrough
+        "storagePath": "C:\\wslc-storage", // Image store path
+        "portMappings": [                  // Host<->container port forwarding. TCP only -- the WSLC SDK runtime returns E_NOTIMPL for UDP, so the parser hard-rejects "udp" entries with a clear message.
+            { "windowsPort": 8080, "containerPort": 80, "protocol": "tcp" }
+        ]
     }
 }
 ```
@@ -397,7 +395,7 @@ force a particular backend.
 | `"lxc"` | Native LXC container isolation. No abstract intent resolves to LXC; request it explicitly. |
 | `"microvm"` | MicroVM isolation via Windows HyperV Platform (NanVix microkernel) |
 | `"hyperlight"` | MicroVM isolation via Hyperlight + Unikraft with an embedded CPython snapshot (experimental) |
-| `"isolation_session"` | Windows isolation session — runs the workload as a freshly-provisioned, per-execution isolated user account in its own OS-managed session (experimental). Dual-mode: one-shot and state-aware. |
+| `"isolation_session"` | Windows isolation session — runs the workload as a freshly-provisioned, per-execution isolated user account in its own OS-managed session. Dual-mode: one-shot and state-aware. |
 | `"seatbelt"` | macOS sandbox isolation (Seatbelt). Requires macOS 15 or later — see [`docs/seatbelt/seatbelt-backend.md`](seatbelt/seatbelt-backend.md). |
 | `"bubblewrap"` | Unprivileged Linux sandboxing via Bubblewrap/user namespaces. The Linux default — see [`docs/bwrap-support/bubblewrap-backend.md`](bwrap-support/bubblewrap-backend.md). |
 
@@ -413,15 +411,20 @@ state-aware lifecycle (`provision` / `start` / `exec` / `stop` /
 `ExecutionRequest` to run once, a state-aware envelope identifies which
 phase is being driven against an existing provisioned sandbox.
 
-State-aware envelopes currently require the exact `0.9.0-alpha` development
-contract. The published `0.6.0-alpha`, `0.7.0-alpha`, and `0.8.0-alpha`
-contracts contain only one-shot request roots. The state-aware field shape is
-documented by the exact development schema:
+State-aware envelopes use an exact backend-specific contract:
+
+- IsolationSession uses published `0.9.0-alpha`.
+- WSLC uses published `0.9.0-alpha`; Windows Sandbox uses development
+  `0.10.0-alpha`.
+
+The published `0.6.0-alpha`, `0.7.0-alpha`, and `0.8.0-alpha` contracts contain
+only one-shot request roots. This Windows Sandbox example therefore uses the
+exact development schema:
 
 ```json
 {
-    "$schema": "./schemas/dev/mxc-config.schema.0.9.0-alpha.json",
-    "version": "0.9.0-alpha",
+    "$schema": "./schemas/dev/mxc-config.schema.0.10.0-alpha.json",
+    "version": "0.10.0-alpha",
     "phase": "exec",                       // One of: provision | start | exec | stop | deprovision
     "sandboxId": "wsb:abcd1234",           // Required for non-provision phases.
                                            // Prefix routes to the backend (wsb: -> windows_sandbox,
@@ -432,8 +435,8 @@ documented by the exact development schema:
     // Cross-cutting fields (process / filesystem / network / ui) sit at the TOP
     // level, exactly as in a one-shot request -- there is no wrapping `config`
     // object. Backend- and phase-specific config, when a phase has any, nests
-    // under `experimental.<backendKey>.<phase>`, e.g.:
-    //   "experimental": { "isolation_session": { "provision": { "appId": "PFN:Contoso.App_8wekyb3d8bbwe" } } }
+    // under its permanent backend section, e.g.:
+    //   "isolationSession": { "provision": { "appId": "PFN:Contoso.App_8wekyb3d8bbwe" } }
 }
 ```
 
@@ -447,37 +450,35 @@ Phase / sandboxId / containment validation:
 | `stop`          | **Required** | Ignored if present |
 | `deprovision`   | **Required** | Ignored if present |
 
-State-aware-capable backends today: `isolation_session` and `windows_sandbox`
-(both Windows-only, both still experimental). The dispatcher rejects
-state-aware envelopes for backends that have not opted in.
+State-aware-capable backends today are `isolation_session`, `windows_sandbox`,
+and `wslc` (all Windows-only). IsolationSession does not require runtime
+experimental authorization; Windows Sandbox does.
 
 Full lifecycle API: [`docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md`](state-aware-lifecycle/mxc-state-aware-sandbox-api.md).
 
 ### Schema Versioning
 
-MXC config files include an optional `version` field using
-[Semantic Versioning](https://semver.org/) (MAJOR.MINOR.PATCH). The parser uses
-this to detect incompatible configs and provide clear upgrade guidance. If
-`version` is absent, the config is assumed compatible with the current version.
+MXC execution config files require a `version` field naming an exact registered
+contract. Version spelling, including patch and prerelease, is significant;
+there is no range, latest-version, or missing-version fallback.
 
 Versions with a pre-release suffix (e.g., `-alpha`) indicate the schema is not
 yet stable — breaking changes may occur in any release. Once the schema is
 stable, version `1.0.0` (no suffix) will be released. After `1.0.0`, breaking
 changes require a major version bump per semver.
 
-The parser compares the config's major.minor against its supported version
-(pre-release labels are ignored for comparison):
+Registered contracts:
 
-| Config `version` | Parser supports | Result |
-|---|---|---|
-| absent | >=0.6, <=0.9 | Accepted (assumed compatible) |
-| `"0.5.0-alpha"` | >=0.6, <=0.9 | **Rejected** — "older than supported" |
-| `"0.6.0-alpha"` | >=0.6, <=0.9 | Accepted (0.6 in range) |
-| `"0.7.0-alpha"` | >=0.6, <=0.9 | Accepted (0.7 in range) |
-| `"0.8.0-alpha"` | >=0.6, <=0.9 | Accepted (0.8 in range) |
-| `"0.9.0-alpha"` | >=0.6, <=0.9 | Accepted (0.9 in range) |
-| `"0.10.0"` | >=0.6, <=0.9 | **Rejected** — "newer than supported" |
-| `"1.0.0"` | >=0.6, <=0.9 | **Rejected** — "newer than supported" |
+| Config `version` | Status |
+|---|---|
+| `"0.6.0-alpha"` | Published; minimum supported |
+| `"0.7.0-alpha"` | Published |
+| `"0.8.0-alpha"` | Published |
+| `"0.9.0-alpha"` | Published; current stable |
+| `"0.10.0-alpha"` | Mutable development contract |
+
+An absent version, a retired version, or any unregistered spelling such as
+`0.6.1-alpha`, `0.10.0`, or `1.0.0` is rejected.
 
 #### When to bump
 
