@@ -116,6 +116,68 @@ pub unsafe extern "C" fn mxc_io_spawn_request_callback(
     out_handle: *mut *mut MxcIoCoordinator,
     out_error: *mut MxcErrorDetail,
 ) -> i32 {
+    unsafe {
+        spawn_callback(
+            "mxc_io_spawn_request_callback",
+            request_json_utf8,
+            callback,
+            user_data,
+            out_handle,
+            out_error,
+            |request_json| {
+                let request = request::build_request_from_json(request_json)
+                    .map_err(|error| sdk_error_detail(&error))?;
+                mxc_engine::spawn_io(&request).map_err(|error| sdk_error_detail(&error))
+            },
+        )
+    }
+}
+
+/// Execute a state-aware `exec` request and deliver native I/O completions
+/// through `callback`.
+///
+/// This is the lifecycle counterpart to [`mxc_io_spawn_request_callback`].
+/// The request must be an `exec` phase and reference an already-provisioned
+/// sandbox.
+///
+/// # Safety
+/// The pointer and callback lifetime requirements are identical to
+/// [`mxc_io_spawn_request_callback`].
+#[no_mangle]
+pub unsafe extern "C" fn mxc_io_state_aware_exec_callback(
+    request_json_utf8: *const c_char,
+    experimental: i32,
+    callback: Option<MxcIoEventCallback>,
+    user_data: *mut c_void,
+    out_handle: *mut *mut MxcIoCoordinator,
+    out_error: *mut MxcErrorDetail,
+) -> i32 {
+    unsafe {
+        spawn_callback(
+            "mxc_io_state_aware_exec_callback",
+            request_json_utf8,
+            callback,
+            user_data,
+            out_handle,
+            out_error,
+            |request_json| {
+                let process = mxc_engine::exec_state_aware_json(request_json, experimental != 0)
+                    .map_err(|error| sdk_error_detail(&error))?;
+                Ok(mxc_engine::coordinate_io(process, None))
+            },
+        )
+    }
+}
+
+unsafe fn spawn_callback(
+    operation: &str,
+    request_json_utf8: *const c_char,
+    callback: Option<MxcIoEventCallback>,
+    user_data: *mut c_void,
+    out_handle: *mut *mut MxcIoCoordinator,
+    out_error: *mut MxcErrorDetail,
+    spawn: impl FnOnce(&str) -> Result<IoCoordinator, (i32, MxcErrorDetail)>,
+) -> i32 {
     let Some(callback) = callback else {
         return MXC_STATUS_NULL_ARGUMENT;
     };
@@ -148,10 +210,7 @@ pub unsafe extern "C" fn mxc_io_spawn_request_callback(
                     )
                 })?
         };
-        let request = request::build_request_from_json(request_json)
-            .map_err(|error| sdk_error_detail(&error))?;
-        let coordinator =
-            mxc_engine::spawn_io(&request).map_err(|error| sdk_error_detail(&error))?;
+        let coordinator = spawn(request_json)?;
         let inner = Arc::new(coordinator);
         let events = Arc::new(EventPumpState {
             callback,
@@ -173,7 +232,7 @@ pub unsafe extern "C" fn mxc_io_spawn_request_callback(
         })
     }))
     .unwrap_or_else(|panic| {
-        crate::report_panic("mxc_io_spawn_request", &*panic);
+        crate::report_panic(operation, &*panic);
         Err((
             MXC_STATUS_PANIC,
             MxcErrorDetail::from_message("the mxc engine panicked"),
@@ -282,18 +341,8 @@ fn run_event_pump(coordinator: Arc<IoCoordinator>, events: Arc<EventPumpState>) 
     let mut output = vec![0_u8; EVENT_BUFFER_BYTES];
     let mut process_complete = false;
     loop {
-        pump_output(
-            &coordinator,
-            &events,
-            MXC_IO_STDOUT,
-            output.as_mut_slice(),
-        );
-        pump_output(
-            &coordinator,
-            &events,
-            MXC_IO_STDERR,
-            output.as_mut_slice(),
-        );
+        pump_output(&coordinator, &events, MXC_IO_STDOUT, output.as_mut_slice());
+        pump_output(&coordinator, &events, MXC_IO_STDERR, output.as_mut_slice());
 
         let operations: Vec<_> = lock_unpoisoned(&events.operations)
             .iter()
@@ -313,14 +362,7 @@ fn run_event_pump(coordinator: Arc<IoCoordinator>, events: Arc<EventPumpState>) 
                     written as i64,
                     1,
                 ),
-                Err(_) => emit_event(
-                    &events,
-                    MXC_IO_EVENT_STDIN_COMPLETE,
-                    operation,
-                    &[],
-                    0,
-                    0,
-                ),
+                Err(_) => emit_event(&events, MXC_IO_EVENT_STDIN_COMPLETE, operation, &[], 0, 0),
             }
         }
 
@@ -432,10 +474,7 @@ pub unsafe extern "C" fn mxc_io_request_shutdown(handle: *mut MxcIoCoordinator) 
 
 /// Request delivery of one output chunk or end-of-file event.
 #[no_mangle]
-pub unsafe extern "C" fn mxc_io_request_read(
-    handle: *mut MxcIoCoordinator,
-    stream: i32,
-) -> i32 {
+pub unsafe extern "C" fn mxc_io_request_read(handle: *mut MxcIoCoordinator, stream: i32) -> i32 {
     catch_status("mxc_io_request_read", || {
         let Some(coordinator) = coordinator_ref(handle) else {
             return MXC_STATUS_NULL_ARGUMENT;
