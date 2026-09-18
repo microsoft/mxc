@@ -1113,7 +1113,6 @@ mod tests {
         build_request, CaptureDenials, CaptureDenialsMode, NetworkAction, NetworkEgressSection,
         NetworkIngressSection, NetworkSection, ProxySpec, RuntimeConfigSection, SandboxPolicy,
     };
-    use wxc_common::wire;
 
     fn policy_with_network(network: NetworkSection) -> SandboxPolicy {
         SandboxPolicy {
@@ -1667,11 +1666,15 @@ mod tests {
     }
 
     // The emitted `processContainer.captureDenials` object is Windows-gated, so
-    // pin its shape against the wire type it has to satisfy — `deny_unknown_fields`
-    // there turns a misspelled key or mode into a failure here rather than on a
-    // Windows host.
+    // pin its shape against the exact development-contract type it has to
+    // satisfy.
     #[test]
-    fn emitted_capture_denials_json_matches_the_wire_contract() {
+    fn emitted_capture_denials_json_matches_the_exact_contract() {
+        use mxc_config_contract::dev::{
+            CaptureDenials as ContractCaptureDenials,
+            CaptureDenialsMode as ContractCaptureDenialsMode,
+        };
+
         fn wire_mode(mode: CaptureDenialsMode) -> &'static str {
             match mode {
                 CaptureDenialsMode::Block => "block",
@@ -1680,30 +1683,42 @@ mod tests {
         }
 
         for (mode, expected) in [
-            (CaptureDenialsMode::Block, wire::CaptureDenialsMode::Block),
-            (CaptureDenialsMode::Allow, wire::CaptureDenialsMode::Allow),
+            (CaptureDenialsMode::Block, ContractCaptureDenialsMode::Block),
+            (CaptureDenialsMode::Allow, ContractCaptureDenialsMode::Allow),
         ] {
             let emitted = serde_json::json!({
                 "mode": wire_mode(mode),
                 "outputPath": Some("/tmp/denials.json"),
                 "retainEtl": true,
             });
-            let parsed: wire::CaptureDenials =
-                serde_json::from_value(emitted).expect("emitted object satisfies the wire type");
+            let parsed: ContractCaptureDenials = serde_json::from_value(emitted)
+                .expect("emitted object satisfies the exact contract");
 
-            assert_eq!(parsed.mode, Some(expected));
-            assert_eq!(parsed.output_path.as_deref(), Some("/tmp/denials.json"));
-            assert_eq!(parsed.retain_etl, Some(true));
+            assert!(matches!(
+                (expected, parsed.mode.into_option()),
+                (
+                    ContractCaptureDenialsMode::Block,
+                    Some(ContractCaptureDenialsMode::Block)
+                ) | (
+                    ContractCaptureDenialsMode::Allow,
+                    Some(ContractCaptureDenialsMode::Allow)
+                )
+            ));
+            assert_eq!(
+                parsed.output_path.into_option().as_deref(),
+                Some("/tmp/denials.json")
+            );
+            assert_eq!(parsed.retain_etl.into_option(), Some(true));
         }
 
         let omitted = serde_json::json!({
             "mode": wire_mode(CaptureDenialsMode::Block),
             "retainEtl": false,
         });
-        let parsed: wire::CaptureDenials =
-            serde_json::from_value(omitted).expect("omitted outputPath satisfies the wire type");
-        assert!(parsed.output_path.is_none());
-        assert_eq!(parsed.retain_etl, Some(false));
+        let parsed: ContractCaptureDenials = serde_json::from_value(omitted)
+            .expect("omitted outputPath satisfies the exact contract");
+        assert!(parsed.output_path.into_option().is_none());
+        assert_eq!(parsed.retain_etl.into_option(), Some(false));
     }
 
     // `captureDenials` and `network.proxy` are independent: capture records

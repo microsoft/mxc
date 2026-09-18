@@ -388,7 +388,7 @@ Create process security environment, then launch with CreateProcessW
 Process runs in sandbox
 ```
 
-## Exact Contract, Normalized Wire, and Runtime Models
+## Exact Contract, Config Input, and Runtime Models
 
 MXC deliberately keeps three Rust representations rather than sharing one type
 across trust-boundary parsing, common normalization, and backend execution:
@@ -411,7 +411,7 @@ The exact contract rejects structural errors first. Version-specific adapters
 then produce the internal config input, and `config_parser` applies
 shared semantic validation and maps it to the runtime model.
 
-### Why two layers (pros)
+### Why the layers stay separate (pros)
 
 - **One validate/normalize boundary.** Defaults, invariant enforcement,
   abstract→concrete backend resolution, and field reshaping all happen in exactly
@@ -419,48 +419,38 @@ shared semantic validation and maps it to the runtime model.
 - **Parse, don't validate.** The domain type makes illegal states
   unrepresentable (required fields non-`Option`, enums resolved, containment
   always concrete), so a backend never re-checks "is this set / known?".
-- **The wire model stays a pure schema/DTO source.** Being exactly the JSON shape
-  is what makes schemars-from-types and SDK TS codegen clean — and it is what the
-  per-field stability attributes (stable/experimental/deprecated, for the
-  stable-vs-dev schema views and the promotion guard) hang on. A merged type would
-  entangle schema-generation concerns with runtime fields.
-- **Decoupled evolution.** The wire format can change (rename, alias, restructure
-  `experimental`) without touching backend code, and vice-versa; the blast radius
-  of either is bounded by the parser.
-- **Backends don't couple to JSON quirks** — camelCase renames, deprecated-spelling
-  serde aliases, the raw-`Value` experimental block, `$schema`/`_comment`
-  passthrough — none leak into runner code.
+- **Exact contracts stay authoritative.** Each registered contract remains the
+  closed JSON deserialization boundary and the source for its schema and exact
+  TypeScript types. Schema concerns do not leak into common normalization or
+  runtime types.
+- **Shared normalization is version-neutral.** Version-specific adapters map
+  exact contracts into private `ConfigInput` DTOs, so shared semantic
+  validation does not depend on a rolling union of historical JSON shapes.
+- **Backends don't couple to JSON quirks.** Camel-case names, exact-contract
+  aliases, optional-field presence, and `$schema`/`_comment` passthrough are
+  resolved before the runtime model reaches a runner.
 
 ### Costs (cons)
 
-- **Boilerplate.** Two definitions plus a mapping for each object; adding a field
-  touches the wire struct, the domain struct, and the parser (`From` impls only
-  soften the trivial cases).
-- **Internal drift risk.** The two Rust types can fall out of sync. This is
-  mitigated by destructuring wire structs without `..` in conversions (a new wire
-  field then fails to compile until mapped), but that is a convention, not a
-  guarantee everywhere.
-- **Indirection.** Tracing one field means hopping wire struct → mapping → domain
-  struct → runner.
+- **Boilerplate.** Adding a field touches its exact contract, version-specific
+  adapter, internal input, and runtime mapping as applicable.
+- **Internal drift risk.** Exact and internal types can fall out of sync. This
+  is mitigated by destructuring exact structs without `..` in adapters, so a
+  new exact field fails to compile until it is deliberately mapped.
+- **Indirection.** Tracing one field means following exact request → adapter →
+  `ConfigInput` → `ExecutionRequest` → runner.
 
 ### Why the split is the right call for MXC
 
-It earns its keep because of three load-bearing facts: (a) the wire model is
-*also* the schema + SDK codegen source, a job that wants a pure JSON-shaped type;
-(b) there is genuine wire↔runtime impedance (containment resolution, field
-reshaping, defaults, deprecated-spelling aliases) that must live somewhere, and
-concentrating it in the parser beats scattering it across backends; (c) the
-per-field stability attributes need the wire model as a distinct annotatable
-layer. For a config that was a thin pass-through, a single layer would be the
-better call — here it is not.
+It earns its keep because each exact contract must remain independently frozen
+and regenerable, while semantic normalization and backend execution need one
+current model. The adapter boundary absorbs version-specific JSON differences;
+the internal input supports shared validation without becoming a parser; and
+the runtime model carries only validated enforcement semantics.
 
-The real costs (boilerplate, internal drift) are addressable **without merging**
-— e.g. a derive/macro for the trivial wire→domain `From` impls, or a compile-time
-totality check on the mapping — which captures most of the single-layer ergonomics
-while preserving the separation the schema/SDK codegen and stability-attribute work
-depend on. No planned phase merges the two models; 2B already reduced three layers
-(`Raw*` → … → domain) to two (wire → domain), and a single layer is explicitly not
-on the roadmap.
+The costs are addressable without merging these responsibilities, for example
+with shared adapter helpers and compile-time mapping checks. No planned phase
+reintroduces a rolling whole-request contract.
 
 ## Version Negotiation
 
@@ -607,15 +597,16 @@ mirrors that behavior. We do *not* gate alias acceptance on schema version (i.e.
    removal in a future minor release; gating buys little and costs review
    complexity in every layer that re-checks containment.
 
-**Observability.** Legacy *value* aliases are mapped to their canonical form by
-serde (`#[serde(alias = "...")]`) during deserialization, so the Rust parser no
-longer emits a per-value deprecation hint for them — serde normalizes the alias
-before any parser code runs, and the wire model is the trust boundary. Aliases
-are still accepted; they are simply silent in the native parser. The TypeScript
-SDK validator may still surface a deprecation hint via `diagLog` where it
-inspects the raw config before serialization. (Earlier revisions emitted a
-`Logger` line from the hand-written parser for each legacy value; that path was
-removed when the parser was rewired onto the wire model.)
+**Observability.** Each exact contract accepts its version-specific legacy
+value aliases and normalizes them during exact deserialization, before its
+adapter produces `ConfigInput`. The private normalization DTOs are not a JSON
+trust boundary. Internal raw-string consumers that need containment only for
+classification, such as command splicing, recognize aliases explicitly through
+`wire::Containment::parse_wire_name`. Alias acceptance is silent in the native
+parser; the TypeScript SDK validator may still surface a deprecation hint via
+`diagLog` while inspecting raw config. Earlier revisions emitted a `Logger`
+line from the hand-written rolling parser; that path was removed when exact
+contract dispatch became authoritative.
 
 **Removal.** When an alias is removed in a future release, the change goes
 through the same promotion-style migration: a single release that turns the
