@@ -65,9 +65,7 @@ when the Seatbelt directional-ingress fixtures
 `seatbelt_net_egress_deny_ingress_allow.json` and
 `seatbelt_net_ingress_allow_loopback_deny.json` joined the corpus. Both parsers
 accept each of those two and build identical runtime models, so they add no
-shared rejection. It rose by one again when the LXC inbound-traffic fixture
-`lxc_inbound_traffic_deny.json` joined the corpus, which both parsers likewise
-accept identically. Both retain no
+shared rejection. Both retain no
 exact-looser acceptance and no accepted-model mismatch. Assertion failures list
 the shared-rejection files so future platform-specific movement is attributable
 rather than represented only by aggregate counts.
