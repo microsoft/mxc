@@ -90,6 +90,10 @@ pub struct OneShotWslc {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct IsolationSession {
     /// Optional application identifier carried by the sandbox identity.
+    ///
+    /// Packaged applications must use `PFN:<packageFamilyName>`, for example
+    /// `PFN:Contoso.App_8wekyb3d8bbwe`. Unpackaged applications may pass any
+    /// string.
     #[serde(default)]
     pub app_id: OptionalField<String>,
 }

@@ -414,10 +414,8 @@ fn lifecycle_matrix<C: Case>() {
         let mut value = input::<C>(phase);
         value["_testBackend"] = json!(C::BACKEND);
         assert_dispatch::<C>(&value, phase, Config::Absent);
-        if phase == Phase::Provision {
-            value["experimental"] = json!({});
-            assert_dispatch::<C>(&value, phase, Config::Absent);
-        }
+        value["experimental"] = json!({});
+        assert_dispatch::<C>(&value, phase, Config::Absent);
     }
 }
 
@@ -426,6 +424,27 @@ fn every_backend_and_phase_preserves_validation_execution_and_dry_run_order() {
     lifecycle_matrix::<Isolation>();
     lifecycle_matrix::<WindowsSandbox>();
     lifecycle_matrix::<Wslc>();
+}
+
+#[test]
+fn non_provision_operations_reject_backend_experimental_config() {
+    for phase in [Phase::Start, Phase::Exec, Phase::Stop, Phase::Deprovision] {
+        let mut value = input::<Isolation>(phase);
+        value["experimental"] = json!({"isolation_session": {}});
+        let error = load_state_aware_request_from_json_with_options(
+            &value.to_string(),
+            &mut Logger::new(Mode::Buffer),
+            phase,
+            Some("iso:test-id"),
+            &[],
+        )
+        .unwrap_err();
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("experimental.isolation_session is not accepted"),
+            "{message}"
+        );
+    }
 }
 
 #[test]

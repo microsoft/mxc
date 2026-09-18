@@ -1253,6 +1253,7 @@ fn main() {
             ) {
                 Ok(parsed) => parsed,
                 Err(error) => {
+                    log_request_parse_rejection(&mut logger, &error);
                     let error = match error {
                         ParseError::StateAware(error) => error,
                         ParseError::Decode(error)

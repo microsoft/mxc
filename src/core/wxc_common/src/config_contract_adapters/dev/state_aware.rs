@@ -56,6 +56,32 @@ fn take_experimental(common: &mut wire::MxcConfig) -> wire::Experimental {
     })
 }
 
+fn reject_non_provision_experimental(
+    common: &mut wire::MxcConfig,
+    phase: Phase,
+) -> Result<(), WxcError> {
+    let experimental = take_experimental(common);
+    let field = [
+        ("test", experimental.test.is_some()),
+        ("windows_sandbox", experimental.windows_sandbox.is_some()),
+        ("wslc", experimental.wslc.is_some()),
+        (
+            "isolation_session",
+            experimental.isolation_session.is_some(),
+        ),
+        ("seatbelt", experimental.seatbelt.is_some()),
+    ]
+    .into_iter()
+    .find_map(|(name, present)| present.then_some(name));
+
+    if let Some(field) = field {
+        return Err(malformed(format!(
+            "experimental.{field} is not accepted by the {phase} operation"
+        )));
+    }
+    Ok(())
+}
+
 fn reject_foreign_experimental(
     experimental: &wire::Experimental,
     expected: &str,
@@ -191,6 +217,7 @@ pub(super) fn operation_into_input(
             provision_operation(&mut common)?
         }
         Phase::Exec => {
+            reject_non_provision_experimental(&mut common, phase)?;
             if common.filesystem.is_some() || common.ui.is_some() {
                 return Err(malformed(
                     "filesystem and ui are not accepted by the exec operation",
@@ -201,6 +228,7 @@ pub(super) fn operation_into_input(
             }
         }
         Phase::Start => {
+            reject_non_provision_experimental(&mut common, phase)?;
             reject_non_exec_process(&common, phase)?;
             reject_non_exec_policy(&common, phase)?;
             StateAwareOperation::Start {
@@ -208,6 +236,7 @@ pub(super) fn operation_into_input(
             }
         }
         Phase::Stop => {
+            reject_non_provision_experimental(&mut common, phase)?;
             reject_non_exec_process(&common, phase)?;
             reject_non_exec_policy(&common, phase)?;
             StateAwareOperation::Stop {
@@ -215,6 +244,7 @@ pub(super) fn operation_into_input(
             }
         }
         Phase::Deprovision => {
+            reject_non_provision_experimental(&mut common, phase)?;
             reject_non_exec_process(&common, phase)?;
             reject_non_exec_policy(&common, phase)?;
             StateAwareOperation::Deprovision {

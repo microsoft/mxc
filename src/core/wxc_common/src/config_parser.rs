@@ -93,6 +93,8 @@ struct RequestDiscriminator<'a> {
     phase: Option<&'a RawValue>,
     #[serde(borrow, default, deserialize_with = "deserialize_present_raw")]
     experimental: Option<&'a RawValue>,
+    #[serde(borrow, default, deserialize_with = "deserialize_present_raw")]
+    containment: Option<&'a RawValue>,
 }
 
 fn deserialize_present_raw<'de, D>(deserializer: D) -> Result<Option<&'de RawValue>, D::Error>
@@ -397,17 +399,34 @@ fn development_network_migration(contract: &str, path: Option<&str>) -> Option<&
     }
 }
 
+fn development_migration_contract(
+    discriminator: &RequestDiscriminator<'_>,
+    phase: Option<Phase>,
+) -> Option<&'static str> {
+    let containment = discriminator
+        .containment
+        .and_then(|value| serde_json::from_str::<&str>(value.get()).ok());
+    match (phase, containment) {
+        (Some(Phase::Provision), Some("isolation_session")) => Some("IsolationSession provision"),
+        (Some(Phase::Provision), Some("wslc")) => Some("WSLC provision"),
+        _ => None,
+    }
+}
+
 fn deserialize_development_root<T>(
     json: &str,
     contract: &'static str,
     state_aware: bool,
+    migration_contract: Option<&str>,
 ) -> Result<T, ParseError>
 where
     T: serde::de::DeserializeOwned,
 {
     config_deserialize::from_str(json).map_err(|error| {
         let mut message = format!("Invalid {contract} request: {error}");
-        if let Some(migration) = development_network_migration(contract, error.path()) {
+        if let Some(migration) =
+            development_network_migration(migration_contract.unwrap_or(contract), error.path())
+        {
             message.push_str(&format!("; schema 0.9 migration: {migration}"));
         }
         if state_aware {
@@ -425,7 +444,7 @@ fn parse_exact_development(json: &str, logger: &mut Logger) -> Result<MxcRequest
         return Err(ParseError::OneShot(error));
     }
     let request: mxc_config_contract::dev::OneShotRequest =
-        deserialize_development_root(json, "one-shot", false)?;
+        deserialize_development_root(json, "one-shot", false, None)?;
     mxc_config_contract::dev::validate_one_shot_request(&request)
         .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
     let request = mxc_config_contract::dev::Request::OneShot(Box::new(request));
@@ -445,8 +464,9 @@ fn parse_exact_state_aware_development(
         .map_err(|error| ParseError::StateAware(MxcError::malformed_request(error.to_string())))?;
     reject_legacy_telemetry_raw(discriminator.experimental.map(RawValue::get))
         .map_err(|error| ParseError::StateAware(MxcError::malformed_request(error.to_string())))?;
+    let migration_contract = development_migration_contract(&discriminator, Some(phase));
     let request: mxc_config_contract::dev::OneShotRequest =
-        deserialize_development_root(json, "lifecycle operation", true)?;
+        deserialize_development_root(json, "lifecycle operation", true, migration_contract)?;
     let input =
         crate::config_contract_adapters::dev::state_aware_into_input(request, phase, sandbox_id)
             .map_err(|error| {
@@ -5547,41 +5567,42 @@ mod tests {
 
     #[test]
     fn exact_development_network_migration_guidance_is_contract_aware() {
-        for (json, expected, rejected) in [
+        for (json, expected) in [
             (
                 r#"{
                     "version": "0.9.0-alpha",
-                    "phase": "provision",
                     "containment": "wslc",
                     "network": {"proxy": {"url": "http://proxy.example:8080"}}
                 }"#,
-                "use runtimeConfig.networkProxy with a proxy URL",
                 "top-level runtimeConfig.networkProxy on the exec phase",
             ),
             (
                 r#"{
                     "version": "0.9.0-alpha",
-                    "phase": "provision",
                     "containment": "isolation_session",
                     "network": {"allowedHosts": ["example.com"]}
                 }"#,
-                "use network.egress.allow/deny CIDR rules",
                 "IsolationSession requires",
             ),
             (
                 r#"{
                     "version": "0.9.0-alpha",
-                    "phase": "provision",
                     "containment": "isolation_session",
                     "network": {"defaultPolicy": "allow"}
                 }"#,
-                "use network.egress.default ('allow' or 'deny')",
                 "IsolationSession requires",
             ),
         ] {
-            let message = parse_exact_for_test(json).unwrap_err().message();
+            let message = load_state_aware_request_from_json_with_options(
+                json,
+                &mut test_logger(),
+                Phase::Provision,
+                None,
+                &[],
+            )
+            .unwrap_err()
+            .message();
             assert!(message.contains(expected), "{message}");
-            assert!(!message.contains(rejected), "{message}");
         }
     }
 

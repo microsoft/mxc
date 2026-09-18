@@ -727,6 +727,11 @@ pub enum TransportProtocol {
 #[serde(rename_all = "camelCase")]
 pub struct IsolationSession {
     /// Lifecycle provision application identifier.
+    ///
+    /// Packaged applications must use `PFN:<packageFamilyName>`, for example
+    /// `PFN:Contoso.App_8wekyb3d8bbwe`. Unpackaged applications may pass any
+    /// string. The value is carried inside the sandbox ID so later operations
+    /// can recover it without the caller supplying it again.
     pub app_id: Option<String>,
     /// Legacy rolling-parser representation. Exact 0.9 requests use `appId`.
     #[cfg_attr(feature = "schema-gen", schemars(skip))]

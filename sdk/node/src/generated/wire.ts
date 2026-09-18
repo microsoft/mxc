@@ -132,6 +132,8 @@ export interface Filesystem {
 export interface IsolationSession {
   /**
    * Lifecycle provision application identifier.
+   *
+   * Packaged applications must use `PFN:<packageFamilyName>`, for example `PFN:Contoso.App_8wekyb3d8bbwe`. Unpackaged applications may pass any string. The value is carried inside the sandbox ID so later operations can recover it without the caller supplying it again.
    */
   appId?: string | null;
   [k: string]: unknown;

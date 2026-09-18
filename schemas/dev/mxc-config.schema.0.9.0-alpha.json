@@ -113,7 +113,7 @@
       "description": "IsolationSession settings accepted by lifecycle provisioning.",
       "properties": {
         "appId": {
-          "description": "Optional application identifier carried by the sandbox identity.",
+          "description": "Optional application identifier carried by the sandbox identity.\n\nPackaged applications must use `PFN:<packageFamilyName>`, for example `PFN:Contoso.App_8wekyb3d8bbwe`. Unpackaged applications may pass any string.",
           "type": "string"
         }
       },

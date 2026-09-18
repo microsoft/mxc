@@ -516,6 +516,12 @@ public class MxcLifecycleTests
     }
 
     [Fact]
+    public void SandboxId_EmbeddedNul_Throws()
+    {
+        Assert.Throws<ArgumentException>(() => new SandboxId("iso:valid\0suffix"));
+    }
+
+    [Fact]
     public void BuildProvisionEnvelope_CompatibilityDoesNotSilentlyDiscardPolicies()
     {
         var options = new ProvisionSandboxOptions

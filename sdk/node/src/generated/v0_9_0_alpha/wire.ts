@@ -66,6 +66,8 @@ export interface Filesystem {
 export interface IsolationSession {
   /**
    * Optional application identifier carried by the sandbox identity.
+   *
+   * Packaged applications must use `PFN:<packageFamilyName>`, for example `PFN:Contoso.App_8wekyb3d8bbwe`. Unpackaged applications may pass any string.
    */
   appId?: string;
 }

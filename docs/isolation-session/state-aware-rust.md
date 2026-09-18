@@ -293,7 +293,6 @@ meaning for this backend.
 | `process.commandLine` | **honored** | rejected | rejected | **honored** | rejected | rejected |
 | `process.{cwd,env,timeout}` | **honored** | rejected | rejected | **honored** | rejected | rejected |
 | `experimental.isolation_session.appId` | rejected | **honored** | n/a | n/a | n/a | n/a |
-| `experimental.isolation_session.<another phase>.*` | rejected | rejected | rejected | rejected | rejected | rejected |
 | `processContainer` / `lxc` / `seatbelt` (stable sections) | rejected | rejected | rejected | rejected | rejected | rejected |
 | another backend's `experimental.<backend>` section | rejected | rejected | rejected | rejected | rejected | rejected |
 
@@ -313,15 +312,18 @@ Notes on the rows that are not a simple accept/reject:
   is vacuously satisfied and neither asserts anything untrue. Bringing it under
   the single-backend-section check uniformly across backends is tracked
   separately.
-- **Foreign or mis-slotted experimental payloads** are rejected by the exact
-  request root, not silently ignored. Only provision defines the
-  `experimental.isolation_session` input. Exact adaptation carries
-  its runtime configuration directly to checked engine binding; the dispatcher
-  does not navigate or reparse experimental JSON.
-- **`containerId`** is not part of the exact state-aware roots. Lifecycle
-  requests address the sandbox by its returned `sandboxId` after provision.
-- **`process` on non-exec state-aware phases** is structurally rejected. Supply
-  process settings only on exec; other phases do not run a workload.
+- **Foreign experimental payloads** and backend configuration on
+  non-provision operations are rejected during operation adaptation, not
+  silently ignored. Only provision accepts `experimental.isolation_session`.
+  Exact adaptation carries its runtime configuration directly to checked
+  engine binding; the dispatcher does not navigate or reparse experimental
+  JSON.
+- **`containerId`** is not accepted by state-aware operation adaptation.
+  Lifecycle requests address the sandbox by its returned `sandboxId` after
+  provision.
+- **`process` on non-exec state-aware operations** is rejected during
+  operation adaptation. Supply process settings only on exec; other operations
+  do not run a workload.
 
 With either valid network spelling, an absent provision member remains `None`,
 while a present empty object remains a configuration with absent fields. An
@@ -329,12 +331,13 @@ explicit empty `appId` remains `Some("")`, and exact input rejects `appId:
 null`. These distinctions survive binding unchanged, so application identity
 resolution remains owned by the backend.
 
-The exact `0.9.0-alpha` state-aware request roots reject structurally excluded
-fields before backend validation. For example, supplied `ui`, noncanonical
-provision `network` shapes, and policy on phases that do not define it surface
-as `malformed_request`. Requests that pass the exact structural contract but
-violate a backend semantic invariant surface as `policy_validation`; a
-structurally valid but oversized `appId` is one such case.
+The shared exact `0.9.0-alpha` request root rejects unknown or incorrectly
+shaped fields. Operation adaptation then rejects fields that are valid in the
+shared schema but invalid for the selected operation, such as `process` on
+start; these failures surface as `malformed_request`. Backend policy
+validation rejects representable policy the backend cannot honor. For
+IsolationSession, provision `filesystem`, a missing or restrictive `network`
+posture, and an oversized `appId` surface as `policy_validation`.
 
 On the **one-shot** surface the backend's typed policy variant is discarded
 (`ScriptResponse::error`) and the envelope carries `error.code =
@@ -346,7 +349,7 @@ also structurally refused as `malformed_request`.
 ### Fields valid in both modes
 
 - `process.commandLine` — required for one-shot and for state-aware exec;
-  rejected structurally at non-exec state-aware phases.
+  rejected during operation adaptation on non-exec state-aware operations.
 - `process.cwd`, `process.env`, `process.timeout` — optional in both modes,
   honoured per-process (each exec receives its own block).
 
@@ -358,10 +361,10 @@ phase (no host-folder-sharing primitive). `policy.ui` is likewise rejected at
 every phase (no UI-restriction primitive). The network policy is honesty-gated
 per the matrix — provision requires the directional all-allow network posture,
 and post-provision rejects supplied network policy
-(inheriting absence). One-shot enforces
-representable policy through `validate_runner`. State-aware fields excluded from
-an exact phase root fail structurally; `validate_<phase>` handles semantic
-invariants among admitted fields.
+(inheriting absence). One-shot enforces representable policy through
+`validate_runner`. State-aware operation adaptation rejects fields that the
+selected operation cannot take; `validate_<phase>` handles backend semantic
+invariants among the remaining fields.
 
 The one asymmetry is `lifecycle`: one-shot refuses it by value (the defaults
 match what the backend actually does), while the state-aware parser refuses the
@@ -420,7 +423,7 @@ wire-format `MxcError` codes via `map_lifecycle_error`:
 
 | `IsolationSessionError` variant | Wire `error.code` | Trigger |
 |---|---|---|
-| `Policy(...)` | `policy_validation` | A structurally representable request violates a backend semantic invariant — see the honor matrix above. Rejected by `validate_<phase>` hooks (state-aware) or `validate_runner` (one-shot); fields excluded by an exact request root fail earlier as `malformed_request`. |
+| `Policy(...)` | `policy_validation` | A representable request violates a backend semantic invariant — see the honor matrix above. Rejected by `validate_<phase>` hooks (state-aware) or `validate_runner` (one-shot); operation-incompatible fields rejected during adaptation surface earlier as `malformed_request`. |
 | `ServiceUnavailable(...)` | `backend_unavailable` | Activation failure of the in-proc IsolationSession runtime API: it is unavailable on this OS build (not registered, or the OS feature gate is off). HRESULTs `CLASS_E_CLASSNOTAVAILABLE` (`0x80040111`) or `REGDB_E_CLASSNOTREG` (`0x80040154`). |
 | `Stale(...)` | `stale_id` | The OS service reports `HRESULT_FROM_WIN32(ERROR_NOT_FOUND)` (`0x80070490`) — the agent user is unknown to it. After `deprovision`, every non-provision op against the dead `sandboxId` triggers this. |
 | `Lifecycle(...)` | `backend_error` | Any other failure of a lifecycle op, whether the API reported it semantically or the call itself could not be completed. |

@@ -632,29 +632,29 @@ try {
         Assert-True ($msg -match 'appId') "error.message names appId (got '$msg')"
     } | Out-Null
 
-    # The exact IsolationSession provision root excludes filesystem policy.
-    # Backend-level denied-path behavior remains covered in policy unit tests.
-    Run-StateAwareTest "provision (deniedPaths rejected structurally)" {
+    # The shared request contract admits filesystem policy; IsolationSession
+    # rejects it during backend policy validation before touching the OS.
+    Run-StateAwareTest "provision (deniedPaths rejected by policy)" {
         $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_rejected_denied.json' -Experimental
         Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
         $envObj = Parse-Envelope -Stdout $r.Stdout
         Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
         $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-        Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+        Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
         $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
-        Assert-True ($msg -match 'unknown field `filesystem`') "error.message reports the closed filesystem field (got '$msg')"
+        Assert-True ($msg -match 'filesystem policy is not supported') "error.message reports unsupported filesystem policy (got '$msg')"
     } | Out-Null
 
-    # Provision requires the exact directional all-allow network posture.
-    Run-StateAwareTest "provision (restrictive network rejected structurally)" {
+    # Provision requires the directional all-allow network posture.
+    Run-StateAwareTest "provision (restrictive network rejected by policy)" {
         $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_rejected_network.json' -Experimental
         Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
         $envObj = Parse-Envelope -Stdout $r.Stdout
         Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
         $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-        Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+        Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
         $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
-        Assert-True ($msg -match 'network.egress.default') "error.message reports the restrictive network path (got '$msg')"
+        Assert-True ($msg -match 'network is unrestricted and cannot be filtered or denied') "error.message reports the required unrestricted posture (got '$msg')"
     } | Out-Null
 
     # Every legacy network field is rejected even alongside the required
@@ -680,7 +680,7 @@ try {
     }
 
     foreach ($axis in @('egress', 'ingress')) {
-        Run-StateAwareTest "provision (restrictive $axis default rejected structurally)" {
+        Run-StateAwareTest "provision (restrictive $axis default rejected by policy)" {
             $req = @{
                 containment = 'isolation_session'
                 network = @{
@@ -695,14 +695,14 @@ try {
             Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
             $envObj = Parse-Envelope -Stdout $r.Stdout
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-            Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+            Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
             $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
-            Assert-True ($msg.Contains("network.$axis.default")) `
-                "error.message identifies the restrictive network path (got '$msg')"
+            Assert-True ($msg -match 'network is unrestricted and cannot be filtered or denied') `
+                "error.message reports the required unrestricted posture (got '$msg')"
         } | Out-Null
     }
 
-    Run-StateAwareTest "provision (missing network rejected structurally)" {
+    Run-StateAwareTest "provision (missing network rejected by policy)" {
         $req = @{
             containment = 'isolation_session'
             experimental = @{ isolation_session = @{} }
@@ -711,16 +711,15 @@ try {
         Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
         $envObj = Parse-Envelope -Stdout $r.Stdout
         $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-        Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+        Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
         $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
         Assert-True ($msg.Contains('network')) `
             "error.message identifies the missing network field (got '$msg')"
     } | Out-Null
 
-    # exec is absent: its request root defines `network`, so the field is
-    # structurally accepted there and rejected by policy instead (test 3c).
+    # Exec reaches backend policy validation instead (test 3c).
     foreach ($phase in @('start', 'stop', 'deprovision')) {
-        Run-StateAwareTest "$phase (network redeclaration rejected structurally)" {
+        Run-StateAwareTest "$phase (network redeclaration rejected by operation adapter)" {
             $req = @{
                 network = @{
                     egress = @{ default = 'allow' }
@@ -733,14 +732,13 @@ try {
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
             Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
             $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
-            Assert-True ($msg.Contains('network') -and $msg.Contains('unknown field `network`')) `
+            Assert-True ($msg.Contains("network is not accepted by the $phase operation")) `
                 "error.message identifies the phase-incompatible network field (got '$msg')"
         } | Out-Null
     }
 
-    # The exact IsolationSession provision root excludes UI policy. Backend
-    # policy unit tests retain the capability-honesty validation coverage.
-    Run-StateAwareTest "provision (ui policy rejected structurally)" {
+    # UI policy is valid in the shared schema but not on provision.
+    Run-StateAwareTest "provision (ui policy rejected by operation adapter)" {
         $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_rejected_ui.json' -Experimental
         Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
         $envObj = Parse-Envelope -Stdout $r.Stdout
@@ -748,7 +746,7 @@ try {
         $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
         Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
         $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
-        Assert-True ($msg -match 'unknown field `ui`') "error.message reports the closed ui field (got '$msg')"
+        Assert-True ($msg -match 'runtimeConfig and ui are not accepted by the provision operation') "error.message reports the operation-incompatible ui field (got '$msg')"
     } | Out-Null
 
     # Test 2: start succeeds against the provisioned sandbox. Exercises the
@@ -773,10 +771,9 @@ try {
         }
     }
 
-    # Test 2b: the exact IsolationSession start root excludes filesystem policy.
-    # Backend-level immutable-policy behavior remains covered in policy tests.
+    # Test 2b: start does not accept filesystem policy.
     if ($startedOk) {
-        Run-StateAwareTest "start (filesystem policy rejected structurally)" {
+        Run-StateAwareTest "start (filesystem policy rejected by operation adapter)" {
             $req = @{
                 filesystem = @{ readwritePaths = @('C:\mxc_share_test\rw') }
             }
@@ -787,14 +784,13 @@ try {
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
             Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
             $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
-            Assert-True ($msg -match 'unknown field `filesystem`') "error.message reports the closed filesystem field (got '$msg')"
+            Assert-True ($msg -match 'filesystem is not accepted by the start operation') "error.message reports the operation-incompatible filesystem field (got '$msg')"
         } | Out-Null
     }
 
-    # Test 2c: the exact IsolationSession start root excludes network policy.
-    # Backend-level immutable-policy behavior remains covered in policy tests.
+    # Test 2c: start does not accept network policy.
     if ($startedOk) {
-        Run-StateAwareTest "start (network policy rejected structurally)" {
+        Run-StateAwareTest "start (network policy rejected by operation adapter)" {
             $req = @{
                 network = @{ egress = @{ default = 'allow' } }
             }
@@ -805,7 +801,7 @@ try {
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
             Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
             $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
-            Assert-True ($msg -match 'unknown field `network`') "error.message reports the closed network field (got '$msg')"
+            Assert-True ($msg -match 'network is not accepted by the start operation') "error.message reports the operation-incompatible network field (got '$msg')"
         } | Out-Null
     }
 
@@ -830,10 +826,9 @@ try {
         }
     }
 
-    # Test 3b: the exact IsolationSession exec root excludes filesystem policy.
-    # Backend-level immutable-policy behavior remains covered in policy tests.
+    # Test 3b: exec does not accept filesystem policy.
     if ($execedOk) {
-        Run-StateAwareTest "exec (filesystem policy rejected structurally)" {
+        Run-StateAwareTest "exec (filesystem policy rejected by operation adapter)" {
             $req = @{
                 process    = @{ commandLine = 'echo unused' }
                 filesystem = @{ readwritePaths = @('C:\mxc_share_test\rw') }
@@ -845,7 +840,7 @@ try {
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
             Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
             $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
-            Assert-True ($msg -match 'unknown field `filesystem`') "error.message reports the closed filesystem field (got '$msg')"
+            Assert-True ($msg -match 'filesystem and ui are not accepted by the exec operation') "error.message reports the operation-incompatible filesystem field (got '$msg')"
         } | Out-Null
     }
 
@@ -991,10 +986,10 @@ try {
         } | Out-Null
     }
 
-    # Test 8b: the exact IsolationSession stop root excludes filesystem policy.
+    # Test 8b: stop does not accept filesystem policy.
     # Runs before the actual stop test so the sandbox is still started.
     if ($execedOk) {
-        Run-StateAwareTest "stop (filesystem policy rejected structurally)" {
+        Run-StateAwareTest "stop (filesystem policy rejected by operation adapter)" {
             $req = @{
                 filesystem = @{ readwritePaths = @('C:\mxc_share_test\rw') }
             }
@@ -1005,7 +1000,7 @@ try {
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
             Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
             $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
-            Assert-True ($msg -match 'unknown field `filesystem`') "error.message reports the closed filesystem field (got '$msg')"
+            Assert-True ($msg -match 'filesystem is not accepted by the stop operation') "error.message reports the operation-incompatible filesystem field (got '$msg')"
         } | Out-Null
     }
 
@@ -1030,10 +1025,10 @@ try {
         }
     }
 
-    # Test 9b: the exact IsolationSession deprovision root excludes filesystem
-    # policy. Runs before the actual deprovision so the sandbox still exists.
+    # Test 9b: deprovision does not accept filesystem policy. Runs before the
+    # actual deprovision so the sandbox still exists.
     if ($stoppedOk) {
-        Run-StateAwareTest "deprovision (filesystem policy rejected structurally)" {
+        Run-StateAwareTest "deprovision (filesystem policy rejected by operation adapter)" {
             $req = @{
                 filesystem = @{ readwritePaths = @('C:\mxc_share_test\rw') }
             }
@@ -1044,7 +1039,7 @@ try {
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
             Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
             $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
-            Assert-True ($msg -match 'unknown field `filesystem`') "error.message reports the closed filesystem field (got '$msg')"
+            Assert-True ($msg -match 'filesystem is not accepted by the deprovision operation') "error.message reports the operation-incompatible filesystem field (got '$msg')"
         } | Out-Null
     }
 
@@ -1137,18 +1132,16 @@ try {
 
 # ---------------- Lifecycle B: Filesystem policy rejection ----------------
 
-# Filesystem policy is absent from the exact IsolationSession provision root,
-# so the public JSON surface rejects it before creating a sandbox. Direct
-# backend policy tests retain readwrite/readonly/denied validation coverage.
-Run-StateAwareTest "filesystem: provision rejected structurally" {
+# IsolationSession rejects filesystem policy before creating a sandbox.
+Run-StateAwareTest "filesystem: provision rejected by policy" {
     $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_with_filesystem.json' -Experimental
     Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
     $envObj = Parse-Envelope -Stdout $r.Stdout
     Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
     $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-    Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+    Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
     $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
-    Assert-True ($msg -match 'unknown field `filesystem`') "error.message reports the closed filesystem field (got '$msg')"
+    Assert-True ($msg -match 'filesystem policy is not supported') "error.message reports unsupported filesystem policy (got '$msg')"
 
     # MXC rejects this before any API call is made, so the fields describing
     # that call must be absent. `remediation` is not one of them, and is
