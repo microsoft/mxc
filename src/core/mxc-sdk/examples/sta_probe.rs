@@ -183,12 +183,10 @@ fn main() {
         // Exec spawns relay and waiter threads that call into WinRT without
         // initialising COM themselves.
         checkpoint("exec — worker threads call WinRT with no apartment of their own");
-        let exec = format!(
-            r#"{{"version":"0.9.0-alpha",
-                "process":{{"commandLine":"cmd.exe /c echo sta-probe-marker","timeout":30000}}}}"#
-        );
+        let exec = r#"{"version":"0.9.0-alpha",
+                "process":{"commandLine":"cmd.exe /c echo sta-probe-marker","timeout":30000}}"#;
         let mut exec_ok = false;
-        match mxc_sdk::sandbox::exec(&sandbox_id, &exec, true) {
+        match mxc_sdk::sandbox::exec(&sandbox_id, exec, true) {
             Ok(mut sandbox) => {
                 let out = sandbox.take_stdout();
                 let reader = std::thread::spawn(move || {
@@ -288,11 +286,9 @@ fn measure_handle_outliving_its_thread() {
         // Long enough that the workload is certainly still running when this
         // thread exits, so the handle under test is live, but short enough to
         // end on its own so no kill races the read path.
-        let exec = format!(
-            r#"{{"version":"0.9.0-alpha",
-                "process":{{"commandLine":"cmd.exe /c echo marker-before && ping -n 4 127.0.0.1","timeout":120000}}}}"#
-        );
-        match mxc_sdk::sandbox::exec(&sandbox_id, &exec, true) {
+        let exec = r#"{"version":"0.9.0-alpha",
+                "process":{"commandLine":"cmd.exe /c echo marker-before && ping -n 4 127.0.0.1","timeout":120000}}"#;
+        match mxc_sdk::sandbox::exec(&sandbox_id, exec, true) {
             Ok(sandbox) => {
                 let _ = exec_tx.send(Ok(sandbox));
             }
