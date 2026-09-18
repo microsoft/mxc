@@ -149,9 +149,9 @@ class FakeBinding implements SandboxProcessBinding {
       timedOut: false,
     };
   }
-  wait() {
+  wait(): Promise<{ exitCode: number; timedOut: boolean }> {
     this.waitCalls += 1;
-    return this.waitResult;
+    return Promise.resolve(this.waitResult);
   }
   outputMetadata(): unknown {
     this.outputMetadataReads += 1;
@@ -162,6 +162,21 @@ class FakeBinding implements SandboxProcessBinding {
   }
   free(): void {
     this.freed = true;
+  }
+}
+
+class DeferredWaitBinding extends FakeBinding {
+  private finishWait?: (result: { exitCode: number; timedOut: boolean }) => void;
+
+  override wait(): Promise<{ exitCode: number; timedOut: boolean }> {
+    this.waitCalls += 1;
+    return new Promise((resolve) => {
+      this.finishWait = resolve;
+    });
+  }
+
+  releaseWait(): void {
+    this.finishWait?.({ exitCode: 7, timedOut: false });
   }
 }
 
@@ -326,6 +341,21 @@ describe('native streaming spawn APIs', () => {
     assert.strictEqual(binding.freed, true);
   });
 
+  it('keeps the native handle alive while asynchronous wait is in flight', async () => {
+    const binding = new DeferredWaitBinding(22, 0);
+    const proc = _createMxcSandboxProcess(binding);
+    const wait = proc.waitAsync();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    proc.dispose();
+    assert.strictEqual(binding.freed, false);
+    binding.releaseWait();
+
+    await assert.rejects(wait, /disposed/);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.strictEqual(binding.freed, true);
+  });
+
   it('enforces the policy timeout by killing before the final wait', async () => {
     const binding = new FakeBinding(3, Number.MAX_SAFE_INTEGER, { exitCode: -1, timedOut: false });
     const proc = _createMxcSandboxProcess(binding, 0.001);
@@ -434,4 +464,43 @@ describe('native streaming spawn APIs', () => {
     assert.strictEqual(getEventListeners(controller.signal, 'abort').length, 0);
     proc.dispose();
   });
+
+  for (const failurePoint of ['tryWait', 'kill', 'wait'] as const) {
+    it(`releases resources when ${failurePoint} fails`, async () => {
+      const controller = new AbortController();
+      const binding = new FakeBinding(
+        21,
+        failurePoint === 'kill' ? Number.MAX_SAFE_INTEGER : 0,
+      );
+      const expected = new Error(`${failurePoint} failed`);
+      if (failurePoint === 'tryWait') {
+        binding.tryWait = () => {
+          throw expected;
+        };
+      } else if (failurePoint === 'kill') {
+        binding.kill = () => {
+          throw expected;
+        };
+        binding.tryWait = () => ({
+          running: true,
+          exitCode: 0,
+          timedOut: false,
+        });
+      } else {
+        binding.wait = () => Promise.reject(expected);
+      }
+      _setBindingSandboxProcessFactory(() =>
+        _createMxcSandboxProcess(binding, failurePoint === 'kill' ? 0.001 : undefined));
+
+      const proc = spawnSandbox(
+        'echo hello',
+        { version: '0.9.0-alpha' },
+        { signal: controller.signal },
+      );
+
+      await assert.rejects(proc.waitAsync(), (error) => error === expected);
+      assert.strictEqual(binding.freed, true);
+      assert.strictEqual(getEventListeners(controller.signal, 'abort').length, 0);
+    });
+  }
 });

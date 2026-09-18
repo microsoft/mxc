@@ -30,6 +30,7 @@ type Pointer = unknown;
 type TakeReadResult = { stream: Pointer; closer: Pointer | null } | null;
 
 type SpawnFunction = KoffiFunc<(request: string, handle: Pointer[], error: AbiErrorDetail) => number>;
+type WaitFunction = KoffiFunc<(sandbox: Pointer, exitCode: number[], timedOut: number[]) => number>;
 type ReadFunction = KoffiFunc<(stream: Pointer, buffer: Buffer, cap: number, outRead: number[]) => number>;
 type WriteFunction = KoffiFunc<(stream: Pointer, buffer: Buffer, len: number, outWritten: number[]) => number>;
 type FlushFunction = KoffiFunc<(stream: Pointer) => number>;
@@ -45,7 +46,7 @@ interface StreamingApi {
   warnings(handle: Pointer): string[];
   outputMetadata(handle: Pointer): unknown | undefined;
   tryWait(handle: Pointer): SandboxWaitResult & { running: boolean };
-  wait(handle: Pointer): SandboxWaitResult;
+  wait(handle: Pointer): Promise<SandboxWaitResult>;
   kill(handle: Pointer): void;
   freeSandbox(handle: Pointer): void;
   read: ReadFunction;
@@ -352,20 +353,22 @@ function readTryWait(
   };
 }
 
-function readWait(
-  native: BoundStreamingFunctions,
+function waitAsync(
+  wait: WaitFunction,
   sandbox: Pointer,
-): SandboxWaitResult {
+): Promise<SandboxWaitResult> {
   const exitCode = [0];
   const timedOut = [0];
-  throwIfFailed(
-    native.wait(sandbox, exitCode, timedOut),
-    'waiting on sandbox failed',
+  return callAsync(
+    (callback) => wait.async(sandbox, exitCode, timedOut, callback),
+    (status) => {
+      throwIfFailed(status, 'waiting on sandbox failed');
+      return {
+        exitCode: exitCode[0]!,
+        timedOut: timedOut[0] !== 0,
+      };
+    },
   );
-  return {
-    exitCode: exitCode[0]!,
-    timedOut: timedOut[0] !== 0,
-  };
 }
 
 function createStreamingApi(): StreamingApi {
@@ -396,7 +399,7 @@ function createStreamingApi(): StreamingApi {
       return json === undefined ? undefined : JSON.parse(json);
     },
     tryWait: (sandbox) => readTryWait(native, sandbox),
-    wait: (sandbox) => readWait(native, sandbox),
+    wait: (sandbox) => waitAsync(native.wait, sandbox),
     kill: (sandbox) => {
       throwIfFailed(native.kill(sandbox), 'killing sandbox failed');
     },
@@ -579,7 +582,7 @@ class StreamingProcessBinding implements SandboxProcessBinding {
     return this.api.tryWait(this.handle);
   }
 
-  wait(): SandboxWaitResult {
+  wait(): Promise<SandboxWaitResult> {
     this.ensureLive();
     return this.api.wait(this.handle);
   }
