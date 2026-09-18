@@ -1,8 +1,8 @@
 # WSLC-Inclusive Version-Aware Stack Session Plan
 
-Status: active handoff for the WSLC-inclusive stack.
+Status: active rebuild handoff for the WSLC-inclusive stack.
 
-Date: September 17, 2026.
+Date: September 18, 2026.
 
 ## Scope and ownership
 
@@ -10,7 +10,7 @@ This session owns only:
 
 | Phase | Branch | PR | Current remote tip |
 | --- | --- | --- | --- |
-| Phase 12 | `user/gudge/version_specific_config_parsers_phase12_wslc_graduation` | #1187 | `eb88b090` |
+| Phase 12 | `user/gudge/version_specific_config_parsers_phase12_wslc_graduation` | #1187 | `d8cab425` |
 | Phase 13 core | `user/gudge/version_specific_config_parsers_phase13_wslc_graduation` | #1188 | `54496529` |
 | Phase 13 follow-ups | `user/gudge/version_specific_config_parsers_phase13_wslc_graduation_followups` | #1189 | `1d76e9ce` |
 
@@ -20,8 +20,9 @@ modify or push the non-WSLC branches.
 
 ## Current Phase 12 state
 
-#1187 is based on `ca1ada8a`. Current `origin/main` was `dd589b41` when this
-handoff was written.
+#1187 is one commit on `d20511e7`. Current `origin/main` is `4bb804c0`, which
+adds #1211's LXC inbound-deny tests and documentation. GitHub reports #1187 as
+`DIRTY`, so it must be rebased before the alternative stack is merge-ready.
 
 The current head includes fixes for:
 
@@ -34,49 +35,79 @@ The current head includes fixes for:
 - removal of stale documentation that still called graduated WSLC
   experimental.
 
-Copilot's four comments on #1187 have been addressed. Exact schema validation
-accepts all v0.9 WSLC fixtures, and representative v0.9 provision dry runs reach
-the intended `policy_validation` and `malformed_request` paths.
+Two current Copilot comments remain on #1187:
+
+- `docs/linux-wsl-roadmap-june-2026.md` incorrectly says Bubblewrap remains
+  experimental;
+- `sdk/node/tests/unit/wire-conformance.test.ts` allows `wslc` as a permanent
+  public-only root key but documents only `appContainer`.
+
+#1188 is not currently a clean one-commit child of #1187. Its configured PR
+base is `d8cab425`, but head `54496529` has parent `ef52be43`, an older WSLC
+publication commit. Git therefore sees two commits over the configured base.
+#1189 remains one commit on current #1188 and must be replayed after #1188 is
+rebuilt.
 
 ## Required sequence
 
-1. Monitor #1187 until every required check is green. Treat neutral/skipped
-   aggregate CodeQL as acceptable when both language analyses pass.
-2. Inspect only newly failing jobs. Do not repeatedly report already-known
-   failures.
-3. If Phase 12 changes again:
-   - make the smallest fix on the WSLC Phase 12 branch;
-   - validate the failing job and the WSLC feature-specific paths;
-   - preserve the single-commit PR shape with `git commit --amend`;
-   - push with an explicit `--force-with-lease`;
-   - wait for the new #1187 CI run.
-4. Do not rebase #1188 or #1189 until #1187 is fully green.
-5. Once #1187 is green, fetch `origin` and record the remote tips. Restack:
+1. Fetch `origin`, record all three remote tips for force-with-lease, and
+   confirm `mxc.cyan` is clean on the #1187 branch.
+2. Rebase #1187 onto `origin/main` `4bb804c0`, resolving the #1211 overlap by
+   retaining the new LXC fixture for exact-schema validation while preserving
+   deletion of obsolete rolling-corpus accounting.
+3. Port the applicable Phase 12 fixes:
+   - emit `0.10.0-alpha` from the playground raw builder used only by Windows
+     Sandbox, MicroVM, and Hyperlight, and update its diagnostics and comments
+     from v0.9 to v0.10;
+   - remove the stale Bubblewrap experimental claim;
+   - document both `appContainer` and `wslc` in the root-key conformance
+     exception.
+4. Validate #1187, amend its single commit, push with explicit
+   `--force-with-lease`, resolve its review threads, and wait for required CI.
+5. Rebuild #1188 by replaying only its Phase 13 commit onto rewritten #1187:
 
    ```powershell
    git rebase --onto `
      origin/user/gudge/version_specific_config_parsers_phase12_wslc_graduation `
      ef52be43685d417c20b15a29d213ca79db43f105 `
      user/gudge/version_specific_config_parsers_phase13_wslc_graduation
+   ```
 
+   Port the finalized Phase 13 corrections:
+   - clear only `source_contract` for direct typed SDK requests and retain the
+     exact adapter's v0.6/v0.7 `LegacyCompatible` selection;
+   - exclude source attribution from policy hashes while including normalized
+     network-enforcement compatibility;
+   - document compatibility as version-dependent for both JSON and typed SDK
+     inputs.
+6. Rebuild #1189 on rewritten #1188:
+
+   ```powershell
    git rebase --onto `
      user/gudge/version_specific_config_parsers_phase13_wslc_graduation `
      544965294edb33f7c138bc90b6b478169f4cec15 `
      user/gudge/version_specific_config_parsers_phase13_wslc_graduation_followups
    ```
 
-   Recompute the old-parent arguments if either remote Phase 13 tip changed.
-6. Verify each rewritten endpoint. In addition to the standard Rust, Node,
+   Port the finalized follow-up corrections:
+   - run the specialized malformed-exec diagnostic check only when the
+     registry exposes `ExecRequest`;
+   - return a controlled error rather than panicking if registry metadata marks
+     a legacy version renderable;
+   - give non-renderable v0.6-v0.8 contracts no generated request roots;
+   - retain parser-backed backend-name validation and the simplified probe
+     checks.
+7. Verify each rewritten endpoint. In addition to the standard Rust, Node,
    .NET, exact-codegen, and config-validation ladder, run:
    - WSLC-feature checks and clippy for `wxc`, `mxc_engine`, `mxc-sdk`, and
      `mxc_ffi`;
    - WSLC-feature unit tests for the engine, Rust SDK, and FFI;
    - exact v0.9 WSLC fixture validation and representative state-aware dry
      runs.
-7. Confirm each PR remains exactly one commit above its base, contains the
+8. Confirm each PR remains exactly one commit above its base, contains the
    required trailers, and passes the base-sensitive contract-history gate.
-8. Push #1188 and #1189 with explicit `--force-with-lease`.
-9. Verify:
+9. Push #1188 and #1189 with explicit `--force-with-lease`.
+10. Verify:
 
    ```text
    #1187: main <- phase12_wslc_graduation
@@ -89,6 +120,10 @@ the intended `policy_validation` and `malformed_request` paths.
 - Do not modify the non-WSLC branches or PRs.
 - Keep WSLC in published v0.9; do not copy the non-WSLC stack's v0.10 WSLC
   defaults into this stack.
+- Keep the Node WSLC binding fixtures and Rust SDK WSLC example on v0.9 without
+  runtime experimental authorization.
+- Retain `WslcProvisionRequest` in the published v0.9 request-root metadata and
+  do not describe WSLC normalization or runtime support as experimental.
 - Preserve compile-time feature gates, platform probes, and runtime
   prerequisites even though runtime experimental authorization is removed.
 - Live WSLC runtime E2E requires a suitable WSL2/WSLC host. Report it as
