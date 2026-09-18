@@ -84,8 +84,6 @@ pub fn validate_network_policy_support(
     request: &ExecutionRequest,
     support: NetworkPolicySupport,
 ) -> Result<(), ScriptResponse> {
-    validate_legacy_host_lists(request)?;
-
     let directional_posture_supplied = request.policy.network_mode_specified
         || (request.policy.network_egress.is_some() && request.policy.network_proxy.is_enabled());
 
@@ -178,6 +176,8 @@ pub fn validate_network_policy_support(
             "network.ingress.hostLoopback='deny' conflicts with the legacy inbound policy",
         ));
     }
+
+    validate_legacy_host_lists(request)?;
 
     if !support.contains(NetworkPolicySupport::PROXY_PEER_IDENTITY)
         && request.policy.allowed_proxy_peer.is_some()
@@ -404,7 +404,12 @@ mod tests {
                 ..Default::default()
             };
 
-            assert!(validate_network_policy_support(&request, NetworkPolicySupport::ALL).is_ok());
+            for support in [NetworkPolicySupport::LEGACY, NetworkPolicySupport::ALL] {
+                assert!(
+                    validate_network_policy_support(&request, support).is_ok(),
+                    "valid legacy host-list policy was rejected for support {support:?}"
+                );
+            }
         }
     }
 
@@ -442,10 +447,27 @@ mod tests {
                 ..Default::default()
             };
 
-            let error =
-                validate_network_policy_support(&request, NetworkPolicySupport::ALL).unwrap_err();
-            assert_eq!(error.error_message, expected);
+            for support in [NetworkPolicySupport::LEGACY, NetworkPolicySupport::ALL] {
+                let error = validate_network_policy_support(&request, support).unwrap_err();
+                assert_eq!(error.error_message, expected);
+            }
         }
+    }
+
+    #[test]
+    fn network_support_reports_directional_error_before_legacy_host_list_error() {
+        let mut request = ExecutionRequest::default();
+        request.policy.network_mode_specified = true;
+        request.policy.network_egress = Some(NetworkEgressPolicy::default());
+        request.policy.default_network_policy = NetworkPolicy::Allow;
+        request.policy.allowed_hosts = vec!["203.0.113.7".to_string()];
+
+        let error =
+            validate_network_policy_support(&request, NetworkPolicySupport::LEGACY).unwrap_err();
+        assert_eq!(
+            error.error_message,
+            "network.egress.default is not supported by the selected backend"
+        );
     }
 
     #[test]
