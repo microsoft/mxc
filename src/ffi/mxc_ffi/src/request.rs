@@ -97,13 +97,14 @@ impl RequestPolicy {
         let telemetry = match self.telemetry {
             TelemetryField::Absent => None,
             TelemetryField::Present(telemetry) => {
-                if let Ok(version) = semver::Version::parse(&self.version) {
-                    if version.major == 0 && version.minor < 9 {
-                        return Err(Error::new(
-                            ErrorCode::MalformedRequest,
-                            "policy.telemetry requires config schema version 0.9.0-alpha or later",
-                        ));
-                    }
+                if matches!(
+                    self.version.as_str(),
+                    "0.6.0-alpha" | "0.7.0-alpha" | "0.8.0-alpha"
+                ) {
+                    return Err(Error::new(
+                        ErrorCode::MalformedRequest,
+                        "policy.telemetry requires config schema version 0.9.0-alpha or later",
+                    ));
                 }
                 telemetry
             }

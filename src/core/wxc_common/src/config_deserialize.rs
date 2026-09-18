@@ -134,6 +134,11 @@ impl fmt::Display for ConfigDeserializeError {
             Some((line, column)) => rewrite_trailing_location(&source, line, column),
             None => source,
         };
+        let source = if self.source.classify() == Category::Data && self.path.is_none() {
+            normalize_root_object_expectation(source)
+        } else {
+            source
+        };
         let source = escape_control_characters(&source);
         match self.source.classify() {
             Category::Syntax | Category::Eof => {
@@ -152,6 +157,23 @@ impl fmt::Display for ConfigDeserializeError {
             Category::Io => write!(formatter, "Unable to read JSON configuration: {source}"),
         }
     }
+}
+
+fn normalize_root_object_expectation(source: String) -> String {
+    const EXPECTED_STRUCT: &str = ", expected struct ";
+    let Some(expectation_start) = source.rfind(EXPECTED_STRUCT) else {
+        return source;
+    };
+    let type_start = expectation_start + EXPECTED_STRUCT.len();
+    let type_end = source[type_start..]
+        .find(" at line ")
+        .map(|offset| type_start + offset)
+        .unwrap_or(source.len());
+    format!(
+        "{}, expected a configuration object{}",
+        &source[..expectation_start],
+        &source[type_end..]
+    )
 }
 
 fn redact_secret_value(source: &serde_json::Error) -> String {
@@ -479,11 +501,57 @@ mod tests {
 
     #[test]
     fn root_level_errors_have_no_policy_path_or_rust_type_name() {
-        let error = from_str::<crate::wire::MxcConfig>(r#""not an object""#).unwrap_err();
-        assert_eq!(error.path.as_deref(), None);
+        fn assert_exact_root<T>()
+        where
+            T: serde::de::DeserializeOwned + std::fmt::Debug,
+        {
+            let error = from_str::<T>(r#""not an object""#).unwrap_err();
+            assert_eq!(error.path.as_deref(), None);
+            let message = error.to_string();
+            assert!(message.contains("expected a configuration object"));
+            let rust_type_name = std::any::type_name::<T>()
+                .rsplit("::")
+                .next()
+                .unwrap_or_default();
+            assert!(!message.contains(rust_type_name), "{message}");
+        }
+
+        assert_exact_root::<mxc_config_contract::published::v0_6_0_alpha::Request>();
+        assert_exact_root::<mxc_config_contract::published::v0_7_0_alpha::Request>();
+        assert_exact_root::<mxc_config_contract::published::v0_8_0_alpha::Request>();
+        assert_exact_root::<mxc_config_contract::published::v0_9_0_alpha::OneShotRequest>();
+        assert_exact_root::<
+            mxc_config_contract::published::v0_9_0_alpha::IsolationSessionProvisionRequest,
+        >();
+        assert_exact_root::<mxc_config_contract::published::v0_9_0_alpha::WslcProvisionRequest>();
+        assert_exact_root::<mxc_config_contract::published::v0_9_0_alpha::StartRequest>();
+        assert_exact_root::<mxc_config_contract::published::v0_9_0_alpha::ExecRequest>();
+        assert_exact_root::<mxc_config_contract::published::v0_9_0_alpha::StopRequest>();
+        assert_exact_root::<mxc_config_contract::published::v0_9_0_alpha::DeprovisionRequest>();
+        assert_exact_root::<mxc_config_contract::dev::OneShotRequest>();
+        assert_exact_root::<mxc_config_contract::dev::WindowsSandboxProvisionRequest>();
+        assert_exact_root::<mxc_config_contract::dev::IsolationSessionProvisionRequest>();
+        assert_exact_root::<mxc_config_contract::dev::WslcProvisionRequest>();
+        assert_exact_root::<mxc_config_contract::dev::StartRequest>();
+        assert_exact_root::<mxc_config_contract::dev::ExecRequest>();
+        assert_exact_root::<mxc_config_contract::dev::StopRequest>();
+        assert_exact_root::<mxc_config_contract::dev::DeprovisionRequest>();
+    }
+
+    #[test]
+    fn root_expectation_rewrite_uses_the_final_serde_marker() {
+        let error = from_str::<mxc_config_contract::dev::OneShotRequest>(
+            r#""marker, expected struct Decoy at line 7 column 9""#,
+        )
+        .unwrap_err();
         let message = error.to_string();
+
+        assert!(message.contains("marker, expected struct Decoy at line 7 column 9"));
         assert!(message.contains("expected a configuration object"));
-        assert!(!message.contains("MxcConfig"));
+        assert!(
+            !message.contains(", expected struct Request at line"),
+            "{message}"
+        );
     }
 
     #[test]

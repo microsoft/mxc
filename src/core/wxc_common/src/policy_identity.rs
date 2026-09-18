@@ -41,6 +41,7 @@
 //! | `network_proxy.original_url` | A proxy URL can embed `user:password@`. The host and port *are* hashed. |
 //! | `capture_denials.output_path` | Only decides where the diagnostic JSON deliverable is written; not enforcement. `capture_denials.mode` remains hashed. |
 //! | `dry_run`, `testing_features_enabled` | Invocation modes, not policy. |
+//! | `source_contract` | External JSON provenance used only for diagnostics and telemetry. Normalized network compatibility is hashed separately. |
 //!
 //! `ContainerPolicy::network_proxy` is `#[serde(skip)]`, so the proxy's
 //! credential-bearing URL cannot reach the hash through the blanket policy
@@ -186,7 +187,10 @@ fn hash_canonical_json(canonical: &str) -> String {
 /// that keeps the allow-list from silently falling behind the model.
 fn policy_projection(request: &ExecutionRequest) -> Value {
     let ExecutionRequest {
-        schema_version,
+        // External contract provenance is diagnostics/telemetry attribution,
+        // not enforcement. The normalized compatibility value below is.
+        source_contract: _excluded_source_contract,
+        network_enforcement_compatibility,
         container_id,
         working_directory,
         script_timeout,
@@ -216,8 +220,8 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
     let mut root = Map::new();
 
     root.insert(
-        "schemaVersion".into(),
-        Value::String(schema_version.clone()),
+        "networkEnforcementCompatibility".into(),
+        Value::String(network_enforcement_compatibility.as_str().to_string()),
     );
     root.insert(
         "containment".into(),
@@ -452,7 +456,9 @@ mod tests {
 
     fn request() -> ExecutionRequest {
         let mut r = ExecutionRequest {
-            schema_version: "0.7.0-alpha".to_string(),
+            source_contract: Some(mxc_config_contract::ContractVersion::V0_7_0Alpha),
+            network_enforcement_compatibility:
+                crate::models::NetworkEnforcementCompatibility::LegacyCompatible,
             container_id: "test".to_string(),
             script_code: "echo hello".to_string(),
             working_directory: "C:\\work".to_string(),
@@ -482,6 +488,23 @@ mod tests {
     #[test]
     fn identical_policies_hash_identically() {
         assert_eq!(policy_hash(&request()), policy_hash(&request()));
+    }
+
+    #[test]
+    fn source_contract_attribution_does_not_change_the_hash() {
+        let baseline = policy_hash(&request());
+        let mut changed = request();
+        changed.source_contract = None;
+        assert_eq!(baseline, policy_hash(&changed));
+    }
+
+    #[test]
+    fn network_enforcement_compatibility_changes_the_hash() {
+        let baseline = policy_hash(&request());
+        let mut changed = request();
+        changed.network_enforcement_compatibility =
+            crate::models::NetworkEnforcementCompatibility::Strict;
+        assert_ne!(baseline, policy_hash(&changed));
     }
 
     #[test]

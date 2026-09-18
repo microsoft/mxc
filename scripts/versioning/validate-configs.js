@@ -7,19 +7,20 @@
 // Run from anywhere (paths are resolved relative to the repo root):
 //   node scripts/versioning/validate-configs.js
 
+const { execFileSync } = require("child_process");
 const { readFileSync, readdirSync, existsSync } = require("fs");
 const { join, resolve } = require("path");
 const Ajv = require("ajv");
-const { compareVersions, parseVersion } = require("./lib/version");
+const { parseVersion } = require("./lib/version");
 
 const repoRoot = resolve(__dirname, "..", "..");
+const cargoRoot = join(repoRoot, "src");
 
 function readJson(...parts) {
   return JSON.parse(readFileSync(join(repoRoot, ...parts), "utf8"));
 }
 
 const schemaVer = readJson("schemas", "schema-version.json");
-const stableSchemaDir = join(repoRoot, "schemas", "stable");
 
 function parseRegisteredVersion(version) {
   const parsed = parseVersion(version);
@@ -29,31 +30,63 @@ function parseRegisteredVersion(version) {
   return parsed;
 }
 
-const minimumVersion = parseRegisteredVersion(schemaVer.min);
-const stableVersions = readdirSync(stableSchemaDir)
-  .map((name) => /^mxc-config\.schema\.(.+)\.json$/.exec(name)?.[1])
-  .filter(Boolean)
-  .map((version) => ({
-    version,
-    parsed: parseRegisteredVersion(version),
-  }))
-  .sort((left, right) => compareVersions(left.parsed, right.parsed));
-if (!stableVersions.some(({ version }) => version === schemaVer.min)) {
-  throw new Error(`Minimum registered schema not found: ${schemaVer.min}`);
+function loadContractRegistry() {
+  let output;
+  try {
+    output = execFileSync(
+      "cargo",
+      ["run", "-q", "-p", "mxc_schema_gen", "--", "versions", "--json"],
+      {
+        cwd: cargoRoot,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }
+    );
+  } catch (error) {
+    const stderr = error?.stderr?.toString().trim();
+    throw new Error(
+      `Failed to load exact contract registry through mxc_schema_gen` +
+        (stderr ? `: ${stderr}` : "")
+    );
+  }
+
+  let registry;
+  try {
+    registry = JSON.parse(output);
+  } catch (error) {
+    throw new Error(`mxc_schema_gen versions --json returned invalid JSON: ${error.message}`);
+  }
+  if (!Array.isArray(registry) || registry.length === 0) {
+    throw new Error("mxc_schema_gen versions --json returned no registered contracts");
+  }
+  return registry;
 }
 
-const schemaPaths = new Map(
-  stableVersions
-    .filter(({ parsed }) => compareVersions(parsed, minimumVersion) >= 0)
-    .map(({ version }) => [
-      version,
-      join("schemas", "stable", `mxc-config.schema.${version}.json`),
-    ])
-);
-schemaPaths.set(
-  schemaVer.maxSupported,
-  join("schemas", "dev", `mxc-config.schema.${schemaVer.maxSupported}.json`)
-);
+const registry = loadContractRegistry();
+const schemaPaths = new Map();
+for (const contract of registry) {
+  if (
+    typeof contract?.version !== "string" ||
+    typeof contract?.schemaPath !== "string"
+  ) {
+    throw new Error("Contract registry entry is missing version or schemaPath");
+  }
+  parseRegisteredVersion(contract.version);
+  if (schemaPaths.has(contract.version)) {
+    throw new Error(`Duplicate registered contract version: ${contract.version}`);
+  }
+  if (!existsSync(join(repoRoot, contract.schemaPath))) {
+    throw new Error(
+      `Registered schema for ${contract.version} does not exist: ${contract.schemaPath}`
+    );
+  }
+  schemaPaths.set(contract.version, contract.schemaPath);
+}
+for (const required of [schemaVer.min, schemaVer.maxSupported]) {
+  if (!schemaPaths.has(required)) {
+    throw new Error(`Canonical schema version is absent from the exact registry: ${required}`);
+  }
+}
 
 // Directories whose *.json files (recursively) are configs we expect to validate.
 const CONFIG_DIRS = [join("tests", "examples"), join("tests", "configs")];
