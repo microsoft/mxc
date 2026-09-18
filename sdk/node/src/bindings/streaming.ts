@@ -59,7 +59,7 @@ interface StreamingApi {
 }
 
 let sharedApi: StreamingApi | undefined;
-let sandboxProcessFactory: ((request: RequestSpec, timeoutMs?: number) => MxcSandboxProcess)
+let sandboxProcessFactory: ((request: RequestSpec) => MxcSandboxProcess)
   | undefined;
 const AbiSandbox = koffi.opaque('MxcNodeSandbox');
 const AbiReadStream = koffi.opaque('MxcNodeReadStream');
@@ -642,20 +642,19 @@ export function spawnStreamingProcessBinding(
 }
 
 export function _setBindingSandboxProcessFactory(
-  factory?: (request: RequestSpec, timeoutMs?: number) => MxcSandboxProcess,
+  factory?: (request: RequestSpec) => MxcSandboxProcess,
 ): void {
   sandboxProcessFactory = factory;
 }
 
 export function spawnBindingSandboxProcess(
   request: RequestSpec,
-  timeoutMs?: number,
 ): MxcSandboxProcess {
   if (sandboxProcessFactory !== undefined) {
-    return sandboxProcessFactory(request, timeoutMs);
+    return sandboxProcessFactory(request);
   }
   return _createMxcSandboxProcess(
     spawnStreamingProcessBinding(request),
-    timeoutMs,
+    request.policy.timeoutMs,
   );
 }

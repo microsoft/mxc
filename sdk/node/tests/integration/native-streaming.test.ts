@@ -32,7 +32,7 @@ interface RequestModule {
 }
 
 interface StreamingModule {
-  spawnBindingSandboxProcess(request: unknown, timeoutMs?: number): NativeSandbox;
+  spawnBindingSandboxProcess(request: unknown): NativeSandbox;
 }
 
 const platformSupport = sdk.getPlatformSupport();
@@ -69,10 +69,7 @@ describe(`Internal native streaming (schema ${schemaVersion})`, { skip: skipReas
     const request = requestModule.prepareRequestSpec(config, {
       experimental: debugSpawnOptions.experimental,
     });
-    const sandbox = streamingModule.spawnBindingSandboxProcess(
-      request,
-      config.process?.timeout,
-    );
+    const sandbox = streamingModule.spawnBindingSandboxProcess(request);
     assert.ok(sandbox.standardInput, 'streaming stdin should be available');
     assert.ok(sandbox.standardOutput, 'streaming stdout should be available');
     assert.ok(sandbox.standardError, 'streaming stderr should be available');
