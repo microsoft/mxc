@@ -175,8 +175,9 @@ pub use sandbox::{
 /// the command, and any working directory / env, filled in).
 ///
 /// Returns a [`Sandbox`] handle for live bidirectional stdio and termination;
-/// no pty is allocated. Any stdout/stderr stream the caller does not `take_*` is
-/// drained and discarded by [`wait`](Sandbox::wait).
+/// most backends expose pipes, while LXC exposes its required pty with stderr
+/// merged into stdout. Any output stream the caller does not `take_*` is drained
+/// and discarded by [`wait`](Sandbox::wait).
 pub fn spawn_sandbox(request: SandboxRequest) -> Result<Sandbox, Error> {
     mxc_engine::spawn(&request).map(Sandbox::new)
 }
@@ -188,7 +189,7 @@ pub fn spawn_sandbox(request: SandboxRequest) -> Result<Sandbox, Error> {
 /// spawns the sandboxed process, waits for it to exit (honouring the request's
 /// `scriptTimeout`), and returns the captured stdout/stderr plus the
 /// [`WaitOutcome`]. Both streams are drained concurrently, so an output-heavy
-/// child can't deadlock. No pty is allocated.
+/// child can't deadlock. LXC's pty output is captured entirely as stdout.
 ///
 /// Use [`spawn_sandbox`] instead when you need to stream stdio live, feed
 /// stdin, or kill the process while it runs.

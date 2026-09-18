@@ -66,13 +66,14 @@ impl StreamCloser for ReadCanceller {
     }
 }
 
-/// A readable pipe whose `read` can be cancelled via a [`ReadCanceller`].
+/// A readable Unix fd whose `read` can be cancelled via a [`ReadCanceller`].
 ///
 /// Implements [`Read`]: it blocks in `poll(2)` on the data pipe and a self-pipe
 /// and returns the next chunk, real EOF (`Ok(0)`), or — once a paired
 /// [`ReadCanceller::close`] fires — a prompt cancellation EOF (`Ok(0)`).
 pub struct InterruptibleReader {
-    /// The child's stdout/stderr pipe, set non-blocking.
+    /// The child's stdout/stderr fd. Normally non-blocking; pty callers may
+    /// preserve blocking mode because duplicated primary fds share flags.
     fd: OwnedFd,
     /// Read end of the self-pipe; readable once cancellation writes its byte.
     wake_r: OwnedFd,
@@ -89,7 +90,28 @@ impl InterruptibleReader {
     /// Returns the underlying [`io::Error`] if the self-pipe cannot be created
     /// or either fd cannot be switched to non-blocking mode.
     pub fn new(fd: OwnedFd) -> io::Result<Self> {
-        set_nonblocking(fd.as_raw_fd())?;
+        Self::new_inner(fd, true)
+    }
+
+    /// Wrap a readable fd without changing its shared file-status flags.
+    ///
+    /// This is intended for a pseudo-terminal primary whose duplicated fd is
+    /// also used for stdin. `O_NONBLOCK` belongs to the shared open-file
+    /// description, so setting it on the reader would unexpectedly make the
+    /// writer non-blocking too.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying [`io::Error`] if the cancellation self-pipe
+    /// cannot be created or configured.
+    pub fn new_blocking(fd: OwnedFd) -> io::Result<Self> {
+        Self::new_inner(fd, false)
+    }
+
+    fn new_inner(fd: OwnedFd, make_nonblocking: bool) -> io::Result<Self> {
+        if make_nonblocking {
+            set_nonblocking(fd.as_raw_fd())?;
+        }
 
         // Self-pipe for wakeups: the write end is non-blocking so `cancel`
         // never stalls; the read end stays blocking but is only ever polled.
@@ -309,5 +331,40 @@ mod tests {
         let mut buf = [0u8; 16];
         assert_eq!(reader.read(&mut buf).expect("eof"), 0);
         assert_eq!(reader.read(&mut buf).expect("still eof"), 0);
+    }
+
+    #[test]
+    fn blocking_constructor_preserves_shared_file_status_flags() {
+        let mut fds = [0 as RawFd; 2];
+        assert!(unsafe { libc::pipe(fds.as_mut_ptr()) } == 0, "pipe");
+        let read_end = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let write_end = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        let reader = InterruptibleReader::new_blocking(read_end).expect("wrap reader");
+
+        // SAFETY: the reader owns this valid fd and F_GETFL only reads flags.
+        let flags = unsafe { libc::fcntl(reader.fd.as_raw_fd(), libc::F_GETFL) };
+        assert!(flags >= 0, "F_GETFL");
+        assert_eq!(flags & libc::O_NONBLOCK, 0);
+
+        drop(write_end);
+    }
+
+    #[test]
+    fn blocking_constructor_still_allows_concurrent_cancellation() {
+        let mut fds = [0 as RawFd; 2];
+        assert!(unsafe { libc::pipe(fds.as_mut_ptr()) } == 0, "pipe");
+        let read_end = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let _write_end = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        let mut reader = InterruptibleReader::new_blocking(read_end).expect("wrap reader");
+        let canceller = reader.canceller();
+
+        let blocked = std::thread::spawn(move || {
+            let mut byte = [0_u8; 1];
+            reader.read(&mut byte)
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        canceller.close();
+
+        assert_eq!(blocked.join().expect("reader thread").expect("read"), 0);
     }
 }

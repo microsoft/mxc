@@ -7,8 +7,10 @@ Build a `SandboxRequest` from a [`SandboxPolicy`], then either **run it to
 completion** with [`run`] (capturing stdout/stderr in one call) or hand it to
 [`spawn_sandbox`] for a live handle you can stream, feed stdin, and kill.
 Either way it selects the right containment backend for the host and runs the
-sandboxed process over ordinary pipes, with no pty. The state-aware
-[`exec_attached`] path is the one exception — see *Pty allocation*.
+sandboxed process over live callback I/O. Most backends use ordinary pipes;
+LXC exposes a pty so the inner workload remains terminal-attached. The
+state-aware [`exec_attached`] path can also allocate a terminal — see *Pty
+allocation*.
 
 ## Usage
 
@@ -156,8 +158,9 @@ let request = build_request_with_containment(
 # Ok::<(), mxc_sdk::Error>(())
 ```
 
-This models the LXC request for configuration parity. The in-process `run` and
-`spawn_sandbox` APIs reject it; execute LXC requests with `lxc-exec`.
+The in-process `run` and `spawn_sandbox` APIs execute this request natively
+through `mxc_engine`, without spawning `lxc-exec`. LXC exposes its pty as live
+stdin and stdout; stderr is merged into stdout.
 
 Filesystem-policy discovery helpers are also available to feed a policy:
 [`available_tools_policy`] (PATH + tool/SDK environment directories),
@@ -329,8 +332,9 @@ now-empty per-run parent directory.
 ## Live stdio + kill (streaming)
 
 [`spawn_sandbox`] returns a [`Sandbox`] you can drive
-while it runs — persistent bidirectional stdio plus termination. No pty is
-allocated; the streams are ordinary pipes.
+while it runs — persistent bidirectional stdio plus termination. Most backends
+expose ordinary pipes. LXC exposes the primary side of its required pty, with
+stderr merged into stdout.
 
 ```rust,no_run
 use std::error::Error;
@@ -522,9 +526,9 @@ Backends with no variant at all — Windows Sandbox, MicroVM, and Hyperlight —
 cannot be named from this crate; use the executor binaries. Windows Sandbox is
 still reachable here through the state-aware lifecycle.
 
-`Containment::Lxc` models explicit LXC distribution settings, but `run` and
-`spawn_sandbox` reject it because the LXC backend does not expose captured
-pipe-based execution. Use the standalone `lxc-exec` binary for LXC.
+`Containment::Lxc` carries explicit LXC distribution settings. `run` and
+`spawn_sandbox` execute it in-process through the engine-owned I/O coordinator;
+the standalone `lxc-exec` binary remains available for CLI execution.
 
 ### WSLC (experimental)
 
@@ -638,9 +642,10 @@ It never fails: any unreadable or unrecognized value reads back as
 
 ## Pty allocation
 
-Every entry point except `exec_attached` wires the child's stdio to ordinary
-pipes and allocates no pty; output the caller does not take is drained and
-discarded by `wait()`.
+Most entry points wire the child's stdio to ordinary pipes. LXC one-shot
+execution instead allocates a pty for `lxc-attach`, exposes live stdin and
+merged stdout/stderr through the same `Sandbox` handle, and drains output the
+caller does not take during `wait()`.
 
 Under `exec_attached`, IsolationSession allocates a pseudo-console and forwards
 stdin, so interactive shells render and resize. A pseudo-console has one output

@@ -189,8 +189,9 @@ pub fn run_attached(request: &SandboxRequest) -> Result<AttachedOutput, Error> {
 /// filled in).
 ///
 /// Selects the containment backend for the host, spawns the sandboxed process
-/// with piped stdio, and returns the handle. No pty is allocated. Backends
-/// without a streaming implementation return an [`Error`] with
+/// with callback-driven stdio, and returns the handle. Most backends use pipes;
+/// LXC exposes its required pty as live stdin plus merged stdout/stderr.
+/// Backends without a streaming implementation return an [`Error`] with
 /// [`ErrorCode::UnsupportedContainment`].
 ///
 /// # Safety / lifetime contract for library-context callers

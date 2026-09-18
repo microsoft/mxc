@@ -34,7 +34,10 @@ use crate::validator::{validate_common, validate_network_policy_support, Network
 /// discarded internally by [`wait`](SandboxProcess::wait) so the child can
 /// never block on a full pipe.
 ///
-/// No pty is ever allocated; the streams are ordinary pipes.
+/// Most implementations expose ordinary pipes. A backend whose containment
+/// contract requires a terminal may instead expose a pty primary as stdin and
+/// stdout; in that case stderr is normally merged into stdout and
+/// [`take_stderr`](SandboxProcess::take_stderr) returns `None`.
 ///
 /// # Abandoning a held-open stream (stdout/stderr closers)
 ///
@@ -95,7 +98,7 @@ pub trait SandboxProcess: Send {
     fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>>;
 
     /// Take ownership of the child's stderr for live reading. Returns `None`
-    /// if already taken. A taken stream is **not** drained by
+    /// if already taken or if the backend merges stderr into a pty stdout. A taken stream is **not** drained by
     /// [`wait`](SandboxProcess::wait).
     fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>>;
 
@@ -346,9 +349,11 @@ pub fn wait_with_timeout(
 /// How a [`SandboxBackend`] wires the sandboxed child's standard streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StdioMode {
-    /// stdin/stdout/stderr are fresh pipes the caller drives via the handle's
-    /// `take_*` accessors (the `mxc` library / streaming path). The child sees
-    /// no TTY and leads its own process group so it can be tree-terminated.
+    /// stdin/stdout/stderr are callback-driven handles exposed through the
+    /// `take_*` accessors (the `mxc` library / streaming path). They are
+    /// normally fresh pipes; a terminal-required backend may expose a pty with
+    /// merged stdout/stderr. The child leads its own process group so it can be
+    /// tree-terminated.
     Pipes,
     /// The child inherits the current process's stdin/stdout/stderr (the CLI
     /// executor path): its output goes straight to the binary's own stdio, so

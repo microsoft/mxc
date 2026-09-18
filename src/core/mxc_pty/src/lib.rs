@@ -3,12 +3,11 @@
 
 //! `mxc_pty` — shared pty bridge for the unix-side MXC backends.
 //!
-//! Both the Linux LXC backend (`lxc_common::lxc_bindings::attach_run`) and
-//! the macOS Seatbelt backend (`seatbelt_common::seatbelt_runner`) need to
-//! run a child process attached to a freshly-allocated pty so the inner
-//! shell sees a real TTY (`isatty(0/1/2) -> true`) and the host can stream
-//! output as it arrives. The two implementations were ~95% the same code;
-//! this crate is the deduplicated home for that pty plumbing.
+//! The Linux LXC backend uses this crate both for the executor's inherited
+//! stdio bridge and for native handle-based streaming. In both cases the inner
+//! shell sees a real TTY (`isatty(0/1/2) -> true`); handle-based callers receive
+//! the pty primary directly, while the executor bridge forwards it to host
+//! stdio.
 
 use std::process::Command;
 use std::time::Duration;
@@ -80,6 +79,148 @@ pub enum PtyOutcome {
     TimedOut,
 }
 
+/// A child attached to a freshly allocated pseudo-terminal.
+///
+/// The child owns the secondary end as all three standard streams. The parent
+/// receives one writer and one reader for the primary end, so stderr is merged
+/// into stdout exactly as it is for a terminal.
+#[derive(Debug)]
+pub struct PtyChild {
+    child: std::process::Child,
+    stdin: Option<std::fs::File>,
+    stdout: Option<std::fs::File>,
+}
+
+impl PtyChild {
+    /// Take the writable side of the pty primary.
+    pub fn take_stdin(&mut self) -> Option<std::fs::File> {
+        self.stdin.take()
+    }
+
+    /// Take the readable side of the pty primary.
+    pub fn take_stdout(&mut self) -> Option<std::fs::File> {
+        self.stdout.take()
+    }
+
+    /// Borrow the direct child for waiting and process-group termination.
+    pub fn child_mut(&mut self) -> &mut std::process::Child {
+        &mut self.child
+    }
+
+    /// Return the direct child's process identifier.
+    pub fn id(&self) -> u32 {
+        self.child.id()
+    }
+}
+
+/// Spawn `command` with a real controlling terminal and return its live pty
+/// endpoints.
+///
+/// Unlike [`run_with_pty`], this function does not bridge the pty to this
+/// process's stdio or wait for the child. The caller owns the returned handle
+/// and is responsible for draining output, terminating descendants, reaping
+/// the direct child, and closing both pty endpoints.
+///
+/// # Errors
+///
+/// Returns an error if the pty cannot be allocated or duplicated, the child
+/// terminal cannot be configured, or the command cannot be spawned.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn spawn_with_pty(
+    mut command: Command,
+    unblock_signals: &'static [Signal],
+) -> Result<PtyChild, String> {
+    use std::os::unix::io::AsRawFd;
+    use std::process::Stdio;
+
+    use nix::pty::openpty;
+
+    let outer_winsize = current_winsize();
+    let inner_winsize = outer_winsize.map(|ws| nix::pty::Winsize {
+        ws_row: ws.ws_row,
+        ws_col: ws.ws_col,
+        ws_xpixel: ws.ws_xpixel,
+        ws_ypixel: ws.ws_ypixel,
+    });
+    let pty_pair =
+        openpty(inner_winsize.as_ref(), None).map_err(|e| format!("openpty failed: {e}"))?;
+
+    set_cloexec_best_effort(pty_pair.master.as_raw_fd());
+    set_cloexec_best_effort(pty_pair.slave.as_raw_fd());
+
+    let secondary_in: Stdio = pty_pair
+        .slave
+        .try_clone()
+        .map_err(|e| format!("dup secondary for stdin: {e}"))?
+        .into();
+    let secondary_out: Stdio = pty_pair
+        .slave
+        .try_clone()
+        .map_err(|e| format!("dup secondary for stdout: {e}"))?
+        .into();
+    let secondary_err: Stdio = pty_pair.slave.into();
+    command
+        .stdin(secondary_in)
+        .stdout(secondary_out)
+        .stderr(secondary_err);
+
+    // SAFETY: the closure runs after fork and uses only async-signal-safe
+    // operations (`setsid`, `ioctl`, and `pthread_sigmask`).
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(move || {
+            nix::unistd::setsid().map_err(std::io::Error::from)?;
+            let _ = libc::ioctl(0, libc::TIOCSCTTY as _, 0);
+
+            let mut mask = nix::sys::signal::SigSet::empty();
+            mask.add(nix::sys::signal::Signal::SIGWINCH);
+            for sig in unblock_signals {
+                mask.add(*sig);
+            }
+            mask.thread_unblock().map_err(std::io::Error::from)?;
+            Ok(())
+        });
+    }
+
+    let primary: std::fs::File = pty_pair.master.into();
+    let stdin = primary
+        .try_clone()
+        .map_err(|e| format!("dup primary: {e}"))?;
+    let child = command
+        .spawn()
+        .map_err(|e| format!("failed to spawn child: {e}"))?;
+    drop(command);
+
+    Ok(PtyChild {
+        child,
+        stdin: Some(stdin),
+        stdout: Some(primary),
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn current_winsize() -> Option<libc::winsize> {
+    // SAFETY: fd 0 belongs to this process and `ws` is a valid output buffer.
+    unsafe {
+        let mut ws: libc::winsize = std::mem::zeroed();
+        if libc::ioctl(0, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
+            Some(ws)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn set_cloexec_best_effort(fd: std::os::fd::RawFd) {
+    use nix::fcntl::{fcntl, FcntlArg, FdFlag};
+
+    if let Ok(bits) = fcntl(fd, FcntlArg::F_GETFD) {
+        let flags = FdFlag::from_bits_truncate(bits) | FdFlag::FD_CLOEXEC;
+        let _ = fcntl(fd, FcntlArg::F_SETFD(flags));
+    }
+}
+
 /// Spawn `command` attached to a freshly-allocated pty pair and bridge
 /// it to the host's stdin/stdout/stderr.
 ///
@@ -99,15 +240,12 @@ pub enum PtyOutcome {
 /// any TUI the inner child renders (e.g. terminal palette query
 /// responses get echoed instead of forwarded as input).
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutcome, String> {
+pub fn run_with_pty(command: Command, options: PtyOptions) -> Result<PtyOutcome, String> {
     use std::io::{Read, Write};
     use std::os::unix::io::AsRawFd;
-    use std::process::Stdio;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Instant;
-
-    use nix::pty::openpty;
 
     // Put our own stdin (the outer pty secondary, if any) into raw mode so
     // input bytes pass through to the inner pty without local echo or
@@ -116,128 +254,16 @@ pub fn run_with_pty(mut command: Command, options: PtyOptions) -> Result<PtyOutc
     // print to stdout after `run_with_pty` returns.
     let _outer_raw_guard = RawSecondaryGuard::install(std::io::stdin().as_raw_fd());
 
-    // Inherit the outer pty's window size so the inner child renders at
-    // the host terminal's actual dimensions instead of macOS' default
-    // 0×0 (which silently breaks any TUI). When fd 0 is not a tty (CI,
-    // pipe, file redirect) we leave the inner pty at its kernel
-    // default — interactive TUIs aren't useful in that case anyway.
-    let outer_winsize = unsafe {
-        let mut ws: libc::winsize = std::mem::zeroed();
-        if libc::ioctl(0, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
-            Some(ws)
-        } else {
-            None
-        }
-    };
-    let inner_winsize = outer_winsize.map(|ws| nix::pty::Winsize {
-        ws_row: ws.ws_row,
-        ws_col: ws.ws_col,
-        ws_xpixel: ws.ws_xpixel,
-        ws_ypixel: ws.ws_ypixel,
-    });
-
-    let pty_pair =
-        openpty(inner_winsize.as_ref(), None).map_err(|e| format!("openpty failed: {}", e))?;
-
-    // The `nix::pty` crate exposes the POSIX field names `.master` and
-    // `.slave` on `PtyPair`. We refer to those ends as primary and
-    // secondary in our own variables and prose below.
-
-    // Mark both pty fds close-on-exec. macOS' `openpty(3)` leaves them
-    // without `FD_CLOEXEC`, so without this fixup the primary fd would
-    // be inherited by the child across `exec` — the secondary would never
-    // hang up when we die (the child itself keeps a primary ref open),
-    // and the sandboxed shell would become immortal. The dups we make
-    // below via `File::try_clone` already get CLOEXEC for free (Rust
-    // uses `F_DUPFD_CLOEXEC`), so we only have to fix the originals
-    // returned by `openpty`. Best-effort: an `fcntl` failure here just
-    // restores the pre-fix behaviour, no regression.
-    {
-        use nix::fcntl::{fcntl, FcntlArg, FdFlag};
-        for fd in [pty_pair.master.as_raw_fd(), pty_pair.slave.as_raw_fd()] {
-            if let Ok(bits) = fcntl(fd, FcntlArg::F_GETFD) {
-                let flags = FdFlag::from_bits_truncate(bits) | FdFlag::FD_CLOEXEC;
-                let _ = fcntl(fd, FcntlArg::F_SETFD(flags));
-            }
-        }
-    }
-
-    // Three duplicates of the secondary fd so each Stdio takes ownership of
-    // its own handle; otherwise std::process::Stdio::from would consume
-    // the single OwnedFd and the rest of the spawn calls would fail.
-    let secondary_in: Stdio = pty_pair
-        .slave
-        .try_clone()
-        .map_err(|e| format!("dup secondary for stdin: {}", e))?
-        .into();
-    let secondary_out: Stdio = pty_pair
-        .slave
-        .try_clone()
-        .map_err(|e| format!("dup secondary for stdout: {}", e))?
-        .into();
-    let secondary_err: Stdio = pty_pair.slave.into();
-
-    command
-        .stdin(secondary_in)
-        .stdout(secondary_out)
-        .stderr(secondary_err);
-
-    // Drop the inherited controlling terminal in the child and make the
-    // secondary end of our pty its new controlling tty. Without this the
-    // child detects that it has a controlling tty (the outer pty from
-    // node-pty) and forwards the inner pty's I/O to `/dev/tty` directly,
-    // bypassing the secondary fds we wired into stdio. Our primary would
-    // then see no data at all.
-    //
-    // `unblock_signals` reverses any sigmask the parent installed (e.g.
-    // signal_cleanup's sigwait-blocked set) so the child doesn't
-    // silently ignore Ctrl-C / termination. SIGWINCH is unblocked
-    // defensively in case anyone in the parent process had it blocked;
-    // execve(2) resets the handler to default ("ignore" for SIGWINCH on
-    // both Linux and macOS) but preserves the inherited signal mask, so
-    // a child process running e.g. node will install its own SIGWINCH
-    // handler and depend on the signal not being masked.
-    let unblock_signals = options.unblock_signals;
-    // SAFETY: the closure runs after fork, before exec. Only
-    // async-signal-safe operations are used: `setsid`, `ioctl`, and
-    // `pthread_sigmask` (via nix's `SigSet::thread_unblock`). No
-    // allocation or non-reentrant libc calls.
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        command.pre_exec(move || {
-            // Become a new session leader, detaching from the inherited
-            // controlling terminal.
-            nix::unistd::setsid().map_err(std::io::Error::from)?;
-            // ioctl on fd 0 (the secondary we just dup2'd in via stdin) to
-            // make it the new controlling tty. Errors are non-fatal
-            // because setsid above already cleared the ctty state, which
-            // is what actually matters for the child.
-            let _ = libc::ioctl(0, libc::TIOCSCTTY as _, 0);
-
-            let mut mask = nix::sys::signal::SigSet::empty();
-            mask.add(nix::sys::signal::Signal::SIGWINCH);
-            for sig in unblock_signals {
-                mask.add(*sig);
-            }
-            mask.thread_unblock().map_err(std::io::Error::from)?;
-            Ok(())
-        });
-    }
-
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("failed to spawn child: {}", e))?;
-
-    drop(command);
-
-    // The child inherited all three secondary handles and the parent's
-    // copies have been moved into Stdio. The secondary will be fully closed
-    // when the child exits, which makes our primary read return EOF.
-    let primary: std::fs::File = pty_pair.master.into();
-    let mut primary_writer = primary
-        .try_clone()
-        .map_err(|e| format!("dup primary: {}", e))?;
-    let mut primary_reader = primary;
+    let mut spawned = spawn_with_pty(command, options.unblock_signals)?;
+    let mut child = spawned.child;
+    let mut primary_writer = spawned
+        .stdin
+        .take()
+        .ok_or_else(|| "pty stdin was already taken".to_string())?;
+    let mut primary_reader = spawned
+        .stdout
+        .take()
+        .ok_or_else(|| "pty stdout was already taken".to_string())?;
 
     // Resize forwarder: when the host's terminal resizes, the kernel
     // delivers SIGWINCH to us (because our fd 0 is the outer pty
@@ -496,6 +522,15 @@ impl Drop for RawSecondaryGuard {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn run_with_pty(_command: Command, _options: PtyOptions) -> Result<PtyOutcome, String> {
     Err("mxc_pty::run_with_pty is only supported on Linux and macOS".to_string())
+}
+
+/// Stub for workspace-wide non-Unix builds.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn spawn_with_pty(
+    _command: Command,
+    _unblock_signals: &'static [Signal],
+) -> Result<PtyChild, String> {
+    Err("mxc_pty::spawn_with_pty is only supported on Linux and macOS".to_string())
 }
 
 #[cfg(test)]

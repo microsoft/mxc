@@ -57,7 +57,8 @@ pub struct Output {
     pub warnings: Vec<String>,
     /// Everything the child wrote to stdout.
     pub stdout: Vec<u8>,
-    /// Everything the child wrote to stderr.
+    /// Everything the child wrote to stderr. Empty for a pty-backed backend
+    /// such as LXC, where terminal output is merged into [`stdout`](Self::stdout).
     pub stderr: Vec<u8>,
     /// Structured outputs produced by optional sandbox features.
     pub output_metadata: Option<SandboxOutputMetadata>,
@@ -67,8 +68,10 @@ pub struct Output {
 /// and [`exec_sandbox`](crate::exec_sandbox).
 ///
 /// Stream the child's stdio with the `take_*` accessors, wait for it, or kill
-/// it. No pty is allocated — the streams are ordinary pipes. Any stdout/stderr
-/// the caller does not `take_*` is drained and discarded by [`wait`](Self::wait).
+/// it. Most backends expose ordinary pipes. LXC exposes a pty so the inner
+/// workload retains a true terminal; its stderr is merged into stdout. Any
+/// stdout/stderr the caller does not `take_*` is drained and discarded by
+/// [`wait`](Self::wait).
 pub struct Sandbox {
     inner: Box<dyn SandboxProcess>,
 }

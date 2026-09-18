@@ -13,13 +13,10 @@
 //! (Windows AppContainer / BaseContainer, with the full three-tier fallback —
 //! BaseContainer, AppContainer + BFS, AppContainer + DACL — shared with the
 //! run-to-completion path via `appcontainer_common::dispatcher`), Bubblewrap
-//! (Linux), Seatbelt (macOS), WSLC and IsolationSession (Windows, experimental,
-//! behind the `wslc` and `isolation_session` features). Every other backend —
-//! including the remaining experimental ones (Windows Sandbox, MicroVM,
-//! Hyperlight) and LXC (no streaming path suitable for the library) — returns
-//! [`MxcError::unsupported_containment`]; callers that need those must drive the
-//! standalone executor binaries (whose run-to-completion path will, in a later
-//! increment, also route through this engine).
+//! and LXC (Linux), Seatbelt (macOS), WSLC and IsolationSession (Windows,
+//! experimental, behind the `wslc` and `isolation_session` features). Every
+//! other backend — including the remaining experimental ones (Windows Sandbox,
+//! MicroVM, Hyperlight) — returns [`MxcError::unsupported_containment`].
 
 use wxc_common::logger::Logger;
 use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
@@ -50,9 +47,11 @@ fn ensure_host_supported() -> Result<(), MxcError> {
 
 /// Spawn a [`SandboxProcess`] handle for `request` on the current host.
 ///
-/// Spawns the sandboxed process with piped stdio and returns a handle the
-/// caller can write to, read from, wait on, and kill. Backends without a
-/// streaming implementation return [`MxcError::unsupported_containment`].
+/// Spawns the sandboxed process with callback-driven stdio and returns a handle
+/// the caller can write to, read from, wait on, and kill. LXC exposes a pty
+/// (with stderr merged into stdout); the other native paths expose pipes.
+/// Backends without a streaming implementation return
+/// [`MxcError::unsupported_containment`].
 pub fn spawn_runner(
     request: &ExecutionRequest,
     logger: &mut Logger,
@@ -72,6 +71,7 @@ pub fn spawn_runner(
     match &request.containment {
         ContainmentBackend::Seatbelt => spawn_seatbelt(request, logger),
         ContainmentBackend::Bubblewrap => spawn_bubblewrap(request, logger),
+        ContainmentBackend::Lxc => spawn_lxc(request, logger),
         ContainmentBackend::ProcessContainer => spawn_process_container(request, logger),
         ContainmentBackend::Wslc => spawn_wslc(request, logger),
         ContainmentBackend::IsolationSession => spawn_isolation_session(request, logger),
@@ -80,6 +80,33 @@ pub fn spawn_runner(
             other.wire_name()
         ))),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_lxc(
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    use wxc_common::sandbox_process::{SandboxBackend, StdioMode};
+
+    let mut runner = lxc_common::lxc_runner::LxcScriptRunner::new(
+        &request.lxc_config,
+        &request.container_id,
+        &request.lifecycle,
+    );
+    runner
+        .spawn(request, logger, StdioMode::Pipes)
+        .map_err(map_spawn_error)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn spawn_lxc(
+    _request: &ExecutionRequest,
+    _logger: &mut Logger,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    Err(MxcError::unsupported_containment(
+        "LXC is only available on Linux",
+    ))
 }
 
 /// Map a backend's `spawn` failure `ScriptResponse` to an
@@ -388,12 +415,10 @@ mod tests {
         assert_eq!(err.code, MxcErrorCode::MalformedRequest);
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn streaming_rejects_unsupported_containment() {
-        // LXC has no streaming path in the library; selecting it must surface a
-        // clear `UnsupportedContainment` rather than spawning. The public
-        // `SandboxRequest` can't choose a backend, so drive dispatch with the
-        // internal model.
+        // LXC is Linux-only. Selecting it elsewhere must fail before launch.
         let mut request =
             build_request(&minimal_policy(), "echo hello", None).expect("build_request");
         request.inner.containment = ContainmentBackend::Lxc;

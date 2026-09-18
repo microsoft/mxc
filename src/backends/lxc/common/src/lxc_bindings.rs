@@ -397,19 +397,7 @@ impl LxcContainer {
         // inner shell would ignore Ctrl-C.
         const UNBLOCK: &[Signal] = &[Signal::SIGHUP, Signal::SIGTERM, Signal::SIGINT];
 
-        let mut cmd = self.lxc_command("lxc-attach");
-        cmd.args(build_attach_args_with_env_control(
-            env,
-            working_directory,
-            command,
-            force_clear_env,
-        ));
-
-        // The drop needs CAP_SETPCAP, which an unprivileged caller lacks, and a
-        // run with no chains has nothing to protect anyway.
-        if firewall == ContainerFirewall::Installed {
-            confine_network_capabilities(&mut cmd);
-        }
+        let cmd = self.attach_command(command, working_directory, env, force_clear_env, firewall);
 
         let options = PtyOptions {
             unblock_signals: UNBLOCK,
@@ -429,6 +417,54 @@ impl LxcContainer {
         }
     }
 
+    /// Spawn an attached command behind a real pty and return its live handle.
+    #[cfg(target_os = "linux")]
+    pub fn attach_spawn(
+        &self,
+        command: &str,
+        working_directory: &str,
+        env: &[String],
+        force_clear_env: bool,
+        firewall: ContainerFirewall,
+    ) -> Result<mxc_pty::PtyChild, String> {
+        use mxc_pty::Signal;
+
+        // This process can block these for the executor cleanup watchdog. A
+        // library process normally does not, but unblocking is harmless and
+        // keeps both launch paths equivalent.
+        const UNBLOCK: &[Signal] = &[Signal::SIGHUP, Signal::SIGTERM, Signal::SIGINT];
+
+        mxc_pty::spawn_with_pty(
+            self.attach_command(command, working_directory, env, force_clear_env, firewall),
+            UNBLOCK,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    fn attach_command(
+        &self,
+        command: &str,
+        working_directory: &str,
+        env: &[String],
+        force_clear_env: bool,
+        firewall: ContainerFirewall,
+    ) -> std::process::Command {
+        let mut cmd = self.lxc_command("lxc-attach");
+        cmd.args(build_attach_args_with_env_control(
+            env,
+            working_directory,
+            command,
+            force_clear_env,
+        ));
+
+        // The drop needs CAP_SETPCAP, which an unprivileged caller lacks, and a
+        // run with no chains has nothing to protect anyway.
+        if firewall == ContainerFirewall::Installed {
+            confine_network_capabilities(&mut cmd);
+        }
+        cmd
+    }
+
     /// Stub for the workspace-wide clippy lane that runs on Windows.
     #[cfg(not(target_os = "linux"))]
     pub fn attach_run(
@@ -441,6 +477,19 @@ impl LxcContainer {
         _firewall: ContainerFirewall,
     ) -> Result<(i32, String, String), String> {
         Err("LxcContainer::attach_run is only supported on Linux".to_string())
+    }
+
+    /// Stub for the workspace-wide clippy lane that runs on Windows.
+    #[cfg(not(target_os = "linux"))]
+    pub fn attach_spawn(
+        &self,
+        _command: &str,
+        _working_directory: &str,
+        _env: &[String],
+        _force_clear_env: bool,
+        _firewall: ContainerFirewall,
+    ) -> Result<mxc_pty::PtyChild, String> {
+        Err("LxcContainer::attach_spawn is only supported on Linux".to_string())
     }
 
     /// Stop the container by killing it, not by asking it to exit.
