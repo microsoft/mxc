@@ -497,6 +497,30 @@ impl LxcContainer {
         Self::run_tool(self.stop_command())
     }
 
+    /// Stop the container and confirm that no contained process remains.
+    pub fn stop_and_verify(&self) -> Result<(), String> {
+        self.stop()?;
+        let output = self
+            .lxc_command("lxc-info")
+            .args(["-s", "-H"])
+            .output()
+            .map_err(|e| format!("Failed to verify that the container stopped: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Failed to verify that the container stopped: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        let state = String::from_utf8_lossy(&output.stdout);
+        if state.trim() != "STOPPED" {
+            return Err(format!(
+                "Container stop returned success but its state is '{}'",
+                state.trim()
+            ));
+        }
+        Ok(())
+    }
+
     fn stop_command(&self) -> std::process::Command {
         let mut cmd = self.lxc_command("lxc-stop");
 
@@ -512,6 +536,19 @@ impl LxcContainer {
 
         cmd.arg("-f");
         Self::run_tool(cmd)
+    }
+
+    /// Destroy the container and confirm that its definition is gone.
+    pub fn destroy_and_verify(&self) -> Result<(), String> {
+        self.destroy()?;
+        let config_path = self.config_file_path();
+        let still_defined = std::path::Path::new(&config_path)
+            .try_exists()
+            .map_err(|e| format!("Failed to verify that the container was destroyed: {e}"))?;
+        if still_defined {
+            return Err("Container destroy returned success but it is still defined".to_string());
+        }
+        Ok(())
     }
 
     fn config_file_path(&self) -> String {

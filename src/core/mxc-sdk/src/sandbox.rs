@@ -171,9 +171,24 @@ impl Sandbox {
 
         // Take both streams before waiting so `wait` won't discard them, and
         // read each on its own thread so the child never blocks on a full pipe.
+        let stdout_closer = self.inner.stdout_closer();
+        let stderr_closer = self.inner.stderr_closer();
         let stdout = capture(self.inner.take_stdout());
         let stderr = capture(self.inner.take_stderr());
-        let outcome = self.wait()?;
+        let wait_result = self.wait();
+        // The foreground process is terminal now. A descendant may still hold
+        // an inherited output handle open, so release the capture reads before
+        // joining them. Both capture threads have been draining concurrently
+        // throughout the foreground wait, preserving its output.
+        if let Some(closer) = stdout_closer {
+            closer.close();
+        }
+        if let Some(closer) = stderr_closer {
+            closer.close();
+        }
+        let stdout = stdout.join().unwrap_or_default();
+        let stderr = stderr.join().unwrap_or_default();
+        let outcome = wait_result?;
         // Sampled after the wait: a backend whose teardown runs there reports
         // its failures here.
         let warnings = self.inner.warnings();
@@ -181,8 +196,8 @@ impl Sandbox {
         Ok(Output {
             outcome,
             warnings,
-            stdout: stdout.join().unwrap_or_default(),
-            stderr: stderr.join().unwrap_or_default(),
+            stdout,
+            stderr,
             output_metadata,
         })
     }
@@ -209,11 +224,105 @@ impl StreamCloser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Condvar, Mutex};
 
     struct FakeProcess {
         warnings: Vec<String>,
         wait_warning: Option<String>,
         output_metadata: Option<SandboxOutputMetadata>,
+    }
+
+    #[derive(Default)]
+    struct HeldOutputState {
+        bytes: VecDeque<u8>,
+        closed: bool,
+    }
+
+    #[derive(Default)]
+    struct HeldOutput {
+        state: Mutex<HeldOutputState>,
+        ready: Condvar,
+    }
+
+    struct HeldOutputReader(Arc<HeldOutput>);
+
+    impl Read for HeldOutputReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+            while state.bytes.is_empty() && !state.closed {
+                state = self.0.ready.wait(state).unwrap_or_else(|e| e.into_inner());
+            }
+            state.bytes.read(buf)
+        }
+    }
+
+    #[derive(Clone)]
+    struct HeldOutputCloser(Arc<HeldOutput>);
+
+    impl InnerCloser for HeldOutputCloser {
+        fn close(&self) {
+            let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.closed = true;
+            self.0.ready.notify_all();
+        }
+    }
+
+    struct HeldOutputProcess {
+        output: Arc<HeldOutput>,
+        reader: Option<HeldOutputReader>,
+    }
+
+    impl HeldOutputProcess {
+        fn new() -> Self {
+            let output = Arc::new(HeldOutput::default());
+            Self {
+                reader: Some(HeldOutputReader(Arc::clone(&output))),
+                output,
+            }
+        }
+    }
+
+    impl SandboxProcess for HeldOutputProcess {
+        fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
+            None
+        }
+
+        fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
+            self.reader
+                .take()
+                .map(|reader| Box::new(reader) as Box<dyn Read + Send>)
+        }
+
+        fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
+            None
+        }
+
+        fn stdout_closer(&self) -> Option<Box<dyn InnerCloser>> {
+            Some(Box::new(HeldOutputCloser(Arc::clone(&self.output))))
+        }
+
+        fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+            Ok(None)
+        }
+
+        fn id(&self) -> u32 {
+            1
+        }
+
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn wait(&mut self) -> std::io::Result<i32> {
+            let mut state = self.output.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.bytes.extend(b"foreground output");
+            self.output.ready.notify_all();
+            Ok(0)
+        }
     }
 
     impl SandboxProcess for FakeProcess {
@@ -290,5 +399,16 @@ mod tests {
                 .total_denials,
             2
         );
+    }
+
+    #[test]
+    fn wait_with_output_closes_descendant_held_stream_after_foreground_wait() {
+        let sandbox = Sandbox::new(Box::new(HeldOutputProcess::new()));
+        let output = sandbox
+            .wait_with_output()
+            .expect("capture should not wait for a descendant-held output handle");
+
+        assert_eq!(output.outcome, WaitOutcome::Exited(0));
+        assert_eq!(output.stdout, b"foreground output");
     }
 }

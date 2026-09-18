@@ -14,7 +14,8 @@
 //! It uses a self-pipe + `poll(2)`: the read fd is set non-blocking and the
 //! reader blocks in `poll` on both the data pipe and the read end of a
 //! self-pipe; cancellation writes a byte to the self-pipe (waking the `poll`)
-//! and sets a flag so later reads short-circuit to EOF.
+//! and sets a flag so later reads drain bytes already available, then report
+//! EOF without waiting for more.
 
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -70,7 +71,8 @@ impl StreamCloser for ReadCanceller {
 ///
 /// Implements [`Read`]: it blocks in `poll(2)` on the data pipe and a self-pipe
 /// and returns the next chunk, real EOF (`Ok(0)`), or — once a paired
-/// [`ReadCanceller::close`] fires — a prompt cancellation EOF (`Ok(0)`).
+/// [`ReadCanceller::close`] fires — bytes already buffered followed by a prompt
+/// cancellation EOF (`Ok(0)`).
 pub struct InterruptibleReader {
     /// The child's stdout/stderr fd. Normally non-blocking; pty callers may
     /// preserve blocking mode because duplicated primary fds share flags.
@@ -174,11 +176,8 @@ impl Read for InterruptibleReader {
         if buf.is_empty() {
             return Ok(0);
         }
-        // Already cancelled: report EOF without touching the data pipe.
-        if self.state.cancelled.load(Ordering::Acquire) {
-            return Ok(0);
-        }
         loop {
+            let cancelled = self.state.cancelled.load(Ordering::Acquire);
             let mut poll_fds = [
                 libc::pollfd {
                     fd: self.fd.as_raw_fd(),
@@ -193,7 +192,10 @@ impl Read for InterruptibleReader {
             ];
             // SAFETY: `poll_fds` is a valid 2-element array of pollfds; both
             // fds are owned and live for the duration of the call.
-            let rc = unsafe { libc::poll(poll_fds.as_mut_ptr(), 2, -1) };
+            // After cancellation, poll without waiting so bytes already in the
+            // kernel buffer are preserved but later descendant output is not.
+            let timeout = if cancelled { 0 } else { -1 };
+            let rc = unsafe { libc::poll(poll_fds.as_mut_ptr(), 2, timeout) };
             if rc < 0 {
                 let err = io::Error::last_os_error();
                 if err.kind() == io::ErrorKind::Interrupted {
@@ -201,13 +203,12 @@ impl Read for InterruptibleReader {
                 }
                 return Err(err);
             }
-
-            // Cancellation wins over any pending data so a held-open pipe is
-            // abandoned promptly.
-            if self.state.cancelled.load(Ordering::Acquire) || poll_fds[1].revents != 0 {
+            if rc == 0 {
                 return Ok(0);
             }
 
+            // Data wins over cancellation for this read so foreground bytes
+            // already queued when close fired are not lost.
             if poll_fds[0].revents != 0 {
                 // SAFETY: `fd` is owned and `buf` is a valid writable slice.
                 let n =
@@ -218,11 +219,18 @@ impl Read for InterruptibleReader {
                 let err = io::Error::last_os_error();
                 match err.raw_os_error() {
                     // Spurious readiness (e.g. POLLHUP with no buffered bytes):
-                    // loop and re-poll.
+                    // loop and re-poll, or finish if cancellation has fired.
+                    Some(libc::EAGAIN) if self.state.cancelled.load(Ordering::Acquire) => {
+                        return Ok(0);
+                    }
                     Some(libc::EAGAIN) => continue,
                     _ if err.kind() == io::ErrorKind::Interrupted => continue,
                     _ => return Err(err),
                 }
+            }
+
+            if self.state.cancelled.load(Ordering::Acquire) || poll_fds[1].revents != 0 {
+                return Ok(0);
             }
         }
     }
@@ -319,6 +327,21 @@ mod tests {
             elapsed < Duration::from_secs(5),
             "read should return promptly after close, took {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn close_preserves_bytes_already_buffered() {
+        let (mut reader, write_end) = reader_with_writer();
+        let mut writer = std::fs::File::from(write_end);
+        writer.write_all(b"foreground").expect("write");
+        let canceller = reader.canceller();
+
+        canceller.close();
+
+        let mut buf = [0u8; 32];
+        let n = reader.read(&mut buf).expect("read buffered data");
+        assert_eq!(&buf[..n], b"foreground");
+        assert_eq!(reader.read(&mut buf).expect("cancelled eof"), 0);
     }
 
     #[test]

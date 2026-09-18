@@ -44,6 +44,32 @@ enum ContainerRelease {
     Stop,
 }
 
+fn release_before_policy_teardown<R, T>(
+    cleanup_policy: bool,
+    destroy_on_exit: bool,
+    mut release: R,
+    mut policy_teardown: T,
+) -> Result<(), String>
+where
+    R: FnMut(ContainerRelease) -> Result<(), String>,
+    T: FnMut(),
+{
+    if !cleanup_policy && !destroy_on_exit {
+        return Ok(());
+    }
+
+    let release_kind = if destroy_on_exit {
+        ContainerRelease::Destroy
+    } else {
+        ContainerRelease::Stop
+    };
+    release(release_kind)?;
+    if cleanup_policy {
+        policy_teardown();
+    }
+    Ok(())
+}
+
 pub struct LxcScriptRunner {
     config: LxcConfig,
     container_id: String,
@@ -63,6 +89,21 @@ struct PreparedLxc {
 }
 
 impl PreparedLxc {
+    fn preserve_firewall_ownership(&mut self) {
+        self.fw_manager.set_preserve_policy(true);
+        if let Some(manager) = &mut self.ingress_manager {
+            manager.set_preserve_policy(true);
+        }
+    }
+
+    fn finish_failed_setup(&mut self) {
+        // The caller has already attempted a verified stop/destroy. Whether it
+        // succeeded (the namespace is gone) or failed (enforcement must stay),
+        // no Drop path may nsenter the former init PID.
+        self.preserve_firewall_ownership();
+        self.cleaned_up = true;
+    }
+
     fn cleanup(&mut self, logger: &mut Logger) -> Vec<String> {
         if self.cleaned_up {
             return Vec::new();
@@ -92,29 +133,46 @@ impl PreparedLxc {
             }
         }
 
-        if self.fw_manager.rules_applied() && self.cleanup_policy {
-            if let Err(error) = self.fw_manager.remove_firewall_rules(logger) {
-                warnings.push(format!(
-                    "failed to remove LXC egress firewall rules: {error}"
-                ));
-            }
-        }
-        if let Some(manager) = &mut self.ingress_manager {
-            if manager.rules_applied() && self.cleanup_policy {
-                if let Err(error) = manager.remove_firewall_rules(logger) {
-                    warnings.push(format!(
-                        "failed to remove LXC ingress firewall rules: {error}"
-                    ));
-                }
-            }
-        }
-
-        if self.destroy_on_exit {
-            let _ = writeln!(logger, "Destroying container...");
-            if let Err(error) = self.container.destroy() {
-                let warning = format!("failed to destroy container: {error}");
+        if self.cleanup_policy || self.destroy_on_exit {
+            let action = if self.destroy_on_exit {
+                "Destroying"
+            } else {
+                "Stopping"
+            };
+            let _ = writeln!(logger, "{action} container...");
+            let container = &self.container;
+            let fw_manager = &mut self.fw_manager;
+            let ingress_manager = &mut self.ingress_manager;
+            if let Err(error) = release_before_policy_teardown(
+                self.cleanup_policy,
+                self.destroy_on_exit,
+                |release| match release {
+                    ContainerRelease::Destroy => container.destroy_and_verify(),
+                    ContainerRelease::Stop => container.stop_and_verify(),
+                },
+                || {
+                    // The chains lived in the container's network namespace,
+                    // which the verified release removed. Do not nsenter the
+                    // former init PID: it may already identify another process.
+                    fw_manager.set_preserve_policy(true);
+                    if let Some(manager) = ingress_manager.as_mut() {
+                        manager.set_preserve_policy(true);
+                    }
+                },
+            ) {
+                let verb = if self.destroy_on_exit {
+                    "destroy"
+                } else {
+                    "stop"
+                };
+                let warning = format!(
+                    "failed to {verb} and verify container before releasing network policy: \
+                     {error}; firewall enforcement was retained"
+                );
                 let _ = writeln!(logger, "Warning: {warning}");
                 warnings.push(warning);
+                self.preserve_firewall_ownership();
+                return warnings;
             }
         }
         warnings
@@ -208,8 +266,8 @@ impl LxcScriptRunner {
     ) {
         let release = self.release_kind(container_created);
         let result = match release {
-            ContainerRelease::Destroy => container.destroy(),
-            ContainerRelease::Stop => container.stop(),
+            ContainerRelease::Destroy => container.destroy_and_verify(),
+            ContainerRelease::Stop => container.stop_and_verify(),
         };
         Self::report_release_failure(release, result, logger);
     }
@@ -471,8 +529,8 @@ impl LxcScriptRunner {
                 logger,
                 Self::wait_for_network,
                 |release| match release {
-                    ContainerRelease::Destroy => container.destroy(),
-                    ContainerRelease::Stop => container.stop(),
+                    ContainerRelease::Destroy => container.destroy_and_verify(),
+                    ContainerRelease::Stop => container.stop_and_verify(),
                 },
             ) {
                 return Err(response);
@@ -486,8 +544,8 @@ impl LxcScriptRunner {
             container_created,
             logger,
             |release| match release {
-                ContainerRelease::Destroy => container.destroy(),
-                ContainerRelease::Stop => container.stop(),
+                ContainerRelease::Destroy => container.destroy_and_verify(),
+                ContainerRelease::Stop => container.stop_and_verify(),
             },
         )?;
 
@@ -561,6 +619,7 @@ impl LxcScriptRunner {
             };
             if let Some(reason) = pin_error {
                 self.release_after_failure(&prepared.container, container_created, logger);
+                prepared.finish_failed_setup();
                 return Err(ScriptResponse::error(&format!(
                     "Failed to pin the network proxy host inside the container: {reason}. \
                      The proxy would be unreachable, so the script was not run."
@@ -583,6 +642,7 @@ impl LxcScriptRunner {
             };
             if let Some(reason) = stale_pin_error {
                 self.release_after_failure(&prepared.container, container_created, logger);
+                prepared.finish_failed_setup();
                 return Err(ScriptResponse::error(&format!(
                     "Failed to clear a stale network proxy pin from the container's \
                      /etc/hosts: {reason}. The script was not run, because it could have \
@@ -620,7 +680,7 @@ impl LxcScriptRunner {
             timeout,
             prepared.firewall,
         );
-        let response = match result {
+        let mut response = match result {
             Ok((exit_code, stdout, stderr)) => ScriptResponse {
                 exit_code,
                 standard_out: stdout,
@@ -629,7 +689,7 @@ impl LxcScriptRunner {
             },
             Err(error) => ScriptResponse::error(&format!("Execution failed: {error}")),
         };
-        prepared.cleanup(logger);
+        response.warnings.extend(prepared.cleanup(logger));
         response
     }
 
@@ -781,7 +841,7 @@ fn terminate_and_reap_pty(pty: &mut mxc_pty::PtyChild) -> bool {
 #[cfg(target_os = "linux")]
 struct LxcSandboxProcess {
     pty: mxc_pty::PtyChild,
-    stdin: Option<std::fs::File>,
+    stdin: Option<mxc_pty::PtyStdin>,
     stdout: Option<PtyOutput>,
     stdout_canceller: Option<ReadCanceller>,
     timeout: Option<Duration>,
@@ -1011,6 +1071,8 @@ fn container_firewall(egress_applied: bool, ingress_applied: bool) -> ContainerF
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use wxc_common::logger::Mode;
     use wxc_common::models::ContainerPolicy;
 
@@ -1020,6 +1082,68 @@ mod tests {
             "validate-test",
             &LifecycleConfig::default(),
         )
+    }
+
+    #[test]
+    fn reusable_cleanup_stops_before_releasing_policy_ownership() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let release_events = Rc::clone(&events);
+        let teardown_events = Rc::clone(&events);
+
+        release_before_policy_teardown(
+            true,
+            false,
+            move |release| {
+                assert!(matches!(release, ContainerRelease::Stop));
+                release_events.borrow_mut().push("stop");
+                Ok(())
+            },
+            move || teardown_events.borrow_mut().push("policy"),
+        )
+        .expect("verified stop");
+
+        assert_eq!(&*events.borrow(), &["stop", "policy"]);
+    }
+
+    #[test]
+    fn failed_reusable_stop_retains_policy_ownership() {
+        let policy_released = Rc::new(RefCell::new(false));
+        let callback_state = Rc::clone(&policy_released);
+
+        let result = release_before_policy_teardown(
+            true,
+            false,
+            |release| {
+                assert!(matches!(release, ContainerRelease::Stop));
+                Err("stop verification failed".to_string())
+            },
+            move || *callback_state.borrow_mut() = true,
+        );
+
+        assert!(result.is_err());
+        assert!(
+            !*policy_released.borrow(),
+            "policy ownership must be retained until stop is verified"
+        );
+    }
+
+    #[test]
+    fn preserved_policy_keeps_reusable_container_running() {
+        let release_called = Rc::new(RefCell::new(false));
+        let callback_state = Rc::clone(&release_called);
+
+        release_before_policy_teardown(
+            false,
+            false,
+            move |_release| {
+                *callback_state.borrow_mut() = true;
+                Ok(())
+            },
+            || panic!("preserved policy must not be released"),
+        )
+        .expect("nothing to release");
+
+        assert!(!*release_called.borrow());
     }
 
     fn request_with_policy(policy: ContainerPolicy) -> ExecutionRequest {

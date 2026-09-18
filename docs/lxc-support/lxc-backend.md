@@ -101,7 +101,10 @@ rules carry no such exemption and govern port 53 like any other destination.
 `preservePolicy` leaves the egress chains in place after the run.  The chains
 live in the container's network namespace, so they last only as long as the
 container keeps running; stopping or destroying it takes them with it.  A
-partially installed chain from a failed run is torn down regardless.
+partially installed chain from a failed run is torn down regardless. When
+`destroyOnExit` and `preservePolicy` are both false, MXC stops and verifies the
+reusable container before allowing that namespace and its enforcement to
+disappear; the next execution starts the container again.
 
 If using the legacy network shape, `enforcementMode` cannot be `capabilities`.
 

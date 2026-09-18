@@ -79,6 +79,110 @@ pub enum PtyOutcome {
     TimedOut,
 }
 
+/// Writable side of a pseudo-terminal.
+///
+/// A pty primary is opened read/write, so closing only a duplicated writer
+/// does not hang up the secondary while a reader duplicate remains open.
+/// Closing this handle therefore sends the terminal's configured `VEOF`
+/// character before releasing the writer, matching an interactive Ctrl-D.
+#[derive(Debug)]
+pub struct PtyStdin {
+    writer: TerminalEofWriter<std::fs::File>,
+}
+
+impl PtyStdin {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn new(file: std::fs::File, fallback_eof: u8) -> Self {
+        Self {
+            writer: TerminalEofWriter::new(file, fallback_eof),
+        }
+    }
+
+    /// Send terminal EOF and close the writable handle.
+    ///
+    /// The operation is idempotent. The first call uses the pty's current
+    /// `VEOF` setting when it can be read, falling back to the setting captured
+    /// when the pty was allocated.
+    pub fn close(&mut self) -> std::io::Result<()> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(file) = self.writer.inner.as_ref() {
+            if let Ok(eof) = terminal_eof_byte(file) {
+                self.writer.eof = eof;
+            }
+        }
+        self.writer.close()
+    }
+}
+
+impl std::io::Write for PtyStdin {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.writer.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
+    }
+}
+
+impl Drop for PtyStdin {
+    fn drop(&mut self) {
+        let _ = self.close();
+    }
+}
+
+#[derive(Debug)]
+struct TerminalEofWriter<W: std::io::Write> {
+    inner: Option<W>,
+    eof: u8,
+}
+
+impl<W: std::io::Write> TerminalEofWriter<W> {
+    fn new(inner: W, eof: u8) -> Self {
+        Self {
+            inner: Some(inner),
+            eof,
+        }
+    }
+
+    fn close(&mut self) -> std::io::Result<()> {
+        let Some(mut inner) = self.inner.take() else {
+            return Ok(());
+        };
+        inner.write_all(&[self.eof])?;
+        inner.flush()
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for TerminalEofWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner
+            .as_mut()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pty stdin closed"))?
+            .write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner
+            .as_mut()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pty stdin closed"))?
+            .flush()
+    }
+}
+
+impl<W: std::io::Write> Drop for TerminalEofWriter<W> {
+    fn drop(&mut self) {
+        let _ = self.close();
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn terminal_eof_byte(fd: &impl std::os::fd::AsFd) -> Result<u8, nix::errno::Errno> {
+    use nix::sys::termios::{tcgetattr, SpecialCharacterIndices};
+
+    let termios = tcgetattr(fd)?;
+    Ok(termios.control_chars[SpecialCharacterIndices::VEOF as usize])
+}
+
 /// A child attached to a freshly allocated pseudo-terminal.
 ///
 /// The child owns the secondary end as all three standard streams. The parent
@@ -87,13 +191,13 @@ pub enum PtyOutcome {
 #[derive(Debug)]
 pub struct PtyChild {
     child: std::process::Child,
-    stdin: Option<std::fs::File>,
+    stdin: Option<PtyStdin>,
     stdout: Option<std::fs::File>,
 }
 
 impl PtyChild {
     /// Take the writable side of the pty primary.
-    pub fn take_stdin(&mut self) -> Option<std::fs::File> {
+    pub fn take_stdin(&mut self) -> Option<PtyStdin> {
         self.stdin.take()
     }
 
@@ -144,6 +248,8 @@ pub fn spawn_with_pty(
     });
     let pty_pair =
         openpty(inner_winsize.as_ref(), None).map_err(|e| format!("openpty failed: {e}"))?;
+    let eof = terminal_eof_byte(&pty_pair.slave)
+        .map_err(|e| format!("read pty terminal EOF setting: {e}"))?;
 
     set_cloexec_best_effort(pty_pair.master.as_raw_fd());
     set_cloexec_best_effort(pty_pair.slave.as_raw_fd());
@@ -193,7 +299,7 @@ pub fn spawn_with_pty(
 
     Ok(PtyChild {
         child,
-        stdin: Some(stdin),
+        stdin: Some(PtyStdin::new(stdin, eof)),
         stdout: Some(primary),
     })
 }
@@ -274,7 +380,7 @@ pub fn run_with_pty(command: Command, options: PtyOptions) -> Result<PtyOutcome,
     // of `primary_writer` (which the input-forwarder thread can drop
     // mid-session); the forwarder leaks its dup for the rest of the
     // process, the same lifetime as the signal handler that targets it.
-    let winch_primary = primary_writer
+    let winch_primary = primary_reader
         .try_clone()
         .map_err(|e| format!("dup primary for sigwinch forwarder: {}", e))?;
     let _winch_thread = spawn_sigwinch_forwarder(winch_primary);
@@ -536,6 +642,31 @@ pub fn spawn_with_pty(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Debug, Default)]
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl SharedWriter {
+        fn bytes(&self) -> Vec<u8> {
+            self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        }
+    }
+
+    impl Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     // Serialize tests that call `run_with_pty`. The leak regression test
     // uses `lsof -p $$` in the child to enumerate inherited fds; if other
@@ -559,6 +690,50 @@ mod tests {
     #[test]
     fn poll_interval_is_500ms() {
         assert_eq!(PtyOptions::POLL_INTERVAL, Duration::from_millis(500));
+    }
+
+    #[test]
+    fn terminal_eof_writer_closes_once_and_rejects_later_writes() {
+        let output = SharedWriter::default();
+        let mut writer = TerminalEofWriter::new(output.clone(), 0x04);
+
+        writer.write_all(b"input").expect("ordinary write");
+        writer.close().expect("first close");
+        writer.close().expect("idempotent close");
+
+        assert_eq!(output.bytes(), b"input\x04");
+        assert_eq!(
+            writer.write(b"late").expect_err("closed writer").kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+    }
+
+    #[test]
+    fn terminal_eof_writer_sends_eof_on_drop() {
+        let output = SharedWriter::default();
+        {
+            let mut writer = TerminalEofWriter::new(output.clone(), 0x1a);
+            writer.write_all(b"input").expect("ordinary write");
+        }
+
+        assert_eq!(output.bytes(), b"input\x1a");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn terminal_eof_byte_reads_the_configured_termios_character() {
+        use nix::pty::openpty;
+        use nix::sys::termios::{tcgetattr, tcsetattr, SetArg, SpecialCharacterIndices};
+
+        let pair = openpty(None, None).expect("openpty");
+        let mut termios = tcgetattr(&pair.slave).expect("read termios");
+        termios.control_chars[SpecialCharacterIndices::VEOF as usize] = 0x1a;
+        tcsetattr(&pair.slave, SetArg::TCSANOW, &termios).expect("set custom VEOF");
+
+        assert_eq!(
+            terminal_eof_byte(&pair.master).expect("read VEOF through primary"),
+            0x1a
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
