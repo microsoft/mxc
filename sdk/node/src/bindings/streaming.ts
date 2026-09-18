@@ -617,10 +617,13 @@ export function spawnStreamingProcessBinding(
 ): SandboxProcessBinding {
   const api = getStreamingApi();
   const outHandle = [null] as Pointer[];
-  const error = {} as AbiErrorDetail;
-  let spawned = false;
+  const error: AbiErrorDetail = {
+    message: null,
+    operation: null,
+    nativeCode: null,
+    remediation: null,
+  };
   try {
-    spawned = true;
     const status = api.spawn(JSON.stringify(request), outHandle, error);
     if (status !== 0 || outHandle[0] === null) {
       throw nativeStatusError(status || 12, error, 'spawning sandbox failed');
@@ -634,7 +637,7 @@ export function spawnStreamingProcessBinding(
     if (outHandle[0] !== null) api.freeSandbox(outHandle[0]);
     throw errorValue;
   } finally {
-    if (spawned) api.freeError(error);
+    api.freeError(error);
   }
 }
 

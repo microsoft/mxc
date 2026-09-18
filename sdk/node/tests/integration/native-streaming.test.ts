@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
 import { pathToFileURL } from 'node:url';
-import type { Readable } from 'node:stream';
+import type { Readable, Writable } from 'node:stream';
 import type { ContainerConfig } from '@microsoft/mxc-sdk';
 import {
   debugSpawnOptions,
@@ -18,6 +18,7 @@ import {
 } from './test-helpers.js';
 
 interface NativeSandbox {
+  readonly standardInput: Writable | null;
   readonly standardOutput: Readable | null;
   readonly standardError: Readable | null;
   waitAsync(): Promise<{ exitCode: number; timedOut: boolean }>;
@@ -55,9 +56,9 @@ describe(`Internal native streaming (schema ${schemaVersion})`, { skip: skipReas
 
     const command = os.platform() === 'win32'
       ? 'powershell.exe -NoProfile -Command "Write-Output STREAM_FIRST; ' +
-        'Start-Sleep -Milliseconds 500; Write-Output STREAM_SECOND; ' +
+        '$null = [Console]::In.ReadLine(); Write-Output STREAM_SECOND; ' +
         '[Console]::Error.WriteLine(\'STREAM_ERROR\')"'
-      : 'sh -c "printf \'STREAM_FIRST\\n\'; sleep 0.5; ' +
+      : 'sh -c "printf \'STREAM_FIRST\\n\'; IFS= read -r _; ' +
         'printf \'STREAM_SECOND\\n\'; printf \'STREAM_ERROR\\n\' >&2"';
     const policy = {
       version: schemaVersion.raw,
@@ -72,6 +73,7 @@ describe(`Internal native streaming (schema ${schemaVersion})`, { skip: skipReas
       request,
       config.process?.timeout,
     );
+    assert.ok(sandbox.standardInput, 'streaming stdin should be available');
     assert.ok(sandbox.standardOutput, 'streaming stdout should be available');
     assert.ok(sandbox.standardError, 'streaming stderr should be available');
 
@@ -99,6 +101,7 @@ describe(`Internal native streaming (schema ${schemaVersion})`, { skip: skipReas
 
     await firstChunk;
     assert.strictEqual(completed, false, 'first output should arrive before process completion');
+    sandbox.standardInput.end('continue\n');
 
     const result = await wait;
     assert.strictEqual(result.exitCode, 0, stderr);

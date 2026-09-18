@@ -379,6 +379,7 @@ export class MxcSandboxProcess {
   private failWait(error: unknown, reject: (reason?: unknown) => void): void {
     this.waitReject = undefined;
     this.dispose();
+    this.freeHandle();
     reject(error);
   }
 

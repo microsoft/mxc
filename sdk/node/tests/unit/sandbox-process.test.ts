@@ -164,16 +164,22 @@ class FakeBinding implements SandboxProcessBinding {
 
 class DeferredWaitBinding extends FakeBinding {
   private finishWait?: (result: { exitCode: number; timedOut: boolean }) => void;
+  private failWait?: (error: Error) => void;
 
   override wait(): Promise<{ exitCode: number; timedOut: boolean }> {
     this.waitCalls += 1;
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       this.finishWait = resolve;
+      this.failWait = reject;
     });
   }
 
   releaseWait(): void {
     this.finishWait?.({ exitCode: 7, timedOut: false });
+  }
+
+  rejectWait(error: Error): void {
+    this.failWait?.(error);
   }
 }
 
@@ -290,6 +296,21 @@ describe('native streaming process', () => {
     binding.releaseWait();
 
     await assert.rejects(wait, /disposed/);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.strictEqual(binding.freed, true);
+  });
+
+  it('releases the native handle when a disposed asynchronous wait rejects', async () => {
+    const binding = new DeferredWaitBinding(24, 0);
+    const proc = _createMxcSandboxProcess(binding);
+    const wait = proc.waitAsync();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    proc.dispose();
+    assert.strictEqual(binding.freed, false);
+    await assert.rejects(wait, /disposed/);
+
+    binding.rejectWait(new Error('wait failed'));
     await new Promise((resolve) => setImmediate(resolve));
     assert.strictEqual(binding.freed, true);
   });
