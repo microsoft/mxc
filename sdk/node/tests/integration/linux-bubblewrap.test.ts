@@ -165,7 +165,7 @@ describe('Linux Bubblewrap network proxy (schema 0.6.0-alpha)', {
       'fi';
     config.network = {
       ...(config.network ?? {}),
-      defaultPolicy: 'allow',
+      defaultPolicy: 'block',
       proxy: { builtinTestServer: true },
       allowedHosts: ['pkgs.dev.azure.com'],
     };

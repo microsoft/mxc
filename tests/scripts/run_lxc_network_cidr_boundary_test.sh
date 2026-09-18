@@ -196,11 +196,11 @@ assert_programmed_rule iptables "198.51.100.42/32" DROP
 assert_programmed_rule ip6tables "2001:db8::5" DROP
 assert_programmed_rule ip6tables "2001:db8::5/128" DROP
 
-if ! echo "$OUTPUT" | grep -q "Default network policy: ACCEPT"; then
-    fail "default-allow policy was not applied."
+if ! echo "$OUTPUT" | grep -q "Default network policy: DROP"; then
+    fail "default-deny policy was not applied."
 fi
-if echo "$OUTPUT" | grep -q "Default network policy: DROP"; then
-    fail "default-deny policy was applied unexpectedly."
+if echo "$OUTPUT" | grep -q "Default network policy: ACCEPT"; then
+    fail "default-allow policy was applied unexpectedly."
 fi
 
 # The v6 half is required by roadmap item 19 / AB#62830559; skipping it would be a dual-stack bypass.

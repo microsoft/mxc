@@ -10,7 +10,7 @@ use wxc_common::mxc_error::MxcError;
 
 use crate::configs::{Lxc, ProcessContainer, Seatbelt};
 
-use super::network::{select_network_format, NetworkFormat};
+use super::network::{legacy_default_allows, select_network_format, NetworkFormat};
 use super::{Containment, NetworkAction, ProxySpec, SandboxPolicy, SandboxRequest};
 
 macro_rules! optional {
@@ -74,6 +74,15 @@ fn validate_common(
         if matches!(network.proxy, Some(ProxySpec::BuiltinTestServer)) {
             return Err(error(
                 "network.proxy.builtinTestServer is not supported by the in-process Rust SDK; use localhost or url",
+            ));
+        }
+
+        if !network.blocked_hosts.is_empty()
+            && network.allowed_hosts.is_empty()
+            && !network.allow_outbound
+        {
+            return Err(error(
+                "blockedHosts requires allowedHosts when network.defaultPolicy='block'",
             ));
         }
 

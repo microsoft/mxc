@@ -215,10 +215,10 @@ All flags default to `false` (no network access).
 
 | Field              | Description |
 |--------------------|-------------|
-| `allowOutbound`    | Allow outbound connections to the internet (HTTP, DNS, etc.). |
+| `allowOutbound`    | Allow outbound connections by default when no `allowedHosts` list narrows the policy. |
 | `allowLocalNetwork`| Allow connections to local networks. |
-| `allowedHosts`     | When set, only these outbound hosts are reachable on host-filtering backends. Seatbelt accepts the field for compatibility but degrades to allow-all outbound because it cannot filter DNS names. |
-| `blockedHosts`     | Hosts to block even when outbound is allowed. Seatbelt rejects this field because hostname blocks cannot be enforced. |
+| `allowedHosts`     | Hosts or CIDRs allowed under a default-block policy. SDK builders select the block default whenever this list is non-empty; Windows ProcessContainer callers must also set `allowOutbound`. Seatbelt rejects the shared-valid combination unless `builtinTestServer` supplies the enforcement path. |
+| `blockedHosts`     | Hosts or CIDRs denied after allow rules are applied. Without `allowedHosts`, set `allowOutbound` to express allow-all-except-these. Seatbelt rejects this field because hostname blocks cannot be enforced. |
 | `proxy`            | `{ builtinTestServer: true }`, `{ localhost: <port> }`, or `{ url: "..." }`. Windows enforces the proxy through WinHTTP; Bubblewrap and Seatbelt inject cooperative proxy environment variables that raw-socket clients can bypass. Combination rules are backend-specific: Bubblewrap and Seatbelt both reject proxy plus `enforcementMode: "firewall"` / `"both"` (neither has a privileged packet-filter layer), and Bubblewrap external proxies cannot be combined with host lists or `defaultPolicy: "block"`. `builtinTestServer` is testing-only and requires the `--allow-testing-features` flag (set `allowTestingFeatures: true` in the SDK spawn options). |
 
 Omitted = no network access.

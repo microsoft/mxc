@@ -758,7 +758,7 @@ an exit is detected; see [Limitations](#limitations).
     "commandLine": "curl -fsSL https://api.github.com/zen && echo OK"
   },
   "network": {
-    "defaultPolicy": "allow",
+    "defaultPolicy": "block",
     "proxy": { "builtinTestServer": true },
     "allowedHosts": ["api.github.com"]
   }
