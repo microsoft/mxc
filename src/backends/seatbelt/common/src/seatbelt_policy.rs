@@ -154,8 +154,8 @@ pub fn validate_seatbelt_network_policy(policy: &ContainerPolicy) -> Result<(), 
     if !policy.blocked_hosts.is_empty() {
         return Err(
             "macOS Seatbelt does not support per-host network filtering. \
-                    'blockedHosts' cannot be enforced; remove it or use \
-                    defaultPolicy: \"block\" to deny all network."
+                    'blockedHosts' cannot be enforced; remove it. To deny all \
+                    network, use defaultPolicy: \"block\" without host lists."
                 .to_string(),
         );
     }
