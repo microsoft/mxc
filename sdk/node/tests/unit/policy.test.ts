@@ -46,14 +46,25 @@ describe('getAvailableToolsPolicy - PowerShell discovery', () => {
         }
     });
 
-    it('should add system root to readonlyPaths when pwsh.exe is on PATH', { skip: isLinux }, () => {
+    it('should never add the drive root to readonlyPaths when pwsh.exe is on PATH', { skip: isLinux }, () => {
         mockWindows();
         const pwshDir = createFakePwshDir();
         const env = { PATH: pwshDir, USERPROFILE: 'C:\\Users\\TestUser' };
         const result = getAvailableToolsPolicy(env);
         assert.ok(
-            result.readonlyPaths.some(p => /^[a-z]:\\$/i.test(p)),
-            'System root (e.g. C:\\) should be in readonlyPaths when pwsh.exe is on PATH',
+            !result.readonlyPaths.some(p => /^[a-z]:\\$/i.test(p)),
+            'Finding pwsh.exe must not grant a recursive read of the whole volume',
+        );
+    });
+
+    it('should still grant $PSHOME read-only via PATH discovery', { skip: isLinux }, () => {
+        mockWindows();
+        const pwshDir = createFakePwshDir();
+        const env = { PATH: pwshDir, USERPROFILE: 'C:\\Users\\TestUser' };
+        const result = getAvailableToolsPolicy(env);
+        assert.ok(
+            result.readonlyPaths.some(p => p.toLowerCase() === pwshDir.toLowerCase()),
+            'The directory holding pwsh.exe is a PATH directory and stays granted',
         );
     });
 
@@ -104,8 +115,8 @@ describe('getAvailableToolsPolicy - PowerShell discovery', () => {
         const env = { PATH: pwshDir };
         const result = getAvailableToolsPolicy(env);
         assert.ok(
-            result.readonlyPaths.some(p => /^[a-z]:\\$/i.test(p)),
-            'System root should still be in readonlyPaths',
+            !result.readonlyPaths.some(p => /^[a-z]:\\$/i.test(p)),
+            'System root must not be in readonlyPaths',
         );
         assert.strictEqual(result.readwritePaths.length, 0,
             'readwritePaths should be empty without USERPROFILE',

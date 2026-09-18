@@ -273,13 +273,21 @@ fn apply_environment_overrides<K, V>(
 }
 
 /// PowerShell-specific policy: when `pwsh.exe` is found on `path_dirs`
-/// (Windows only), grant the system-drive root (`C:\`) read-only — `pwsh.exe`
-/// enumerates the drive root on startup — plus the PSReadLine history directory
-/// read-write so the module can persist command history.
+/// (Windows only), grant the PSReadLine history directory read-write so the
+/// module can persist command history.
 ///
-/// Mirrors the SDK's `getPowerShellPolicy`. The system drive is read from the
-/// process environment (`SystemDrive`, defaulting to `C:`); the user-scoped
-/// `USERPROFILE` comes from the passed-in `env`.
+/// Deliberately grants no read access to the system-drive root. `pwsh.exe`
+/// before 7.7 stats the root at startup, but that is a *metadata-only* need,
+/// and a recursive `readonlyPaths` grant on `C:\` would expose every file on
+/// the volume (`~/.ssh`, `~/.aws/credentials`, other users' profiles) to
+/// satisfy it. The narrow, host-wide answer is `wxc-host-prep
+/// prepare-system-drive`, which stamps non-inheriting metadata ACEs on the
+/// root. `$PSHOME` itself needs no special handling here: the directory
+/// holding `pwsh.exe` is by definition a `PATH` directory, so
+/// [`available_tools_policy`] already grants it read-only.
+///
+/// Mirrors the SDK's `getPowerShellPolicy`. `USERPROFILE` comes from the
+/// passed-in `env`.
 ///
 /// On non-Windows, or when `pwsh.exe` is not on `path_dirs`, returns an empty
 /// policy.
@@ -294,12 +302,6 @@ fn powershell_policy(path_dirs: &[String], env: &[(String, String)]) -> Filesyst
     if !pwsh_found {
         return FilesystemPolicyResult::default();
     }
-
-    let system_drive = std::env::var("SystemDrive")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "C:".to_string());
-    let readonly_paths = vec![format!("{system_drive}\\")];
 
     let mut readwrite_paths: Vec<String> = Vec::new();
     if let Some(user_profile) = env_get(env, "USERPROFILE") {
@@ -318,8 +320,8 @@ fn powershell_policy(path_dirs: &[String], env: &[(String, String)]) -> Filesyst
     }
 
     FilesystemPolicyResult {
-        readonly_paths,
         readwrite_paths,
+        ..Default::default()
     }
 }
 
@@ -327,8 +329,9 @@ fn powershell_policy(path_dirs: &[String], env: &[(String, String)]) -> Filesyst
 /// environment) as read-only policy paths.
 ///
 /// Reads `PATH` plus a registry of well-known tool/SDK variables, then filters
-/// out non-existent and system-critical directories, and adds PowerShell paths
-/// when `pwsh.exe` is on `PATH`. The Rust port of `getAvailableToolsPolicy`.
+/// out non-existent and system-critical directories, and adds the PowerShell
+/// write paths when `pwsh.exe` is on `PATH`. The Rust port of
+/// `getAvailableToolsPolicy`.
 /// (The SDK's `processcontainer` AAP-ACL filter is Windows-runtime-specific and
 /// is applied server-side; it is not replicated here.)
 pub fn available_tools_policy(env: Option<&[(String, String)]>) -> FilesystemPolicyResult {
@@ -360,11 +363,8 @@ pub fn available_tools_policy(env: Option<&[(String, String)]>) -> FilesystemPol
 
     let pwsh = powershell_policy(&path_dirs, env);
 
-    let mut readonly = filtered;
-    readonly.extend(pwsh.readonly_paths);
-
     FilesystemPolicyResult {
-        readonly_paths: deduplicate_paths(&readonly),
+        readonly_paths: deduplicate_paths(&filtered),
         readwrite_paths: deduplicate_paths(&pwsh.readwrite_paths),
     }
 }
@@ -1594,7 +1594,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn powershell_policy_grants_system_drive_root() {
+    fn powershell_policy_never_grants_the_drive_root() {
         use super::powershell_policy;
         use std::fs;
         use std::path::PathBuf;
@@ -1619,15 +1619,13 @@ mod tests {
         // Clean up before asserting so a failing assertion still leaves nothing.
         let _ = fs::remove_dir_all(&ps_home);
 
-        // The system-drive root (e.g. `C:\`) is granted read-only — pwsh
-        // enumerates the drive root on startup (mirrors `getPowerShellPolicy`).
-        // A bare drive root normalizes to a 2-char `X:` after trimming separators.
+        // Finding pwsh.exe must never hand out a recursive read grant on the
+        // volume root: that would expose every file on the drive to satisfy a
+        // metadata-only startup stat. A bare drive root normalizes to a 2-char
+        // `X:` after trimming separators.
         assert!(
-            result.readonly_paths.iter().any(|p| {
-                let trimmed = p.trim_end_matches(['\\', '/']);
-                trimmed.len() == 2 && trimmed.ends_with(':')
-            }),
-            "expected system-drive root in readonly paths: {:?}",
+            result.readonly_paths.is_empty(),
+            "pwsh discovery must grant no read paths of its own: {:?}",
             result.readonly_paths
         );
         // PSReadLine command history stays read-write.
@@ -1638,6 +1636,51 @@ mod tests {
                 .any(|p| p.contains("PSReadLine")),
             "expected PSReadLine history in readwrite paths: {:?}",
             result.readwrite_paths
+        );
+    }
+
+    /// Dropping the root grant must not cost `$PSHOME` itself: the directory
+    /// holding `pwsh.exe` is a `PATH` directory, so the ordinary discovery
+    /// filter already grants it read-only.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn available_tools_policy_still_grants_pshome_via_path() {
+        use super::available_tools_policy;
+        use std::fs;
+
+        let unique = format!(
+            "mxc_pwsh_pshome_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let ps_home = std::env::temp_dir().join(unique);
+        fs::create_dir_all(&ps_home).expect("create temp $PSHOME");
+        fs::write(ps_home.join("pwsh.exe"), b"").expect("create fake pwsh.exe");
+        let ps_home_str = ps_home.to_string_lossy().into_owned();
+
+        let env = vec![("PATH".to_string(), ps_home_str.clone())];
+        let result = available_tools_policy(Some(&env));
+
+        let _ = fs::remove_dir_all(&ps_home);
+
+        assert!(
+            result
+                .readonly_paths
+                .iter()
+                .any(|p| p.eq_ignore_ascii_case(&ps_home_str)),
+            "expected $PSHOME granted via PATH: {:?}",
+            result.readonly_paths
+        );
+        assert!(
+            !result.readonly_paths.iter().any(|p| {
+                let trimmed = p.trim_end_matches(['\\', '/']);
+                trimmed.len() == 2 && trimmed.ends_with(':')
+            }),
+            "no drive root may be granted: {:?}",
+            result.readonly_paths
         );
     }
 
