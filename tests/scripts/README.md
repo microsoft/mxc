@@ -5,7 +5,8 @@ locally and in CI. The primary Rust executor E2E path is
 `cargo test -p wxc_e2e_tests`, which invokes the MXC binaries directly instead
 of shelling through these scripts.
 
-All scripts accept a `-Release` switch to use the release build (default: debug).
+Arguments and build-profile defaults vary by suite. Use the script's help or
+header comment for its supported parameters.
 
 ## Prerequisites
 
@@ -40,20 +41,26 @@ Linux / macOS (`.sh`):
 | `run_microvm_tests.ps1` | Full MicroVM E2E suite | WHP enabled, NanVix binaries |
 | `run_windows_sandbox_one_shot_tests.ps1` | Windows Sandbox one-shot E2E suite (fresh disposable VM per test) | Windows Sandbox enabled |
 | `run_windows_sandbox_state_aware_tests.ps1` | Windows Sandbox state-aware lifecycle E2E (single VM held across provision/start/exec*/stop/deprovision) | Windows Sandbox enabled |
+| `run_isolation_session_tests.ps1` | IsolationSession one-shot E2E suite | Interactive local session; OS-side IsolationSession service |
+| `run_isolation_session_state_aware_tests.ps1` | IsolationSession provision/start/exec/stop/deprovision E2E suite | Interactive local session; OS-side IsolationSession service |
+| `run_wslc_all_tests.ps1` | All WSLC one-shot and state-aware E2E tests | WSL2, WSLC SDK, staged daemon, and network access for image setup (or pre-pulled images with `-SkipSetup`) |
 | `run_processcontainer_proxy_tests.ps1` | Process container proxy tests | `wxc-exec.exe` |
 | `WinProcessContainer-Tests.ps1` | Process container (AppContainer / BaseContainer) primitives suite — tier probes, rw/ro/denied matrix, UI mitigations, DACL restore, crash recovery | `wxc-exec.exe`, `wxc-ui-probe.exe` |
 | `T3-Workloads.ps1` | Real workloads (pwsh, git, node, python, cmd) on top of the T3 primitives. A missing interpreter is reported as a skip, not a failure | `wxc-exec.exe`; `pwsh` / `git` / `node` / `python` each optional, gating their own cases |
+| `run_telemetry_consent_smoke_test.ps1` | Consent maintenance, presentation, policy, and exit-code smoke tests | Debug `wxc-exec.exe` built with `test-support` |
+| `run_telemetry_etw_smoke_test.ps1` | Isolated consent flow plus public-provider ETW capture | Debug `wxc-exec.exe` built with `test-support`; ETW tooling |
 | `run_on_repeat.ps1` | Stress test (loops core tests) | `wxc-exec.exe` |
 
-### Linux suites
+### Unix suites
 
 | Script | Description | Extra prerequisites |
 |--------|-------------|---------------------|
 | `run_bwrap_all_tests.sh` | All Bubblewrap tests | `lxc-exec`, `bwrap` |
 | `run_lxc_all_tests.sh` | All LXC tests | `lxc-exec`, LXC stack, root |
+| `run_seatbelt_all_tests.sh` | All Seatbelt tests; missing prerequisites are failures rather than skips | macOS, `mxc-exec-mac`, unprivileged user, backend prerequisites |
 
-Individual `run_bwrap_*.sh` / `run_lxc_*.sh` scripts run one case each; the
-aggregate scripts above are what CI dispatches to.
+Individual `run_bwrap_*.sh`, `run_lxc_*.sh`, and `run_seatbelt_*.sh` scripts
+run focused backend suites; the aggregate scripts above are what CI dispatches to.
 
 Not every script runs in CI: several depend on local OS features such as
 Windows Sandbox, WHP, proxy setup, or stress-test duration. The ones CI does
@@ -155,7 +162,7 @@ Use npm for SDK tests and Cargo for Rust executor tests. Avoid routing npm tests
 through Cargo.
 
 ```powershell
-cd sdk
+cd sdk\node
 npm test                    # SDK unit tests
 npm run test:integration    # SDK integration tests
 ```
