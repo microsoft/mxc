@@ -58,6 +58,12 @@ BaseProcessContainer UI isolation, proxy peer identity, and denial capture.
 Schema 0.8 directional networking is available through
 `NetworkSection::{egress, ingress, runtime_config}`.
 
+For legacy networking, a non-empty `NetworkSection::allowed_hosts` list selects
+a block default even when `allow_outbound` is true, so the allowlist narrows
+outbound access. With no allowlist, `allow_outbound = true` selects an allow
+default and `blocked_hosts` expresses allow-all-except-these. A blocklist
+without either an allowlist or `allow_outbound` is rejected.
+
 The new ProcessContainer and directional-network configuration types are
 non-exhaustive so fields can be added compatibly. Construct types whose fields
 are all optional with `Default`, then assign the settings the request needs.

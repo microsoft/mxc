@@ -6,7 +6,7 @@
     "commandLine": "set -e; curl -fsSL --max-time 15 http://mxc-test.invalid/ | grep -q MXC_TEST_ORIGIN_OK && echo SENTINEL_OK; if curl -fsS --max-time 5 http://mxc-blocked.invalid/ > /dev/null 2>&1; then echo SENTINEL_BAD_LEAK; exit 1; else echo BLOCKED_OK; fi"
   },
   "network": {
-    "defaultPolicy": "allow",
+    "defaultPolicy": "block",
     "proxy": { "builtinTestServer": true },
     "allowedHosts": ["mxc-test.invalid"]
   }

@@ -164,6 +164,27 @@ fn build_request_host_rules_require_outbound() {
 }
 
 #[test]
+fn build_request_blocklist_only_requires_outbound() {
+    let mut network = mxc_sdk::policy::NetworkSection::default();
+    network.blocked_hosts = vec!["198.51.100.10".to_string()];
+
+    let policy = SandboxPolicy {
+        version: "0.7.0-alpha".to_string(),
+        filesystem: None,
+        network: Some(network),
+        ui: None,
+        timeout_ms: None,
+    };
+
+    let error = build_request(&policy, "echo hello", None)
+        .expect_err("blocklist-only requires an allow default");
+    assert_eq!(
+        error.message,
+        "blockedHosts requires allowedHosts when network.defaultPolicy='block'"
+    );
+}
+
+#[test]
 fn rust_sdk_builds_legacy_networking() {
     use mxc_sdk::policy::NetworkSection;
 

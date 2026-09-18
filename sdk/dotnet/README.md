@@ -57,6 +57,12 @@ catch (MxcException ex)
 }
 ```
 
+For legacy `NetworkPolicy`, a non-empty `AllowedHosts` list selects a block
+default even when `AllowOutbound` is true, so the allowlist narrows outbound
+access. With no allowlist, `AllowOutbound = true` selects an allow default and
+`BlockedHosts` expresses allow-all-except-these. A blocklist without either an
+allowlist or `AllowOutbound` is rejected by the native SDK.
+
 `MxcSandbox.RunAsync(policy, command)` offloads the blocking native call to the
 thread pool. `MxcSandbox.NativeVersion` returns the loaded `mxc_ffi` version.
 Optional feature outputs are returned through `RunResult.OutputMetadata`; for
