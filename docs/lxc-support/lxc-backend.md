@@ -87,6 +87,14 @@ Note the required field lxc.
 
 Any combination that lxc-create supports.
 
+### Working directory
+
+`process.cwd` is applied inside the container, so it names a path in the
+container's filesystem rather than the host's. From schema `0.9.0-alpha` on, a
+set value must be an absolute Linux path; earlier versions resolve a relative
+value against the `lxc-exec` process's directory. An empty value keeps the
+container default.
+
 ### Preventing environment variables from leaking into LXC
 
 If `process.env` has a value, `lxc-attach` is run with `--clear-env` so host

@@ -683,6 +683,7 @@ impl ScriptRunner for WSLContainerRunner {
             .into_response());
         }
         policy::reject_unsupported_enforcement_mode(request).map_err(as_wslc_rejection)?;
+        container_working_directory(request)?;
         // The shared validator returns an untagged response; retag it so its
         // rejections reach SDK callers as `policy_validation` like the checks above.
         validate_network_policy_support(request, policy::network_policy_support())
@@ -702,9 +703,42 @@ fn as_wslc_rejection(err: MxcError) -> ScriptResponse {
     WslcError::Rejected(err.message).into_response()
 }
 
+/// Resolve `process.cwd` to the container path the SDK is configured with, or
+/// `None` when it was omitted.
+///
+/// One-shot reads the value as a Windows host path and maps it to its
+/// in-container mount point, so a value without a drive letter (a UNC path,
+/// say) has no equivalent inside the container. This is the only place the
+/// one-shot surface converts or refuses it: `validate_runner` calls it so a
+/// dry-run reports the rejection before any SDK work, and
+/// [`WSLContainerRunner::start_container`] calls it for the value it hands the
+/// SDK.
+fn container_working_directory(
+    request: &ExecutionRequest,
+) -> Result<Option<String>, ScriptResponse> {
+    if request.working_directory.is_empty() {
+        return Ok(None);
+    }
+
+    policy_mapping::windows_path_to_container_path(&request.working_directory)
+        .map(Some)
+        .ok_or_else(|| {
+            WslcError::Rejected(format!(
+                "WSLc: process.cwd must be a Windows drive path that maps into the container \
+                 (e.g. C:\\workspace -> /mnt/c/workspace), got {:?}",
+                request.working_directory
+            ))
+            .into_response()
+        })
+}
+
 /// The first line [`WSLContainerRunner::start_container`] writes, before any
 /// SDK call. Tests assert its absence to prove a rejection aborted early.
 pub(crate) const START_CONTAINER_BANNER: &str = "[WSLC] Starting WSL Container runner";
+
+/// The first line [`WSLContainerRunner::init_and_load_sdk`] writes. Tests
+/// assert its absence to prove a rejection ran before any SDK work.
+pub(crate) const SDK_INIT_BANNER: &str = "[WSLC] COM initialized";
 
 /// Refuses the `lifecycle` settings the one-shot surface cannot honour.
 ///
@@ -765,7 +799,7 @@ impl WSLContainerRunner {
                 )
             }
         }
-        let _ = writeln!(logger, "[WSLC] COM initialized");
+        let _ = writeln!(logger, "{SDK_INIT_BANNER}");
 
         let sdk = match WslcSdk::shared() {
             Ok(s) => s,
@@ -1389,6 +1423,10 @@ impl WSLContainerRunner {
             }
         };
 
+        // Resolved before any SDK work so an untranslatable value is refused
+        // without a session or image being touched.
+        let container_cwd = container_working_directory(request)?;
+
         // -- Init: COM + SDK + preflight --
         let sdk = Self::init_and_load_sdk(logger)?;
 
@@ -1511,22 +1549,18 @@ impl WSLContainerRunner {
         }
 
         let _cwd_cstr;
-        if !request.working_directory.is_empty() {
-            if let Some(container_cwd) =
-                policy_mapping::windows_path_to_container_path(&request.working_directory)
-            {
-                _cwd_cstr = format!("{}\0", container_cwd);
-                let hr = sdk.WslcSetProcessSettingsWorkingDirectory(
-                    &mut process_settings,
-                    _cwd_cstr.as_bytes().as_ptr() as PCSTR,
-                );
-                if hr != S_OK {
-                    return Err(sdk_error(
-                        "WslcSetProcessSettingsWorkingDirectory failed",
-                        hr,
-                        "",
-                    ));
-                }
+        if let Some(container_cwd) = container_cwd.as_deref() {
+            _cwd_cstr = format!("{container_cwd}\0");
+            let hr = sdk.WslcSetProcessSettingsWorkingDirectory(
+                &mut process_settings,
+                _cwd_cstr.as_bytes().as_ptr() as PCSTR,
+            );
+            if hr != S_OK {
+                return Err(sdk_error(
+                    "WslcSetProcessSettingsWorkingDirectory failed",
+                    hr,
+                    "",
+                ));
             }
         }
 
@@ -2547,6 +2581,110 @@ mod tests {
         assert_eq!(
             err.failure_phase,
             wxc_common::models::FailurePhase::Rejected
+        );
+    }
+
+    #[test]
+    fn validate_runner_rejects_a_cwd_that_does_not_map_into_the_container() {
+        let runner = WSLContainerRunner::new(&WslcConfig::default());
+        for cwd in ["\\\\server\\share", "/mnt/c/workspace", "relative"] {
+            let request = ExecutionRequest {
+                containment: wxc_common::models::ContainmentBackend::Wslc,
+                working_directory: cwd.to_string(),
+                ..Default::default()
+            };
+            let err = runner
+                .validate_runner(&request)
+                .expect_err(&format!("accepted '{cwd}'"));
+            assert!(
+                err.error_message.contains("maps into the container"),
+                "got: {}",
+                err.error_message
+            );
+            assert_eq!(
+                err.failure_phase,
+                wxc_common::models::FailurePhase::Rejected
+            );
+        }
+    }
+
+    #[test]
+    fn validate_runner_accepts_a_drive_rooted_cwd() {
+        let runner = WSLContainerRunner::new(&WslcConfig::default());
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            working_directory: "C:\\workspace".to_string(),
+            ..Default::default()
+        };
+        assert!(runner.validate_runner(&request).is_ok());
+    }
+
+    /// The one conversion both entry points read, so neither can accept a form
+    /// the other refuses, or configure a different container path for it.
+    #[test]
+    fn container_working_directory_resolves_or_refuses_the_value_once() {
+        let resolve = |cwd: &str| {
+            container_working_directory(&ExecutionRequest {
+                containment: wxc_common::models::ContainmentBackend::Wslc,
+                working_directory: cwd.to_string(),
+                ..Default::default()
+            })
+        };
+
+        assert_eq!(resolve("").unwrap(), None, "an omitted cwd stays omitted");
+        assert_eq!(
+            resolve("C:\\workspace").unwrap(),
+            Some("/mnt/c/workspace".to_string())
+        );
+        assert_eq!(
+            resolve("C:/workspace/src").unwrap(),
+            Some("/mnt/c/workspace/src".to_string())
+        );
+
+        for cwd in ["\\\\server\\share", "/mnt/c/workspace", "relative", "C:rel"] {
+            let err = resolve(cwd).expect_err(&format!("accepted '{cwd}'"));
+            assert!(
+                err.error_message.contains("maps into the container"),
+                "got: {}",
+                err.error_message
+            );
+        }
+    }
+
+    /// The direct caller-built path (no `validate_runner`): the conversion runs
+    /// before the SDK is loaded, so an untranslatable value cannot reach COM,
+    /// the session, or image resolution.
+    #[test]
+    fn start_container_refuses_an_untranslatable_cwd_before_loading_the_sdk() {
+        let runner = WSLContainerRunner::new(&WslcConfig::default());
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            script_code: "echo hi".to_string(),
+            working_directory: "\\\\server\\share".to_string(),
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+
+        // SAFETY: the rejection returns before any FFI call is made.
+        let Err(err) =
+            (unsafe { runner.start_container(&request, &mut logger, OutputMode::Capture) })
+        else {
+            panic!("an untranslatable cwd must not bring a container up");
+        };
+
+        assert!(
+            err.error_message.contains("maps into the container"),
+            "got: {}",
+            err.error_message
+        );
+        assert_eq!(
+            err.failure_phase,
+            wxc_common::models::FailurePhase::Rejected
+        );
+        assert!(
+            !logger.get_buffer().contains(SDK_INIT_BANNER),
+            "the refusal must precede SDK initialization; logger: {}",
+            logger.get_buffer()
         );
     }
 

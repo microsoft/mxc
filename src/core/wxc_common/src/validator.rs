@@ -1,7 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::models::{ExecutionRequest, NetworkAction, NetworkPolicy, ScriptResponse};
+use crate::models::{
+    ExecutionRequest, FailurePhase, NetworkAction, NetworkPolicy, ScriptResponse,
+    WorkingDirectoryScope,
+};
 use crate::mxc_error::MxcError;
 
 /// Declares which optional network policy features a backend enforces.
@@ -184,11 +187,65 @@ pub fn validate_state_aware_network_policy_support(
         .map_err(|response| MxcError::policy_validation(response.error_message))
 }
 
+/// First schema version (major, minor) that requires an absolute `process.cwd`.
+const ABSOLUTE_CWD_MIN_SCHEMA: (u64, u64) = (0, 9);
+
+/// Reject a relative `process.cwd` from schema 0.9.0-alpha on, where relative
+/// means "resolves against the launching process's working directory".
+///
+/// Absoluteness belongs to the target the path reaches, not the host, so the
+/// shape comes from [`ContainmentBackend::working_directory_style`] for
+/// `scope`. Earlier schema versions keep the previous behavior.
+pub fn validate_working_directory(
+    request: &ExecutionRequest,
+    scope: WorkingDirectoryScope,
+) -> Result<(), String> {
+    // Validate the exact string the backends receive: only a genuinely empty
+    // value means "omitted", and " /tmp" is relative everywhere.
+    let cwd = request.working_directory.as_str();
+    if cwd.is_empty() || !schema_requires_absolute_cwd(&request.schema_version) {
+        return Ok(());
+    }
+
+    let style = request.containment.working_directory_style(scope);
+    if style.is_absolute(cwd) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "process.cwd must be an absolute path (e.g. {}), got '{}'. Schema 0.9.0-alpha and \
+         later reject a relative working directory because it resolves against the host \
+         process's working directory.",
+        style.example(),
+        crate::config_deserialize::escape_diagnostic_text(cwd)
+    ))
+}
+
+/// A malformed version is left to the schema-version validator, which owns that
+/// diagnostic.
+fn schema_requires_absolute_cwd(version: &str) -> bool {
+    semver::Version::parse(version)
+        .is_ok_and(|parsed| (parsed.major, parsed.minor) >= ABSOLUTE_CWD_MIN_SCHEMA)
+}
+
 /// Validates non-backend-specific parts of the request (e.g. non-empty script).
 pub fn validate_common(request: &ExecutionRequest) -> Result<(), ScriptResponse> {
     if request.script_code.is_empty() {
         return Err(ScriptResponse::error("Script content must not be empty."));
     }
+
+    // `Rejected` so the SDK surfaces this as `policy_validation`, matching what
+    // state-aware `exec` returns for the same cwd. Only `error_message` is set:
+    // the CLI prints `standard_err` and then the error envelope, so populating
+    // both would report the same rejection twice.
+    validate_working_directory(request, WorkingDirectoryScope::OneShot).map_err(|message| {
+        ScriptResponse {
+            exit_code: -1,
+            failure_phase: FailurePhase::Rejected,
+            error_message: message,
+            ..Default::default()
+        }
+    })?;
 
     // Enforce the testing-only-features gate centrally so it applies uniformly
     // to all backends — every backend runs `validate_common` before executing.
@@ -216,14 +273,15 @@ pub fn validate_common(request: &ExecutionRequest) -> Result<(), ScriptResponse>
 }
 
 /// Cross-backend invariants for state-aware `exec`. The dispatcher calls this
-/// before the backend's own `validate_exec` hook. Only the exec phase has a
-/// common-check today (a non-empty `process.commandLine`).
+/// before the backend's own `validate_exec` hook.
 pub fn validate_exec_common(request: &ExecutionRequest) -> Result<(), MxcError> {
     if request.script_code.is_empty() {
         return Err(MxcError::malformed_request(
             "exec phase requires a non-empty process.commandLine",
         ));
     }
+    validate_working_directory(request, WorkingDirectoryScope::Exec)
+        .map_err(MxcError::policy_validation)?;
     Ok(())
 }
 
@@ -231,8 +289,8 @@ pub fn validate_exec_common(request: &ExecutionRequest) -> Result<(), MxcError> 
 mod tests {
     use super::*;
     use crate::models::{
-        ExecutionRequest, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkRule,
-        ProxyAddress, ProxyConfig,
+        ContainmentBackend, ExecutionRequest, NetworkAction, NetworkEgressPolicy,
+        NetworkIngressPolicy, NetworkRule, ProxyAddress, ProxyConfig,
     };
     use crate::mxc_error::MxcErrorCode;
 
@@ -348,6 +406,229 @@ mod tests {
         req.testing_features_enabled = true;
 
         assert!(validate_common(&req).is_ok());
+    }
+
+    fn request_with_cwd(
+        version: &str,
+        containment: ContainmentBackend,
+        cwd: &str,
+    ) -> ExecutionRequest {
+        ExecutionRequest {
+            script_code: "echo hi".to_string(),
+            schema_version: version.to_string(),
+            containment,
+            working_directory: cwd.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rejects_relative_cwd_on_schema_0_9_for_every_backend() {
+        let backends = [
+            ContainmentBackend::ProcessContainer,
+            ContainmentBackend::WindowsSandbox,
+            ContainmentBackend::IsolationSession,
+            ContainmentBackend::Lxc,
+            ContainmentBackend::Bubblewrap,
+            ContainmentBackend::Seatbelt,
+            ContainmentBackend::Wslc,
+            ContainmentBackend::MicroVm,
+            ContainmentBackend::Hyperlight,
+            ContainmentBackend::Vm,
+        ];
+        for backend in backends {
+            for cwd in [
+                "sub",
+                ".",
+                "..\\sibling",
+                "./sub",
+                "C:relative",
+                "~",
+                "~/sub",
+            ] {
+                let req = request_with_cwd("0.9.0-alpha", backend.clone(), cwd);
+                let resp = validate_common(&req)
+                    .expect_err(&format!("{} accepted '{cwd}'", backend.wire_name()));
+                assert!(
+                    resp.error_message
+                        .contains("process.cwd must be an absolute path"),
+                    "unexpected message: {}",
+                    resp.error_message
+                );
+                // Caller-fixable, so the SDK reports `policy_validation`.
+                assert_eq!(resp.failure_phase, FailurePhase::Rejected);
+            }
+        }
+    }
+
+    #[test]
+    fn a_rejected_cwd_is_escaped_before_it_reaches_the_diagnostic() {
+        let req = request_with_cwd(
+            "0.9.0-alpha",
+            ContainmentBackend::Bubblewrap,
+            "sub\nerror: forged\u{202e}",
+        );
+        let message = validate_common(&req).unwrap_err().error_message;
+        assert!(!message.contains('\n'), "raw newline in: {message}");
+        assert!(message.contains("\\n") && message.contains("\\u{202e}"));
+    }
+
+    /// Assert `backend` accepts exactly the expected absolute shape on `scope`,
+    /// and rejects the other one — an absolute path in the wrong style is
+    /// relative on the target, so both directions must be checked.
+    #[cfg(target_os = "windows")]
+    fn assert_cwd_shape(backend: &ContainmentBackend, scope: WorkingDirectoryScope, windows: bool) {
+        let (accepted, rejected) = if windows {
+            ("C:\\workspace", "/workspace")
+        } else {
+            ("/workspace", "C:\\workspace")
+        };
+        let validate = |cwd: &str| {
+            let req = request_with_cwd("0.9.0-alpha", backend.clone(), cwd);
+            match scope {
+                WorkingDirectoryScope::OneShot => {
+                    validate_common(&req).map_err(|e| e.error_message)
+                }
+                WorkingDirectoryScope::Exec => validate_exec_common(&req).map_err(|e| e.message),
+            }
+        };
+
+        let name = backend.wire_name();
+        assert!(
+            validate(accepted).is_ok(),
+            "{name} rejected '{accepted}' on {scope:?}"
+        );
+        assert!(
+            validate(rejected).is_err(),
+            "{name} accepted '{rejected}' on {scope:?}"
+        );
+    }
+
+    /// Pins every entry of `ContainmentBackend::working_directory_style`. The
+    /// `match` is exhaustive, so a new backend fails to compile until it is
+    /// covered here rather than silently inheriting someone else's shape.
+    ///
+    /// Gated on Windows: Linux and macOS narrow every backend to their own (see
+    /// `ContainmentBackend::effective_on_host`), which
+    /// `a_foreign_backend_is_validated_against_the_one_the_host_runs` covers.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn every_backend_accepts_only_its_own_absolute_cwd_shape() {
+        for backend in [
+            ContainmentBackend::ProcessContainer,
+            ContainmentBackend::WindowsSandbox,
+            ContainmentBackend::IsolationSession,
+            ContainmentBackend::Lxc,
+            ContainmentBackend::Bubblewrap,
+            ContainmentBackend::Seatbelt,
+            ContainmentBackend::Wslc,
+            ContainmentBackend::MicroVm,
+            ContainmentBackend::Hyperlight,
+            ContainmentBackend::Vm,
+        ] {
+            let (one_shot_windows, exec_windows) = match &backend {
+                ContainmentBackend::ProcessContainer
+                | ContainmentBackend::WindowsSandbox
+                | ContainmentBackend::IsolationSession => (true, true),
+
+                ContainmentBackend::Lxc
+                | ContainmentBackend::Bubblewrap
+                | ContainmentBackend::Seatbelt
+                | ContainmentBackend::MicroVm
+                | ContainmentBackend::Hyperlight
+                | ContainmentBackend::Vm => (false, false),
+
+                // One-shot takes the Windows host path and translates it into
+                // the container; exec takes the in-container path.
+                ContainmentBackend::Wslc => (true, false),
+            };
+
+            assert_cwd_shape(&backend, WorkingDirectoryScope::OneShot, one_shot_windows);
+            assert_cwd_shape(&backend, WorkingDirectoryScope::Exec, exec_windows);
+        }
+    }
+
+    /// The Windows spellings that are absolute beyond the plain `C:\dir` the
+    /// matrix above uses, and the drive-relative one that looks absolute.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_absoluteness_covers_forward_slashes_and_unc_but_not_drive_relative() {
+        for cwd in ["C:/workspace", "\\\\server\\share", "\\\\?\\C:\\workspace"] {
+            let req = request_with_cwd("0.9.0-alpha", ContainmentBackend::ProcessContainer, cwd);
+            assert!(validate_common(&req).is_ok(), "rejected '{cwd}'");
+        }
+
+        // `\workspace` is relative to the launcher's current drive.
+        let drive_relative = request_with_cwd(
+            "0.9.0-alpha",
+            ContainmentBackend::ProcessContainer,
+            "\\workspace",
+        );
+        assert!(validate_common(&drive_relative).is_err());
+    }
+
+    /// The engine falls an unsupported request back to LXC on Linux and
+    /// overrides everything to Seatbelt on macOS without rewriting
+    /// `containment`, so a Windows-shaped cwd would otherwise reach a POSIX
+    /// backend as a relative path.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn a_foreign_backend_is_validated_against_the_one_the_host_runs() {
+        for backend in [
+            ContainmentBackend::ProcessContainer,
+            ContainmentBackend::WindowsSandbox,
+            ContainmentBackend::Wslc,
+        ] {
+            let req = request_with_cwd("0.9.0-alpha", backend.clone(), "C:\\workspace");
+            assert!(
+                validate_common(&req).is_err(),
+                "{} accepted a Windows cwd",
+                backend.wire_name()
+            );
+
+            let posix = request_with_cwd("0.9.0-alpha", backend.clone(), "/workspace");
+            assert!(
+                validate_common(&posix).is_ok(),
+                "{} rejected '/workspace'",
+                backend.wire_name()
+            );
+        }
+    }
+
+    #[test]
+    fn relative_cwd_is_accepted_below_schema_0_9() {
+        for version in ["", "0.6.0-alpha", "0.8.0-alpha"] {
+            let req = request_with_cwd(version, ContainmentBackend::ProcessContainer, "sub");
+            assert!(
+                validate_common(&req).is_ok(),
+                "version '{version}' rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn relative_cwd_is_rejected_above_schema_0_9() {
+        for version in ["0.9.0-dev", "0.10.0", "1.0.0"] {
+            let req = request_with_cwd(version, ContainmentBackend::ProcessContainer, "sub");
+            assert!(
+                validate_common(&req).is_err(),
+                "version '{version}' accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn an_omitted_cwd_is_still_accepted_on_schema_0_9() {
+        let req = request_with_cwd("0.9.0-alpha", ContainmentBackend::ProcessContainer, "");
+        assert!(validate_common(&req).is_ok());
+    }
+
+    #[test]
+    fn state_aware_exec_rejects_a_relative_cwd_as_policy_validation() {
+        let req = request_with_cwd("0.9.0-alpha", ContainmentBackend::IsolationSession, "sub");
+        let error = validate_exec_common(&req).unwrap_err();
+        assert_eq!(error.code, MxcErrorCode::PolicyValidation);
+        assert!(error.message.contains("process.cwd"), "got {error:?}");
     }
 
     #[test]

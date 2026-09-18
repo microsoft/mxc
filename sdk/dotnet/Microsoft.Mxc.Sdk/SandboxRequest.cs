@@ -36,7 +36,10 @@ public sealed class SandboxRequest
     [JsonPropertyName("containerName")]
     public string? ContainerName { get; set; }
 
-    /// <summary>An optional initial working directory.</summary>
+    /// <summary>
+    /// An optional initial working directory. Must be absolute from schema
+    /// <c>0.9.0-alpha</c> on.
+    /// </summary>
     [JsonPropertyName("workingDirectory")]
     public string? WorkingDirectory { get; set; }
 

@@ -127,10 +127,8 @@ that can be executed independently.
 
     "process": {
         "commandLine": "python app.py",    // Required: command to execute
-        "cwd": "C:\\workspace",            // Working directory (optional; when omitted each
-                                           //  backend substitutes a granted directory rather
-                                           //  than inheriting the launcher's — see
-                                           //  "Working Directory" below)
+        "cwd": "C:\\workspace",            // Working directory (optional; must be absolute on
+                                           //  0.9.0-alpha+ — see "Working Directory" below)
         "env": ["MY_VAR=value"],           // Omitted: backend default; supplied: used verbatim
         "inheritDefaultEnv": true,         // Layer env on the backend default (0.9.0-alpha+)
         "timeout": 30000                   // Timeout in ms (0 = no timeout)
@@ -269,7 +267,24 @@ that can be executed independently.
 
 `process.cwd` is optional. When it is set, it is passed to the backend
 verbatim — an unusable value fails the launch rather than being silently
-replaced. When it is **omitted**, backends do not simply inherit the launcher's
+replaced. The one exception is the WSL Container backend's one-shot surface,
+which reads the value as a Windows host path and translates it to the matching
+in-container path (`C:\workspace` → `/mnt/c/workspace`); a value with no such
+equivalent is rejected.
+
+**From schema `0.9.0-alpha` on, a set value must be absolute**, since a relative
+path would resolve against the launching process's working directory. Absolute
+means absolute for the target the path reaches, not for the host MXC runs on:
+
+| Backend | Absolute form |
+|---------|---------------|
+| Windows ProcessContainer / Windows Sandbox / IsolationSession | `C:\workspace`, `C:/workspace`, or a UNC path. `C:workspace` and `\workspace` are relative. |
+| WSL Container | One-shot: the Windows host path (`C:\workspace`), which the backend translates. State-aware `exec`: the in-container path (`/workspace`). |
+| Seatbelt (macOS) | `/workspace`. A `~` path is rejected: MXC would expand it from the launching host's `HOME`, and falls back to a literal `~` when that is unset. |
+| LXC / Bubblewrap | `/workspace`. A `~` path is rejected; it is not expanded. |
+| MicroVM (NanVix) / Hyperlight | n/a — these backends reject any working directory. |
+
+When `process.cwd` is **omitted**, backends do not simply inherit the launcher's
 working directory: under a deny-by-default sandbox that directory is usually
 unreadable, and the result ranges from a confusing silent relocation (Windows
 restarts the child at the drive root) to `getcwd()` errors on the child's
@@ -280,7 +295,7 @@ use:
 |---------|----------------------------------------|
 | Windows ProcessContainer (AppContainer / BaseContainer) | First `readwritePaths` entry that is an existing directory, else the first such `readonlyPaths` entry, else the system drive root (`%SystemDrive%\`). Never `NULL`. |
 | Seatbelt (macOS) | Same precedence, with `~` expanded as the profile expands it; falls back to `/`. |
-| LXC / WSL Container | The container root — see [`docs/lxc-support/lxc-backend.md`](lxc-support/lxc-backend.md). |
+| LXC / WSL Container | The container root. |
 | MicroVM (NanVix) / Hyperlight | Not applicable — these backends reject a working directory outright. |
 
 Policy entries that are blank, name a file, or do not exist yet are skipped:

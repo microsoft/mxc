@@ -4,6 +4,7 @@
 import assert from 'node:assert';
 import { describe, it } from 'node:test';
 import os from 'os';
+import { MxcError } from '@microsoft/mxc-sdk';
 import {
   sdk,
   supportedVersions,
@@ -106,3 +107,31 @@ for (const schemaVersion of platformVersions) {
     });
   });
 }
+
+// A working directory MXC cannot honour is caller-fixable, so it must reach an
+// SDK caller as `policy_validation` — the classification the state-aware and
+// native surfaces already give the same refusal — rather than the
+// infrastructure-failure `backend_error`. The refusal happens in shared
+// validation before any sandbox is created, so this needs no backend
+// prerequisites and cannot run the command.
+describe('Working directory (schema 0.9.0-alpha)', {
+  skip: !platformSupport.isSupported ? `Platform not supported: ${platformSupport.reason}` : undefined,
+}, () => {
+  it('should reject a relative cwd as policy_validation', async () => {
+    await assert.rejects(
+      () => sdk.spawnSandboxAsync(
+        'echo unreachable',
+        { version: '0.9.0-alpha' },
+        { ...debugSpawnOptions },
+        'relative-subdir',
+        'cwd-relative',
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof MxcError, `expected an MxcError, got ${String(error)}`);
+        assert.strictEqual(error.code, 'policy_validation', `got ${error.code}: ${error.message}`);
+        assert.match(error.message, /process\.cwd must be an absolute path/);
+        return true;
+      },
+    );
+  });
+});
