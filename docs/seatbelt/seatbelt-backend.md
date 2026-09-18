@@ -439,7 +439,7 @@ empty from inside the workload.
 > yourself.
 
 Tools installed outside the default `PATH` need both an env entry **and** a
-`readonlyPaths` grant — e.g. Homebrew ons Apple silicon needs
+`readonlyPaths` grant — e.g. Homebrew on Apple silicon needs
 `"PATH=/opt/homebrew/bin:…"` plus `readonlyPaths: ["/opt/homebrew"]`.
 
 ### Before schema 0.9
