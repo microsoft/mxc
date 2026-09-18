@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 import { performance } from 'node:perf_hooks';
+import { EventEmitter } from 'node:events';
 import { Readable, Writable } from 'node:stream';
 import { MxcError } from './errors.js';
 import type {
@@ -173,7 +174,7 @@ class WritePipe extends Writable {
  * sandbox runs. Untaken output streams are drained internally during
  * `waitAsync()` so a child that writes heavily cannot deadlock on a full pipe.
  */
-export class MxcSandboxProcess {
+export class MxcSandboxProcess extends EventEmitter {
   private readonly startedAt = performance.now();
   private readonly timeoutMs?: number;
   private readonly binding: SandboxProcessBinding;
@@ -195,8 +196,10 @@ export class MxcSandboxProcess {
   private disposed = false;
   private handleFreed = false;
   private finalizing = false;
+  private compatibilityWaitStarted = false;
 
   private constructor(binding: SandboxProcessBinding, timeoutMs?: number) {
+    super();
     this.binding = binding;
     this.idValue = binding.id;
     this.warningsValue = binding.warnings();
@@ -244,8 +247,38 @@ export class MxcSandboxProcess {
     return this.takeReadable('stderr');
   }
 
+  /** ChildProcess-compatible alias for {@link standardInput}. */
+  get stdin(): Writable | null {
+    return this.standardInput;
+  }
+
+  /** ChildProcess-compatible alias for {@link standardOutput}. */
+  get stdout(): Readable | null {
+    return this.standardOutput;
+  }
+
+  /** ChildProcess-compatible alias for {@link standardError}. */
+  get stderr(): Readable | null {
+    return this.standardError;
+  }
+
   get outputMetadata(): unknown | undefined {
     return this.outputMetadataReady ? this.outputMetadataValue : undefined;
+  }
+
+  /**
+   * Register an event listener.
+   *
+   * `exit` and `close` provide the minimal ChildProcess-compatible completion
+   * surface used by existing pipe-based SDK consumers. They do not imply PTY
+   * semantics.
+   */
+  override on(eventName: string | symbol, listener: (...args: any[]) => void): this {
+    super.on(eventName, listener);
+    if (eventName === 'exit' || eventName === 'close') {
+      this.startCompatibilityWait();
+    }
+    return this;
   }
 
   /** Wait asynchronously for terminal completion. */
@@ -297,9 +330,10 @@ export class MxcSandboxProcess {
     return this.waitPromise;
   }
 
-  kill(): void {
+  kill(_signal?: NodeJS.Signals | number): boolean {
     this.ensureHandleAvailable('process');
     this.binding.kill();
+    return true;
   }
 
   /** @internal Register cleanup tied to terminal completion or disposal. */
@@ -381,6 +415,20 @@ export class MxcSandboxProcess {
     this.waitReject = undefined;
     this.dispose();
     reject(error);
+  }
+
+  private startCompatibilityWait(): void {
+    if (this.compatibilityWaitStarted) return;
+    this.compatibilityWaitStarted = true;
+    queueMicrotask(() => {
+      void this.waitAsync().then(
+        ({ exitCode }) => {
+          this.emit('exit', exitCode, null);
+          this.emit('close', exitCode, null);
+        },
+        (error) => this.emit('error', asError(error)),
+      );
+    });
   }
 
   private runCleanups(): void {

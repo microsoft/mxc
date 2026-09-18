@@ -34,7 +34,7 @@ const config = createConfigFromPolicy({
 });
 config.process!.commandLine = 'python -c "print(\'hello from sandbox\')"';
 
-const sandbox = spawnSandboxFromConfig(config);
+const sandbox = spawnSandboxFromConfig(config, { usePty: false });
 sandbox.standardOutput?.on('data', (data) => process.stdout.write(data));
 const status = await sandbox.waitAsync();
 console.log('exit:', status.exitCode);
@@ -173,8 +173,11 @@ It is reported **fail closed**: if the probe cannot run, the result is `'unsuppo
 
 The SDK provides three entry points. **Prefer the config-based path**
 (`createConfigFromPolicy` + `spawnSandboxFromConfig`) when you need backend
-selection or backend-specific tuning. The streaming APIs return separate Node.js
-stdin, stdout, and stderr streams.
+selection or backend-specific tuning. The streaming APIs use a PTY by default
+and return a `node-pty` `IPty`. Pass `{ usePty: false }` to receive an
+`MxcSandboxProcess` with separate Node.js stdin, stdout, and stderr streams.
+That pipe process also exposes ChildProcess-compatible aliases and completion
+events for existing non-interactive consumers.
 
 ### 1. Config-based — recommended
 
@@ -203,7 +206,7 @@ const config = createConfigFromPolicy(
 // Add the script and any backend-specific runtime settings on the returned config.
 config.process!.commandLine = 'python script.py';
 
-const sandbox = spawnSandboxFromConfig(config);
+const sandbox = spawnSandboxFromConfig(config, { usePty: false });
 sandbox.standardOutput?.on('data', (data) => process.stdout.write(data));
 sandbox.standardError?.on('data', (data) => process.stderr.write(data));
 const status = await sandbox.waitAsync();
@@ -213,8 +216,9 @@ console.log('exit:', status.exitCode);
 ### 2. `spawnSandbox(script, policy, ...)` — convenience
 
 Quick path for **process-isolation only** (`processcontainer` on Windows, `bubblewrap`
-on Linux, `seatbelt` on macOS). Returns an `MxcSandboxProcess` with streaming,
-separate stdin, stdout, and stderr streams.
+on Linux, `seatbelt` on macOS). It returns an `IPty` by default. Pass
+`usePty: false` for an `MxcSandboxProcess` with separate stdin, stdout, and
+stderr streams.
 
 ```typescript
 import {
@@ -234,6 +238,7 @@ const sandbox = spawnSandbox('python script.py', {
   timeoutMs: 30_000,
 }, {
   inheritDefaultEnv: true,
+  usePty: false,
 }, undefined, undefined, {
   APP_MODE: 'development',
 });
@@ -332,7 +337,10 @@ const config: ContainerConfig = {
   },
 };
 
-const sandbox = spawnSandboxFromConfig(config, { experimental: true });
+const sandbox = spawnSandboxFromConfig(config, {
+  experimental: true,
+  usePty: false,
+});
 const status = await sandbox.waitAsync();
 sandbox.dispose();
 ```
@@ -507,23 +515,25 @@ const config = createConfigFromPolicy({
 });
 config.process!.commandLine = 'powershell.exe -NoProfile -Command "Get-Date"';
 
-const sandbox = spawnSandboxFromConfig(config);
+const sandbox = spawnSandboxFromConfig(config, { usePty: false });
 const status = await sandbox.waitAsync();
 ```
 
-### PTY support is removed starting with the 0.9 Node SDK
+### PTY and pipe modes do not require MXC executor binaries
 
-`spawnSandbox` and `spawnSandboxFromConfig` now return an
-`MxcSandboxProcess` backed by `mxc_ffi` pipes instead of a `node-pty` `IPty`.
-Read `sandbox.standardOutput` and `sandbox.standardError` separately, write to
-`sandbox.standardInput`, and use `await sandbox.waitAsync()` for the exit status. A terminal
-wait releases the native sandbox handle automatically; call `dispose()` only
-when abandoning a process without waiting.
+`spawnSandbox` and `spawnSandboxFromConfig` preserve the original default PTY
+behavior. The SDK starts a packaged Node worker under `node-pty`; the worker
+calls `mxc_ffi`, and the selected backend inherits that terminal. Interactive
+shells, terminal applications, resize, line discipline, and TTY detection
+therefore continue to work without launching `wxc-exec`, `lxc-exec`, or
+`mxc-exec-mac`.
 
-Programs receive ordinary pipes rather than a terminal. Interactive shells,
-terminal editors, curses applications, terminal resize, and terminal-mode
-negotiation are not supported by these APIs. `spawnSandboxAsync` remains the
-buffered alternative and returns separate `stdout` and `stderr` strings.
+Pass `{ usePty: false }` for an `MxcSandboxProcess` backed directly by
+`mxc_ffi` pipes. Read `standardOutput` and `standardError`, write to
+`standardInput`, and use `await waitAsync()` for completion. Its
+ChildProcess-compatible aliases and events remain a pipe compatibility surface;
+they do not provide PTY semantics. `spawnSandboxAsync` is the buffered
+alternative and returns separate `stdout` and `stderr` strings.
 
 ### `createConfigFromPolicy` leaves `commandLine` empty
 

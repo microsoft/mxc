@@ -20,8 +20,8 @@
 //!   port of the SDK's `createConfigFromPolicy`), for the host's native
 //!   containment or an explicitly selected [`Containment`] backend.
 //! - [`spawn`] — spawn a streaming [`SandboxProcess`] handle for a request.
-//! - [`run`] / [`resolve_runner`] (Windows) — run-to-completion backend
-//!   selection and execution.
+//! - [`run`] / [`run_attached`] / [`resolve_runner`] (Windows) —
+//!   run-to-completion backend selection and execution.
 //! - [`run_state_aware`] — state-aware lifecycle backend resolution + dispatch.
 //! - [`platform_support`] / [`PlatformSupport`] — host support detection.
 //! - [`available_backends`] / [`AvailableBackend`] — read-only host
@@ -69,9 +69,118 @@ pub use state_aware::{
 pub use verbose_telemetry::emit_verbose_telemetry;
 
 use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::{ContainmentBackend, FailurePhase, ScriptResponse};
+use wxc_common::models::{
+    ContainmentBackend, FailurePhase, SandboxOutputMetadata, ScriptResponse,
+};
 use wxc_common::sandbox_process::{SandboxProcess, StreamCloser};
 use wxc_common::telemetry;
+
+/// Result of running a sandbox attached to the current process's stdio.
+#[derive(Debug, Clone)]
+pub struct AttachedOutput {
+    /// Workload exit code, or `-1` when the request timed out.
+    pub exit_code: i32,
+    /// Whether the request's script timeout elapsed.
+    pub timed_out: bool,
+    /// Policy and operational warnings raised during execution.
+    pub warnings: Vec<String>,
+    /// Structured outputs produced by optional sandbox features.
+    pub output_metadata: Option<SandboxOutputMetadata>,
+}
+
+fn classify_error(error: &Error) -> telemetry::FailureReason {
+    match error.code {
+        ErrorCode::MalformedRequest | ErrorCode::MalformedId => {
+            telemetry::FailureReason::ConfigError
+        }
+        ErrorCode::PolicyValidation => telemetry::FailureReason::PolicyError,
+        ErrorCode::UnsupportedContainment
+        | ErrorCode::UnsupportedPhase
+        | ErrorCode::BackendUnavailable => telemetry::FailureReason::InitError,
+        ErrorCode::StaleId
+        | ErrorCode::NotProvisioned
+        | ErrorCode::NotStarted
+        | ErrorCode::AlreadyStarted
+        | ErrorCode::AlreadyStopped
+        | ErrorCode::BackendError => telemetry::FailureReason::ProcessError,
+    }
+}
+
+/// Run a sandbox to completion with the workload attached to this process's stdio.
+///
+/// This is the in-process equivalent of the executor binaries' attached path:
+/// the selected backend receives [`wxc_common::sandbox_process::StdioMode::Inherit`],
+/// so a caller launched under a PTY passes that terminal through to the
+/// sandboxed workload.
+///
+/// # Errors
+///
+/// Returns an [`Error`] when policy validation, backend selection, or launch
+/// fails.
+pub fn run_attached(request: &SandboxRequest) -> Result<AttachedOutput, Error> {
+    let mut logger = Logger::new(Mode::Buffer);
+    let telemetry_active = request
+        .inner
+        .telemetry
+        .as_ref()
+        .map(|config| telemetry::init(config, &mut logger))
+        .unwrap_or(false);
+    let mut telemetry_registration = TelemetryRegistration::new(telemetry_active);
+    let requested_sandbox_kind = request
+        .inner
+        .telemetry
+        .as_ref()
+        .and_then(|config| config.requested_sandbox_kind);
+    let containment = request.inner.containment.clone();
+    let started = std::time::Instant::now();
+
+    let response = match run::run(&request.inner, &mut logger) {
+        Ok(response) => response,
+        Err(error) => {
+            telemetry::emit_sdk_early_exit_with_kind(
+                telemetry_registration.transfer(),
+                &containment,
+                requested_sandbox_kind,
+                classify_error(&error),
+            );
+            return Err(error);
+        }
+    };
+
+    let telemetry_active = telemetry_registration.transfer();
+    let mut warnings = logger.take_warnings();
+    #[cfg(target_os = "windows")]
+    if telemetry_active {
+        if let Err(error) = emit_verbose_telemetry(
+            true,
+            &containment,
+            requested_sandbox_kind,
+            &response,
+        ) {
+            warnings.push(format!(
+                "telemetry: captureDenials verbose artifact was not emitted: {error}"
+            ));
+        }
+    }
+    telemetry::emit_sdk_completion_with_kind(
+        telemetry_active,
+        &containment,
+        requested_sandbox_kind,
+        &response,
+        started.elapsed(),
+    );
+
+    print!("{}", response.standard_out);
+    eprint!("{}", response.standard_err);
+    wxc_common::script_runner::emit_backend_error_envelope(&response);
+
+    Ok(AttachedOutput {
+        exit_code: response.exit_code,
+        timed_out: response.failure_phase == FailurePhase::Timeout,
+        warnings,
+        output_metadata: response.output_metadata.map(|metadata| *metadata),
+    })
+}
 
 /// Spawn a streaming [`SandboxProcess`] handle for a [`SandboxRequest`] built
 /// by [`build_request`] (with the command, and any working directory / env,

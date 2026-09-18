@@ -3,8 +3,14 @@
 
 import assert from 'node:assert';
 import { getEventListeners, once } from 'node:events';
+import { readFileSync } from 'node:fs';
 import { afterEach, describe, it } from 'node:test';
-import { spawnSandbox, spawnSandboxFromConfig } from '../../src/sandbox.js';
+import type pty from 'node-pty';
+import {
+  _setPtySpawnImplementation,
+  spawnSandbox,
+  spawnSandboxFromConfig,
+} from '../../src/sandbox.js';
 import {
   _createMxcSandboxProcess,
   type SandboxProcessBinding,
@@ -180,9 +186,40 @@ class DeferredWaitBinding extends FakeBinding {
   }
 }
 
-afterEach(() => _setBindingSandboxProcessFactory());
+afterEach(() => {
+  _setBindingSandboxProcessFactory();
+  _setPtySpawnImplementation();
+});
 
 describe('native streaming spawn APIs', () => {
+  it('routes the default spawn mode through the attached PTY worker', () => {
+    let request: RequestSpec | undefined;
+    let exitListener: ((event: { exitCode: number; signal?: number }) => void) | undefined;
+    const fakePty = {
+      onExit(listener: (event: { exitCode: number; signal?: number }) => void) {
+        exitListener = listener;
+        return { dispose() {} };
+      },
+      kill() {},
+    } as unknown as pty.IPty;
+
+    _setPtySpawnImplementation((_file, args) => {
+      const payloadIndex = args.indexOf('--payload-file');
+      request = JSON.parse(readFileSync(args[payloadIndex + 1], 'utf8')) as RequestSpec;
+      return fakePty;
+    });
+
+    const proc = spawnSandboxFromConfig({
+      version: '0.9.0-alpha',
+      process: { commandLine: 'echo attached' },
+    });
+
+    assert.strictEqual(proc, fakePty);
+    assert.strictEqual(request?.command, 'echo attached');
+    assert.deepStrictEqual(request?.containment, { type: 'process' });
+    exitListener?.({ exitCode: 0 });
+  });
+
   it('routes the existing policy entry point through the binding request adapter', () => {
     let seen: RequestSpec | undefined;
     _setBindingSandboxProcessFactory((request) => {
@@ -190,7 +227,13 @@ describe('native streaming spawn APIs', () => {
       return _createMxcSandboxProcess(new FakeBinding(42, 0));
     });
 
-    const proc = spawnSandbox('echo hello', { version: '0.9.0-alpha' }, { experimental: true }, 'C:\\work', 'sample');
+    const proc = spawnSandbox(
+      'echo hello',
+      { version: '0.9.0-alpha' },
+      { experimental: true, usePty: false },
+      'C:\\work',
+      'sample',
+    );
 
     assert.strictEqual(proc.id, 42);
     assert.deepStrictEqual(proc.warnings, ['relaxed']);
@@ -222,6 +265,7 @@ describe('native streaming spawn APIs', () => {
     }, {
       experimental: true,
       inheritDefaultEnv: true,
+      usePty: false,
     }, 'C:\\work', {
       FROM_CALLER: 'yes',
       OVERRIDE: 'new',
@@ -247,6 +291,33 @@ describe('native streaming spawn APIs', () => {
     await once(proc.standardOutput!, 'end');
 
     assert.strictEqual(Buffer.concat(chunks).toString('utf8'), 'out');
+    proc.dispose();
+  });
+
+  it('supports the ChildProcess-compatible pipe and close-event surface', async () => {
+    const binding = new FakeBinding(23, 0);
+    const proc = _createMxcSandboxProcess(binding);
+    const chunks: Buffer[] = [];
+    proc.stdout!.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+    assert.strictEqual(proc.stdin, proc.standardInput);
+    assert.strictEqual(proc.stderr, proc.standardError);
+    proc.stderr!.resume();
+
+    const exit = once(proc, 'exit');
+    const close = once(proc, 'close');
+    assert.deepStrictEqual(await exit, [7, null]);
+    assert.deepStrictEqual(await close, [7, null]);
+    assert.strictEqual(Buffer.concat(chunks).toString('utf8'), 'out');
+    assert.strictEqual(binding.waitCalls, 1);
+    assert.strictEqual(binding.freed, true);
+  });
+
+  it('accepts a ChildProcess-style signal argument when killing', () => {
+    const binding = new FakeBinding(24, 0);
+    const proc = _createMxcSandboxProcess(binding);
+
+    assert.strictEqual(proc.kill('SIGTERM'), true);
+    assert.strictEqual(binding.killed, true);
     proc.dispose();
   });
 
@@ -455,7 +526,7 @@ describe('native streaming spawn APIs', () => {
     const proc = spawnSandbox(
       'echo hello',
       { version: '0.9.0-alpha' },
-      { signal: controller.signal },
+      { signal: controller.signal, usePty: false },
     );
     assert.strictEqual(getEventListeners(controller.signal, 'abort').length, 1);
 
@@ -495,7 +566,7 @@ describe('native streaming spawn APIs', () => {
       const proc = spawnSandbox(
         'echo hello',
         { version: '0.9.0-alpha' },
-        { signal: controller.signal },
+        { signal: controller.signal, usePty: false },
       );
 
       await assert.rejects(proc.waitAsync(), (error) => error === expected);

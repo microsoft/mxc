@@ -8,11 +8,14 @@
 //!
 //! - hand it to [`run`] to run the sandboxed process **to completion** and get
 //!   its captured stdout/stderr and exit outcome in one call, or
+//! - hand it to [`run_attached`] to run to completion using this process's
+//!   inherited standard streams, or
 //! - hand it to [`spawn_sandbox`] for a live [`Sandbox`] handle you can stream
 //!   stdio through, feed stdin, and kill while it runs.
 //!
-//! Either way the right containment backend is selected for the host and the
-//! process runs **without ever allocating a pty**.
+//! Either way the right containment backend is selected for the host. Call
+//! [`run_attached`] when a parent process already owns a terminal that the
+//! sandboxed workload should inherit.
 //!
 //! ```no_run
 //! use mxc_sdk::{build_request, run, SandboxPolicy, WaitOutcome};
@@ -156,7 +159,7 @@ pub use mxc_engine::configs;
 pub use mxc_engine::policy;
 pub use mxc_engine::{
     available_backends, available_tools_policy, build_request, build_request_with_containment,
-    platform_support, temporary_files_policy, user_profile_policy, AvailableBackend,
+    platform_support, temporary_files_policy, user_profile_policy, AttachedOutput, AvailableBackend,
     BackendCapability, BubblewrapNetworkSupport, Containment, Error, ErrorCode,
     FilesystemPolicyResult, NetworkAction, NetworkEgressSection, NetworkIngressSection,
     NetworkPeerSection, NetworkPortSection, NetworkProtocol, NetworkRuleSection, PlatformSupport,
@@ -200,6 +203,20 @@ pub fn run(request: SandboxRequest) -> Result<Output, Error> {
             format!("waiting for the sandbox to complete failed: {e}"),
         )
     })
+}
+
+/// Run a sandbox to completion using the current process's standard streams.
+///
+/// When this process is attached to a PTY, supported backends pass that
+/// terminal through to the workload. Output is written directly to the
+/// process's stdout/stderr rather than captured.
+///
+/// # Errors
+///
+/// Returns an [`Error`] when policy validation, backend selection, or launch
+/// fails.
+pub fn run_attached(request: SandboxRequest) -> Result<AttachedOutput, Error> {
+    mxc_engine::run_attached(&request)
 }
 
 /// Run a **state-aware lifecycle** request (as a JSON string) and return the
