@@ -20,9 +20,9 @@ export { STATE_AWARE_VERSION };
 // currently uses the exact 0.9 development contract.
 export const WSLC_STATE_AWARE_VERSION = '0.9.0-alpha';
 
-// Wire-format cross-cutting fields that live at the envelope's top level.
-// Anything else on a per-(backend, phase) Config is backend-specific and is
-// nested under `experimental.<backend>.<phase>`.
+// Wire-format cross-cutting fields that live at the config's top level.
+// Anything else is backend-specific and lives directly under
+// `experimental.<backend>`.
 export const CROSS_CUTTING_FIELDS = ['filesystem', 'network', 'runtimeConfig', 'ui', 'process', 'telemetry'] as const;
 
 // Per-backend wire-format prefix. Each value mirrors the corresponding
@@ -86,7 +86,6 @@ export interface BuildEnvelopeArgs {
   phase: Phase;
   backendKey: StateAwareContainmentBackend;
   containment?: StateAwareContainmentBackend; // provision only
-  sandboxId?: string;                        // non-provision only
   config?: Record<string, unknown>;
 }
 
@@ -94,18 +93,17 @@ export interface BuildEnvelopeArgs {
  * Constructs the wire-format JSON-shaped envelope for a state-aware request
  * from a per-(backend, phase) Config. Lifts cross-cutting fields
  * (filesystem, network, runtimeConfig, ui, process, telemetry) to envelope top-level; nests any
- * remaining backend-specific fields under `experimental.<backend>.<phase>`.
+ * remaining backend-specific fields under `experimental.<backend>`.
  */
 export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string, unknown> {
   const {
     phase,
     backendKey,
     containment,
-    sandboxId,
     config,
   } = args;
   // Copy of config; fields are removed as they are lifted into the envelope.
-  // Anything left becomes experimental.<backend>.<phase>.
+  // Anything left becomes experimental.<backend>.
   const backendSpecific: Record<string, unknown> = { ...(config ?? {}) };
   const defaultVersion = DEFAULT_STATE_AWARE_VERSION[backendKey] ?? STATE_AWARE_VERSION;
   const telemetry = backendSpecific.telemetry as TelemetryConfig | undefined;
@@ -179,12 +177,9 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
       }
     }
   }
-  const envelope: Record<string, unknown> = { version, phase };
+  const envelope: Record<string, unknown> = { version };
   if (containment) {
     envelope.containment = containment;
-  }
-  if (sandboxId) {
-    envelope.sandboxId = sandboxId;
   }
   if (telemetry !== undefined) {
     envelope.telemetry = telemetry;
@@ -199,7 +194,7 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   }
 
   if (Object.keys(backendSpecific).length > 0) {
-    envelope.experimental = { [backendKey]: { [phase]: backendSpecific } };
+    envelope.experimental = { [backendKey]: backendSpecific };
   }
 
   return envelope;
@@ -290,6 +285,8 @@ export interface CollectedOutput {
 export function spawnAndCollect(
   envelope: Record<string, unknown>,
   options: SandboxSpawnOptions,
+  operation: Phase,
+  sandboxId?: string,
 ): Promise<CollectedOutput> {
   return new Promise((resolve, reject) => {
     const signal = options.signal;
@@ -301,13 +298,20 @@ export function spawnAndCollect(
     let executablePath: string;
     let args: string[];
     try {
-      ({ executablePath, args } = resolveBinaryAndCommonArgs(JSON.stringify(envelope), options));
+      ({ executablePath, args } = resolveBinaryAndCommonArgs(
+        JSON.stringify(envelope),
+        options,
+        operation,
+      ));
+      if (sandboxId) {
+        args.push('--sandbox-id', sandboxId);
+      }
     } catch (err) {
       reject(err);
       return;
     }
 
-    diagLog(`state-aware: spawning phase=${envelope.phase}`);
+    diagLog(`sandbox lifecycle: spawning operation=${operation}`);
 
     const child = spawnImpl(executablePath, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -371,7 +375,9 @@ export function spawnAndCollect(
 export async function nonExecCall<T>(
   envelope: Record<string, unknown>,
   options: SandboxSpawnOptions,
+  operation: Exclude<Phase, 'exec'>,
+  sandboxId?: string,
 ): Promise<T> {
-  const { stdout } = await spawnAndCollect(envelope, options);
+  const { stdout } = await spawnAndCollect(envelope, options, operation, sandboxId);
   return parseNonExecResponse<T>(stdout);
 }

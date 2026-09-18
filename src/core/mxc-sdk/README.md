@@ -8,7 +8,7 @@ completion** with [`run`] (capturing stdout/stderr in one call) or hand it to
 [`spawn_sandbox`] for a live handle you can stream, feed stdin, and kill.
 Either way it selects the right containment backend for the host and runs the
 sandboxed process over ordinary pipes, with no pty. The state-aware
-[`exec_attached`] path is the one exception — see *Pty allocation*.
+[`sandbox::exec_attached`] path is the one exception — see *Pty allocation*.
 
 ## Usage
 
@@ -167,7 +167,8 @@ Filesystem-policy discovery helpers are also available to feed a policy:
 
 Every fallible **entry point** — [`build_request`],
 [`build_request_with_containment`], [`run`], [`spawn_sandbox`],
-[`exec_sandbox`], [`exec_attached`], [`run_state_aware_json`] — returns an
+[`sandbox::provision`], [`sandbox::start`], [`sandbox::exec`],
+[`sandbox::exec_attached`], [`sandbox::stop`], [`sandbox::deprovision`] — returns an
 [`Error`] carrying a closed [`ErrorCode`] and a message, plus, when the failure
 came from an underlying platform API, the call that failed and its status.
 
@@ -415,27 +416,30 @@ features, and with the request's experimental opt-in — **WSLC** and
 > restore outlives the child. A host with none of the tiers available surfaces a
 > clear error rather than silently running unsandboxed.
 
-## State-aware lifecycle
+## Stateful sandbox operations
 
-Beyond the one-shot `run` / `spawn_sandbox` paths, the SDK exposes the
-state-aware sandbox lifecycle from a wire-format request JSON string:
+Beyond the one-shot `run` / `spawn_sandbox` paths, the SDK exposes explicit
+sandbox operations under `mxc_sdk::sandbox`:
 
-- `run_state_aware_json(request_json, dry_run, experimental)` drives the
-  **envelope phases** — `provision`, `start`, `stop`, `deprovision` (and a dry
-  run of any phase) — and returns the response-envelope JSON string.
-- `exec_attached(request_json, experimental)` runs the `exec` phase **attached
+- `sandbox::provision(request_json, experimental)` creates a sandbox.
+- `sandbox::start(sandbox_id, request_json, experimental)`,
+  `sandbox::stop(...)`, and `sandbox::deprovision(...)` operate on an existing
+  sandbox and return response-envelope JSON.
+- `sandbox::exec_attached(sandbox_id, request_json, experimental)` runs an operation
+  **attached
   to this process's stdio**, blocking until the workload exits and returning a
   `WaitOutcome`. See *Pty allocation* for the terminal requirement and what each
   backend does with the streams. Parser and telemetry-initialization warnings
   are written to the attached host stderr because this API returns no process
   handle with a `warnings()` channel.
-- `exec_sandbox(request_json, experimental)` runs the same `exec` phase as a
+- `sandbox::exec(sandbox_id, request_json, experimental)` runs the same
+  operation as a
   **live streaming** `Sandbox` (the same handle `spawn_sandbox` returns), for a
   caller that drives the pipes itself. The child sees no TTY and this process's
   console is left untouched.
 
-Both take the same request JSON and differ only in where the workload's stdio
-goes.
+Operation and sandbox identity are API arguments, not fields in request JSON.
+The legacy `phase` and `sandboxId` JSON properties are rejected.
 
 Every state-aware backend is experimental, so `experimental` is the in-process
 equivalent of the executor's `--experimental` flag: without it the request is
@@ -447,29 +451,31 @@ OS-side service.
 
 ```rust,no_run
 use std::error::Error;
-use mxc_sdk::{run_state_aware_json, exec_attached};
+use mxc_sdk::sandbox;
 
 fn main() -> Result<(), Box<dyn Error>> {
 // Provision. Describe the backend's unrestricted network posture explicitly.
-let provisioned = run_state_aware_json(
-    r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
+let provisioned = sandbox::provision(
+    r#"{"version":"0.9.0-alpha","containment":"isolation_session",
         "network":{"egress":{"default":"allow"},
           "ingress":{"default":"allow","hostLoopback":"allow"}}}"#,
-    false, // dry_run
     true,  // experimental
 )?;
 // The returned `sandboxId` is opaque — carry it forward, never parse it.
+let sandbox_id = serde_json::from_str::<serde_json::Value>(&provisioned)?
+    ["result"]["sandboxId"].as_str().unwrap().to_owned();
 
 // Start. The exec phase runs against a started session.
-run_state_aware_json(
-    r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"..."}"#,
-    false, // dry_run
+sandbox::start(
+    &sandbox_id,
+    r#"{"version":"0.9.0-alpha"}"#,
     true,  // experimental
 )?;
 
 // Exec phase, attached: an interactive shell on this console.
-let outcome = exec_attached(
-    r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"...","process":{"commandLine":"powershell.exe"}}"#,
+let outcome = sandbox::exec_attached(
+    &sandbox_id,
+    r#"{"version":"0.9.0-alpha","process":{"commandLine":"powershell.exe"}}"#,
     true, // experimental
 )?;
 let _ = outcome;
@@ -479,9 +485,9 @@ Ok(())
 ```
 
 Three backends implement the state-aware lifecycle — IsolationSession, WSLc and
-Windows Sandbox. Only IsolationSession serves `exec_sandbox`.
+Windows Sandbox. Only IsolationSession serves streaming `sandbox::exec`.
 
-`exec_attached` is verified against **IsolationSession** only.
+`sandbox::exec_attached` is verified against **IsolationSession** only.
 
 What an unavailable backend returns differs, so branch on the code rather than
 assuming one: a build without the `wslc` or `isolation_session` feature answers
@@ -515,8 +521,9 @@ Constructing the listed variants is unaffected.
 must opt in (`SandboxRequest::set_experimental(true)`). Its exec has no host
 process id (`Sandbox::id()` is `0`), `kill()` stops the whole session, and
 dropping the handle tears the session down synchronously rather than in the
-background. Reach its multi-call lifecycle through
-`run_state_aware_json` plus `exec_attached` or `exec_sandbox`.
+background. Reach its multi-call operations through `sandbox::provision`,
+`sandbox::start`, `sandbox::exec` or `sandbox::exec_attached`, `sandbox::stop`,
+and `sandbox::deprovision`.
 
 Backends with no variant at all — Windows Sandbox, MicroVM, and Hyperlight —
 cannot be named from this crate; use the executor binaries. Windows Sandbox is
@@ -638,16 +645,16 @@ It never fails: any unreadable or unrecognized value reads back as
 
 ## Pty allocation
 
-Every entry point except `exec_attached` wires the child's stdio to ordinary
+Every entry point except `sandbox::exec_attached` wires the child's stdio to ordinary
 pipes and allocates no pty; output the caller does not take is drained and
 discarded by `wait()`.
 
-Under `exec_attached`, IsolationSession allocates a pseudo-console and forwards
+Under `sandbox::exec_attached`, IsolationSession allocates a pseudo-console and forwards
 stdin, so interactive shells render and resize. A pseudo-console has one output
 stream, so the sandbox's stderr arrives merged into stdout.
 
-`exec_attached` refuses with `MalformedRequest` unless this process's stdout and
-stdin are both terminals; use `exec_sandbox` for a workload with no terminal.
+`sandbox::exec_attached` refuses with `MalformedRequest` unless this process's
+stdout and stdin are both terminals; use `sandbox::exec` for a workload with no terminal.
 
 ## Relationship to `mxc_engine` and the executor binaries
 

@@ -1,9 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::id::parse_sandbox_id_prefix;
 use crate::models::ContainmentBackend;
-use crate::mxc_error::MxcError;
 use crate::wire;
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
@@ -80,20 +78,6 @@ impl<'a> CommandSource<'a> {
         };
 
         Some(containment.unwrap_or(wire::Containment::Process).into())
-    }
-
-    pub(crate) fn state_aware_backend(&self) -> Result<ContainmentBackend, MxcError> {
-        let sandbox_id = match find_member(&self.root, "sandboxId") {
-            MemberMatch::Missing => None,
-            MemberMatch::Duplicate => {
-                return Err(MxcError::malformed_request("duplicate field `sandboxId`"))
-            }
-            MemberMatch::Unique(value) => serde_json::from_str::<Option<String>>(value.get())
-                .map_err(|_| MxcError::malformed_request("'sandboxId' must be a string"))?,
-        }
-        .ok_or_else(|| MxcError::malformed_request("state-aware requests require 'sandboxId'"))?;
-
-        crate::state_aware_dispatch::backend_from_prefix(parse_sandbox_id_prefix(&sandbox_id)?)
     }
 }
 
@@ -208,7 +192,6 @@ mod tests {
     use super::*;
     use crate::config_parser::load_mxc_request_from_json;
     use crate::logger::{Logger, Mode};
-    use crate::mxc_error::MxcErrorCode;
     use crate::state_aware_request::MxcRequest;
     use serde_json::Value;
 
@@ -248,35 +231,6 @@ mod tests {
             source.one_shot_backend(),
             Some(crate::config_parser::map_wire_containment(None)),
         );
-    }
-
-    #[test]
-    fn state_aware_backend_resolves_every_registered_prefix() {
-        for (id, expected) in [
-            ("iso:abcd1234", ContainmentBackend::IsolationSession),
-            ("wsb:abcd1234", ContainmentBackend::WindowsSandbox),
-            ("wslc:abcd1234", ContainmentBackend::Wslc),
-        ] {
-            let json = format!(r#"{{"phase":"exec","sandboxId":"{id}"}}"#);
-            let source = CommandSource::parse(&json).unwrap();
-            assert_eq!(source.state_aware_backend().unwrap(), expected);
-        }
-    }
-
-    #[test]
-    fn state_aware_backend_rejects_missing_malformed_and_unregistered_ids() {
-        for json in [
-            r#"{"phase":"exec"}"#,
-            r#"{"sandboxId":"no-colon"}"#,
-            r#"{"sandboxId":":abcd"}"#,
-        ] {
-            let source = CommandSource::parse(json).unwrap();
-            assert!(source.state_aware_backend().is_err(), "{json}");
-        }
-
-        let source = CommandSource::parse(r#"{"sandboxId":"zzz:abcd"}"#).unwrap();
-        let error = source.state_aware_backend().unwrap_err();
-        assert_eq!(error.code, MxcErrorCode::UnsupportedContainment);
     }
 
     #[test]

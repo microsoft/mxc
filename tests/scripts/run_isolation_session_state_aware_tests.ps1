@@ -5,13 +5,13 @@
 .SYNOPSIS
     Runs IsolationSession state-aware lifecycle E2E tests. Companion to
     run_isolation_session_tests.ps1 --that script asserts the one-shot path;
-    this script asserts the state-aware path (`phase` / `sandboxId` envelope
-    style, multi-invocation lifecycle).
+    this script asserts the state-aware path (operation and sandbox identity
+    supplied out of band, with a multi-invocation lifecycle).
 
 .DESCRIPTION
-    Each test invokes wxc-exec.exe with a base64-encoded state-aware request
-    envelope, parses the JSON response on stdout, and asserts on the
-    envelope's `result` or `error` fields. The corpus covers lifecycle,
+    Each test invokes wxc-exec.exe with a base64-encoded policy plus explicit
+    lifecycle CLI arguments, parses the JSON response on stdout, and asserts
+    on the envelope's `result` or `error` fields. The corpus covers lifecycle,
     process execution, sandbox-internal persistence, and validation errors.
 
     This script must run INTERACTIVELY on the test host. The OS-side service
@@ -165,17 +165,16 @@ if (-not $ConfigDir) {
     $ConfigDir = Join-Path $RepoRoot "tests\configs"
 }
 
-# Encode a state-aware request envelope and run wxc-exec against it. The
-# request comes either from an in-line hashtable or from a static JSON
-# fixture file under tests/configs/ (for the project-wide "test scenarios are
-# version-controlled JSON" pattern). When the fixture contains the
-# placeholder `{{SANDBOX_ID}}`, the caller must supply -SandboxId so it can
-# be substituted before the request is base64-encoded. Returns a hashtable
-# with stdout / stderr / exitCode for the caller to assert on.
+# Encode a state-aware policy and run wxc-exec against it. Static fixture names
+# identify their operation; inline requests pass it explicitly. Sandbox identity
+# is always supplied out of band. Returns a hashtable with stdout / stderr /
+# exitCode for the caller to assert on.
 function Invoke-StateAware {
     param(
         [hashtable]$Request,
         [string]$ConfigFile,
+        [ValidateSet('provision', 'start', 'exec', 'stop', 'deprovision')]
+        [string]$Operation,
         [string]$SandboxId,
         [switch]$Experimental,
         # Adds --dry-run: wxc-exec parses, routes, and runs the backend's
@@ -192,13 +191,13 @@ function Invoke-StateAware {
             throw "Config fixture not found: $path"
         }
         $json = Get-Content $path -Raw
-        if ($json -match '\{\{SANDBOX_ID\}\}') {
-            if (-not $SandboxId) {
-                throw "Fixture $ConfigFile contains {{SANDBOX_ID}} but -SandboxId was not supplied"
+        if (-not $Operation) {
+            if ($ConfigFile -notmatch '_state_aware_(provision|start|exec|stop|deprovision)(?:_|\.json$)') {
+                throw "Cannot infer lifecycle operation from fixture name: $ConfigFile"
             }
-            $json = $json -replace '\{\{SANDBOX_ID\}\}', $SandboxId
+            $Operation = $Matches[1]
         }
-    } elseif ($Request) {
+    } elseif ($null -ne $Request) {
         if (-not $Request.ContainsKey('version')) {
             $Request = $Request.Clone()
             $Request['version'] = '0.9.0-alpha'
@@ -207,12 +206,18 @@ function Invoke-StateAware {
     } else {
         throw "Invoke-StateAware requires either -Request or -ConfigFile"
     }
+    if (-not $Operation) { throw "Invoke-StateAware requires -Operation for inline requests" }
+    if ($Operation -ne 'provision' -and -not $SandboxId) {
+        throw "Invoke-StateAware requires -SandboxId for the $Operation operation"
+    }
 
     $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
 
     $argList = @()
     if ($Experimental.IsPresent) { $argList += '--experimental' }
     if ($DryRun.IsPresent) { $argList += '--dry-run' }
+    $argList += @('--operation', $Operation)
+    if ($SandboxId) { $argList += @('--sandbox-id', $SandboxId) }
     $argList += @('--config-base64', $b64)
 
     $stdoutFile = [System.IO.Path]::GetTempFileName()
@@ -303,7 +308,7 @@ if ($null -ne $probeEnv -and $null -ne $probeEnv.result -and $null -ne $probeEnv
     $probeSandboxId = [string]$probeEnv.result.sandboxId
     $probeAgent = if ($probeEnv.result.metadata) { [string]$probeEnv.result.metadata.agentUserName } else { '<absent>' }
     Write-Host "Backend probe: provisioned $probeSandboxId (agentUserName=$probeAgent), deprovisioning ..." -ForegroundColor DarkGray
-    $probeDeprov = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $probeSandboxId -Experimental
+    $probeDeprov = Invoke-StateAware -Request @{} -Operation deprovision -SandboxId $probeSandboxId -Experimental
     if ($probeDeprov.ExitCode -ne 0) {
         Write-Host "WARN: probe deprovision returned exit $($probeDeprov.ExitCode); local user $probeAgent may persist" -ForegroundColor Yellow
         Write-Host "  Stdout: $($probeDeprov.Stdout)" -ForegroundColor Gray
@@ -421,7 +426,7 @@ try {
             # appId is deliberately NOT echoed in metadata -- the caller already
             # supplied it, so echoing it would be redundant surface.
             Assert-True ($null -eq $envObj.result.metadata.appId) "metadata does not echo appId"
-            $cleanup = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $id -Experimental
+            $cleanup = Invoke-StateAware -Request @{} -Operation deprovision -SandboxId $id -Experimental
             Assert-True ($cleanup.ExitCode -eq 0) "cleanup deprovision succeeded (exit $($cleanup.ExitCode)) -- a silent failure here leaks an agent user"
         }
     } | Out-Null
@@ -440,7 +445,7 @@ try {
             Assert-True ($null -ne $decoded) "sandbox_id payload decodes ($id)"
             Assert-True ($decoded.PSObject.Properties.Name -contains 'appId') "payload keeps the appId key when empty"
             Assert-True ($decoded.appId -eq '') "payload appId is the empty string (got '$($decoded.appId)')"
-            $cleanup = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $id -Experimental
+            $cleanup = Invoke-StateAware -Request @{} -Operation deprovision -SandboxId $id -Experimental
             Assert-True ($cleanup.ExitCode -eq 0) "cleanup deprovision succeeded (exit $($cleanup.ExitCode)) -- a silent failure here leaks an agent user"
         }
     } | Out-Null
@@ -470,7 +475,7 @@ try {
     Run-StateAwareTest "malformed_id (undecodable sandboxId rejected)" {
         # A tail that is not a valid encoded payload is refused by the decoder,
         # before any OS call.
-        $r = Invoke-StateAware -Request @{ phase = 'stop'; sandboxId = 'iso:not-a-valid-payload' } -Experimental
+        $r = Invoke-StateAware -Request @{} -Operation stop -SandboxId 'iso:not-a-valid-payload' -Experimental
         Assert-True ($r.ExitCode -ne 0) "exit code is non-zero"
         $envObj = Parse-Envelope -Stdout $r.Stdout
         $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
@@ -483,7 +488,7 @@ try {
         # completely different from "this id is corrupt".
         $json = '{"version":9999,"agentUserName":"a"}'
         $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)).TrimEnd('=').Replace('+', '-').Replace('/', '_')
-        $r = Invoke-StateAware -Request @{ phase = 'stop'; sandboxId = "iso:$b64" } -Experimental
+        $r = Invoke-StateAware -Request @{} -Operation stop -SandboxId "iso:$b64" -Experimental
         Assert-True ($r.ExitCode -ne 0) "exit code is non-zero"
         $envObj = Parse-Envelope -Stdout $r.Stdout
         $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
@@ -499,16 +504,16 @@ try {
         # run would report success for a request the real call rejects -- which
         # is the whole point of decoding in all four hooks rather than just one.
         foreach ($phase in @('start', 'exec', 'stop', 'deprovision')) {
-            $req = @{ phase = $phase; sandboxId = 'iso:not-a-valid-payload' }
+            $req = @{}
             if ($phase -eq 'exec') { $req.process = @{ commandLine = 'cmd.exe /c echo unreachable' } }
 
-            $r = Invoke-StateAware -Request $req -Experimental
+            $r = Invoke-StateAware -Request $req -Operation $phase -SandboxId 'iso:not-a-valid-payload' -Experimental
             Assert-True ($r.ExitCode -ne 0) "$phase (real): exit code is non-zero"
             $envObj = Parse-Envelope -Stdout $r.Stdout
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
             Assert-True ($code -eq 'malformed_id') "$phase (real): error.code is 'malformed_id' (got '$code')"
 
-            $d = Invoke-StateAware -Request $req -Experimental -DryRun
+            $d = Invoke-StateAware -Request $req -Operation $phase -SandboxId 'iso:not-a-valid-payload' -Experimental -DryRun
             Assert-True ($d.ExitCode -ne 0) "$phase (--dry-run): exit code is non-zero"
             $dEnv = Parse-Envelope -Stdout $d.Stdout
             $dCode = if ($dEnv) { $dEnv.error.code } else { '<no envelope>' }
@@ -542,14 +547,14 @@ try {
             # harness's own leak discipline.
             try {
                 foreach ($phase in @('start', 'exec', 'stop', 'deprovision')) {
-                    $req = @{ phase = $phase; sandboxId = $id }
+                    $req = @{}
                     if ($phase -eq 'exec') {
                         # Deliberately exits 1 and prints a marker: if --dry-run
                         # were dropped this really would run, and BOTH the exit
                         # code and the absent envelope would flag it.
                         $req.process = @{ commandLine = 'cmd.exe /c echo DRY_RUN_LEAKED & exit /b 1' }
                     }
-                    $d = Invoke-StateAware -Request $req -Experimental -DryRun
+                    $d = Invoke-StateAware -Request $req -Operation $phase -SandboxId $id -Experimental -DryRun
                     Assert-True ($d.ExitCode -eq 0) "$phase (--dry-run): exit code = 0 for a well-formed id (got $($d.ExitCode))"
                     $dEnv = Parse-Envelope -Stdout $d.Stdout
                     # NOTE the limit of this assertion. For exec it IS a
@@ -570,7 +575,7 @@ try {
                     }
                 }
             } finally {
-                $cleanup = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $id -Experimental
+                $cleanup = Invoke-StateAware -Request @{} -Operation deprovision -SandboxId $id -Experimental
                 Assert-True ($cleanup.ExitCode -eq 0) "cleanup deprovision succeeded (exit $($cleanup.ExitCode)) -- a silent failure here leaks an agent user"
             }
         }
@@ -581,7 +586,7 @@ try {
         # malformed and must not reach the OS as an empty string.
         $json = '{"version":1,"agentUserName":""}'
         $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)).TrimEnd('=').Replace('+', '-').Replace('/', '_')
-        $r = Invoke-StateAware -Request @{ phase = 'stop'; sandboxId = "iso:$b64" } -Experimental
+        $r = Invoke-StateAware -Request @{} -Operation stop -SandboxId "iso:$b64" -Experimental
         Assert-True ($r.ExitCode -ne 0) "exit code is non-zero"
         $envObj = Parse-Envelope -Stdout $r.Stdout
         $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
@@ -601,7 +606,7 @@ try {
         # Asserting the message names `appId` is what pins that distinction.
         $json = '{"version":1,"agentUserName":"agent","appId":"has\u0007bell"}'
         $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)).TrimEnd('=').Replace('+', '-').Replace('/', '_')
-        $r = Invoke-StateAware -Request @{ phase = 'stop'; sandboxId = "iso:$b64" } -Experimental
+        $r = Invoke-StateAware -Request @{} -Operation stop -SandboxId "iso:$b64" -Experimental
         Assert-True ($r.ExitCode -ne 0) "exit code is non-zero"
         $envObj = Parse-Envelope -Stdout $r.Stdout
         $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
@@ -618,7 +623,7 @@ try {
         $long = 'a' * 257
         $json = '{"version":1,"agentUserName":"agent","appId":"' + $long + '"}'
         $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)).TrimEnd('=').Replace('+', '-').Replace('/', '_')
-        $r = Invoke-StateAware -Request @{ phase = 'stop'; sandboxId = "iso:$b64" } -Experimental
+        $r = Invoke-StateAware -Request @{} -Operation stop -SandboxId "iso:$b64" -Experimental
         Assert-True ($r.ExitCode -ne 0) "exit code is non-zero"
         $envObj = Parse-Envelope -Stdout $r.Stdout
         $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
@@ -657,7 +662,6 @@ try {
     foreach ($field in @('defaultPolicy', 'allowLocalNetwork')) {
         Run-StateAwareTest "provision (legacy network.$field rejected)" {
             $req = @{
-                phase = 'provision'
                 containment = 'isolation_session'
                 network = @{
                     egress = @{ default = 'allow' }
@@ -665,7 +669,7 @@ try {
                     $field = if ($field -eq 'defaultPolicy') { 'allow' } else { $true }
                 }
             }
-            $r = Invoke-StateAware -Request $req -Experimental -DryRun
+            $r = Invoke-StateAware -Request $req -Operation provision -Experimental -DryRun
             Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
             $envObj = Parse-Envelope -Stdout $r.Stdout
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
@@ -678,7 +682,6 @@ try {
     foreach ($axis in @('egress', 'ingress')) {
         Run-StateAwareTest "provision (restrictive $axis default rejected structurally)" {
             $req = @{
-                phase = 'provision'
                 containment = 'isolation_session'
                 network = @{
                     egress = @{ default = if ($axis -eq 'egress') { 'deny' } else { 'allow' } }
@@ -688,7 +691,7 @@ try {
                     }
                 }
             }
-            $r = Invoke-StateAware -Request $req -Experimental -DryRun
+            $r = Invoke-StateAware -Request $req -Operation provision -Experimental -DryRun
             Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
             $envObj = Parse-Envelope -Stdout $r.Stdout
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
@@ -701,11 +704,10 @@ try {
 
     Run-StateAwareTest "provision (missing network rejected structurally)" {
         $req = @{
-            phase = 'provision'
             containment = 'isolation_session'
-            experimental = @{ isolation_session = @{ provision = @{} } }
+            experimental = @{ isolation_session = @{} }
         }
-        $r = Invoke-StateAware -Request $req -Experimental -DryRun
+        $r = Invoke-StateAware -Request $req -Operation provision -Experimental -DryRun
         Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
         $envObj = Parse-Envelope -Stdout $r.Stdout
         $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
@@ -720,14 +722,12 @@ try {
     foreach ($phase in @('start', 'stop', 'deprovision')) {
         Run-StateAwareTest "$phase (network redeclaration rejected structurally)" {
             $req = @{
-                phase = $phase
-                sandboxId = 'iso:unused'
                 network = @{
                     egress = @{ default = 'allow' }
                     ingress = @{ default = 'allow'; hostLoopback = 'allow' }
                 }
             }
-            $r = Invoke-StateAware -Request $req -Experimental -DryRun
+            $r = Invoke-StateAware -Request $req -Operation $phase -SandboxId 'iso:unused' -Experimental -DryRun
             Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
             $envObj = Parse-Envelope -Stdout $r.Stdout
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
@@ -757,7 +757,7 @@ try {
     $startedOk = $false
     if ($null -ne $script:sandboxId) {
         $startedOk = Run-StateAwareTest "start (provision + start sequence)" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start.json' -SandboxId $script:sandboxId -Experimental
+            $r = Invoke-StateAware -Request @{} -Operation start -SandboxId $script:sandboxId -Experimental
             $envObj = Parse-Envelope -Stdout $r.Stdout
             $arm = Envelope-Arm $envObj
             if ($arm -ne 'result') {
@@ -778,11 +778,9 @@ try {
     if ($startedOk) {
         Run-StateAwareTest "start (filesystem policy rejected structurally)" {
             $req = @{
-                phase     = 'start'
-                sandboxId = $script:sandboxId
                 filesystem = @{ readwritePaths = @('C:\mxc_share_test\rw') }
             }
-            $r = Invoke-StateAware -Request $req -Experimental
+            $r = Invoke-StateAware -Request $req -Operation start -SandboxId $script:sandboxId -Experimental
             Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
             $envObj = Parse-Envelope -Stdout $r.Stdout
             Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
@@ -798,11 +796,9 @@ try {
     if ($startedOk) {
         Run-StateAwareTest "start (network policy rejected structurally)" {
             $req = @{
-                phase     = 'start'
-                sandboxId = $script:sandboxId
-                network   = @{ egress = @{ default = 'allow' } }
+                network = @{ egress = @{ default = 'allow' } }
             }
-            $r = Invoke-StateAware -Request $req -Experimental
+            $r = Invoke-StateAware -Request $req -Operation start -SandboxId $script:sandboxId -Experimental
             Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
             $envObj = Parse-Envelope -Stdout $r.Stdout
             Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
@@ -819,7 +815,9 @@ try {
     $execedOk = $false
     if ($startedOk) {
         $execedOk = Run-StateAwareTest "exec (basic)" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_basic.json' -SandboxId $script:sandboxId -Experimental
+            $r = Invoke-StateAware -Request @{
+                process = @{ commandLine = 'echo state-aware-exec-marker'; timeout = 30000 }
+            } -Operation exec -SandboxId $script:sandboxId -Experimental
             Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
             Assert-True ($r.Stdout -match 'state-aware-exec-marker') `
                 "stdout contains the script's output (streamed live, not enveloped)"
@@ -837,12 +835,10 @@ try {
     if ($execedOk) {
         Run-StateAwareTest "exec (filesystem policy rejected structurally)" {
             $req = @{
-                phase     = 'exec'
-                sandboxId = $script:sandboxId
                 process    = @{ commandLine = 'echo unused' }
                 filesystem = @{ readwritePaths = @('C:\mxc_share_test\rw') }
             }
-            $r = Invoke-StateAware -Request $req -Experimental
+            $r = Invoke-StateAware -Request $req -Operation exec -SandboxId $script:sandboxId -Experimental
             Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
             $envObj = Parse-Envelope -Stdout $r.Stdout
             Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
@@ -859,12 +855,10 @@ try {
     if ($execedOk) {
         Run-StateAwareTest "exec (network policy rejected post-provision)" {
             $req = @{
-                phase     = 'exec'
-                sandboxId = $script:sandboxId
-                process   = @{ commandLine = 'echo unused' }
-                network   = @{ egress = @{ default = 'allow' } }
+                process = @{ commandLine = 'echo unused' }
+                network = @{ egress = @{ default = 'allow' } }
             }
-            $r = Invoke-StateAware -Request $req -Experimental
+            $r = Invoke-StateAware -Request $req -Operation exec -SandboxId $script:sandboxId -Experimental
             Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
             $envObj = Parse-Envelope -Stdout $r.Stdout
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
@@ -881,9 +875,13 @@ try {
     # wxc-exec process consuming the same sandbox_id.
     if ($execedOk) {
         Run-StateAwareTest "multi-exec (%TEMP% state continuity)" {
-            $w = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_write_marker.json' -SandboxId $script:sandboxId -Experimental
+            $w = Invoke-StateAware -Request @{
+                process = @{ commandLine = 'echo multi-exec-marker-content > %TEMP%\sa-multi-exec.txt'; timeout = 30000 }
+            } -Operation exec -SandboxId $script:sandboxId -Experimental
             Assert-True ($w.ExitCode -eq 0) "exec #1 (write) exit code = 0"
-            $rd = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_read_marker.json' -SandboxId $script:sandboxId -Experimental
+            $rd = Invoke-StateAware -Request @{
+                process = @{ commandLine = 'type %TEMP%\sa-multi-exec.txt'; timeout = 30000 }
+            } -Operation exec -SandboxId $script:sandboxId -Experimental
             Assert-True ($rd.ExitCode -eq 0) "exec #2 (read) exit code = 0"
             Assert-True ($rd.Stdout -match 'multi-exec-marker-content') `
                 "exec #2 stdout contains the marker exec #1 wrote (state preserved across wxc-exec processes)"
@@ -898,11 +896,13 @@ try {
     if ($execedOk) {
         Run-StateAwareTest "multi-exec (exit code propagation)" {
             foreach ($pair in @(
-                    @{ file = 'isolation_session_state_aware_exec_exit_1.json'; code = 1 },
-                    @{ file = 'isolation_session_state_aware_exec_exit_2.json'; code = 2 },
-                    @{ file = 'isolation_session_state_aware_exec_exit_0.json'; code = 0 }
+                    @{ code = 1 },
+                    @{ code = 2 },
+                    @{ code = 0 }
                 )) {
-                $r = Invoke-StateAware -ConfigFile $pair.file -SandboxId $script:sandboxId -Experimental
+                $r = Invoke-StateAware -Request @{
+                    process = @{ commandLine = "exit $($pair.code)"; timeout = 30000 }
+                } -Operation exec -SandboxId $script:sandboxId -Experimental
                 Assert-True ($r.ExitCode -eq $pair.code) `
                     "exec 'exit $($pair.code)' propagates exit code $($pair.code) (got $($r.ExitCode))"
             }
@@ -914,7 +914,9 @@ try {
     # starts with the requested path.
     if ($execedOk) {
         Run-StateAwareTest "multi-exec (cwd plumbing)" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_cwd.json' -SandboxId $script:sandboxId -Experimental
+            $r = Invoke-StateAware -Request @{
+                process = @{ commandLine = 'cd'; cwd = 'C:\Windows'; timeout = 30000 }
+            } -Operation exec -SandboxId $script:sandboxId -Experimental
             Assert-True ($r.ExitCode -eq 0) "exit code = 0"
             Assert-True ($r.Stdout -match '^C:\\Windows') `
                 "stdout starts with C:\Windows (cwd wire field honored on state-aware path)"
@@ -928,11 +930,23 @@ try {
     # prior calls.
     if ($execedOk) {
         Run-StateAwareTest "multi-exec (wire-format env per-invocation)" {
-            $rInit = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_env_initial.json' -SandboxId $script:sandboxId -Experimental
+            $rInit = Invoke-StateAware -Request @{
+                process = @{
+                    commandLine = 'echo %MY_SA_ENV%'
+                    env = @('MY_SA_ENV=initial-value')
+                    timeout = 30000
+                }
+            } -Operation exec -SandboxId $script:sandboxId -Experimental
             Assert-True ($rInit.ExitCode -eq 0) "initial exit code = 0"
             Assert-True ($rInit.Stdout -match 'initial-value') "initial value reaches the agent"
 
-            $rMod = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_env_modified.json' -SandboxId $script:sandboxId -Experimental
+            $rMod = Invoke-StateAware -Request @{
+                process = @{
+                    commandLine = 'echo %MY_SA_ENV%'
+                    env = @('MY_SA_ENV=modified-value')
+                    timeout = 30000
+                }
+            } -Operation exec -SandboxId $script:sandboxId -Experimental
             Assert-True ($rMod.ExitCode -eq 0) "modified exit code = 0"
             Assert-True ($rMod.Stdout -match 'modified-value') "second wire request overrides the first"
             Assert-True ($rMod.Stdout -notmatch 'initial-value') "no cached env block from prior call"
@@ -940,7 +954,9 @@ try {
             # No env block -- the agent inherits its profile env only. echo of
             # an unset variable in cmd.exe prints `%MY_SA_ENV%` literally; the
             # checks below catch leakage from the prior call.
-            $rAbsent = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_exec_env_absent.json' -SandboxId $script:sandboxId -Experimental
+            $rAbsent = Invoke-StateAware -Request @{
+                process = @{ commandLine = 'echo %MY_SA_ENV%'; timeout = 30000 }
+            } -Operation exec -SandboxId $script:sandboxId -Experimental
             Assert-True ($rAbsent.ExitCode -eq 0) "absent exit code = 0"
             Assert-True ($rAbsent.Stdout -match '%MY_SA_ENV%') `
                 "literal %MY_SA_ENV% in stdout (var unset, no leak from prior call)"
@@ -958,12 +974,14 @@ try {
     if ($execedOk) {
         Run-StateAwareTest "multi-exec (HKCU env persistence + modification)" {
             foreach ($step in @(
-                    @{ file = 'isolation_session_state_aware_exec_setx_initial.json';  expect = $null;              label = 'setx initial' },
-                    @{ file = 'isolation_session_state_aware_exec_read_persist.json';  expect = 'initial-persist';  label = 'fresh cmd reads HKCU' },
-                    @{ file = 'isolation_session_state_aware_exec_setx_modified.json'; expect = $null;              label = 'setx modified' },
-                    @{ file = 'isolation_session_state_aware_exec_read_persist.json';  expect = 'modified-persist'; label = 'fresh cmd reads modified HKCU' }
+                    @{ command = 'setx MY_SA_PERSIST initial-persist';  expect = $null;              label = 'setx initial' },
+                    @{ command = 'echo %MY_SA_PERSIST%';               expect = 'initial-persist';  label = 'fresh cmd reads HKCU' },
+                    @{ command = 'setx MY_SA_PERSIST modified-persist'; expect = $null;              label = 'setx modified' },
+                    @{ command = 'echo %MY_SA_PERSIST%';               expect = 'modified-persist'; label = 'fresh cmd reads modified HKCU' }
                 )) {
-                $r = Invoke-StateAware -ConfigFile $step.file -SandboxId $script:sandboxId -Experimental
+                $r = Invoke-StateAware -Request @{
+                    process = @{ commandLine = $step.command; timeout = 30000 }
+                } -Operation exec -SandboxId $script:sandboxId -Experimental
                 Assert-True ($r.ExitCode -eq 0) "$($step.label): exit code = 0"
                 if ($null -ne $step.expect) {
                     Assert-True ($r.Stdout -match [regex]::Escape($step.expect)) `
@@ -978,11 +996,9 @@ try {
     if ($execedOk) {
         Run-StateAwareTest "stop (filesystem policy rejected structurally)" {
             $req = @{
-                phase     = 'stop'
-                sandboxId = $script:sandboxId
                 filesystem = @{ readwritePaths = @('C:\mxc_share_test\rw') }
             }
-            $r = Invoke-StateAware -Request $req -Experimental
+            $r = Invoke-StateAware -Request $req -Operation stop -SandboxId $script:sandboxId -Experimental
             Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
             $envObj = Parse-Envelope -Stdout $r.Stdout
             Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
@@ -999,7 +1015,7 @@ try {
     $stoppedOk = $false
     if ($execedOk) {
         $stoppedOk = Run-StateAwareTest "stop (full lifecycle through stop)" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:sandboxId -Experimental
+            $r = Invoke-StateAware -Request @{} -Operation stop -SandboxId $script:sandboxId -Experimental
             $envObj = Parse-Envelope -Stdout $r.Stdout
             $arm = Envelope-Arm $envObj
             if ($arm -ne 'result') {
@@ -1019,11 +1035,9 @@ try {
     if ($stoppedOk) {
         Run-StateAwareTest "deprovision (filesystem policy rejected structurally)" {
             $req = @{
-                phase     = 'deprovision'
-                sandboxId = $script:sandboxId
                 filesystem = @{ readwritePaths = @('C:\mxc_share_test\rw') }
             }
-            $r = Invoke-StateAware -Request $req -Experimental
+            $r = Invoke-StateAware -Request $req -Operation deprovision -SandboxId $script:sandboxId -Experimental
             Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
             $envObj = Parse-Envelope -Stdout $r.Stdout
             Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
@@ -1039,7 +1053,7 @@ try {
     # its cleanup pass when this test ran.
     if ($stoppedOk) {
         $deprovPassed = Run-StateAwareTest "deprovision (full lifecycle through deprovision)" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:sandboxId -Experimental
+            $r = Invoke-StateAware -Request @{} -Operation deprovision -SandboxId $script:sandboxId -Experimental
             $envObj = Parse-Envelope -Stdout $r.Stdout
             $arm = Envelope-Arm $envObj
             if ($arm -ne 'result') {
@@ -1067,7 +1081,7 @@ try {
     # cross-repo contract, so `nativeCode` has a stable expected value here.
     if ($deprovisionedOk) {
         Run-StateAwareTest "stale_id (stop on previously-deprovisioned sandbox)" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:sandboxId -Experimental
+            $r = Invoke-StateAware -Request @{} -Operation stop -SandboxId $script:sandboxId -Experimental
             Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (stop on stale sandbox failed as expected)"
             $envObj = Parse-Envelope -Stdout $r.Stdout
             Assert-True ($null -ne $envObj) "stdout is a parseable envelope"
@@ -1108,7 +1122,7 @@ try {
         Write-Host ""
         Write-Host "[cleanup] best-effort deprovision of $script:sandboxId" -ForegroundColor DarkGray
         try {
-            $cleanupResult = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:sandboxId -Experimental
+            $cleanupResult = Invoke-StateAware -Request @{} -Operation deprovision -SandboxId $script:sandboxId -Experimental
             if ($cleanupResult.ExitCode -eq 0) {
                 Write-Host "  cleanup deprovision succeeded" -ForegroundColor DarkGray
             } else {
@@ -1188,28 +1202,24 @@ function Provision-LifecycleESandbox {
 function Exec-LifecycleEWriteMarker {
     param([string]$SandboxId, [string]$Marker)
     $req = @{
-        phase     = 'exec'
-        sandboxId = $SandboxId
-        process   = @{
+        process = @{
             commandLine = "cmd /c `"echo $Marker-content > %TEMP%\$Marker.txt`""
             timeout     = 30000
         }
     }
-    Invoke-StateAware -Request $req -Experimental
+    Invoke-StateAware -Request $req -Operation exec -SandboxId $SandboxId -Experimental
 }
 
 # Helper: exec a "list all markers" command inside the given sandbox.
 function Exec-LifecycleEListMarkers {
     param([string]$SandboxId)
     $req = @{
-        phase     = 'exec'
-        sandboxId = $SandboxId
-        process   = @{
+        process = @{
             commandLine = 'cmd /c "dir /b %TEMP%\marker_*.txt 2>nul"'
             timeout     = 30000
         }
     }
-    Invoke-StateAware -Request $req -Experimental
+    Invoke-StateAware -Request $req -Operation exec -SandboxId $SandboxId -Experimental
 }
 
 try {
@@ -1242,15 +1252,15 @@ try {
     if ($allProvisioned) {
         # E2: Start A, B, C.
         Run-StateAwareTest "Lifecycle E: start A" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start.json' -SandboxId $script:saSandboxA -Experimental
+            $r = Invoke-StateAware -Request @{} -Operation start -SandboxId $script:saSandboxA -Experimental
             Assert-True ($r.ExitCode -eq 0) "start A exit 0"
         } | Out-Null
         Run-StateAwareTest "Lifecycle E: start B" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start.json' -SandboxId $script:saSandboxB -Experimental
+            $r = Invoke-StateAware -Request @{} -Operation start -SandboxId $script:saSandboxB -Experimental
             Assert-True ($r.ExitCode -eq 0) "start B exit 0"
         } | Out-Null
         Run-StateAwareTest "Lifecycle E: start C" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start.json' -SandboxId $script:saSandboxC -Experimental
+            $r = Invoke-StateAware -Request @{} -Operation start -SandboxId $script:saSandboxC -Experimental
             Assert-True ($r.ExitCode -eq 0) "start C exit 0"
         } | Out-Null
 
@@ -1297,11 +1307,11 @@ try {
         # E5: Stop + deprovision B. Each sandbox is a distinct OS agent user,
         # so deprovisioning B removes only B's user; A / C remain functional.
         Run-StateAwareTest "Lifecycle E: stop B" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:saSandboxB -Experimental
+            $r = Invoke-StateAware -Request @{} -Operation stop -SandboxId $script:saSandboxB -Experimental
             Assert-True ($r.ExitCode -eq 0) "stop B exit 0"
         } | Out-Null
         $bDeprovPassed = Run-StateAwareTest "Lifecycle E: deprovision B" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:saSandboxB -Experimental
+            $r = Invoke-StateAware -Request @{} -Operation deprovision -SandboxId $script:saSandboxB -Experimental
             Assert-True ($r.ExitCode -eq 0) "deprovision B exit 0"
         }
         if ($bDeprovPassed) { $saBDeprov = $true }
@@ -1323,11 +1333,11 @@ try {
 
         # E7: Stop + deprovision A.
         Run-StateAwareTest "Lifecycle E: stop A" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:saSandboxA -Experimental
+            $r = Invoke-StateAware -Request @{} -Operation stop -SandboxId $script:saSandboxA -Experimental
             Assert-True ($r.ExitCode -eq 0) "stop A exit 0"
         } | Out-Null
         $aDeprovPassed = Run-StateAwareTest "Lifecycle E: deprovision A" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:saSandboxA -Experimental
+            $r = Invoke-StateAware -Request @{} -Operation deprovision -SandboxId $script:saSandboxA -Experimental
             Assert-True ($r.ExitCode -eq 0) "deprovision A exit 0"
         }
         if ($aDeprovPassed) { $saADeprov = $true }
@@ -1342,11 +1352,11 @@ try {
 
         # E9: Stop + deprovision C.
         Run-StateAwareTest "Lifecycle E: stop C" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:saSandboxC -Experimental
+            $r = Invoke-StateAware -Request @{} -Operation stop -SandboxId $script:saSandboxC -Experimental
             Assert-True ($r.ExitCode -eq 0) "stop C exit 0"
         } | Out-Null
         $cDeprovPassed = Run-StateAwareTest "Lifecycle E: deprovision C" {
-            $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:saSandboxC -Experimental
+            $r = Invoke-StateAware -Request @{} -Operation deprovision -SandboxId $script:saSandboxC -Experimental
             Assert-True ($r.ExitCode -eq 0) "deprovision C exit 0"
         }
         if ($cDeprovPassed) { $saCDeprov = $true }
@@ -1360,16 +1370,16 @@ try {
     } | Out-Null
     if ($null -ne $script:saSandboxD) {
         $dBundlePassed = Run-StateAwareTest "Lifecycle E: D start + exec + stop + deprovision" {
-            $rs = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start.json' -SandboxId $script:saSandboxD -Experimental
+            $rs = Invoke-StateAware -Request @{} -Operation start -SandboxId $script:saSandboxD -Experimental
             Assert-True ($rs.ExitCode -eq 0) "start D exit 0"
             $rw = Exec-LifecycleEWriteMarker -SandboxId $script:saSandboxD -Marker "marker_D"
             Assert-True ($rw.ExitCode -eq 0) "exec write marker_D exit 0"
             $rl = Exec-LifecycleEListMarkers -SandboxId $script:saSandboxD
             $out = [string]$rl.Stdout
             Assert-True ($out.Contains("marker_D.txt")) "D sees marker_D.txt"
-            $rst = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:saSandboxD -Experimental
+            $rst = Invoke-StateAware -Request @{} -Operation stop -SandboxId $script:saSandboxD -Experimental
             Assert-True ($rst.ExitCode -eq 0) "stop D exit 0"
-            $rd = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:saSandboxD -Experimental
+            $rd = Invoke-StateAware -Request @{} -Operation deprovision -SandboxId $script:saSandboxD -Experimental
             Assert-True ($rd.ExitCode -eq 0) "deprovision D exit 0"
         }
         if ($dBundlePassed) { $saDDeprov = $true }
@@ -1387,7 +1397,7 @@ try {
             Write-Host ""
             Write-Host "[cleanup] best-effort deprovision of Lifecycle E sandbox $($entry.label) ($($entry.id))" -ForegroundColor DarkGray
             try {
-                $null = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $entry.id -Experimental
+                $null = Invoke-StateAware -Request @{} -Operation deprovision -SandboxId $entry.id -Experimental
             } catch { }
         }
     }
@@ -1436,11 +1446,9 @@ function Provision-LifecycleFSandbox {
 function Exec-InSession {
     param([string]$SandboxId, [string]$CommandLine)
     $req = @{
-        phase     = 'exec'
-        sandboxId = $SandboxId
-        process   = @{ commandLine = $CommandLine; timeout = 30000 }
+        process = @{ commandLine = $CommandLine; timeout = 30000 }
     }
-    Invoke-StateAware -Request $req -Experimental
+    Invoke-StateAware -Request $req -Operation exec -SandboxId $SandboxId -Experimental
 }
 
 try {
@@ -1463,9 +1471,9 @@ try {
 
     if ($null -ne $script:fA -and $null -ne $script:fB -and $script:fA.Workspace -and $script:fB.Workspace) {
         Run-StateAwareTest "Lifecycle F: start A + B" {
-            $rsa = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start.json' -SandboxId $script:fA.SandboxId -Experimental
+            $rsa = Invoke-StateAware -Request @{} -Operation start -SandboxId $script:fA.SandboxId -Experimental
             Assert-True ($rsa.ExitCode -eq 0) "start A exit 0"
-            $rsb = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_start.json' -SandboxId $script:fB.SandboxId -Experimental
+            $rsb = Invoke-StateAware -Request @{} -Operation start -SandboxId $script:fB.SandboxId -Experimental
             Assert-True ($rsb.ExitCode -eq 0) "start B exit 0"
         } | Out-Null
 
@@ -1507,9 +1515,9 @@ try {
         # F5: teardown deletes the workspace.
         $script:fADeprovOk = $false
         Run-StateAwareTest "Lifecycle F: deprovision A deletes its workspace" {
-            $rstop = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:fA.SandboxId -Experimental
+            $rstop = Invoke-StateAware -Request @{} -Operation stop -SandboxId $script:fA.SandboxId -Experimental
             Assert-True ($rstop.ExitCode -eq 0) "stop A exit 0"
-            $rdep = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:fA.SandboxId -Experimental
+            $rdep = Invoke-StateAware -Request @{} -Operation deprovision -SandboxId $script:fA.SandboxId -Experimental
             Assert-True ($rdep.ExitCode -eq 0) "deprovision A exit 0"
             if ($rdep.ExitCode -eq 0) { $script:fADeprovOk = $true }
             Assert-True (-not (Test-Path -LiteralPath $script:fA.Workspace)) "A's workspace dir is gone after deprovision"
@@ -1518,9 +1526,9 @@ try {
 
         $script:fBDeprovOk = $false
         Run-StateAwareTest "Lifecycle F: deprovision B" {
-            $rstop = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $script:fB.SandboxId -Experimental
+            $rstop = Invoke-StateAware -Request @{} -Operation stop -SandboxId $script:fB.SandboxId -Experimental
             Assert-True ($rstop.ExitCode -eq 0) "stop B exit 0"
-            $rdep = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $script:fB.SandboxId -Experimental
+            $rdep = Invoke-StateAware -Request @{} -Operation deprovision -SandboxId $script:fB.SandboxId -Experimental
             Assert-True ($rdep.ExitCode -eq 0) "deprovision B exit 0"
             if ($rdep.ExitCode -eq 0) { $script:fBDeprovOk = $true }
         } | Out-Null
@@ -1535,7 +1543,7 @@ try {
             Write-Host ""
             Write-Host "[cleanup] best-effort deprovision of Lifecycle F sandbox $($entry.label) ($($entry.obj.SandboxId))" -ForegroundColor DarkGray
             try {
-                $null = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $entry.obj.SandboxId -Experimental
+                $null = Invoke-StateAware -Request @{} -Operation deprovision -SandboxId $entry.obj.SandboxId -Experimental
             } catch { }
         }
     }

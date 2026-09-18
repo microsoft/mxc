@@ -35,11 +35,9 @@ impl Drop for Teardown {
     fn drop(&mut self) {
         let id = &self.0;
         eprintln!("\n[driver] tearing down…");
-        let stop = format!(r#"{{"version":"0.9.0-alpha","phase":"stop","sandboxId":"{id}"}}"#);
-        let _ = mxc_sdk::run_state_aware_json(&stop, false, true);
-        let deprovision =
-            format!(r#"{{"version":"0.9.0-alpha","phase":"deprovision","sandboxId":"{id}"}}"#);
-        match mxc_sdk::run_state_aware_json(&deprovision, false, true) {
+        let request = r#"{"version":"0.9.0-alpha"}"#;
+        let _ = mxc_sdk::sandbox::stop(id, request, true);
+        match mxc_sdk::sandbox::deprovision(id, request, true) {
             Ok(_) => eprintln!("[driver] deprovisioned."),
             Err(e) => eprintln!("[driver] WARNING: deprovision failed, account may leak: {e:?}"),
         }
@@ -116,9 +114,9 @@ fn run() -> i32 {
         return 2;
     }
 
-    let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
+    let provision = r#"{"version":"0.9.0-alpha","containment":"isolation_session",
         "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#;
-    let response = mxc_sdk::run_state_aware_json(provision, false, true).expect("provision");
+    let response = mxc_sdk::sandbox::provision(provision, true).expect("provision");
     // The sandbox id is opaque by contract — carried verbatim, never parsed.
     let sandbox_id = response
         .split(r#""sandboxId":""#)
@@ -129,9 +127,7 @@ fn run() -> i32 {
     let _teardown = Teardown(sandbox_id.clone());
     eprintln!("[driver] provisioned.");
 
-    let start =
-        format!(r#"{{"version":"0.9.0-alpha","phase":"start","sandboxId":"{sandbox_id}"}}"#);
-    mxc_sdk::run_state_aware_json(&start, false, true).expect("start");
+    mxc_sdk::sandbox::start(&sandbox_id, r#"{"version":"0.9.0-alpha"}"#, true).expect("start");
     eprintln!("[driver] started. Scenario: {label}");
     if let Some(g) = guidance {
         eprintln!("[driver] WHAT TO LOOK FOR: {g}");
@@ -140,11 +136,11 @@ fn run() -> i32 {
 
     let escaped = command.replace('\\', "\\\\").replace('"', "\\\"");
     let exec = format!(
-        r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"{sandbox_id}",
+        r#"{{"version":"0.9.0-alpha",
             "process":{{"commandLine":"{escaped}","timeout":3600000}}}}"#
     );
 
-    match mxc_sdk::exec_attached(&exec, true) {
+    match mxc_sdk::sandbox::exec_attached(&sandbox_id, &exec, true) {
         Ok(outcome) => {
             println!("\n[driver] outcome: {outcome:?}");
             match outcome {

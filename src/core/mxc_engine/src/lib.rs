@@ -63,7 +63,8 @@ pub use run::resolve_runner_for_audit;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 pub use run::{log_policy_hash, resolve_runner, run, ResolvedRunner};
 pub use state_aware::{
-    exec_state_aware_attached, exec_state_aware_json, run_state_aware, run_state_aware_json,
+    exec_state_aware_attached, exec_state_aware_operation_json, run_state_aware,
+    run_state_aware_operation_json, LifecycleOperation,
 };
 #[cfg(target_os = "windows")]
 pub use verbose_telemetry::emit_verbose_telemetry;

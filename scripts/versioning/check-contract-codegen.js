@@ -38,14 +38,7 @@ function fixtureRootFor(contract) {
 }
 
 const roots = {
-  one_shot: "OneShotRequest",
-  windows_sandbox_provision: "WindowsSandboxProvisionRequest",
-  isolation_session_provision: "IsolationSessionProvisionRequest",
-  wslc_provision: "WslcProvisionRequest",
-  start: "StartRequest",
-  exec: "ExecRequest",
-  stop: "StopRequest",
-  deprovision: "DeprovisionRequest",
+  one_shot: "Request",
 };
 
 function fail(message) {
@@ -257,27 +250,6 @@ function validateFixtures(schema, fixtureRoot) {
     }
   }
 
-  const malformedExec = readFixture(
-    fixtureRoot,
-    "exec",
-    "invalid",
-    "missing_process.json"
-  );
-  if (composed(malformedExec.value)) {
-    fail("malformed exec diagnostic fixture unexpectedly passed");
-  }
-  const diagnostics = JSON.stringify(composed.errors);
-  if (
-    !diagnostics.includes('"missingProperty":"process"') ||
-    diagnostics.includes("OneShotRequest") ||
-    diagnostics.includes("StartRequest") ||
-    diagnostics.includes("StopRequest")
-  ) {
-    fail(
-      "if/then dispatch produced unfocused diagnostics for malformed exec: " +
-        diagnostics
-    );
-  }
 }
 
 function main() {

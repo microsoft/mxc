@@ -5,12 +5,6 @@
     "tests/configs/hyperlight_networking_blocked.json",
     "tests/configs/isolation_session_configid_rejected.json",
     "tests/configs/isolation_session_one_shot_stray_config_rejected.json",
-    "tests/configs/isolation_session_state_aware_provision_rejected_denied.json",
-    "tests/configs/isolation_session_state_aware_provision_rejected_network.json",
-    "tests/configs/isolation_session_state_aware_provision_rejected_ui.json",
-    "tests/configs/isolation_session_state_aware_provision_with_filesystem.json",
-    "tests/configs/rejected_version_too_old.json",
-    "tests/configs/wslc_state_aware_exec_rejected_filesystem.json",
-    "tests/configs/wslc_state_aware_provision_rejected_proxy.json"
+    "tests/configs/rejected_version_too_old.json"
   ]
 }

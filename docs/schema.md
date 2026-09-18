@@ -88,7 +88,6 @@ that actual posture through the standard directional network fields:
 ```json
 {
     "version": "0.9.0-alpha",
-    "phase": "provision",
     "containment": "isolation_session",
     "network": {
         "egress": { "default": "allow" },
@@ -255,13 +254,12 @@ that can be executed independently.
 }
 ```
 
-> **State-aware fields.** The `phase` top-level field is the **state-aware
-> discriminator**: a request that includes it is parsed as a state-aware
-> lifecycle request (see below), *not* the one-shot config above. The `sandboxId`
-> top-level field is state-aware-only — a one-shot request carrying `sandboxId`
-> is rejected with a parse error. Callers cannot supply `correlationVector`;
-> it is rejected as an unknown field because lifecycle correlation is internal
-> to MXC and is not part of the request or response contract. See
+> **Lifecycle operations.** The operation and sandbox identity are not config
+> fields. Select an operation through an SDK method or with
+> `--operation <provision|start|exec|stop|deprovision>`; pass
+> `--sandbox-id <id>` for every operation except provision. A config containing
+> the legacy `phase` or `sandboxId` fields is rejected. Callers also cannot
+> supply `correlationVector`; lifecycle correlation is internal to MXC. See
 > [`docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md`](state-aware-lifecycle/mxc-state-aware-sandbox-api.md)
 > and [`docs/telemetry/telemetry.md`](telemetry/telemetry.md).
 
@@ -405,51 +403,43 @@ Only the backend section matching the selected `containment` value is accepted;
 a config that also carries an unrelated backend's section is **rejected** with a
 "Multiple containment backends configured" error rather than silently ignored.
 
-### State-aware lifecycle envelope
+### Lifecycle operations
 
-The exact development schema documents a multi-phase envelope shape for the
-state-aware lifecycle (`provision` / `start` / `exec` / `stop` /
-`deprovision`). Where the one-shot config above is a self-contained
-`ExecutionRequest` to run once, a state-aware envelope identifies which
-phase is being driven against an existing provisioned sandbox.
-
-State-aware envelopes currently require the exact `0.9.0-alpha` development
-contract. The published `0.6.0-alpha`, `0.7.0-alpha`, and `0.8.0-alpha`
-contracts contain only one-shot request roots. The state-aware field shape is
-documented by the exact development schema:
+Lifecycle operations use the same operation-neutral `0.9.0-alpha` config
+document as one-shot execution. The SDK method or executor arguments select the
+operation and carry the sandbox ID separately. `process` is therefore optional
+in the schema: provision, start, stop, and deprovision do not execute a command,
+while one-shot and exec entry points require `process.commandLine` during
+operation-specific validation.
 
 ```json
 {
     "$schema": "./schemas/dev/mxc-config.schema.0.9.0-alpha.json",
     "version": "0.9.0-alpha",
-    "phase": "exec",                       // One of: provision | start | exec | stop | deprovision
-    "sandboxId": "wsb:abcd1234",           // Required for non-provision phases.
-                                           // Prefix routes to the backend (wsb: -> windows_sandbox,
-                                           // iso: -> isolation_session).
-    "containment": "windows_sandbox",      // Required for `provision`; ignored for other phases
-                                           // (the backend is inferred from sandboxId).
     "process": { "commandLine": "echo hi" }
-    // Cross-cutting fields (process / filesystem / network / ui) sit at the TOP
-    // level, exactly as in a one-shot request -- there is no wrapping `config`
-    // object. Backend- and phase-specific config, when a phase has any, nests
-    // under `experimental.<backendKey>.<phase>`, e.g.:
-    //   "experimental": { "isolation_session": { "provision": { "appId": "PFN:Contoso.App_8wekyb3d8bbwe" } } }
 }
 ```
 
-Phase / sandboxId / containment validation:
+For example:
 
-| Phase | `sandboxId` | `containment` |
-|---|---|---|
-| `provision`     | (not allowed) | **Required** — picks the backend whose `provision` mints a fresh sandboxId |
-| `start`         | **Required** (`<prefix>:<token>`) | Ignored if present |
-| `exec`          | **Required** | Ignored if present |
-| `stop`          | **Required** | Ignored if present |
-| `deprovision`   | **Required** | Ignored if present |
+```powershell
+wxc-exec.exe --experimental --operation provision provision.json
+wxc-exec.exe --experimental --operation start --sandbox-id wslc:... operation.json
+wxc-exec.exe --experimental --operation exec --sandbox-id wslc:... exec.json
+wxc-exec.exe --experimental --operation stop --sandbox-id wslc:... operation.json
+wxc-exec.exe --experimental --operation deprovision --sandbox-id wslc:... operation.json
+```
+
+Provision selects the backend with `containment` and places backend settings
+directly under `experimental.<backend>`, for example
+`experimental.wslc.image` or `experimental.isolation_session.appId`. Later
+operations derive the backend from the `--sandbox-id` prefix. Start, stop, and
+deprovision generally need only `{ "version": "0.9.0-alpha" }`; exec additionally
+requires `process.commandLine`.
 
 State-aware-capable backends today: `isolation_session` and `windows_sandbox`
 (both Windows-only, both still experimental). The dispatcher rejects
-state-aware envelopes for backends that have not opted in.
+lifecycle operations for backends that have not opted in.
 
 Full lifecycle API: [`docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md`](state-aware-lifecycle/mxc-state-aware-sandbox-api.md).
 

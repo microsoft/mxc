@@ -249,11 +249,7 @@ fn rejects_non_exact_version() {
 // Required field tests
 #[test]
 fn rejects_missing_process() {
-    assert_invalid(
-        r#"{
-            "version": "0.9.0-alpha"
-        }"#,
-    );
+    assert!(mxc_config_contract::dev::parse_request(r#"{"version":"0.9.0-alpha"}"#).is_err());
 }
 
 #[test]

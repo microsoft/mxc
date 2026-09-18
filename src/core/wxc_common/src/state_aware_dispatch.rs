@@ -869,16 +869,19 @@ mod tests {
 
     #[test]
     fn start_without_sandbox_id_cannot_reach_binding() {
-        let error = crate::config_parser::load_mxc_request_from_json(
-            r#"{"version":"0.9.0-alpha","phase":"start"}"#,
+        let error = crate::config_parser::load_state_aware_request_from_json_with_options(
+            r#"{"version":"0.9.0-alpha"}"#,
             &mut crate::logger::Logger::new(crate::logger::Mode::Buffer),
+            Phase::Start,
+            None,
+            &[],
         )
         .unwrap_err();
         let crate::config_parser::ParseError::StateAware(error) = error else {
             panic!("expected state-aware structural rejection");
         };
         assert_eq!(error.code, MxcErrorCode::MalformedRequest);
-        assert!(error.message.contains("sandboxId"));
+        assert!(error.message.contains("sandbox ID"));
     }
 
     #[test]
@@ -1020,10 +1023,13 @@ mod tests {
 
     #[test]
     fn misplaced_phase_configuration_is_rejected_before_dispatch() {
-        let err = crate::config_parser::load_mxc_request_from_json(
-            r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"iso:abc",
-                "experimental":{"isolation_session":{"provision":{"appId":"small"}}}}"#,
+        let err = crate::config_parser::load_state_aware_request_from_json_with_options(
+            r#"{"version":"0.9.0-alpha",
+                "experimental":{"isolation_session":{"appId":"small"}}}"#,
             &mut crate::logger::Logger::new(crate::logger::Mode::Buffer),
+            Phase::Start,
+            Some("iso:abc"),
+            &[],
         )
         .unwrap_err();
         let crate::config_parser::ParseError::StateAware(err) = err else {
@@ -1053,9 +1059,12 @@ mod tests {
 
     #[test]
     fn provision_without_containment_cannot_reach_binding() {
-        let err = crate::config_parser::load_mxc_request_from_json(
-            r#"{"version":"0.9.0-alpha","phase":"provision"}"#,
+        let err = crate::config_parser::load_state_aware_request_from_json_with_options(
+            r#"{"version":"0.9.0-alpha"}"#,
             &mut crate::logger::Logger::new(crate::logger::Mode::Buffer),
+            Phase::Provision,
+            None,
+            &[],
         )
         .unwrap_err();
         let crate::config_parser::ParseError::StateAware(err) = err else {

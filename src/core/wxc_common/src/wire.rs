@@ -56,10 +56,12 @@ pub struct MxcConfig {
     /// State-aware lifecycle phase. When present, the request is a state-aware
     /// request (`sandboxId` is required for non-provision phases); when absent,
     /// the request is one-shot.
+    #[cfg_attr(feature = "schema-gen", schemars(skip))]
     pub phase: Option<Phase>,
 
     /// Sandbox identifier returned by a prior provision request. Required for
     /// non-provision state-aware phases.
+    #[cfg_attr(feature = "schema-gen", schemars(skip))]
     pub sandbox_id: Option<String>,
 
     /// Externally assigned container identifier.
@@ -668,6 +670,7 @@ pub struct Wslc {
     /// (`experimental.wslc.provision`). Carries the container-creation knobs
     /// for the state-aware lifecycle; the flat sibling fields above remain the
     /// one-shot surface. Absent on one-shot configs and non-provision phases.
+    #[cfg_attr(feature = "schema-gen", schemars(skip))]
     pub provision: Option<WslcProvisionPhase>,
 }
 
@@ -718,17 +721,15 @@ pub enum TransportProtocol {
     Tcp,
 }
 
-/// IsolationSession backend config. Carries only the per-phase state-aware
-/// nesting for the phases that take config (`provision`). The one-shot surface
-/// takes no backend configuration at all. `start`, `stop`, `deprovision`, and
-/// `exec` take no per-phase config payload: `start`, `stop` and `deprovision`
-/// are invoked with only the top-level `phase` and `sandboxId`, and `exec`
-/// additionally carries the top-level `process` block.
+/// IsolationSession backend configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct IsolationSession {
-    /// State-aware provision-phase configuration.
+    /// Lifecycle provision application identifier.
+    pub app_id: Option<String>,
+    /// Legacy rolling-parser representation. Exact 0.9 requests use `appId`.
+    #[cfg_attr(feature = "schema-gen", schemars(skip))]
     pub provision: Option<IsolationSessionProvisionPhase>,
 }
 

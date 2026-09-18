@@ -33,102 +33,6 @@ export interface CaptureDenials {
 export type CaptureDenialsMode = "block" | "allow";
 
 /**
- * Experimental settings accepted by the `deprovision` phase.
- */
-export interface DeprovisionExperimental {
-}
-
-export type DeprovisionPhase = "deprovision";
-
-/**
- * A complete state-aware `deprovision` request.
- */
-export interface DeprovisionRequest {
-  /**
-   * Optional JSON Schema reference for editor validation.
-   */
-  $schema?: string;
-  /**
-   * Optional human-readable annotation ignored by the runtime.
-   */
-  _comment?: unknown;
-  /**
-   * Optional closed post-provision experimental settings.
-   */
-  experimental?: DeprovisionExperimental;
-  /**
-   * Exact `deprovision` phase marker.
-   */
-  phase: DeprovisionPhase;
-  /**
-   * Identifier of the sandbox to deprovision.
-   */
-  sandboxId: string;
-  /**
-   * Optional telemetry configuration.
-   */
-  telemetry?: Telemetry;
-  /**
-   * Exact development contract version.
-   */
-  version: Version;
-}
-
-/**
- * Experimental settings accepted by the `exec` phase.
- */
-export interface ExecExperimental {
-}
-
-export type ExecPhase = "exec";
-
-/**
- * A complete state-aware `exec` request.
- */
-export interface ExecRequest {
-  /**
-   * Optional JSON Schema reference for editor validation.
-   */
-  $schema?: string;
-  /**
-   * Optional human-readable annotation ignored by the runtime.
-   */
-  _comment?: unknown;
-  /**
-   * Optional closed exec experimental settings.
-   */
-  experimental?: ExecExperimental;
-  /**
-   * Optional per-execution network settings.
-   */
-  network?: Network;
-  /**
-   * Exact `exec` phase marker.
-   */
-  phase: ExecPhase;
-  /**
-   * Process to execute in the sandbox.
-   */
-  process: Process;
-  /**
-   * Optional per-execution runtime values, including the cooperative proxy URL.
-   */
-  runtimeConfig?: RuntimeConfig;
-  /**
-   * Identifier of the sandbox to execute in.
-   */
-  sandboxId: string;
-  /**
-   * Optional telemetry configuration.
-   */
-  telemetry?: Telemetry;
-  /**
-   * Exact development contract version.
-   */
-  version: Version;
-}
-
-/**
  * Operator consent for containment fallback behavior.
  */
 export interface Fallback {
@@ -156,106 +60,14 @@ export interface Filesystem {
   readwritePaths?: string[];
 }
 
-export type IsolationSessionContainment = "isolation_session";
-
 /**
- * The canonical unrestricted-network posture.
+ * IsolationSession settings accepted by lifecycle provisioning.
  */
-export interface IsolationSessionNetwork {
-  /**
-   * Required unrestricted outbound posture.
-   */
-  egress: IsolationSessionNetworkEgress;
-  /**
-   * Required unrestricted inbound and host-loopback posture.
-   */
-  ingress: IsolationSessionNetworkIngress;
-}
-
-export type IsolationSessionNetworkAllow = "allow";
-
-/**
- * Unrestricted outbound posture.
- */
-export interface IsolationSessionNetworkEgress {
-  /**
-   * Allow outbound traffic by default.
-   */
-  default: IsolationSessionNetworkAllow;
-}
-
-/**
- * Unrestricted inbound and host-loopback posture.
- */
-export interface IsolationSessionNetworkIngress {
-  /**
-   * Allow private-network inbound traffic by default.
-   */
-  default: IsolationSessionNetworkAllow;
-  /**
-   * Allow bidirectional host-loopback connectivity.
-   */
-  hostLoopback: IsolationSessionNetworkAllow;
-}
-
-/**
- * IsolationSession settings accepted during provisioning.
- */
-export interface IsolationSessionProvision {
+export interface IsolationSession {
   /**
    * Optional application identifier carried by the sandbox identity.
    */
   appId?: string;
-}
-
-/**
- * Experimental settings accepted by an IsolationSession provision request.
- */
-export interface IsolationSessionProvisionExperimental {
-  /**
-   * Optional IsolationSession backend settings.
-   */
-  isolation_session?: StateAwareIsolationSession;
-}
-
-/**
- * A complete state-aware `provision` request for IsolationSession.
- *
- * The backend cannot restrict networking, so `network` is required and must describe its actual unrestricted posture through the standard directional all-allow shape.
- */
-export interface IsolationSessionProvisionRequest {
-  /**
-   * Optional JSON Schema reference for editor validation.
-   */
-  $schema?: string;
-  /**
-   * Optional human-readable annotation ignored by the runtime.
-   */
-  _comment?: unknown;
-  /**
-   * Exact `isolation_session` containment marker.
-   */
-  containment: IsolationSessionContainment;
-  /**
-   * Optional closed experimental settings containing only `appId`.
-   */
-  experimental?: IsolationSessionProvisionExperimental;
-  /**
-   * Required unrestricted network posture.
-   */
-  network: IsolationSessionNetwork;
-  /**
-   * Exact `provision` phase marker.
-   */
-  phase: ProvisionPhase;
-  /**
-   * Optional telemetry configuration.
-   */
-  telemetry?: Telemetry;
-  /**
-   * Exact development contract version.
-   */
-  version: Version;
 }
 
 /**
@@ -391,6 +203,10 @@ export type OneShotContainment = "process" | "processcontainer" | "appcontainer"
  */
 export interface OneShotExperimental {
   /**
+   * Optional IsolationSession lifecycle provision settings.
+   */
+  isolation_session?: IsolationSession;
+  /**
    * Optional placeholder test feature.
    */
   test?: TestFeature;
@@ -403,88 +219,6 @@ export interface OneShotExperimental {
    */
   wslc?: OneShotWslc;
 }
-
-/**
- * A complete one-shot `0.9.0-alpha` configuration request.
- */
-export type OneShotRequest = {
-  /**
-   * Optional JSON Schema reference for editor validation.
-   */
-  $schema?: string;
-  /**
-   * Optional human-readable annotation ignored by the runtime.
-   */
-  _comment?: unknown;
-  /**
-   * Optional ProcessContainer settings. The legacy `appContainer` spelling is accepted as an alias.
-   */
-  appContainer?: ProcessContainer;
-  /**
-   * Optional externally assigned container identifier.
-   */
-  containerId?: string;
-  /**
-   * Optional containment selection.
-   */
-  containment?: OneShotContainment;
-  /**
-   * Optional experimental settings.
-   */
-  experimental?: OneShotExperimental;
-  /**
-   * Optional fallback consent.
-   */
-  fallback?: Fallback;
-  /**
-   * Optional filesystem policy.
-   */
-  filesystem?: Filesystem;
-  /**
-   * Optional lifecycle settings.
-   */
-  lifecycle?: Lifecycle;
-  /**
-   * Optional LXC distribution settings.
-   */
-  lxc?: Lxc;
-  /**
-   * Optional macOS Seatbelt configuration.
-   */
-  macos_sandbox?: Seatbelt;
-  /**
-   * Optional network policy.
-   */
-  network?: Network;
-  /**
-   * The process to execute.
-   */
-  process: Process;
-  /**
-   * Optional ProcessContainer settings. The legacy `appContainer` spelling is accepted as an alias.
-   */
-  processContainer?: ProcessContainer;
-  /**
-   * Optional runtime configuration settings.
-   */
-  runtimeConfig?: RuntimeConfig;
-  /**
-   * Optional macOS Seatbelt configuration.
-   */
-  seatbelt?: Seatbelt;
-  /**
-   * Optional telemetry configuration.
-   */
-  telemetry?: Telemetry;
-  /**
-   * Optional cross-platform user-interface policy.
-   */
-  ui?: Ui;
-  /**
-   * The exact contract version marker.
-   */
-  version: Version;
-} & ({ processContainer?: never } | { appContainer?: never }) & ({ seatbelt?: never } | { macos_sandbox?: never });
 
 /**
  * Compatibility settings accepted for one-shot Windows Sandbox requests.
@@ -668,7 +402,89 @@ export interface ProcessContainerUi {
 
 export type ProcessContainerUiIsolation = "container" | "desktop" | "handles" | "atoms";
 
-export type ProvisionPhase = "provision";
+/**
+ * A complete `0.9.0-alpha` configuration request.
+ *
+ * The process is optional at the schema layer because lifecycle provision, start, stop, and deprovision operations do not execute a command. One-shot and exec entry points require it during operation-specific validation.
+ */
+export type Request = {
+  /**
+   * Optional JSON Schema reference for editor validation.
+   */
+  $schema?: string;
+  /**
+   * Optional human-readable annotation ignored by the runtime.
+   */
+  _comment?: unknown;
+  /**
+   * Optional ProcessContainer settings. The legacy `appContainer` spelling is accepted as an alias.
+   */
+  appContainer?: ProcessContainer;
+  /**
+   * Optional externally assigned container identifier.
+   */
+  containerId?: string;
+  /**
+   * Optional containment selection.
+   */
+  containment?: OneShotContainment;
+  /**
+   * Optional experimental settings.
+   */
+  experimental?: OneShotExperimental;
+  /**
+   * Optional fallback consent.
+   */
+  fallback?: Fallback;
+  /**
+   * Optional filesystem policy.
+   */
+  filesystem?: Filesystem;
+  /**
+   * Optional lifecycle settings.
+   */
+  lifecycle?: Lifecycle;
+  /**
+   * Optional LXC distribution settings.
+   */
+  lxc?: Lxc;
+  /**
+   * Optional macOS Seatbelt configuration.
+   */
+  macos_sandbox?: Seatbelt;
+  /**
+   * Optional network policy.
+   */
+  network?: Network;
+  /**
+   * Optional process to execute.
+   */
+  process?: Process;
+  /**
+   * Optional ProcessContainer settings. The legacy `appContainer` spelling is accepted as an alias.
+   */
+  processContainer?: ProcessContainer;
+  /**
+   * Optional runtime configuration settings.
+   */
+  runtimeConfig?: RuntimeConfig;
+  /**
+   * Optional macOS Seatbelt configuration.
+   */
+  seatbelt?: Seatbelt;
+  /**
+   * Optional telemetry configuration.
+   */
+  telemetry?: Telemetry;
+  /**
+   * Optional cross-platform user-interface policy.
+   */
+  ui?: Ui;
+  /**
+   * The exact contract version marker.
+   */
+  version: Version;
+} & ({ processContainer?: never } | { appContainer?: never }) & ({ seatbelt?: never } | { macos_sandbox?: never });
 
 /**
  * Runtime configuration supplied alongside the sandbox policy.
@@ -704,110 +520,6 @@ export interface Seatbelt {
    * Optional override of the generated sandbox profile.
    */
   profileOverride?: string;
-}
-
-/**
- * Experimental settings accepted by the `start` phase.
- */
-export interface StartExperimental {
-}
-
-export type StartPhase = "start";
-
-/**
- * A complete state-aware `start` request.
- */
-export interface StartRequest {
-  /**
-   * Optional JSON Schema reference for editor validation.
-   */
-  $schema?: string;
-  /**
-   * Optional human-readable annotation ignored by the runtime.
-   */
-  _comment?: unknown;
-  /**
-   * Optional closed post-provision experimental settings.
-   */
-  experimental?: StartExperimental;
-  /**
-   * Exact `start` phase marker.
-   */
-  phase: StartPhase;
-  /**
-   * Identifier returned by the provision phase.
-   */
-  sandboxId: string;
-  /**
-   * Optional telemetry configuration.
-   */
-  telemetry?: Telemetry;
-  /**
-   * Exact development contract version.
-   */
-  version: Version;
-}
-
-/**
- * State-aware IsolationSession experimental settings.
- */
-export interface StateAwareIsolationSession {
-  /**
-   * Optional provision-phase settings.
-   */
-  provision?: IsolationSessionProvision;
-}
-
-/**
- * State-aware WSLC experimental settings.
- */
-export interface StateAwareWslc {
-  /**
-   * Optional provision-phase settings.
-   */
-  provision?: WslcProvision;
-}
-
-/**
- * Experimental settings accepted by the `stop` phase.
- */
-export interface StopExperimental {
-}
-
-export type StopPhase = "stop";
-
-/**
- * A complete state-aware `stop` request.
- */
-export interface StopRequest {
-  /**
-   * Optional JSON Schema reference for editor validation.
-   */
-  $schema?: string;
-  /**
-   * Optional human-readable annotation ignored by the runtime.
-   */
-  _comment?: unknown;
-  /**
-   * Optional closed post-provision experimental settings.
-   */
-  experimental?: StopExperimental;
-  /**
-   * Exact `stop` phase marker.
-   */
-  phase: StopPhase;
-  /**
-   * Identifier returned by the provision phase.
-   */
-  sandboxId: string;
-  /**
-   * Optional telemetry configuration.
-   */
-  telemetry?: Telemetry;
-  /**
-   * Exact development contract version.
-   */
-  version: Version;
 }
 
 /**
@@ -854,121 +566,7 @@ export type UiClipboard = "none" | "read" | "write" | "all";
 
 export type Version = "0.9.0-alpha";
 
-export type WindowsSandboxContainment = "windows_sandbox";
-
-/**
- * Experimental settings accepted by a Windows Sandbox provision request.
- */
-export interface WindowsSandboxExperimental {
-}
-
-/**
- * A complete state-aware `provision` request for windows_sandbox
- */
-export interface WindowsSandboxProvisionRequest {
-  /**
-   * Optional JSON Schema reference for editor validation.
-   */
-  $schema?: string;
-  /**
-   * Optional human-readable annotation ignored by the runtime.
-   */
-  _comment?: unknown;
-  /**
-   * Exact `windows_sandbox` containment marker.
-   */
-  containment: WindowsSandboxContainment;
-  /**
-   * Optional closed experimental settings.
-   */
-  experimental?: WindowsSandboxExperimental;
-  /**
-   * Optional filesystem policy.
-   */
-  filesystem?: Filesystem;
-  /**
-   * Exact `provision` phase marker.
-   */
-  phase: ProvisionPhase;
-  /**
-   * Optional telemetry configuration.
-   */
-  telemetry?: Telemetry;
-  /**
-   * Exact development contract version.
-   */
-  version: Version;
-}
-
-export type WslcContainment = "wslc";
-
-/**
- * WSLC settings accepted during provisioning.
- */
-export interface WslcProvision {
-  /**
-   * Optional container image reference.
-   */
-  image?: string;
-  /**
-   * Optional path to a local container image archive.
-   */
-  imageTarPath?: string;
-}
-
-/**
- * Experimental settings accepted by a WSLC provision request.
- */
-export interface WslcProvisionExperimental {
-  /**
-   * Optional WSLC backend settings.
-   */
-  wslc?: StateAwareWslc;
-}
-
-/**
- * A complete state-aware `provision` request for wslc
- */
-export interface WslcProvisionRequest {
-  /**
-   * Optional JSON Schema reference for editor validation.
-   */
-  $schema?: string;
-  /**
-   * Optional human-readable annotation ignored by the runtime.
-   */
-  _comment?: unknown;
-  /**
-   * Exact `wslc` containment marker.
-   */
-  containment: WslcContainment;
-  /**
-   * Optional closed experimental settings.
-   */
-  experimental?: WslcProvisionExperimental;
-  /**
-   * Optional filesystem policy fixed at provision time.
-   */
-  filesystem?: Filesystem;
-  /**
-   * Optional network policy fixed at provision time.
-   */
-  network?: Network;
-  /**
-   * Exact `provision` phase marker.
-   */
-  phase: ProvisionPhase;
-  /**
-   * Optional telemetry configuration.
-   */
-  telemetry?: Telemetry;
-  /**
-   * Exact development contract version.
-   */
-  version: Version;
-}
-
 /**
  * Exact mutable MXC development configuration contract.
  */
-export type MXCConfiguration = OneShotRequest | DeprovisionRequest | StopRequest | ExecRequest | StartRequest | WslcProvisionRequest | IsolationSessionProvisionRequest | WindowsSandboxProvisionRequest;
+export type MXCConfiguration = Request;

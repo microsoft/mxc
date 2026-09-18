@@ -128,6 +128,10 @@ Write-Host "Pre-flight OK: $freeMb MB free, no orphan vmmem`n" -ForegroundColor 
 function Invoke-StateAware {
     param(
         [hashtable]$Request,
+        [Parameter(Mandatory)]
+        [ValidateSet('provision', 'start', 'exec', 'stop', 'deprovision')]
+        [string]$Operation,
+        [string]$SandboxId,
         [int]$TimeoutSec = 120
     )
 
@@ -141,14 +145,19 @@ function Invoke-StateAware {
     $stdoutFile = [System.IO.Path]::GetTempFileName()
     $stderrFile = [System.IO.Path]::GetTempFileName()
     try {
+        $arguments = @('--experimental', '--operation', $Operation)
+        if ($SandboxId) {
+            $arguments += @('--sandbox-id', $SandboxId)
+        }
+        $arguments += @('--config-base64', $b64)
         $proc = Start-Process -FilePath $WxcExec `
-            -ArgumentList @('--experimental', '--config-base64', $b64) `
+            -ArgumentList $arguments `
             -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile `
             -NoNewWindow -PassThru
         $null = $proc.Handle  # cache the handle so ExitCode survives the timed wait
         if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
             try { $proc.Kill() } catch { }
-            throw "phase '$($Request.phase)' timed out after $TimeoutSec s"
+            throw "operation '$Operation' timed out after $TimeoutSec s"
         }
         $proc.WaitForExit()
         $stdoutText = Get-Content $stdoutFile -Raw -ErrorAction SilentlyContinue
@@ -181,7 +190,7 @@ function Show-Procs {
 
 # Provision is pure bookkeeping (no VM); a healthy build returns a wsb: id.
 # A backend_unavailable envelope means the build lacks the backend -- SKIP.
-$probe = Invoke-StateAware -Request @{ phase = 'provision'; containment = 'windows_sandbox' } -TimeoutSec 60
+$probe = Invoke-StateAware -Operation provision -Request @{ containment = 'windows_sandbox' } -TimeoutSec 60
 $probeEnv = Parse-Envelope -Stdout $probe.Stdout
 if ($null -ne $probeEnv -and $probeEnv.error.code -eq 'backend_unavailable') {
     Write-Host "SKIPPED: wxc-exec reports backend_unavailable (build without the windows_sandbox backend or --experimental off)" -ForegroundColor Yellow
@@ -192,7 +201,7 @@ if ($null -ne $probeEnv -and $probeEnv.error.code -eq 'backend_unavailable') {
 if ($null -ne $probeEnv -and $null -ne $probeEnv.result -and $null -ne $probeEnv.result.sandboxId) {
     $probeId = [string]$probeEnv.result.sandboxId
     Write-Host "Backend probe: provisioned $probeId, deprovisioning ..." -ForegroundColor DarkGray
-    [void](Invoke-StateAware -Request @{ phase = 'deprovision'; sandboxId = $probeId } -TimeoutSec 60)
+    [void](Invoke-StateAware -Operation deprovision -SandboxId $probeId -Request @{} -TimeoutSec 60)
 }
 
 # ---------------- Test harness ----------------
@@ -249,7 +258,7 @@ $script:Started = $false
 
 try {
     Run-StateAwareTest 'provision mints a wsb: sandbox id' {
-        $r = Invoke-StateAware -Request @{ phase = 'provision'; containment = 'windows_sandbox' } -TimeoutSec 60
+        $r = Invoke-StateAware -Operation provision -Request @{ containment = 'windows_sandbox' } -TimeoutSec 60
         Assert-True ($r.ExitCode -eq 0) "provision exit 0 (got $($r.ExitCode))"
         $env = Parse-Envelope -Stdout $r.Stdout
         $sid = if ($env) { [string]$env.result.sandboxId } else { $null }
@@ -262,7 +271,7 @@ try {
     } else {
         Run-StateAwareTest 'start boots the VM and the daemon' {
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
-            $r = Invoke-StateAware -Request @{ phase = 'start'; sandboxId = $script:Sid } -TimeoutSec $StartTimeoutSec
+            $r = Invoke-StateAware -Operation start -SandboxId $script:Sid -Request @{} -TimeoutSec $StartTimeoutSec
             $sw.Stop()
             Write-Host "  (start took $([int]$sw.Elapsed.TotalSeconds)s)" -ForegroundColor DarkGray
             Assert-True ($r.ExitCode -eq 0) "start exit 0 (got $($r.ExitCode)); stdout=$($r.Stdout.Trim())"
@@ -274,13 +283,13 @@ try {
 
         if ($script:Started) {
             Run-StateAwareTest 'exec streams stdout and returns exit 0' {
-                $r = Invoke-StateAware -Request @{ phase = 'exec'; sandboxId = $script:Sid; process = @{ commandLine = 'echo hello-from-wsb' } } -TimeoutSec 120
+                $r = Invoke-StateAware -Operation exec -SandboxId $script:Sid -Request @{ process = @{ commandLine = 'echo hello-from-wsb' } } -TimeoutSec 120
                 Assert-True ($r.ExitCode -eq 0) "exec exit 0 (got $($r.ExitCode))"
                 Assert-True ($r.Stdout -match 'hello-from-wsb') "exec stdout contains the marker (got '[$($r.Stdout.Trim())]')"
             } | Out-Null
 
             Run-StateAwareTest 'a second exec reuses the same VM' {
-                $r = Invoke-StateAware -Request @{ phase = 'exec'; sandboxId = $script:Sid; process = @{ commandLine = 'echo second-exec' } } -TimeoutSec 120
+                $r = Invoke-StateAware -Operation exec -SandboxId $script:Sid -Request @{ process = @{ commandLine = 'echo second-exec' } } -TimeoutSec 120
                 Assert-True ($r.ExitCode -eq 0) "reuse exec exit 0 (got $($r.ExitCode))"
                 Assert-True ($r.Stdout -match 'second-exec') "reuse exec stdout contains the marker (got '[$($r.Stdout.Trim())]')"
             } | Out-Null
@@ -295,7 +304,7 @@ try {
             # and isn't part of the test's behavioural contract).
             Run-StateAwareTest 'python exec on held VM prints expected markers' {
                 $cmd = 'python -S -B -c "import sys; print(''Hello from Windows Sandbox!''); print(''pyver:''+sys.version.split()[0]); print(''Script executed successfully in sandbox isolation'')"'
-                $r = Invoke-StateAware -Request @{ phase = 'exec'; sandboxId = $script:Sid; process = @{ commandLine = $cmd } } -TimeoutSec 120
+                $r = Invoke-StateAware -Operation exec -SandboxId $script:Sid -Request @{ process = @{ commandLine = $cmd } } -TimeoutSec 120
                 Assert-True ($r.ExitCode -eq 0) "python exec exit 0 (got $($r.ExitCode))"
                 Assert-True ($r.Stdout -match 'Hello from Windows Sandbox!') "python stdout greets (got '[$($r.Stdout.Trim())]')"
                 Assert-True ($r.Stdout -match 'executed successfully') "python stdout reports success (got '[$($r.Stdout.Trim())]')"
@@ -304,14 +313,14 @@ try {
 
             Run-StateAwareTest 'powershell exec on held VM prints expected markers' {
                 $cmd = 'powershell -NoProfile -Command "Write-Output ''PowerShell works''; Write-Output (''psver:''+$PSVersionTable.PSVersion.ToString())"'
-                $r = Invoke-StateAware -Request @{ phase = 'exec'; sandboxId = $script:Sid; process = @{ commandLine = $cmd } } -TimeoutSec 120
+                $r = Invoke-StateAware -Operation exec -SandboxId $script:Sid -Request @{ process = @{ commandLine = $cmd } } -TimeoutSec 120
                 Assert-True ($r.ExitCode -eq 0) "powershell exec exit 0 (got $($r.ExitCode))"
                 Assert-True ($r.Stdout -match 'PowerShell works') "powershell stdout greets (got '[$($r.Stdout.Trim())]')"
                 Assert-True ($r.Stdout -match 'psver:\d+\.\d+') "powershell stdout reports version (got '[$($r.Stdout.Trim())]')"
             } | Out-Null
 
             Run-StateAwareTest 'exec propagates a non-zero child exit code' {
-                $r = Invoke-StateAware -Request @{ phase = 'exec'; sandboxId = $script:Sid; process = @{ commandLine = 'exit 7' } } -TimeoutSec 120
+                $r = Invoke-StateAware -Operation exec -SandboxId $script:Sid -Request @{ process = @{ commandLine = 'exit 7' } } -TimeoutSec 120
                 Assert-True ($r.ExitCode -eq 7) "exec surfaces child exit 7 (got $($r.ExitCode))"
             } | Out-Null
 
@@ -334,7 +343,7 @@ try {
             # expected stdout.
             Run-StateAwareTest 'reused VM survives a timed-out exec' {
                 $sleepCmd = 'powershell -NoProfile -Command "Start-Sleep -Seconds 30"'
-                $timed = Invoke-StateAware -Request @{ phase = 'exec'; sandboxId = $script:Sid; process = @{ commandLine = $sleepCmd; timeout = 2000 } } -TimeoutSec 30
+                $timed = Invoke-StateAware -Operation exec -SandboxId $script:Sid -Request @{ process = @{ commandLine = $sleepCmd; timeout = 2000 } } -TimeoutSec 30
                 # The exact exit code on timeout is backend-defined
                 # (currently non-zero "process timed out"); we just
                 # require it to be non-zero so the test does not get
@@ -345,7 +354,7 @@ try {
                 # something, this will either hang to the script's
                 # outer timeout or come back with empty stdout. The
                 # assertion catches both.
-                $r = Invoke-StateAware -Request @{ phase = 'exec'; sandboxId = $script:Sid; process = @{ commandLine = 'echo post-timeout-still-alive' } } -TimeoutSec 120
+                $r = Invoke-StateAware -Operation exec -SandboxId $script:Sid -Request @{ process = @{ commandLine = 'echo post-timeout-still-alive' } } -TimeoutSec 120
                 Assert-True ($r.ExitCode -eq 0) "post-timeout exec exit 0 (got $($r.ExitCode))"
                 Assert-True ($r.Stdout -match 'post-timeout-still-alive') "post-timeout exec stdout (got '[$($r.Stdout.Trim())]')"
             } | Out-Null
@@ -354,7 +363,7 @@ try {
 } finally {
     if ($script:Started) {
         Run-StateAwareTest 'stop tears down the VM' {
-            $r = Invoke-StateAware -Request @{ phase = 'stop'; sandboxId = $script:Sid } -TimeoutSec 120
+            $r = Invoke-StateAware -Operation stop -SandboxId $script:Sid -Request @{} -TimeoutSec 120
             Assert-True ($r.ExitCode -eq 0) "stop exit 0 (got $($r.ExitCode))"
             Start-Sleep -Seconds 3
             $procs = Show-Procs
@@ -363,7 +372,7 @@ try {
     }
     if ($script:Sid) {
         Run-StateAwareTest 'deprovision removes the sandbox records' {
-            $r = Invoke-StateAware -Request @{ phase = 'deprovision'; sandboxId = $script:Sid } -TimeoutSec 120
+            $r = Invoke-StateAware -Operation deprovision -SandboxId $script:Sid -Request @{} -TimeoutSec 120
             Assert-True ($r.ExitCode -eq 0) "deprovision exit 0 (got $($r.ExitCode))"
             $daemonRec = Join-Path $env:TEMP 'wxc-wsb\state-aware\daemon.json'
             Assert-True (-not (Test-Path $daemonRec)) "daemon.json is gone after deprovision"

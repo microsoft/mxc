@@ -1,310 +1,226 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::config_contract_adapters::dev::common::{
-    convert_filesystem, convert_network, convert_process, convert_runtime_config,
-    convert_telemetry, convert_version,
-};
 use crate::error::WxcError;
-use crate::models::{IsolationSessionProvisionConfig, WslcProvisionConfig};
+use crate::models::{ContainmentBackend, IsolationSessionProvisionConfig, WslcProvisionConfig};
 use crate::state_aware_operation::{StateAwareOperation, StateAwareProvision};
+use crate::state_aware_request::Phase;
 use crate::state_aware_wire::StateAwareInput;
 use crate::wire;
 use mxc_config_contract::dev as contract;
 
-fn convert_state_aware_isolation_session(
-    value: contract::StateAwareIsolationSession,
-) -> Option<IsolationSessionProvisionConfig> {
-    let contract::StateAwareIsolationSession { provision } = value;
-    provision
-        .into_option()
-        .map(convert_isolation_session_provision)
+fn malformed(message: impl Into<String>) -> WxcError {
+    WxcError::ConfigParse(message.into())
 }
 
-fn convert_isolation_session_provision(
-    value: contract::IsolationSessionProvision,
-) -> IsolationSessionProvisionConfig {
-    let contract::IsolationSessionProvision { app_id } = value;
-    IsolationSessionProvisionConfig {
-        app_id: app_id.into_option(),
+fn require_sandbox_id(phase: Phase, sandbox_id: Option<&str>) -> Result<String, WxcError> {
+    sandbox_id.map(str::to_owned).ok_or_else(|| {
+        malformed(format!(
+            "the {phase} operation requires a sandbox ID supplied by the API or --sandbox-id"
+        ))
+    })
+}
+
+fn reject_non_exec_process(common: &wire::MxcConfig, phase: Phase) -> Result<(), WxcError> {
+    if common.process.is_some() {
+        return Err(malformed(format!(
+            "process is accepted only by one-shot execution and the exec operation, not {phase}"
+        )));
     }
+    Ok(())
 }
 
-fn convert_isolation_session_provision_experimental(
-    value: contract::IsolationSessionProvisionExperimental,
-) -> Option<IsolationSessionProvisionConfig> {
-    let contract::IsolationSessionProvisionExperimental { isolation_session } = value;
-    isolation_session
-        .into_option()
-        .and_then(convert_state_aware_isolation_session)
-}
-
-fn convert_isolation_session_network(value: contract::IsolationSessionNetwork) -> wire::Network {
-    let contract::IsolationSessionNetwork { egress, ingress } = value;
-    let contract::IsolationSessionNetworkEgress {
-        default: contract::IsolationSessionNetworkAllow,
-    } = egress;
-    let contract::IsolationSessionNetworkIngress {
-        default: contract::IsolationSessionNetworkAllow,
-        host_loopback: contract::IsolationSessionNetworkAllow,
-    } = ingress;
-    wire::Network {
-        allow_local_network: None,
-        default_policy: None,
-        allowed_hosts: None,
-        enforcement_mode: None,
-        blocked_hosts: None,
-        proxy: None,
-        egress: Some(wire::NetworkEgress {
-            default: Some(wire::NetworkAction::Allow),
-            allow: None,
-            deny: None,
-        }),
-        ingress: Some(wire::NetworkIngress {
-            default: Some(wire::NetworkAction::Allow),
-            host_loopback: Some(wire::NetworkAction::Allow),
-        }),
+fn reject_non_exec_policy(common: &wire::MxcConfig, phase: Phase) -> Result<(), WxcError> {
+    for (present, field) in [
+        (common.filesystem.is_some(), "filesystem"),
+        (common.network.is_some(), "network"),
+        (common.runtime_config.is_some(), "runtimeConfig"),
+        (common.ui.is_some(), "ui"),
+    ] {
+        if present {
+            return Err(malformed(format!(
+                "{field} is not accepted by the {phase} operation"
+            )));
+        }
     }
+    Ok(())
 }
 
-fn consume_windows_sandbox_experimental(value: contract::WindowsSandboxExperimental) {
-    let contract::WindowsSandboxExperimental {} = value;
-}
-
-fn convert_wslc_provision(value: contract::WslcProvision) -> WslcProvisionConfig {
-    let contract::WslcProvision {
-        image,
-        image_tar_path,
-    } = value;
-    WslcProvisionConfig {
-        image: image.into_option(),
-        image_tar_path: image_tar_path.into_option(),
-    }
-}
-
-fn convert_state_aware_wslc(value: contract::StateAwareWslc) -> Option<WslcProvisionConfig> {
-    let contract::StateAwareWslc { provision } = value;
-    provision.into_option().map(convert_wslc_provision)
-}
-
-fn convert_wslc_provision_experimental(
-    value: contract::WslcProvisionExperimental,
-) -> Option<WslcProvisionConfig> {
-    let contract::WslcProvisionExperimental { wslc } = value;
-    wslc.into_option().and_then(convert_state_aware_wslc)
-}
-
-fn consume_start_experimental(value: contract::StartExperimental) {
-    let contract::StartExperimental {} = value;
-}
-
-fn consume_exec_experimental(value: contract::ExecExperimental) {
-    let contract::ExecExperimental {} = value;
-}
-
-fn consume_stop_experimental(value: contract::StopExperimental) {
-    let contract::StopExperimental {} = value;
-}
-
-fn consume_deprovision_experimental(value: contract::DeprovisionExperimental) {
-    let contract::DeprovisionExperimental {} = value;
-}
-
-fn state_aware_common(
-    schema: contract::OptionalField<String>,
-    comment: contract::OptionalField<serde_json::Value>,
-    version: contract::Version,
-    telemetry: contract::OptionalField<contract::Telemetry>,
-) -> wire::MxcConfig {
-    wire::MxcConfig {
-        schema: schema.into_option(),
-        comment: comment.into_option(),
-        version: Some(convert_version(version).to_owned()),
-        phase: None,
-        experimental: None,
-        containment: None,
-        container_id: None,
-        sandbox_id: None,
-        process: None,
-        filesystem: None,
-        fallback: None,
-        network: None,
-        runtime_config: None,
-        telemetry: telemetry.into_option().map(convert_telemetry),
-        lifecycle: None,
-        lxc: None,
-        process_container: None,
+fn take_experimental(common: &mut wire::MxcConfig) -> wire::Experimental {
+    common.experimental.take().unwrap_or(wire::Experimental {
+        test: None,
+        windows_sandbox: None,
+        wslc: None,
+        isolation_session: None,
         seatbelt: None,
-        ui: None,
-    }
+    })
 }
 
-pub(super) fn provision_into_input(
-    request: contract::ProvisionRequest,
-) -> Result<StateAwareInput, WxcError> {
-    match request {
-        contract::ProvisionRequest::IsolationSession(request) => {
-            isolation_session_provision_into_input(request)
+fn reject_foreign_experimental(
+    experimental: &wire::Experimental,
+    expected: &str,
+) -> Result<(), WxcError> {
+    let foreign = [
+        ("test", experimental.test.is_some()),
+        (
+            "windows_sandbox",
+            expected != "windows_sandbox" && experimental.windows_sandbox.is_some(),
+        ),
+        ("wslc", expected != "wslc" && experimental.wslc.is_some()),
+        (
+            "isolation_session",
+            expected != "isolation_session" && experimental.isolation_session.is_some(),
+        ),
+        ("seatbelt", experimental.seatbelt.is_some()),
+    ]
+    .into_iter()
+    .find_map(|(name, present)| present.then_some(name));
+
+    if let Some(name) = foreign {
+        return Err(malformed(format!(
+            "experimental.{name} is not accepted when provisioning {expected}"
+        )));
+    }
+    Ok(())
+}
+
+fn isolation_session_provision(
+    experimental: wire::Experimental,
+) -> Result<StateAwareProvision, WxcError> {
+    reject_foreign_experimental(&experimental, "isolation_session")?;
+    let config = experimental
+        .isolation_session
+        .map(|value| IsolationSessionProvisionConfig {
+            app_id: value
+                .app_id
+                .or_else(|| value.provision.and_then(|value| value.app_id)),
+        });
+    Ok(StateAwareProvision::IsolationSession(config))
+}
+
+fn windows_sandbox_provision(
+    experimental: wire::Experimental,
+) -> Result<StateAwareProvision, WxcError> {
+    reject_foreign_experimental(&experimental, "windows_sandbox")?;
+    if let Some(value) = experimental.windows_sandbox {
+        if value.idle_timeout.is_some()
+            || value.idle_timeout_ms.is_some()
+            || value.daemon_pipe_name.is_some()
+        {
+            return Err(malformed(
+                "experimental.windows_sandbox settings are not accepted by lifecycle provision",
+            ));
         }
-        contract::ProvisionRequest::WindowsSandbox(request) => {
-            windows_sandbox_provision_into_input(request)
+    }
+    Ok(StateAwareProvision::WindowsSandbox)
+}
+
+fn wslc_provision(experimental: wire::Experimental) -> Result<StateAwareProvision, WxcError> {
+    reject_foreign_experimental(&experimental, "wslc")?;
+    let config = experimental
+        .wslc
+        .map(|value| {
+            if value.target_os.is_some()
+                || value.cpu_count.is_some()
+                || value.memory_mb.is_some()
+                || value.gpu.is_some()
+                || value.storage_path.is_some()
+                || value.port_mappings.is_some()
+            {
+                return Err(malformed(
+                    "lifecycle provision accepts only experimental.wslc.image and imageTarPath",
+                ));
+            }
+            let nested = value.provision;
+            if nested.is_some() {
+                return Err(malformed(
+                    "experimental.wslc.provision is no longer supported; place image and \
+                     imageTarPath directly under experimental.wslc",
+                ));
+            }
+            Ok(WslcProvisionConfig {
+                image: value.image,
+                image_tar_path: value.image_tar_path,
+            })
+        })
+        .transpose()?;
+    Ok(StateAwareProvision::Wslc(config))
+}
+
+fn provision_operation(common: &mut wire::MxcConfig) -> Result<StateAwareOperation, WxcError> {
+    reject_non_exec_process(common, Phase::Provision)?;
+    if common.runtime_config.is_some() || common.ui.is_some() {
+        return Err(malformed(
+            "runtimeConfig and ui are not accepted by the provision operation",
+        ));
+    }
+
+    let containment = common
+        .containment
+        .take()
+        .map(ContainmentBackend::from)
+        .ok_or_else(|| malformed("the provision operation requires containment"))?;
+    let experimental = take_experimental(common);
+    let provision = match containment {
+        ContainmentBackend::IsolationSession => isolation_session_provision(experimental)?,
+        ContainmentBackend::WindowsSandbox => windows_sandbox_provision(experimental)?,
+        ContainmentBackend::Wslc => wslc_provision(experimental)?,
+        backend => {
+            return Err(malformed(format!(
+                "backend '{}' does not support lifecycle provision",
+                backend.wire_name()
+            )))
         }
-        contract::ProvisionRequest::Wslc(request) => wslc_provision_into_input(request),
-    }
+    };
+    Ok(StateAwareOperation::Provision(provision))
 }
 
-fn isolation_session_provision_into_input(
-    request: contract::IsolationSessionProvisionRequest,
+pub(super) fn operation_into_input(
+    request: contract::OneShotRequest,
+    phase: Phase,
+    sandbox_id: Option<&str>,
 ) -> Result<StateAwareInput, WxcError> {
-    let contract::IsolationSessionProvisionRequest {
-        schema,
-        comment,
-        version,
-        phase: contract::ProvisionPhase,
-        containment: contract::IsolationSessionContainment,
-        network,
-        telemetry,
-        experimental,
-    } = request;
-    let provision = experimental
-        .into_option()
-        .and_then(convert_isolation_session_provision_experimental);
-    let mut common = state_aware_common(schema, comment, version, telemetry);
-    common.network = Some(convert_isolation_session_network(network));
-    StateAwareInput::new(
-        common,
-        StateAwareOperation::Provision(StateAwareProvision::IsolationSession(provision)),
-    )
+    let mut common = super::one_shot::into_wire(request);
+    let operation = match phase {
+        Phase::Provision => {
+            if sandbox_id.is_some() {
+                return Err(malformed(
+                    "a sandbox ID is not accepted by the provision operation",
+                ));
+            }
+            provision_operation(&mut common)?
+        }
+        Phase::Exec => {
+            if common.filesystem.is_some() || common.ui.is_some() {
+                return Err(malformed(
+                    "filesystem and ui are not accepted by the exec operation",
+                ));
+            }
+            StateAwareOperation::Exec {
+                sandbox_id: require_sandbox_id(phase, sandbox_id)?,
+            }
+        }
+        Phase::Start => {
+            reject_non_exec_process(&common, phase)?;
+            reject_non_exec_policy(&common, phase)?;
+            StateAwareOperation::Start {
+                sandbox_id: require_sandbox_id(phase, sandbox_id)?,
+            }
+        }
+        Phase::Stop => {
+            reject_non_exec_process(&common, phase)?;
+            reject_non_exec_policy(&common, phase)?;
+            StateAwareOperation::Stop {
+                sandbox_id: require_sandbox_id(phase, sandbox_id)?,
+            }
+        }
+        Phase::Deprovision => {
+            reject_non_exec_process(&common, phase)?;
+            reject_non_exec_policy(&common, phase)?;
+            StateAwareOperation::Deprovision {
+                sandbox_id: require_sandbox_id(phase, sandbox_id)?,
+            }
+        }
+    };
+    StateAwareInput::new(common, operation)
 }
-
-fn windows_sandbox_provision_into_input(
-    request: contract::WindowsSandboxProvisionRequest,
-) -> Result<StateAwareInput, WxcError> {
-    let contract::WindowsSandboxProvisionRequest {
-        schema,
-        comment,
-        version,
-        phase: contract::ProvisionPhase,
-        containment: contract::WindowsSandboxContainment,
-        filesystem,
-        telemetry,
-        experimental,
-    } = request;
-    if let Some(experimental) = experimental.into_option() {
-        consume_windows_sandbox_experimental(experimental);
-    }
-    let mut common = state_aware_common(schema, comment, version, telemetry);
-    common.filesystem = filesystem.into_option().map(convert_filesystem);
-    StateAwareInput::new(
-        common,
-        StateAwareOperation::Provision(StateAwareProvision::WindowsSandbox),
-    )
-}
-
-fn wslc_provision_into_input(
-    request: contract::WslcProvisionRequest,
-) -> Result<StateAwareInput, WxcError> {
-    let contract::WslcProvisionRequest {
-        schema,
-        comment,
-        version,
-        phase: contract::ProvisionPhase,
-        containment: contract::WslcContainment,
-        filesystem,
-        network,
-        telemetry,
-        experimental,
-    } = request;
-    let provision = experimental
-        .into_option()
-        .and_then(convert_wslc_provision_experimental);
-    let mut common = state_aware_common(schema, comment, version, telemetry);
-    common.filesystem = filesystem.into_option().map(convert_filesystem);
-    common.network = network.into_option().map(convert_network);
-    StateAwareInput::new(
-        common,
-        StateAwareOperation::Provision(StateAwareProvision::Wslc(provision)),
-    )
-}
-
-pub(super) fn start_into_input(
-    request: contract::StartRequest,
-) -> Result<StateAwareInput, WxcError> {
-    let contract::StartRequest {
-        schema,
-        comment,
-        version,
-        phase: contract::StartPhase,
-        sandbox_id,
-        telemetry,
-        experimental,
-    } = request;
-    if let Some(experimental) = experimental.into_option() {
-        consume_start_experimental(experimental);
-    }
-    let common = state_aware_common(schema, comment, version, telemetry);
-    StateAwareInput::new(common, StateAwareOperation::Start { sandbox_id })
-}
-
-pub(super) fn exec_into_input(request: contract::ExecRequest) -> Result<StateAwareInput, WxcError> {
-    let contract::ExecRequest {
-        schema,
-        comment,
-        version,
-        phase: contract::ExecPhase,
-        sandbox_id,
-        process,
-        network,
-        runtime_config,
-        telemetry,
-        experimental,
-    } = request;
-    if let Some(experimental) = experimental.into_option() {
-        consume_exec_experimental(experimental);
-    }
-    let mut common = state_aware_common(schema, comment, version, telemetry);
-    common.process = Some(convert_process(process));
-    common.network = network.into_option().map(convert_network);
-    common.runtime_config = runtime_config.into_option().map(convert_runtime_config);
-    StateAwareInput::new(common, StateAwareOperation::Exec { sandbox_id })
-}
-
-pub(super) fn stop_into_input(request: contract::StopRequest) -> Result<StateAwareInput, WxcError> {
-    let contract::StopRequest {
-        schema,
-        comment,
-        version,
-        phase: contract::StopPhase,
-        sandbox_id,
-        telemetry,
-        experimental,
-    } = request;
-    if let Some(experimental) = experimental.into_option() {
-        consume_stop_experimental(experimental);
-    }
-    let common = state_aware_common(schema, comment, version, telemetry);
-    StateAwareInput::new(common, StateAwareOperation::Stop { sandbox_id })
-}
-
-pub(super) fn deprovision_into_input(
-    request: contract::DeprovisionRequest,
-) -> Result<StateAwareInput, WxcError> {
-    let contract::DeprovisionRequest {
-        schema,
-        comment,
-        version,
-        phase: contract::DeprovisionPhase,
-        sandbox_id,
-        telemetry,
-        experimental,
-    } = request;
-    if let Some(experimental) = experimental.into_option() {
-        consume_deprovision_experimental(experimental);
-    }
-    let common = state_aware_common(schema, comment, version, telemetry);
-    StateAwareInput::new(common, StateAwareOperation::Deprovision { sandbox_id })
-}
-
-#[cfg(test)]
-#[path = "state_aware_tests/mod.rs"]
-mod tests;

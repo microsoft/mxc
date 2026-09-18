@@ -10,7 +10,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use appcontainer_common::appcontainer_runner::delete_app_container_profile;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+use mxc_engine::LifecycleOperation;
 use wxc_common::audit::{AuditEvent, AuditEventName, RejectionReason};
 use wxc_common::config_parser::{LoadOptions, ParseError};
 #[cfg(target_os = "windows")]
@@ -63,6 +64,15 @@ struct Cli {
     /// Parse and validate config then exit without executing
     #[arg(long = "dry-run")]
     dry_run: bool,
+
+    /// Sandbox lifecycle operation. Lifecycle operations are selected only by
+    /// this argument, never by the config document.
+    #[arg(long, value_enum)]
+    operation: Option<CliOperation>,
+
+    /// Existing sandbox targeted by start, exec, stop, or deprovision.
+    #[arg(long = "sandbox-id", requires = "operation")]
+    sandbox_id: Option<String>,
 
     /// Path to diagnostic log file (appends, creates if missing)
     #[arg(long = "log-file")]
@@ -126,7 +136,9 @@ struct Cli {
             "image",
             "storage_path",
             "probe",
-            "force_reclaim"
+            "force_reclaim",
+            "operation",
+            "sandbox_id"
         ]
     )]
     #[cfg_attr(
@@ -176,6 +188,27 @@ impl Cli {
             }
         }
         self
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliOperation {
+    Provision,
+    Start,
+    Exec,
+    Stop,
+    Deprovision,
+}
+
+impl From<CliOperation> for LifecycleOperation {
+    fn from(operation: CliOperation) -> Self {
+        match operation {
+            CliOperation::Provision => Self::Provision,
+            CliOperation::Start => Self::Start,
+            CliOperation::Exec => Self::Exec,
+            CliOperation::Stop => Self::Stop,
+            CliOperation::Deprovision => Self::Deprovision,
+        }
     }
 }
 
@@ -1208,11 +1241,45 @@ fn main() {
     // Non-delete paths always have a config JSON at this point (or exited
     // above with the missing-config error).
     let config_json = config_json.expect("config_json is Some on non-delete paths");
+    if let Some(operation) = cli.operation {
+        let operation: LifecycleOperation = operation.into();
+        let parsed =
+            match wxc_common::config_parser::load_state_aware_request_from_json_with_options(
+                &config_json,
+                &mut logger,
+                operation.phase(),
+                cli.sandbox_id.as_deref(),
+                &cli.command,
+            ) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    let error = match error {
+                        ParseError::StateAware(error) => error,
+                        ParseError::Decode(error)
+                        | ParseError::Version(error)
+                        | ParseError::OneShot(error)
+                        | ParseError::OneShotMalformed(error) => {
+                            MxcError::malformed_request(error.to_string())
+                        }
+                    };
+                    log_state_aware_dispatch_error(&mut logger, &error);
+                    print_error_envelope(&error);
+                    process::exit(1);
+                }
+            };
+        let mut parsed = parsed;
+        let telemetry_active = parsed
+            .request()
+            .telemetry
+            .as_ref()
+            .map(|config| telemetry::init(config, &mut logger))
+            .unwrap_or(false);
+        parsed.set_experimental_enabled(cli.experimental);
+        parsed.set_dry_run(cli.dry_run);
+        run_state_aware_main(parsed, cli.dry_run, telemetry_active, &mut logger)
+    }
 
-    // Load request — discriminates state-aware (top-level `phase` field) from
-    // one-shot. State-aware failures emit a JSON envelope on stdout; one-shot
-    // and pre-discrimination failures keep the existing diagnostic-on-stderr
-    // convention.
+    // Without --operation the config is always a one-shot request.
     let load_opts = LoadOptions {
         is_base64: false,
         cli_command: &cli.command,
@@ -1224,25 +1291,7 @@ fn main() {
     );
     let request = match parsed_request {
         Ok(MxcRequest::OneShot(req)) => req,
-        Ok(MxcRequest::StateAware(mut parsed)) => {
-            let telemetry_active = parsed
-                .request()
-                .telemetry
-                .as_ref()
-                .map(|config| telemetry::init(config, &mut logger))
-                .unwrap_or(false);
-            // Mirror what the one-shot path does at the post-dispatch stage
-            // below: copy the CLI `--experimental` flag into the parsed
-            // request so backends that gate on it (e.g. Windows Sandbox
-            // experimental features) see the same value regardless of which
-            // dispatch branch the request entered through. Without this, the
-            // state-aware path runs without the gate -- a phase-envelope request
-            // could provision/start/exec experimental backends with no
-            // `--experimental` on the CLI.
-            parsed.set_experimental_enabled(cli.experimental);
-            parsed.set_dry_run(cli.dry_run);
-            run_state_aware_main(parsed, cli.dry_run, telemetry_active, &mut logger)
-        }
+        Ok(MxcRequest::StateAware(_)) => unreachable!(),
         Err(error) => {
             log_request_parse_rejection(&mut logger, &error);
             match request_error_route(&error) {
@@ -1656,6 +1705,47 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cli_accepts_lifecycle_operation_and_sandbox_id() {
+        for (name, operation) in [
+            ("provision", CliOperation::Provision),
+            ("start", CliOperation::Start),
+            ("exec", CliOperation::Exec),
+            ("stop", CliOperation::Stop),
+            ("deprovision", CliOperation::Deprovision),
+        ] {
+            let cli = parse_cli(&["wxc-exec", "policy.json", "--operation", name]);
+            assert_eq!(
+                cli.operation.map(LifecycleOperation::from),
+                Some(operation.into())
+            );
+        }
+
+        let cli = parse_cli(&[
+            "wxc-exec",
+            "policy.json",
+            "--operation",
+            "start",
+            "--sandbox-id",
+            "wsb:abcd1234",
+        ]);
+        assert_eq!(cli.sandbox_id.as_deref(), Some("wsb:abcd1234"));
+
+        let error = match Cli::try_parse_from([
+            "wxc-exec",
+            "policy.json",
+            "--sandbox-id",
+            "wsb:abcd1234",
+        ]) {
+            Err(error) => error,
+            Ok(_) => panic!("--sandbox-id must require --operation"),
+        };
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+    }
+
     fn encoded_policy(json: &str) -> String {
         base64_encode(json.as_bytes())
     }
@@ -1948,27 +2038,7 @@ mod tests {
     }
 
     #[test]
-    fn request_preflight_duplicates_preserve_the_selected_output_route() {
-        let state_aware = r#"{
-            "version":"0.9.0-alpha",
-            "phase":"exec",
-            "sandboxId":"wsb:abcd1234",
-            "process":{"commandLine":"echo hello"},
-            "experimental":{},
-            "experimental":{}
-        }"#;
-        let mut logger = test_logger();
-        let error = wxc_common::config_parser::load_mxc_request_from_json(state_aware, &mut logger)
-            .unwrap_err();
-        let RequestErrorRoute::Envelope(error) = request_error_route(&error) else {
-            panic!("identified lifecycle requests must retain their JSON error envelope");
-        };
-        let envelope: serde_json::Value =
-            serde_json::from_str(&error_envelope_string(error)).unwrap();
-        assert_eq!(envelope["error"]["code"], "malformed_request");
-        assert!(error.message.contains("duplicate field `experimental`"));
-        assert!(logger.get_buffer().is_empty());
-
+    fn request_preflight_duplicates_use_the_one_shot_output_route_without_operation() {
         let one_shot = r#"{
             "version":"0.9.0-alpha",
             "process":{"commandLine":"echo hello"},
@@ -1998,12 +2068,33 @@ mod tests {
             cli_command: &cli.command,
         };
 
-        let result = load_mxc_request_with_options(&encoded_policy(policy_json), &mut logger, opts)
-            .map(|r| match r {
-                MxcRequest::OneShot(q) => q,
-                MxcRequest::StateAware(p) => p.into_request(),
+        let result = if let Some(operation) = cli.operation {
+            wxc_common::config_parser::load_state_aware_request_from_json_with_options(
+                policy_json,
+                &mut logger,
+                LifecycleOperation::from(operation).phase(),
+                cli.sandbox_id.as_deref(),
+                &cli.command,
+            )
+            .map(|request| request.into_request())
+            .map_err(|error| match error {
+                ParseError::StateAware(error) => ParseError::StateAware(error),
+                ParseError::Decode(error)
+                | ParseError::Version(error)
+                | ParseError::OneShot(error)
+                | ParseError::OneShotMalformed(error) => {
+                    ParseError::StateAware(MxcError::malformed_request(error.to_string()))
+                }
             })
-            .map_err(ResolveError::from_parse);
+        } else {
+            load_mxc_request_with_options(&encoded_policy(policy_json), &mut logger, opts).map(
+                |request| match request {
+                    MxcRequest::OneShot(request) => request,
+                    MxcRequest::StateAware(_) => unreachable!(),
+                },
+            )
+        }
+        .map_err(ResolveError::from_parse);
         (result, logger.get_buffer().to_string())
     }
 
@@ -2600,8 +2691,6 @@ mod tests {
         let argv = &["wxc-exec", "policy.json", "--", "echo", "hi"];
         let policy = r#"{
             "version": "0.9.0-alpha",
-            "phase": "exec",
-            "sandboxId": "iso:abcd1234",
             "process": {
                 "commandLine": "echo from policy"
             }
@@ -2620,11 +2709,19 @@ mod tests {
 
     #[test]
     fn state_aware_exec_cli_command_fills_absent_policy_command_line_without_override_log() {
-        let argv = &["wxc-exec", "policy.json", "--", "echo", "hi"];
+        let argv = &[
+            "wxc-exec",
+            "policy.json",
+            "--operation",
+            "exec",
+            "--sandbox-id",
+            "iso:abcd1234",
+            "--",
+            "echo",
+            "hi",
+        ];
         let policy = r#"{
-            "version": "0.9.0-alpha",
-            "phase": "exec",
-            "sandboxId": "iso:abcd1234"
+            "version": "0.9.0-alpha"
         }"#;
 
         let (resolved_request, log) = resolve_with_cli(argv, policy);
@@ -2640,11 +2737,19 @@ mod tests {
 
     #[test]
     fn state_aware_non_exec_cli_command_error_routes_to_envelope() {
-        let argv = &["wxc-exec", "policy.json", "--", "echo", "hi"];
+        let argv = &[
+            "wxc-exec",
+            "policy.json",
+            "--operation",
+            "start",
+            "--sandbox-id",
+            "iso:abcd1234",
+            "--",
+            "echo",
+            "hi",
+        ];
         let policy = r#"{
-            "version": "0.9.0-alpha",
-            "phase": "start",
-            "sandboxId": "iso:abcd1234"
+            "version": "0.9.0-alpha"
         }"#;
 
         let (result, _log) = resolve_with_cli(argv, policy);
@@ -2656,7 +2761,7 @@ mod tests {
         );
         assert!(err
             .message
-            .contains("only supported for state-aware exec requests"));
+            .contains("CLI command override is accepted only by the exec operation"));
     }
 
     #[test]
@@ -2664,14 +2769,16 @@ mod tests {
         let argv = &[
             "wxc-exec",
             "policy.json",
+            "--operation",
+            "exec",
+            "--sandbox-id",
+            "iso:abcd1234",
             "--",
             "app.exe",
             "hidden\0payload",
         ];
         let policy = r#"{
-            "version": "0.9.0-alpha",
-            "phase": "exec",
-            "sandboxId": "iso:abcd1234"
+            "version": "0.9.0-alpha"
         }"#;
 
         let (result, _log) = resolve_with_cli(argv, policy);

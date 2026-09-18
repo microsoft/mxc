@@ -7,6 +7,7 @@
 
 use std::io::{Read, Write};
 
+pub use crate::sandbox_operations::{deprovision, exec, exec_attached, provision, start, stop};
 pub use wxc_common::models::{
     CaptureDenialsErrorOutput, CaptureDenialsOutput, SandboxOutputMetadata,
 };
@@ -38,7 +39,7 @@ pub enum WaitOutcome {
     ///
     /// That state-aware route is reachable from this crate once the caller
     /// passes the `experimental` opt-in to
-    /// [`exec_sandbox`](crate::exec_sandbox) and the backend is compiled in via
+    /// [`exec`] and the backend is compiled in via
     /// this crate's `isolation_session` feature, which forwards to the engine.
     /// Both refusals are
     /// [`ErrorCode::BackendUnavailable`](crate::ErrorCode::BackendUnavailable).
@@ -64,7 +65,7 @@ pub struct Output {
 }
 
 /// A live sandboxed process, returned by [`spawn_sandbox`](crate::spawn_sandbox)
-/// and [`exec_sandbox`](crate::exec_sandbox).
+/// and [`exec`].
 ///
 /// Stream the child's stdio with the `take_*` accessors, wait for it, or kill
 /// it. No pty is allocated — the streams are ordinary pipes. Any stdout/stderr

@@ -111,7 +111,6 @@ There is no idle watchdog. A started state-aware sandbox remains active until
 ```json
 {
   "version": "0.9.0-alpha",
-  "phase": "provision",
   "containment": "windows_sandbox",
   "filesystem": {
     "readwritePaths": ["C:\\workspace"],

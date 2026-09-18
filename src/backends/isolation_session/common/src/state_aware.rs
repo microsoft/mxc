@@ -457,7 +457,10 @@ mod tests {
         // Field-by-field construction is deliberate: adding a per-phase field
         // to the wire struct breaks this test's compilation, forcing a
         // decision about whether the backend honors it.
-        let wire = wxc_common::wire::IsolationSession { provision: None };
+        let wire = wxc_common::wire::IsolationSession {
+            app_id: None,
+            provision: None,
+        };
         let value = serde_json::to_value(&wire).unwrap();
         let mut keys: Vec<&str> = value
             .as_object()

@@ -19,6 +19,7 @@ MXC (Microsoft eXecution Container) is a cross-platform sandboxed code execution
 - Keep build-time staging in `mxc_build_common` or `nanvix_build_common`, not runtime crates.
 - Use `#[cfg(target_os = "...")]` and existing Cargo feature gates for platform-specific code.
 - Preserve the distinction between run-to-completion, streaming, and state-aware lifecycle APIs.
+- State-aware operations and sandbox IDs are supplied out of band by the CLI or SDK; keep lifecycle request JSON operation-neutral.
 - Unsupported policy must fail closed. Do not accept a field that the selected backend cannot enforce.
 
 See:
@@ -57,7 +58,7 @@ cargo test -p wxc_common -- config_parser
 npm test
 npm run test:integration
 
-# From sdk/dotnet/ (requires .NET SDK 10+)
+# From sdk/dotnet/ (requires .NET SDK 10+)
 dotnet test --solution Microsoft.Mxc.Sdk.slnx
 ```
 

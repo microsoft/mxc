@@ -84,6 +84,16 @@ pub struct OneShotWslc {
     pub port_mappings: OptionalField<Vec<PortMapping>>,
 }
 
+/// IsolationSession settings accepted by lifecycle provisioning.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IsolationSession {
+    /// Optional application identifier carried by the sandbox identity.
+    #[serde(default)]
+    pub app_id: OptionalField<String>,
+}
+
 /// Experimental settings.
 #[derive(Debug, serde::Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
@@ -98,4 +108,7 @@ pub struct OneShotExperimental {
     /// Optional one-shot WSLC backend settings.
     #[serde(default)]
     pub wslc: OptionalField<OneShotWslc>,
+    /// Optional IsolationSession lifecycle provision settings.
+    #[serde(rename = "isolation_session", default)]
+    pub isolation_session: OptionalField<IsolationSession>,
 }

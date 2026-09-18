@@ -1,9 +1,0 @@
-{
-    "version": "0.9.0-alpha",
-    "phase": "exec",
-    "sandboxId": "{{SANDBOX_ID}}",
-    "process": {
-        "commandLine": "echo %MY_SA_PERSIST%",
-        "timeout": 30000
-    }
-}

@@ -25,11 +25,44 @@ use wxc_common::state_aware_backend::ExecOutcome;
 use wxc_common::state_aware_dispatch::{
     resolve_backend, run_state_aware as run_state_aware_fallback, DispatchOutcome,
 };
-use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
+use wxc_common::state_aware_request::{ParsedStateAwareRequest, Phase};
 use wxc_common::telemetry;
 
 use crate::error::Error;
 use crate::{wrap_state_aware_telemetry_process_with_kind, TelemetryRegistration};
+
+/// A sandbox lifecycle operation supplied out-of-band by an SDK or executor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifecycleOperation {
+    Provision,
+    Start,
+    Exec,
+    Stop,
+    Deprovision,
+}
+
+impl LifecycleOperation {
+    /// Stable command-line and SDK spelling for this operation.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Provision => "provision",
+            Self::Start => "start",
+            Self::Exec => "exec",
+            Self::Stop => "stop",
+            Self::Deprovision => "deprovision",
+        }
+    }
+    /// Internal phase representation used by common lifecycle dispatch.
+    pub const fn phase(self) -> Phase {
+        match self {
+            Self::Provision => Phase::Provision,
+            Self::Start => Phase::Start,
+            Self::Exec => Phase::Exec,
+            Self::Stop => Phase::Stop,
+            Self::Deprovision => Phase::Deprovision,
+        }
+    }
+}
 
 #[cfg(not(all(target_os = "windows", feature = "wslc")))]
 fn wslc_unavailable() -> MxcError {
@@ -213,8 +246,7 @@ pub fn exec_state_aware(
     }
 }
 
-/// Parse a state-aware request JSON string into a [`ParsedStateAwareRequest`],
-/// rejecting a one-shot config (no `phase`).
+/// Parse a state-aware request JSON string into a [`ParsedStateAwareRequest`].
 ///
 /// `experimental` is the in-process equivalent of the executor's
 /// `--experimental` flag, and is applied **here, after parsing**, because
@@ -222,19 +254,21 @@ pub fn exec_state_aware(
 /// state-aware request.
 fn parse_state_aware(
     request_json: &str,
+    operation: LifecycleOperation,
+    sandbox_id: Option<&str>,
     experimental: bool,
     logger: &mut Logger,
 ) -> Result<ParsedStateAwareRequest, Error> {
-    match wxc_common::config_parser::load_mxc_request_from_json(request_json, logger) {
-        Ok(MxcRequest::StateAware(mut parsed)) => {
-            parsed.set_experimental_enabled(experimental);
-            Ok(parsed)
-        }
-        Ok(MxcRequest::OneShot(_)) => Err(Error::from(MxcError::malformed_request(
-            "expected a state-aware lifecycle request (with a 'phase' field), got a one-shot config",
-        ))),
-        Err(e) => Err(Error::from(parse_error_to_mxc(e))),
-    }
+    let mut parsed = wxc_common::config_parser::load_state_aware_request_from_json_with_options(
+        request_json,
+        logger,
+        operation.phase(),
+        sandbox_id,
+        &[],
+    )
+    .map_err(parse_error_to_mxc)?;
+    parsed.set_experimental_enabled(experimental);
+    Ok(parsed)
 }
 
 /// Map a [`config_parser::ParseError`](wxc_common::config_parser::ParseError) to
@@ -302,9 +336,10 @@ fn with_attached_exec_claim<T>(work: impl FnOnce() -> T) -> Option<T> {
 /// [`ExecOutcome::Exited`], because the relay rejects anything else.
 pub fn exec_state_aware_attached(
     request_json: &str,
+    sandbox_id: &str,
     experimental: bool,
 ) -> Result<ExecOutcome, Error> {
-    exec_state_aware_attached_with(request_json, experimental, || {
+    exec_state_aware_attached_with(request_json, sandbox_id, experimental, || {
         host_stdio_is_attachable(
             std::io::stdout().is_terminal(),
             std::io::stdin().is_terminal(),
@@ -341,18 +376,18 @@ fn exec_attached_gate(host_is_interactive: impl FnOnce() -> bool) -> Result<(), 
 
 fn exec_state_aware_attached_with(
     request_json: &str,
+    sandbox_id: &str,
     experimental: bool,
     host_is_interactive: impl FnOnce() -> bool,
 ) -> Result<ExecOutcome, Error> {
     let mut logger = Logger::new(Mode::Buffer);
-    let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
-
-    if !matches!(parsed.phase(), Phase::Exec) {
-        return Err(Error::from(MxcError::malformed_request(format!(
-            "an attached exec requires the exec phase, got {}",
-            parsed.phase()
-        ))));
-    }
+    let parsed = parse_state_aware(
+        request_json,
+        LifecycleOperation::Exec,
+        Some(sandbox_id),
+        experimental,
+        &mut logger,
+    )?;
 
     exec_attached_gate(host_is_interactive)?;
     let phase = parsed.phase();
@@ -420,13 +455,21 @@ fn exec_state_aware_attached_with(
 /// `experimental` opts in to the experimental backends (WindowsSandbox,
 /// IsolationSession, WSLc); without it they are refused with
 /// `backend_unavailable` before any work is done.
-pub fn run_state_aware_json(
+pub fn run_state_aware_operation_json(
     request_json: &str,
+    operation: LifecycleOperation,
+    sandbox_id: Option<&str>,
     dry_run: bool,
     experimental: bool,
 ) -> Result<String, Error> {
     let mut logger = Logger::new(Mode::Buffer);
-    let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
+    let parsed = parse_state_aware(
+        request_json,
+        operation,
+        sandbox_id,
+        experimental,
+        &mut logger,
+    )?;
 
     if matches!(parsed.phase(), Phase::Exec) && !dry_run {
         return Err(Error::from(MxcError::malformed_request(
@@ -513,18 +556,20 @@ pub fn run_state_aware_json(
 ///
 /// `experimental` opts in to the experimental backends, as for
 /// [`run_state_aware_json`].
-pub fn exec_state_aware_json(
+pub fn exec_state_aware_operation_json(
     request_json: &str,
+    sandbox_id: &str,
     experimental: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
-    let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
-    if !matches!(parsed.phase(), Phase::Exec) {
-        return Err(Error::from(MxcError::malformed_request(format!(
-            "streaming exec requires the exec phase, got {}",
-            parsed.phase()
-        ))));
-    }
+    let parsed = parse_state_aware(
+        request_json,
+        LifecycleOperation::Exec,
+        Some(sandbox_id),
+        experimental,
+        &mut logger,
+    )?;
+
     let phase = parsed.phase();
     let sandbox_id = parsed.sandbox_id().map(str::to_owned);
     let requested_sandbox_kind = parsed
@@ -582,9 +627,122 @@ pub fn exec_state_aware_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use wxc_common::mxc_error::MxcErrorCode;
     use wxc_common::state_aware_request::Phase;
     use wxc_common::telemetry::correlation_state::test_support::StoreDirGuard;
+
+    fn legacy_test_request(json: &str) -> (String, LifecycleOperation, Option<String>) {
+        let mut value: Value = serde_json::from_str(json).unwrap();
+        let object = value.as_object_mut().unwrap();
+        let operation = match object
+            .remove("phase")
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .as_deref()
+        {
+            Some("provision") => LifecycleOperation::Provision,
+            Some("start") => LifecycleOperation::Start,
+            Some("exec") => LifecycleOperation::Exec,
+            Some("stop") => LifecycleOperation::Stop,
+            Some("deprovision") => LifecycleOperation::Deprovision,
+            _ => LifecycleOperation::Provision,
+        };
+        let sandbox_id = object
+            .remove("sandboxId")
+            .and_then(|value| value.as_str().map(str::to_owned));
+        if operation == LifecycleOperation::Provision {
+            if let Some(experimental) = object
+                .get_mut("experimental")
+                .and_then(Value::as_object_mut)
+            {
+                for backend in ["isolation_session", "wslc"] {
+                    if let Some(config) = experimental.get_mut(backend) {
+                        if let Some(provision) = config
+                            .as_object_mut()
+                            .and_then(|config| config.remove("provision"))
+                        {
+                            *config = provision;
+                        }
+                    }
+                }
+            }
+        }
+        (
+            serde_json::to_string(&value).unwrap(),
+            operation,
+            sandbox_id,
+        )
+    }
+
+    fn parse_state_aware(
+        json: &str,
+        experimental: bool,
+        logger: &mut Logger,
+    ) -> Result<ParsedStateAwareRequest, Error> {
+        let (json, operation, sandbox_id) = legacy_test_request(json);
+        super::parse_state_aware(
+            &json,
+            operation,
+            sandbox_id.as_deref(),
+            experimental,
+            logger,
+        )
+    }
+
+    fn run_state_aware_json(
+        json: &str,
+        dry_run: bool,
+        experimental: bool,
+    ) -> Result<String, Error> {
+        if serde_json::from_str::<Value>(json).is_err() {
+            return super::run_state_aware_operation_json(
+                json,
+                LifecycleOperation::Provision,
+                None,
+                dry_run,
+                experimental,
+            );
+        }
+        let (json, operation, sandbox_id) = legacy_test_request(json);
+        super::run_state_aware_operation_json(
+            &json,
+            operation,
+            sandbox_id.as_deref(),
+            dry_run,
+            experimental,
+        )
+    }
+
+    fn exec_state_aware_attached_with(
+        json: &str,
+        experimental: bool,
+        host_is_interactive: impl FnOnce() -> bool,
+    ) -> Result<ExecOutcome, Error> {
+        let (json, _, sandbox_id) = legacy_test_request(json);
+        super::exec_state_aware_attached_with(
+            &json,
+            sandbox_id.as_deref().unwrap_or("wsb:test"),
+            experimental,
+            host_is_interactive,
+        )
+    }
+
+    #[test]
+    fn lifecycle_fields_are_rejected_in_config_json() {
+        for field in [r#""phase":"provision""#, r#""sandboxId":"wslc:abcd1234""#] {
+            let json = format!(r#"{{"version":"0.9.0-alpha",{field}}}"#);
+            let error = super::parse_state_aware(
+                &json,
+                LifecycleOperation::Provision,
+                None,
+                true,
+                &mut Logger::new(Mode::Buffer),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, crate::ErrorCode::MalformedRequest);
+            assert!(error.message.contains("unknown field"), "{}", error.message);
+        }
+    }
 
     #[test]
     fn version_failures_keep_the_state_aware_wire_error_code() {
@@ -786,22 +944,6 @@ mod tests {
         assert!(
             err.message.contains("terminals"),
             "the refusal must name the terminal requirement, got: {}",
-            err.message
-        );
-    }
-
-    #[test]
-    fn attached_exec_checks_the_phase_before_the_terminal() {
-        // A non-exec phase must be reported as such even from a non-terminal
-        // host, so the caller learns the actionable problem first.
-        let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
-            "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#;
-
-        let err = exec_state_aware_attached_with(provision, true, || false)
-            .expect_err("a non-exec phase must be refused");
-        assert!(
-            err.message.contains("exec phase"),
-            "the phase check must precede the terminal check, got: {}",
             err.message
         );
     }
@@ -1099,7 +1241,7 @@ mod tests {
         // Malformed JSON — the JSON decoder rejects it, `parse_state_aware`
         // wraps it as `MalformedRequest`, and the classifier maps that to
         // `ConfigError`. This is the same path a user's typo takes.
-        let error = super::run_state_aware_json("{ not json", false, false).unwrap_err();
+        let error = run_state_aware_json("{ not json", false, false).unwrap_err();
         assert_eq!(error.code, ErrorCode::MalformedRequest);
         assert_eq!(
             telemetry::classify_mxc_error(&MxcError::malformed_request(error.message)),
@@ -1108,7 +1250,7 @@ mod tests {
 
         // Provision without containment — the dispatcher rejects it as
         // `MalformedRequest` before ever reaching a backend.
-        let error = super::run_state_aware_json(
+        let error = run_state_aware_json(
             r#"{"version":"0.9.0-alpha","phase":"provision"}"#,
             false,
             false,
@@ -1123,7 +1265,7 @@ mod tests {
         // Provision of an experimental backend without --experimental —
         // `BackendUnavailable` → `InitError`; the shared classifier keeps
         // streaming and state-aware attribution in lockstep.
-        let error = super::run_state_aware_json(
+        let error = run_state_aware_json(
             r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
             false,
             false,
@@ -1152,7 +1294,7 @@ mod tests {
     fn engine_state_aware_provider_released_between_calls() {
         use crate::error::ErrorCode;
         for _ in 0..3 {
-            let error = super::run_state_aware_json(
+            let error = run_state_aware_json(
                 r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
                 false,
                 false,

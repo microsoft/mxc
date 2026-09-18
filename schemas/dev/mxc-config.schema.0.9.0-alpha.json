@@ -3,147 +3,19 @@
   "$id": "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.9.0-alpha.json",
   "title": "MXC Configuration 0.9.0-alpha",
   "description": "Exact mutable MXC development configuration contract.",
-  "$comment": "GENERATED FILE - DO NOT EDIT. Regenerate with: cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0.9.0-alpha --out schemas/dev/mxc-config.schema.0.9.0-alpha.json. This exact contract is authoritative for declared 0.9.0-alpha requests. Request roots are selected by phase and provision containment.",
+  "$comment": "GENERATED FILE - DO NOT EDIT. Regenerate with: cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0.9.0-alpha --out schemas/dev/mxc-config.schema.0.9.0-alpha.json. Lifecycle operation and sandbox identity are supplied out of band.",
   "allOf": [
     {
-      "else": {
-        "allOf": [
-          {
-            "$ref": "#/definitions/OneShotRequest"
-          },
-          {
-            "else": true,
-            "if": {
-              "properties": {
-                "containment": {
-                  "const": "isolation_session"
-                }
-              },
-              "required": [
-                "containment"
-              ]
-            },
-            "then": {
-              "required": [
-                "network"
-              ]
-            }
-          }
-        ]
-      },
-      "if": {
-        "required": [
-          "phase"
-        ]
-      },
-      "then": {
-        "else": {
-          "else": {
-            "else": {
-              "else": {
-                "else": false,
-                "if": {
-                  "properties": {
-                    "phase": {
-                      "const": "deprovision"
-                    }
-                  },
-                  "required": [
-                    "phase"
-                  ]
-                },
-                "then": {
-                  "$ref": "#/definitions/DeprovisionRequest"
-                }
-              },
-              "if": {
-                "properties": {
-                  "phase": {
-                    "const": "stop"
-                  }
-                },
-                "required": [
-                  "phase"
-                ]
-              },
-              "then": {
-                "$ref": "#/definitions/StopRequest"
-              }
-            },
-            "if": {
-              "properties": {
-                "phase": {
-                  "const": "exec"
-                }
-              },
-              "required": [
-                "phase"
-              ]
-            },
-            "then": {
-              "$ref": "#/definitions/ExecRequest"
-            }
-          },
-          "if": {
-            "properties": {
-              "phase": {
-                "const": "start"
-              }
-            },
-            "required": [
-              "phase"
-            ]
-          },
-          "then": {
-            "$ref": "#/definitions/StartRequest"
-          }
+      "allOf": [
+        {
+          "$ref": "#/definitions/Request"
         },
-        "if": {
-          "properties": {
-            "phase": {
-              "const": "provision"
-            }
-          },
-          "required": [
-            "phase"
-          ]
-        },
-        "then": {
-          "else": {
-            "else": {
-              "else": false,
-              "if": {
-                "properties": {
-                  "containment": {
-                    "const": "wslc"
-                  }
-                },
-                "required": [
-                  "containment"
-                ]
-              },
-              "then": {
-                "$ref": "#/definitions/WslcProvisionRequest"
-              }
-            },
-            "if": {
-              "properties": {
-                "containment": {
-                  "const": "isolation_session"
-                }
-              },
-              "required": [
-                "containment"
-              ]
-            },
-            "then": {
-              "$ref": "#/definitions/IsolationSessionProvisionRequest"
-            }
-          },
+        {
+          "else": true,
           "if": {
             "properties": {
               "containment": {
-                "const": "windows_sandbox"
+                "const": "isolation_session"
               }
             },
             "required": [
@@ -151,10 +23,12 @@
             ]
           },
           "then": {
-            "$ref": "#/definitions/WindowsSandboxProvisionRequest"
+            "required": [
+              "network"
+            ]
           }
         }
-      }
+      ]
     }
   ],
   "definitions": {
@@ -195,119 +69,6 @@
         }
       ]
     },
-    "DeprovisionExperimental": {
-      "additionalProperties": false,
-      "description": "Experimental settings accepted by the `deprovision` phase.",
-      "type": "object"
-    },
-    "DeprovisionPhase": {
-      "enum": [
-        "deprovision"
-      ],
-      "type": "string"
-    },
-    "DeprovisionRequest": {
-      "additionalProperties": false,
-      "description": "A complete state-aware `deprovision` request.",
-      "properties": {
-        "$schema": {
-          "description": "Optional JSON Schema reference for editor validation.",
-          "type": "string"
-        },
-        "_comment": {
-          "description": "Optional human-readable annotation ignored by the runtime."
-        },
-        "experimental": {
-          "$ref": "#/definitions/DeprovisionExperimental",
-          "description": "Optional closed post-provision experimental settings."
-        },
-        "phase": {
-          "$ref": "#/definitions/DeprovisionPhase",
-          "description": "Exact `deprovision` phase marker."
-        },
-        "sandboxId": {
-          "description": "Identifier of the sandbox to deprovision.",
-          "type": "string"
-        },
-        "telemetry": {
-          "$ref": "#/definitions/Telemetry",
-          "description": "Optional telemetry configuration."
-        },
-        "version": {
-          "$ref": "#/definitions/Version",
-          "description": "Exact development contract version."
-        }
-      },
-      "required": [
-        "phase",
-        "sandboxId",
-        "version"
-      ],
-      "type": "object"
-    },
-    "ExecExperimental": {
-      "additionalProperties": false,
-      "description": "Experimental settings accepted by the `exec` phase.",
-      "type": "object"
-    },
-    "ExecPhase": {
-      "enum": [
-        "exec"
-      ],
-      "type": "string"
-    },
-    "ExecRequest": {
-      "additionalProperties": false,
-      "description": "A complete state-aware `exec` request.",
-      "properties": {
-        "$schema": {
-          "description": "Optional JSON Schema reference for editor validation.",
-          "type": "string"
-        },
-        "_comment": {
-          "description": "Optional human-readable annotation ignored by the runtime."
-        },
-        "experimental": {
-          "$ref": "#/definitions/ExecExperimental",
-          "description": "Optional closed exec experimental settings."
-        },
-        "network": {
-          "$ref": "#/definitions/Network",
-          "description": "Optional per-execution network settings."
-        },
-        "phase": {
-          "$ref": "#/definitions/ExecPhase",
-          "description": "Exact `exec` phase marker."
-        },
-        "process": {
-          "$ref": "#/definitions/Process",
-          "description": "Process to execute in the sandbox."
-        },
-        "runtimeConfig": {
-          "$ref": "#/definitions/RuntimeConfig",
-          "description": "Optional per-execution runtime values, including the cooperative proxy URL."
-        },
-        "sandboxId": {
-          "description": "Identifier of the sandbox to execute in.",
-          "type": "string"
-        },
-        "telemetry": {
-          "$ref": "#/definitions/Telemetry",
-          "description": "Optional telemetry configuration."
-        },
-        "version": {
-          "$ref": "#/definitions/Version",
-          "description": "Exact development contract version."
-        }
-      },
-      "required": [
-        "phase",
-        "process",
-        "sandboxId",
-        "version"
-      ],
-      "type": "object"
-    },
     "Fallback": {
       "additionalProperties": false,
       "description": "Operator consent for containment fallback behavior.",
@@ -347,134 +108,15 @@
       },
       "type": "object"
     },
-    "IsolationSessionContainment": {
-      "enum": [
-        "isolation_session"
-      ],
-      "type": "string"
-    },
-    "IsolationSessionNetwork": {
+    "IsolationSession": {
       "additionalProperties": false,
-      "description": "The canonical unrestricted-network posture.",
-      "properties": {
-        "egress": {
-          "$ref": "#/definitions/IsolationSessionNetworkEgress",
-          "description": "Required unrestricted outbound posture."
-        },
-        "ingress": {
-          "$ref": "#/definitions/IsolationSessionNetworkIngress",
-          "description": "Required unrestricted inbound and host-loopback posture."
-        }
-      },
-      "required": [
-        "egress",
-        "ingress"
-      ],
-      "type": "object"
-    },
-    "IsolationSessionNetworkAllow": {
-      "enum": [
-        "allow"
-      ],
-      "type": "string"
-    },
-    "IsolationSessionNetworkEgress": {
-      "additionalProperties": false,
-      "description": "Unrestricted outbound posture.",
-      "properties": {
-        "default": {
-          "$ref": "#/definitions/IsolationSessionNetworkAllow",
-          "description": "Allow outbound traffic by default."
-        }
-      },
-      "required": [
-        "default"
-      ],
-      "type": "object"
-    },
-    "IsolationSessionNetworkIngress": {
-      "additionalProperties": false,
-      "description": "Unrestricted inbound and host-loopback posture.",
-      "properties": {
-        "default": {
-          "$ref": "#/definitions/IsolationSessionNetworkAllow",
-          "description": "Allow private-network inbound traffic by default."
-        },
-        "hostLoopback": {
-          "$ref": "#/definitions/IsolationSessionNetworkAllow",
-          "description": "Allow bidirectional host-loopback connectivity."
-        }
-      },
-      "required": [
-        "default",
-        "hostLoopback"
-      ],
-      "type": "object"
-    },
-    "IsolationSessionProvision": {
-      "additionalProperties": false,
-      "description": "IsolationSession settings accepted during provisioning.",
+      "description": "IsolationSession settings accepted by lifecycle provisioning.",
       "properties": {
         "appId": {
           "description": "Optional application identifier carried by the sandbox identity.",
           "type": "string"
         }
       },
-      "type": "object"
-    },
-    "IsolationSessionProvisionExperimental": {
-      "additionalProperties": false,
-      "description": "Experimental settings accepted by an IsolationSession provision request.",
-      "properties": {
-        "isolation_session": {
-          "$ref": "#/definitions/StateAwareIsolationSession",
-          "description": "Optional IsolationSession backend settings."
-        }
-      },
-      "type": "object"
-    },
-    "IsolationSessionProvisionRequest": {
-      "additionalProperties": false,
-      "description": "A complete state-aware `provision` request for IsolationSession.\n\nThe backend cannot restrict networking, so `network` is required and must describe its actual unrestricted posture through the standard directional all-allow shape.",
-      "properties": {
-        "$schema": {
-          "description": "Optional JSON Schema reference for editor validation.",
-          "type": "string"
-        },
-        "_comment": {
-          "description": "Optional human-readable annotation ignored by the runtime."
-        },
-        "containment": {
-          "$ref": "#/definitions/IsolationSessionContainment",
-          "description": "Exact `isolation_session` containment marker."
-        },
-        "experimental": {
-          "$ref": "#/definitions/IsolationSessionProvisionExperimental",
-          "description": "Optional closed experimental settings containing only `appId`."
-        },
-        "network": {
-          "$ref": "#/definitions/IsolationSessionNetwork",
-          "description": "Required unrestricted network posture."
-        },
-        "phase": {
-          "$ref": "#/definitions/ProvisionPhase",
-          "description": "Exact `provision` phase marker."
-        },
-        "telemetry": {
-          "$ref": "#/definitions/Telemetry",
-          "description": "Optional telemetry configuration."
-        },
-        "version": {
-          "$ref": "#/definitions/Version",
-          "description": "Exact development contract version."
-        }
-      },
-      "required": [
-        "containment",
-        "network",
-        "phase",
-        "version"
-      ],
       "type": "object"
     },
     "Lifecycle": {
@@ -786,6 +428,10 @@
       "additionalProperties": false,
       "description": "Experimental settings.",
       "properties": {
+        "isolation_session": {
+          "$ref": "#/definitions/IsolationSession",
+          "description": "Optional IsolationSession lifecycle provision settings."
+        },
         "test": {
           "$ref": "#/definitions/TestFeature",
           "description": "Optional placeholder test feature."
@@ -799,110 +445,6 @@
           "description": "Optional one-shot WSLC backend settings."
         }
       },
-      "type": "object"
-    },
-    "OneShotRequest": {
-      "additionalProperties": false,
-      "allOf": [
-        {
-          "not": {
-            "required": [
-              "processContainer",
-              "appContainer"
-            ]
-          }
-        },
-        {
-          "not": {
-            "required": [
-              "seatbelt",
-              "macos_sandbox"
-            ]
-          }
-        }
-      ],
-      "description": "A complete one-shot `0.9.0-alpha` configuration request.",
-      "properties": {
-        "$schema": {
-          "description": "Optional JSON Schema reference for editor validation.",
-          "type": "string"
-        },
-        "_comment": {
-          "description": "Optional human-readable annotation ignored by the runtime."
-        },
-        "appContainer": {
-          "$ref": "#/definitions/ProcessContainer",
-          "description": "Optional ProcessContainer settings. The legacy `appContainer` spelling is accepted as an alias."
-        },
-        "containerId": {
-          "description": "Optional externally assigned container identifier.",
-          "type": "string"
-        },
-        "containment": {
-          "$ref": "#/definitions/OneShotContainment",
-          "description": "Optional containment selection."
-        },
-        "experimental": {
-          "$ref": "#/definitions/OneShotExperimental",
-          "description": "Optional experimental settings."
-        },
-        "fallback": {
-          "$ref": "#/definitions/Fallback",
-          "description": "Optional fallback consent."
-        },
-        "filesystem": {
-          "$ref": "#/definitions/Filesystem",
-          "description": "Optional filesystem policy."
-        },
-        "lifecycle": {
-          "$ref": "#/definitions/Lifecycle",
-          "description": "Optional lifecycle settings."
-        },
-        "lxc": {
-          "$ref": "#/definitions/Lxc",
-          "description": "Optional LXC distribution settings."
-        },
-        "macos_sandbox": {
-          "$ref": "#/definitions/Seatbelt",
-          "description": "Optional macOS Seatbelt configuration."
-        },
-        "network": {
-          "$ref": "#/definitions/Network",
-          "description": "Optional network policy."
-        },
-        "process": {
-          "$ref": "#/definitions/Process",
-          "description": "The process to execute."
-        },
-        "processContainer": {
-          "$ref": "#/definitions/ProcessContainer",
-          "description": "Optional ProcessContainer settings. The legacy `appContainer` spelling is accepted as an alias."
-        },
-        "runtimeConfig": {
-          "$ref": "#/definitions/RuntimeConfig",
-          "description": "Optional runtime configuration settings."
-        },
-        "seatbelt": {
-          "$ref": "#/definitions/Seatbelt",
-          "description": "Optional macOS Seatbelt configuration."
-        },
-        "telemetry": {
-          "$ref": "#/definitions/Telemetry",
-          "description": "Optional telemetry configuration."
-        },
-        "ui": {
-          "$ref": "#/definitions/Ui",
-          "description": "Optional cross-platform user-interface policy."
-        },
-        "version": {
-          "$ref": "#/definitions/Version",
-          "description": "The exact contract version marker."
-        }
-      },
-      "required": [
-        "process",
-        "version"
-      ],
       "type": "object"
     },
     "OneShotWindowsSandbox": {
@@ -1158,11 +700,108 @@
         }
       ]
     },
-    "ProvisionPhase": {
-      "enum": [
-        "provision"
+    "Request": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "processContainer",
+              "appContainer"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "seatbelt",
+              "macos_sandbox"
+            ]
+          }
+        }
       ],
-      "type": "string"
+      "description": "A complete `0.9.0-alpha` configuration request.\n\nThe process is optional at the schema layer because lifecycle provision, start, stop, and deprovision operations do not execute a command. One-shot and exec entry points require it during operation-specific validation.",
+      "properties": {
+        "$schema": {
+          "description": "Optional JSON Schema reference for editor validation.",
+          "type": "string"
+        },
+        "_comment": {
+          "description": "Optional human-readable annotation ignored by the runtime."
+        },
+        "appContainer": {
+          "$ref": "#/definitions/ProcessContainer",
+          "description": "Optional ProcessContainer settings. The legacy `appContainer` spelling is accepted as an alias."
+        },
+        "containerId": {
+          "description": "Optional externally assigned container identifier.",
+          "type": "string"
+        },
+        "containment": {
+          "$ref": "#/definitions/OneShotContainment",
+          "description": "Optional containment selection."
+        },
+        "experimental": {
+          "$ref": "#/definitions/OneShotExperimental",
+          "description": "Optional experimental settings."
+        },
+        "fallback": {
+          "$ref": "#/definitions/Fallback",
+          "description": "Optional fallback consent."
+        },
+        "filesystem": {
+          "$ref": "#/definitions/Filesystem",
+          "description": "Optional filesystem policy."
+        },
+        "lifecycle": {
+          "$ref": "#/definitions/Lifecycle",
+          "description": "Optional lifecycle settings."
+        },
+        "lxc": {
+          "$ref": "#/definitions/Lxc",
+          "description": "Optional LXC distribution settings."
+        },
+        "macos_sandbox": {
+          "$ref": "#/definitions/Seatbelt",
+          "description": "Optional macOS Seatbelt configuration."
+        },
+        "network": {
+          "$ref": "#/definitions/Network",
+          "description": "Optional network policy."
+        },
+        "process": {
+          "$ref": "#/definitions/Process",
+          "description": "Optional process to execute."
+        },
+        "processContainer": {
+          "$ref": "#/definitions/ProcessContainer",
+          "description": "Optional ProcessContainer settings. The legacy `appContainer` spelling is accepted as an alias."
+        },
+        "runtimeConfig": {
+          "$ref": "#/definitions/RuntimeConfig",
+          "description": "Optional runtime configuration settings."
+        },
+        "seatbelt": {
+          "$ref": "#/definitions/Seatbelt",
+          "description": "Optional macOS Seatbelt configuration."
+        },
+        "telemetry": {
+          "$ref": "#/definitions/Telemetry",
+          "description": "Optional telemetry configuration."
+        },
+        "ui": {
+          "$ref": "#/definitions/Ui",
+          "description": "Optional cross-platform user-interface policy."
+        },
+        "version": {
+          "$ref": "#/definitions/Version",
+          "description": "The exact contract version marker."
+        }
+      },
+      "required": [
+        "version"
+      ],
+      "type": "object"
     },
     "RuntimeConfig": {
       "additionalProperties": false,
@@ -1203,128 +842,6 @@
           "type": "string"
         }
       },
-      "type": "object"
-    },
-    "StartExperimental": {
-      "additionalProperties": false,
-      "description": "Experimental settings accepted by the `start` phase.",
-      "type": "object"
-    },
-    "StartPhase": {
-      "enum": [
-        "start"
-      ],
-      "type": "string"
-    },
-    "StartRequest": {
-      "additionalProperties": false,
-      "description": "A complete state-aware `start` request.",
-      "properties": {
-        "$schema": {
-          "description": "Optional JSON Schema reference for editor validation.",
-          "type": "string"
-        },
-        "_comment": {
-          "description": "Optional human-readable annotation ignored by the runtime."
-        },
-        "experimental": {
-          "$ref": "#/definitions/StartExperimental",
-          "description": "Optional closed post-provision experimental settings."
-        },
-        "phase": {
-          "$ref": "#/definitions/StartPhase",
-          "description": "Exact `start` phase marker."
-        },
-        "sandboxId": {
-          "description": "Identifier returned by the provision phase.",
-          "type": "string"
-        },
-        "telemetry": {
-          "$ref": "#/definitions/Telemetry",
-          "description": "Optional telemetry configuration."
-        },
-        "version": {
-          "$ref": "#/definitions/Version",
-          "description": "Exact development contract version."
-        }
-      },
-      "required": [
-        "phase",
-        "sandboxId",
-        "version"
-      ],
-      "type": "object"
-    },
-    "StateAwareIsolationSession": {
-      "additionalProperties": false,
-      "description": "State-aware IsolationSession experimental settings.",
-      "properties": {
-        "provision": {
-          "$ref": "#/definitions/IsolationSessionProvision",
-          "description": "Optional provision-phase settings."
-        }
-      },
-      "type": "object"
-    },
-    "StateAwareWslc": {
-      "additionalProperties": false,
-      "description": "State-aware WSLC experimental settings.",
-      "properties": {
-        "provision": {
-          "$ref": "#/definitions/WslcProvision",
-          "description": "Optional provision-phase settings."
-        }
-      },
-      "type": "object"
-    },
-    "StopExperimental": {
-      "additionalProperties": false,
-      "description": "Experimental settings accepted by the `stop` phase.",
-      "type": "object"
-    },
-    "StopPhase": {
-      "enum": [
-        "stop"
-      ],
-      "type": "string"
-    },
-    "StopRequest": {
-      "additionalProperties": false,
-      "description": "A complete state-aware `stop` request.",
-      "properties": {
-        "$schema": {
-          "description": "Optional JSON Schema reference for editor validation.",
-          "type": "string"
-        },
-        "_comment": {
-          "description": "Optional human-readable annotation ignored by the runtime."
-        },
-        "experimental": {
-          "$ref": "#/definitions/StopExperimental",
-          "description": "Optional closed post-provision experimental settings."
-        },
-        "phase": {
-          "$ref": "#/definitions/StopPhase",
-          "description": "Exact `stop` phase marker."
-        },
-        "sandboxId": {
-          "description": "Identifier returned by the provision phase.",
-          "type": "string"
-        },
-        "telemetry": {
-          "$ref": "#/definitions/Telemetry",
-          "description": "Optional telemetry configuration."
-        },
-        "version": {
-          "$ref": "#/definitions/Version",
-          "description": "Exact development contract version."
-        }
-      },
-      "required": [
-        "phase",
-        "sandboxId",
-        "version"
-      ],
       "type": "object"
     },
     "Telemetry": {
@@ -1421,139 +938,6 @@
           "type": "string"
         }
       ]
-    },
-    "WindowsSandboxContainment": {
-      "enum": [
-        "windows_sandbox"
-      ],
-      "type": "string"
-    },
-    "WindowsSandboxExperimental": {
-      "additionalProperties": false,
-      "description": "Experimental settings accepted by a Windows Sandbox provision request.",
-      "type": "object"
-    },
-    "WindowsSandboxProvisionRequest": {
-      "additionalProperties": false,
-      "description": "A complete state-aware `provision` request for windows_sandbox",
-      "properties": {
-        "$schema": {
-          "description": "Optional JSON Schema reference for editor validation.",
-          "type": "string"
-        },
-        "_comment": {
-          "description": "Optional human-readable annotation ignored by the runtime."
-        },
-        "containment": {
-          "$ref": "#/definitions/WindowsSandboxContainment",
-          "description": "Exact `windows_sandbox` containment marker."
-        },
-        "experimental": {
-          "$ref": "#/definitions/WindowsSandboxExperimental",
-          "description": "Optional closed experimental settings."
-        },
-        "filesystem": {
-          "$ref": "#/definitions/Filesystem",
-          "description": "Optional filesystem policy."
-        },
-        "phase": {
-          "$ref": "#/definitions/ProvisionPhase",
-          "description": "Exact `provision` phase marker."
-        },
-        "telemetry": {
-          "$ref": "#/definitions/Telemetry",
-          "description": "Optional telemetry configuration."
-        },
-        "version": {
-          "$ref": "#/definitions/Version",
-          "description": "Exact development contract version."
-        }
-      },
-      "required": [
-        "containment",
-        "phase",
-        "version"
-      ],
-      "type": "object"
-    },
-    "WslcContainment": {
-      "enum": [
-        "wslc"
-      ],
-      "type": "string"
-    },
-    "WslcProvision": {
-      "additionalProperties": false,
-      "description": "WSLC settings accepted during provisioning.",
-      "properties": {
-        "image": {
-          "description": "Optional container image reference.",
-          "type": "string"
-        },
-        "imageTarPath": {
-          "description": "Optional path to a local container image archive.",
-          "type": "string"
-        }
-      },
-      "type": "object"
-    },
-    "WslcProvisionExperimental": {
-      "additionalProperties": false,
-      "description": "Experimental settings accepted by a WSLC provision request.",
-      "properties": {
-        "wslc": {
-          "$ref": "#/definitions/StateAwareWslc",
-          "description": "Optional WSLC backend settings."
-        }
-      },
-      "type": "object"
-    },
-    "WslcProvisionRequest": {
-      "additionalProperties": false,
-      "description": "A complete state-aware `provision` request for wslc",
-      "properties": {
-        "$schema": {
-          "description": "Optional JSON Schema reference for editor validation.",
-          "type": "string"
-        },
-        "_comment": {
-          "description": "Optional human-readable annotation ignored by the runtime."
-        },
-        "containment": {
-          "$ref": "#/definitions/WslcContainment",
-          "description": "Exact `wslc` containment marker."
-        },
-        "experimental": {
-          "$ref": "#/definitions/WslcProvisionExperimental",
-          "description": "Optional closed experimental settings."
-        },
-        "filesystem": {
-          "$ref": "#/definitions/Filesystem",
-          "description": "Optional filesystem policy fixed at provision time."
-        },
-        "network": {
-          "$ref": "#/definitions/Network",
-          "description": "Optional network policy fixed at provision time."
-        },
-        "phase": {
-          "$ref": "#/definitions/ProvisionPhase",
-          "description": "Exact `provision` phase marker."
-        },
-        "telemetry": {
-          "$ref": "#/definitions/Telemetry",
-          "description": "Optional telemetry configuration."
-        },
-        "version": {
-          "$ref": "#/definitions/Version",
-          "description": "Exact development contract version."
-        }
-      },
-      "required": [
-        "containment",
-        "phase",
-        "version"
-      ],
-      "type": "object"
     }
   }
 }

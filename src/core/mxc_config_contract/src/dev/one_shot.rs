@@ -42,10 +42,14 @@ string_enum! {
     }
 }
 
-/// A complete one-shot `0.9.0-alpha` configuration request.
+/// A complete `0.9.0-alpha` configuration request.
+///
+/// The process is optional at the schema layer because lifecycle provision,
+/// start, stop, and deprovision operations do not execute a command. One-shot
+/// and exec entry points require it during operation-specific validation.
 #[derive(Debug, serde::Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[cfg_attr(feature = "schema-gen", schemars(rename = "OneShotRequest"))]
+#[cfg_attr(feature = "schema-gen", schemars(rename = "Request"))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Request {
     /// Optional JSON Schema reference for editor validation.
@@ -65,8 +69,9 @@ pub struct Request {
     /// Optional lifecycle settings.
     #[serde(default)]
     pub lifecycle: OptionalField<Lifecycle>,
-    /// The process to execute.
-    pub process: Process,
+    /// Optional process to execute.
+    #[serde(default)]
+    pub process: OptionalField<Process>,
     /// Optional filesystem policy.
     #[serde(default)]
     pub filesystem: OptionalField<Filesystem>,

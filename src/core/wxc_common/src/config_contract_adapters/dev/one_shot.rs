@@ -258,17 +258,28 @@ fn convert_wslc(value: contract::OneShotWslc) -> wire::Wslc {
     }
 }
 
+fn convert_isolation_session(value: contract::IsolationSession) -> wire::IsolationSession {
+    let contract::IsolationSession { app_id } = value;
+    wire::IsolationSession {
+        app_id: app_id.into_option(),
+        provision: None,
+    }
+}
+
 fn convert_experimental(value: contract::OneShotExperimental) -> wire::Experimental {
     let contract::OneShotExperimental {
         test,
         windows_sandbox,
         wslc,
+        isolation_session,
     } = value;
     wire::Experimental {
         test: test.into_option().map(convert_test),
         windows_sandbox: windows_sandbox.into_option().map(convert_windows_sandbox),
         wslc: wslc.into_option().map(convert_wslc),
-        isolation_session: None,
+        isolation_session: isolation_session
+            .into_option()
+            .map(convert_isolation_session),
         seatbelt: None,
     }
 }
@@ -301,7 +312,7 @@ pub(super) fn into_wire(request: contract::OneShotRequest) -> wire::MxcConfig {
         sandbox_id: None,
         container_id: container_id.into_option(),
         containment: containment.into_option().map(convert_containment),
-        process: Some(convert_process(process)),
+        process: process.into_option().map(convert_process),
         lifecycle: lifecycle.into_option().map(convert_lifecycle),
         process_container: process_container
             .into_option()

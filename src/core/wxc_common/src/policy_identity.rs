@@ -756,13 +756,31 @@ mod tests {
     }
 
     fn parse_state_aware(json: &str) -> crate::state_aware_request::ParsedStateAwareRequest {
-        let mut logger = crate::logger::Logger::new(crate::logger::Mode::Buffer);
-        let parsed = crate::config_parser::load_mxc_request_from_json(json, &mut logger)
-            .expect("accepted exact state-aware request");
-        let crate::state_aware_request::MxcRequest::StateAware(parsed) = parsed else {
-            panic!("expected state-aware request");
+        let mut value: Value = serde_json::from_str(json).expect("valid state-aware test JSON");
+        let object = value.as_object_mut().expect("state-aware test JSON object");
+        let phase = match object
+            .remove("phase")
+            .and_then(|value| value.as_str().map(str::to_owned))
+        {
+            Some(phase) if phase == "provision" => crate::state_aware_request::Phase::Provision,
+            Some(phase) if phase == "start" => crate::state_aware_request::Phase::Start,
+            Some(phase) if phase == "exec" => crate::state_aware_request::Phase::Exec,
+            Some(phase) if phase == "stop" => crate::state_aware_request::Phase::Stop,
+            Some(phase) if phase == "deprovision" => crate::state_aware_request::Phase::Deprovision,
+            other => panic!("invalid test phase: {other:?}"),
         };
-        parsed
+        let sandbox_id = object
+            .remove("sandboxId")
+            .and_then(|value| value.as_str().map(str::to_owned));
+        let mut logger = crate::logger::Logger::new(crate::logger::Mode::Buffer);
+        crate::config_parser::load_state_aware_request_from_json_with_options(
+            &value.to_string(),
+            &mut logger,
+            phase,
+            sandbox_id.as_deref(),
+            &[],
+        )
+        .expect("accepted exact state-aware request")
     }
 
     fn parsed_state_aware_hash(json: &str, backend: &str) -> String {
@@ -854,9 +872,7 @@ mod tests {
             ),
         ] {
             let experimental = payload
-                .map(|payload| {
-                    format!(r#","experimental":{{"{backend}":{{"provision":{payload}}}}}"#)
-                })
+                .map(|payload| format!(r#","experimental":{{"{backend}":{payload}}}"#))
                 .unwrap_or_default();
             let json = provision_json(backend, &experimental);
             let parsed = parse_state_aware(&json);
@@ -939,30 +955,12 @@ mod tests {
             }
             if backend != "windows_sandbox" {
                 let extra_fields = format!(r#","experimental":{{"{backend}":{{}}}}"#);
-                assert_eq!(
+                assert_ne!(
                     baseline,
                     parsed_state_aware_hash(&provision_json(backend, &extra_fields), backend),
-                    "{backend}: an empty backend wrapper is not a provision config"
+                    "{backend}: an empty backend object is a present provision config"
                 );
             }
-        }
-
-        for phase in ["start", "exec", "stop", "deprovision"] {
-            let process = if phase == "exec" {
-                r#","process":{"commandLine":"echo hello"}"#
-            } else {
-                ""
-            };
-            let source = |extra_fields: &str| {
-                format!(
-                    r#"{{"version":"0.9.0-alpha","phase":"{phase}","sandboxId":"wsb:deadbeef"{process}{extra_fields}}}"#
-                )
-            };
-            assert_eq!(
-                parsed_state_aware_hash(&source(""), "windows_sandbox"),
-                parsed_state_aware_hash(&source(r#","experimental":{}"#), "windows_sandbox"),
-                "{phase}: an empty experimental wrapper is not a phase config"
-            );
         }
     }
 

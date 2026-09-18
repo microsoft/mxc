@@ -348,8 +348,7 @@ public class MxcLifecycleTests
         else
         {
             var provision = root.GetProperty("experimental")
-                .GetProperty("isolation_session")
-                .GetProperty("provision");
+                .GetProperty("isolation_session");
             Assert.Equal(appId, provision.GetProperty("appId").GetString());
         }
     }
@@ -654,8 +653,7 @@ public class MxcLifecycleTests
             "allow",
             root.GetProperty("network").GetProperty("ingress").GetProperty("hostLoopback").GetString());
         var provision = root.GetProperty("experimental")
-            .GetProperty("wslc")
-            .GetProperty("provision");
+            .GetProperty("wslc");
         Assert.Equal("alpine:latest", provision.GetProperty("image").GetString());
         Assert.Equal(
             @"C:\images\alpine.tar",
@@ -672,7 +670,7 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void BuildExecEnvelope_CarriesSandboxIdAndCommandLine()
+    public void BuildExecEnvelope_CarriesCommandLineWithoutRoutingFields()
     {
         var json = MxcLifecycle
             .BuildExecEnvelope(new SandboxId("iso:abc"), "cmd /c echo hi")
@@ -680,8 +678,8 @@ public class MxcLifecycleTests
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        Assert.Equal("exec", root.GetProperty("phase").GetString());
-        Assert.Equal("iso:abc", root.GetProperty("sandboxId").GetString());
+        Assert.False(root.TryGetProperty("phase", out _));
+        Assert.False(root.TryGetProperty("sandboxId", out _));
         var process = root.GetProperty("process");
         Assert.Equal("cmd /c echo hi", process.GetProperty("commandLine").GetString());
         Assert.False(process.TryGetProperty("timeout", out _));
@@ -811,7 +809,7 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void BuildStartEnvelope_CarriesVersionAndSandboxIdOnly()
+    public void BuildStartEnvelope_CarriesVersionOnly()
     {
         // The backend's start config is empty, so anything else on this envelope
         // would be a field the backend rejects or silently drops.
@@ -822,8 +820,8 @@ public class MxcLifecycleTests
         var root = doc.RootElement;
 
         Assert.Equal("0.9.0-alpha", root.GetProperty("version").GetString());
-        Assert.Equal("start", root.GetProperty("phase").GetString());
-        Assert.Equal("iso:abc", root.GetProperty("sandboxId").GetString());
+        Assert.False(root.TryGetProperty("phase", out _));
+        Assert.False(root.TryGetProperty("sandboxId", out _));
         Assert.False(root.TryGetProperty("experimental", out _));
         Assert.False(root.TryGetProperty("network", out _));
     }

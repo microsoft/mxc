@@ -1,6 +1,5 @@
 {
     "version": "0.9.0-alpha",
-    "phase": "provision",
     "containment": "wslc",
     "filesystem": {
         "readwritePaths": ["C:\\mxc_wslc_sa_test\\rw"],
@@ -11,9 +10,7 @@
     },
     "experimental": {
         "wslc": {
-            "provision": {
-                "image": "alpine:latest"
-            }
+            "image": "alpine:latest"
         }
     }
 }

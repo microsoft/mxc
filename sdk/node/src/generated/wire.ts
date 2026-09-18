@@ -127,26 +127,11 @@ export interface Filesystem {
 }
 
 /**
- * IsolationSession backend config. Carries only the per-phase state-aware nesting for the phases that take config (`provision`). The one-shot surface takes no backend configuration at all. `start`, `stop`, `deprovision`, and `exec` take no per-phase config payload: `start`, `stop` and `deprovision` are invoked with only the top-level `phase` and `sandboxId`, and `exec` additionally carries the top-level `process` block.
+ * IsolationSession backend configuration.
  */
 export interface IsolationSession {
   /**
-   * State-aware provision-phase configuration.
-   */
-  provision?: IsolationSessionProvisionPhase | null;
-  [k: string]: unknown;
-}
-
-/**
- * Provision-phase IsolationSession configuration (state-aware lifecycle).
- *
- * The only phase that takes a per-phase payload, so it is its own type rather than a shared one: a shared type would advertise its fields on every phase in the generated schema. The domain configs and the SDK types are already split per phase; this keeps the wire model aligned with them.
- */
-export interface IsolationSessionProvisionPhase {
-  /**
-   * Optional identifier for the calling application.
-   *
-   * **A packaged application must supply its Package Family Name in the form `PFN:<packageFamilyName>`** (for example `PFN:Contoso.App_8wekyb3d8bbwe`). An unpackaged application may pass any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it.
+   * Lifecycle provision application identifier.
    */
   appId?: string | null;
   [k: string]: unknown;
@@ -320,11 +305,6 @@ export interface NetworkRule {
    */
   to?: NetworkPeer[] | null;
 }
-
-/**
- * State-aware lifecycle phase.
- */
-export type Phase = "provision" | "start" | "exec" | "stop" | "deprovision";
 
 /**
  * A single host → container port forward. Reachable only under the permissive `experimental` surface, so unknown fields are tolerated (forward-compat).
@@ -584,10 +564,6 @@ export interface Wslc {
    */
   portMappings?: PortMapping[] | null;
   /**
-   * State-aware provision-phase configuration (`experimental.wslc.provision`). Carries the container-creation knobs for the state-aware lifecycle; the flat sibling fields above remain the one-shot surface. Absent on one-shot configs and non-provision phases.
-   */
-  provision?: WslcProvisionPhase | null;
-  /**
    * Storage path override.
    */
   storagePath?: string | null;
@@ -595,23 +571,6 @@ export interface Wslc {
    * OS inside the WSL container.
    */
   targetOs?: string | null;
-  [k: string]: unknown;
-}
-
-/**
- * Per-phase WSLc **provision** configuration (state-aware lifecycle), nested under `experimental.wslc.provision`. Carries only what the amortized daemon session honors: the container image (or a local tarball to import).
- *
- * Filesystem mounts and network mode derive from the top-level `policy` section (readwrite / readonly paths, network), not from here. The one-shot-only sizing knobs (`cpuCount` / `memoryMb` / `gpu` / `storagePath` / `portMappings`) are deliberately absent: the daemon shares a single session across sandboxes and does not apply per-sandbox sizing. start / exec / stop / deprovision carry no backend-specific config (the exec command flows through the top-level `process` section), so they have no phase struct.
- */
-export interface WslcProvisionPhase {
-  /**
-   * Container image reference (e.g. `alpine:latest`). Defaults to `alpine:latest` when omitted.
-   */
-  image?: string | null;
-  /**
-   * Path to a local image tarball to import instead of pulling.
-   */
-  imageTarPath?: string | null;
   [k: string]: unknown;
 }
 
@@ -660,10 +619,6 @@ export interface MXCConfiguration {
    */
   network?: Network | null;
   /**
-   * State-aware lifecycle phase. When present, the request is a state-aware request (`sandboxId` is required for non-provision phases); when absent, the request is one-shot.
-   */
-  phase?: Phase | null;
-  /**
    * Process to execute and its environment.
    */
   process?: Process | null;
@@ -675,10 +630,6 @@ export interface MXCConfiguration {
    * Runtime values supplied alongside, but separate from, sandbox policy.
    */
   runtimeConfig?: RuntimeConfig | null;
-  /**
-   * Sandbox identifier returned by a prior provision request. Required for non-provision state-aware phases.
-   */
-  sandboxId?: string | null;
   /**
    * macOS Seatbelt backend configuration. Used when containment is `seatbelt`.
    */

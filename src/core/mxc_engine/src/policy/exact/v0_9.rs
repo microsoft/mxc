@@ -281,6 +281,7 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::OneShotReques
                 test: Default::default(),
                 windows_sandbox: Default::default(),
                 wslc: contract::OptionalField::present(map_wslc(wslc)?),
+                isolation_session: Default::default(),
             })
         }
         _ => Default::default(),
@@ -313,13 +314,13 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::OneShotReques
                     .unwrap_or(true),
             ),
         }),
-        process: contract::Process {
+        process: contract::OptionalField::present(contract::Process {
             command_line: contract::NonEmptyString::new(input.script.to_string()).map_err(error)?,
             cwd: Default::default(),
             env: Default::default(),
             inherit_default_env: Default::default(),
             timeout: contract::OptionalField::present(policy.timeout_ms.unwrap_or(0)),
-        },
+        }),
         filesystem: contract::OptionalField::present(contract::Filesystem {
             readwrite_paths: contract::OptionalField::present(
                 policy

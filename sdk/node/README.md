@@ -383,7 +383,6 @@ const { sandboxId } = await provisionSandbox(
 const opts = { experimental: true };
 
 await startSandbox(sandboxId, undefined, opts);
-
 const r1 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'echo hello' } }, opts);
 const r2 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'whoami' } }, opts);
 
