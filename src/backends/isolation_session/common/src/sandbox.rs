@@ -312,6 +312,10 @@ impl SandboxProcess for OneShotSandboxProcess {
         self.inner.take_stdin()
     }
 
+    fn stdin_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        self.inner.stdin_closer()
+    }
+
     fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
         self.inner.take_stdout()
     }

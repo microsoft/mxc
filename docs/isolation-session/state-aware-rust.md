@@ -30,7 +30,7 @@ The Rust SDK (`mxc-sdk`) and the C ABI over it (`mxc_ffi`), each with an
 |---|---|---|
 | provision / start / stop / deprovision | `wxc-exec --config …` | `mxc_sdk::run_state_aware_json`, `mxc_state_aware` |
 | exec, attached to the caller's stdio | `wxc-exec --config …` | `mxc_sdk::exec_attached`, `mxc_state_aware_exec_attached` |
-| exec, caller drives the pipes | *(no CLI equivalent)* | `mxc_sdk::exec_sandbox`, `mxc_state_aware_exec` |
+| exec, caller drives the pipes | *(no CLI equivalent)* | `mxc_sdk::exec_sandbox`, `mxc_state_aware_exec`, `mxc_io_state_aware_exec_callback` |
 
 Requirements on an in-process caller:
 

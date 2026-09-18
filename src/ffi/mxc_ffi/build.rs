@@ -16,6 +16,7 @@
 fn main() {
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=src/error_detail.rs");
+    println!("cargo:rerun-if-changed=src/io_coordinator.rs");
     println!("cargo:rerun-if-changed=src/streaming.rs");
     println!("cargo:rerun-if-changed=src/state_aware.rs");
     println!("cargo:rerun-if-changed=build.rs");

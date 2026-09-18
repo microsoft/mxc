@@ -69,9 +69,22 @@ type ReadStream = (Box<dyn Read + Send>, StreamCanceller);
 /// A pipe reaches EOF only once every write handle closes, so dropping the
 /// caller's duplicate is not enough: the backend keeps its own. Dropping this
 /// closes both, in that order.
+type StdinCloseCallback = Box<dyn FnOnce() + Send>;
+
+#[derive(Clone)]
+struct StdinCloser(Arc<Mutex<Option<StdinCloseCallback>>>);
+
+impl StreamCloser for StdinCloser {
+    fn close(&self) {
+        if let Some(close) = self.0.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            close();
+        }
+    }
+}
+
 struct StdinWriter {
     writer: Option<Box<dyn Write + Send>>,
-    backend_closer: Option<Box<dyn FnOnce() + Send>>,
+    backend_closer: Option<StdinCloser>,
 }
 
 impl Write for StdinWriter {
@@ -93,8 +106,8 @@ impl Write for StdinWriter {
 impl Drop for StdinWriter {
     fn drop(&mut self) {
         drop(self.writer.take());
-        if let Some(close) = self.backend_closer.take() {
-            close();
+        if let Some(closer) = self.backend_closer.take() {
+            closer.close();
         }
     }
 }
@@ -104,6 +117,7 @@ struct PreparedStreams {
     stdout: Option<ReadStream>,
     stderr: Option<ReadStream>,
     stdin: Option<Box<dyn Write + Send>>,
+    stdin_closer: Option<StdinCloser>,
 }
 
 /// A streaming [`SandboxProcess`] backed by a state-aware [`ExecHandle`].
@@ -111,6 +125,7 @@ pub struct ExecSandboxProcess {
     stdout: Option<Box<dyn Read + Send>>,
     stderr: Option<Box<dyn Read + Send>>,
     stdin: Option<Box<dyn Write + Send>>,
+    stdin_closer: Option<StdinCloser>,
     /// Closers for the two readable streams, kept whether or not the caller
     /// takes them: [`wait`](SandboxProcess::wait) fires one to end its own
     /// safety-drain, and [`stdout_closer`](SandboxProcess::stdout_closer) hands
@@ -186,6 +201,7 @@ impl ExecSandboxProcess {
             ));
         }
 
+        let stdin_closer = stdin_closer.map(|close| StdinCloser(Arc::new(Mutex::new(Some(close)))));
         let streams = wrap_cancellable_read_checked(stdout, "stdout").and_then(|out| {
             let err = wrap_cancellable_read_checked(stderr, "stderr")?;
             let input = wrap_write_checked(stdin, "stdin")?;
@@ -195,9 +211,10 @@ impl ExecSandboxProcess {
                 stdin: input.map(|writer| {
                     Box::new(StdinWriter {
                         writer: Some(writer),
-                        backend_closer: stdin_closer,
+                        backend_closer: stdin_closer.clone(),
                     }) as Box<dyn Write + Send>
                 }),
+                stdin_closer,
             })
         });
 
@@ -219,6 +236,7 @@ impl ExecSandboxProcess {
             stdout,
             stderr,
             stdin,
+            stdin_closer,
         } = match streams {
             Ok(streams) => streams,
             Err(error) => {
@@ -278,6 +296,7 @@ impl ExecSandboxProcess {
             stdout,
             stderr,
             stdin,
+            stdin_closer,
             stdout_canceller,
             stderr_canceller,
             waiter: Some(waiter_thread),
@@ -454,6 +473,10 @@ fn spawn_discard_checked(
 impl SandboxProcess for ExecSandboxProcess {
     fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
         self.stdin.take()
+    }
+
+    fn stdin_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        boxed_closer(&self.stdin_closer)
     }
 
     fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
