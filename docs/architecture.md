@@ -34,7 +34,7 @@ The workspace members and shared Rust dependencies are declared in
 | `wxc`, `lxc`, `mxc_darwin` | Windows, Linux, and macOS executor binaries |
 | `learning_mode_core` | Cross-platform denial models, analysis interfaces, and output artifacts |
 | `mxc_schema_support` | Schema and TypeScript generation support |
-| `mxc_telemetry` | Consent-gated telemetry API and platform implementation |
+| `mxc_telemetry` | ETW TraceLogging provider and non-Windows no-op implementation; consent and policy gating live in `wxc_common` |
 | `mxc_build_common` | Windows binary metadata generation |
 | `mxc_pty` | Shared pseudo-terminal support |
 
