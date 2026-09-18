@@ -2,9 +2,10 @@
 # Licensed under the MIT License.
 #
 # Native helper types for the Windows process-container suite. Dot-sourced
-# only by the two scripts that need them (the UI-mitigation matrix and the
-# global-atom isolation test) — compiling these on every child script would
-# add a second or two to each of the nineteen processes for nothing.
+# only by the three areas that need them (the UI-mitigation matrix and the
+# UI-policy matrix use WindowHost; the global-atom isolation test uses
+# AtomNative) — compiling these on every child script would add a second or
+# two to each of the nineteen processes for nothing.
 
 # kernel32 atom-table P/Invoke used by Phase-GlobalAtomIsolation to plant a
 # host-side global atom (direction 1) and to probe its own session-global

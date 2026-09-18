@@ -31,7 +31,9 @@ Initialize-WpcContext @PSBoundParameters
 # hostLoopback allow, and no fallback to SBOX/AppContainer.
 #
 # The workload prints its own environment: an MXC log line saying a proxy was
-# configured does not prove the child received it.
+# configured does not prove the child received it. A host-side listener stands
+# in for the proxy so one case can go further and prove the endpoint is
+# actually reachable from inside the container.
 function Phase-NetworkProxy {
     Section 'Phase 8e: schema 0.8 runtime proxy (model 2)'
 
@@ -42,7 +44,35 @@ function Phase-NetworkProxy {
 
     $fs = Get-NetFsGrants
     $psec = Test-PsecEligible
-    $port = Get-FreeTcpPort
+
+    # A live listener, not just a reserved port. With nothing listening, every
+    # workload below either dumps its environment or bypasses the proxy, so the
+    # phase would pass without any traffic ever reaching the endpoint MXC
+    # configured — which is the one thing model 2 promises.
+    $proxy = Start-LoopbackListener
+    if (-not $proxy) {
+        Record-Result -Phase 'P8e' -Name 'runtime proxy listener' -Pass $false `
+            -Detail 'could not bind a listener on 127.0.0.1; cannot assert the proxy endpoint is reachable'
+        return
+    }
+    try {
+        Invoke-NetworkProxyAssertions -ProxyPort $proxy.Port -Fs $fs -Psec $psec
+    } finally {
+        & $proxy.Stop
+    }
+}
+
+# Body of phase 8e, split out only so the listener above has a lifetime.
+function Invoke-NetworkProxyAssertions {
+    param(
+        [Parameter(Mandatory)] [int]$ProxyPort,
+        [Parameter(Mandatory)] $Fs,
+        [Parameter(Mandatory)] [bool]$Psec
+    )
+
+    $fs = $Fs
+    $psec = $Psec
+    $port = $ProxyPort
     $proxyUrl = "http://127.0.0.1:$port"
 
     # Identity-less deployment: no allowedProxyPeer, so the doc requires
@@ -81,6 +111,24 @@ function Phase-NetworkProxy {
             $noProxyPoisoned = [bool]($out -match ("(?im)^no_proxy=.*" + [regex]::Escape("127.0.0.1:$port")))
             Record-Result -Phase 'P8e' -Name 'NO_PROXY does NOT carry the proxy endpoint' `
                 -Pass (-not $noProxyPoisoned) -Detail 'NO_PROXY is a bypass list, not a proxy setting'
+
+            # The env vars prove only that MXC told the child where the proxy
+            # is. This proves the child can get there: the fetch is routed to
+            # the endpoint by those same variables, and the host-side listener
+            # answers it. The target host is deliberately unresolvable — under
+            # a proxy the workload never resolves or contacts it, so REACHED
+            # can only mean the proxy endpoint was reachable, and the
+            # assertion needs no external connectivity.
+            $cfgVia = New-Config -Name 'net-proxy-via-endpoint' `
+                -CommandLine (Get-AnchorFetchCommand -Url 'http://mxc-proxy-probe.invalid/') `
+                -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+                -EgressDefault 'deny' -IngressDefault 'allow' -HostLoopback 'allow' `
+                -NetworkProxy $proxyUrl -TimeoutMs 25000
+            $via = Invoke-NetRun -Name 'net-proxy-via-endpoint' -ConfigPath $cfgVia
+            Record-Result -Phase 'P8e' -Name 'a proxied fetch reaches the configured proxy endpoint' `
+                -Pass ($via.Verdict -eq 'REACHED') `
+                -Detail ("verdict=$($via.Verdict); endpoint=127.0.0.1:$port; " +
+                         'target is unresolvable, so REACHED is attributable to the proxy alone')
         }
 
         # Direct egress must be blocked while the proxy is configured. The

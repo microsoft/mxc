@@ -49,10 +49,22 @@ function Phase-DaclDisabled {
     $aclAfter = Get-Acl-Snapshot $rw
     $stateAfter = @(Get-NewStateFiles)
 
-    Record-Result -Phase 'P5' -Name 'dispatch refused (exit != 0)' -Pass ($r.ExitCode -ne 0) -Detail "exit=$($r.ExitCode)"
+    # A bare `exit != 0` is satisfied by a launch failure or a harness timeout,
+    # which is the false-green pattern this suite exists to remove. This refusal
+    # is raised during runner resolution, before any launch API, so wxc-exec
+    # logs a ConfigRejected event with reason `runner_unavailable` and exits 1.
+    # Test-WasRejected does not apply here: it deliberately treats
+    # `runner_unavailable` as a non-rejection, because everywhere else it means
+    # the host could not build a tier and the policy was never judged.
+    $stderrOrLog = ($r.Stderr + "`n" + $logContent)
+    $typedRefusal = [bool]($stderrOrLog -match '"reason"\s*:\s*"runner_unavailable"')
+    $refused = (-not $r.TimedOut) -and ($r.ExitCode -eq 1) -and $typedRefusal
+    Record-Result -Phase 'P5' -Name 'dispatch refused before launch (typed runner_unavailable, exit 1)' `
+        -Pass $refused `
+        -Detail "exit=$($r.ExitCode); timedOut=$($r.TimedOut); typedRefusal=$typedRefusal"
     Record-Result -Phase 'P5' -Name 'rw ACL untouched' -Pass ($aclBefore -eq $aclAfter)
     Record-Result -Phase 'P5' -Name 'no state file written' -Pass ($stateAfter.Count -eq 0)
-    $stderrOrLog = ($r.Stderr + "`n" + $logContent)
+    # Separates this refusal from any other runner_unavailable cause.
     Record-Result -Phase 'P5' -Name 'error message mentions DACL fallback' -Pass ([bool]($stderrOrLog -match '(?i)DACL fallback'))
 }
 

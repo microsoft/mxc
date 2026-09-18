@@ -41,9 +41,6 @@ function Phase-NetworkEgressRules {
     $fs = Get-NetFsGrants
     $psec = Test-PsecEligible
 
-    $fs = Get-NetFsGrants
-    $psec = Test-PsecEligible
-
     # Probe the negative control's destination up front. On a runner behind an
     # allowlisting proxy that permits the anchor but not this destination, the
     # control reads BLOCKED and scores green while proving nothing — an
@@ -76,12 +73,16 @@ function Phase-NetworkEgressRules {
         return
     }
 
-    # Allow the anchor's /32 on tcp/443 plus DNS to every resolver the host
-    # uses. Anything else stays denied by the egress default.
+    # Allow the anchor's /32 on its own port plus DNS to every resolver the
+    # host uses. Anything else stays denied by the egress default. The port
+    # comes from the anchor URI, so a -ExternalAnchorUrl override on http or a
+    # non-default port authors a rule that matches the fetch it is meant to
+    # permit; a hardcoded 443 would block the workload for the wrong reason.
+    $anchorPort = ([Uri]$ExternalAnchorUrl).Port
     $dnsServers = Get-HostDnsServers
     $allowRules = @()
     foreach ($ip in $anchorIps) {
-        $allowRules += (New-EgressRule -Cidr @("$ip/32") -Protocol 'tcp' -Port 443)
+        $allowRules += (New-EgressRule -Cidr @("$ip/32") -Protocol 'tcp' -Port $anchorPort)
     }
     foreach ($dns in $dnsServers) {
         $allowRules += (New-EgressRule -Cidr @("$dns/32") -Protocol 'udp' -Port 53)
@@ -95,7 +96,7 @@ function Phase-NetworkEgressRules {
     $allow = Invoke-NetRun -Name 'net-rules-allow-anchor' -ConfigPath $cfgAllow
 
     # D4: an explicit deny on the same destination must beat the allow.
-    $denyRules = @(foreach ($ip in $anchorIps) { New-EgressRule -Cidr @("$ip/32") -Protocol 'tcp' -Port 443 })
+    $denyRules = @(foreach ($ip in $anchorIps) { New-EgressRule -Cidr @("$ip/32") -Protocol 'tcp' -Port $anchorPort })
     $cfgPrecedence = New-Config -Name 'net-rules-deny-precedence' `
         -CommandLine (Get-AnchorFetchCommand) `
         -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
@@ -117,9 +118,9 @@ function Phase-NetworkEgressRules {
     }
 
     if ($psec) {
-        Record-Result -Phase 'P8c' -Name 'egress allow rule permits the named CIDR:443' `
+        Record-Result -Phase 'P8c' -Name 'egress allow rule permits the named CIDR on the anchor port' `
             -Pass ($allow.Verdict -eq 'REACHED') `
-            -Detail "verdict=$($allow.Verdict); rules=$($allowRules.Count); exit=$($allow.Result.ExitCode)"
+            -Detail "verdict=$($allow.Verdict); port=$anchorPort; rules=$($allowRules.Count); exit=$($allow.Result.ExitCode)"
         Record-Result -Phase 'P8c' -Name 'unlisted destination still blocked under the same rule set' `
             -Pass ($null -ne $unlisted -and $unlisted.Verdict -eq 'BLOCKED') `
             -Detail $(if ($null -eq $unlisted) { 'not run: the control destination is unreachable from the host' }

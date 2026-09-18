@@ -25,7 +25,6 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 . (Join-Path $PSScriptRoot 'lib\WinProcessContainer.Common.ps1')
-. (Join-Path $PSScriptRoot 'lib\WinProcessContainer.Native.ps1')
 
 Initialize-WpcContext @PSBoundParameters
 

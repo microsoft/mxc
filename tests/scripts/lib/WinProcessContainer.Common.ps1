@@ -114,9 +114,14 @@ function Test-Preflight {
         Write-Host "Building debug + release binaries (workspace: $CargoRoot)..."
         Push-Location $CargoRoot
         try {
-            & cargo build -p wxc 2>&1 | Out-Host
+            # plm and the proxy shim are sidecars wxc-exec resolves next to its
+            # own image: plm backs the guarded-WPR captureDenials fallback and
+            # winhttp-proxy-shim backs the legacy proxy path. Absent, those
+            # areas fail as launch errors rather than policy results, so build
+            # them here for the same reason CI stages them.
+            & cargo build -p wxc -p plm -p wxc_winhttp_proxy_shim 2>&1 | Out-Host
             if ($LASTEXITCODE -ne 0) { throw "cargo build (debug) failed" }
-            & cargo build -p wxc --release 2>&1 | Out-Host
+            & cargo build -p wxc -p plm -p wxc_winhttp_proxy_shim --release 2>&1 | Out-Host
             if ($LASTEXITCODE -ne 0) { throw "cargo build (release) failed" }
             & cargo build -p wxc_ui_probe 2>&1 | Out-Host
             if ($LASTEXITCODE -ne 0) { throw "cargo build wxc_ui_probe (debug) failed" }
@@ -131,6 +136,22 @@ function Test-Preflight {
     if (-not (Test-Path $WxcRelease)) { throw "Release binary not found at $WxcRelease" }
     if (-not (Test-Path $UiProbeDebug))   { throw "UI probe debug binary not found at $UiProbeDebug" }
     if (-not (Test-Path $UiProbeRelease)) { throw "UI probe release binary not found at $UiProbeRelease" }
+    Assert-Sidecars
+}
+
+function Assert-Sidecars {
+    # wxc-exec resolves these next to its own image, so check each lane's
+    # directory rather than the build output. Missing, the capture-denials and
+    # legacy-proxy areas fail as launch errors instead of policy results.
+    foreach ($exe in @($WxcDebug, $WxcRelease)) {
+        $dir = Split-Path -Parent $exe
+        foreach ($sidecar in 'plm.exe', 'winhttp-proxy-shim.exe') {
+            $path = Join-Path $dir $sidecar
+            if (-not (Test-Path $path)) {
+                throw "$sidecar not found beside $exe. Build it with ``cargo build -p plm -p wxc_winhttp_proxy_shim`` (add --release for the release lane) or drop -SkipBuild."
+            }
+        }
+    }
 }
 
 function Assert-BfsSafety {
@@ -1035,13 +1056,16 @@ function Get-HostDnsServers {
 # on exactly the hosts this phase must run on. The accept loop sits on a
 # background runspace so the harness thread stays free.
 function Start-LoopbackListener {
-    $port = Get-FreeTcpPort
-    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $port)
+    # Bind port 0 and read back what the OS assigned, rather than reserving a
+    # port up front and re-binding it: another process can take the port in
+    # between, and the anchor then answers on a socket nobody can reach.
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
     try {
         $listener.Start()
     } catch {
         return $null
     }
+    $port = $listener.LocalEndpoint.Port
     $ps = [PowerShell]::Create()
     [void]$ps.AddScript({
         param($l)
@@ -1073,14 +1097,6 @@ function Start-LoopbackListener {
             try { $ps.Dispose() } catch {}
         }.GetNewClosure()
     }
-}
-
-function Get-FreeTcpPort {
-    $l = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
-    $l.Start()
-    $port = $l.LocalEndpoint.Port
-    $l.Stop()
-    return $port
 }
 
 # Contained command line that fetches a host-loopback URL. Same two-branch
@@ -1237,6 +1253,7 @@ function Initialize-WpcContext {
         foreach ($bin in @($WxcDebug, $WxcRelease)) {
             if (-not (Test-Path $bin)) { throw "Binary not found at $bin. Run run_processcontainer_all_tests.ps1, or pass -ContextJson." }
         }
+        Assert-Sidecars
     }
     Assert-BfsSafety -Quiet:(-not $Fresh)
 

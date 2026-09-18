@@ -34,7 +34,6 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 . (Join-Path $PSScriptRoot 'lib\WinProcessContainer.Common.ps1')
-. (Join-Path $PSScriptRoot 'lib\WinProcessContainer.Native.ps1')
 
 Initialize-WpcContext @PSBoundParameters
 
@@ -192,11 +191,13 @@ function Phase-CaptureDenialsStampedPath {
             -CaptureDenialsOutputPath $requested
         $log = Join-Path $ScratchRoot "logs\cd-stamped-$i.log"
         $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log -TimeoutSec 60
-        # The config echo repeats the REQUESTED path verbatim, so matching the
-        # raw log would find the un-stamped path and score the uniqueness
-        # assertion against two identical strings. Strip it first and read
-        # only what the runner reported.
-        $all = Remove-ConfigEcho "$($r.Stderr)`n$(Read-Log $log)"
+        # stderr only: the one-line pointer is the CLI-boundary contract under
+        # test, and the backend log carries its own copy of the resolved path,
+        # so including the log would keep this green if the pointer were
+        # dropped. The config echo repeats the REQUESTED path verbatim on
+        # stderr, so strip it first or the uniqueness assertion scores two
+        # identical un-stamped strings.
+        $all = Remove-ConfigEcho "$($r.Stderr)"
         $m = [regex]::Match($all, $pattern)
         $observed += $(if ($m.Success) { $m.Groups[1].Value } else { '' })
     }

@@ -32,7 +32,7 @@ Initialize-WpcContext @PSBoundParameters
 # "deny" opens a default-allow hole that no single-config test would catch,
 # because each config in isolation still behaves plausibly.
 function Phase-NetworkModel3Equivalence {
-    Section 'Phase 8b: model 3 — explicit deny == omitted network == empty network'
+    Section 'Phase 8b: model 3 - explicit deny == omitted network == empty network'
 
     if ($SkipNetwork) {
         Record-Result -Phase 'P8b' -Name 'model 3 equivalence' -Status 'skip' -Detail '-SkipNetwork'

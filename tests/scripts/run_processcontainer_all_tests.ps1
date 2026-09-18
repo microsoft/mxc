@@ -206,7 +206,7 @@ try {
         if ($childExit -eq 78) {
             $FatalAbort = "area '$key' reported MXC-FATAL (exit 78). Dispatch stopped; no further area was run."
             Write-Host ''
-            Write-Host "MXC-FATAL from area '$key' — stopping the suite." -ForegroundColor Red
+            Write-Host "MXC-FATAL from area '$key' - stopping the suite." -ForegroundColor Red
             break
         }
     }
