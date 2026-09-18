@@ -115,6 +115,16 @@ function Invoke-ProcessContainerTests {
     Copy-Item -LiteralPath $uiProbe -Destination (Join-Path $debugDirectory 'wxc-ui-probe.exe') -Force
     Copy-Item -LiteralPath $uiProbe -Destination (Join-Path $releaseDirectory 'wxc-ui-probe.exe') -Force
 
+    # wxc-exec resolves these next to its own image: plm.exe backs the guarded-WPR
+    # captureDenials fallback and winhttp-proxy-shim.exe backs the legacy proxy
+    # path. Absent, those areas fail as launch errors instead of policy results.
+    foreach ($sidecar in 'plm.exe', 'winhttp-proxy-shim.exe') {
+        $source = Join-Path $binaryDirectoryPath $sidecar
+        Assert-File -Path $source
+        Copy-Item -LiteralPath $source -Destination (Join-Path $debugDirectory $sidecar) -Force
+        Copy-Item -LiteralPath $source -Destination (Join-Path $releaseDirectory $sidecar) -Force
+    }
+
     $script = Join-Path $testScriptRoot 'run_processcontainer_all_tests.ps1'
     # -KeepArtifacts stops the suite deleting its scratch tree on a clean run,
     # so a passing job still uploads its per-area logs, configs, and result

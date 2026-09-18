@@ -238,15 +238,19 @@ function Phase-IntentTelemetryVersion {
     #
     # The error must name the field. A run that failed for an unrelated reason
     # would otherwise satisfy a bare "was rejected" check and prove nothing.
+    # 0.8's closed contract has no `telemetry` member, so the refusal arrives as
+    # an unknown-field parse error rather than a bespoke version-gate message;
+    # both spellings attribute the refusal to the field and both are accepted.
     $cfg = New-Config -Name 'lc-telemetry-0800' -CommandLine $Script:LifecycleCmd -ReadWrite @($rw) `
         -TelemetryEnabled $true -SchemaVersion '0.8.0-alpha'
     $log = Join-Path $ScratchRoot 'logs\lc-telemetry-0800.log'
     $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log -TimeoutSec 30
     $logText = Read-Log $log
-    $gated = [bool]((Remove-ConfigEcho "$logText`n$($r.Stderr)") -match "(?i)telemetry.{0,60}schema version")
+    $gated = [bool]((Remove-ConfigEcho "$logText`n$($r.Stderr)") -match
+        '(?i)(unknown field .{0,2}telemetry|telemetry.{0,60}schema version)')
     Record-Result -Phase 'P13d' -Name 'telemetry is rejected on schema 0.8.0-alpha (0.9.0-alpha+ only)' `
         -Pass ((Test-WasRejected -Run $r -Log $logText) -and $gated) `
-        -Detail "exit=$($r.ExitCode); errorNamesTheVersionGate=$gated"
+        -Detail "exit=$($r.ExitCode); errorNamesTelemetry=$gated"
 
     # The supported range is 0.6.0-alpha through 0.9.0-alpha inclusive
     # (schemas/schema-version.json). Both ends must be accepted and both
