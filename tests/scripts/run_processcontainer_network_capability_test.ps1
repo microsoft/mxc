@@ -41,19 +41,19 @@ function Phase-NetworkCapabilityMatrix {
 
     $cases = @(
         @{ Egress = 'deny';  Ingress = 'deny'
-           Verdict = 'BLOCKED'; Caps = @()
+           Verdict = 'BLOCKED'
            Name = 'egress=deny ingress=deny -> internet denied' }
         @{ Egress = 'allow'; Ingress = 'deny'
-           Verdict = 'REACHED'; Caps = @('internetClient')
+           Verdict = 'REACHED'
            Name = 'egress=allow ingress=deny -> internet REACHED (internetClient granted)' }
         # Accepted only on PSEC, where WFP still blocks egress; every other
         # tier must reject the config outright.
         @{ Egress = 'deny';  Ingress = 'allow'
-           Verdict = 'BLOCKED'; Caps = @('privateNetworkClientServer')
+           Verdict = 'BLOCKED'
            RejectUnlessPsec = $true
            Name = 'egress=deny ingress=allow -> accepted on PSEC, egress still blocked by WFP' }
         @{ Egress = 'allow'; Ingress = 'allow'
-           Verdict = 'REACHED'; Caps = @('internetClient', 'privateNetworkClientServer')
+           Verdict = 'REACHED'
            Name = 'egress=allow ingress=allow -> internet REACHED (both capabilities)' }
     )
 
@@ -75,14 +75,6 @@ function Phase-NetworkCapabilityMatrix {
         }
 
         Record-Result -Phase 'P8a' -Name $case.Name -Pass ($run.Verdict -eq $case.Verdict) -Detail $detail
-        # The capability is what makes the grant real: a run that reached the
-        # anchor by some other route must not score as a working grant.
-        if ($case.Caps.Count -gt 0) {
-            Record-CapabilityLogged -Phase 'P8a' `
-                -Name "egress=$($case.Egress) ingress=$($case.Ingress) logs $($case.Caps -join ' + ')" `
-                -LogContent (Remove-ConfigEcho $run.Log) -Capability $case.Caps `
-                -Detail 'documented capability mapping'
-        }
     }
 }
 

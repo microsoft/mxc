@@ -94,9 +94,6 @@ function Phase-NetworkLegacy07 {
     $cap = Invoke-NetRun -Name 'net07-explicit-capability' -ConfigPath $cfgCap
     Record-Result -Phase 'P9' -Name 'explicit processContainer.capabilities=[internetClient] reaches the anchor' `
         -Pass ($cap.Verdict -eq 'REACHED') -Detail "verdict=$($cap.Verdict)"
-    Record-CapabilityLogged -Phase 'P9' -Name 'explicit capability is named in the log' `
-        -LogContent (Remove-ConfigEcho $cap.Log) -Capability @('internetClient') `
-        -Detail 'capability list reached the backend'
 }
 
 Invoke-WpcPhase -Key 'NetworkLegacy07' -Body { Phase-NetworkLegacy07 }

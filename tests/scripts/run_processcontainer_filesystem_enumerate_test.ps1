@@ -104,8 +104,8 @@ function Phase-FsEnumerate {
     # --- 3. enforcement --------------------------------------------------
     if (-not $Script:Caps.SupportsEnumeratePaths) {
         # Not a skip: the documented refusal is itself testable, and it is the
-        # property that matters most here. enumeratePaths cannot degrade to
-        # SBOX or AppContainer, so a host that quietly ran the workload without
+        # property that matters most here. enumeratePaths cannot degrade to an
+        # AppContainer tier, so a host that quietly ran the workload without
         # the grant would be the real defect.
         $log = Join-Path $ScratchRoot 'logs\fsenum-unsupported.log'
         $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log -TimeoutSec 30

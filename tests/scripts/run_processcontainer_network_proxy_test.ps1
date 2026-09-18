@@ -28,7 +28,7 @@ Initialize-WpcContext @PSBoundParameters
 # Per docs/process-container/networking.md: HTTP(S)_PROXY (both cases) point
 # at the loopback endpoint, NO_PROXY must not carry it, direct egress is
 # blocked, egress rules do not apply, identity-less proxy requires
-# hostLoopback allow, and no fallback to SBOX/AppContainer.
+# hostLoopback allow, and no fallback to an AppContainer tier.
 #
 # The workload prints its own environment: an MXC log line saying a proxy was
 # configured does not prove the child received it. A host-side listener stands
@@ -151,8 +151,8 @@ function Invoke-NetworkProxyAssertions {
                 -Detail "verdict=$($direct.Verdict); WFP scopes egress to the proxy endpoint only"
         }
     } else {
-        # "schema 0.8 runtime proxy requests do not fall back because neither
-        # SBOX nor AppContainer can preserve their peer or host-loopback
+        # "schema 0.8 runtime proxy requests do not fall back because
+        # AppContainer cannot preserve their peer or host-loopback
         # requirements."
         $rejected = Test-WasRejected $envRun
         Record-Result -Phase 'P8e' -Name 'non-PSEC tier rejects schema 0.8 runtime proxy (no fallback)' `

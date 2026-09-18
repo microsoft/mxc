@@ -306,35 +306,6 @@ function Get-MinimalEnv {
     return @($base + $Extra)
 }
 
-# The spec dump that names capabilities and UI limits is written only on the
-# legacy SBOX path (`log_sandbox_spec`, base_container_runner.rs). PSEC logs a
-# version+size line instead, and the AppContainer tiers never build a spec at
-# all, so assertions that read the dump have nothing to read on either.
-function Test-SpecDumpAvailable {
-    param([string]$LogContent)
-    return [bool]($LogContent -match '\[token\]')
-}
-
-# Assert capability names reached the backend, skipping where the run produced
-# no spec dump to read.
-function Record-CapabilityLogged {
-    param(
-        [Parameter(Mandatory)][string]$Phase,
-        [Parameter(Mandatory)][string]$Name,
-        [Parameter(Mandatory)][AllowEmptyString()][string]$LogContent,
-        [Parameter(Mandatory)][string[]]$Capability,
-        [string]$Detail = ''
-    )
-    if (-not (Test-SpecDumpAvailable $LogContent)) {
-        Record-Result -Phase $Phase -Name $Name -Status 'skip' `
-            -Detail 'no sandbox spec dump in the log; capabilities appear only on the legacy SBOX path'
-        return
-    }
-    $missing = @($Capability | Where-Object { $LogContent -notmatch ('(?i)' + [regex]::Escape($_)) })
-    Record-Result -Phase $Phase -Name $Name -Pass ($missing.Count -eq 0) `
-        -Detail ("$Detail; missing=[" + ($missing -join ', ') + ']')
-}
-
 function Get-ProbeEnvWithDestructive {
     $list = New-Object System.Collections.Generic.List[string]
     foreach ($e in [System.Environment]::GetEnvironmentVariables().GetEnumerator()) {
@@ -399,9 +370,8 @@ function Get-HostCapabilities {
         # accounts for separately.
         CanBlockInputInjection         = $canInject
         # deniedPaths is enforced on T3 via DENY ACEs, and on BaseContainer when
-        # either contract reports native deny support -- PSEC's
-        # PSE_SUPPORT_FS_DENY or a usable SBOX contract's SANDBOX_CAP_DENY_PATHS.
-        # Detected at runtime so denied tests auto-enable when it ships.
+        # PSEC reports the PSE_SUPPORT_FS_DENY bit. Detected at runtime so
+        # denied tests auto-enable when it ships.
         SupportsDeniedPaths            = (($tier -eq 'appcontainer-dacl') -or $denyBit)
         BaseContainerSupportsEnumeratePaths = $enumBit
         # enumeratePaths has NO fallback: it needs PSEC 1.1 plus
@@ -442,49 +412,33 @@ function Get-SelectedTier {
     return $(if ($m.Success) { $m.Groups[1].Value.Trim() } else { '' })
 }
 
-# Pass when the log shows that UI restrictions were applied, using the tier's
-# telemetry. T3 (AppContainer + DACL) creates the job object on the OUTSIDE and
-# logs "UI Job Object assigned". BaseContainer applies the job/UI limits INSIDE
-# via Experimental_CreateProcessInSandbox and instead logs a
-# "[ui subsystem] ... uilimits blocked" line.
+# Pass when the log shows that UI restrictions were applied. Only T3
+# (AppContainer + DACL) reports them: it creates the job object on the OUTSIDE
+# and logs "UI Job Object assigned". BaseContainer carries the same limits in
+# the process security environment spec, which emits no per-limit telemetry.
 function Test-UiRestrictionsApplied {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$LogContent)
-    if ($Script:ExpectedTier -eq 'appcontainer-dacl') {
-        return [bool]($LogContent -match 'UI Job Object assigned')
-    }
-    return [bool]($LogContent -match '(?im)uilimits blocked')
+    return [bool]($LogContent -match 'UI Job Object assigned')
 }
 
 # Pass when the log shows the Win32k mitigation (win32k syscalls blocked) was
-# applied. T3 logs "Win32k mitigation applied"; BaseContainer logs a
-# "win32k_system_calls: ... blocked" line in its [ui subsystem] section (vs.
-# "... allowed" when ui.disable=false).
+# applied. T3-only for the same reason as above.
 function Test-Win32kMitigationApplied {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$LogContent)
-    if ($Script:ExpectedTier -eq 'appcontainer-dacl') {
-        return [bool]($LogContent -match 'Win32k mitigation applied')
-    }
-    return [bool]($LogContent -match '(?im)win32k_system_calls:.*?blocked')
+    return [bool]($LogContent -match 'Win32k mitigation applied')
 }
 
-# The two helpers above read BaseContainer's "[ui subsystem]" telemetry, which
-# log_sandbox_spec() emits only behind `if !use_process_security_environment`.
-# A PSEC run emits none of it regardless of how the limits were applied, so
-# asserting on those tokens is unsound both ways — and a NEGATED assertion
-# passes vacuously, which is the dangerous direction.
-#
-# Fail-closed: skip only on positive proof that PSEC built a spec. A run that
-# died earlier matches neither marker and is asserted as before.
+# Only T3 reports per-limit UI telemetry, so a BaseContainer run has no token
+# to read and asserting on its absence is unsound — a NEGATED assertion would
+# pass vacuously, which is the dangerous direction.
 function Test-UiTelemetryAvailable {
-    param([Parameter(Mandatory)][AllowEmptyString()][string]$LogContent)
-    if ($Script:ExpectedTier -eq 'appcontainer-dacl') { return $true }
-    return -not ($LogContent -match '(?im)process security environment spec built \(PSEC')
+    return ($Script:ExpectedTier -eq 'appcontainer-dacl')
 }
 
-# Record a BaseContainer UI-telemetry assertion, skipping it when the run took
-# the PSEC path. $Expected is the value the token grep should return, so a
-# caller asserting "mitigation NOT applied" passes -Expected $false rather than
-# negating the result itself (which would defeat the skip).
+# Record a UI-telemetry assertion, skipping it on tiers that emit none.
+# $Expected is the value the token grep should return, so a caller asserting
+# "mitigation NOT applied" passes -Expected $false rather than negating the
+# result itself (which would defeat the skip).
 function Record-UiTelemetryResult {
     param(
         [Parameter(Mandatory)][string]$Phase,
@@ -494,8 +448,8 @@ function Record-UiTelemetryResult {
         [bool]$Expected = $true,
         [string]$Detail = ''
     )
-    if (-not (Test-UiTelemetryAvailable -LogContent $LogContent)) {
-        $skipDetail = 'PSEC path selected; BaseContainer emits UI telemetry only on the legacy SBOX path'
+    if (-not (Test-UiTelemetryAvailable)) {
+        $skipDetail = "tier=$($Script:ExpectedTier) emits no per-limit UI telemetry; only T3 reports applied limits"
         if ($Detail) { $skipDetail = "$Detail; $skipDetail" }
         Record-Result -Phase $Phase -Name $Name -Status 'skip' -Detail $skipDetail
         return
@@ -846,8 +800,7 @@ function Assert-RequiredTier {
 # ProcessContainer path that receives schema 0.8 egress filters, proxy peer
 # identity, or host-loopback configuration. The probe does not name the
 # process-creation contract, so the tier stands in for it — `base-container`
-# is the only tier that can be on PSEC. A base-container host still running
-# the transitional SBOX contract fails these, which is the correct signal.
+# is the only tier that can be on PSEC.
 function Test-PsecEligible {
     return ($Script:ExpectedTier -eq 'base-container')
 }
@@ -973,7 +926,7 @@ function Test-WasRejected {
     $both = "$text`n$err"
 
     # Reached the launch API, so validation had already accepted the policy.
-    if ($both -match '(?i)create_process_failed|CreateProcessInSandbox failed|CreateProcessSecurityEnvironment failed') {
+    if ($both -match '(?i)create_process_failed|CreateProcessSecurityEnvironment failed') {
         return $false
     }
     # Validation failures surface as config_parse or policy_validation.

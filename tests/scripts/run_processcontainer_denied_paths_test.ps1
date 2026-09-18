@@ -50,10 +50,10 @@ function Phase-T1DenyForced {
         return
     }
     # The deny test is only meaningful once BaseContainer can enforce
-    # deniedPaths. Before SANDBOX_CAP_DENY_PATHS lights up the runner rejects
-    # deniedPaths outright, which would otherwise make this phase "pass"
-    # vacuously (the run aborts, so the child never echoes the secret). Skip
-    # until the capability is present; it then asserts real deny enforcement.
+    # deniedPaths. Without PSE_SUPPORT_FS_DENY the runner rejects deniedPaths
+    # outright, which would otherwise make this phase "pass" vacuously (the run
+    # aborts, so the child never echoes the secret). Skip until the capability
+    # is present; it then asserts real deny enforcement.
     if (-not $Script:Caps.SupportsDeniedPaths) {
         # Enforcement cannot be tested, but the documented refusal can: the
         # PSEC path rejects deniedPaths outright rather than running unenforced
