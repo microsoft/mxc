@@ -3,14 +3,8 @@
 
 import assert from 'node:assert';
 import { getEventListeners, once } from 'node:events';
-import { readFileSync } from 'node:fs';
 import { afterEach, describe, it } from 'node:test';
-import type pty from 'node-pty';
-import {
-  _setPtySpawnImplementation,
-  spawnSandbox,
-  spawnSandboxFromConfig,
-} from '../../src/sandbox.js';
+import { spawnSandbox, spawnSandboxFromConfig } from '../../src/sandbox.js';
 import {
   _createMxcSandboxProcess,
   type SandboxProcessBinding,
@@ -186,38 +180,52 @@ class DeferredWaitBinding extends FakeBinding {
   }
 }
 
-afterEach(() => {
-  _setBindingSandboxProcessFactory();
-  _setPtySpawnImplementation();
-});
+afterEach(() => _setBindingSandboxProcessFactory());
 
 describe('native streaming spawn APIs', () => {
-  it('routes the default spawn mode through the attached PTY worker', () => {
-    let request: RequestSpec | undefined;
-    let exitListener: ((event: { exitCode: number; signal?: number }) => void) | undefined;
-    const fakePty = {
-      onExit(listener: (event: { exitCode: number; signal?: number }) => void) {
-        exitListener = listener;
-        return { dispose() {} };
-      },
-      kill() {},
-    } as unknown as pty.IPty;
-
-    _setPtySpawnImplementation((_file, args) => {
-      const payloadIndex = args.indexOf('--payload-file');
-      request = JSON.parse(readFileSync(args[payloadIndex + 1], 'utf8')) as RequestSpec;
-      return fakePty;
+  it('returns the in-process pipe-backed IPty adapter by default', async () => {
+    let seen: RequestSpec | undefined;
+    const binding = new FakeBinding(41, 0);
+    const multibyteOutput = Buffer.from('€');
+    binding.stdout = new FakeReadable(
+      [multibyteOutput.subarray(0, 1), multibyteOutput.subarray(1), null],
+      binding.stdoutEvents,
+    );
+    _setBindingSandboxProcessFactory((request) => {
+      seen = request;
+      return _createMxcSandboxProcess(binding);
     });
 
-    const proc = spawnSandboxFromConfig({
+    const terminal = spawnSandboxFromConfig({
       version: '0.9.0-alpha',
-      process: { commandLine: 'echo attached' },
+      process: { commandLine: 'echo adapted' },
+    }, {
+      ptyOptions: { cols: 90, rows: 30 },
+    });
+    let output = '';
+    terminal.onData((data) => {
+      output += data;
+    });
+    const exited = new Promise<{ exitCode: number; signal?: number }>((resolve) => {
+      terminal.onExit(resolve);
     });
 
-    assert.strictEqual(proc, fakePty);
-    assert.strictEqual(request?.command, 'echo attached');
-    assert.deepStrictEqual(request?.containment, { type: 'process' });
-    exitListener?.({ exitCode: 0 });
+    assert.strictEqual(terminal.pid, 41);
+    assert.strictEqual(terminal.process, 'mxc-sandbox');
+    assert.strictEqual(terminal.cols, 90);
+    assert.strictEqual(terminal.rows, 30);
+    terminal.resize(100, 40);
+    assert.strictEqual(terminal.cols, 100);
+    assert.strictEqual(terminal.rows, 40);
+    terminal.write('input');
+
+    assert.deepStrictEqual(await exited, { exitCode: 7 });
+    assert.ok(output.includes('€'));
+    assert.strictEqual(output.replace('€', ''), 'err');
+    assert.ok(!output.includes('\uFFFD'));
+    assert.deepStrictEqual(binding.stdin.writes, ['input']);
+    assert.strictEqual(seen?.command, 'echo adapted');
+    assert.deepStrictEqual(seen?.containment, { type: 'process' });
   });
 
   it('routes the existing policy entry point through the binding request adapter', () => {

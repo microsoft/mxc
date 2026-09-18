@@ -1,14 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import pty from 'node-pty';
+import type pty from 'node-pty';
 import * as os from 'os';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { randomBytes } from "crypto";
 import { parse as semverParse } from 'semver';
+import { diagLog } from './diagnostic.js';
 import {
     SandboxPolicy,
     ContainerConfig,
@@ -16,7 +13,6 @@ import {
     ContainmentBackend,
 } from './types.js';
 import { diagLogVersion, applyLinuxNetworkPolicy } from './helper.js';
-import { diagLog } from './diagnostic.js';
 import { MxcError } from './errors.js';
 import {
   prepareRequestSpec,
@@ -28,6 +24,7 @@ import {
 } from './bindings/run.js';
 import { spawnBindingSandboxProcess } from './bindings/streaming.js';
 import type { MxcSandboxProcess } from './sandbox-process.js';
+import { createPtyAdapter } from './pty-adapter.js';
 
 const MIN_VERSION = '0.6.0-alpha';
 const SUPPORTED_VERSION = '0.9.0-alpha';
@@ -50,21 +47,6 @@ const LEGACY_NETWORK_FIELDS = [
     'blockedHosts',
     'proxy',
 ] as const;
-
-type PtySpawnImplementation = (
-  file: string,
-  args: string[],
-  options: pty.IPtyForkOptions,
-) => pty.IPty;
-
-let ptySpawnImplementation: PtySpawnImplementation = pty.spawn.bind(pty);
-
-/** @internal Replaces PTY process creation for one process's unit tests. */
-export function _setPtySpawnImplementation(
-  implementation?: PtySpawnImplementation,
-): void {
-  ptySpawnImplementation = implementation ?? pty.spawn.bind(pty);
-}
 
 /**
  * Generates a random 8-character alphanumeric string for the app container name.
@@ -701,7 +683,10 @@ export interface SandboxSpawnOptions {
   skipPlatformCheck?: boolean;
 
   /**
-   * Terminal options used when `usePty` is true or omitted.
+   * Compatibility dimensions used by the pipe-backed `IPty` adapter.
+   *
+   * Other `node-pty` process-creation options have no effect because the
+   * sandbox is created in-process through `mxc_ffi`.
    */
   ptyOptions?: pty.IPtyForkOptions;
 
@@ -716,8 +701,8 @@ export interface SandboxSpawnOptions {
   logDir?: string;
 
   /**
-   * Use a pseudo-terminal. Defaults to true for compatibility with the
-   * original executor-backed spawn API. Set false for separate stdio pipes.
+   * Return the pipe-backed `IPty` compatibility interface. Defaults to true.
+   * Set false to receive the underlying `MxcSandboxProcess`.
    */
   usePty?: boolean;
 
@@ -725,7 +710,7 @@ export interface SandboxSpawnOptions {
    * Optional cancellation signal. Streaming in-process execution kills the
    * sandbox when the signal aborts.
    *
-   * Cancellation is best-effort: killing an attached worker mid-call leaves
+   * Cancellation is best-effort: killing a sandbox mid-call leaves
    * any backend-side state (e.g. a partially-provisioned IsolationSession)
    * wherever it landed. Callers may need a follow-up `deprovisionSandbox`
    * (or its equivalent) to clean up an orphaned sandbox after an abort.
@@ -798,114 +783,6 @@ function bufferedStderr(result: BindingRunResult): string {
   return stderr;
 }
 
-/**
- * Inject environment variables into the config's `process.env` field as
- * `KEY=VALUE` strings.  This is the explicit channel for passing env vars
- * to the sandboxed child -- the parent process environment is NOT inherited
- * by the sandbox (security: prevents secret leakage).
- */
-function injectEnvIntoConfig(
-  config: ContainerConfig,
-  env: { [key: string]: string | undefined },
-): void {
-  if (!config.process) {
-    config.process = { commandLine: '' };
-  }
-  const entries: string[] = config.process.env ? [...config.process.env] : [];
-  for (const [key, value] of Object.entries(env)) {
-    if (value !== undefined) {
-      entries.push(`${key}=${value}`);
-    }
-  }
-  config.process.env = entries;
-}
-
-/**
- * Apply {@link SandboxSpawnOptions.inheritDefaultEnv} to the config, so the
- * environment is layered on the backend's default rather than replacing it.
- * An option left unset does not clobber a value the caller already put in the
- * config; an explicit boolean overrides it.
- */
-function applyInheritDefaultEnv(config: ContainerConfig, options: SandboxSpawnOptions): void {
-  if (options.inheritDefaultEnv === undefined) {
-    return;
-  }
-  if (!options.inheritDefaultEnv) {
-    if (config.process) {
-      delete config.process.inheritDefaultEnv;
-    }
-    return;
-  }
-  if (!config.process) {
-    config.process = { commandLine: '' };
-  }
-  config.process.inheritDefaultEnv = true;
-}
-
-/** Spawn the attached native request worker under node-pty. */
-function spawnWithConfig(
-  config: ContainerConfig,
-  options: SandboxSpawnOptions,
-  workingDirectory?: string,
-  env?: { [key: string]: string | undefined },
-): pty.IPty {
-  // Inject env vars into config.process.env so they are passed explicitly to
-  // the sandboxed child via the JSON config (not via process inheritance).
-  if (env) {
-    injectEnvIntoConfig(config, env);
-  }
-  applyInheritDefaultEnv(config, options);
-
-  const request = prepareRequestSpec(config, {
-    experimental: options.experimental,
-  });
-  const payloadDirectory = mkdtempSync(path.join(tmpdir(), 'mxc-pty-'));
-  const payloadFile = path.join(payloadDirectory, 'request.json');
-  writeFileSync(payloadFile, JSON.stringify(request), {
-    encoding: 'utf8',
-    mode: 0o600,
-  });
-
-  try {
-    const ptyOpts: pty.IPtyForkOptions = {
-      name: "xterm-color",
-      cols: 120,
-      rows: 80,
-      ...options.ptyOptions,
-      cwd: workingDirectory || process.cwd(),
-    };
-
-    const workerPath = fileURLToPath(new URL('./pty-worker.js', import.meta.url));
-    diagLog(`spawnWithConfig: spawning PTY worker, cwd=${ptyOpts.cwd}`);
-    const ptyProcess = ptySpawnImplementation(
-      process.execPath,
-      [workerPath, '--payload-file', payloadFile],
-      ptyOpts,
-    );
-    const onAbort = () => {
-      try {
-        ptyProcess.kill();
-      } catch {
-        // Best-effort cancellation only.
-      }
-    };
-    if (options.signal?.aborted) {
-      onAbort();
-    } else {
-      options.signal?.addEventListener('abort', onAbort, { once: true });
-    }
-    ptyProcess.onExit(() => {
-      options.signal?.removeEventListener('abort', onAbort);
-      rmSync(payloadDirectory, { force: true, recursive: true });
-    });
-
-    return ptyProcess;
-  } catch (err) {
-    rmSync(payloadDirectory, { force: true, recursive: true });
-    throw err;
-  }
-}
-
 function spawnConfig(
   config: ContainerConfig,
   options: SandboxSpawnOptions,
@@ -920,17 +797,15 @@ function spawnConfig(
         `sandbox execution does not support option '${unsupportedOption}' in PTY mode`,
       );
     }
-    validateBindingPolicy(config);
-    return spawnWithConfig(config, options, workingDirectory, env);
-  }
-
-  const pipeOptions = { ...options, usePty: undefined };
-  const unsupportedOption = unsupportedInProcessRunOption(pipeOptions, true, false);
-  if (unsupportedOption !== undefined) {
-    throw new MxcError(
-      'malformed_request',
-      `sandbox execution does not support executor-only option '${unsupportedOption}'`,
-    );
+  } else {
+    const pipeOptions = { ...options, usePty: undefined };
+    const unsupportedOption = unsupportedInProcessRunOption(pipeOptions, true, false);
+    if (unsupportedOption !== undefined) {
+      throw new MxcError(
+        'malformed_request',
+        `sandbox execution does not support executor-only option '${unsupportedOption}'`,
+      );
+    }
   }
 
   const proc = spawnBindingSandboxProcess(
@@ -943,7 +818,9 @@ function spawnConfig(
     config.process?.timeout,
   );
   wireAbortToProcess(proc, options);
-  return proc;
+  return options.usePty === false
+    ? proc
+    : createPtyAdapter(proc, options.ptyOptions);
 }
 
 /**

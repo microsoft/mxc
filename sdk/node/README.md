@@ -173,11 +173,10 @@ It is reported **fail closed**: if the probe cannot run, the result is `'unsuppo
 
 The SDK provides three entry points. **Prefer the config-based path**
 (`createConfigFromPolicy` + `spawnSandboxFromConfig`) when you need backend
-selection or backend-specific tuning. The streaming APIs use a PTY by default
-and return a `node-pty` `IPty`. Pass `{ usePty: false }` to receive an
-`MxcSandboxProcess` with separate Node.js stdin, stdout, and stderr streams.
-That pipe process also exposes ChildProcess-compatible aliases and completion
-events for existing non-interactive consumers.
+selection or backend-specific tuning. The streaming APIs return a pipe-backed
+`node-pty` `IPty` compatibility interface by default. Pass
+`{ usePty: false }` to receive the underlying `MxcSandboxProcess` with separate
+Node.js stdin, stdout, and stderr streams.
 
 ### 1. Config-based — recommended
 
@@ -519,20 +518,23 @@ const sandbox = spawnSandboxFromConfig(config, { usePty: false });
 const status = await sandbox.waitAsync();
 ```
 
-### PTY and pipe modes do not require MXC executor binaries
+### `IPty` compatibility does not provide terminal semantics
 
-`spawnSandbox` and `spawnSandboxFromConfig` preserve the original default PTY
-behavior. The SDK starts a packaged Node worker under `node-pty`; the worker
-calls `mxc_ffi`, and the selected backend inherits that terminal. Interactive
-shells, terminal applications, resize, line discipline, and TTY detection
-therefore continue to work without launching `wxc-exec`, `lxc-exec`, or
-`mxc-exec-mac`.
+`spawnSandbox` and `spawnSandboxFromConfig` preserve their original default
+return type by wrapping the in-process `MxcSandboxProcess` in a pipe-backed
+`node-pty` `IPty` adapter. The adapter supports `onData`, `write`, `onExit`,
+`kill`, pause/resume, and compatibility dimensions without launching an MXC
+executor, Node worker, or native `node-pty` process.
 
-Pass `{ usePty: false }` for an `MxcSandboxProcess` backed directly by
-`mxc_ffi` pipes. Read `standardOutput` and `standardError`, write to
-`standardInput`, and use `await waitAsync()` for completion. Its
-ChildProcess-compatible aliases and events remain a pipe compatibility surface;
-they do not provide PTY semantics. `spawnSandboxAsync` is the buffered
+The sandboxed workload still receives ordinary pipes. TTY detection, terminal
+line discipline, raw mode, job control, and resize propagation are not
+available; `resize()` only updates the adapter's reported dimensions and
+`clear()` is a no-op. Interactive shells and terminal applications may behave
+differently.
+
+Pass `{ usePty: false }` for the underlying `MxcSandboxProcess`. Read
+`standardOutput` and `standardError`, write to `standardInput`, and use
+`await waitAsync()` for completion. `spawnSandboxAsync` remains the buffered
 alternative and returns separate `stdout` and `stderr` strings.
 
 ### `createConfigFromPolicy` leaves `commandLine` empty

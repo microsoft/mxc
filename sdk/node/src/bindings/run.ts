@@ -56,14 +56,13 @@ const AbiRunResultType = koffi.struct('MxcNodeJsonRunResult', {
 
 function bindRunFunctions(
   native: ReturnType<typeof loadMxcFfi>,
-  symbol = 'mxc_run_request',
 ): {
   run: ReturnType<typeof bindNativeFunction<RunFunction>>;
   free: ReturnType<typeof bindNativeFunction<FreeFunction>>;
 } {
   return {
     run: bindNativeFunction<RunFunction>(native.handle, {
-      symbol,
+      symbol: 'mxc_run_request',
       result: 'int32_t',
       parameters: [
         'const char *',
@@ -94,23 +93,9 @@ function decodeRunResult(status: number, result: AbiRunResult): BindingRunResult
 }
 
 export function runBindingRequest(request: RequestSpec): BindingRunResult {
-  return runBindingRequestSync(request, 'mxc_run_request');
-}
-
-/** Execute a request with stdio inherited from the current process. */
-export function runBindingRequestAttached(
-  request: RequestSpec,
-): BindingRunResult {
-  return runBindingRequestSync(request, 'mxc_run_request_attached');
-}
-
-function runBindingRequestSync(
-  request: RequestSpec,
-  symbol: string,
-): BindingRunResult {
   const native = loadMxcFfi();
   try {
-    const { run, free } = bindRunFunctions(native, symbol);
+    const { run, free } = bindRunFunctions(native);
     const result = {} as AbiRunResult;
     let filled = false;
     try {
