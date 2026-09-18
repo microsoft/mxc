@@ -1239,9 +1239,11 @@ pub enum FailurePhase {
     /// the VM/sandbox bring-up, or a transient resource contention (e.g. a
     /// single-instance backend already running). Generally worth retrying.
     LaunchFailed,
-    /// The request cannot be honored and will not succeed on a blind retry
-    /// without changing the input or host: a policy rejection, or a missing
-    /// host prerequisite (backend/runtime not installed).
+    /// The request cannot be honored as written and will not succeed on a blind
+    /// retry without changing the input: a policy rejection, or a policy this
+    /// host's backend cannot enforce. Caller-fixable, so it surfaces as
+    /// `policy_validation`. A backend that cannot serve *any* request on this
+    /// host is [`BackendUnavailable`](Self::BackendUnavailable) instead.
     Rejected,
     /// The launch command succeeded but the guest/sandbox infrastructure failed
     /// before or while running user code (agent rendezvous, channel connect, or

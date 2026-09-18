@@ -116,9 +116,15 @@ pub fn emit_backend_error_envelope(response: &ScriptResponse) {
 /// (`mxc_engine`'s `map_spawn_error`). Reporting it as `backend_error` would
 /// classify the same refusal differently depending on which surface the caller
 /// happened to use.
+///
+/// This relies on [`FailurePhase::Rejected`] meaning a policy refusal only. A
+/// backend that cannot serve any request on this host must report
+/// [`FailurePhase::BackendUnavailable`], or an unusable host would be
+/// misreported here as an invalid caller policy.
 fn envelope_error_code(phase: &FailurePhase) -> MxcErrorCode {
     match phase {
         FailurePhase::Rejected => MxcErrorCode::PolicyValidation,
+        FailurePhase::BackendUnavailable => MxcErrorCode::BackendUnavailable,
         _ => MxcErrorCode::BackendError,
     }
 }
@@ -177,13 +183,18 @@ mod tests {
             super::envelope_error_code(&FailurePhase::Rejected),
             MxcErrorCode::PolicyValidation
         );
+        // A host that cannot serve the backend at all is not a caller policy
+        // problem, and must not be reported as one.
+        assert_eq!(
+            super::envelope_error_code(&FailurePhase::BackendUnavailable),
+            MxcErrorCode::BackendUnavailable
+        );
         for phase in [
             FailurePhase::None,
             FailurePhase::LaunchFailed,
             FailurePhase::PostLaunchFailed,
             FailurePhase::ProcessExited,
             FailurePhase::Timeout,
-            FailurePhase::BackendUnavailable,
         ] {
             assert_eq!(
                 super::envelope_error_code(&phase),
