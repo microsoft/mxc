@@ -5,7 +5,6 @@ members = [
     "backends/hyperlight/common",
     "backends/isolation_session/bindings",
     "backends/isolation_session/common",
-    "backends/learning_mode/windows",
     "backends/lxc/common",
     "backends/nanvix/binaries",
     "backends/nanvix/build_common",
@@ -20,6 +19,7 @@ members = [
     "backends/wslc/daemon",
     "core/generated/process_security_environment_specification",
     "core/learning_mode_core",
+    "core/learning_mode_platforms/windows",
     "core/lxc",
     "core/mxc_build_common",
     "core/mxc_config_contract",
@@ -75,7 +75,7 @@ hyperlight_common = { path = "backends/hyperlight/common" }
 isolation_session_bindings = { path = "backends/isolation_session/bindings" }
 isolation_session_common = { path = "backends/isolation_session/common" }
 learning_mode_core = { path = "core/learning_mode_core" }
-learning_mode_windows = { path = "backends/learning_mode/windows" }
+learning_mode_windows = { path = "core/learning_mode_platforms/windows" }
 libc = "0.2"
 lxc_common = { path = "backends/lxc/common" }
 mxc_build_common = { path = "core/mxc_build_common" }

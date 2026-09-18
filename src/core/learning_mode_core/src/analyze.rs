@@ -4,8 +4,8 @@
 //! The decode abstraction: turn a platform-native capture source into the
 //! cross-platform [`DeniedResource`] model.
 //!
-//! Each backend implements [`DenialAnalyzer`] over its own capture format.
-//! The Windows backend (`learning_mode_windows`) implements it over a
+//! Each platform implements [`DenialAnalyzer`] over its own capture format.
+//! The Windows support crate (`learning_mode_windows`) implements it over a
 //! sealed ETW trace (`.etl`); a future Linux backend would implement it
 //! over its own source. Keeping the trait in this cross-platform crate
 //! lets the runner and tests depend on the abstraction rather than any
