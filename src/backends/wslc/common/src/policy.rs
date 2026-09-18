@@ -316,15 +316,37 @@ mod tests {
         }
     }
 
+    fn parsed_operation(
+        source: &str,
+        phase: wxc_common::state_aware_request::Phase,
+    ) -> ExecutionRequest {
+        let sandbox_id = match phase {
+            wxc_common::state_aware_request::Phase::Provision => None,
+            _ => Some("wslc:0123456789abcdef0123456789abcdef"),
+        };
+        wxc_common::config_parser::load_state_aware_request_from_json_with_options(
+            source,
+            &mut wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer),
+            phase,
+            sandbox_id,
+            &[],
+        )
+        .unwrap()
+        .into_request()
+    }
+
     #[test]
     fn directional_networking_accepts_only_truthful_all_or_nothing_postures() {
         for egress in ["allow", "deny"] {
             for ingress in ["allow", "deny"] {
                 for loopback in ["allow", "deny"] {
                     let source = format!(
-                        r#"{{"version":"0.9.0-alpha","phase":"provision","containment":"wslc","network":{{"egress":{{"default":"{egress}"}},"ingress":{{"default":"{ingress}","hostLoopback":"{loopback}"}}}}}}"#
+                        r#"{{"version":"0.9.0-alpha","containment":"wslc","network":{{"egress":{{"default":"{egress}"}},"ingress":{{"default":"{ingress}","hostLoopback":"{loopback}"}}}}}}"#
                     );
-                    let request = parsed(&source);
+                    let request = parsed_operation(
+                        &source,
+                        wxc_common::state_aware_request::Phase::Provision,
+                    );
                     assert_eq!(network_is_isolated(&request), egress == "deny");
                     assert_eq!(
                         validate_provision_policy(&request).is_ok(),
@@ -334,8 +356,10 @@ mod tests {
                 }
             }
         }
-        let defaults =
-            parsed(r#"{"version":"0.9.0-alpha","phase":"provision","containment":"wslc"}"#);
+        let defaults = parsed_operation(
+            r#"{"version":"0.9.0-alpha","containment":"wslc"}"#,
+            wxc_common::state_aware_request::Phase::Provision,
+        );
         assert!(network_is_isolated(&defaults));
         validate_provision_policy(&defaults).unwrap();
     }
@@ -355,8 +379,9 @@ mod tests {
 
     #[test]
     fn runtime_proxy_only_exec_inherits_mode_and_retains_guest_routable_url() {
-        let request = parsed(
-            r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wslc:0123456789abcdef0123456789abcdef","process":{"commandLine":"echo"},"runtimeConfig":{"networkProxy":"http://proxy.example:8080"}}"#,
+        let request = parsed_operation(
+            r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo"},"runtimeConfig":{"networkProxy":"http://proxy.example:8080"}}"#,
+            wxc_common::state_aware_request::Phase::Exec,
         );
         assert!(!request.policy.network_specified);
         assert!(!request.policy.network_mode_specified);
@@ -373,10 +398,14 @@ mod tests {
 
         for network in [r#"{}"#, r#"{"egress":{"default":"deny"}}"#] {
             let source = format!(
-                r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wslc:0123456789abcdef0123456789abcdef","process":{{"commandLine":"echo"}},"network":{network},"runtimeConfig":{{"networkProxy":"http://proxy.example:8080"}}}}"#
+                r#"{{"version":"0.9.0-alpha","process":{{"commandLine":"echo"}},"network":{network},"runtimeConfig":{{"networkProxy":"http://proxy.example:8080"}}}}"#
             );
             assert_policy_validation(
-                validate_exec_policy(&parsed(&source)).unwrap_err(),
+                validate_exec_policy(&parsed_operation(
+                    &source,
+                    wxc_common::state_aware_request::Phase::Exec,
+                ))
+                .unwrap_err(),
                 "network mode",
             );
         }
@@ -404,10 +433,14 @@ mod tests {
         assert!(!network_policy_support().contains(NetworkPolicySupport::PROXY_PEER_IDENTITY));
         for action in ["allow", "deny"] {
             let source = format!(
-                r#"{{"version":"0.9.0-alpha","phase":"provision","containment":"wslc","network":{{"egress":{{"{action}":[{{"to":[{{"cidr":"192.0.2.0/24"}}]}}]}}}}}}"#
+                r#"{{"version":"0.9.0-alpha","containment":"wslc","network":{{"egress":{{"{action}":[{{"to":[{{"cidr":"192.0.2.0/24"}}]}}]}}}}}}"#
             );
             assert_policy_validation(
-                validate_provision_policy(&parsed(&source)).unwrap_err(),
+                validate_provision_policy(&parsed_operation(
+                    &source,
+                    wxc_common::state_aware_request::Phase::Provision,
+                ))
+                .unwrap_err(),
                 "allow/deny rules",
             );
         }
