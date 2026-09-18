@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 
 use nvx_common::{WINDOWS_PLATFORM_ARTIFACTS, WORKLOAD_IMAGE_ARTIFACTS};
 
+/// The only supported NVX package target triple.
+pub const SUPPORTED_NVX_TARGET_TRIPLE: &str = "x86_64-pc-windows-msvc";
+
 /// Category of an NVX release artifact.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ArtifactKind {
@@ -27,6 +30,38 @@ pub fn artifact_rel_paths() -> impl Iterator<Item = (ArtifactKind, &'static str)
                 .into_iter()
                 .map(|path| (ArtifactKind::WorkloadImage, path)),
         )
+}
+
+/// Returns whether the NVX artifact pipeline supports the given target.
+///
+/// NVX packaging is intentionally restricted to the Windows x86_64 MSVC
+/// target. That is the only target that is allowed to download, verify, and
+/// stage the pinned WHP artifacts.
+pub fn target_supports_nvx(target_os: &str, target_arch: &str, target_env: &str) -> bool {
+    target_os == "windows" && target_arch == "x86_64" && target_env == "msvc"
+}
+
+/// Returns `Ok(())` for the only supported NVX target, or a clear error
+/// message for anything else.
+pub fn validate_nvx_target(
+    target: &str,
+    target_os: &str,
+    target_arch: &str,
+    target_env: &str,
+) -> Result<(), String> {
+    if target_supports_nvx(target_os, target_arch, target_env) {
+        Ok(())
+    } else {
+        Err(unsupported_target_message(target))
+    }
+}
+
+/// Formats the explicit error message used when NVX is requested for an
+/// unsupported target.
+pub fn unsupported_target_message(target: &str) -> String {
+    format!(
+        "nvx packaging is only supported for target {SUPPORTED_NVX_TARGET_TRIPLE}; current target is {target}"
+    )
 }
 
 /// Returns the artifacts required by the currently configured release.
@@ -256,5 +291,30 @@ mod tests {
         for relative_path in WINDOWS_PLATFORM_ARTIFACTS {
             assert!(!target.path().join(relative_path).exists());
         }
+    }
+
+    #[test]
+    fn target_support_only_allows_windows_x86_64_msvc() {
+        assert!(target_supports_nvx("windows", "x86_64", "msvc"));
+        assert!(!target_supports_nvx("windows", "x86_64", "gnu"));
+        assert!(!target_supports_nvx("windows", "aarch64", "msvc"));
+        assert!(!target_supports_nvx("linux", "x86_64", "gnu"));
+    }
+
+    #[test]
+    fn unsupported_target_message_names_supported_triple() {
+        let message = unsupported_target_message("aarch64-pc-windows-msvc");
+
+        assert!(message.contains(SUPPORTED_NVX_TARGET_TRIPLE));
+        assert!(message.contains("aarch64-pc-windows-msvc"));
+    }
+
+    #[test]
+    fn validate_nvx_target_rejects_unsupported_target() {
+        let error = validate_nvx_target("aarch64-pc-windows-msvc", "windows", "aarch64", "msvc")
+            .expect_err("unsupported target must fail closed");
+
+        assert!(error.contains(SUPPORTED_NVX_TARGET_TRIPLE));
+        assert!(error.contains("aarch64-pc-windows-msvc"));
     }
 }

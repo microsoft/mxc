@@ -23,11 +23,7 @@ fn main() {
         return;
     }
 
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    if target_os != "windows" {
-        emit_disabled_metadata();
-        return;
-    }
+    ensure_supported_target();
 
     let out_dir = PathBuf::from(
         std::env::var_os("OUT_DIR").expect("nvx_binaries: OUT_DIR is not set by Cargo"),
@@ -75,6 +71,16 @@ fn main() {
     nvx_build_common::emit_rerun_for_artifacts(&bin_dir, workload_images_available);
 
     emit_metadata(&bin_dir, workload_images_available);
+}
+
+fn ensure_supported_target() {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    let target = std::env::var("TARGET")
+        .unwrap_or_else(|_| format!("{target_arch}-pc-{target_os}-{target_env}"));
+    nvx_build_common::validate_nvx_target(&target, &target_os, &target_arch, &target_env)
+        .unwrap_or_else(|error| panic!("nvx_binaries: {error}"));
 }
 
 fn emit_disabled_metadata() {

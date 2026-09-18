@@ -13,7 +13,10 @@ fn main() {
     copy_nanvix_binaries();
 
     #[cfg(all(windows, feature = "nvx"))]
-    copy_nvx_binaries();
+    {
+        ensure_supported_nvx_target();
+        copy_nvx_binaries();
+    }
 
     // Delay-load winhvplatform.dll so WHP-less hosts don't crash before main().
     // CARGO_CFG_TARGET_* (not #[cfg]) because build.rs cfg gates are host, not target.
@@ -98,6 +101,17 @@ fn copy_nanvix_binaries() {
     // of the staging logic (target-dir derivation, snapshot trust, copy/purge,
     // rerun emission) lives in the build-only `nanvix_build_common` crate.
     nanvix_build_common::stage_artifacts_next_to_exe(Path::new(&nanvix_bin_dir));
+}
+
+#[cfg(all(windows, feature = "nvx"))]
+fn ensure_supported_nvx_target() {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    let target = std::env::var("TARGET")
+        .unwrap_or_else(|_| format!("{target_arch}-pc-{target_os}-{target_env}"));
+    nvx_build_common::validate_nvx_target(&target, &target_os, &target_arch, &target_env)
+        .unwrap_or_else(|error| panic!("wxc build.rs: {error}"));
 }
 
 #[cfg(all(windows, feature = "nvx"))]
