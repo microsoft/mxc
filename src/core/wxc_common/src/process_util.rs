@@ -658,15 +658,6 @@ mod tests {
         );
     }
 
-    /// Creates a non-inheritable pipe pair for use in tests.
-    /// Unlike `create_std_pipes`, neither end is marked inheritable, which
-    /// prevents handles from leaking into child processes spawned by other
-    /// tests running concurrently (cargo test runs in parallel). Leaked
-    /// write-ends would keep pipes open and cause `read_from_pipe` to block.
-    fn create_test_pipes() -> (OwnedHandle, OwnedHandle) {
-        create_local_pipe().unwrap()
-    }
-
     #[test]
     fn test_captured_output_stdout() {
         let output =
@@ -699,8 +690,8 @@ mod tests {
     }
 
     #[test]
-    fn test_read_from_pipe_basic() {
-        let (mut read_handle, write_handle) = create_test_pipes();
+    fn test_read_from_pipe_basic() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut read_handle, write_handle) = create_local_pipe()?;
         let test_msg = b"test pipe content";
         let mut bytes_written = 0u32;
         unsafe {
@@ -709,12 +700,12 @@ mod tests {
                 Some(test_msg),
                 Some(&mut bytes_written),
                 None,
-            )
-            .unwrap();
+            )?;
         }
         drop(write_handle);
         let output = read_from_pipe(read_handle.take());
         assert_eq!(output, "test pipe content");
+        Ok(())
     }
 
     #[test]
@@ -766,18 +757,19 @@ mod tests {
     }
 
     #[test]
-    fn test_create_local_pipe_is_not_inheritable() {
+    fn test_create_local_pipe_is_not_inheritable() -> Result<(), Box<dyn std::error::Error>> {
         use windows::Win32::Foundation::GetHandleInformation;
 
-        let (read_handle, write_handle) = create_local_pipe().unwrap();
+        let (read_handle, write_handle) = create_local_pipe()?;
         let mut read_flags = 0u32;
         let mut write_flags = 0u32;
         unsafe {
-            GetHandleInformation(read_handle.get(), &mut read_flags).unwrap();
-            GetHandleInformation(write_handle.get(), &mut write_flags).unwrap();
+            GetHandleInformation(read_handle.get(), &mut read_flags)?;
+            GetHandleInformation(write_handle.get(), &mut write_flags)?;
         }
         assert_eq!(read_flags & HANDLE_FLAG_INHERIT.0, 0);
         assert_eq!(write_flags & HANDLE_FLAG_INHERIT.0, 0);
+        Ok(())
     }
 
     #[test]
