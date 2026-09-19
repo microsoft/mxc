@@ -725,11 +725,18 @@ fn dup_handle_to_file(handle: PipeHandle) -> Option<std::fs::File> {
     dup_handle_to_owned(handle).map(std::fs::File::from)
 }
 
+/// Records a non-null Windows `HANDLE` for later duplication.
+///
+/// This neither duplicates nor takes ownership of the backend's handle.
 #[cfg(target_os = "windows")]
 fn native_pipe_source(handle: PipeHandle) -> Option<isize> {
     (!is_null_pipe(handle)).then_some(handle.0 as isize)
 }
 
+/// Duplicates a recorded Windows pipe `HANDLE`.
+///
+/// The non-Windows implementation with the same name instead duplicates a
+/// Unix file descriptor. Exactly one implementation is compiled per target.
 #[cfg(target_os = "windows")]
 fn duplicate_native_pipe(
     source: Option<isize>,
@@ -846,11 +853,18 @@ fn dup_fd_to_file(handle: PipeHandle) -> Option<std::fs::File> {
     borrowed.try_clone_to_owned().ok().map(std::fs::File::from)
 }
 
+/// Records a non-null Unix file descriptor for later duplication.
+///
+/// This neither duplicates nor takes ownership of the backend's descriptor.
 #[cfg(not(target_os = "windows"))]
 fn native_pipe_source(handle: PipeHandle) -> Option<isize> {
     (!is_null_pipe(handle)).then_some(handle as isize)
 }
 
+/// Duplicates a recorded Unix pipe file descriptor using `dup`.
+///
+/// The Windows implementation with the same name instead duplicates a native
+/// `HANDLE`. Exactly one implementation is compiled per target.
 #[cfg(not(target_os = "windows"))]
 fn duplicate_native_pipe(
     source: Option<isize>,
