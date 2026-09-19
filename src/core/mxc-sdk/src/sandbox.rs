@@ -10,7 +10,7 @@ use std::io::{Read, Write};
 pub use wxc_common::models::{
     CaptureDenialsErrorOutput, CaptureDenialsOutput, SandboxOutputMetadata,
 };
-use wxc_common::sandbox_process::{SandboxProcess, StreamCloser as InnerCloser};
+use wxc_common::sandbox_process::{NativeStdio, SandboxProcess, StreamCloser as InnerCloser};
 
 /// The outcome of waiting on a [`Sandbox`] (see [`Sandbox::wait`]).
 ///
@@ -103,6 +103,11 @@ impl Sandbox {
     /// Take the child's stderr pipe. Returns `None` after the first call.
     pub fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
         self.inner.take_stderr()
+    }
+
+    #[doc(hidden)]
+    pub fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+        self.inner.take_native_stdio()
     }
 
     /// A [`StreamCloser`] that unblocks a parked blocking read on stdout without

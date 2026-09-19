@@ -27,6 +27,7 @@
 
 use std::collections::HashSet;
 use std::fmt::Write as FmtWrite;
+use std::os::fd::AsFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -38,8 +39,8 @@ use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, ScriptResponse};
 use wxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, group_kill, spawn_discard, take_boxed_read,
-    take_boxed_write, wait_with_timeout, SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
-    WaitError,
+    take_boxed_write, wait_with_timeout, NativeStdio, SandboxBackend, SandboxProcess, StdioMode,
+    StreamCloser, WaitError,
 };
 use wxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
 use wxc_common::validator::{
@@ -768,6 +769,38 @@ impl BubblewrapSandboxProcess {
 }
 
 impl SandboxProcess for BubblewrapSandboxProcess {
+    fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+        let stdio = NativeStdio {
+            stdin: self
+                .inner
+                .stdin
+                .as_ref()
+                .map(|stream| stream.as_fd().try_clone_to_owned())
+                .transpose()?,
+            stdout: self
+                .inner
+                .stdout
+                .as_ref()
+                .map(InterruptibleReader::try_clone_owned_fd)
+                .transpose()?,
+            stderr: self
+                .inner
+                .stderr
+                .as_ref()
+                .map(InterruptibleReader::try_clone_owned_fd)
+                .transpose()?,
+        };
+        if stdio.is_empty() {
+            return Ok(None);
+        }
+        self.inner.stdin.take();
+        self.inner.stdout.take();
+        self.inner.stderr.take();
+        self.inner.stdout_canceller.take();
+        self.inner.stderr_canceller.take();
+        Ok(Some(stdio))
+    }
+
     fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
         take_boxed_write(&mut self.inner.stdin)
     }

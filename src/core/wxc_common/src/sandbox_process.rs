@@ -22,6 +22,29 @@ use crate::models::{ExecutionRequest, FailurePhase, SandboxOutputMetadata, Scrip
 use crate::script_runner::ScriptRunner;
 use crate::validator::{validate_common, validate_network_policy_support, NetworkPolicySupport};
 
+#[cfg(unix)]
+pub type OwnedPipe = std::os::fd::OwnedFd;
+#[cfg(windows)]
+pub type OwnedPipe = std::os::windows::io::OwnedHandle;
+
+/// Owned native endpoints for a sandbox process.
+///
+/// Taking these endpoints transfers stream ownership to the caller. The
+/// process retains only lifecycle control; its normal `take_*` methods return
+/// `None` afterward.
+#[derive(Debug)]
+pub struct NativeStdio {
+    pub stdin: Option<OwnedPipe>,
+    pub stdout: Option<OwnedPipe>,
+    pub stderr: Option<OwnedPipe>,
+}
+
+impl NativeStdio {
+    pub fn is_empty(&self) -> bool {
+        self.stdin.is_none() && self.stdout.is_none() && self.stderr.is_none()
+    }
+}
+
 /// A handle to a running sandboxed process.
 ///
 /// Modelled on [`std::process::Child`]: the caller may `take_*` the std
@@ -85,9 +108,23 @@ pub trait SandboxProcess: Send {
         None
     }
 
+    /// Transfer owned native stdio endpoints to the caller.
+    ///
+    /// Backends that cannot expose OS pipe endpoints return `Ok(None)`.
+    fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+        Ok(None)
+    }
+
     /// Take ownership of the child's stdin so the caller can write to it.
     /// Returns `None` if already taken. Drop the writer to send EOF.
     fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>>;
+
+    /// A closer that interrupts the stdin stream returned by
+    /// [`take_stdin`](SandboxProcess::take_stdin), including an in-flight
+    /// blocking write. The default returns `None`.
+    fn stdin_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        None
+    }
 
     /// Take ownership of the child's stdout for live reading. Returns `None`
     /// if already taken. A taken stream is **not** drained by
@@ -119,6 +156,15 @@ pub trait SandboxProcess: Send {
     /// object the child is assigned to. Reaping happens in
     /// [`wait`](SandboxProcess::wait).
     fn kill(&mut self) -> std::io::Result<()>;
+
+    /// Request termination because the execution deadline elapsed.
+    ///
+    /// The default uses the same process-tree termination primitive as
+    /// [`kill`](SandboxProcess::kill). Wrappers may override this to preserve
+    /// timeout-specific reporting while delegating the actual termination.
+    fn kill_for_timeout(&mut self) -> std::io::Result<()> {
+        self.kill()
+    }
 
     /// Block until the child exits (honouring the request's `scriptTimeout`,
     /// where `0` means wait forever) and return its exit code.
