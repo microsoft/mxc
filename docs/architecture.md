@@ -119,11 +119,14 @@ flowchart LR
 
 `mxc_ffi` provides the C ABI for in-process language bindings. Its sandbox
 lifecycle functions call `mxc-sdk`, and its native stdio functions transfer
-duplicated stdin, stdout, and stderr endpoints that runtimes can adopt as
-native streams. The Node package contains an internal native stdio binding for
-this path, while its current public APIs use the platform executor. The
-generated C# P/Invoke file is created during the C# build. Generated TypeScript
-wire types come from the schema tooling.
+owned stdin, stdout, and stderr endpoints that runtimes can adopt as native
+streams. Process-based backends duplicate their existing OS pipe endpoints.
+WSLC, whose SDK delivers stdout and stderr through callbacks, pumps those
+callback-backed streams into synthesized OS pipes; stdin remains unavailable.
+The Node package contains an internal native stdio binding for this path, while
+its current public APIs use the platform executor. The generated C# P/Invoke
+file is created during the C# build. Generated TypeScript wire types come from
+the schema tooling.
 
 ## Tests
 

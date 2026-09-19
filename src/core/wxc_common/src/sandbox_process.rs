@@ -29,9 +29,14 @@ pub type OwnedPipe = std::os::windows::io::OwnedHandle;
 
 /// Owned native endpoints for a sandbox process.
 ///
-/// Taking these endpoints transfers stream ownership to the caller. The
-/// process retains only lifecycle control; its normal `take_*` methods return
-/// `None` afterward.
+/// Each populated endpoint is an OS pipe handle/file descriptor with the
+/// conventional direction: stdin is writable, while stdout and stderr are
+/// readable. A backend may transfer its existing process pipes or synthesize
+/// compatible pipes from another live stream transport.
+///
+/// Taking these endpoints atomically transfers stream ownership to the caller.
+/// Unsupported streams remain `None`; the process retains only lifecycle
+/// control, and its normal `take_*` methods return `None` afterward.
 #[derive(Debug)]
 pub struct NativeStdio {
     pub stdin: Option<OwnedPipe>,
@@ -150,7 +155,9 @@ pub trait SandboxProcess: Send {
 
     /// Transfer owned native stdio endpoints to the caller.
     ///
-    /// Backends that cannot expose OS pipe endpoints return `Ok(None)`.
+    /// Backends may return existing process pipes or synthesize OS pipes from
+    /// another live stream transport. Backends that cannot provide compatible
+    /// endpoints return `Ok(None)`.
     fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
         Ok(None)
     }
