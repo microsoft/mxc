@@ -6,7 +6,7 @@ import { once } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { describe, it } from 'node:test';
 import {
-  _createMxcSandboxProcess,
+  createMxcSandboxProcess,
   type NativeLifecycleDriver,
   type NativeLifecycleStatus,
 } from '../../src/sandbox-process.js';
@@ -95,7 +95,7 @@ class FakeDriver implements NativeLifecycleDriver {
 describe('native sandbox process', () => {
   it('exposes the transferred Node streams directly', async () => {
     const driver = new FakeDriver();
-    const proc = _createMxcSandboxProcess(driver);
+    const proc = createMxcSandboxProcess(driver);
     assert.strictEqual(proc.standardInput, driver.standardInput);
     assert.strictEqual(proc.standardOutput, driver.standardOutput);
     assert.strictEqual(proc.standardError, driver.standardError);
@@ -109,7 +109,7 @@ describe('native sandbox process', () => {
 
   it('closes untaken stdin and drains untaken output while waiting', async () => {
     const driver = new FakeDriver();
-    const proc = _createMxcSandboxProcess(driver);
+    const proc = createMxcSandboxProcess(driver);
     const inputEnded = once(driver.standardInput, 'finish');
     const wait = proc.waitAsync();
 
@@ -125,7 +125,7 @@ describe('native sandbox process', () => {
 
   it('refreshes warnings and metadata after terminal completion', async () => {
     const driver = new FakeDriver();
-    const proc = _createMxcSandboxProcess(driver);
+    const proc = createMxcSandboxProcess(driver);
     assert.deepStrictEqual(proc.warnings, ['initial warning']);
     driver.warningValues = ['cleanup warning'];
     driver.metadata = { source: 'native' };
@@ -143,7 +143,7 @@ describe('native sandbox process', () => {
 
   it('does not reject successful completion for an expected stdin closure', async () => {
     const driver = new FakeDriver();
-    const proc = _createMxcSandboxProcess(driver);
+    const proc = createMxcSandboxProcess(driver);
     const error = Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
 
     driver.standardInput.emit('error', error);
@@ -157,7 +157,7 @@ describe('native sandbox process', () => {
 
   it('still rejects unexpected stdin failures', async () => {
     const driver = new FakeDriver();
-    const proc = _createMxcSandboxProcess(driver);
+    const proc = createMxcSandboxProcess(driver);
     const error = Object.assign(new Error('stdin failed'), { code: 'EIO' });
 
     driver.standardInput.emit('error', error);
@@ -167,7 +167,7 @@ describe('native sandbox process', () => {
 
   it('does not destroy caller-owned output when the process exits', async () => {
     const driver = new FakeDriver();
-    const proc = _createMxcSandboxProcess(driver);
+    const proc = createMxcSandboxProcess(driver);
     const output = proc.standardOutput!;
     output.pause();
     driver.standardOutput.write('trailing output');
@@ -181,7 +181,7 @@ describe('native sandbox process', () => {
 
   it('forwards kill while the process is running', () => {
     const driver = new FakeDriver();
-    const proc = _createMxcSandboxProcess(driver);
+    const proc = createMxcSandboxProcess(driver);
 
     proc.kill();
 
@@ -191,7 +191,7 @@ describe('native sandbox process', () => {
 
   it('rejects wait when lifecycle polling fails', async () => {
     const driver = new FakeDriver();
-    const proc = _createMxcSandboxProcess(driver);
+    const proc = createMxcSandboxProcess(driver);
     driver.pollError = new Error('poll failed');
 
     await assert.rejects(proc.waitAsync(), /poll failed/);
@@ -201,7 +201,7 @@ describe('native sandbox process', () => {
 
   it('runs all registered cleanup and preserves the first failure', async () => {
     const driver = new FakeDriver();
-    const proc = _createMxcSandboxProcess(driver);
+    const proc = createMxcSandboxProcess(driver);
     let secondRan = false;
     proc._registerCleanup(() => {
       throw new Error('cleanup failed');
@@ -217,7 +217,7 @@ describe('native sandbox process', () => {
 
   it('disposes streams and native lifecycle ownership exactly once', async () => {
     const driver = new FakeDriver();
-    const proc = _createMxcSandboxProcess(driver);
+    const proc = createMxcSandboxProcess(driver);
     const wait = proc.waitAsync();
 
     proc.dispose();
@@ -234,7 +234,7 @@ describe('native sandbox process', () => {
 
   it('enforces the request timeout and reports a timed-out result', async () => {
     const driver = new FakeDriver();
-    const proc = _createMxcSandboxProcess(driver, 1);
+    const proc = createMxcSandboxProcess(driver, 1);
 
     const result = await proc.waitAsync();
 
@@ -247,7 +247,7 @@ describe('native sandbox process', () => {
   it('observes an exit racing the timeout before killing', async () => {
     const driver = new FakeDriver();
     driver.completeOnPoll = 3;
-    const proc = _createMxcSandboxProcess(driver, 1);
+    const proc = createMxcSandboxProcess(driver, 1);
 
     const result = await proc.waitAsync();
 
@@ -265,7 +265,7 @@ describe('native sandbox process', () => {
       running: false,
       timedOut: true,
     };
-    const proc = _createMxcSandboxProcess(driver, 1);
+    const proc = createMxcSandboxProcess(driver, 1);
 
     const result = await proc.waitAsync();
 
@@ -277,7 +277,7 @@ describe('native sandbox process', () => {
   it('does not issue control calls after terminal wait starts', async () => {
     const driver = new FakeDriver();
     driver.deferWait = true;
-    const proc = _createMxcSandboxProcess(driver);
+    const proc = createMxcSandboxProcess(driver);
     const wait = proc.waitAsync();
     driver.complete(5);
 

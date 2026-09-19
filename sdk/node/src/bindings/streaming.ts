@@ -1,16 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Native stdio ownership is transferred once to Node. Process lifecycle uses
-// the existing MxcSandbox FFI handle, so bytes never cross Koffi callbacks.
-
-import * as fs from 'node:fs';
-import * as net from 'node:net';
-import * as os from 'node:os';
 import type { Readable, Writable } from 'node:stream';
 import koffi, { type KoffiFunc } from 'koffi';
 import {
-  _createMxcSandboxProcess,
+  createMxcSandboxProcess,
   type MxcSandboxProcess,
   type NativeLifecycleDriver,
   type NativeLifecycleStatus,
@@ -18,6 +12,15 @@ import {
 import { loadMxcFfi, type MxcNativeLibrary } from '../native-library.js';
 import type { RequestSpec } from './request.js';
 import { bindNativeFunction } from './native-function.js';
+import {
+  adoptNativeStdio,
+  minimumWindowsNativeStdioNodeVersion,
+  nodeStreamFactory,
+  supportsNativeStdio,
+  type NativeHandle,
+  type NativeStdioHandles,
+  type NativeStreamFactory,
+} from './native-stdio.js';
 import {
   AbiErrorDetailType,
   decodeString,
@@ -27,16 +30,9 @@ import {
 } from './native-error.js';
 
 type Pointer = unknown;
-type NativeHandle = number | bigint;
 type NativeLibraryHandle = MxcNativeLibrary['handle'];
 type NativeFreeCompletion = (error: Error | null) => void;
 type NativeWaitCompletion = (error: Error | null, status: number) => void;
-
-interface AbiNativeStdio {
-  stdin_handle: NativeHandle;
-  stdout_handle: NativeHandle;
-  stderr_handle: NativeHandle;
-}
 
 const AbiSandbox = koffi.opaque('MxcSandbox');
 const AbiNativeStdioType = koffi.struct('MxcNodeNativeStdio', {
@@ -45,14 +41,14 @@ const AbiNativeStdioType = koffi.struct('MxcNodeNativeStdio', {
   stderr_handle: 'intptr_t',
 });
 
-export interface _StreamingNativeFacade {
+export interface StreamingNativeFacade {
   spawn(
     request: string,
     outHandle: Pointer[],
     error: AbiErrorDetail,
   ): number;
   id(handle: Pointer): number;
-  takeNativeStdio(handle: Pointer, stdio: AbiNativeStdio): number;
+  takeNativeStdio(handle: Pointer, stdio: NativeStdioHandles): number;
   closeNativePipe(handle: NativeHandle): void;
   tryWait(
     handle: Pointer,
@@ -75,66 +71,9 @@ export interface _StreamingNativeFacade {
   freeString(value: Pointer): void;
 }
 
-export interface _NativeStreamFactory {
-  readonly platform: NodeJS.Platform;
-  readable(handle: NativeHandle): Readable;
-  writable(handle: NativeHandle): Writable;
-}
-
-const MINIMUM_NODE_VERSION = [24, 21, 0] as const;
-
-function windowsHandleOptions(
-  handle: NativeHandle,
-): { autoClose: true; windowsHandle: bigint } {
-  return {
-    autoClose: true,
-    windowsHandle: typeof handle === 'bigint' ? handle : BigInt(handle),
-  };
-}
-
-function unixFd(handle: NativeHandle): number {
-  const fd = Number(handle);
-  if (!Number.isSafeInteger(fd) || fd < 0) {
-    throw new Error(`native runtime returned invalid file descriptor ${handle}`);
-  }
-  return fd;
-}
-
-const nodeStreamFactory: _NativeStreamFactory = {
-  platform: os.platform(),
-  readable(handle) {
-    if (this.platform === 'win32') {
-      return fs.createReadStream(
-        '',
-        windowsHandleOptions(handle) as unknown as
-          Parameters<typeof fs.createReadStream>[1],
-      );
-    }
-    return new net.Socket({
-      fd: unixFd(handle),
-      readable: true,
-      writable: false,
-    });
-  },
-  writable(handle) {
-    if (this.platform === 'win32') {
-      return fs.createWriteStream(
-        '',
-        windowsHandleOptions(handle) as unknown as
-          Parameters<typeof fs.createWriteStream>[1],
-      );
-    }
-    return new net.Socket({
-      fd: unixFd(handle),
-      readable: false,
-      writable: true,
-    });
-  },
-};
-
 function bindSandboxFunctions(
   handle: NativeLibraryHandle,
-): _StreamingNativeFacade {
+): StreamingNativeFacade {
   const pointer = koffi.pointer(AbiSandbox);
   const free = bindNativeFunction<KoffiFunc<(sandbox: Pointer) => void>>(
     handle,
@@ -228,12 +167,12 @@ function bindSandboxFunctions(
       result: 'void',
       parameters: ['char *'],
     }),
-  } as _StreamingNativeFacade;
+  } as StreamingNativeFacade;
 }
 
-let sharedNative: _StreamingNativeFacade | undefined;
+let sharedNative: StreamingNativeFacade | undefined;
 
-function getNative(): _StreamingNativeFacade {
+function getNative(): StreamingNativeFacade {
   return sharedNative ??= bindSandboxFunctions(loadMxcFfi().handle);
 }
 
@@ -241,21 +180,12 @@ function throwIfFailed(status: number, message: string): void {
   if (status !== 0) throw nativeStatusError(status, {}, message);
 }
 
-function isMissingHandle(
-  handle: NativeHandle,
-  platform: NodeJS.Platform,
-): boolean {
-  return platform === 'win32'
-    ? handle === 0 || handle === 0n
-    : handle === -1 || handle === -1n;
-}
-
 function destroyStream(stream: Readable | Writable | null): void {
   if (stream !== null && !stream.destroyed) stream.destroy();
 }
 
 function freeSandboxAsync(
-  native: _StreamingNativeFacade,
+  native: StreamingNativeFacade,
   handle: Pointer,
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
@@ -271,7 +201,7 @@ class KoffiLifecycleDriver implements NativeLifecycleDriver {
   private waitPromise: Promise<{ exitCode: number; timedOut: boolean }> | undefined;
 
   constructor(
-    private readonly native: _StreamingNativeFacade,
+    private readonly native: StreamingNativeFacade,
     private readonly handle: Pointer,
     readonly id: number,
     readonly standardInput: Writable | null,
@@ -323,12 +253,12 @@ class KoffiLifecycleDriver implements NativeLifecycleDriver {
 
   warnings(): readonly string[] {
     return parseStringArray(
-      this.readOwnedJson(this.native.warningsJson),
+      this.readOwnedJson('warningsJson'),
     );
   }
 
   outputMetadata(): unknown | undefined {
-    const json = this.readOwnedJson(this.native.outputMetadataJson);
+    const json = this.readOwnedJson('outputMetadataJson');
     return json === undefined ? undefined : JSON.parse(json);
   }
 
@@ -353,10 +283,13 @@ class KoffiLifecycleDriver implements NativeLifecycleDriver {
   }
 
   private readOwnedJson(
-    read: (handle: Pointer, out: Pointer[]) => number,
+    method: 'warningsJson' | 'outputMetadataJson',
   ): string | undefined {
     const out: Pointer[] = [null];
-    throwIfFailed(read(this.handle, out), 'reading sandbox process data failed');
+    throwIfFailed(
+      this.native[method](this.handle, out),
+      'reading sandbox process data failed',
+    );
     try {
       return decodeString(out[0]);
     } finally {
@@ -365,40 +298,18 @@ class KoffiLifecycleDriver implements NativeLifecycleDriver {
   }
 }
 
-function adoptEndpoint(
-  factory: _NativeStreamFactory,
-  handle: NativeHandle,
-  writable: boolean,
-): Readable | Writable | null {
-  if (isMissingHandle(handle, factory.platform)) return null;
-
-  return writable ? factory.writable(handle) : factory.readable(handle);
-}
-
-function closeUnadopted(
-  native: _StreamingNativeFacade,
-  factory: _NativeStreamFactory,
-  handles: NativeHandle[],
-): void {
-  for (const handle of handles) {
-    if (!isMissingHandle(handle, factory.platform)) {
-      native.closeNativePipe(handle);
-    }
-  }
-}
-
 function beginFailedSpawnCleanup(
-  native: _StreamingNativeFacade,
+  native: StreamingNativeFacade,
   handle: Pointer,
 ): void {
   void freeSandboxAsync(native, handle).catch(() => {});
 }
 
-/** @internal Builds a driver with injectable native and stream facades. */
-export function _spawnStreamingDriverForTest(
+/** Internal constructor with injectable native and stream dependencies. */
+export function createStreamingDriver(
   request: RequestSpec,
-  native: _StreamingNativeFacade,
-  factory: _NativeStreamFactory,
+  native: StreamingNativeFacade,
+  factory: NativeStreamFactory,
 ): NativeLifecycleDriver {
   const outHandle: Pointer[] = [null];
   const error = {} as AbiErrorDetail;
@@ -420,36 +331,19 @@ export function _spawnStreamingDriverForTest(
   let output: Readable | null = null;
   let errorOutput: Readable | null = null;
   try {
-    const stdio = {} as AbiNativeStdio;
+    const stdio = {} as NativeStdioHandles;
     throwIfFailed(
       native.takeNativeStdio(handle, stdio),
       'taking native stdio failed',
     );
-    const remaining = [
-      stdio.stdin_handle,
-      stdio.stdout_handle,
-      stdio.stderr_handle,
-    ];
-    try {
-      const invalid = factory.platform === 'win32' ? 0 : -1;
-      input = adoptEndpoint(factory, remaining[0], true) as Writable | null;
-      remaining[0] = invalid;
-      output = adoptEndpoint(
-        factory,
-        remaining[1],
-        false,
-      ) as Readable | null;
-      remaining[1] = invalid;
-      errorOutput = adoptEndpoint(
-        factory,
-        remaining[2],
-        false,
-      ) as Readable | null;
-      remaining[2] = invalid;
-    } catch (error) {
-      closeUnadopted(native, factory, remaining);
-      throw error;
-    }
+    const adopted = adoptNativeStdio(
+      stdio,
+      factory,
+      (nativeHandle) => native.closeNativePipe(nativeHandle),
+    );
+    input = adopted.standardInput;
+    output = adopted.standardOutput;
+    errorOutput = adopted.standardError;
 
     const id = native.id(handle);
     return new KoffiLifecycleDriver(
@@ -469,23 +363,11 @@ export function _spawnStreamingDriverForTest(
   }
 }
 
-/** @internal Tests whether a Node.js version supports native Windows handles. */
-export function _isSupportedNodeVersionForTest(version: string): boolean {
-  const current = version
-    .split('.')
-    .slice(0, 3)
-    .map((component) => Number.parseInt(component, 10));
-  const difference = current.findIndex(
-    (component, index) => component !== MINIMUM_NODE_VERSION[index],
-  );
-  return difference === -1 ||
-    current[difference] > MINIMUM_NODE_VERSION[difference];
-}
-
 function ensureSupportedNodeVersion(): void {
-  if (!_isSupportedNodeVersionForTest(process.versions.node)) {
+  if (!supportsNativeStdio(nodeStreamFactory.platform, process.versions.node)) {
     throw new Error(
-      `native stdio requires Node.js ${MINIMUM_NODE_VERSION.join('.')} or newer; ` +
+      `native stdio on Windows requires Node.js ` +
+      `${minimumWindowsNativeStdioNodeVersion()} or newer; ` +
       `current version is ${process.versions.node}`,
     );
   }
@@ -493,7 +375,7 @@ function ensureSupportedNodeVersion(): void {
 
 function spawnDriver(request: RequestSpec): NativeLifecycleDriver {
   ensureSupportedNodeVersion();
-  return _spawnStreamingDriverForTest(request, getNative(), nodeStreamFactory);
+  return createStreamingDriver(request, getNative(), nodeStreamFactory);
 }
 
 export function spawnBindingSandboxProcess(
@@ -501,7 +383,7 @@ export function spawnBindingSandboxProcess(
 ): MxcSandboxProcess {
   const driver = spawnDriver(request);
   try {
-    return _createMxcSandboxProcess(driver, request.policy.timeoutMs);
+    return createMxcSandboxProcess(driver, request.policy.timeoutMs);
   } catch (error) {
     destroyStream(driver.standardInput);
     destroyStream(driver.standardOutput);

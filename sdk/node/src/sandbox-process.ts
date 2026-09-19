@@ -27,6 +27,7 @@ export interface NativeLifecycleDriver {
 }
 
 const POLL_INTERVAL_MS = 10;
+type ProcessPhase = 'active' | 'settling' | 'terminal' | 'disposed';
 
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
@@ -60,9 +61,7 @@ export class MxcSandboxProcess {
   private errorTaken = false;
   private outputDrained = false;
   private errorDrained = false;
-  private disposed = false;
-  private terminal = false;
-  private settling = false;
+  private phase: ProcessPhase = 'active';
   private cleanupStarted = false;
   private warningsValue: readonly string[];
   private metadataValue: unknown | undefined;
@@ -151,14 +150,15 @@ export class MxcSandboxProcess {
 
   kill(): void {
     this.throwIfDisposed();
-    if (!this.terminal && !this.settling) this.driver.kill();
+    if (this.phase === 'active') this.driver.kill();
   }
 
   dispose(): void {
-    if (this.disposed) return;
-    this.disposed = true;
+    if (this.phase === 'disposed') return;
+    const previousPhase = this.phase;
+    this.phase = 'disposed';
     let firstError: Error | undefined;
-    if (!this.terminal && !this.settling) {
+    if (previousPhase === 'active') {
       try {
         this.driver.kill();
       } catch (error) {
@@ -172,8 +172,7 @@ export class MxcSandboxProcess {
     const cleanupError = this.runCleanups();
     firstError ??= cleanupError;
     void this.driver.free().catch(() => {});
-    if (!this.terminal) {
-      this.terminal = true;
+    if (previousPhase !== 'terminal') {
       this.rejectWait(new Error('sandbox process was disposed before completion'));
     }
     if (firstError !== undefined) throw firstError;
@@ -189,7 +188,7 @@ export class MxcSandboxProcess {
   }
 
   private poll(): void {
-    if (this.disposed || this.terminal) return;
+    if (this.phase !== 'active') return;
     let status: NativeLifecycleStatus;
     try {
       status = this.driver.poll();
@@ -237,8 +236,8 @@ export class MxcSandboxProcess {
   }
 
   private beginSettling(): boolean {
-    if (this.disposed || this.terminal || this.settling) return false;
-    this.settling = true;
+    if (this.phase !== 'active') return false;
+    this.phase = 'settling';
     this.stopPolling();
     return true;
   }
@@ -259,8 +258,8 @@ export class MxcSandboxProcess {
     result: SandboxWaitResult | undefined,
     initialError?: Error,
   ): Promise<void> {
-    if (this.terminal) return;
-    this.terminal = true;
+    if (this.phase === 'terminal' || this.phase === 'disposed') return;
+    this.phase = 'terminal';
     this.stopPolling();
 
     let error = initialError;
@@ -321,12 +320,14 @@ export class MxcSandboxProcess {
   }
 
   private throwIfDisposed(): void {
-    if (this.disposed) throw new Error('sandbox process has been disposed');
+    if (this.phase === 'disposed') {
+      throw new Error('sandbox process has been disposed');
+    }
   }
 }
 
-/** @internal Creates a process around a test or native lifecycle driver. */
-export function _createMxcSandboxProcess(
+/** Internal constructor with an injectable lifecycle driver. */
+export function createMxcSandboxProcess(
   driver: NativeLifecycleDriver,
   timeoutMs?: number,
 ): MxcSandboxProcess {

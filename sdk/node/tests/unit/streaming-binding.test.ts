@@ -5,13 +5,15 @@ import assert from 'node:assert';
 import { PassThrough, type Readable, type Writable } from 'node:stream';
 import { describe, it } from 'node:test';
 import {
-  _isSupportedNodeVersionForTest,
-  _spawnStreamingDriverForTest,
-  type _NativeStreamFactory,
-  type _StreamingNativeFacade,
+  createStreamingDriver,
+  type StreamingNativeFacade,
 } from '../../src/bindings/streaming.js';
+import {
+  supportsNativeStdio,
+  type NativeStreamFactory,
+} from '../../src/bindings/native-stdio.js';
 
-class FakeNative implements _StreamingNativeFacade {
+class FakeNative implements StreamingNativeFacade {
   readonly handle = {};
   readonly closedHandles: Array<number | bigint> = [];
   readonly freedStrings: unknown[] = [];
@@ -22,6 +24,8 @@ class FakeNative implements _StreamingNativeFacade {
   waitCount = 0;
   freeCount = 0;
   freeErrorCount = 0;
+  warningsStatus = 0;
+  outputMetadataStatus = 0;
   deferWait = false;
   pendingWait:
     | {
@@ -109,12 +113,12 @@ class FakeNative implements _StreamingNativeFacade {
 
   warningsJson(_handle: unknown, out: unknown[]): number {
     out[0] = null;
-    return 0;
+    return this.warningsStatus;
   }
 
   outputMetadataJson(_handle: unknown, out: unknown[]): number {
     out[0] = null;
-    return 0;
+    return this.outputMetadataStatus;
   }
 
   free(_handle: unknown, completion: (error: Error | null) => void): void {
@@ -131,7 +135,7 @@ class FakeNative implements _StreamingNativeFacade {
   }
 }
 
-class FakeStreams implements _NativeStreamFactory {
+class FakeStreams implements NativeStreamFactory {
   readonly readableHandles: Array<number | bigint> = [];
   readonly writableHandles: Array<number | bigint> = [];
   failHandle: number | bigint | undefined;
@@ -163,7 +167,7 @@ describe('native streaming binding ownership', () => {
     native.stderrHandle = 0x100000003n;
     const streams = new FakeStreams('win32');
 
-    const driver = _spawnStreamingDriverForTest(
+    const driver = createStreamingDriver(
       {} as never,
       native,
       streams,
@@ -182,7 +186,7 @@ describe('native streaming binding ownership', () => {
     const native = new FakeNative();
     const streams = new FakeStreams();
 
-    const driver = _spawnStreamingDriverForTest(
+    const driver = createStreamingDriver(
       {} as never,
       native,
       streams,
@@ -200,7 +204,7 @@ describe('native streaming binding ownership', () => {
   it('waits off-thread and defers free until the wait completes', async () => {
     const native = new FakeNative();
     native.deferWait = true;
-    const driver = _spawnStreamingDriverForTest(
+    const driver = createStreamingDriver(
       {} as never,
       native,
       new FakeStreams(),
@@ -227,7 +231,7 @@ describe('native streaming binding ownership', () => {
     unixNative.stdinHandle = -1;
     unixNative.stderrHandle = -1n;
     const unixStreams = new FakeStreams();
-    const unixDriver = _spawnStreamingDriverForTest(
+    const unixDriver = createStreamingDriver(
       {} as never,
       unixNative,
       unixStreams,
@@ -242,7 +246,7 @@ describe('native streaming binding ownership', () => {
     windowsNative.stdinHandle = 0n;
     windowsNative.stderrHandle = 0;
     const windowsStreams = new FakeStreams('win32');
-    const windowsDriver = _spawnStreamingDriverForTest(
+    const windowsDriver = createStreamingDriver(
       {} as never,
       windowsNative,
       windowsStreams,
@@ -260,7 +264,7 @@ describe('native streaming binding ownership', () => {
     streams.failHandle = 12;
 
     assert.throws(
-      () => _spawnStreamingDriverForTest({} as never, native, streams),
+      () => createStreamingDriver({} as never, native, streams),
       /readable construction failed/,
     );
 
@@ -274,7 +278,7 @@ describe('native streaming binding ownership', () => {
     native.takeStatus = 12;
 
     assert.throws(
-      () => _spawnStreamingDriverForTest(
+      () => createStreamingDriver(
         {} as never,
         native,
         new FakeStreams(),
@@ -291,7 +295,7 @@ describe('native streaming binding ownership', () => {
     native.spawnStatus = 12;
 
     assert.throws(
-      () => _spawnStreamingDriverForTest(
+      () => createStreamingDriver(
         {} as never,
         native,
         new FakeStreams(),
@@ -302,14 +306,34 @@ describe('native streaming binding ownership', () => {
     assert.strictEqual(native.freeErrorCount, 1);
     assert.strictEqual(native.freeCount, 0);
   });
+
+  it('surfaces native process-data read failures', async () => {
+    const native = new FakeNative();
+    native.warningsStatus = 12;
+    native.outputMetadataStatus = 12;
+    const driver = createStreamingDriver(
+      {} as never,
+      native,
+      new FakeStreams(),
+    );
+
+    assert.throws(() => driver.warnings(), /reading sandbox process data failed/);
+    assert.throws(
+      () => driver.outputMetadata(),
+      /reading sandbox process data failed/,
+    );
+    await driver.free();
+  });
 });
 
 describe('native streaming Node version support', () => {
-  it('requires Node 24.21.0 or newer', () => {
-    assert.strictEqual(_isSupportedNodeVersionForTest('24.20.9'), false);
-    assert.strictEqual(_isSupportedNodeVersionForTest('24.21.0'), true);
-    assert.strictEqual(_isSupportedNodeVersionForTest('24.21.1'), true);
-    assert.strictEqual(_isSupportedNodeVersionForTest('25.0.0'), true);
-    assert.strictEqual(_isSupportedNodeVersionForTest('23.99.99'), false);
+  it('requires Node 24.21.0 or newer only on Windows', () => {
+    assert.strictEqual(supportsNativeStdio('win32', '24.20.9'), false);
+    assert.strictEqual(supportsNativeStdio('win32', '24.21.0'), true);
+    assert.strictEqual(supportsNativeStdio('win32', '24.21.1'), true);
+    assert.strictEqual(supportsNativeStdio('win32', '25.0.0'), true);
+    assert.strictEqual(supportsNativeStdio('win32', '23.99.99'), false);
+    assert.strictEqual(supportsNativeStdio('linux', '18.0.0'), true);
+    assert.strictEqual(supportsNativeStdio('darwin', '18.0.0'), true);
   });
 });
