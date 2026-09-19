@@ -19,7 +19,7 @@ parameters:
       nodeVersion: '24.x'
     - name: macos
       os: macos
-      nodeVersion: '20.x'
+      nodeVersion: '24.x'
 
 jobs:
 - ${{ each target in parameters.targets }}:

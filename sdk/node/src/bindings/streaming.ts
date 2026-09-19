@@ -412,7 +412,12 @@ function ensureSupportedNodeVersion(): void {
     supportsNativeStdio(platform, process.versions.node)
   ) return;
 
-  const platformName = platform === 'win32' ? 'Windows' : 'Linux';
+  const platformName =
+    platform === 'win32'
+      ? 'Windows'
+      : platform === 'darwin'
+        ? 'macOS'
+        : 'Linux';
   throw new MxcError({
     code: 'backend_unavailable',
     message: `native stdio on ${platformName} requires Node.js ` +

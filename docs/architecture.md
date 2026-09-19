@@ -108,7 +108,7 @@ flowchart LR
     sdk["mxc-sdk"]
     engine["mxc_engine"]
 
-    typescript -- "public APIs (deprecated in 1.0)" --> executor
+    typescript --> executor
     typescript -. "internal native stdio binding" .-> ffi
     cli --> executor
     csharp --> ffi --> sdk
@@ -121,10 +121,9 @@ flowchart LR
 lifecycle functions call `mxc-sdk`, and its native stdio functions transfer
 duplicated stdin, stdout, and stderr endpoints that runtimes can adopt as
 native streams. The Node package contains an internal native stdio binding for
-this path. Its current public APIs still use the platform executor; that route
-is scheduled to be deprecated in 1.0. The generated C# P/Invoke file is created
-during the C# build. Generated TypeScript wire types come from the schema
-tooling.
+this path, while its current public APIs use the platform executor. The
+generated C# P/Invoke file is created during the C# build. Generated TypeScript
+wire types come from the schema tooling.
 
 ## Tests
 

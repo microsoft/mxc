@@ -30,6 +30,7 @@ export interface NativeStdioStreams {
 const MINIMUM_NATIVE_STDIO_NODE_VERSION: Partial<
   Record<NodeJS.Platform, readonly [number, number, number]>
 > = {
+  darwin: [24, 0, 0],
   linux: [24, 0, 0],
   win32: [24, 21, 0],
 };

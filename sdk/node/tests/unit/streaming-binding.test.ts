@@ -372,6 +372,7 @@ describe('native streaming Node version support', () => {
     assert.strictEqual(supportsNativeStdio('linux', '23.99.99'), false);
     assert.strictEqual(supportsNativeStdio('linux', '24.0.0'), true);
     assert.strictEqual(supportsNativeStdio('linux', '25.0.0'), true);
-    assert.strictEqual(supportsNativeStdio('darwin', '18.0.0'), true);
+    assert.strictEqual(supportsNativeStdio('darwin', '23.99.99'), false);
+    assert.strictEqual(supportsNativeStdio('darwin', '24.0.0'), true);
   });
 });

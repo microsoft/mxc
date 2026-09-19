@@ -41,14 +41,11 @@ const schemaVersion = supportedVersions.at(-1)!;
 const minimumNativeStreamingNodeVersion =
   os.platform() === 'win32'
     ? '24.21.0'
-    : os.platform() === 'linux'
-      ? '24.0.0'
-      : undefined;
+    : '24.0.0';
 const skipReason =
   sandboxSkipReason ??
   (!platformSupport.isSupported ? `Platform not supported: ${platformSupport.reason}` : undefined) ??
-  (minimumNativeStreamingNodeVersion !== undefined &&
-    semver.lt(process.version, minimumNativeStreamingNodeVersion)
+  (semver.lt(process.version, minimumNativeStreamingNodeVersion)
     ? `Native streaming on ${os.platform()} requires Node.js ` +
       `${minimumNativeStreamingNodeVersion} or newer`
     : undefined) ??
