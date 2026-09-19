@@ -4,7 +4,7 @@
 # T3-Workloads.ps1 — explore what real workloads can run inside the
 # Tier 3 (AppContainer + DACL) sandbox on a 25H2 host.
 #
-# Companion to WinProcessContainer-Tests.ps1: that script proves the T3
+# Companion to run_processcontainer_all_tests.ps1: that suite proves the T3
 # *primitives* (rw / ro / denied / control matrix, crash recovery, UI
 # mitigations) work; this one asks whether useful programs — pwsh 7
 # and git in particular — can run on top of those primitives.
@@ -886,7 +886,7 @@ finally {
     }
 
     # Structured results for programmatic consumption, mirroring the shape
-    # WinProcessContainer-Tests.ps1 writes. Every step here is guarded: this
+    # run_processcontainer_all_tests.ps1 writes. Every step here is guarded: this
     # runs in `finally`, so an unhandled throw would skip the exit-code line
     # below and report a bogus result. CIM in particular is unavailable on
     # locked-down hosts.
