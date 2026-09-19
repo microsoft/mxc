@@ -128,9 +128,9 @@ function Invoke-UiPolicyCase {
         $name = "$($Case.Label) -> $tag=$want"
 
         # INJECTION is the one tag whose verdict is not a clean two-state.
-        # Mirror Phase 4b: unsupported build or a lost foreground race is a
-        # skip, and a genuine non-enforcement is a warn rather than a red fail,
-        # so the suite stays green where the OS does not enforce the bit yet.
+        # Mirror Phase 4b: an unsupported build or a lost foreground race is a
+        # skip, but once the build advertises the limit, non-enforcement is a
+        # failure like any other unmet documented contract.
         if ($tag -eq 'INJECTION') {
             $diag = if ($r.Stdout -match '(?m)^INJECTION=DIAG\s+(?<d>.+?)\s*$') { $matches['d'] } else { '<no diag>' }
             if (-not $Script:Caps.CanBlockInputInjection) {

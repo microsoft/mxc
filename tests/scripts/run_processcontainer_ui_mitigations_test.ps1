@@ -95,8 +95,8 @@ function Phase-UiMitigationMatrix {
         # foregrounds its own window first so the kernel's foreground check
         # (which precedes the injection limit) passes and the limit is really
         # evaluated. SKIP on build < 26100 (bit dropped) or on INCONCLUSIVE
-        # (never owned the foreground); PASS when SendInput was blocked; WARN
-        # rather than green when it went through, auto-promoting once enforced.
+        # (never owned the foreground); PASS when SendInput was blocked; FAIL
+        # when the build advertises the limit but it was not enforced.
         $injDiag = if ($rA.Stdout -match '(?m)^INJECTION=DIAG\s+(?<d>.+?)\s*$') { $matches['d'] } else { '<no diag>' }
         $injInconclusive = [bool]($rA.Stdout -match '(?m)^INJECTION=INCONCLUSIVE\s*$')
         if (-not $Script:Caps.CanBlockInputInjection) {

@@ -549,6 +549,7 @@ function New-Config {
         # Windows backend; `processcontainer` is the concrete name.
         [string]$Containment                = 'processcontainer',
         # processContainer.capabilities — the AppContainer capability list.
+        # Supplying `@()` emits `[]`; omitting the parameter omits the key.
         [string[]]$Capabilities             = @(),
         [Nullable[bool]]$LeastPrivilege     = $null,
         [Nullable[bool]]$LearningMode       = $null,
@@ -655,7 +656,8 @@ function New-Config {
 
     # --- processContainer ----------------------------------------------
     $pc = [ordered]@{}
-    if ($Capabilities.Count -gt 0)  { $pc['capabilities']  = @($Capabilities) }
+    # Presence, not count: an explicit `-Capabilities @()` must emit `[]`.
+    if ($PSBoundParameters.ContainsKey('Capabilities')) { $pc['capabilities'] = @($Capabilities) }
     if ($null -ne $LeastPrivilege)  { $pc['leastPrivilege'] = [bool]$LeastPrivilege }
     if ($null -ne $LearningMode)    { $pc['learningMode']   = [bool]$LearningMode }
     if ($hasEnumerate) { $pc['filesystem'] = [ordered]@{ enumeratePaths = @($EnumeratePaths) } }

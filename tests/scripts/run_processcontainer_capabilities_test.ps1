@@ -121,9 +121,11 @@ function Phase-CapabilityContract {
            Caps = @('internetClient', 'registryRead', 'privateNetworkClientServer') }
     )
 
+    $emptyCfgPath = $null
     foreach ($case in $accepted) {
         $slug = ($case.Name -replace '[^a-zA-Z0-9]+', '-').Trim('-').ToLowerInvariant()
         $cfg = New-Config -Name "cap-ok-$slug" -CommandLine $cmd -ReadWrite @($rw) -Capabilities $case.Caps
+        if ($case.Caps.Count -eq 0) { $emptyCfgPath = $cfg }
         $log = Join-Path $ScratchRoot "logs\cap-ok-$slug.log"
         $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log -TimeoutSec 30
         $ran = [bool]("$($r.Stdout)" -match $marker)
@@ -134,6 +136,25 @@ function Phase-CapabilityContract {
         Record-Result -Phase 'P12b' -Name $case.Name -Pass (-not $rejected) `
             -Detail "exit=$($r.ExitCode); rejectedAtValidation=$rejected; workloadRan=$ran; caps=[$($case.Caps -join ', ')]"
     }
+
+    $omitCfg = New-Config -Name 'cap-ok-omitted' -CommandLine $cmd -ReadWrite @($rw)
+    $omitLog = Join-Path $ScratchRoot 'logs\cap-ok-omitted.log'
+    $omit = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $omitCfg -LogPath $omitLog -TimeoutSec 30
+    $omitRejected = Test-WasRejected -Run $omit -Log (Read-Log $omitLog)
+    Record-Result -Phase 'P12b' -Name 'an omitted capability list is accepted' -Pass (-not $omitRejected) `
+        -Detail "exit=$($omit.ExitCode); rejectedAtValidation=$omitRejected"
+
+    # Without this the two cases above could be the same run twice.
+    $emptyHasKey = $false
+    if ($emptyCfgPath -and (Test-Path -LiteralPath $emptyCfgPath)) {
+        $emptyPc = (Get-Content -LiteralPath $emptyCfgPath -Raw | ConvertFrom-Json).processContainer
+        $emptyHasKey = [bool]($emptyPc -and $emptyPc.PSObject.Properties['capabilities'])
+    }
+    $omitPc = (Get-Content -LiteralPath $omitCfg -Raw | ConvertFrom-Json).processContainer
+    $omitHasKey = [bool]($omitPc -and $omitPc.PSObject.Properties['capabilities'])
+    Record-Result -Phase 'P12b' -Name 'the empty-list and omitted cases emit different configs' `
+        -Pass ($emptyHasKey -and (-not $omitHasKey)) `
+        -Detail "emptyCaseEmitsKey=$emptyHasKey (expected True); omittedCaseEmitsKey=$omitHasKey (expected False)"
 }
 
 

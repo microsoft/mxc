@@ -137,20 +137,16 @@ expectation from the tier the host actually selects, which makes it
 self-consistent anywhere — and therefore silently useless on a host that was
 supposed to be T1 and fell back to T3, since it would run the T3 expectations
 and report green. The dispatcher now passes `-RequireTier base-container` for
-`process-t1` and `-RequireTier appcontainer-dacl` for `process-t3`, and a
-mismatch aborts the run instead of scoring it.
+`process-t1` and `-RequireTier appcontainer-dacl` for `process-t3`; the suite
+resolves the tier once at startup and aborts on a mismatch instead of scoring
+the run. Tier selection follows from the host's Windows build, so without the
+check a pool that quietly fell back to AppContainer would run the suite and
+report green while proving nothing about T1.
 
 Both ids also get the same host preparation. A T1 host selects BaseContainer for
 most policies but still exercises the AppContainer fallback tiers, and an
 unprepared host fails the launch outright rather than producing a policy result,
 so `process-t1` runs `prepare-system-drive` / `prepare-null-device` too.
-
-Before running the suite, `process-t1` asserts the host selects the tier the
-entry was scheduled for: the dispatcher reads `wxc-exec --probe` and fails the
-job unless it reports `base-container`. Tier selection follows from the host's
-Windows build, so without the check a pool that quietly fell back to
-AppContainer would run the suite and report green while proving nothing about
-T1.
 
 `process-t3` runs its two suites back to back and reports them together: a
 failure in the primitives suite does not skip the workloads suite, so one job
