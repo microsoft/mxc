@@ -33,9 +33,9 @@ use wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCance
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, LaunchMethod, ProxyAddress, ScriptResponse};
 use wxc_common::sandbox_process::{
-    boxed_closer, cancel_and_join_discard, group_kill, spawn_discard, take_boxed_read,
-    take_boxed_write, wait_with_timeout, NativeStdio, SandboxBackend, SandboxProcess, StdioMode,
-    StreamCloser, WaitError,
+    boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, group_kill,
+    spawn_discard, take_boxed_read, take_boxed_write, wait_with_timeout, NativeStdio,
+    SandboxBackend, SandboxProcess, StdioMode, StreamCloser, WaitError,
 };
 use wxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
 use wxc_common::validator::{
@@ -497,32 +497,19 @@ impl SeatbeltSandboxProcess {
 
 impl SandboxProcess for SeatbeltSandboxProcess {
     fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
-        let stdio = NativeStdio {
-            stdin: self
-                .stdin
-                .as_ref()
-                .map(|stream| stream.as_fd().try_clone_to_owned())
-                .transpose()?,
-            stdout: self
-                .stdout
-                .as_ref()
-                .map(InterruptibleReader::try_clone_owned_fd)
-                .transpose()?,
-            stderr: self
-                .stderr
-                .as_ref()
-                .map(InterruptibleReader::try_clone_owned_fd)
-                .transpose()?,
-        };
-        if stdio.is_empty() {
-            return Ok(None);
+        let stdio = duplicate_and_take_native_stdio(
+            &mut self.stdin,
+            &mut self.stdout,
+            &mut self.stderr,
+            |stream| stream.as_fd().try_clone_to_owned(),
+            InterruptibleReader::try_clone_owned_fd,
+            InterruptibleReader::try_clone_owned_fd,
+        )?;
+        if stdio.is_some() {
+            self.stdout_canceller.take();
+            self.stderr_canceller.take();
         }
-        self.stdin.take();
-        self.stdout.take();
-        self.stderr.take();
-        self.stdout_canceller.take();
-        self.stderr_canceller.take();
-        Ok(Some(stdio))
+        Ok(stdio)
     }
 
     fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
