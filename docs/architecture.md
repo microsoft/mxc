@@ -109,7 +109,7 @@ flowchart LR
     engine["mxc_engine"]
 
     typescript --> executor
-    typescript -. "native live execution" .-> ffi
+    typescript -. "internal native stdio binding" .-> ffi
     cli --> executor
     csharp --> ffi --> sdk
     rust --> sdk
@@ -117,12 +117,13 @@ flowchart LR
     sdk --> engine
 ```
 
-`mxc_ffi` is the C ABI used by in-process language bindings. Its live-sandbox
-surface delegates lifecycle operations through `mxc-sdk` and can transfer
-native stdio endpoints to runtimes such as Node.js that adopt OS pipes
-directly; it does not dispatch to `mxc_engine` independently. The generated C#
-P/Invoke file is created during the C# build. Generated TypeScript wire types
-come from the schema tooling.
+`mxc_ffi` provides the C ABI for in-process language bindings. Its sandbox
+lifecycle functions call `mxc-sdk`, and its native stdio functions transfer
+duplicated stdin, stdout, and stderr endpoints that runtimes can adopt as
+native streams. The Node package uses this path through an internal native
+stdio binding, while its public APIs use the platform executor. The generated
+C# P/Invoke file is created during the C# build. Generated TypeScript wire
+types come from the schema tooling.
 
 ## Tests
 
