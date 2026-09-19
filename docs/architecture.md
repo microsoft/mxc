@@ -116,7 +116,10 @@ flowchart LR
     sdk --> engine
 ```
 
-`mxc_ffi` is the C ABI used by the C# SDK. Its generated C# P/Invoke file is
+`mxc_ffi` is the C ABI used by in-process language bindings. Its live-sandbox
+surface delegates lifecycle operations through `mxc-sdk` and can transfer
+native stdio endpoints to runtimes that adopt OS pipes directly; it does not
+dispatch to `mxc_engine` independently. The generated C# P/Invoke file is
 created during the C# build. Generated TypeScript wire types come from the
 schema tooling.
 

@@ -70,7 +70,7 @@ pub use verbose_telemetry::emit_verbose_telemetry;
 
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainmentBackend, FailurePhase, ScriptResponse};
-use wxc_common::sandbox_process::{SandboxProcess, StreamCloser};
+use wxc_common::sandbox_process::{NativeStdio, SandboxProcess, StreamCloser};
 use wxc_common::telemetry;
 
 /// Spawn a streaming [`SandboxProcess`] handle for a [`SandboxRequest`] built
@@ -518,6 +518,10 @@ impl SandboxProcess for TelemetryProcess {
         self.inner.take_stdin()
     }
 
+    fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+        self.inner.take_native_stdio()
+    }
+
     fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
         self.inner.take_stdout()
     }
@@ -624,6 +628,10 @@ impl SandboxProcess for ProcessWithWarnings {
         self.inner.take_stdin()
     }
 
+    fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+        self.inner.take_native_stdio()
+    }
+
     fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
         self.inner.take_stdout()
     }
@@ -660,6 +668,8 @@ impl SandboxProcess for ProcessWithWarnings {
 #[cfg(test)]
 mod telemetry_process_tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     enum TryWaitResult {
         Running,
@@ -675,6 +685,45 @@ mod telemetry_process_tests {
         finalized: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
         metadata_read_before_finalization: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
         output_metadata: Option<wxc_common::models::SandboxOutputMetadata>,
+    }
+
+    struct NativeStdioProbe {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl SandboxProcess for NativeStdioProbe {
+        fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        }
+
+        fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
+            None
+        }
+
+        fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+            None
+        }
+
+        fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+            None
+        }
+
+        fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+            Ok(Some(0))
+        }
+
+        fn id(&self) -> u32 {
+            1
+        }
+
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn wait(&mut self) -> std::io::Result<i32> {
+            Ok(0)
+        }
     }
 
     impl SandboxProcess for StubProcess {
@@ -762,6 +811,36 @@ mod telemetry_process_tests {
             },
             std::time::Instant::now(),
         )
+    }
+
+    #[test]
+    fn process_wrappers_forward_native_stdio_transfer() {
+        let telemetry_calls = Arc::new(AtomicUsize::new(0));
+        let mut telemetry = TelemetryProcess::new(
+            Box::new(NativeStdioProbe {
+                calls: Arc::clone(&telemetry_calls),
+            }),
+            true,
+            TelemetryMode::StateAware {
+                backend: "test".to_string(),
+                phase: "exec".to_string(),
+                correlation_vector: String::new(),
+                requested_sandbox_kind: None,
+            },
+            std::time::Instant::now(),
+        );
+        assert!(telemetry.take_native_stdio().unwrap().is_none());
+        assert_eq!(telemetry_calls.load(Ordering::SeqCst), 1);
+
+        let warning_calls = Arc::new(AtomicUsize::new(0));
+        let mut with_warnings = ProcessWithWarnings::wrap(
+            Box::new(NativeStdioProbe {
+                calls: Arc::clone(&warning_calls),
+            }),
+            vec!["test warning".to_string()],
+        );
+        assert!(with_warnings.take_native_stdio().unwrap().is_none());
+        assert_eq!(warning_calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
