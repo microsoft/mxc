@@ -1,142 +1,48 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! C translation layer for the engine-owned native I/O coordinator.
+//! C translation layer for native stdio and process lifecycle coordination.
 
-use std::collections::HashSet;
-use std::ffi::{c_char, c_void, CStr};
+use std::ffi::{c_char, CStr};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::thread::{self, JoinHandle};
-use std::time::Duration;
 
-use mxc_engine::{IoCoordinator, IoCoordinatorError, IoReadState};
+use mxc_engine::{IoCoordinator, IoCoordinatorError};
 
 use crate::{
     alloc_cstring, request, status_from_error_code, MxcErrorDetail, MXC_STATUS_BACKEND_ERROR,
     MXC_STATUS_INVALID_UTF8, MXC_STATUS_NULL_ARGUMENT, MXC_STATUS_PANIC, MXC_STATUS_SUCCESS,
 };
 
-/// Output selector for [`mxc_io_request_read`] and [`mxc_io_close_output`].
-pub const MXC_IO_STDOUT: i32 = 1;
-/// Output selector for [`mxc_io_request_read`] and [`mxc_io_close_output`].
-pub const MXC_IO_STDERR: i32 = 2;
-
-/// Callback event containing stdout bytes.
-pub const MXC_IO_EVENT_STDOUT: i32 = 1;
-/// Callback event containing stderr bytes.
-pub const MXC_IO_EVENT_STDERR: i32 = 2;
-/// Callback event reporting stdout end-of-file.
-pub const MXC_IO_EVENT_STDOUT_EOF: i32 = 3;
-/// Callback event reporting stderr end-of-file.
-pub const MXC_IO_EVENT_STDERR_EOF: i32 = 4;
-/// Callback event completing a stdin operation.
-pub const MXC_IO_EVENT_STDIN_COMPLETE: i32 = 5;
-/// Callback event reporting process completion.
-pub const MXC_IO_EVENT_EXIT: i32 = 6;
-/// Callback event reporting an asynchronous coordinator failure.
-pub const MXC_IO_EVENT_ERROR: i32 = 7;
-/// Final callback event confirming that native callback production has stopped.
-pub const MXC_IO_EVENT_SHUTDOWN: i32 = 8;
-
-const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(10);
-const EVENT_BUFFER_BYTES: usize = 16 * 1024;
-
-/// Native event callback used by event-loop language bindings.
-///
-/// `operation` identifies stdin operations except on output error events,
-/// where it contains the `MXC_IO_STDOUT` or `MXC_IO_STDERR` stream selector.
-/// `data`/`len` carry output bytes, and `value`/`flag` carry event-specific
-/// scalar values.
-///
-/// `data` borrows the event pump's reusable buffer and is valid only until the
-/// callback returns. Bindings must copy non-empty output synchronously. When
-/// `len` is zero, `data` may be null and must not be dereferenced.
-pub type MxcIoEventCallback = unsafe extern "C" fn(
-    user_data: *mut c_void,
-    event: i32,
-    operation: u32,
-    data: *const u8,
-    len: usize,
-    value: i64,
-    flag: i32,
-);
-
-#[derive(Default)]
-struct OperationState {
-    pending: HashSet<u32>,
-    stdout_requested: bool,
-    stderr_requested: bool,
-    shutdown_requested: bool,
-}
-
-struct EventPumpState {
-    callback: MxcIoEventCallback,
-    user_data: usize,
-    operations: Mutex<OperationState>,
-    wake: Condvar,
-}
-
-impl EventPumpState {
-    fn wake(&self) {
-        self.wake.notify_one();
-    }
-
-    fn request_read(&self, stream: i32) -> Result<(), IoCoordinatorError> {
-        let mut operations = lock_unpoisoned(&self.operations);
-        if operations.shutdown_requested {
-            return Err(IoCoordinatorError::Closed);
-        }
-        let requested = match stream {
-            MXC_IO_STDOUT => &mut operations.stdout_requested,
-            MXC_IO_STDERR => &mut operations.stderr_requested,
-            _ => return Err(IoCoordinatorError::Closed),
-        };
-        if *requested {
-            return Err(IoCoordinatorError::Backend);
-        }
-        *requested = true;
-        drop(operations);
-        self.wake();
-        Ok(())
-    }
-
-    fn has_read_request(&self, stream: i32) -> bool {
-        let operations = lock_unpoisoned(&self.operations);
-        match stream {
-            MXC_IO_STDOUT => operations.stdout_requested,
-            MXC_IO_STDERR => operations.stderr_requested,
-            _ => false,
-        }
-    }
-
-    fn complete_read_request(&self, stream: i32) {
-        let mut operations = lock_unpoisoned(&self.operations);
-        match stream {
-            MXC_IO_STDOUT => operations.stdout_requested = false,
-            MXC_IO_STDERR => operations.stderr_requested = false,
-            _ => {}
-        }
-    }
-
-    fn request_shutdown(&self, coordinator: &IoCoordinator) {
-        let mut operations = lock_unpoisoned(&self.operations);
-        if operations.shutdown_requested {
-            return;
-        }
-        operations.shutdown_requested = true;
-        coordinator.request_shutdown();
-        drop(operations);
-        self.wake();
-    }
-}
-
-/// Opaque coordinator handle for event-loop language bindings.
+/// Opaque lifecycle coordinator for event-loop language bindings.
 pub struct MxcIoCoordinator {
-    inner: Arc<IoCoordinator>,
-    events: Arc<EventPumpState>,
-    event_thread: Mutex<Option<JoinHandle<()>>>,
+    inner: IoCoordinator,
+}
+
+/// Caller-owned native stdio endpoints.
+///
+/// Values are Win32 `HANDLE`s on Windows and file descriptors on Unix.
+/// Absent endpoints are `0` on Windows and `-1` on Unix.
+#[repr(C)]
+pub struct MxcNativeStdio {
+    pub stdin_handle: isize,
+    pub stdout_handle: isize,
+    pub stderr_handle: isize,
+}
+
+impl MxcNativeStdio {
+    const fn invalid() -> Self {
+        #[cfg(target_os = "windows")]
+        const INVALID: isize = 0;
+        #[cfg(not(target_os = "windows"))]
+        const INVALID: isize = -1;
+
+        Self {
+            stdin_handle: INVALID,
+            stdout_handle: INVALID,
+            stderr_handle: INVALID,
+        }
+    }
 }
 
 fn coordinator_ref<'a>(handle: *mut MxcIoCoordinator) -> Option<&'a MxcIoCoordinator> {
@@ -155,38 +61,22 @@ fn catch_status(operation: &str, body: impl FnOnce() -> i32) -> i32 {
     })
 }
 
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-/// Spawn a sandbox and deliver native I/O completions through `callback`.
-///
-/// The callback may be invoked from the coordinator's event thread until a
-/// [`MXC_IO_EVENT_SHUTDOWN`] event is delivered. The caller must keep the
-/// callback and `user_data` alive until then.
+/// Spawn a one-shot sandbox with native stdio and lifecycle coordination.
 ///
 /// # Safety
 /// - `request_json_utf8` must be null or valid NUL-terminated UTF-8.
-/// - `callback` must remain valid for the complete callback lifetime.
-/// - `user_data` must remain valid for every callback invocation.
 /// - `out_handle` must point to writable pointer storage holding no live handle.
-/// - `out_error` must be null or writable fresh [`MxcErrorDetail`] storage.
+/// - `out_error` must be null or point to writable fresh error storage.
 #[no_mangle]
-pub unsafe extern "C" fn mxc_io_spawn_request_callback(
+pub unsafe extern "C" fn mxc_io_spawn_request(
     request_json_utf8: *const c_char,
-    callback: Option<MxcIoEventCallback>,
-    user_data: *mut c_void,
     out_handle: *mut *mut MxcIoCoordinator,
     out_error: *mut MxcErrorDetail,
 ) -> i32 {
     unsafe {
-        spawn_callback(
-            "mxc_io_spawn_request_callback",
+        spawn_coordinator(
+            "mxc_io_spawn_request",
             request_json_utf8,
-            callback,
-            user_data,
             out_handle,
             out_error,
             |request_json| {
@@ -198,47 +88,35 @@ pub unsafe extern "C" fn mxc_io_spawn_request_callback(
     }
 }
 
-/// Execute a state-aware `exec` request and deliver native I/O completions
-/// through `callback`.
-///
-/// This is the lifecycle counterpart to [`mxc_io_spawn_request_callback`].
-/// The request must be an `exec` phase and reference an already-provisioned
-/// sandbox.
+/// Execute a state-aware request with native stdio and lifecycle coordination.
 ///
 /// # Safety
-/// The pointer and callback lifetime requirements are identical to
-/// [`mxc_io_spawn_request_callback`].
+/// Pointer requirements are identical to [`mxc_io_spawn_request`].
 #[no_mangle]
-pub unsafe extern "C" fn mxc_io_state_aware_exec_callback(
+pub unsafe extern "C" fn mxc_io_state_aware_exec(
     request_json_utf8: *const c_char,
     experimental: i32,
-    callback: Option<MxcIoEventCallback>,
-    user_data: *mut c_void,
     out_handle: *mut *mut MxcIoCoordinator,
     out_error: *mut MxcErrorDetail,
 ) -> i32 {
     unsafe {
-        spawn_callback(
-            "mxc_io_state_aware_exec_callback",
+        spawn_coordinator(
+            "mxc_io_state_aware_exec",
             request_json_utf8,
-            callback,
-            user_data,
             out_handle,
             out_error,
             |request_json| {
                 let process = mxc_engine::exec_state_aware_json(request_json, experimental != 0)
                     .map_err(|error| sdk_error_detail(&error))?;
-                Ok(mxc_engine::coordinate_io(process, None))
+                mxc_engine::coordinate_io(process, None).map_err(|error| sdk_error_detail(&error))
             },
         )
     }
 }
 
-unsafe fn spawn_callback(
+unsafe fn spawn_coordinator(
     operation: &str,
     request_json_utf8: *const c_char,
-    callback: Option<MxcIoEventCallback>,
-    user_data: *mut c_void,
     out_handle: *mut *mut MxcIoCoordinator,
     out_error: *mut MxcErrorDetail,
     spawn: impl FnOnce(&str) -> Result<IoCoordinator, (i32, MxcErrorDetail)>,
@@ -254,9 +132,6 @@ unsafe fn spawn_callback(
     if out_handle.is_null() {
         return MXC_STATUS_NULL_ARGUMENT;
     }
-    let Some(callback) = callback else {
-        return MXC_STATUS_NULL_ARGUMENT;
-    };
 
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         let request_json = if request_json_utf8.is_null() {
@@ -265,7 +140,7 @@ unsafe fn spawn_callback(
                 MxcErrorDetail::from_message("request JSON pointer is null"),
             ));
         } else {
-            // SAFETY: the caller contract guarantees a valid C string.
+            // SAFETY: caller contract guarantees a valid C string.
             unsafe { CStr::from_ptr(request_json_utf8) }
                 .to_str()
                 .map_err(|_| {
@@ -275,33 +150,7 @@ unsafe fn spawn_callback(
                     )
                 })?
         };
-        let coordinator = spawn(request_json)?;
-        let inner = Arc::new(coordinator);
-        let events = Arc::new(EventPumpState {
-            callback,
-            user_data: user_data as usize,
-            operations: Mutex::new(OperationState::default()),
-            wake: Condvar::new(),
-        });
-        let event_thread = {
-            let coordinator = Arc::clone(&inner);
-            let events = Arc::clone(&events);
-            thread::spawn(move || {
-                let panic_events = Arc::clone(&events);
-                if let Err(panic) =
-                    catch_unwind(AssertUnwindSafe(|| run_event_pump(coordinator, events)))
-                {
-                    crate::report_panic("mxc_io_event_pump", &*panic);
-                    emit_event(&panic_events, MXC_IO_EVENT_ERROR, 0, &[], 0, 0);
-                    emit_event(&panic_events, MXC_IO_EVENT_SHUTDOWN, 0, &[], 0, 0);
-                }
-            })
-        };
-        Ok(MxcIoCoordinator {
-            inner,
-            events,
-            event_thread: Mutex::new(Some(event_thread)),
-        })
+        spawn(request_json)
     }))
     .unwrap_or_else(|panic| {
         crate::report_panic(operation, &*panic);
@@ -314,14 +163,16 @@ unsafe fn spawn_callback(
     match outcome {
         Ok(coordinator) => {
             // SAFETY: `out_handle` is non-null and writable.
-            unsafe { *out_handle = Box::into_raw(Box::new(coordinator)) };
+            unsafe {
+                *out_handle = Box::into_raw(Box::new(MxcIoCoordinator { inner: coordinator }))
+            };
             MXC_STATUS_SUCCESS
         }
         Err((status, mut detail)) => {
             if out_error.is_null() {
                 detail.free_strings();
             } else {
-                // SAFETY: `out_error` is caller-guaranteed writable fresh storage.
+                // SAFETY: caller-guaranteed writable fresh storage.
                 unsafe { *out_error = detail };
             }
             status
@@ -336,165 +187,10 @@ fn sdk_error_detail(error: &mxc_sdk::Error) -> (i32, MxcErrorDetail) {
     )
 }
 
-fn emit_event(
-    events: &EventPumpState,
-    event: i32,
-    operation: u32,
-    data: &[u8],
-    value: i64,
-    flag: i32,
-) {
-    // SAFETY: the callback registration contract keeps the callback and user
-    // data alive until the final shutdown event returns.
-    unsafe {
-        (events.callback)(
-            events.user_data as *mut c_void,
-            event,
-            operation,
-            data.as_ptr(),
-            data.len(),
-            value,
-            flag,
-        );
-    }
-}
-
-fn pump_output(
-    coordinator: &IoCoordinator,
-    events: &EventPumpState,
-    stream: i32,
-    buffer: &mut [u8],
-) {
-    if !events.has_read_request(stream) {
-        return;
-    }
-
-    let state = match stream {
-        MXC_IO_STDOUT => coordinator.try_read_stdout(buffer),
-        MXC_IO_STDERR => coordinator.try_read_stderr(buffer),
-        _ => return,
-    };
-    match state {
-        Ok(IoReadState::Pending) => {}
-        Ok(IoReadState::Data(read)) => {
-            events.complete_read_request(stream);
-            emit_event(
-                events,
-                if stream == MXC_IO_STDOUT {
-                    MXC_IO_EVENT_STDOUT
-                } else {
-                    MXC_IO_EVENT_STDERR
-                },
-                0,
-                &buffer[..read],
-                0,
-                0,
-            );
-        }
-        Ok(IoReadState::Eof) => {
-            events.complete_read_request(stream);
-            emit_event(
-                events,
-                if stream == MXC_IO_STDOUT {
-                    MXC_IO_EVENT_STDOUT_EOF
-                } else {
-                    MXC_IO_EVENT_STDERR_EOF
-                },
-                0,
-                &[],
-                0,
-                0,
-            );
-        }
-        Err(_) => {
-            events.complete_read_request(stream);
-            emit_event(events, MXC_IO_EVENT_ERROR, stream as u32, &[], 0, 0);
-        }
-    }
-}
-
-fn run_event_pump(coordinator: Arc<IoCoordinator>, events: Arc<EventPumpState>) {
-    let mut output = vec![0_u8; EVENT_BUFFER_BYTES];
-    let mut process_complete = false;
-    loop {
-        pump_output(&coordinator, &events, MXC_IO_STDOUT, output.as_mut_slice());
-        pump_output(&coordinator, &events, MXC_IO_STDERR, output.as_mut_slice());
-
-        let operations: Vec<_> = lock_unpoisoned(&events.operations)
-            .pending
-            .iter()
-            .copied()
-            .collect();
-        for operation in operations {
-            let Some(result) = coordinator.poll_stdin(operation) else {
-                continue;
-            };
-            lock_unpoisoned(&events.operations)
-                .pending
-                .remove(&operation);
-            match result {
-                Ok(written) => emit_event(
-                    &events,
-                    MXC_IO_EVENT_STDIN_COMPLETE,
-                    operation,
-                    &[],
-                    written as i64,
-                    1,
-                ),
-                Err(_) => emit_event(&events, MXC_IO_EVENT_STDIN_COMPLETE, operation, &[], 0, 0),
-            }
-        }
-
-        if !process_complete {
-            match coordinator.poll_process() {
-                Ok(status) if !status.running => {
-                    process_complete = true;
-                    emit_event(
-                        &events,
-                        MXC_IO_EVENT_EXIT,
-                        0,
-                        &[],
-                        i64::from(status.exit_code),
-                        i32::from(status.timed_out),
-                    );
-                }
-                Ok(_) => {}
-                Err(_) => {
-                    emit_event(&events, MXC_IO_EVENT_ERROR, 0, &[], 0, 0);
-                    process_complete = coordinator.process_is_terminal();
-                }
-            }
-        }
-
-        let shutdown_complete = {
-            let operations = lock_unpoisoned(&events.operations);
-            operations.shutdown_requested
-                && process_complete
-                && coordinator.workers_finished()
-                && operations.pending.is_empty()
-                && !operations.stdout_requested
-                && !operations.stderr_requested
-        };
-        if shutdown_complete {
-            emit_event(&events, MXC_IO_EVENT_SHUTDOWN, 0, &[], 0, 0);
-            return;
-        }
-
-        let operations = lock_unpoisoned(&events.operations);
-        drop(
-            events
-                .wake
-                .wait_timeout(operations, EVENT_POLL_INTERVAL)
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        );
-    }
-}
-
 /// Return the child process identifier, or zero for an invalid handle.
 ///
 /// # Safety
-/// `handle` must be null or a live coordinator handle, and this call must not
-/// overlap [`mxc_io_free`] for the same handle.
+/// `handle` must be null or a live coordinator handle.
 #[no_mangle]
 pub unsafe extern "C" fn mxc_io_id(handle: *mut MxcIoCoordinator) -> u32 {
     catch_unwind(AssertUnwindSafe(|| {
@@ -506,221 +202,151 @@ pub unsafe extern "C" fn mxc_io_id(handle: *mut MxcIoCoordinator) -> u32 {
     })
 }
 
-/// Report whether the sandbox exposes stdin.
+/// Transfer native stdio endpoints from the coordinator exactly once.
 ///
 /// # Safety
-/// `handle` must be null or a live coordinator handle, and this call must not
-/// overlap [`mxc_io_free`] for the same handle.
+/// - `handle` must be null or a live coordinator handle.
+/// - `out_stdio` must point to writable storage for one [`MxcNativeStdio`].
 #[no_mangle]
-pub unsafe extern "C" fn mxc_io_has_stdin(handle: *mut MxcIoCoordinator) -> i32 {
-    catch_boolean("mxc_io_has_stdin", || {
-        coordinator_ref(handle).is_some_and(|coordinator| coordinator.inner.has_stdin())
+pub unsafe extern "C" fn mxc_io_take_native_stdio(
+    handle: *mut MxcIoCoordinator,
+    out_stdio: *mut MxcNativeStdio,
+) -> i32 {
+    if out_stdio.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+    // SAFETY: caller-guaranteed writable storage.
+    unsafe { ptr::write(out_stdio, MxcNativeStdio::invalid()) };
+    catch_status("mxc_io_take_native_stdio", || {
+        let Some(coordinator) = coordinator_ref(handle) else {
+            return MXC_STATUS_NULL_ARGUMENT;
+        };
+        let Some(stdio) = coordinator.inner.take_native_stdio() else {
+            return MXC_STATUS_BACKEND_ERROR;
+        };
+        let result = MxcNativeStdio {
+            stdin_handle: native_pipe_into_raw(stdio.stdin),
+            stdout_handle: native_pipe_into_raw(stdio.stdout),
+            stderr_handle: native_pipe_into_raw(stdio.stderr),
+        };
+        // SAFETY: non-null writable output per the caller contract.
+        unsafe { ptr::write(out_stdio, result) };
+        MXC_STATUS_SUCCESS
     })
 }
 
-/// Report whether the sandbox exposes stdout.
-///
-/// # Safety
-/// `handle` must be null or a live coordinator handle, and this call must not
-/// overlap [`mxc_io_free`] for the same handle.
-#[no_mangle]
-pub unsafe extern "C" fn mxc_io_has_stdout(handle: *mut MxcIoCoordinator) -> i32 {
-    catch_boolean("mxc_io_has_stdout", || {
-        coordinator_ref(handle).is_some_and(|coordinator| coordinator.inner.has_stdout())
-    })
+#[cfg(target_os = "windows")]
+fn native_pipe_into_raw(pipe: Option<std::os::windows::io::OwnedHandle>) -> isize {
+    use std::os::windows::io::IntoRawHandle;
+    pipe.map_or(0, |handle| handle.into_raw_handle() as isize)
 }
 
-/// Report whether the sandbox exposes stderr.
-///
-/// # Safety
-/// `handle` must be null or a live coordinator handle, and this call must not
-/// overlap [`mxc_io_free`] for the same handle.
-#[no_mangle]
-pub unsafe extern "C" fn mxc_io_has_stderr(handle: *mut MxcIoCoordinator) -> i32 {
-    catch_boolean("mxc_io_has_stderr", || {
-        coordinator_ref(handle).is_some_and(|coordinator| coordinator.inner.has_stderr())
-    })
+#[cfg(not(target_os = "windows"))]
+fn native_pipe_into_raw(pipe: Option<std::os::fd::OwnedFd>) -> isize {
+    use std::os::fd::IntoRawFd;
+    pipe.map_or(-1, |fd| fd.into_raw_fd() as isize)
 }
 
-fn catch_boolean(operation: &str, body: impl FnOnce() -> bool) -> i32 {
-    catch_unwind(AssertUnwindSafe(body))
-        .map(i32::from)
-        .unwrap_or_else(|panic| {
-            crate::report_panic(operation, &*panic);
-            0
-        })
+/// Close a transferred endpoint that the caller could not adopt.
+///
+/// # Safety
+/// `handle` must be an owned endpoint returned by
+/// [`mxc_io_take_native_stdio`] and must not have been closed or adopted.
+#[no_mangle]
+pub unsafe extern "C" fn mxc_native_pipe_close(handle: isize) {
+    if let Err(panic) = catch_unwind(AssertUnwindSafe(|| close_native_pipe(handle))) {
+        crate::report_panic("mxc_native_pipe_close", &*panic);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn close_native_pipe(handle: isize) {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    if handle != 0 {
+        // SAFETY: caller transfers one live owned handle to this function.
+        drop(unsafe { OwnedHandle::from_raw_handle(handle as _) });
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn close_native_pipe(handle: isize) {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    if let Ok(fd) = i32::try_from(handle) {
+        if fd >= 0 {
+            // SAFETY: caller transfers one live owned descriptor to this function.
+            drop(unsafe { OwnedFd::from_raw_fd(fd) });
+        }
+    }
+}
+
+/// Poll process completion without blocking.
+///
+/// # Safety
+/// All output pointers must be non-null and writable.
+#[no_mangle]
+pub unsafe extern "C" fn mxc_io_try_wait(
+    handle: *mut MxcIoCoordinator,
+    out_exit: *mut i32,
+    out_running: *mut i32,
+    out_timed_out: *mut i32,
+) -> i32 {
+    if handle.is_null() || out_exit.is_null() || out_running.is_null() || out_timed_out.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+    // SAFETY: caller-guaranteed writable outputs.
+    unsafe {
+        *out_exit = 0;
+        *out_running = 1;
+        *out_timed_out = 0;
+    }
+    catch_status("mxc_io_try_wait", || {
+        let Some(coordinator) = coordinator_ref(handle) else {
+            return MXC_STATUS_NULL_ARGUMENT;
+        };
+        match coordinator.inner.poll_process() {
+            Ok(status) => {
+                // SAFETY: non-null writable outputs per the caller contract.
+                unsafe {
+                    *out_exit = status.exit_code;
+                    *out_running = i32::from(status.running);
+                    *out_timed_out = i32::from(status.timed_out);
+                }
+                MXC_STATUS_SUCCESS
+            }
+            Err(IoCoordinatorError::Closed | IoCoordinatorError::Backend) => {
+                MXC_STATUS_BACKEND_ERROR
+            }
+        }
+    })
 }
 
 /// Queue a process-tree kill and return immediately.
 ///
 /// # Safety
-/// `handle` must be null or a live coordinator handle, and this call must not
-/// overlap [`mxc_io_free`] for the same handle.
+/// `handle` must be null or a live coordinator handle.
 #[no_mangle]
 pub unsafe extern "C" fn mxc_io_request_kill(handle: *mut MxcIoCoordinator) -> i32 {
     catch_status("mxc_io_request_kill", || {
         coordinator_ref(handle).map_or(MXC_STATUS_NULL_ARGUMENT, |coordinator| {
-            let status = coordinator
+            coordinator
                 .inner
                 .request_kill()
-                .map_or(MXC_STATUS_BACKEND_ERROR, |()| MXC_STATUS_SUCCESS);
-            coordinator.events.wake();
-            status
+                .map_or(MXC_STATUS_BACKEND_ERROR, |()| MXC_STATUS_SUCCESS)
         })
     })
 }
 
-/// Request process and stream shutdown without releasing the caller's handle.
+/// Request process shutdown without releasing the caller's handle.
 ///
 /// # Safety
-/// `handle` must be null or a live coordinator handle, and this call must not
-/// overlap [`mxc_io_free`] for the same handle.
+/// `handle` must be null or a live coordinator handle.
 #[no_mangle]
 pub unsafe extern "C" fn mxc_io_request_shutdown(handle: *mut MxcIoCoordinator) -> i32 {
     catch_status("mxc_io_request_shutdown", || {
         let Some(coordinator) = coordinator_ref(handle) else {
             return MXC_STATUS_NULL_ARGUMENT;
         };
-        coordinator.events.request_shutdown(&coordinator.inner);
-        MXC_STATUS_SUCCESS
-    })
-}
-
-/// Request delivery of one output chunk or end-of-file event.
-///
-/// # Safety
-/// `handle` must be null or a live coordinator handle, and this call must not
-/// overlap [`mxc_io_free`] for the same handle.
-#[no_mangle]
-pub unsafe extern "C" fn mxc_io_request_read(handle: *mut MxcIoCoordinator, stream: i32) -> i32 {
-    catch_status("mxc_io_request_read", || {
-        let Some(coordinator) = coordinator_ref(handle) else {
-            return MXC_STATUS_NULL_ARGUMENT;
-        };
-        if stream != MXC_IO_STDOUT && stream != MXC_IO_STDERR {
-            return MXC_STATUS_NULL_ARGUMENT;
-        }
-        coordinator
-            .events
-            .request_read(stream)
-            .map_or(MXC_STATUS_BACKEND_ERROR, |()| MXC_STATUS_SUCCESS)
-    })
-}
-
-/// Close and discard one output stream without blocking.
-///
-/// # Safety
-/// `handle` must be null or a live coordinator handle, and this call must not
-/// overlap [`mxc_io_free`] for the same handle.
-#[no_mangle]
-pub unsafe extern "C" fn mxc_io_close_output(handle: *mut MxcIoCoordinator, stream: i32) -> i32 {
-    catch_status("mxc_io_close_output", || {
-        let Some(coordinator) = coordinator_ref(handle) else {
-            return MXC_STATUS_NULL_ARGUMENT;
-        };
-        match stream {
-            MXC_IO_STDOUT => coordinator.inner.close_stdout(),
-            MXC_IO_STDERR => coordinator.inner.close_stderr(),
-            _ => return MXC_STATUS_NULL_ARGUMENT,
-        }
-        coordinator.events.wake();
-        MXC_STATUS_SUCCESS
-    })
-}
-
-/// Queue a bounded stdin write.
-///
-/// # Safety
-/// `buf` must address `len` readable bytes and `out_operation` must be writable.
-#[no_mangle]
-pub unsafe extern "C" fn mxc_io_start_write(
-    handle: *mut MxcIoCoordinator,
-    buf: *const u8,
-    len: usize,
-    out_operation: *mut u32,
-) -> i32 {
-    catch_status("mxc_io_start_write", || {
-        if handle.is_null() || buf.is_null() || out_operation.is_null() {
-            return MXC_STATUS_NULL_ARGUMENT;
-        }
-        // SAFETY: `out_operation` is caller-guaranteed writable.
-        unsafe { *out_operation = 0 };
-        let Some(coordinator) = coordinator_ref(handle) else {
-            return MXC_STATUS_NULL_ARGUMENT;
-        };
-        // SAFETY: `buf` addresses `len` readable bytes by caller contract.
-        let bytes = unsafe { std::slice::from_raw_parts(buf, len) };
-        let mut operations = lock_unpoisoned(&coordinator.events.operations);
-        if operations.shutdown_requested {
-            return MXC_STATUS_BACKEND_ERROR;
-        }
-        match coordinator.inner.start_write(bytes) {
-            Ok(operation) => {
-                if let Some(operation) = operation {
-                    operations.pending.insert(operation);
-                }
-                // SAFETY: `out_operation` is caller-guaranteed writable.
-                unsafe { *out_operation = operation.unwrap_or(0) };
-                drop(operations);
-                coordinator.events.wake();
-                MXC_STATUS_SUCCESS
-            }
-            Err(_) => MXC_STATUS_BACKEND_ERROR,
-        }
-    })
-}
-
-/// Queue a stdin flush.
-///
-/// # Safety
-/// `out_operation` must be non-null and writable.
-#[no_mangle]
-pub unsafe extern "C" fn mxc_io_start_flush(
-    handle: *mut MxcIoCoordinator,
-    out_operation: *mut u32,
-) -> i32 {
-    catch_status("mxc_io_start_flush", || {
-        if handle.is_null() || out_operation.is_null() {
-            return MXC_STATUS_NULL_ARGUMENT;
-        }
-        // SAFETY: `out_operation` is caller-guaranteed writable.
-        unsafe { *out_operation = 0 };
-        let Some(coordinator) = coordinator_ref(handle) else {
-            return MXC_STATUS_NULL_ARGUMENT;
-        };
-        let mut operations = lock_unpoisoned(&coordinator.events.operations);
-        if operations.shutdown_requested {
-            return MXC_STATUS_BACKEND_ERROR;
-        }
-        match coordinator.inner.start_flush() {
-            Ok(operation) => {
-                if let Some(operation) = operation {
-                    operations.pending.insert(operation);
-                }
-                // SAFETY: `out_operation` is caller-guaranteed writable.
-                unsafe { *out_operation = operation.unwrap_or(0) };
-                drop(operations);
-                coordinator.events.wake();
-                MXC_STATUS_SUCCESS
-            }
-            Err(_) => MXC_STATUS_BACKEND_ERROR,
-        }
-    })
-}
-
-/// Close stdin after all accepted writes.
-///
-/// # Safety
-/// `handle` must be null or a live coordinator handle, and this call must not
-/// overlap [`mxc_io_free`] for the same handle.
-#[no_mangle]
-pub unsafe extern "C" fn mxc_io_close_stdin(handle: *mut MxcIoCoordinator) -> i32 {
-    catch_status("mxc_io_close_stdin", || {
-        let Some(coordinator) = coordinator_ref(handle) else {
-            return MXC_STATUS_NULL_ARGUMENT;
-        };
-        coordinator.inner.close_stdin();
-        coordinator.events.wake();
+        coordinator.inner.request_shutdown();
         MXC_STATUS_SUCCESS
     })
 }
@@ -749,13 +375,8 @@ unsafe fn copy_owned_json(
 
 /// Return the latest warnings JSON without blocking.
 ///
-/// The caller owns a non-null `*out_json_utf8` and must release it with
-/// [`mxc_string_free`](crate::mxc_string_free).
-///
 /// # Safety
-/// - `handle` must be null or a live coordinator handle, and this call must not
-///   overlap [`mxc_io_free`] for the same handle.
-/// - `out_json_utf8` must be null or point to writable pointer-sized storage.
+/// `out_json_utf8` must be null or point to writable pointer-sized storage.
 #[no_mangle]
 pub unsafe extern "C" fn mxc_io_warnings_json(
     handle: *mut MxcIoCoordinator,
@@ -773,13 +394,8 @@ pub unsafe extern "C" fn mxc_io_warnings_json(
 
 /// Return terminal output metadata JSON without blocking.
 ///
-/// The caller owns a non-null `*out_json_utf8` and must release it with
-/// [`mxc_string_free`](crate::mxc_string_free).
-///
 /// # Safety
-/// - `handle` must be null or a live coordinator handle, and this call must not
-///   overlap [`mxc_io_free`] for the same handle.
-/// - `out_json_utf8` must be null or point to writable pointer-sized storage.
+/// `out_json_utf8` must be null or point to writable pointer-sized storage.
 #[no_mangle]
 pub unsafe extern "C" fn mxc_io_output_metadata_json(
     handle: *mut MxcIoCoordinator,
@@ -797,18 +413,13 @@ pub unsafe extern "C" fn mxc_io_output_metadata_json(
     })
 }
 
-/// Request native shutdown, wait for callback production to stop, and release
-/// the caller's coordinator handle.
+/// Request shutdown and release the coordinator.
 ///
-/// This call may block while the final callbacks are delivered. Event-loop
-/// bindings must invoke it through a native worker pool rather than directly
-/// on the event-loop thread. Once it returns, no coordinator thread is still
-/// executing code from this library.
+/// This call may block while the native lifecycle worker exits. Event-loop
+/// bindings should invoke it through a native worker pool.
 ///
 /// # Safety
-/// - `handle` must be null or a live, not-yet-freed coordinator handle.
-/// - The registered callback and `user_data` must remain valid until the
-///   final [`MXC_IO_EVENT_SHUTDOWN`] callback returns.
+/// `handle` must be null or a live, not-yet-freed coordinator handle.
 #[no_mangle]
 pub unsafe extern "C" fn mxc_io_free(handle: *mut MxcIoCoordinator) {
     if handle.is_null() {
@@ -816,128 +427,41 @@ pub unsafe extern "C" fn mxc_io_free(handle: *mut MxcIoCoordinator) {
     }
     if let Err(panic) = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: live unique handle produced by `Box::into_raw`.
-        let coordinator = unsafe { Box::from_raw(handle) };
-        coordinator.events.request_shutdown(&coordinator.inner);
-        let event_thread = lock_unpoisoned(&coordinator.event_thread).take();
-        join_event_thread(event_thread);
-        drop(coordinator);
+        drop(unsafe { Box::from_raw(handle) });
     })) {
         crate::report_panic("mxc_io_free", &*panic);
-    }
-}
-
-fn join_event_thread(event_thread: Option<JoinHandle<()>>) {
-    if let Some(event_thread) = event_thread {
-        let _ = event_thread.join();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    unsafe extern "C" fn ignore_event(
-        _user_data: *mut c_void,
-        _event: i32,
-        _operation: u32,
-        _data: *const u8,
-        _len: usize,
-        _value: i64,
-        _flag: i32,
-    ) {
-    }
 
     #[test]
-    fn pending_read_rejects_a_second_request() {
-        let events = EventPumpState {
-            callback: ignore_event,
-            user_data: 0,
-            operations: Mutex::new(OperationState::default()),
-            wake: Condvar::new(),
-        };
-
-        assert_eq!(events.request_read(MXC_IO_STDOUT), Ok(()));
-        assert!(events.has_read_request(MXC_IO_STDOUT));
-        assert_eq!(
-            events.request_read(MXC_IO_STDOUT),
-            Err(IoCoordinatorError::Backend)
-        );
-        events.complete_read_request(MXC_IO_STDOUT);
-        assert_eq!(events.request_read(MXC_IO_STDOUT), Ok(()));
-    }
-
-    #[test]
-    fn joining_the_event_thread_establishes_native_quiescence() {
-        let finished = Arc::new(AtomicBool::new(false));
-        let worker_finished = Arc::clone(&finished);
-        let worker = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(10));
-            worker_finished.store(true, Ordering::Release);
-        });
-
-        join_event_thread(Some(worker));
-
-        assert!(finished.load(Ordering::Acquire));
-    }
-
-    fn event_state() -> EventPumpState {
-        EventPumpState {
-            callback: ignore_event,
-            user_data: 0,
-            operations: Mutex::new(OperationState::default()),
-            wake: Condvar::new(),
-        }
-    }
-
-    #[test]
-    fn read_request_is_single_outstanding_and_rejected_after_shutdown() {
-        let events = event_state();
-
-        assert_eq!(events.request_read(MXC_IO_STDOUT), Ok(()));
-        assert_eq!(
-            events.request_read(MXC_IO_STDOUT),
-            Err(IoCoordinatorError::Backend)
-        );
-        assert!(events.has_read_request(MXC_IO_STDOUT));
-        events.complete_read_request(MXC_IO_STDOUT);
-        assert_eq!(events.request_read(MXC_IO_STDOUT), Ok(()));
-
-        lock_unpoisoned(&events.operations).shutdown_requested = true;
-        assert_eq!(
-            events.request_read(MXC_IO_STDOUT),
-            Err(IoCoordinatorError::Closed)
-        );
-    }
-
-    #[test]
-    fn null_callback_still_clears_output_storage() {
-        let mut handle = std::ptr::NonNull::<MxcIoCoordinator>::dangling().as_ptr();
-        let dangling = std::ptr::NonNull::<c_char>::dangling().as_ptr();
-        let mut error = MxcErrorDetail {
-            message_utf8: dangling,
-            operation_utf8: dangling,
-            native_code_utf8: dangling,
-            remediation_utf8: dangling,
-        };
-
-        let status = unsafe {
-            spawn_callback(
-                "test",
-                ptr::null(),
-                None,
-                ptr::null_mut(),
-                &mut handle,
-                &mut error,
-                |_| unreachable!(),
-            )
-        };
-
+    fn null_handle_accessors_fail_closed() {
+        let mut exit = 7;
+        let mut running = 7;
+        let mut timed_out = 7;
+        // SAFETY: null handles are explicitly accepted and writable outputs
+        // are provided.
+        let status =
+            unsafe { mxc_io_try_wait(ptr::null_mut(), &mut exit, &mut running, &mut timed_out) };
         assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
-        assert!(handle.is_null());
-        assert!(error.message_utf8.is_null());
-        assert!(error.operation_utf8.is_null());
-        assert!(error.native_code_utf8.is_null());
-        assert!(error.remediation_utf8.is_null());
+    }
+
+    #[test]
+    fn native_stdio_output_is_initialized_before_handle_validation() {
+        let mut stdio = MxcNativeStdio {
+            stdin_handle: 5,
+            stdout_handle: 6,
+            stderr_handle: 7,
+        };
+        // SAFETY: null handles are explicitly accepted and `stdio` is writable.
+        let status = unsafe { mxc_io_take_native_stdio(ptr::null_mut(), &mut stdio) };
+        assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
+        let invalid = MxcNativeStdio::invalid();
+        assert_eq!(stdio.stdin_handle, invalid.stdin_handle);
+        assert_eq!(stdio.stdout_handle, invalid.stdout_handle);
+        assert_eq!(stdio.stderr_handle, invalid.stderr_handle);
     }
 }

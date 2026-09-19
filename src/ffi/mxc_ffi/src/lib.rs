@@ -12,10 +12,9 @@
 //! - **Streaming** (`streaming` module) — [`mxc_spawn_request`] accepts the
 //!   same binding request and returns an opaque live handle.
 //! - **Event-loop streaming** (`io_coordinator` module) —
-//!   [`mxc_io_spawn_request_callback`] and
-//!   [`mxc_io_state_aware_exec_callback`] own blocking I/O and process control
-//!   on native threads and deliver short completion events to language
-//!   bindings.
+//!   [`mxc_io_spawn_request`] and [`mxc_io_state_aware_exec`] transfer native
+//!   stdio endpoints to the caller while retaining timeout, kill, wait,
+//!   metadata, and teardown control on a native lifecycle thread.
 //! - **State-aware lifecycle** (`state_aware` module) — [`mxc_state_aware`]
 //!   drives the envelope phases (provision / start / stop / deprovision), and
 //!   [`mxc_state_aware_exec`] runs the exec phase as a live streaming handle
