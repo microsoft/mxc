@@ -8,6 +8,7 @@ import path from 'node:path';
 import { describe, it } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import type { Readable } from 'node:stream';
+import semver from 'semver';
 import type { ContainerConfig } from '@microsoft/mxc-sdk';
 import {
   debugSpawnOptions,
@@ -40,6 +41,9 @@ const schemaVersion = supportedVersions.at(-1)!;
 const skipReason =
   sandboxSkipReason ??
   (!platformSupport.isSupported ? `Platform not supported: ${platformSupport.reason}` : undefined) ??
+  (os.platform() === 'win32' && semver.lt(process.version, '24.21.0')
+    ? 'Native streaming on Windows requires Node.js 24.21.0 or newer'
+    : undefined) ??
   (os.platform() === 'linux' && !isLinuxBubblewrap
     ? 'Native streaming requires Bubblewrap on Linux'
     : undefined);

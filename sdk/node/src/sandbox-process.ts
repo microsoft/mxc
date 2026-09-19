@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 import type { Readable, Writable } from 'node:stream';
+import { destroyNativeStream } from './bindings/native-stdio.js';
 
 export interface SandboxWaitResult {
   exitCode: number;
@@ -29,6 +30,18 @@ export interface NativeLifecycleDriver {
 const POLL_INTERVAL_MS = 10;
 type ProcessPhase = 'active' | 'settling' | 'terminal' | 'disposed';
 
+export interface LifecycleScheduler {
+  now(): number;
+  schedule(callback: () => void, delayMs: number): unknown;
+  cancel(handle: unknown): void;
+}
+
+const defaultScheduler: LifecycleScheduler = {
+  now: () => performance.now(),
+  schedule: (callback, delayMs) => setTimeout(callback, delayMs),
+  cancel: (handle) => clearTimeout(handle as NodeJS.Timeout),
+};
+
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
@@ -37,18 +50,19 @@ function isExpectedStdinClosure(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
   return code === 'EPIPE' ||
     code === 'ECONNRESET' ||
-    code === 'ERR_STREAM_DESTROYED';
-}
-
-function destroyStream(stream: Readable | Writable | null): void {
-  if (stream !== null && !stream.destroyed) stream.destroy();
+    code === 'ERR_STREAM_DESTROYED' ||
+    code === 'EOF';
 }
 
 /**
  * A sandbox process whose stdio is backed by native Node streams.
  *
- * Rust retains lifecycle ownership; Node owns the transferred stdio
- * descriptors and provides their normal buffering and backpressure.
+ * Rust retains lifecycle ownership; Node owns the transferred native stdio
+ * endpoints and provides their normal buffering and backpressure.
+ *
+ * Access each output stream before calling {@link waitAsync}. Waiting drains
+ * any untaken output internally, and subsequent access to that stream throws.
+ * Output metadata is populated only after terminal settling completes.
  */
 export class MxcSandboxProcess {
   readonly id: number;
@@ -62,19 +76,18 @@ export class MxcSandboxProcess {
   private outputDrained = false;
   private errorDrained = false;
   private phase: ProcessPhase = 'active';
-  private cleanupStarted = false;
   private warningsValue: readonly string[];
   private metadataValue: unknown | undefined;
-  private readonly cleanups: Array<() => void> = [];
   private resolveWait!: (result: SandboxWaitResult) => void;
   private rejectWait!: (error: Error) => void;
   private readonly waitPromise: Promise<SandboxWaitResult>;
-  private pollTimer: NodeJS.Timeout | undefined;
+  private pollTimer: unknown;
   private readonly deadline: number | undefined;
 
-  private constructor(
+  constructor(
     private readonly driver: NativeLifecycleDriver,
     timeoutMs?: number,
+    private readonly scheduler: LifecycleScheduler = defaultScheduler,
   ) {
     this.id = driver.id;
     this.input = driver.standardInput;
@@ -82,7 +95,7 @@ export class MxcSandboxProcess {
     this.errorOutput = driver.standardError;
     this.warningsValue = driver.warnings();
     this.deadline = timeoutMs !== undefined && timeoutMs > 0
-      ? performance.now() + timeoutMs
+      ? this.scheduler.now() + timeoutMs
       : undefined;
     this.waitPromise = new Promise<SandboxWaitResult>((resolve, reject) => {
       this.resolveWait = resolve;
@@ -99,45 +112,59 @@ export class MxcSandboxProcess {
     this.poll();
   }
 
-  static create(
-    driver: NativeLifecycleDriver,
-    timeoutMs?: number,
-  ): MxcSandboxProcess {
-    return new MxcSandboxProcess(driver, timeoutMs);
-  }
-
+  /** Returns stdin and transfers responsibility for closing it to the caller. */
   get standardInput(): Writable | null {
     this.throwIfDisposed();
     this.inputTaken = true;
     return this.input;
   }
 
+  /**
+   * Returns stdout unless {@link waitAsync} already began draining it
+   * internally.
+   */
   get standardOutput(): Readable | null {
     this.throwIfDisposed();
     if (this.outputDrained) {
-      throw new Error('standard output is being drained internally');
+      throw new Error(
+        'standard output is unavailable because waitAsync() began draining it; ' +
+        'access the stream before awaiting process completion',
+      );
     }
     this.outputTaken = true;
     return this.output;
   }
 
+  /**
+   * Returns stderr unless {@link waitAsync} already began draining it
+   * internally.
+   */
   get standardError(): Readable | null {
     this.throwIfDisposed();
     if (this.errorDrained) {
-      throw new Error('standard error is being drained internally');
+      throw new Error(
+        'standard error is unavailable because waitAsync() began draining it; ' +
+        'access the stream before awaiting process completion',
+      );
     }
     this.errorTaken = true;
     return this.errorOutput;
   }
 
+  /** Warnings collected during spawn and refreshed after terminal settling. */
   get warnings(): readonly string[] {
     return this.warningsValue;
   }
 
+  /** Structured output populated only after terminal settling completes. */
   get outputMetadata(): unknown | undefined {
     return this.metadataValue;
   }
 
+  /**
+   * Waits for process completion. Untaken stdin is closed and untaken output
+   * streams are drained internally to prevent pipe-buffer deadlocks.
+   */
   waitAsync(): Promise<SandboxWaitResult> {
     this.throwIfDisposed();
     if (!this.inputTaken && this.input !== null && !this.input.destroyed) {
@@ -166,25 +193,14 @@ export class MxcSandboxProcess {
       }
     }
     this.stopPolling();
-    destroyStream(this.input);
-    destroyStream(this.output);
-    destroyStream(this.errorOutput);
-    const cleanupError = this.runCleanups();
-    firstError ??= cleanupError;
+    destroyNativeStream(this.input);
+    destroyNativeStream(this.output);
+    destroyNativeStream(this.errorOutput);
     void this.driver.free().catch(() => {});
     if (previousPhase !== 'terminal') {
       this.rejectWait(new Error('sandbox process was disposed before completion'));
     }
     if (firstError !== undefined) throw firstError;
-  }
-
-  /** @internal Registers state-aware cleanup tied to process completion. */
-  _registerCleanup(cleanup: () => void): void {
-    if (this.cleanupStarted) {
-      cleanup();
-      return;
-    }
-    this.cleanups.push(cleanup);
   }
 
   private poll(): void {
@@ -200,11 +216,11 @@ export class MxcSandboxProcess {
       this.finishAfterWait();
       return;
     }
-    if (this.deadline !== undefined && performance.now() >= this.deadline) {
+    if (this.deadline !== undefined && this.scheduler.now() >= this.deadline) {
       this.finishAfterTimeout();
       return;
     }
-    this.pollTimer = setTimeout(() => this.poll(), POLL_INTERVAL_MS);
+    this.pollTimer = this.scheduler.schedule(() => this.poll(), POLL_INTERVAL_MS);
   }
 
   private finishAfterWait(): void {
@@ -263,16 +279,16 @@ export class MxcSandboxProcess {
     this.stopPolling();
 
     let error = initialError;
-    if (error === undefined) {
-      try {
-        this.warningsValue = this.driver.warnings();
-        this.metadataValue = this.driver.outputMetadata();
-      } catch (cause) {
-        error = asError(cause);
-      }
+    try {
+      this.warningsValue = this.driver.warnings();
+    } catch (cause) {
+      error ??= asError(cause);
     }
-    const cleanupError = this.runCleanups();
-    error ??= cleanupError;
+    try {
+      this.metadataValue = this.driver.outputMetadata();
+    } catch (cause) {
+      error ??= asError(cause);
+    }
 
     try {
       await this.driver.free();
@@ -287,24 +303,9 @@ export class MxcSandboxProcess {
     }
   }
 
-  private runCleanups(): Error | undefined {
-    if (this.cleanupStarted) return undefined;
-    this.cleanupStarted = true;
-    let firstError: Error | undefined;
-    while (this.cleanups.length > 0) {
-      const cleanup = this.cleanups.shift()!;
-      try {
-        cleanup();
-      } catch (error) {
-        firstError ??= asError(error);
-      }
-    }
-    return firstError;
-  }
-
   private stopPolling(): void {
     if (this.pollTimer !== undefined) {
-      clearTimeout(this.pollTimer);
+      this.scheduler.cancel(this.pollTimer);
       this.pollTimer = undefined;
     }
   }
@@ -330,6 +331,7 @@ export class MxcSandboxProcess {
 export function createMxcSandboxProcess(
   driver: NativeLifecycleDriver,
   timeoutMs?: number,
+  scheduler?: LifecycleScheduler,
 ): MxcSandboxProcess {
-  return MxcSandboxProcess.create(driver, timeoutMs);
+  return new MxcSandboxProcess(driver, timeoutMs, scheduler);
 }

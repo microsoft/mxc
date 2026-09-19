@@ -13,10 +13,13 @@ parameters:
   default:
     - name: windows
       os: windows
+      nodeVersion: '24.21.0'
     - name: linux
       os: linux
+      nodeVersion: '20.x'
     - name: macos
       os: macos
+      nodeVersion: '20.x'
 
 jobs:
 - ${{ each target in parameters.targets }}:
@@ -51,9 +54,9 @@ jobs:
       - checkout: self
 
       - task: UseNode@1
-        displayName: Use Node.js 24.21.0
+        displayName: Use Node.js ${{ target.nodeVersion }}
         inputs:
-          version: '24.21.0'
+          version: ${{ target.nodeVersion }}
 
       - task: Cache@2
         displayName: Cache npm

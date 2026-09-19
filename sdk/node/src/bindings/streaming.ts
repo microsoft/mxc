@@ -3,6 +3,7 @@
 
 import type { Readable, Writable } from 'node:stream';
 import koffi, { type KoffiFunc } from 'koffi';
+import { MxcError } from '../errors.js';
 import {
   createMxcSandboxProcess,
   type MxcSandboxProcess,
@@ -14,6 +15,7 @@ import type { RequestSpec } from './request.js';
 import { bindNativeFunction } from './native-function.js';
 import {
   adoptNativeStdio,
+  destroyNativeStream,
   minimumWindowsNativeStdioNodeVersion,
   nodeStreamFactory,
   supportsNativeStdio,
@@ -180,10 +182,6 @@ function throwIfFailed(status: number, message: string): void {
   if (status !== 0) throw nativeStatusError(status, {}, message);
 }
 
-function destroyStream(stream: Readable | Writable | null): void {
-  if (stream !== null && !stream.destroyed) stream.destroy();
-}
-
 function freeSandboxAsync(
   native: StreamingNativeFacade,
   handle: Pointer,
@@ -199,6 +197,9 @@ function freeSandboxAsync(
 class KoffiLifecycleDriver implements NativeLifecycleDriver {
   private freePromise: Promise<void> | undefined;
   private waitPromise: Promise<{ exitCode: number; timedOut: boolean }> | undefined;
+  private readonly pollExit = [0];
+  private readonly pollRunning = [1];
+  private readonly pollTimedOut = [0];
 
   constructor(
     private readonly native: StreamingNativeFacade,
@@ -210,22 +211,22 @@ class KoffiLifecycleDriver implements NativeLifecycleDriver {
   ) {}
 
   poll(): NativeLifecycleStatus {
-    const exit = [0];
-    const running = [1];
-    const timedOut = [0];
+    this.pollExit[0] = 0;
+    this.pollRunning[0] = 1;
+    this.pollTimedOut[0] = 0;
     throwIfFailed(
       this.native.tryWait(
         this.handle,
-        exit,
-        running,
-        timedOut,
+        this.pollExit,
+        this.pollRunning,
+        this.pollTimedOut,
       ),
       'polling sandbox process failed',
     );
     return {
-      exitCode: exit[0],
-      running: running[0] !== 0,
-      timedOut: timedOut[0] !== 0,
+      exitCode: this.pollExit[0],
+      running: this.pollRunning[0] !== 0,
+      timedOut: this.pollTimedOut[0] !== 0,
     };
   }
 
@@ -259,7 +260,18 @@ class KoffiLifecycleDriver implements NativeLifecycleDriver {
 
   outputMetadata(): unknown | undefined {
     const json = this.readOwnedJson('outputMetadataJson');
-    return json === undefined ? undefined : JSON.parse(json);
+    if (json === undefined) return undefined;
+    try {
+      return JSON.parse(json);
+    } catch (error) {
+      throw new MxcError({
+        code: 'backend_error',
+        message: 'native runtime returned malformed output metadata',
+        details: {
+          cause: error instanceof Error ? error.message : String(error),
+        },
+      });
+    }
   }
 
   kill(): void {
@@ -286,9 +298,12 @@ class KoffiLifecycleDriver implements NativeLifecycleDriver {
     method: 'warningsJson' | 'outputMetadataJson',
   ): string | undefined {
     const out: Pointer[] = [null];
+    const description = method === 'warningsJson'
+      ? 'reading sandbox process warnings failed'
+      : 'reading sandbox process output metadata failed';
     throwIfFailed(
       this.native[method](this.handle, out),
-      'reading sandbox process data failed',
+      description,
     );
     try {
       return decodeString(out[0]);
@@ -324,7 +339,10 @@ export function createStreamingDriver(
 
   const handle = outHandle[0];
   if (handle === null || handle === undefined) {
-    throw new Error('native runtime returned a null lifecycle handle');
+    throw new MxcError(
+      'backend_error',
+      'native runtime returned a null lifecycle handle',
+    );
   }
 
   let input: Writable | null = null;
@@ -355,9 +373,9 @@ export function createStreamingDriver(
       errorOutput,
     );
   } catch (error) {
-    destroyStream(input);
-    destroyStream(output);
-    destroyStream(errorOutput);
+    destroyNativeStream(input);
+    destroyNativeStream(output);
+    destroyNativeStream(errorOutput);
     beginFailedSpawnCleanup(native, handle);
     throw error;
   }
@@ -365,11 +383,14 @@ export function createStreamingDriver(
 
 function ensureSupportedNodeVersion(): void {
   if (!supportsNativeStdio(nodeStreamFactory.platform, process.versions.node)) {
-    throw new Error(
-      `native stdio on Windows requires Node.js ` +
-      `${minimumWindowsNativeStdioNodeVersion()} or newer; ` +
-      `current version is ${process.versions.node}`,
-    );
+    throw new MxcError({
+      code: 'backend_unavailable',
+      message: `native stdio on Windows requires Node.js ` +
+        `${minimumWindowsNativeStdioNodeVersion()} or newer; ` +
+        `current version is ${process.versions.node}`,
+      remediation: `Use Node.js ${minimumWindowsNativeStdioNodeVersion()} ` +
+        'or newer on Windows.',
+    });
   }
 }
 
@@ -385,9 +406,9 @@ export function spawnBindingSandboxProcess(
   try {
     return createMxcSandboxProcess(driver, request.policy.timeoutMs);
   } catch (error) {
-    destroyStream(driver.standardInput);
-    destroyStream(driver.standardOutput);
-    destroyStream(driver.standardError);
+    destroyNativeStream(driver.standardInput);
+    destroyNativeStream(driver.standardOutput);
+    destroyNativeStream(driver.standardError);
     void driver.free().catch(() => {});
     throw error;
   }

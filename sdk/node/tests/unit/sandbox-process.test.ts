@@ -7,6 +7,7 @@ import { PassThrough } from 'node:stream';
 import { describe, it } from 'node:test';
 import {
   createMxcSandboxProcess,
+  type LifecycleScheduler,
   type NativeLifecycleDriver,
   type NativeLifecycleStatus,
 } from '../../src/sandbox-process.js';
@@ -92,6 +93,40 @@ class FakeDriver implements NativeLifecycleDriver {
   }
 }
 
+class ManualScheduler implements LifecycleScheduler {
+  private time = 0;
+  private nextId = 1;
+  private readonly tasks = new Map<number, {
+    readonly due: number;
+    readonly callback: () => void;
+  }>();
+
+  now(): number {
+    return this.time;
+  }
+
+  schedule(callback: () => void, delayMs: number): unknown {
+    const id = this.nextId++;
+    this.tasks.set(id, { due: this.time + delayMs, callback });
+    return id;
+  }
+
+  cancel(handle: unknown): void {
+    this.tasks.delete(handle as number);
+  }
+
+  advance(delayMs: number): void {
+    this.time += delayMs;
+    const ready = [...this.tasks.entries()]
+      .filter(([, task]) => task.due <= this.time)
+      .sort((left, right) => left[1].due - right[1].due);
+    for (const [id, task] of ready) {
+      if (!this.tasks.delete(id)) continue;
+      task.callback();
+    }
+  }
+}
+
 describe('native sandbox process', () => {
   it('exposes the transferred Node streams directly', async () => {
     const driver = new FakeDriver();
@@ -153,6 +188,20 @@ describe('native sandbox process', () => {
       exitCode: 7,
       timedOut: false,
     });
+
+    it('accepts the Windows EOF code as an expected stdin closure', async () => {
+      const driver = new FakeDriver();
+      const proc = createMxcSandboxProcess(driver);
+      const error = Object.assign(new Error('stdin reached EOF'), { code: 'EOF' });
+
+      driver.standardInput.emit('error', error);
+      driver.complete(7);
+
+      assert.deepStrictEqual(await proc.waitAsync(), {
+        exitCode: 7,
+        timedOut: false,
+      });
+    });
   });
 
   it('still rejects unexpected stdin failures', async () => {
@@ -199,22 +248,6 @@ describe('native sandbox process', () => {
     assert.strictEqual(driver.freeCount, 1);
   });
 
-  it('runs all registered cleanup and preserves the first failure', async () => {
-    const driver = new FakeDriver();
-    const proc = createMxcSandboxProcess(driver);
-    let secondRan = false;
-    proc._registerCleanup(() => {
-      throw new Error('cleanup failed');
-    });
-    proc._registerCleanup(() => {
-      secondRan = true;
-    });
-    driver.complete();
-
-    await assert.rejects(proc.waitAsync(), /cleanup failed/);
-    assert.strictEqual(secondRan, true);
-  });
-
   it('disposes streams and native lifecycle ownership exactly once', async () => {
     const driver = new FakeDriver();
     const proc = createMxcSandboxProcess(driver);
@@ -234,9 +267,12 @@ describe('native sandbox process', () => {
 
   it('enforces the request timeout and reports a timed-out result', async () => {
     const driver = new FakeDriver();
-    const proc = createMxcSandboxProcess(driver, 1);
+    const scheduler = new ManualScheduler();
+    const proc = createMxcSandboxProcess(driver, 1, scheduler);
 
-    const result = await proc.waitAsync();
+    const wait = proc.waitAsync();
+    scheduler.advance(10);
+    const result = await wait;
 
     assert.deepStrictEqual(result, { exitCode: 0, timedOut: true });
     assert.strictEqual(driver.killCount, 0);
@@ -247,9 +283,12 @@ describe('native sandbox process', () => {
   it('observes an exit racing the timeout before killing', async () => {
     const driver = new FakeDriver();
     driver.completeOnPoll = 3;
-    const proc = createMxcSandboxProcess(driver, 1);
+    const scheduler = new ManualScheduler();
+    const proc = createMxcSandboxProcess(driver, 1, scheduler);
 
-    const result = await proc.waitAsync();
+    const wait = proc.waitAsync();
+    scheduler.advance(10);
+    const result = await wait;
 
     assert.deepStrictEqual(result, { exitCode: 23, timedOut: false });
     assert.strictEqual(driver.killCount, 0);
@@ -265,9 +304,12 @@ describe('native sandbox process', () => {
       running: false,
       timedOut: true,
     };
-    const proc = createMxcSandboxProcess(driver, 1);
+    const scheduler = new ManualScheduler();
+    const proc = createMxcSandboxProcess(driver, 1, scheduler);
 
-    const result = await proc.waitAsync();
+    const wait = proc.waitAsync();
+    scheduler.advance(10);
+    const result = await wait;
 
     assert.deepStrictEqual(result, { exitCode: -1, timedOut: true });
     assert.strictEqual(driver.timeoutKillCount, 1);
@@ -277,13 +319,13 @@ describe('native sandbox process', () => {
   it('does not issue control calls after terminal wait starts', async () => {
     const driver = new FakeDriver();
     driver.deferWait = true;
-    const proc = createMxcSandboxProcess(driver);
+    const scheduler = new ManualScheduler();
+    const proc = createMxcSandboxProcess(driver, undefined, scheduler);
     const wait = proc.waitAsync();
     driver.complete(5);
 
-    while (driver.waitCount === 0) {
-      await new Promise((resolve) => setTimeout(resolve, 1));
-    }
+    scheduler.advance(10);
+    assert.strictEqual(driver.waitCount, 1);
     proc.kill();
 
     assert.strictEqual(driver.killCount, 0);

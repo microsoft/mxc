@@ -17,6 +17,7 @@ class FakeNative implements StreamingNativeFacade {
   readonly handle = {};
   readonly closedHandles: Array<number | bigint> = [];
   readonly freedStrings: unknown[] = [];
+  closeFailureHandle: number | bigint | undefined;
   spawnStatus = 0;
   takeStatus = 0;
   killCount = 0;
@@ -60,6 +61,9 @@ class FakeNative implements StreamingNativeFacade {
 
   closeNativePipe(handle: number | bigint): void {
     this.closedHandles.push(handle);
+    if (handle === this.closeFailureHandle) {
+      throw new Error(`closing ${handle} failed`);
+    }
   }
 
   tryWait(
@@ -138,6 +142,8 @@ class FakeNative implements StreamingNativeFacade {
 class FakeStreams implements NativeStreamFactory {
   readonly readableHandles: Array<number | bigint> = [];
   readonly writableHandles: Array<number | bigint> = [];
+  readonly readableStreams: PassThrough[] = [];
+  readonly writableStreams: PassThrough[] = [];
   failHandle: number | bigint | undefined;
 
   constructor(readonly platform: NodeJS.Platform = 'linux') {}
@@ -147,7 +153,9 @@ class FakeStreams implements NativeStreamFactory {
       throw new Error('readable construction failed');
     }
     this.readableHandles.push(handle);
-    return new PassThrough();
+    const stream = new PassThrough();
+    this.readableStreams.push(stream);
+    return stream;
   }
 
   writable(handle: number | bigint): Writable {
@@ -155,7 +163,9 @@ class FakeStreams implements NativeStreamFactory {
       throw new Error('writable construction failed');
     }
     this.writableHandles.push(handle);
-    return new PassThrough();
+    const stream = new PassThrough();
+    this.writableStreams.push(stream);
+    return stream;
   }
 }
 
@@ -269,6 +279,24 @@ describe('native streaming binding ownership', () => {
     );
 
     assert.deepStrictEqual(native.closedHandles, [12, 13]);
+    assert.strictEqual(streams.writableStreams[0].destroyed, true);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.strictEqual(native.freeCount, 1);
+  });
+
+  it('continues rollback when closing one unadopted handle fails', async () => {
+    const native = new FakeNative();
+    native.closeFailureHandle = 12;
+    const streams = new FakeStreams();
+    streams.failHandle = 12;
+
+    assert.throws(
+      () => createStreamingDriver({} as never, native, streams),
+      /rollback was incomplete/,
+    );
+
+    assert.deepStrictEqual(native.closedHandles, [12, 13]);
+    assert.strictEqual(streams.writableStreams[0].destroyed, true);
     await new Promise((resolve) => setImmediate(resolve));
     assert.strictEqual(native.freeCount, 1);
   });
@@ -317,10 +345,13 @@ describe('native streaming binding ownership', () => {
       new FakeStreams(),
     );
 
-    assert.throws(() => driver.warnings(), /reading sandbox process data failed/);
+    assert.throws(
+      () => driver.warnings(),
+      /reading sandbox process warnings failed/,
+    );
     assert.throws(
       () => driver.outputMetadata(),
-      /reading sandbox process data failed/,
+      /reading sandbox process output metadata failed/,
     );
     await driver.free();
   });
@@ -333,6 +364,11 @@ describe('native streaming Node version support', () => {
     assert.strictEqual(supportsNativeStdio('win32', '24.21.1'), true);
     assert.strictEqual(supportsNativeStdio('win32', '25.0.0'), true);
     assert.strictEqual(supportsNativeStdio('win32', '23.99.99'), false);
+    assert.strictEqual(supportsNativeStdio('win32', 'v24.21.0'), true);
+    assert.strictEqual(supportsNativeStdio('win32', '25.0'), true);
+    assert.strictEqual(supportsNativeStdio('win32', 'invalid'), false);
+    assert.strictEqual(supportsNativeStdio('win32', '24.21beta'), false);
+    assert.strictEqual(supportsNativeStdio('win32', '24.21.0.1'), false);
     assert.strictEqual(supportsNativeStdio('linux', '18.0.0'), true);
     assert.strictEqual(supportsNativeStdio('darwin', '18.0.0'), true);
   });
