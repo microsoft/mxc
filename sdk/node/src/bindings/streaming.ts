@@ -30,6 +30,7 @@ type Pointer = unknown;
 type NativeHandle = number | bigint;
 type NativeLibraryHandle = MxcNativeLibrary['handle'];
 type NativeFreeCompletion = (error: Error | null) => void;
+type NativeWaitCompletion = (error: Error | null, status: number) => void;
 
 interface AbiNativeStdio {
   stdin_handle: NativeHandle;
@@ -59,7 +60,12 @@ export interface _StreamingNativeFacade {
     outRunning: number[],
     outTimedOut: number[],
   ): number;
-  wait(handle: Pointer, outExit: number[], outTimedOut: number[]): number;
+  wait(
+    handle: Pointer,
+    outExit: number[],
+    outTimedOut: number[],
+    completion: NativeWaitCompletion,
+  ): void;
   kill(handle: Pointer): number;
   warningsJson(handle: Pointer, out: Pointer[]): number;
   outputMetadataJson(handle: Pointer, out: Pointer[]): number;
@@ -137,6 +143,19 @@ function bindSandboxFunctions(
       parameters: [pointer],
     },
   );
+  const wait = bindNativeFunction<KoffiFunc<(
+    sandbox: Pointer,
+    outExit: number[],
+    outTimedOut: number[],
+  ) => number>>(handle, {
+    symbol: 'mxc_sandbox_wait',
+    result: 'int32_t',
+    parameters: [
+      pointer,
+      koffi.out(koffi.pointer('int32_t')),
+      koffi.out(koffi.pointer('int32_t')),
+    ],
+  });
   return {
     spawn: bindNativeFunction(handle, {
       symbol: 'mxc_spawn_request',
@@ -172,15 +191,9 @@ function bindSandboxFunctions(
         koffi.out(koffi.pointer('int32_t')),
       ],
     }),
-    wait: bindNativeFunction(handle, {
-      symbol: 'mxc_sandbox_wait',
-      result: 'int32_t',
-      parameters: [
-        pointer,
-        koffi.out(koffi.pointer('int32_t')),
-        koffi.out(koffi.pointer('int32_t')),
-      ],
-    }),
+    wait(sandbox, outExit, outTimedOut, completion) {
+      wait.async(sandbox, outExit, outTimedOut, completion);
+    },
     kill: bindNativeFunction(handle, {
       symbol: 'mxc_sandbox_kill',
       result: 'int32_t',
@@ -249,6 +262,7 @@ function freeSandboxAsync(
 
 class KoffiLifecycleDriver implements NativeLifecycleDriver {
   private freePromise: Promise<void> | undefined;
+  private waitPromise: Promise<{ exitCode: number; timedOut: boolean }> | undefined;
 
   constructor(
     private readonly native: _StreamingNativeFacade,
@@ -279,17 +293,26 @@ class KoffiLifecycleDriver implements NativeLifecycleDriver {
     };
   }
 
-  wait(): { exitCode: number; timedOut: boolean } {
-    const exit = [0];
-    const timedOut = [0];
-    throwIfFailed(
-      this.native.wait(this.handle, exit, timedOut),
-      'waiting for sandbox process failed',
-    );
-    return {
-      exitCode: exit[0],
-      timedOut: timedOut[0] !== 0,
-    };
+  wait(): Promise<{ exitCode: number; timedOut: boolean }> {
+    return this.waitPromise ??= new Promise((resolve, reject) => {
+      const exit = [0];
+      const timedOut = [0];
+      this.native.wait(this.handle, exit, timedOut, (error, status) => {
+        if (error !== null) {
+          reject(error);
+          return;
+        }
+        try {
+          throwIfFailed(status, 'waiting for sandbox process failed');
+          resolve({
+            exitCode: exit[0],
+            timedOut: timedOut[0] !== 0,
+          });
+        } catch (failure) {
+          reject(failure);
+        }
+      });
+    });
   }
 
   warnings(): readonly string[] {
@@ -311,7 +334,9 @@ class KoffiLifecycleDriver implements NativeLifecycleDriver {
   }
 
   free(): Promise<void> {
-    return this.freePromise ??= freeSandboxAsync(this.native, this.handle);
+    return this.freePromise ??= (this.waitPromise ?? Promise.resolve())
+      .catch(() => {})
+      .then(() => freeSandboxAsync(this.native, this.handle));
   }
 
   private readOwnedJson(

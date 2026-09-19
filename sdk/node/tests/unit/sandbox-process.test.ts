@@ -38,7 +38,7 @@ class FakeDriver implements NativeLifecycleDriver {
     return this.status;
   }
 
-  wait(): { exitCode: number; timedOut: boolean } {
+  async wait(): Promise<{ exitCode: number; timedOut: boolean }> {
     this.waitCount += 1;
     return {
       exitCode: this.status.exitCode,
@@ -114,6 +114,30 @@ describe('native sandbox process', () => {
     assert.deepStrictEqual(proc.outputMetadata, { source: 'native' });
     assert.strictEqual(driver.waitCount, 1);
     assert.strictEqual(driver.freeCount, 1);
+  });
+
+  it('does not reject successful completion for an expected stdin closure', async () => {
+    const driver = new FakeDriver();
+    const proc = _createMxcSandboxProcess(driver);
+    const error = Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+
+    driver.standardInput.emit('error', error);
+    driver.complete(7);
+
+    assert.deepStrictEqual(await proc.waitAsync(), {
+      exitCode: 7,
+      timedOut: false,
+    });
+  });
+
+  it('still rejects unexpected stdin failures', async () => {
+    const driver = new FakeDriver();
+    const proc = _createMxcSandboxProcess(driver);
+    const error = Object.assign(new Error('stdin failed'), { code: 'EIO' });
+
+    driver.standardInput.emit('error', error);
+
+    await assert.rejects(proc.waitAsync(), /stdin failed/);
   });
 
   it('does not destroy caller-owned output when the process exits', async () => {

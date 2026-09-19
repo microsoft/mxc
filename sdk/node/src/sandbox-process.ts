@@ -18,7 +18,7 @@ export interface NativeLifecycleDriver {
   readonly standardOutput: Readable | null;
   readonly standardError: Readable | null;
   poll(): NativeLifecycleStatus;
-  wait(): SandboxWaitResult;
+  wait(): Promise<SandboxWaitResult>;
   warnings(): readonly string[];
   outputMetadata(): unknown | undefined;
   kill(): void;
@@ -29,6 +29,13 @@ const POLL_INTERVAL_MS = 10;
 
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
+}
+
+function isExpectedStdinClosure(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === 'EPIPE' ||
+    code === 'ECONNRESET' ||
+    code === 'ERR_STREAM_DESTROYED';
 }
 
 function destroyStream(stream: Readable | Writable | null): void {
@@ -81,7 +88,11 @@ export class MxcSandboxProcess {
       this.rejectWait = reject;
     });
     void this.waitPromise.catch(() => {});
-    this.input?.on('error', (error) => void this.finish(undefined, asError(error)));
+    this.input?.on('error', (error) => {
+      if (!isExpectedStdinClosure(error)) {
+        void this.finish(undefined, asError(error));
+      }
+    });
     this.output?.on('error', (error) => void this.finish(undefined, asError(error)));
     this.errorOutput?.on('error', (error) => void this.finish(undefined, asError(error)));
     this.poll();
@@ -196,25 +207,32 @@ export class MxcSandboxProcess {
   }
 
   private finishAfterWait(): void {
-    try {
-      void this.finish(this.driver.wait());
-    } catch (error) {
-      void this.finish(undefined, asError(error));
-    }
+    void this.waitForTerminalResult(false);
   }
 
   private finishAfterTimeout(): void {
     try {
       const status = this.driver.poll();
       if (!status.running) {
-        void this.finish(this.driver.wait());
+        void this.waitForTerminalResult(false);
         return;
       }
       this.driver.kill();
-      const result = this.driver.wait();
-      void this.finish({ exitCode: result.exitCode, timedOut: true });
+      void this.waitForTerminalResult(true);
     } catch (error) {
       void this.finish(undefined, asError(error));
+    }
+  }
+
+  private async waitForTerminalResult(timedOut: boolean): Promise<void> {
+    try {
+      const result = await this.driver.wait();
+      await this.finish({
+        exitCode: result.exitCode,
+        timedOut: timedOut || result.timedOut,
+      });
+    } catch (error) {
+      await this.finish(undefined, asError(error));
     }
   }
 

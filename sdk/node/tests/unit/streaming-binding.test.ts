@@ -18,8 +18,17 @@ class FakeNative implements _StreamingNativeFacade {
   spawnStatus = 0;
   takeStatus = 0;
   killCount = 0;
+  waitCount = 0;
   freeCount = 0;
   freeErrorCount = 0;
+  deferWait = false;
+  pendingWait:
+    | {
+      exit: number[];
+      timedOut: number[];
+      completion: (error: Error | null, status: number) => void;
+    }
+    | undefined;
   stdinHandle: number | bigint = 11;
   stdoutHandle: number | bigint = 12;
   stderrHandle: number | bigint = 13;
@@ -60,10 +69,31 @@ class FakeNative implements _StreamingNativeFacade {
     return 0;
   }
 
-  wait(_handle: unknown, exit: number[], timedOut: number[]): number {
-    exit[0] = 0;
-    timedOut[0] = 0;
-    return 0;
+  wait(
+    _handle: unknown,
+    exit: number[],
+    timedOut: number[],
+    completion: (error: Error | null, status: number) => void,
+  ): void {
+    this.waitCount += 1;
+    if (this.deferWait) {
+      this.pendingWait = { exit, timedOut, completion };
+      return;
+    }
+    queueMicrotask(() => {
+      exit[0] = 0;
+      timedOut[0] = 0;
+      completion(null, 0);
+    });
+  }
+
+  completeWait(exitCode = 0, timedOut = false): void {
+    const pending = this.pendingWait;
+    assert.notStrictEqual(pending, undefined);
+    this.pendingWait = undefined;
+    pending!.exit[0] = exitCode;
+    pending!.timedOut[0] = timedOut ? 1 : 0;
+    pending!.completion(null, 0);
   }
 
   kill(): number {
@@ -158,6 +188,31 @@ describe('native streaming binding ownership', () => {
     assert.deepStrictEqual(native.closedHandles, []);
     await driver.free();
     await driver.free();
+    assert.strictEqual(native.freeCount, 1);
+  });
+
+  it('waits off-thread and defers free until the wait completes', async () => {
+    const native = new FakeNative();
+    native.deferWait = true;
+    const driver = _spawnStreamingDriverForTest(
+      {} as never,
+      native,
+      new FakeStreams(),
+    );
+
+    const wait = driver.wait();
+    const repeatedWait = driver.wait();
+    const free = driver.free();
+    await Promise.resolve();
+
+    assert.strictEqual(native.waitCount, 1);
+    assert.strictEqual(native.freeCount, 0);
+
+    native.completeWait(31, true);
+
+    assert.deepStrictEqual(await wait, { exitCode: 31, timedOut: true });
+    assert.deepStrictEqual(await repeatedWait, { exitCode: 31, timedOut: true });
+    await free;
     assert.strictEqual(native.freeCount, 1);
   });
 
