@@ -120,10 +120,10 @@ flowchart LR
 `mxc_ffi` provides the C ABI for in-process language bindings. Its sandbox
 lifecycle functions call `mxc-sdk`, and its native stdio functions transfer
 duplicated stdin, stdout, and stderr endpoints that runtimes can adopt as
-native streams. The Node package uses this path through an internal native
-stdio binding, while its public APIs use the platform executor. The generated
-C# P/Invoke file is created during the C# build. Generated TypeScript wire
-types come from the schema tooling.
+native streams. The Node package contains an internal native stdio binding for
+this path, while its public APIs use the platform executor. The generated C#
+P/Invoke file is created during the C# build. Generated TypeScript wire types
+come from the schema tooling.
 
 ## Tests
 

@@ -72,9 +72,9 @@ jobs:
     path: s
 
   - task: NodeTool@1
-    displayName: Use Node.js 24.21.0
+    displayName: Use Node.js 22
     inputs:
-      version: '24.21.0'
+      version: '22.x'
 
   - script: node "$(Pipeline.Workspace)/lock-check/scripts/versioning/check-package-lock-integrity.js"
     displayName: 'Check package locks use npmjs and SHA-512 integrity'
