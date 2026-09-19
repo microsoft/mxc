@@ -51,9 +51,9 @@ jobs:
       - checkout: self
 
       - task: UseNode@1
-        displayName: Use Node.js 20
+        displayName: Use Node.js 24.21.0
         inputs:
-          version: '20.x'
+          version: '24.21.0'
 
       - task: Cache@2
         displayName: Cache npm

@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 import assert from 'node:assert';
+import { once } from 'node:events';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
@@ -69,8 +70,10 @@ describe(`Internal native streaming (schema ${schemaVersion})`, { skip: skipReas
       experimental: debugSpawnOptions.experimental,
     });
     const sandbox = streamingModule.spawnBindingSandboxProcess(request);
-    assert.ok(sandbox.standardOutput, 'streaming stdout should be available');
-    assert.ok(sandbox.standardError, 'streaming stderr should be available');
+    const standardOutput = sandbox.standardOutput;
+    const standardError = sandbox.standardError;
+    assert.ok(standardOutput, 'streaming stdout should be available');
+    assert.ok(standardError, 'streaming stderr should be available');
 
     let stdout = '';
     let stderr = '';
@@ -78,13 +81,13 @@ describe(`Internal native streaming (schema ${schemaVersion})`, { skip: skipReas
     const firstChunk = new Promise<void>((resolve) => {
       resolveFirstChunk = resolve;
     });
-    sandbox.standardOutput.on('data', (data: Buffer) => {
+    standardOutput.on('data', (data: Buffer) => {
       stdout += data.toString();
       if (stdout.includes('STREAM_FIRST')) {
         resolveFirstChunk?.();
       }
     });
-    sandbox.standardError.on('data', (data: Buffer) => {
+    standardError.on('data', (data: Buffer) => {
       stderr += data.toString();
     });
 
@@ -93,11 +96,13 @@ describe(`Internal native streaming (schema ${schemaVersion})`, { skip: skipReas
       completed = true;
       return result;
     });
+    const outputEnded = once(standardOutput, 'end');
+    const errorEnded = once(standardError, 'end');
     await firstChunk;
-    assert.strictEqual(completed, false, 'first output should arrive before process completion');
     assert.strictEqual(completed, false, 'first output should arrive before process completion');
 
     const result = await wait;
+    await Promise.all([outputEnded, errorEnded]);
     assert.strictEqual(result.exitCode, 0, stderr);
     assert.ok(stdout.includes('STREAM_FIRST'));
     assert.ok(stdout.includes('STREAM_SECOND'));

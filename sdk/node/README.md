@@ -51,6 +51,10 @@ child.on('close', (code) => console.log('exit:', code));
   When a new schema graduates or a new backend ships, update only this block.
 -->
 
+**Node.js:** `24.21.0` or later. On Windows, native pipe streaming uses the
+`windowsHandle` option added to `fs.ReadStream` and `fs.WriteStream` in
+Node.js 24.21.0.
+
 **Policy / config schema versions:**
 
 | Version | Status | Schema file |

@@ -1,7 +1,20 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+// Native stdio ownership is transferred once to Node. Rust retains only
+// process lifecycle control, so bytes never cross Koffi callbacks.
+
+import * as fs from 'node:fs';
+import * as net from 'node:net';
+import * as os from 'node:os';
+import type { Readable, Writable } from 'node:stream';
 import koffi, { type KoffiFunc } from 'koffi';
+import {
+  _createMxcSandboxProcess,
+  type MxcSandboxProcess,
+  type NativeLifecycleDriver,
+  type NativeLifecycleStatus,
+} from '../sandbox-process.js';
 import { loadMxcFfi, type MxcNativeLibrary } from '../native-library.js';
 import type { RequestSpec } from './request.js';
 import { bindNativeFunction } from './native-function.js';
@@ -12,211 +25,192 @@ import {
   parseStringArray,
   type AbiErrorDetail,
 } from './native-error.js';
-import {
-  _createMxcSandboxProcess,
-  type MxcSandboxProcess,
-  type NativeStreamingDriver,
-  type NativeStreamingEvent,
-} from '../sandbox-process.js';
 
 type Pointer = unknown;
+type NativeHandle = number | bigint;
 type NativeLibraryHandle = MxcNativeLibrary['handle'];
-type RegisteredCallback = ReturnType<typeof koffi.register>;
-type NativeEventCallback = (
-  userData: Pointer,
-  event: number,
-  operation: number,
-  data: Pointer,
-  length: number,
-  value: number | bigint,
-  flag: number,
-) => void;
 type NativeFreeCompletion = (error: Error | null) => void;
 
-const STDOUT = 1;
-const STDERR = 2;
-const EVENT_STDOUT = 1;
-const EVENT_STDERR = 2;
-const EVENT_STDOUT_EOF = 3;
-const EVENT_STDERR_EOF = 4;
-const EVENT_STDIN_COMPLETE = 5;
-const EVENT_EXIT = 6;
-const EVENT_ERROR = 7;
-const EVENT_SHUTDOWN = 8;
+interface AbiNativeStdio {
+  stdin_handle: NativeHandle;
+  stdout_handle: NativeHandle;
+  stderr_handle: NativeHandle;
+}
 
-const AbiCoordinator = koffi.opaque('MxcNodeIoCoordinator');
-const AbiEventCallback = koffi.pointer(koffi.proto(
-  'void MxcIoEventCallback(void *userData, int32 event, uint32 operation, const uint8 *data, size_t length, int64 value, int32 flag)',
-));
+const AbiCoordinator = koffi.opaque('MxcNodeLifecycleCoordinator');
+const AbiNativeStdioType = koffi.struct('MxcNodeNativeStdio', {
+  stdin_handle: 'intptr_t',
+  stdout_handle: 'intptr_t',
+  stderr_handle: 'intptr_t',
+});
 
-function bindCoordinatorFunctions(handle: NativeLibraryHandle) {
-  const pointer = koffi.pointer(AbiCoordinator);
-  const free = bindNativeFunction<KoffiFunc<(
-    coordinator: Pointer,
-  ) => void>>(handle, {
-    symbol: 'mxc_io_free',
-    result: 'void',
-    parameters: [pointer],
-  });
+export interface _StreamingNativeFacade {
+  spawn(
+    request: string,
+    outHandle: Pointer[],
+    error: AbiErrorDetail,
+  ): number;
+  id(handle: Pointer): number;
+  takeNativeStdio(handle: Pointer, stdio: AbiNativeStdio): number;
+  closeNativePipe(handle: NativeHandle): void;
+  tryWait(
+    handle: Pointer,
+    outExit: number[],
+    outRunning: number[],
+    outTimedOut: number[],
+  ): number;
+  requestKill(handle: Pointer): number;
+  requestShutdown(handle: Pointer): number;
+  warningsJson(handle: Pointer, out: Pointer[]): number;
+  outputMetadataJson(handle: Pointer, out: Pointer[]): number;
+  free(handle: Pointer, completion: NativeFreeCompletion): void;
+  freeError(error: AbiErrorDetail): void;
+  freeString(value: Pointer): void;
+}
+
+export interface _NativeStreamFactory {
+  readonly platform: NodeJS.Platform;
+  readable(handle: NativeHandle): Readable;
+  writable(handle: NativeHandle): Writable;
+}
+
+const MINIMUM_NODE_VERSION = [24, 21, 0] as const;
+
+function windowsHandleOptions(
+  handle: NativeHandle,
+): { autoClose: true; windowsHandle: bigint } {
   return {
-    spawn: bindNativeFunction<KoffiFunc<(
-      request: string,
-      callback: RegisteredCallback,
-      userData: Pointer,
-      coordinator: Pointer[],
-      error: AbiErrorDetail,
-    ) => number>>(handle, {
-      symbol: 'mxc_io_spawn_request_callback',
+    autoClose: true,
+    windowsHandle: typeof handle === 'bigint' ? handle : BigInt(handle),
+  };
+}
+
+function unixFd(handle: NativeHandle): number {
+  const fd = Number(handle);
+  if (!Number.isSafeInteger(fd) || fd < 0) {
+    throw new Error(`native runtime returned invalid file descriptor ${handle}`);
+  }
+  return fd;
+}
+
+const nodeStreamFactory: _NativeStreamFactory = {
+  platform: os.platform(),
+  readable(handle) {
+    if (this.platform === 'win32') {
+      return fs.createReadStream(
+        '',
+        windowsHandleOptions(handle) as unknown as
+          Parameters<typeof fs.createReadStream>[1],
+      );
+    }
+    return new net.Socket({
+      fd: unixFd(handle),
+      readable: true,
+      writable: false,
+    });
+  },
+  writable(handle) {
+    if (this.platform === 'win32') {
+      return fs.createWriteStream(
+        '',
+        windowsHandleOptions(handle) as unknown as
+          Parameters<typeof fs.createWriteStream>[1],
+      );
+    }
+    return new net.Socket({
+      fd: unixFd(handle),
+      readable: false,
+      writable: true,
+    });
+  },
+};
+
+function bindCoordinatorFunctions(
+  handle: NativeLibraryHandle,
+): _StreamingNativeFacade {
+  const pointer = koffi.pointer(AbiCoordinator);
+  const free = bindNativeFunction<KoffiFunc<(coordinator: Pointer) => void>>(
+    handle,
+    {
+      symbol: 'mxc_io_free',
+      result: 'void',
+      parameters: [pointer],
+    },
+  );
+  return {
+    spawn: bindNativeFunction(handle, {
+      symbol: 'mxc_io_spawn_request',
       result: 'int32_t',
       parameters: [
         'const char *',
-        AbiEventCallback,
-        'void *',
         koffi.out(koffi.pointer(AbiCoordinator, 2)),
         koffi.out(koffi.pointer(AbiErrorDetailType)),
       ],
     }),
-
-    id: bindNativeFunction<(coordinator: Pointer) => number>(handle, {
+    id: bindNativeFunction(handle, {
       symbol: 'mxc_io_id',
       result: 'uint32_t',
       parameters: [pointer],
     }),
-
-    hasStdin: bindNativeFunction<(coordinator: Pointer) => number>(handle, {
-      symbol: 'mxc_io_has_stdin',
+    takeNativeStdio: bindNativeFunction(handle, {
+      symbol: 'mxc_io_take_native_stdio',
       result: 'int32_t',
-      parameters: [pointer],
+      parameters: [pointer, koffi.out(koffi.pointer(AbiNativeStdioType))],
     }),
-
-    hasStdout: bindNativeFunction<(coordinator: Pointer) => number>(handle, {
-      symbol: 'mxc_io_has_stdout',
-      result: 'int32_t',
-      parameters: [pointer],
+    closeNativePipe: bindNativeFunction(handle, {
+      symbol: 'mxc_native_pipe_close',
+      result: 'void',
+      parameters: ['intptr_t'],
     }),
-
-    hasStderr: bindNativeFunction<(coordinator: Pointer) => number>(handle, {
-      symbol: 'mxc_io_has_stderr',
-      result: 'int32_t',
-      parameters: [pointer],
-    }),
-
-    requestRead: bindNativeFunction<
-      (coordinator: Pointer, stream: number) => number
-    >(handle, {
-      symbol: 'mxc_io_request_read',
-      result: 'int32_t',
-      parameters: [pointer, 'int32_t'],
-    }),
-
-    closeOutput: bindNativeFunction<
-      (coordinator: Pointer, stream: number) => number
-    >(handle, {
-      symbol: 'mxc_io_close_output',
-      result: 'int32_t',
-      parameters: [pointer, 'int32_t'],
-    }),
-
-    startWrite: bindNativeFunction<KoffiFunc<(
-      coordinator: Pointer,
-      buffer: Buffer,
-      length: number,
-      operation: number[],
-    ) => number>>(handle, {
-      symbol: 'mxc_io_start_write',
+    tryWait: bindNativeFunction(handle, {
+      symbol: 'mxc_io_try_wait',
       result: 'int32_t',
       parameters: [
         pointer,
-        'const uint8_t *',
-        'size_t',
-        koffi.out(koffi.pointer('uint32_t')),
+        koffi.out(koffi.pointer('int32_t')),
+        koffi.out(koffi.pointer('int32_t')),
+        koffi.out(koffi.pointer('int32_t')),
       ],
     }),
-
-    startFlush: bindNativeFunction<KoffiFunc<(
-      coordinator: Pointer,
-      operation: number[],
-    ) => number>>(handle, {
-      symbol: 'mxc_io_start_flush',
-      result: 'int32_t',
-      parameters: [pointer, koffi.out(koffi.pointer('uint32_t'))],
-    }),
-
-    closeStdin: bindNativeFunction<(coordinator: Pointer) => number>(handle, {
-      symbol: 'mxc_io_close_stdin',
-      result: 'int32_t',
-      parameters: [pointer],
-    }),
-
-    requestKill: bindNativeFunction<(coordinator: Pointer) => number>(handle, {
+    requestKill: bindNativeFunction(handle, {
       symbol: 'mxc_io_request_kill',
       result: 'int32_t',
       parameters: [pointer],
     }),
-
-    requestShutdown: bindNativeFunction<
-      (coordinator: Pointer) => number
-    >(handle, {
+    requestShutdown: bindNativeFunction(handle, {
       symbol: 'mxc_io_request_shutdown',
       result: 'int32_t',
       parameters: [pointer],
     }),
-
-    warningsJson: bindNativeFunction<KoffiFunc<(
-      coordinator: Pointer,
-      out: Pointer[],
-    ) => number>>(handle, {
+    warningsJson: bindNativeFunction(handle, {
       symbol: 'mxc_io_warnings_json',
       result: 'int32_t',
       parameters: [pointer, koffi.out(koffi.pointer('char', 2))],
     }),
-
-    outputMetadataJson: bindNativeFunction<KoffiFunc<(
-      coordinator: Pointer,
-      out: Pointer[],
-    ) => number>>(handle, {
+    outputMetadataJson: bindNativeFunction(handle, {
       symbol: 'mxc_io_output_metadata_json',
       result: 'int32_t',
       parameters: [pointer, koffi.out(koffi.pointer('char', 2))],
     }),
-
-    free(coordinator: Pointer, completion: NativeFreeCompletion): void {
+    free(coordinator, completion) {
       free.async(coordinator, completion);
     },
-
-    freeError: bindNativeFunction<(error: AbiErrorDetail) => void>(handle, {
+    freeError: bindNativeFunction(handle, {
       symbol: 'mxc_error_detail_free',
       result: 'void',
       parameters: [koffi.pointer(AbiErrorDetailType)],
     }),
-
-    freeString: bindNativeFunction<(value: Pointer) => void>(handle, {
+    freeString: bindNativeFunction(handle, {
       symbol: 'mxc_string_free',
       result: 'void',
       parameters: ['char *'],
     }),
-  };
+  } as _StreamingNativeFacade;
 }
 
-export type _StreamingNativeFacade = ReturnType<typeof bindCoordinatorFunctions>;
+let sharedNative: _StreamingNativeFacade | undefined;
 
-export interface _StreamingCallbackFacade {
-  register(callback: NativeEventCallback): RegisteredCallback;
-  unregister(callback: RegisteredCallback): void;
-}
-
-const koffiCallbacks: _StreamingCallbackFacade = {
-  register: (callback) => koffi.register(callback, AbiEventCallback),
-  unregister: (callback) => koffi.unregister(callback),
-};
-
-type NativeCoordinator = _StreamingNativeFacade;
-let sharedNative: NativeCoordinator | undefined;
-let sandboxProcessFactory:
-  | ((request: RequestSpec) => MxcSandboxProcess)
-  | undefined;
-
-function getNative(): NativeCoordinator {
+function getNative(): _StreamingNativeFacade {
   return sharedNative ??= bindCoordinatorFunctions(loadMxcFfi().handle);
 }
 
@@ -224,103 +218,79 @@ function throwIfFailed(status: number, message: string): void {
   if (status !== 0) throw nativeStatusError(status, {}, message);
 }
 
-function asError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(String(error));
+function isMissingHandle(
+  handle: NativeHandle,
+  platform: NodeJS.Platform,
+): boolean {
+  return platform === 'win32'
+    ? handle === 0 || handle === 0n
+    : handle === -1 || handle === -1n;
 }
 
-class KoffiStreamingDriver implements NativeStreamingDriver {
-  readonly id: number;
-  readonly hasStdin: boolean;
-  readonly hasStdout: boolean;
-  readonly hasStderr: boolean;
-  private handler?: (event: NativeStreamingEvent) => void;
-  private readonly queued: NativeStreamingEvent[] = [];
+function destroyStream(stream: Readable | Writable | null): void {
+  if (stream !== null && !stream.destroyed) stream.destroy();
+}
+
+function freeCoordinatorAsync(
+  native: _StreamingNativeFacade,
+  handle: Pointer,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    native.free(handle, (error) => {
+      if (error === null) resolve();
+      else reject(error);
+    });
+  });
+}
+
+class KoffiLifecycleDriver implements NativeLifecycleDriver {
+  private freePromise: Promise<void> | undefined;
   private shutdownRequested = false;
-  private nativeFreeStarted = false;
-  private callbackUnregistered = false;
 
   constructor(
-    private readonly native: NativeCoordinator,
+    private readonly native: _StreamingNativeFacade,
     private readonly handle: Pointer,
-    private readonly callback: RegisteredCallback,
-    private readonly callbacks: _StreamingCallbackFacade,
-  ) {
-    this.id = native.id(handle);
-    this.hasStdin = native.hasStdin(handle) !== 0;
-    this.hasStdout = native.hasStdout(handle) !== 0;
-    this.hasStderr = native.hasStderr(handle) !== 0;
-  }
+    readonly id: number,
+    readonly standardInput: Writable | null,
+    readonly standardOutput: Readable | null,
+    readonly standardError: Readable | null,
+  ) {}
 
-  setEventHandler(handler: (event: NativeStreamingEvent) => void): void {
-    this.handler = handler;
-    for (const event of this.queued.splice(0)) handler(event);
-  }
-
-  onEvent(event: NativeStreamingEvent): void {
-    if (this.handler === undefined) this.queued.push(event);
-    else this.handler(event);
-    if (event.type === 'shutdown') setImmediate(() => this.startNativeFree());
+  poll(): NativeLifecycleStatus {
+    const exit = [0];
+    const running = [1];
+    const timedOut = [0];
+    throwIfFailed(
+      this.native.tryWait(
+        this.handle,
+        exit,
+        running,
+        timedOut,
+      ),
+      'polling sandbox process failed',
+    );
+    return {
+      exitCode: exit[0],
+      running: running[0] !== 0,
+      timedOut: timedOut[0] !== 0,
+    };
   }
 
   warnings(): readonly string[] {
-    return parseStringArray(this.readJson(
-      (out) => this.native.warningsJson(this.handle, out),
-      'retrieving sandbox warnings failed',
-    ));
+    return parseStringArray(
+      this.readOwnedJson(this.native.warningsJson),
+    );
   }
 
   outputMetadata(): unknown | undefined {
-    const json = this.readJson(
-      (out) => this.native.outputMetadataJson(this.handle, out),
-      'retrieving sandbox output metadata failed',
-    );
+    const json = this.readOwnedJson(this.native.outputMetadataJson);
     return json === undefined ? undefined : JSON.parse(json);
-  }
-
-  requestRead(stream: 'stdout' | 'stderr'): void {
-    throwIfFailed(
-      this.native.requestRead(this.handle, stream === 'stdout' ? STDOUT : STDERR),
-      `requesting sandbox ${stream} failed`,
-    );
-  }
-
-  startWrite(buffer: Buffer): number {
-    const operation = [0];
-    // Native copies the bytes before returning, so this Buffer need not be retained.
-    throwIfFailed(
-      this.native.startWrite(this.handle, buffer, buffer.length, operation),
-      'queueing sandbox stdin failed',
-    );
-    return operation[0]!;
-  }
-
-  startFlush(): number {
-    const operation = [0];
-    throwIfFailed(
-      this.native.startFlush(this.handle, operation),
-      'queueing sandbox stdin flush failed',
-    );
-    return operation[0]!;
-  }
-
-  closeStdin(): void {
-    throwIfFailed(
-      this.native.closeStdin(this.handle),
-      'closing sandbox stdin failed',
-    );
-  }
-
-  closeOutput(stream: 'stdout' | 'stderr'): void {
-    throwIfFailed(
-      this.native.closeOutput(this.handle, stream === 'stdout' ? STDOUT : STDERR),
-      `closing sandbox ${stream} failed`,
-    );
   }
 
   kill(): void {
     throwIfFailed(
       this.native.requestKill(this.handle),
-      'requesting sandbox termination failed',
+      'killing sandbox process failed',
     );
   }
 
@@ -328,301 +298,180 @@ class KoffiStreamingDriver implements NativeStreamingDriver {
     if (this.shutdownRequested) return;
     throwIfFailed(
       this.native.requestShutdown(this.handle),
-      'requesting sandbox shutdown failed',
+      'shutting down sandbox process failed',
     );
     this.shutdownRequested = true;
   }
 
-  abort(): void {
-    this.startNativeFree();
+  free(): Promise<void> {
+    return this.freePromise ??= freeCoordinatorAsync(this.native, this.handle);
   }
 
-  private readJson(
-    call: (out: Pointer[]) => number,
-    message: string,
+  private readOwnedJson(
+    read: (handle: Pointer, out: Pointer[]) => number,
   ): string | undefined {
-    const out = [null] as Pointer[];
-    throwIfFailed(call(out), message);
+    const out: Pointer[] = [null];
+    throwIfFailed(read(this.handle, out), 'reading sandbox process data failed');
     try {
       return decodeString(out[0]);
     } finally {
       if (out[0] !== null) this.native.freeString(out[0]);
     }
   }
+}
 
-  private startNativeFree(): void {
-    if (this.nativeFreeStarted) return;
-    this.nativeFreeStarted = true;
-    try {
-      this.native.free(this.handle, (error) => {
-        if (!this.callbackUnregistered) {
-          this.callbackUnregistered = true;
-          unregisterAfterFree(this.callbacks, this.callback, error);
-        } else {
-          reportAsyncCleanupFailure(error);
-        }
-      });
-    } catch (error) {
-      this.nativeFreeStarted = false;
-      throw error;
+function adoptEndpoint(
+  factory: _NativeStreamFactory,
+  handle: NativeHandle,
+  writable: boolean,
+): Readable | Writable | null {
+  if (isMissingHandle(handle, factory.platform)) return null;
+
+  return writable ? factory.writable(handle) : factory.readable(handle);
+}
+
+function closeUnadopted(
+  native: _StreamingNativeFacade,
+  factory: _NativeStreamFactory,
+  handles: NativeHandle[],
+): void {
+  for (const handle of handles) {
+    if (!isMissingHandle(handle, factory.platform)) {
+      native.closeNativePipe(handle);
     }
   }
 }
 
-function reportAsyncCleanupFailure(error: Error | null): void {
-  if (error !== null) {
-    setImmediate(() => {
-      throw error;
-    });
-  }
-}
-
-function unregisterAfterFree(
-  callbacks: _StreamingCallbackFacade,
-  callback: RegisteredCallback,
-  error: Error | null,
-): void {
-  let cleanupError = error;
-  try {
-    callbacks.unregister(callback);
-  } catch (errorValue) {
-    const unregisterError = asError(errorValue);
-    cleanupError = cleanupError === null
-      ? unregisterError
-      : new AggregateError(
-          [cleanupError, unregisterError],
-          'native coordinator free and callback unregister failed',
-        );
-  }
-  reportAsyncCleanupFailure(cleanupError);
-}
-
-function startCleanupFree(
-  native: NativeCoordinator,
-  callbacks: _StreamingCallbackFacade,
-  callback: RegisteredCallback,
+function beginFailedSpawnCleanup(
+  native: _StreamingNativeFacade,
   handle: Pointer,
-  started: { value: boolean },
 ): void {
-  if (started.value) return;
-  started.value = true;
   try {
-    native.free(handle, (error) => {
-      unregisterAfterFree(callbacks, callback, error);
-    });
+    native.requestShutdown(handle);
+  } finally {
+    void freeCoordinatorAsync(native, handle).catch(() => {});
+  }
+}
+
+/** @internal Builds a driver with injectable native and stream facades. */
+export function _spawnStreamingDriverForTest(
+  request: RequestSpec,
+  native: _StreamingNativeFacade,
+  factory: _NativeStreamFactory,
+): NativeLifecycleDriver {
+  const outHandle: Pointer[] = [null];
+  const error = {} as AbiErrorDetail;
+  const status = native.spawn(JSON.stringify(request), outHandle, error);
+  if (status !== 0) {
+    try {
+      throw nativeStatusError(status, error);
+    } finally {
+      native.freeError(error);
+    }
+  }
+
+  const handle = outHandle[0];
+  if (handle === null || handle === undefined) {
+    throw new Error('native runtime returned a null lifecycle handle');
+  }
+
+  let input: Writable | null = null;
+  let output: Readable | null = null;
+  let errorOutput: Readable | null = null;
+  try {
+    const stdio = {} as AbiNativeStdio;
+    throwIfFailed(
+      native.takeNativeStdio(handle, stdio),
+      'taking native stdio failed',
+    );
+    const remaining = [
+      stdio.stdin_handle,
+      stdio.stdout_handle,
+      stdio.stderr_handle,
+    ];
+    try {
+      const invalid = factory.platform === 'win32' ? 0 : -1;
+      input = adoptEndpoint(factory, remaining[0], true) as Writable | null;
+      remaining[0] = invalid;
+      output = adoptEndpoint(
+        factory,
+        remaining[1],
+        false,
+      ) as Readable | null;
+      remaining[1] = invalid;
+      errorOutput = adoptEndpoint(
+        factory,
+        remaining[2],
+        false,
+      ) as Readable | null;
+      remaining[2] = invalid;
+    } catch (error) {
+      closeUnadopted(native, factory, remaining);
+      throw error;
+    }
+
+    const id = native.id(handle);
+    return new KoffiLifecycleDriver(
+      native,
+      handle,
+      id,
+      input,
+      output,
+      errorOutput,
+    );
   } catch (error) {
-    started.value = false;
+    destroyStream(input);
+    destroyStream(output);
+    destroyStream(errorOutput);
+    beginFailedSpawnCleanup(native, handle);
     throw error;
   }
 }
 
-function decodeEvent(
-  event: number,
-  operation: number,
-  data: Pointer,
-  length: number,
-  value: number | bigint,
-  flag: number,
-): NativeStreamingEvent {
-  const scalar = Number(value);
-  switch (event) {
-    case EVENT_STDOUT:
-    case EVENT_STDERR: {
-      let bytes: Buffer<ArrayBufferLike> = Buffer.alloc(0);
-      if (data && length > 0) {
-        const decoded = koffi.decode(
-          data,
-          koffi.array('uint8', length, 'Typed'),
-        ) as Uint8Array;
-        bytes = Buffer.from(
-          decoded.buffer,
-          decoded.byteOffset,
-          decoded.byteLength,
-        );
-      }
-      return {
-        type: event === EVENT_STDOUT ? 'stdout' : 'stderr',
-        data: bytes,
-      };
-    }
-    case EVENT_STDOUT_EOF:
-      return { type: 'stdout-eof' };
-    case EVENT_STDERR_EOF:
-      return { type: 'stderr-eof' };
-    case EVENT_STDIN_COMPLETE:
-      return {
-        type: 'stdin-complete',
-        operation,
-        written: scalar,
-        succeeded: flag !== 0,
-      };
-    case EVENT_EXIT:
-      return {
-        type: 'exit',
-        result: { exitCode: scalar, timedOut: flag !== 0 },
-      };
-    case EVENT_SHUTDOWN:
-      return { type: 'shutdown' };
-    default:
-      return {
-        type: 'error',
-        error: new Error(
-          `native sandbox I/O coordinator emitted unknown event ${event}`,
-        ),
-      };
-  }
+/** @internal Tests whether a Node.js version supports native Windows handles. */
+export function _isSupportedNodeVersionForTest(version: string): boolean {
+  const current = version
+    .split('.')
+    .slice(0, 3)
+    .map((component) => Number.parseInt(component, 10));
+  const difference = current.findIndex(
+    (component, index) => component !== MINIMUM_NODE_VERSION[index],
+  );
+  return difference === -1 ||
+    current[difference] > MINIMUM_NODE_VERSION[difference];
 }
 
-function spawnDriverWithFacade(
-  request: RequestSpec,
-  native: NativeCoordinator,
-  callbacks: _StreamingCallbackFacade,
-): NativeStreamingDriver {
-  const outHandle = [null] as Pointer[];
-  const error: AbiErrorDetail = {
-    message: null,
-    operation: null,
-    nativeCode: null,
-    remediation: null,
-  };
-  let driver: KoffiStreamingDriver | undefined;
-  let cleanupHandle: Pointer | null = null;
-  const cleanupFreeStarted = { value: false };
-  const queued: NativeStreamingEvent[] = [];
-  let callback!: RegisteredCallback;
-  callback = callbacks.register((
-    _userData: Pointer,
-    event: number,
-    operation: number,
-    data: Pointer,
-    length: number,
-    value: number | bigint,
-    flag: number,
-  ) => {
-    try {
-      const decoded = decodeEvent(event, operation, data, length, value, flag);
-      if (driver !== undefined) {
-        driver.onEvent(decoded);
-      } else if (cleanupHandle !== null && decoded.type === 'shutdown') {
-        const handle = cleanupHandle;
-        cleanupHandle = null;
-        setImmediate(() => {
-          startCleanupFree(
-            native,
-            callbacks,
-            callback,
-            handle,
-            cleanupFreeStarted,
-          );
-        });
-      } else {
-        queued.push(decoded);
-      }
-    } catch (errorValue) {
-      const error = asError(errorValue);
-      try {
-        const failure: NativeStreamingEvent = { type: 'error', error };
-        if (driver !== undefined) driver.onEvent(failure);
-        else queued.push(failure);
-      } catch (failureValue) {
-        const failure = asError(failureValue);
-        setImmediate(() => {
-          throw new AggregateError(
-            [error, failure],
-            'native sandbox callback delivery failed',
-          );
-        });
-        return;
-      }
-      setImmediate(() => {
-        throw error;
-      });
-    }
-  });
-
-  try {
-    const status = native.spawn(
-      JSON.stringify(request),
-      callback,
-      null,
-      outHandle,
-      error,
+function ensureSupportedNodeVersion(): void {
+  if (!_isSupportedNodeVersionForTest(process.versions.node)) {
+    throw new Error(
+      `native stdio requires Node.js ${MINIMUM_NODE_VERSION.join('.')} or newer; ` +
+      `current version is ${process.versions.node}`,
     );
-    if (status !== 0 || outHandle[0] === null) {
-      throw nativeStatusError(status || 12, error, 'spawning sandbox failed');
-    }
-    driver = new KoffiStreamingDriver(native, outHandle[0], callback, callbacks);
-    for (const event of queued) driver.onEvent(event);
-    return driver;
-  } catch (errorValue) {
-    if (outHandle[0] === null) {
-      callbacks.unregister(callback);
-    } else {
-      cleanupHandle = outHandle[0];
-      const shutdownAlreadyQueued = queued.some(
-        (event) => event.type === 'shutdown',
-      );
-      if (shutdownAlreadyQueued) {
-        const handle = cleanupHandle;
-        cleanupHandle = null;
-        setImmediate(() => {
-          startCleanupFree(
-            native,
-            callbacks,
-            callback,
-            handle,
-            cleanupFreeStarted,
-          );
-        });
-      } else {
-        let shutdownAccepted = false;
-        try {
-          shutdownAccepted = native.requestShutdown(cleanupHandle) === 0;
-        } catch {
-          shutdownAccepted = false;
-        }
-        if (!shutdownAccepted) {
-          const handle = cleanupHandle;
-          cleanupHandle = null;
-          startCleanupFree(
-            native,
-            callbacks,
-            callback,
-            handle,
-            cleanupFreeStarted,
-          );
-        }
-      }
-    }
-    throw errorValue;
-  } finally {
-    native.freeError(error);
   }
 }
 
-function spawnDriver(request: RequestSpec): NativeStreamingDriver {
-  return spawnDriverWithFacade(request, getNative(), koffiCallbacks);
-}
-
-export function _spawnStreamingDriverForTest(
-  request: RequestSpec,
-  native: _StreamingNativeFacade,
-  callbacks: _StreamingCallbackFacade,
-): NativeStreamingDriver {
-  return spawnDriverWithFacade(request, native, callbacks);
-}
-
-export function _setBindingSandboxProcessFactory(
-  factory?: (request: RequestSpec) => MxcSandboxProcess,
-): void {
-  sandboxProcessFactory = factory;
+function spawnDriver(request: RequestSpec): NativeLifecycleDriver {
+  ensureSupportedNodeVersion();
+  return _spawnStreamingDriverForTest(request, getNative(), nodeStreamFactory);
 }
 
 export function spawnBindingSandboxProcess(
   request: RequestSpec,
 ): MxcSandboxProcess {
-  if (sandboxProcessFactory !== undefined) {
-    return sandboxProcessFactory(request);
+  const driver = spawnDriver(request);
+  try {
+    return _createMxcSandboxProcess(driver);
+  } catch (error) {
+    destroyStream(driver.standardInput);
+    destroyStream(driver.standardOutput);
+    destroyStream(driver.standardError);
+    try {
+      driver.shutdown();
+    } catch {
+      // Preserve the construction failure while still releasing native state.
+    } finally {
+      void driver.free().catch(() => {});
+    }
+    throw error;
   }
-  return _createMxcSandboxProcess(spawnDriver(request));
 }
