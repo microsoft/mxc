@@ -45,6 +45,33 @@ impl NativeStdio {
     }
 }
 
+/// Duplicates available native endpoints, then detaches their stream wrappers.
+///
+/// All duplication completes before any source is taken. If a duplication
+/// fails, every source remains available to the sandbox process.
+pub fn duplicate_and_take_native_stdio<I, O, E>(
+    stdin: &mut Option<I>,
+    stdout: &mut Option<O>,
+    stderr: &mut Option<E>,
+    duplicate_stdin: impl FnOnce(&I) -> std::io::Result<OwnedPipe>,
+    duplicate_stdout: impl FnOnce(&O) -> std::io::Result<OwnedPipe>,
+    duplicate_stderr: impl FnOnce(&E) -> std::io::Result<OwnedPipe>,
+) -> std::io::Result<Option<NativeStdio>> {
+    let stdio = NativeStdio {
+        stdin: stdin.as_ref().map(duplicate_stdin).transpose()?,
+        stdout: stdout.as_ref().map(duplicate_stdout).transpose()?,
+        stderr: stderr.as_ref().map(duplicate_stderr).transpose()?,
+    };
+    if stdio.is_empty() {
+        return Ok(None);
+    }
+
+    stdin.take();
+    stdout.take();
+    stderr.take();
+    Ok(Some(stdio))
+}
+
 /// A handle to a running sandboxed process.
 ///
 /// Modelled on [`std::process::Child`]: the caller may `take_*` the std
@@ -560,6 +587,7 @@ impl<B: SandboxBackend> ScriptRunner for Runner<B> {
 
 #[cfg(test)]
 mod runner_tests {
+    use std::fs::File;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -568,6 +596,77 @@ mod runner_tests {
     use super::*;
 
     struct CompletedProcess;
+
+    struct NativePipeSource;
+
+    fn duplicate_test_pipe() -> std::io::Result<OwnedPipe> {
+        Ok(File::open(std::env::current_exe()?)?.into())
+    }
+
+    #[test]
+    fn native_stdio_transfer_detaches_sources_only_after_all_duplicates_succeed() {
+        let mut stdin = Some(NativePipeSource);
+        let mut stdout = Some(NativePipeSource);
+        let mut stderr = Some(NativePipeSource);
+
+        let stdio = duplicate_and_take_native_stdio(
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+            |_| duplicate_test_pipe(),
+            |_| duplicate_test_pipe(),
+            |_| duplicate_test_pipe(),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(stdio.stdin.is_some());
+        assert!(stdio.stdout.is_some());
+        assert!(stdio.stderr.is_some());
+        assert!(stdin.is_none());
+        assert!(stdout.is_none());
+        assert!(stderr.is_none());
+    }
+
+    #[test]
+    fn native_stdio_transfer_returns_none_when_all_sources_are_empty() {
+        let mut stdin: Option<NativePipeSource> = None;
+        let mut stdout: Option<NativePipeSource> = None;
+        let mut stderr: Option<NativePipeSource> = None;
+
+        let stdio = duplicate_and_take_native_stdio(
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+            |_| duplicate_test_pipe(),
+            |_| duplicate_test_pipe(),
+            |_| duplicate_test_pipe(),
+        )
+        .unwrap();
+
+        assert!(stdio.is_none());
+    }
+
+    #[test]
+    fn native_stdio_transfer_preserves_sources_when_duplication_fails() {
+        let mut stdin = Some(NativePipeSource);
+        let mut stdout = Some(NativePipeSource);
+        let mut stderr = Some(NativePipeSource);
+
+        let result = duplicate_and_take_native_stdio(
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+            |_| duplicate_test_pipe(),
+            |_| Err(std::io::Error::other("duplicate failed")),
+            |_| duplicate_test_pipe(),
+        );
+
+        assert!(result.is_err());
+        assert!(stdin.is_some());
+        assert!(stdout.is_some());
+        assert!(stderr.is_some());
+    }
 
     impl SandboxProcess for CompletedProcess {
         fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
