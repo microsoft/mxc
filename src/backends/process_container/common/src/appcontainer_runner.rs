@@ -1866,6 +1866,8 @@ struct AppContainerSandboxProcess {
     filesystem_mode: FilesystemMode,
     preserve_policy: bool,
     timeout_ms: u32,
+    // Retained here, in addition to the optional engine telemetry wrapper, so
+    // callers still receive timeout classification when telemetry is disabled.
     timeout_requested: bool,
     teardown_result: Option<Result<(), String>>,
     /// Live guarded WPR capture session, moved from the `SpawnedChild`.

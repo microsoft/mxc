@@ -57,10 +57,23 @@ pub fn duplicate_and_take_native_stdio<I, O, E>(
     duplicate_stdout: impl FnOnce(&O) -> std::io::Result<OwnedPipe>,
     duplicate_stderr: impl FnOnce(&E) -> std::io::Result<OwnedPipe>,
 ) -> std::io::Result<Option<NativeStdio>> {
+    fn duplicate<T>(
+        stream: Option<&T>,
+        name: &str,
+        duplicate: impl FnOnce(&T) -> std::io::Result<OwnedPipe>,
+    ) -> std::io::Result<Option<OwnedPipe>> {
+        stream.map(duplicate).transpose().map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("failed to duplicate the {name} pipe: {error}"),
+            )
+        })
+    }
+
     let stdio = NativeStdio {
-        stdin: stdin.as_ref().map(duplicate_stdin).transpose()?,
-        stdout: stdout.as_ref().map(duplicate_stdout).transpose()?,
-        stderr: stderr.as_ref().map(duplicate_stderr).transpose()?,
+        stdin: duplicate(stdin.as_ref(), "stdin", duplicate_stdin)?,
+        stdout: duplicate(stdout.as_ref(), "stdout", duplicate_stdout)?,
+        stderr: duplicate(stderr.as_ref(), "stderr", duplicate_stderr)?,
     };
     if stdio.is_empty() {
         return Ok(None);
@@ -189,6 +202,8 @@ pub trait SandboxProcess: Send {
     /// The default uses the same process-tree termination primitive as
     /// [`kill`](SandboxProcess::kill). Wrappers may override this to preserve
     /// timeout-specific reporting while delegating the actual termination.
+    /// Once requested, a later successful terminal observation is reported as
+    /// timed out; callers must invoke this only after the deadline elapsed.
     fn kill_for_timeout(&mut self) -> std::io::Result<()> {
         self.kill()
     }

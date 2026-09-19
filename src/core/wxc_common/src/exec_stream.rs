@@ -509,6 +509,9 @@ impl SandboxProcess for ExecSandboxProcess {
             stdout: duplicate_native_pipe(source.stdout, "stdout")?,
             stderr: duplicate_native_pipe(source.stderr, "stderr")?,
         };
+        if stdio.is_empty() {
+            return Ok(None);
+        }
         self.native_stdio.take();
         self.stdin.take();
         self.stdout.take();

@@ -1557,6 +1557,8 @@ struct BaseContainerSandboxProcess {
     stdout_canceller: Option<PipeReadCanceller>,
     stderr_canceller: Option<PipeReadCanceller>,
     timeout_ms: u32,
+    // Retained here, in addition to the optional engine telemetry wrapper, so
+    // callers still receive timeout classification when telemetry is disabled.
     timeout_requested: bool,
     preserve_policy: bool,
     identity: String,
