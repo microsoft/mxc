@@ -109,6 +109,7 @@ flowchart LR
     engine["mxc_engine"]
 
     typescript --> executor
+    typescript -. "native live execution" .-> ffi
     cli --> executor
     csharp --> ffi --> sdk
     rust --> sdk
@@ -118,10 +119,10 @@ flowchart LR
 
 `mxc_ffi` is the C ABI used by in-process language bindings. Its live-sandbox
 surface delegates lifecycle operations through `mxc-sdk` and can transfer
-native stdio endpoints to runtimes that adopt OS pipes directly; it does not
-dispatch to `mxc_engine` independently. The generated C# P/Invoke file is
-created during the C# build. Generated TypeScript wire types come from the
-schema tooling.
+native stdio endpoints to runtimes such as Node.js that adopt OS pipes
+directly; it does not dispatch to `mxc_engine` independently. The generated C#
+P/Invoke file is created during the C# build. Generated TypeScript wire types
+come from the schema tooling.
 
 ## Tests
 
