@@ -21,13 +21,18 @@ export interface NativeStreamFactory {
   writable(handle: NativeHandle): Writable;
 }
 
-export interface AdoptedNativeStdio {
+export interface NativeStdioStreams {
   readonly standardInput: Writable | null;
   readonly standardOutput: Readable | null;
   readonly standardError: Readable | null;
 }
 
-const WINDOWS_NATIVE_STDIO_MINIMUM_NODE_VERSION = [24, 21, 0] as const;
+const MINIMUM_NATIVE_STDIO_NODE_VERSION: Partial<
+  Record<NodeJS.Platform, readonly [number, number, number]>
+> = {
+  linux: [24, 0, 0],
+  win32: [24, 21, 0],
+};
 
 function windowsHandleOptions(
   handle: NativeHandle,
@@ -90,23 +95,28 @@ function isMissingHandle(
     : handle === -1 || handle === -1n;
 }
 
-function adoptEndpoint(
+/** Creates a Node stream that owns and closes the transferred native endpoint. */
+function createOwningStream(
   factory: NativeStreamFactory,
   handle: NativeHandle,
-  writable: true,
+  direction: 'writable',
 ): Writable | null;
-function adoptEndpoint(
+
+function createOwningStream(
   factory: NativeStreamFactory,
   handle: NativeHandle,
-  writable: false,
+  direction: 'readable',
 ): Readable | null;
-function adoptEndpoint(
+
+function createOwningStream(
   factory: NativeStreamFactory,
   handle: NativeHandle,
-  writable: boolean,
+  direction: 'readable' | 'writable',
 ): Readable | Writable | null {
   if (isMissingHandle(handle, factory.platform)) return null;
-  return writable ? factory.writable(handle) : factory.readable(handle);
+  return direction === 'writable'
+    ? factory.writable(handle)
+    : factory.readable(handle);
 }
 
 export function destroyNativeStream(
@@ -115,22 +125,22 @@ export function destroyNativeStream(
   if (stream !== null && !stream.destroyed) stream.destroy();
 }
 
-function rollbackAdoption(
-  adoptedStreams: readonly (Readable | Writable | null)[],
+function rollbackStreamCreation(
+  createdStreams: readonly (Readable | Writable | null)[],
   handles: readonly NativeHandle[],
-  firstUnadopted: number,
+  firstUnowned: number,
   factory: NativeStreamFactory,
   closeHandle: (handle: NativeHandle) => void,
 ): Error[] {
   const errors: Error[] = [];
-  for (const stream of adoptedStreams) {
+  for (const stream of createdStreams) {
     try {
       destroyNativeStream(stream);
     } catch (error) {
       errors.push(error instanceof Error ? error : new Error(String(error)));
     }
   }
-  for (let index = firstUnadopted; index < handles.length; index += 1) {
+  for (let index = firstUnowned; index < handles.length; index += 1) {
     const handle = handles[index];
     if (isMissingHandle(handle, factory.platform)) continue;
     try {
@@ -143,47 +153,63 @@ function rollbackAdoption(
 }
 
 /**
- * Adopts every available native endpoint transactionally. If any stream
- * constructor fails, already-adopted streams are destroyed and every remaining
- * raw endpoint is closed before the original error is rethrown.
+ * Creates owning Node streams for every available native endpoint. If any
+ * stream constructor fails, streams already created are destroyed and every
+ * remaining raw endpoint is closed before the original error is rethrown.
  */
-export function adoptNativeStdio(
+export function createNativeStdioStreams(
   stdio: NativeStdioHandles,
   factory: NativeStreamFactory,
   closeHandle: (handle: NativeHandle) => void,
-): AdoptedNativeStdio {
+): NativeStdioStreams {
   const handles = [
     stdio.stdin_handle,
     stdio.stdout_handle,
     stdio.stderr_handle,
   ];
-  const adoptedStreams: Array<Readable | Writable | null> = [];
-  let firstUnadopted = 0;
+  const createdStreams: Array<Readable | Writable | null> = [];
+  let firstUnowned = 0;
   try {
-    const standardInput = adoptEndpoint(factory, handles[0], true);
-    adoptedStreams.push(standardInput);
-    firstUnadopted = 1;
-    const standardOutput = adoptEndpoint(factory, handles[1], false);
-    adoptedStreams.push(standardOutput);
-    firstUnadopted = 2;
-    const standardError = adoptEndpoint(factory, handles[2], false);
-    adoptedStreams.push(standardError);
-    firstUnadopted = 3;
+    const standardInput = createOwningStream(
+      factory,
+      handles[0],
+      'writable',
+    );
+    createdStreams.push(standardInput);
+    firstUnowned = 1;
+
+    const standardOutput = createOwningStream(
+      factory,
+      handles[1],
+      'readable',
+    );
+    createdStreams.push(standardOutput);
+    firstUnowned = 2;
+
+    const standardError = createOwningStream(
+      factory,
+      handles[2],
+      'readable',
+    );
+    createdStreams.push(standardError);
+    firstUnowned = 3;
+
     return { standardInput, standardOutput, standardError };
   } catch (error) {
-    const rollbackErrors = rollbackAdoption(
-      adoptedStreams,
+    const rollbackErrors = rollbackStreamCreation(
+      createdStreams,
       handles,
-      firstUnadopted,
+      firstUnowned,
       factory,
       closeHandle,
     );
     if (rollbackErrors.length > 0) {
       throw new MxcError({
         code: 'backend_error',
-        message: 'native stdio adoption failed and rollback was incomplete',
+        message: 'native stdio stream creation failed and rollback was incomplete',
         details: {
-          adoptionError: error instanceof Error ? error.message : String(error),
+          streamCreationError:
+            error instanceof Error ? error.message : String(error),
           rollbackErrors: rollbackErrors.map((failure) => failure.message),
         },
       });
@@ -197,25 +223,28 @@ export function supportsNativeStdio(
   platform: NodeJS.Platform,
   version: string,
 ): boolean {
-  if (platform !== 'win32') return true;
+  const minimum = MINIMUM_NATIVE_STDIO_NODE_VERSION[platform];
+  if (minimum === undefined) return true;
 
   const normalized = version.replace(/^v/, '');
   if (!/^\d+(?:\.\d+){0,2}$/.test(normalized)) return false;
   const current = normalized
     .split('.')
     .map((component) => Number.parseInt(component, 10));
-  while (current.length < WINDOWS_NATIVE_STDIO_MINIMUM_NODE_VERSION.length) {
+  while (current.length < minimum.length) {
     current.push(0);
   }
   if (current.some((component) => !Number.isFinite(component))) return false;
   const difference = current.findIndex(
     (component, index) =>
-      component !== WINDOWS_NATIVE_STDIO_MINIMUM_NODE_VERSION[index],
+      component !== minimum[index],
   );
   return difference === -1 ||
-    current[difference] > WINDOWS_NATIVE_STDIO_MINIMUM_NODE_VERSION[difference];
+    current[difference] > minimum[difference];
 }
 
-export function minimumWindowsNativeStdioNodeVersion(): string {
-  return WINDOWS_NATIVE_STDIO_MINIMUM_NODE_VERSION.join('.');
+export function minimumNativeStdioNodeVersion(
+  platform: NodeJS.Platform,
+): string | undefined {
+  return MINIMUM_NATIVE_STDIO_NODE_VERSION[platform]?.join('.');
 }

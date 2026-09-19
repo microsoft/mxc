@@ -51,9 +51,10 @@ child.on('close', (code) => console.log('exit:', code));
   When a new schema graduates or a new backend ships, update only this block.
 -->
 
-**Node.js:** 18 or later. The internal native stdio binding requires Node.js
-24.21.0 or later on Windows for the `windowsHandle` option used by
-`fs.ReadStream` and `fs.WriteStream`.
+**Node.js:** The internal native stdio binding requires Node.js 24 or later on
+Linux, 24.21.0 or later on Windows, and 18 or later on macOS. The package's
+current executor-backed public APIs continue to support Node.js 18 or later;
+that route is scheduled to be deprecated in 1.0.
 
 **Policy / config schema versions:**
 

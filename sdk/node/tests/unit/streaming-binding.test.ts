@@ -192,7 +192,7 @@ describe('native streaming binding ownership', () => {
     await driver.free();
   });
 
-  it('adopts each endpoint once with the correct direction', async () => {
+  it('creates one owning stream per endpoint with the correct direction', async () => {
     const native = new FakeNative();
     const streams = new FakeStreams();
 
@@ -284,7 +284,7 @@ describe('native streaming binding ownership', () => {
     assert.strictEqual(native.freeCount, 1);
   });
 
-  it('continues rollback when closing one unadopted handle fails', async () => {
+  it('continues rollback when closing one remaining raw handle fails', async () => {
     const native = new FakeNative();
     native.closeFailureHandle = 12;
     const streams = new FakeStreams();
@@ -358,7 +358,7 @@ describe('native streaming binding ownership', () => {
 });
 
 describe('native streaming Node version support', () => {
-  it('requires Node 24.21.0 or newer only on Windows', () => {
+  it('enforces the platform-specific native stdio runtime floors', () => {
     assert.strictEqual(supportsNativeStdio('win32', '24.20.9'), false);
     assert.strictEqual(supportsNativeStdio('win32', '24.21.0'), true);
     assert.strictEqual(supportsNativeStdio('win32', '24.21.1'), true);
@@ -369,7 +369,9 @@ describe('native streaming Node version support', () => {
     assert.strictEqual(supportsNativeStdio('win32', 'invalid'), false);
     assert.strictEqual(supportsNativeStdio('win32', '24.21beta'), false);
     assert.strictEqual(supportsNativeStdio('win32', '24.21.0.1'), false);
-    assert.strictEqual(supportsNativeStdio('linux', '18.0.0'), true);
+    assert.strictEqual(supportsNativeStdio('linux', '23.99.99'), false);
+    assert.strictEqual(supportsNativeStdio('linux', '24.0.0'), true);
+    assert.strictEqual(supportsNativeStdio('linux', '25.0.0'), true);
     assert.strictEqual(supportsNativeStdio('darwin', '18.0.0'), true);
   });
 });

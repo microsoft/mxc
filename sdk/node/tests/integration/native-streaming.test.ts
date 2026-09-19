@@ -38,11 +38,19 @@ interface StreamingModule {
 
 const platformSupport = sdk.getPlatformSupport();
 const schemaVersion = supportedVersions.at(-1)!;
+const minimumNativeStreamingNodeVersion =
+  os.platform() === 'win32'
+    ? '24.21.0'
+    : os.platform() === 'linux'
+      ? '24.0.0'
+      : undefined;
 const skipReason =
   sandboxSkipReason ??
   (!platformSupport.isSupported ? `Platform not supported: ${platformSupport.reason}` : undefined) ??
-  (os.platform() === 'win32' && semver.lt(process.version, '24.21.0')
-    ? 'Native streaming on Windows requires Node.js 24.21.0 or newer'
+  (minimumNativeStreamingNodeVersion !== undefined &&
+    semver.lt(process.version, minimumNativeStreamingNodeVersion)
+    ? `Native streaming on ${os.platform()} requires Node.js ` +
+      `${minimumNativeStreamingNodeVersion} or newer`
     : undefined) ??
   (os.platform() === 'linux' && !isLinuxBubblewrap
     ? 'Native streaming requires Bubblewrap on Linux'

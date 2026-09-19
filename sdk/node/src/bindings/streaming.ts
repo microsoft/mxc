@@ -14,9 +14,9 @@ import { loadMxcFfi, type MxcNativeLibrary } from '../native-library.js';
 import type { RequestSpec } from './request.js';
 import { bindNativeFunction } from './native-function.js';
 import {
-  adoptNativeStdio,
+  createNativeStdioStreams,
   destroyNativeStream,
-  minimumWindowsNativeStdioNodeVersion,
+  minimumNativeStdioNodeVersion,
   nodeStreamFactory,
   supportsNativeStdio,
   type NativeHandle,
@@ -73,19 +73,25 @@ export interface StreamingNativeFacade {
   freeString(value: Pointer): void;
 }
 
-function bindSandboxFunctions(
+function bindStreamingNativeFacade(
   handle: NativeLibraryHandle,
 ): StreamingNativeFacade {
-  const pointer = koffi.pointer(AbiSandbox);
-  const free = bindNativeFunction<KoffiFunc<(sandbox: Pointer) => void>>(
+  const sandboxPointer = koffi.pointer(AbiSandbox);
+
+  // Koffi exposes asynchronous invocation on the bound function object, so
+  // wait and free keep their raw bindings behind callback-shaped facade methods.
+  const freeAsyncBinding = bindNativeFunction<
+    KoffiFunc<(sandbox: Pointer) => void>
+  >(
     handle,
     {
       symbol: 'mxc_sandbox_free',
       result: 'void',
-      parameters: [pointer],
+      parameters: [sandboxPointer],
     },
   );
-  const wait = bindNativeFunction<KoffiFunc<(
+
+  const waitAsyncBinding = bindNativeFunction<KoffiFunc<(
     sandbox: Pointer,
     outExit: number[],
     outTimedOut: number[],
@@ -93,12 +99,13 @@ function bindSandboxFunctions(
     symbol: 'mxc_sandbox_wait',
     result: 'int32_t',
     parameters: [
-      pointer,
+      sandboxPointer,
       koffi.out(koffi.pointer('int32_t')),
       koffi.out(koffi.pointer('int32_t')),
     ],
   });
-  return {
+
+  const native: StreamingNativeFacade = {
     spawn: bindNativeFunction(handle, {
       symbol: 'mxc_spawn_request',
       result: 'int32_t',
@@ -111,71 +118,87 @@ function bindSandboxFunctions(
     id: bindNativeFunction(handle, {
       symbol: 'mxc_sandbox_id',
       result: 'uint32_t',
-      parameters: [pointer],
+      parameters: [sandboxPointer],
     }),
+
     takeNativeStdio: bindNativeFunction(handle, {
       symbol: 'mxc_sandbox_take_native_stdio',
       result: 'int32_t',
-      parameters: [pointer, koffi.out(koffi.pointer(AbiNativeStdioType))],
+      parameters: [
+        sandboxPointer,
+        koffi.out(koffi.pointer(AbiNativeStdioType)),
+      ],
     }),
+
     closeNativePipe: bindNativeFunction(handle, {
       symbol: 'mxc_native_pipe_close',
       result: 'void',
       parameters: ['intptr_t'],
     }),
+
     tryWait: bindNativeFunction(handle, {
       symbol: 'mxc_sandbox_try_wait',
       result: 'int32_t',
       parameters: [
-        pointer,
+        sandboxPointer,
         koffi.out(koffi.pointer('int32_t')),
         koffi.out(koffi.pointer('int32_t')),
         koffi.out(koffi.pointer('int32_t')),
       ],
     }),
+
     wait(sandbox, outExit, outTimedOut, completion) {
-      wait.async(sandbox, outExit, outTimedOut, completion);
+      waitAsyncBinding.async(sandbox, outExit, outTimedOut, completion);
     },
+
     kill: bindNativeFunction(handle, {
       symbol: 'mxc_sandbox_kill',
       result: 'int32_t',
-      parameters: [pointer],
+      parameters: [sandboxPointer],
     }),
+
     killForTimeout: bindNativeFunction(handle, {
       symbol: 'mxc_sandbox_kill_for_timeout',
       result: 'int32_t',
-      parameters: [pointer],
+      parameters: [sandboxPointer],
     }),
+
     warningsJson: bindNativeFunction(handle, {
       symbol: 'mxc_sandbox_warnings_json',
       result: 'int32_t',
-      parameters: [pointer, koffi.out(koffi.pointer('char', 2))],
+      parameters: [sandboxPointer, koffi.out(koffi.pointer('char', 2))],
     }),
+
     outputMetadataJson: bindNativeFunction(handle, {
       symbol: 'mxc_sandbox_output_metadata_json',
       result: 'int32_t',
-      parameters: [pointer, koffi.out(koffi.pointer('char', 2))],
+      parameters: [sandboxPointer, koffi.out(koffi.pointer('char', 2))],
     }),
+
     free(sandbox, completion) {
-      free.async(sandbox, completion);
+      freeAsyncBinding.async(sandbox, completion);
     },
+
     freeError: bindNativeFunction(handle, {
       symbol: 'mxc_error_detail_free',
       result: 'void',
       parameters: [koffi.pointer(AbiErrorDetailType)],
     }),
+
     freeString: bindNativeFunction(handle, {
       symbol: 'mxc_string_free',
       result: 'void',
       parameters: ['char *'],
     }),
-  } as StreamingNativeFacade;
+  };
+
+  return native;
 }
 
 let sharedNative: StreamingNativeFacade | undefined;
 
 function getNative(): StreamingNativeFacade {
-  return sharedNative ??= bindSandboxFunctions(loadMxcFfi().handle);
+  return sharedNative ??= bindStreamingNativeFacade(loadMxcFfi().handle);
 }
 
 function throwIfFailed(status: number, message: string): void {
@@ -354,14 +377,14 @@ export function createStreamingDriver(
       native.takeNativeStdio(handle, stdio),
       'taking native stdio failed',
     );
-    const adopted = adoptNativeStdio(
+    const streams = createNativeStdioStreams(
       stdio,
       factory,
       (nativeHandle) => native.closeNativePipe(nativeHandle),
     );
-    input = adopted.standardInput;
-    output = adopted.standardOutput;
-    errorOutput = adopted.standardError;
+    input = streams.standardInput;
+    output = streams.standardOutput;
+    errorOutput = streams.standardError;
 
     const id = native.id(handle);
     return new KoffiLifecycleDriver(
@@ -382,16 +405,21 @@ export function createStreamingDriver(
 }
 
 function ensureSupportedNodeVersion(): void {
-  if (!supportsNativeStdio(nodeStreamFactory.platform, process.versions.node)) {
-    throw new MxcError({
-      code: 'backend_unavailable',
-      message: `native stdio on Windows requires Node.js ` +
-        `${minimumWindowsNativeStdioNodeVersion()} or newer; ` +
-        `current version is ${process.versions.node}`,
-      remediation: `Use Node.js ${minimumWindowsNativeStdioNodeVersion()} ` +
-        'or newer on Windows.',
-    });
-  }
+  const platform = nodeStreamFactory.platform;
+  const minimum = minimumNativeStdioNodeVersion(platform);
+  if (
+    minimum === undefined ||
+    supportsNativeStdio(platform, process.versions.node)
+  ) return;
+
+  const platformName = platform === 'win32' ? 'Windows' : 'Linux';
+  throw new MxcError({
+    code: 'backend_unavailable',
+    message: `native stdio on ${platformName} requires Node.js ` +
+      `${minimum} or newer; ` +
+      `current version is ${process.versions.node}`,
+    remediation: `Use Node.js ${minimum} or newer on ${platformName}.`,
+  });
 }
 
 function spawnDriver(request: RequestSpec): NativeLifecycleDriver {
