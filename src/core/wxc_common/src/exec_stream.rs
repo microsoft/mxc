@@ -1774,6 +1774,42 @@ mod tests {
         assert_eq!(proc.wait().unwrap(), 0);
     }
 
+    /// Native transfer drops the adapter's wrapped writer after duplicating
+    /// the caller-facing handle, which must also fire the backend stdin closer.
+    #[test]
+    fn taking_native_stdio_closes_the_backend_stdin_end() {
+        use std::sync::mpsc;
+
+        let (_reader, writer) = std::io::pipe().expect("pipe");
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let handle = ExecHandle {
+            stdout: null_pipe_handle(),
+            stderr: null_pipe_handle(),
+            stdin: writer_handle(&writer),
+            waiter: Box::new(|| Ok(ExecOutcome::Exited(0))),
+            terminator: Box::new(|| Ok(())),
+            stdin_closer: Some(Box::new(move || {
+                let _ = closed_tx.send(());
+            })),
+        };
+        let mut proc = ExecSandboxProcess::from_exec_handle(handle).unwrap();
+
+        let stdio = proc
+            .take_native_stdio()
+            .expect("native stdio transfer should succeed")
+            .expect("stdin should be transferable");
+
+        assert!(
+            closed_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok(),
+            "native transfer must close the backend's retained stdin end"
+        );
+        drop(stdio);
+        drop(writer);
+        assert_eq!(proc.wait().unwrap(), 0);
+    }
+
     /// The backend keeps its own write end, as `IsoSessionProcess` does. EOF
     /// then depends on `stdin_closer`, not on dropping the caller's duplicate.
     ///
