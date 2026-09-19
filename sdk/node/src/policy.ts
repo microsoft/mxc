@@ -193,10 +193,19 @@ function deduplicatePaths(paths: string[]): string[] {
  * Check whether PowerShell (pwsh.exe) is available on the machine by scanning
  * the supplied PATH directories for a `pwsh.exe` binary.
  *
- * When PowerShell is found, return a policy fragment with:
- * - `C:\` in `readonlyPaths` — pwsh.exe enumerates the drive root on startup.
- * - The PSReadLine history directory in `readwritePaths` so the PSReadLine
- *   module can persist command history.
+ * When PowerShell is found, return a policy fragment with the PSReadLine
+ * history directory in `readwritePaths` so the PSReadLine module can persist
+ * command history.
+ *
+ * Deliberately grants no read access to the system-drive root. `pwsh.exe`
+ * before 7.7 stats the root at startup, but that is a *metadata-only* need, and
+ * a recursive `readonlyPaths` grant on `C:\` would expose every file on the
+ * volume (`~/.ssh`, `~/.aws/credentials`, other users' profiles) to satisfy it.
+ * The narrow, host-wide answer is `wxc-host-prep prepare-system-drive`, which
+ * stamps non-inheriting metadata ACEs on the root. `$PSHOME` itself needs no
+ * special handling here: the directory holding `pwsh.exe` is by definition a
+ * PATH directory, so {@link getAvailableToolsPolicy} already grants it
+ * read-only.
  *
  * On non-Windows platforms or when pwsh.exe is not found on PATH, returns an
  * empty policy.
@@ -224,9 +233,6 @@ function getPowerShellPolicy(
         return { readonlyPaths: [], readwritePaths: [] };
     }
 
-    const systemDrive = process.env["SystemDrive"] || 'C:';
-    const systemRoot = systemDrive + "\\";
-    const readonlyPaths: string[] = [systemRoot];
     const readwritePaths: string[] = [];
 
     const userProfile = env['USERPROFILE'];
@@ -237,7 +243,7 @@ function getPowerShellPolicy(
         readwritePaths.push(psReadLineDir);
     }
 
-    return { readonlyPaths, readwritePaths };
+    return { readonlyPaths: [], readwritePaths };
 }
 
 // ---------------------------------------------------------------------------
@@ -257,10 +263,10 @@ function getPowerShellPolicy(
  *    already grant access to `ALL_APPLICATION_PACKAGES` are removed because
  *    AppContainer processes can see them without explicit brokering.
  *
- * Additionally, if PowerShell (`pwsh.exe`) is found on PATH, the drive root
- * (`C:\`) is added to `readonlyPaths` and the PSReadLine history directory
- * is added to `readwritePaths` so that interactive PowerShell sessions work
- * correctly inside the container.
+ * Additionally, if PowerShell (`pwsh.exe`) is found on PATH, the PSReadLine
+ * history directory is added to `readwritePaths` so that interactive PowerShell
+ * sessions can persist command history. `$PSHOME` needs no special case: it is
+ * a PATH directory and so is already covered by the filters above.
  *
  * @param env - Environment variable map. Defaults to `process.env`.
  * @param options - Filtering options.
@@ -306,9 +312,19 @@ export function getAvailableToolsPolicy(
     // Merge PowerShell-specific paths when pwsh.exe is available
     const pwshPolicy = getPowerShellPolicy(pathDirs, environment);
 
+    // The write paths are held to the same system-critical bar as the read
+    // paths: `USERPROFILE` can legitimately sit under `%WINDIR%` (the SYSTEM
+    // account's profile is `C:\Windows\System32\config\systemprofile`), and a
+    // *write* grant there would be strictly worse than the read grant this
+    // discovery no longer emits. They are deliberately NOT existence-filtered:
+    // PowerShell creates the PSReadLine history directory on first use, so
+    // requiring it to pre-exist would silently drop a legitimate grant.
+    const pwshWritePaths = deduplicatePaths(pwshPolicy.readwritePaths)
+        .filter(dirPath => !isSystemCriticalPath(dirPath));
+
     return {
-        readonlyPaths: deduplicatePaths([...filtered, ...pwshPolicy.readonlyPaths]),
-        readwritePaths: deduplicatePaths([...pwshPolicy.readwritePaths]),
+        readonlyPaths: deduplicatePaths(filtered),
+        readwritePaths: pwshWritePaths,
     };
 }
 
