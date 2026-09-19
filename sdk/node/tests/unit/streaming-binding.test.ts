@@ -18,6 +18,7 @@ class FakeNative implements _StreamingNativeFacade {
   spawnStatus = 0;
   takeStatus = 0;
   killCount = 0;
+  timeoutKillCount = 0;
   waitCount = 0;
   freeCount = 0;
   freeErrorCount = 0;
@@ -98,6 +99,11 @@ class FakeNative implements _StreamingNativeFacade {
 
   kill(): number {
     this.killCount += 1;
+    return 0;
+  }
+
+  killForTimeout(): number {
+    this.timeoutKillCount += 1;
     return 0;
   }
 
@@ -259,6 +265,23 @@ describe('native streaming binding ownership', () => {
     );
 
     assert.deepStrictEqual(native.closedHandles, [12, 13]);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.strictEqual(native.freeCount, 1);
+  });
+
+  it('frees the sandbox when native stdio transfer fails', async () => {
+    const native = new FakeNative();
+    native.takeStatus = 12;
+
+    assert.throws(
+      () => _spawnStreamingDriverForTest(
+        {} as never,
+        native,
+        new FakeStreams(),
+      ),
+      /taking native stdio failed/,
+    );
+
     await new Promise((resolve) => setImmediate(resolve));
     assert.strictEqual(native.freeCount, 1);
   });
