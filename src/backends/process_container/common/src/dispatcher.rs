@@ -782,6 +782,12 @@ impl SandboxProcess for DaclGuardedProcess {
         self.inner.stdin_closer()
     }
 
+    fn take_native_stdio(
+        &mut self,
+    ) -> std::io::Result<Option<wxc_common::sandbox_process::NativeStdio>> {
+        self.inner.take_native_stdio()
+    }
+
     fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
         self.inner.take_stdout()
     }
@@ -1368,6 +1374,8 @@ mod tests {
     fn dacl_guarded_process_delegates_to_inner() {
         use crate::test_env::ScopedStateDir;
         use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
         use wxc_common::sandbox_process::SandboxProcess;
 
         /// Minimal fake recording which delegated calls arrived and returning
@@ -1375,6 +1383,7 @@ mod tests {
         #[derive(Default)]
         struct FakeProcess {
             stdin_taken: bool,
+            native_stdio_calls: Arc<AtomicUsize>,
             killed: bool,
             output_metadata: wxc_common::models::SandboxOutputMetadata,
         }
@@ -1385,6 +1394,12 @@ mod tests {
             }
             fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
                 None
+            }
+            fn take_native_stdio(
+                &mut self,
+            ) -> std::io::Result<Option<wxc_common::sandbox_process::NativeStdio>> {
+                self.native_stdio_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(None)
             }
             fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
                 None
@@ -1414,8 +1429,12 @@ mod tests {
         // A manager with no ACEs applied: `Drop`/`restore` is a no-op, so the
         // test only exercises delegation, not real host-ACE mutation.
         let dacl_manager = DaclManager::new().expect("dacl mgr");
+        let native_stdio_calls = Arc::new(AtomicUsize::new(0));
         let mut guarded = DaclGuardedProcess {
-            inner: Box::new(FakeProcess::default()),
+            inner: Box::new(FakeProcess {
+                native_stdio_calls: Arc::clone(&native_stdio_calls),
+                ..FakeProcess::default()
+            }),
             _dacl_manager: dacl_manager,
         };
 
@@ -1426,6 +1445,11 @@ mod tests {
         );
         assert!(matches!(guarded.wait(), Ok(7)), "wait() must delegate");
         assert!(guarded.take_stdin().is_none(), "take_stdin() must delegate");
+        assert!(
+            guarded.take_native_stdio().unwrap().is_none(),
+            "take_native_stdio() must delegate"
+        );
+        assert_eq!(native_stdio_calls.load(Ordering::SeqCst), 1);
         assert!(guarded.kill().is_err(), "kill() must delegate");
         assert!(
             guarded.kill_for_timeout().is_ok(),

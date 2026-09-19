@@ -198,6 +198,7 @@ impl Drop for TelemetryRegistration {
 struct TelemetryProcess {
     inner: Box<dyn SandboxProcess>,
     active: bool,
+    timeout_requested: bool,
     warnings: Vec<String>,
     mode: TelemetryMode,
     started: std::time::Instant,
@@ -253,6 +254,7 @@ impl TelemetryProcess {
         Self {
             inner,
             active,
+            timeout_requested: false,
             warnings,
             mode,
             started,
@@ -535,7 +537,13 @@ impl SandboxProcess for TelemetryProcess {
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
-        let result = self.inner.try_wait();
+        let result = match self.inner.try_wait() {
+            Ok(Some(_)) if self.timeout_requested => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "sandbox execution timed out",
+            )),
+            result => result,
+        };
         match &result {
             // Preserve the nonblocking contract. Capture metadata is finalized
             // only by backend teardown, so this path emits completion without
@@ -572,6 +580,7 @@ impl SandboxProcess for TelemetryProcess {
     }
 
     fn kill_for_timeout(&mut self) -> std::io::Result<()> {
+        self.timeout_requested = true;
         let result = self.inner.kill_for_timeout();
         if result.is_ok() {
             self.emit(&Err(std::io::Error::new(
@@ -583,7 +592,13 @@ impl SandboxProcess for TelemetryProcess {
     }
 
     fn wait(&mut self) -> std::io::Result<i32> {
-        let result = self.inner.wait();
+        let result = match self.inner.wait() {
+            Ok(_) if self.timeout_requested => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "sandbox execution timed out",
+            )),
+            result => result,
+        };
         self.emit(&result);
         result
     }
@@ -924,6 +939,19 @@ mod telemetry_process_tests {
             std::io::ErrorKind::TimedOut
         );
         assert!(!timed_out.active);
+    }
+
+    #[test]
+    fn failed_timeout_kill_preserves_timeout_when_exit_wins_the_race() {
+        let mut process = wrapped_with_kill_failure(TryWaitResult::Exited(7), true);
+
+        assert!(process.kill_for_timeout().is_err());
+        let error = process
+            .try_wait()
+            .expect_err("the terminal race must retain timeout classification");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(!process.active);
     }
 
     #[test]

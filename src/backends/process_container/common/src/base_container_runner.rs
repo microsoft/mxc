@@ -1557,7 +1557,7 @@ struct BaseContainerSandboxProcess {
     stdout_canceller: Option<PipeReadCanceller>,
     stderr_canceller: Option<PipeReadCanceller>,
     timeout_ms: u32,
-    coordinator_timed_out: bool,
+    timeout_requested: bool,
     preserve_policy: bool,
     identity: String,
     proxy_coordinator: ProxyCoordinator,
@@ -1609,7 +1609,7 @@ impl BaseContainerSandboxProcess {
             stdout_canceller,
             stderr_canceller,
             timeout_ms: child.timeout_ms,
-            coordinator_timed_out: false,
+            timeout_requested: false,
             preserve_policy: child.preserve_policy,
             identity: sanitize_identity(&std::mem::take(&mut child.identity)).to_string(),
             proxy_coordinator: std::mem::take(&mut child.proxy_coordinator),
@@ -2101,7 +2101,7 @@ impl SandboxProcess for BaseContainerSandboxProcess {
                 // Keep polling non-blocking and independent of captureDenials.
                 // `wait()` or `Drop` owns descendant termination and capture
                 // finalization after the root exit becomes observable.
-                if self.coordinator_timed_out {
+                if self.timeout_requested {
                     Err(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
                         "sandbox execution timed out",
@@ -2126,7 +2126,7 @@ impl SandboxProcess for BaseContainerSandboxProcess {
     }
 
     fn kill_for_timeout(&mut self) -> std::io::Result<()> {
-        self.coordinator_timed_out = true;
+        self.timeout_requested = true;
         self.kill_process_tree()
     }
 
@@ -2146,7 +2146,7 @@ impl SandboxProcess for BaseContainerSandboxProcess {
                 let mut code: u32 = 0;
                 if unsafe { GetExitCodeProcess(self.process.get(), &mut code) }.is_err() {
                     Err(std::io::Error::other("GetExitCodeProcess failed"))
-                } else if self.coordinator_timed_out {
+                } else if self.timeout_requested {
                     self.timeout_result()
                 } else {
                     let exit_code = code as i32;

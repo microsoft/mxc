@@ -74,7 +74,7 @@ use crate::{
 // Opaque handles
 // ---------------------------------------------------------------------------
 
-/// Opaque live-sandbox handle wrapping an [`mxc_sdk::Sandbox`]. Created by
+/// Opaque sandbox process handle wrapping an [`mxc_sdk::Sandbox`]. Created by
 /// [`mxc_spawn_request`], destroyed by [`mxc_sandbox_free`].
 pub struct MxcSandbox {
     inner: Sandbox,
@@ -288,6 +288,8 @@ pub unsafe extern "C" fn mxc_sandbox_take_stderr(handle: *mut MxcSandbox) -> *mu
 ///
 /// On success, each non-sentinel endpoint is owned by the caller and must be
 /// adopted by the language runtime or closed with [`mxc_native_pipe_close`].
+/// Returns [`MXC_STATUS_BACKEND_ERROR`] if the backend cannot expose native
+/// endpoints or if duplicating an endpoint fails.
 ///
 /// # Safety
 /// - `handle` must be null or a live handle from [`mxc_spawn_request`].

@@ -1866,7 +1866,7 @@ struct AppContainerSandboxProcess {
     filesystem_mode: FilesystemMode,
     preserve_policy: bool,
     timeout_ms: u32,
-    coordinator_timed_out: bool,
+    timeout_requested: bool,
     teardown_result: Option<Result<(), String>>,
     /// Live guarded WPR capture session, moved from the `SpawnedChild`.
     /// Stopped and analyzed in `run_teardown` once the child has exited and
@@ -1935,7 +1935,7 @@ impl AppContainerSandboxProcess {
             filesystem_mode,
             preserve_policy: request.lifecycle.preserve_policy,
             timeout_ms: child.timeout_ms,
-            coordinator_timed_out: false,
+            timeout_requested: false,
             teardown_result: None,
             capture_session: child.capture_session.take(),
             capture_output_path: child.capture_output_path.take(),
@@ -2142,7 +2142,7 @@ impl SandboxProcess for AppContainerSandboxProcess {
                 if unsafe { GetExitCodeProcess(self.process.get(), &mut code) }.is_err() {
                     return Err(std::io::Error::other("GetExitCodeProcess failed"));
                 }
-                if self.coordinator_timed_out {
+                if self.timeout_requested {
                     Err(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
                         "sandbox execution timed out",
@@ -2192,7 +2192,7 @@ impl SandboxProcess for AppContainerSandboxProcess {
     }
 
     fn kill_for_timeout(&mut self) -> std::io::Result<()> {
-        self.coordinator_timed_out = true;
+        self.timeout_requested = true;
         self.kill()
     }
 
@@ -2212,7 +2212,7 @@ impl SandboxProcess for AppContainerSandboxProcess {
                 let mut code: u32 = 0;
                 if unsafe { GetExitCodeProcess(self.process.get(), &mut code) }.is_err() {
                     Err(std::io::Error::other("GetExitCodeProcess failed"))
-                } else if self.coordinator_timed_out {
+                } else if self.timeout_requested {
                     self.timeout_result()
                 } else {
                     let exit_code = code as i32;
