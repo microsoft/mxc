@@ -33,10 +33,11 @@
 //! Calls that take an [`MxcSandbox`] handle — process control, stream/closer
 //! accessors, warning/metadata getters, and [`mxc_sandbox_free`] — must be
 //! serialized by the caller. A caller that needs a cancellable wait should poll
-//! [`mxc_sandbox_try_wait`] and call [`mxc_sandbox_kill`] from the *same*
-//! thread, rather than blocking one thread in [`mxc_sandbox_wait`] and killing
-//! from another. Handles already returned for streams and closers are separate
-//! objects and are unaffected by this rule.
+//! [`mxc_sandbox_try_wait`] and call [`mxc_sandbox_kill`] or
+//! [`mxc_sandbox_kill_for_timeout`] from the *same* thread, rather than blocking
+//! one thread in [`mxc_sandbox_wait`] and killing from another. Handles already
+//! returned for streams and closers are separate objects and are unaffected by
+//! this rule.
 //!
 //! Each stream handle is likewise single-owner: [`mxc_stream_read`] /
 //! [`mxc_stream_write`] / [`mxc_stream_flush`] borrow the stream mutably, so
@@ -857,6 +858,31 @@ pub unsafe extern "C" fn mxc_sandbox_kill(handle: *mut MxcSandbox) -> i32 {
     })
 }
 
+/// Kill the child and its whole process tree because the caller's deadline
+/// elapsed. Reaping happens in a subsequent [`mxc_sandbox_wait`] /
+/// [`mxc_sandbox_try_wait`] or in [`mxc_sandbox_free`].
+///
+/// # Safety
+/// `handle` must be null or a live handle from [`mxc_spawn_request`].
+#[no_mangle]
+pub unsafe extern "C" fn mxc_sandbox_kill_for_timeout(handle: *mut MxcSandbox) -> i32 {
+    if handle.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+    let status = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: non-null live handle per the caller contract.
+        let sandbox = unsafe { &mut *handle };
+        match sandbox.inner.kill_for_timeout() {
+            Ok(()) => MXC_STATUS_SUCCESS,
+            Err(_) => MXC_STATUS_BACKEND_ERROR,
+        }
+    }));
+    status.unwrap_or_else(|panic| {
+        crate::report_panic("mxc_sandbox_kill_for_timeout", &*panic);
+        MXC_STATUS_PANIC
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Handle destructors
 // ---------------------------------------------------------------------------
@@ -1116,6 +1142,10 @@ mod tests {
                 MXC_STATUS_NULL_ARGUMENT
             );
             assert_eq!(mxc_sandbox_kill(ptr::null_mut()), MXC_STATUS_NULL_ARGUMENT);
+            assert_eq!(
+                mxc_sandbox_kill_for_timeout(ptr::null_mut()),
+                MXC_STATUS_NULL_ARGUMENT
+            );
         }
     }
 

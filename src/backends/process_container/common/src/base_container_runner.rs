@@ -2101,7 +2101,14 @@ impl SandboxProcess for BaseContainerSandboxProcess {
                 // Keep polling non-blocking and independent of captureDenials.
                 // `wait()` or `Drop` owns descendant termination and capture
                 // finalization after the root exit becomes observable.
-                Ok(Some(code as i32))
+                if self.coordinator_timed_out {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "sandbox execution timed out",
+                    ))
+                } else {
+                    Ok(Some(code as i32))
+                }
             }
             WAIT_TIMEOUT => Ok(None),
             _ => Err(std::io::Error::other("WaitForSingleObject failed")),

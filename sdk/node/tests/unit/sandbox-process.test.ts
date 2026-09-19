@@ -23,11 +23,18 @@ class FakeDriver implements NativeLifecycleDriver {
     timedOut: false,
   };
   pollError: Error | undefined;
+  timeoutKillError: Error | undefined;
+  completeOnTimeoutKill: NativeLifecycleStatus | undefined;
   completeOnPoll: number | undefined;
   pollCount = 0;
   killCount = 0;
+  timeoutKillCount = 0;
   waitCount = 0;
   freeCount = 0;
+  deferWait = false;
+  private completeDeferredWait:
+    | ((result: { exitCode: number; timedOut: boolean }) => void)
+    | undefined;
 
   constructor(readonly id = 17) {}
 
@@ -40,6 +47,11 @@ class FakeDriver implements NativeLifecycleDriver {
 
   async wait(): Promise<{ exitCode: number; timedOut: boolean }> {
     this.waitCount += 1;
+    if (this.deferWait) {
+      return new Promise((resolve) => {
+        this.completeDeferredWait = resolve;
+      });
+    }
     return {
       exitCode: this.status.exitCode,
       timedOut: this.status.timedOut,
@@ -58,12 +70,25 @@ class FakeDriver implements NativeLifecycleDriver {
     this.killCount += 1;
   }
 
+  killForTimeout(): void {
+    this.timeoutKillCount += 1;
+    if (this.completeOnTimeoutKill !== undefined) {
+      this.status = this.completeOnTimeoutKill;
+    }
+    if (this.timeoutKillError !== undefined) throw this.timeoutKillError;
+  }
+
   async free(): Promise<void> {
     this.freeCount += 1;
   }
 
   complete(exitCode = 0, timedOut = false): void {
     this.status = { exitCode, running: false, timedOut };
+  }
+
+  resolveWait(exitCode = this.status.exitCode, timedOut = this.status.timedOut): void {
+    this.completeDeferredWait?.({ exitCode, timedOut });
+    this.completeDeferredWait = undefined;
   }
 }
 
@@ -214,7 +239,8 @@ describe('native sandbox process', () => {
     const result = await proc.waitAsync();
 
     assert.deepStrictEqual(result, { exitCode: 0, timedOut: true });
-    assert.strictEqual(driver.killCount, 1);
+    assert.strictEqual(driver.killCount, 0);
+    assert.strictEqual(driver.timeoutKillCount, 1);
     assert.strictEqual(driver.waitCount, 1);
   });
 
@@ -227,6 +253,41 @@ describe('native sandbox process', () => {
 
     assert.deepStrictEqual(result, { exitCode: 23, timedOut: false });
     assert.strictEqual(driver.killCount, 0);
+    assert.strictEqual(driver.timeoutKillCount, 0);
     assert.strictEqual(driver.waitCount, 1);
+  });
+
+  it('reaps a timeout exit that races a failed timeout kill', async () => {
+    const driver = new FakeDriver();
+    driver.timeoutKillError = new Error('process already exited');
+    driver.completeOnTimeoutKill = {
+      exitCode: -1,
+      running: false,
+      timedOut: true,
+    };
+    const proc = _createMxcSandboxProcess(driver, 1);
+
+    const result = await proc.waitAsync();
+
+    assert.deepStrictEqual(result, { exitCode: -1, timedOut: true });
+    assert.strictEqual(driver.timeoutKillCount, 1);
+    assert.strictEqual(driver.waitCount, 1);
+  });
+
+  it('does not issue control calls after terminal wait starts', async () => {
+    const driver = new FakeDriver();
+    driver.deferWait = true;
+    const proc = _createMxcSandboxProcess(driver);
+    const wait = proc.waitAsync();
+    driver.complete(5);
+
+    while (driver.waitCount === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    proc.kill();
+
+    assert.strictEqual(driver.killCount, 0);
+    driver.resolveWait(5, false);
+    assert.deepStrictEqual(await wait, { exitCode: 5, timedOut: false });
   });
 });

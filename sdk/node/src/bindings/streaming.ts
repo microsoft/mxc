@@ -67,6 +67,7 @@ export interface _StreamingNativeFacade {
     completion: NativeWaitCompletion,
   ): void;
   kill(handle: Pointer): number;
+  killForTimeout(handle: Pointer): number;
   warningsJson(handle: Pointer, out: Pointer[]): number;
   outputMetadataJson(handle: Pointer, out: Pointer[]): number;
   free(handle: Pointer, completion: NativeFreeCompletion): void;
@@ -196,6 +197,11 @@ function bindSandboxFunctions(
     },
     kill: bindNativeFunction(handle, {
       symbol: 'mxc_sandbox_kill',
+      result: 'int32_t',
+      parameters: [pointer],
+    }),
+    killForTimeout: bindNativeFunction(handle, {
+      symbol: 'mxc_sandbox_kill_for_timeout',
       result: 'int32_t',
       parameters: [pointer],
     }),
@@ -330,6 +336,13 @@ class KoffiLifecycleDriver implements NativeLifecycleDriver {
     throwIfFailed(
       this.native.kill(this.handle),
       'killing sandbox process failed',
+    );
+  }
+
+  killForTimeout(): void {
+    throwIfFailed(
+      this.native.killForTimeout(this.handle),
+      'killing timed-out sandbox process failed',
     );
   }
 

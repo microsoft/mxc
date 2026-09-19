@@ -2142,7 +2142,14 @@ impl SandboxProcess for AppContainerSandboxProcess {
                 if unsafe { GetExitCodeProcess(self.process.get(), &mut code) }.is_err() {
                     return Err(std::io::Error::other("GetExitCodeProcess failed"));
                 }
-                Ok(Some(code as i32))
+                if self.coordinator_timed_out {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "sandbox execution timed out",
+                    ))
+                } else {
+                    Ok(Some(code as i32))
+                }
             }
             WAIT_TIMEOUT => Ok(None),
             _ => Err(std::io::Error::other("WaitForSingleObject failed")),

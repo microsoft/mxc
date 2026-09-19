@@ -518,6 +518,10 @@ impl SandboxProcess for TelemetryProcess {
         self.inner.take_stdin()
     }
 
+    fn stdin_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        self.inner.stdin_closer()
+    }
+
     fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
         self.inner.take_native_stdio()
     }
@@ -563,6 +567,17 @@ impl SandboxProcess for TelemetryProcess {
         let result = self.inner.kill();
         if result.is_ok() {
             self.emit_cancellation();
+        }
+        result
+    }
+
+    fn kill_for_timeout(&mut self) -> std::io::Result<()> {
+        let result = self.inner.kill_for_timeout();
+        if result.is_ok() {
+            self.emit(&Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "sandbox execution timed out",
+            )));
         }
         result
     }
@@ -628,6 +643,10 @@ impl SandboxProcess for ProcessWithWarnings {
         self.inner.take_stdin()
     }
 
+    fn stdin_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        self.inner.stdin_closer()
+    }
+
     fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
         self.inner.take_native_stdio()
     }
@@ -650,6 +669,10 @@ impl SandboxProcess for ProcessWithWarnings {
 
     fn kill(&mut self) -> std::io::Result<()> {
         self.inner.kill()
+    }
+
+    fn kill_for_timeout(&mut self) -> std::io::Result<()> {
+        self.inner.kill_for_timeout()
     }
 
     fn wait(&mut self) -> std::io::Result<i32> {
@@ -689,6 +712,8 @@ mod telemetry_process_tests {
 
     struct NativeStdioProbe {
         calls: Arc<AtomicUsize>,
+        stdin_closer_calls: Arc<AtomicUsize>,
+        timeout_kill_calls: Arc<AtomicUsize>,
     }
 
     impl SandboxProcess for NativeStdioProbe {
@@ -698,6 +723,11 @@ mod telemetry_process_tests {
         }
 
         fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
+            None
+        }
+
+        fn stdin_closer(&self) -> Option<Box<dyn StreamCloser>> {
+            self.stdin_closer_calls.fetch_add(1, Ordering::SeqCst);
             None
         }
 
@@ -718,6 +748,11 @@ mod telemetry_process_tests {
         }
 
         fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn kill_for_timeout(&mut self) -> std::io::Result<()> {
+            self.timeout_kill_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
@@ -816,9 +851,13 @@ mod telemetry_process_tests {
     #[test]
     fn process_wrappers_forward_native_stdio_transfer() {
         let telemetry_calls = Arc::new(AtomicUsize::new(0));
+        let telemetry_closer_calls = Arc::new(AtomicUsize::new(0));
+        let telemetry_timeout_calls = Arc::new(AtomicUsize::new(0));
         let mut telemetry = TelemetryProcess::new(
             Box::new(NativeStdioProbe {
                 calls: Arc::clone(&telemetry_calls),
+                stdin_closer_calls: Arc::clone(&telemetry_closer_calls),
+                timeout_kill_calls: Arc::clone(&telemetry_timeout_calls),
             }),
             true,
             TelemetryMode::StateAware {
@@ -830,17 +869,29 @@ mod telemetry_process_tests {
             std::time::Instant::now(),
         );
         assert!(telemetry.take_native_stdio().unwrap().is_none());
+        assert!(telemetry.stdin_closer().is_none());
+        telemetry.kill_for_timeout().unwrap();
         assert_eq!(telemetry_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(telemetry_closer_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(telemetry_timeout_calls.load(Ordering::SeqCst), 1);
 
         let warning_calls = Arc::new(AtomicUsize::new(0));
+        let warning_closer_calls = Arc::new(AtomicUsize::new(0));
+        let warning_timeout_calls = Arc::new(AtomicUsize::new(0));
         let mut with_warnings = ProcessWithWarnings::wrap(
             Box::new(NativeStdioProbe {
                 calls: Arc::clone(&warning_calls),
+                stdin_closer_calls: Arc::clone(&warning_closer_calls),
+                timeout_kill_calls: Arc::clone(&warning_timeout_calls),
             }),
             vec!["test warning".to_string()],
         );
         assert!(with_warnings.take_native_stdio().unwrap().is_none());
+        assert!(with_warnings.stdin_closer().is_none());
+        with_warnings.kill_for_timeout().unwrap();
         assert_eq!(warning_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(warning_closer_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(warning_timeout_calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

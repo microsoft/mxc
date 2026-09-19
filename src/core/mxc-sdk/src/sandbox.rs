@@ -136,6 +136,11 @@ impl Sandbox {
         self.inner.kill()
     }
 
+    #[doc(hidden)]
+    pub fn kill_for_timeout(&mut self) -> std::io::Result<()> {
+        self.inner.kill_for_timeout()
+    }
+
     /// Wait for the child to exit, draining and discarding any untaken
     /// stdout/stderr so it can't block on a full pipe.
     ///

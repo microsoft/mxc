@@ -22,6 +22,7 @@ export interface NativeLifecycleDriver {
   warnings(): readonly string[];
   outputMetadata(): unknown | undefined;
   kill(): void;
+  killForTimeout(): void;
   free(): Promise<void>;
 }
 
@@ -61,6 +62,7 @@ export class MxcSandboxProcess {
   private errorDrained = false;
   private disposed = false;
   private terminal = false;
+  private settling = false;
   private cleanupStarted = false;
   private warningsValue: readonly string[];
   private metadataValue: unknown | undefined;
@@ -149,14 +151,14 @@ export class MxcSandboxProcess {
 
   kill(): void {
     this.throwIfDisposed();
-    if (!this.terminal) this.driver.kill();
+    if (!this.terminal && !this.settling) this.driver.kill();
   }
 
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
     let firstError: Error | undefined;
-    if (!this.terminal) {
+    if (!this.terminal && !this.settling) {
       try {
         this.driver.kill();
       } catch (error) {
@@ -207,21 +209,38 @@ export class MxcSandboxProcess {
   }
 
   private finishAfterWait(): void {
-    void this.waitForTerminalResult(false);
+    if (this.beginSettling()) {
+      void this.waitForTerminalResult(false);
+    }
   }
 
   private finishAfterTimeout(): void {
     try {
       const status = this.driver.poll();
       if (!status.running) {
-        void this.waitForTerminalResult(false);
+        if (this.beginSettling()) {
+          void this.waitForTerminalResult(false);
+        }
         return;
       }
-      this.driver.kill();
+      if (!this.beginSettling()) return;
+      try {
+        this.driver.killForTimeout();
+      } catch (killError) {
+        const racedStatus = this.driver.poll();
+        if (racedStatus.running) throw killError;
+      }
       void this.waitForTerminalResult(true);
     } catch (error) {
       void this.finish(undefined, asError(error));
     }
+  }
+
+  private beginSettling(): boolean {
+    if (this.disposed || this.terminal || this.settling) return false;
+    this.settling = true;
+    this.stopPolling();
+    return true;
   }
 
   private async waitForTerminalResult(timedOut: boolean): Promise<void> {
