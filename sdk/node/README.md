@@ -51,6 +51,10 @@ child.on('close', (code) => console.log('exit:', code));
   When a new schema graduates or a new backend ships, update only this block.
 -->
 
+**Node.js:** `24.21.0` or later. On Windows, native pipe streaming uses the
+`windowsHandle` option added to `fs.ReadStream` and `fs.WriteStream` in
+Node.js 24.21.0.
+
 **Policy / config schema versions:**
 
 | Version | Status | Schema file |
@@ -163,8 +167,6 @@ if (network.proxyEnforcement !== 'supported') {
 ```
 
 It is reported **fail closed**: if the probe cannot run, the result is `'unsupported'` with the reason in `warnings`, never absent. The check is advisory — the runner still verifies the dependencies at launch, since the probe runs in a different process at an earlier time. See [the Bubblewrap backend guide](../../docs/bwrap-support/bubblewrap-backend.md#checking-host-support-before-you-run).
-
-**Node.js:** ≥ 18.
 
 ---
 
