@@ -241,19 +241,20 @@ pub trait SandboxProcess: Send {
     }
 }
 
-/// Abandons reads on one of a [`SandboxProcess`]'s standard streams: a call to
-/// [`close`](StreamCloser::close) makes an in-flight or subsequent read on the
-/// corresponding [`take_stdout`](SandboxProcess::take_stdout) /
-/// [`take_stderr`](SandboxProcess::take_stderr) stream return EOF (`Ok(0)`)
-/// promptly, **without** terminating the child.
+/// Interrupts blocking I/O on one of a [`SandboxProcess`]'s standard streams.
 ///
-/// Obtained from [`stdout_closer`](SandboxProcess::stdout_closer) /
+/// For stdout/stderr, [`close`](StreamCloser::close) makes an in-flight or
+/// subsequent read return EOF (`Ok(0)`) promptly without terminating the
+/// child. For stdin, it closes/cancels the writable path so an in-flight write
+/// can return and the child can observe EOF.
+///
+/// Obtained from [`stdin_closer`](SandboxProcess::stdin_closer),
+/// [`stdout_closer`](SandboxProcess::stdout_closer), or
 /// [`stderr_closer`](SandboxProcess::stderr_closer). `Send + Sync` so a
-/// watchdog thread (separate from the one blocked on the read) can hold and
-/// fire it.
+/// watchdog thread separate from the blocked I/O can hold and fire it.
 pub trait StreamCloser: Send + Sync {
-    /// Promptly EOF the stream this closer was minted for. Idempotent and safe
-    /// to call after the reader has already reached EOF or been dropped.
+    /// Promptly interrupt the stream this closer was minted for. Idempotent and
+    /// safe to call after the stream has already completed or been dropped.
     fn close(&self);
 }
 
