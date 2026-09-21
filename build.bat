@@ -137,6 +137,71 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
             copy /Y "!BIN_DIR!\mxc_ffi.dll" "sdk\node\bin\!SDK_ARCH!\" >nul
             echo   Copied !SDK_ARCH!\mxc_ffi.dll
         )
+        if "%%T"=="x86_64-pc-windows-msvc" (
+            if "%WITH_NVX%"=="1" (
+                for %%B in (bin\openvmm.exe guest\vmlinux guest\initramfs.cpio.gz) do (
+                    if not exist "!BIN_DIR!\%%B" (
+                        echo ERROR: NVX-enabled Node runtime is missing !BIN_DIR!\%%B
+                        exit /b 1
+                    )
+                )
+                set "NVX_WORKLOAD_IMAGE_COUNT=0"
+                for %%B in (images\distro.erofs images\runtime.erofs images\scratch.ext4) do (
+                    if exist "!BIN_DIR!\%%B" set /A NVX_WORKLOAD_IMAGE_COUNT+=1
+                )
+                if not "!NVX_WORKLOAD_IMAGE_COUNT!"=="0" if not "!NVX_WORKLOAD_IMAGE_COUNT!"=="3" (
+                    echo ERROR: NVX-enabled Node runtime has an incomplete workload-image bundle.
+                    exit /b 1
+                )
+                for %%B in (images\distro.erofs images\runtime.erofs images\scratch.ext4) do (
+                    if exist "sdk\node\bin\!SDK_ARCH!\%%B" del /Q "sdk\node\bin\!SDK_ARCH!\%%B"
+                )
+                if exist "sdk\node\bin\!SDK_ARCH!\images" rd "sdk\node\bin\!SDK_ARCH!\images" 2>nul
+                for %%B in (bin\openvmm.exe guest\vmlinux guest\initramfs.cpio.gz) do (
+                    for %%D in ("sdk\node\bin\!SDK_ARCH!\%%B") do (
+                        if not exist "%%~dpD" (
+                            mkdir "%%~dpD"
+                            if errorlevel 1 (
+                                echo ERROR: Failed to create NVX Node runtime directory %%~dpD
+                                exit /b 1
+                            )
+                        )
+                    )
+                    copy /Y "!BIN_DIR!\%%B" "sdk\node\bin\!SDK_ARCH!\%%B" >nul
+                    if errorlevel 1 (
+                        echo ERROR: Failed to copy NVX Node runtime artifact %%B
+                        exit /b 1
+                    )
+                    echo   Copied !SDK_ARCH!\%%B
+                )
+                if "!NVX_WORKLOAD_IMAGE_COUNT!"=="3" (
+                    for %%B in (images\distro.erofs images\runtime.erofs images\scratch.ext4) do (
+                        for %%D in ("sdk\node\bin\!SDK_ARCH!\%%B") do (
+                            if not exist "%%~dpD" (
+                                mkdir "%%~dpD"
+                                if errorlevel 1 (
+                                    echo ERROR: Failed to create NVX Node runtime directory %%~dpD
+                                    exit /b 1
+                                )
+                            )
+                        )
+                        copy /Y "!BIN_DIR!\%%B" "sdk\node\bin\!SDK_ARCH!\%%B" >nul
+                        if errorlevel 1 (
+                            echo ERROR: Failed to copy NVX Node runtime artifact %%B
+                            exit /b 1
+                        )
+                        echo   Copied !SDK_ARCH!\%%B
+                    )
+                )
+            ) else (
+                for %%B in (bin\openvmm.exe guest\vmlinux guest\initramfs.cpio.gz images\distro.erofs images\runtime.erofs images\scratch.ext4) do (
+                    if exist "sdk\node\bin\!SDK_ARCH!\%%B" del /Q "sdk\node\bin\!SDK_ARCH!\%%B"
+                )
+                if exist "sdk\node\bin\!SDK_ARCH!\bin" rd "sdk\node\bin\!SDK_ARCH!\bin" 2>nul
+                if exist "sdk\node\bin\!SDK_ARCH!\guest" rd "sdk\node\bin\!SDK_ARCH!\guest" 2>nul
+                if exist "sdk\node\bin\!SDK_ARCH!\images" rd "sdk\node\bin\!SDK_ARCH!\images" 2>nul
+            )
+        )
         if "!COPY_WSLC_RUNTIME!"=="1" (
             if "%WITH_WSLC%"=="1" (
                 for %%B in (wxc-wslc-daemon.exe wslcsdk.dll) do (

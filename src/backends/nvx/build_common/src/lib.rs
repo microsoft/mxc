@@ -133,7 +133,15 @@ pub fn copy_artifact_paths<'a>(
     relative_paths: impl IntoIterator<Item = &'a str>,
 ) -> io::Result<()> {
     let relative_paths: Vec<&str> = relative_paths.into_iter().collect();
-    for relative_path in &relative_paths {
+    validate_artifact_paths(src_dir, relative_paths.iter().copied())?;
+    copy_validated_artifact_paths(src_dir, target_dir, relative_paths)
+}
+
+fn validate_artifact_paths<'a>(
+    src_dir: &Path,
+    relative_paths: impl IntoIterator<Item = &'a str>,
+) -> io::Result<()> {
+    for relative_path in relative_paths {
         let source = src_dir.join(relative_path);
         if !source.is_file() {
             return Err(io::Error::new(
@@ -142,7 +150,14 @@ pub fn copy_artifact_paths<'a>(
             ));
         }
     }
+    Ok(())
+}
 
+fn copy_validated_artifact_paths<'a>(
+    src_dir: &Path,
+    target_dir: &Path,
+    relative_paths: impl IntoIterator<Item = &'a str>,
+) -> io::Result<()> {
     for relative_path in relative_paths {
         let source = src_dir.join(relative_path);
         let destination = target_dir.join(relative_path);
@@ -172,17 +187,44 @@ pub fn copy_artifact_paths<'a>(
     Ok(())
 }
 
+fn remove_artifact_paths<'a>(
+    target_dir: &Path,
+    relative_paths: impl IntoIterator<Item = &'a str>,
+) -> io::Result<()> {
+    for relative_path in relative_paths {
+        let destination = target_dir.join(relative_path);
+        match std::fs::remove_file(&destination) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "failed to remove stale NVX artifact '{}': {error}",
+                        destination.display()
+                    ),
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Stages all artifacts available in the configured release.
 pub fn copy_artifacts_to_target(
     src_dir: &Path,
     target_dir: &Path,
     workload_images_available: bool,
 ) -> io::Result<()> {
-    copy_artifact_paths(
-        src_dir,
-        target_dir,
-        available_artifact_rel_paths(workload_images_available),
-    )
+    let relative_paths: Vec<&str> =
+        available_artifact_rel_paths(workload_images_available).collect();
+    validate_artifact_paths(src_dir, relative_paths.iter().copied())?;
+
+    if !workload_images_available {
+        remove_artifact_paths(target_dir, WORKLOAD_IMAGE_ARTIFACTS)?;
+    }
+
+    copy_validated_artifact_paths(src_dir, target_dir, relative_paths)
 }
 
 /// Emits Cargo change tracking for every artifact available in this release.
@@ -280,6 +322,9 @@ mod tests {
         for relative_path in WINDOWS_PLATFORM_ARTIFACTS {
             write_artifact(source.path(), relative_path, relative_path.as_bytes());
         }
+        for relative_path in WORKLOAD_IMAGE_ARTIFACTS {
+            write_artifact(target.path(), relative_path, b"stale");
+        }
 
         copy_artifacts_to_target(source.path(), target.path(), false)
             .expect("platform-only staging failed");
@@ -303,6 +348,9 @@ mod tests {
         for relative_path in WINDOWS_PLATFORM_ARTIFACTS {
             write_artifact(source.path(), relative_path, b"platform");
         }
+        for relative_path in WORKLOAD_IMAGE_ARTIFACTS {
+            write_artifact(target.path(), relative_path, b"existing");
+        }
 
         let error = copy_artifacts_to_target(source.path(), target.path(), true)
             .expect_err("missing workload images must fail");
@@ -311,6 +359,13 @@ mod tests {
         assert!(error.to_string().contains("images/distro.erofs"));
         for relative_path in WINDOWS_PLATFORM_ARTIFACTS {
             assert!(!target.path().join(relative_path).exists());
+        }
+        for relative_path in WORKLOAD_IMAGE_ARTIFACTS {
+            assert_eq!(
+                std::fs::read(target.path().join(relative_path))
+                    .expect("failed staging must preserve existing artifacts"),
+                b"existing"
+            );
         }
     }
 
