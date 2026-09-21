@@ -15,7 +15,6 @@ param(
         'isolation-session',
         'windows-sandbox',
         'wslc',
-        'microvm',
         'hyperlight'
     )]
     [string]$Backend,
@@ -186,11 +185,6 @@ switch ($Backend) {
         }
         Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_wslc_all_tests.ps1') -Arguments @{
             WxcExecPath = $wxc
-        }
-    }
-    'microvm' {
-        Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_microvm_tests.ps1') -Arguments @{
-            BinDir = $binaryDirectoryPath
         }
     }
     'hyperlight' {

@@ -36,8 +36,6 @@ Linux / macOS (`.sh`):
 | `run_filesystem_bfs_spaces_test.ps1` | BFS path-with-spaces test | `wxc-exec.exe` |
 | `run_test_configs.ps1` | All test configs via wxc-test-driver | `wxc-test-driver.exe` |
 | `run_examples.ps1` | All examples via wxc-test-driver | `wxc-test-driver.exe` |
-| `run_microvm_basic_test.ps1` | MicroVM smoke test | `wxc-exec.exe`, NanVix binaries |
-| `run_microvm_tests.ps1` | Full MicroVM E2E suite | WHP enabled, NanVix binaries |
 | `run_windows_sandbox_one_shot_tests.ps1` | Windows Sandbox one-shot E2E suite (fresh disposable VM per test) | Windows Sandbox enabled |
 | `run_windows_sandbox_state_aware_tests.ps1` | Windows Sandbox state-aware lifecycle E2E (single VM held across provision/start/exec*/stop/deprovision) | Windows Sandbox enabled |
 | `run_processcontainer_proxy_tests.ps1` | Process container proxy tests | `wxc-exec.exe` |
@@ -71,8 +69,8 @@ these dispatchers, which map a matrix backend id to the suites above:
 
 | Dispatcher | Platforms | Backend ids |
 |------------|-----------|-------------|
-| `scripts/ci/run_backend_validation_tests.ps1` | Windows | `process-t1`, `process-t3`, `isolation-session`, `windows-sandbox`, `wslc`, `microvm`, `hyperlight` |
-| `scripts/ci/run_backend_validation_tests.sh` | Linux, macOS | `bubblewrap`, `lxc`, `seatbelt`, `microvm`, `hyperlight` |
+| `scripts/ci/run_backend_validation_tests.ps1` | Windows | `process-t1`, `process-t3`, `isolation-session`, `windows-sandbox`, `wslc`, `hyperlight` |
+| `scripts/ci/run_backend_validation_tests.sh` | Linux, macOS | `bubblewrap`, `lxc`, `seatbelt`, `hyperlight` |
 
 Pass the backend id exactly as it appears in the catalog — there is no separate
 handler name. Ids that share a suite have their own case in the dispatcher:
@@ -194,22 +192,3 @@ Run them explicitly on capable machines with
 | `test_examples` | Requires velocity key 61714527 (BFS deadlock fix) |
 | `test_processcontainer_proxy` | Requires velocity key 61714527 (BFS deadlock fix) and elevation |
 | `test_on_repeat` | Stress test (loops BFS tests) |
-
-## MicroVM E2E
-
-### Build
-
-```powershell
-cd src
-cargo build --features microvm --target x86_64-pc-windows-msvc
-```
-
-### Run
-
-```powershell
-cd src
-cargo test -p wxc_e2e_tests --target x86_64-pc-windows-msvc test_microvm_suite -- --nocapture
-```
-
-The MicroVM suite runs 6 functional tests + 1 timeout behavior test.
-It generates `microvm-perf-results.json` with per-test timing and status data (uploaded as CI artifact).

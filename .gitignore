@@ -25,7 +25,6 @@ bld/
 # Test artifacts
 *.etl
 *.log
-microvm-perf-results*.json
 
 # npm pack artifacts
 *.tgz

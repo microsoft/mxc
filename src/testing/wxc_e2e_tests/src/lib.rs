@@ -158,27 +158,6 @@ pub fn has_daemon() -> bool {
     }
 }
 
-/// Return whether the NanVix runtime binaries are available next to wxc-exec.
-pub fn has_nanvix_binaries() -> bool {
-    let Some(exe) = find_binary("wxc-exec.exe") else {
-        return false;
-    };
-    let exe_dir = exe.parent().unwrap_or(Path::new("."));
-    // Flat binaries staged next to wxc-exec.exe by `nanvix_binaries`.
-    let flat_present = ["nanvixd.exe", "nanvix_rootfs.img", "python3.initrd"]
-        .iter()
-        .all(|name| exe_dir.join(name).exists());
-    // Kernel binary now lives under `bin/` (nanvixd locates it via -bin-dir).
-    let bin_present = ["kernel.elf"]
-        .iter()
-        .all(|name| exe_dir.join("bin").join(name).exists());
-    let present = flat_present && bin_present;
-    if !present {
-        println!("SKIPPED: NanVix binaries not found next to wxc-exec.exe");
-    }
-    present
-}
-
 /// Return whether `lxc-exec` is available for direct E2E execution.
 pub fn has_lxc_exe() -> bool {
     match find_binary("lxc-exec") {
@@ -187,40 +166,10 @@ pub fn has_lxc_exe() -> bool {
             true
         }
         None => {
-            println!("SKIPPED: lxc-exec not found — build with `cargo build -p lxc --features microvm` first");
+            println!("SKIPPED: lxc-exec not found — build with `cargo build -p lxc` first");
             false
         }
     }
-}
-
-/// Return whether the NanVix runtime binaries are available next to lxc-exec (Linux).
-pub fn has_lxc_nanvix_binaries() -> bool {
-    let Some(exe) = find_binary("lxc-exec") else {
-        return false;
-    };
-    let exe_dir = exe.parent().unwrap_or(Path::new("."));
-    // Flat binaries staged next to lxc-exec by `nanvix_binaries`.
-    let flat_present = ["nanvixd.elf", "nanvix_rootfs.img", "python3.initrd"]
-        .iter()
-        .all(|name| exe_dir.join(name).exists());
-    // Kernel binary under `bin/` (nanvixd locates it relative to cwd).
-    let bin_present = ["kernel.elf"]
-        .iter()
-        .all(|name| exe_dir.join("bin").join(name).exists());
-    let present = flat_present && bin_present;
-    if !present {
-        println!("SKIPPED: NanVix binaries not found next to lxc-exec — build with `cargo build -p lxc --features microvm`");
-    }
-    present
-}
-
-/// Return whether `/dev/kvm` is available for KVM-based execution.
-pub fn has_kvm() -> bool {
-    let available = Path::new("/dev/kvm").exists();
-    if !available {
-        println!("SKIPPED: /dev/kvm not available — KVM required for NanVix on Linux");
-    }
-    available
 }
 
 /// Run `lxc-exec` with the supplied config file and extra arguments.

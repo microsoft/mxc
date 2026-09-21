@@ -46,7 +46,7 @@ jobs:
         workingDirectory: $(Build.SourcesDirectory)/src
         # Explicit feature set (no --all-features): tier2_bfs must NOT ship
         # on Win 11 25H2 (bfscfg.exe risks an OS hang).
-        cargoFeatures: hyperlight isolation_session microvm wslc
+        cargoFeatures: hyperlight isolation_session wslc
         signPattern: |
             wxc-exec.exe
             plm.exe

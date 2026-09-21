@@ -18,7 +18,7 @@ interface Scenario {
   script: string;
   policy: any;
   shell: 'cmd' | 'ps51' | 'ps7' | 'python' | 'networking' | 'filesystem';
-  containment?: 'appcontainer' | 'windows_sandbox' | 'microvm' | 'hyperlight';
+  containment?: 'appcontainer' | 'windows_sandbox' | 'hyperlight';
   requiresV05?: boolean;
   /** If set, output must contain this string for a PASS verdict */
   successMarker?: string;
@@ -377,77 +377,6 @@ var SCENARIOS: Scenario[] = [
     script: 'ping -n 30 127.0.0.1',
     policy: { timeoutMs: 5000 } },
 
-  // ========== MicroVM (NanVix) ==========
-  { id: 'mv-hello', name: 'Hello from MicroVM', category: 'Quick Tests', categoryIcon: '🎯', shell: 'python',
-    containment: 'microvm',
-    description: 'Runs a simple Python script inside the NanVix micro-VM.',
-    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
-    script: "x = 42\ny = 58\nprint('Hello from MicroVM! sum=%d' % (x + y))",
-    policy: {}, successMarker: 'Hello from MicroVM!' },
-  { id: 'mv-stdlib', name: 'Stdlib (json, math, hashlib)', category: 'Quick Tests', categoryIcon: '🎯', shell: 'python',
-    containment: 'microvm',
-    description: 'Imports json, math, hashlib to verify the CPython stdlib is available.',
-    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
-    script: "import json, math, hashlib\ndata = {'pi': math.pi, 'e': math.e, 'hash': hashlib.sha256(b'nanvix').hexdigest()[:16]}\nprint(json.dumps(data))",
-    policy: {}, successMarker: 'pi' },
-  { id: 'mv-multiline', name: 'Fibonacci (multiline)', category: 'Quick Tests', categoryIcon: '🎯', shell: 'python',
-    containment: 'microvm',
-    description: 'Runs a multi-line Fibonacci function to verify complex scripts work.',
-    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
-    script: "def fib(n):\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a\n\nfor i in range(10):\n    print(f'fib({i}) = {fib(i)}')",
-    policy: {}, successMarker: 'fib(9) = 34' },
-  { id: 'mv-large-output', name: 'Large output (1000 lines)', category: 'Quick Tests', categoryIcon: '🎯', shell: 'python',
-    containment: 'microvm',
-    description: 'Prints 1000 lines to verify large output streaming works.',
-    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
-    script: "for i in range(1000):\n    print(f'line {i}: ' + 'x' * 80)",
-    policy: {}, successMarker: 'line 999' },
-  { id: 'mv-exit-code', name: 'Exit code 42', category: 'Error Cases', categoryIcon: '⚠️', shell: 'python',
-    containment: 'microvm',
-    description: 'Exits with code 42. Verifies exit codes propagate from the micro-VM.',
-    expectedOutcome: 'show-error', expectedLabel: 'Should exit 42',
-    script: 'import sys; sys.exit(42)',
-    policy: {} },
-  { id: 'mv-error', name: 'Python error', category: 'Error Cases', categoryIcon: '⚠️', shell: 'python',
-    containment: 'microvm',
-    description: 'Raises a ValueError. Verifies stderr capture from the micro-VM.',
-    expectedOutcome: 'show-error', expectedLabel: 'Should show error',
-    script: "raise ValueError('intentional test error')",
-    policy: {} },
-  { id: 'mv-timeout', name: 'Timeout', category: 'Error Cases', categoryIcon: '⚠️', shell: 'python',
-    containment: 'microvm',
-    description: 'Sleeps for 120s with a 5s timeout. MicroVM adds 60s boot grace, so actual ~65s.',
-    expectedOutcome: 'be-blocked', expectedLabel: 'Should be terminated',
-    script: "import time; time.sleep(120); print('should not reach here')",
-    policy: { timeoutMs: 5000 } },
-
-  // ========== MicroVM — Filesystem ==========
-  { id: 'mv-fs-write-read', name: 'Write & read file (FS mount)', category: 'Filesystem', categoryIcon: '📁', shell: 'filesystem',
-    containment: 'microvm',
-    description: 'Writes a file to a readwritePaths mount and reads it back. Verifies staging dir works.',
-    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
-    script: "import os\ntest_dir = 'C:\\\\Users\\\\Public\\\\MXCPlaygroundTests'\nfpath = os.path.join(test_dir, 'mxc-mv-test.txt')\ntry:\n    with open(fpath, 'w') as f:\n        f.write('hello from microvm')\n    with open(fpath) as f:\n        data = f.read()\n    print('Read back:', data)\n    assert data == 'hello from microvm', 'mismatch!'\n    print('MV FS write/read OK')\nfinally:\n    try: os.remove(fpath)\n    except OSError: pass",
-    policy: { filesystem: { readwritePaths: ['C:\\Users\\Public\\MXCPlaygroundTests'] } }, successMarker: 'MV FS write/read OK' },
-  { id: 'mv-fs-list-dir', name: 'List directory contents', category: 'Filesystem', categoryIcon: '📁', shell: 'filesystem',
-    containment: 'microvm',
-    description: 'Creates and lists files in a readwritePaths mount. Verifies directory operations.',
-    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
-    script: "import os\ntest_dir = 'C:\\\\Users\\\\Public\\\\MXCPlaygroundTests'\nnames = ['mxc-a.txt', 'mxc-b.txt', 'mxc-c.txt']\ntry:\n    for name in names:\n        with open(os.path.join(test_dir, name), 'w') as f:\n            f.write(name)\n    entries = [e for e in os.listdir(test_dir) if e.startswith('mxc-')]\n    print('MXC files:', sorted(entries))\n    assert 'mxc-a.txt' in entries and 'mxc-c.txt' in entries\n    print('MV dir listing OK')\nfinally:\n    for name in names:\n        try: os.remove(os.path.join(test_dir, name))\n        except OSError: pass",
-    policy: { filesystem: { readwritePaths: ['C:\\Users\\Public\\MXCPlaygroundTests'] } }, successMarker: 'MV dir listing OK' },
-
-  // ========== MicroVM — Stdlib ==========
-  { id: 'mv-stdlib-broad', name: 'Stdlib (re, datetime, collections)', category: 'Quick Tests', categoryIcon: '🎯', shell: 'python',
-    containment: 'microvm',
-    description: 'Imports re, datetime, collections to verify broader stdlib availability.',
-    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
-    script: "import re, datetime, collections\nm = re.match(r'(\\w+)@(\\w+)', 'user@host')\nprint('regex:', m.group(1), m.group(2))\nnow = datetime.datetime(2025, 1, 15, 12, 0)\nprint('datetime:', now.isoformat())\nc = collections.Counter('abracadabra')\nprint('counter:', c.most_common(3))\nprint('broad stdlib OK')",
-    policy: {}, successMarker: 'broad stdlib OK' },
-  { id: 'mv-memory', name: 'Memory stress (10MB list)', category: 'Quick Tests', categoryIcon: '🎯', shell: 'python',
-    containment: 'microvm',
-    description: 'Allocates a 10MB list to verify the VM handles non-trivial memory.',
-    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
-    script: "data = list(range(1_000_000))\nprint('Allocated', len(data), 'items')\nprint('Sum:', sum(data[:100]))\nprint('Memory OK')",
-    policy: {}, successMarker: 'Memory OK' },
   { id: 'hl-hello', name: 'Hello from Hyperlight', category: 'Quick Tests', categoryIcon: '🎯', shell: 'python',
     containment: 'hyperlight',
     description: 'Runs a simple Python script inside the Hyperlight+Unikraft micro-VM.',
@@ -772,7 +701,7 @@ function getCurrentScript(): string {
   // Replace bare 'python' with resolved full path for BaseContainer compatibility
   // (skip for Windows Sandbox — it uses mapped Python from the host)
   var containment = $sel('containmentSelect').value;
-  if (containment !== 'windows_sandbox' && containment !== 'microvm' && containment !== 'hyperlight' && shellPaths.python?.exe && script.match(/^python\s/)) {
+  if (containment !== 'windows_sandbox' && containment !== 'hyperlight' && shellPaths.python?.exe && script.match(/^python\s/)) {
     script = '"' + shellPaths.python.exe + '"' + script.substring(6);
   }
 
@@ -786,7 +715,6 @@ function getCurrentScript(): string {
 var CONTAINMENT_LABELS: Record<string, string> = {
   appcontainer: 'Base Process Container',
   windows_sandbox: 'Windows Sandbox',
-  microvm: 'MicroVM (NanVix)',
   hyperlight: 'Hyperlight',
   wslc: 'WSLC',
   lxc: 'LXC',
@@ -825,8 +753,8 @@ var cachedPlatformSupport: { isSupported: boolean; reason?: string } | null = nu
 
 /** Update the platform badge based on the selected containment backend. */
 function updatePlatformBadgeForContainment(containment: string): void {
-  if (containment === 'microvm' || containment === 'hyperlight') {
-    // HL/MV don't depend on a specific Windows build version
+  if (containment === 'hyperlight') {
+    // Hyperlight does not depend on a specific Windows build version.
     var label = CONTAINMENT_LABELS[containment] || containment;
     $('platformBadge').textContent = '✓ ' + label + ' (no OS version requirement)';
   } else if (cachedPlatformSupport) {
@@ -843,7 +771,7 @@ function updatePlatformBadgeForContainment(containment: string): void {
 
 function isVmBackend(): boolean {
   var c = $sel('containmentSelect').value;
-  return c === 'microvm' || c === 'hyperlight' || c === 'windows_sandbox';
+  return c === 'hyperlight' || c === 'windows_sandbox';
 }
 
 function getPermsSummary(): string {
@@ -1062,7 +990,7 @@ function populateScenarios(): void {
   select.innerHTML = '';
 
   var containment = $sel('containmentSelect').value;
-  var isRawBackend = containment === 'windows_sandbox' || containment === 'microvm' || containment === 'hyperlight';
+  var isRawBackend = containment === 'windows_sandbox' || containment === 'hyperlight';
   var filtered = SCENARIOS.filter(function(s) {
     if (s.shell !== shell) return false;
     if (isRawBackend) return s.containment === containment;
@@ -1246,8 +1174,7 @@ function buildRawBackendConfig(
     }
   }
   // Hyperlight defaults to network-allowed when `network` is omitted; explicitly
-  // block unless the scenario opts in. MicroVM/NanVix rejects `defaultPolicy: block`,
-  // so leave its network field unset in that case.
+  // block unless the scenario opts in.
   if (containment === 'hyperlight' && !config.network) {
     config.network = { defaultPolicy: 'block' };
   }
@@ -1312,9 +1239,9 @@ async function runSandbox(): Promise<void> {
     return;
   }
 
-  // Windows Sandbox / MicroVM mode — build raw wxc-exec JSON config and use runSandboxRaw
+  // VM backends build raw wxc-exec JSON config and use runSandboxRaw.
   var currentContainment = $sel('containmentSelect').value;
-  if (currentContainment === 'windows_sandbox' || currentContainment === 'microvm' || currentContainment === 'hyperlight') {
+  if (currentContainment === 'windows_sandbox' || currentContainment === 'hyperlight') {
     var rawScript = state.selectedScenario ? state.selectedScenario.script : (state.customScript || '').trim();
     if (!rawScript) {
       termError('No script specified');
@@ -1327,31 +1254,6 @@ async function runSandbox(): Promise<void> {
       rawScript,
       state.timeoutSeconds,
     );
-
-    // MicroVM staging requires readwritePaths to exist on the host. Pre-create
-    // any dirs the scenario mounts (e.g. C:\Users\Public\MXCPlaygroundTests).
-    if (currentContainment === 'microvm' && rawConfig.filesystem && rawConfig.filesystem.readwritePaths) {
-      try {
-        var ensureDirsResult = await mxc.ensureDirs(rawConfig.filesystem.readwritePaths);
-        if (ensureDirsResult && typeof ensureDirsResult === 'object') {
-          if ((ensureDirsResult as any).success === false) {
-            throw new Error((ensureDirsResult as any).error || (ensureDirsResult as any).message || 'Unknown error');
-          }
-          if (Array.isArray(ensureDirsResult)) {
-            var failedEnsureDir = ensureDirsResult.find(function (entry: any) {
-              return entry && typeof entry === 'object' && entry.success === false;
-            });
-            if (failedEnsureDir) {
-              throw new Error(failedEnsureDir.error || failedEnsureDir.message || 'Unknown error');
-            }
-          }
-        }
-      } catch (e: any) {
-        termError('[Playground] Failed to pre-create RW mount dirs: ' + (e && e.message ? e.message : String(e)));
-        onSandboxExit(-1);
-        return;
-      }
-    }
 
     state.running = true;
     if (!runAllInProgress) {
@@ -1372,8 +1274,6 @@ async function runSandbox(): Promise<void> {
     termInfo('[MXC] API: spawnSandboxFromConfig (raw config)');
     if (currentContainment === 'windows_sandbox') {
       termDim('[MXC] Note: First run may take 3-5 minutes while the sandbox VM boots.');
-    } else if (currentContainment === 'microvm') {
-      termDim('[MXC] Note: MicroVM boot adds ~60s grace period to the script timeout.');
     } else if (currentContainment === 'hyperlight') {
       termDim('[MXC] Note: First run may take longer while Hyperlight warms up the snapshot.');
     }
@@ -1539,9 +1439,9 @@ async function runAllScenarios(): Promise<void> {
 
   // Filter scenarios: current shell, containment, available runtimes, version-appropriate
   var currentContainment = $sel('containmentSelect').value;
-  var isRawBackend = currentContainment === 'windows_sandbox' || currentContainment === 'microvm' || currentContainment === 'hyperlight';
+  var isRawBackend = currentContainment === 'windows_sandbox' || currentContainment === 'hyperlight';
   var scenariosToRun = SCENARIOS.filter(function(s) {
-    // When the user picks "python" on a raw backend (MicroVM/Hyperlight), also
+    // When the user picks "python" on a raw backend (Hyperlight), also
     // pull in the pseudo-shell categories (networking, filesystem) since those
     // scenarios are Python-backed and would otherwise be silently skipped.
     var shellMatch = (s.shell === currentShell);
@@ -1551,7 +1451,7 @@ async function runAllScenarios(): Promise<void> {
     }
     if (!shellMatch) { return false; }
     if (isRawBackend) { if (s.containment !== currentContainment) return false; }
-    else { if (s.containment === 'windows_sandbox' || s.containment === 'microvm' || s.containment === 'hyperlight') return false; }
+    else { if (s.containment === 'windows_sandbox' || s.containment === 'hyperlight') return false; }
     if (s.shell === 'ps7' && !shellAvailability['ps7']) { return false; }
     if (s.shell === 'python' && !shellAvailability['python']) { return false; }
     if (s.requiresV05 && version !== '0.5.0-dev') { return false; }
@@ -1926,7 +1826,7 @@ function showJsonPanel(tab: string): void {
 
   if (tab === 'policy') {
     var containment = $sel('containmentSelect').value;
-    if (containment === 'windows_sandbox' || containment === 'microvm' || containment === 'hyperlight') {
+    if (containment === 'windows_sandbox' || containment === 'hyperlight') {
       var rawScript = state.selectedScenario ? state.selectedScenario.script : (state.customScript || '').trim();
       var rawConfig = buildRawBackendConfig(
         containment,
@@ -1941,7 +1841,7 @@ function showJsonPanel(tab: string): void {
     }
   } else {
     var containment2 = $sel('containmentSelect').value;
-    if (containment2 === 'windows_sandbox' || containment2 === 'microvm' || containment2 === 'hyperlight') {
+    if (containment2 === 'windows_sandbox' || containment2 === 'hyperlight') {
       var rawScript2 = state.selectedScenario ? state.selectedScenario.script : (state.customScript || '').trim();
       var rawConfig2 = buildRawBackendConfig(
         containment2,
@@ -1991,8 +1891,8 @@ function updateDevSidebar(): void {
   var currentShell = $sel('shellSelect').value;
   var currentContainment = $sel('containmentSelect').value;
 
-  // Windows Sandbox / MicroVM / Hyperlight mode — show the raw config
-  if ((currentContainment === 'windows_sandbox' || currentContainment === 'microvm' || currentContainment === 'hyperlight') && currentShell !== 'rawjson') {
+  // Windows Sandbox / Hyperlight mode — show the raw config
+  if ((currentContainment === 'windows_sandbox' || currentContainment === 'hyperlight') && currentShell !== 'rawjson') {
     var rawScript = state.selectedScenario ? state.selectedScenario.script : (state.customScript || '').trim();
     var rawConfig = buildRawBackendConfig(
       currentContainment,
@@ -2210,27 +2110,6 @@ function init(): void {
       } else {
         populateScenarios();
       }
-    } else if (containment === 'microvm') {
-      // MicroVM (NanVix) — the policy-generator UI is hidden because MicroVM
-      // does not consume the SandboxPolicy schema; scenarios may still set
-      // filesystem (and other) fields in the raw config sent to wxc-exec.
-      $('runtimeRow').classList.remove('hidden');
-      $sel('shellSelect').disabled = false;
-      $('experimentalCaution').classList.add('hidden');
-      $('policySectionWrapper').classList.add('hidden');
-      $('advancedSectionWrapper').classList.add('hidden');
-      $('uiGroupWrapper').classList.add('hidden');
-      ($('experimentalToggle') as HTMLInputElement).checked = true;
-      ($('experimentalToggle') as HTMLInputElement).disabled = true;
-      // MicroVM supports Python + Filesystem test categories
-      var mvOpts = $sel('shellSelect').options;
-      for (var mi = 0; mi < mvOpts.length; mi++) {
-        var v = mvOpts[mi].value;
-        (mvOpts[mi] as HTMLOptionElement).hidden = (v !== 'python' && v !== 'filesystem' && v !== 'custom' && v !== 'rawjson');
-      }
-      $sel('shellSelect').value = 'python';
-      $sel('shellSelect').dispatchEvent(new Event('change'));
-      updatePlatformBadgeForContainment(containment);
     } else if (containment === 'hyperlight') {
       // Hyperlight — the policy-generator UI is hidden because Hyperlight
       // does not consume the SandboxPolicy schema; scenarios may still set
@@ -2258,7 +2137,7 @@ function init(): void {
       $('categoryRow').classList.add('hidden');
       $('policySectionWrapper').classList.remove('hidden');
       // Restore PowerShell runtimes (but keep pseudo-shells hidden — they only
-      // apply to MicroVM/Hyperlight, where Python is the runtime).
+      // apply to Hyperlight, where Python is the runtime).
       var shellOpts2 = $sel('shellSelect').options;
       for (var j = 0; j < shellOpts2.length; j++) {
         var sv2 = shellOpts2[j].value;
@@ -2276,7 +2155,7 @@ function init(): void {
       $('policySectionWrapper').classList.remove('hidden');
       ($('experimentalToggle') as HTMLInputElement).disabled = false;
       // Restore PowerShell runtimes (but keep pseudo-shells hidden — they only
-      // apply to MicroVM/Hyperlight, where Python is the runtime).
+      // apply to Hyperlight, where Python is the runtime).
       var shellOpts3 = $sel('shellSelect').options;
       for (var k = 0; k < shellOpts3.length; k++) {
         var sv3 = shellOpts3[k].value;
@@ -2302,7 +2181,7 @@ function init(): void {
       $('categoryRow').classList.add('hidden');
       $('scriptSection').classList.remove('hidden');
       $('rawJsonSection').classList.add('hidden');
-      if ($sel('containmentSelect').value !== 'windows_sandbox' && $sel('containmentSelect').value !== 'microvm' && $sel('containmentSelect').value !== 'hyperlight') {
+      if ($sel('containmentSelect').value !== 'windows_sandbox' && $sel('containmentSelect').value !== 'hyperlight') {
         $('policySectionWrapper').classList.remove('hidden');
       }
       $('btnRun').classList.remove('hidden');
@@ -2337,7 +2216,7 @@ function init(): void {
         populateScenarios();
         $('btnRun').classList.remove('hidden');
         $('btnRunAll').classList.remove('hidden');
-        if ($sel('containmentSelect').value !== 'windows_sandbox' && $sel('containmentSelect').value !== 'microvm' && $sel('containmentSelect').value !== 'hyperlight') {
+        if ($sel('containmentSelect').value !== 'windows_sandbox' && $sel('containmentSelect').value !== 'hyperlight') {
           $('policySectionWrapper').classList.remove('hidden');
         }
         if (document.getElementById('advancedSectionWrapper')) {

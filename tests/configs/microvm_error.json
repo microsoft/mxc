@@ -1,7 +1,0 @@
-{
-    "process": {
-        "commandLine": "raise ValueError('intentional test error')",
-        "timeout": 30000
-    },
-    "containment": "microvm"
-}
