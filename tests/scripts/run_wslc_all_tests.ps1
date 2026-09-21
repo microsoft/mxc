@@ -47,7 +47,7 @@ $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $TestConfigs = Join-Path $RepoRoot "tests\configs"
 
 # Find binary -- prefer explicit path, then probe target-specific and default
-# dirs. Use the host arch to determine which target to use. 
+# dirs. Use the host arch to determine which target to use.
 $Target = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') {
     'aarch64-pc-windows-msvc'
 } else {
@@ -69,7 +69,7 @@ if (-not $WxcExec -or -not (Test-Path $WxcExec)) {
     Write-Host "ERROR: wxc-exec.exe not found." -ForegroundColor Red
     Write-Host "Searched:" -ForegroundColor Yellow
     foreach ($p in $CandidatePaths) { Write-Host "  - $p" -ForegroundColor Yellow }
-    Write-Host "Build with: cargo build --features wslc $(if (-not $Debug) { '--release ' })--target $HostTarget" -ForegroundColor Yellow
+    Write-Host "Build with: cargo build --features wslc $(if (-not $Debug) { '--release ' })--target $Target" -ForegroundColor Yellow
     Write-Host "Or pass -WxcExecPath explicitly." -ForegroundColor Yellow
     exit 1
 }

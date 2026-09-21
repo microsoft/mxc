@@ -101,6 +101,11 @@ Verify the binary starts without errors:
 .\src\target\x86_64-pc-windows-msvc\release\wxc-exec.exe --help
 ```
 
+> **Note:** paths in this guide use the x64 target directory. On an ARM64 host
+> `build.bat` targets `aarch64-pc-windows-msvc`, so substitute that directory.
+> The WSLC scripts under `scripts\` and `tests\scripts\` pick the host-arch
+> directory themselves.
+
 > **Note:** `wxc-exec.exe` does **not** require `wslcsdk.dll` at startup. The
 > DLL is loaded at runtime only when the WSLC backend is invoked. All other
 > backends (Process Container, Windows Sandbox) work without it.

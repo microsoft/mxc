@@ -37,7 +37,7 @@
     provision so the spawned daemon inherits them.
 
 .PARAMETER WxcExecPath
-    Path to wxc-exec.exe. Default probes the x64 target release/debug dirs.
+    Path to wxc-exec.exe. Default probes the host-arch target release/debug dirs.
 
 .PARAMETER ConfigDir
     Directory holding the state-aware request fixtures. Defaults to
