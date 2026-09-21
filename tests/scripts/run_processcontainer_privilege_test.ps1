@@ -80,9 +80,12 @@ function Phase-LeastPrivilege {
     $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log -TimeoutSec 60
     $logText = Read-Log $log
     $rejected = Test-WasRejected -Run $r -Log $logText
+    # Test-WasRejected is false for backend_error, runner_unavailable and any
+    # unexplained launch failure, so negating it alone proves no fallback ran.
+    $ran = [bool]("$($r.Stdout)" -match $Script:PrivMarker)
     Record-Result -Phase 'P15a' -Name 'leastPrivilege + captureDenials falls back rather than being rejected' `
-        -Pass (-not $rejected) `
-        -Detail ("exit=$($r.ExitCode); rejectedAtValidation=$rejected; " +
+        -Pass ((-not $rejected) -and $ran) `
+        -Detail ("exit=$($r.ExitCode); rejectedAtValidation=$rejected; workloadRan=$ran; " +
                  'documented as a tier constraint (guarded WPR fallback), not a validation error')
 }
 
