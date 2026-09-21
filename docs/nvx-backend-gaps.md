@@ -6,10 +6,11 @@ The original NVX prototype accepted a real MXC `0.9.0-dev` JSON, validated it
 against the schema, and adapted supported fields into typed NVX launch plans.
 The prototype first exercised those plans on Windows through OpenVMM and WHP.
 
-The current MXC foundation is additive: `containment: "nvx"` parses while the
-existing `microvm` backend remains available. An NVX-enabled build returns a
-typed backend-unavailable error for execution, and capability probes do not
-advertise NVX while the runtime is incomplete.
+NVX is now the sole micro-VM backend identity in the active MXC development
+contract. The retired NanVix-backed `microvm` value is rejected with migration
+guidance to `nvx`. An NVX-enabled build returns a typed backend-unavailable
+error for execution, and capability probes do not advertise NVX while the
+runtime is incomplete.
 
 ## Current architecture
 
@@ -85,8 +86,8 @@ them for this backend:
 
 The rolling `0.9.0-dev` and exact `0.9.0-alpha` development contracts now
 include `containment: "nvx"` in their generated schemas and TypeScript wire
-types. The existing `microvm` identifier remains in both artifact sets. No
-stable schema is changed. An `experimental.nvx.provision` section is necessary
+types. The retired `microvm` identifier is absent from both development artifact sets.
+Published stable schemas remain unchanged. An `experimental.nvx.provision` section is necessary
 only if images remain caller-configurable.
 
 Example state-aware provision request:
@@ -145,9 +146,8 @@ Example state-aware provision request:
 
 ## Binary acquisition and packaging
 
-`build.bat --with-nvx` enables the incomplete x64 Windows/WHP foundation. This
-path is additive and does not replace the existing `--with-microvm` packaging
-path.
+`build.bat --with-nvx` enables the incomplete x64 Windows/WHP foundation. It is
+the only active micro-VM packaging path.
 
 The build pins the exact `microsoft/nvx` release tag, platform asset name, and
 per-file SHA-256 checksums in the repository. It downloads and verifies the
@@ -164,8 +164,8 @@ writable scratch image required to run a workload.
 ## Remaining MXC integration work
 
 The schema/wire, policy/model, typed-unavailable dispatch, and pinned Windows
-artifact-acquisition foundations are now present without replacing NanVix.
-PR2/runtime remains blocked on all of the following:
+artifact-acquisition foundations now replace the removed NanVix integration.
+Phase 2 runtime remains blocked on all of the following:
 
 - NVX-produced distro and runtime EROFS images plus a writable scratch image;
 - a proven combined managed-sandbox/virtio-fs contract; and

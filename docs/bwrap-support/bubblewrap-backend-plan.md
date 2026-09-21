@@ -48,7 +48,7 @@ Plus optional `validate_runner()`. This is a perfect fit for bwrap, which is fun
 Add `"bubblewrap"` to the `containment` enum:
 ```json
 "containment": {
-  "enum": ["process", "processcontainer", "windows_sandbox", "lxc", "microvm",
+  "enum": ["process", "processcontainer", "windows_sandbox", "lxc", "nvx",
            "wslc", "seatbelt", "isolation_session", "bubblewrap"]
 }
 ```
@@ -228,10 +228,10 @@ Add `bwrap_common` dependency to `lxc/Cargo.toml`.
 ```typescript
 export type ContainmentBackend =
   | 'processcontainer' | 'windows_sandbox' | 'wslc'
-  | 'lxc' | 'microvm' | 'seatbelt' | 'isolation_session'
+  | 'lxc' | 'nvx' | 'seatbelt' | 'isolation_session'
   | 'bubblewrap';  // ← add
 
-export const ExperimentalBackends = ['microvm', 'wslc', 'seatbelt', 'bubblewrap'];
+export const ExperimentalBackends = ['nvx', 'wslc', 'seatbelt', 'bubblewrap'];
 ```
 
 **`sdk/node/src/platform.ts`:**

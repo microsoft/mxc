@@ -497,7 +497,7 @@ to learn the cross-cutting flags. Phase-specific fields on `SandboxSpawnOptions`
 (`ptyOptions`, `usePty`) are honored by `execInSandbox` / `execInSandboxAsync` and
 silently ignored on the other phases. State-awareness is not itself experimental —
 `experimental: true` must be set when the targeted backend is itself experimental, just
-as it is today for one-shot calls against `microvm` and `wslc`. IsolationSession is
+as it is today for one-shot calls against `nvx` and `wslc`. IsolationSession is
 experimental at the time of writing; that status is independent of the state-aware API
 surface (§13).
 
@@ -1395,11 +1395,9 @@ that shape and reuses `ExecutionRequest` for five concrete reasons:
 
 1. **The field-ignore precedent is established across every existing backend.** Every
    `ScriptRunner` impl in the workspace today (`AppContainer`, `BaseContainer`,
-   `NanVix`, `WindowsSandbox`, `IsolationSession`, `Lxc`, `Wslc`) takes
-   `&ExecutionRequest` and reads only the fields it needs. `NanVix` and
-   `IsolationSession` go further and actively reject fields they cannot honor (e.g.,
-   `NanVixScriptRunner::validate_runner` rejects filesystem paths, network rules,
-   network proxy, and a non-empty working directory). State-aware follows the same
+   `WindowsSandbox`, `IsolationSession`, `Lxc`, `Wslc`) takes
+   `&ExecutionRequest` and reads only the fields it needs. `IsolationSession`
+   goes further and actively rejects fields it cannot honor. State-aware follows the same
    pattern, so the trait ergonomic stays consistent across one-shot and state-aware
    surfaces.
 

@@ -397,7 +397,7 @@ Constructing the listed variants is unaffected.
 [`ErrorCode::UnsupportedContainment`]. Reach it through the state-aware
 lifecycle — `run_state_aware_json` plus `exec_attached` or `exec_sandbox`.
 
-Backends with no variant at all — Windows Sandbox, MicroVM, Hyperlight, LXC —
+Backends with no variant at all — Windows Sandbox, NVX, Hyperlight, LXC —
 cannot be named from this crate; use the executor binaries. Windows Sandbox is
 still reachable here through the state-aware lifecycle.
 

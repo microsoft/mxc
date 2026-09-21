@@ -90,7 +90,7 @@ Assign matching owner(s) with `assign_to_user` using this map:
 | @mgudgin | AppContainer / BaseContainer / process isolation/container |
 | @bbonaby | AppContainer / BaseContainer / process isolation/container / networking / firewall / DNS / proxy / iptables |
 | @SohamDas2021 | Linux / LXC / WSLC / Bubblewrap (bwrap) / proxy on Linux / iptables |
-| @huzaifa-d | MicroVM / NanVix / Hyperlight / Windows Sandbox |
+| @huzaifa-d | MicroVM / NVX / Hyperlight / Windows Sandbox |
 | @adpa-ms | IsolationSession / session isolation |
 | @richiemsft | macOS / Seatbelt |
 | @mgudgin | SDK configuration and policy (Area-SDK-Configuration, Area-SDK-Policy) |
