@@ -67,7 +67,7 @@ try {
     }
 
     Write-Host "Running WSLC object-validation test (RW + denied junction alias, expect masked)..."
-    $wxcArgs = @("--experimental")
+    $wxcArgs = @()
     if ($Debug) { $wxcArgs += "--debug" }
     $wxcArgs += $ConfigPath
 

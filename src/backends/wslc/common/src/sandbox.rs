@@ -17,19 +17,31 @@
 //!
 //! - **stdout / stderr** — the SDK pushes them to callbacks, which this module
 //!   forwards to an in-memory stream per handle (see [`crate::stream_buffer`]);
-//!   the caller reads the other end.
+//!   the caller reads the other end. Native-stdio callers receive synthesized
+//!   OS pipes pumped from those streams because the SDK exposes bytes rather
+//!   than pipe handles. Each exposed output needs its own blocking pump because
+//!   the SDK offers no waitable or overlapped read primitive; the cost is
+//!   therefore bounded at two threads per native-streaming sandbox.
 //! - **stdin** — the WSLC SDK exposes no process-input API, so
 //!   [`take_stdin`](SandboxProcess::take_stdin) always returns `None`.
 //! - **[`id`](SandboxProcess::id)** — the process lives inside the WSL VM and
 //!   has no host process id, so this is always `0`.
 
 use std::io::{Read, Write};
+use std::sync::mpsc::{sync_channel, SyncSender};
+use std::sync::OnceLock;
 
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::HMODULE;
+use windows::Win32::System::LibraryLoader::{
+    GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_PIN,
+};
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ExecutionRequest, ScriptResponse};
+use wxc_common::process_util::{create_local_pipe, PipeWriter};
 use wxc_common::sandbox_process::{
-    boxed_closer, cancel_and_join_discard, spawn_discard, take_boxed_read, SandboxBackend,
-    SandboxProcess, StdioMode, StreamCloser,
+    boxed_closer, cancel_and_join_discard, spawn_discard, take_boxed_read, NativeStdio, OwnedPipe,
+    SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
 };
 use wxc_common::script_runner::ScriptRunner;
 use wxc_common::validator::validate_common;
@@ -97,6 +109,10 @@ struct WslcSandboxProcess {
     stderr: Option<StreamReader>,
     stdout_canceller: Option<StreamCanceller>,
     stderr_canceller: Option<StreamCanceller>,
+    /// Pump handles are retained but deliberately not joined: after process
+    /// exit they may still be delivering queued bytes to caller-owned pipes,
+    /// and joining would block if the caller left a full pipe unread.
+    native_output_pumps: Vec<std::thread::JoinHandle<()>>,
     /// Exit code cached by the first successful wait, so repeat waits are
     /// idempotent (and don't re-run teardown).
     exit: Option<i32>,
@@ -197,6 +213,7 @@ impl WslcSandboxProcess {
             stderr_canceller: stderr.as_ref().map(|r| r.canceller()),
             stdout,
             stderr,
+            native_output_pumps: Vec::new(),
             started,
             exit: None,
             timed_out: false,
@@ -233,7 +250,152 @@ impl WslcSandboxProcess {
     }
 }
 
+struct PreparedNativeOutput {
+    reader: Option<OwnedPipe>,
+    start: Option<SyncSender<StreamReader>>,
+    pump: Option<std::thread::JoinHandle<()>>,
+}
+
+impl PreparedNativeOutput {
+    fn activate(
+        mut self,
+        source: StreamReader,
+    ) -> std::io::Result<(OwnedPipe, std::thread::JoinHandle<()>)> {
+        let start = self
+            .start
+            .take()
+            .ok_or_else(|| std::io::Error::other("native output pump is already active"))?;
+        start
+            .send(source)
+            .map_err(|_| std::io::Error::other("native output pump stopped before activation"))?;
+        let reader = self
+            .reader
+            .take()
+            .ok_or_else(|| std::io::Error::other("native output reader is unavailable"))?;
+        let pump = self
+            .pump
+            .take()
+            .ok_or_else(|| std::io::Error::other("native output pump is unavailable"))?;
+        Ok((reader, pump))
+    }
+}
+
+impl Drop for PreparedNativeOutput {
+    fn drop(&mut self) {
+        self.start.take();
+        if let Some(pump) = self.pump.take() {
+            let _ = pump.join();
+        }
+    }
+}
+
+/// Keep the module containing output pump code loaded for the process lifetime.
+///
+/// Native pipe readers outlive the sandbox handle, so an active pump may still
+/// return from a blocking write after `mxc_sandbox_free` has completed.
+fn pin_output_pump_module() -> std::io::Result<()> {
+    static MODULE_PIN: OnceLock<Result<(), String>> = OnceLock::new();
+
+    MODULE_PIN
+        .get_or_init(|| {
+            let mut module = HMODULE::default();
+            // SAFETY: FROM_ADDRESS interprets the pointer as an address within
+            // the current module rather than as a string. PIN keeps that module
+            // loaded until process exit, so detached pumps can finish safely.
+            unsafe {
+                GetModuleHandleExW(
+                    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                    PCWSTR(pin_output_pump_module as *const () as *const u16),
+                    &mut module,
+                )
+            }
+            .map_err(|error| format!("failed to pin the WSLC output-pump module: {error}"))
+        })
+        .as_ref()
+        .map_err(|error| std::io::Error::other(error.clone()))
+        .copied()
+}
+
+/// Prepare a native pipe and an idle output pump before detaching a WSLC stream.
+///
+/// WSLC exposes stdout and stderr as callback-backed streams rather than
+/// transferable OS handles. The pump copies each stream into a local pipe so
+/// FFI consumers can adopt its native read endpoint. WSLC does not currently
+/// expose a corresponding native stdin endpoint.
+///
+/// A shared worker cannot safely drain both callback streams: each read may
+/// block independently, and failing to drain either stream can stall the
+/// container. Keep the explicit one-pump-per-output tradeoff until the WSLC SDK
+/// exposes a waitable or cancellable asynchronous read primitive.
+fn prepare_native_output() -> std::io::Result<PreparedNativeOutput> {
+    pin_output_pump_module()?;
+    let (reader, writer) = create_local_pipe().map_err(std::io::Error::other)?;
+    let mut destination = PipeWriter::new(writer);
+    let (start, source) = sync_channel::<StreamReader>(1);
+    let pump = std::thread::Builder::new()
+        .name("mxc-wslc-output-pump".to_string())
+        .spawn(move || {
+            let Ok(mut source) = source.recv() else {
+                return;
+            };
+            // A closed native read end reports BrokenPipe and ends the pump.
+            // Dropping `source` then abandons the callback queue so it cannot
+            // grow after the caller has stopped consuming this stream.
+            let _ = std::io::copy(&mut source, &mut destination);
+        })?;
+    Ok(PreparedNativeOutput {
+        reader: Some(reader.try_into_std_owned_handle()?),
+        start: Some(start),
+        pump: Some(pump),
+    })
+}
+
 impl SandboxProcess for WslcSandboxProcess {
+    fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+        if self.stdout.is_none() && self.stderr.is_none() {
+            return Ok(None);
+        }
+
+        // Allocate pipes and start idle workers before detaching either source,
+        // so setup failure leaves the ordinary stream API untouched.
+        let stdout_pipe = self
+            .stdout
+            .as_ref()
+            .map(|_| prepare_native_output())
+            .transpose()?;
+        let stderr_pipe = self
+            .stderr
+            .as_ref()
+            .map(|_| prepare_native_output())
+            .transpose()?;
+
+        let stdout = match (self.stdout.take(), stdout_pipe) {
+            (Some(source), Some(pipe)) => {
+                let (reader, pump) = pipe.activate(source)?;
+                self.native_output_pumps.push(pump);
+                Some(reader)
+            }
+            _ => None,
+        };
+        let stderr = match (self.stderr.take(), stderr_pipe) {
+            (Some(source), Some(pipe)) => {
+                let (reader, pump) = pipe.activate(source)?;
+                self.native_output_pumps.push(pump);
+                Some(reader)
+            }
+            _ => None,
+        };
+
+        self.stdout_canceller.take();
+        self.stderr_canceller.take();
+
+        Ok(Some(NativeStdio {
+            stdin: None,
+            stdout,
+            stderr,
+        }))
+    }
+
     /// Always `None`: the WSLC SDK has no API to write to a container process's
     /// stdin.
     fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
@@ -394,6 +556,9 @@ impl Drop for WslcSandboxProcess {
 mod tests {
     use super::*;
     use crate::wsl_container_runner::START_CONTAINER_BANNER;
+    use std::fs::File;
+    use std::io::Read;
+    use std::time::Duration;
 
     /// The banner is what makes this host-independent: on a host that *has*
     /// `wslcsdk.dll`, a guard moved after `start_container` would leak a
@@ -528,5 +693,62 @@ mod tests {
             unconfirmed.to_string().contains("may still be running"),
             "the unconfirmed message must say the container may still be running"
         );
+    }
+
+    #[test]
+    fn native_output_bridge_delivers_bytes_and_eof() {
+        let (writer, reader) = crate::stream_buffer::stream_pair();
+        let pipe = prepare_native_output().expect("create native output pipe");
+        let (native_reader, pump) = pipe.activate(reader).expect("activate output pump");
+        let mut native_reader = File::from(native_reader);
+
+        writer.write(b"hello from wslc");
+        writer.close();
+
+        let mut output = Vec::new();
+        native_reader
+            .read_to_end(&mut output)
+            .expect("read bridged output");
+        pump.join().expect("output pump");
+        assert_eq!(output, b"hello from wslc");
+    }
+
+    #[test]
+    fn native_output_bridge_preserves_large_output_after_delayed_read() {
+        let expected = vec![b'x'; 1024 * 1024];
+        let (writer, reader) = crate::stream_buffer::stream_pair();
+        let pipe = prepare_native_output().expect("create native output pipe");
+        let (native_reader, pump) = pipe.activate(reader).expect("activate output pump");
+        let mut native_reader = File::from(native_reader);
+
+        writer.write(&expected);
+        writer.close();
+        std::thread::sleep(Duration::from_millis(50));
+
+        let mut output = Vec::new();
+        native_reader
+            .read_to_end(&mut output)
+            .expect("read bridged output");
+        pump.join().expect("output pump");
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn dropping_native_reader_ends_the_output_pump() {
+        let (writer, reader) = crate::stream_buffer::stream_pair();
+        let pipe = prepare_native_output().expect("create native output pipe");
+        let (native_reader, pump) = pipe.activate(reader).expect("activate output pump");
+        drop(native_reader);
+
+        writer.write(b"unobserved output");
+        writer.close();
+
+        pump.join().expect("output pump");
+    }
+
+    #[test]
+    fn dropping_unactivated_native_output_joins_idle_pump() {
+        let pipe = prepare_native_output().expect("prepare native output");
+        drop(pipe);
     }
 }

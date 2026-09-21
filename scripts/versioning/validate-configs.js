@@ -51,8 +51,8 @@ const schemaPaths = new Map(
     ])
 );
 schemaPaths.set(
-  schemaVer.stateAware,
-  join("schemas", "dev", `mxc-config.schema.${schemaVer.stateAware}.json`)
+  schemaVer.maxSupported,
+  join("schemas", "dev", `mxc-config.schema.${schemaVer.maxSupported}.json`)
 );
 
 // Directories whose *.json files (recursively) are configs we expect to validate.

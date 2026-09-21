@@ -97,7 +97,7 @@ There is no idle watchdog. A started state-aware sandbox remains active until
 
 ```json
 {
-  "version": "0.9.0-alpha",
+  "version": "0.10.0-alpha",
   "containment": "windows_sandbox",
   "process": {
     "commandLine": "powershell -NoProfile -Command \"Write-Output 'hello'\"",
@@ -110,7 +110,7 @@ There is no idle watchdog. A started state-aware sandbox remains active until
 
 ```json
 {
-  "version": "0.9.0-alpha",
+  "version": "0.10.0-alpha",
   "phase": "provision",
   "containment": "windows_sandbox",
   "filesystem": {
@@ -122,7 +122,7 @@ There is no idle watchdog. A started state-aware sandbox remains active until
 
 Subsequent phases use the returned `sandboxId`.
 
-The legacy `experimental.windows_sandbox.idleTimeoutMs`, `idleTimeout`, and
+The legacy `windowsSandbox.idleTimeoutMs`, `idleTimeout`, and
 `daemonPipeName` fields remain parseable for schema compatibility but do not
 affect either execution surface. One-shot emits a targeted warning only for
 non-default values.

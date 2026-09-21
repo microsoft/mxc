@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 use std::os::windows::ffi::OsStringExt;
+use std::os::windows::io::{BorrowedHandle, FromRawHandle, OwnedHandle as StdOwnedHandle};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -68,6 +69,10 @@ impl PipeReader {
     /// Take ownership of `handle` (invalidating the source `OwnedHandle`).
     pub fn new(mut handle: OwnedHandle) -> Self {
         Self(SendOwnedHandle::take(&mut handle))
+    }
+
+    pub fn try_clone_owned_handle(&self) -> std::io::Result<StdOwnedHandle> {
+        self.0.try_clone_owned_handle()
     }
 }
 
@@ -156,6 +161,10 @@ impl InterruptiblePipeReader {
     /// reader's lifetime.
     pub fn canceller(&self) -> PipeReadCanceller {
         PipeReadCanceller(Arc::downgrade(&self.0))
+    }
+
+    pub fn try_clone_owned_handle(&self) -> std::io::Result<StdOwnedHandle> {
+        self.0.handle.try_clone_owned_handle()
     }
 }
 
@@ -253,6 +262,10 @@ impl PipeWriter {
     pub fn new(mut handle: OwnedHandle) -> Self {
         Self(SendOwnedHandle::take(&mut handle))
     }
+
+    pub fn try_clone_owned_handle(&self) -> std::io::Result<StdOwnedHandle> {
+        self.0.try_clone_owned_handle()
+    }
 }
 
 impl std::io::Write for PipeWriter {
@@ -300,6 +313,13 @@ impl SendOwnedHandle {
     pub fn get(&self) -> HANDLE {
         HANDLE(self.0 as *mut core::ffi::c_void)
     }
+
+    fn try_clone_owned_handle(&self) -> std::io::Result<StdOwnedHandle> {
+        // SAFETY: this wrapper owns a valid process-wide handle for the
+        // duration of the borrow; `try_clone_to_owned` duplicates it.
+        let borrowed = unsafe { BorrowedHandle::borrow_raw(self.get().0) };
+        borrowed.try_clone_to_owned()
+    }
 }
 
 impl Drop for SendOwnedHandle {
@@ -333,6 +353,20 @@ impl OwnedHandle {
 
     pub fn is_valid(&self) -> bool {
         !self.0.is_invalid() && self.0 != HANDLE::default()
+    }
+
+    /// Transfer this handle into the standard library's owning wrapper.
+    pub fn try_into_std_owned_handle(mut self) -> std::io::Result<StdOwnedHandle> {
+        if !self.is_valid() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "cannot transfer an invalid Windows handle",
+            ));
+        }
+        let raw = self.take().0;
+        // SAFETY: `self` owned this valid handle and was invalidated by
+        // `take`, so the returned wrapper becomes its sole owner.
+        Ok(unsafe { StdOwnedHandle::from_raw_handle(raw) })
     }
 }
 
@@ -397,6 +431,24 @@ pub fn create_std_pipes(no_inherit_read: bool) -> Result<(OwnedHandle, OwnedHand
             let _ = CloseHandle(h_write);
             WxcError::Process("Failed to set handle information on pipe".into())
         })?;
+    }
+
+    Ok((OwnedHandle::new(h_read), OwnedHandle::new(h_write)))
+}
+
+/// Create an anonymous pipe whose read and write ends are both non-inheritable.
+///
+/// This is intended for in-process adapters where neither endpoint should leak
+/// into subsequently spawned children.
+pub fn create_local_pipe() -> Result<(OwnedHandle, OwnedHandle), WxcError> {
+    let mut h_read = HANDLE::default();
+    let mut h_write = HANDLE::default();
+
+    // SAFETY: both output pointers are valid local variables. Passing no
+    // security attributes creates non-inheritable handles.
+    unsafe {
+        CreatePipe(&mut h_read, &mut h_write, None, 0)
+            .map_err(|error| WxcError::Process(format!("Failed to create local pipe: {error}")))?;
     }
 
     Ok((OwnedHandle::new(h_read), OwnedHandle::new(h_write)))
@@ -606,20 +658,6 @@ mod tests {
         );
     }
 
-    /// Creates a non-inheritable pipe pair for use in tests.
-    /// Unlike `create_std_pipes`, neither end is marked inheritable, which
-    /// prevents handles from leaking into child processes spawned by other
-    /// tests running concurrently (cargo test runs in parallel). Leaked
-    /// write-ends would keep pipes open and cause `read_from_pipe` to block.
-    fn create_test_pipes() -> (OwnedHandle, OwnedHandle) {
-        let mut h_read = HANDLE::default();
-        let mut h_write = HANDLE::default();
-        unsafe {
-            CreatePipe(&mut h_read, &mut h_write, None, 0).unwrap();
-        }
-        (OwnedHandle::new(h_read), OwnedHandle::new(h_write))
-    }
-
     #[test]
     fn test_captured_output_stdout() {
         let output =
@@ -652,8 +690,8 @@ mod tests {
     }
 
     #[test]
-    fn test_read_from_pipe_basic() {
-        let (mut read_handle, write_handle) = create_test_pipes();
+    fn test_read_from_pipe_basic() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut read_handle, write_handle) = create_local_pipe()?;
         let test_msg = b"test pipe content";
         let mut bytes_written = 0u32;
         unsafe {
@@ -662,12 +700,12 @@ mod tests {
                 Some(test_msg),
                 Some(&mut bytes_written),
                 None,
-            )
-            .unwrap();
+            )?;
         }
         drop(write_handle);
         let output = read_from_pipe(read_handle.take());
         assert_eq!(output, "test pipe content");
+        Ok(())
     }
 
     #[test]
@@ -716,6 +754,22 @@ mod tests {
             0,
             "write end should be non-inheritable"
         );
+    }
+
+    #[test]
+    fn test_create_local_pipe_is_not_inheritable() -> Result<(), Box<dyn std::error::Error>> {
+        use windows::Win32::Foundation::GetHandleInformation;
+
+        let (read_handle, write_handle) = create_local_pipe()?;
+        let mut read_flags = 0u32;
+        let mut write_flags = 0u32;
+        unsafe {
+            GetHandleInformation(read_handle.get(), &mut read_flags)?;
+            GetHandleInformation(write_handle.get(), &mut write_flags)?;
+        }
+        assert_eq!(read_flags & HANDLE_FLAG_INHERIT.0, 0);
+        assert_eq!(write_flags & HANDLE_FLAG_INHERIT.0, 0);
+        Ok(())
     }
 
     #[test]

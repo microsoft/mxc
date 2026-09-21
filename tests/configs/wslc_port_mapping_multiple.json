@@ -9,13 +9,11 @@
     "egress": { "default": "allow" },
     "ingress": { "default": "allow", "hostLoopback": "allow" }
   },
-  "experimental": {
-    "wslc": {
-      "image": "python:3.12-alpine",
-      "portMappings": [
-        { "windowsPort": 18080, "containerPort": 8080, "protocol": "tcp" },
-        { "windowsPort": 19090, "containerPort": 9090, "protocol": "tcp" }
-      ]
-    }
+  "wslc": {
+    "image": "python:3.12-alpine",
+    "portMappings": [
+    { "windowsPort": 18080, "containerPort": 8080, "protocol": "tcp" },
+    { "windowsPort": 19090, "containerPort": 9090, "protocol": "tcp" }
+    ]
   }
 }

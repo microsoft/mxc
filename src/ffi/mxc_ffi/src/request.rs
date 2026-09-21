@@ -420,6 +420,7 @@ pub(crate) fn build_request_from_json(request_json: &str) -> Result<SandboxReque
     }
     let (policy, telemetry) = spec.policy.into_sdk()?;
     let containment = spec.containment.into_sdk();
+    let wslc = matches!(&containment, Containment::Wslc(_));
 
     let mut request = build_request_with_containment(
         &policy,
@@ -437,7 +438,9 @@ pub(crate) fn build_request_from_json(request_json: &str) -> Result<SandboxReque
             request.set_env(environment);
         }
     }
-    request.set_experimental(spec.experimental);
+    if !wslc {
+        request.set_experimental(spec.experimental);
+    }
     if let Some(enabled) = telemetry.and_then(|telemetry| telemetry.enabled) {
         request.set_telemetry_opt_in(enabled);
     }
@@ -600,7 +603,7 @@ mod tests {
         let wslc = include_str!("../../../../tests/policy/request-wslc.json");
         let wslc_spec: RequestSpec = serde_json::from_str(wslc).expect("WSLC golden parses");
         assert_eq!(wslc_spec.command, "printf parity");
-        assert!(wslc_spec.experimental);
+        assert!(!wslc_spec.experimental);
         match wslc_spec.containment {
             RequestContainment::Wslc {
                 image,
