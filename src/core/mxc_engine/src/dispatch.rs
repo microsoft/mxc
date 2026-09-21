@@ -15,7 +15,7 @@
 //! run-to-completion path via `appcontainer_common::dispatcher`), Bubblewrap
 //! (Linux), Seatbelt (macOS), and WSLC (Windows, experimental, behind the
 //! `wslc` feature). Every other backend — including the remaining experimental
-//! ones (Windows Sandbox, IsolationSession, MicroVM, Hyperlight) and LXC (no
+//! ones (Windows Sandbox, IsolationSession, NVX, Hyperlight) and LXC (no
 //! streaming path suitable for the library) — returns
 //! [`MxcError::unsupported_containment`]; callers that need those must drive the
 //! standalone executor binaries (whose run-to-completion path will, in a later

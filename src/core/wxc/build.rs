@@ -9,9 +9,6 @@ fn main() {
     #[cfg(windows)]
     check_test_prerequisites();
 
-    #[cfg(all(windows, feature = "microvm"))]
-    copy_nanvix_binaries();
-
     #[cfg(all(windows, feature = "nvx"))]
     {
         ensure_supported_nvx_target();
@@ -83,24 +80,6 @@ fn check_test_prerequisites() {
             "cargo:warning=Fix: Run scripts\\setup-test-prereqs.ps1 (elevated) or install PowerShell 7"
         );
     }
-}
-
-#[cfg(all(windows, feature = "microvm"))]
-fn copy_nanvix_binaries() {
-    use std::path::Path;
-
-    let nanvix_bin_dir = match std::env::var("DEP_NANVIX_BINARIES_BIN_DIR") {
-        Ok(dir) => dir,
-        Err(_) => {
-            eprintln!("wxc build.rs: DEP_NANVIX_BINARIES_BIN_DIR not set, skipping copy");
-            return;
-        }
-    };
-
-    // Stage the artifacts next to the executable and emit rerun triggers. All
-    // of the staging logic (target-dir derivation, snapshot trust, copy/purge,
-    // rerun emission) lives in the build-only `nanvix_build_common` crate.
-    nanvix_build_common::stage_artifacts_next_to_exe(Path::new(&nanvix_bin_dir));
 }
 
 #[cfg(all(windows, feature = "nvx"))]

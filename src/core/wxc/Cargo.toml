@@ -21,7 +21,6 @@ hyperlight_common = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 appcontainer_common = { workspace = true }
-nanvix_binaries = { path = "../../backends/nanvix/binaries", optional = true }
 nvx_binaries = { workspace = true, optional = true }
 wslc_common = { workspace = true, optional = true }
 # Shared PLM dep: coordination, guarded lifecycle, and restricted WPR control.
@@ -34,13 +33,11 @@ tempfile.workspace = true
 mxc_build_common.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
-nanvix_build_common = { path = "../../backends/nanvix/build_common" }
 nvx_build_common = { workspace = true, optional = true }
 
 [features]
 default = []
 test-support = ["wxc_common/test-support"]
-microvm = ["dep:nanvix_binaries", "nanvix_binaries/microvm", "mxc_engine/microvm"]
 nvx = [
     "dep:nvx_binaries",
     "nvx_binaries/nvx",

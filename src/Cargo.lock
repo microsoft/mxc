@@ -1396,8 +1396,6 @@ dependencies = [
  "lxc_common",
  "mxc_build_common",
  "mxc_engine",
- "nanvix_binaries",
- "nanvix_build_common",
  "wxc_common",
 ]
 
@@ -1547,7 +1545,6 @@ dependencies = [
  "isolation_session_common",
  "learning_mode_core",
  "lxc_common",
- "nanvix_runner",
  "nvx_runner",
  "plm",
  "seatbelt_common",
@@ -1603,40 +1600,6 @@ version = "0.8.0"
 dependencies = [
  "tracelogging",
  "uuid",
-]
-
-[[package]]
-name = "nanvix_binaries"
-version = "0.8.0"
-dependencies = [
- "nanvix_build_common",
- "nanvix_common",
-]
-
-[[package]]
-name = "nanvix_build_common"
-version = "0.8.0"
-dependencies = [
- "nanvix_common",
-]
-
-[[package]]
-name = "nanvix_common"
-version = "0.8.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "nanvix_runner"
-version = "0.8.0"
-dependencies = [
- "libc",
- "nanvix_common",
- "uuid",
- "windows",
- "wxc_common",
 ]
 
 [[package]]
@@ -3221,8 +3184,6 @@ dependencies = [
  "learning_mode_core",
  "mxc_build_common",
  "mxc_engine",
- "nanvix_binaries",
- "nanvix_build_common",
  "nvx_binaries",
  "nvx_build_common",
  "plm",
@@ -3245,7 +3206,6 @@ dependencies = [
  "mxc_config_contract",
  "mxc_schema_support",
  "mxc_telemetry",
- "nanvix_common",
  "schemars",
  "semver",
  "serde",
@@ -3256,7 +3216,6 @@ dependencies = [
  "thiserror",
  "unicode-general-category",
  "url",
- "uuid",
  "widestring",
  "windows",
  "windows-core",

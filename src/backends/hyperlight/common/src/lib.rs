@@ -6,7 +6,7 @@
 // `hyperlight` cargo feature. On other targets, or when the feature is
 // disabled, this crate compiles to an empty library so workspace builds
 // (`cargo build --workspace`) on ARM64 hosts and feature-less builds
-// (e.g. `cargo build --features microvm`) succeed without pulling in
+// (e.g. `cargo build --features nvx`) succeed without pulling in
 // hyperlight-host. Consumers gate their use of `HyperlightScriptRunner`
 // on `target_arch = "x86_64"` and the `hyperlight` cargo feature.
 #![cfg(all(feature = "hyperlight", target_arch = "x86_64"))]

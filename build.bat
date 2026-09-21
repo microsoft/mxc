@@ -5,7 +5,6 @@ setlocal enabledelayedexpansion
 set "BUILD_CONFIG=release"
 set "BUILD_ARCH="
 set "BUILD_ALL=0"
-set "WITH_NANVIX=0"
 set "WITH_NVX=0"
 set "WITH_WSLC=0"
 set "WITH_ISOLATION_SESSION=0"
@@ -19,7 +18,6 @@ if /i "%~1"=="--release" ( set "BUILD_CONFIG=release"  & shift & goto :parse_arg
 if /i "%~1"=="--x64"     ( set "BUILD_ARCH=x86_64-pc-windows-msvc"   & shift & goto :parse_args )
 if /i "%~1"=="--arm64"   ( set "BUILD_ARCH=aarch64-pc-windows-msvc"  & shift & goto :parse_args )
 if /i "%~1"=="--all"     ( set "BUILD_ALL=1"           & shift & goto :parse_args )
-if /i "%~1"=="--with-microvm" ( set "WITH_NANVIX=1"    & shift & goto :parse_args )
 if /i "%~1"=="--with-nvx"     ( set "WITH_NVX=1"       & shift & goto :parse_args )
 if /i "%~1"=="--with-wslc"    ( set "WITH_WSLC=1"      & shift & goto :parse_args )
 if /i "%~1"=="--with-isolation-session" ( set "WITH_ISOLATION_SESSION=1" & shift & goto :parse_args )
@@ -57,7 +55,6 @@ if "%BUILD_CONFIG%"=="release" set "CARGO_FLAGS=--release --target"
 :: workspace feature flags above, so it uses its own profile/target-only flags.
 set "PLM_FLAGS=--target"
 if "%BUILD_CONFIG%"=="release" set "PLM_FLAGS=--release --target"
-if "%WITH_NANVIX%"=="1" set "CARGO_FLAGS=--features microvm %CARGO_FLAGS%"
 if "%WITH_NVX%"=="1" set "CARGO_FLAGS=--features nvx %CARGO_FLAGS%"
 if "%WITH_WSLC%"=="1" set "CARGO_FLAGS=--features wslc %CARGO_FLAGS%"
 if "%WITH_ISOLATION_SESSION%"=="1" set "CARGO_FLAGS=--features isolation_session %CARGO_FLAGS%"
@@ -135,26 +132,6 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
         if exist "!BIN_DIR!\plm.exe" (
             copy /Y "!BIN_DIR!\plm.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
             echo   Copied !SDK_ARCH!\plm.exe
-        )
-        if "%WITH_NANVIX%"=="1" (
-            for %%B in (nanvixd.exe nanvix_rootfs.img python3.initrd) do (
-                if exist "!BIN_DIR!\%%B" (
-                    copy /Y "!BIN_DIR!\%%B" "sdk\node\bin\!SDK_ARCH!\" >nul
-                    echo   Copied !SDK_ARCH!\%%B
-                )
-            )
-            if exist "!BIN_DIR!\bin\kernel.elf" (
-                if not exist "sdk\node\bin\!SDK_ARCH!\bin" mkdir "sdk\node\bin\!SDK_ARCH!\bin"
-                copy /Y "!BIN_DIR!\bin\kernel.elf" "sdk\node\bin\!SDK_ARCH!\bin\" >nul
-                echo   Copied !SDK_ARCH!\bin\kernel.elf
-            )
-            for %%S in (kernel.vmem kernel.whp.cbor) do (
-                if exist "!BIN_DIR!\snapshots\%%S" (
-                    if not exist "sdk\node\bin\!SDK_ARCH!\snapshots" mkdir "sdk\node\bin\!SDK_ARCH!\snapshots"
-                    copy /Y "!BIN_DIR!\snapshots\%%S" "sdk\node\bin\!SDK_ARCH!\snapshots\" >nul
-                    echo   Copied !SDK_ARCH!\snapshots\%%S
-                )
-            )
         )
         if "!COPY_WSLC_RUNTIME!"=="1" (
             if "%WITH_WSLC%"=="1" (
@@ -287,7 +264,6 @@ echo   --release   Build release configuration
 echo   --x64       Build for x64 only
 echo   --arm64     Build for ARM64 only
 echo   --all             Build for both x64 and ARM64
-echo   --with-microvm    Download and include NanVix micro-VM binaries
 echo   --with-nvx        Add the incomplete NVX foundation and platform artifacts (x64)
 echo                     Runtime preflight remains unavailable until NVX publishes
 echo                     the workload image bundle

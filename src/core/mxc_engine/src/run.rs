@@ -259,25 +259,6 @@ fn resolve_runner_inner_windows(
             "VM backend not yet implemented",
         )),
         ContainmentBackend::Nvx => resolve_nvx_backend(request),
-        ContainmentBackend::MicroVm => {
-            if !request.experimental_enabled {
-                return Err(MxcError::malformed_request(
-                    "MicroVM is an experimental feature. Use --experimental flag.",
-                ));
-            }
-            #[cfg(feature = "microvm")]
-            {
-                Ok(ResolvedRunner::without_guard(Box::new(
-                    nanvix_runner::NanVixScriptRunner::new(),
-                )))
-            }
-            #[cfg(not(feature = "microvm"))]
-            {
-                Err(MxcError::unsupported_containment(
-                    "MicroVM backend not compiled in (build with --features microvm)",
-                ))
-            }
-        }
         ContainmentBackend::Hyperlight => resolve_hyperlight(request),
         ContainmentBackend::WindowsSandbox => {
             if !request.experimental_enabled {
@@ -326,7 +307,7 @@ fn resolve_runner_inner_windows(
 
 // ---------------------------------------------------------------------------
 // Linux: mirrors `lxc-exec` — Bubblewrap (default), LXC, and the experimental
-// Hyperlight / MicroVM backends. Any other containment falls back to LXC.
+// Hyperlight backend. Any other containment falls back to LXC.
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "linux")]
@@ -338,25 +319,6 @@ fn resolve_runner_inner(
 
     match request.containment {
         ContainmentBackend::Hyperlight => resolve_hyperlight(request),
-        ContainmentBackend::MicroVm => {
-            if !request.experimental_enabled {
-                return Err(MxcError::malformed_request(
-                    "MicroVM is an experimental feature. Use --experimental flag.",
-                ));
-            }
-            #[cfg(feature = "microvm")]
-            {
-                Ok(ResolvedRunner::without_guard(Box::new(
-                    nanvix_runner::NanVixScriptRunner::new(),
-                )))
-            }
-            #[cfg(not(feature = "microvm"))]
-            {
-                Err(MxcError::unsupported_containment(
-                    "MicroVM backend not compiled in (build with --features microvm)",
-                ))
-            }
-        }
         ContainmentBackend::Nvx => resolve_nvx_backend(request),
         ContainmentBackend::Bubblewrap => Ok(ResolvedRunner::without_guard(Box::new(Runner::new(
             bwrap_common::bwrap_runner::BubblewrapScriptRunner::new(),

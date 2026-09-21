@@ -14,11 +14,11 @@ jobs:
             runner: windows-2025
             target: x86_64-pc-windows-msvc
             # tier2_bfs must NOT ship on Win 11 25H2 (bfscfg.exe hangs the host).
-            features: hyperlight isolation_session microvm wslc
+            features: hyperlight isolation_session wslc
           - arch: arm64
             runner: windows-11-arm
             target: aarch64-pc-windows-msvc
-            # Hyperlight and MicroVM runtimes are x64-only.
+            # Hyperlight is x64-only.
             features: isolation_session wslc
     runs-on: ${{ matrix.runner }}
     defaults:

@@ -172,7 +172,7 @@ mod tests {
             Containment::Vm,
             Containment::WindowsSandbox,
             Containment::Lxc,
-            Containment::Microvm,
+            Containment::Nvx,
             Containment::Hyperlight,
             Containment::Wslc,
             Containment::Seatbelt,

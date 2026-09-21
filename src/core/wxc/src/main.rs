@@ -1951,7 +1951,7 @@ mod tests {
             ContainmentBackend::WindowsSandbox,
             ContainmentBackend::Wslc,
             ContainmentBackend::IsolationSession,
-            ContainmentBackend::MicroVm,
+            ContainmentBackend::Nvx,
         ] {
             let containment_name = containment.wire_name();
             request.containment = containment;

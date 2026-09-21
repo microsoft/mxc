@@ -17,8 +17,6 @@ pub mod filesystem_resolve;
 pub mod id;
 pub mod log_symbols;
 pub mod logger;
-#[cfg(all(feature = "microvm", any(target_os = "windows", target_os = "linux")))]
-pub mod microvm_staging;
 pub mod models;
 pub mod mxc_error;
 mod network_parser;

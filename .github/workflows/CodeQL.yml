@@ -55,7 +55,7 @@ jobs:
       # surface the pinned toolchain and the MxcDependencies feed so that
       # dependency resolution succeeds (the private feed 401s otherwise). No
       # `cargo build` is run, so the feature-gated backends' build workarounds
-      # (hyperlight/microvm/windows_sandbox) are irrelevant here.
+      # (hyperlight/nvx/windows_sandbox) are irrelevant here.
       - name: Surface toolchain file at repo root
         if: matrix.language == 'rust'
         shell: bash
