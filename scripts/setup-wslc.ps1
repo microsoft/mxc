@@ -66,7 +66,11 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 
 # Discover wxc-exec.exe -- prefer explicit path, then probe target dirs.
-$Target = "x86_64-pc-windows-msvc"
+$Target = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') {
+    'aarch64-pc-windows-msvc'
+} else {
+    'x86_64-pc-windows-msvc'
+}
 if ($WxcExecPath) {
     $WxcExec = $WxcExecPath
 } else {
