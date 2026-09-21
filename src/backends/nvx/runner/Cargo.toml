@@ -7,7 +7,7 @@ description = "NVX backend preflight checks for incomplete runtime builds"
 
 [features]
 default = []
-nvx = ["nvx_binaries/nvx"]
+nvx = []
 
 [dependencies]
 nvx_binaries = { workspace = true }

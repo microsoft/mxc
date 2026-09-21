@@ -31,8 +31,6 @@ tempfile.workspace = true
 
 [build-dependencies]
 mxc_build_common.workspace = true
-
-[target.'cfg(windows)'.build-dependencies]
 nvx_build_common = { workspace = true, optional = true }
 
 [features]

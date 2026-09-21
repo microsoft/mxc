@@ -56,6 +56,25 @@ pub fn validate_nvx_target(
     }
 }
 
+/// Determines whether an executor build should stage NVX artifacts.
+///
+/// Non-Windows targets do not package NVX. Windows targets must be the exact
+/// supported x64 MSVC triple; unsupported Windows targets fail instead of
+/// silently producing an incomplete NVX-enabled executor.
+pub fn should_stage_nvx(
+    target: &str,
+    target_os: &str,
+    target_arch: &str,
+    target_env: &str,
+) -> Result<bool, String> {
+    if target_os != "windows" {
+        return Ok(false);
+    }
+
+    validate_nvx_target(target, target_os, target_arch, target_env)?;
+    Ok(true)
+}
+
 /// Formats the explicit error message used when NVX is requested for an
 /// unsupported target.
 pub fn unsupported_target_message(target: &str) -> String {
@@ -316,5 +335,27 @@ mod tests {
 
         assert!(error.contains(SUPPORTED_NVX_TARGET_TRIPLE));
         assert!(error.contains("aarch64-pc-windows-msvc"));
+    }
+
+    #[test]
+    fn staging_decision_uses_target_not_build_host() {
+        assert_eq!(
+            should_stage_nvx("x86_64-pc-windows-msvc", "windows", "x86_64", "msvc"),
+            Ok(true)
+        );
+        assert_eq!(
+            should_stage_nvx("x86_64-unknown-linux-gnu", "linux", "x86_64", "gnu"),
+            Ok(false)
+        );
+
+        for (target, arch, env) in [
+            ("aarch64-pc-windows-msvc", "aarch64", "msvc"),
+            ("x86_64-pc-windows-gnu", "x86_64", "gnu"),
+        ] {
+            let error = should_stage_nvx(target, "windows", arch, env)
+                .expect_err("unsupported Windows targets must fail closed");
+            assert!(error.contains(SUPPORTED_NVX_TARGET_TRIPLE));
+            assert!(error.contains(target));
+        }
     }
 }

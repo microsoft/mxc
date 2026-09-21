@@ -77,8 +77,7 @@ fn ensure_supported_target() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
-    let target = std::env::var("TARGET")
-        .unwrap_or_else(|_| format!("{target_arch}-pc-{target_os}-{target_env}"));
+    let target = std::env::var("TARGET").expect("nvx_binaries: TARGET is not set by Cargo");
     nvx_build_common::validate_nvx_target(&target, &target_os, &target_arch, &target_env)
         .unwrap_or_else(|error| panic!("nvx_binaries: {error}"));
 }

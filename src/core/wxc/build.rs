@@ -9,11 +9,8 @@ fn main() {
     #[cfg(windows)]
     check_test_prerequisites();
 
-    #[cfg(all(windows, feature = "nvx"))]
-    {
-        ensure_supported_nvx_target();
-        copy_nvx_binaries();
-    }
+    #[cfg(feature = "nvx")]
+    stage_nvx_for_target();
 
     // Delay-load winhvplatform.dll so WHP-less hosts don't crash before main().
     // CARGO_CFG_TARGET_* (not #[cfg]) because build.rs cfg gates are host, not target.
@@ -82,18 +79,22 @@ fn check_test_prerequisites() {
     }
 }
 
-#[cfg(all(windows, feature = "nvx"))]
-fn ensure_supported_nvx_target() {
+#[cfg(feature = "nvx")]
+fn stage_nvx_for_target() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
-    let target = std::env::var("TARGET")
-        .unwrap_or_else(|_| format!("{target_arch}-pc-{target_os}-{target_env}"));
-    nvx_build_common::validate_nvx_target(&target, &target_os, &target_arch, &target_env)
-        .unwrap_or_else(|error| panic!("wxc build.rs: {error}"));
+
+    let target = std::env::var("TARGET").expect("wxc build.rs: TARGET is not set by Cargo");
+    let should_stage =
+        nvx_build_common::should_stage_nvx(&target, &target_os, &target_arch, &target_env)
+            .unwrap_or_else(|error| panic!("wxc build.rs: {error}"));
+    if should_stage {
+        copy_nvx_binaries();
+    }
 }
 
-#[cfg(all(windows, feature = "nvx"))]
+#[cfg(feature = "nvx")]
 fn copy_nvx_binaries() {
     use std::path::Path;
 

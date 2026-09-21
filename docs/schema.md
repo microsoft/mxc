@@ -246,7 +246,8 @@ use:
 | Windows ProcessContainer (AppContainer / BaseContainer) | First `readwritePaths` entry that is an existing directory, else the first such `readonlyPaths` entry, else the system drive root (`%SystemDrive%\`). Never `NULL`. |
 | Seatbelt (macOS) | Same precedence, with `~` expanded as the profile expands it; falls back to `/`. |
 | LXC / WSL Container | The container root — see [`docs/lxc-support/lxc-backend.md`](lxc-support/lxc-backend.md). |
-| NVX / Hyperlight | Not applicable — these backends reject a working directory outright. |
+| NVX | Guest root when omitted; a caller-supplied guest path is preserved. |
+| Hyperlight | Not applicable — this backend rejects a working directory outright. |
 
 Policy entries that are blank, name a file, or do not exist yet are skipped:
 a process cannot be launched in any of them.
