@@ -208,8 +208,8 @@ the exact schema 0.9 request and expose their outcomes through MXC APIs.
 | HTTP/HTTPS proxy | An exec-time `runtimeConfig.networkProxy` endpoint is injected as controlled proxy environment variables and allowed as one exact TCP endpoint under host-loopback denial. | Caller-provided proxy variables remain rejected; UDP to the same endpoint is not allowed. |
 | Outcomes and telemetry | Execution, lifecycle, and teardown return bounded status and failure categories without workload secrets. | Richer MXC telemetry facts are optional future work; MXC owns telemetry policy and emission. |
 
-See the NVX [run guide](https://github.com/microsoft/nvx/blob/main/doc/run.md)
-and [command-line reference](https://github.com/microsoft/nvx/blob/main/doc/usage.md)
+See the NVX [run guide](https://github.com/microsoft/nvx/blob/dev/doc/run.md)
+and [command-line reference](https://github.com/microsoft/nvx/blob/dev/doc/usage.md)
 for the current direct runtime options.
 
 ## Appendix B: NVX issue tracking
