@@ -84,12 +84,15 @@ function Phase-ProcessPlumbing {
     # carried an unused $ExpectExitCode parameter.
     foreach ($code in @(0, 1, 42)) {
         $ecCfg = New-Config -Name "plumb-exit-$code" `
-            -CommandLine "$env:SystemRoot\System32\cmd.exe /c exit $code" `
+            -CommandLine (New-ProbeCommand -Body "exit $code") `
             -ReadWrite @($rw) -ReadOnly @($env:SystemRoot) -TimeoutMs 20000
         $ecLog = Join-Path $ScratchRoot "logs\plumb-exit-$code.log"
         $rEc = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $ecCfg -LogPath $ecLog -TimeoutSec 40
+        # Without the marker, a wxc-exec that fails before launching the child
+        # scores green on the $code=1 case.
+        $ecRan = Test-WorkloadRan $rEc
         Record-Result -Phase 'P11' -Name "child exit code $code propagates to wxc-exec" `
-            -Pass ($rEc.ExitCode -eq $code) -Detail "got=$($rEc.ExitCode)"
+            -Pass ($ecRan -and $rEc.ExitCode -eq $code) -Detail "ran=$ecRan; got=$($rEc.ExitCode)"
     }
 
     # --- timeout enforcement plus the survivor check. The workload
