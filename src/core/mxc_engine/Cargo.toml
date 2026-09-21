@@ -22,18 +22,18 @@ nanvix_runner = { workspace = true, optional = true }
 hyperlight_common = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-appcontainer_common = { workspace = true }
+process_container_common = { workspace = true }
 windows_sandbox_lifecycle = { workspace = true }
 isolation_session_common = { workspace = true, optional = true }
 isolation_session_bindings = { workspace = true, optional = true }
 wslc_common = { workspace = true, optional = true }
-# Elevated PLM guardian client, used to adapt appcontainer_common's
+# Elevated PLM guardian client, used to adapt process_container_common's
 # GuardedCaptureFactory/GuardedCaptureSession DI traits (guarded-WPR
-# captureDenials fallback) without appcontainer_common depending on plm
+# captureDenials fallback) without process_container_common depending on plm
 # directly.
 plm = { workspace = true }
 # ProcessLifetime / AnalysisResult types shared across the guarded-capture DI
-# boundary; appcontainer_common and plm already depend on this crate.
+# boundary; process_container_common and plm already depend on this crate.
 learning_mode_core = { workspace = true }
 getrandom.workspace = true
 sha2.workspace = true
@@ -60,9 +60,9 @@ isolation_session = [
     "dep:isolation_session_common",
 ]
 # Forwards the test-executor-only ProcessContainer tier override.
-force-tier-testing = ["appcontainer_common/force-tier-testing"]
-# Forwards appcontainer_common/tier2_bfs. OFF by default; see appcontainer_common/Cargo.toml.
-tier2_bfs = ["appcontainer_common/tier2_bfs"]
+force-tier-testing = ["process_container_common/force-tier-testing"]
+# Forwards process_container_common/tier2_bfs. OFF by default; see process_container_common/Cargo.toml.
+tier2_bfs = ["process_container_common/tier2_bfs"]
 
 [dev-dependencies]
 mxc_config_contract.workspace = true

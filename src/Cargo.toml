@@ -63,7 +63,7 @@ license = "MIT"
 
 [workspace.dependencies]
 anyhow = "1"
-appcontainer_common = { path = "backends/process_container/common" }
+process_container_common = { path = "backends/process_container/common" }
 base64 = "0.22"
 bwrap_common = { path = "backends/bubblewrap/common" }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }

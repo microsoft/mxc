@@ -30,7 +30,7 @@
 //! BaseContainer-capable and a downlevel host covers both tiers. Because that is
 //! not enforceable in ordinary CI, the tier-independent guarantee — that neither
 //! runner can resolve a `NULL` cwd — is additionally locked in by the unit tests
-//! on the shared `appcontainer_common::working_directory` mapping both launch
+//! on the shared `process_container_common::working_directory` mapping both launch
 //! sites call, which run on every lane with no host prerequisites.
 #![cfg(target_os = "windows")]
 
@@ -196,7 +196,7 @@ fn processcontainer_timeout_kills_before_completion() {
 /// `NULL` current directory to the launch API: the child would then inherit the
 /// launcher's cwd, and when the sandbox token can't open it the kernel silently
 /// resets the child to the drive root (`C:\`). Instead the runners resolve the
-/// cwd via `appcontainer_common::working_directory::launch_working_directory()`
+/// cwd via `process_container_common::working_directory::launch_working_directory()`
 /// — here, the first `readwritePaths` entry.
 ///
 /// The unit tests on that mapping cover selection and the never-`NULL`

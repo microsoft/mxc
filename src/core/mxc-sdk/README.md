@@ -655,6 +655,6 @@ curated engine surface and wraps the engine's streaming handle in [`Sandbox`].
 The `wxc-exec`, `lxc-exec`, and `mxc-exec-mac` binaries do not (yet) depend on
 this crate. The engine reuses the same backend crates they do; on Windows both
 the streaming and the run-to-completion paths share
-`appcontainer_common::dispatcher`'s tier selection (`select_backend_with_fallback`),
+`process_container_common::dispatcher`'s tier selection (`select_backend_with_fallback`),
 so they agree on the BaseContainer / AppContainer + BFS / AppContainer + DACL
 tier and spawn the appropriate handle.

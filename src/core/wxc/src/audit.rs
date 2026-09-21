@@ -263,10 +263,10 @@ fn remove_empty_managed_directory(
         return Ok(());
     };
     // Only prune a per-run directory promoted into the backend's retained-ETL
-    // store; the predicate is owned by `appcontainer_common` so this does not
+    // store; the predicate is owned by `process_container_common` so this does not
     // duplicate the store's private directory name.
     let is_retained_capture_dir =
-        appcontainer_common::capture_output::is_retained_capture_run_dir(directory);
+        process_container_common::capture_output::is_retained_capture_run_dir(directory);
     if directory == audit_dir || !is_retained_capture_dir {
         return Ok(());
     }
