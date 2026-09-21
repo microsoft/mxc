@@ -50,7 +50,7 @@ jobs:
 
       - name: Delayed start
         if: matrix.startup_delay_seconds > 0
-        shell: pwsh
+        shell: powershell
         run: |
           # Spreads network-heavy setup across the pool's shared egress address
           # instead of issuing every job's downloads at once. Configured by
@@ -60,8 +60,8 @@ jobs:
           Start-Sleep -Seconds $seconds
 
       - name: Prepare backend prerequisites
-        timeout-minutes: 15
-        shell: pwsh
+        timeout-minutes: 20
+        shell: powershell
         run: |
           & ./scripts/ci/prepare-windows-host.ps1 `
             -Backend '${{ matrix.backend }}' `

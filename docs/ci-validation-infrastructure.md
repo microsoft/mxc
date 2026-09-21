@@ -29,7 +29,7 @@ the individual local test scripts are documented in
 | `.github/workflows/Validation.Tests.Matrix.Job.yml` | `workflow_call`-only. Resolves the plan and runs the per-family test jobs. |
 | `scripts/ci/validation-test-matrix.json` | The matrix: OS versions, backends, triggers, job staggering. |
 | `scripts/ci/resolve-validation-test-matrix.mjs` | Matrix validator + plan expander. Emits the GitHub Actions matrices. |
-| `scripts/ci/prepare-windows-host.ps1` | Per-backend Windows host preparation / prerequisite assertions, plus the `winget` repair and the packaged-tooling install. |
+| `scripts/ci/prepare-windows-host.ps1` | Per-backend Windows host preparation / prerequisite assertions, plus the `winget` repair and the workload-tooling install. Runs in Windows PowerShell, because it installs the `pwsh` the steps after it use. |
 | `scripts/ci/prepare-linux-host.sh` | Per-backend Linux package install and service startup (distro-aware), plus the workload-interpreter inventory. |
 | `scripts/ci/prepare-macos-host.sh` | Per-backend macOS host preparation / prerequisite assertions. |
 | `scripts/ci/run_backend_validation_tests.ps1` | Windows dispatcher: backend id → existing backend suite. Also points `TEMP` at `$RUNNER_TEMP` so logs get collected. |
@@ -254,8 +254,8 @@ message instead of surfacing later as an opaque backend error.
 
 The script does provision two things, for every backend rather than a particular
 one: `Repair-Winget` re-registers the App Installer package when `winget` is on
-`PATH` but cannot run, and `Install-PackagedTooling` then installs `winapp` and
-`openssl`
+`PATH` but cannot run, and `Install-WorkloadTooling` then installs `pwsh`,
+`node`, `python`, `winapp`, and `openssl`
 ([below](#who-installs-what)).
 
 Every run also opens with the host's Windows caption, release, build, and
@@ -304,10 +304,10 @@ mid-suite failure.
 
 | Interpreter | Platforms | Version | Notes |
 |-------------|-----------|---------|-------|
-| `pwsh` | all | Latest 7.x | The only entry whose absence fails a job, and only on Windows. |
+| `pwsh` | all | Latest | Installed per job on Windows — see below. The only entry whose absence fails a job, and only on Windows. |
 | `git` | all | Latest | |
-| `node`, `npm`, `npx` | all | 24.x | `npm` and `npx` arrive with Node. |
-| `python`, `pip` | all | Latest | Windows tries `python` first, Unix `python3`. |
+| `node`, `npm`, `npx` | all | Latest LTS | `npm` and `npx` arrive with Node. Installed per job on Windows. |
+| `python`, `pip` | all | Latest stable | Windows tries `python` first, Unix `python3`. Installed per job on Windows. |
 | `dotnet` | all | Latest LTS | Currently 10.x, from the `LTS` channel — resolved at image-build time, not pinned. |
 | `az` | all | Latest | No ARM64 Windows build exists; ARM64 images get the x64 one under emulation. |
 | `gh` | all | Latest | |
@@ -318,9 +318,10 @@ mid-suite failure.
 | `scoop`, `choco` | Windows | Latest | |
 | `brew` | macOS | Latest | |
 
-Nothing is pinned: every entry is whatever was current when the image was built,
-within the constraint in the Version column. Only Node is held to a major
-version, because the SDK targets it.
+Nothing is pinned to an exact version: an image-provided entry is whatever was
+current when the image was built, and a per-job install is whatever the source
+offers that day — the LTS line for Node, and for Python the newest stable minor,
+since Python publishes no LTS line of its own.
 
 The list is **suite-agnostic by design** and is checked for every backend, not
 only the ones whose suites need it today: it describes what a validation *host*
@@ -354,13 +355,12 @@ Every pool runs images pre-provisioned with programs installed by
 `ubuntu-debian-provision.sh` / `rhel-provision.sh` for Linux and 
 `windows-provision.ps1` for Windows. These scripts are located in the
 `validation-provision-artifacts` branch in the ADO repo. On Windows that
-script covers `dotnet`, `choco`, `scoop`, `az`, `gh` and `nuget`; the remaining
-runtimes (`node`, `python`, `pwsh`, `git`) come from separate image artifacts.
+script covers `dotnet`, `choco`, `scoop`, `az`, `gh` and `nuget`; `git` comes
+from a separate image artifact.
 
-During the start of a job, the installed programs are inventoried; no job
-installs a workload interpreter. Windows is the one exception, installing
-OpenSSL and WinApp via the repaired WinGet, because both are published as
-packaged applications.
+During the start of a job, the installed programs are inventoried. On Linux and
+macOS no job installs a workload interpreter. Windows installs five of them
+through the repaired winget - `pwsh`, `node`, `python`, `openssl`, and `winapp`.
 
 A backend's own prerequisites are separate and are still installed per job by
 `prepare-linux-host.sh` — see [Host preparation](#host-preparation).
