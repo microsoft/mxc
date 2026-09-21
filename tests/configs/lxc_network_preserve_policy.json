@@ -16,7 +16,7 @@
   "network": {
     "defaultPolicy": "block",
     "enforcementMode": "firewall",
-    "allowedHosts": [],
+    "allowedHosts": ["example.com"],
     "blockedHosts": []
   }
 }

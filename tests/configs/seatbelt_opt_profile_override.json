@@ -1,0 +1,20 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
+    "version": "0.8.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "cat {{TESTDIR}}/denied/secret.txt && echo OVERRIDE_READ_OK",
+        "timeout": 20000
+    },
+    "filesystem": {
+        "readonlyPaths": [
+            "{{TESTDIR}}"
+        ],
+        "deniedPaths": [
+            "{{TESTDIR}}/denied"
+        ]
+    },
+    "seatbelt": {
+        "profileOverride": "(version 1)\n(allow default)\n"
+    }
+}

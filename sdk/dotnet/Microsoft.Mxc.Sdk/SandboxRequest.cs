@@ -40,9 +40,35 @@ public sealed class SandboxRequest
     [JsonPropertyName("workingDirectory")]
     public string? WorkingDirectory { get; set; }
 
-    /// <summary>Environment variables supplied to the sandboxed process.</summary>
+    /// <summary>
+    /// Optional environment variables supplied to the sandboxed process.
+    /// </summary>
+    /// <remarks>
+    /// When non-null, this is the child's environment and is used verbatim —
+    /// including when the dictionary is empty. Nothing is merged into it, so
+    /// an environment missing what the platform requires fails the launch.
+    /// Set <see cref="InheritDefaultEnvironment"/> to layer these entries on
+    /// top of the default environment instead. Leave this property null to
+    /// give the child the backend's default environment (on Windows, the
+    /// user's profile block).
+    /// </remarks>
     [JsonPropertyName("environment")]
-    public Dictionary<string, string> Environment { get; set; } = new();
+    public Dictionary<string, string>? Environment { get; set; }
+
+    /// <summary>
+    /// Start from the backend's default environment and layer
+    /// <see cref="Environment"/> on top of it, rather than replacing it.
+    /// </summary>
+    /// <remarks>
+    /// Use this for "the usual environment, plus these": on Windows the
+    /// default is the user's profile block, which only the OS can produce, so
+    /// it cannot be assembled by a caller. This is a different set from the
+    /// calling process's own variables, which you can still add explicitly.
+    /// Has no effect when <see cref="Environment"/> is null.
+    /// </remarks>
+    [JsonPropertyName("inheritDefaultEnv")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool InheritDefaultEnvironment { get; set; }
 
     /// <summary>Opt in to experimental containment backends and features.</summary>
     [JsonPropertyName("experimental")]
@@ -53,7 +79,11 @@ public sealed class SandboxRequest
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "type")]
 [JsonDerivedType(typeof(ProcessContainment), "process")]
 [JsonDerivedType(typeof(ProcessContainerContainment), "processContainer")]
+[JsonDerivedType(typeof(SeatbeltContainment), "seatbelt")]
+[JsonDerivedType(typeof(LxcContainment), "lxc")]
+[JsonDerivedType(typeof(BubblewrapContainment), "bubblewrap")]
 [JsonDerivedType(typeof(WslcContainment), "wslc")]
+[JsonDerivedType(typeof(IsolationSessionContainment), "isolationSession")]
 public abstract class SandboxContainment;
 
 /// <summary>
@@ -61,6 +91,52 @@ public abstract class SandboxContainment;
 /// Bubblewrap on Linux, and Seatbelt on macOS.
 /// </summary>
 public sealed class ProcessContainment : SandboxContainment;
+
+/// <summary>
+/// Experimental Windows IsolationSession backend, which runs the workload under
+/// an isolated agent user account.
+/// </summary>
+/// <remarks>Requires <see cref="SandboxRequest.Experimental"/>.</remarks>
+public sealed class IsolationSessionContainment : SandboxContainment;
+
+/// <summary>Explicit macOS Seatbelt configuration.</summary>
+public sealed class SeatbeltContainment : SandboxContainment
+{
+    /// <summary>Replace the generated sandbox profile entirely.</summary>
+    [JsonPropertyName("profileOverride")]
+    public string? ProfileOverride { get; set; }
+
+    /// <summary>Allow GUI applications to reach WindowServer and related services.</summary>
+    [JsonPropertyName("guiAccess")]
+    public bool GuiAccess { get; set; }
+
+    /// <summary>Allow the contained process to allocate nested pseudo-terminals.</summary>
+    [JsonPropertyName("nestedPty")]
+    public bool NestedPty { get; set; } = true;
+
+    /// <summary>Allow access to the macOS Keychain.</summary>
+    [JsonPropertyName("keychainAccess")]
+    public bool KeychainAccess { get; set; }
+
+    /// <summary>Additional Mach service global names the process may resolve.</summary>
+    [JsonPropertyName("extraMachLookups")]
+    public List<string> ExtraMachLookups { get; set; } = new();
+}
+
+/// <summary>Explicit Linux LXC configuration.</summary>
+public sealed class LxcContainment : SandboxContainment
+{
+    /// <summary>Linux distribution for the container root filesystem.</summary>
+    [JsonPropertyName("distribution")]
+    public string Distribution { get; set; } = "alpine";
+
+    /// <summary>Distribution release version.</summary>
+    [JsonPropertyName("release")]
+    public string Release { get; set; } = "3.23";
+}
+
+/// <summary>Explicit Linux Bubblewrap configuration.</summary>
+public sealed class BubblewrapContainment : SandboxContainment;
 
 /// <summary>Explicit Windows ProcessContainer configuration.</summary>
 public sealed class ProcessContainerContainment : SandboxContainment
@@ -85,9 +161,21 @@ public sealed class ProcessContainerContainment : SandboxContainment
     [JsonPropertyName("ui")]
     public ProcessContainerUiPolicy? Ui { get; set; } = new();
 
+    /// <summary>ProcessContainer-specific filesystem settings.</summary>
+    [JsonPropertyName("filesystem")]
+    public ProcessContainerFilesystemPolicy? Filesystem { get; set; }
+
     /// <summary>ProcessContainer-specific directional network settings.</summary>
     [JsonPropertyName("network")]
     public ProcessContainerNetworkPolicy? Network { get; set; }
+}
+
+/// <summary>ProcessContainer-specific filesystem settings.</summary>
+public sealed class ProcessContainerFilesystemPolicy
+{
+    /// <summary>Paths that may be enumerated without granting file-content reads.</summary>
+    [JsonPropertyName("enumeratePaths")]
+    public List<string> EnumeratePaths { get; set; } = new();
 }
 
 /// <summary>ProcessContainer desktop-resource isolation level.</summary>

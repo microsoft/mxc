@@ -39,6 +39,7 @@ struct SchemaVersion {
 }
 
 table ProcessSecurityEnvironment {
+    // Initial CPSE schema version is 1.0; the current schema version is 1.1.
     version:SchemaVersion (required);
     capabilities:string;
     disallow_win32k_system_calls:bool = false;
@@ -47,6 +48,9 @@ table ProcessSecurityEnvironment {
     fs_read_only:[string];
     fs_deny:[string];
     network_policy:NetworkPolicy;
+
+    // Paths that may be queried or enumerated. [version(1.1)]
+    fs_enumerate:[string];
 }
 
 table ProxyInfo {

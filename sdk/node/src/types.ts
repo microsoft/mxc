@@ -15,8 +15,27 @@ export interface ProcessConfig {
   commandLine: string;
   /** Working directory for the process */
   cwd?: string;
-  /** Environment variables as KEY=VALUE strings */
+  /**
+   * Environment variables as KEY=VALUE strings.
+   *
+   * Omit this field to give the child the backend's default environment (on
+   * Windows, the user's profile block). Supply it -- including as an empty
+   * array -- and it is used **verbatim**: MXC adds nothing to it, so an
+   * environment missing what the platform requires will fail the launch.
+   * Set {@link ProcessConfig.inheritDefaultEnv} to layer these on the
+   * default environment instead of replacing it.
+   */
   env?: string[];
+  /**
+   * Start from the backend's default environment and layer {@link
+   * ProcessConfig.env} on top of it, rather than replacing it (default false).
+   *
+   * Use this when you want "the usual environment, plus these": on Windows the
+   * default is the user's profile block, which only the OS can produce, so it
+   * cannot be assembled by a caller. Note this is a different set from the
+   * calling process's `process.env`, which you can still pass explicitly.
+   */
+  inheritDefaultEnv?: boolean;
   /** Execution timeout in milliseconds (default: 0 = no timeout) */
   timeout?: number;
 }
@@ -169,8 +188,22 @@ export interface ProcessContainerConfig {
    * The reserved learning-mode capability names must not be supplied directly.
    */
   capabilities?: string[];
+  /** Optional denial-capture configuration. */
+  captureDenials?: {
+    /** Whether denied accesses remain blocked or are temporarily allowed. */
+    mode?: 'block' | 'allow';
+    /** Optional destination for the generated denial report. */
+    outputPath?: string;
+    /** Preserve the captured ETL trace after analysis. */
+    retainEtl?: boolean;
+  };
   /** BaseProcess-specific UI settings (Windows only) */
   ui?: BaseProcessUiConfig;
+  /** ProcessContainer-specific filesystem settings. */
+  filesystem?: {
+    /** Paths the script can enumerate without reading file contents. */
+    enumeratePaths?: string[];
+  };
   /** ProcessContainer-specific networking settings. */
   network?: {
     /** Package family name or AppContainer profile authorized as the loopback proxy peer. */
@@ -193,9 +226,10 @@ export interface FilesystemConfig {
 }
 
 /**
- * Network access configuration
+ * Network access configuration across published versions. The legacy fields
+ * are valid only through 0.8; 0.9 accepts DirectionalNetworkConfig exclusively.
  */
-export interface NetworkConfig {
+export interface NetworkConfig extends DirectionalNetworkConfig {
   /**
    * Network enforcement mode:
    * - "capabilities": Use AppContainer capabilities only (no admin required)
@@ -238,6 +272,10 @@ export interface NetworkConfig {
   proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
   /** Automatically remove firewall rules after execution (default: true). Deprecated: use lifecycle.preservePolicy. */
   removeRulesOnExit?: boolean;
+}
+
+/** The complete network wire shape for schema 0.9. */
+export interface DirectionalNetworkConfig {
   /** Outbound network policy. */
   egress?: NetworkEgressConfig;
   /** Inbound and host-loopback network policy. */
@@ -296,7 +334,11 @@ export interface NetworkIngressConfig {
 
 /** Runtime values supplied separately from sandbox policy. */
 export interface RuntimeConfig {
-  /** HTTP/S loopback proxy URL. */
+  /**
+   * HTTP/S proxy URL. Host-loopback restrictions are backend-specific.
+   * WSLC accepts a URL reachable from inside the guest, including guest-loopback
+   * URLs such as `http://127.0.0.1:8888`.
+   */
   networkProxy?: string;
 }
 
@@ -347,11 +389,16 @@ export interface PortMapping {
   protocol?: 'tcp';
 }
 
-/** Telemetry configuration for TraceLogging ETW support. */
+/**
+ * Telemetry configuration for TraceLogging ETW support.
+ */
 export interface TelemetryConfig {
   /**
-   * Explicit telemetry opt-in. `true` requests telemetry subject to user
-   * consent and administrative policy; `false` or `undefined` keeps it off.
+   * Per-invocation telemetry opt-in.
+   *
+   * `true` requests telemetry for this invocation; emission is still gated by
+   * persisted user consent and administrative policy. `false` (or `undefined`)
+   * disables telemetry for this invocation.
    */
   enabled?: boolean;
 }
@@ -390,11 +437,11 @@ export interface ContainerConfig {
   network?: NetworkConfig;
   /** Runtime values supplied separately from sandbox policy. */
   runtimeConfig?: RuntimeConfig;
-  /** Telemetry configuration */
+  /** Telemetry configuration for TraceLogging ETW support */
   telemetry?: TelemetryConfig;
   /** Experimental features (only applied when --experimental flag is set) */
   experimental?: {
-    /** WSLC SDK configuration for Linux containers from Windows */
+      /** WSLC SDK configuration for Linux containers from Windows */
     wslc?: WslcConfig;
   };
   /** macOS Seatbelt sandbox configuration (macOS only) */
@@ -454,14 +501,10 @@ export type SandboxPolicy = {
   };
   /** Schema 0.8 runtime values supplied separately from sandbox policy. */
   runtimeConfig?: RuntimeConfig;
-  /** Schema 0.8 ProcessContainer-specific policy. */
-  processContainer?: {
-      /** ProcessContainer-specific networking settings. */
-      network?: {
-          /** Package family name or AppContainer profile authorized as the loopback proxy peer. */
-          allowedProxyPeer?: string;
-      };
-  };
+  /** Per-invocation telemetry opt-in, subject to consent and policy. */
+  telemetry?: TelemetryConfig;
+  /** ProcessContainer-specific policy fields honored by policy conversion. */
+  processContainer?: Pick<ProcessContainerConfig, 'filesystem' | 'network'>;
   /** UI access restrictions. All flags default to denied. */
   ui?: {
       /** Whether the sandbox may create visible windows. (default: false) */
@@ -498,6 +541,8 @@ export interface SeatbeltConfig {
    * Optional override of the generated TinyScheme sandbox profile.
    */
   profileOverride?: string;
+  /** Allow GUI applications to access the macOS WindowServer and related services. */
+  guiAccess?: boolean;
   /**
    * Allow the inner process to allocate its own pseudo-terminals via
    * `posix_openpt` (needed by tests, `git`, `gh`, REPLs, and any tool
@@ -540,7 +585,7 @@ export type SandboxingMethod = ContainmentType | ContainmentBackend;
 /**
  * Isolation tier selected by the runtime fallback detector.
  *
- * - `base-container`: full BaseContainer (Experimental_CreateProcessInSandbox)
+ * - `base-container`: full BaseContainer (process security environment)
  * - `appcontainer-bfs`: AppContainer + BFS filesystem isolation
  * - `appcontainer-dacl`: AppContainer + host DACL augmentation (last-resort fallback)
  */
@@ -583,6 +628,26 @@ export interface UiCapabilitySupport {
 }
 
 /**
+ * Host support for enforcing Bubblewrap proxy-only egress.
+ *
+ * Schema `0.8.0-alpha`+ proxy policies run the sandbox in a private network
+ * namespace and default-drop everything except the proxy endpoint. That
+ * requires host tooling (slirp4netns, util-linux unshare, nsenter, the
+ * iptables family) plus unprivileged user and network namespaces the kernel
+ * will actually grant; see `docs/bwrap-support/bubblewrap-backend.md` for the
+ * full list. There is deliberately no fallback to the weaker shared-host-network
+ * model, so a request that cannot configure private networking fails rather
+ * than silently degrading. This reports, before launching, whether the host
+ * can satisfy such a policy.
+ */
+export interface BubblewrapNetworkSupport {
+  /** Whether proxy-only egress can be enforced on this host. */
+  proxyEnforcement: 'supported' | 'unsupported';
+  /** Why enforcement is unsupported. Empty when it is supported. */
+  warnings: string[];
+}
+
+/**
  * Platform support information
  */
 export interface PlatformSupport {
@@ -613,4 +678,10 @@ export interface PlatformSupport {
    * determine them, including on Linux and macOS today.
    */
   uiCapabilities?: UiCapabilitySupport;
+  /**
+   * Bubblewrap host network capability. Omitted on non-Linux platforms and
+   * when bubblewrap itself is unavailable. Reported fail-closed: if the probe
+   * cannot run, `proxyEnforcement` is `'unsupported'`, never absent.
+   */
+  bubblewrapNetwork?: BubblewrapNetworkSupport;
 }

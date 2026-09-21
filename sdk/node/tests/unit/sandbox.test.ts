@@ -17,7 +17,66 @@ import {
   SandboxPolicy,
   SandboxingMethod,
 } from '../../src/types.js';
+import { MxcError } from '../../src/errors.js';
 import { platformSkip } from './test-helpers.js';
+
+describe('exact-version network authoring', () => {
+  for (const [field, value] of Object.entries({
+    allowOutbound: false, allowLocalNetwork: false, allowedHosts: [],
+    blockedHosts: [], proxy: { url: 'http://proxy.example:8080' },
+    defaultPolicy: 'block', enforcementMode: 'both',
+  })) {
+    it(`rejects explicit v0.9 network.${field} with migration guidance`, () => {
+      assert.throws(() => createConfigFromPolicy({
+        version: '0.9.0-alpha', network: { [field]: value },
+      } as SandboxPolicy), /no longer supports.*network\..*network\.egress/);
+    });
+    it(`rejects null v0.9 network.${field} without turning it into omission`, () => {
+      assert.throws(() => createConfigFromPolicy({
+        version: '0.9.0-alpha', network: { [field]: null },
+      } as SandboxPolicy), /no longer supports.*network\..*network\.egress/);
+    });
+  }
+
+  for (const version of ['0.6.0-alpha', '0.7.0-alpha', '0.8.0-alpha']) {
+    it(`retains legacy authoring for the exact ${version} contract`, () => {
+      if (process.platform === 'darwin' && version === '0.6.0-alpha') {
+        assert.throws(() => createConfigFromPolicy({
+          version,
+          network: { allowOutbound: true },
+        }), /use schema 0\.7\.0-alpha or later/);
+        return;
+      }
+      const config = createConfigFromPolicy({
+        version,
+        network: { allowOutbound: true, allowLocalNetwork: false, allowedHosts: [], blockedHosts: [] },
+      });
+      assert.strictEqual(config.version, version);
+      assert.strictEqual(config.network?.defaultPolicy, 'allow');
+      assert.strictEqual(config.network?.allowLocalNetwork, false);
+      assert.deepStrictEqual(config.network?.allowedHosts, []);
+      assert.deepStrictEqual(config.network?.blockedHosts, []);
+    });
+  }
+
+  it('preserves v0.9 omitted, empty, directional and proxy-only intent', () => {
+    const base = { version: '0.9.0-alpha' };
+    assert.strictEqual(createConfigFromPolicy(base).network, undefined);
+    const empty = createConfigFromPolicy({ ...base, network: {} });
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(empty)).network, {});
+    const directional = createConfigFromPolicy({
+      ...base, network: { egress: { default: 'deny' }, ingress: { default: 'deny' } },
+    });
+    assert.deepStrictEqual(directional.network, {
+      egress: { default: 'deny' }, ingress: { default: 'deny' },
+    });
+    const proxy = createConfigFromPolicy({
+      ...base, runtimeConfig: { networkProxy: 'http://127.0.0.1:8080' },
+    });
+    assert.strictEqual(proxy.network, undefined);
+    assert.deepStrictEqual(proxy.runtimeConfig, { networkProxy: 'http://127.0.0.1:8080' });
+  });
+});
 
 describe('containment exports', () => {
   it('exposes nvx and no longer exposes microvm', () => {
@@ -35,10 +94,12 @@ describe('buildSandboxPayload', () => {
   describe('Windows', () => {
     let originalPlatform: PropertyDescriptor | undefined;
 
-    const mockWindows = () => {
+    const mockPlatform = (platform: NodeJS.Platform) => {
       originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
-      Object.defineProperty(process, 'platform', { value: 'win32' });
+      Object.defineProperty(process, 'platform', { value: platform });
     };
+
+    const mockWindows = () => mockPlatform('win32');
 
     const restore = () => {
       if (originalPlatform) {
@@ -137,6 +198,136 @@ describe('buildSandboxPayload', () => {
       mockWindows();
       try {
         assert.doesNotThrow(() => buildSandboxPayload('echo hi', { version: '0.9.0-alpha' }));
+      } finally {
+        restore();
+      }
+    });
+
+    it('should reject ProcessContainer enumeration policy before schema 0.9', () => {
+      mockWindows();
+      try {
+        assert.throws(
+          () => createConfigFromPolicy({
+            version: '0.8.0-alpha',
+            processContainer: { filesystem: { enumeratePaths: ['C:\\tools'] } },
+          }),
+          { message: /requires schema version 0\.9\.0-alpha/ },
+        );
+      } finally {
+        restore();
+      }
+    });
+
+    it('should reject ProcessContainer enumeration policy for non-ProcessContainer targets', () => {
+      const policy: SandboxPolicy = {
+        version: '0.9.0-alpha',
+        processContainer: { filesystem: { enumeratePaths: ['C:\\tools'] } },
+      };
+      for (const [platform, containment] of [
+        ['linux', 'process'],
+        ['darwin', 'process'],
+        ['win32', 'wslc'],
+      ] as const) {
+        mockPlatform(platform);
+        try {
+          assert.throws(
+            () => createConfigFromPolicy(policy, containment),
+            { message: /supported only by the Windows ProcessContainer backend/ },
+          );
+        } finally {
+          restore();
+        }
+      }
+    });
+
+    it('should reject an unregistered version within the supported range', () => {
+      mockWindows();
+      try {
+        assert.throws(
+          () => buildSandboxPayload('echo hi', { version: '0.6.1-alpha' }),
+          { message: /not a registered schema contract/ },
+        );
+      } finally {
+        restore();
+      }
+    });
+
+    it('should enforce the minimum schema for every development-only containment', () => {
+      mockWindows();
+      try {
+        for (const containment of [
+          'vm',
+          'nvx',
+          'windows_sandbox',
+          'wslc',
+          'hyperlight',
+          'isolation_session',
+        ] as const) {
+          assert.throws(
+            () => createConfigFromPolicy({ version: '0.8.0-alpha' }, containment),
+            {
+              message: new RegExp(
+                `does not support containment '${containment}'.*0\\.9\\.0-alpha`,
+              ),
+            },
+          );
+        }
+      } finally {
+        restore();
+      }
+    });
+
+    it('should accept the exact 0.9 boundary for every development containment', () => {
+      mockWindows();
+      try {
+        for (const containment of [
+          'vm',
+          'nvx',
+          'windows_sandbox',
+          'wslc',
+          'hyperlight',
+          'isolation_session',
+        ] as const) {
+          try {
+            createConfigFromPolicy({ version: '0.9.0-alpha' }, containment);
+          } catch (error) {
+            assert.doesNotMatch(
+              (error as Error).message,
+              /Schema .* does not support containment/,
+              `${containment} must pass the 0.9 schema floor before backend-specific validation`,
+            );
+          }
+        }
+      } finally {
+        restore();
+      }
+    });
+
+    it('should enforce and accept the macOS process-to-Seatbelt boundary', () => {
+      mockPlatform('darwin');
+      try {
+        assert.throws(
+          () => createConfigFromPolicy({ version: '0.6.0-alpha' }),
+          { message: /does not support containment 'process'.*0\.7\.0-alpha/ },
+        );
+        assert.doesNotThrow(
+          () => createConfigFromPolicy({ version: '0.7.0-alpha' }),
+        );
+        assert.throws(
+          () => createConfigFromPolicy({ version: '0.6.0-alpha' }, 'seatbelt'),
+          { message: /does not support containment 'seatbelt'.*0\.7\.0-alpha/ },
+        );
+      } finally {
+        restore();
+      }
+    });
+
+    it('should retain the 0.6 boundary for stable process containment', () => {
+      mockWindows();
+      try {
+        assert.doesNotThrow(
+          () => createConfigFromPolicy({ version: '0.6.0-alpha' }),
+        );
       } finally {
         restore();
       }
@@ -321,6 +512,7 @@ describe('buildSandboxPayload', () => {
 
   describe('Containment override', () => {
     let originalPlatform: PropertyDescriptor | undefined;
+    const developmentPolicy: SandboxPolicy = { version: '0.9.0-alpha' };
 
     const mockWindows = () => {
       originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
@@ -337,8 +529,8 @@ describe('buildSandboxPayload', () => {
       mockWindows();
       try {
         const policy: SandboxPolicy = {
-          version: '0.6.0-alpha',
-          network: { allowOutbound: true },
+          version: '0.9.0-alpha',
+          network: { egress: { default: 'allow' } },
         };
         const payload = buildSandboxPayload('echo hi', policy);
         assert.ok(payload.processContainer, 'processContainer section should be present');
@@ -352,26 +544,26 @@ describe('buildSandboxPayload', () => {
 
   describe('WSLC', () => {
     it('should set containment to wslc when containment option is passed', () => {
-      const payload = buildSandboxPayload('echo hello', { version: '0.6.0-alpha' }, undefined, undefined, 'wslc');
+      const payload = buildSandboxPayload('echo hello', { version: '0.9.0-alpha' }, undefined, undefined, 'wslc');
       assert.strictEqual(payload.containment, 'wslc');
       assert.strictEqual(payload.process!.commandLine, 'echo hello');
     });
 
     it('should populate experimental.wslc with default image', () => {
-      const payload = buildSandboxPayload('echo hello', { version: '0.6.0-alpha' }, undefined, undefined, 'wslc');
+      const payload = buildSandboxPayload('echo hello', { version: '0.9.0-alpha' }, undefined, undefined, 'wslc');
       assert.ok(payload.experimental?.wslc);
       assert.strictEqual(payload.experimental!.wslc!.image, 'alpine:latest');
     });
 
     it('should not set processContainer or lxc config', () => {
-      const payload = buildSandboxPayload('echo hello', { version: '0.6.0-alpha' }, undefined, undefined, 'wslc');
+      const payload = buildSandboxPayload('echo hello', { version: '0.9.0-alpha' }, undefined, undefined, 'wslc');
       assert.strictEqual(payload.processContainer, undefined);
       assert.strictEqual(payload.lxc, undefined);
     });
 
-    it('should set default-deny network', () => {
-      const payload = buildSandboxPayload('echo hello', { version: '0.6.0-alpha' }, undefined, undefined, 'wslc');
-      assert.strictEqual(payload.network!.defaultPolicy, 'block');
+    it('should rely on the 0.9 implicit default-deny network', () => {
+      const payload = buildSandboxPayload('echo hello', { version: '0.9.0-alpha' }, undefined, undefined, 'wslc');
+      assert.strictEqual(payload.network, undefined);
     });
   });
 });
@@ -406,6 +598,47 @@ describe('createConfigFromPolicy', () => {
     assert.deepStrictEqual(config.filesystem!.readwritePaths, ['/workspace']);
     assert.deepStrictEqual(config.filesystem!.readonlyPaths, ['/tools']);
     assert.deepStrictEqual(config.filesystem!.deniedPaths, ['/secrets']);
+  });
+
+  it('should pass enumerate-only filesystem paths through for 0.9', () => {
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    try {
+      const config = createConfigFromPolicy({
+        version: '0.9.0-alpha',
+        processContainer: {
+          filesystem: {
+            enumeratePaths: ['C:\\tools'],
+          },
+        },
+      });
+
+      assert.strictEqual(config.containment, 'processcontainer');
+      assert.deepStrictEqual(
+        config.processContainer!.filesystem!.enumeratePaths,
+        ['C:\\tools'],
+      );
+    } finally {
+      if (originalPlatform) {
+        Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    }
+  });
+
+  it('should not select ProcessContainer for an empty processContainer policy', () => {
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    try {
+      const config = createConfigFromPolicy({
+        version: '0.9.0-alpha',
+        processContainer: {},
+      });
+      assert.strictEqual(config.containment, 'process');
+    } finally {
+      if (originalPlatform) {
+        Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    }
   });
 
   it('should map UI fields correctly', () => {
@@ -616,6 +849,7 @@ describe('createConfigFromPolicy', () => {
           },
         });
 
+        assert.strictEqual(config.containment, 'processcontainer');
         assert.deepStrictEqual(config.network, {
           egress: { default: 'deny' },
           ingress: { default: 'allow', hostLoopback: 'deny' },
@@ -1013,7 +1247,7 @@ describe('createConfigFromPolicy', () => {
       // real bridge) must get the identical wire config.
       mockLinux();
       try {
-        const policy = {
+        const policy: SandboxPolicy = {
           version: '0.8.0-alpha',
           network: {
             egress: { default: 'deny' as const },
@@ -1075,7 +1309,7 @@ describe('createConfigFromPolicy', () => {
       mockDarwin();
       try {
         const config = createConfigFromPolicy({
-          version: '0.6.0-alpha',
+          version: '0.7.0-alpha',
           network: { allowedHosts: ['api.github.com'] },
         });
         // Abstract 'process' on macOS resolves to 'seatbelt' in the wire format
@@ -1092,7 +1326,7 @@ describe('createConfigFromPolicy', () => {
       mockDarwin();
       try {
         const config = createConfigFromPolicy({
-          version: '0.6.0-alpha',
+          version: '0.7.0-alpha',
           network: { blockedHosts: ['evil.com'] },
         });
         assert.strictEqual(config.containment, 'seatbelt');
@@ -1111,7 +1345,7 @@ describe('createConfigFromPolicy', () => {
       mockDarwin();
       try {
         const config = createConfigFromPolicy({
-          version: '0.6.0-alpha',
+          version: '0.7.0-alpha',
           network: { allowOutbound: true, allowLocalNetwork: true },
         });
         assert.strictEqual(config.containment, 'seatbelt');
@@ -1125,7 +1359,7 @@ describe('createConfigFromPolicy', () => {
       mockDarwin();
       try {
         const config = createConfigFromPolicy({
-          version: '0.6.0-alpha',
+          version: '0.7.0-alpha',
           network: { allowOutbound: true },
         });
         assert.strictEqual(config.network!.allowLocalNetwork, undefined);
@@ -1420,7 +1654,7 @@ describe('createConfigFromPolicy', () => {
 
   describe('WSLC', () => {
     it('should set containment to wslc and populate experimental.wslc', () => {
-      const config = createConfigFromPolicy({ version: '0.6.0-alpha' }, 'wslc');
+      const config = createConfigFromPolicy({ version: '0.9.0-alpha' }, 'wslc');
       assert.strictEqual(config.containment, 'wslc');
       assert.ok(config.experimental?.wslc);
       assert.strictEqual(config.experimental!.wslc!.image, 'alpine:latest');
@@ -1429,7 +1663,7 @@ describe('createConfigFromPolicy', () => {
     it('should forward schema 0.8 ProcessContainer peer policy for native rejection', () => {
       const config = createConfigFromPolicy(
         {
-          version: '0.8.0-alpha',
+          version: '0.9.0-alpha',
           processContainer: {
             network: {
               allowedProxyPeer: 'Contoso.Proxy_1234567890abc',
@@ -1444,49 +1678,53 @@ describe('createConfigFromPolicy', () => {
       });
     });
 
-    it('should set default-deny network when no network policy is specified', () => {
-      const config = createConfigFromPolicy({ version: '0.6.0-alpha' }, 'wslc');
-      assert.strictEqual(config.network!.defaultPolicy, 'block');
+    it('should rely on the 0.9 implicit default-deny network when no policy is specified', () => {
+      const config = createConfigFromPolicy({ version: '0.9.0-alpha' }, 'wslc');
+      assert.strictEqual(config.network, undefined);
     });
 
-    it('should map allowOutbound to network allow policy', () => {
+    it('should preserve directional egress allow policy', () => {
       const config = createConfigFromPolicy({
-        version: '0.6.0-alpha',
-        network: { allowOutbound: true },
+        version: '0.9.0-alpha',
+        network: {
+          egress: { default: 'allow' },
+          ingress: { default: 'allow', hostLoopback: 'allow' },
+        },
       }, 'wslc');
-      assert.strictEqual(config.network!.defaultPolicy, 'allow');
+      assert.strictEqual(config.network!.egress!.default, 'allow');
     });
 
     it('should not set enforcementMode for wslc', () => {
       const config = createConfigFromPolicy({
-        version: '0.6.0-alpha',
-        network: { allowOutbound: true },
+        version: '0.9.0-alpha',
+        network: {
+          egress: { default: 'allow' },
+          ingress: { default: 'allow', hostLoopback: 'allow' },
+        },
       }, 'wslc');
       assert.strictEqual(config.network!.enforcementMode, undefined);
     });
 
-    it('should allow allowedHosts without allowOutbound (block + allowlist)', () => {
-      const config = createConfigFromPolicy({
-        version: '0.6.0-alpha',
+    it('rejects legacy host authoring without guessing hostname CIDRs', () => {
+      assert.throws(() => createConfigFromPolicy({
+        version: '0.9.0-alpha',
         network: { allowedHosts: ['example.com'] },
-      }, 'wslc');
-      assert.strictEqual(config.network!.defaultPolicy, 'block');
-      assert.deepStrictEqual(config.network!.allowedHosts, ['example.com']);
+      }, 'wslc'), /network.allowedHosts.*Hostnames are not converted/);
     });
 
     it('should not set processContainer config for wslc', () => {
-      const config = createConfigFromPolicy({ version: '0.6.0-alpha' }, 'wslc');
+      const config = createConfigFromPolicy({ version: '0.9.0-alpha' }, 'wslc');
       assert.strictEqual(config.processContainer, undefined);
     });
 
     it('should not set lxc config for wslc', () => {
-      const config = createConfigFromPolicy({ version: '0.6.0-alpha' }, 'wslc');
+      const config = createConfigFromPolicy({ version: '0.9.0-alpha' }, 'wslc');
       assert.strictEqual(config.lxc, undefined);
     });
 
     it('should map filesystem paths correctly', () => {
       const config = createConfigFromPolicy({
-        version: '0.6.0-alpha',
+        version: '0.9.0-alpha',
         filesystem: {
           readwritePaths: ['C:\\workspace'],
           readonlyPaths: ['C:\\data'],
@@ -1500,19 +1738,19 @@ describe('createConfigFromPolicy', () => {
 
     it('should map timeoutMs to process.timeout', () => {
       const config = createConfigFromPolicy({
-        version: '0.6.0-alpha',
+        version: '0.9.0-alpha',
         timeoutMs: 30000,
       }, 'wslc');
       assert.strictEqual(config.process!.timeout, 30000);
     });
 
     it('should set containerId', () => {
-      const config = createConfigFromPolicy({ version: '0.6.0-alpha' }, 'wslc', 'my-container');
+      const config = createConfigFromPolicy({ version: '0.9.0-alpha' }, 'wslc', 'my-container');
       assert.strictEqual(config.containerId, 'my-container');
     });
 
     it('should throw from spawnSandbox when experimental backend is used via config', () => {
-      const config = createConfigFromPolicy({ version: '0.6.0-alpha' }, 'wslc');
+      const config = createConfigFromPolicy({ version: '0.9.0-alpha' }, 'wslc');
       config.process!.commandLine = 'echo hello';
       assert.throws(
         () => spawnSandboxFromConfig(config),
@@ -1521,12 +1759,64 @@ describe('createConfigFromPolicy', () => {
     });
 
     it('should throw from spawnSandboxFromConfig when experimental is not set', () => {
-      const config = createConfigFromPolicy({ version: '0.6.0-alpha' }, 'wslc');
+      const config = createConfigFromPolicy({ version: '0.9.0-alpha' }, 'wslc');
       config.process!.commandLine = 'echo hello';
       assert.throws(
         () => spawnSandboxFromConfig(config),
         { message: /experimental mode/ },
       );
+    });
+
+    it('should apply inheritDefaultEnv without replacing the supplied environment', () => {
+      const config = createConfigFromPolicy({ version: '0.9.0-alpha' }, 'wslc');
+      config.process!.commandLine = 'echo hello';
+      config.process!.env = ['GREETING=hello'];
+
+      assert.throws(
+        () => spawnSandboxFromConfig(config, { inheritDefaultEnv: true }),
+        { message: /experimental mode/ },
+      );
+      assert.deepStrictEqual(config.process!.env, ['GREETING=hello']);
+      assert.strictEqual(config.process!.inheritDefaultEnv, true);
+    });
+
+    it('should leave inheritDefaultEnv version validation to the native engine', () => {
+      const config = createConfigFromPolicy({ version: '0.9.0-alpha' }, 'wslc');
+      config.process!.commandLine = 'echo hello';
+
+      assert.throws(
+        () => spawnSandboxFromConfig(config, { inheritDefaultEnv: true }),
+        { message: /experimental mode/ },
+      );
+      assert.equal(config.version, '0.9.0-alpha');
+      assert.strictEqual(config.process!.inheritDefaultEnv, true);
+    });
+
+    it('should leave non-PTY inheritDefaultEnv version validation to the native engine', () => {
+      const config = createConfigFromPolicy({ version: '0.9.0-alpha' }, 'wslc');
+      config.process!.commandLine = 'echo hello';
+
+      assert.throws(
+        () => spawnSandboxFromConfig(config, {
+          usePty: false,
+          inheritDefaultEnv: true,
+        }),
+        { message: /experimental mode/ },
+      );
+      assert.equal(config.version, '0.9.0-alpha');
+      assert.strictEqual(config.process!.inheritDefaultEnv, true);
+    });
+
+    it('should allow explicit false to disable inheritDefaultEnv in a supplied config', () => {
+      const config = createConfigFromPolicy({ version: '0.9.0-alpha' }, 'wslc');
+      config.process!.commandLine = 'echo hello';
+      config.process!.inheritDefaultEnv = true;
+
+      assert.throws(
+        () => spawnSandboxFromConfig(config, { inheritDefaultEnv: false }),
+        { message: /experimental mode/ },
+      );
+      assert.strictEqual(config.process!.inheritDefaultEnv, undefined);
     });
   });
 
@@ -1564,6 +1854,26 @@ describe('createConfigFromPolicy', () => {
       assert.strictEqual(config.lxc!.distribution, 'alpine');
     });
 
+    it('should use firewall enforcement for legacy LXC policies with or without network access', () => {
+      for (const version of ['0.6.0-alpha', '0.7.0-alpha'] as const) {
+        const noNetwork = createConfigFromPolicy({ version }, 'lxc');
+        assert.strictEqual(noNetwork.network!.defaultPolicy, 'block');
+        assert.strictEqual(noNetwork.network!.enforcementMode, 'firewall');
+
+        const outbound = createConfigFromPolicy({
+          version,
+          network: { allowOutbound: true },
+        }, 'lxc');
+        assert.strictEqual(outbound.network!.defaultPolicy, 'allow');
+        assert.strictEqual(outbound.network!.enforcementMode, 'firewall');
+      }
+    });
+
+    it('should not add a legacy enforcement mode to a schema 0.8 policy', () => {
+      const config = createConfigFromPolicy({ version: '0.8.0-alpha' }, 'lxc');
+      assert.strictEqual(config.network, undefined);
+    });
+
     it('should force enforcementMode=firewall when host filtering is requested', () => {
       // The LXC runner only invokes iptables when network_enforcement_mode is
       // Firewall|Both (see lxc_common::network_iptables). Without this stamp,
@@ -1590,7 +1900,7 @@ describe('createConfigFromPolicy', () => {
   });
 });
 
-describe('Schema 0.6.0 vocabulary', () => {
+describe('Development containment vocabulary', () => {
   it('should accept isolation_session as a SandboxingMethod', () => {
     const m: SandboxingMethod = 'isolation_session';
     assert.strictEqual(m, 'isolation_session');
@@ -1598,10 +1908,57 @@ describe('Schema 0.6.0 vocabulary', () => {
 
   it('should accept isolation_session as a ContainerConfig.containment value', () => {
     const c: ContainerConfig = {
-      version: '0.6.0-alpha',
+      version: '0.9.0-alpha',
       containment: 'isolation_session',
     };
     assert.strictEqual(c.containment, 'isolation_session');
+  });
+
+});
+
+describe('IsolationSession one-shot request serialization', () => {
+  const decodeConfig = (config: ContainerConfig): Record<string, unknown> => {
+    const { args } = resolveExecutableAndArgs(config, {
+      executablePath: process.execPath,
+      skipPlatformCheck: true,
+      experimental: true,
+    });
+    const index = args.indexOf('--config-base64');
+    assert.ok(index >= 0, '--config-base64 should be present in args');
+    return JSON.parse(Buffer.from(args[index + 1], 'base64').toString('utf-8'));
+  };
+
+  it('preserves every removed raw network field for native exact-contract rejection', () => {
+    for (const [field, value] of Object.entries({
+      defaultPolicy: 'block', enforcementMode: 'both', allowedHosts: [],
+      blockedHosts: [], allowLocalNetwork: false, proxy: { url: 'http://proxy.example:8080' },
+    })) {
+      for (const authoredValue of [value, null]) {
+        const request = decodeConfig({
+          version: '0.9.0-alpha', containment: 'process',
+          process: { commandLine: 'echo test' },
+          network: { [field]: authoredValue },
+        });
+        assert.deepStrictEqual(request.network, { [field]: authoredValue });
+      }
+    }
+  });
+
+  it('preserves the directional IsolationSession network posture', () => {
+    const request = decodeConfig({
+      version: '0.9.0-alpha',
+      containment: 'isolation_session',
+      process: { commandLine: 'echo hello' },
+      network: {
+        egress: { default: 'allow' },
+        ingress: { default: 'allow', hostLoopback: 'allow' },
+      },
+    });
+    assert.deepStrictEqual(request.network, {
+      egress: { default: 'allow' },
+      ingress: { default: 'allow', hostLoopback: 'allow' },
+    });
+    assert.ok(!('experimental' in request));
   });
 });
 
@@ -1612,8 +1969,14 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
   const fakeExe = process.execPath;
 
   function makeConfig(containment: string): ContainerConfig {
+    const version =
+      ['nvx', 'vm', 'wslc', 'isolation_session', 'windows_sandbox'].includes(containment)
+        ? '0.9.0-alpha'
+        : ['seatbelt', 'macos_sandbox'].includes(containment)
+          ? '0.7.0-alpha'
+          : '0.6.0-alpha';
     return {
-      version: '0.6.0-alpha',
+      version,
       containment: containment as ContainerConfig['containment'],
       process: { commandLine: 'echo hi' },
     };
@@ -1828,5 +2191,80 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
         'did not expect --allow-testing-features for a url proxy',
       );
     });
+  });
+
+  describe('one-shot telemetry', () => {
+    function decodeConfig(args: string[]): ContainerConfig {
+      const index = args.indexOf('--config-base64');
+      assert.ok(index >= 0, '--config-base64 should be present in args');
+      return JSON.parse(
+        Buffer.from(args[index + 1], 'base64').toString('utf-8'),
+      ) as ContainerConfig;
+    }
+
+    it('serializes config telemetry with schema 0.9', () => {
+      const config = makeConfig('process');
+      config.version = '0.9.0-alpha';
+      config.telemetry = { enabled: true };
+      const { args } = resolveExecutableAndArgs(config, {
+        executablePath: fakeExe,
+        skipPlatformCheck: true,
+      });
+
+      assert.deepStrictEqual(decodeConfig(args).telemetry, { enabled: true });
+    });
+
+    it('propagates SandboxPolicy telemetry through the primary one-shot API', () => {
+      const payload = buildSandboxPayload('echo hi', {
+        version: '0.9.0-alpha',
+        telemetry: { enabled: true },
+      });
+
+      assert.deepStrictEqual(payload.telemetry, { enabled: true });
+    });
+
+    for (const version of ['0.6.0-alpha', '0.7.0-alpha', '0.8.0-alpha']) {
+      it(`rejects SandboxPolicy telemetry with schema ${version}`, () => {
+        assert.throws(
+          () => createConfigFromPolicy({
+            version,
+            telemetry: { enabled: true },
+          }),
+          {
+            message: `Schema ${version} does not support telemetry; ` +
+              `use schema 0.9.0-alpha or later.`,
+          },
+        );
+      });
+    }
+
+    it('leaves config telemetry schema validation to the native parser', () => {
+      const config = makeConfig('process');
+      config.telemetry = { enabled: true };
+      const { args } = resolveExecutableAndArgs(config, {
+        executablePath: fakeExe,
+        skipPlatformCheck: true,
+      });
+
+      const serialized = decodeConfig(args);
+      assert.deepStrictEqual(serialized.telemetry, { enabled: true });
+      assert.strictEqual(serialized.version, config.version);
+    });
+
+    for (const experimental of [true, 'invalid']) {
+      it(`leaves malformed experimental value ${JSON.stringify(experimental)} to the native parser`, () => {
+        const config = {
+          ...makeConfig('process'),
+          experimental,
+        } as unknown as ContainerConfig;
+
+        const { args } = resolveExecutableAndArgs(config, {
+          executablePath: fakeExe,
+          skipPlatformCheck: true,
+        });
+
+        assert.strictEqual(decodeConfig(args).experimental, experimental);
+      });
+    }
   });
 });

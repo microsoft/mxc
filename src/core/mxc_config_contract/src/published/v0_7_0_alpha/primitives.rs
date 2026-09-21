@@ -35,6 +35,11 @@ impl<T> Default for OptionalField<T> {
 }
 
 impl<T> OptionalField<T> {
+    /// Construct a field that is present with `value`.
+    pub fn present(value: T) -> Self {
+        Self(Some(value))
+    }
+
     /// Returns a shared reference to the value when the field was present.
     pub fn as_ref(&self) -> Option<&T> {
         self.0.as_ref()
@@ -66,7 +71,7 @@ impl NonEmptyString {
     /// Creates a validated string.
     ///
     /// Returns an error when `value` is empty.
-    fn new(value: String) -> Result<Self, String> {
+    pub fn new(value: String) -> Result<Self, String> {
         if value.is_empty() {
             Err("string must not be empty".to_string())
         } else {
@@ -109,5 +114,19 @@ mod tests {
     fn non_empty_string_rejects_empty() {
         let error = NonEmptyString::new(String::new()).unwrap_err();
         assert_eq!(error, "string must not be empty");
+    }
+
+    #[test]
+    fn optional_field_constructs_present_value() {
+        let field = OptionalField::present("value".to_string());
+
+        assert_eq!(field.into_option().as_deref(), Some("value"));
+    }
+
+    #[test]
+    fn optional_field_default_is_absent() {
+        let field: OptionalField<String> = OptionalField::default();
+
+        assert_eq!(field.into_option(), None);
     }
 }

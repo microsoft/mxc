@@ -145,6 +145,7 @@ fn processcontainer_capture_denials_output_file() {
     let _ = std::fs::remove_file(&output_path);
 
     let config = serde_json::json!({
+        "version": "0.9.0-alpha",
         "process": { "commandLine": "cmd.exe /c echo capture-denials-e2e", "timeout": 30000 },
         "containment": "processcontainer",
         "processContainer": {
@@ -248,6 +249,58 @@ fn processcontainer_capture_denials_output_file() {
     let _ = std::fs::remove_file(emitted_path);
 }
 
+/// PSEC capture must preserve the runtime proxy's unrestricted loopback peer;
+/// omitting that sentinel makes CreateProcessSecurityEnvironment reject the
+/// otherwise valid policy with E_INVALIDARG.
+fn processcontainer_proxy_capture_uses_native_capture() {
+    let config = serde_json::json!({
+        "version": "0.9.0-alpha",
+        "process": {
+            "commandLine": "cmd.exe /d /c echo proxy-capture-launched",
+            "timeout": 30000
+        },
+        "containment": "processcontainer",
+        "network": {
+            "egress": { "default": "deny" },
+            "ingress": { "default": "allow", "hostLoopback": "allow" }
+        },
+        "runtimeConfig": {
+            "networkProxy": "http://127.0.0.1:8080"
+        },
+        "processContainer": {
+            "captureDenials": { "mode": "block" }
+        }
+    });
+
+    let result = run_wxc_config_value(
+        "processcontainer_proxy_capture_uses_native_capture",
+        &config,
+        &["--debug"],
+    );
+    let combined = result.combined_output_with_decoded_base64();
+
+    if combined.contains("captureDenials requires either") {
+        println!(
+            "SKIPPED: processcontainer_proxy_capture_uses_native_capture requires native capture \
+             APIs"
+        );
+        return;
+    }
+    if result.is_missing_process_prerequisite() {
+        println!(
+            "SKIPPED: processcontainer_proxy_capture_uses_native_capture requires local sandbox \
+             runtime prerequisites not available here"
+        );
+        return;
+    }
+
+    assert_success(&result);
+    assert!(
+        combined.contains("proxy-capture-launched"),
+        "the native proxy-capture child did not launch\n--- combined output ---\n{combined}"
+    );
+}
+
 /// Exercises timeout -> capture teardown -> retained metadata end to end.
 fn processcontainer_capture_denials_timeout_retention() {
     let output_path = std::env::temp_dir().join(format!(
@@ -260,6 +313,7 @@ fn processcontainer_capture_denials_timeout_retention() {
     let _ = std::fs::remove_file(&output_path);
 
     let config = serde_json::json!({
+        "version": "0.9.0-alpha",
         "process": {
             "commandLine": "cmd.exe /d /c \"for /L %i in (1,1,100000000) do @rem\"",
             "timeout": 1000
@@ -375,6 +429,15 @@ fn test_processcontainer_capture_denials_output_file() {
         return;
     }
     with_test_lock(processcontainer_capture_denials_output_file);
+}
+
+#[test]
+#[ignore] // Live capture needs the brokered learning-mode API + PSEC 1.1 on a compatible host
+fn test_processcontainer_proxy_capture_uses_native_capture() {
+    if !cached_has_wxc_exe() {
+        return;
+    }
+    with_test_lock(processcontainer_proxy_capture_uses_native_capture);
 }
 
 #[test]
@@ -643,18 +706,8 @@ fn hyperlight_suite() {
             expected_exit: 42,
             output_contains: None,
         },
-        HyperlightCase {
-            config: "hyperlight_networking.json",
-            description: "HTTP GET with allowedHosts network policy",
-            expected_exit: 0,
-            output_contains: Some("200"),
-        },
-        HyperlightCase {
-            config: "hyperlight_networking_blocked.json",
-            description: "HTTP GET to unlisted host is blocked by allowedHosts",
-            expected_exit: 0,
-            output_contains: Some("BLOCKED"),
-        },
+        // The legacy hostname-policy fixtures are intentional v0.9 parser
+        // rejections covered by run_hyperlight_network_migration_test.ps1.
         HyperlightCase {
             config: "hyperlight_timeout.json",
             description: "time.sleep(120) killed by 1s timeout",
@@ -709,6 +762,7 @@ fn hyperlight_suite() {
         );
 
         let config = serde_json::json!({
+            "version": "0.9.0-alpha",
             "process": { "commandLine": script, "timeout": 30000 },
             "containment": "hyperlight",
             "filesystem": { "readwritePaths": [mount_dir.to_string_lossy()] }
@@ -773,6 +827,7 @@ fn hyperlight_suite() {
         );
 
         let config = serde_json::json!({
+            "version": "0.9.0-alpha",
             "process": { "commandLine": script, "timeout": 30000 },
             "containment": "hyperlight",
             "filesystem": {

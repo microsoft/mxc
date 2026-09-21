@@ -39,28 +39,11 @@ command -v lxc-create >/dev/null 2>&1 || skip "LXC (lxc-create) is not installed
 [ -f "$LXC_EXEC" ] || skip "lxc-exec binary not built; run build.sh first."
 
 CHAIN_NAME=""
-VETH=""
 
-# This test deliberately leaves a container, a firewall chain, and the veth
-# return rules behind, so it owns their removal on every exit path rather than
-# the runner.
+# This test deliberately leaves a container behind, so it owns the container's
+# removal on every exit path rather than the runner. The policy it preserves
+# lives in that container's network namespace and goes with it.
 cleanup() {
-    for tool in iptables ip6tables; do
-        # The return rules name only the veth and jump to ACCEPT, so a search
-        # keyed on the chain name alone never sees them.
-        for pattern in "$CHAIN_NAME" "$VETH"; do
-            [ -n "$pattern" ] || continue
-            while read -r rule; do
-                [ -n "$rule" ] || continue
-                # shellcheck disable=SC2086
-                $tool -D FORWARD ${rule#-A FORWARD } >/dev/null 2>&1 || true
-            done <<<"$($tool -S FORWARD 2>/dev/null | grep -F -- "$pattern" || true)"
-        done
-        if [ -n "$CHAIN_NAME" ]; then
-            $tool -F "$CHAIN_NAME" >/dev/null 2>&1 || true
-            $tool -X "$CHAIN_NAME" >/dev/null 2>&1 || true
-        fi
-    done
     lxc-destroy -n "$CONTAINER" -f >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -79,30 +62,40 @@ if ! grep -Fq "MXC_PRESERVE_RAN" <<<"$OUTPUT"; then
 fi
 
 derive_chain_name "$OUTPUT"
-VETH="$(sed -n 's/^.*Discovered veth interface: \([^ ]*\).*$/\1/p' <<<"$OUTPUT" | head -n 1)"
 
 # The positive control. Were the chain never installed, every assertion below
 # would be asserting the absence of something that was never there.
-if ! grep -Fq "FORWARD hook installed" <<<"$OUTPUT"; then
-    fail "no FORWARD hook was installed, so this run never had a policy to preserve."
-fi
-
-if ! iptables -S "$CHAIN_NAME" >/dev/null 2>&1; then
-    fail "preservePolicy was set, but iptables chain '$CHAIN_NAME' was removed."
-fi
-
-if ! ip6tables -S "$CHAIN_NAME" >/dev/null 2>&1; then
-    fail "preservePolicy was set, but ip6tables chain '$CHAIN_NAME' was removed."
-fi
-
-# A surviving chain that nothing dispatches to is not a preserved policy.
-if ! iptables -S FORWARD 2>/dev/null | grep -Fq -- "$CHAIN_NAME"; then
-    fail "chain '$CHAIN_NAME' survived but no FORWARD rule reaches it, so the container is unfiltered."
+if ! grep -Fq "OUTPUT hook installed" <<<"$OUTPUT"; then
+    fail "no OUTPUT hook was installed, so this run never had a policy to preserve."
 fi
 
 if ! lxc-info -n "$CONTAINER" >/dev/null 2>&1; then
     fail "destroyOnExit was false, but the container was destroyed."
 fi
 
-echo "PASS: the policy and its FORWARD hook outlived the run."
+# The preserved rules live in the container's network namespace, so reaching
+# them means entering it. `lxc-info -p -H` prints the init PID alone.
+INIT_PID="$(lxc-info -n "$CONTAINER" -p -H 2>/dev/null || true)"
+if [ -z "$INIT_PID" ] || [ "$INIT_PID" = "-1" ]; then
+    fail "could not read the init PID of the preserved container."
+fi
+
+in_ns() {
+    nsenter -t "$INIT_PID" -n "$@"
+}
+
+if ! in_ns iptables -S "$CHAIN_NAME" >/dev/null 2>&1; then
+    fail "preservePolicy was set, but iptables chain '$CHAIN_NAME' was removed."
+fi
+
+if ! in_ns ip6tables -S "$CHAIN_NAME" >/dev/null 2>&1; then
+    fail "preservePolicy was set, but ip6tables chain '$CHAIN_NAME' was removed."
+fi
+
+# A surviving chain that nothing dispatches to is not a preserved policy.
+if ! in_ns iptables -S OUTPUT 2>/dev/null | grep -Fq -- "$CHAIN_NAME"; then
+    fail "chain '$CHAIN_NAME' survived but no OUTPUT rule reaches it, so the container is unfiltered."
+fi
+
+echo "PASS: the policy and its OUTPUT hook outlived the run."
 echo "LXC preserved-policy test complete."

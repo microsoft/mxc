@@ -97,7 +97,7 @@ There is no idle watchdog. A started state-aware sandbox remains active until
 
 ```json
 {
-  "version": "0.6.0-alpha",
+  "version": "0.9.0-alpha",
   "containment": "windows_sandbox",
   "process": {
     "commandLine": "powershell -NoProfile -Command \"Write-Output 'hello'\"",
@@ -110,7 +110,7 @@ There is no idle watchdog. A started state-aware sandbox remains active until
 
 ```json
 {
-  "version": "0.6.0-alpha",
+  "version": "0.9.0-alpha",
   "phase": "provision",
   "containment": "windows_sandbox",
   "filesystem": {

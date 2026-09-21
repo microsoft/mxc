@@ -93,6 +93,21 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
+const requiredSignatures = [
+  "mxc_run_request(byte* request_json_utf8, MxcRunResult* @out)",
+  "mxc_spawn_request(byte* request_json_utf8, MxcSandbox** out_handle, MxcErrorDetail* out_error)",
+];
+const missingSignatures = requiredSignatures.filter(
+  (signature) => !content.includes(signature)
+);
+if (missingSignatures.length > 0) {
+  console.error(
+    "ERROR: generated C# bindings have unexpected request signature(s):\n  " +
+      missingSignatures.join("\n  ")
+  );
+  process.exit(1);
+}
+
 // build.rs names the same set of Rust sources twice: once for csbindgen to
 // read, and once as `cargo:rerun-if-changed`. Emitting any `rerun-if-changed`
 // replaces cargo's default "re-run when any package file changed" with exactly

@@ -4,7 +4,7 @@
 MXC uses a JSON configuration file. The current stable schema is at
 [`schemas/stable/mxc-config.schema.0.8.0-alpha.json`](../schemas/stable/mxc-config.schema.0.8.0-alpha.json).
 For development, the dev schema at
-[`schemas/dev/mxc-config.schema.0.9.0-dev.json`](../schemas/dev/mxc-config.schema.0.9.0-dev.json)
+[`schemas/dev/mxc-config.schema.0.9.0-alpha.json`](../schemas/dev/mxc-config.schema.0.9.0-alpha.json)
 includes experimental features and may change without notice.
 
 Editors that support JSON Schema will provide autocomplete and validation when
@@ -16,7 +16,7 @@ production configs and the dev schema when working on experimental features:
 "$schema": "./schemas/stable/mxc-config.schema.0.8.0-alpha.json"
 
 // Development (experimental features)
-"$schema": "./schemas/dev/mxc-config.schema.0.9.0-dev.json"
+"$schema": "./schemas/dev/mxc-config.schema.0.9.0-alpha.json"
 ```
 
 ### Schema 0.8 networking
@@ -80,11 +80,43 @@ schema 0.6 and 0.7. During the additive schema 0.8 transition, requests may
 continue to use those legacy fields or use the directional fields above, but
 cannot mix both formats in one request.
 
+### IsolationSession unrestricted networking (0.9)
+
+IsolationSession cannot restrict networking. Exact v0.9 requests must describe
+that actual posture through the standard directional network fields:
+
+```json
+{
+    "version": "0.9.0-alpha",
+    "phase": "provision",
+    "containment": "isolation_session",
+    "network": {
+        "egress": { "default": "allow" },
+        "ingress": {
+            "default": "allow",
+            "hostLoopback": "allow"
+        }
+    }
+}
+```
+
+All three directional values must be explicitly `allow`; omission defaults to
+deny. Legacy network fields, rules, mixed postures, and proxies are rejected.
+An absent or empty `network` object is rejected. The existing experimental
+execution opt-in remains required. Published v0.6/v0.7/v0.8 contracts are
+unchanged by this addition.
+Every complete request that carries a process requires a non-empty
+`process.commandLine`. The Windows native CLI may accept a template without
+that field when the command is supplied after `--`; `wxc-exec.exe` inserts or
+replaces `process.commandLine` before schema and typed request validation. That
+entry-point transform does not make the unmodified template a complete request
+that can be executed independently.
+
 ### Full Schema
 
 ```json
 {
-    "version": "0.6.0-alpha",              // Schema version (semver). Minimum supported: "0.6.0-alpha"; current stable: "0.8.0-alpha".
+    "version": "0.9.0-alpha",              // Schema version (semver). Minimum supported: "0.6.0-alpha"; current stable: "0.8.0-alpha".
     "containerId": "my-container",         // Externally assigned container ID
     "containment": "processcontainer",     // Backend (see table below)
 
@@ -99,7 +131,8 @@ cannot mix both formats in one request.
                                            //  backend substitutes a granted directory rather
                                            //  than inheriting the launcher's — see
                                            //  "Working Directory" below)
-        "env": ["MY_VAR=value"],           // Environment variables as KEY=VALUE
+        "env": ["MY_VAR=value"],           // Omitted: backend default; supplied: used verbatim
+        "inheritDefaultEnv": true,         // Layer env on the backend default (0.9.0-alpha+)
         "timeout": 30000                   // Timeout in ms (0 = no timeout)
     },
 
@@ -164,6 +197,9 @@ cannot mix both formats in one request.
     "processContainer": {                  // Process-based container-specific
         "leastPrivilege": false,
         "capabilities": ["internetClient"],
+        "filesystem": {
+            "enumeratePaths": ["C:\\tools"] // Query/list entries without reading file contents
+        },
         "captureDenials": {                // Windows-only: record the process's access
             "mode": "block",               // "block" (default): access stays denied and
                                            // is logged (deny-by-default preserved). "allow":
@@ -193,7 +229,6 @@ cannot mix both formats in one request.
     "seatbelt": {                          // macOS Seatbelt settings (macOS only)
         "profileOverride": null,           // Optional raw TinyScheme profile (escape hatch)
         "guiAccess": false,                // Allow GUI Mach services / IOKit / pty for window-drawing apps
-        "launchMethod": "exec",            // "exec" or "open" (LaunchServices, for Apple-constrained apps)
         "nestedPty": true,                 // Allow inner process to allocate its own pty (posix_openpt)
         "keychainAccess": false,           // Allow Keychain via securityd / trustd / cfprefsd / lsd.*
         "extraMachLookups": []             // Additional Mach service global-names the inner process may resolve
@@ -262,11 +297,17 @@ The `filesystem` section defines path access policy shared across backends:
 | `readonlyPaths` | string[] | `[]` | Paths the process can read but not write. |
 | `deniedPaths` | string[] | `[]` | Paths the process cannot access at all. |
 
+The ProcessContainer-only `processContainer.filesystem` section contains:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enumeratePaths` | string[] | `[]` | Paths the process can query or enumerate without reading file contents. Requires schema `0.9.0-alpha` and a Windows BaseContainer host with PSEC 1.1 `fs_enumerate` support. It cannot be combined with `processContainer.leastPrivilege`; that combination fails rather than falling back. |
+
 On Windows, `deniedPaths` is enforced by one of two mechanisms depending on the
 containment tier selected at runtime:
 
-- **BaseContainer (Tier 1):** enforced natively by the OS when the build advertises
-  the `SANDBOX_CAP_FS_DENY` capability. No host filesystem changes are made.
+- **BaseContainer (Tier 1):** enforced natively by the OS when PSEC advertises
+  `PSE_SUPPORT_FS_DENY`. No host filesystem changes are made.
 - **AppContainer (Tier 2/3):** enforced by host-filesystem DENY ACEs, applied before
   the run and removed on exit. This path is gated by `allowDaclMutation`, requires
   `WRITE_DAC` on each denied path, and temporarily modifies host security descriptors.
@@ -319,10 +360,10 @@ for a session-isolated sandbox (see
 [`isolation-session/state-aware-rust.md`](isolation-session/state-aware-rust.md)),
 while WSLc has no mechanism to enforce UI restrictions on a container (see
 [`wsl/wslc-state-aware.md`](wsl/wslc-state-aware.md)).
-The Windows
-`processContainer.ui` sub-block carries additional ProcessContainer-only fields
-(`isolation`, `desktopSystemControl`, `systemSettings`, `ime`) and is valid only
-when `containment` is `processcontainer`.
+The Windows `processContainer.ui` sub-block carries the ProcessContainer-only
+fields `isolation`, `desktopSystemControl`, `systemSettings`, and `ime`.
+`processContainer.filesystem` carries `enumeratePaths`. Both sub-blocks are
+valid only when `containment` is `processcontainer`.
 
 ### Fallback Policy
 
@@ -343,7 +384,7 @@ force a particular backend.
 
 | Value | Resolution |
 |-------|------------|
-| `"process"` | `processcontainer` on Windows, `lxc` on Linux, `seatbelt` on macOS |
+| `"process"` | `processcontainer` on Windows, `bubblewrap` on Linux, `seatbelt` on macOS |
 | `"vm"` | Full hardware-virtualised VM isolation. Resolves to `windows_sandbox` on Windows. |
 
 #### Concrete backends
@@ -353,12 +394,12 @@ force a particular backend.
 | `"processcontainer"` | (Default) Windows process-level isolation. Resolves to AppContainer (legacy) or BaseContainer (newer OS sandbox API) at run time depending on host capabilities and the `--experimental` flag. |
 | `"windows_sandbox"` | Windows Sandbox VM isolation. Dual-mode: a transient **one-shot** runner that launches a fresh disposable VM per execution, and a **state-aware** lifecycle backed by a long-lived per-sandbox daemon. |
 | `"wslc"` | Linux containers via the WSL Container SDK |
-| `"lxc"` | Native LXC container isolation |
+| `"lxc"` | Native LXC container isolation. No abstract intent resolves to LXC; request it explicitly. |
 | `"nvx"` | NVX Linux micro-VM hosted by OpenVMM/WHP (experimental, Windows x64 foundation; runtime unavailable in Phase 1) |
 | `"hyperlight"` | MicroVM isolation via Hyperlight + Unikraft with an embedded CPython snapshot (experimental) |
 | `"isolation_session"` | Windows isolation session — runs the workload as a freshly-provisioned, per-execution isolated user account in its own OS-managed session (experimental). Dual-mode: one-shot and state-aware. |
 | `"seatbelt"` | macOS sandbox isolation (Seatbelt). Requires macOS 15 or later — see [`docs/seatbelt/seatbelt-backend.md`](seatbelt/seatbelt-backend.md). |
-| `"bubblewrap"` | Unprivileged Linux sandboxing via Bubblewrap/user namespaces (experimental) |
+| `"bubblewrap"` | Unprivileged Linux sandboxing via Bubblewrap/user namespaces. The Linux default — see [`docs/bwrap-support/bubblewrap-backend.md`](bwrap-support/bubblewrap-backend.md). |
 
 Only the backend section matching the selected `containment` value is accepted;
 a config that also carries an unrelated backend's section is **rejected** with a
@@ -366,21 +407,21 @@ a config that also carries an unrelated backend's section is **rejected** with a
 
 ### State-aware lifecycle envelope
 
-The dev schema additionally documents a multi-phase envelope shape for the
+The exact development schema documents a multi-phase envelope shape for the
 state-aware lifecycle (`provision` / `start` / `exec` / `stop` /
 `deprovision`). Where the one-shot config above is a self-contained
 `ExecutionRequest` to run once, a state-aware envelope identifies which
 phase is being driven against an existing provisioned sandbox.
 
-The envelope follows the same supported version range as one-shot requests:
-`>=0.6, <=0.9`. The example uses `0.6.0-alpha`, which is accepted throughout
-that range. The state-aware field shape is documented by the current dev
-schema:
+State-aware envelopes currently require the exact `0.9.0-alpha` development
+contract. The published `0.6.0-alpha`, `0.7.0-alpha`, and `0.8.0-alpha`
+contracts contain only one-shot request roots. The state-aware field shape is
+documented by the exact development schema:
 
 ```json
 {
-    "$schema": "./schemas/dev/mxc-config.schema.0.9.0-dev.json",
-    "version": "0.6.0-alpha",
+    "$schema": "./schemas/dev/mxc-config.schema.0.9.0-alpha.json",
+    "version": "0.9.0-alpha",
     "phase": "exec",                       // One of: provision | start | exec | stop | deprovision
     "sandboxId": "wsb:abcd1234",           // Required for non-provision phases.
                                            // Prefix routes to the backend (wsb: -> windows_sandbox,

@@ -2,27 +2,28 @@
 // Licensed under the MIT License.
 
 import { spawn } from 'child_process';
-import { parse as semverParse } from 'semver';
 import { resolveBinaryAndCommonArgs } from './helper.js';
 import { SandboxSpawnOptions } from './sandbox.js';
 import { mxcErrorFromCode, mxcErrorFromEnvelope, WireError } from './errors.js';
 import { diagLog } from './diagnostic.js';
-import { Phase, StateAwareContainmentBackend } from './state-aware-types.js';
+import {
+  Phase,
+  STATE_AWARE_VERSION,
+  StateAwareContainmentBackend,
+} from './state-aware-types.js';
+import { TelemetryConfig } from './types.js';
 
-export const STATE_AWARE_VERSION = '0.6.0-alpha';
+export { STATE_AWARE_VERSION };
 
-// WSLc's state-aware surface shipped at a later schema version than the
-// `STATE_AWARE_VERSION` default above (the shared default for IsolationSession
-// and Windows Sandbox). WSLc is intentionally NOT gate-locked to it: the
-// backends were promoted independently, so WSLc carries its own later default.
-// See `DEFAULT_STATE_AWARE_VERSION`.
-export const WSLC_STATE_AWARE_VERSION = '0.8.0-alpha';
-export const TELEMETRY_STATE_AWARE_VERSION = '0.9.0-alpha';
+// Keep the WSLC constant separate because it is part of the public SDK surface
+// and remains independently versioned, even though every state-aware backend
+// currently uses the exact 0.9 development contract.
+export const WSLC_STATE_AWARE_VERSION = '0.9.0-alpha';
 
 // Wire-format cross-cutting fields that live at the envelope's top level.
 // Anything else on a per-(backend, phase) Config is backend-specific and is
 // nested under `experimental.<backend>.<phase>`.
-export const CROSS_CUTTING_FIELDS = ['filesystem', 'network', 'ui', 'process', 'telemetry'] as const;
+export const CROSS_CUTTING_FIELDS = ['filesystem', 'network', 'runtimeConfig', 'ui', 'process', 'telemetry'] as const;
 
 // Per-backend wire-format prefix. Each value mirrors the corresponding
 // Rust `<Backend>Runner::ID_PREFIX` const and is the leading segment of a
@@ -92,29 +93,92 @@ export interface BuildEnvelopeArgs {
 /**
  * Constructs the wire-format JSON-shaped envelope for a state-aware request
  * from a per-(backend, phase) Config. Lifts cross-cutting fields
- * (filesystem, network, ui, process, telemetry) to envelope top-level; nests any
+ * (filesystem, network, runtimeConfig, ui, process, telemetry) to envelope top-level; nests any
  * remaining backend-specific fields under `experimental.<backend>.<phase>`.
  */
 export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string, unknown> {
-  const { phase, backendKey, containment, sandboxId, config } = args;
+  const {
+    phase,
+    backendKey,
+    containment,
+    sandboxId,
+    config,
+  } = args;
   // Copy of config; fields are removed as they are lifted into the envelope.
   // Anything left becomes experimental.<backend>.<phase>.
   const backendSpecific: Record<string, unknown> = { ...(config ?? {}) };
   const defaultVersion = DEFAULT_STATE_AWARE_VERSION[backendKey] ?? STATE_AWARE_VERSION;
-  const suppliedVersion = typeof backendSpecific.version === 'string' && backendSpecific.version;
-  const hasTelemetry = backendSpecific.telemetry !== undefined;
-  const version = suppliedVersion || (hasTelemetry ? TELEMETRY_STATE_AWARE_VERSION : defaultVersion);
-  if (hasTelemetry && suppliedVersion) {
-    const parsed = semverParse(suppliedVersion);
-    if (parsed && parsed.major === 0 && parsed.minor < 9) {
-      throw mxcErrorFromCode(
-        'malformed_request',
-        `telemetry requires schema version ${TELEMETRY_STATE_AWARE_VERSION} or later; got ${suppliedVersion}`,
-      );
-    }
+  const telemetry = backendSpecific.telemetry as TelemetryConfig | undefined;
+  const requestedVersion = backendSpecific.version;
+  if (requestedVersion !== undefined && requestedVersion !== defaultVersion) {
+    throw mxcErrorFromCode(
+      'malformed_request',
+      `State-aware ${backendKey} requests require schema version '${defaultVersion}', ` +
+      `got '${String(requestedVersion)}'.`,
+    );
   }
+  const version = defaultVersion;
   delete backendSpecific.version;
 
+  const fail = (message: string): never => {
+    throw mxcErrorFromCode('malformed_request', message);
+  };
+  const network = backendSpecific.network;
+  if (network !== undefined) {
+    if (phase !== 'provision' || (backendKey !== 'wslc' && backendKey !== 'isolation_session')) {
+      fail(`network is not accepted on ${backendKey} ${phase}; WSLC exec uses runtimeConfig.networkProxy.`);
+    }
+    if (network === null || typeof network !== 'object' || Array.isArray(network)) {
+      fail('network must be an object.');
+    }
+    for (const key of Object.keys(network as object)) {
+      if (key !== 'egress' && key !== 'ingress') {
+        fail(`Schema ${version} no longer supports network.${key}; use network.egress/network.ingress, or runtimeConfig.networkProxy on WSLC exec.`);
+      }
+    }
+    if (backendKey === 'isolation_session') {
+      const directional = network as {
+        egress?: { default?: unknown; allow?: unknown; deny?: unknown };
+        ingress?: { default?: unknown; hostLoopback?: unknown };
+      };
+      if (
+        directional.egress?.default !== 'allow'
+        || directional.egress.allow !== undefined
+        || directional.egress.deny !== undefined
+        || directional.ingress?.default !== 'allow'
+        || directional.ingress.hostLoopback !== 'allow'
+      ) {
+        fail('IsolationSession requires network egress, ingress, and hostLoopback defaults set to allow, with no rules.');
+      }
+    }
+  }
+  const runtime = backendSpecific.runtimeConfig;
+  if (runtime !== undefined) {
+    if (backendKey !== 'wslc' || phase !== 'exec') {
+      fail(`runtimeConfig is accepted only on WSLC exec, not ${backendKey} ${phase}.`);
+    }
+    if (runtime === null || typeof runtime !== 'object' || Array.isArray(runtime)) {
+      fail('runtimeConfig must be an object.');
+    }
+    for (const [key, value] of Object.entries(runtime as object)) {
+      if (key !== 'networkProxy') {
+        fail(`Unknown runtimeConfig.${key}.`);
+      }
+      if (value === undefined) continue;
+      if (typeof value !== 'string' || value.trim() !== value || !value) {
+        fail('runtimeConfig.networkProxy must be an HTTP/S URL string.');
+      }
+      let url!: URL;
+      try {
+        url = new URL(value as string);
+      } catch {
+        fail('runtimeConfig.networkProxy must be an HTTP/S URL string.');
+      }
+      if (!['http:', 'https:'].includes(url.protocol)) {
+        fail('runtimeConfig.networkProxy must use HTTP or HTTPS.');
+      }
+    }
+  }
   const envelope: Record<string, unknown> = { version, phase };
   if (containment) {
     envelope.containment = containment;
@@ -122,12 +186,16 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   if (sandboxId) {
     envelope.sandboxId = sandboxId;
   }
+  if (telemetry !== undefined) {
+    envelope.telemetry = telemetry;
+    delete backendSpecific.telemetry;
+  }
 
   for (const field of CROSS_CUTTING_FIELDS) {
     if (backendSpecific[field] !== undefined) {
       envelope[field] = backendSpecific[field];
-      delete backendSpecific[field];
     }
+    delete backendSpecific[field];
   }
 
   if (Object.keys(backendSpecific).length > 0) {

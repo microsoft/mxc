@@ -6,13 +6,45 @@ import * as os from 'os';
 import { spawn, ChildProcess } from 'child_process';
 import { randomBytes } from "crypto";
 import { parse as semverParse } from 'semver';
-import { SandboxPolicy, ContainerConfig, ContainmentType, ContainmentBackend } from './types.js';
+import {
+    SandboxPolicy,
+    ContainerConfig,
+    ContainmentType,
+    ContainmentBackend,
+} from './types.js';
 import { prepareSpawn, diagLogVersion, applyLinuxNetworkPolicy } from './helper.js';
 import { diagLog } from './diagnostic.js';
-import { MxcError, mxcErrorFromEnvelope } from './errors.js';
+import { MxcError } from './errors.js';
+import {
+  prepareRequestSpec,
+  validateBindingPolicy,
+} from './bindings/request.js';
+import {
+  runBindingRequestAsync,
+  type BindingRunResult,
+} from './bindings/run.js';
 
-const SUPPORTED_VERSION = '0.9.0-alpha';
 const MIN_VERSION = '0.6.0-alpha';
+const SUPPORTED_VERSION = '0.9.0-alpha';
+const REGISTERED_VERSION_VALUES = [
+    '0.6.0-alpha',
+    '0.7.0-alpha',
+    '0.8.0-alpha',
+    '0.9.0-alpha',
+];
+const REGISTERED_VERSIONS = new Set(REGISTERED_VERSION_VALUES);
+const REGISTERED_VERSION_ORDER = new Map(
+    REGISTERED_VERSION_VALUES.map((version, index) => [version, index]),
+);
+const LEGACY_NETWORK_FIELDS = [
+    'allowOutbound',
+    'defaultPolicy',
+    'enforcementMode',
+    'allowLocalNetwork',
+    'allowedHosts',
+    'blockedHosts',
+    'proxy',
+] as const;
 
 /**
  * Generates a random 8-character alphanumeric string for the app container name.
@@ -58,14 +90,63 @@ function validatePolicyVersion(version: string): void {
             ` Upgrade the SDK.`
         );
     }
+    if (!REGISTERED_VERSIONS.has(version)) {
+        throw new Error(
+            `Policy version '${version}' is not a registered schema contract. ` +
+            `Use one of: ${REGISTERED_VERSION_VALUES.join(', ')}.`
+        );
+    }
+}
+
+function validateContainmentVersion(
+    version: string,
+    containment: ContainmentType | ContainmentBackend,
+    platform: NodeJS.Platform,
+): void {
+    const effectiveContainment =
+        containment === 'process' && platform === 'darwin' ? 'seatbelt' : containment;
+    const minimumVersion =
+        effectiveContainment === 'seatbelt'
+            ? '0.7.0-alpha'
+            : effectiveContainment === 'vm' ||
+                effectiveContainment === 'nvx' ||
+                effectiveContainment === 'windows_sandbox' ||
+                effectiveContainment === 'wslc' ||
+                effectiveContainment === 'hyperlight' ||
+                effectiveContainment === 'isolation_session'
+              ? '0.9.0-alpha'
+              : '0.6.0-alpha';
+
+    const versionOrder = REGISTERED_VERSION_ORDER.get(version);
+    const minimumOrder = REGISTERED_VERSION_ORDER.get(minimumVersion);
+    if (versionOrder === undefined || minimumOrder === undefined || versionOrder < minimumOrder) {
+        throw new Error(
+            `Schema ${version} does not support containment '${containment}'; ` +
+            `use schema ${minimumVersion} or later.`
+        );
+    }
+}
+
+function validateTelemetryVersion(policy: SandboxPolicy): void {
+    if (policy.telemetry === undefined) {
+        return;
+    }
+
+    const minimumVersion = '0.9.0-alpha';
+    const versionOrder = REGISTERED_VERSION_ORDER.get(policy.version);
+    const minimumOrder = REGISTERED_VERSION_ORDER.get(minimumVersion);
+    if (versionOrder === undefined || minimumOrder === undefined || versionOrder < minimumOrder) {
+        throw new Error(
+            `Schema ${policy.version} does not support telemetry; ` +
+            `use schema ${minimumVersion} or later.`
+        );
+    }
 }
 
 function hasLegacyNetworkFields(network: NonNullable<SandboxPolicy['network']>): boolean {
-    return network.allowOutbound !== undefined ||
-        network.allowLocalNetwork !== undefined ||
-        network.allowedHosts !== undefined ||
-        network.blockedHosts !== undefined ||
-        network.proxy !== undefined;
+    return LEGACY_NETWORK_FIELDS.some(
+        field => (network as Record<string, unknown>)[field] !== undefined,
+    );
 }
 
 function hasDirectionalNetworkFields(network: NonNullable<SandboxPolicy['network']>): boolean {
@@ -79,8 +160,27 @@ function usesDirectionalNetwork(policy: SandboxPolicy): boolean {
         policy.processContainer?.network?.allowedProxyPeer !== undefined;
 }
 
+function hasProcessContainerPolicy(policy: SandboxPolicy): boolean {
+    return Boolean(policy.processContainer?.filesystem?.enumeratePaths?.length) ||
+        policy.processContainer?.network?.allowedProxyPeer !== undefined;
+}
+
 function selectDirectionalNetwork(policy: SandboxPolicy): boolean {
     const network = policy.network;
+    if (policy.version === '0.9.0-alpha' && network !== undefined) {
+        for (const field of LEGACY_NETWORK_FIELDS) {
+            if (network !== null && (network as Record<string, unknown>)[field] !== undefined) {
+                throw new Error(
+                    `Schema 0.9.0-alpha no longer supports network.${field}. ` +
+                    'Author network.egress/network.ingress and runtimeConfig.networkProxy explicitly, ' +
+                    'or retain schema 0.8.0-alpha for legacy networking. Hostnames are not converted to CIDRs.',
+                );
+            }
+        }
+        if (network === null || typeof network !== 'object' || Array.isArray(network)) {
+            throw new Error('network must be an object when supplied.');
+        }
+    }
     const hasLegacy = network !== undefined && hasLegacyNetworkFields(network);
     const hasDirectional = usesDirectionalNetwork(policy);
 
@@ -124,7 +224,7 @@ function buildWslcContainerConfig(
     };
 
     // WSLC uses its own networking mode (None/Bridged) derived from
-    // the network.defaultPolicy field — no firewall enforcement needed.
+    // the directional egress posture — no firewall enforcement needed.
 
     return config;
 }
@@ -202,13 +302,16 @@ function buildProcessBaseContainerConfig(
             systemSettings: "none",
             ime: false,
         },
+        filesystem: policy.processContainer?.filesystem?.enumeratePaths?.length
+            ? { enumeratePaths: [...policy.processContainer.filesystem.enumeratePaths] }
+            : undefined,
         network: policy.processContainer?.network?.allowedProxyPeer !== undefined
             ? { allowedProxyPeer: policy.processContainer.network.allowedProxyPeer }
             : undefined,
     };
 
     // Network enforcement: use firewall only when host filtering is needed (requires admin)
-    if (config.network && !usesDirectionalNetwork(policy)) {
+    if (config.network && policy.version !== '0.9.0-alpha' && !usesDirectionalNetwork(policy)) {
         if (config.network.allowedHosts?.length || config.network.blockedHosts?.length) {
             config.network.enforcementMode = 'both';
         } else {
@@ -254,9 +357,12 @@ export function createConfigFromPolicy(
 ): ContainerConfig {
     diagLogVersion();
     validatePolicyVersion(policy.version);
-    const directionalNetwork = selectDirectionalNetwork(policy);
-
     const platform = os.platform();
+    validateContainmentVersion(policy.version, containment, platform);
+    validateTelemetryVersion(policy);
+    const directionalNetwork = selectDirectionalNetwork(policy);
+    const enumeratePaths = policy.processContainer?.filesystem?.enumeratePaths;
+
     const containerId = containerName ?? generateRandomContainerName();
 
     const clearPolicy = policy.filesystem?.clearPolicyOnExit ?? true;
@@ -271,15 +377,39 @@ export function createConfigFromPolicy(
             commandLine: '',
             timeout: policy.timeoutMs ?? 0,
         },
+        telemetry: policy.telemetry === undefined ? undefined : { ...policy.telemetry },
     };
+
+    if (enumeratePaths?.length) {
+        if (policy.version !== '0.9.0-alpha') {
+            throw new Error(
+                'processContainer.filesystem.enumeratePaths requires schema version 0.9.0-alpha.'
+            );
+        }
+        const targetsWindowsProcessContainer =
+            platform === 'win32' && (containment === 'process' || containment === 'processcontainer');
+        if (!targetsWindowsProcessContainer) {
+            throw new Error(
+                'processContainer.filesystem.enumeratePaths is supported only by the Windows ' +
+                'ProcessContainer backend.'
+            );
+        }
+    }
 
     config.filesystem = {
         readwritePaths: [...(policy.filesystem?.readwritePaths ?? [])],
         readonlyPaths: [...(policy.filesystem?.readonlyPaths ?? [])],
         deniedPaths: [...(policy.filesystem?.deniedPaths ?? [])],
     };
+    if (enumeratePaths?.length) {
+        config.processContainer = {
+            filesystem: {
+                enumeratePaths: [...enumeratePaths],
+            },
+        };
+    }
 
-    // UI mapping (cross-platform)
+    // SandboxPolicy defaults are fail-closed, so omission still emits lockdown.
     config.ui = {
         disable: !(policy.ui?.allowWindows ?? false),
         clipboard: policy.ui?.clipboard ?? "none",
@@ -287,10 +417,11 @@ export function createConfigFromPolicy(
     };
 
     if (directionalNetwork) {
-        if (policy.network?.egress !== undefined || policy.network?.ingress !== undefined) {
+        if ((policy.version === '0.9.0-alpha' && policy.network !== undefined) ||
+            policy.network?.egress !== undefined || policy.network?.ingress !== undefined) {
             config.network = {
-                egress: policy.network.egress,
-                ingress: policy.network.ingress,
+                egress: policy.network?.egress,
+                ingress: policy.network?.ingress,
             };
         }
         if (policy.runtimeConfig?.networkProxy !== undefined) {
@@ -300,6 +431,7 @@ export function createConfigFromPolicy(
         }
         if (policy.processContainer?.network?.allowedProxyPeer !== undefined) {
             config.processContainer = {
+                ...config.processContainer,
                 network: {
                     allowedProxyPeer: policy.processContainer.network.allowedProxyPeer,
                 },
@@ -390,7 +522,11 @@ export function createConfigFromPolicy(
             return buildDarwinProcessConfig(config);
         }
         diagLog(`createConfigFromPolicy: containment=process (BaseContainer), id=${containerId}`);
-        return buildProcessBaseContainerConfig(config, policy);
+        const processConfig = buildProcessBaseContainerConfig(config, policy);
+        if (hasProcessContainerPolicy(policy)) {
+            processConfig.containment = 'processcontainer';
+        }
+        return processConfig;
     }
 
     throw new Error(`Containment type '${containment}' is not yet supported.`);
@@ -446,6 +582,25 @@ export interface SandboxSpawnOptions {
   allowTestingFeatures?: boolean;
 
   /**
+   * Start from the backend's default environment and layer the supplied
+   * environment variables on top of it, rather than replacing it
+   * (default false).
+   *
+   * Without this, an environment you supply is used verbatim — which on the
+   * Windows process container means a sparse environment is missing the
+   * variables Windows requires to be present, and the launch fails. Use this
+   * to express "the usual environment, plus these": the default is the user's
+   * profile block, which only the OS can produce.
+   *
+   * This is a different, smaller set than the calling process's `process.env`,
+   * which you can still pass explicitly as the `env` argument if you want your
+   * own variables handed to the child.
+   *
+   * Maps to `process.inheritDefaultEnv` in the JSON config.
+   */
+  inheritDefaultEnv?: boolean;
+
+  /**
    * Explicit path to the wxc-exec (or lxc-exec) binary.
    * When set, the SDK uses this path directly instead of searching.
    * Useful for packaged apps (e.g., Electron) where the binary
@@ -497,6 +652,44 @@ export interface SandboxSpawnOptions {
   signal?: AbortSignal;
 }
 
+function unsupportedInProcessRunOption(options: SandboxSpawnOptions): string | undefined {
+  if (options.debug === true) return 'debug';
+  if (options.allowTestingFeatures === true) return 'allowTestingFeatures';
+  if (options.skipPlatformCheck === true) return 'skipPlatformCheck';
+  if (options.executablePath !== undefined) return 'executablePath';
+  if (options.ptyOptions !== undefined) return 'ptyOptions';
+  if (options.dryRun === true) return 'dryRun';
+  if (options.logDir !== undefined) return 'logDir';
+  if (options.usePty === true) return 'usePty';
+  if (options.signal !== undefined) return 'signal';
+  return undefined;
+}
+
+function appendDiagnosticLine(output: string, line: string): string {
+  const prefix = output.length === 0 || output.endsWith('\n') ? output : `${output}\n`;
+  return `${prefix}${line}\n`;
+}
+
+// Preserve diagnostics that the executor CLI previously emitted on stderr.
+function bufferedStderr(result: BindingRunResult): string {
+  let stderr = result.stderr;
+  for (const warning of result.warnings) {
+    stderr = appendDiagnosticLine(stderr, warning);
+  }
+
+  if (
+    result.outputMetadata !== null
+    && typeof result.outputMetadata === 'object'
+    && !Array.isArray(result.outputMetadata)
+  ) {
+    const captureDenials = (result.outputMetadata as Record<string, unknown>).captureDenials;
+    if (captureDenials !== undefined) {
+      stderr = appendDiagnosticLine(stderr, JSON.stringify(captureDenials));
+    }
+  }
+  return stderr;
+}
+
 /**
  * Inject environment variables into the config's `process.env` field as
  * `KEY=VALUE` strings.  This is the explicit channel for passing env vars
@@ -520,6 +713,28 @@ function injectEnvIntoConfig(
 }
 
 /**
+ * Apply {@link SandboxSpawnOptions.inheritDefaultEnv} to the config, so the
+ * environment is layered on the backend's default rather than replacing it.
+ * An option left unset does not clobber a value the caller already put in the
+ * config; an explicit boolean overrides it.
+ */
+function applyInheritDefaultEnv(config: ContainerConfig, options: SandboxSpawnOptions): void {
+  if (options.inheritDefaultEnv === undefined) {
+    return;
+  }
+  if (!options.inheritDefaultEnv) {
+    if (config.process) {
+      delete config.process.inheritDefaultEnv;
+    }
+    return;
+  }
+  if (!config.process) {
+    config.process = { commandLine: '' };
+  }
+  config.process.inheritDefaultEnv = true;
+}
+
+/**
  * Internal helper: resolves the executor binary path and spawns a PTY process.
  */
 function spawnWithConfig(
@@ -533,6 +748,7 @@ function spawnWithConfig(
   if (env) {
     injectEnvIntoConfig(config, env);
   }
+  applyInheritDefaultEnv(config, options);
 
   const { executablePath, args, logger, startTime } = prepareSpawn(config, options);
 
@@ -649,6 +865,7 @@ export function spawnSandboxFromConfig(
     if (env) {
       injectEnvIntoConfig(config, env);
     }
+    applyInheritDefaultEnv(config, options);
 
     const { executablePath, args, logger, startTime } = prepareSpawn(config, options);
     try {
@@ -679,7 +896,7 @@ export function spawnSandboxFromConfig(
 
 /**
  * Spawn a sandboxed process and return a promise that resolves with output.
- * Convenience wrapper around spawnSandbox for non-interactive use cases.
+ * Runs non-interactive workloads through the native runtime.
  *
  * @param script The command line script to execute
  * @param policy The sandbox policy
@@ -701,66 +918,41 @@ export function spawnSandboxFromConfig(
  * console.log('Exit code:', result.exitCode);
  * ```
  */
-export function spawnSandboxAsync(
+export async function spawnSandboxAsync(
   script: string,
   policy: SandboxPolicy,
   options: SandboxSpawnOptions = {},
   workingDirectory?: string,
   containerName?: string,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  return new Promise((resolve, reject) => {
-    try {
-      const ptyProcess = spawnSandbox(script, policy, options, workingDirectory, containerName);
-      let output = '';
-
-      ptyProcess.onData((data: string) => {
-        output += data;
-      });
-
-      ptyProcess.onExit((event: { exitCode: number; signal?: number }) => {
-        // Note: wxc-exec doesn't separate stdout/stderr when using PTY
-        // All output is combined
-        //
-        // Check for structured error envelopes from wxc-exec on failure.
-        if (event.exitCode !== 0) {
-          const mxcError = tryParseErrorEnvelopeFromLines(output);
-          if (mxcError) {
-            reject(mxcError);
-            return;
-          }
-        }
-        resolve({
-          stdout: output,
-          stderr: '',
-          exitCode: event.exitCode
-        });
-      });
-    } catch (error) {
-      reject(error);
-    }
-  });
-}
-
-/**
- * Scans a multi-line string for a JSON error envelope emitted by wxc-exec
- * on stderr. Returns the first matching envelope, or null if none found.
- * The envelope format is: `{"error": {"code": "...", "message": "...", ...}}`
- */
-function tryParseErrorEnvelopeFromLines(output: string): MxcError | null {
-  for (const line of output.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith('{')) continue;
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (parsed && typeof parsed === 'object' && 'error' in parsed) {
-        const env = parsed.error;
-        if (env && typeof env.code === 'string' && typeof env.message === 'string') {
-          return mxcErrorFromEnvelope(env);
-        }
-      }
-    } catch {
-      // Not valid JSON on this line, continue scanning.
-    }
+  const unsupportedOption = unsupportedInProcessRunOption(options);
+  if (unsupportedOption !== undefined) {
+    throw new MxcError(
+      'malformed_request',
+      `spawnSandboxAsync does not support executor-only option '${unsupportedOption}'`,
+    );
   }
-  return null;
+  validateBindingPolicy(policy);
+
+  const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
+  // Legacy policy construction derives an executor-specific enforcement mode.
+  // The native policy builder derives its own mode from the portable fields.
+  if (config.network !== undefined) {
+    delete config.network.enforcementMode;
+  }
+  const request = prepareRequestSpec(config, {
+    inheritDefaultEnv: options.inheritDefaultEnv,
+    experimental: options.experimental,
+  });
+  const result = await runBindingRequestAsync(request);
+  if (result.timedOut) {
+    throw new MxcError('backend_error', 'sandbox execution timed out', {
+      timedOut: true,
+    });
+  }
+  return {
+    stdout: result.stdout,
+    stderr: bufferedStderr(result),
+    exitCode: result.exitCode,
+  };
 }

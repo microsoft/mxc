@@ -1,0 +1,16 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
+    "version": "0.8.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "pbpaste > /dev/null 2>&1 && echo CLIPBOARD_OK || echo CLIPBOARD_BLOCKED",
+        "timeout": 20000
+    },
+    "ui": {
+        "disable": false,
+        "clipboard": "all"
+    },
+    "seatbelt": {
+        "guiAccess": true
+    }
+}

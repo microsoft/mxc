@@ -1,0 +1,9 @@
+{
+  "version": "0.9.0-alpha",
+  "containment": "isolation_session",
+  "process": { "commandLine": "cmd /c exit 0" },
+  "network": {
+    "egress": { "default": "allow" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
+  }
+}

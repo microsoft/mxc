@@ -700,7 +700,7 @@ pub(crate) fn build_args_classified_with_mode(
     // Clear the inherited environment, then set only the vars from the
     // request so the sandbox has a minimal, predictable environment.
     args.push("--clearenv".into());
-    for env_str in &request.env {
+    for env_str in request.env_entries() {
         if let Some((key, value)) = env_str.split_once('=') {
             // When the proxy is active, drop any caller-supplied proxy env
             // entries so they cannot override the values we set below.
@@ -1913,7 +1913,7 @@ mod tests {
     #[test]
     fn environment_variables_are_set() {
         let mut r = base_request();
-        r.env = vec!["FOO=bar".into(), "PATH=/usr/bin".into()];
+        r.env = Some(vec!["FOO=bar".into(), "PATH=/usr/bin".into()]);
         let args = build_args(&r, None);
         assert!(args.contains(&"--clearenv".to_string()));
         let foo_pos = args.iter().position(|a| a == "FOO").unwrap();
@@ -2072,7 +2072,7 @@ mod tests {
     #[test]
     fn proxy_active_strips_caller_supplied_proxy_env() {
         let mut r = base_request();
-        r.env = vec![
+        r.env = Some(vec![
             "FOO=bar".into(),
             "HTTP_PROXY=http://attacker.example:9999".into(),
             "https_proxy=http://attacker.example:9999".into(),
@@ -2081,7 +2081,7 @@ mod tests {
             "ftp_proxy=http://attacker.example:9999".into(),
             "NO_PROXY=*".into(),
             "PATH=/usr/bin".into(),
-        ];
+        ]);
         let addr = ProxyAddress::new("127.0.0.1".into(), 9000);
         let args = build_args(&r, Some(&addr));
 
@@ -2125,7 +2125,7 @@ mod tests {
         // strip env vars whose keys happen to match PROXY_ENV_KEYS -- those
         // are just regular env vars set by the caller for some other reason.
         let mut r = base_request();
-        r.env = vec!["HTTP_PROXY=http://caller.example:8080".into()];
+        r.env = Some(vec!["HTTP_PROXY=http://caller.example:8080".into()]);
         let args = build_args(&r, None);
 
         let pos = args.iter().position(|a| a == "HTTP_PROXY").unwrap();

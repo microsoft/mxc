@@ -5,7 +5,6 @@
     "commandLine": "echo alias"
   },
   "macos_sandbox": {
-    "guiAccess": true,
-    "launchMethod": "exec"
+    "guiAccess": true
   }
 }

@@ -28,10 +28,10 @@ public sealed class RunResult
     /// Security warnings raised during the run, empty when there were none.
     /// </summary>
     /// <remarks>
-    /// Raised when a policy relaxes containment — notably
+    /// A policy that relaxes containment raises one — notably
     /// <c>permissiveLearningMode</c>, which disables deny-by-default. These are
     /// never written to the host's stderr, so inspecting this is the only way to
-    /// learn that containment was relaxed.
+    /// see them.
     /// </remarks>
     public IReadOnlyList<string> Warnings { get; init; } = Array.Empty<string>();
 }

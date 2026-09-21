@@ -1,0 +1,15 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.0.7.0-alpha.json",
+    "version": "0.7.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "echo PROXY_GATE_SHOULD_NOT_RUN",
+        "timeout": 30000
+    },
+    "network": {
+        "defaultPolicy": "block",
+        "proxy": {
+            "builtinTestServer": true
+        }
+    }
+}

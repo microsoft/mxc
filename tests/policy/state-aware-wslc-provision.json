@@ -1,5 +1,5 @@
 {
-  "version": "0.8.0-alpha",
+  "version": "0.9.0-alpha",
   "phase": "provision",
   "containment": "wslc",
   "filesystem": {
@@ -8,7 +8,8 @@
     "deniedPaths": []
   },
   "network": {
-    "defaultPolicy": "allow"
+    "egress": { "default": "allow" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
   },
   "experimental": {
     "wslc": {

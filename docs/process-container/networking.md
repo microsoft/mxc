@@ -103,12 +103,25 @@ client policy and package identity are the same; the enforcement table below sep
 `ingress.hostLoopback` is bidirectional. `allowedProxyPeer` authorizes a package family or AppContainer profile without
 opening general host-loopback access, so identity-scoped paths keep `hostLoopback: "deny"`. Only an unpackaged
 non-AppContainer proxy lacks an accepted peer identity and requires `hostLoopback: "allow"`. This is a weaker
-development/testing compatibility deployment, not the shared policy's strict host-loopback-closure guarantee. It
-authorizes both host-loopback directions, although WFP still restricts client-container egress to the configured proxy
-endpoint. Host-loopback clients can reach listeners in the MXC client container.
-On the PSEC path, MXC maps `hostLoopback: "allow"` to the `networkLoopback` capability and the reserved
-`MXC-Loopback` peer identity passed to `CreateProcessSecurityEnvironment`. Caller-supplied `allowedProxyPeer` values
-cannot use that reserved identity.
+development/testing compatibility deployment, not the shared policy's strict host-loopback-closure guarantee.
+The shared setting requests both host-loopback directions, while WFP restricts client-container egress to the
+configured proxy endpoint.
+For direct-egress policies, MXC passes `ingress.default` and `ingress.hostLoopback` through the PSEC 1.1 ingress table when
+`IsProcessSecurityEnvironmentVersionSupported` reports contract 1.1 or newer and
+`QueryProcessSecurityEnvironmentSupport` advertises ingress support. Proxy policies omit that native table because
+PSEC rejects it alongside a proxy. Their ingress default still selects `privateNetworkClientServer`, and their
+host-loopback setting selects both the `networkLoopback` capability and the `MXC-Loopback` peer rather than an
+identity-scoped proxy peer. The peer alone is insufficient: without the capability, the environment can be created
+but its client cannot reach the host proxy.
+The public ingress policy remains required, and host-loopback allow retains the PSEC 1.1 host requirement.
+Requests that do not allow host loopback use the
+PSEC 1.0 capability mapping; `hostLoopback: "allow"` is rejected when the PSEC 1.1 ingress contract is unavailable.
+Requests the PSEC contract cannot preserve continue to an AppContainer tier.
+
+**Unresolved ingress limitation:** on Windows build 26691.1002, this proxy mapping permits unprivileged connections
+to the configured proxy and blocks direct loopback bypasses, but host-to-container listener connections still time
+out. The same listener succeeds under a non-proxy PSEC ingress policy. The proxy mapping is therefore not yet a
+complete implementation of the shared bidirectional `hostLoopback: "allow"` contract.
 
 #### Identity-scoped proxy
 
@@ -138,11 +151,11 @@ An unpackaged non-AppContainer proxy has no package family or AppContainer profi
 ```
 
 MXC grants the client container `privateNetworkClientServer` through `ingress.default: "allow"`, just as it does for an
-identity-scoped proxy. The difference is that MXC identifies this proxy only by the configured endpoint and enables
-bidirectional host-loopback access. This is the lowest-enforcement deployment option because common WFP endpoint
+identity-scoped proxy. The difference is that MXC identifies this proxy only by the configured endpoint and grants
+the loopback capability; the inbound limitation above still applies. This is the lowest-enforcement deployment option because common WFP endpoint
 scoping remains, but Windows cannot verify which host process owns that endpoint. It is intended primarily for
-development and debugging and requires an installer- or administrator-owned firewall rule scoped to the proxy
-executable and configured port.
+development and debugging. PSEC grants `networkLoopback` to authorize the host-loopback connection without MXC
+installing administrator-owned firewall rules. Independently managed host firewall restrictions can still apply.
 
 #### HTTP client guidance
 
@@ -185,9 +198,9 @@ middle rows provide different protections and are not ordered relative to each o
 | Packaged AppContainer | Package family name | **Best:** AppContainer isolation, package identity, package firewall |
 | Unpackaged AppContainer | AppContainer profile name | AppContainer isolation and administrator firewall rule |
 | Packaged non-AppContainer | Package family name | Package identity and package firewall; no AppContainer isolation |
-| Unpackaged non-AppContainer | Omit | **Least:** no proxy identity or isolation; administrator firewall |
+| Unpackaged non-AppContainer | Omit | **Least:** no proxy identity or isolation; PSEC loopback capability |
 
-The scoped peer rule and `privateNetworkClientServer` do not bypass Windows
+For identity-scoped proxies, the scoped peer rule and `privateNetworkClientServer` do not bypass Windows
 Firewall's block-inbound-to-non-allowed-apps policy. A packaged AppContainer proxy uses the package-owned firewall
 declaration shown in the [schema 0.8 examples](examples/0.8.0-schema.md); its application entry uses
 `uap10:RuntimeBehavior="packagedClassicApp"` with `uap10:TrustLevel="appContainer"`. An unpackaged AppContainer proxy
@@ -248,31 +261,21 @@ usable process-creation contract through runtime probing.
 **Preferred selection:** Use PSEC (`CreateProcessSecurityEnvironment`) when its complete export set and runtime support
 probe succeed. PSEC is the only ProcessContainer path that receives schema 0.8 egress filters, proxy peer identity, or
 host-loopback configuration because it owns the corresponding policy lifetime through workload completion. When PSEC
-is unavailable or incompatible with another requested policy, fall back temporarily to the legacy SBOX contract
-through CPIS. SBOX is eligible only when it can represent the request without dropping PSEC-only networking features;
-otherwise selection continues to AppContainer, where unsupported policy is rejected.
+is unavailable or incompatible, selection continues to AppContainer, where unsupported policy is rejected.
 
-SBOX retains its legacy network contract. It receives only the effective egress default and legacy `network.proxy`
-configuration; schema 0.8 allow/deny filters, `allowedProxyPeer`, and host-loopback configuration are never serialized
-into its FlatBuffer. The SBOX creation API supplies no policy-lifetime handle or workload-completion cleanup contract,
-so MXC cannot safely install and later remove schema 0.8 WFP filters through that path. A valid schema 0.8 runtime proxy
-requires either peer identity or unrestricted host loopback and is therefore rejected when PSEC is unavailable.
-
-**Downlevel behavior:** When PSEC is unavailable, compatible requests use CPIS or the AppContainer fallback.
+**Downlevel behavior:** When PSEC is unavailable, compatible requests use the AppContainer fallback.
 `egress.default: "allow"` grants `internetClient`; `ingress.default: "allow"` grants the bidirectional
 `privateNetworkClientServer` capability. This is the documented ProcessContainer mapping on every tier, not a
 downlevel weakening. Legacy proxy requests retain their existing compatibility behavior; schema 0.8 runtime proxy
-requests do not fall back because neither SBOX nor AppContainer can preserve their peer or host-loopback requirements.
+requests do not fall back because AppContainer cannot preserve their peer or host-loopback requirements.
 
 The AppContainer fallback is selected only when its capability mapping preserves the request. Explicit egress rules,
 proxy peer identity, and host-loopback allow fail with a typed unsupported-policy error when PSEC cannot enforce them.
 
 ## 3. WFP enforcement
 
-PSEC applies outbound WFP filters in the OS's elevated context and owns their lifetime. SBOX does not expose the
-equivalent teardown handle, so using it to install those filters could leave policy behind after the workload exits.
-Downlevel WFP installation, elevation, and reliable cleanup are future work and are not part of the initial schema 0.8
-downlevel support.
+PSEC applies outbound WFP filters in the OS's elevated context and owns their lifetime. AppContainer fallback does not
+install schema 0.8 WFP filters.
 
 WFP implements `egress` rules for public and private destinations. `internetClient` enables public-network access.
 `privateNetworkClientServer`, selected through `ingress.default`, is the prerequisite for private-network access and

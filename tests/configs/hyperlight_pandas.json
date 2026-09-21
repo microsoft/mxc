@@ -1,4 +1,5 @@
 {
+    "version": "0.9.0-alpha",
     "process": {
         "commandLine": "import pandas as pd, numpy as np\ndf = pd.DataFrame({'x': np.arange(5), 'y': np.arange(5) ** 2})\nprint(df.sum().to_dict())",
         "timeout": 30000

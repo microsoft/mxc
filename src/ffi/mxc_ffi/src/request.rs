@@ -6,19 +6,21 @@
 use std::collections::BTreeMap;
 
 use mxc_sdk::configs::{
-    CaptureDenials, ProcessContainer, ProcessContainerNetwork, ProcessContainerSystemSettings,
-    ProcessContainerUi, ProcessContainerUiIsolation,
+    CaptureDenials, Lxc, ProcessContainer, ProcessContainerFilesystem, ProcessContainerNetwork,
+    ProcessContainerSystemSettings, ProcessContainerUi, ProcessContainerUiIsolation, Seatbelt,
 };
+use mxc_sdk::policy::{FilesystemSection, NetworkSection, UiSection};
 use mxc_sdk::{
     build_request_with_containment, Containment, Error, ErrorCode, SandboxPolicy, SandboxRequest,
     WslcSection,
 };
-use serde_json::Value;
+use serde::de::{Error as _, IgnoredAny};
+use serde::{Deserialize, Deserializer};
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RequestSpec {
-    policy: SandboxPolicy,
+    policy: RequestPolicy,
     command: String,
     #[serde(default)]
     containment: RequestContainment,
@@ -27,9 +29,96 @@ struct RequestSpec {
     #[serde(default)]
     working_directory: Option<String>,
     #[serde(default)]
-    environment: BTreeMap<String, String>,
+    environment: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    inherit_default_env: bool,
     #[serde(default)]
     experimental: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RequestPolicy {
+    version: String,
+    #[serde(default)]
+    filesystem: Option<FilesystemSection>,
+    #[serde(default)]
+    network: Option<NetworkSection>,
+    #[serde(default)]
+    ui: Option<UiSection>,
+    #[serde(default)]
+    timeout_ms: Option<u32>,
+    #[serde(
+        default,
+        rename = "captureDenials",
+        deserialize_with = "reject_legacy_capture_denials"
+    )]
+    _capture_denials: (),
+    #[serde(default)]
+    telemetry: TelemetryField,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TelemetrySpec {
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+
+#[derive(Default)]
+enum TelemetryField {
+    #[default]
+    Absent,
+    Present(Option<TelemetrySpec>),
+}
+
+impl<'de> Deserialize<'de> for TelemetryField {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Option::<TelemetrySpec>::deserialize(deserializer).map(Self::Present)
+    }
+}
+
+fn reject_legacy_capture_denials<'de, D>(deserializer: D) -> Result<(), D::Error>
+where
+    D: Deserializer<'de>,
+{
+    IgnoredAny::deserialize(deserializer)?;
+    Err(D::Error::custom(
+        "policy.captureDenials is not supported; set containment.type to \
+         processContainer and use containment.captureDenials",
+    ))
+}
+
+impl RequestPolicy {
+    fn into_sdk(self) -> Result<(SandboxPolicy, Option<TelemetrySpec>), Error> {
+        let telemetry = match self.telemetry {
+            TelemetryField::Absent => None,
+            TelemetryField::Present(telemetry) => {
+                if let Ok(version) = semver::Version::parse(&self.version) {
+                    if version.major == 0 && version.minor < 9 {
+                        return Err(Error::new(
+                            ErrorCode::MalformedRequest,
+                            "policy.telemetry requires config schema version 0.9.0-alpha or later",
+                        ));
+                    }
+                }
+                telemetry
+            }
+        };
+        Ok((
+            SandboxPolicy {
+                version: self.version,
+                filesystem: self.filesystem,
+                network: self.network,
+                ui: self.ui,
+                timeout_ms: self.timeout_ms,
+            },
+            telemetry,
+        ))
+    }
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -49,8 +138,29 @@ enum RequestContainment {
         #[serde(default = "default_process_container_ui")]
         ui: Option<ProcessContainerUiSpec>,
         #[serde(default)]
+        filesystem: Option<ProcessContainerFilesystemSpec>,
+        #[serde(default)]
         network: Option<ProcessContainerNetworkSpec>,
     },
+    Seatbelt {
+        #[serde(default, rename = "profileOverride")]
+        profile_override: Option<String>,
+        #[serde(default, rename = "guiAccess")]
+        gui_access: bool,
+        #[serde(default = "default_nested_pty", rename = "nestedPty")]
+        nested_pty: bool,
+        #[serde(default, rename = "keychainAccess")]
+        keychain_access: bool,
+        #[serde(default, rename = "extraMachLookups")]
+        extra_mach_lookups: Vec<String>,
+    },
+    Lxc {
+        #[serde(default = "default_lxc_distribution")]
+        distribution: String,
+        #[serde(default = "default_lxc_release")]
+        release: String,
+    },
+    Bubblewrap {},
     Wslc {
         #[serde(default = "default_wslc_image")]
         image: String,
@@ -67,6 +177,7 @@ enum RequestContainment {
         #[serde(default, rename = "portMappings")]
         port_mappings: Vec<WslcPortMappingSpec>,
     },
+    IsolationSession {},
 }
 
 #[derive(serde::Deserialize)]
@@ -120,6 +231,13 @@ struct ProcessContainerNetworkSpec {
     allowed_proxy_peer: Option<String>,
 }
 
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProcessContainerFilesystemSpec {
+    #[serde(default)]
+    enumerate_paths: Vec<String>,
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WslcPortMappingSpec {
@@ -133,6 +251,18 @@ fn default_process_container_ui() -> Option<ProcessContainerUiSpec> {
 
 fn default_wslc_image() -> String {
     "alpine:latest".to_string()
+}
+
+fn default_lxc_distribution() -> String {
+    "alpine".to_string()
+}
+
+fn default_lxc_release() -> String {
+    "3.23".to_string()
+}
+
+fn default_nested_pty() -> bool {
+    true
 }
 
 impl RequestContainment {
@@ -149,6 +279,7 @@ impl RequestContainment {
                 capabilities,
                 capture_denials,
                 ui,
+                filesystem,
                 network,
             } => {
                 let mut process_container = ProcessContainer::default();
@@ -157,9 +288,36 @@ impl RequestContainment {
                 process_container.capabilities = capabilities;
                 process_container.capture_denials = capture_denials;
                 process_container.ui = ui.map(ProcessContainerUiSpec::into_sdk);
+                process_container.filesystem =
+                    filesystem.map(ProcessContainerFilesystemSpec::into_sdk);
                 process_container.network = network.map(ProcessContainerNetworkSpec::into_sdk);
                 Containment::ProcessContainer(process_container)
             }
+            Self::Seatbelt {
+                profile_override,
+                gui_access,
+                nested_pty,
+                keychain_access,
+                extra_mach_lookups,
+            } => {
+                let mut seatbelt = Seatbelt::default();
+                seatbelt.profile_override = profile_override;
+                seatbelt.gui_access = gui_access;
+                seatbelt.nested_pty = nested_pty;
+                seatbelt.keychain_access = keychain_access;
+                seatbelt.extra_mach_lookups = extra_mach_lookups;
+                Containment::Seatbelt(seatbelt)
+            }
+            Self::Lxc {
+                distribution,
+                release,
+            } => {
+                let mut lxc = Lxc::default();
+                lxc.distribution = distribution;
+                lxc.release = release;
+                Containment::Lxc(lxc)
+            }
+            Self::Bubblewrap {} => Containment::Bubblewrap,
             Self::Wslc {
                 image,
                 image_tar_path,
@@ -182,7 +340,16 @@ impl RequestContainment {
                     .collect();
                 Containment::Wslc(wslc)
             }
+            Self::IsolationSession {} => Containment::IsolationSession,
         }
+    }
+}
+
+impl ProcessContainerFilesystemSpec {
+    fn into_sdk(self) -> ProcessContainerFilesystem {
+        let mut filesystem = ProcessContainerFilesystem::default();
+        filesystem.enumerate_paths = self.enumerate_paths;
+        filesystem
     }
 }
 
@@ -219,30 +386,61 @@ impl ProcessContainerNetworkSpec {
 
 /// Parse a binding request and build the public Rust SDK request it describes.
 pub(crate) fn build_request_from_json(request_json: &str) -> Result<SandboxRequest, Error> {
-    let value: Value = serde_json::from_str(request_json).map_err(malformed_request)?;
-    if value
-        .get("policy")
-        .and_then(|policy| policy.get("captureDenials"))
-        .is_some()
-    {
+    let mut deserializer = serde_json::Deserializer::from_str(request_json);
+    let mut ignored_paths = Vec::new();
+    let spec: RequestSpec = serde_ignored::deserialize(&mut deserializer, |path| {
+        ignored_paths.push(path.to_string().replace(".?.", "."));
+    })
+    .map_err(malformed_request)?;
+    deserializer.end().map_err(malformed_request)?;
+    // The SDK authoring model recognizes these wire-only legacy names only to
+    // preserve their presence for the version-specific migration diagnostic.
+    let accepts_wire_legacy_names = spec.policy.version == "0.9.0-alpha";
+    if let Some(path) = ignored_paths.iter().find(|path| {
+        !(accepts_wire_legacy_names
+            && matches!(
+                path.as_str(),
+                "policy.network.defaultPolicy" | "policy.network.enforcementMode"
+            ))
+    }) {
         return Err(Error::new(
             ErrorCode::MalformedRequest,
-            "policy.captureDenials is not supported; set containment.type to \
-             processContainer and use containment.captureDenials",
+            format!("unknown request field `{path}`"),
         ));
     }
-
-    let spec: RequestSpec = serde_json::from_value(value).map_err(malformed_request)?;
+    if let Some(name) = spec.environment.as_ref().and_then(|environment| {
+        environment
+            .keys()
+            .find(|name| name.is_empty() || name.contains('='))
+    }) {
+        return Err(Error::new(
+            ErrorCode::MalformedRequest,
+            format!("invalid environment variable name `{name}`"),
+        ));
+    }
+    let (policy, telemetry) = spec.policy.into_sdk()?;
     let containment = spec.containment.into_sdk();
 
-    let mut request =
-        build_request_with_containment(&spec.policy, &containment, spec.container_name.as_deref())?;
-    request.set_script(spec.command);
+    let mut request = build_request_with_containment(
+        &policy,
+        &containment,
+        &spec.command,
+        spec.container_name.as_deref(),
+    )?;
     if let Some(working_directory) = spec.working_directory {
         request.set_working_directory(working_directory);
     }
-    request.set_env(spec.environment);
+    if let Some(environment) = spec.environment {
+        if spec.inherit_default_env {
+            request.inherit_default_env(environment);
+        } else {
+            request.set_env(environment);
+        }
+    }
     request.set_experimental(spec.experimental);
+    if let Some(enabled) = telemetry.and_then(|telemetry| telemetry.enabled) {
+        request.set_telemetry_opt_in(enabled);
+    }
     Ok(request)
 }
 
@@ -258,6 +456,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn process_container_filesystem_is_accepted_by_native_contract() {
+        let spec: RequestSpec = serde_json::from_str(
+            r#"{
+                "policy": { "version": "0.9.0-alpha" },
+                "command": "echo parity",
+                "containment": {
+                    "type": "processContainer",
+                    "filesystem": {
+                        "enumeratePaths": ["C:\\input"]
+                    }
+                }
+            }"#,
+        )
+        .expect("ProcessContainer filesystem request parses");
+
+        match spec.containment.into_sdk() {
+            Containment::ProcessContainer(process_container) => {
+                assert_eq!(
+                    process_container
+                        .filesystem
+                        .expect("filesystem settings are preserved")
+                        .enumerate_paths,
+                    ["C:\\input"]
+                );
+            }
+            _ => panic!("request selected the wrong containment"),
+        }
+    }
+
+    #[test]
     fn managed_full_request_goldens_are_accepted_by_native_contract() {
         let process_container =
             include_str!("../../../../tests/policy/request-process-container.json");
@@ -265,7 +493,11 @@ mod tests {
             serde_json::from_str(process_container).expect("process-container golden parses");
         assert_eq!(process_spec.command, "echo parity");
         assert_eq!(
-            process_spec.environment.get("PARITY").map(String::as_str),
+            process_spec
+                .environment
+                .as_ref()
+                .and_then(|environment| environment.get("PARITY"))
+                .map(String::as_str),
             Some("true")
         );
         assert_eq!(process_spec.policy.timeout_ms, Some(30_000));
@@ -390,6 +622,279 @@ mod tests {
     }
 
     #[test]
+    fn environment_presence_distinguishes_default_from_explicitly_empty() {
+        let omitted = build_request_from_json(
+            r#"{
+                "policy": { "version": "0.8.0-alpha" },
+                "command": "echo hi"
+            }"#,
+        )
+        .expect("omitted environment builds");
+        assert!(omitted.env().is_none());
+
+        let explicitly_empty = build_request_from_json(
+            r#"{
+                "policy": { "version": "0.8.0-alpha" },
+                "command": "echo hi",
+                "environment": {}
+            }"#,
+        )
+        .expect("explicitly empty environment builds");
+        assert_eq!(explicitly_empty.env(), Some([].as_slice()));
+    }
+
+    #[test]
+    fn telemetry_is_parsed_from_the_binding_policy() {
+        for (telemetry, expected) in [
+            ("", None),
+            (r#","telemetry":{"enabled":true}"#, Some(true)),
+            (r#","telemetry":{"enabled":false}"#, Some(false)),
+            (r#","telemetry":null"#, None),
+            (r#","telemetry":{}"#, None),
+            (r#","telemetry":{"enabled":null}"#, None),
+        ] {
+            let request_json = format!(
+                r#"{{
+                    "policy": {{
+                        "version": "0.9.0-alpha"
+                        {telemetry}
+                    }},
+                    "command": "echo hi"
+                }}"#
+            );
+            let request = build_request_from_json(&request_json)
+                .unwrap_or_else(|error| panic!("request failed: {error}"));
+            assert_eq!(request.telemetry_enabled(), expected);
+        }
+    }
+
+    #[test]
+    fn telemetry_rejects_unknown_fields() {
+        let error = build_request_from_json(
+            r#"{
+                "policy": {
+                    "version": "0.9.0-alpha",
+                    "telemetry": {
+                        "enabled": true,
+                        "unexpected": true
+                    }
+                },
+                "command": "echo hi"
+            }"#,
+        )
+        .expect_err("unknown telemetry fields must fail");
+
+        assert!(
+            error.message.contains("unknown field `unexpected`"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn telemetry_rejects_pre_0_9_policies() {
+        let error = build_request_from_json(
+            r#"{
+                "policy": {
+                    "version": "0.8.0-alpha",
+                    "telemetry": null
+                },
+                "command": "echo hi"
+            }"#,
+        )
+        .expect_err("telemetry must require policy version 0.9 or later");
+
+        assert!(
+            error
+                .message
+                .contains("telemetry requires config schema version 0.9.0-alpha"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn telemetry_rejects_malformed_enabled_values() {
+        let error = build_request_from_json(
+            r#"{
+                "policy": {
+                    "version": "0.9.0-alpha",
+                    "telemetry": {
+                        "enabled": "yes"
+                    }
+                },
+                "command": "echo hi"
+            }"#,
+        )
+        .expect_err("non-boolean telemetry must fail");
+
+        assert!(
+            error.message.contains("invalid type"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn duplicate_request_and_telemetry_fields_are_rejected() {
+        for request_json in [
+            r#"{
+                "policy": { "version": "0.9.0-alpha" },
+                "command": "echo first",
+                "command": "echo second"
+            }"#,
+            r#"{
+                "policy": {
+                    "version": "0.9.0-alpha",
+                    "telemetry": { "enabled": true },
+                    "telemetry": null
+                },
+                "command": "echo hi"
+            }"#,
+        ] {
+            let error =
+                build_request_from_json(request_json).expect_err("duplicate fields must fail");
+            assert!(
+                error.message.contains("duplicate field"),
+                "unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_policy_fields_are_rejected() {
+        let error = build_request_from_json(
+            r#"{
+                "policy": {
+                    "version": "0.9.0-alpha",
+                    "timeoutMS": 1
+                },
+                "command": "echo hi"
+            }"#,
+        )
+        .expect_err("unknown policy fields must fail");
+
+        assert!(
+            error.message.contains("unknown field `timeoutMS`"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn wire_legacy_network_names_are_exempt_only_for_v0_9_migration_errors() {
+        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha"] {
+            for (field, value) in [
+                ("defaultPolicy", r#""allow""#),
+                ("enforcementMode", r#""capabilities""#),
+            ] {
+                let request_json = format!(
+                    r#"{{
+                        "policy": {{
+                            "version": "{version}",
+                            "network": {{ "{field}": {value} }}
+                        }},
+                        "command": "echo hi"
+                    }}"#
+                );
+                let error = build_request_from_json(&request_json)
+                    .expect_err("wire-only network names must remain unknown before v0.9");
+                assert!(
+                    error.message.contains(&format!("policy.network.{field}")),
+                    "unexpected error for {version} {field}: {error}"
+                );
+            }
+        }
+
+        for (field, value) in [
+            ("defaultPolicy", r#""allow""#),
+            ("enforcementMode", r#""capabilities""#),
+        ] {
+            let request_json = format!(
+                r#"{{
+                    "policy": {{
+                        "version": "0.9.0-alpha",
+                        "network": {{ "{field}": {value} }}
+                    }},
+                    "command": "echo hi"
+                }}"#
+            );
+            let error = build_request_from_json(&request_json)
+                .expect_err("v0.9 wire-only network names must reach migration validation");
+            assert!(
+                error
+                    .message
+                    .contains("no longer accepts legacy network authoring"),
+                "unexpected error for v0.9 {field}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_nested_policy_fields_are_rejected() {
+        for (request_json, expected_path) in [
+            (
+                r#"{
+                    "policy": {
+                        "version": "0.9.0-alpha",
+                        "filesystem": {
+                            "readwritePaths": [],
+                            "unexpected": true
+                        }
+                    },
+                    "command": "echo hi"
+                }"#,
+                "policy.filesystem.unexpected",
+            ),
+            (
+                r#"{
+                    "policy": {
+                        "version": "0.9.0-alpha",
+                        "network": {
+                            "allowOutboud": true
+                        }
+                    },
+                    "command": "echo hi"
+                }"#,
+                "policy.network.allowOutboud",
+            ),
+            (
+                r#"{
+                    "policy": {
+                        "version": "0.9.0-alpha",
+                        "ui": {
+                            "unexpected": true
+                        }
+                    },
+                    "command": "echo hi"
+                }"#,
+                "policy.ui.unexpected",
+            ),
+        ] {
+            let error =
+                build_request_from_json(request_json).expect_err("unknown nested fields must fail");
+            assert!(
+                error.message.contains(expected_path),
+                "unexpected error for {expected_path}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_environment_variable_names_are_rejected() {
+        for name in ["", "A=B"] {
+            let request_json = serde_json::json!({
+                "policy": { "version": "0.9.0-alpha" },
+                "command": "echo hi",
+                "environment": { name: "value" }
+            })
+            .to_string();
+            let error =
+                build_request_from_json(&request_json).expect_err("invalid names must fail");
+            assert!(
+                error.message.contains("invalid environment variable name"),
+                "unexpected error for {name:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn capture_denials_is_mapped_to_process_container_configuration() {
         let error = build_request_from_json(
             r#"{
@@ -507,6 +1012,105 @@ mod tests {
         assert!(config.gpu);
         assert_eq!(config.storage_path.as_deref(), Some(r"C:\wslc"));
         assert_eq!(config.port_mappings, [(8080, 80)]);
+    }
+
+    #[test]
+    fn seatbelt_options_map_to_the_sdk_type() {
+        let json = r#"{
+                "type": "seatbelt",
+                "profileOverride": "(version 1)",
+                "guiAccess": true,
+                "nestedPty": false,
+                "keychainAccess": true,
+                "extraMachLookups": ["com.example.service"]
+            }"#;
+        let containment: RequestContainment =
+            serde_json::from_str(json).expect("request containment parses");
+
+        let Containment::Seatbelt(config) = containment.into_sdk() else {
+            panic!("expected Seatbelt");
+        };
+        assert_eq!(config.profile_override.as_deref(), Some("(version 1)"));
+        assert!(config.gui_access);
+        assert!(!config.nested_pty);
+        assert!(config.keychain_access);
+        assert_eq!(config.extra_mach_lookups, ["com.example.service"]);
+
+        build_request_from_json(&format!(
+            r#"{{
+                "policy": {{ "version": "0.8.0-alpha" }},
+                "command": "echo hi",
+                "containment": {json}
+            }}"#
+        ))
+        .expect("Seatbelt binding request builds through the public Rust SDK");
+    }
+
+    #[test]
+    fn lxc_options_map_to_the_sdk_type() {
+        let json = r#"{
+                "type": "lxc",
+                "distribution": "ubuntu",
+                "release": "24.04"
+            }"#;
+        let containment: RequestContainment =
+            serde_json::from_str(json).expect("request containment parses");
+
+        let Containment::Lxc(config) = containment.into_sdk() else {
+            panic!("expected LXC");
+        };
+        assert_eq!(config.distribution, "ubuntu");
+        assert_eq!(config.release, "24.04");
+
+        build_request_from_json(&format!(
+            r#"{{
+                "policy": {{ "version": "0.8.0-alpha" }},
+                "command": "echo hi",
+                "containment": {json}
+            }}"#
+        ))
+        .expect("LXC binding request builds through the public Rust SDK");
+    }
+
+    #[test]
+    fn bubblewrap_selects_the_backend_from_its_wire_spelling() {
+        let containment: RequestContainment = serde_json::from_str(r#"{ "type": "bubblewrap" }"#)
+            .expect("request containment parses");
+
+        assert!(matches!(containment.into_sdk(), Containment::Bubblewrap));
+    }
+
+    /// The discriminator is derived from the enum's `rename_all`, not written by
+    /// hand, and the managed binding spells it independently.
+    #[test]
+    fn isolation_session_selects_the_backend_from_its_wire_spelling() {
+        let containment: RequestContainment =
+            serde_json::from_str(r#"{ "type": "isolationSession" }"#)
+                .expect("request containment parses");
+
+        assert!(matches!(
+            containment.into_sdk(),
+            Containment::IsolationSession
+        ));
+    }
+
+    /// `deny_unknown_fields` does not reach an internally tagged unit variant,
+    /// so the empty-struct form is what closes this one.
+    #[test]
+    fn isolation_session_rejects_a_member_it_does_not_define() {
+        let error = build_request_from_json(
+            r#"{
+                "policy": { "version": "0.9.0-alpha" },
+                "command": "echo hi",
+                "containment": { "type": "isolationSession", "unexpected": true }
+            }"#,
+        )
+        .expect_err("an undefined member must not be discarded");
+
+        assert!(
+            error.message.contains("unexpected"),
+            "the error must name the member: {error}"
+        );
     }
 
     #[test]

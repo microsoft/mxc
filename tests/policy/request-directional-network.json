@@ -36,6 +36,5 @@
   "containment": {
     "type": "process"
   },
-  "environment": {},
   "experimental": false
 }

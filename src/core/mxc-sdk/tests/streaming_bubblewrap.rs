@@ -45,9 +45,7 @@ fn bwrap_request(command: &str, timeout_ms: u32) -> SandboxRequest {
             Some(timeout_ms)
         },
     };
-    let mut request = build_request(&policy, None).expect("build_request should succeed");
-    request.set_script(command);
-    request
+    build_request(&policy, command, None).expect("build_request should succeed")
 }
 
 /// Whether `pid` still has a `/proc` entry. An exited child stays a zombie --

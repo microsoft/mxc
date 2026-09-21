@@ -93,15 +93,15 @@ run_rejected "ingress.hostLoopback=allow is refused" \
     "network.ingress.hostLoopback='allow' is not supported" \
     "DIRECTIONAL_HOST_LOOPBACK_ALLOW_SHOULD_NOT_RUN"
 
-# A directional section on a pre-0.8 schema. The parser refuses this before the
-# backend ever sees it (`select_network_format`), so the message asserted here
-# is the parser's, not the backend's. The backend carries its own twin of this
-# rejection for programmatic callers that build an `ExecutionRequest` directly
-# and never pass through the parser; that path has no config file and so is
-# covered by unit tests rather than here.
+# A directional section on a pre-0.8 schema. The declared version selects a
+# closed 0.7 contract that has no `egress`/`ingress` field, so deserialization
+# refuses it before the backend ever sees it. The backend carries its own twin
+# of this rejection for programmatic callers that build an `ExecutionRequest`
+# directly and never pass through the parser; that path has no config file and
+# so is covered by unit tests rather than here.
 run_rejected "a directional section before 0.8 is refused" \
     "bubblewrap_network_directional_pre08_rejected.json" \
-    "require schema version 0.8 or later" \
+    "Invalid configuration at \`network.egress\`" \
     "DIRECTIONAL_PRE_0_8_SHOULD_NOT_RUN"
 
 # The per-peer block budget. `except` is the amplifier: 20 dispersed /32

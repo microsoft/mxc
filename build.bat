@@ -133,6 +133,10 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
             copy /Y "!BIN_DIR!\plm.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
             echo   Copied !SDK_ARCH!\plm.exe
         )
+        if exist "!BIN_DIR!\mxc_ffi.dll" (
+            copy /Y "!BIN_DIR!\mxc_ffi.dll" "sdk\node\bin\!SDK_ARCH!\" >nul
+            echo   Copied !SDK_ARCH!\mxc_ffi.dll
+        )
         if "!COPY_WSLC_RUNTIME!"=="1" (
             if "%WITH_WSLC%"=="1" (
                 for %%B in (wxc-wslc-daemon.exe wslcsdk.dll) do (

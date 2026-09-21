@@ -38,8 +38,15 @@ pub struct Process {
     #[serde(default)]
     pub cwd: OptionalField<String>,
     /// Optional environment entries encoded as `KEY=VALUE` strings.
+    ///
+    /// Omitted gives the backend's default environment; supplied (including as
+    /// an empty array) is used verbatim unless `inheritDefaultEnv` is set.
     #[serde(default)]
     pub env: OptionalField<Vec<String>>,
+    /// Layer `env` on top of the backend's default environment rather than
+    /// replacing it.
+    #[serde(default)]
+    pub inherit_default_env: OptionalField<bool>,
     /// Optional execution timeout in milliseconds.
     #[serde(default)]
     pub timeout: OptionalField<u32>,
@@ -289,9 +296,22 @@ pub struct ProcessContainer {
     /// Optional ProcessContainer-specific user-interface policy.
     #[serde(default)]
     pub ui: OptionalField<ProcessContainerUi>,
+    /// Optional ProcessContainer-specific filesystem policy.
+    #[serde(default)]
+    pub filesystem: OptionalField<ProcessContainerFilesystem>,
     /// Optional ProcessContainer-specific network settings.
     #[serde(default)]
     pub network: OptionalField<ProcessContainerNetwork>,
+}
+
+/// ProcessContainer-specific filesystem policy.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProcessContainerFilesystem {
+    /// Optional paths that may be queried or enumerated without granting file-content reads.
+    #[serde(default)]
+    pub enumerate_paths: OptionalField<Vec<String>>,
 }
 
 /// ProcessContainer-specific network settings.
@@ -310,8 +330,9 @@ pub struct ProcessContainerNetwork {
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeConfig {
-    /// Optional loopback proxy the runtime configures for the sandbox. Must
-    /// address localhost, and requires an egress policy.
+    /// Optional HTTP/S proxy URL. Host-process backends require a localhost
+    /// endpoint; WSLc requires an endpoint routable from its container and
+    /// inherits the provisioned networking mode on exec.
     #[serde(default)]
     pub network_proxy: OptionalField<String>,
 }
@@ -327,17 +348,6 @@ pub struct Lxc {
     pub release: String,
 }
 
-string_enum! {
-    /// Launch method for macOS Seatbelt config.
-    #[derive(Debug)]
-    pub enum LaunchMethod {
-        /// Launch the contained process directly through `exec`.
-        Exec => ["exec"],
-        /// Launch the contained application through macOS LaunchServices.
-        Open => ["open"],
-    }
-}
-
 /// macOS Seatbelt backend settings.
 #[derive(Debug, serde::Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
@@ -349,9 +359,6 @@ pub struct Seatbelt {
     /// Whether GUI application access is allowed.
     #[serde(default)]
     pub gui_access: OptionalField<bool>,
-    /// Optional method used to launch the contained process.
-    #[serde(default)]
-    pub launch_method: OptionalField<LaunchMethod>,
     /// Whether the contained process may allocate nested pseudo-terminals.
     #[serde(default)]
     pub nested_pty: OptionalField<bool>,

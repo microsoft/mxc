@@ -27,11 +27,12 @@ pub use network_parser::supports_directional_network;
 pub mod proxy_env;
 pub mod sandbox_process;
 pub mod script_runner;
+pub(crate) mod splice;
 pub mod state_aware_backend;
+pub mod state_aware_binding;
 pub mod state_aware_dispatch;
+pub mod state_aware_operation;
 pub mod state_aware_request;
-// Not yet reachable from production dispatch; see Gudge.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod state_aware_wire;
 pub mod telemetry;
 pub mod ui_policy;
@@ -70,7 +71,7 @@ pub mod unix_proxy_coordinator;
 
 /// Test-only helper for env-var serialization within this crate's
 /// `filesystem_dacl` tests. The same shape lives in
-/// `backends/appcontainer/common/src/test_env.rs`; each crate has its
+/// `backends/process_container/common/src/test_env.rs`; each crate has its
 /// own `ENV_LOCK` because the env-var contention is only within a
 /// single test binary.
 #[cfg(all(test, target_os = "windows"))]

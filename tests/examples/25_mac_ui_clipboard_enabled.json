@@ -3,7 +3,7 @@
     "version": "0.7.0-alpha",
     "containment": "seatbelt",
     "process": {
-        "commandLine": "/bin/sh -c 'echo sandbox_clip_test | /usr/bin/pbcopy; /usr/bin/pbpaste'",
+        "commandLine": "/bin/sh -c 'echo sandbox_clip_test | /usr/bin/pbcopy && echo PBCOPY_OK || echo PBCOPY_DENIED; /usr/bin/pbpaste && echo PBPASTE_OK || echo PBPASTE_DENIED'",
         "timeout": 10000
     },
     "network": {

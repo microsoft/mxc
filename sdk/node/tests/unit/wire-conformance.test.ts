@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Wire-type conformance oracle (Phase 2C, option C).
+// Wire-type conformance oracle.
 //
 // The generated module `../../src/generated/wire.ts` is emitted from the Rust
 // wire model (`wxc_common::wire`) by the `mxc_schema_gen types` Rust TypeScript
@@ -62,6 +62,7 @@ import type {
   PortMapping as PublicPortMapping,
   LxcConfig,
   SeatbeltConfig,
+  TelemetryConfig,
   ContainerConfig,
   ClipboardPolicy as PublicClipboardPolicy,
   ContainmentType,
@@ -86,6 +87,7 @@ import type {
   PortMapping as WirePortMapping,
   Lxc as WireLxc,
   Seatbelt as WireSeatbelt,
+  Telemetry as WireTelemetry,
   MXCConfiguration as WireMxcConfig,
   ClipboardPolicy as WireClipboardPolicy,
   Containment as WireContainment,
@@ -167,6 +169,7 @@ type _BaseProcessUiVals = AssertTrue<Assignable<BaseProcessUiConfig, WireBasePro
 type _WslcVals = AssertTrue<Assignable<WslcConfig, WireWslc>>;
 type _PortMappingVals = AssertTrue<Assignable<PublicPortMapping, WirePortMapping>>;
 type _SeatbeltVals = AssertTrue<Assignable<SeatbeltConfig, WireSeatbelt>>;
+type _TelemetryVals = AssertTrue<Assignable<TelemetryConfig, WireTelemetry>>;
 type _LxcVals = AssertTrue<Assignable<StripIndex<LxcConfig>, WireLxc>>;
 
 // --- key conformance (rename / removal detection) -------------------------
@@ -187,6 +190,7 @@ type _BaseProcessUiKeys = AssertTrue<Equivalent<OnlyInPublic<BaseProcessUiConfig
 type _WslcKeys = AssertTrue<Equivalent<OnlyInPublic<WslcConfig, WireWslc>, never>>;
 type _PortMappingKeys = AssertTrue<Equivalent<OnlyInPublic<PublicPortMapping, WirePortMapping>, never>>;
 type _SeatbeltKeys = AssertTrue<Equivalent<OnlyInPublic<SeatbeltConfig, WireSeatbelt>, never>>;
+type _TelemetryKeys = AssertTrue<Equivalent<OnlyInPublic<TelemetryConfig, WireTelemetry>, never>>;
 
 // `FilesystemConfig.clearPolicyOnExit` is an SDK-side convenience flag mapped
 // into `lifecycle.preservePolicy`; it is not a wire `filesystem` field.
@@ -243,14 +247,15 @@ type _PortMappingWireKeys = AssertTrue<Equivalent<OnlyInWire<PublicPortMapping, 
 type _LxcWireKeys = AssertTrue<Equivalent<OnlyInWire<LxcConfig, WireLxc>, never>>;
 
 type _ProcessContainerWireKeys = AssertTrue<
-  Equivalent<OnlyInWire<ProcessContainerConfig, WireProcessContainer>, 'captureDenials'>
+  Equivalent<OnlyInWire<ProcessContainerConfig, WireProcessContainer>, never>
 >;
 
-// `seatbelt.guiAccess` and `seatbelt.launchMethod` are wire fields the one-shot
-// `SeatbeltConfig` does not expose today.
+// `SeatbeltConfig` now exposes `guiAccess` because RequestSpec carries it.
+// `launchMethod` was removed from the exact 0.9 contract and remains wire-only.
 type _SeatbeltWireKeys = AssertTrue<
-  Equivalent<OnlyInWire<SeatbeltConfig, WireSeatbelt>, 'guiAccess' | 'launchMethod'>
+  Equivalent<OnlyInWire<SeatbeltConfig, WireSeatbelt>, 'launchMethod'>
 >;
+type _TelemetryWireKeys = AssertTrue<Equivalent<OnlyInWire<TelemetryConfig, WireTelemetry>, never>>;
 
 // Root: the SDK's `ContainerConfig` intentionally omits the schema-metadata keys
 // (`$schema`, `_comment`), the state-aware-only keys (`phase`, `sandboxId`),

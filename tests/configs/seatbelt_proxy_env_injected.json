@@ -1,0 +1,15 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.0.7.0-alpha.json",
+    "version": "0.7.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "for v in HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; do eval \"echo $v=[\\$$v]\"; done",
+        "timeout": 30000
+    },
+    "network": {
+        "defaultPolicy": "block",
+        "proxy": {
+            "builtinTestServer": true
+        }
+    }
+}

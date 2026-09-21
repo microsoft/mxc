@@ -289,8 +289,13 @@ Seatbelt has the caveat described below.
   Seatbelt maps `ingress.default` to its existing
   `(allow network-inbound (local ip))` behavior and enforces `hostLoopback` on
   the container-to-host direction with a `localhost`-scoped `network-outbound`
-  rule. The inbound half is not expressible in a Seatbelt profile, so
-  `hostLoopback` must equal `ingress.default` there. That rule is scoped to the
+  rule. The inbound half is not expressible in a Seatbelt profile, so Seatbelt
+  refuses `hostLoopback: "allow"` under `ingress.default: "deny"` — an inbound
+  promise no rule can carry. It accepts `hostLoopback: "deny"` under
+  `ingress.default: "allow"`, enforcing the container-to-host half while the
+  blanket inbound grant over-permits the host-to-container half; that pair is
+  the only way Seatbelt can offer a listener without surrendering the
+  container-to-host direction, which is what a model-2 proxy depends on. That rule is scoped to the
   host, not to loopback: SBPL's `localhost` means *this machine*, so it covers
   every address bound to the host (loopback, LAN, and any public address) in
   both the `deny` and `allow` cases. Other machines are unaffected — they
@@ -333,7 +338,7 @@ the exact endpoint in `runtimeConfig.networkProxy` is the sole sanctioned except
 
 | Platform | Enforcement Mechanism |
 |---|---|
-| Windows (Process Containers) | PSEC BaseContainer path: per-AppContainer WinHTTP proxy configuration and scoped proxy-only access. Legacy SBOX and AppContainer fallback reject schema 0.8 runtime proxy. |
+| Windows (Process Containers) | PSEC BaseContainer path: per-AppContainer WinHTTP proxy configuration and scoped proxy-only access. AppContainer fallback rejects schema 0.8 runtime proxy. |
 | WSLc | VM-level network policy permits only the translated proxy endpoint. Proxy variables are routing hints. |
 | Linux (LXC, Bubblewrap) | iptables permits only the proxy endpoint; proxy variables are routing hints. |
 | macOS (Seatbelt) | Seatbelt profile confines network-outbound to the loopback proxy port. MXC-set `HTTP_PROXY`/`HTTPS_PROXY` env variables are an advisory routing hint; a client that ignores the variables is denied by the profile (only the proxy port is reachable), so it is dropped, not bypassed. |
@@ -404,8 +409,8 @@ already implemented.
 The strict host-loopback guarantee applies to the identity-scoped
 ProcessContainer path with OS-scoped proxy enforcement. The identity-less host
 proxy path requires broader host-loopback access and is an explicitly documented
-PSEC compatibility behavior rather than strict model-2 enforcement. Legacy SBOX
-and the AppContainer fallback reject schema 0.8 runtime proxy requests because
+PSEC compatibility behavior rather than strict model-2 enforcement. The
+AppContainer fallback rejects schema 0.8 runtime proxy requests because
 they cannot preserve either posture.
 
 **Connectivity models:**
@@ -425,11 +430,11 @@ they cannot preserve either posture.
 
 | Configuration concept | Enforcement mechanism | Notes |
 |---|---|---|
-| IP/CIDR allow/block | PSEC IPv4/IPv6 WFP filters scoped to AppContainer SID | Public and private destinations; unsupported on SBOX and AppContainer fallback |
+| IP/CIDR allow/block | PSEC IPv4/IPv6 WFP filters scoped to AppContainer SID | Public and private destinations; unsupported on AppContainer fallback |
 | Port filtering | Port filtering via WFP | Port ranges supported. |
 | Protocol filtering | Protocol filtering via WFP | Schema values are `tcp`, `udp`, `icmp`, and `any`; WFP maps ICMP by address family. |
 | Default-deny | PSEC WFP block-all baseline filter at lower precedence than explicit allows. | A non-empty allow list grants `internetClient` only as the capability prerequisite; WFP still limits egress to explicit allows. With no allows, `internetClient` is absent. |
-| Proxy (HTTP/S only) | PSEC per-AppContainer WinHTTP configuration, endpoint filtering, and optional scoped peer access | Identity-scoped proxies keep `hostLoopback: "deny"`; the identity-less development/testing compatibility path requires `"allow"`; schema 0.8 proxy requests do not fall back to SBOX or AppContainer |
+| Proxy (HTTP/S only) | PSEC per-AppContainer WinHTTP configuration, endpoint filtering, and optional scoped peer access | Identity-scoped proxies keep `hostLoopback: "deny"`; the identity-less development/testing compatibility path requires `"allow"`; schema 0.8 proxy requests do not fall back to AppContainer |
 | Per-sandbox scoping | AppContainer SID, unique per sandbox instance | |
 | Private network | `privateNetworkClientServer` via `ingress.default` | Capability gate; `egress` filters outbound |
 | Inbound | Capabilities and loopback rules | Private network uses `ingress.default`; loopback is separate |
@@ -533,7 +538,7 @@ Model 2 permits only the proxy endpoint.
 | Proxy routing (HTTP/S) | `HTTP_PROXY`/`HTTPS_PROXY` set to the loopback proxy; cooperating clients route there. | A minority of clients ignore the variables; their traffic is dropped by the egress restriction, not bypassed. |
 | IP/CIDR / port / protocol allow-lists | Not supported. | |
 | Per-sandbox scoping | Seatbelt profile per sandbox-exec invocation | |
-| Inbound | Seatbelt `network-inbound (local ip)` rule | Preserves current `allowLocalNetwork` behavior through `ingress.default`; differing `default` and `hostLoopback` values are rejected with `policy_validation`. |
+| Inbound | Seatbelt `network-inbound (local ip)` rule | Preserves current `allowLocalNetwork` behavior through `ingress.default`. `hostLoopback: "allow"` under `default: "deny"` is rejected with `policy_validation`; `hostLoopback: "deny"` under `default: "allow"` is accepted, enforcing only the container-to-host half. |
 | DNS | Direct outbound DNS to an external resolver is blocked (egress confined to the proxy port); cooperating clients pass hostnames to the proxy, which resolves them. All others would be blocked. | |
 | Bypass resistance | Medium. Egress is profile-restricted to the proxy port, so raw-socket and direct-DNS attempts are denied. Weaker than a separate network namespace (Seatbelt shares the host network stack) and depends on a correct profile. | |
 

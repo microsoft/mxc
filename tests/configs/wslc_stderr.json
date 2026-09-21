@@ -1,12 +1,12 @@
 {
-  "version": "0.6.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "wslc-stderr",
   "containment": "wslc",
   "process": {
     "commandLine": "echo 'stdout message' && echo 'stderr message' >&2 && echo 'another stdout'"
   },
   "network": {
-    "defaultPolicy": "block"
+    "egress": { "default": "deny" }
   },
   "experimental": {
     "wslc": {

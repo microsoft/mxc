@@ -1,5 +1,5 @@
 {
-  "version": "0.8.0-alpha",
+  "version": "0.9.0-alpha",
   "phase": "exec",
   "sandboxId": "wslc:0123456789abcdef0123456789abcdef",
   "process": {
@@ -8,9 +8,7 @@
     "env": ["A=1", "B=two"],
     "timeout": 1234
   },
-  "network": {
-    "proxy": {
-      "url": "http://proxy.example:8080"
-    }
+  "runtimeConfig": {
+    "networkProxy": "http://proxy.example:8080"
   }
 }

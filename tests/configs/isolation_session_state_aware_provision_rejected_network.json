@@ -1,7 +1,10 @@
 {
-    "phase": "provision",
-    "containment": "isolation_session",
-    "network": {
-        "defaultPolicy": "block"
+  "version": "0.9.0-alpha",
+  "phase": "provision",
+  "containment": "isolation_session",
+  "network": {
+    "egress": {
+      "default": "deny"
     }
+  }
 }

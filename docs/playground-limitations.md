@@ -89,8 +89,8 @@ WinHTTP with `WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY` (like curl.exe) respect this 
 Tools that use their own DNS resolution (.NET HttpClient, PowerShell) do not.
 
 **BaseContainer (v0.5.0):** The proxy URL is passed in the FlatBuffer spec to
-`CreateProcessInSandbox`. The OS-level `appinfosvc` configures WinHTTP proxy for the
-container. System-level WinHTTP sessions (Windows telemetry) use the proxy. App-created
+the PSEC specification. The OS-level `appinfosvc` configures WinHTTP proxy for the
+container. System-level WinHTTP sessions use the proxy. App-created
 WinHTTP sessions may or may not pick it up depending on how they're initialized.
 
 ### Admin Requirements
@@ -159,4 +159,4 @@ to the SDK.
 | 0.8.0-alpha | Stable (current) | ProcessContainer (capability-resolved) | Production |
 | 0.9.0-alpha | Dev | ProcessContainer (capability-resolved) | Experimental |
 
-The SDK and Rust parser accept `>=0.6, <=0.9`. As of Phase 3a the schema version no longer selects the Windows backend — BaseContainer vs AppContainer is resolved at runtime by host capability.
+The SDK and Rust parser accept only the exact registered versions `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, and `0.9.0-alpha`; an unregistered spelling such as `0.6.1-alpha` is rejected. The schema version does not select the Windows backend — BaseContainer vs AppContainer is resolved at runtime by host capability.

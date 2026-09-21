@@ -46,11 +46,7 @@ fn accepts_exec_request_with_optional_fields() {
         "phase": "exec",
         "sandboxId": "test123456",
         "process": {"commandLine": "echo"},
-        "network": {
-            "proxy": {
-                "url": "http://proxy.example"
-            }
-        },
+        "runtimeConfig": {"networkProxy": "http://proxy.example:8080"},
         "telemetry": {
                 "enabled": true
             }
@@ -62,6 +58,7 @@ fn accepts_exec_request_with_optional_fields() {
 fn accepts_empty_exec_optional_objects() {
     for field in [
         r#""network": {}"#,
+        r#""runtimeConfig": {}"#,
         r#""experimental": {}"#,
         r#""telemetry": {}"#,
     ] {

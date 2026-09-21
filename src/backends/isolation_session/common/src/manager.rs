@@ -6,11 +6,13 @@
 //! `create_process` also drives the ConPTY relay setup + shutdown ladder
 //! against the local console.
 
+use std::sync::Arc;
+
 use wxc_common::audit::{AuditEvent, AuditEventName, KillMethod, TeardownStatus};
 use wxc_common::logger::Logger;
 use wxc_common::process_util::{OwnedHandle, PipeReadCanceller};
 use wxc_common::sandbox_process::StreamCloser;
-use wxc_common::state_aware_backend::ExecOutcome;
+use wxc_common::state_aware_backend::{ExecHandle, ExecOutcome};
 
 use isolation_session_bindings::bindings::{
     IsoSessionFeature, IsoSessionOps, IsoSessionProcess, IsoSessionProcessResult,
@@ -614,6 +616,69 @@ impl IsolationSessionManager {
         Ok(match outcome {
             ExecOutcome::Exited(exit_code) => exit_code,
             ExecOutcome::TimedOut => WAIT_FOR_EXIT_TIMEOUT,
+        })
+    }
+
+    /// Start a process and hand back its live pipes as an [`ExecHandle`].
+    ///
+    /// Shared by the state-aware `Piped` exec and the one-shot streaming
+    /// backend.
+    ///
+    /// `timeout_ms` is the caller's deadline, enforced by the waiter. Arm the
+    /// service-side timer with [`with_service_timeout_grace`] before calling:
+    /// without that margin the two deadlines coincide, and a timeout can arrive
+    /// as an ordinary exit.
+    ///
+    /// [`with_service_timeout_grace`]: super::process_options::with_service_timeout_grace
+    pub(super) fn piped_exec_handle(
+        &self,
+        options: &ProcessOptions,
+        timeout_ms: u32,
+        logger: Option<&Logger>,
+    ) -> Result<ExecHandle, IsolationSessionError> {
+        // Acquired before the workload starts, so a failure here cannot leave
+        // one running with no handle to reach it.
+        let mta = MtaReference::acquire()?;
+        let started = Arc::new(ClosingProcess::new(
+            self.start_process(options, logger)?,
+            mta,
+        ));
+
+        // Read the handles before the closures take ownership. A zero means the
+        // stream is genuinely absent, which is exactly the sentinel the
+        // consumer already treats as "no stream".
+        let stdout = HANDLE(started.stdout as *mut std::ffi::c_void);
+        let stderr = HANDLE(started.stderr as *mut std::ffi::c_void);
+        let stdin = HANDLE(started.stdin as *mut std::ffi::c_void);
+
+        // `IsoSessionProcess` is an agile WinRT object (the bindings declare it
+        // `Send + Sync`), so the closures can hold it without the
+        // apartment-affine worker thread the WSLC backend needs.
+        let waiter_process = Arc::clone(&started);
+        let stdin_process = Arc::clone(&started);
+        Ok(ExecHandle {
+            stdout,
+            stderr,
+            stdin,
+            stdin_closer: Some(Box::new(move || {
+                let _ = stdin_process.process.CloseStandardInput();
+            })),
+            // Reports `TimedOut` when the deadline elapsed with the process
+            // still running — see `StartedProcess::wait`, which samples that
+            // before the shutdown ladder destroys the evidence.
+            waiter: Box::new(move || {
+                waiter_process
+                    .wait(timeout_ms)
+                    .map_err(super::error::map_lifecycle_error)
+            }),
+            // Reports whether the platform *accepted* the kill: `terminate`'s
+            // bounded post-kill wait is not consulted, so a `Terminate` that
+            // was accepted and then did not take effect still reports success.
+            terminator: Box::new(move || {
+                started
+                    .terminate()
+                    .map_err(super::error::map_lifecycle_error)
+            }),
         })
     }
 

@@ -7,7 +7,6 @@
   "seatbelt": {
     "profileOverride": "(version 1) (allow default)",
     "guiAccess": true,
-    "launchMethod": "open",
     "nestedPty": false,
     "keychainAccess": true,
     "extraMachLookups": [

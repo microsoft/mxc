@@ -71,6 +71,12 @@ struct MappedRoot {
 /// `deniedPaths` against them.
 fn plan_filesystem(request: &ExecutionRequest) -> Result<Vec<MappedFolder>, OneShotError> {
     let policy = &request.policy;
+    if !policy.enumerate_paths.is_empty() {
+        return Err(OneShotError::Policy(
+            "processContainer.filesystem.enumeratePaths is not supported by the Windows Sandbox backend"
+                .to_string(),
+        ));
+    }
     let mut roots: Vec<MappedRoot> = Vec::new();
 
     for path in &policy.readwrite_paths {
@@ -344,6 +350,16 @@ mod tests {
         }))
         .unwrap_err();
         assert_policy_err_contains(err, "per-host network filtering");
+    }
+
+    #[test]
+    fn enumerate_paths_rejected() {
+        let err = plan_policy(&request_with(ContainerPolicy {
+            enumerate_paths: vec!["C:\\tools".to_string()],
+            ..Default::default()
+        }))
+        .unwrap_err();
+        assert_policy_err_contains(err, "processContainer.filesystem.enumeratePaths");
     }
 
     #[test]

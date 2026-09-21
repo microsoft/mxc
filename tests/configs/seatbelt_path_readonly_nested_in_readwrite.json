@@ -1,0 +1,13 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
+    "version": "0.8.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "cat {{TESTDIR}}/rw/inner/secret.txt && (echo x > {{TESTDIR}}/rw/inner/w.txt && echo PATH_NESTED_RO_WRITE_SUCCEEDED)",
+        "timeout": 10000
+    },
+    "filesystem": {
+        "readwritePaths": ["{{TESTDIR}}/rw"],
+        "readonlyPaths": ["{{TESTDIR}}/rw/inner"]
+    }
+}

@@ -1,5 +1,5 @@
 {
-  "version": "0.8.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "wslc-denied-masking",
   "containment": "wslc",
   "process": {
@@ -10,7 +10,8 @@
     "deniedPaths": ["C:\\wslcmask\\secret_file.txt", "C:\\wslcmask\\secret_dir"]
   },
   "network": {
-    "defaultPolicy": "allow"
+    "egress": { "default": "allow" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
   },
   "experimental": {
     "wslc": {

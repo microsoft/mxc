@@ -421,31 +421,12 @@ var SCENARIOS: Scenario[] = [
     policy: { timeoutMs: 5000 } },
 
   // ========== Hyperlight — Networking ==========
-  { id: 'hl-net-socket-api', name: 'Socket API available', category: 'Networking', categoryIcon: '🌐', shell: 'networking',
-    containment: 'hyperlight',
-    description: 'Verifies the socket module loads and socket creation works (no actual connection).',
-    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
-    script: "import socket\ns = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\nprint('Socket created:', s.fileno())\nprint('Family:', s.family.name)\nprint('Type:', s.type.name)\ns.close()\nprint('Socket API OK')",
-    policy: { network: { enabled: true } }, successMarker: 'Socket API OK' },
   { id: 'hl-net-modules', name: 'Network stdlib modules', category: 'Networking', categoryIcon: '🌐', shell: 'networking',
     containment: 'hyperlight',
     description: 'Imports ssl, http.client, urllib to verify network stdlib is available.',
     expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
     script: "import ssl\nimport http.client\nimport urllib.request\nimport urllib.parse\nprint('ssl version:', ssl.OPENSSL_VERSION)\nprint('http.client OK')\nprint('urllib OK')\nprint('Net modules OK')",
     policy: {}, successMarker: 'Net modules OK' },
-  { id: 'hl-net-http-allow', name: 'HTTP GET (network on)', category: 'Networking', categoryIcon: '🌐', shell: 'networking',
-    containment: 'hyperlight',
-    description: 'Makes an HTTP GET request with networking enabled. Verifies real outbound connectivity.',
-    expectedOutcome: 'succeed', expectedLabel: 'Should succeed',
-    script: "import urllib.request\nresp = urllib.request.urlopen('http://httpbin.org/get', timeout=10)\nprint('HTTP status:', resp.status)\nprint('Network works!')",
-    policy: { network: { enabled: true } }, successMarker: 'Network works!' },
-  { id: 'hl-net-http-blocked', name: 'HTTP GET (network off)', category: 'Networking', categoryIcon: '🌐', shell: 'networking',
-    containment: 'hyperlight',
-    description: 'Attempts HTTP GET with networking disabled. Should fail to connect (verdict passes when blocked).',
-    expectedOutcome: 'succeed', expectedLabel: 'Should block network request',
-    script: "import urllib.request\ntry:\n    urllib.request.urlopen('http://httpbin.org/get', timeout=5)\n    print('ERROR: request should have failed')\nexcept Exception as e:\n    print('Correctly blocked:', type(e).__name__)",
-    policy: {}, successMarker: 'Correctly blocked', failureMarker: 'ERROR: request should have failed' },
-
   // ========== Hyperlight — Filesystem ==========
   { id: 'hl-fs-write-read', name: 'Write & read file', category: 'Filesystem', categoryIcon: '📁', shell: 'filesystem',
     containment: 'hyperlight',
@@ -1149,19 +1130,29 @@ function buildRawBackendConfig(
   var scenarioPolicy: any = scenario ? scenario.policy : {};
   var timeoutMs = timeoutSeconds > 0 ? timeoutSeconds * 1000 : 0;
   var config: any = {
+    version: '0.9.0-alpha',
     containment: containment,
     process: {
       commandLine: script,
       timeout: timeoutMs,
     },
   };
-  if (scenarioPolicy.network && scenarioPolicy.network.enabled) {
-    config.network = { defaultPolicy: 'allow' };
-    if (scenarioPolicy.network.allowedHosts) {
-      config.network.allowedHosts = scenarioPolicy.network.allowedHosts;
+  if (scenarioPolicy.network) {
+    if (scenarioPolicy.network.allowedHosts || scenarioPolicy.network.blockedHosts) {
+      throw new Error(
+        'Schema 0.9 raw-backend configs require CIDR-based directional rules; '
+        + 'hostname allow/block lists cannot be translated safely.',
+      );
     }
-    if (scenarioPolicy.network.blockedHosts) {
-      config.network.blockedHosts = scenarioPolicy.network.blockedHosts;
+    if (containment === 'hyperlight' && scenarioPolicy.network.enabled) {
+      throw new Error(
+        'Hyperlight has no representable schema 0.9 enabled-network posture.',
+      );
+    }
+    // Hyperlight has no valid v0.9 network section. Omission keeps the
+    // default-deny posture, which the backend maps to no networking.
+    if (containment !== 'hyperlight' && scenarioPolicy.network.enabled) {
+      config.network = { egress: { default: 'allow' } };
     }
   }
   if (scenarioPolicy.filesystem) {
@@ -1198,20 +1189,6 @@ async function runSandbox(): Promise<void> {
     if (!rawJson) {
       termError('No JSON config provided');
       return;
-    }
-
-    // Apply Hyperlight default-block defense-in-depth: if the user-pasted config
-    // targets Hyperlight and omits `network`, inject `{ defaultPolicy: 'block' }`
-    // so we don't silently inherit the backend's default-allow.
-    try {
-      var rawParsed = JSON.parse(rawJson);
-      if (rawParsed && rawParsed.containment === 'hyperlight' && !rawParsed.network) {
-        rawParsed.network = { defaultPolicy: 'block' };
-        rawJson = JSON.stringify(rawParsed);
-        termDim('[Playground] Hyperlight: injected network.defaultPolicy=block (no network field provided)');
-      }
-    } catch {
-      // Let the backend surface the parse error.
     }
 
     state.running = true;
@@ -1714,7 +1691,7 @@ var ERROR_PATTERNS = [
   { pattern: 'CreateProcessW failed.*0x80070002', title: 'Executable not found', explanation: 'The executable was not found inside the container.', suggestion: 'The executable was not found. Enable \'Include common tools\' in File Access to add PATH directories.' },
   { pattern: '0x80070005', title: 'Access denied (firewall)', explanation: 'An operation was denied, possibly due to firewall rules.', suggestion: 'Firewall rules require administrator privileges. Try running the app as administrator.' },
   { pattern: 'firewall rule blocked', title: 'Firewall blocked', explanation: 'A firewall rule blocked the operation.', suggestion: 'Firewall rules require administrator privileges. Try running the app as administrator.' },
-  { pattern: 'Experimental_CreateProcessInSandbox failed', title: 'Sandbox API failed', explanation: 'The CreateProcessInSandbox API returned an error. Check the error code for details.', suggestion: 'Enable Debug Mode for more details.' },
+  { pattern: 'CreateProcessSecurityEnvironment failed', title: 'Sandbox API failed', explanation: 'The process security environment API returned an error. Check the error code for details.', suggestion: 'Enable Debug Mode for more details.' },
   { pattern: 'LoadLibraryExW(processmodel.dll) failed', title: 'BaseContainer not available', explanation: 'processmodel.dll could not be loaded. BaseContainer requires Windows builds that support the v0.5.0+ schema.', suggestion: 'Use version 0.4.0-alpha instead of 0.5.0-dev.' },
   { pattern: 'Access is denied', title: 'Access denied', explanation: 'The script tried to access a resource that the sandbox blocks.', suggestion: 'Enable File Access and add the needed path, or enable Internet if the script needs network.' },
   { pattern: 'Unable to open file', title: 'BFS path not found', explanation: 'BFS could not open a brokered path. The directory may not exist or the path contains unresolved environment variables.', suggestion: 'Ensure the path exists on disk. Use resolved paths (e.g., C:\\Users\\...\\Temp) not environment variables like %TEMP%.' },

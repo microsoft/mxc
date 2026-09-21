@@ -25,6 +25,12 @@ parameters:
       clientId: ''
 
 stages:
+- stage: Validate_Package_Locks
+  displayName: 'Validate Package Locks'
+  dependsOn: []
+  jobs:
+  - template: Package.Lock.Check.Job.yml
+
 - stage: Build_Binaries
   displayName: 'Build Executables'
   jobs:
@@ -62,7 +68,9 @@ stages:
 
 - stage: Package_MXC
   displayName: 'Package MXC'
-  dependsOn: Build_Binaries
+  dependsOn:
+  - Build_Binaries
+  - Validate_Package_Locks
   jobs:
   - template: Package.NpmSdk.Job.yml
     parameters:
@@ -93,7 +101,7 @@ stages:
 
 - stage: SDK_Unit_Tests
   displayName: 'SDK Unit Tests'
-  dependsOn: []
+  dependsOn: Validate_Package_Locks
   jobs:
   - template: SDK.Unit.Test.Job.yml
     parameters:
@@ -101,7 +109,9 @@ stages:
 
 - stage: SDK_Integration_Tests
   displayName: 'SDK Integration Tests'
-  dependsOn: Package_MXC
+  dependsOn:
+  - Package_MXC
+  - Validate_Package_Locks
   jobs:
   - template: SDK.Integration.Test.Job.yml
     parameters:

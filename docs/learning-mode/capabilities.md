@@ -13,7 +13,7 @@ surfaces the resulting denial events is layered on top in later work.
 
 > **Platform support.** Learning-mode capabilities are **Windows-only** and
 > apply to the AppContainer-based backends (classic AppContainer and
-> BaseContainer, which share `backends/appcontainer/common`). On other platforms
+> BaseContainer, which share `backends/process_container/common`). On other platforms
 > the capability strings are ignored.
 
 ## The two capabilities
@@ -141,7 +141,7 @@ ungranted access is handled while it is recorded:
 > `QueryProcessSecurityEnvironmentSupport`, and
 > `CloseProcessSecurityEnvironment`. When that set is unavailable or cannot
 > fully honor the requested policy, MXC retains the highest compatible legacy
-> containment tier (SBOX, AppContainer+BFS, or AppContainer+DACL) and pairs it
+> AppContainer containment tier (AppContainer+BFS or AppContainer+DACL) and pairs it
 > with the guarded WPR capture provider. Unsupported hosts return
 > `backend_unavailable` only when neither path can preserve the full policy.
 >
@@ -152,17 +152,18 @@ ungranted access is handled while it is recorded:
 >
 > Native PSEC capture cannot represent `processContainer.leastPrivilege`
 > because the process security-environment API does not expose an LPAC token
-> option. MXC therefore retains a compatible legacy containment tier and uses
-> guarded WPR instead of weakening or rejecting the requested policy.
+> option. MXC therefore uses a compatible AppContainer tier with guarded WPR
+> instead of weakening or rejecting the requested policy.
 >
-> Native PSEC capture also cannot currently represent `network.proxy` without a
-> separate proxy AppContainer peer identity. Compatible requests use guarded
-> WPR with the legacy tier that can enforce the proxy contract.
+> Native PSEC capture represents `runtimeConfig.networkProxy` with the PSEC
+> proxy endpoint and either the requested proxy AppContainer peer identity or
+> MXC's reserved unrestricted-loopback sentinel. Other proxy policies remain
+> on a compatible AppContainer tier with guarded WPR capture.
 >
 > Native capture uses `filesystem.deniedPaths` only when
 > `QueryProcessSecurityEnvironmentSupport` advertises `PSE_SUPPORT_FS_DENY`.
-> Otherwise MXC selects a compatible legacy SBOX, AppContainer+BFS, or
-> AppContainer+DACL tier and uses guarded WPR.
+> Otherwise MXC selects a compatible AppContainer+BFS or AppContainer+DACL tier
+> and uses guarded WPR.
 
 - `mode: "block"` (default) maps onto `learningModeLogging`
   (deny-and-record) — the app / user-configurable flow.
@@ -330,6 +331,14 @@ capture failure unless both final artifacts are committed. The verbose logging p
 is intentionally absent from stderr pointers and Rust, Node, C#, and FFI output
 metadata; callers derive it from the actionable output path using the naming rule
 above.
+
+When stable telemetry is enabled and authorized, MXC may validate, compact, and
+send this redacted verbose document through `Microsoft.MXC/MXC.VerboseDenials`. Each
+event contains a valid JSON array of complete signatures and document
+reconstruction metadata. Before emission, MXC derives provider GUIDs from the
+closed provider enum and drops every verbose property name and value. MXC does
+not send the actionable denials file, workload-derived properties, or raw ETL
+through telemetry. See [MXC telemetry](../telemetry/telemetry.md).
 
 **Locating the file.** Set `captureDenials.outputPath` to name the file
 explicitly (its parent directory must already exist). MXC inserts a unique

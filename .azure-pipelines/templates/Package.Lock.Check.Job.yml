@@ -1,0 +1,20 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+
+jobs:
+- job: package_lock_check
+  displayName: 'Package Lock Check'
+  pool:
+    name: Azure-Pipelines-1ESPT-ExDShared
+    image: windows-2022
+    os: windows
+  steps:
+  - checkout: self
+
+  - task: NodeTool@1
+    displayName: Use Node.js 20
+    inputs:
+      version: '20.x'
+
+  - script: node scripts/versioning/check-package-lock-integrity.js
+    displayName: Check package locks use npmjs and SHA-512 integrity

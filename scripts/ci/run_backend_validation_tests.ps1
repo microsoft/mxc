@@ -152,8 +152,35 @@ function Invoke-T3WorkloadTests {
 
 Redirect-TempToRunnerTemp
 
+# The matrix entry names the tier the job exists to exercise, but the tier is
+# chosen by the host at run time. Without this check a runner that selects a
+# different tier would run the suite anyway and report green, proving nothing
+# about the tier the entry was scheduled for.
+function Assert-ContainmentTier {
+    param([Parameter(Mandatory)][string]$ExpectedTier)
+
+    $global:LASTEXITCODE = 0
+    $probeJson = & $wxc --probe 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        throw "wxc-exec --probe failed with exit code $LASTEXITCODE`: $probeJson"
+    }
+
+    try {
+        $probe = $probeJson | ConvertFrom-Json
+    } catch {
+        throw "wxc-exec --probe did not return JSON: $probeJson"
+    }
+
+    $actualTier = $probe.tier
+    Write-Host "Host selected containment tier '$actualTier' (expected '$ExpectedTier')."
+    if ($actualTier -ne $ExpectedTier) {
+        throw "Host selected tier '$actualTier' but this matrix entry tests '$ExpectedTier'."
+    }
+}
+
 switch ($Backend) {
     'process-t1' {
+        Assert-ContainmentTier -ExpectedTier 'base-container'
         $primitives = Invoke-ProcessContainerTests
         if ($primitives -ne 0) {
             throw "Process Container tests failed with exit code $primitives."
@@ -169,8 +196,18 @@ switch ($Backend) {
         }
     }
     'isolation-session' {
-        Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_isolation_session_tests.ps1') -Arguments @{
-            WxcExePath = $wxc
+        $global:LASTEXITCODE = 0
+        & (Join-Path $testScriptRoot 'run_isolation_session_tests.ps1') -WxcExePath $wxc
+        $oneShot = $LASTEXITCODE
+
+        $global:LASTEXITCODE = 0
+        & (Join-Path $testScriptRoot 'run_isolation_session_state_aware_tests.ps1') -WxcExePath $wxc
+        $stateAware = $LASTEXITCODE
+
+        Write-Host "isolation-session suites finished: one-shot exit=$oneShot, state-aware exit=$stateAware"
+
+        if ($oneShot -ne 0 -or $stateAware -ne 0) {
+            throw 'isolation-session tests failed; see the exit codes above.'
         }
     }
     'windows-sandbox' {

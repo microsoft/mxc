@@ -91,7 +91,6 @@ dependencies = [
  "learning_mode_core",
  "learning_mode_windows",
  "process_security_environment_spec",
- "sandbox_spec",
  "serde",
  "serde_json",
  "tempfile",
@@ -1540,16 +1539,19 @@ version = "0.8.0"
 dependencies = [
  "appcontainer_common",
  "bwrap_common",
+ "getrandom 0.2.17",
  "hyperlight_common",
  "isolation_session_bindings",
  "isolation_session_common",
  "learning_mode_core",
  "lxc_common",
+ "mxc_config_contract",
  "nvx_runner",
  "plm",
  "seatbelt_common",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "windows",
  "windows_sandbox_lifecycle",
@@ -1563,8 +1565,12 @@ version = "0.8.0"
 dependencies = [
  "csbindgen",
  "mxc-sdk",
+ "semver",
  "serde",
+ "serde_ignored",
  "serde_json",
+ "tempfile",
+ "wxc_common",
 ]
 
 [[package]]
@@ -2059,13 +2065,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sandbox_spec"
-version = "0.8.0"
-dependencies = [
- "flatbuffers",
-]
-
-[[package]]
 name = "schemars"
 version = "0.8.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2168,6 +2167,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "serde_ignored"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "115dffd5f3853e06e746965a20dcbae6ee747ae30b543d91b0e089668bb07798"
+dependencies = [
+ "serde",
+ "serde_core",
 ]
 
 [[package]]

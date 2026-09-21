@@ -17,6 +17,38 @@ fn no_phase_selects_one_shot_request() {
 }
 
 #[test]
+fn isolation_session_one_shot_requires_network() {
+    let json = r#"{
+        "version": "0.9.0-alpha",
+        "containment": "isolation_session",
+        "process": {"commandLine": "echo"}
+    }"#;
+
+    assert!(matches!(
+        parse_request(json).unwrap_err(),
+        RequestParseError::InvalidCombination {
+            contract: "one-shot",
+            message: "IsolationSession requires an explicit network policy",
+        }
+    ));
+}
+
+#[test]
+fn isolation_session_one_shot_accepts_directional_network() {
+    let json = r#"{
+        "version": "0.9.0-alpha",
+        "containment": "isolation_session",
+        "process": {"commandLine": "echo"},
+        "network": {
+            "egress": {"default": "allow"},
+            "ingress": {"default": "allow", "hostLoopback": "allow"}
+        }
+    }"#;
+
+    assert!(matches!(parse_request(json).unwrap(), Request::OneShot(_)));
+}
+
+#[test]
 fn invalid_one_shot_root_returns_invalid_request() {
     let json = r#"{
         "version": "0.9.0-alpha"
@@ -96,10 +128,7 @@ fn provision_phase_with_isolation_session_containment_selects_isolation_session_
             "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
-            "network": {
-                "defaultPolicy": "allow",
-                "allowLocalNetwork": true
-            }
+            "network": {"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}
     }"#;
 
     assert!(matches!(

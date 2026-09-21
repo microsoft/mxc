@@ -1,0 +1,16 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
+    "version": "0.8.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "echo GUI_INJECTION_PROBE",
+        "timeout": 20000
+    },
+    "ui": {
+        "disable": false,
+        "injection": false
+    },
+    "seatbelt": {
+        "guiAccess": true
+    }
+}

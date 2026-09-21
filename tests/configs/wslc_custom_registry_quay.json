@@ -1,12 +1,13 @@
 {
-  "version": "0.6.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "wslc-quay-registry",
   "containment": "wslc",
   "process": {
     "commandLine": "echo 'Image pulled from Quay' && cat /etc/os-release | head -4"
   },
   "network": {
-    "defaultPolicy": "allow"
+    "egress": { "default": "allow" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
   },
   "experimental": {
     "wslc": {

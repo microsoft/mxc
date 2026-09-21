@@ -1,11 +1,10 @@
 [workspace]
 members = [
-    "backends/appcontainer/common",
+    "backends/process_container/common",
     "backends/bubblewrap/common",
     "backends/hyperlight/common",
     "backends/isolation_session/bindings",
     "backends/isolation_session/common",
-    "backends/learning_mode/windows",
     "backends/lxc/common",
     "backends/nvx/binaries",
     "backends/nvx/build_common",
@@ -18,9 +17,9 @@ members = [
     "backends/windows_sandbox/lifecycle",
     "backends/wslc/common",
     "backends/wslc/daemon",
-    "core/generated/base_container_specification",
     "core/generated/process_security_environment_specification",
     "core/learning_mode_core",
+    "core/learning_mode_platforms/windows",
     "core/lxc",
     "core/mxc_build_common",
     "core/mxc_config_contract",
@@ -64,7 +63,7 @@ license = "MIT"
 
 [workspace.dependencies]
 anyhow = "1"
-appcontainer_common = { path = "backends/appcontainer/common" }
+appcontainer_common = { path = "backends/process_container/common" }
 base64 = "0.22"
 bwrap_common = { path = "backends/bubblewrap/common" }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
@@ -76,7 +75,7 @@ hyperlight_common = { path = "backends/hyperlight/common" }
 isolation_session_bindings = { path = "backends/isolation_session/bindings" }
 isolation_session_common = { path = "backends/isolation_session/common" }
 learning_mode_core = { path = "core/learning_mode_core" }
-learning_mode_windows = { path = "backends/learning_mode/windows" }
+learning_mode_windows = { path = "core/learning_mode_platforms/windows" }
 libc = "0.2"
 lxc_common = { path = "backends/lxc/common" }
 mxc_build_common = { path = "core/mxc_build_common" }
@@ -94,11 +93,10 @@ nvx_runner = { path = "backends/nvx/runner" }
 process_security_environment_spec = { path = "core/generated/process_security_environment_specification" }
 plm = { path = "host/plm" }
 quick-xml = "0.41"
-sandbox_spec = { path = "core/generated/base_container_specification" }
 seatbelt_common = { path = "backends/seatbelt/common" }
 same-file = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 serde_path_to_error = "0.1"
 schemars = "0.8"
 sha2 = "0.10"

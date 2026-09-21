@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use super::one_shot::Request as OneShotRequest;
+use super::one_shot::{Containment as OneShotContainment, Request as OneShotRequest};
 use super::state_aware::{probe_containment, Containment, ContainmentProbeError};
 use super::state_aware::{probe_phase, Phase, PhaseProbeError};
 use super::state_aware::{
@@ -45,6 +45,15 @@ pub enum RequestParseError {
         #[source]
         source: serde_json::Error,
     },
+
+    /// The selected request is structurally valid but violates a cross-field constraint.
+    #[error("Invalid {contract} request: {message}")]
+    InvalidCombination {
+        /// Human-readable name of the selected contract.
+        contract: &'static str,
+        /// Description of the violated cross-field constraint.
+        message: &'static str,
+    },
 }
 
 fn deserialize<T>(json: &str, contract: &'static str) -> Result<T, RequestParseError>
@@ -67,6 +76,33 @@ fn parse_provision(json: &str) -> Result<ProvisionRequest, RequestParseError> {
     }
 }
 
+fn parse_one_shot(json: &str) -> Result<Request, RequestParseError> {
+    let request: OneShotRequest = deserialize(json, "one-shot")?;
+    validate_one_shot_request(&request)?;
+    Ok(Request::OneShot(Box::new(request)))
+}
+
+/// Validates cross-field invariants on an already-deserialized exact one-shot
+/// request.
+///
+/// # Errors
+///
+/// Returns [`RequestParseError::InvalidCombination`] when the selected
+/// containment requires fields that the request omitted.
+pub fn validate_one_shot_request(request: &OneShotRequest) -> Result<(), RequestParseError> {
+    if matches!(
+        request.containment.as_ref(),
+        Some(OneShotContainment::IsolationSession)
+    ) && request.network.as_ref().is_none()
+    {
+        return Err(RequestParseError::InvalidCombination {
+            contract: "one-shot",
+            message: "IsolationSession requires an explicit network policy",
+        });
+    }
+    Ok(())
+}
+
 /// Selects and deserializes one exact development request from raw JSON source.
 ///
 /// An absent `phase` selects the one-shot contract. A present phase selects its
@@ -80,12 +116,11 @@ fn parse_provision(json: &str) -> Result<ProvisionRequest, RequestParseError> {
 /// or unsupported, [`RequestParseError::Containment`] when a provision
 /// containment declaration is malformed or unsupported, and
 /// [`RequestParseError::InvalidRequest`] when the selected concrete contract
-/// rejects the document.
+/// rejects the document. Returns [`RequestParseError::InvalidCombination`] when
+/// individually valid fields violate a request-level invariant.
 pub fn parse_request(json: &str) -> Result<Request, RequestParseError> {
     match probe_phase(json)? {
-        None => deserialize(json, "one-shot")
-            .map(Box::new)
-            .map(Request::OneShot),
+        None => parse_one_shot(json),
         Some(Phase::Provision) => parse_provision(json).map(Request::Provision),
         Some(Phase::Start) => deserialize(json, "start").map(Request::Start),
         Some(Phase::Exec) => deserialize(json, "exec").map(Request::Exec),

@@ -1,0 +1,7 @@
+{
+  "version": "0.9.0-alpha",
+  "phase": "exec",
+  "sandboxId": "wslc:0123456789abcdef0123456789abcdef",
+  "process": {"commandLine": "echo legacy"},
+  "network": {"proxy": {"url": "http://proxy.example:8080"}}
+}

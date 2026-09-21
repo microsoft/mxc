@@ -3,7 +3,9 @@
 
 //! ProcessContainer-specific configuration types and wire mapping.
 
+#[cfg(test)]
 use crate::policy::network::{has_host_rules, NetworkFormat};
+#[cfg(test)]
 use crate::policy::{NetworkAction, SandboxPolicy};
 
 /// How denial capture handles ungranted access checks.
@@ -19,6 +21,7 @@ pub enum CaptureDenialsMode {
 }
 
 impl CaptureDenialsMode {
+    #[cfg(test)]
     pub(crate) fn wire(self) -> &'static str {
         match self {
             Self::Block => "block",
@@ -64,6 +67,8 @@ pub struct ProcessContainer {
     pub capture_denials: Option<CaptureDenials>,
     /// Optional BaseProcessContainer user-interface settings.
     pub ui: Option<ProcessContainerUi>,
+    /// Optional ProcessContainer-specific filesystem settings.
+    pub filesystem: Option<ProcessContainerFilesystem>,
     /// Optional ProcessContainer-specific network settings.
     pub network: Option<ProcessContainerNetwork>,
 }
@@ -76,9 +81,18 @@ impl Default for ProcessContainer {
             capabilities: Vec::new(),
             capture_denials: None,
             ui: Some(ProcessContainerUi::default()),
+            filesystem: None,
             network: None,
         }
     }
+}
+
+/// ProcessContainer-specific filesystem settings.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ProcessContainerFilesystem {
+    /// Paths that may be enumerated without granting file-content reads.
+    pub enumerate_paths: Vec<String>,
 }
 
 /// ProcessContainer-specific network settings.
@@ -130,6 +144,7 @@ pub enum ProcessContainerSystemSettings {
 }
 
 impl ProcessContainerSystemSettings {
+    #[cfg(test)]
     fn wire(self) -> &'static str {
         match self {
             Self::All => "all",
@@ -152,6 +167,7 @@ pub enum ProcessContainerUiIsolation {
 }
 
 impl ProcessContainerUiIsolation {
+    #[cfg(test)]
     fn wire(self) -> &'static str {
         match self {
             Self::Desktop => "desktop",
@@ -162,6 +178,7 @@ impl ProcessContainerUiIsolation {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn apply(
     config: &mut serde_json::Value,
     policy: &SandboxPolicy,
@@ -184,6 +201,16 @@ pub(crate) fn apply(
                 "processContainer.captureDenials requires schema version 0.8 or later",
             ));
         }
+    }
+    if process_container
+        .filesystem
+        .as_ref()
+        .is_some_and(|filesystem| !filesystem.enumerate_paths.is_empty())
+        && policy.version != "0.9.0-alpha"
+    {
+        return Err(wxc_common::mxc_error::MxcError::malformed_request(
+            "processContainer.filesystem.enumeratePaths requires schema version 0.9.0-alpha",
+        ));
     }
 
     let mut capabilities = process_container.capabilities.clone();
@@ -233,6 +260,13 @@ pub(crate) fn apply(
             "ime": ui.ime,
         });
     }
+    if let Some(filesystem) = &process_container.filesystem {
+        if !filesystem.enumerate_paths.is_empty() {
+            config["processContainer"]["filesystem"] = json!({
+                "enumeratePaths": filesystem.enumerate_paths,
+            });
+        }
+    }
     if let Some(allowed_proxy_peer) = process_container
         .network
         .as_ref()
@@ -274,6 +308,8 @@ mod tests {
         RuntimeConfigSection,
     };
 
+    const TEST_COMMAND: &str = "echo hello";
+
     fn policy(network: Option<NetworkSection>) -> SandboxPolicy {
         policy_for_version("0.8.0-alpha", network)
     }
@@ -305,14 +341,18 @@ mod tests {
                 system_settings: ProcessContainerSystemSettings::Parameters,
                 ime: true,
             }),
+            filesystem: Some(ProcessContainerFilesystem {
+                enumerate_paths: vec!["C:\\tools".to_string()],
+            }),
             network: Some(ProcessContainerNetwork {
                 allowed_proxy_peer: Some("Contoso.Proxy_123".to_string()),
             }),
         };
 
         let config = build_wire_config(
-            &policy(None),
+            &policy_for_version("0.9.0-alpha", None),
             &crate::policy::Containment::ProcessContainer(process_container),
+            TEST_COMMAND,
             Some("sdk-test"),
         )
         .expect("ProcessContainer config should build");
@@ -328,6 +368,10 @@ mod tests {
         assert_eq!(
             config["processContainer"]["ui"]["systemSettings"],
             "parameters"
+        );
+        assert_eq!(
+            config["processContainer"]["filesystem"]["enumeratePaths"],
+            serde_json::json!(["C:\\tools"])
         );
         assert_eq!(
             config["processContainer"]["network"]["allowedProxyPeer"],
@@ -370,6 +414,7 @@ mod tests {
         let config = build_wire_config(
             &policy(Some(network)),
             &crate::policy::Containment::ProcessContainer(process_container),
+            TEST_COMMAND,
             None,
         )
         .expect("directional network config should build");
@@ -400,6 +445,7 @@ mod tests {
         let config = build_wire_config(
             &policy(Some(network)),
             &crate::policy::Containment::ProcessContainer(ProcessContainer::default()),
+            TEST_COMMAND,
             None,
         )
         .expect("directional network config should build");
@@ -427,6 +473,7 @@ mod tests {
         let config = build_wire_config(
             &policy(Some(network)),
             &crate::policy::Containment::ProcessContainer(process_container),
+            TEST_COMMAND,
             None,
         )
         .expect("schema 0.8 config should build");
@@ -461,6 +508,7 @@ mod tests {
             let error = build_wire_config(
                 &policy_for_version("0.7.0-alpha", None),
                 &crate::policy::Containment::ProcessContainer(process_container),
+                TEST_COMMAND,
                 None,
             )
             .expect_err("schema 0.7 must reject schema 0.8 ProcessContainer fields");
@@ -475,6 +523,7 @@ mod tests {
         let config = build_wire_config(
             &policy_for_version("0.7.0-alpha", None),
             &crate::policy::Containment::ProcessContainer(ProcessContainer::default()),
+            TEST_COMMAND,
             None,
         )
         .expect("default ProcessContainer should remain valid for schema 0.7");
@@ -499,6 +548,7 @@ mod tests {
         let error = build_wire_config(
             &policy(Some(network)),
             &crate::policy::Containment::ProcessContainer(process_container),
+            TEST_COMMAND,
             None,
         )
         .expect_err("legacy and ProcessContainer directional networking must not mix");

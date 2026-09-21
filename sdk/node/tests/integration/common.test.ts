@@ -21,7 +21,12 @@ describe('Platform support', () => {
 
 const platformSupport = sdk.getPlatformSupport();
 
-for (const schemaVersion of supportedVersions) {
+// The exact 0.6 contract predates Seatbelt, which is the native macOS backend.
+const platformVersions = os.platform() === 'darwin'
+  ? supportedVersions.filter((version) => version.compare('0.7.0-alpha') >= 0)
+  : supportedVersions;
+
+for (const schemaVersion of platformVersions) {
   const skipReason = !platformSupport.isSupported
     ? `Platform not supported: ${platformSupport.reason}`
     : undefined;
@@ -60,11 +65,13 @@ for (const schemaVersion of supportedVersions) {
       assertDryRunResult(result.stdout, result.code, schemaVersion.raw);
     });
 
-    it('should dry-run via spawnSandboxAsync', async () => {
-      const result = await sdk.spawnSandboxAsync(
-        'cmd.exe /c echo test', policy, { dryRun: true, ...debugSpawnOptions }, undefined, `dryrun-async-${schemaVersion}`,
+    it('should reject executor-only dry-run via spawnSandboxAsync', async () => {
+      await assert.rejects(
+        sdk.spawnSandboxAsync(
+          'cmd.exe /c echo test', policy, { dryRun: true }, undefined, `dryrun-async-${schemaVersion}`,
+        ),
+        /does not support executor-only option 'dryRun'/,
       );
-      assertDryRunResult(result.stdout, result.exitCode, schemaVersion.raw);
     });
 
     it('should dry-run via spawnSandboxFromConfig', async () => {

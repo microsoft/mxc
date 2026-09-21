@@ -77,6 +77,7 @@
           "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
           "pool": "",
           "backends": [
+            "process-t1",
             "process-t3",
             "wslc",
             "windows-sandbox",
@@ -88,6 +89,7 @@
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
           "pool": "",
           "backends": [
+            "process-t1",
             "process-t3",
             "wslc",
             "windows-sandbox"
@@ -105,6 +107,7 @@
           "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
           "pool": "1es-mxc-e2e-windows-25h2-pro-x64",
           "backends": [
+            "process-t1",
             "process-t3",
             "wslc",
             "windows-sandbox",
@@ -116,6 +119,7 @@
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
           "pool": "",
           "backends": [
+            "process-t1",
             "process-t3",
             "wslc",
             "windows-sandbox"
@@ -133,6 +137,7 @@
           "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
           "pool": "1es-mxc-e2e-windows-24h2-pro-x64",
           "backends": [
+            "process-t1",
             "process-t3",
             "wslc",
             "windows-sandbox",
@@ -144,6 +149,7 @@
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
           "pool": "",
           "backends": [
+            "process-t1",
             "process-t3",
             "wslc",
             "windows-sandbox"
@@ -334,14 +340,14 @@
       {
         "os": "windows-25h2",
         "backends": [
-          "process-t3",
+          "process-t1",
           "wslc"
         ]
       },
       {
         "os": "windows-24h2",
         "backends": [
-          "process-t3",
+          "process-t1",
           "wslc"
         ]
       },
@@ -378,6 +384,18 @@
         "backends": [
           "bubblewrap",
           "lxc"
+        ]
+      },
+      {
+        "os": "macos-26",
+        "backends": [
+          "seatbelt"
+        ]
+      },
+      {
+        "os": "macos-15",
+        "backends": [
+          "seatbelt"
         ]
       }
     ],

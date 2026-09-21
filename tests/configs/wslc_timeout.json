@@ -1,5 +1,5 @@
 {
-  "version": "0.6.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "wslc-timeout-test",
   "containment": "wslc",
   "process": {
@@ -7,7 +7,7 @@
     "timeout": 5000
   },
   "network": {
-    "defaultPolicy": "block"
+    "egress": { "default": "deny" }
   },
   "experimental": {
     "wslc": {
