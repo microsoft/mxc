@@ -84,7 +84,7 @@ them for this backend:
 
 ## Schema changes
 
-The rolling `0.9.0-dev` and exact `0.9.0-alpha` development contracts now
+The rolling `0.10.0-dev` and exact `0.10.0-alpha` development contracts now
 include `containment: "nvx"` in their generated schemas and TypeScript wire
 types. The retired `microvm` identifier is absent from both development artifact sets.
 Published stable schemas remain unchanged. An `experimental.nvx.provision` section is necessary
@@ -98,8 +98,8 @@ Future state-aware provision design:
 
 ```json
 {
-  "$schema": "https://aka.ms/mxc/schemas/0.9.0-alpha.json",
-  "version": "0.9.0-alpha",
+  "$schema": "https://aka.ms/mxc/schemas/0.10.0-alpha.json",
+  "version": "0.10.0-alpha",
   "phase": "provision",
   "containment": "nvx",
   "filesystem": {

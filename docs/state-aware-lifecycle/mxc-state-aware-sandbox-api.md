@@ -511,10 +511,10 @@ State-aware reuses the same options bag as one-shot — single mental model, sin
 to learn the cross-cutting flags. Phase-specific fields on `SandboxSpawnOptions`
 (`ptyOptions`, `usePty`) are honored by `execInSandbox` / `execInSandboxAsync` and
 silently ignored on the other phases. State-awareness is not itself experimental —
-`experimental: true` must be set when the targeted backend is itself experimental, just
-as it is today for one-shot calls against `nvx` and `wslc`. IsolationSession is
-experimental at the time of writing; that status is independent of the state-aware API
-surface (§13).
+`experimental: true` must be set only when the targeted backend participation remains
+experimental, as it is for Windows Sandbox state-aware calls and for one-shot calls
+against NVX or Windows Sandbox. WSLc and IsolationSession are stable and do not require
+the generic experimental opt-in (§13).
 
 ### 6.3 Example
 
