@@ -3,7 +3,7 @@
   "platforms": [
     {
       "id": "windows-prerelease-process-container",
-      "displayName": "Windows Prerelease T1 Process Container",
+      "displayName": "Windows Prerelease Process Container",
       "family": "windows",
       "prerelease": true,
       "architectures": {
@@ -13,7 +13,6 @@
           "pool": "1es-mxc-windows-prerelease-t1-x64",
           "backends": [
             "process-t1",
-            "process-t3",
             "isolation-session",
             "wslc",
             "windows-sandbox",
@@ -24,13 +23,9 @@
         "arm64": {
           "target": "aarch64-pc-windows-msvc",
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
-          "pool": "",
+          "pool": "1es-mxc-windows-prerelease-t1-arm64",
           "backends": [
-            "process-t1",
-            "process-t3",
-            "isolation-session",
-            "wslc",
-            "windows-sandbox"
+            "process-t1"
           ]
         }
       }
@@ -47,7 +42,6 @@
           "pool": "1es-mxc-e2e-win-prerelease-isolationsesh-x64",
           "backends": [
             "process-t1",
-            "process-t3",
             "isolation-session",
             "wslc",
             "windows-sandbox",
@@ -61,7 +55,6 @@
           "pool": "",
           "backends": [
             "process-t1",
-            "process-t3",
             "isolation-session",
             "wslc",
             "windows-sandbox"
@@ -80,7 +73,6 @@
           "pool": "",
           "backends": [
             "process-t1",
-            "process-t3",
             "wslc",
             "windows-sandbox",
             "microvm",
@@ -93,7 +85,6 @@
           "pool": "",
           "backends": [
             "process-t1",
-            "process-t3",
             "wslc",
             "windows-sandbox"
           ]
@@ -111,7 +102,6 @@
           "pool": "1es-mxc-e2e-windows-25h2-pro-x64",
           "backends": [
             "process-t1",
-            "process-t3",
             "wslc",
             "windows-sandbox",
             "microvm",
@@ -124,7 +114,6 @@
           "pool": "",
           "backends": [
             "process-t1",
-            "process-t3",
             "wslc",
             "windows-sandbox"
           ]
@@ -142,7 +131,6 @@
           "pool": "1es-mxc-e2e-windows-24h2-pro-x64",
           "backends": [
             "process-t1",
-            "process-t3",
             "wslc",
             "windows-sandbox",
             "microvm",
@@ -155,7 +143,6 @@
           "pool": "",
           "backends": [
             "process-t1",
-            "process-t3",
             "wslc",
             "windows-sandbox"
           ]
