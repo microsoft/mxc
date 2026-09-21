@@ -259,15 +259,13 @@ describe('native binding request', () => {
       version: '0.9.0-alpha',
       containment: 'wslc',
       process: { commandLine: 'echo hello' },
-      experimental: {
-        wslc: {
-          image: 'alpine:latest',
-          targetOs: 'linux',
-          cpuCount: 2,
-          portMappings: [{ windowsPort: 8080, containerPort: 80, protocol: 'tcp' }],
-        },
+      wslc: {
+        image: 'alpine:latest',
+        targetOs: 'linux',
+        cpuCount: 2,
+        portMappings: [{ windowsPort: 8080, containerPort: 80, protocol: 'tcp' }],
       },
-    }, { experimental: true });
+    });
 
     assert.deepStrictEqual(request.containment, {
       type: 'wslc',
@@ -284,16 +282,14 @@ describe('native binding request', () => {
         version: '0.9.0-alpha',
         containment: 'wslc',
         process: { commandLine: 'echo hello' },
-        experimental: {
-          wslc: {
-            portMappings: [{
-              windowsPort: 8080,
-              containerPort: 80,
-              protocol: 'udp' as unknown as 'tcp',
-            }],
-          },
+        wslc: {
+          portMappings: [{
+            windowsPort: 8080,
+            containerPort: 80,
+            protocol: 'udp' as unknown as 'tcp',
+          }],
         },
-      }, { experimental: true }),
+      }),
       /support only protocol 'tcp'/,
     );
 
@@ -302,10 +298,8 @@ describe('native binding request', () => {
         version: '0.9.0-alpha',
         containment: 'process',
         process: { commandLine: 'echo hello' },
-        experimental: {
-          wslc: { image: 'alpine:latest' },
-        },
-      }, { experimental: true }),
+        wslc: { image: 'alpine:latest' },
+      }),
       /require containment 'wslc'/,
     );
   });

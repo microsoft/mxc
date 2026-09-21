@@ -116,7 +116,7 @@ function Run-WslcTest {
 
     # Skip if the config references a tar file that doesn't exist locally
     $configJson = Get-Content $configPath -Raw | ConvertFrom-Json
-    $tarPath = $configJson.experimental.wslc.imageTarPath
+    $tarPath = $configJson.wslc.imageTarPath
     if ($tarPath -and -not (Test-Path $tarPath)) {
         Write-Host "  $ConfigFile ... " -NoNewline
         Write-Host "SKIP (tar not found: $tarPath)" -ForegroundColor Yellow
@@ -127,7 +127,7 @@ function Run-WslcTest {
 
     $prevPref = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    $wxcArgs = @("--experimental")
+    $wxcArgs = @()
     if ($Debug) {
         $wxcArgs += "--debug"
     }

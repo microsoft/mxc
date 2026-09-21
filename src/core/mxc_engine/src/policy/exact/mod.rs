@@ -22,6 +22,7 @@ macro_rules! optional {
     };
 }
 
+mod v0_10;
 mod v0_6;
 mod v0_7;
 mod v0_8;
@@ -223,7 +224,10 @@ pub(super) fn build_request(
             ExactOneShotContract::V0_8(Box::new(v0_8::build(&prepared)?))
         }
         ContractVersion::V0_9_0Alpha => {
-            ExactOneShotContract::Dev(Box::new(v0_9::build(&prepared)?))
+            ExactOneShotContract::V0_9(Box::new(v0_9::build(&prepared)?))
+        }
+        ContractVersion::V0_10_0Alpha => {
+            ExactOneShotContract::Dev(Box::new(v0_10::build(&prepared)?))
         }
     };
     let mut logger = Logger::new(Mode::Buffer);

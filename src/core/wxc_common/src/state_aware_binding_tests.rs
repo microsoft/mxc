@@ -314,7 +314,11 @@ fn unit(config: Option<&()>) -> Config {
 
 fn input<C: Case>(phase: Phase) -> Value {
     let mut value = json!({
-        "version": "0.9.0-alpha",
+        "version": if C::BACKEND == "isolation_session" {
+            "0.9.0-alpha"
+        } else {
+            "0.10.0-alpha"
+        },
         "phase": phase.as_str(),
         "telemetry": {"enabled": false},
     });
@@ -399,9 +403,7 @@ fn lifecycle_matrix<C: Case>() {
         Phase::Stop,
         Phase::Deprovision,
     ] {
-        let mut value = input::<C>(phase);
-        assert_dispatch::<C>(&value, Config::Absent);
-        value["experimental"] = json!({});
+        let value = input::<C>(phase);
         assert_dispatch::<C>(&value, Config::Absent);
     }
 }
@@ -416,7 +418,7 @@ fn every_backend_and_phase_preserves_validation_execution_and_dry_run_order() {
 #[test]
 fn isolation_provision_preserves_each_backend_observable_configuration() {
     let mut value = input::<Isolation>(Phase::Provision);
-    value["experimental"] = json!({"isolation_session": {}});
+    value["isolationSession"] = json!({});
     assert_dispatch::<Isolation>(&value, Config::Absent);
     for (config, expected) in [
         (json!({}), Config::Isolation(None)),
@@ -426,7 +428,7 @@ fn isolation_provision_preserves_each_backend_observable_configuration() {
             Config::Isolation(Some("PFN:example".into())),
         ),
     ] {
-        value["experimental"] = json!({"isolation_session": {"provision": config}});
+        value["isolationSession"] = json!({"provision": config});
         assert_dispatch::<Isolation>(&value, expected);
     }
 }
@@ -434,7 +436,7 @@ fn isolation_provision_preserves_each_backend_observable_configuration() {
 #[test]
 fn wslc_provision_preserves_each_backend_observable_configuration() {
     let mut value = input::<Wslc>(Phase::Provision);
-    value["experimental"] = json!({"wslc": {}});
+    value["wslc"] = json!({});
     assert_dispatch::<Wslc>(&value, Config::Absent);
     for (config, expected) in [
         (json!({}), Config::Wslc(None, None)),
@@ -455,7 +457,7 @@ fn wslc_provision_preserves_each_backend_observable_configuration() {
             Config::Wslc(Some(String::new()), Some(String::new())),
         ),
     ] {
-        value["experimental"] = json!({"wslc": {"provision": config}});
+        value["wslc"] = json!({"provision": config});
         assert_dispatch::<Wslc>(&value, expected);
     }
 }

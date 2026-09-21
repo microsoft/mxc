@@ -223,7 +223,10 @@ export async function safeDeprovision<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
 ): Promise<void> {
   try {
-    await deprovisionSandbox(sandboxId, undefined, { experimental: true });
+    const options = String(sandboxId).startsWith('wsb:')
+      ? { experimental: true }
+      : undefined;
+    await deprovisionSandbox(sandboxId, undefined, options);
   } catch (err) {
     console.error(`Cleanup deprovision failed for ${sandboxId}: ${err}`);
   }
@@ -283,9 +286,7 @@ export async function probeStateAwareRuntime<C extends StateAwareContainmentBack
           return result.sandboxId;
         }
         case 'wslc': {
-          const result = await provisionSandbox('wslc', undefined, {
-            experimental: true,
-          });
+          const result = await provisionSandbox('wslc');
           return result.sandboxId;
         }
         default: {

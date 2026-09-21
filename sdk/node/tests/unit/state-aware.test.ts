@@ -29,7 +29,7 @@ describe('buildStateAwareEnvelope', () => {
       config: { telemetry: { enabled: true } },
     });
     assert.deepEqual(env.telemetry, { enabled: true });
-    assert.equal(env.version, '0.9.0-alpha');
+    assert.equal(env.version, '0.10.0-alpha');
     assert.equal(env.experimental, undefined);
   });
 
@@ -45,12 +45,12 @@ describe('buildStateAwareEnvelope', () => {
         error instanceof MxcError &&
         error.code === 'malformed_request' &&
         error.message.includes(
-          "State-aware windows_sandbox requests require schema version '0.9.0-alpha'",
+          "State-aware windows_sandbox requests require schema version '0.10.0-alpha'",
         ),
     );
   });
 
-  it('selects schema 0.9 when exec inherits the backend environment', () => {
+  it('selects schema 0.9 when WSLC exec inherits the backend environment', () => {
     const env = buildStateAwareEnvelope({
       phase: 'exec',
       backendKey: 'wslc',
@@ -166,7 +166,7 @@ describe('buildStateAwareEnvelope', () => {
     );
   });
 
-  it('nests provision appId under experimental.isolation_session.provision', () => {
+  it('nests provision appId under isolationSession.provision', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',
       backendKey: 'isolation_session',
@@ -174,10 +174,8 @@ describe('buildStateAwareEnvelope', () => {
       config: { appId: 'PFN:Contoso.App_8wekyb3d8bbwe' },
     });
     const wire = JSON.parse(JSON.stringify(env));
-    assert.deepStrictEqual(wire.experimental, {
-      isolation_session: {
-        provision: { appId: 'PFN:Contoso.App_8wekyb3d8bbwe' },
-      },
+    assert.deepStrictEqual(wire.isolationSession, {
+      provision: { appId: 'PFN:Contoso.App_8wekyb3d8bbwe' },
     });
   });
 
@@ -191,12 +189,12 @@ describe('buildStateAwareEnvelope', () => {
       config: { appId: '' },
     });
     const wire = JSON.parse(JSON.stringify(env));
-    assert.deepStrictEqual(wire.experimental, {
-      isolation_session: { provision: { appId: '' } },
+    assert.deepStrictEqual(wire.isolationSession, {
+      provision: { appId: '' },
     });
   });
 
-  it('omits the experimental block entirely when no appId is supplied', () => {
+  it('omits the IsolationSession section when no appId is supplied', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',
       backendKey: 'isolation_session',
@@ -204,7 +202,7 @@ describe('buildStateAwareEnvelope', () => {
       config: {},
     });
     const wire = JSON.parse(JSON.stringify(env));
-    assert.strictEqual(wire.experimental, undefined);
+    assert.strictEqual(wire.isolationSession, undefined);
   });
 
   it('never emits correlationVector on state-aware envelopes', () => {
@@ -362,9 +360,9 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
     assert.strictEqual(fake.captured.envelope?.phase, 'provision');
     assert.strictEqual(fake.captured.envelope?.containment, 'isolation_session');
     // An unpackaged app may pass any string; it reaches the wire config verbatim.
-    const provisionConfig = (fake.captured.envelope?.experimental as {
-      isolation_session?: { provision?: { appId?: string } };
-    })?.isolation_session?.provision;
+    const provisionConfig = (fake.captured.envelope?.isolationSession as {
+      provision?: { appId?: string };
+    })?.provision;
     assert.strictEqual(provisionConfig?.appId, 'example.app.id');
     // The unrestricted-network acknowledgment is lifted to the envelope top level.
     assert.deepStrictEqual(fake.captured.envelope?.network, {
@@ -571,7 +569,7 @@ describe('windows_sandbox state-aware lifecycle', () => {
       backendKey: 'windows_sandbox',
       containment: 'windows_sandbox',
       config: {
-        version: '0.9.0-alpha',
+        version: '0.10.0-alpha',
         filesystem: {
           readwritePaths: ['C:\\workspace'],
           readonlyPaths: ['C:\\inputs'],
@@ -646,7 +644,7 @@ describe('windows_sandbox state-aware lifecycle', () => {
 });
 
 describe('wslc state-aware lifecycle', () => {
-  it('defaults the version to the shared 0.9.0-alpha development contract', () => {
+  it('defaults the version to the published 0.9.0-alpha contract', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',
       backendKey: 'wslc',
@@ -670,7 +668,7 @@ describe('wslc state-aware lifecycle', () => {
     );
   });
 
-  it('lifts filesystem + network and nests image under experimental.wslc.provision', () => {
+  it('lifts filesystem + network and nests image under wslc.provision', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',
       backendKey: 'wslc',
@@ -692,12 +690,12 @@ describe('wslc state-aware lifecycle', () => {
       ingress: { default: 'allow', hostLoopback: 'allow' },
     });
     const wire = JSON.parse(JSON.stringify(env));
-    assert.deepStrictEqual(wire.experimental, {
-      wslc: { provision: { image: 'alpine:latest', imageTarPath: 'C:\\images\\alpine.tar' } },
+    assert.deepStrictEqual(wire.wslc, {
+      provision: { image: 'alpine:latest', imageTarPath: 'C:\\images\\alpine.tar' },
     });
   });
 
-  it('omits the experimental block when provision carries no backend-specific field', () => {
+  it('omits the WSLC section when provision carries no backend-specific field', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',
       backendKey: 'wslc',
@@ -709,7 +707,7 @@ describe('wslc state-aware lifecycle', () => {
         },
       },
     });
-    assert.strictEqual(env.experimental, undefined);
+    assert.strictEqual(env.wslc, undefined);
     assert.deepStrictEqual(env.network, {
       egress: { default: 'deny' },
       ingress: { default: 'deny', hostLoopback: 'deny' },
@@ -748,19 +746,20 @@ describe('wslc state-aware lifecycle', () => {
             ingress: { default: 'deny', hostLoopback: 'deny' },
           },
         },
-        testOptions(),
+        testOptions({ experimental: false }),
       );
       assert.strictEqual(result.sandboxId, 'wslc:0123abcd');
       assert.strictEqual(fake.captured.envelope?.phase, 'provision');
       assert.strictEqual(fake.captured.envelope?.containment, 'wslc');
       assert.strictEqual(fake.captured.envelope?.version, '0.9.0-alpha');
+      assert.ok(!fake.captured.args?.includes('--experimental'));
     });
 
     it('startSandbox infers wslc from the wslc: prefix', async () => {
       const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
       _setSpawnImpl(fake.spawn);
       const id = 'wslc:0123abcd' as SandboxId<'wslc'>;
-      await startSandbox(id, undefined, testOptions());
+      await startSandbox(id, undefined, testOptions({ experimental: false }));
       assert.strictEqual(fake.captured.envelope?.phase, 'start');
       assert.strictEqual(fake.captured.envelope?.sandboxId, 'wslc:0123abcd');
       assert.strictEqual(fake.captured.envelope?.experimental, undefined);
@@ -773,7 +772,7 @@ describe('wslc state-aware lifecycle', () => {
       const result = await execInSandboxAsync(
         id,
         { process: { commandLine: 'echo hello-from-wslc' } },
-        testOptions(),
+        testOptions({ experimental: false }),
       );
       assert.deepStrictEqual(result, { stdout: 'hello-from-wslc\n', stderr: '', exitCode: 0 });
       assert.deepStrictEqual(fake.captured.envelope?.process, { commandLine: 'echo hello-from-wslc' });
@@ -785,7 +784,7 @@ describe('wslc state-aware lifecycle', () => {
         _setSpawnImpl(fake.spawn);
         const id = 'wslc:0123abcd' as SandboxId<'wslc'>;
         const call = phase === 'stop' ? stopSandbox : deprovisionSandbox;
-        await call(id, undefined, testOptions());
+        await call(id, undefined, testOptions({ experimental: false }));
         assert.strictEqual(fake.captured.envelope?.phase, phase);
         assert.strictEqual(fake.captured.envelope?.sandboxId, 'wslc:0123abcd');
         _resetSpawnImpl();

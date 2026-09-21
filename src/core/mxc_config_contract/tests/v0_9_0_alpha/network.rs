@@ -5,7 +5,7 @@ use crate::common::{assert_invalid, assert_valid};
 
 #[test]
 fn every_removed_property_is_rejected_from_every_request_root() {
-    use mxc_config_contract::dev::parse_request;
+    use mxc_config_contract::published::v0_9_0_alpha::parse_request;
     use serde_json::{json, Map, Value};
 
     let roots = [
@@ -15,8 +15,6 @@ fn every_removed_property_is_rejected_from_every_request_root() {
             "sandboxId": "wslc:id",
             "process": {"commandLine": "echo"}
         }),
-        json!({"phase": "provision", "containment": "wslc"}),
-        json!({"phase": "provision", "containment": "windows_sandbox"}),
         json!({
             "phase": "provision",
             "containment": "isolation_session",
@@ -62,7 +60,7 @@ fn every_removed_property_is_rejected_from_every_request_root() {
 
 #[test]
 fn exec_runtime_proxy_is_a_closed_optional_string_surface() {
-    use mxc_config_contract::dev::parse_request;
+    use mxc_config_contract::published::v0_9_0_alpha::parse_request;
     for runtime in [
         r#"{"networkProxy":null}"#,
         r#"{"networkProxy":true}"#,

@@ -30,6 +30,7 @@ const {
   min,
   maxSupported,
   stateAware,
+  stateAwareWindowsSandbox,
   stateAwareWslc,
   stableLatest,
   devSchemaFile,
@@ -109,8 +110,15 @@ expectConst(
   stateAware
 );
 expectConst(
-  "state-aware-helper.ts",
-  read("sdk", "node", "src", "state-aware-helper.ts"),
+  "state-aware-types.ts",
+  stateAwareTs,
+  "WINDOWS_SANDBOX_STATE_AWARE_VERSION",
+  /const WINDOWS_SANDBOX_STATE_AWARE_VERSION\s*=\s*'([^']+)'/,
+  stateAwareWindowsSandbox
+);
+expectConst(
+  "state-aware-types.ts",
+  stateAwareTs,
   "WSLC_STATE_AWARE_VERSION",
   /const WSLC_STATE_AWARE_VERSION\s*=\s*'([^']+)'/,
   stateAwareWslc
@@ -127,6 +135,7 @@ for (const [label, expected] of [
   ["MaximumSupported", maxSupported],
   ["LatestStable", stableLatest],
   ["StateAware", stateAware],
+  ["WindowsSandboxStateAware", stateAwareWindowsSandbox],
   ["WslcStateAware", stateAwareWslc],
 ]) {
   expectConst(
@@ -166,6 +175,6 @@ if (errors.length > 0) {
 
 console.log(
   `Schema version sync OK: maxSupported ${maxSupported} ` +
-    `(min ${min}, state-aware ${stateAware}, WSLC state-aware ${stateAwareWslc}, ` +
+    `(min ${min}, state-aware ${stateAware}, Windows Sandbox state-aware ${stateAwareWindowsSandbox}, WSLC state-aware ${stateAwareWslc}, ` +
     `stable ${stableLatest})`
 );

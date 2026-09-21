@@ -72,6 +72,7 @@ public sealed class SandboxRequest
 
     /// <summary>Opt in to experimental containment backends and features.</summary>
     [JsonPropertyName("experimental")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool Experimental { get; set; }
 }
 
@@ -93,10 +94,10 @@ public abstract class SandboxContainment;
 public sealed class ProcessContainment : SandboxContainment;
 
 /// <summary>
-/// Experimental Windows IsolationSession backend, which runs the workload under
+/// Windows IsolationSession backend, which runs the workload under
 /// an isolated agent user account.
 /// </summary>
-/// <remarks>Requires <see cref="SandboxRequest.Experimental"/>.</remarks>
+/// <remarks>The native library must be built with IsolationSession support.</remarks>
 public sealed class IsolationSessionContainment : SandboxContainment;
 
 /// <summary>Explicit macOS Seatbelt configuration.</summary>
@@ -243,7 +244,7 @@ public sealed class ProcessContainerNetworkPolicy
     public string? AllowedProxyPeer { get; set; }
 }
 
-/// <summary>Experimental WSL Container backend configuration.</summary>
+/// <summary>WSL Container backend configuration.</summary>
 public sealed class WslcContainment : SandboxContainment
 {
     /// <summary>Container image reference.</summary>

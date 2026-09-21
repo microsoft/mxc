@@ -24,7 +24,7 @@ pub struct WslcProvision {
     pub image_tar_path: OptionalField<String>,
 }
 
-/// State-aware WSLC experimental settings.
+/// State-aware WSLC settings.
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -32,16 +32,6 @@ pub struct StateAwareWslc {
     /// Optional provision-phase settings.
     #[serde(default)]
     pub provision: OptionalField<WslcProvision>,
-}
-
-/// Experimental settings accepted by a WSLC provision request.
-#[derive(Debug, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct WslcProvisionExperimental {
-    /// Optional WSLC backend settings.
-    #[serde(default)]
-    pub wslc: OptionalField<StateAwareWslc>,
 }
 
 /// A complete state-aware `provision` request for wslc
@@ -70,7 +60,7 @@ pub struct WslcProvisionRequest {
     /// Optional telemetry configuration.
     #[serde(default)]
     pub telemetry: OptionalField<Telemetry>,
-    /// Optional closed experimental settings.
+    /// Optional WSLC provision settings.
     #[serde(default)]
-    pub experimental: OptionalField<WslcProvisionExperimental>,
+    pub wslc: OptionalField<StateAwareWslc>,
 }

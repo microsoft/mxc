@@ -1,5 +1,5 @@
 {
-  "version": "0.9.0-alpha",
+  "version": "0.10.0-alpha",
   "containerId": "CLI-Experimental-Hello-LXC",
   "containment": "lxc",
   "process": {
@@ -12,9 +12,7 @@
     "distribution": "alpine",
     "release": "3.23"
   },
-  "experimental": {
-    "test": {
-      "message": "Test feature from LXC experimental!"
-    }
+  "test": {
+    "message": "Test feature from LXC experimental!"
   }
 }

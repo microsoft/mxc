@@ -1,18 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::common::assert_v09_introduces;
-
-#[test]
-fn experimental_test_is_introduced_in_v09() {
-    assert_v09_introduces(
-        r#""experimental": {
-            "test": {
-                "message": "version boundary test"
-            }
-        }"#,
-    );
-}
+use crate::common::{assert_v09_introduces, assert_v10_introduces};
 
 #[test]
 fn telemetry_is_introduced_in_v09() {
@@ -20,31 +9,32 @@ fn telemetry_is_introduced_in_v09() {
 }
 
 #[test]
-fn experimental_windows_sandbox_is_introduced_in_v09() {
-    assert_v09_introduces(
-        r#""experimental": {
-            "windows_sandbox": {
-                "idleTimeoutMs": 60000, "daemonPipeName": "mxc-boundary-test"
-            }
+fn test_feature_is_introduced_in_v010() {
+    assert_v10_introduces(r#""test": {"message": "version boundary test"}"#);
+}
+
+#[test]
+fn windows_sandbox_config_is_introduced_in_v010() {
+    assert_v10_introduces(
+        r#""windowsSandbox": {
+            "idleTimeoutMs": 60000, "daemonPipeName": "mxc-boundary-test"
         }"#,
     );
 }
 
 #[test]
-fn experimental_wslc_is_introduced_in_v09() {
+fn wslc_config_is_introduced_in_v09() {
     assert_v09_introduces(
-        r#""experimental": {
-            "wslc": {
-                "targetOs": "linux",
-                "image": "ubuntu",
-                "cpuCount": 2,
-                "memoryMb": 4096,
-                "gpu": false,
-                "storagePath": "C:\\mxc",
-                "portMappings": [
-                    {"windowsPort": 8080, "containerPort": 80, "protocol": "tcp"}
-                ]
-            }
+        r#""wslc": {
+            "targetOs": "linux",
+            "image": "ubuntu",
+            "cpuCount": 2,
+            "memoryMb": 4096,
+            "gpu": false,
+            "storagePath": "C:\\mxc",
+            "portMappings": [
+                {"windowsPort": 8080, "containerPort": 80, "protocol": "tcp"}
+            ]
         }"#,
     );
 }

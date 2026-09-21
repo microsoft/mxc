@@ -47,10 +47,10 @@ fn isolation_session_unavailable() -> MxcError {
     )
 }
 
-/// Reject a state-aware request for an experimental backend when the caller has
-/// not enabled experimental features. Applied by both the envelope dispatcher
+/// Reject a Windows Sandbox state-aware request when the caller has not enabled
+/// experimental features. Applied by both the envelope dispatcher
 /// ([`run_state_aware`]) and the streaming exec dispatcher ([`exec_state_aware`])
-/// so no entry point can reach an experimental backend without the opt-in.
+/// so no entry point can reach that development backend without the opt-in.
 fn require_experimental_optin(
     backend: &wxc_common::models::ContainmentBackend,
     parsed: &ParsedStateAwareRequest,
@@ -58,8 +58,6 @@ fn require_experimental_optin(
     if matches!(
         backend,
         wxc_common::models::ContainmentBackend::WindowsSandbox
-            | wxc_common::models::ContainmentBackend::IsolationSession
-            | wxc_common::models::ContainmentBackend::Wslc
     ) && !parsed.request().experimental_enabled
     {
         return Err(MxcError::backend_unavailable(format!(
@@ -417,9 +415,9 @@ fn exec_state_aware_attached_with(
 /// [`exec_state_aware_attached`] to attach the workload to this process's stdio,
 /// or [`exec_state_aware_json`] to drive the pipes yourself.
 ///
-/// `experimental` opts in to the experimental backends (WindowsSandbox,
-/// IsolationSession, WSLc); without it they are refused with
-/// `backend_unavailable` before any work is done.
+/// `experimental` opts in to Windows Sandbox; without it that backend is
+/// refused with `backend_unavailable` before any work is done. WSLC and
+/// IsolationSession do not require the runtime opt-in.
 pub fn run_state_aware_json(
     request_json: &str,
     dry_run: bool,
@@ -643,7 +641,7 @@ mod tests {
     #[test]
     fn experimental_backend_requires_optin() {
         let parsed = parse_state_aware(
-            r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
+            r#"{"version":"0.10.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
             false,
             &mut Logger::new(Mode::Buffer),
         )
@@ -656,28 +654,43 @@ mod tests {
     }
 
     #[test]
-    fn exec_experimental_backend_requires_optin() {
-        // The streaming exec entry point applies the same opt-in gate as the
-        // envelope dispatcher: a `wslc:` exec without the opt-in must be
-        // refused before reaching the backend.
+    fn isolation_session_does_not_require_optin() {
         let parsed = parse_state_aware(
-            r#"{"version":"0.9.0-alpha","phase":"exec",
-                "sandboxId":"wslc:00000000000000000000000000000000",
-                "process":{"commandLine":"echo typed"}}"#,
+            r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session","network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#,
             false,
             &mut Logger::new(Mode::Buffer),
         )
         .unwrap();
 
-        let error = match exec_state_aware(parsed) {
-            Ok(_) => {
-                panic!("expected the experimental gate to reject a wslc exec without the opt-in")
-            }
-            Err(e) => e,
-        };
+        assert!(require_experimental_optin(
+            &wxc_common::models::ContainmentBackend::IsolationSession,
+            &parsed
+        )
+        .is_ok());
+    }
 
-        assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
-        assert!(error.message.contains("experimental"));
+    #[test]
+    fn wslc_does_not_require_optin() {
+        let parsed = parse_state_aware(
+            r#"{"version":"0.9.0-alpha","phase":"provision","containment":"wslc"}"#,
+            false,
+            &mut Logger::new(Mode::Buffer),
+        )
+        .unwrap();
+
+        if let Err(error) = run_state_aware(parsed, true) {
+            assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
+            assert!(
+                error.message.contains("wslc") || error.message.contains("WSLc"),
+                "got: {}",
+                error.message
+            );
+            assert!(
+                !error.message.contains("experimental"),
+                "got: {}",
+                error.message
+            );
+        }
     }
 
     #[test]
@@ -759,7 +772,7 @@ mod tests {
         // The gate and phase checks pass, so the refusal can only come from the
         // single-flight claim. The exec goes no further: `wsb:` resolves to a
         // backend needing a live host, and the claim is taken before that.
-        let json = r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wsb:0123abcd",
+        let json = r#"{"version":"0.10.0-alpha","phase":"exec","sandboxId":"wsb:0123abcd",
             "process":{"commandLine":"cmd.exe /c echo hi"}}"#;
 
         let held = claim_attached_exec().expect("the claim must be available");
@@ -777,7 +790,7 @@ mod tests {
 
     #[test]
     fn attached_exec_requires_a_terminal() {
-        let json = r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wsb:0123abcd",
+        let json = r#"{"version":"0.10.0-alpha","phase":"exec","sandboxId":"wsb:0123abcd",
             "process":{"commandLine":"cmd.exe /c echo hi"}}"#;
 
         let err = exec_state_aware_attached_with(json, true, || false)
@@ -812,7 +825,7 @@ mod tests {
         let parsed = parse_state_aware(
             r#"{"version":"0.9.0-alpha","phase":"start",
                 "sandboxId":"wslc:00000000000000000000000000000000"}"#,
-            true,
+            false,
             &mut Logger::new(Mode::Buffer),
         )
         .unwrap();
@@ -829,7 +842,7 @@ mod tests {
     #[test]
     fn exec_state_aware_routes_windows_sandbox_exec_to_backend() {
         let parsed = parse_state_aware(
-            r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wsb:abcd1234",
+            r#"{"version":"0.10.0-alpha","phase":"exec","sandboxId":"wsb:abcd1234",
                 "process":{"commandLine":"echo typed"}}"#,
             true,
             &mut Logger::new(Mode::Buffer),
@@ -869,7 +882,11 @@ mod tests {
 
     fn lifecycle_fixture(backend: &str, id: &str, phase: Phase) -> String {
         let mut value = serde_json::json!({
-            "version": "0.9.0-alpha",
+            "version": if backend == "windows_sandbox" {
+                "0.10.0-alpha"
+            } else {
+                "0.9.0-alpha"
+            },
             "phase": phase.as_str(),
         });
         if phase == Phase::Provision {
@@ -890,7 +907,7 @@ mod tests {
     }
 
     #[test]
-    fn every_backend_and_phase_keeps_optin_and_feature_gates_before_binding() {
+    fn every_backend_and_phase_keeps_required_gates_before_binding() {
         for (backend, id, available) in backend_cases() {
             for phase in [
                 Phase::Provision,
@@ -902,18 +919,20 @@ mod tests {
                 let json = lifecycle_fixture(backend, id, phase);
                 let parsed =
                     parse_state_aware(&json, false, &mut Logger::new(Mode::Buffer)).unwrap();
-                let error = run_state_aware(parsed.clone(), true).unwrap_err();
-                assert_eq!(
-                    error.code,
-                    MxcErrorCode::BackendUnavailable,
-                    "{backend} {phase}"
-                );
-                assert!(error.message.contains("experimental"));
-                let error = exec_state_aware(parsed)
-                    .err()
-                    .expect("opt-in must be required");
-                assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
-                assert!(error.message.contains("experimental"));
+                if backend == "windows_sandbox" {
+                    let error = run_state_aware(parsed.clone(), true).unwrap_err();
+                    assert_eq!(
+                        error.code,
+                        MxcErrorCode::BackendUnavailable,
+                        "{backend} {phase}"
+                    );
+                    assert!(error.message.contains("experimental"));
+                    let error = exec_state_aware(parsed)
+                        .err()
+                        .expect("opt-in must be required");
+                    assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
+                    assert!(error.message.contains("experimental"));
+                }
 
                 if !available {
                     let parsed =
@@ -1109,7 +1128,7 @@ mod tests {
         // Provision without containment — the dispatcher rejects it as
         // `MalformedRequest` before ever reaching a backend.
         let error = super::run_state_aware_json(
-            r#"{"version":"0.9.0-alpha","phase":"provision"}"#,
+            r#"{"version":"0.10.0-alpha","phase":"provision"}"#,
             false,
             false,
         )
@@ -1124,7 +1143,7 @@ mod tests {
         // `BackendUnavailable` → `InitError`; the shared classifier keeps
         // streaming and state-aware attribution in lockstep.
         let error = super::run_state_aware_json(
-            r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
+            r#"{"version":"0.10.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
             false,
             false,
         )
@@ -1153,7 +1172,7 @@ mod tests {
         use crate::error::ErrorCode;
         for _ in 0..3 {
             let error = super::run_state_aware_json(
-                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
+                r#"{"version":"0.10.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
                 false,
                 false,
             )
