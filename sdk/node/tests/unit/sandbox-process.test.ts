@@ -36,6 +36,7 @@ class FakeDriver implements NativeLifecycleDriver {
   freeCount = 0;
   deferWait = false;
   deferFree = false;
+  freeError: Error | undefined;
   waitInFlight = false;
   readonly serializedCallsDuringWait: string[] = [];
   private completeDeferredWait:
@@ -98,6 +99,7 @@ class FakeDriver implements NativeLifecycleDriver {
         this.completeDeferredFree = resolve;
       });
     }
+    if (this.freeError !== undefined) throw this.freeError;
   }
 
   complete(exitCode = 0, timedOut = false): void {
@@ -127,12 +129,14 @@ class ManualScheduler implements LifecycleScheduler {
     readonly due: number;
     readonly callback: () => void;
   }>();
+  readonly scheduledDelays: number[] = [];
 
   now(): number {
     return this.time;
   }
 
   schedule(callback: () => void, delayMs: number): unknown {
+    this.scheduledDelays.push(delayMs);
     const id = this.nextId++;
     this.tasks.set(id, { due: this.time + delayMs, callback });
     return id;
@@ -290,6 +294,59 @@ describe('native sandbox process', () => {
     assert.strictEqual(driver.standardOutput.destroyed, true);
     assert.strictEqual(driver.standardError.destroyed, true);
     assert.throws(() => proc.standardOutput, /disposed/);
+  });
+
+  it('reports asynchronous native cleanup failures during disposal', async () => {
+    const driver = new FakeDriver();
+    driver.freeError = new Error('native free callback failed');
+    const reported: Error[] = [];
+    const proc = createMxcSandboxProcess(
+      driver,
+      undefined,
+      undefined,
+      (error) => reported.push(error),
+    );
+
+    proc.dispose();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    assert.deepStrictEqual(
+      reported.map((error) => error.message),
+      ['native free callback failed'],
+    );
+  });
+
+  it('backs off lifecycle polling for long-running processes', () => {
+    const driver = new FakeDriver();
+    const scheduler = new ManualScheduler();
+    const proc = createMxcSandboxProcess(driver, undefined, scheduler);
+
+    scheduler.advance(10);
+    scheduler.advance(20);
+    scheduler.advance(40);
+    scheduler.advance(80);
+    scheduler.advance(100);
+
+    assert.deepStrictEqual(
+      scheduler.scheduledDelays,
+      [10, 20, 40, 80, 100, 100],
+    );
+    proc.dispose();
+  });
+
+  it('schedules polling against the exact timeout deadline while backing off', async () => {
+    const driver = new FakeDriver();
+    const scheduler = new ManualScheduler();
+    const proc = createMxcSandboxProcess(driver, 35, scheduler);
+    const wait = proc.waitAsync();
+
+    scheduler.advance(10);
+    scheduler.advance(20);
+    assert.deepStrictEqual(scheduler.scheduledDelays, [10, 20, 5]);
+    scheduler.advance(5);
+
+    assert.deepStrictEqual(await wait, { exitCode: 0, timedOut: true });
+    assert.strictEqual(driver.timeoutKillCount, 1);
   });
 
   it('enforces the request timeout and reports a timed-out result', async () => {

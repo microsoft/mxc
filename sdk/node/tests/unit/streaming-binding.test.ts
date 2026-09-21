@@ -9,7 +9,9 @@ import {
   type StreamingNativeFacade,
 } from '../../src/bindings/streaming.js';
 import {
+  createNodeStreamFactory,
   supportsNativeStdio,
+  type NodeStreamDependencies,
   type NativeStreamFactory,
 } from '../../src/bindings/native-stdio.js';
 
@@ -354,6 +356,75 @@ describe('native streaming binding ownership', () => {
       /reading sandbox process output metadata failed/,
     );
     await driver.free();
+  });
+});
+
+describe('native Node stream construction', () => {
+  it('constructs owning Windows streams from the full native handle', () => {
+    const calls: Array<{
+      readonly direction: 'readable' | 'writable';
+      readonly path: string;
+      readonly options: unknown;
+    }> = [];
+    const dependencies: NodeStreamDependencies = {
+      createReadStream(path, options) {
+        calls.push({ direction: 'readable', path, options });
+        return new PassThrough();
+      },
+      createWriteStream(path, options) {
+        calls.push({ direction: 'writable', path, options });
+        return new PassThrough();
+      },
+      createSocket() {
+        throw new Error('Windows must not construct fd-backed sockets');
+      },
+    };
+    const factory = createNodeStreamFactory('win32', dependencies);
+
+    factory.writable(0x100000001n);
+    factory.readable(0x100000002);
+
+    assert.deepStrictEqual(calls, [
+      {
+        direction: 'writable',
+        path: '',
+        options: { autoClose: true, windowsHandle: 0x100000001n },
+      },
+      {
+        direction: 'readable',
+        path: '',
+        options: { autoClose: true, windowsHandle: 0x100000002n },
+      },
+    ]);
+  });
+
+  it('constructs directional owning Unix sockets from validated descriptors', () => {
+    const socketOptions: unknown[] = [];
+    const dependencies: NodeStreamDependencies = {
+      createReadStream() {
+        throw new Error('Unix must not construct Windows read streams');
+      },
+      createWriteStream() {
+        throw new Error('Unix must not construct Windows write streams');
+      },
+      createSocket(options) {
+        socketOptions.push(options);
+        return new PassThrough();
+      },
+    };
+    const factory = createNodeStreamFactory('linux', dependencies);
+
+    factory.writable(11n);
+    factory.readable(12);
+
+    assert.deepStrictEqual(socketOptions, [
+      { fd: 11, readable: false, writable: true },
+      { fd: 12, readable: true, writable: false },
+    ]);
+    assert.throws(
+      () => factory.readable(Number.MAX_SAFE_INTEGER + 1),
+      /invalid file descriptor/,
+    );
   });
 });
 

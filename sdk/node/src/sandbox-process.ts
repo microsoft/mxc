@@ -28,7 +28,8 @@ export interface NativeLifecycleDriver {
   free(): Promise<void>;
 }
 
-const POLL_INTERVAL_MS = 10;
+const INITIAL_POLL_INTERVAL_MS = 10;
+const MAX_POLL_INTERVAL_MS = 100;
 type ProcessPhase = 'active' | 'settling' | 'terminal' | 'disposed';
 
 export interface LifecycleScheduler {
@@ -41,6 +42,18 @@ const defaultScheduler: LifecycleScheduler = {
   now: () => performance.now(),
   schedule: (callback, delayMs) => setTimeout(callback, delayMs),
   cancel: (handle) => clearTimeout(handle as NodeJS.Timeout),
+};
+
+export type BackgroundErrorReporter = (error: Error) => void;
+
+const defaultBackgroundErrorReporter: BackgroundErrorReporter = (error) => {
+  process.emitWarning(
+    `native sandbox cleanup failed: ${error.message}`,
+    {
+      code: 'MXC_NATIVE_CLEANUP_FAILED',
+      detail: error.stack,
+    },
+  );
 };
 
 function asError(error: unknown): Error {
@@ -90,11 +103,14 @@ export class MxcSandboxProcess {
   private pollTimer: unknown;
   private readonly deadline: number | undefined;
   private settlingError: Error | undefined;
+  private pollIntervalMs = INITIAL_POLL_INTERVAL_MS;
 
   constructor(
     private readonly driver: NativeLifecycleDriver,
     timeoutMs?: number,
     private readonly scheduler: LifecycleScheduler = defaultScheduler,
+    private readonly reportBackgroundError: BackgroundErrorReporter =
+      defaultBackgroundErrorReporter,
   ) {
     this.id = driver.id;
     this.input = driver.standardInput;
@@ -206,7 +222,13 @@ export class MxcSandboxProcess {
     destroyNativeStream(this.input);
     destroyNativeStream(this.output);
     destroyNativeStream(this.errorOutput);
-    void this.driver.free().catch(() => {});
+    void this.driver.free().catch((error) => {
+      try {
+        this.reportBackgroundError(asError(error));
+      } catch {
+        // Diagnostics must not make synchronous disposal fail later.
+      }
+    });
     if (previousPhase !== 'terminal') {
       this.rejectWait(new Error('sandbox process was disposed before completion'));
     }
@@ -230,7 +252,20 @@ export class MxcSandboxProcess {
       this.finishAfterTimeout();
       return;
     }
-    this.pollTimer = this.scheduler.schedule(() => this.poll(), POLL_INTERVAL_MS);
+    const now = this.scheduler.now();
+    const remaining = this.deadline === undefined
+      ? undefined
+      : Math.max(0, this.deadline - now);
+    const delay = remaining === undefined
+      ? this.pollIntervalMs
+      : Math.min(this.pollIntervalMs, remaining);
+    this.pollTimer = this.scheduler.schedule(() => this.poll(), delay);
+    // Fast polls catch short-lived processes; bounded backoff avoids a
+    // permanent 100 Hz main-thread FFI cost for long-running workloads.
+    this.pollIntervalMs = Math.min(
+      this.pollIntervalMs * 2,
+      MAX_POLL_INTERVAL_MS,
+    );
   }
 
   private finishAfterWait(): void {
@@ -357,6 +392,12 @@ export function createMxcSandboxProcess(
   driver: NativeLifecycleDriver,
   timeoutMs?: number,
   scheduler?: LifecycleScheduler,
+  reportBackgroundError?: BackgroundErrorReporter,
 ): MxcSandboxProcess {
-  return new MxcSandboxProcess(driver, timeoutMs, scheduler);
+  return new MxcSandboxProcess(
+    driver,
+    timeoutMs,
+    scheduler,
+    reportBackgroundError,
+  );
 }

@@ -25,6 +25,13 @@ export interface NativeStreamFactory {
   writable(handle: NativeHandle): Writable;
 }
 
+export interface NodeStreamDependencies {
+  createReadStream(path: string, options: unknown): Readable;
+  createWriteStream(path: string, options: unknown): Writable;
+  createSocket(options: ConstructorParameters<typeof net.Socket>[0]):
+    Readable & Writable;
+}
+
 export interface NativeStdioStreams {
   readonly standardInput: Writable | null;
   readonly standardOutput: Readable | null;
@@ -78,37 +85,49 @@ function unixFd(handle: NativeHandle): number {
   return fd;
 }
 
-export const nodeStreamFactory: NativeStreamFactory = {
-  platform: os.platform(),
-  readable(handle) {
-    if (this.platform === 'win32') {
-      return fs.createReadStream(
-        '',
-        windowsHandleOptions(handle) as unknown as
-          Parameters<typeof fs.createReadStream>[1],
-      );
-    }
-    return new net.Socket({
-      fd: unixFd(handle),
-      readable: true,
-      writable: false,
-    });
-  },
-  writable(handle) {
-    if (this.platform === 'win32') {
-      return fs.createWriteStream(
-        '',
-        windowsHandleOptions(handle) as unknown as
-          Parameters<typeof fs.createWriteStream>[1],
-      );
-    }
-    return new net.Socket({
-      fd: unixFd(handle),
-      readable: false,
-      writable: true,
-    });
-  },
+const nodeStreamDependencies: NodeStreamDependencies = {
+  createReadStream: (path, options) => fs.createReadStream(
+    path,
+    options as Parameters<typeof fs.createReadStream>[1],
+  ),
+  createWriteStream: (path, options) => fs.createWriteStream(
+    path,
+    options as Parameters<typeof fs.createWriteStream>[1],
+  ),
+  createSocket: (options) => new net.Socket(options),
 };
+
+/** Internal constructor with injectable Node stream primitives for tests. */
+export function createNodeStreamFactory(
+  platform: NodeJS.Platform,
+  dependencies: NodeStreamDependencies = nodeStreamDependencies,
+): NativeStreamFactory {
+  return {
+    platform,
+    readable(handle) {
+      if (platform === 'win32') {
+        return dependencies.createReadStream('', windowsHandleOptions(handle));
+      }
+      return dependencies.createSocket({
+        fd: unixFd(handle),
+        readable: true,
+        writable: false,
+      });
+    },
+    writable(handle) {
+      if (platform === 'win32') {
+        return dependencies.createWriteStream('', windowsHandleOptions(handle));
+      }
+      return dependencies.createSocket({
+        fd: unixFd(handle),
+        readable: false,
+        writable: true,
+      });
+    },
+  };
+}
+
+export const nodeStreamFactory = createNodeStreamFactory(os.platform());
 
 function isMissingHandle(
   handle: NativeHandle,

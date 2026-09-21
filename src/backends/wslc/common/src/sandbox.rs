@@ -19,7 +19,9 @@
 //!   forwards to an in-memory stream per handle (see [`crate::stream_buffer`]);
 //!   the caller reads the other end. Native-stdio callers receive synthesized
 //!   OS pipes pumped from those streams because the SDK exposes bytes rather
-//!   than pipe handles.
+//!   than pipe handles. Each exposed output needs its own blocking pump because
+//!   the SDK offers no waitable or overlapped read primitive; the cost is
+//!   therefore bounded at two threads per native-streaming sandbox.
 //! - **stdin** — the WSLC SDK exposes no process-input API, so
 //!   [`take_stdin`](SandboxProcess::take_stdin) always returns `None`.
 //! - **[`id`](SandboxProcess::id)** — the process lives inside the WSL VM and
@@ -315,6 +317,11 @@ fn pin_output_pump_module() -> std::io::Result<()> {
 }
 
 /// Prepare a native pipe and an idle output pump before detaching a WSLC stream.
+///
+/// A shared worker cannot safely drain both callback streams: each read may
+/// block independently, and failing to drain either stream can stall the
+/// container. Keep the explicit one-pump-per-output tradeoff until the WSLC SDK
+/// exposes a waitable or cancellable asynchronous read primitive.
 fn prepare_native_output() -> std::io::Result<PreparedNativeOutput> {
     pin_output_pump_module()?;
     let (reader, writer) = create_local_pipe().map_err(std::io::Error::other)?;
