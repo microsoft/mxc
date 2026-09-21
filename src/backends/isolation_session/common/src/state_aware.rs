@@ -447,7 +447,7 @@ mod tests {
 
     // ====== Wire-model / backend config parity ======
 
-    // Retained rolling schema/type oracles still use wire::IsolationSession.
+    // Shared adapter DTOs retain the one-shot/state-aware nesting shape.
     // These tests characterize their configuration compatibility independently
     // of the exact adapter. Production dispatch uses checked typed binding, not
     // this deserialization path; common recording-backend tests cover delivery.
@@ -504,23 +504,16 @@ mod tests {
     }
 
     #[test]
-    fn phases_with_a_config_accept_the_wire_payload() {
+    fn provision_config_preserves_the_runtime_app_id() {
         type ProvisionConfig = <IsolationSessionRunner as StatefulSandboxBackend>::ProvisionConfig;
 
-        // Derive the payload from the wire type instead of a JSON literal: the
-        // wire model is only the schema source on this path, so a serde rename
-        // on either side would go unnoticed. The config type is
-        // `#[serde(default)]` with no `deny_unknown_fields`, so a renamed key
-        // does not error — it silently drops the value.
-        let provision_phase = wxc_common::wire::IsolationSessionProvisionPhase {
+        let provision = ProvisionConfig {
             app_id: Some("PFN:Contoso.App_8wekyb3d8bbwe".to_string()),
         };
-        let provision: ProvisionConfig =
-            serde_json::from_value(serde_json::to_value(&provision_phase).unwrap()).unwrap();
         assert_eq!(
             provision.app_id.as_deref(),
             Some("PFN:Contoso.App_8wekyb3d8bbwe"),
-            "provision dropped the wire appId (serde rename drift?)"
+            "provision dropped the normalized app id"
         );
     }
 

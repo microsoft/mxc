@@ -21,5 +21,6 @@ fn isolation_session_containment_maps_to_runtime_wire_value() {
         wire.containment,
         Some(super::wire::Containment::IsolationSession)
     ));
-    assert!(wire.experimental.is_none());
+    assert!(wire.test_feature.is_none());
+    assert!(wire.windows_sandbox.is_none());
 }

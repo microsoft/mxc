@@ -4,7 +4,7 @@
 use mxc_config_contract::dev::OneShotRequest;
 
 pub(crate) fn assert_valid(json: &str) {
-    serde_json::from_str::<OneShotRequest>(json).unwrap();
+    crate::exact_test_support::assert_valid::<OneShotRequest>(json);
 }
 
 pub(crate) fn assert_invalid(json: &str) {
@@ -28,12 +28,5 @@ pub(crate) fn assert_invalid_cases<'a>(
 }
 
 fn assert_invalid_with_context(json: &str, context: &str) {
-    if let Err(error) = serde_json::from_str::<serde_json::Value>(json) {
-        panic!("{context} used malformed test JSON: {error}");
-    }
-
-    assert!(
-        serde_json::from_str::<OneShotRequest>(json).is_err(),
-        "{context} was accepted"
-    );
+    crate::exact_test_support::assert_invalid::<OneShotRequest>(json, context);
 }

@@ -512,9 +512,9 @@ to learn the cross-cutting flags. Phase-specific fields on `SandboxSpawnOptions`
 (`ptyOptions`, `usePty`) are honored by `execInSandbox` / `execInSandboxAsync` and
 silently ignored on the other phases. State-awareness is not itself experimental —
 `experimental: true` must be set when the targeted backend is itself experimental, just
-as it is today for one-shot calls against `microvm` and `wslc`. IsolationSession is
-experimental at the time of writing; that status is independent of the state-aware API
-surface (§13).
+as it is for one-shot calls against `microvm` and `windows_sandbox`. Windows Sandbox
+requires this runtime authorization; IsolationSession and WSLC do not. That status is
+independent of the state-aware API surface (§13).
 
 ### 6.3 Example
 
@@ -628,7 +628,8 @@ interface OneShotRequest {
   lifecycle?: LifecycleConfig;
   processContainer?: ProcessContainerConfig;
   lxc?: LxcConfig;
-  experimental?: ExperimentalOneShotConfigs;     // existing one-shot shape per docs/schema.md
+  windowsSandbox?: OneShotWindowsSandbox;
+  wslc?: WslcConfig;
 }
 
 interface ProvisionStateAwareRequest {
@@ -638,7 +639,12 @@ interface ProvisionStateAwareRequest {
   filesystem?: FilesystemConfig;                  // backend declares per-phase honor
   network?: NetworkConfig;                        // backend declares per-phase honor
   ui?: UiConfig;                                  // backend declares per-phase honor
-  experimental?: ExperimentalStateAwareConfigs;
+  isolationSession?: {
+    provision?: { appId?: string };
+  };
+  wslc?: {
+    provision?: { image?: string; imageTarPath?: string };
+  };
 }
 
 interface NonProvisionStateAwareRequest {
@@ -649,7 +655,6 @@ interface NonProvisionStateAwareRequest {
   filesystem?: FilesystemConfig;                      // backend declares per-phase honor
   network?: NetworkConfig;                            // backend declares per-phase honor
   ui?: UiConfig;                                      // backend declares per-phase honor
-  experimental?: ExperimentalStateAwareConfigs;
 }
 
 type StateAwareRequest = ProvisionStateAwareRequest | NonProvisionStateAwareRequest;
@@ -666,7 +671,6 @@ Top-level fields shared by both branches:
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `version` | string | Yes | Exact backend-specific schema version. IsolationSession and WSLC use `0.9.0-alpha`; Windows Sandbox uses `0.10.0-alpha`. The SDK fills this field when the consumer Config omits it. |
-| `experimental` | object | No | Backend-specific config block. Shape depends on `phase` (§7.2). |
 
 Backend-routing fields:
 
@@ -694,34 +698,37 @@ declare which phases honor them, see §10.3):
 One-shot-only fields (`containerId`, `lifecycle`, `processContainer`, `lxc`) are not
 enumerated here; their definitions live in `docs/schema.md`.
 
-### 7.2 The `experimental` block
+### 7.2 Backend-specific sections
 
-`ExperimentalStateAwareConfigs` describes the wire-format shape of the `experimental`
-field on a state-aware request. It is a wire-only type — consumers do not construct
-it directly. The SDK builds this shape internally from the per-(backend, phase) Configs
-defined in §6.1, lifting backend-specific fields into the nested experimental block:
+Backend-specific configuration uses each backend's permanent top-level JSON
+section. The SDK builds these sections internally from the per-(backend, phase)
+Configs defined in §6.1:
 
 ```typescript
-interface ExperimentalStateAwareConfigs {
-  isolation_session?: {
+interface StateAwareBackendSections {
+  isolationSession?: {
     provision?: { appId?: string };
     // start, exec, stop, deprovision omitted — IsolationSession has no
     // backend-specific config for those phases.
   };
-  // future state-aware-capable backends add typed entries here
+  wslc?: {
+    provision?: { image?: string; imageTarPath?: string };
+  };
 }
 ```
 
 | Layer | Wire shape | Constraint |
 |---|---|---|
-| Outer key | `StateAwareContainmentBackend` member | Must be a state-aware-capable backend |
+| Outer key | Permanent camel-case backend section | Must match the selected state-aware-capable backend |
 | Inner key | A subset of `Phase` per backend's needs | Backends omit phases with no backend-specific config |
 | Innermost value | Backend-specific fields only (no cross-cutting, no `version`) | The SDK extracts these from the consumer's per-(backend, phase) Config |
 
 Compile-time enforcement of valid combinations lives on the SDK's per-(backend, phase)
-Configs (§6.1), not on this wire-shape type. Raw-JSON callers writing
-`ExperimentalStateAwareConfigs` directly are validated by the Rust parser and
-`validate_<phase>` hooks at runtime (§10.1).
+Configs (§6.1), not on this illustrative aggregate. Raw-JSON callers writing
+backend sections directly are validated by the exact Rust contract and
+`validate_<phase>` hooks at runtime (§10.1). Runtime experimental authorization
+is supplied separately through `SandboxSpawnOptions.experimental` or the
+executor's `--experimental` flag; it is not a request JSON field.
 
 For one-shot calls (phase absent), the top-level backend section directly holds
 the one-shot config object (e.g., `wslc?: WslcConfig`), as documented in
@@ -916,8 +923,8 @@ await startSandbox(
 
 ```rust
 // `start` carries no per-phase config for this backend — its StartConfig is
-// `()`, so the envelope above has no `experimental` block and the dispatcher
-// passes None:
+// `()`, so the envelope above has no backend-specific section and the
+// dispatcher passes None:
 backend.start(
     "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0",
     &request,
@@ -1041,7 +1048,7 @@ other state-aware backend, so caller error-handling code is portable across back
 
 | Code | Meaning |
 |---|---|
-| `malformed_request` | Structural request error: malformed JSON, missing required field, unknown or phase-inappropriate field, recursively unknown experimental field, or invalid phase-specific shape |
+| `malformed_request` | Structural request error: malformed JSON, missing required field, unknown or phase-inappropriate field, recursively unknown backend-specific field, or invalid phase-specific shape |
 | `unsupported_containment` | The backend named by `containment` (provision) or implied by the `sandboxId` prefix (non-provision) is not a recognised backend in this build. **SDK callers**: the SDK type-checks unknown `sandboxId` prefixes against the closed `StateAwareContainmentBackend` union *before* dispatching and instead throws `malformed_id` for an unknown prefix; `unsupported_containment` is reachable from the SDK only on the provision path. See §6.4 |
 | `unsupported_phase` | The backend does not support the requested call mode (state-aware call against an ephemeral-only backend, or one-shot call against a state-aware-only backend) |
 | `backend_unavailable` | The backend's runtime dependency is missing or unreachable (service not running, daemon stopped) |
@@ -1117,12 +1124,12 @@ the backend-specific closed root registered by that exact contract.
 
 The exact contract is the JSON trust boundary. Its recursively closed request
 types enforce required declarations, phase-inappropriate fields,
-duplicate/unknown fields, rejected nulls, and recursively unknown
-`experimental` fields. Structural failures surface as `malformed_request`
+duplicate/unknown fields, rejected nulls, and recursively unknown fields.
+Structural failures surface as `malformed_request`
 before backend binding or policy validation. Exact adapters convert backend
 payloads directly to runtime configurations, while common fields reuse
-`wire::MxcConfig` conversion in `config_parser.rs`. The rolling whole-request
-parser and executable equivalence harness have been removed.
+`common_request_ir::CommonRequestIR` conversion in `config_parser.rs`. The
+internal common parser and executable equivalence harness have been removed.
 
 When the native CLI supplies trailing command arguments, the loader first
 splices the rendered command into `process.commandLine` and then parses that
@@ -1154,7 +1161,7 @@ The state-aware adapter produces a checked input:
 
 ```rust
 StateAwareInput {
-    common,             // no phase, containment, sandboxId, or experimental
+    common,             // no phase, containment, sandboxId, or backend phase config
     operation,          // backend-tagged provision or a later operation + ID
 }
 ```
@@ -1176,11 +1183,7 @@ structurally representable fields. They enforce semantic values, cross-field
 invariants, backend identity, and policy capabilities; those representable
 refusals surface as `policy_validation`.
 
-Rolling structural checks and independent legacy payload extraction survive
-only in test support, using a separate legacy observation type. They share
-common conversion but do not force legacy-only inputs into production operations.
-
-Normalization populates the cross-cutting wire fields (`filesystem`, `network`,
+Normalization populates the cross-cutting input fields (`filesystem`, `network`,
 `ui`) into `ExecutionRequest.policy` (a `ContainerPolicy`) exactly as the
 one-shot path does, and `process` populates `ExecutionRequest`'s flat
 `script_code` / `working_directory` / `script_timeout` / `env` fields. Typed
@@ -1413,9 +1416,10 @@ pub enum ExecOutcome {
 ```
 
 Trait methods take `&ExecutionRequest` (the existing one-shot domain model from
-`wxc_common::models`, populated by the same `convert_wire_config` parser path that
-serves one-shot calls), plus `sandbox_id` for non-provision phases and an optional
-backend-specific typed config (`Self::<Phase>Config`). Cross-cutting policy fields
+`wxc_common::models`, populated by the same `normalize_common_request_ir`
+parser path that serves one-shot calls), plus `sandbox_id` for non-provision
+phases and an optional backend-specific typed config
+(`Self::<Phase>Config`). Cross-cutting policy fields
 flow through `request.policy` (a `ContainerPolicy`); per-exec process info flows
 through `request.script_code` / `request.working_directory` / `request.script_timeout`
 / `request.env`; backend-specific config is adapted from the exact contract,
@@ -1517,7 +1521,7 @@ fn run(req: MxcRequest, dry_run: bool) -> Result<DispatchOutcome, MxcError> {
 
         MxcRequest::StateAware(parsed) => match resolve_backend(&parsed)? {
             ContainmentBackend::IsolationSession => {
-                // Experimental/build gates run before binding in the engine.
+                // Runtime authorization/build gates run before binding in the engine.
                 let bound = bind_isolation_session::<IsolationSessionRunner>(parsed)?;
                 let mut backend = IsolationSessionRunner::new();
                 dispatch_state_aware(&mut backend, bound, dry_run)
@@ -1634,7 +1638,7 @@ shapes.
 | Layer | Validates | Failure surfaces as |
 |---|---|---|
 | SDK (TypeScript) | Recognised `containment` (provision); branded `SandboxId<C>` (other phases); required cross-backend fields (`process.commandLine` for exec); typed config shape (autocompletion + compile-time check) | Thrown at the call site, before any subprocess runs |
-| MXC parser (Rust) | Exact registered version and closed request root; required phase fields; phase-inappropriate, unknown, and recursively unknown experimental fields | `error.code: malformed_request`, `unsupported_phase`, `unsupported_containment` |
+| MXC parser (Rust) | Exact registered version and closed request root; required phase fields; phase-inappropriate, unknown, and recursively unknown fields | `error.code: malformed_request`, `unsupported_phase`, `unsupported_containment` |
 | MXC dispatch common (Rust) | Cross-backend per-phase invariants (e.g., `validate_exec_common` checks `process.commandLine` non-empty) | `error.code: malformed_request`, `policy_validation` |
 | Backend `validate_<phase>` hooks (Rust) | Per-backend per-phase invariants: config field values, cross-cutting policy honor (per the matrix in §10.3), id format checks beyond prefix matching | `error.code: policy_validation`, `malformed_id`, `stale_id`, `backend_error`, `backend_unavailable` |
 
@@ -1654,9 +1658,9 @@ agent user").
 A state-aware backend declares runtime configuration as trait associated types.
 IsolationSession and WSLC provision types live in `wxc_common::models`, keeping
 neutral operations and binding independent of backend crates. Exact contract
-types separately define the JSON shape under
-`experimental.<BACKEND_KEY>.<phase>`; adapters map their fields exhaustively to
-runtime values. Dispatch does not require `Deserialize`. The
+types separately define the JSON shape under each permanent top-level
+`<backend>.<phase>` section; adapters map their fields exhaustively to runtime
+values. Dispatch does not require `Deserialize`. The
 TypeScript type exported from the SDK package is the consumer-facing per-(backend,
 phase) Config from §6.1; it is a strict superset of the wire shape, adding
 `version?` (for an optional exact schema declaration) and the cross-cutting `filesystem` /
@@ -1688,8 +1692,8 @@ policy. The Rust struct receives the `appId` from the wire's
 `isolationSession.provision` block through exact adaptation and checked
 binding to `Self::ProvisionConfig` (§9.3), while the network policy remains on the
 execution request. The SDK is responsible for splitting
-the consumer Config into top-level wire fields (cross-cutting, `version`) and the
-experimental sub-block; Rust sees only the post-split shape.
+the consumer Config into top-level common fields (cross-cutting, `version`) and
+the permanent backend section; Rust sees only the post-split shape.
 
 `provision` is used here because it is IsolationSession's **only** phase with a
 per-phase config; `start`, `exec`, `stop` and `deprovision` declare `()` and reject
@@ -1849,12 +1853,12 @@ capability mismatches automatically (§9.4).
 
 ### 11.5 Add a config-parser case
 
-The state-aware wire format expects permanent top-level backend sections for
-backends that declare per-phase configs. Add the new shape to the exact development
-contract and its direct runtime adapter. Keep the retained rolling wire oracle
-aligned while it remains in use, and regenerate both development artifact sets.
-Preserve configuration presence through normalization and binding; leave
-defaults and semantic checks in the backend.
+State-aware exact contracts use permanent top-level backend sections for
+backends that declare per-phase configs. Add the new shape to the exact
+development contract and adapt it directly into the phase-specific runtime
+config and `StateAwareOperation`. Regenerate the registered exact schema and
+TypeScript artifacts. Preserve configuration presence through normalization and
+binding; leave defaults and semantic checks in the backend.
 
 ### 11.6 Document the backend
 

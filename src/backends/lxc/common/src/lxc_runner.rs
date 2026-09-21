@@ -309,7 +309,7 @@ impl LxcScriptRunner {
         );
 
         if request.experimental_enabled {
-            if let Some(ref test) = request.experimental.test {
+            if let Some(ref test) = request.test_feature {
                 let _ = writeln!(
                     logger,
                     "Experimental feature 'test' applied: {}",

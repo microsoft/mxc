@@ -75,9 +75,9 @@ flowchart LR
     config --> contract --> common --> request --> engine --> backend
 ```
 
-Production parsing selects an exact registered contract. The rolling wire model
-is retained for development and differential testing. See
-[Versioning](versioning.md) and
+Production parsing selects an exact registered contract. Version-specific
+adapters produce `CommonRequestIR`, and shared normalization constructs the
+runtime `ExecutionRequest`. See [Versioning](versioning.md) and
 [Schema code generation](schema-codegen.md).
 
 State-aware requests follow the same parsing path and produce a typed lifecycle

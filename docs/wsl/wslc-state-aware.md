@@ -55,9 +55,9 @@ Exact adapters construct `wxc_common::models::WslcProvisionConfig` directly from
 `wslc.provision`. Engine-side checked binding preserves an absent
 config, a present empty config, and supplied `image`/`imageTarPath` values
 without reparsing JSON. An omitted image remains `None` until the backend
-chooses its default. The separate rolling `wire::WslcProvisionPhase` survives
-only as schema/type-oracle input and test characterization, not the backend's
-provision associated type.
+chooses its default. The exact contract type is converted once by its adapter;
+the backend's provision associated type is the runtime-owned model, not a wire
+deserialization DTO.
 
 ## Sandbox IDs
 

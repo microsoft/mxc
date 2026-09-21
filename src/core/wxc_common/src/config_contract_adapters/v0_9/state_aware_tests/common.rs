@@ -1,29 +1,36 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::config_contract_adapters::v0_9::{adapt_request, AdaptedWireRequest};
+use crate::config_contract_adapters::v0_9::{adapt_request, AdaptedConfigRequest};
+use crate::state_aware_input::StateAwareInput;
 use crate::state_aware_operation::StateAwareOperation;
-use crate::state_aware_wire::StateAwareInput;
 use crate::wire;
 use mxc_config_contract::published::v0_9_0_alpha as contract;
 
-pub(super) fn adapt(source: &str) -> (wire::MxcConfig, StateAwareOperation) {
-    let AdaptedWireRequest::StateAware(input) =
+pub(super) fn adapt(
+    source: &str,
+) -> (
+    crate::common_request_ir::CommonRequestIR,
+    StateAwareOperation,
+) {
+    let AdaptedConfigRequest::StateAware(input) =
         adapt_request(contract::parse_request(source).unwrap()).unwrap()
     else {
         panic!("expected state-aware request");
     };
     input.into_parts()
 }
-pub(super) fn assert_clean_common(common: &wire::MxcConfig) {
+pub(super) fn assert_clean_common(common: &crate::common_request_ir::CommonRequestIR) {
     assert!(common.phase.is_none());
     assert!(common.sandbox_id.is_none());
     assert!(common.containment.is_none());
-    assert!(common.experimental.is_none());
+    assert!(common.test_feature.is_none());
+    assert!(common.windows_sandbox.is_none());
     assert!(common.container_id.is_none());
     assert!(common.lifecycle.is_none());
     assert!(common.process_container.is_none());
     assert!(common.lxc.is_none());
+    assert!(common.wslc.is_none());
     assert!(common.seatbelt.is_none());
     assert!(common.fallback.is_none());
     assert!(common.ui.is_none());
@@ -32,18 +39,38 @@ pub(super) fn assert_clean_common(common: &wire::MxcConfig) {
 #[test]
 fn controlled_input_rejects_every_routing_and_one_shot_field() {
     for field in [
-        r#""phase":"start""#,
-        r#""sandboxId":"""#,
-        r#""containment":"wslc""#,
-        r#""experimental":{}"#,
-        r#""containerId":"container""#,
-        r#""fallback":{}"#,
-        r#""seatbelt":{}"#,
-        r#""processContainer":{}"#,
-        r#""lxc":{}"#,
-        r#""lifecycle":{}"#,
+        "phase",
+        "sandboxId",
+        "containment",
+        "test",
+        "windowsSandbox",
+        "containerId",
+        "fallback",
+        "seatbelt",
+        "processContainer",
+        "lxc",
+        "wslc",
+        "lifecycle",
     ] {
-        let common = serde_json::from_str(&format!("{{{field}}}")).unwrap();
+        let (mut common, _) =
+            adapt(r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"iso:example"}"#);
+        match field {
+            "phase" => common.phase = Some(wire::Phase::Start),
+            "sandboxId" => common.sandbox_id = Some(String::new()),
+            "containment" => common.containment = Some(wire::Containment::Wslc),
+            "test" => common.test_feature = Some(serde_json::from_str("{}").unwrap()),
+            "windowsSandbox" => common.windows_sandbox = Some(serde_json::from_str("{}").unwrap()),
+            "containerId" => common.container_id = Some("container".to_string()),
+            "fallback" => common.fallback = Some(serde_json::from_str("{}").unwrap()),
+            "seatbelt" => common.seatbelt = Some(serde_json::from_str("{}").unwrap()),
+            "processContainer" => {
+                common.process_container = Some(serde_json::from_str("{}").unwrap())
+            }
+            "lxc" => common.lxc = Some(serde_json::from_str("{}").unwrap()),
+            "wslc" => common.wslc = Some(serde_json::from_str("{}").unwrap()),
+            "lifecycle" => common.lifecycle = Some(serde_json::from_str("{}").unwrap()),
+            _ => unreachable!(),
+        }
         assert!(
             StateAwareInput::new(
                 common,
@@ -82,7 +109,10 @@ pub(super) fn assert_no_config_phase(phase: &str) {
             assert!(common.process.is_none());
             assert!(common.filesystem.is_none());
             assert!(common.network.is_none());
-            assert_eq!(common.version.as_deref(), Some("0.9.0-alpha"));
+            assert_eq!(
+                common.source_contract,
+                mxc_config_contract::ContractVersion::V0_9_0Alpha
+            );
             if fields.contains("$schema") {
                 assert_eq!(common.schema.as_deref(), Some("https://example.com/schema"));
                 assert_eq!(common.comment, Some(serde_json::json!("comment")));

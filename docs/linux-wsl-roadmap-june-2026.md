@@ -215,7 +215,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 | # | Item | Description | Effort |
 |---|---|---|---|
 | 28 | **Resource limits (cgroups v2)** | No CPU / memory / PID / IO governance. Same gap as LXC. *(see [Ext-Dep E7](#external-dependencies))* | L |
-| 29 | **Promote bubblewrap from `experimental` → stable** | Move config under the stable surface per `docs/versioning.md:91-93,182-203`. | L |
+| 29 | **Stable backend surface** | Addressed — Bubblewrap is published in v0.8. | — |
 | 30 | **State-aware lifecycle** | Implement `StatefulSandboxBackend` for bwrap. | L |
 | 31 | **Update plan doc** | `docs/bwrap-support/bubblewrap-backend-plan.md:42-60,295-324` still describes core implementation as "planned" even though it's shipped. | M |
 | 32 | **Structured per-host network decision trace** | Surface why each connection attempt was allowed/denied. | M |
@@ -306,13 +306,11 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 >
 > ```json
 > {
->   "experimental": {
->     "wslc": {
->       "image": "python:3.12",
->       "portMappings": [
->         { "windowsPort": 3000, "containerPort": 3000, "protocol": "tcp" }
->       ]
->     }
+>   "wslc": {
+>     "image": "python:3.12",
+>     "portMappings": [
+>       { "windowsPort": 3000, "containerPort": 3000, "protocol": "tcp" }
+>     ]
 >   }
 > }
 > ```
@@ -552,8 +550,6 @@ Item **LXC Network #24** (nftables backend) is gated on a real user signal — s
 ## Notes
 
 - **Issue tracking**: [open issues](https://github.com/microsoft/mxc/issues?q=is%3Aissue+is%3Aopen). None of the above are filed yet.
-- **Promotion status**: WSLC was experimental when this roadmap was written and
-  subsequently graduated into published schema `0.9.0-alpha`. Bubblewrap was
-  already published in v0.8 and does not require runtime experimental
-  authorization.
+- **Published backends**: WSLC is published in schema `0.9.0-alpha`.
+  Bubblewrap is published in v0.8.
 - **Labels**: re-use `Container-WSLC` and `Area-Executor-LXC`; propose adding `Container-Bubblewrap` (Bwrap #35).

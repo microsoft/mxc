@@ -5,6 +5,7 @@
 // and every backend crate).
 pub mod audit;
 pub mod cmdline;
+mod common_request_ir;
 mod config_deserialize;
 pub mod config_parser;
 pub mod encoding;
@@ -23,9 +24,7 @@ pub mod models;
 pub mod mxc_error;
 mod network_parser;
 pub mod policy_identity;
-pub use network_parser::directional_network_support;
 pub use network_parser::host_is_canonical_loopback;
-pub use network_parser::supports_directional_network;
 pub mod proxy_env;
 pub mod sandbox_process;
 pub mod script_runner;
@@ -33,18 +32,17 @@ pub(crate) mod splice;
 pub mod state_aware_backend;
 pub mod state_aware_binding;
 pub mod state_aware_dispatch;
+pub(crate) mod state_aware_input;
 pub mod state_aware_operation;
 pub mod state_aware_request;
-pub(crate) mod state_aware_wire;
 pub mod telemetry;
 pub mod ui_policy;
 pub mod validator;
 
-// Dedicated well-typed wire model. It is the parser's deserialization target;
-// the JSON Schema is generated from it under the `schema-gen` feature.
+// Reusable DTOs shared by exact-contract adapters and typed SDK builders.
 pub mod wire;
 
-// Adapters that map between specific JSON contracts and the 'wire' model.
+// Adapters that map specific JSON contracts into the internal config input.
 pub(crate) mod config_contract_adapters;
 
 // Thin Windows-only helpers that are not backend-specific. Backend

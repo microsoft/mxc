@@ -67,9 +67,7 @@ fn windows_sandbox_maps_expected_wire_fields() {
         Some(super::wire::Containment::WindowsSandbox)
     ));
 
-    let experimental = wire.experimental.expect("experimental should be populated");
-
-    let windows_sandbox = experimental
+    let windows_sandbox = wire
         .windows_sandbox
         .expect("windows_sandbox should be populated");
 
@@ -80,10 +78,8 @@ fn windows_sandbox_maps_expected_wire_fields() {
         Some("custom-sandbox-pipe")
     );
 
-    assert!(experimental.test.is_none());
-    assert!(experimental.wslc.is_none());
-    assert!(experimental.isolation_session.is_none());
-    assert!(experimental.seatbelt.is_none());
+    assert!(wire.test_feature.is_none());
+    assert!(wire.wslc.is_none());
     assert!(wire.telemetry.is_none());
 }
 
@@ -91,18 +87,14 @@ fn windows_sandbox_maps_expected_wire_fields() {
 fn test_feature_and_telemetry_map_expected_wire_fields() {
     let wire = adapt(TEST_FEATURE_AND_TELEMETRY_REQUEST_JSON);
 
-    let experimental = wire.experimental.expect("experimental should be populated");
-
-    let test = experimental.test.expect("test should be populated");
+    let test = wire.test_feature.expect("test should be populated");
     assert_eq!(test.message.as_deref(), Some("test message"));
 
     let telemetry = wire.telemetry.expect("telemetry should be populated");
     assert_eq!(telemetry.enabled, Some(false));
 
-    assert!(experimental.windows_sandbox.is_none());
-    assert!(experimental.wslc.is_none());
-    assert!(experimental.isolation_session.is_none());
-    assert!(experimental.seatbelt.is_none());
+    assert!(wire.windows_sandbox.is_none());
+    assert!(wire.wslc.is_none());
 }
 
 #[test]
@@ -114,8 +106,9 @@ fn wslc_maps_expected_wire_fields() {
         Some(super::wire::Containment::Wslc)
     ));
 
-    let experimental = wire.experimental.expect("experimental should be populated");
-    let wslc = experimental.wslc.expect("wslc should be populated");
+    assert!(wire.test_feature.is_none());
+    assert!(wire.windows_sandbox.is_none());
+    let wslc = wire.wslc.expect("wslc should be populated");
 
     assert_eq!(wslc.target_os.as_deref(), Some("linux"));
     assert_eq!(wslc.image.as_deref(), Some("alpine:latest"));
@@ -145,10 +138,6 @@ fn wslc_maps_expected_wire_fields() {
         Some(super::wire::TransportProtocol::Tcp)
     ));
 
-    assert!(experimental.test.is_none());
-    assert!(experimental.windows_sandbox.is_none());
-    assert!(experimental.isolation_session.is_none());
-    assert!(experimental.seatbelt.is_none());
     assert!(wire.telemetry.is_none());
 }
 

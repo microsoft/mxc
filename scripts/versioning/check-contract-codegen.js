@@ -291,7 +291,48 @@ function collectDispatchRoots(value, references = new Set()) {
 }
 
 function contractsWithTypeScriptOracles(registry) {
-  return registry.filter((contract) => contract.typescriptPath);
+  const byVersion = new Map(
+    registry.map((contract) => [contract.version, contract])
+  );
+  for (const version of expectedRootsByVersion.keys()) {
+    const contract = byVersion.get(version);
+    if (!contract) {
+      fail(`renderable exact contract ${version} is absent from the registry`);
+    }
+    if (
+      typeof contract.schemaPath !== "string" ||
+      contract.schemaPath.length === 0
+    ) {
+      fail(`renderable exact contract ${version} has no schema path`);
+    }
+    if (
+      typeof contract.typescriptPath !== "string" ||
+      contract.typescriptPath.length === 0
+    ) {
+      fail(`renderable exact contract ${version} has no TypeScript oracle path`);
+    }
+  }
+
+  return registry
+    .filter(
+      (contract) =>
+        typeof contract.typescriptPath === "string" &&
+        contract.typescriptPath.length > 0
+    )
+    .map((contract) => {
+      if (!expectedRootsByVersion.has(contract.version)) {
+        fail(
+          `renderable exact contract ${contract.version} has no expected request-root set`
+        );
+      }
+      if (
+        typeof contract.schemaPath !== "string" ||
+        contract.schemaPath.length === 0
+      ) {
+        fail(`renderable exact contract ${contract.version} has no schema path`);
+      }
+      return contract;
+    });
 }
 
 function expectedRequestRoots(version) {
@@ -523,6 +564,7 @@ function main() {
 module.exports = {
   assertDirectionalNetworkOnly,
   contractsWithTypeScriptOracles,
+  expectedRequestRoots,
   formatFailure,
   stableSchemaVersion,
   validateDispatchRoots,

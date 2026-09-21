@@ -163,8 +163,7 @@ Once setup is done, the day-to-day flow is two distinct commands:
 .\scripts\setup-wslc.ps1 -Image <image>
 
 # (any number of times) execute against the cached image
-.\src\target\x86_64-pc-windows-msvc\release\wxc-exec.exe `
-    --experimental my-config.json
+.\src\target\x86_64-pc-windows-msvc\release\wxc-exec.exe my-config.json
 ```
 
 This separation keeps `wxc-exec.exe` hermetic and fast at run time —
@@ -208,8 +207,7 @@ child.on('close', (code) => console.log('Exit code:', code));
 
 The Rust SDK (`mxc-sdk`) runs WSLC **in-process** — it does not spawn
 `wxc-exec.exe`. Build the crate with its `wslc` feature, select the backend with
-`build_request_with_containment`, and opt into experimental features on the
-request (the library-side equivalent of `--experimental`):
+`build_request_with_containment`, and run the request directly:
 
 ```toml
 # Cargo.toml
