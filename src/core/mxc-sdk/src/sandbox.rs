@@ -10,7 +10,7 @@ use std::io::{Read, Write};
 pub use wxc_common::models::{
     CaptureDenialsErrorOutput, CaptureDenialsOutput, SandboxOutputMetadata,
 };
-use wxc_common::sandbox_process::{SandboxProcess, StreamCloser as InnerCloser};
+use wxc_common::sandbox_process::{NativeStdio, SandboxProcess, StreamCloser as InnerCloser};
 
 /// The outcome of waiting on a [`Sandbox`] (see [`Sandbox::wait`]).
 ///
@@ -71,11 +71,26 @@ pub struct Output {
 /// the caller does not `take_*` is drained and discarded by [`wait`](Self::wait).
 pub struct Sandbox {
     inner: Box<dyn SandboxProcess>,
+    stdio_access: StdioAccess,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum StdioAccess {
+    /// No stdio ownership has been transferred from the sandbox.
+    #[default]
+    Untouched,
+    /// One or more Rust streams were taken; remaining streams may be taken individually.
+    Individual,
+    /// All available native endpoints were transferred; individual access is disabled.
+    Native,
 }
 
 impl Sandbox {
     pub(crate) fn new(inner: Box<dyn SandboxProcess>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            stdio_access: StdioAccess::Untouched,
+        }
     }
 
     /// Policy and operational warnings from this sandbox, such as security
@@ -92,17 +107,56 @@ impl Sandbox {
 
     /// Take the child's stdin pipe. Returns `None` after the first call.
     pub fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
-        self.inner.take_stdin()
+        if self.stdio_access == StdioAccess::Native {
+            return None;
+        }
+        let stream = self.inner.take_stdin();
+        if stream.is_some() {
+            self.stdio_access = StdioAccess::Individual;
+        }
+        stream
     }
 
     /// Take the child's stdout pipe. Returns `None` after the first call.
     pub fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
-        self.inner.take_stdout()
+        if self.stdio_access == StdioAccess::Native {
+            return None;
+        }
+        let stream = self.inner.take_stdout();
+        if stream.is_some() {
+            self.stdio_access = StdioAccess::Individual;
+        }
+        stream
     }
 
     /// Take the child's stderr pipe. Returns `None` after the first call.
     pub fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
-        self.inner.take_stderr()
+        if self.stdio_access == StdioAccess::Native {
+            return None;
+        }
+        let stream = self.inner.take_stderr();
+        if stream.is_some() {
+            self.stdio_access = StdioAccess::Individual;
+        }
+        stream
+    }
+
+    #[doc(hidden)]
+    pub fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+        match self.stdio_access {
+            StdioAccess::Individual => {
+                return Err(std::io::Error::other(
+                    "native stdio must be taken before taking individual streams",
+                ));
+            }
+            StdioAccess::Native => return Ok(None),
+            StdioAccess::Untouched => {}
+        }
+        let stdio = self.inner.take_native_stdio()?;
+        if stdio.is_some() {
+            self.stdio_access = StdioAccess::Native;
+        }
+        Ok(stdio)
     }
 
     /// A [`StreamCloser`] that unblocks a parked blocking read on stdout without
@@ -129,6 +183,13 @@ impl Sandbox {
     /// Kill the child.
     pub fn kill(&mut self) -> std::io::Result<()> {
         self.inner.kill()
+    }
+
+    /// Request timeout termination and permanently classify a later successful
+    /// terminal observation as timed out. Call only after the deadline elapsed.
+    #[doc(hidden)]
+    pub fn kill_for_timeout(&mut self) -> std::io::Result<()> {
+        self.inner.kill_for_timeout()
     }
 
     /// Wait for the child to exit, draining and discarding any untaken
@@ -211,6 +272,51 @@ mod tests {
         warnings: Vec<String>,
         wait_warning: Option<String>,
         output_metadata: Option<SandboxOutputMetadata>,
+        stdout: Option<Box<dyn Read + Send>>,
+    }
+
+    struct NativeOnlyFake;
+
+    impl SandboxProcess for NativeOnlyFake {
+        fn warnings(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
+            panic!("individual stdin must not be delegated after native transfer")
+        }
+
+        fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
+            panic!("individual stdout must not be delegated after native transfer")
+        }
+
+        fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
+            panic!("individual stderr must not be delegated after native transfer")
+        }
+
+        fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+            Ok(Some(NativeStdio {
+                stdin: None,
+                stdout: None,
+                stderr: None,
+            }))
+        }
+
+        fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+            Ok(Some(0))
+        }
+
+        fn id(&self) -> u32 {
+            1
+        }
+
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn wait(&mut self) -> std::io::Result<i32> {
+            Ok(0)
+        }
     }
 
     impl SandboxProcess for FakeProcess {
@@ -227,11 +333,15 @@ mod tests {
         }
 
         fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
-            None
+            self.stdout.take()
         }
 
         fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
             None
+        }
+
+        fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+            panic!("native stdio must not be delegated after taking a stream")
         }
 
         fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
@@ -272,6 +382,7 @@ mod tests {
                 }),
                 capture_denials_error: None,
             }),
+            stdout: None,
         }));
 
         assert_eq!(sandbox.warnings(), [warning.as_str()]);
@@ -287,5 +398,42 @@ mod tests {
                 .total_denials,
             2
         );
+    }
+
+    #[test]
+    fn native_stdio_is_rejected_after_an_individual_stream_is_taken() {
+        let mut sandbox = Sandbox::new(Box::new(FakeProcess {
+            warnings: Vec::new(),
+            wait_warning: None,
+            output_metadata: None,
+            stdout: Some(Box::new(std::io::Cursor::new(Vec::<u8>::new()))),
+        }));
+
+        assert!(sandbox.take_stdout().is_some());
+        let error = sandbox
+            .take_native_stdio()
+            .expect_err("mixed stream ownership must be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "native stdio must be taken before taking individual streams"
+        );
+    }
+
+    #[test]
+    fn individual_streams_are_not_delegated_after_native_stdio_is_taken() {
+        let mut sandbox = Sandbox::new(Box::new(NativeOnlyFake));
+
+        assert!(sandbox
+            .take_native_stdio()
+            .expect("native stdio transfer succeeds")
+            .is_some());
+        assert!(sandbox.take_stdin().is_none());
+        assert!(sandbox.take_stdout().is_none());
+        assert!(sandbox.take_stderr().is_none());
+        assert!(sandbox
+            .take_native_stdio()
+            .expect("repeated native transfer is empty")
+            .is_none());
     }
 }

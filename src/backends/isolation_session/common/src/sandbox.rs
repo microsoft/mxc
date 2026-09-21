@@ -301,6 +301,34 @@ struct OneShotSandboxProcess {
     inner: wxc_common::exec_stream::ExecSandboxProcess,
 }
 
+impl OneShotSandboxProcess {
+    fn terminate_and_reclaim(&mut self, timed_out: bool) -> std::io::Result<()> {
+        let termination = if timed_out {
+            self.inner.kill_for_timeout()
+        } else {
+            self.inner.kill()
+        };
+        if let Err(error) = termination {
+            self.session
+                .warnings
+                .push(format!("terminating the workload was refused: {error}"));
+        }
+
+        let outcome = self.session.reclaim("kill");
+        if outcome.session_stopped == Some(true) {
+            return Ok(());
+        }
+        let mut message = "the isolation session could not be stopped, so the sandboxed process \
+                           may still be running"
+            .to_string();
+        if let Some(cause) = &self.session.stop_error {
+            message.push_str(": ");
+            message.push_str(cause);
+        }
+        Err(std::io::Error::other(message))
+    }
+}
+
 impl SandboxProcess for OneShotSandboxProcess {
     /// Teardown failures, which happen after the spawn returned and so have no
     /// other route to the caller.
@@ -310,6 +338,16 @@ impl SandboxProcess for OneShotSandboxProcess {
 
     fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
         self.inner.take_stdin()
+    }
+
+    fn stdin_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        self.inner.stdin_closer()
+    }
+
+    fn take_native_stdio(
+        &mut self,
+    ) -> std::io::Result<Option<wxc_common::sandbox_process::NativeStdio>> {
+        self.inner.take_native_stdio()
     }
 
     fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
@@ -345,23 +383,11 @@ impl SandboxProcess for OneShotSandboxProcess {
     /// stop is what makes the workload's death observable — and it is what this
     /// reports. A caller that gets `Ok` knows nothing is left running.
     fn kill(&mut self) -> std::io::Result<()> {
-        if let Err(e) = self.inner.kill() {
-            self.session
-                .warnings
-                .push(format!("terminating the workload was refused: {e}"));
-        }
-        let outcome = self.session.reclaim("kill");
-        if outcome.session_stopped == Some(true) {
-            return Ok(());
-        }
-        let mut message = "the isolation session could not be stopped, so the sandboxed process \
-                           may still be running"
-            .to_string();
-        if let Some(cause) = &self.session.stop_error {
-            message.push_str(": ");
-            message.push_str(cause);
-        }
-        Err(std::io::Error::other(message))
+        self.terminate_and_reclaim(false)
+    }
+
+    fn kill_for_timeout(&mut self) -> std::io::Result<()> {
+        self.terminate_and_reclaim(true)
     }
 
     fn wait(&mut self) -> std::io::Result<i32> {
