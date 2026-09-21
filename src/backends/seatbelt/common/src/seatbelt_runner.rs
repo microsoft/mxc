@@ -23,6 +23,7 @@
 use std::ffi::{CStr, CString};
 use std::fmt::Write as FmtWrite;
 use std::fs;
+use std::os::fd::AsFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -32,9 +33,9 @@ use wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCance
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, LaunchMethod, ProxyAddress, ScriptResponse};
 use wxc_common::sandbox_process::{
-    boxed_closer, cancel_and_join_discard, group_kill, spawn_discard, take_boxed_read,
-    take_boxed_write, wait_with_timeout, SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
-    WaitError,
+    boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, group_kill,
+    spawn_discard, take_boxed_read, take_boxed_write, wait_with_timeout, NativeStdio,
+    SandboxBackend, SandboxProcess, StdioMode, StreamCloser, WaitError,
 };
 use wxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
 use wxc_common::validator::{
@@ -495,6 +496,22 @@ impl SeatbeltSandboxProcess {
 }
 
 impl SandboxProcess for SeatbeltSandboxProcess {
+    fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+        let stdio = duplicate_and_take_native_stdio(
+            &mut self.stdin,
+            &mut self.stdout,
+            &mut self.stderr,
+            |stream| stream.as_fd().try_clone_to_owned(),
+            InterruptibleReader::try_clone_owned_fd,
+            InterruptibleReader::try_clone_owned_fd,
+        )?;
+        if stdio.is_some() {
+            self.stdout_canceller.take();
+            self.stderr_canceller.take();
+        }
+        Ok(stdio)
+    }
+
     fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
         take_boxed_write(&mut self.stdin)
     }
