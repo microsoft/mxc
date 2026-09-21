@@ -4,8 +4,8 @@
 # Asserts reachability rather than a log line: a chain can install cleanly,
 # name the right chain, and still filter nothing.
 #
-# The tcp/443 cases probe a CI-controlled peer this script stands up in its own
-# routed namespace.  The udp/53 cases still query a public resolver.
+# The tcp/443 and ICMP cases probe a CI-controlled peer this script stands up in
+# its own routed namespace.  The udp/53 cases still query a public resolver.
 #
 # A directional posture carries no port 53 exemption, unlike the legacy chain,
 # which is what the two DNS cases pin.
@@ -42,6 +42,15 @@ DNS_ALLOWED_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_dns_allowed.js
 DENY_RULE_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_deny_rule.json"
 EXCEPT_EXCLUDED_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_except_excluded.json"
 EXCEPT_SIBLING_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_except_sibling.json"
+ICMP_ALLOWED_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_icmp_allowed.json"
+ICMP_NO_TCP_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_icmp_no_tcp.json"
+ICMP_DENIED_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_icmp_denied.json"
+PORT_RANGE_INSIDE_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_port_range_inside.json"
+PORT_RANGE_OUTSIDE_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_port_range_outside.json"
+ANY_TCP_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_any_tcp.json"
+ANY_ICMP_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_any_icmp.json"
+ANY_PORT_MATCH_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_any_port_match.json"
+ANY_WRONG_PORT_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_any_wrong_port.json"
 
 fail() {
     echo "FAIL: $1"
@@ -221,13 +230,34 @@ finally:
     s.close()
 PY
 
-# Drift guard: the tcp/443 fixtures must target this peer, or the run would
-# probe a stale address and prove nothing.
-for cfg in "$DENY_CONFIG" "$ALLOW_CONFIG" "$WRONG_PORT_CONFIG"; do
+# The ICMP cases below read an unanswered echo as a firewall verdict, so a peer
+# that ignores echo has to fail here as harness breakage instead.
+if command -v ping >/dev/null 2>&1; then
+    ping -c 1 -W 5 "$PEER_IP" >/dev/null 2>&1 \
+        || fail "the egress peer does not answer ICMP echo at $PEER_IP."
+fi
+
+# Drift guard: the peer fixtures must target this peer, or the run would probe a
+# stale address and prove nothing.
+PEER_TARGETING_CONFIGS=(
+    "$DENY_CONFIG" "$ALLOW_CONFIG" "$WRONG_PORT_CONFIG"
+    "$ICMP_ALLOWED_CONFIG" "$ICMP_NO_TCP_CONFIG" "$ICMP_DENIED_CONFIG"
+    "$PORT_RANGE_INSIDE_CONFIG" "$PORT_RANGE_OUTSIDE_CONFIG"
+    "$ANY_TCP_CONFIG" "$ANY_ICMP_CONFIG"
+    "$ANY_PORT_MATCH_CONFIG" "$ANY_WRONG_PORT_CONFIG"
+)
+PEER_ALLOWING_CONFIGS=(
+    "$ALLOW_CONFIG" "$WRONG_PORT_CONFIG"
+    "$ICMP_ALLOWED_CONFIG" "$ICMP_NO_TCP_CONFIG" "$ICMP_DENIED_CONFIG"
+    "$PORT_RANGE_INSIDE_CONFIG" "$PORT_RANGE_OUTSIDE_CONFIG"
+    "$ANY_TCP_CONFIG" "$ANY_ICMP_CONFIG"
+    "$ANY_PORT_MATCH_CONFIG" "$ANY_WRONG_PORT_CONFIG"
+)
+for cfg in "${PEER_TARGETING_CONFIGS[@]}"; do
     grep -Fq "$PEER_IP" "$cfg" \
         || fail "fixture ${cfg##*/} no longer targets the peer $PEER_IP; script and fixture drifted."
 done
-for cfg in "$ALLOW_CONFIG" "$WRONG_PORT_CONFIG"; do
+for cfg in "${PEER_ALLOWING_CONFIGS[@]}"; do
     grep -Fq "$PEER_CIDR" "$cfg" \
         || fail "fixture ${cfg##*/} no longer allows $PEER_CIDR; script and fixture drifted."
 done
@@ -261,5 +291,32 @@ assert_blocked "an address named in except was reachable through the rule that e
 run_case "except case: same policy, probe an address the exclusion does not cover" "$EXCEPT_SIBLING_CONFIG"
 assert_allowed "an address inside the allowed range but outside except was unreachable. The exclusion is over-blocking, so the case above proves only that the whole rule failed to install."
 
-echo "PASS: schema 0.8 egress rules filtered by destination, by port, by resolver, by deny rule, and by exclusion."
+run_case "icmp case: egress.default deny, peer allowed on protocol icmp" "$ICMP_ALLOWED_CONFIG"
+assert_allowed "an ICMP echo to a peer allowed on protocol icmp was unreachable. Either the icmp selector never reached the chain, or the container cannot open a raw socket at all, which would make the icmp-denied case below pass without filtering anything."
+
+run_case "icmp case: same icmp-only policy, probe tcp/443" "$ICMP_NO_TCP_CONFIG"
+assert_blocked "tcp/443 succeeded while the policy allowed only icmp. The protocol selector is being dropped, so an icmp rule opens every transport to its destination."
+
+run_case "icmp case: egress.default deny, peer allowed on tcp/443 only" "$ICMP_DENIED_CONFIG"
+assert_blocked "an ICMP echo succeeded while the policy allowed only tcp/443. ICMP is not carrying the port selectors, so a policy written for one transport leaks another."
+
+run_case "port-range case: peer allowed on tcp/440-445, probe tcp/443" "$PORT_RANGE_INSIDE_CONFIG"
+assert_allowed "a port inside the allowed range 440-445 was unreachable. endPort is not reaching the chain, so a range selector blocks the traffic it was written to permit."
+
+run_case "port-range case: peer allowed on tcp/444-446, probe tcp/443" "$PORT_RANGE_OUTSIDE_CONFIG"
+assert_blocked "tcp/443 succeeded while the allowed range started at 444. The range bounds are not enforced, so the case above proves only that some rule installed."
+
+run_case "protocol-any case: peer allowed on protocol any, probe tcp/443" "$ANY_TCP_CONFIG"
+assert_allowed "tcp/443 was unreachable under protocol any, so the any selector is not reaching the chain."
+
+run_case "protocol-any case: same policy, probe icmp" "$ANY_ICMP_CONFIG"
+assert_allowed "an ICMP echo was unreachable under protocol any. The any selector is being lowered to the transports alone, so it is narrower than written."
+
+run_case "protocol-any case: peer allowed on any port 443, probe tcp/443" "$ANY_PORT_MATCH_CONFIG"
+assert_allowed "tcp/443 was unreachable while protocol any allowed port 443, so the tcp/udp fan-out is not reaching the chain."
+
+run_case "protocol-any case: peer allowed on any port 444, probe tcp/443" "$ANY_WRONG_PORT_CONFIG"
+assert_blocked "tcp/443 succeeded while protocol any allowed only port 444. The fan-out drops the port selector, so any carrying a port opens every port."
+
+echo "PASS: schema 0.8 egress rules filtered by destination, by port, by port range, by protocol, by resolver, by deny rule, and by exclusion."
 echo "LXC schema 0.8 egress enforcement test complete."
