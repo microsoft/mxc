@@ -90,7 +90,11 @@ types. The retired `microvm` identifier is absent from both development artifact
 Published stable schemas remain unchanged. An `experimental.nvx.provision` section is necessary
 only if images remain caller-configurable.
 
-Example state-aware provision request:
+Future state-aware provision design:
+
+> **Not runnable in Phase 1.** The exact development state-aware registry does
+> not yet include NVX, so the current parser rejects this request before
+> dispatch. This example records the intended Phase 2 request shape only.
 
 ```json
 {

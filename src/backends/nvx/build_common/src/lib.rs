@@ -49,7 +49,9 @@ pub fn validate_nvx_target(
     target_arch: &str,
     target_env: &str,
 ) -> Result<(), String> {
-    if target_supports_nvx(target_os, target_arch, target_env) {
+    if target == SUPPORTED_NVX_TARGET_TRIPLE
+        && target_supports_nvx(target_os, target_arch, target_env)
+    {
         Ok(())
     } else {
         Err(unsupported_target_message(target))
@@ -338,6 +340,16 @@ mod tests {
     }
 
     #[test]
+    fn validate_nvx_target_rejects_custom_target_with_matching_cfg_values() {
+        let target = "custom-windows-x64-msvc";
+        let error = validate_nvx_target(target, "windows", "x86_64", "msvc")
+            .expect_err("only the exact supported target triple may stage NVX");
+
+        assert!(error.contains(SUPPORTED_NVX_TARGET_TRIPLE));
+        assert!(error.contains(target));
+    }
+
+    #[test]
     fn staging_decision_uses_target_not_build_host() {
         assert_eq!(
             should_stage_nvx("x86_64-pc-windows-msvc", "windows", "x86_64", "msvc"),
@@ -351,6 +363,7 @@ mod tests {
         for (target, arch, env) in [
             ("aarch64-pc-windows-msvc", "aarch64", "msvc"),
             ("x86_64-pc-windows-gnu", "x86_64", "gnu"),
+            ("custom-windows-x64-msvc", "x86_64", "msvc"),
         ] {
             let error = should_stage_nvx(target, "windows", arch, env)
                 .expect_err("unsupported Windows targets must fail closed");

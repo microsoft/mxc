@@ -540,6 +540,49 @@ describe('buildSandboxPayload', () => {
       }
     });
 
+    it('should build an NVX payload for the native backend', () => {
+      mockWindows();
+      try {
+        const policy: SandboxPolicy = {
+          version: '0.9.0-alpha',
+          filesystem: {
+            readonlyPaths: ['C:\\workspace\\source'],
+            readwritePaths: ['C:\\workspace\\output'],
+          },
+          network: {
+            egress: { default: 'deny' },
+            ingress: { default: 'deny', hostLoopback: 'deny' },
+          },
+        };
+
+        const payload = buildSandboxPayload(
+          'echo hello',
+          policy,
+          '/',
+          'nvx-test',
+          'nvx',
+        );
+
+        assert.strictEqual(payload.containment, 'nvx');
+        assert.strictEqual(payload.containerId, 'nvx-test');
+        assert.deepStrictEqual(payload.process, {
+          commandLine: 'echo hello',
+          timeout: 0,
+          cwd: '/',
+        });
+        assert.deepStrictEqual(payload.filesystem, {
+          readonlyPaths: ['C:\\workspace\\source'],
+          readwritePaths: ['C:\\workspace\\output'],
+          deniedPaths: [],
+        });
+        assert.deepStrictEqual(payload.network, policy.network);
+        assert.strictEqual(payload.processContainer, undefined);
+        assert.strictEqual(payload.lxc, undefined);
+      } finally {
+        restore();
+      }
+    });
+
   });
 
   describe('WSLC', () => {

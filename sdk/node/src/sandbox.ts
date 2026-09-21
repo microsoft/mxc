@@ -485,6 +485,12 @@ export function createConfigFromPolicy(
     }
 
     // Backend-specific config based on containment type
+    if (containment === 'nvx') {
+        diagLog(`createConfigFromPolicy: containment=nvx, id=${containerId}`);
+        config.containment = 'nvx';
+        return config;
+    }
+
     if (containment === 'wslc') {
         return buildWslcContainerConfig(config, policy, containerId);
     }
