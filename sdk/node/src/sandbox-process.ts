@@ -2,10 +2,7 @@
 // Licensed under the MIT License.
 
 import type { Readable, Writable } from 'node:stream';
-
-function destroyStream(stream: Readable | Writable | null): void {
-  if (stream !== null && !stream.destroyed) stream.destroy();
-}
+import { destroyNativeStream } from './bindings/native-stdio.js';
 
 export interface SandboxWaitResult {
   exitCode: number;
@@ -220,9 +217,9 @@ export class MxcSandboxProcess {
       }
     }
     this.stopPolling();
-    destroyStream(this.input);
-    destroyStream(this.output);
-    destroyStream(this.errorOutput);
+    destroyNativeStream(this.input);
+    destroyNativeStream(this.output);
+    destroyNativeStream(this.errorOutput);
     void this.driver.free().catch((error) => {
       try {
         this.reportBackgroundError(asError(error));
