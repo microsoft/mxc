@@ -47,12 +47,14 @@ ICMP_NO_TCP_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_icmp_no_tcp.js
 ICMP_DENIED_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_icmp_denied.json"
 PORT_RANGE_INSIDE_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_port_range_inside.json"
 PORT_RANGE_OUTSIDE_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_port_range_outside.json"
+PORT_RANGE_ABOVE_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_port_range_above.json"
 ANY_TCP_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_any_tcp.json"
 ANY_ICMP_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_any_icmp.json"
 ANY_PORT_MATCH_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_any_port_match.json"
 ANY_WRONG_PORT_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_any_wrong_port.json"
 ANY_UDP_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_any_udp.json"
 ANY_UDP_WRONG_PORT_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_any_udp_wrong_port.json"
+ANY_UDP_UNSCOPED_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_any_udp_unscoped.json"
 
 fail() {
     echo "FAIL: $1"
@@ -282,18 +284,18 @@ fi
 PEER_TARGETING_CONFIGS=(
     "$DENY_CONFIG" "$ALLOW_CONFIG" "$WRONG_PORT_CONFIG"
     "$ICMP_ALLOWED_CONFIG" "$ICMP_NO_TCP_CONFIG" "$ICMP_DENIED_CONFIG"
-    "$PORT_RANGE_INSIDE_CONFIG" "$PORT_RANGE_OUTSIDE_CONFIG"
+    "$PORT_RANGE_INSIDE_CONFIG" "$PORT_RANGE_OUTSIDE_CONFIG" "$PORT_RANGE_ABOVE_CONFIG"
     "$ANY_TCP_CONFIG" "$ANY_ICMP_CONFIG"
     "$ANY_PORT_MATCH_CONFIG" "$ANY_WRONG_PORT_CONFIG"
-    "$ANY_UDP_CONFIG" "$ANY_UDP_WRONG_PORT_CONFIG"
+    "$ANY_UDP_CONFIG" "$ANY_UDP_WRONG_PORT_CONFIG" "$ANY_UDP_UNSCOPED_CONFIG"
 )
 PEER_ALLOWING_CONFIGS=(
     "$ALLOW_CONFIG" "$WRONG_PORT_CONFIG"
     "$ICMP_ALLOWED_CONFIG" "$ICMP_NO_TCP_CONFIG" "$ICMP_DENIED_CONFIG"
-    "$PORT_RANGE_INSIDE_CONFIG" "$PORT_RANGE_OUTSIDE_CONFIG"
+    "$PORT_RANGE_INSIDE_CONFIG" "$PORT_RANGE_OUTSIDE_CONFIG" "$PORT_RANGE_ABOVE_CONFIG"
     "$ANY_TCP_CONFIG" "$ANY_ICMP_CONFIG"
     "$ANY_PORT_MATCH_CONFIG" "$ANY_WRONG_PORT_CONFIG"
-    "$ANY_UDP_CONFIG" "$ANY_UDP_WRONG_PORT_CONFIG"
+    "$ANY_UDP_CONFIG" "$ANY_UDP_WRONG_PORT_CONFIG" "$ANY_UDP_UNSCOPED_CONFIG"
 )
 for cfg in "${PEER_TARGETING_CONFIGS[@]}"; do
     grep -Fq "$PEER_IP" "$cfg" \
@@ -306,7 +308,7 @@ done
 
 # Both udp fixtures probe the echo service, so a port the listener does not hold
 # would read as the firewall blocking rather than as drift.
-for cfg in "$ANY_UDP_CONFIG" "$ANY_UDP_WRONG_PORT_CONFIG"; do
+for cfg in "$ANY_UDP_CONFIG" "$ANY_UDP_WRONG_PORT_CONFIG" "$ANY_UDP_UNSCOPED_CONFIG"; do
     grep -Fq "$PEER_UDP_PORT" "$cfg" \
         || fail "fixture ${cfg##*/} no longer probes udp/$PEER_UDP_PORT; script and fixture drifted."
 done
@@ -353,11 +355,17 @@ assert_allowed "a port inside the allowed range 440-445 was unreachable. endPort
 run_case "port-range case: peer allowed on tcp/444-446, probe tcp/443" "$PORT_RANGE_OUTSIDE_CONFIG"
 assert_blocked "tcp/443 succeeded while the allowed range started at 444. The range bounds are not enforced, so the case above proves only that some rule installed."
 
+run_case "port-range case: peer allowed on tcp/438-442, probe tcp/443" "$PORT_RANGE_ABOVE_CONFIG"
+assert_blocked "tcp/443 succeeded while the allowed range ended at 442. The range's upper bound is not reaching the chain, so a range opens every port above its start."
+
 run_case "protocol-any case: peer allowed on protocol any, probe tcp/443" "$ANY_TCP_CONFIG"
 assert_allowed "tcp/443 was unreachable under protocol any, so the any selector is not reaching the chain."
 
 run_case "protocol-any case: same policy, probe icmp" "$ANY_ICMP_CONFIG"
 assert_allowed "an ICMP echo was unreachable under protocol any. The any selector is being lowered to the transports alone, so it is narrower than written."
+
+run_case "protocol-any case: same policy, probe udp/$PEER_UDP_PORT" "$ANY_UDP_UNSCOPED_CONFIG"
+assert_allowed "udp/$PEER_UDP_PORT was unreachable under protocol any carrying no port. An unscoped any is being lowered to a protocol list that omits udp, which the port-scoped cases below would not catch."
 
 run_case "protocol-any case: peer allowed on any port 443, probe tcp/443" "$ANY_PORT_MATCH_CONFIG"
 assert_allowed "tcp/443 was unreachable while protocol any allowed port 443, so the tcp/udp fan-out is not reaching the chain."
