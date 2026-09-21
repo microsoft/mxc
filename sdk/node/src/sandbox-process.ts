@@ -28,8 +28,7 @@ export interface NativeLifecycleDriver {
   free(): Promise<void>;
 }
 
-const INITIAL_POLL_INTERVAL_MS = 10;
-const MAX_POLL_INTERVAL_MS = 100;
+const POLL_INTERVAL_MS = 100;
 type ProcessPhase = 'active' | 'settling' | 'terminal' | 'disposed';
 
 export interface LifecycleScheduler {
@@ -103,7 +102,6 @@ export class MxcSandboxProcess {
   private pollTimer: unknown;
   private readonly deadline: number | undefined;
   private settlingError: Error | undefined;
-  private pollIntervalMs = INITIAL_POLL_INTERVAL_MS;
 
   constructor(
     private readonly driver: NativeLifecycleDriver,
@@ -257,15 +255,9 @@ export class MxcSandboxProcess {
       ? undefined
       : Math.max(0, this.deadline - now);
     const delay = remaining === undefined
-      ? this.pollIntervalMs
-      : Math.min(this.pollIntervalMs, remaining);
+      ? POLL_INTERVAL_MS
+      : Math.min(POLL_INTERVAL_MS, remaining);
     this.pollTimer = this.scheduler.schedule(() => this.poll(), delay);
-    // Fast polls catch short-lived processes; bounded backoff avoids a
-    // permanent 100 Hz main-thread FFI cost for long-running workloads.
-    this.pollIntervalMs = Math.min(
-      this.pollIntervalMs * 2,
-      MAX_POLL_INTERVAL_MS,
-    );
   }
 
   private finishAfterWait(): void {

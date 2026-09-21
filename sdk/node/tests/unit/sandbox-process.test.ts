@@ -316,34 +316,29 @@ describe('native sandbox process', () => {
     );
   });
 
-  it('backs off lifecycle polling for long-running processes', () => {
+  it('polls lifecycle state at a fixed 100 ms interval', () => {
     const driver = new FakeDriver();
     const scheduler = new ManualScheduler();
     const proc = createMxcSandboxProcess(driver, undefined, scheduler);
 
-    scheduler.advance(10);
-    scheduler.advance(20);
-    scheduler.advance(40);
-    scheduler.advance(80);
+    scheduler.advance(100);
     scheduler.advance(100);
 
     assert.deepStrictEqual(
       scheduler.scheduledDelays,
-      [10, 20, 40, 80, 100, 100],
+      [100, 100, 100],
     );
     proc.dispose();
   });
 
-  it('schedules polling against the exact timeout deadline while backing off', async () => {
+  it('schedules polling against an earlier timeout deadline', async () => {
     const driver = new FakeDriver();
     const scheduler = new ManualScheduler();
     const proc = createMxcSandboxProcess(driver, 35, scheduler);
     const wait = proc.waitAsync();
 
-    scheduler.advance(10);
-    scheduler.advance(20);
-    assert.deepStrictEqual(scheduler.scheduledDelays, [10, 20, 5]);
-    scheduler.advance(5);
+    assert.deepStrictEqual(scheduler.scheduledDelays, [35]);
+    scheduler.advance(35);
 
     assert.deepStrictEqual(await wait, { exitCode: 0, timedOut: true });
     assert.strictEqual(driver.timeoutKillCount, 1);
@@ -355,7 +350,7 @@ describe('native sandbox process', () => {
     const proc = createMxcSandboxProcess(driver, 1, scheduler);
 
     const wait = proc.waitAsync();
-    scheduler.advance(10);
+    scheduler.advance(100);
     const result = await wait;
 
     assert.deepStrictEqual(result, { exitCode: 0, timedOut: true });
@@ -371,7 +366,7 @@ describe('native sandbox process', () => {
     const proc = createMxcSandboxProcess(driver, 1, scheduler);
 
     const wait = proc.waitAsync();
-    scheduler.advance(10);
+    scheduler.advance(100);
     const result = await wait;
 
     assert.deepStrictEqual(result, { exitCode: 23, timedOut: false });
@@ -392,7 +387,7 @@ describe('native sandbox process', () => {
     const proc = createMxcSandboxProcess(driver, 1, scheduler);
 
     const wait = proc.waitAsync();
-    scheduler.advance(10);
+    scheduler.advance(100);
     const result = await wait;
 
     assert.deepStrictEqual(result, { exitCode: -1, timedOut: true });
@@ -408,7 +403,7 @@ describe('native sandbox process', () => {
     const wait = proc.waitAsync();
     driver.complete(5);
 
-    scheduler.advance(10);
+    scheduler.advance(100);
     assert.strictEqual(driver.waitCount, 1);
     proc.kill();
 
@@ -425,7 +420,7 @@ describe('native sandbox process', () => {
     const wait = proc.waitAsync();
     driver.complete(5);
 
-    scheduler.advance(10);
+    scheduler.advance(100);
     assert.strictEqual(driver.waitCount, 1);
     driver.standardOutput.emit('error', new Error('stdout failed'));
 
@@ -453,7 +448,7 @@ describe('native sandbox process', () => {
     const wait = proc.waitAsync();
     driver.complete(5);
 
-    scheduler.advance(10);
+    scheduler.advance(100);
     driver.resolveWait(5, false);
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.strictEqual(driver.freeCount, 1);
