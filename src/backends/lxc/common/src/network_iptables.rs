@@ -969,18 +969,6 @@ impl NetworkIptablesManager {
     /// An `iptables` rule matches one destination block and cannot carry an
     /// exclusion, so the exclusion is subtracted from the peer instead.
     fn peer_destinations(peer: &NetworkPeer) -> Result<Vec<String>, String> {
-        let family = match peer.cidr.address {
-            IpAddr::V4(_) => IpFamily::V4,
-            IpAddr::V6(_) => IpFamily::V6,
-        };
-        let width = Self::family_width(family);
-
-        // Passing an out-of-range prefix through unchanged keeps it on the path
-        // that reports a destination resolving to no address.
-        let Some(block) = Self::to_block(&peer.cidr, width) else {
-            return Ok(vec![Self::cidr_destination(&peer.cidr)]);
-        };
-
         // Checked against each entry's own family, before the peer's family
         // selects which ones apply: dropping a malformed exclusion would widen
         // the rule it was written to narrow.
@@ -1000,13 +988,23 @@ impl NetworkIptablesManager {
             }
         }
 
-        // Blocks carry no family, so an exclusion from the other one would be
-        // compared against the peer as a meaningless integer.
+        // Passing an out-of-range prefix through unchanged keeps it on the path
+        // that reports a destination resolving to no address.
+        let Some((family, block)) = Self::resolve_block(&peer.cidr) else {
+            return Ok(vec![Self::cidr_destination(&peer.cidr)]);
+        };
+        let width = Self::family_width(family);
+
+        // Compared after the mapped rewriting, so an exclusion written in the
+        // other notation for the same addresses still narrows its peer. An
+        // exclusion in the other family cannot overlap the peer at all, so it
+        // is dropped rather than compared as a meaningless integer.
         let exclusions: Vec<DestinationBlock> = peer
             .except
             .iter()
-            .filter(|excluded| excluded.address.is_ipv4() == peer.cidr.address.is_ipv4())
-            .filter_map(|excluded| Self::to_block(excluded, width))
+            .filter_map(Self::resolve_block)
+            .filter(|(excluded_family, _)| *excluded_family == family)
+            .map(|(_, block)| block)
             .collect();
 
         let mut blocks = Vec::new();
@@ -1121,20 +1119,38 @@ impl NetworkIptablesManager {
         left.base <= Self::block_last(right, width) && right.base <= Self::block_last(left, width)
     }
 
-    /// `NetworkCidr` has public fields and validates only through `FromStr`, so
-    /// a programmatic request reaches here with a prefix the parser refuses.
-    fn to_block(cidr: &NetworkCidr, width: u8) -> Option<DestinationBlock> {
-        if cidr.prefix_length > width {
+    /// A CIDR as the family it is programmed in and the block it covers there.
+    ///
+    /// An IPv4-mapped address is programmed as IPv4, because Linux puts a
+    /// genuine IPv4 packet on the wire for one. `NetworkCidr` has public fields
+    /// and validates only through `FromStr`, so a programmatic request reaches
+    /// here with a prefix the parser refuses.
+    fn resolve_block(cidr: &NetworkCidr) -> Option<(IpFamily, DestinationBlock)> {
+        let (family, raw, prefix) = match cidr.address {
+            IpAddr::V4(ip) => (IpFamily::V4, u128::from(u32::from(ip)), cidr.prefix_length),
+            IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
+                // Below /96 the block reaches outside the mapped range, so it
+                // stays IPv6 and keeps covering what it actually names.
+                Some(v4) if cidr.prefix_length >= 96 => (
+                    IpFamily::V4,
+                    u128::from(u32::from(v4)),
+                    cidr.prefix_length - 96,
+                ),
+                _ => (IpFamily::V6, u128::from(ip), cidr.prefix_length),
+            },
+        };
+
+        let width = Self::family_width(family);
+        if prefix > width {
             return None;
         }
-        let raw = match cidr.address {
-            IpAddr::V4(ip) => u128::from(u32::from(ip)),
-            IpAddr::V6(ip) => u128::from(ip),
-        };
-        Some(DestinationBlock {
-            base: raw & !Self::host_mask(width - cidr.prefix_length),
-            prefix: cidr.prefix_length,
-        })
+        Some((
+            family,
+            DestinationBlock {
+                base: raw & !Self::host_mask(width - prefix),
+                prefix,
+            },
+        ))
     }
 
     fn block_destination(block: DestinationBlock, family: IpFamily) -> String {

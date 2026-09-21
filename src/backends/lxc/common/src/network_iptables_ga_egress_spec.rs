@@ -1153,13 +1153,107 @@ fn allow_peer_policy(peers: Vec<NetworkPeer>) -> ContainerPolicy {
 }
 
 #[test]
-fn an_ipv6_peer_whose_exclusion_splits_the_mapped_range_is_refused() {
+fn an_ipv6_peer_whose_exclusion_splits_the_mapped_range_opens_no_ipv4() {
     let policy = allow_peer_policy(vec![peer("::/0", &["::ffff:10.0.0.0/104"])]);
-    let error = lowering_error(&policy);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
 
     assert!(
-        error.contains("IPv4-mapped"),
-        "input=allow.to=[{{cidr:::/0, except:[::ffff:10.0.0.0/104]}}]; subtracting inside the mapped range leaves blocks that are programmed as IPv4, so the IPv6 peer would open IPv4 it never named; got: {error}"
+        rules.ipv4.is_empty(),
+        "input=allow.to=[{{cidr:::/0, except:[::ffff:10.0.0.0/104]}}]; the exclusion names mapped addresses, which are programmed as IPv4, so this IPv6 allow must reach the IPv4 chain with nothing; output={:?}",
+        rules.ipv4
+    );
+    assert_eq!(
+        chain_verdict(
+            &rules.ipv4,
+            NetworkAction::Deny,
+            packet_address("10.10.1.1"),
+            "tcp",
+            Some(443)
+        ),
+        "DROP",
+        "input=as above, packet=10.10.1.1; the direction default still covers IPv4; output={:?}",
+        rules.ipv4
+    );
+}
+
+#[test]
+fn an_ipv4_peer_subtracts_an_exclusion_written_in_mapped_notation() {
+    let policy = allow_peer_policy(vec![peer("10.0.0.0/8", &["::ffff:10.10.0.0/112"])]);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+
+    assert_eq!(
+        chain_verdict(
+            &rules.ipv4,
+            NetworkAction::Deny,
+            packet_address("10.10.1.1"),
+            "tcp",
+            Some(443)
+        ),
+        "DROP",
+        "input=allow.to=[{{cidr:10.0.0.0/8, except:[::ffff:10.10.0.0/112]}}], packet=10.10.1.1; the exclusion names 10.10.0.0/16 in mapped notation, so it must narrow the peer rather than be discarded; output={:?}",
+        rules.ipv4
+    );
+    assert_eq!(
+        chain_verdict(
+            &rules.ipv4,
+            NetworkAction::Deny,
+            packet_address("10.11.1.1"),
+            "tcp",
+            Some(443)
+        ),
+        "ACCEPT",
+        "input=as above, packet=10.11.1.1; the rest of the peer is still allowed; output={:?}",
+        rules.ipv4
+    );
+}
+
+#[test]
+fn a_mapped_peer_subtracts_an_exclusion_written_in_plain_ipv4() {
+    let policy = allow_peer_policy(vec![peer("::ffff:10.0.0.0/104", &["10.10.0.0/16"])]);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+
+    assert_eq!(
+        chain_verdict(
+            &rules.ipv4,
+            NetworkAction::Deny,
+            packet_address("10.10.1.1"),
+            "tcp",
+            Some(443)
+        ),
+        "DROP",
+        "input=allow.to=[{{cidr:::ffff:10.0.0.0/104, except:[10.10.0.0/16]}}], packet=10.10.1.1; the peer is programmed as IPv4, so a plain IPv4 exclusion must narrow it; output={:?}",
+        rules.ipv4
+    );
+    assert_eq!(
+        chain_verdict(
+            &rules.ipv4,
+            NetworkAction::Deny,
+            packet_address("10.11.1.1"),
+            "tcp",
+            Some(443)
+        ),
+        "ACCEPT",
+        "input=as above, packet=10.11.1.1; the rest of the peer is still allowed; output={:?}",
+        rules.ipv4
+    );
+}
+
+#[test]
+fn an_exclusion_that_cannot_overlap_its_peer_is_dropped_rather_than_applied() {
+    let policy = allow_peer_policy(vec![peer("10.0.0.0/8", &["2001:db8::/32"])]);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+
+    assert_eq!(
+        chain_verdict(
+            &rules.ipv4,
+            NetworkAction::Deny,
+            packet_address("10.10.1.1"),
+            "tcp",
+            Some(443)
+        ),
+        "ACCEPT",
+        "input=allow.to=[{{cidr:10.0.0.0/8, except:[2001:db8::/32]}}], packet=10.10.1.1; an IPv6 range cannot lie inside an IPv4 peer, so the peer is unnarrowed rather than refused; output={:?}",
+        rules.ipv4
     );
 }
 
