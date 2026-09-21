@@ -198,9 +198,9 @@ impl Drop for TelemetryRegistration {
 struct TelemetryProcess {
     inner: Box<dyn SandboxProcess>,
     active: bool,
-    // Records engine-level timeout intent for telemetry classification. The
-    // wrapped backend separately tracks timeout enforcement and sticky wait
-    // semantics because those remain required without this decorator.
+    // Set by kill_for_timeout() so telemetry reports a timeout instead of a
+    // normal exit or cancellation. The backend keeps its own timeout state so
+    // later wait() and try_wait() calls also report the timeout.
     timeout_requested: bool,
     warnings: Vec<String>,
     mode: TelemetryMode,
