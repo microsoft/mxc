@@ -318,6 +318,11 @@ fn pin_output_pump_module() -> std::io::Result<()> {
 
 /// Prepare a native pipe and an idle output pump before detaching a WSLC stream.
 ///
+/// WSLC exposes stdout and stderr as callback-backed streams rather than
+/// transferable OS handles. The pump copies each stream into a local pipe so
+/// FFI consumers can adopt its native read endpoint. WSLC does not currently
+/// expose a corresponding native stdin endpoint.
+///
 /// A shared worker cannot safely drain both callback streams: each read may
 /// block independently, and failing to drain either stream can stall the
 /// container. Keep the explicit one-pump-per-output tradeoff until the WSLC SDK
