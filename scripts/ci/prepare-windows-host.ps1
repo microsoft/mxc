@@ -420,6 +420,9 @@ function Install-WorkloadTooling {
     # upgrade", which both mean the tool is present and are equally fine.
     $success = @(0, -1978335135, -1978335189)
 
+    $programFilesX86 = ${env:ProgramFiles(x86)}
+    if (-not $programFilesX86) { $programFilesX86 = $env:ProgramFiles }
+
     $packages = @(
         @{
             Name       = 'pwsh'
@@ -444,10 +447,14 @@ function Install-WorkloadTooling {
             Candidates = @('python', 'python3')
             Id         = Get-LatestPythonPackageId
             Required   = $false
-            # The machine-scope bundle installs for all users and prepends its
-            # own directories to PATH, which Update-ProcessPath then picks up.
+            # The bundle prepends its own directories to PATH, but the
+            # directory name carries the architecture, so the hints cover the
+            # case where it did not.
             Extra      = @('--installer-type', 'burn', '--scope', 'machine')
-            PathHints  = @()
+            PathHints  = @(
+                (Join-Path $env:ProgramFiles 'Python3*'),
+                (Join-Path $env:ProgramFiles 'Python3*\Scripts')
+            )
         },
         @{
             Name       = 'winapp'
@@ -468,10 +475,11 @@ function Install-WorkloadTooling {
             Id         = 'ShiningLight.OpenSSL.Light'
             Required   = $false
             Extra      = @()
-            # This installer does not publish its own bin directory.
+            # This installer does not publish its own bin directory, and names
+            # it for the architecture it built for.
             PathHints  = @(
-                (Join-Path $env:ProgramFiles 'OpenSSL-Win64\bin'),
-                (Join-Path $env:ProgramFiles 'OpenSSL\bin')
+                (Join-Path $env:ProgramFiles 'OpenSSL*\bin'),
+                (Join-Path $programFilesX86 'OpenSSL*\bin')
             )
         }
     )
@@ -524,9 +532,14 @@ function Install-WorkloadTooling {
         }
 
         Update-ProcessPath
+        # Hints may be wildcards: an installer's directory name can carry the
+        # architecture (Python314-arm64, OpenSSL-Win64-ARM), so the pattern
+        # matches whichever one this host actually got.
         foreach ($hint in $package.PathHints) {
-            if (Test-Path -LiteralPath $hint) {
-                Add-PathEntry -Directory $hint
+            foreach ($match in (Resolve-Path -Path $hint -ErrorAction SilentlyContinue)) {
+                if (Test-Path -LiteralPath $match.Path -PathType Container) {
+                    Add-PathEntry -Directory $match.Path
+                }
             }
         }
 
@@ -536,7 +549,7 @@ function Install-WorkloadTooling {
         } elseif ($package.Required) {
             Exit-WithError "$($package.Name) installed but still does not resolve on PATH."
         } else {
-            Write-Host "::warning::$($package.Name) installed but still does not resolve on PATH."
+            Write-Host "::warning::$($package.Name) installed but still does not resolve on PATH (searched $($package.PathHints -join ', '))."
         }
     }
 
