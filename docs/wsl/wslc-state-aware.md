@@ -10,8 +10,9 @@ It complements:
 - [`wsl-container-support-plan.md`](wsl-container-support-plan.md) — the original one-shot backend design.
 - [`../state-aware-lifecycle/mxc-state-aware-sandbox-api.md`](../state-aware-lifecycle/mxc-state-aware-sandbox-api.md) — the cross-backend state-aware wire format, the Rust `StatefulSandboxBackend` trait, and the dispatcher contract.
 
-The WSLc state-aware surface is **experimental** — it requires `--experimental` and a build with
-the `wslc` feature (`build.bat --with-wslc`).
+The WSLc state-aware surface is part of published schema `0.9.0-alpha` and does
+not require a runtime experimental opt-in. Native builds still require the
+`wslc` feature (`build.bat --with-wslc`).
 
 ## Why a daemon
 
@@ -51,7 +52,7 @@ against different sandboxes are serialized — correct, just not concurrent. See
 | Prefix registration | `src/core/wxc_common/src/state_aware_dispatch.rs` (`backend_from_prefix`) | Maps the `wslc:` id prefix back to the WSLc backend for post-provision phases. |
 
 Exact adapters construct `wxc_common::models::WslcProvisionConfig` directly from
-`experimental.wslc.provision`. Engine-side checked binding preserves an absent
+`wslc.provision`. Engine-side checked binding preserves an absent
 config, a present empty config, and supplied `image`/`imageTarPath` values
 without reparsing JSON. An omitted image remains `None` until the backend
 chooses its default. The separate rolling `wire::WslcProvisionPhase` survives

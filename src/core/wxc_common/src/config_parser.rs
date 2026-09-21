@@ -13,8 +13,6 @@ use crate::models::{
     WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
-#[cfg(test)]
-use crate::network_parser::{directional_network_version_error, supports_directional_network};
 use crate::network_parser::{host_is_any_loopback, parse_network_policy, NetworkSections};
 use crate::state_aware_operation::{StateAwareOperation, StateAwareProvision};
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
@@ -22,20 +20,7 @@ use crate::state_aware_wire::StateAwareInput;
 use crate::wire;
 use mxc_config_contract::dev::{probe_phase, Phase as ContractPhase};
 use mxc_config_contract::{probe_version, supported_versions, ContractVersion, VersionProbeError};
-use serde::{Deserialize, Deserializer};
-use serde_json::value::RawValue;
-#[cfg(test)]
-use std::borrow::Cow;
 use std::fs;
-
-#[cfg(test)]
-pub(crate) mod legacy_payload_reference;
-#[cfg(test)]
-pub(crate) mod legacy_state_aware_request;
-#[cfg(test)]
-use legacy_state_aware_request::{
-    LegacyMxcRequest, LegacyStateAwareRequest, LegacyStateAwareWireInput,
-};
 
 /// Categorised error from `load_mxc_request`. The `wxc-exec` driver uses the
 /// variant to choose the failure-output convention: state-aware failures
@@ -85,59 +70,6 @@ impl ParseError {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(expecting = "a configuration object")]
-struct RequestDiscriminator<'a> {
-    // Exact dispatch uses the contract's phase probe instead.
-    #[cfg(test)]
-    #[serde(borrow, default, deserialize_with = "deserialize_present_raw")]
-    phase: Option<&'a RawValue>,
-    #[serde(borrow, default, deserialize_with = "deserialize_present_raw")]
-    experimental: Option<&'a RawValue>,
-}
-
-fn deserialize_present_raw<'de, D>(deserializer: D) -> Result<Option<&'de RawValue>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    <&RawValue>::deserialize(deserializer).map(Some)
-}
-
-fn reject_legacy_telemetry_raw(experimental: Option<&str>) -> Result<(), WxcError> {
-    let Some(experimental) = experimental else {
-        return Ok(());
-    };
-    let value: serde_json::Value = serde_json::from_str(experimental)
-        .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
-    if value
-        .as_object()
-        .is_some_and(|object| object.contains_key("telemetry"))
-    {
-        return Err(WxcError::ConfigParse(
-            "'experimental.telemetry' has moved to the stable section; \
-             use top-level 'telemetry' instead."
-                .to_string(),
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-fn reject_legacy_telemetry_value(config: &serde_json::Value) -> Result<(), WxcError> {
-    if config
-        .get("experimental")
-        .and_then(serde_json::Value::as_object)
-        .is_some_and(|object| object.contains_key("telemetry"))
-    {
-        return Err(WxcError::ConfigParse(
-            "'experimental.telemetry' has moved to the stable section; \
-             use top-level 'telemetry' instead."
-                .to_string(),
-        ));
-    }
-    Ok(())
-}
-
 // ---------- Public API ----------
 
 /// Options for [`load_mxc_request_with_options`].
@@ -154,108 +86,6 @@ pub struct LoadOptions<'a> {
     pub cli_command: &'a [String],
 }
 
-/// Loads and parses a JSON-based code execution request.
-///
-/// If `is_base64` is true, `input` is treated as a base64-encoded JSON string.
-/// Otherwise `input` is treated as a file path.
-#[cfg(test)]
-pub fn load_request(
-    input: &str,
-    logger: &mut Logger,
-    is_base64: bool,
-) -> Result<ExecutionRequest, WxcError> {
-    let result = (|| {
-        let json_str = decode_request_input(input, is_base64)?;
-        let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(&json_str)
-            .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
-        reject_legacy_telemetry_raw(discriminator.experimental.map(|raw| raw.get()))?;
-
-        let cfg: wire::MxcConfig = config_deserialize::from_str(&json_str)
-            .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
-        let raw: serde_json::Value = config_deserialize::from_str(&json_str)
-            .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
-        validate_versioned_fields(&raw)?;
-
-        convert_wire_config(cfg, logger, true, false)
-    })();
-    log_one_shot_error(logger, &result);
-    result
-}
-
-/// Rolling one-shot raw-JSON loader retained only for characterization tests.
-#[cfg(test)]
-pub fn load_request_from_json(
-    json_str: &str,
-    logger: &mut Logger,
-) -> Result<ExecutionRequest, WxcError> {
-    load_request_from_json_with_options(
-        json_str,
-        logger,
-        LoadOptions {
-            is_base64: false,
-            cli_command: &[],
-        },
-    )
-}
-
-/// Options-aware rolling loader retained only for characterization tests.
-#[cfg(test)]
-pub(crate) fn load_request_from_json_with_options(
-    json_str: &str,
-    logger: &mut Logger,
-    opts: LoadOptions,
-) -> Result<ExecutionRequest, WxcError> {
-    // `is_base64` is meaningless on an already-decoded JSON string; the field
-    // is kept in `LoadOptions` for signature parity with the from-input path.
-    let _ = opts.is_base64;
-    let result = (|| {
-        let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json_str)
-            .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
-        if discriminator.phase.is_some() {
-            return Err(WxcError::ConfigParse(
-                "expected a one-shot execution request, got a state-aware lifecycle request"
-                    .to_string(),
-            ));
-        }
-        reject_legacy_telemetry_raw(discriminator.experimental.map(|raw| raw.get()))?;
-
-        let cfg: wire::MxcConfig = config_deserialize::from_str(json_str)
-            .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
-        let raw: serde_json::Value = config_deserialize::from_str(json_str)
-            .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
-        validate_versioned_fields(&raw)?;
-
-        convert_wire_config(cfg, logger, true, false)
-    })();
-    log_one_shot_error(logger, &result);
-    result
-}
-
-/// Build a request from an already-parsed wire-format config [`Value`], running
-/// the same validation and wire→model mapping as [`load_request`] but without a
-/// base64 (or file) round-trip. For in-process callers (e.g. the `mxc` crate)
-/// that already hold the config as JSON and would otherwise pay to
-/// serialise → base64 → decode → re-parse it.
-///
-/// [`Value`]: serde_json::Value
-#[cfg(test)]
-pub fn load_request_from_value(
-    config: serde_json::Value,
-    logger: &mut Logger,
-) -> Result<ExecutionRequest, WxcError> {
-    let result = (|| {
-        let raw = config.clone();
-        reject_legacy_telemetry_value(&config)?;
-        let cfg: wire::MxcConfig = config_deserialize::from_value(config)
-            .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
-        validate_versioned_fields(&raw)?;
-
-        convert_wire_config(cfg, logger, true, false)
-    })();
-    log_one_shot_error(logger, &result);
-    result
-}
-
 /// Workspace-internal exact one-shot contract selected by a trusted typed
 /// producer.
 ///
@@ -267,6 +97,7 @@ pub enum ExactOneShotContract {
     V0_6(Box<mxc_config_contract::published::v0_6_0_alpha::Request>),
     V0_7(Box<mxc_config_contract::published::v0_7_0_alpha::Request>),
     V0_8(Box<mxc_config_contract::published::v0_8_0_alpha::Request>),
+    V0_9(Box<mxc_config_contract::published::v0_9_0_alpha::OneShotRequest>),
     Dev(Box<mxc_config_contract::dev::OneShotRequest>),
 }
 
@@ -288,6 +119,11 @@ pub fn load_one_shot_request_from_contract(
         }
         ExactOneShotContract::V0_8(request) => {
             crate::config_contract_adapters::v0_8::into_wire(*request)
+        }
+        ExactOneShotContract::V0_9(request) => {
+            mxc_config_contract::published::v0_9_0_alpha::validate_one_shot_request(&request)
+                .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
+            crate::config_contract_adapters::v0_9::one_shot_into_wire(*request)
         }
         ExactOneShotContract::Dev(request) => {
             mxc_config_contract::dev::validate_one_shot_request(&request)
@@ -425,6 +261,7 @@ fn development_network_migration(contract: &str, path: Option<&str>) -> Option<&
 fn deserialize_development_root<T>(
     json: &str,
     contract: &'static str,
+    version: &'static str,
     state_aware: bool,
 ) -> Result<T, ParseError>
 where
@@ -433,7 +270,7 @@ where
     config_deserialize::from_str(json).map_err(|error| {
         let mut message = format!("Invalid {contract} request: {error}");
         if let Some(migration) = development_network_migration(contract, error.path()) {
-            message.push_str(&format!("; schema 0.9 migration: {migration}"));
+            message.push_str(&format!("; schema {version} migration: {migration}"));
         }
         if state_aware {
             ParseError::StateAware(MxcError::malformed_request(message))
@@ -441,6 +278,101 @@ where
             ParseError::OneShot(WxcError::ConfigParse(message))
         }
     })
+}
+
+fn v0_9_phase_error(
+    error: mxc_config_contract::published::v0_9_0_alpha::PhaseProbeError,
+) -> ParseError {
+    let message = match error {
+        mxc_config_contract::published::v0_9_0_alpha::PhaseProbeError::InvalidDeclaration(
+            source,
+        ) => format!("Invalid phase declaration: {source}"),
+        mxc_config_contract::published::v0_9_0_alpha::PhaseProbeError::UnsupportedPhase(_) => {
+            "Unsupported phase".to_string()
+        }
+    };
+    ParseError::StateAware(MxcError::malformed_request(message))
+}
+
+fn v0_9_containment_error(
+    error: mxc_config_contract::published::v0_9_0_alpha::ContainmentProbeError,
+) -> ParseError {
+    let message = match error {
+        mxc_config_contract::published::v0_9_0_alpha::ContainmentProbeError::InvalidDeclaration(
+            source,
+        ) => format!("Invalid provision containment declaration: {source}"),
+        mxc_config_contract::published::v0_9_0_alpha::ContainmentProbeError::UnsupportedContainment(
+            _,
+        ) => "Unsupported containment for provision phase".to_string(),
+    };
+    ParseError::StateAware(MxcError::malformed_request(message))
+}
+
+fn deserialize_v0_9_request(
+    json: &str,
+    phase: Option<mxc_config_contract::published::v0_9_0_alpha::Phase>,
+) -> Result<mxc_config_contract::published::v0_9_0_alpha::Request, ParseError> {
+    use mxc_config_contract::published::v0_9_0_alpha::{
+        self as contract, Containment, Phase, ProvisionRequest, Request,
+    };
+
+    match phase {
+        None => {
+            let request: contract::OneShotRequest =
+                deserialize_development_root(json, "one-shot", "0.9", false)?;
+            contract::validate_one_shot_request(&request)
+                .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
+            Ok(Request::OneShot(Box::new(request)))
+        }
+        Some(Phase::Provision) => {
+            let request = match contract::probe_containment(json).map_err(v0_9_containment_error)? {
+                Containment::IsolationSession => {
+                    deserialize_development_root(json, "IsolationSession provision", "0.9", true)
+                        .map(ProvisionRequest::IsolationSession)
+                }
+                Containment::Wslc => {
+                    deserialize_development_root(json, "WSLC provision", "0.9", true)
+                        .map(ProvisionRequest::Wslc)
+                }
+            }?;
+            Ok(Request::Provision(request))
+        }
+        Some(Phase::Start) => {
+            deserialize_development_root(json, "start", "0.9", true).map(Request::Start)
+        }
+        Some(Phase::Exec) => {
+            deserialize_development_root(json, "exec", "0.9", true).map(Request::Exec)
+        }
+        Some(Phase::Stop) => {
+            deserialize_development_root(json, "stop", "0.9", true).map(Request::Stop)
+        }
+        Some(Phase::Deprovision) => {
+            deserialize_development_root(json, "deprovision", "0.9", true).map(Request::Deprovision)
+        }
+    }
+}
+
+fn parse_exact_v0_9(json: &str, logger: &mut Logger) -> Result<MxcRequest, ParseError> {
+    let phase = mxc_config_contract::published::v0_9_0_alpha::probe_phase(json)
+        .map_err(v0_9_phase_error)?;
+    let request = deserialize_v0_9_request(json, phase)?;
+    let adapted = crate::config_contract_adapters::v0_9::adapt_request(request)
+        .map_err(|error| ParseError::StateAware(MxcError::malformed_request(error.to_string())))?;
+
+    match adapted {
+        crate::config_contract_adapters::v0_9::AdaptedWireRequest::OneShot(config) => {
+            convert_wire_config(config, logger, true, false)
+                .map(MxcRequest::OneShot)
+                .map_err(ParseError::OneShot)
+        }
+        crate::config_contract_adapters::v0_9::AdaptedWireRequest::StateAware(input) => {
+            normalize_state_aware(input, logger)
+                .map(MxcRequest::StateAware)
+                .map_err(|error| {
+                    ParseError::StateAware(MxcError::malformed_request(error.to_string()))
+                })
+        }
+    }
 }
 
 fn deserialize_development_request(
@@ -452,7 +384,7 @@ fn deserialize_development_request(
     match phase {
         None => {
             let request: mxc_config_contract::dev::OneShotRequest =
-                deserialize_development_root(json, "one-shot", false)?;
+                deserialize_development_root(json, "one-shot", "0.10", false)?;
             dev::validate_one_shot_request(&request)
                 .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
             Ok(Request::OneShot(Box::new(request)))
@@ -460,45 +392,36 @@ fn deserialize_development_request(
         Some(Phase::Provision) => {
             let request = match dev::probe_containment(json).map_err(exact_containment_error)? {
                 Containment::WindowsSandbox => {
-                    deserialize_development_root(json, "Windows Sandbox provision", true)
+                    deserialize_development_root(json, "Windows Sandbox provision", "0.10", true)
                         .map(ProvisionRequest::WindowsSandbox)
                 }
                 Containment::IsolationSession => {
-                    deserialize_development_root(json, "IsolationSession provision", true)
+                    deserialize_development_root(json, "IsolationSession provision", "0.10", true)
                         .map(ProvisionRequest::IsolationSession)
                 }
-                Containment::Wslc => deserialize_development_root(json, "WSLC provision", true)
-                    .map(ProvisionRequest::Wslc),
+                Containment::Wslc => {
+                    deserialize_development_root(json, "WSLC provision", "0.10", true)
+                        .map(ProvisionRequest::Wslc)
+                }
             }?;
             Ok(Request::Provision(request))
         }
-        Some(Phase::Start) => deserialize_development_root(json, "start", true).map(Request::Start),
-        Some(Phase::Exec) => deserialize_development_root(json, "exec", true).map(Request::Exec),
-        Some(Phase::Stop) => deserialize_development_root(json, "stop", true).map(Request::Stop),
-        Some(Phase::Deprovision) => {
-            deserialize_development_root(json, "deprovision", true).map(Request::Deprovision)
+        Some(Phase::Start) => {
+            deserialize_development_root(json, "start", "0.10", true).map(Request::Start)
         }
+        Some(Phase::Exec) => {
+            deserialize_development_root(json, "exec", "0.10", true).map(Request::Exec)
+        }
+        Some(Phase::Stop) => {
+            deserialize_development_root(json, "stop", "0.10", true).map(Request::Stop)
+        }
+        Some(Phase::Deprovision) => deserialize_development_root(json, "deprovision", "0.10", true)
+            .map(Request::Deprovision),
     }
 }
 
 fn parse_exact_development(json: &str, logger: &mut Logger) -> Result<MxcRequest, ParseError> {
     let phase = mxc_config_contract::dev::probe_phase(json).map_err(exact_phase_error)?;
-    let discriminator: RequestDiscriminator<'_> =
-        config_deserialize::from_str(json).map_err(|error| {
-            let message = error.to_string();
-            if phase.is_some() {
-                ParseError::StateAware(MxcError::malformed_request(message))
-            } else {
-                ParseError::OneShot(WxcError::ConfigParse(message))
-            }
-        })?;
-    if let Err(error) = reject_legacy_telemetry_raw(discriminator.experimental.map(RawValue::get)) {
-        return Err(if phase.is_some() {
-            ParseError::StateAware(MxcError::malformed_request(error.to_string()))
-        } else {
-            ParseError::OneShot(error)
-        });
-    }
     let request = deserialize_development_request(json, phase)?;
     let adapted = crate::config_contract_adapters::dev::adapt_request(request)
         .map_err(|error| ParseError::StateAware(MxcError::malformed_request(error.to_string())))?;
@@ -536,7 +459,8 @@ fn parse_exact_mxc_request_json(json: &str, logger: &mut Logger) -> Result<MxcRe
             logger,
             crate::config_contract_adapters::v0_8::into_wire,
         ),
-        ContractVersion::V0_9_0Alpha => parse_exact_development(json, logger),
+        ContractVersion::V0_9_0Alpha => parse_exact_v0_9(json, logger),
+        ContractVersion::V0_10_0Alpha => parse_exact_development(json, logger),
     }
 }
 
@@ -695,15 +619,32 @@ fn apply_cli_command(json: &str, argv: &[String]) -> Result<(String, Option<Stri
     let Ok(version) = probe_version(json) else {
         return Ok((json.to_string(), None));
     };
-    let phase = if version == ContractVersion::V0_9_0Alpha {
-        // An unreadable phase declaration is likewise the exact parser's to
-        // report through the development contract.
-        let Ok(phase) = probe_phase(json) else {
-            return Ok((json.to_string(), None));
-        };
-        phase
-    } else {
-        None
+    let phase = match version {
+        ContractVersion::V0_9_0Alpha => {
+            let Ok(phase) = mxc_config_contract::published::v0_9_0_alpha::probe_phase(json) else {
+                return Ok((json.to_string(), None));
+            };
+            phase.map(|phase| match phase {
+                mxc_config_contract::published::v0_9_0_alpha::Phase::Provision => {
+                    ContractPhase::Provision
+                }
+                mxc_config_contract::published::v0_9_0_alpha::Phase::Start => ContractPhase::Start,
+                mxc_config_contract::published::v0_9_0_alpha::Phase::Exec => ContractPhase::Exec,
+                mxc_config_contract::published::v0_9_0_alpha::Phase::Stop => ContractPhase::Stop,
+                mxc_config_contract::published::v0_9_0_alpha::Phase::Deprovision => {
+                    ContractPhase::Deprovision
+                }
+            })
+        }
+        ContractVersion::V0_10_0Alpha => {
+            let Ok(phase) = probe_phase(json) else {
+                return Ok((json.to_string(), None));
+            };
+            phase
+        }
+        ContractVersion::V0_6_0Alpha
+        | ContractVersion::V0_7_0Alpha
+        | ContractVersion::V0_8_0Alpha => None,
     };
 
     let Some(command_source) = crate::splice::CommandSource::parse(json) else {
@@ -759,169 +700,6 @@ fn apply_cli_command(json: &str, argv: &[String]) -> Result<(String, Option<Stri
     Ok((spliced.json, override_log))
 }
 
-/// Shared parse core over an already-decoded JSON string.
-///
-/// Borrows only the discriminator and the raw state-aware backend block, then
-/// deserialises the typed model directly from source text so policy errors
-/// retain line and column information (`serde_json::Value` would discard it).
-#[cfg(test)]
-fn parse_mxc_request_json(
-    json_str: &str,
-    logger: &mut Logger,
-) -> Result<LegacyMxcRequest, ParseError> {
-    let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json_str)
-        .map_err(|error| ParseError::Decode(WxcError::ConfigParse(error.to_string())))?;
-    if discriminator.phase.is_some() {
-        let raw: serde_json::Value = config_deserialize::from_str(json_str)
-            .map_err(|error| ParseError::Decode(WxcError::ConfigParse(error.to_string())))?;
-        validate_versioned_fields(&raw).map_err(|error| {
-            ParseError::StateAware(MxcError::malformed_request(error.to_string()))
-        })?;
-        convert_wire_state_aware(json_str, discriminator.experimental, logger)
-            .map(LegacyMxcRequest::StateAware)
-            .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string())))
-    } else {
-        reject_legacy_telemetry_raw(discriminator.experimental.map(|raw| raw.get()))
-            .map_err(ParseError::OneShot)?;
-        let cfg: wire::MxcConfig = config_deserialize::from_str(json_str).map_err(|error| {
-            let malformed = error.is_syntax_error();
-            let error = WxcError::ConfigParse(error.to_string());
-            if malformed {
-                ParseError::OneShotMalformed(error)
-            } else {
-                ParseError::OneShot(error)
-            }
-        })?;
-        let raw: serde_json::Value = config_deserialize::from_str(json_str)
-            .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
-        validate_versioned_fields(&raw).map_err(ParseError::OneShot)?;
-        convert_wire_config(cfg, logger, true, false)
-            .map(LegacyMxcRequest::OneShot)
-            .map_err(ParseError::OneShot)
-    }
-}
-
-#[cfg(test)]
-fn validate_versioned_fields(config: &serde_json::Value) -> Result<(), WxcError> {
-    validate_directional_network_field_versions(config)?;
-    validate_seatbelt_launch_method_version(config)?;
-    validate_telemetry_field_version(config)?;
-    validate_inherit_default_env_field_version(config)
-}
-
-#[cfg(test)]
-fn validate_directional_network_field_versions(config: &serde_json::Value) -> Result<(), WxcError> {
-    let Some(config) = config.as_object() else {
-        return Ok(());
-    };
-    if let Some(version) = config.get("version").and_then(serde_json::Value::as_str) {
-        if semver::Version::parse(version).is_err() || supports_directional_network(version) {
-            return Ok(());
-        }
-    }
-
-    let has_directional_network = config
-        .get("network")
-        .and_then(serde_json::Value::as_object)
-        .is_some_and(|network| network.contains_key("egress") || network.contains_key("ingress"));
-    let has_runtime_config = config.contains_key("runtimeConfig");
-    let has_process_container_network = ["processContainer", "appContainer"]
-        .into_iter()
-        .filter_map(|key| config.get(key))
-        .filter_map(serde_json::Value::as_object)
-        .any(|process_container| process_container.contains_key("network"));
-
-    if has_directional_network || has_runtime_config || has_process_container_network {
-        return Err(directional_network_version_error());
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-fn validate_seatbelt_launch_method_version(config: &serde_json::Value) -> Result<(), WxcError> {
-    let Some(config) = config.as_object() else {
-        return Ok(());
-    };
-    let has_launch_method = ["seatbelt", "macos_sandbox"]
-        .into_iter()
-        .filter_map(|key| config.get(key))
-        .filter_map(serde_json::Value::as_object)
-        .any(|seatbelt| seatbelt.contains_key("launchMethod"));
-    if !has_launch_method {
-        return Ok(());
-    }
-    let Some(version) = config.get("version").and_then(serde_json::Value::as_str) else {
-        return Ok(());
-    };
-    let Ok(version) = semver::Version::parse(version) else {
-        // The ordinary schema-version validator owns malformed-version
-        // diagnostics so this feature gate does not mask the more useful error.
-        return Ok(());
-    };
-    if version.major == 0 && version.minor >= 9 {
-        return Err(WxcError::ConfigParse(
-            "'seatbelt.launchMethod' was removed in config schema version 0.9.0-alpha; \
-             remove the field (the contained process is always launched with exec)"
-                .to_string(),
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-fn validate_telemetry_field_version(config: &serde_json::Value) -> Result<(), WxcError> {
-    let Some(config) = config.as_object() else {
-        return Ok(());
-    };
-    if !config.contains_key("telemetry") {
-        return Ok(());
-    }
-    let Some(version) = config.get("version").and_then(serde_json::Value::as_str) else {
-        return Ok(());
-    };
-    let Ok(version) = semver::Version::parse(version) else {
-        // The ordinary schema-version validator owns malformed-version
-        // diagnostics so this feature gate does not mask the more useful error.
-        return Ok(());
-    };
-    if version.major == 0 && version.minor < 9 {
-        return Err(WxcError::ConfigParse(
-            "top-level 'telemetry' requires config schema version 0.9.0-alpha or later".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-fn validate_inherit_default_env_field_version(config: &serde_json::Value) -> Result<(), WxcError> {
-    let Some(config) = config.as_object() else {
-        return Ok(());
-    };
-    let has_inherit_default_env = config
-        .get("process")
-        .and_then(serde_json::Value::as_object)
-        .is_some_and(|process| process.contains_key("inheritDefaultEnv"));
-    if !has_inherit_default_env {
-        return Ok(());
-    }
-
-    if let Some(version) = config.get("version").and_then(serde_json::Value::as_str) {
-        let Ok(version) = semver::Version::parse(version) else {
-            // The ordinary schema-version validator owns malformed-version
-            // diagnostics so this feature gate does not mask the more useful error.
-            return Ok(());
-        };
-        if version.major > 0 || version.minor >= 9 {
-            return Ok(());
-        }
-    }
-
-    Err(WxcError::ConfigParse(
-        "'process.inheritDefaultEnv' requires config schema version 0.9.0-alpha or later"
-            .to_string(),
-    ))
-}
-
 fn log_one_shot_error<T>(logger: &mut Logger, result: &Result<T, WxcError>) {
     if let Err(error) = result {
         log_error(logger, &error.to_string(), ErrorOutput::Primary);
@@ -969,19 +747,12 @@ pub fn decode_request_input(input: &str, is_base64: bool) -> Result<String, WxcE
 // ---------- Cross-field validation ----------
 
 /// Maximum supported schema version (major.minor). Configs with a higher major.minor are rejected.
-const SUPPORTED_VERSION: &str = ">=0.6, <=0.9";
+const SUPPORTED_VERSION: &str = ">=0.6, <=0.10";
 
 /// Canonical "latest" schema version string used in samples and tests. Bump
 /// alongside `SUPPORTED_VERSION`'s upper bound when a new dev schema lands.
 #[cfg(test)]
-const CURRENT_SCHEMA_VERSION: &str = "0.9.0-alpha";
-
-/// Known `experimental.<backend>` keys. Used by validation code to flag
-/// experimental backend sections that don't match the selected
-/// `containment`. Add a new entry when promoting a backend to a top-level
-/// section or graduating one from experimental.
-#[cfg(test)]
-const KNOWN_EXPERIMENTAL_BACKENDS: &[&str] = &["windows_sandbox", "wslc", "isolation_session"];
+const CURRENT_SCHEMA_VERSION: &str = "0.10.0-alpha";
 
 /// Validate that the schema version (semver) is supported by this binary.
 /// Compares major.minor only — patch and pre-release labels are ignored.
@@ -1231,52 +1002,6 @@ fn validate_single_backend_section(
             extras.join(", "),
         ),
     };
-    Err(WxcError::ConfigParse(msg))
-}
-
-/// Rejects `experimental.<backend>` keys that don't match the resolved
-/// `containment`. When `containment` is `None` (state-aware non-provision
-/// phases can resolve the backend from `sandboxId`), a single key is
-/// allowed; two or more is unambiguously wrong.
-#[cfg(test)]
-fn validate_experimental_backend_keys(
-    containment: Option<&ContainmentBackend>,
-    experimental_raw: Option<&serde_json::Value>,
-) -> Result<(), WxcError> {
-    let Some(serde_json::Value::Object(map)) = experimental_raw else {
-        return Ok(());
-    };
-
-    let matching_key = containment
-        .and_then(|c| c.section_path())
-        .and_then(|path| path.strip_prefix("experimental."));
-
-    let present: Vec<&'static str> = KNOWN_EXPERIMENTAL_BACKENDS
-        .iter()
-        .copied()
-        .filter(|key| map.contains_key(*key))
-        .collect();
-
-    let rejected: Vec<&'static str> = match matching_key {
-        Some(allowed) => present.into_iter().filter(|k| *k != allowed).collect(),
-        None if present.len() > 1 => present,
-        None => return Ok(()),
-    };
-
-    if rejected.is_empty() {
-        return Ok(());
-    }
-
-    let qualified: Vec<String> = rejected
-        .iter()
-        .map(|k| format!("experimental.{k}"))
-        .collect();
-    let msg = format!(
-        "Multiple containment backends configured: request includes \
-         experimental backend section(s) {}. Only one backend section is allowed; \
-         remove the unused section(s).",
-        qualified.join(", "),
-    );
     Err(WxcError::ConfigParse(msg))
 }
 
@@ -1771,7 +1496,7 @@ fn convert_wire_config(
             }
 
             // WSLc cannot honor a blanket inbound-listen grant. The runner only
-            // wires explicit host->container port forwards (experimental.wslc
+            // wires explicit host->container port forwards (wslc
             // portMappings) into the WSL2 VM's NAT; it never consults
             // allowLocalNetwork. Reject `true` and point at portMappings.
             // (`false` is the default and a no-op.)
@@ -1779,7 +1504,7 @@ fn convert_wire_config(
                 let msg = "WSLc: network.allowLocalNetwork=true is not supported. A WSLc \
                            container runs in the NAT'd WSL2 VM and MXC does not honor a \
                            blanket inbound-listen grant; expose specific ports with \
-                           experimental.wslc.portMappings instead.";
+                           wslc.portMappings instead.";
                 logger.log_line(msg);
                 return Err(WxcError::ConfigParse(msg.to_string()));
             }
@@ -1948,15 +1673,11 @@ fn convert_wire_config(
                 let mut converted = Vec::with_capacity(mappings.len());
                 for (idx, m) in mappings.into_iter().enumerate() {
                     if m.windows_port == 0 {
-                        let msg = format!(
-                            "experimental.wslc.portMappings[{idx}]: 'windowsPort' must be > 0"
-                        );
+                        let msg = format!("wslc.portMappings[{idx}]: 'windowsPort' must be > 0");
                         return Err(WxcError::ConfigParse(msg));
                     }
                     if m.container_port == 0 {
-                        let msg = format!(
-                            "experimental.wslc.portMappings[{idx}]: 'containerPort' must be > 0"
-                        );
+                        let msg = format!("wslc.portMappings[{idx}]: 'containerPort' must be > 0");
                         return Err(WxcError::ConfigParse(msg));
                     }
                     // Only TCP is representable in the wire model
@@ -1980,7 +1701,7 @@ fn convert_wire_config(
                 for pm in &converted {
                     if !seen.insert((pm.windows_port, pm.protocol.as_str())) {
                         let msg = format!(
-                            "experimental.wslc.portMappings: duplicate windowsPort {} \
+                            "wslc.portMappings: duplicate windowsPort {} \
                              for protocol '{}'",
                             pm.windows_port, pm.protocol
                         );
@@ -2052,54 +1773,6 @@ fn convert_wire_config(
     })
 }
 
-#[cfg(test)]
-pub(crate) fn parse_rolling_state_aware_wire_input(
-    json: &str,
-    experimental: Option<&RawValue>,
-) -> Result<LegacyStateAwareWireInput, WxcError> {
-    let experimental = experimental.map(RawValue::get);
-    let experimental_span = experimental
-        .map(|raw| experimental_source_span(json, raw))
-        .transpose()?;
-    let experimental_raw = experimental
-        .map(|raw| {
-            config_deserialize::from_str::<serde_json::Value>(raw)
-                .map_err(|error| WxcError::ConfigParse(error.to_string()))
-        })
-        .transpose()?;
-
-    if let Some(experimental) = experimental_raw.as_ref() {
-        if !experimental.is_null() && !experimental.is_object() {
-            return Err(WxcError::ConfigParse(
-                "Invalid configuration at `experimental`: expected an object".to_string(),
-            ));
-        }
-    }
-
-    let base_json = mask_state_aware_experimental_with_span(json, experimental, experimental_span)?;
-    let mut config: wire::MxcConfig = config_deserialize::from_str(&base_json)
-        .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
-
-    // The raw value above is authoritative for state-aware experimental data.
-    config.experimental = None;
-
-    Ok(LegacyStateAwareWireInput {
-        config,
-        experimental_raw,
-        source_text: json.into(),
-    })
-}
-
-#[cfg(test)]
-fn convert_wire_state_aware(
-    json: &str,
-    experimental: Option<&RawValue>,
-    logger: &mut Logger,
-) -> Result<LegacyStateAwareRequest, WxcError> {
-    let input = parse_rolling_state_aware_wire_input(json, experimental)?;
-    normalize_legacy_state_aware(input, logger)
-}
-
 /// Normalize checked exact input without retaining source or backend JSON.
 fn normalize_state_aware(
     input: StateAwareInput,
@@ -2126,137 +1799,6 @@ fn normalize_state_aware(
         logger,
     )?;
     Ok(ParsedStateAwareRequest::new(request, operation))
-}
-
-#[cfg(test)]
-fn normalize_legacy_state_aware(
-    input: LegacyStateAwareWireInput,
-    logger: &mut Logger,
-) -> Result<LegacyStateAwareRequest, WxcError> {
-    let LegacyStateAwareWireInput {
-        config: mut cfg,
-        experimental_raw,
-        source_text,
-    } = input;
-
-    // `phase` is the state-aware discriminator and is constrained by the wire
-    // enum; absence here would be a logic error in the caller's discrimination.
-    let phase = match cfg.phase.take() {
-        Some(p) => p.into(),
-        None => {
-            return Err(WxcError::ConfigParse(
-                "Missing required field: phase".to_string(),
-            ));
-        }
-    };
-
-    // Resolved backend, present only when the request carried `containment`.
-    let containment = cfg
-        .containment
-        .as_ref()
-        .map(|c| map_wire_containment(Some(c)));
-
-    // `containment` is a provision-only field: the backend is selected once at
-    // provision, and every later phase routes by `sandboxId`. A stray
-    // `containment` on a non-provision phase would otherwise leak into the
-    // shared converter's per-backend network guards and produce contradictory
-    // policy behavior (e.g. an exec `containment:"wslc"` + proxy is rejected
-    // either as "proxy requires allow" or as an immutable post-provision mode
-    // change). Reject it once, clearly, as a malformed envelope.
-    if phase != Phase::Provision && cfg.containment.is_some() {
-        return Err(WxcError::ConfigParse(format!(
-            "State-aware '{phase}' requests must not carry 'containment'; the backend is fixed \
-             at provision and later phases route by 'sandboxId'."
-        )));
-    }
-
-    // Mirror the one-shot rejection of moved-to-stable experimental sections.
-    // The one-shot path errors on `experimental.seatbelt` in `convert_wire_config`,
-    // but the state-aware path peels `experimental` into `experimental_raw`
-    // before that runs, so without this check the block would be silently
-    // discarded (the same silent-policy-drop class as the moved-to-stable
-    // sections).
-    if let Some(serde_json::Value::Object(exp)) = experimental_raw.as_ref() {
-        for key in ["seatbelt", "macos_sandbox"] {
-            if exp.contains_key(key) {
-                let msg = format!(
-                    "'experimental.{key}' has moved to the stable section; \
-                     use top-level 'seatbelt' instead."
-                );
-                return Err(WxcError::ConfigParse(msg));
-            }
-        }
-        if exp.contains_key("telemetry") {
-            return Err(WxcError::ConfigParse(
-                "'experimental.telemetry' has moved to the stable section; \
-                 use top-level 'telemetry' instead."
-                    .to_string(),
-            ));
-        }
-    }
-
-    validate_experimental_backend_keys(containment.as_ref(), experimental_raw.as_ref())?;
-
-    let sandbox_id = cfg.sandbox_id.clone();
-
-    // State-aware requests carry only cross-cutting fields (process /
-    // filesystem / network / ui) plus the experimental backend block. One-shot-
-    // only stable sections and lifecycle are not valid here; reject them
-    // explicitly rather than silently discarding a policy the caller believes
-    // is in effect.
-    let mut stray: Vec<&'static str> = Vec::new();
-    if cfg.seatbelt.is_some() {
-        stray.push("seatbelt");
-    }
-    if cfg.process_container.is_some() {
-        stray.push("processContainer");
-    }
-    if cfg.lxc.is_some() {
-        stray.push("lxc");
-    }
-    if cfg.lifecycle.is_some() {
-        stray.push("lifecycle");
-    }
-    if !stray.is_empty() {
-        let msg = format!(
-            "State-aware lifecycle requests do not accept one-shot section(s): {}. \
-             Remove them; per-backend policy and lifecycle are fixed at provision time.",
-            stray.join(", ")
-        );
-        return Err(WxcError::ConfigParse(msg));
-    }
-
-    // Populate the inner ExecutionRequest from cross-cutting fields only. Clear
-    // the state-aware-only fields (already consumed above) and the
-    // now-validated-absent stable sections so the shared one-shot converter
-    // sees a clean surrogate and its `phase`/`sandboxId` guard passes.
-    cfg.sandbox_id = None;
-    cfg.experimental = None;
-    cfg.seatbelt = None;
-    cfg.process_container = None;
-    cfg.lxc = None;
-    cfg.lifecycle = None;
-    let provision_containment = cfg.containment.take();
-    let request = normalize_state_aware_common(
-        cfg,
-        NormalizationContext {
-            phase,
-            containment: provision_containment,
-            sandbox_id: sandbox_id.as_deref(),
-        },
-        logger,
-    )?;
-
-    Ok(LegacyStateAwareRequest {
-        request,
-        phase,
-        containment,
-        sandbox_id,
-        experimental_raw,
-        // Only the legacy diagnostic reference retains source for positional
-        // phase-fragment errors; production dispatch consumes typed operations.
-        source_text: Some(source_text),
-    })
 }
 
 /// Temporary routing view; production derives it exclusively from the operation.
@@ -2291,86 +1833,6 @@ fn normalize_state_aware_common(
     Ok(request)
 }
 
-/// Byte range `[start, end)` of the borrowed `experimental` value within the
-/// original request text.
-///
-/// `raw` is `serde_json`'s borrowed `RawValue` for the `experimental` field,
-/// which — for `&str` input — is a sub-slice of `json`; its pointer therefore
-/// lies within `json`'s allocation and its length stays within bounds. The
-/// checks below make that invariant explicit and fail closed if a future caller
-/// ever passes a `raw` not borrowed from `json` (unreachable on the normal
-/// parser path).
-#[cfg(test)]
-fn experimental_source_span(json: &str, raw: &str) -> Result<(usize, usize), WxcError> {
-    let locate_err = || {
-        WxcError::ConfigParse("Unable to locate the experimental configuration block".to_string())
-    };
-    let start = (raw.as_ptr() as usize)
-        .checked_sub(json.as_ptr() as usize)
-        .filter(|start| *start <= json.len())
-        .ok_or_else(locate_err)?;
-    let end = start
-        .checked_add(raw.len())
-        .filter(|end| *end <= json.len())
-        .ok_or_else(locate_err)?;
-    Ok((start, end))
-}
-
-#[cfg(test)]
-fn mask_state_aware_experimental<'a>(
-    json: &'a str,
-    experimental: Option<&str>,
-) -> Result<Cow<'a, str>, WxcError> {
-    let span = experimental
-        .map(|raw| experimental_source_span(json, raw))
-        .transpose()?;
-    mask_state_aware_experimental_with_span(json, experimental, span)
-}
-
-#[cfg(test)]
-fn mask_state_aware_experimental_with_span<'a>(
-    json: &'a str,
-    experimental: Option<&str>,
-    span: Option<(usize, usize)>,
-) -> Result<Cow<'a, str>, WxcError> {
-    let Some(experimental) = experimental else {
-        return Ok(Cow::Borrowed(json));
-    };
-
-    let (start, end) = span.ok_or_else(|| {
-        WxcError::ConfigParse("Unable to locate the experimental configuration block".to_string())
-    })?;
-    let (prefix, suffix) = match (json.get(..start), json.get(end..)) {
-        (Some(prefix), Some(suffix)) => (prefix, suffix),
-        _ => {
-            return Err(WxcError::ConfigParse(
-                "Unable to locate the experimental configuration block".to_string(),
-            ))
-        }
-    };
-
-    // State-aware backend config is retained separately and typed at dispatch.
-    // Replace it with an empty object of identical byte/line length so the base
-    // wire model validates cross-cutting fields without shifting source
-    // coordinates. ASCII spaces preserve byte offsets; retained CR/LF preserve
-    // lines. The caller already verified that `raw` is an object.
-    let mut masked = String::with_capacity(json.len());
-    masked.push_str(prefix);
-    let mut braces = ['{', '}'].into_iter();
-    for byte in experimental.bytes() {
-        match byte {
-            b'\r' => masked.push('\r'),
-            b'\n' => masked.push('\n'),
-            _ => masked.push(braces.next().unwrap_or(' ')),
-        }
-    }
-    debug_assert!(braces.next().is_none());
-    masked.push_str(suffix);
-    debug_assert_eq!(masked.len(), json.len());
-
-    Ok(Cow::Owned(masked))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2386,6 +1848,50 @@ mod tests {
 
     fn test_logger() -> Logger {
         Logger::new(Mode::Buffer)
+    }
+
+    fn normalize_wire_input_for_test(
+        input: &str,
+        logger: &mut Logger,
+        is_base64: bool,
+    ) -> Result<ExecutionRequest, WxcError> {
+        let result = decode_request_input(input, is_base64).and_then(|json| {
+            config_deserialize::from_str::<wire::MxcConfig>(&json)
+                .map_err(|error| WxcError::ConfigParse(error.to_string()))
+                .and_then(|config| convert_wire_config(config, logger, true, false))
+        });
+        log_one_shot_error(logger, &result);
+        result
+    }
+
+    fn normalize_wire_json_for_test(
+        json: &str,
+        logger: &mut Logger,
+    ) -> Result<ExecutionRequest, WxcError> {
+        let result = config_deserialize::from_str::<wire::MxcConfig>(json)
+            .map_err(|error| WxcError::ConfigParse(error.to_string()))
+            .and_then(|config| convert_wire_config(config, logger, true, false));
+        log_one_shot_error(logger, &result);
+        result
+    }
+
+    fn normalize_wire_value_for_test(
+        value: serde_json::Value,
+        logger: &mut Logger,
+    ) -> Result<ExecutionRequest, WxcError> {
+        let result = config_deserialize::from_value::<wire::MxcConfig>(value)
+            .map_err(|error| WxcError::ConfigParse(error.to_string()))
+            .and_then(|config| convert_wire_config(config, logger, true, false));
+        log_one_shot_error(logger, &result);
+        result
+    }
+
+    fn repository_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap()
+            .to_path_buf()
     }
 
     fn assert_exact_contract_bridge(request: ExactOneShotContract, expected_version: &str) {
@@ -2456,28 +1962,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn execution_snapshot_detects_requested_sandbox_kind_drift() {
-        let json = r#"{
-            "version": "0.9.0-alpha",
-            "containment": "process",
-            "process": {"commandLine": "echo hello"},
-            "telemetry": {"enabled": true}
-        }"#;
-        let MxcRequest::OneShot(mut request) = parse_exact_for_test(json).unwrap() else {
-            panic!("expected a one-shot request");
-        };
-        let original = ExecutionSnapshot::from(&request);
-        assert_eq!(original.requested_sandbox_kind, Some("process"));
-
-        for requested_kind in [Some("processcontainer"), None] {
-            request.telemetry.as_mut().unwrap().requested_sandbox_kind = requested_kind;
-            let changed = ExecutionSnapshot::from(&request);
-            assert_eq!(original.serialized, changed.serialized);
-            assert_ne!(original, changed);
-        }
-    }
-
     #[derive(Debug, Clone, PartialEq)]
     enum RequestSnapshot {
         OneShot(ExecutionSnapshot),
@@ -2495,21 +1979,6 @@ mod tests {
         IsolationSession(Option<Option<String>>),
         WindowsSandbox,
         Wslc(Option<(Option<String>, Option<String>)>),
-        InvalidLegacyPayload(String),
-    }
-
-    /// Frozen mirror of the legacy runtime IsolationSession provision config.
-    ///
-    /// The legacy payload path is the independent *baseline* the exact parser is
-    /// characterized against. Pointing it at the live runtime type would let it
-    /// silently learn every field added to that type afterwards, so the baseline
-    /// would grow with later contract additions and stop being independent.
-    /// Freezing the shape here keeps the reference
-    /// describing the old parser, which is its only job.
-    #[derive(Debug, Default, serde::Deserialize)]
-    #[serde(default, rename_all = "camelCase")]
-    struct FrozenLegacyIsolationSessionProvisionConfig {
-        app_id: Option<String>,
     }
 
     impl From<&MxcRequest> for RequestSnapshot {
@@ -2538,38 +2007,6 @@ mod tests {
                             }
                         }),
                         _ => None,
-                    },
-                },
-            }
-        }
-    }
-
-    impl From<&LegacyMxcRequest> for RequestSnapshot {
-        fn from(request: &LegacyMxcRequest) -> Self {
-            match request {
-                LegacyMxcRequest::OneShot(request) => Self::OneShot(request.into()),
-                LegacyMxcRequest::StateAware(request) => Self::StateAware {
-                    request: (&request.request).into(),
-                    phase: request.phase,
-                    containment: request.containment.clone(),
-                    sandbox_id: request.sandbox_id.clone(),
-                    provision: if request.phase == Phase::Provision {
-                        match request.containment {
-                            Some(ContainmentBackend::IsolationSession) => Some(
-                                request.deserialize_config::<FrozenLegacyIsolationSessionProvisionConfig>("isolation_session", "provision")
-                                    .map(|config| ProvisionSnapshot::IsolationSession(config.map(|config| config.app_id)))
-                                    .unwrap_or_else(|error| ProvisionSnapshot::InvalidLegacyPayload(error.message)),
-                            ),
-                            Some(ContainmentBackend::WindowsSandbox) => Some(ProvisionSnapshot::WindowsSandbox),
-                            Some(ContainmentBackend::Wslc) => Some(
-                                request.deserialize_config::<wire::WslcProvisionPhase>("wslc", "provision")
-                                    .map(|config| ProvisionSnapshot::Wslc(config.map(|config| (config.image, config.image_tar_path))))
-                                    .unwrap_or_else(|error| ProvisionSnapshot::InvalidLegacyPayload(error.message)),
-                            ),
-                            _ => None,
-                        }
-                    } else {
-                        None
                     },
                 },
             }
@@ -2605,1275 +2042,33 @@ mod tests {
         );
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum ErrorRoute {
-        Decode,
-        Version,
-        OneShot,
-        OneShotMalformed,
-        StateAware,
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum ErrorCategory {
-        Syntax,
-        TypedStructure,
-        Semantic,
-    }
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    struct DiagnosticSnapshot {
-        route: ErrorRoute,
-        category: ErrorCategory,
-        path: Option<String>,
-        line: Option<usize>,
-        column: Option<usize>,
-        message: String,
-    }
-
-    fn number_after(message: &str, marker: &str) -> Option<usize> {
-        let suffix = message.split_once(marker)?.1;
-        suffix
-            .split(|character: char| !character.is_ascii_digit())
-            .next()?
-            .parse()
-            .ok()
-    }
-
-    impl From<&ParseError> for DiagnosticSnapshot {
-        fn from(error: &ParseError) -> Self {
-            let route = match error {
-                ParseError::Decode(_) => ErrorRoute::Decode,
-                ParseError::Version(_) => ErrorRoute::Version,
-                ParseError::OneShot(_) => ErrorRoute::OneShot,
-                ParseError::OneShotMalformed(_) => ErrorRoute::OneShotMalformed,
-                ParseError::StateAware(_) => ErrorRoute::StateAware,
-            };
-            let message = error.message();
-            let category = if message.contains("Invalid JSON syntax") {
-                ErrorCategory::Syntax
-            } else if message.contains("Invalid configuration at `")
-                || message.contains("unknown field")
-                || message.contains("missing field")
-                || message.contains("invalid type")
-            {
-                ErrorCategory::TypedStructure
-            } else {
-                ErrorCategory::Semantic
-            };
-            let path = message
-                .split_once("Invalid configuration at `")
-                .and_then(|(_, suffix)| suffix.split_once('`'))
-                .map(|(path, _)| path.to_string());
-
-            Self {
-                route,
-                category,
-                path,
-                line: number_after(&message, "line "),
-                column: number_after(&message, "column "),
-                message,
-            }
-        }
-    }
-
     #[test]
-    fn differential_snapshot_preserves_one_shot_malformed_variant() {
-        let error = || WxcError::ConfigParse("same diagnostic".to_string());
-        let one_shot = DiagnosticSnapshot::from(&ParseError::OneShot(error()));
-        let malformed = DiagnosticSnapshot::from(&ParseError::OneShotMalformed(error()));
-
-        assert_eq!(one_shot.message, malformed.message);
-        assert_eq!(one_shot.category, malformed.category);
-        assert_eq!(one_shot.route, ErrorRoute::OneShot);
-        assert_eq!(malformed.route, ErrorRoute::OneShotMalformed);
-        assert_ne!(one_shot, malformed);
-    }
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    struct LoggerSnapshot {
-        primary_buffer: String,
-        warnings: Vec<String>,
-    }
-
-    impl From<&Logger> for LoggerSnapshot {
-        fn from(logger: &Logger) -> Self {
-            Self {
-                primary_buffer: logger.get_buffer().to_string(),
-                warnings: logger.warnings().to_vec(),
-            }
-        }
-    }
-
-    #[derive(Debug, Clone, PartialEq)]
-    struct AcceptedSnapshot {
-        request: RequestSnapshot,
-        logger: LoggerSnapshot,
-    }
-
-    impl std::ops::Deref for AcceptedSnapshot {
-        type Target = RequestSnapshot;
-
-        fn deref(&self) -> &Self::Target {
-            &self.request
-        }
-    }
-
-    #[derive(Debug, Clone, PartialEq)]
-    struct RejectedSnapshot {
-        diagnostic: DiagnosticSnapshot,
-        logger: LoggerSnapshot,
-    }
-
-    impl std::ops::Deref for RejectedSnapshot {
-        type Target = DiagnosticSnapshot;
-
-        fn deref(&self) -> &Self::Target {
-            &self.diagnostic
-        }
-    }
-
-    #[derive(Debug, Clone, PartialEq)]
-    enum ParserSnapshot {
-        Accepted(AcceptedSnapshot),
-        Rejected(RejectedSnapshot),
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum DivergenceDirection {
-        ExactStricter,
-        DiagnosticOnly,
-    }
-
-    struct DivergenceCase {
-        name: &'static str,
-        input: &'static str,
-        direction: DivergenceDirection,
-        rolling_diagnostic: Option<DiagnosticExpectation>,
-        exact_diagnostic: DiagnosticExpectation,
-        rolling_logger: LoggerExpectation,
-        exact_logger: LoggerExpectation,
-        reason: &'static str,
-    }
-
-    fn snapshot<T>(result: Result<T, ParseError>, logger: &Logger) -> ParserSnapshot
-    where
-        for<'a> RequestSnapshot: From<&'a T>,
-    {
-        let logger = logger.into();
-        match result {
-            Ok(request) => ParserSnapshot::Accepted(AcceptedSnapshot {
-                request: (&request).into(),
-                logger,
-            }),
-            Err(error) => ParserSnapshot::Rejected(RejectedSnapshot {
-                diagnostic: (&error).into(),
-                logger,
-            }),
-        }
-    }
-
-    fn same_parse_outcome(left: &ParserSnapshot, right: &ParserSnapshot) -> bool {
-        match (left, right) {
-            (ParserSnapshot::Accepted(left), ParserSnapshot::Accepted(right)) => {
-                left.request == right.request
-            }
-            (ParserSnapshot::Rejected(left), ParserSnapshot::Rejected(right)) => {
-                left.diagnostic == right.diagnostic
-            }
-            _ => false,
-        }
-    }
-
-    fn parse_both(json: &str) -> (ParserSnapshot, ParserSnapshot) {
-        let mut rolling_logger = test_logger();
-        let rolling_result = parse_mxc_request_json(json, &mut rolling_logger);
-        let rolling = snapshot(rolling_result, &rolling_logger);
-
-        let mut exact_logger = test_logger();
-        let exact_result = parse_exact_mxc_request_json(json, &mut exact_logger);
-        let exact = snapshot(exact_result, &exact_logger);
-        (rolling, exact)
-    }
-
-    #[test]
-    fn differential_snapshot_retains_caller_visible_logger_channels() {
-        let mut logger = test_logger();
-        logger.log_line("primary diagnostic");
-        logger.warning_line("caller warning");
-
-        assert_eq!(
-            LoggerSnapshot::from(&logger),
-            LoggerSnapshot {
-                primary_buffer: "primary diagnostic\n".to_string(),
-                warnings: vec!["caller warning".to_string()],
-            }
-        );
-    }
-
-    #[test]
-    fn differential_success_compares_logger_output() {
-        let existing_path = repository_root().to_string_lossy().replace('\\', "\\\\");
-        let json = format!(
-            r#"{{
-                "version":"0.9.0-alpha",
-                "process":{{"commandLine":"echo logger parity"}},
-                "filesystem":{{
-                    "readwritePaths":["{existing_path}"],
-                    "readonlyPaths":["{existing_path}"]
-                }}
-            }}"#
-        );
-
-        let (rolling, exact) = parse_both(&json);
-        let (ParserSnapshot::Accepted(rolling), ParserSnapshot::Accepted(exact)) =
-            (&rolling, &exact)
-        else {
-            panic!("both parsers must accept the logger parity fixture");
-        };
-
-        assert_eq!(rolling, exact);
-        assert!(rolling
-            .logger
-            .primary_buffer
-            .contains("applying most-restrictive intent (readonly)"));
-        assert!(rolling.logger.warnings.is_empty());
-    }
-
-    fn assert_accepted_models_converge(case: &str, json: &str) {
-        let (rolling, exact) = parse_both(json);
-        match (&rolling, &exact) {
-            (ParserSnapshot::Accepted(rolling), ParserSnapshot::Accepted(exact)) => {
-                assert_eq!(rolling, exact, "{case}: runtime models diverged");
-            }
-            _ => panic!(
-                "{case}: expected both parsers to accept; rolling={rolling:?}, exact={exact:?}"
-            ),
-        }
-    }
-
-    fn repository_root() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .nth(3)
-            .unwrap()
-            .to_path_buf()
-    }
-
-    fn collect_json_files(directory: &Path, files: &mut Vec<PathBuf>) {
-        for entry in fs::read_dir(directory).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                collect_json_files(&path, files);
-            } else if path.extension().and_then(|extension| extension.to_str()) == Some("json") {
-                files.push(path);
-            }
-        }
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-    enum CorpusDivergenceKind {
-        MissingVersion,
-        PublishedComment,
-        PublishedDevelopmentContainment,
-        PublishedExperimental,
-        PublishedStateAware,
-        DevelopmentContractTightening,
-        RemovedDevelopmentNetworkField,
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    struct ExpectedCorpusDivergence {
-        kind: CorpusDivergenceKind,
-        route: ErrorRoute,
-        category: ErrorCategory,
-        path: Option<&'static str>,
-        message_fragment: &'static str,
-    }
-
-    impl ExpectedCorpusDivergence {
-        fn matches(self, actual: &DiagnosticSnapshot) -> bool {
-            actual.route == self.route
-                && actual.category == self.category
-                && actual.path.as_deref() == self.path
-                && actual.message.contains(self.message_fragment)
-        }
-    }
-
-    impl CorpusDivergenceKind {
-        fn reason(self) -> &'static str {
-            match self {
-                Self::MissingVersion => {
-                    "The rolling parser supports legacy omitted versions; exact contracts require a registered declaration."
-                }
-                Self::PublishedComment => {
-                    "The rolling parser accepts the comment extension, but this published contract rejects it before later fields."
-                }
-                Self::PublishedDevelopmentContainment => {
-                    "The rolling parser exposes development backends under an older declaration; the published contract freezes its original containment enum."
-                }
-                Self::PublishedExperimental => {
-                    "Published one-shot contracts are closed and do not contain the rolling experimental extension."
-                }
-                Self::PublishedStateAware => {
-                    "Published 0.6-0.8 contracts are one-shot only; state-aware roots exist in the development contract."
-                }
-                Self::DevelopmentContractTightening => {
-                    "The migrated 0.9 contract intentionally rejects a parse-and-ignore one-shot extension or a phase/backend policy that the rolling parser defers to backend validation."
-                }
-                Self::RemovedDevelopmentNetworkField => {
-                    "The exact 0.9 contract removes legacy network fields; the rolling parser remains an independent legacy-input oracle."
-                }
-            }
-        }
-    }
-
-    fn expected_corpus_divergences(
-    ) -> std::collections::BTreeMap<&'static str, ExpectedCorpusDivergence> {
-        let entries = [
-            (
-                "tests/configs/hyperlight_networking.json",
-                ExpectedCorpusDivergence {
-                    kind: CorpusDivergenceKind::RemovedDevelopmentNetworkField,
-                    route: ErrorRoute::OneShot,
-                    category: ErrorCategory::TypedStructure,
-                    path: Some("network.allowedHosts"),
-                    message_fragment: "unknown field `allowedHosts`",
-                },
-            ),
-            (
-                "tests/configs/hyperlight_networking_blocked.json",
-                ExpectedCorpusDivergence {
-                    kind: CorpusDivergenceKind::RemovedDevelopmentNetworkField,
-                    route: ErrorRoute::OneShot,
-                    category: ErrorCategory::TypedStructure,
-                    path: Some("network.allowedHosts"),
-                    message_fragment: "unknown field `allowedHosts`",
-                },
-            ),
-            (
-                "tests/configs/isolation_session_configid_rejected.json",
-                ExpectedCorpusDivergence {
-                    kind: CorpusDivergenceKind::DevelopmentContractTightening,
-                    route: ErrorRoute::OneShot,
-                    category: ErrorCategory::TypedStructure,
-                    path: Some("experimental.isolation_session"),
-                    message_fragment: "unknown field `isolation_session`",
-                },
-            ),
-            (
-                "tests/configs/isolation_session_one_shot_stray_config_rejected.json",
-                ExpectedCorpusDivergence {
-                    kind: CorpusDivergenceKind::DevelopmentContractTightening,
-                    route: ErrorRoute::OneShot,
-                    category: ErrorCategory::TypedStructure,
-                    path: Some("experimental.isolation_session"),
-                    message_fragment: "unknown field `isolation_session`",
-                },
-            ),
-            (
-                "tests/configs/isolation_session_state_aware_provision_rejected_denied.json",
-                ExpectedCorpusDivergence {
-                    kind: CorpusDivergenceKind::DevelopmentContractTightening,
-                    route: ErrorRoute::StateAware,
-                    category: ErrorCategory::TypedStructure,
-                    path: Some("filesystem"),
-                    message_fragment: "unknown field `filesystem`",
-                },
-            ),
-            (
-                "tests/configs/isolation_session_state_aware_provision_rejected_network.json",
-                ExpectedCorpusDivergence {
-                    kind: CorpusDivergenceKind::DevelopmentContractTightening,
-                    route: ErrorRoute::StateAware,
-                    category: ErrorCategory::TypedStructure,
-                    path: Some("network.egress.default"),
-                    message_fragment: "expected `allow`",
-                },
-            ),
-            (
-                "tests/configs/isolation_session_state_aware_provision_rejected_ui.json",
-                ExpectedCorpusDivergence {
-                    kind: CorpusDivergenceKind::DevelopmentContractTightening,
-                    route: ErrorRoute::StateAware,
-                    category: ErrorCategory::TypedStructure,
-                    path: Some("ui"),
-                    message_fragment: "unknown field `ui`",
-                },
-            ),
-            (
-                "tests/configs/isolation_session_state_aware_provision_with_filesystem.json",
-                ExpectedCorpusDivergence {
-                    kind: CorpusDivergenceKind::DevelopmentContractTightening,
-                    route: ErrorRoute::StateAware,
-                    category: ErrorCategory::TypedStructure,
-                    path: Some("filesystem"),
-                    message_fragment: "unknown field `filesystem`",
-                },
-            ),
-            (
-                "tests/configs/wslc_state_aware_exec_rejected_filesystem.json",
-                ExpectedCorpusDivergence {
-                    kind: CorpusDivergenceKind::DevelopmentContractTightening,
-                    route: ErrorRoute::StateAware,
-                    category: ErrorCategory::TypedStructure,
-                    path: Some("filesystem"),
-                    message_fragment: "unknown field `filesystem`",
-                },
-            ),
-            (
-                "tests/configs/wslc_state_aware_provision_rejected_proxy.json",
-                ExpectedCorpusDivergence {
-                    kind: CorpusDivergenceKind::DevelopmentContractTightening,
-                    route: ErrorRoute::StateAware,
-                    category: ErrorCategory::TypedStructure,
-                    path: Some("runtimeConfig"),
-                    message_fragment: "unknown field `runtimeConfig`",
-                },
-            ),
-        ];
-        let divergences: std::collections::BTreeMap<_, _> = entries.into_iter().collect();
-        assert_eq!(
-            divergences.len(),
-            entries.len(),
-            "expected corpus divergence paths must be unique"
-        );
-        divergences
-    }
-
-    #[derive(Debug, Clone, Copy)]
-    struct DiagnosticExpectation {
-        route: ErrorRoute,
-        category: ErrorCategory,
-        path: Option<&'static str>,
-        line: Option<usize>,
-        column: Option<usize>,
-        message_contains: &'static [&'static str],
-    }
-
-    #[derive(Debug, Clone, Copy, Default)]
-    struct LoggerExpectation {
-        // One stable fragment per message; channel, order, and counts are exact.
-        primary_lines: &'static [&'static str],
-        warnings: &'static [&'static str],
-    }
-
-    #[derive(Debug, Clone, Copy)]
-    struct CorpusDiagnosticDivergence {
-        rolling: DiagnosticExpectation,
-        exact: DiagnosticExpectation,
-        reason: &'static str,
-    }
-
-    fn policy_document_diagnostic_divergence(exact_line: usize) -> CorpusDiagnosticDivergence {
-        CorpusDiagnosticDivergence {
-            rolling: DiagnosticExpectation {
-                route: ErrorRoute::OneShot,
-                category: ErrorCategory::TypedStructure,
-                path: Some("policy"),
-                line: Some(2),
-                column: Some(10),
-                message_contains: &["unknown field `policy`"],
-            },
-            exact: DiagnosticExpectation {
-                route: ErrorRoute::Version,
-                category: ErrorCategory::TypedStructure,
-                path: None,
-                line: Some(exact_line),
-                column: Some(1),
-                message_contains: &["Invalid version declaration", "missing field `version`"],
-            },
-            reason: "These policy documents are not executor requests: rolling decoding reaches the wrapper field, while exact routing first requires a version declaration.",
-        }
-    }
-
-    fn expected_corpus_diagnostic_divergences(
-    ) -> std::collections::BTreeMap<&'static str, CorpusDiagnosticDivergence> {
-        let entries = [
-            (
-                "tests/configs/bubblewrap_network_directional_pre08_rejected.json",
-                CorpusDiagnosticDivergence {
-                    rolling: DiagnosticExpectation {
-                        route: ErrorRoute::OneShot,
-                        category: ErrorCategory::Semantic,
-                        path: None,
-                        line: None,
-                        column: None,
-                        message_contains: &[
-                            "network.egress",
-                            "require schema version 0.8 or later",
-                        ],
-                    },
-                    exact: DiagnosticExpectation {
-                        route: ErrorRoute::OneShot,
-                        category: ErrorCategory::TypedStructure,
-                        path: Some("network.egress"),
-                        line: Some(9),
-                        column: Some(12),
-                        message_contains: &["unknown field `egress`"],
-                    },
-                    reason: "The published pre-0.8 contract rejects the directional field structurally before the rolling semantic version gate.",
-                },
-            ),
-            (
-                "tests/configs/rejected_version_too_old.json",
-                CorpusDiagnosticDivergence {
-                    rolling: DiagnosticExpectation {
-                        route: ErrorRoute::OneShot,
-                        category: ErrorCategory::Semantic,
-                        path: None,
-                        line: None,
-                        column: None,
-                        message_contains: &["older than supported"],
-                    },
-                    exact: DiagnosticExpectation {
-                        route: ErrorRoute::Version,
-                        category: ErrorCategory::Semantic,
-                        path: None,
-                        line: None,
-                        column: None,
-                        message_contains: &["Unsupported contract version"],
-                    },
-                    reason: "Exact routing rejects an unregistered declaration before the rolling parser formats its supported-range diagnostic.",
-                },
-            ),
-            (
-                "tests/configs/seatbelt_reject_directional_pre08.json",
-                CorpusDiagnosticDivergence {
-                    rolling: DiagnosticExpectation {
-                        route: ErrorRoute::OneShot,
-                        category: ErrorCategory::Semantic,
-                        path: None,
-                        line: None,
-                        column: None,
-                        message_contains: &[
-                            "network.egress",
-                            "require schema version 0.8 or later",
-                        ],
-                    },
-                    exact: DiagnosticExpectation {
-                        route: ErrorRoute::OneShot,
-                        category: ErrorCategory::TypedStructure,
-                        path: Some("network.egress"),
-                        line: Some(9),
-                        column: Some(25),
-                        message_contains: &["unknown field `egress`"],
-                    },
-                    reason: "The published pre-0.8 contract rejects the directional field structurally before the rolling semantic version gate.",
-                },
-            ),
-            (
-                "tests/policy/request-directional-network.json",
-                policy_document_diagnostic_divergence(40),
-            ),
-            (
-                "tests/policy/request-process-container.json",
-                policy_document_diagnostic_divergence(60),
-            ),
-            (
-                "tests/policy/request-wslc.json",
-                policy_document_diagnostic_divergence(23),
-            ),
-        ];
-        let divergences: std::collections::BTreeMap<_, _> = entries.into_iter().collect();
-        assert_eq!(
-            divergences.len(),
-            entries.len(),
-            "expected corpus diagnostic divergence paths must be unique"
-        );
-        divergences
-    }
-
-    fn diagnostic_expectation_mismatches(
-        expected: DiagnosticExpectation,
-        actual: &DiagnosticSnapshot,
-    ) -> Vec<String> {
-        let mut mismatches = Vec::new();
-        if actual.route != expected.route {
-            mismatches.push(format!(
-                "route: expected {:?}, observed {:?}",
-                expected.route, actual.route
-            ));
-        }
-        if actual.category != expected.category {
-            mismatches.push(format!(
-                "category: expected {:?}, observed {:?}",
-                expected.category, actual.category
-            ));
-        }
-        if actual.path.as_deref() != expected.path {
-            mismatches.push(format!(
-                "path: expected {:?}, observed {:?}",
-                expected.path, actual.path
-            ));
-        }
-        if actual.line != expected.line {
-            mismatches.push(format!(
-                "line: expected {:?}, observed {:?}",
-                expected.line, actual.line
-            ));
-        }
-        if actual.column != expected.column {
-            mismatches.push(format!(
-                "column: expected {:?}, observed {:?}",
-                expected.column, actual.column
-            ));
-        }
-        for fragment in expected.message_contains {
-            if !actual.message.contains(fragment) {
-                mismatches.push(format!("message does not contain {fragment:?}"));
-            }
-        }
-        mismatches
-    }
-
-    fn logger_expectation_mismatches(
-        expected: LoggerExpectation,
-        actual: &LoggerSnapshot,
-    ) -> Vec<String> {
-        let mut mismatches = Vec::new();
-        for (channel, messages, fragments) in [
-            (
-                "primary_buffer",
-                actual.primary_buffer.lines().collect::<Vec<_>>(),
-                expected.primary_lines,
-            ),
-            (
-                "warnings",
-                actual
-                    .warnings
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>(),
-                expected.warnings,
-            ),
+    fn exact_parser_preserves_source_aware_typed_diagnostics() {
+        for (version, state_aware) in [
+            ("0.6.0-alpha", false),
+            ("0.7.0-alpha", false),
+            ("0.8.0-alpha", false),
+            ("0.9.0-alpha", false),
+            ("0.9.0-alpha", true),
         ] {
-            if messages.len() != fragments.len() {
-                mismatches.push(format!(
-                    "{channel}: expected {} messages, observed {}",
-                    fragments.len(),
-                    messages.len()
-                ));
-            }
-            for (index, (message, fragment)) in messages.iter().zip(fragments).enumerate() {
-                if !message.contains(fragment) {
-                    mismatches.push(format!(
-                        "{channel}[{index}]: message does not contain {fragment:?}"
-                    ));
-                }
-            }
-        }
-        mismatches
-    }
-
-    fn corpus_divergence_counts(
-        divergences: impl Iterator<Item = CorpusDivergenceKind>,
-    ) -> std::collections::BTreeMap<CorpusDivergenceKind, usize> {
-        let mut counts = std::collections::BTreeMap::new();
-        for kind in divergences {
-            *counts.entry(kind).or_insert(0) += 1;
-        }
-        counts
-    }
-
-    fn classify_corpus_exact_stricter(
-        root: &serde_json::Value,
-        exact: &DiagnosticSnapshot,
-    ) -> Option<CorpusDivergenceKind> {
-        let object = root.as_object()?;
-        if !object.contains_key("version")
-            && exact.route == ErrorRoute::Version
-            && exact.category == ErrorCategory::TypedStructure
-            && exact.path.is_none()
-            && exact
-                .message
-                .contains("Invalid version declaration: missing field `version`")
-        {
-            return Some(CorpusDivergenceKind::MissingVersion);
-        }
-
-        let version = object.get("version")?.as_str()?;
-        if version == "0.9.0-alpha" {
-            if exact.category == ErrorCategory::TypedStructure {
-                if let Some(field) = exact
-                    .path
-                    .as_deref()
-                    .and_then(|path| path.strip_prefix("network."))
-                {
-                    if matches!(
-                        field,
-                        "defaultPolicy"
-                            | "enforcementMode"
-                            | "allowedHosts"
-                            | "blockedHosts"
-                            | "allowLocalNetwork"
-                            | "proxy"
-                    ) && object
-                        .get("network")
-                        .and_then(serde_json::Value::as_object)
-                        .is_some_and(|network| network.contains_key(field))
-                        && exact.message.contains(&format!("unknown field `{field}`"))
-                    {
-                        return Some(CorpusDivergenceKind::RemovedDevelopmentNetworkField);
-                    }
-                }
-                let removed_phase_field = object.get("phase").and_then(serde_json::Value::as_str)
-                    == Some("provision")
-                    && match object
-                        .get("containment")
-                        .and_then(serde_json::Value::as_str)
-                    {
-                        Some("isolation_session") => {
-                            exact.path.as_deref().is_some_and(|path| {
-                                path == "network" || path.starts_with("network.")
-                            }) && object.contains_key("network")
-                        }
-                        Some("wslc") => {
-                            exact.path.as_deref() == Some("runtimeConfig")
-                                && object.contains_key("runtimeConfig")
-                                && exact.message.contains("unknown field `runtimeConfig`")
-                        }
-                        _ => false,
-                    };
-                if removed_phase_field {
-                    return Some(CorpusDivergenceKind::DevelopmentContractTightening);
-                }
-            }
-            // The one-shot IsolationSession section is closed. The rolling
-            // parser stores unknown members there and lets the backend decide;
-            // the exact contract refuses them outright. Matching on the
-            // section's own path keeps this specific to that surface.
-            let is_closed_one_shot_extension = exact.route == ErrorRoute::OneShot
-                && exact.category == ErrorCategory::TypedStructure
-                && exact
-                    .path
-                    .as_deref()
-                    .is_some_and(|path| path.starts_with("experimental.isolation_session"))
-                && exact.message.contains("unknown field");
-            let is_state_aware_policy_tightening = exact.route == ErrorRoute::StateAware
-                && matches!(
-                    exact.category,
-                    ErrorCategory::TypedStructure | ErrorCategory::Semantic
-                )
-                && (object.contains_key("filesystem")
-                    || object.contains_key("ui")
-                    || object
-                        .get("network")
-                        .and_then(serde_json::Value::as_object)
-                        .and_then(|network| network.get("defaultPolicy"))
-                        .and_then(serde_json::Value::as_str)
-                        == Some("block"));
-            return (is_closed_one_shot_extension || is_state_aware_policy_tightening)
-                .then_some(CorpusDivergenceKind::DevelopmentContractTightening);
-        }
-
-        if !matches!(version, "0.6.0-alpha" | "0.7.0-alpha" | "0.8.0-alpha")
-            || exact.route != ErrorRoute::OneShot
-            || exact.category != ErrorCategory::TypedStructure
-        {
-            return None;
-        }
-
-        match exact.path.as_deref() {
-            Some("_comment")
-                if exact
-                    .message
-                    .contains("Invalid configuration at `_comment`: unknown field `_comment`") =>
-            {
-                Some(CorpusDivergenceKind::PublishedComment)
-            }
-            Some("phase")
-                if exact
-                    .message
-                    .contains("Invalid configuration at `phase`: unknown field `phase`") =>
-            {
-                Some(CorpusDivergenceKind::PublishedStateAware)
-            }
-            Some("containment")
-                if exact
-                    .message
-                    .contains("Invalid configuration at `containment`: unknown variant") =>
-            {
-                Some(CorpusDivergenceKind::PublishedDevelopmentContainment)
-            }
-            Some("experimental")
-                if exact.message.contains(
-                    "Invalid configuration at `experimental`: unknown field `experimental`",
-                ) =>
-            {
-                Some(CorpusDivergenceKind::PublishedExperimental)
-            }
-            _ => None,
-        }
-    }
-
-    #[test]
-    fn corpus_divergence_classification_requires_exact_diagnostic() {
-        let diagnostic = |route, path: Option<&str>, message: &str| DiagnosticSnapshot {
-            route,
-            category: ErrorCategory::TypedStructure,
-            path: path.map(str::to_string),
-            line: None,
-            column: None,
-            message: message.to_string(),
-        };
-        let missing_version = diagnostic(
-            ErrorRoute::Version,
-            None,
-            "Invalid version declaration: missing field `version`",
-        );
-        assert_eq!(
-            classify_corpus_exact_stricter(&serde_json::json!({}), &missing_version),
-            Some(CorpusDivergenceKind::MissingVersion)
-        );
-        assert_eq!(
-            classify_corpus_exact_stricter(&serde_json::json!({"version": 8}), &missing_version),
-            None,
-            "a present non-string version is not a missing version"
-        );
-
-        let published = serde_json::json!({"version": "0.8.0-alpha"});
-        for (path, message, kind) in [
-            (
-                "_comment",
-                "Invalid configuration at `_comment`: unknown field `_comment`",
-                CorpusDivergenceKind::PublishedComment,
-            ),
-            (
-                "phase",
-                "Invalid configuration at `phase`: unknown field `phase`",
-                CorpusDivergenceKind::PublishedStateAware,
-            ),
-            (
-                "containment",
-                "Invalid configuration at `containment`: unknown variant `wslc`",
-                CorpusDivergenceKind::PublishedDevelopmentContainment,
-            ),
-            (
-                "experimental",
-                "Invalid configuration at `experimental`: unknown field `experimental`",
-                CorpusDivergenceKind::PublishedExperimental,
-            ),
-        ] {
-            let exact = diagnostic(ErrorRoute::OneShot, Some(path), message);
-            assert_eq!(
-                classify_corpus_exact_stricter(&published, &exact),
-                Some(kind),
-                "{path}"
-            );
-
-            let wrong_route = diagnostic(ErrorRoute::StateAware, Some(path), message);
-            assert_eq!(
-                classify_corpus_exact_stricter(&published, &wrong_route),
-                None,
-                "{path}: the exact diagnostic route is part of the classification"
-            );
-        }
-    }
-
-    fn classified_divergence_mismatches(
-        case: &DivergenceCase,
-        rolling: &ParserSnapshot,
-        exact: &ParserSnapshot,
-    ) -> Vec<String> {
-        let mut mismatches = Vec::new();
-        if case.reason.is_empty() {
-            mismatches.push("missing classification reason".to_string());
-        }
-        if case.rolling_diagnostic.is_some()
-            != (case.direction == DivergenceDirection::DiagnosticOnly)
-        {
-            mismatches.push("rolling expectation contradicts the divergence direction".to_string());
-        }
-        for (side, actual, diagnostic, logger) in [
-            (
-                "rolling",
-                rolling,
-                case.rolling_diagnostic,
-                case.rolling_logger,
-            ),
-            (
-                "exact",
-                exact,
-                Some(case.exact_diagnostic),
-                case.exact_logger,
-            ),
-        ] {
-            let actual_logger = match (actual, diagnostic) {
-                (ParserSnapshot::Accepted(actual), None) => &actual.logger,
-                (ParserSnapshot::Rejected(actual), Some(expected)) => {
-                    mismatches.extend(
-                        diagnostic_expectation_mismatches(expected, &actual.diagnostic)
-                            .into_iter()
-                            .map(|message| format!("{side}: {message}")),
-                    );
-                    &actual.logger
-                }
-                (ParserSnapshot::Accepted(actual), Some(_)) => {
-                    mismatches.push(format!("{side}: expected rejection, observed acceptance"));
-                    &actual.logger
-                }
-                (ParserSnapshot::Rejected(actual), None) => {
-                    mismatches.push(format!("{side}: expected acceptance, observed rejection"));
-                    &actual.logger
-                }
-            };
-            mismatches.extend(
-                logger_expectation_mismatches(logger, actual_logger)
-                    .into_iter()
-                    .map(|message| format!("{side}: logger.{message}")),
-            );
-        }
-        if case.direction == DivergenceDirection::DiagnosticOnly {
-            if let (ParserSnapshot::Rejected(rolling), ParserSnapshot::Rejected(exact)) =
-                (rolling, exact)
-            {
-                if rolling.message == exact.message {
-                    mismatches.push("classified diagnostic unexpectedly converged".to_string());
-                }
-            }
-        }
-        mismatches
-    }
-
-    fn assert_classified_divergence(case: &DivergenceCase) {
-        let (rolling, exact) = parse_both(case.input);
-        let mismatches = classified_divergence_mismatches(case, &rolling, &exact);
-        assert!(
-            mismatches.is_empty(),
-            "{}: {}\nrolling={rolling:?}\nexact={exact:?}",
-            case.name,
-            mismatches.join("\n")
-        );
-    }
-
-    #[test]
-    fn differential_one_shot_matrix_converges_across_registered_versions() {
-        for (case, json) in [
-            (
-                "v0.6 stable policy",
-                r#"{
-                    "version":"0.6.0-alpha",
-                    "containerId":"differential-v06",
-                    "containment":"processcontainer",
-                    "process":{
-                        "commandLine":"echo v06",
-                        "cwd":"C:\\work",
-                        "env":["A=1"],
-                        "timeout":1234
-                    },
-                    "filesystem":{
-                        "readwritePaths":["C:\\work"],
-                        "readonlyPaths":["C:\\input"],
-                        "deniedPaths":["C:\\secret"]
-                    },
-                    "network":{
-                        "defaultPolicy":"block",
-                        "enforcementMode":"capabilities",
-                        "allowedHosts":["example.com"],
-                        "allowLocalNetwork":false
-                    },
-                    "ui":{"disable":false,"clipboard":"read","injection":true},
-                    "processContainer":{
-                        "leastPrivilege":true,
-                        "capabilities":["internetClient"],
-                        "ui":{"isolation":"desktop","ime":true}
-                    }
-                }"#,
-            ),
-            (
-                "v0.7 stable policy",
-                r#"{
-                    "$schema":"https://example.invalid/v07",
-                    "_comment":{"purpose":"differential"},
-                    "version":"0.7.0-alpha",
-                    "containerId":"differential-v07",
-                    "containment":"processcontainer",
-                    "lifecycle":{"destroyOnExit":false,"preservePolicy":true},
-                    "process":{"commandLine":"echo v07","env":["B=2"]},
-                    "filesystem":{"readonlyPaths":["C:\\input"]},
-                    "fallback":{"allowDaclMutation":false},
-                    "network":{
-                        "defaultPolicy":"allow",
-                        "enforcementMode":"capabilities",
-                        "blockedHosts":["blocked.example"],
-                        "allowLocalNetwork":true
-                    },
-                    "ui":{"disable":true,"clipboard":"write","injection":false},
-                    "processContainer":{"capabilities":["internetClient"]}
-                }"#,
-            ),
-            (
-                "v0.8 directional policy",
-                r#"{
-                    "version":"0.8.0-alpha",
-                    "containment":"processcontainer",
-                    "process":{"commandLine":"echo v08"},
-                    "filesystem":{"readwritePaths":["C:\\work"]},
-                    "network":{
-                        "egress":{"default":"deny","allow":[{"to":[{"cidr":"203.0.113.0/24"}]}]},
-                        "ingress":{"default":"deny","hostLoopback":"deny"}
-                    },
-                    "ui":{"disable":false,"clipboard":"all","injection":true},
-                    "processContainer":{"capabilities":["internetClient"]}
-                }"#,
-            ),
-            (
-                "v0.9 development policy",
-                r#"{
-                    "version":"0.9.0-alpha",
-                    "containment":"processcontainer",
-                    "process":{"commandLine":"echo v09","timeout":5678},
-                    "filesystem":{"deniedPaths":["C:\\secret"]},
-                    "network":{
-                        "egress":{"default":"deny"},
-                        "ingress":{"default":"deny","hostLoopback":"deny"}
-                    },
-                    "ui":{"disable":true,"clipboard":"none","injection":false},
-                    "processContainer":{
-                        "capabilities":["internetClient"],
-                        "captureDenials":{"mode":"block","retainEtl":true}
-                    },
-                    "telemetry":{"enabled":false}
-                }"#,
-            ),
-        ] {
-            assert_accepted_models_converge(case, json);
-        }
-    }
-
-    #[test]
-    fn differential_state_aware_matrix_converges_for_every_phase_and_backend() {
-        for (case, json) in [
-            (
-                "Windows Sandbox provision",
-                r#"{
-                    "version":"0.9.0-alpha",
-                    "phase":"provision",
-                    "containment":"windows_sandbox",
-                    "filesystem":{"readwritePaths":["C:\\work"],"readonlyPaths":["C:\\input"]},
-                    "telemetry":{"enabled":true}
-                }"#,
-            ),
-            (
-                "IsolationSession provision",
-                r#"{
-                    "version":"0.9.0-alpha",
-                    "phase":"provision",
-                    "containment":"isolation_session",
-                    "telemetry":{"enabled":false},
-                    "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},
-                    "experimental":{
-                        "isolation_session":{"provision":{"appId":"Contoso.App"}}
-                    }
-                }"#,
-            ),
-            (
-                "WSLC provision",
-                r#"{
-                    "version":"0.9.0-alpha",
-                    "phase":"provision",
-                    "containment":"wslc",
-                    "filesystem":{"readwritePaths":["C:\\work"],"readonlyPaths":["C:\\input"]},
-                    "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},
-                    "telemetry":{"enabled":true},
-                    "experimental":{
-                        "wslc":{"provision":{"image":"alpine:latest","imageTarPath":"C:\\images\\a.tar"}}
-                    }
-                }"#,
-            ),
-            (
-                "start",
-                r#"{
-                    "version":"0.9.0-alpha",
-                    "phase":"start",
-                    "sandboxId":"wsb:abcd1234",
-                    "telemetry":{"enabled":true}
-                }"#,
-            ),
-            (
-                "exec with immutable network presence",
-                r#"{
-                    "version":"0.9.0-alpha",
-                    "phase":"exec",
-                    "sandboxId":"wslc:abcd1234",
-                    "process":{"commandLine":"echo exec","cwd":"/work","env":["C=3"],"timeout":42},
-                    "runtimeConfig":{"networkProxy":"http://proxy.example.com:8080"},
-                    "telemetry":{"enabled":false}
-                }"#,
-            ),
-            (
-                "stop",
-                r#"{
-                    "version":"0.9.0-alpha",
-                    "phase":"stop",
-                    "sandboxId":"iso:abcd1234",
-                    "telemetry":{"enabled":true}
-                }"#,
-            ),
-            (
-                "deprovision",
-                r#"{
-                    "version":"0.9.0-alpha",
-                    "phase":"deprovision",
-                    "sandboxId":"wslc:abcd1234",
-                    "telemetry":{"enabled":false}
-                }"#,
-            ),
-        ] {
-            assert_accepted_models_converge(case, json);
-        }
-    }
-
-    #[test]
-    fn differential_source_aware_diagnostics_converge_when_contracts_share_the_shape() {
-        for (version, route) in [
-            ("0.6.0-alpha", ErrorRoute::OneShot),
-            ("0.7.0-alpha", ErrorRoute::OneShot),
-            ("0.8.0-alpha", ErrorRoute::OneShot),
-            ("0.9.0-alpha", ErrorRoute::OneShot),
-            ("0.9.0-alpha", ErrorRoute::StateAware),
-        ] {
-            let phase_fields = if route == ErrorRoute::StateAware {
-                "  \"phase\": \"exec\",\n  \"sandboxId\": \"wslc:abcd1234\",\n"
+            let phase_fields = if state_aware {
+                "  \"phase\": \"exec\",\n  \"sandboxId\": \"iso:abcd1234\",\n"
             } else {
                 ""
             };
             let json = format!(
                 "{{\n  \"version\": \"{version}\",\n{phase_fields}  \"process\": {{\n    \"commandLine\": \"echo hello\",\n    \"cwd\": 42\n  }}\n}}"
             );
-            let (rolling, exact) = parse_both(&json);
-            let (ParserSnapshot::Rejected(rolling), ParserSnapshot::Rejected(exact)) =
-                (rolling, exact)
-            else {
-                panic!("{version} {route:?}: both parsers must reject the typed cwd error");
-            };
-
-            assert_eq!(rolling.route, route);
-            assert_eq!(rolling.route, exact.route);
-            assert_eq!(rolling.category, exact.category);
-            assert_eq!(rolling.path.as_deref(), Some("process.cwd"));
-            assert_eq!(rolling.path, exact.path);
-            assert_eq!(rolling.line, exact.line);
-            assert_eq!(rolling.column, exact.column);
+            let error = parse_exact_for_test(&json).unwrap_err();
+            let message = error.message();
+            assert!(
+                message.contains("Invalid configuration at `process.cwd`"),
+                "{message}"
+            );
+            assert!(message.contains("line "), "{message}");
+            assert!(message.contains("column "), "{message}");
+            assert_eq!(matches!(error, ParseError::StateAware(_)), state_aware);
         }
-
-        let malformed = "{\n  \"version\":\"0.9.0-alpha\",\n  \"process\":";
-        let (rolling, exact) = parse_both(malformed);
-        let (ParserSnapshot::Rejected(rolling), ParserSnapshot::Rejected(exact)) = (rolling, exact)
-        else {
-            panic!("both parsers must reject invalid JSON syntax");
-        };
-        assert_eq!(rolling.route, ErrorRoute::Decode);
-        assert_eq!(exact.route, ErrorRoute::Decode);
-        assert_eq!(rolling.category, ErrorCategory::Syntax);
-        assert_eq!(exact.category, ErrorCategory::Semantic);
-        assert_eq!(rolling.path, None);
-        assert_eq!(exact.path, None);
-        assert_eq!(rolling.line, exact.line);
-        assert_eq!(rolling.column, exact.column);
-    }
-
-    #[test]
-    fn differential_effective_document_covers_loader_modes_and_command_splice() {
-        let root = repository_root();
-        let path = root
-            .join("tests")
-            .join("examples")
-            .join("01_hello_world.json");
-        let json = fs::read_to_string(&path).unwrap();
-
-        let file_loaded = load_mxc_request(path.to_str().unwrap(), &mut test_logger(), false)
-            .map(|request| RequestSnapshot::from(&request))
-            .unwrap();
-        let encoded = base64_encode(json.as_bytes());
-        let base64_loaded = load_mxc_request(&encoded, &mut test_logger(), true)
-            .map(|request| RequestSnapshot::from(&request))
-            .unwrap();
-        let raw_loaded = load_mxc_request_from_json(&json, &mut test_logger())
-            .map(|request| RequestSnapshot::from(&request))
-            .unwrap();
-        let exact = parse_exact_for_test(&json)
-            .map(|request| RequestSnapshot::from(&request))
-            .unwrap();
-        assert_eq!(file_loaded, base64_loaded);
-        assert_eq!(file_loaded, raw_loaded);
-        assert_eq!(file_loaded, exact);
-
-        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        let rolling_value = load_request_from_value(value.clone(), &mut test_logger()).unwrap();
-        let serialized_value = serde_json::to_string(&value).unwrap();
-        let exact_value = parse_exact_for_test(&serialized_value).unwrap();
-        assert_eq!(
-            ExecutionSnapshot::from(&rolling_value),
-            match RequestSnapshot::from(&exact_value) {
-                RequestSnapshot::OneShot(request) => request,
-                RequestSnapshot::StateAware { .. } => panic!("value was one-shot"),
-            }
-        );
-
-        let wrong_type = r#"{
-            "version":"0.9.0-alpha",
-            "containment":"processcontainer",
-            "process":{"commandLine":42}
-        }"#;
-        assert!(parse_mxc_request_json(wrong_type, &mut test_logger()).is_err());
-        assert!(parse_exact_for_test(wrong_type).is_err());
-
-        let command = argv(&["echo", "from splice"]);
-        let (effective, _) = apply_cli_command(wrong_type, &command).unwrap();
-        assert_eq!(
-            effective, wrong_type,
-            "command splicing deliberately leaves invalid existing commandLine types for typed parsing"
-        );
-        let (rolling, exact) = parse_both(&effective);
-        assert!(matches!(rolling, ParserSnapshot::Rejected(_)));
-        assert!(matches!(exact, ParserSnapshot::Rejected(_)));
-
-        let null_command = wrong_type.replace("42", "null");
-        let (effective, _) = apply_cli_command(&null_command, &command).unwrap();
-        assert_ne!(effective, null_command);
-        assert_accepted_models_converge("command-spliced effective one-shot", &effective);
-
-        let state_aware = r#"{
-            "version":"0.9.0-alpha",
-            "phase":"exec",
-            "sandboxId":"wslc:abcd1234",
-            "process":{"commandLine":"old"}
-        }"#;
-        let (effective, override_log) = apply_cli_command(state_aware, &command).unwrap();
-        assert!(override_log.is_some());
-        assert_accepted_models_converge("command-spliced effective state-aware exec", &effective);
-
-        let one_shot = parse_both(r#"{"version":"0.9.0-alpha","process":{"commandLine":"x"}}"#);
-        let state_aware =
-            parse_both(r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#);
-        assert!(matches!(
-            one_shot,
-            (
-                ParserSnapshot::Accepted(AcceptedSnapshot {
-                    request: RequestSnapshot::OneShot(_),
-                    ..
-                }),
-                ParserSnapshot::Accepted(AcceptedSnapshot {
-                    request: RequestSnapshot::OneShot(_),
-                    ..
-                })
-            )
-        ));
-        assert!(matches!(
-            state_aware,
-            (
-                ParserSnapshot::Accepted(AcceptedSnapshot {
-                    request: RequestSnapshot::StateAware { .. },
-                    ..
-                }),
-                ParserSnapshot::Accepted(AcceptedSnapshot {
-                    request: RequestSnapshot::StateAware { .. },
-                    ..
-                })
-            )
-        ));
     }
 
     #[test]
@@ -3883,886 +2078,19 @@ mod tests {
             "process": {"commandLine": "echo hello"},
             "experimental": {}
         }"#;
-        assert!(
-            parse_mxc_request_json(json, &mut test_logger()).is_ok(),
-            "the route-proof input must remain valid under the rolling parser"
-        );
-
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("exact-route-proof.json");
         fs::write(&path, json).unwrap();
 
-        let file_error =
-            load_mxc_request(path.to_str().unwrap(), &mut test_logger(), false).unwrap_err();
-        let encoded = base64_encode(json.as_bytes());
-        let base64_error = load_mxc_request(&encoded, &mut test_logger(), true).unwrap_err();
-        let exact_error = parse_exact_for_test(json).unwrap_err();
-
-        let file_diagnostic = DiagnosticSnapshot::from(&file_error);
-        let base64_diagnostic = DiagnosticSnapshot::from(&base64_error);
-        let exact_diagnostic = DiagnosticSnapshot::from(&exact_error);
-
-        assert_eq!(file_diagnostic, exact_diagnostic);
-        assert_eq!(base64_diagnostic, exact_diagnostic);
-        assert_eq!(exact_diagnostic.route, ErrorRoute::OneShot);
-        assert!(exact_diagnostic
-            .message
-            .contains("unknown field `experimental`"));
-    }
-
-    #[test]
-    fn one_shot_loader_uses_exact_dispatch_and_rejects_lifecycle_requests() {
-        let one_shot = r#"{
-            "version": "0.8.0-alpha",
-            "process": {"commandLine": "echo hello"}
-        }"#;
-        let encoded = base64_encode(one_shot.as_bytes());
-        let request = load_one_shot_request(&encoded, &mut test_logger(), true).unwrap();
-        assert_eq!(request.schema_version, "0.8.0-alpha");
-        assert_eq!(request.script_code, "echo hello");
-
-        let state_aware = r#"{
-            "version": "0.9.0-alpha",
-            "phase": "start",
-            "sandboxId": "wsb:abcd1234"
-        }"#;
-        let encoded = base64_encode(state_aware.as_bytes());
-        let error = load_one_shot_request(&encoded, &mut test_logger(), true).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("expected a one-shot request, got a state-aware lifecycle request"));
-    }
-
-    fn classified_divergence_cases() -> [DivergenceCase; 14] {
-        [
-            DivergenceCase {
-                name: "published-v06-experimental",
-                input: r#"{
-                    "version":"0.6.0-alpha",
-                    "process":{"commandLine":"echo x"},
-                    "experimental":{"test":{"message":"rolling-only"}}
-                }"#,
-                direction: DivergenceDirection::ExactStricter,
-                rolling_diagnostic: None,
-                exact_diagnostic: DiagnosticExpectation {
-                    route: ErrorRoute::OneShot,
-                    category: ErrorCategory::TypedStructure,
-                    path: Some("experimental"),
-                    line: Some(4),
-                    column: Some(34),
-                    message_contains: &["unknown field `experimental`"],
-                },
-                rolling_logger: LoggerExpectation::default(),
-                exact_logger: LoggerExpectation::default(),
-                reason: "Published 0.6 is closed; rolling compatibility still accepts experimental.",
-            },
-            DivergenceCase {
-                name: "explicit-null-optional-container-id",
-                input: r#"{
-                    "version":"0.9.0-alpha",
-                    "containerId":null,
-                    "process":{"commandLine":"echo x"}
-                }"#,
-                direction: DivergenceDirection::ExactStricter,
-                rolling_diagnostic: None,
-                exact_diagnostic: DiagnosticExpectation {
-                    route: ErrorRoute::OneShot,
-                    category: ErrorCategory::TypedStructure,
-                    path: Some("containerId"),
-                    line: Some(3),
-                    column: Some(38),
-                    message_contains: &["invalid type: null"],
-                },
-                rolling_logger: LoggerExpectation::default(),
-                exact_logger: LoggerExpectation::default(),
-                reason: "OptionalField distinguishes omission from explicit null.",
-            },
-            DivergenceCase {
-                name: "isolation-session-app-id-null",
-                input: r#"{
-                    "version":"0.9.0-alpha",
-                    "phase":"provision",
-                    "containment":"isolation_session",
-                    "_comment":null,
-                    "experimental":{"isolation_session":{"provision":{"appId":null}}}
-                }"#,
-                direction: DivergenceDirection::ExactStricter,
-                rolling_diagnostic: None,
-                exact_diagnostic: DiagnosticExpectation {
-                    route: ErrorRoute::StateAware,
-                    category: ErrorCategory::TypedStructure,
-                    path: Some("experimental.isolation_session.provision.appId"),
-                    line: Some(6),
-                    column: Some(82),
-                    message_contains: &["invalid type: null"],
-                },
-                rolling_logger: LoggerExpectation::default(),
-                exact_logger: LoggerExpectation::default(),
-                reason: "The exact OptionalField rejects null while the temporary backend payload treats it as absent.",
-            },
-            DivergenceCase {
-                name: "unknown-isolation-session-payload-field",
-                input: r#"{
-                    "version":"0.9.0-alpha",
-                    "phase":"provision",
-                    "containment":"isolation_session",
-                    "_comment":null,
-                    "experimental":{"isolation_session":{"provision":{"futureField":true}}}
-                }"#,
-                direction: DivergenceDirection::ExactStricter,
-                rolling_diagnostic: None,
-                exact_diagnostic: DiagnosticExpectation {
-                    route: ErrorRoute::StateAware,
-                    category: ErrorCategory::TypedStructure,
-                    path: Some("experimental.isolation_session.provision.futureField"),
-                    line: Some(6),
-                    column: Some(83),
-                    message_contains: &["unknown field `futureField`"],
-                },
-                rolling_logger: LoggerExpectation::default(),
-                exact_logger: LoggerExpectation::default(),
-                reason: "Exact backend payloads are closed while the temporary runtime payload type ignores unknown fields.",
-            },
-            DivergenceCase {
-                name: "stray-provision-sandbox-id",
-                input: r#"{
-                    "version":"0.9.0-alpha",
-                    "phase":"provision",
-                    "containment":"windows_sandbox",
-                    "sandboxId":"wsb:abcd1234"
-                }"#,
-                direction: DivergenceDirection::ExactStricter,
-                rolling_diagnostic: None,
-                exact_diagnostic: DiagnosticExpectation {
-                    route: ErrorRoute::StateAware,
-                    category: ErrorCategory::TypedStructure,
-                    path: Some("sandboxId"),
-                    line: Some(5),
-                    column: Some(31),
-                    message_contains: &["unknown field `sandboxId`"],
-                },
-                rolling_logger: LoggerExpectation::default(),
-                exact_logger: LoggerExpectation::default(),
-                reason: "Provision roots do not carry an already-created sandbox identifier.",
-            },
-            DivergenceCase {
-                name: "immutable-network-on-start",
-                input: r#"{
-                    "version":"0.9.0-alpha",
-                    "phase":"start",
-                    "sandboxId":"wslc:abcd1234",
-                    "network":{"defaultPolicy":"allow"}
-                }"#,
-                direction: DivergenceDirection::ExactStricter,
-                rolling_diagnostic: None,
-                exact_diagnostic: DiagnosticExpectation {
-                    route: ErrorRoute::StateAware,
-                    category: ErrorCategory::TypedStructure,
-                    path: Some("network"),
-                    line: Some(5),
-                    column: Some(29),
-                    message_contains: &["unknown field `network`"],
-                },
-                rolling_logger: LoggerExpectation::default(),
-                exact_logger: LoggerExpectation::default(),
-                reason: "Network posture is fixed at provision; only exec has a runtime network surface.",
-            },
-            DivergenceCase {
-                name: "immutable-network-on-stop",
-                input: r#"{
-                    "version":"0.9.0-alpha",
-                    "phase":"stop",
-                    "sandboxId":"wslc:abcd1234",
-                    "network":{"defaultPolicy":"allow"}
-                }"#,
-                direction: DivergenceDirection::ExactStricter,
-                rolling_diagnostic: None,
-                exact_diagnostic: DiagnosticExpectation {
-                    route: ErrorRoute::StateAware,
-                    category: ErrorCategory::TypedStructure,
-                    path: Some("network"),
-                    line: Some(5),
-                    column: Some(29),
-                    message_contains: &["unknown field `network`"],
-                },
-                rolling_logger: LoggerExpectation::default(),
-                exact_logger: LoggerExpectation::default(),
-                reason: "Network posture is fixed at provision and cannot be changed while stopping.",
-            },
-            DivergenceCase {
-                name: "immutable-network-on-deprovision",
-                input: r#"{
-                    "version":"0.9.0-alpha",
-                    "phase":"deprovision",
-                    "sandboxId":"wslc:abcd1234",
-                    "network":{"defaultPolicy":"allow"}
-                }"#,
-                direction: DivergenceDirection::ExactStricter,
-                rolling_diagnostic: None,
-                exact_diagnostic: DiagnosticExpectation {
-                    route: ErrorRoute::StateAware,
-                    category: ErrorCategory::TypedStructure,
-                    path: Some("network"),
-                    line: Some(5),
-                    column: Some(29),
-                    message_contains: &["unknown field `network`"],
-                },
-                rolling_logger: LoggerExpectation::default(),
-                exact_logger: LoggerExpectation::default(),
-                reason: "Network posture is fixed at provision and cannot be changed while deprovisioning.",
-            },
-            DivergenceCase {
-                name: "null-phase-declaration",
-                input: r#"{
-                    "version":"0.9.0-alpha",
-                    "phase":null,
-                    "process":{"commandLine":"echo x"}
-                }"#,
-                direction: DivergenceDirection::DiagnosticOnly,
-                rolling_diagnostic: Some(DiagnosticExpectation {
-                    route: ErrorRoute::StateAware,
-                    category: ErrorCategory::Semantic,
-                    path: None,
-                    line: None,
-                    column: None,
-                    message_contains: &["Missing required field: phase"],
-                }),
-                exact_diagnostic: DiagnosticExpectation {
-                    route: ErrorRoute::StateAware,
-                    category: ErrorCategory::TypedStructure,
-                    path: None,
-                    line: Some(3),
-                    column: Some(32),
-                    message_contains: &["Invalid phase declaration", "invalid type: null"],
-                },
-                rolling_logger: LoggerExpectation::default(),
-                exact_logger: LoggerExpectation::default(),
-                reason: "The exact phase probe rejects null structurally before rolling normalization reports a missing phase.",
-            },
-            DivergenceCase {
-                name: "malformed-json-version-probe-diagnostic",
-                input: "{\n  \"version\":\"0.9.0-alpha\",\n  \"process\":",
-                direction: DivergenceDirection::DiagnosticOnly,
-                rolling_diagnostic: Some(DiagnosticExpectation {
-                    route: ErrorRoute::Decode,
-                    category: ErrorCategory::Syntax,
-                    path: None,
-                    line: Some(3),
-                    column: Some(12),
-                    message_contains: &["Invalid JSON syntax"],
-                }),
-                exact_diagnostic: DiagnosticExpectation {
-                    route: ErrorRoute::Decode,
-                    category: ErrorCategory::Semantic,
-                    path: None,
-                    line: Some(3),
-                    column: Some(12),
-                    message_contains: &["Invalid version declaration"],
-                },
-                rolling_logger: LoggerExpectation::default(),
-                exact_logger: LoggerExpectation::default(),
-                reason: "The exact path first probes the version declaration, so malformed trailing JSON is attributed to that probe.",
-            },
-            DivergenceCase {
-                name: "isolation-session-filesystem-curated-vs-structural",
-                // An existing path avoids host-dependent existence warnings.
-                input: r#"{
-                    "version":"0.9.0-alpha",
-                    "phase":"provision",
-                    "containment":"isolation_session",
-                    "filesystem":{"readwritePaths":["."]},
-                    "network":{"defaultPolicy":"allow","allowLocalNetwork":true}
-                }"#,
-                direction: DivergenceDirection::ExactStricter,
-                rolling_diagnostic: None,
-                exact_diagnostic: DiagnosticExpectation {
-                    route: ErrorRoute::StateAware,
-                    category: ErrorCategory::TypedStructure,
-                    path: Some("filesystem"),
-                    line: Some(5),
-                    column: Some(32),
-                    message_contains: &["unknown field `filesystem`"],
-                },
-                rolling_logger: LoggerExpectation::default(),
-                exact_logger: LoggerExpectation::default(),
-                reason: "Rolling parsing retains the field for the backend's curated rejection; the exact root rejects it structurally before dispatch.",
-            },
-            DivergenceCase {
-                name: "isolation-session-ui-curated-vs-structural",
-                input: r#"{
-                    "version":"0.9.0-alpha",
-                    "phase":"provision",
-                    "containment":"isolation_session",
-                    "_comment":null,
-                    "ui":{"disable":true}
-                }"#,
-                direction: DivergenceDirection::ExactStricter,
-                rolling_diagnostic: None,
-                exact_diagnostic: DiagnosticExpectation {
-                    route: ErrorRoute::StateAware,
-                    category: ErrorCategory::TypedStructure,
-                    path: Some("ui"),
-                    line: Some(6),
-                    column: Some(24),
-                    message_contains: &["unknown field `ui`"],
-                },
-                rolling_logger: LoggerExpectation::default(),
-                exact_logger: LoggerExpectation::default(),
-                reason: "Rolling parsing retains the field for the backend's curated rejection; the exact root rejects it structurally before dispatch.",
-            },
-            DivergenceCase {
-                name: "v0.8-comma-capability-structural-vs-semantic",
-                input: r#"{
-                    "version":"0.8.0-alpha",
-                    "containment":"processcontainer",
-                    "process":{"commandLine":"echo x"},
-                    "processContainer":{"capabilities":["internetClient,privateNetworkClientServer"]}
-                }"#,
-                direction: DivergenceDirection::DiagnosticOnly,
-                rolling_diagnostic: Some(DiagnosticExpectation {
-                    route: ErrorRoute::OneShot,
-                    category: ErrorCategory::Semantic,
-                    path: None,
-                    line: None,
-                    column: None,
-                    message_contains: &["processContainer.capabilities entry"],
-                }),
-                exact_diagnostic: DiagnosticExpectation {
-                    route: ErrorRoute::OneShot,
-                    category: ErrorCategory::TypedStructure,
-                    path: Some("processContainer.capabilities[0]"),
-                    line: Some(5),
-                    column: Some(100),
-                    message_contains: &["capability must not contain a comma"],
-                },
-                rolling_logger: LoggerExpectation {
-                    primary_lines: &["processContainer.capabilities entry"],
-                    warnings: &[],
-                },
-                exact_logger: LoggerExpectation::default(),
-                reason: "Published v0.8 validates capability names in its newtype; rolling validation occurs during model conversion.",
-            },
-            DivergenceCase {
-                name: "v0.9-reserved-capability-structural-vs-semantic",
-                input: r#"{
-                    "version":"0.9.0-alpha",
-                    "containment":"processcontainer",
-                    "process":{"commandLine":"echo x"},
-                    "processContainer":{"capabilities":["LearningModeLogging"]}
-                }"#,
-                direction: DivergenceDirection::DiagnosticOnly,
-                rolling_diagnostic: Some(DiagnosticExpectation {
-                    route: ErrorRoute::OneShot,
-                    category: ErrorCategory::Semantic,
-                    path: None,
-                    line: None,
-                    column: None,
-                    message_contains: &["reserved learning-mode capability"],
-                }),
-                exact_diagnostic: DiagnosticExpectation {
-                    route: ErrorRoute::OneShot,
-                    category: ErrorCategory::TypedStructure,
-                    path: Some("processContainer.capabilities[0]"),
-                    line: Some(5),
-                    column: Some(78),
-                    message_contains: &["learningModeLogging and permissiveLearningMode are reserved"],
-                },
-                rolling_logger: LoggerExpectation {
-                    primary_lines: &["reserved learning-mode capability"],
-                    warnings: &[],
-                },
-                exact_logger: LoggerExpectation::default(),
-                reason: "Development validates capability names in its newtype; rolling validation occurs during model conversion.",
-            },
-        ]
-    }
-
-    #[test]
-    fn differential_exact_stricter_and_diagnostic_divergences_are_explicit() {
-        for case in classified_divergence_cases() {
-            assert_classified_divergence(&case);
-        }
-    }
-
-    #[test]
-    fn differential_curated_cases_detect_diagnostic_and_logger_drift() {
-        type DiagnosticMutation = fn(&mut DiagnosticSnapshot);
-        let mutations: [(&str, DiagnosticMutation); 6] = [
-            ("route", |value| {
-                value.route = match value.route {
-                    ErrorRoute::Decode => ErrorRoute::Version,
-                    ErrorRoute::Version => ErrorRoute::Decode,
-                    ErrorRoute::OneShot => ErrorRoute::OneShotMalformed,
-                    ErrorRoute::OneShotMalformed => ErrorRoute::OneShot,
-                    ErrorRoute::StateAware => ErrorRoute::Decode,
-                };
-            }),
-            ("category", |value| {
-                value.category = if value.category == ErrorCategory::Semantic {
-                    ErrorCategory::Syntax
-                } else {
-                    ErrorCategory::Semantic
-                };
-            }),
-            ("path", |value| {
-                value.path = if value.path.is_some() {
-                    None
-                } else {
-                    Some("unexpected.path".to_string())
-                };
-            }),
-            ("line", |value| {
-                value.line = Some(value.line.unwrap_or(0) + 1)
-            }),
-            ("column", |value| {
-                value.column = Some(value.column.unwrap_or(0) + 1)
-            }),
-            ("message", |value| value.message.clear()),
-        ];
-
-        for case in classified_divergence_cases() {
-            let (rolling, exact) = parse_both(case.input);
-            let baseline = [rolling, exact];
-            assert!(
-                classified_divergence_mismatches(&case, &baseline[0], &baseline[1]).is_empty(),
-                "{}: baseline must match before injecting drift",
-                case.name
-            );
-            for (side, name) in ["rolling", "exact"].into_iter().enumerate() {
-                if matches!(&baseline[side], ParserSnapshot::Rejected(_)) {
-                    for (field, mutate) in mutations {
-                        let mut changed = baseline.clone();
-                        let ParserSnapshot::Rejected(rejected) = &mut changed[side] else {
-                            panic!("cloning a rejection must preserve its outcome");
-                        };
-                        mutate(&mut rejected.diagnostic);
-                        let mismatches =
-                            classified_divergence_mismatches(&case, &changed[0], &changed[1]);
-                        assert!(
-                            mismatches.iter().any(|mismatch| {
-                                mismatch.starts_with(&format!("{name}: {field}"))
-                            }),
-                            "{}: {name} {field} drift was not detected: {mismatches:?}",
-                            case.name
-                        );
-                    }
-                }
-                for channel in ["primary_buffer", "warnings"] {
-                    let mut changed = baseline.clone();
-                    let logger = match &mut changed[side] {
-                        ParserSnapshot::Accepted(value) => &mut value.logger,
-                        ParserSnapshot::Rejected(value) => &mut value.logger,
-                    };
-                    if channel == "primary_buffer" {
-                        logger.primary_buffer.push_str("unexpected caller output\n");
-                    } else {
-                        logger
-                            .warnings
-                            .push("unexpected caller warning".to_string());
-                    }
-                    let mismatches =
-                        classified_divergence_mismatches(&case, &changed[0], &changed[1]);
-                    assert!(
-                        mismatches.iter().any(|mismatch| {
-                            mismatch.starts_with(&format!("{name}: logger.{channel}"))
-                        }),
-                        "{}: {name} {channel} drift was not detected: {mismatches:?}",
-                        case.name
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn differential_curated_cases_allow_nonessential_message_wording() {
-        for case in classified_divergence_cases() {
-            let (mut rolling, mut exact) = parse_both(case.input);
-            for snapshot in [&mut rolling, &mut exact] {
-                let logger = match snapshot {
-                    ParserSnapshot::Accepted(value) => &mut value.logger,
-                    ParserSnapshot::Rejected(value) => {
-                        value.diagnostic.message.push_str(" (additional context)");
-                        &mut value.logger
-                    }
-                };
-                logger.primary_buffer = logger
-                    .primary_buffer
-                    .lines()
-                    .map(|line| format!("{line} (additional context)\n"))
-                    .collect();
-                for warning in &mut logger.warnings {
-                    warning.push_str(" (additional context)");
-                }
-            }
-            let mismatches = classified_divergence_mismatches(&case, &rolling, &exact);
-            assert!(
-                mismatches.is_empty(),
-                "{}: wording outside required fragments is not frozen: {mismatches:?}",
-                case.name
-            );
-        }
-    }
-
-    #[test]
-    fn differential_logger_expectations_pin_channels_order_and_counts() {
-        let expected = LoggerExpectation {
-            primary_lines: &["first primary", "second primary"],
-            warnings: &["first warning", "second warning"],
-        };
-        let baseline = LoggerSnapshot {
-            primary_buffer: "first primary detail\nsecond primary detail\n".to_string(),
-            warnings: vec![
-                "first warning detail".to_string(),
-                "second warning detail".to_string(),
-            ],
-        };
-        assert!(logger_expectation_mismatches(expected, &baseline).is_empty());
-
-        type LoggerMutation = fn(&mut LoggerSnapshot);
-        let mutations: [(&str, LoggerMutation); 6] = [
-            ("primary_buffer", |value| {
-                value.primary_buffer = "second primary detail\nfirst primary detail\n".to_string();
-            }),
-            ("primary_buffer", |value| value.primary_buffer.clear()),
-            ("primary_buffer", |value| {
-                value.primary_buffer = "unexpected primary\nsecond primary detail\n".to_string();
-            }),
-            ("warnings", |value| value.warnings.swap(0, 1)),
-            ("warnings", |value| value.warnings.clear()),
-            ("warnings", |value| {
-                value.warnings[0] = "unexpected warning".to_string()
-            }),
-        ];
-        for (channel, mutate) in mutations {
-            let mut changed = baseline.clone();
-            mutate(&mut changed);
-            let mismatches = logger_expectation_mismatches(expected, &changed);
-            assert!(
-                mismatches
-                    .iter()
-                    .any(|mismatch| mismatch.starts_with(channel)),
-                "{channel} drift was not detected: {mismatches:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn differential_exact_path_preserves_all_rolling_value_rule_rejections() {
-        for (case, json) in [
-            (
-                "v0.6 comma capability",
-                r#"{"version":"0.6.0-alpha","process":{"commandLine":"x"},"containment":"processcontainer","processContainer":{"capabilities":["internetClient,privateNetworkClientServer"]}}"#,
-            ),
-            (
-                "v0.7 reserved capability",
-                r#"{"version":"0.7.0-alpha","process":{"commandLine":"x"},"containment":"processcontainer","processContainer":{"capabilities":["PERMISSIVElearningMODE"]}}"#,
-            ),
-            (
-                "v0.8 comma capability",
-                r#"{"version":"0.8.0-alpha","process":{"commandLine":"x"},"containment":"processcontainer","processContainer":{"capabilities":["internetClient,privateNetworkClientServer"]}}"#,
-            ),
-            (
-                "v0.9 reserved capability",
-                r#"{"version":"0.9.0-alpha","process":{"commandLine":"x"},"containment":"processcontainer","processContainer":{"capabilities":["LearningModeLogging"]}}"#,
-            ),
-            (
-                "empty filesystem path",
-                r#"{"version":"0.9.0-alpha","process":{"commandLine":"x"},"filesystem":{"readwritePaths":[" "]}}"#,
-            ),
-            (
-                "quoted filesystem path",
-                r#"{"version":"0.9.0-alpha","process":{"commandLine":"x"},"filesystem":{"readonlyPaths":["C:\\bad\"path"]}}"#,
-            ),
-            (
-                "embedded NUL filesystem path",
-                r#"{"version":"0.9.0-alpha","process":{"commandLine":"x"},"filesystem":{"deniedPaths":["C:\\bad\u0000path"]}}"#,
-            ),
-            (
-                "proxy with capabilities enforcement",
-                r#"{"version":"0.7.0-alpha","process":{"commandLine":"x"},"containment":"lxc","lxc":{"distribution":"ubuntu","release":"24.04"},"network":{"proxy":{"url":"http://proxy.example.com:8080"},"enforcementMode":"capabilities"}}"#,
-            ),
-            (
-                "foreign backend section",
-                r#"{"version":"0.7.0-alpha","process":{"commandLine":"x"},"containment":"lxc","lxc":{"distribution":"ubuntu","release":"24.04"},"processContainer":{"leastPrivilege":true}}"#,
-            ),
-            (
-                "relative captureDenials output",
-                r#"{"version":"0.9.0-alpha","process":{"commandLine":"x"},"containment":"processcontainer","processContainer":{"captureDenials":{"outputPath":"relative.json"}}}"#,
-            ),
+        for error in [
+            load_mxc_request(path.to_str().unwrap(), &mut test_logger(), false).unwrap_err(),
+            load_mxc_request(&base64_encode(json.as_bytes()), &mut test_logger(), true)
+                .unwrap_err(),
+            parse_exact_for_test(json).unwrap_err(),
         ] {
-            let (rolling, exact) = parse_both(json);
-            assert!(
-                matches!(rolling, ParserSnapshot::Rejected(_)),
-                "{case}: rolling value rule unexpectedly accepted: {rolling:?}"
-            );
-            assert!(
-                matches!(exact, ParserSnapshot::Rejected(_)),
-                "{case}: exact path is looser than rolling: {exact:?}"
-            );
-
-            if case.starts_with("v0.6") || case.starts_with("v0.7") {
-                assert_eq!(
-                    rolling, exact,
-                    "{case}: published contracts without capability newtypes should retain the shared semantic diagnostic"
-                );
-            }
+            assert!(matches!(error, ParseError::OneShot(_)), "{error:?}");
+            assert!(error.message().contains("unknown field `experimental`"));
         }
-    }
-
-    #[test]
-    fn each_removed_network_field_is_a_precise_exact_stricter_divergence() {
-        for (field, value) in [
-            ("defaultPolicy", r#""allow""#),
-            ("enforcementMode", r#""capabilities""#),
-            ("allowedHosts", "[]"),
-            ("blockedHosts", "[]"),
-            ("allowLocalNetwork", "false"),
-            ("proxy", r#"{"url":"http://localhost:8080"}"#),
-        ] {
-            for root in [
-                r#""containment":"processcontainer","process":{"commandLine":"echo"}"#,
-                r#""phase":"provision","containment":"wslc""#,
-                r#""phase":"exec","sandboxId":"wslc:0123456789abcdef0123456789abcdef","process":{"commandLine":"echo"}"#,
-            ] {
-                let compatible_proxy_posture =
-                    if field == "proxy" && !root.contains("\"phase\":\"exec\"") {
-                        r#","defaultPolicy":"allow""#
-                    } else {
-                        ""
-                    };
-                let source = format!(
-                    r#"{{"version":"0.9.0-alpha",{root},"network":{{"{field}":{value}{compatible_proxy_posture}}}}}"#
-                );
-                let (rolling, exact) = parse_both(&source);
-                assert!(
-                    matches!(rolling, ParserSnapshot::Accepted(_)),
-                    "{source}: {rolling:?}"
-                );
-                let ParserSnapshot::Rejected(exact) = exact else {
-                    panic!("removed field accepted: {source}");
-                };
-                assert_eq!(
-                    exact.diagnostic.path.as_deref(),
-                    Some(format!("network.{field}").as_str())
-                );
-                assert_eq!(
-                    classify_corpus_exact_stricter(
-                        &serde_json::from_str(&source).unwrap(),
-                        &exact.diagnostic
-                    ),
-                    Some(CorpusDivergenceKind::RemovedDevelopmentNetworkField),
-                    "{source}"
-                );
-                assert!(exact.diagnostic.message.contains("schema 0.9 migration"));
-            }
-        }
-    }
-
-    #[test]
-    fn differential_repository_corpus_has_no_unclassified_or_exact_looser_results() {
-        let root = repository_root();
-        let mut files = Vec::new();
-        collect_json_files(&root.join("tests").join("configs"), &mut files);
-        collect_json_files(&root.join("tests").join("examples"), &mut files);
-        collect_json_files(&root.join("tests").join("policy"), &mut files);
-        files.sort();
-
-        let expected = expected_corpus_divergences();
-        let expected_diagnostics = expected_corpus_diagnostic_divergences();
-        let expected_counts =
-            corpus_divergence_counts(expected.values().map(|expected| expected.kind));
-        let mut observed = std::collections::BTreeMap::new();
-        let mut observed_diagnostics = std::collections::BTreeSet::new();
-        let mut seen_files = std::collections::BTreeSet::new();
-        let mut classified = Vec::new();
-        let mut blockers = Vec::new();
-        let mut equivalent_accepts = 0;
-        let mut shared_rejections = 0;
-        let mut shared_rejection_files = Vec::new();
-
-        for path in &files {
-            let relative = path
-                .strip_prefix(&root)
-                .unwrap()
-                .components()
-                .map(|component| component.as_os_str().to_string_lossy())
-                .collect::<Vec<_>>()
-                .join("/");
-            seen_files.insert(relative.clone());
-            let json = fs::read_to_string(path).unwrap();
-            let root_value: serde_json::Value =
-                serde_json::from_str(&json).unwrap_or_else(|error| {
-                    panic!("{relative}: corpus JSON must be syntactically valid: {error}")
-                });
-
-            let (rolling, exact) = parse_both(&json);
-            let mut public_logger = test_logger();
-            let public_result = load_mxc_request_from_json(&json, &mut public_logger);
-            if relative == "tests/configs/wslc_state_aware_exec_proxy.json" {
-                let retains_proxy_only_wslc_context = match &public_result {
-                    Ok(MxcRequest::StateAware(parsed)) => {
-                        let request = parsed.request();
-                        request.containment == ContainmentBackend::Wslc
-                            && !request.policy.network_specified
-                            && !request.policy.network_mode_specified
-                            && request.policy.runtime_network_proxy_specified
-                            && request.policy.network_proxy.is_enabled()
-                            && request.policy.network_egress.is_none()
-                            && request.policy.network_ingress.is_none()
-                    }
-                    _ => false,
-                };
-                if !retains_proxy_only_wslc_context {
-                    blockers.push(format!(
-                        "{relative}: valid proxy-only template must preserve the WSLC ID prefix \
-                         and inherit network mode; it must not become a shared rejection"
-                    ));
-                }
-            }
-            let public = snapshot(public_result, &public_logger);
-            if !same_parse_outcome(&public, &exact) {
-                blockers.push(format!(
-                    "{relative}: public exact dispatch differs from the exact parser oracle\npublic={public:?}\nexact={exact:?}"
-                ));
-            }
-            match (&rolling, &exact) {
-                (ParserSnapshot::Accepted(rolling), ParserSnapshot::Accepted(exact)) => {
-                    equivalent_accepts += 1;
-                    if let Some(expected) = expected.get(relative.as_str()) {
-                        blockers.push(format!(
-                            "{relative}: expected {:?} exact-stricter divergence, but both parsers accepted",
-                            expected.kind
-                        ));
-                    }
-                    if rolling != exact {
-                        blockers.push(format!(
-                            "{relative}: both accepted but runtime models differ\nrolling={rolling:?}\nexact={exact:?}"
-                        ));
-                    }
-                }
-                (
-                    ParserSnapshot::Rejected(rolling_diagnostic),
-                    ParserSnapshot::Rejected(exact_diagnostic),
-                ) => {
-                    shared_rejections += 1;
-                    shared_rejection_files.push(relative.clone());
-                    if let Some(expected) = expected.get(relative.as_str()) {
-                        blockers.push(format!(
-                            "{relative}: expected {:?} exact-stricter divergence, but both parsers rejected",
-                            expected.kind
-                        ));
-                    }
-                    match expected_diagnostics.get(relative.as_str()) {
-                        Some(expected) => {
-                            observed_diagnostics.insert(relative.clone());
-                            if rolling_diagnostic == exact_diagnostic {
-                                blockers.push(format!(
-                                    "{relative}: expected a diagnostic-only divergence, but both parsers produced the same rejection"
-                                ));
-                                continue;
-                            }
-
-                            let rolling_mismatches = diagnostic_expectation_mismatches(
-                                expected.rolling,
-                                rolling_diagnostic,
-                            );
-                            let exact_mismatches =
-                                diagnostic_expectation_mismatches(expected.exact, exact_diagnostic);
-                            if !rolling_mismatches.is_empty() || !exact_mismatches.is_empty() {
-                                blockers.push(format!(
-                                    "{relative}: classified diagnostic-only divergence changed\nreason={}\nrolling mismatches={rolling_mismatches:?}\nexact mismatches={exact_mismatches:?}\nrolling={rolling_diagnostic:?}\nexact={exact_diagnostic:?}",
-                                    expected.reason
-                                ));
-                            }
-                        }
-                        None if rolling_diagnostic != exact_diagnostic => {
-                            blockers.push(format!(
-                                "{relative}: unclassified shared-rejection diagnostic difference\nrolling={rolling_diagnostic:?}\nexact={exact_diagnostic:?}"
-                            ));
-                        }
-                        None => {}
-                    }
-                }
-                (ParserSnapshot::Accepted(_), ParserSnapshot::Rejected(exact_diagnostic)) => {
-                    if let Some(kind) =
-                        classify_corpus_exact_stricter(&root_value, exact_diagnostic)
-                    {
-                        classified.push(format!(
-                            "{relative}: rolling=accepted; exact=rejected ({}) at {:?}; \
-                             direction=exact-stricter; reason={}",
-                            exact_diagnostic.message,
-                            exact_diagnostic.path,
-                            kind.reason()
-                        ));
-                        match expected.get(relative.as_str()) {
-                            Some(expected)
-                                if expected.kind == kind
-                                    && expected.matches(exact_diagnostic) =>
-                            {
-                                observed.insert(relative.clone(), expected.kind);
-                            }
-                            Some(expected) => blockers.push(format!(
-                                "{relative}: expected {expected:?}, observed kind={kind:?}\nexact={exact_diagnostic:?}"
-                            )),
-                            None => blockers.push(format!(
-                                "{relative}: newly divergent corpus file requires explicit classification as {kind:?}\nexact={exact_diagnostic:?}"
-                            )),
-                        }
-                    } else {
-                        blockers.push(format!(
-                            "{relative}: unclassified exact-stricter result\nexact={exact_diagnostic:?}"
-                        ));
-                    }
-                }
-                (ParserSnapshot::Rejected(rolling_diagnostic), ParserSnapshot::Accepted(_)) => {
-                    blockers.push(format!(
-                        "{relative}: exact is looser than rolling\nrolling={rolling_diagnostic:?}"
-                    ));
-                }
-            }
-        }
-
-        for (relative, expected) in &expected {
-            if !seen_files.contains(*relative) {
-                blockers.push(format!(
-                    "{relative}: expected {:?} divergence fixture is missing from the corpus",
-                    expected.kind
-                ));
-            }
-        }
-        for relative in expected_diagnostics.keys() {
-            if !seen_files.contains(*relative) {
-                blockers.push(format!(
-                    "{relative}: expected diagnostic-divergence fixture is missing from the corpus"
-                ));
-            } else if !observed_diagnostics.contains(*relative) {
-                blockers.push(format!(
-                    "{relative}: expected diagnostic-only divergence was not observed"
-                ));
-            }
-        }
-
-        let observed_counts = corpus_divergence_counts(observed.values().copied());
-        assert!(
-            blockers.is_empty(),
-            "differential corpus blockers:\n{}\n\nexpected category counts: \
-             {expected_counts:?}\nobserved category counts: {observed_counts:?}\n\n\
-             classified exact-stricter inputs:\n{}",
-            blockers.join("\n\n"),
-            classified.join("\n")
-        );
-        assert_eq!(
-            observed_counts, expected_counts,
-            "explicit divergence inventory and observed category totals differ"
-        );
-        let expected_inventory = (368, 344, 14);
-        assert_eq!(
-            (files.len(), equivalent_accepts, shared_rejections),
-            expected_inventory,
-            "the migration corpus inventory changed; regenerate the migration report and explain the delta\nshared rejections:\n{}",
-            shared_rejection_files.join("\n"),
-        );
     }
 
     #[test]
@@ -4945,7 +2273,7 @@ mod tests {
             "0.8.0-dev",
             "0.9.0",
             "0.9.1-alpha",
-            "0.10.0-alpha",
+            "0.10.1-alpha",
         ] {
             let json = format!(
                 r#"{{
@@ -5011,13 +2339,13 @@ mod tests {
     #[test]
     fn exact_parser_accepts_the_development_one_shot_contract() {
         let json = r#"{
-            "version": "0.9.0-alpha",
+            "version": "0.10.0-alpha",
             "process": {"commandLine": "echo dev"}
         }"#;
 
         match parse_exact_for_test(json).unwrap() {
             MxcRequest::OneShot(request) => {
-                assert_eq!(request.schema_version, "0.9.0-alpha");
+                assert_eq!(request.schema_version, "0.10.0-alpha");
                 assert_eq!(request.script_code, "echo dev");
             }
             MxcRequest::StateAware(_) => panic!("expected one-shot request"),
@@ -5037,7 +2365,7 @@ mod tests {
     const DEVELOPMENT_STATE_AWARE_ROOT_CASES: &[DevelopmentStateAwareRootCase] = &[
         DevelopmentStateAwareRootCase {
             name: "Windows Sandbox provision",
-            json: r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
+            json: r#"{"version":"0.10.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
             expected_phase: Phase::Provision,
             expected_declared_containment: Some(ContainmentBackend::WindowsSandbox),
             expected_runtime_containment: ContainmentBackend::WindowsSandbox,
@@ -5046,7 +2374,7 @@ mod tests {
         },
         DevelopmentStateAwareRootCase {
             name: "IsolationSession provision",
-            json: r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session","network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#,
+            json: r#"{"version":"0.10.0-alpha","phase":"provision","containment":"isolation_session","network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#,
             expected_phase: Phase::Provision,
             expected_declared_containment: Some(ContainmentBackend::IsolationSession),
             expected_runtime_containment: ContainmentBackend::IsolationSession,
@@ -5055,7 +2383,7 @@ mod tests {
         },
         DevelopmentStateAwareRootCase {
             name: "WSLC provision",
-            json: r#"{"version":"0.9.0-alpha","phase":"provision","containment":"wslc"}"#,
+            json: r#"{"version":"0.10.0-alpha","phase":"provision","containment":"wslc"}"#,
             expected_phase: Phase::Provision,
             expected_declared_containment: Some(ContainmentBackend::Wslc),
             expected_runtime_containment: ContainmentBackend::Wslc,
@@ -5064,7 +2392,7 @@ mod tests {
         },
         DevelopmentStateAwareRootCase {
             name: "start",
-            json: r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
+            json: r#"{"version":"0.10.0-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
             expected_phase: Phase::Start,
             expected_declared_containment: None,
             expected_runtime_containment: ContainmentBackend::WindowsSandbox,
@@ -5073,7 +2401,7 @@ mod tests {
         },
         DevelopmentStateAwareRootCase {
             name: "exec",
-            json: r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wslc:abcd1234","process":{"commandLine":"echo state-aware"}}"#,
+            json: r#"{"version":"0.10.0-alpha","phase":"exec","sandboxId":"wslc:abcd1234","process":{"commandLine":"echo state-aware"}}"#,
             expected_phase: Phase::Exec,
             expected_declared_containment: None,
             expected_runtime_containment: ContainmentBackend::Wslc,
@@ -5082,7 +2410,7 @@ mod tests {
         },
         DevelopmentStateAwareRootCase {
             name: "stop",
-            json: r#"{"version":"0.9.0-alpha","phase":"stop","sandboxId":"iso:abcd1234"}"#,
+            json: r#"{"version":"0.10.0-alpha","phase":"stop","sandboxId":"iso:abcd1234"}"#,
             expected_phase: Phase::Stop,
             expected_declared_containment: None,
             expected_runtime_containment: ContainmentBackend::IsolationSession,
@@ -5091,7 +2419,7 @@ mod tests {
         },
         DevelopmentStateAwareRootCase {
             name: "deprovision",
-            json: r#"{"version":"0.9.0-alpha","phase":"deprovision","sandboxId":"wslc:abcd1234"}"#,
+            json: r#"{"version":"0.10.0-alpha","phase":"deprovision","sandboxId":"wslc:abcd1234"}"#,
             expected_phase: Phase::Deprovision,
             expected_declared_containment: None,
             expected_runtime_containment: ContainmentBackend::Wslc,
@@ -5147,16 +2475,14 @@ mod tests {
     fn development_configuration_json(telemetry_enabled: bool) -> String {
         format!(
             r#"{{
-                "version": "0.9.0-alpha",
+                "version": "0.10.0-alpha",
                 "phase": "provision",
                 "containment": "isolation_session",
                 "telemetry": {{"enabled": {telemetry_enabled}}},
                 "network": {{"egress":{{"default":"allow"}},"ingress":{{"default":"allow","hostLoopback":"allow"}}}},
-                "experimental": {{
-                    "isolation_session": {{
-                        "provision": {{
-                            "appId": "Contoso.App"
-                        }}
+                "isolationSession": {{
+                    "provision": {{
+                        "appId": "Contoso.App"
                     }}
                 }}
             }}"#
@@ -5268,7 +2594,7 @@ mod tests {
     }
 
     #[test]
-    fn public_preflight_duplicate_experimental_fields_follow_the_selected_request_kind() {
+    fn public_preflight_duplicate_fields_follow_the_selected_request_kind() {
         for (fields, state_aware) in [
             (r#""process":{"commandLine":"echo hello"}"#, false),
             (
@@ -5283,15 +2609,15 @@ mod tests {
             (r#""phase":"stop","sandboxId":"wsb:abcd1234""#, true),
             (r#""phase":"deprovision","sandboxId":"wsb:abcd1234""#, true),
         ] {
-            let valid = format!(r#"{{"version":"0.9.0-alpha",{fields},"experimental":{{}}}}"#);
+            let valid = format!(r#"{{"version":"0.10.0-alpha",{fields},"telemetry":{{}}}}"#);
             load_mxc_request_from_json(&valid, &mut test_logger()).unwrap();
             let duplicate = format!(
-                r#"{{"version":"0.9.0-alpha",{fields},"experimental":{{}},"experimental":{{}}}}"#
+                r#"{{"version":"0.10.0-alpha",{fields},"telemetry":{{}},"telemetry":{{}}}}"#
             );
             let mut logger = test_logger();
             let error = load_mxc_request_from_json(&duplicate, &mut logger).unwrap_err();
             assert!(
-                error.message().contains("duplicate field `experimental`"),
+                error.message().contains("duplicate field `telemetry`"),
                 "{error:?}"
             );
             if state_aware {
@@ -5357,7 +2683,13 @@ mod tests {
 
     #[test]
     fn exact_one_shot_parser_preserves_typed_error_path_and_location() {
-        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha", "0.9.0-alpha"] {
+        for version in [
+            "0.6.0-alpha",
+            "0.7.0-alpha",
+            "0.8.0-alpha",
+            "0.9.0-alpha",
+            "0.10.0-alpha",
+        ] {
             let json = format!(
                 "{{\n  \"version\": \"{version}\",\n  \"process\": {{\n    \"commandLine\": \"echo hello\",\n    \"cwd\": 42\n  }}\n}}"
             );
@@ -5369,7 +2701,7 @@ mod tests {
         let error = parse_exact_for_test(json).unwrap_err();
         assert_eq!(matches!(error, ParseError::StateAware(_)), state_aware);
         if !state_aware {
-            assert!(matches!(error, ParseError::OneShot(_)));
+            assert!(matches!(error, ParseError::OneShot(_)), "{json}: {error:?}");
         }
         let message = error.message();
         assert!(
@@ -5393,42 +2725,42 @@ mod tests {
         for (root, json, state_aware) in [
             (
                 "one-shot",
-                r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hello"}}"#,
+                r#"{"version":"0.10.0-alpha","process":{"commandLine":"echo hello"}}"#,
                 false,
             ),
             (
                 "Windows Sandbox provision",
-                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
+                r#"{"version":"0.10.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
                 true,
             ),
             (
                 "IsolationSession provision",
-                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session","network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#,
+                r#"{"version":"0.10.0-alpha","phase":"provision","containment":"isolation_session","network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#,
                 true,
             ),
             (
                 "WSLC provision",
-                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"wslc"}"#,
+                r#"{"version":"0.10.0-alpha","phase":"provision","containment":"wslc"}"#,
                 true,
             ),
             (
                 "start",
-                r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
+                r#"{"version":"0.10.0-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
                 true,
             ),
             (
                 "exec",
-                r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wslc:abcd1234","process":{"commandLine":"echo hello"}}"#,
+                r#"{"version":"0.10.0-alpha","phase":"exec","sandboxId":"wslc:abcd1234","process":{"commandLine":"echo hello"}}"#,
                 true,
             ),
             (
                 "stop",
-                r#"{"version":"0.9.0-alpha","phase":"stop","sandboxId":"iso:abcd1234"}"#,
+                r#"{"version":"0.10.0-alpha","phase":"stop","sandboxId":"iso:abcd1234"}"#,
                 true,
             ),
             (
                 "deprovision",
-                r#"{"version":"0.9.0-alpha","phase":"deprovision","sandboxId":"wslc:abcd1234"}"#,
+                r#"{"version":"0.10.0-alpha","phase":"deprovision","sandboxId":"wslc:abcd1234"}"#,
                 true,
             ),
         ] {
@@ -5456,12 +2788,12 @@ mod tests {
     fn exact_development_parser_preserves_nested_backend_payload_paths() {
         for (json, path) in [
             (
-                r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"wslc:abcd1234","process":{"commandLine":"echo hello","cwd":42}}"#,
+                r#"{"version":"0.10.0-alpha","phase":"exec","sandboxId":"wslc:abcd1234","process":{"commandLine":"echo hello","cwd":42}}"#,
                 "process.cwd",
             ),
             (
-                r#"{"version":"0.9.0-alpha","phase":"provision","containment":"wslc","experimental":{"wslc":{"provision":{"image":42}}}}"#,
-                "experimental.wslc.provision.image",
+                r#"{"version":"0.10.0-alpha","phase":"provision","containment":"wslc","wslc":{"provision":{"image":42}}}"#,
+                "wslc.provision.image",
             ),
         ] {
             let value: serde_json::Value = serde_json::from_str(json).unwrap();
@@ -5473,8 +2805,8 @@ mod tests {
     #[test]
     fn exact_development_parser_uses_shared_diagnostic_escaping_and_redaction() {
         for json in [
-            r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hello"}}"#,
-            r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
+            r#"{"version":"0.10.0-alpha","process":{"commandLine":"echo hello"}}"#,
+            r#"{"version":"0.10.0-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
         ] {
             let mut value: serde_json::Value = serde_json::from_str(json).unwrap();
             value["telemetry"] =
@@ -5503,7 +2835,7 @@ mod tests {
 
     #[test]
     fn exact_development_parser_preserves_typed_error_path_and_sanitizes_diagnostics() {
-        let json = "{\n  \"version\": \"0.9.0-alpha\",\n  \"phase\": \"provision\",\n  \"containment\": \"isolation_session\",\n  \"network\": {\"defaultPolicy\": \"block\", \"allowLocalNetwork\": true}\n}";
+        let json = "{\n  \"version\": \"0.10.0-alpha\",\n  \"phase\": \"provision\",\n  \"containment\": \"isolation_session\",\n  \"network\": {\"defaultPolicy\": \"block\", \"allowLocalNetwork\": true}\n}";
 
         let error = parse_exact_for_test(json).unwrap_err();
         assert!(matches!(error, ParseError::StateAware(_)));
@@ -5523,7 +2855,7 @@ mod tests {
         for (json, expected, rejected) in [
             (
                 r#"{
-                    "version": "0.9.0-alpha",
+                    "version": "0.10.0-alpha",
                     "phase": "provision",
                     "containment": "wslc",
                     "network": {"proxy": {"url": "http://proxy.example:8080"}}
@@ -5533,7 +2865,7 @@ mod tests {
             ),
             (
                 r#"{
-                    "version": "0.9.0-alpha",
+                    "version": "0.10.0-alpha",
                     "phase": "provision",
                     "containment": "isolation_session",
                     "network": {"allowedHosts": ["example.com"]}
@@ -5543,7 +2875,7 @@ mod tests {
             ),
             (
                 r#"{
-                    "version": "0.9.0-alpha",
+                    "version": "0.10.0-alpha",
                     "phase": "provision",
                     "containment": "isolation_session",
                     "network": {"defaultPolicy": "allow"}
@@ -5553,9 +2885,26 @@ mod tests {
             ),
         ] {
             let message = parse_exact_for_test(json).unwrap_err().message();
+            assert!(message.contains("schema 0.10 migration"), "{message}");
             assert!(message.contains(expected), "{message}");
             assert!(!message.contains(rejected), "{message}");
         }
+    }
+
+    #[test]
+    fn published_v0_9_network_migration_guidance_names_its_contract() {
+        let message = parse_exact_for_test(
+            r#"{
+                "version": "0.9.0-alpha",
+                "phase": "provision",
+                "containment": "isolation_session",
+                "network": {"defaultPolicy": "allow"}
+            }"#,
+        )
+        .unwrap_err()
+        .message();
+
+        assert!(message.contains("schema 0.9 migration"), "{message}");
     }
 
     #[test]
@@ -5619,14 +2968,24 @@ mod tests {
         .unwrap();
         assert_exact_contract_bridge(ExactOneShotContract::V0_8(Box::new(v0_8)), "0.8.0-alpha");
 
+        let v0_9 =
+            serde_json::from_str::<mxc_config_contract::published::v0_9_0_alpha::OneShotRequest>(
+                r#"{
+                "version": "0.9.0-alpha",
+                "process": {"commandLine": "echo hello"}
+            }"#,
+            )
+            .unwrap();
+        assert_exact_contract_bridge(ExactOneShotContract::V0_9(Box::new(v0_9)), "0.9.0-alpha");
+
         let dev = serde_json::from_str::<mxc_config_contract::dev::OneShotRequest>(
             r#"{
-                "version": "0.9.0-alpha",
+                "version": "0.10.0-alpha",
                 "process": {"commandLine": "echo hello"}
             }"#,
         )
         .unwrap();
-        assert_exact_contract_bridge(ExactOneShotContract::Dev(Box::new(dev)), "0.9.0-alpha");
+        assert_exact_contract_bridge(ExactOneShotContract::Dev(Box::new(dev)), "0.10.0-alpha");
     }
 
     #[test]
@@ -5667,7 +3026,7 @@ mod tests {
     fn exact_development_contract_bridge_requires_isolation_session_network() {
         let request = serde_json::from_str::<mxc_config_contract::dev::OneShotRequest>(
             r#"{
-                "version": "0.9.0-alpha",
+                "version": "0.10.0-alpha",
                 "containment": "isolation_session",
                 "process": {"commandLine": "echo hello"}
             }"#,
@@ -5688,166 +3047,6 @@ mod tests {
             "unexpected semantic error: {error}"
         );
     }
-
-    fn neutral_state_aware_input(
-        config_json: &str,
-        experimental_raw: Option<serde_json::Value>,
-        source_text: &str,
-    ) -> LegacyStateAwareWireInput {
-        LegacyStateAwareWireInput {
-            config: config_deserialize::from_str(config_json).unwrap(),
-            experimental_raw,
-            source_text: source_text.into(),
-        }
-    }
-
-    #[test]
-    fn legacy_normalizer_owns_config_and_raw_validations() {
-        let config_input = neutral_state_aware_input(
-            r#"{
-                "phase": "start",
-                "sandboxId": "iso:abcd1234",
-                "containment": "wslc"
-            }"#,
-            None,
-            "config validation source",
-        );
-        let config_error = match normalize_legacy_state_aware(config_input, &mut test_logger()) {
-            Ok(_) => panic!("containment on start should be rejected"),
-            Err(error) => error,
-        };
-        assert!(
-            config_error
-                .to_string()
-                .contains("requests must not carry 'containment'"),
-            "unexpected config validation error: {config_error}"
-        );
-
-        let raw_input = neutral_state_aware_input(
-            r#"{
-                "phase": "start",
-                "sandboxId": "iso:abcd1234"
-            }"#,
-            Some(serde_json::json!({"seatbelt": {}})),
-            "raw validation source",
-        );
-        let raw_error = match normalize_legacy_state_aware(raw_input, &mut test_logger()) {
-            Ok(_) => panic!("moved experimental Seatbelt config should be rejected"),
-            Err(error) => error,
-        };
-        assert!(
-            raw_error
-                .to_string()
-                .contains("'experimental.seatbelt' has moved"),
-            "unexpected raw validation error: {raw_error}"
-        );
-    }
-
-    #[test]
-    fn legacy_normalizer_populates_telemetry_from_neutral_input() {
-        let input = neutral_state_aware_input(
-            r#"{
-                "phase": "start",
-                "sandboxId": "iso:abcd1234",
-                "telemetry": {"enabled": true}
-            }"#,
-            None,
-            "telemetry source",
-        );
-
-        let parsed = normalize_legacy_state_aware(input, &mut test_logger()).unwrap();
-
-        assert_eq!(parsed.phase, Phase::Start);
-        assert_eq!(
-            parsed
-                .request
-                .telemetry
-                .as_ref()
-                .and_then(|telemetry| telemetry.enabled),
-            Some(true)
-        );
-        assert!(parsed.experimental_raw.is_none());
-        assert_eq!(parsed.source_text.as_deref(), Some("telemetry source"));
-    }
-
-    #[test]
-    fn legacy_normalizer_rejects_moved_experimental_telemetry() {
-        let input = neutral_state_aware_input(
-            r#"{
-                "phase": "start",
-                "sandboxId": "iso:abcd1234"
-            }"#,
-            Some(serde_json::json!({"telemetry": 42})),
-            "malformed telemetry source",
-        );
-
-        let error = match normalize_legacy_state_aware(input, &mut test_logger()) {
-            Ok(_) => panic!("moved experimental telemetry should be rejected"),
-            Err(error) => error,
-        };
-        assert!(
-            error
-                .to_string()
-                .contains("'experimental.telemetry' has moved"),
-            "unexpected telemetry error: {error}"
-        );
-    }
-
-    #[test]
-    fn rolling_parser_preserves_legacy_state_aware_validation_diagnostics() {
-        for (case, json, expected) in [
-            (
-                "containment on a non-provision phase",
-                r#"{
-                    "phase": "start",
-                    "sandboxId": "iso:abcd1234",
-                    "containment": "wslc"
-                }"#,
-                "requests must not carry 'containment'",
-            ),
-            (
-                "moved experimental Seatbelt section",
-                r#"{
-                    "phase": "start",
-                    "sandboxId": "iso:abcd1234",
-                    "experimental": {"seatbelt": {}}
-                }"#,
-                "'experimental.seatbelt' has moved",
-            ),
-            (
-                "one-shot lifecycle section",
-                r#"{
-                    "phase": "start",
-                    "sandboxId": "iso:abcd1234",
-                    "lifecycle": {}
-                }"#,
-                "do not accept one-shot section(s): lifecycle",
-            ),
-            (
-                "multiple experimental backend sections",
-                r#"{
-                    "phase": "start",
-                    "sandboxId": "iso:abcd1234",
-                    "experimental": {
-                        "isolation_session": {},
-                        "wslc": {}
-                    }
-                }"#,
-                "Multiple containment backends configured",
-            ),
-        ] {
-            let error = match parse_mxc_request_json(json, &mut test_logger()) {
-                Err(ParseError::StateAware(error)) => error,
-                other => panic!("{case}: expected state-aware error, got {other:?}"),
-            };
-            assert!(
-                error.message.contains(expected),
-                "{case}: unexpected error: {}",
-                error.message
-            );
-        }
-    }
-
     #[test]
     fn reused_phase_probe_classifies_one_shot_and_state_aware_phases() {
         assert_eq!(
@@ -5873,7 +3072,7 @@ mod tests {
     }
 
     #[test]
-    fn reused_phase_probe_is_stricter_than_the_rolling_parser() {
+    fn reused_phase_probe_rejects_invalid_discriminators() {
         assert!(probe_phase(r#"{"phase":null}"#).is_err());
         assert!(probe_phase(r#"{"phase":42}"#).is_err());
         assert!(probe_phase(r#"{"phase":"start","phase":"exec"}"#).is_err());
@@ -5883,19 +3082,11 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn wslc_proxy_template_migration_keeps_backend_context() {
-        let legacy = r#"{
-            "version":"0.9.0-alpha","phase":"exec","sandboxId":"{{SANDBOX_ID}}",
-            "process":{"commandLine":"echo proxy"},
-            "network":{"proxy":{"url":"http://127.0.0.1:8888"}}
-        }"#;
-        assert!(parse_mxc_request_json(legacy, &mut test_logger()).is_ok());
-
         let unprefixed = r#"{
             "version":"0.9.0-alpha","phase":"exec","sandboxId":"{{SANDBOX_ID}}",
             "process":{"commandLine":"echo proxy"},
             "runtimeConfig":{"networkProxy":"http://127.0.0.1:8888"}
         }"#;
-        assert!(parse_mxc_request_json(unprefixed, &mut test_logger()).is_err());
         let error = parse_exact_for_test(unprefixed).unwrap_err();
         assert!(
             error
@@ -5904,13 +3095,13 @@ mod tests {
             "{}",
             error.message()
         );
-        println!(
-            "unprefixed WSLC proxy-template rejection: {}",
-            error.message()
-        );
-
         let prefixed = unprefixed.replace("{{SANDBOX_ID}}", "wslc:{{SANDBOX_ID}}");
-        assert_accepted_models_converge("prefixed WSLC proxy template", &prefixed);
+        let parsed = parse_exact_for_test(&prefixed).unwrap();
+        let MxcRequest::StateAware(parsed) = parsed else {
+            panic!("expected state-aware request");
+        };
+        assert_eq!(parsed.request().containment, ContainmentBackend::Wslc);
+        assert!(parsed.request().policy.network_proxy.is_enabled());
     }
 
     #[test]
@@ -6019,7 +3210,10 @@ mod tests {
     }
 
     #[test]
-    fn public_non_provision_loaders_preserve_routing_policy_presence_and_telemetry() {
+    fn v0_9_non_provision_requests_route_by_registered_sandbox_id_prefix() {
+        // Post-provision roots are backend-neutral by design. Holding a valid
+        // sandbox ID is the routing authority even when its backend was
+        // provisioned through a newer exact contract.
         for (id, backend) in [
             ("iso:example", ContainmentBackend::IsolationSession),
             ("wsb:example", ContainmentBackend::WindowsSandbox),
@@ -6032,7 +3226,7 @@ mod tests {
                     ""
                 };
                 let json = format!(
-                    r#"{{"version":"0.9.0-alpha","phase":"{phase}","sandboxId":"{id}","telemetry":{{"enabled":false}},"experimental":{{}}{process}}}"#
+                    r#"{{"version":"0.9.0-alpha","phase":"{phase}","sandboxId":"{id}","telemetry":{{"enabled":false}}{process}}}"#
                 );
                 let encoded = base64_encode(json.as_bytes());
                 for parsed in [
@@ -6480,14 +3674,16 @@ mod tests {
         // POSIX shell single-quotes it, and the direct Windows path leaves it
         // bare. An argument needing no quoting would render identically under
         // all three and prove nothing about the prefix.
-        for (sandbox_id, expected) in [
+        for (version, sandbox_id, expected) in [
             // iso -> IsolationSession -> WindowsCommandProcessor
-            ("iso:abcd1234", "app.exe \"a&b\""),
+            ("0.9.0-alpha", "iso:abcd1234", "app.exe \"a&b\""),
+            // wsb -> WindowsSandbox -> WindowsCommandProcessor
+            ("0.10.0-alpha", "wsb:abcd1234", "app.exe \"a&b\""),
             // wslc -> Wslc -> PosixShell
-            ("wslc:abcd1234", "app.exe 'a&b'"),
+            ("0.10.0-alpha", "wslc:abcd1234", "app.exe 'a&b'"),
         ] {
             let json =
-                format!(r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"{sandbox_id}"}}"#);
+                format!(r#"{{"version":"{version}","phase":"exec","sandboxId":"{sandbox_id}"}}"#);
             let (out, override_log) = apply_cli_command(&json, &argv(&["app.exe", "a&b"])).unwrap();
 
             let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -6501,12 +3697,13 @@ mod tests {
 
     #[test]
     fn apply_cli_command_rejects_a_non_exec_phase_with_an_envelope_error() {
-        let err = apply_cli_command(
+        for json in [
             r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"iso:abcd1234"}"#,
-            &argv(&["echo", "hi"]),
-        )
-        .unwrap_err();
-        assert!(matches!(err, ParseError::StateAware(_)));
+            r#"{"version":"0.10.0-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
+        ] {
+            let err = apply_cli_command(json, &argv(&["echo", "hi"])).unwrap_err();
+            assert!(matches!(err, ParseError::StateAware(_)), "{json}");
+        }
     }
 
     #[test]
@@ -6523,13 +3720,12 @@ mod tests {
 
     #[test]
     fn apply_cli_command_surfaces_an_unregistered_sandbox_id_prefix() {
-        let err = apply_cli_command(
-            r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"zzz:abcd"}"#,
-            &argv(&["app.exe", "--flag"]),
-        )
-        .unwrap_err();
-
-        assert!(matches!(err, ParseError::StateAware(_)));
+        for version in ["0.9.0-alpha", "0.10.0-alpha"] {
+            let json =
+                format!(r#"{{"version":"{version}","phase":"exec","sandboxId":"zzz:abcd"}}"#);
+            let err = apply_cli_command(&json, &argv(&["app.exe", "--flag"])).unwrap_err();
+            assert!(matches!(err, ParseError::StateAware(_)), "{version}");
+        }
     }
 
     #[test]
@@ -6602,56 +3798,6 @@ mod tests {
             MxcRequest::StateAware(_) => panic!("expected one-shot"),
         }
     }
-
-    #[test]
-    fn rolling_parser_routes_isolation_session_provision_to_state_aware_arm() {
-        let json = r#"{
-            "phase": "provision",
-            "containment": "isolation_session",
-            "filesystem": {"readwritePaths": ["C:\\workspace"]}
-        }"#;
-        match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
-            LegacyMxcRequest::StateAware(p) => {
-                assert_eq!(p.phase, Phase::Provision);
-                assert_eq!(p.containment, Some(ContainmentBackend::IsolationSession));
-                assert!(p.sandbox_id.is_none());
-                assert!(p.experimental_raw.is_none());
-                assert_eq!(p.request.policy.readwrite_paths, vec!["C:\\workspace"]);
-                // Non-exec phase: process-related fields stay default.
-                assert!(p.request.script_code.is_empty());
-            }
-            LegacyMxcRequest::OneShot(_) => panic!("expected state-aware"),
-        }
-    }
-
-    #[test]
-    fn rolling_parser_preserves_state_aware_backend_payload() {
-        let json = r#"{
-            "phase": "start",
-            "sandboxId": "iso:abcd1234",
-            "experimental": {
-                "isolation_session": {"start": {"opaqueFutureField": true}}
-            }
-        }"#;
-        match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
-            LegacyMxcRequest::StateAware(p) => {
-                assert_eq!(p.phase, Phase::Start);
-                assert_eq!(p.sandbox_id.as_deref(), Some("iso:abcd1234"));
-                // Assert the nested experimental payload survives extraction
-                // unchanged (not merely that the block is present), since the
-                // dispatcher types it per-backend from this raw value.
-                let exp = p.experimental_raw.expect("experimental block present");
-                assert_eq!(
-                    exp,
-                    serde_json::json!({
-                        "isolation_session": {"start": {"opaqueFutureField": true}}
-                    })
-                );
-            }
-            LegacyMxcRequest::OneShot(_) => panic!("expected state-aware"),
-        }
-    }
-
     #[test]
     fn state_aware_telemetry_populates_typed_field() {
         // Telemetry is a stable cross-cutting setting parsed identically for
@@ -6693,20 +3839,6 @@ mod tests {
         .unwrap_err();
         assert!(matches!(error, ParseError::OneShot(_)), "got {error:?}");
     }
-
-    #[test]
-    fn rolling_parser_leaves_telemetry_unset_for_backend_only_payload() {
-        let json = r#"{
-            "phase": "start",
-            "sandboxId": "iso:abcd1234",
-            "experimental": {"isolation_session": {"start": {"opaqueFutureField": true}}}
-        }"#;
-        match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
-            LegacyMxcRequest::StateAware(p) => assert!(p.request.telemetry.is_none()),
-            LegacyMxcRequest::OneShot(_) => panic!("expected state-aware"),
-        }
-    }
-
     #[test]
     fn state_aware_malformed_telemetry_is_rejected() {
         // A present-but-malformed telemetry block is a client error rejected at
@@ -6744,117 +3876,6 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn state_aware_pre_v08_rejects_null_directional_sections() {
-        for extra in [
-            r#""network": {"egress": null}"#,
-            r#""runtimeConfig": null"#,
-            r#""processContainer": {"network": null}"#,
-        ] {
-            let json = format!(
-                r#"{{
-                    "version": "0.7.0-alpha",
-                    "phase": "start",
-                    "sandboxId": "wslc:0123456789abcdef0123456789abcdef",
-                    {extra}
-                }}"#
-            );
-            assert!(matches!(
-                parse_mxc_request_json(&json, &mut test_logger()),
-                Err(ParseError::StateAware(_))
-            ));
-        }
-    }
-
-    #[test]
-    fn rolling_state_aware_v08_omitted_network_remains_absent_after_parsing() {
-        let json = r#"{
-            "version": "0.8.0-alpha",
-            "phase": "start",
-            "sandboxId": "wslc:0123456789abcdef0123456789abcdef"
-        }"#;
-        let parsed = match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
-            LegacyMxcRequest::StateAware(parsed) => parsed,
-            LegacyMxcRequest::OneShot(_) => panic!("expected state-aware request"),
-        };
-
-        assert!(parsed.request.policy.network_egress.is_none());
-        assert!(parsed.request.policy.network_ingress.is_none());
-        assert!(!parsed.request.policy.network_specified);
-        assert!(!parsed.request.policy.network_mode_specified);
-    }
-
-    #[test]
-    fn rolling_state_aware_v08_runtime_proxy_uses_sandbox_backend_context() {
-        let json = r#"{
-            "version": "0.8.0-alpha",
-            "phase": "exec",
-            "sandboxId": "wslc:0123456789abcdef0123456789abcdef",
-            "runtimeConfig": {"networkProxy": "http://127.0.0.1:8888"},
-            "process": {"commandLine": "echo hi"}
-        }"#;
-        let parsed = match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
-            LegacyMxcRequest::StateAware(parsed) => parsed,
-            LegacyMxcRequest::OneShot(_) => panic!("expected state-aware request"),
-        };
-
-        assert_eq!(parsed.request.containment, ContainmentBackend::Wslc);
-        assert!(parsed.request.policy.runtime_network_proxy_specified);
-        assert!(parsed.request.policy.network_proxy.is_enabled());
-    }
-
-    /// Parse a provision request and return the resolved cross-cutting policy.
-    fn rolling_provision_policy(network_json: &str) -> ContainerPolicy {
-        let json = format!(
-            r#"{{
-                "version": "0.9.0-alpha",
-                "phase": "provision",
-                "containment": "processcontainer",
-                "network": {network_json}
-            }}"#
-        );
-        match parse_mxc_request_json(&json, &mut test_logger()).unwrap() {
-            LegacyMxcRequest::StateAware(p) => p.request.policy,
-            LegacyMxcRequest::OneShot(_) => panic!("expected state-aware"),
-        }
-    }
-
-    #[test]
-    fn rolling_parser_sets_state_aware_network_mode_presence() {
-        // Every network *mode* field (everything except `proxy`) must flip the
-        // presence bit so post-provision phases can reject an immutable-posture
-        // change by presence.
-        for net in [
-            r#"{"defaultPolicy": "allow"}"#,
-            r#"{"enforcementMode": "firewall"}"#,
-            r#"{"allowLocalNetwork": true}"#,
-            r#"{"allowedHosts": ["example.com"]}"#,
-            r#"{"blockedHosts": ["example.com"]}"#,
-        ] {
-            let policy = rolling_provision_policy(net);
-            assert!(
-                policy.network_mode_specified,
-                "network {net} should set network_mode_specified"
-            );
-            assert!(policy.network_specified);
-        }
-    }
-
-    #[test]
-    fn rolling_parser_keeps_proxy_only_network_mode_unspecified() {
-        // A proxy-only block sets `network_specified` (the block is present) but
-        // NOT `network_mode_specified`, so the cooperative proxy stays honourable
-        // at exec while no immutable mode change is falsely detected.
-        let policy = rolling_provision_policy(r#"{"proxy": {"url": "http://proxy.example:8080"}}"#);
-        assert!(policy.network_specified);
-        assert!(
-            !policy.network_mode_specified,
-            "proxy-only block must not set network_mode_specified"
-        );
-        assert!(policy.network_proxy.is_enabled());
-    }
-
     #[test]
     fn state_aware_malformed_telemetry_logs_once_and_keeps_primary_clean() {
         // The malformed-telemetry error must reach the auxiliary
@@ -6897,7 +3918,7 @@ mod tests {
     }
 
     #[test]
-    fn state_aware_experimental_telemetry_reports_migration() {
+    fn state_aware_legacy_experimental_section_is_rejected() {
         let json = r#"{
             "version": "0.9.0-alpha",
             "phase": "provision",
@@ -6910,108 +3931,10 @@ mod tests {
             _ => panic!("expected state-aware error, got {error:?}"),
         };
         assert!(
-            message.contains("'experimental.telemetry' has moved to the stable section"),
+            message.contains("unknown field `experimental`"),
             "got {error:?}"
         );
     }
-
-    #[test]
-    fn rolling_parser_rejects_non_object_state_aware_experimental() {
-        // A non-object `experimental` (here a bare number) is a hard parse error
-        // on the one-shot path (typed `Option<Experimental>`); the state-aware
-        // path peels `experimental` off before typed deserialize, so it must
-        // reject a non-object value explicitly to stay consistent rather than
-        // silently ignoring it.
-        let json = r#"{
-            "phase": "start",
-            "sandboxId": "iso:abcd1234",
-            "experimental": 42
-        }"#;
-        let r = parse_mxc_request_json(json, &mut test_logger());
-        assert!(matches!(r, Err(ParseError::StateAware(_))), "got {:?}", r);
-    }
-
-    #[test]
-    fn rolling_parser_treats_null_state_aware_experimental_as_absent() {
-        let json = r#"{
-            "phase": "start",
-            "sandboxId": "iso:abcd1234",
-            "experimental": null
-        }"#;
-        match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
-            LegacyMxcRequest::StateAware(parsed) => assert!(parsed.request.telemetry.is_none()),
-            LegacyMxcRequest::OneShot(_) => panic!("expected state-aware"),
-        }
-    }
-
-    #[test]
-    fn rolling_state_aware_wire_input_preserves_config_raw_experimental_and_source() {
-        let json = r#"{
-        "phase": "start",
-        "sandboxId": "iso:abcd1234",
-        "experimental": {
-            "isolation_session": {
-                "start": {"opaqueFutureField": true}
-            }
-        }
-    }"#;
-        let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json).unwrap();
-
-        let input = parse_rolling_state_aware_wire_input(json, discriminator.experimental).unwrap();
-
-        assert!(matches!(input.config.phase, Some(wire::Phase::Start)));
-        assert_eq!(input.config.sandbox_id.as_deref(), Some("iso:abcd1234"));
-        assert!(input.config.experimental.is_none());
-        assert_eq!(
-            input.experimental_raw,
-            Some(serde_json::json!({
-                "isolation_session": {
-                    "start": {"opaqueFutureField": true}
-                }
-            }))
-        );
-        assert_eq!(input.source_text.as_ref(), json);
-    }
-
-    #[test]
-    fn rolling_state_aware_wire_input_preserves_absent_experimental() {
-        let json = r#"{
-            "phase": "start",
-            "sandboxId": "iso:abcd1234"
-        }"#;
-        let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json).unwrap();
-
-        let input = parse_rolling_state_aware_wire_input(json, discriminator.experimental).unwrap();
-
-        assert!(matches!(input.config.phase, Some(wire::Phase::Start)));
-        assert_eq!(input.config.sandbox_id.as_deref(), Some("iso:abcd1234"));
-        assert!(input.config.experimental.is_none());
-        assert!(input.experimental_raw.is_none());
-        assert_eq!(input.source_text.as_ref(), json);
-    }
-
-    #[test]
-    fn rolling_state_aware_wire_input_rejects_non_object_experimental() {
-        let json = r#"{
-            "phase": "start",
-            "sandboxId": "iso:abcd1234",
-            "experimental": 42
-        }"#;
-        let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json).unwrap();
-
-        let error = match parse_rolling_state_aware_wire_input(json, discriminator.experimental) {
-            Ok(_) => panic!("non-object experimental should be rejected"),
-            Err(error) => error,
-        };
-
-        assert!(
-            error
-                .to_string()
-                .contains("Invalid configuration at `experimental`: expected an object"),
-            "unexpected error: {error}"
-        );
-    }
-
     #[test]
     fn state_aware_exec_request_requires_command_line() {
         let json = r#"{
@@ -7080,154 +4003,13 @@ mod tests {
             error.message
         );
     }
-
-    #[test]
-    fn state_aware_mask_preserves_locations_after_multiline_experimental() {
-        let json = r#"{
-            "phase": "provision",
-            "experimental": {
-                "future_backend": {
-                    "nested": true
-                }
-            },
-            "process": {"timeout": "soon"}
-        }"#;
-        let error = match parse_mxc_request_json(json, &mut test_logger()) {
-            Err(ParseError::StateAware(error)) => error,
-            other => panic!("expected state-aware error, got {other:?}"),
-        };
-
-        assert!(
-            error
-                .message
-                .contains("Invalid configuration at `process.timeout`"),
-            "got: {}",
-            error.message
-        );
-        assert!(error.message.contains("line 8"), "got: {}", error.message);
-    }
-
-    #[test]
-    fn state_aware_mask_handles_empty_object_at_root_boundaries() {
-        for json in [
-            r#"{"experimental":{},"phase":"provision"}"#,
-            r#"{"phase":"provision","experimental":{}}"#,
-        ] {
-            let discriminator: RequestDiscriminator<'_> =
-                config_deserialize::from_str(json).unwrap();
-            let masked = mask_state_aware_experimental(
-                json,
-                discriminator.experimental.map(|raw| raw.get()),
-            )
-            .unwrap();
-
-            assert_eq!(masked.len(), json.len());
-            let config: wire::MxcConfig = config_deserialize::from_str(&masked).unwrap();
-            assert!(matches!(config.phase, Some(wire::Phase::Provision)));
-        }
-    }
-
-    #[test]
-    fn state_aware_mask_handles_whitespace_only_multiline_object() {
-        let json = "{\n  \"phase\": \"provision\",\n  \"experimental\": {\r\n    \r\n  }\n}";
-        let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json).unwrap();
-        let masked =
-            mask_state_aware_experimental(json, discriminator.experimental.map(|raw| raw.get()))
-                .unwrap();
-
-        assert_eq!(masked.len(), json.len());
-        assert_eq!(
-            masked.bytes().filter(|byte| *byte == b'\n').count(),
-            json.bytes().filter(|byte| *byte == b'\n').count()
-        );
-        let config: wire::MxcConfig = config_deserialize::from_str(&masked).unwrap();
-        assert!(matches!(config.phase, Some(wire::Phase::Provision)));
-    }
-
-    #[test]
-    fn experimental_source_span_locates_the_borrowed_block() {
-        let json = r#"{"phase":"provision","experimental":{"a":{"b":1}}}"#;
-        let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json).unwrap();
-        let raw = discriminator.experimental.unwrap().get();
-
-        let (start, end) = experimental_source_span(json, raw).unwrap();
-        assert_eq!(&json[start..end], raw);
-        assert_eq!(&json[start..start + 1], "{");
-        assert_eq!(&json[end - 1..end], "}");
-    }
-
-    #[test]
-    fn experimental_source_span_rejects_a_foreign_slice() {
-        // A `raw` not borrowed from `json` must fail closed rather than compute
-        // an out-of-range offset — the invariant guard the masking relies on.
-        let json = r#"{"experimental":{}}"#;
-        let foreign = String::from("{}");
-        let error = experimental_source_span(json, foreign.as_str()).unwrap_err();
-        assert!(matches!(error, WxcError::ConfigParse(_)));
-    }
-
-    #[test]
-    fn state_aware_mask_span_contains_only_braces_spaces_and_newlines() {
-        let json = "{\n  \"experimental\": {\n    \"wslc\": { \"image\": \"py\" }\n  },\n  \"phase\": \"provision\"\n}";
-        let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json).unwrap();
-        let raw = discriminator.experimental.unwrap().get();
-        let (start, end) = experimental_source_span(json, raw).unwrap();
-        let masked =
-            mask_state_aware_experimental(json, discriminator.experimental.map(|raw| raw.get()))
-                .unwrap();
-
-        // The masked span replaces content with exactly one `{`, one `}`,
-        // spaces, and preserved newlines; everything outside is byte-identical.
-        assert_eq!(masked[..start], json[..start]);
-        assert_eq!(masked[end..], json[end..]);
-        let span = &masked[start..end];
-        assert!(span
-            .bytes()
-            .all(|b| matches!(b, b'{' | b'}' | b' ' | b'\r' | b'\n')));
-        assert_eq!(span.bytes().filter(|b| *b == b'{').count(), 1);
-        assert_eq!(span.bytes().filter(|b| *b == b'}').count(), 1);
-    }
-
-    #[test]
-    fn rolling_parser_rejects_non_object_state_aware_experimental_block() {
-        // `null` maps to "absent" and is accepted (see
-        // `state_aware_null_experimental_is_accepted`); only non-null,
-        // non-object values are rejected.
-        for value in [r#""oops""#, "42", "[]"] {
-            let json = format!(r#"{{"phase":"provision","experimental":{value}}}"#);
-            let error = match parse_mxc_request_json(&json, &mut test_logger()) {
-                Err(ParseError::StateAware(error)) => error,
-                other => panic!("expected state-aware error for {value}, got {other:?}"),
-            };
-            assert!(
-                error
-                    .message
-                    .ends_with("Invalid configuration at `experimental`: expected an object"),
-                "got: {}",
-                error.message
-            );
-        }
-    }
-
-    #[test]
-    fn rolling_parser_allows_provision_without_containment() {
-        let json = r#"{"phase":"provision"}"#;
-        match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
-            LegacyMxcRequest::StateAware(parsed) => {
-                assert_eq!(parsed.phase, Phase::Provision);
-                assert!(parsed.containment.is_none());
-            }
-            LegacyMxcRequest::OneShot(_) => panic!("expected state-aware"),
-        }
-    }
-
     #[test]
     fn minimal_config() {
         let json = r#"{"process": {"commandLine": "echo hello"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.script_code, "echo hello");
         assert_eq!(req.script_timeout, 0);
         assert!(req.working_directory.is_empty());
@@ -7243,7 +4025,7 @@ mod tests {
         });
         let mut logger = test_logger();
 
-        let error = load_request_from_value(config, &mut logger).unwrap_err();
+        let error = normalize_wire_value_for_test(config, &mut logger).unwrap_err();
         let message = error.to_string();
         assert!(message.contains("Invalid configuration at `process.timeout`"));
         assert!(message.contains("expected u32"));
@@ -7257,36 +4039,12 @@ mod tests {
     }
 
     #[test]
-    fn load_request_from_value_preserves_null_sensitive_version_gating() {
-        for config in [
-            serde_json::json!({
-                "version": "0.7.0-alpha",
-                "process": {"commandLine": "echo hi"},
-                "network": {"egress": null}
-            }),
-            serde_json::json!({
-                "version": "0.7.0-alpha",
-                "process": {"commandLine": "echo hi"},
-                "runtimeConfig": null
-            }),
-            serde_json::json!({
-                "version": "0.7.0-alpha",
-                "process": {"commandLine": "echo hi"},
-                "processContainer": {"network": null}
-            }),
-        ] {
-            let mut logger = test_logger();
-            assert!(load_request_from_value(config, &mut logger).is_err());
-        }
-    }
-
-    #[test]
     fn missing_process_section() {
         let json = r#"{"containment": "processcontainer"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
         assert!(result.is_err());
     }
 
@@ -7296,7 +4054,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
         assert!(result.is_err());
     }
 
@@ -7306,7 +4064,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
         assert!(result.is_err());
     }
 
@@ -7316,7 +4074,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
         assert!(result.is_err());
     }
 
@@ -7349,7 +4107,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.script_code, "dir");
         assert_eq!(req.working_directory, "C:\\temp");
         assert_eq!(req.script_timeout, 3000);
@@ -7378,7 +4136,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("unknown variant") && msg.contains("invalid"),
@@ -7401,7 +4159,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let error = load_request(&encoded, &mut logger, true).unwrap_err();
+        let error = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         let message = error.to_string();
         assert!(
             message.contains("Invalid configuration at `process.timeout`"),
@@ -7453,7 +4211,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let error = load_request(&encoded, &mut logger, true).unwrap_err();
+        let error = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         let message = error.to_string();
         assert!(
             message.contains("Invalid configuration at `network.proxy.localhost`"),
@@ -7471,7 +4229,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let error = load_request(&encoded, &mut logger, true).unwrap_err();
+        let error = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         let message = error.to_string();
         assert!(
             message.contains("Invalid JSON syntax:"),
@@ -7490,7 +4248,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("unknown variant") && msg.contains("invalid"),
@@ -7505,14 +4263,15 @@ mod tests {
         std::fs::write(&file_path, r#"{"process": {"commandLine": "whoami"}}"#).unwrap();
 
         let mut logger = test_logger();
-        let req = load_request(file_path.to_str().unwrap(), &mut logger, false).unwrap();
+        let req =
+            normalize_wire_input_for_test(file_path.to_str().unwrap(), &mut logger, false).unwrap();
         assert_eq!(req.script_code, "whoami");
     }
 
     #[test]
     fn file_not_found() {
         let mut logger = test_logger();
-        let result = load_request("nonexistent.json", &mut logger, false);
+        let result = normalize_wire_input_for_test("nonexistent.json", &mut logger, false);
         assert!(result.is_err());
         assert_eq!(
             logger
@@ -7529,7 +4288,7 @@ mod tests {
         // Linux/macOS; the diagnostic must escape it so it cannot inject a
         // forged multi-line log entry.
         let mut logger = test_logger();
-        let result = load_request("missing\nfile.json", &mut logger, false);
+        let result = normalize_wire_input_for_test("missing\nfile.json", &mut logger, false);
         assert!(result.is_err());
 
         let message = match result.unwrap_err() {
@@ -7543,7 +4302,7 @@ mod tests {
     #[test]
     fn empty_file_path_error_is_logged_once() {
         let mut logger = test_logger();
-        let result = load_request("", &mut logger, false);
+        let result = normalize_wire_input_for_test("", &mut logger, false);
         assert!(result.is_err());
         assert_eq!(
             logger
@@ -7558,7 +4317,8 @@ mod tests {
     fn file_read_error_is_logged_once() {
         let directory = tempfile::tempdir().unwrap();
         let mut logger = test_logger();
-        let result = load_request(directory.path().to_str().unwrap(), &mut logger, false);
+        let result =
+            normalize_wire_input_for_test(directory.path().to_str().unwrap(), &mut logger, false);
         assert!(result.is_err());
         assert_eq!(
             logger
@@ -7572,7 +4332,7 @@ mod tests {
     #[test]
     fn invalid_base64() {
         let mut logger = test_logger();
-        let result = load_request("not-valid-base64!!!", &mut logger, true);
+        let result = normalize_wire_input_for_test("not-valid-base64!!!", &mut logger, true);
         assert!(result.is_err());
         assert_eq!(
             logger
@@ -7592,7 +4352,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Console);
         logger.enable_file_sink(&log_path).unwrap();
 
-        let result = load_request("not-valid-base64!!!", &mut logger, true);
+        let result = normalize_wire_input_for_test("not-valid-base64!!!", &mut logger, true);
         assert!(result.is_err());
 
         drop(logger);
@@ -7624,7 +4384,7 @@ mod tests {
         drop(logger);
         let log = std::fs::read_to_string(log_path).unwrap();
         assert_eq!(
-            log.matches("unknown field `seatbelt`").count(),
+            log.matches("unknown field `experimental`").count(),
             1,
             "state-aware diagnostics should reach auxiliary sinks exactly once"
         );
@@ -7634,7 +4394,7 @@ mod tests {
     fn invalid_json() {
         let encoded = base64_encode(b"{ not json }");
         let mut logger = test_logger();
-        let result = load_request(&encoded, &mut logger, true);
+        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
         assert!(result.is_err());
         assert!(logger.get_buffer().contains("Invalid JSON syntax:"));
     }
@@ -7645,7 +4405,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req
             .policy
             .capabilities
@@ -7671,7 +4431,7 @@ mod tests {
             let encoded = base64_encode(json.as_bytes());
             let mut logger = test_logger();
 
-            let error = load_request(&encoded, &mut logger, true)
+            let error = normalize_wire_input_for_test(&encoded, &mut logger, true)
                 .expect_err("reserved learning-mode capability must be rejected");
             let message = error.to_string();
             assert!(message.contains("reserved learning-mode capability"));
@@ -7692,7 +4452,7 @@ mod tests {
             let encoded = base64_encode(json.as_bytes());
             let mut logger = test_logger();
 
-            let error = load_request(&encoded, &mut logger, true)
+            let error = normalize_wire_input_for_test(&encoded, &mut logger, true)
                 .expect_err("comma-delimited capability entry must be rejected");
             let message = error.to_string();
             assert!(message.contains("must not contain a comma"));
@@ -7710,7 +4470,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.script_timeout, 60000);
     }
 
@@ -7726,7 +4486,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.policy.capabilities.len(), 3);
         assert_eq!(req.policy.capabilities[0], "internetClient");
         assert_eq!(req.policy.capabilities[1], "privateNetworkClientServer");
@@ -7742,7 +4502,7 @@ mod tests {
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.capture_denials.is_none());
     }
 
@@ -7755,7 +4515,7 @@ mod tests {
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         let cd = req
             .policy
             .capture_denials
@@ -7775,7 +4535,7 @@ mod tests {
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         let cd = req.policy.capture_denials.expect("captureDenials present");
         assert!(cd.retain_etl);
     }
@@ -7789,7 +4549,7 @@ mod tests {
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         let cd = req.policy.capture_denials.expect("captureDenials present");
         assert_eq!(cd.mode, CaptureDenialsMode::Block);
     }
@@ -7803,7 +4563,7 @@ mod tests {
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         let cd = req.policy.capture_denials.expect("captureDenials present");
         assert_eq!(cd.mode, CaptureDenialsMode::Allow);
     }
@@ -7817,7 +4577,7 @@ mod tests {
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(
             req.policy
                 .capabilities
@@ -7842,7 +4602,7 @@ mod tests {
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(
             req.policy
                 .capabilities
@@ -7861,7 +4621,7 @@ mod tests {
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(
             req.policy
                 .capabilities
@@ -7884,7 +4644,7 @@ mod tests {
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(
             req.policy
                 .capabilities
@@ -7918,7 +4678,7 @@ mod tests {
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        let err = load_request(&encoded, &mut logger, true)
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true)
             .expect_err("an unknown captureDenials mode must be rejected");
         // serde surfaces the accepted variants; the message must name both so
         // the error is actionable.
@@ -7943,7 +4703,7 @@ mod tests {
         );
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         let cd = req.policy.capture_denials.expect("captureDenials present");
         assert_eq!(
             cd.output_path.as_deref(),
@@ -7960,7 +4720,7 @@ mod tests {
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        let err = load_request(&encoded, &mut logger, true)
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true)
             .expect_err("a relative outputPath must be rejected");
         assert!(
             format!("{err:?}").contains("absolute"),
@@ -7983,7 +4743,7 @@ mod tests {
         );
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        let err = load_request(&encoded, &mut logger, true)
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true)
             .expect_err("an outputPath whose parent is missing must be rejected");
         assert!(
             format!("{err:?}").contains("parent directory does not"),
@@ -8006,7 +4766,7 @@ mod tests {
         );
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        let err = load_request(&encoded, &mut logger, true)
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true)
             .expect_err("a filesystem-root outputPath must be rejected");
         assert!(
             format!("{err:?}").contains("directory root"),
@@ -8028,7 +4788,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true)
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true)
             .expect_err("an existing directory outputPath must be rejected");
         assert!(
             format!("{err:?}").contains("existing directory"),
@@ -8042,7 +4802,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.least_privilege_mode);
     }
 
@@ -8052,7 +4812,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.policy.default_network_policy, NetworkPolicy::Allow);
     }
 
@@ -8062,7 +4822,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
     }
 
@@ -8077,7 +4837,7 @@ mod tests {
             );
             let encoded = base64_encode(json.as_bytes());
             let mut logger = test_logger();
-            let req = load_request(&encoded, &mut logger, true).unwrap();
+            let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
             assert_eq!(
                 req.policy.default_network_policy,
                 NetworkPolicy::Block,
@@ -8093,7 +4853,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(
             req.policy.network_enforcement_mode,
             NetworkEnforcementMode::Capabilities
@@ -8106,7 +4866,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(
             req.policy.network_enforcement_mode,
             NetworkEnforcementMode::Firewall
@@ -8119,7 +4879,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(
             req.policy.network_enforcement_mode,
             NetworkEnforcementMode::Both
@@ -8138,7 +4898,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.policy.allowed_hosts.len(), 2);
         assert_eq!(req.policy.allowed_hosts[0], "example.com");
         assert_eq!(req.policy.allowed_hosts[1], "api.trusted.com");
@@ -8156,7 +4916,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.allow_local_network);
     }
 
@@ -8169,7 +4929,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(!req.policy.allow_local_network);
     }
 
@@ -8183,7 +4943,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.network_specified);
     }
 
@@ -8193,7 +4953,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(!req.policy.network_specified);
     }
 
@@ -8207,7 +4967,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.ui_specified);
     }
 
@@ -8217,23 +4977,9 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(!req.policy.ui_specified);
     }
-
-    #[test]
-    fn rolling_parser_preserves_state_aware_ui_presence() {
-        let json = r#"{
-            "phase": "provision",
-            "containment": "isolation_session",
-            "ui": {"disable": true}
-        }"#;
-        match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
-            LegacyMxcRequest::StateAware(p) => assert!(p.request.policy.ui_specified),
-            other => panic!("expected state-aware request, got {other:?}"),
-        }
-    }
-
     #[test]
     fn filesystem_paths() {
         let json = r#"{
@@ -8246,7 +4992,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.policy.readwrite_paths.len(), 2);
         assert_eq!(req.policy.readwrite_paths[0], "C:\\Users\\Public");
         assert_eq!(req.policy.readwrite_paths[1], "C:\\Temp\\Data");
@@ -8266,7 +5012,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
         assert!(result.is_err());
     }
 
@@ -8284,7 +5030,7 @@ mod tests {
             let encoded = base64_encode(json.as_bytes());
             let mut logger = test_logger();
 
-            let result = load_request(&encoded, &mut logger, true);
+            let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
             let err = result.expect_err("blank path should be rejected");
             assert!(
                 format!("{err}").contains("empty"),
@@ -8306,7 +5052,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
         let err = result.expect_err("embedded NUL should be rejected");
         assert!(format!("{err}").contains("NUL"), "unexpected error: {err}");
     }
@@ -8327,7 +5073,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.script_code, "import sys\nprint(sys.version)");
         assert_eq!(req.script_timeout, 10000);
         assert_eq!(req.container_id, "TestContainer");
@@ -8340,7 +5086,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
         assert!(result.is_err());
     }
 
@@ -8350,7 +5096,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.script_timeout, 0);
     }
 
@@ -8359,7 +5105,7 @@ mod tests {
         let json = r#"{"process": {"commandLine": "echo hi"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.fallback.allow_dacl_mutation);
     }
 
@@ -8371,7 +5117,7 @@ mod tests {
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(!req.policy.fallback.allow_dacl_mutation);
     }
 
@@ -8383,7 +5129,7 @@ mod tests {
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.fallback.allow_dacl_mutation);
     }
 
@@ -8397,7 +5143,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
 
         #[cfg(target_os = "linux")]
         assert_eq!(req.containment, ContainmentBackend::Bubblewrap);
@@ -8414,7 +5160,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.containment, ContainmentBackend::ProcessContainer);
     }
 
@@ -8428,7 +5174,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
 
         #[cfg(target_os = "linux")]
         assert_eq!(req.containment, ContainmentBackend::Bubblewrap);
@@ -8447,7 +5193,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.containment, ContainmentBackend::Lxc);
     }
 
@@ -8461,7 +5207,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.containment, ContainmentBackend::Bubblewrap);
     }
 
@@ -8473,7 +5219,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.containment, ContainmentBackend::Hyperlight);
     }
 
@@ -8487,7 +5233,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
 
         #[cfg(target_os = "windows")]
         assert_eq!(req.containment, ContainmentBackend::WindowsSandbox);
@@ -8502,7 +5248,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.containment, ContainmentBackend::WindowsSandbox);
     }
 
@@ -8512,7 +5258,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("unknown variant") && msg.contains("docker"),
@@ -8526,7 +5272,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         let sandbox = req.experimental.windows_sandbox.unwrap();
         assert_eq!(sandbox.idle_timeout_ms, 300_000);
         assert_eq!(sandbox.daemon_pipe_name, "wxc-windows-sandbox");
@@ -8547,7 +5293,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         let sandbox = req.experimental.windows_sandbox.unwrap();
         assert_eq!(sandbox.idle_timeout_ms, 60000);
         assert_eq!(sandbox.daemon_pipe_name, "my-custom-pipe");
@@ -8562,7 +5308,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(!req.policy.network_proxy.is_enabled());
     }
 
@@ -8578,7 +5324,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.network_proxy.is_enabled());
         assert_eq!(
             req.policy.network_proxy.address.as_ref().unwrap().port(),
@@ -8598,7 +5344,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.network_proxy.is_enabled());
         let addr = req.policy.network_proxy.address.as_ref().unwrap();
         assert_eq!(addr.port(), 3128);
@@ -8617,7 +5363,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         let addr = req.policy.network_proxy.address.as_ref().unwrap();
         assert_eq!(addr.port(), 8080);
         assert_eq!(addr.host(), "proxy.example.com");
@@ -8630,7 +5376,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
         assert!(result.is_err());
     }
 
@@ -8646,7 +5392,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         let addr = req.policy.network_proxy.address.as_ref().unwrap();
         assert_eq!(addr.port(), 8080);
         assert_eq!(addr.host(), "[::1]");
@@ -8666,7 +5412,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(
             req.policy.network_proxy.address.as_ref().unwrap().port(),
             9090
@@ -8680,7 +5426,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         assert!(
             format!("{}", err).contains("Network proxy is only supported"),
             "expected the supported-backend gate to reject 'vm', got: {}",
@@ -8698,7 +5444,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.network_proxy.is_enabled());
         let addr = req.policy.network_proxy.address.as_ref().unwrap();
         assert_eq!(addr.host(), "proxy.example.com");
@@ -8712,7 +5458,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.network_proxy.is_enabled());
     }
 
@@ -8726,7 +5472,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         assert!(
             format!("{}", err).contains("network.proxy requires network.enforcementMode"),
             "expected the LXC enforcement-mode rejection, got: {}",
@@ -8742,7 +5488,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         assert!(
             format!("{}", err).contains("network.proxy requires network.enforcementMode"),
             "expected the LXC enforcement-mode rejection, got: {}",
@@ -8760,7 +5506,10 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let msg = format!("{}", load_request(&encoded, &mut logger, true).unwrap_err());
+        let msg = format!(
+            "{}",
+            normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err()
+        );
 
         assert!(
             msg.contains("must include a port"),
@@ -8784,7 +5533,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{}", err);
         assert!(
             msg.contains("must not carry credentials"),
@@ -8800,7 +5549,10 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let msg = format!("{}", load_request(&encoded, &mut logger, true).unwrap_err());
+        let msg = format!(
+            "{}",
+            normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err()
+        );
         assert!(
             !msg.contains("hunter2") && !msg.contains("alice"),
             "credentials leaked into the rejection: {msg}"
@@ -8819,7 +5571,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.network_proxy.is_enabled());
     }
 
@@ -8831,7 +5583,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.network_proxy.is_enabled());
     }
 
@@ -8843,7 +5595,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         assert!(
             format!("{}", err).contains("network.proxy.localhost is not reachable"),
             "expected the LXC localhost rejection, got: {}",
@@ -8869,7 +5621,7 @@ mod tests {
             let encoded = base64_encode(json.as_bytes());
             let mut logger = test_logger();
 
-            let err = load_request(&encoded, &mut logger, true).unwrap_err();
+            let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
             assert!(
                 format!("{}", err).contains("loopback address"),
                 "expected the LXC loopback-url rejection for {}, got: {}",
@@ -8887,7 +5639,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         assert!(format!("{}", err).contains("builtinTestServer is not supported"));
     }
 
@@ -8897,7 +5649,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
         assert!(result.is_err());
     }
 
@@ -8907,7 +5659,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
         assert!(result.is_err());
     }
 
@@ -8917,7 +5669,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
         assert!(result.is_err());
     }
 
@@ -8933,7 +5685,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.network_proxy.is_enabled());
         assert!(req.policy.network_proxy.builtin_test_server);
         assert!(req.policy.network_proxy.address.is_some());
@@ -8945,7 +5697,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
         assert!(result.is_err());
     }
 
@@ -8956,7 +5708,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
         assert!(result.is_err());
     }
 
@@ -8967,7 +5719,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
         assert!(result.is_err());
     }
 
@@ -8982,7 +5734,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.network_proxy.is_enabled());
         assert!(req.policy.network_proxy.builtin_test_server);
     }
@@ -8998,7 +5750,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.network_proxy.is_enabled());
         assert!(req.policy.network_proxy.builtin_test_server);
     }
@@ -9014,7 +5766,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.network_proxy.is_enabled());
         assert!(!req.policy.network_proxy.builtin_test_server);
         let addr = req.policy.network_proxy.address.as_ref().unwrap();
@@ -9036,7 +5788,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{}", err);
         assert!(
             msg.contains("network.proxy cannot be combined with"),
@@ -9060,7 +5812,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        assert!(load_request(&encoded, &mut logger, true).is_err());
+        assert!(normalize_wire_input_for_test(&encoded, &mut logger, true).is_err());
     }
 
     #[test]
@@ -9080,7 +5832,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.network_proxy.is_enabled());
         assert_eq!(req.policy.allowed_hosts, vec!["example.com".to_string()]);
     }
@@ -9102,7 +5854,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{}", err);
         assert!(
             msg.contains("external network.proxy") && msg.contains("allowedHosts"),
@@ -9125,7 +5877,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         assert!(format!("{}", err).contains("external network.proxy"));
     }
 
@@ -9146,7 +5898,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         assert!(format!("{}", err).contains("defaultPolicy"));
     }
 
@@ -9168,7 +5920,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.network_proxy.is_enabled());
         assert!(!req.policy.network_proxy.builtin_test_server);
     }
@@ -9190,7 +5942,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.network_proxy.builtin_test_server);
         assert_eq!(req.policy.allowed_hosts, vec!["api.github.com".to_string()]);
     }
@@ -9212,7 +5964,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.network_proxy.is_enabled());
         assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
         assert!(
@@ -9233,7 +5985,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{}", err);
         assert!(
             msg.contains("must not carry credentials"),
@@ -9249,7 +6001,10 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let msg = format!("{}", load_request(&encoded, &mut logger, true).unwrap_err());
+        let msg = format!(
+            "{}",
+            normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err()
+        );
         assert!(
             !msg.contains("hunter2") && !msg.contains("alice"),
             "credentials leaked into the rejection: {msg}"
@@ -9268,7 +6023,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.network_proxy.is_enabled());
     }
 
@@ -9287,7 +6042,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.network_proxy.is_enabled());
         assert!(!req.policy.network_proxy.builtin_test_server);
         let addr = req.policy.network_proxy.address.as_ref().unwrap();
@@ -9307,7 +6062,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         assert!(
             format!("{err}").contains("WSLc: network.proxy must use the 'url' form"),
             "unexpected error: {err}"
@@ -9327,7 +6082,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         assert!(
             format!("{err}").contains("WSLc: network.proxy must use the 'url' form"),
             "unexpected error: {err}"
@@ -9358,9 +6113,10 @@ mod tests {
             let encoded = base64_encode(json.as_bytes());
             let mut logger = test_logger();
 
-            let req = load_request(&encoded, &mut logger, true).unwrap_or_else(|e| {
-                panic!("WSLc must accept its in-container proxy {url}, got: {e}")
-            });
+            let req =
+                normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_or_else(|e| {
+                    panic!("WSLc must accept its in-container proxy {url}, got: {e}")
+                });
             assert_eq!(
                 req.policy
                     .network_proxy
@@ -9387,7 +6143,7 @@ mod tests {
             );
             let encoded = base64_encode(json.as_bytes());
             let mut logger = test_logger();
-            let err = load_request(&encoded, &mut logger, true).unwrap_err();
+            let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
             assert!(
                 format!("{err}").contains("must use the 'http' or 'https' scheme"),
                 "expected scheme rejection for {url}, got: {err}"
@@ -9406,7 +6162,7 @@ mod tests {
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("must use the 'http' or 'https' scheme"),
@@ -9435,7 +6191,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         assert!(
             format!("{err}").contains("requires network.defaultPolicy='allow'"),
             "unexpected error: {err}"
@@ -9459,7 +6215,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         assert!(
             format!("{err}").contains("allowedHosts/blockedHosts"),
             "unexpected error: {err}"
@@ -9483,7 +6239,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         assert!(
             format!("{err}").contains("per-host egress filtering"),
             "unexpected error: {err}"
@@ -9505,7 +6261,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         assert!(
             format!("{err}").contains("per-host egress filtering"),
             "unexpected error: {err}"
@@ -9525,7 +6281,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
         assert!(req.policy.allowed_hosts.is_empty());
     }
@@ -9542,7 +6298,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.policy.default_network_policy, NetworkPolicy::Allow);
         assert!(req.policy.blocked_hosts.is_empty());
     }
@@ -9561,7 +6317,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         assert!(
             format!("{err}").contains("allowLocalNetwork=true is not supported"),
             "unexpected error: {err}"
@@ -9580,7 +6336,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(!req.policy.allow_local_network);
     }
 
@@ -9590,7 +6346,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.schema_version, "0.6.0-alpha");
         assert_eq!(req.container_id, "abc-123");
     }
@@ -9601,7 +6357,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.schema_version, "");
         assert_eq!(req.container_id, "");
     }
@@ -9617,7 +6373,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(
             req.env,
             Some(vec!["FOO=bar".to_string(), "BAZ=qux".to_string()])
@@ -9635,7 +6391,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.working_directory, "/workspace");
     }
 
@@ -9650,7 +6406,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.script_timeout, 9000);
     }
 
@@ -9660,7 +6416,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.containment, ContainmentBackend::MicroVm);
     }
 
@@ -9670,7 +6426,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
         assert!(
             result.is_err(),
             "unknown top-level field should be rejected"
@@ -9685,7 +6441,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
         assert!(result.is_err(), "fileSystem typo should be rejected");
     }
 
@@ -9697,7 +6453,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("unknown field") && msg.contains("bogus"),
@@ -9715,7 +6471,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("unknown field") && msg.contains("unexpected"),
@@ -9730,7 +6486,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("unknown variant") && msg.contains("bogus"),
@@ -9747,7 +6503,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         let wslc = req.experimental.wslc.expect("wslc config present");
         assert_eq!(wslc.port_mappings.len(), 1);
         assert_eq!(wslc.port_mappings[0].windows_port, 8080);
@@ -9764,7 +6520,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true)
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true)
             .expect("one-shot must accept and ignore a stray isolation_session key");
         assert_eq!(req.containment, ContainmentBackend::IsolationSession);
     }
@@ -9775,7 +6531,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.containment, ContainmentBackend::IsolationSession);
     }
 
@@ -9787,7 +6543,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("phase") && msg.contains("state-aware"),
@@ -9801,7 +6557,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("sandboxId") && msg.contains("state-aware"),
@@ -9818,7 +6574,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("correlationVector"),
@@ -9858,7 +6614,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         let sb = req.seatbelt.expect("seatbelt config present via alias");
         assert!(
             sb.gui_access,
@@ -9878,7 +6634,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.script_code, "echo hi");
     }
 
@@ -9900,27 +6656,6 @@ mod tests {
             "unknown top-level field on a state-aware request should be rejected"
         );
     }
-
-    #[test]
-    fn rolling_parser_rejects_one_shot_seatbelt_section_on_state_aware_request() {
-        // A state-aware request carrying a one-shot-only `seatbelt` policy must
-        // be rejected, not silently discarded (the caller might believe the
-        // hardening is in effect).
-        let json = r#"{
-            "phase": "provision",
-            "containment": "seatbelt",
-            "seatbelt": {"guiAccess": true}
-        }"#;
-        let err = match parse_mxc_request_json(json, &mut test_logger()) {
-            Err(ParseError::StateAware(e)) => e.to_string(),
-            other => panic!("expected StateAware rejection, got: {other:?}"),
-        };
-        assert!(
-            err.contains("seatbelt") && err.contains("do not accept"),
-            "got: {err}"
-        );
-    }
-
     #[test]
     fn state_aware_rejects_one_shot_lifecycle_section() {
         let json = r#"{
@@ -9935,41 +6670,6 @@ mod tests {
         };
         assert!(err.contains("unknown field `lifecycle`"), "got: {err}");
     }
-
-    #[test]
-    fn rolling_parser_rejects_one_shot_processcontainer_section_on_state_aware_request() {
-        let json = r#"{
-            "phase": "provision",
-            "containment": "processcontainer",
-            "processContainer": {"leastPrivilege": true}
-        }"#;
-        let err = match parse_mxc_request_json(json, &mut test_logger()) {
-            Err(ParseError::StateAware(e)) => e.to_string(),
-            other => panic!("expected StateAware rejection, got: {other:?}"),
-        };
-        assert!(
-            err.contains("processContainer") && err.contains("do not accept"),
-            "got: {err}"
-        );
-    }
-
-    #[test]
-    fn rolling_parser_rejects_one_shot_lxc_section_on_state_aware_request() {
-        let json = r#"{
-            "phase": "provision",
-            "containment": "lxc",
-            "lxc": {"distribution": "alpine"}
-        }"#;
-        let err = match parse_mxc_request_json(json, &mut test_logger()) {
-            Err(ParseError::StateAware(e)) => e.to_string(),
-            other => panic!("expected StateAware rejection, got: {other:?}"),
-        };
-        assert!(
-            err.contains("lxc") && err.contains("do not accept"),
-            "got: {err}"
-        );
-    }
-
     #[test]
     fn state_aware_rejects_experimental_seatbelt() {
         // `experimental.seatbelt` moved to the stable section; the state-aware
@@ -9985,7 +6685,7 @@ mod tests {
             Err(ParseError::StateAware(e)) => e.to_string(),
             other => panic!("expected StateAware rejection, got: {other:?}"),
         };
-        assert!(err.contains("unknown field `seatbelt`"), "got: {err}");
+        assert!(err.contains("unknown field `experimental`"), "got: {err}");
     }
 
     #[test]
@@ -10000,7 +6700,7 @@ mod tests {
             Err(ParseError::StateAware(e)) => e.to_string(),
             other => panic!("expected StateAware rejection, got: {other:?}"),
         };
-        assert!(err.contains("unknown field `macos_sandbox`"), "got: {err}");
+        assert!(err.contains("unknown field `experimental`"), "got: {err}");
     }
 
     #[test]
@@ -10015,22 +6715,6 @@ mod tests {
         match load_mxc(json).unwrap() {
             MxcRequest::StateAware(p) => assert_eq!(p.phase(), Phase::Provision),
             _ => panic!("expected state-aware request"),
-        }
-    }
-
-    #[test]
-    fn rolling_parser_forwards_state_aware_container_id() {
-        let json = r#"{
-            "phase": "provision",
-            "containerId": "sa-container-1",
-            "containment": "isolation_session"
-        }"#;
-        match parse_mxc_request_json(json, &mut test_logger()).unwrap() {
-            LegacyMxcRequest::StateAware(parsed) => {
-                assert_eq!(parsed.phase, Phase::Provision);
-                assert_eq!(parsed.request.container_id, "sa-container-1");
-            }
-            LegacyMxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
     }
 
@@ -10518,7 +7202,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.schema_version, CURRENT_SCHEMA_VERSION);
     }
 
@@ -10528,7 +7212,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         assert!(
             err.to_string().contains("older than supported"),
             "expected an older-than-supported error, got: {err}"
@@ -10541,7 +7225,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.schema_version, "0.6.0-alpha");
     }
 
@@ -10551,17 +7235,17 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.schema_version, "0.7.0-alpha");
     }
 
     #[test]
     fn schema_version_above_max_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.10.0-alpha"}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.11.0-alpha"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         assert!(
             err.to_string().contains("newer than supported"),
             "expected a newer-than-supported error, got: {err}"
@@ -10581,7 +7265,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.schema_version, "0.6.0-alpha");
         assert_eq!(req.container_id, "test-060");
         assert_eq!(req.script_timeout, 5000);
@@ -10594,7 +7278,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.schema_version, "");
     }
 
@@ -10604,7 +7288,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
         assert!(result.is_err());
     }
 
@@ -10634,7 +7318,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
+        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
         assert!(result.is_err());
     }
 
@@ -10653,23 +7337,12 @@ mod tests {
     }
 
     #[test]
-    fn root_object_expecting_text_is_pinned_across_both_parse_passes() {
-        // serde's `expecting` attribute requires a string literal, so the
-        // wording is duplicated on `RequestDiscriminator` and `wire::MxcConfig`.
-        // Pin both diagnostics so the two parse passes cannot drift.
-        let discriminator_err =
-            match config_deserialize::from_str::<RequestDiscriminator<'_>>(r#""not an object""#) {
-                Ok(_) => panic!("non-object root must fail discriminator parse"),
-                Err(error) => error,
-            };
+    fn root_object_expecting_text_is_pinned() {
         let wire_err = match config_deserialize::from_str::<wire::MxcConfig>(r#""not an object""#) {
             Ok(_) => panic!("non-object root must fail wire parse"),
             Err(error) => error,
         };
 
-        assert!(discriminator_err
-            .to_string()
-            .contains("expected a configuration object"));
         assert!(wire_err
             .to_string()
             .contains("expected a configuration object"));
@@ -10681,7 +7354,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(
             req.experimental.windows_sandbox.unwrap().idle_timeout_ms,
             60000
@@ -10694,7 +7367,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(
             req.experimental.windows_sandbox.unwrap().idle_timeout_ms,
             60000
@@ -10707,7 +7380,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.container_id, "my-container");
     }
 
@@ -10718,7 +7391,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(!req.lifecycle.destroy_on_exit);
     }
 
@@ -10729,7 +7402,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.lifecycle.preserve_policy);
     }
 
@@ -10739,7 +7412,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.lifecycle.destroy_on_exit);
         assert!(!req.lifecycle.preserve_policy);
     }
@@ -10750,7 +7423,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         let wslc = req.experimental.wslc.unwrap();
         assert_eq!(wslc.image, "python:3.12");
         assert!(wslc.image_tar_path.is_none());
@@ -10762,7 +7435,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         let wslc = req.experimental.wslc.unwrap();
         assert_eq!(wslc.image, "my-image:latest");
         assert_eq!(
@@ -10777,7 +7450,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         let wslc = req.experimental.wslc.unwrap();
         assert_eq!(wslc.port_mappings.len(), 1);
         assert_eq!(wslc.port_mappings[0].windows_port, 8080);
@@ -10791,7 +7464,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         let wslc = req.experimental.wslc.unwrap();
         assert_eq!(wslc.port_mappings[0].protocol, "tcp");
     }
@@ -10805,7 +7478,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{}", err);
         assert!(
             msg.contains("unknown variant"),
@@ -10822,7 +7495,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{}", err);
         assert!(
             msg.contains("udp") && msg.contains("unknown variant"),
@@ -10836,7 +7509,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{}", err);
         assert!(
             msg.contains("windows_port") || msg.contains("windowsPort"),
@@ -10850,7 +7523,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{}", err);
         assert!(
             msg.contains("container_port") || msg.contains("containerPort"),
@@ -10864,7 +7537,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{}", err);
         assert!(
             msg.contains("windowsPort") && msg.contains("> 0"),
@@ -10878,7 +7551,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{}", err);
         assert!(
             msg.contains("containerPort") && msg.contains("> 0"),
@@ -10894,7 +7567,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{}", err);
         assert!(
             msg.contains("sctp") && msg.contains("unknown variant"),
@@ -10908,7 +7581,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{}", err);
         assert!(
             msg.contains("duplicate") && msg.contains("8080"),
@@ -10922,7 +7595,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         let wslc = req.experimental.wslc.unwrap();
         assert!(wslc.port_mappings.is_empty());
     }
@@ -10935,7 +7608,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.experimental.test.is_some());
         assert_eq!(req.experimental.test.unwrap().message, "world");
     }
@@ -10946,7 +7619,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.experimental.test.is_none());
     }
 
@@ -10956,7 +7629,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(!req.experimental_enabled);
     }
 
@@ -10966,7 +7639,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.experimental.test.is_some());
     }
 
@@ -10976,7 +7649,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         let test = req.experimental.test.unwrap();
         assert_eq!(test.message, "greetings");
     }
@@ -10987,7 +7660,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         let test = req.experimental.test.unwrap();
         assert!(test.message.is_empty());
     }
@@ -10998,7 +7671,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(!req.policy.ui.disable);
         assert_eq!(req.policy.ui.clipboard, ClipboardPolicy::Read);
         assert!(req.policy.ui.injection);
@@ -11010,7 +7683,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.ui.disable); // default-deny: UI disabled
         assert_eq!(req.policy.ui.clipboard, ClipboardPolicy::None);
         assert!(!req.policy.ui.injection);
@@ -11022,7 +7695,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.policy.ui.clipboard, ClipboardPolicy::All);
     }
 
@@ -11034,7 +7707,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.containment, ContainmentBackend::IsolationSession);
     }
 
@@ -11049,7 +7722,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true)
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true)
             .expect_err("two backend sections must be refused");
         let msg = format!("{err}");
         assert!(
@@ -11064,7 +7737,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.containment, ContainmentBackend::Seatbelt);
     }
 
@@ -11075,7 +7748,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.seatbelt.is_none());
     }
 
@@ -11085,7 +7758,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         let cfg = req.seatbelt.expect("seatbelt should be populated");
         assert_eq!(
             cfg.profile_override.as_deref(),
@@ -11102,7 +7775,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         let cfg = req.seatbelt.expect("seatbelt should be populated");
         assert!(cfg.nested_pty);
         assert!(!cfg.keychain_access);
@@ -11114,7 +7787,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         let cfg = req.seatbelt.expect("seatbelt should be populated");
         assert!(!cfg.nested_pty);
         assert!(cfg.keychain_access);
@@ -11126,7 +7799,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         let cfg = req.seatbelt.expect("seatbelt should be populated");
         assert!(!cfg.nested_pty);
         assert!(cfg.keychain_access);
@@ -11139,7 +7812,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{:?}", err);
         assert!(
             msg.contains("has moved to the stable section"),
@@ -11161,7 +7834,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.containment, ContainmentBackend::ProcessContainer);
     }
 
@@ -11171,7 +7844,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.containment, ContainmentBackend::Seatbelt);
     }
 
@@ -11191,7 +7864,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.least_privilege_mode);
         assert_eq!(req.policy.capabilities, vec!["internetClient".to_string()]);
     }
@@ -11208,7 +7881,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
         let msg = format!("{:?}", err);
         assert!(
             msg.contains("has moved to the stable section"),
@@ -11229,8 +7902,8 @@ mod tests {
     fn assert_multi_backend_rejected(containment: &str, extra_json: &str, expected_extra: &str) {
         let encoded = make_multi_backend_config(containment, extra_json);
         let mut logger = test_logger();
-        let err =
-            load_request(&encoded, &mut logger, true).expect_err("expected rejection but got Ok");
+        let err = normalize_wire_input_for_test(&encoded, &mut logger, true)
+            .expect_err("expected rejection but got Ok");
         let msg = format!("{err:?}");
         assert!(
             msg.contains("Multiple containment backends configured"),
@@ -11245,7 +7918,7 @@ mod tests {
     fn assert_config_accepted(containment: &str, extra_json: &str) {
         let encoded = make_multi_backend_config(containment, extra_json);
         let mut logger = test_logger();
-        load_request(&encoded, &mut logger, true)
+        normalize_wire_input_for_test(&encoded, &mut logger, true)
             .unwrap_or_else(|err| panic!("expected accept, got error: {err:?}"));
     }
 
@@ -11326,32 +7999,6 @@ mod tests {
             r#""lxc": {"distribution": "alpine", "release": "3.20"}, "experimental": {"test": {"message": "hello"}}"#,
         );
     }
-
-    // Rolling state-aware normalization rejects an `experimental` backend key
-    // that does not match the resolved containment.
-    #[test]
-    fn rolling_parser_rejects_foreign_state_aware_experimental_backend() {
-        let json = r#"{
-            "phase": "provision",
-            "containment": "isolation_session",
-            "experimental": {
-                "isolation_session": {},
-                "wslc": {"image": "alpine:latest"}
-            }
-        }"#;
-        let err = parse_mxc_request_json(json, &mut test_logger())
-            .expect_err("state-aware config with foreign experimental backend should be rejected");
-        let msg = format!("{err:?}");
-        assert!(
-            msg.contains("Multiple containment backends configured"),
-            "error did not mention multi-backend rejection: {msg}"
-        );
-        assert!(
-            msg.contains("experimental.wslc"),
-            "error did not name the foreign section: {msg}"
-        );
-    }
-
     // ---- Abstract-intent coverage ----
     // Backend sections paired with `containment: "process"` / "vm" must be
     // accepted iff the intent resolves to the owning backend on this OS.
@@ -11366,7 +8013,7 @@ mod tests {
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        load_request(&encoded, &mut logger, true)
+        normalize_wire_input_for_test(&encoded, &mut logger, true)
             .expect("process resolves to ProcessContainer on Windows");
     }
 
@@ -11380,7 +8027,8 @@ mod tests {
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        load_request(&encoded, &mut logger, true).expect("process resolves to Seatbelt on macOS");
+        normalize_wire_input_for_test(&encoded, &mut logger, true)
+            .expect("process resolves to Seatbelt on macOS");
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -11393,7 +8041,7 @@ mod tests {
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        load_request(&encoded, &mut logger, true)
+        normalize_wire_input_for_test(&encoded, &mut logger, true)
             .expect_err("processContainer is foreign when process resolves off Windows");
     }
 
@@ -11407,7 +8055,7 @@ mod tests {
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        load_request(&encoded, &mut logger, true)
+        normalize_wire_input_for_test(&encoded, &mut logger, true)
             .expect("vm resolves to WindowsSandbox on Windows");
     }
 
@@ -11421,7 +8069,8 @@ mod tests {
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        load_request(&encoded, &mut logger, true).expect_err("vm has no resolver off Windows");
+        normalize_wire_input_for_test(&encoded, &mut logger, true)
+            .expect_err("vm has no resolver off Windows");
     }
 
     // --- Filesystem policy normalization tests (most-restrictive-wins) ---
@@ -11432,7 +8081,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(
             req.policy.readwrite_paths.is_empty(),
             "path should be removed from readwritePaths (denied wins)"
@@ -11446,7 +8095,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(
             req.policy.readwrite_paths.is_empty(),
             "path should be removed from readwritePaths (readonly wins)"
@@ -11457,10 +8106,11 @@ mod tests {
     #[test]
     fn dev_contract_maps_enumerate_paths() {
         let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"containment":"processcontainer","processContainer":{"filesystem":{"enumeratePaths":["C:\\tools"]}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let MxcRequest::OneShot(req) =
+            load_mxc_request_from_json(json, &mut test_logger()).unwrap()
+        else {
+            panic!("expected one-shot request");
+        };
 
         assert_eq!(req.policy.enumerate_paths, vec!["C:\\tools"]);
     }
@@ -11468,10 +8118,11 @@ mod tests {
     #[test]
     fn same_path_in_readonly_and_enumerate_becomes_enumerate() {
         let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"containment":"processcontainer","filesystem":{"readonlyPaths":["C:\\tools"]},"processContainer":{"filesystem":{"enumeratePaths":["C:\\tools"]}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let MxcRequest::OneShot(req) =
+            load_mxc_request_from_json(json, &mut test_logger()).unwrap()
+        else {
+            panic!("expected one-shot request");
+        };
 
         assert!(req.policy.readonly_paths.is_empty());
         assert_eq!(req.policy.enumerate_paths, vec!["C:\\tools"]);
@@ -11480,10 +8131,11 @@ mod tests {
     #[test]
     fn same_path_in_readwrite_and_enumerate_becomes_enumerate() {
         let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"containment":"processcontainer","filesystem":{"readwritePaths":["C:\\tools"]},"processContainer":{"filesystem":{"enumeratePaths":["C:\\tools"]}}}"#;
-        let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let MxcRequest::OneShot(req) = load_mxc_request_from_json(json, &mut logger).unwrap()
+        else {
+            panic!("expected one-shot request");
+        };
 
         assert!(req.policy.readwrite_paths.is_empty());
         assert_eq!(req.policy.enumerate_paths, vec!["C:\\tools"]);
@@ -11495,10 +8147,11 @@ mod tests {
     #[test]
     fn same_path_in_enumerate_and_denied_becomes_denied() {
         let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"containment":"processcontainer","filesystem":{"deniedPaths":["C:\\tools"]},"processContainer":{"filesystem":{"enumeratePaths":["C:\\tools"]}}}"#;
-        let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let MxcRequest::OneShot(req) = load_mxc_request_from_json(json, &mut logger).unwrap()
+        else {
+            panic!("expected one-shot request");
+        };
 
         assert!(req.policy.enumerate_paths.is_empty());
         assert_eq!(req.policy.denied_paths, vec!["C:\\tools"]);
@@ -11510,10 +8163,9 @@ mod tests {
     #[test]
     fn enumerate_path_conflict_diagnostic_escapes_control_characters() {
         let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"containment":"processcontainer","filesystem":{"readonlyPaths":["C:\\tools\nforged"]},"processContainer":{"filesystem":{"enumeratePaths":["C:\\tools\nforged"]}}}"#;
-        let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        load_request(&encoded, &mut logger, true).unwrap();
+        load_mxc_request_from_json(json, &mut logger).unwrap();
 
         assert!(!logger.get_buffer().contains("C:\\tools\nforged"));
         assert!(logger.get_buffer().contains("C:\\tools\\nforged"));
@@ -11525,7 +8177,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(
             req.policy.readonly_paths.is_empty(),
             "path should be removed from readonlyPaths (denied wins)"
@@ -11539,7 +8191,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.readwrite_paths.is_empty());
         assert!(req.policy.readonly_paths.is_empty());
         assert_eq!(req.policy.denied_paths, vec!["C:\\x"]);
@@ -11552,7 +8204,7 @@ mod tests {
         let mut logger = test_logger();
 
         // Distinct paths — nothing dropped.
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.policy.readwrite_paths, vec!["C:\\workspace"]);
         assert_eq!(req.policy.readonly_paths, vec!["C:\\tools"]);
         assert_eq!(req.policy.denied_paths, vec!["C:\\secrets"]);
@@ -11564,7 +8216,7 @@ mod tests {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        load_request(&encoded, &mut logger, true).unwrap();
+        normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
     }
 
     // ── Telemetry ────────────────────────────────────────────────────
@@ -11574,7 +8226,7 @@ mod tests {
         let json = r#"{"process":{"commandLine":"echo hi"}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         assert!(req.telemetry.is_none());
     }
 
@@ -11582,7 +8234,7 @@ mod tests {
     fn telemetry_consent_maintenance_is_not_an_execution_request() {
         let json = r#"{"command":"telemetryConsent","action":"status"}"#;
         let mut logger = test_logger();
-        let error = load_request_from_json(json, &mut logger).unwrap_err();
+        let error = normalize_wire_json_for_test(json, &mut logger).unwrap_err();
         assert!(
             error.to_string().contains("unknown field `command`"),
             "got {error:?}"
@@ -11594,100 +8246,101 @@ mod tests {
         let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"telemetry":{"enabled":true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         let telem = req.telemetry.expect("telemetry should be set");
         assert_eq!(telem.enabled, Some(true));
         assert_eq!(telem.requested_sandbox_kind, Some("process"));
     }
 
     #[test]
-    fn seatbelt_launch_method_rejected_from_09_across_one_shot_loaders() {
-        let json = r#"{"version":"0.9.0-alpha","containment":"seatbelt","process":{"commandLine":"echo hi"},"seatbelt":{"launchMethod":"open"}}"#;
-        let expected = "'seatbelt.launchMethod' was removed in config schema version 0.9.0-alpha";
+    fn exact_loaders_reject_seatbelt_launch_method_from_v0_9_and_v0_10() {
+        for version in ["0.9.0-alpha", "0.10.0-alpha"] {
+            for section in ["seatbelt", "macos_sandbox"] {
+                let json = format!(
+                    r#"{{"version":"{version}","containment":"seatbelt","process":{{"commandLine":"echo hi"}},"{section}":{{"launchMethod":"open"}}}}"#
+                );
+                let directory = tempfile::tempdir().unwrap();
+                let path = directory.path().join("removed-launch-method.json");
+                fs::write(&path, &json).unwrap();
+                let encoded = base64_encode(json.as_bytes());
 
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let error = load_request(&encoded, &mut logger, true).unwrap_err();
-        assert!(error.to_string().contains(expected), "got {error:?}");
-
-        let mut logger = test_logger();
-        let error = load_request_from_json(json, &mut logger).unwrap_err();
-        assert!(error.to_string().contains(expected), "got {error:?}");
-
-        let mut logger = test_logger();
-        let error =
-            load_request_from_value(serde_json::from_str(json).unwrap(), &mut logger).unwrap_err();
-        assert!(error.to_string().contains(expected), "got {error:?}");
+                for error in [
+                    load_mxc_request(path.to_str().unwrap(), &mut test_logger(), false)
+                        .unwrap_err(),
+                    load_mxc_request(&encoded, &mut test_logger(), true).unwrap_err(),
+                    load_mxc_request_from_json(&json, &mut test_logger()).unwrap_err(),
+                ] {
+                    assert!(matches!(error, ParseError::OneShot(_)), "got {error:?}");
+                    assert!(
+                        error.message().contains("unknown field `launchMethod`"),
+                        "got {error:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
-    fn seatbelt_launch_method_rejected_from_09_under_section_alias() {
-        let json = r#"{"version":"0.9.0-alpha","containment":"seatbelt","process":{"commandLine":"echo hi"},"macos_sandbox":{"launchMethod":"exec"}}"#;
-        let mut logger = test_logger();
-
-        let error = load_request_from_json(json, &mut logger).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("'seatbelt.launchMethod' was removed"),
-            "got {error:?}"
-        );
-    }
-
-    #[test]
-    fn seatbelt_launch_method_still_honored_before_09() {
-        // 0.7 and 0.8 are published schemas, so the field keeps working there.
+    fn exact_loaders_accept_seatbelt_launch_method_before_v0_9() {
         for version in ["0.7.0-alpha", "0.8.0-alpha"] {
             let json = format!(
                 r#"{{"version":"{version}","containment":"seatbelt","process":{{"commandLine":"echo hi"}},"seatbelt":{{"launchMethod":"open"}}}}"#
             );
-            let mut logger = test_logger();
 
-            let req = load_request_from_json(&json, &mut logger)
+            let request = load_mxc_request_from_json(&json, &mut test_logger())
                 .unwrap_or_else(|error| panic!("{version} should still accept it: {error:?}"));
-            let cfg = req.seatbelt.expect("seatbelt should be populated");
+            let MxcRequest::OneShot(request) = request else {
+                panic!("{version} should parse as one-shot");
+            };
             assert!(matches!(
-                cfg.launch_method,
+                request
+                    .seatbelt
+                    .expect("seatbelt should be populated")
+                    .launch_method,
                 crate::models::LaunchMethod::Open
             ));
         }
     }
 
     #[test]
-    fn telemetry_rejects_pre_09_schema_version_across_one_shot_loaders() {
+    fn exact_loaders_reject_telemetry_before_v0_9() {
         let json = r#"{"version":"0.8.0-alpha","process":{"commandLine":"echo hi"},"telemetry":{"enabled":true}}"#;
-        let expected = "telemetry' requires config schema version 0.9.0-alpha";
-
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pre-v09-telemetry.json");
+        fs::write(&path, json).unwrap();
         let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let error = load_request(&encoded, &mut logger, true).unwrap_err();
-        assert!(error.to_string().contains(expected), "got {error:?}");
-
-        let mut logger = test_logger();
-        let error = load_request_from_json(json, &mut logger).unwrap_err();
-        assert!(error.to_string().contains(expected), "got {error:?}");
-
-        let mut logger = test_logger();
-        let error =
-            load_request_from_value(serde_json::from_str(json).unwrap(), &mut logger).unwrap_err();
-        assert!(error.to_string().contains(expected), "got {error:?}");
+        for error in [
+            load_mxc_request(path.to_str().unwrap(), &mut test_logger(), false).unwrap_err(),
+            load_mxc_request(&encoded, &mut test_logger(), true).unwrap_err(),
+            load_mxc_request_from_json(json, &mut test_logger()).unwrap_err(),
+        ] {
+            assert!(matches!(error, ParseError::OneShot(_)), "got {error:?}");
+            assert!(
+                error.message().contains("unknown field `telemetry`"),
+                "got {error:?}"
+            );
+        }
     }
 
     #[test]
     fn inherit_default_env_rejects_pre_09_and_absent_versions() {
-        let expected = "'process.inheritDefaultEnv' requires config schema version 0.9.0-alpha";
-        for version in [Some("0.6.0-alpha"), Some("0.8.0-alpha"), None] {
-            let version = version
-                .map(|value| format!(r#""version":"{value}","#))
-                .unwrap_or_default();
+        for version in ["0.6.0-alpha", "0.8.0-alpha"] {
             let json = format!(
-                r#"{{{version}"process":{{"commandLine":"echo hi","inheritDefaultEnv":true}}}}"#
+                r#"{{"version":"{version}","process":{{"commandLine":"echo hi","inheritDefaultEnv":true}}}}"#
             );
 
-            let mut logger = test_logger();
-            let error = load_request_from_json(&json, &mut logger).unwrap_err();
-            assert!(error.to_string().contains(expected), "got {error:?}");
+            let error = load_mxc_request_from_json(&json, &mut test_logger()).unwrap_err();
+            assert!(matches!(error, ParseError::OneShot(_)), "got {error:?}");
+            assert!(
+                error
+                    .message()
+                    .contains("unknown field `inheritDefaultEnv`"),
+                "got {error:?}"
+            );
         }
+        let absent = r#"{"process":{"commandLine":"echo hi","inheritDefaultEnv":true}}"#;
+        let error = load_mxc_request_from_json(absent, &mut test_logger()).unwrap_err();
+        assert!(matches!(error, ParseError::Version(_)), "got {error:?}");
 
         let state_aware = r#"{
             "version": "0.8.0-alpha",
@@ -11702,8 +8355,7 @@ mod tests {
         // published contract, which defines neither `phase` nor
         // `process.inheritDefaultEnv`. The lifecycle discriminator is therefore
         // rejected as an unknown field on the published one-shot root before the
-        // field gate is ever reached — the same divergence the differential
-        // harness classifies as `PublishedStateAware`.
+        // field gate is ever reached.
         let mut logger = test_logger();
         let error = load_mxc_request_from_json(state_aware, &mut logger).unwrap_err();
         assert!(
@@ -11724,8 +8376,10 @@ mod tests {
                 "inheritDefaultEnv": true
             }
         }"#;
-        let mut logger = test_logger();
-        let request = load_request_from_json(one_shot, &mut logger).unwrap();
+        let request = load_mxc_request_from_json(one_shot, &mut test_logger()).unwrap();
+        let MxcRequest::OneShot(request) = request else {
+            panic!("expected one-shot request");
+        };
         assert!(request.inherit_default_env);
 
         let state_aware = r#"{
@@ -11748,7 +8402,7 @@ mod tests {
         let json = r#"{"process":{"commandLine":"echo hi"},"containment":"vm","telemetry":{"enabled":true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         let telem = req.telemetry.expect("telemetry should be set");
         assert_eq!(telem.requested_sandbox_kind, Some("vm"));
     }
@@ -11758,7 +8412,7 @@ mod tests {
         let json = r#"{"process":{"commandLine":"echo hi"},"telemetry":{"enabled":false}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         let telem = req.telemetry.expect("telemetry should be set");
         assert_eq!(telem.enabled, Some(false));
     }
@@ -11768,7 +8422,7 @@ mod tests {
         let json = r#"{"process":{"commandLine":"echo hi"},"telemetry":{}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
         let telem = req.telemetry.expect("telemetry should be set");
         assert_eq!(telem.enabled, None);
     }
@@ -11778,88 +8432,30 @@ mod tests {
         let json = r#"{"process":{"commandLine":"echo hi"},"telemetry":{"enable":true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
-        let error = load_request(&encoded, &mut logger, true).unwrap_err();
+        let error = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
 
         assert!(error.to_string().contains("telemetry.enable"));
     }
 
     #[test]
-    fn experimental_telemetry_reports_migration() {
-        let json = r#"{
-            "process":{"commandLine":"echo hi"},
-            "experimental":{"telemetry":{"enabled":true}}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let error = load_request(&encoded, &mut logger, true).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("'experimental.telemetry' has moved to the stable section"),
-            "got {error:?}"
-        );
-    }
-
-    #[test]
-    fn null_experimental_telemetry_reports_migration() {
-        let json = r#"{
-            "process":{"commandLine":"echo hi"},
-            "experimental":{"telemetry":null}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let error = load_request(&encoded, &mut logger, true).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("'experimental.telemetry' has moved to the stable section"),
-            "got {error:?}"
-        );
-    }
-
-    #[test]
-    fn current_schema_rejects_experimental_telemetry() {
-        let json = r#"{
-            "version":"0.8.0-alpha",
-            "process":{"commandLine":"echo hi"},
-            "experimental":{"telemetry":{"enabled":true}}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let error = load_request(&encoded, &mut logger, true).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("'experimental.telemetry' has moved"));
-    }
-
-    #[test]
-    fn load_request_from_value_legacy_schema_rejects_experimental_telemetry() {
-        let config = serde_json::json!({
-            "version": "0.7.0-alpha",
-            "process": { "commandLine": "echo hi" },
-            "experimental": { "telemetry": { "enabled": true } }
-        });
-        let mut logger = test_logger();
-        let error = load_request_from_value(config, &mut logger).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("'experimental.telemetry' has moved to the stable section"),
-            "got {error:?}"
-        );
-    }
-
-    #[test]
-    fn load_request_from_value_current_schema_rejects_experimental_telemetry() {
-        let config = serde_json::json!({
-            "version": "0.8.0-alpha",
-            "process": { "commandLine": "echo hi" },
-            "experimental": { "telemetry": { "enabled": true } }
-        });
-        let mut logger = test_logger();
-        let error = load_request_from_value(config, &mut logger).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("'experimental.telemetry' has moved"));
+    fn exact_contracts_reject_experimental_telemetry() {
+        for (version, telemetry) in [
+            ("0.7.0-alpha", r#"{"enabled":true}"#),
+            ("0.8.0-alpha", "null"),
+            ("0.9.0-alpha", r#"{"enabled":true}"#),
+        ] {
+            let json = format!(
+                r#"{{
+                    "version":"{version}",
+                    "process":{{"commandLine":"echo hi"}},
+                    "experimental":{{"telemetry":{telemetry}}}
+                }}"#
+            );
+            let error = load_mxc_request_from_json(&json, &mut test_logger()).unwrap_err();
+            assert!(
+                error.message().contains("unknown field `experimental`"),
+                "{version}: got {error:?}"
+            );
+        }
     }
 }

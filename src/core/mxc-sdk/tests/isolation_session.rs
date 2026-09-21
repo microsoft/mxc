@@ -119,46 +119,6 @@ fn a_single_threaded_apartment_is_refused_before_the_service_is_reached() {
     );
 }
 
-/// The experimental gate fires before any host work, so this is
-/// host-independent: it is the same refusal on a machine with no OS-side
-/// service. Both entry points are checked because `run` is `spawn` plus a wait,
-/// and a gate applied to only one of them would still read as covered.
-#[test]
-fn one_shot_requires_the_experimental_optin() {
-    for (name, spawned) in [
-        ("run", {
-            let request = build_request_with_containment(
-                &iso_policy(),
-                &Containment::IsolationSession,
-                "echo hi",
-                None,
-            )
-            .expect("building the request must succeed — the gate is at dispatch");
-            mxc_sdk::run(request).err().map(|e| e.code)
-        }),
-        ("spawn_sandbox", {
-            let request = build_request_with_containment(
-                &iso_policy(),
-                &Containment::IsolationSession,
-                "echo hi",
-                None,
-            )
-            .expect("building the request must succeed — the gate is at dispatch");
-            // `Sandbox` is not `Debug`, so map rather than `expect_err`.
-            match mxc_sdk::spawn_sandbox(request) {
-                Ok(_) => None,
-                Err(err) => Some(err.code),
-            }
-        }),
-    ] {
-        assert_eq!(
-            spawned,
-            Some(ErrorCode::MalformedRequest),
-            "{name} must refuse an experimental backend without the opt-in"
-        );
-    }
-}
-
 /// The one-shot surface reaches the backend and returns the workload's output.
 /// A policy this backend cannot honor is reported as a policy rejection rather
 /// than a generic backend failure.
@@ -175,14 +135,13 @@ fn one_shot_refuses_an_unhonorable_policy_as_policy_validation() {
         denied_paths: vec![],
         clear_policy_on_exit: None,
     });
-    let mut request = build_request_with_containment(
+    let request = build_request_with_containment(
         &policy,
         &Containment::IsolationSession,
         "echo unreachable",
         None,
     )
     .expect("building the request must succeed");
-    request.set_experimental(true);
 
     let err = match mxc_sdk::spawn_sandbox(request) {
         Ok(_) => panic!("the policy must be refused"),
@@ -198,14 +157,13 @@ fn one_shot_refuses_an_unhonorable_policy_as_policy_validation() {
 #[test]
 fn one_shot_run_captures_output() {
     skip_unless_supported!();
-    let mut request = build_request_with_containment(
+    let request = build_request_with_containment(
         &iso_policy(),
         &Containment::IsolationSession,
         "echo marker-oneshot",
         None,
     )
     .expect("building the request must succeed");
-    request.set_experimental(true);
 
     let output = mxc_sdk::run(request).expect("one-shot run must reach the backend");
     assert_eq!(output.outcome, mxc_sdk::WaitOutcome::Exited(0));
@@ -221,14 +179,13 @@ fn one_shot_run_captures_output() {
 #[test]
 fn one_shot_run_propagates_a_nonzero_exit() {
     skip_unless_supported!();
-    let mut request = build_request_with_containment(
+    let request = build_request_with_containment(
         &iso_policy(),
         &Containment::IsolationSession,
         "exit 7",
         None,
     )
     .expect("building the request must succeed");
-    request.set_experimental(true);
 
     let output = mxc_sdk::run(request).expect("one-shot run must reach the backend");
     assert_eq!(output.outcome, mxc_sdk::WaitOutcome::Exited(7));
@@ -313,14 +270,13 @@ fn concurrent_one_shot_runs_stay_isolated() {
                          & whoami & echo {marker}"
                     )
                 };
-                let mut request = build_request_with_containment(
+                let request = build_request_with_containment(
                     &iso_policy_with_deadline(Some(WORKLOAD_DEADLINE_MS)),
                     &Containment::IsolationSession,
                     &script,
                     None,
                 )
                 .expect("building the request must succeed");
-                request.set_experimental(true);
 
                 let mut sandbox =
                     mxc_sdk::spawn_sandbox(request).expect("spawn must reach the backend");
@@ -527,14 +483,13 @@ fn concurrent_one_shot_runs_stay_isolated() {
 #[test]
 fn one_shot_finished_on_an_sta_thread_still_tears_down() {
     skip_unless_supported!();
-    let mut request = build_request_with_containment(
+    let request = build_request_with_containment(
         &iso_policy(),
         &Containment::IsolationSession,
         "ping -n 300 127.0.0.1",
         None,
     )
     .expect("building the request must succeed");
-    request.set_experimental(true);
 
     let mut sandbox = mxc_sdk::spawn_sandbox(request).expect("spawn must reach the backend");
 
@@ -559,14 +514,13 @@ fn one_shot_finished_on_an_sta_thread_still_tears_down() {
 #[test]
 fn an_abandoned_one_shot_handle_completes_teardown() {
     skip_unless_supported!();
-    let mut request = build_request_with_containment(
+    let request = build_request_with_containment(
         &iso_policy(),
         &Containment::IsolationSession,
         "ping -n 300 127.0.0.1",
         None,
     )
     .expect("building the request must succeed");
-    request.set_experimental(true);
 
     let sandbox = mxc_sdk::spawn_sandbox(request).expect("spawn must reach the backend");
 
@@ -591,14 +545,13 @@ fn one_shot_kill_stops_the_workload() {
     skip_unless_supported!();
     // Long enough that a prompt EOF proves the kill worked, rather than racing
     // a workload that was about to exit anyway.
-    let mut request = build_request_with_containment(
+    let request = build_request_with_containment(
         &iso_policy(),
         &Containment::IsolationSession,
         "for /l %i in (1,1,300) do (echo beat & ping -n 2 127.0.0.1 >nul)",
         None,
     )
     .expect("building the request must succeed");
-    request.set_experimental(true);
 
     let mut sandbox = mxc_sdk::spawn_sandbox(request).expect("spawn must reach the backend");
     let stdout = sandbox.take_stdout().expect("stdout must be available");

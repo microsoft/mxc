@@ -70,7 +70,7 @@ pub use verbose_telemetry::emit_verbose_telemetry;
 
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainmentBackend, FailurePhase, ScriptResponse};
-use wxc_common::sandbox_process::{SandboxProcess, StreamCloser};
+use wxc_common::sandbox_process::{NativeStdio, SandboxProcess, StreamCloser};
 use wxc_common::telemetry;
 
 /// Spawn a streaming [`SandboxProcess`] handle for a [`SandboxRequest`] built
@@ -198,6 +198,10 @@ impl Drop for TelemetryRegistration {
 struct TelemetryProcess {
     inner: Box<dyn SandboxProcess>,
     active: bool,
+    // Set by kill_for_timeout() so telemetry reports a timeout instead of a
+    // normal exit or cancellation. The backend keeps its own timeout state so
+    // later wait() and try_wait() calls also report the timeout.
+    timeout_requested: bool,
     warnings: Vec<String>,
     mode: TelemetryMode,
     started: std::time::Instant,
@@ -253,6 +257,7 @@ impl TelemetryProcess {
         Self {
             inner,
             active,
+            timeout_requested: false,
             warnings,
             mode,
             started,
@@ -518,6 +523,14 @@ impl SandboxProcess for TelemetryProcess {
         self.inner.take_stdin()
     }
 
+    fn stdin_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        self.inner.stdin_closer()
+    }
+
+    fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+        self.inner.take_native_stdio()
+    }
+
     fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
         self.inner.take_stdout()
     }
@@ -527,7 +540,13 @@ impl SandboxProcess for TelemetryProcess {
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
-        let result = self.inner.try_wait();
+        let result = match self.inner.try_wait() {
+            Ok(Some(_)) if self.timeout_requested => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "sandbox execution timed out",
+            )),
+            result => result,
+        };
         match &result {
             // Preserve the nonblocking contract. Capture metadata is finalized
             // only by backend teardown, so this path emits completion without
@@ -563,8 +582,26 @@ impl SandboxProcess for TelemetryProcess {
         result
     }
 
+    fn kill_for_timeout(&mut self) -> std::io::Result<()> {
+        self.timeout_requested = true;
+        let result = self.inner.kill_for_timeout();
+        if result.is_ok() {
+            self.emit(&Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "sandbox execution timed out",
+            )));
+        }
+        result
+    }
+
     fn wait(&mut self) -> std::io::Result<i32> {
-        let result = self.inner.wait();
+        let result = match self.inner.wait() {
+            Ok(_) if self.timeout_requested => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "sandbox execution timed out",
+            )),
+            result => result,
+        };
         self.emit(&result);
         result
     }
@@ -624,6 +661,14 @@ impl SandboxProcess for ProcessWithWarnings {
         self.inner.take_stdin()
     }
 
+    fn stdin_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        self.inner.stdin_closer()
+    }
+
+    fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+        self.inner.take_native_stdio()
+    }
+
     fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
         self.inner.take_stdout()
     }
@@ -644,6 +689,10 @@ impl SandboxProcess for ProcessWithWarnings {
         self.inner.kill()
     }
 
+    fn kill_for_timeout(&mut self) -> std::io::Result<()> {
+        self.inner.kill_for_timeout()
+    }
+
     fn wait(&mut self) -> std::io::Result<i32> {
         self.inner.wait()
     }
@@ -660,6 +709,8 @@ impl SandboxProcess for ProcessWithWarnings {
 #[cfg(test)]
 mod telemetry_process_tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     enum TryWaitResult {
         Running,
@@ -675,6 +726,57 @@ mod telemetry_process_tests {
         finalized: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
         metadata_read_before_finalization: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
         output_metadata: Option<wxc_common::models::SandboxOutputMetadata>,
+    }
+
+    struct NativeStdioProbe {
+        calls: Arc<AtomicUsize>,
+        stdin_closer_calls: Arc<AtomicUsize>,
+        timeout_kill_calls: Arc<AtomicUsize>,
+    }
+
+    impl SandboxProcess for NativeStdioProbe {
+        fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        }
+
+        fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
+            None
+        }
+
+        fn stdin_closer(&self) -> Option<Box<dyn StreamCloser>> {
+            self.stdin_closer_calls.fetch_add(1, Ordering::SeqCst);
+            None
+        }
+
+        fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+            None
+        }
+
+        fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+            None
+        }
+
+        fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+            Ok(Some(0))
+        }
+
+        fn id(&self) -> u32 {
+            1
+        }
+
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn kill_for_timeout(&mut self) -> std::io::Result<()> {
+            self.timeout_kill_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn wait(&mut self) -> std::io::Result<i32> {
+            Ok(0)
+        }
     }
 
     impl SandboxProcess for StubProcess {
@@ -765,6 +867,52 @@ mod telemetry_process_tests {
     }
 
     #[test]
+    fn process_wrappers_forward_native_stdio_transfer() {
+        let telemetry_calls = Arc::new(AtomicUsize::new(0));
+        let telemetry_closer_calls = Arc::new(AtomicUsize::new(0));
+        let telemetry_timeout_calls = Arc::new(AtomicUsize::new(0));
+        let mut telemetry = TelemetryProcess::new(
+            Box::new(NativeStdioProbe {
+                calls: Arc::clone(&telemetry_calls),
+                stdin_closer_calls: Arc::clone(&telemetry_closer_calls),
+                timeout_kill_calls: Arc::clone(&telemetry_timeout_calls),
+            }),
+            true,
+            TelemetryMode::StateAware {
+                backend: "test".to_string(),
+                phase: "exec".to_string(),
+                correlation_vector: String::new(),
+                requested_sandbox_kind: None,
+            },
+            std::time::Instant::now(),
+        );
+        assert!(telemetry.take_native_stdio().unwrap().is_none());
+        assert!(telemetry.stdin_closer().is_none());
+        telemetry.kill_for_timeout().unwrap();
+        assert_eq!(telemetry_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(telemetry_closer_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(telemetry_timeout_calls.load(Ordering::SeqCst), 1);
+
+        let warning_calls = Arc::new(AtomicUsize::new(0));
+        let warning_closer_calls = Arc::new(AtomicUsize::new(0));
+        let warning_timeout_calls = Arc::new(AtomicUsize::new(0));
+        let mut with_warnings = ProcessWithWarnings::wrap(
+            Box::new(NativeStdioProbe {
+                calls: Arc::clone(&warning_calls),
+                stdin_closer_calls: Arc::clone(&warning_closer_calls),
+                timeout_kill_calls: Arc::clone(&warning_timeout_calls),
+            }),
+            vec!["test warning".to_string()],
+        );
+        assert!(with_warnings.take_native_stdio().unwrap().is_none());
+        assert!(with_warnings.stdin_closer().is_none());
+        with_warnings.kill_for_timeout().unwrap();
+        assert_eq!(warning_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(warning_closer_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(warning_timeout_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn terminal_paths_consume_the_exactly_once_slot() {
         let mut waited = wrapped(TryWaitResult::Running);
         assert_eq!(waited.wait().unwrap(), 0);
@@ -794,6 +942,19 @@ mod telemetry_process_tests {
             std::io::ErrorKind::TimedOut
         );
         assert!(!timed_out.active);
+    }
+
+    #[test]
+    fn failed_timeout_kill_preserves_timeout_when_exit_wins_the_race() {
+        let mut process = wrapped_with_kill_failure(TryWaitResult::Exited(7), true);
+
+        assert!(process.kill_for_timeout().is_err());
+        let error = process
+            .try_wait()
+            .expect_err("the terminal race must retain timeout classification");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(!process.active);
     }
 
     #[test]

@@ -30,8 +30,8 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $ConfigPath = Join-Path $RepoRoot "tests\configs\wslc_denied_masking.json"
 
-# Find binary -- prefer explicit path, then probe target-specific and default
-# dirs. Use the host arch to determine which target to use. 
+# Resolve the binary: explicit path, then target-specific and default dirs.
+# Use the host arch to determine which target to use.
 $Target = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') {
     'aarch64-pc-windows-msvc'
 } else {
@@ -73,7 +73,7 @@ try {
     Set-Content (Join-Path $SecretDir "inner.txt") "DIR_SECRET"
 
     Write-Host "Running WSLC denied-path masking test (denied sibling file + dir left unmounted)..."
-    $wxcArgs = @("--experimental")
+    $wxcArgs = @()
     if ($Debug) { $wxcArgs += "--debug" }
     $wxcArgs += $ConfigPath
 

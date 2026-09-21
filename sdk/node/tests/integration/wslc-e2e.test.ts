@@ -70,9 +70,9 @@ describe('WSLC SDK E2E — createConfigFromPolicy → customize → spawn', {
         "cat /proc/meminfo | grep MemTotal",
         "echo 'All fields work'",
       ].join(' && ');
-      config.experimental!.wslc!.image = 'python:3.12-alpine';
-      config.experimental!.wslc!.cpuCount = 2;
-      config.experimental!.wslc!.memoryMb = 1024;
+      config.wslc!.image = 'python:3.12-alpine';
+      config.wslc!.cpuCount = 2;
+      config.wslc!.memoryMb = 1024;
       // Intentionally omit `storagePath` so this test reuses the default
       // image store where `python:3.12-alpine` has already been pre-pulled
       // (the docs require operators to pre-pull). Setting storagePath to a
@@ -80,7 +80,7 @@ describe('WSLC SDK E2E — createConfigFromPolicy → customize → spawn', {
       // fail with "image not found" — MXC does not pull at runtime.
 
       const { stdout, stderr, exitCode } = await new Promise<{ stdout: string; stderr: string; exitCode: number }>((resolve, reject) => {
-        const child = sdk.spawnSandboxFromConfig(config, { experimental: true, debug: true, usePty: false }) as ChildProcess;
+        const child = sdk.spawnSandboxFromConfig(config, { debug: true, usePty: false }) as ChildProcess;
         let stdout = '';
         let stderr = '';
         child.stdout?.on('data', (data: Buffer) => { stdout += data.toString(); });
@@ -142,12 +142,12 @@ srv.handle_request()
 `;
     const scriptB64 = Buffer.from(pythonScript, 'utf8').toString('base64');
     config.process!.commandLine = `python3 -c "import base64; exec(base64.b64decode('${scriptB64}'))"`;
-    config.experimental!.wslc!.image = 'python:3.12-alpine';
-    config.experimental!.wslc!.portMappings = [
+    config.wslc!.image = 'python:3.12-alpine';
+    config.wslc!.portMappings = [
       { windowsPort: HOST_PORT, containerPort: CONTAINER_PORT, protocol: 'tcp' },
     ];
 
-    const child = sdk.spawnSandboxFromConfig(config, { experimental: true, debug: true, usePty: false }) as ChildProcess;
+    const child = sdk.spawnSandboxFromConfig(config, { debug: true, usePty: false }) as ChildProcess;
     let stdout = '';
     let stderr = '';
     child.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
@@ -224,13 +224,13 @@ srv.handle_request()
     };
     const config = sdk.createConfigFromPolicy(policy, 'wslc');
     config.process!.commandLine = 'echo unreachable';
-    config.experimental!.wslc!.image = 'python:3.12-alpine';
-    config.experimental!.wslc!.portMappings = [
+    config.wslc!.image = 'python:3.12-alpine';
+    config.wslc!.portMappings = [
       { windowsPort: 39000, containerPort: 9000, protocol: 'udp' as unknown as 'tcp' },
     ];
 
     const { exitCode, combined } = await new Promise<{ exitCode: number; combined: string }>((resolve, reject) => {
-      const child = sdk.spawnSandboxFromConfig(config, { experimental: true, debug: true, usePty: false }) as ChildProcess;
+      const child = sdk.spawnSandboxFromConfig(config, { debug: true, usePty: false }) as ChildProcess;
       let combined = '';
       const onData = (d: Buffer) => { combined += d.toString(); };
       child.stdout?.on('data', onData);

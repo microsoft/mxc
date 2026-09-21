@@ -274,8 +274,9 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
 
 /// The enforcement-relevant, non-credential parts of the experimental block.
 ///
-/// These matter: for `windows_sandbox` and `wslc` the experimental section
-/// carries the sandbox's **entire** filesystem / network / resource policy.
+/// These matter: for `windows_sandbox` and `wslc` the internal experimental
+/// storage carries the sandbox's **entire** filesystem / network / resource
+/// policy.
 /// Omitting it wholesale (the first cut of this module did) would have made two
 /// materially different policies hash identically on those backends.
 ///
@@ -777,7 +778,12 @@ mod tests {
             ""
         };
         format!(
-            r#"{{"version":"0.9.0-alpha","phase":"provision","containment":"{backend}"{network}{extra_fields}}}"#
+            r#"{{"version":"{}","phase":"provision","containment":"{backend}"{network}{extra_fields}}}"#,
+            if backend == "isolation_session" {
+                "0.9.0-alpha"
+            } else {
+                "0.10.0-alpha"
+            }
         )
     }
 
@@ -853,12 +859,18 @@ mod tests {
                 }),
             ),
         ] {
-            let experimental = payload
-                .map(|payload| {
-                    format!(r#","experimental":{{"{backend}":{{"provision":{payload}}}}}"#)
-                })
-                .unwrap_or_default();
-            let json = provision_json(backend, &experimental);
+            let backend_section = match (backend, payload) {
+                (_, None) => String::new(),
+                ("isolation_session", Some(payload)) => {
+                    format!(r#","isolationSession":{{"provision":{payload}}}"#)
+                }
+                ("wslc", Some(payload)) => {
+                    format!(r#","wslc":{{"provision":{payload}}}"#)
+                }
+                ("windows_sandbox", Some(_)) => unreachable!(),
+                _ => unreachable!(),
+            };
+            let json = provision_json(backend, &backend_section);
             let parsed = parse_state_aware(&json);
             assert_eq!(
                 state_aware_config_projection(parsed.operation()),
@@ -922,11 +934,10 @@ mod tests {
     }
 
     #[test]
-    fn state_aware_hash_ignores_empty_wrappers_through_public_parser() {
+    fn state_aware_hash_ignores_empty_non_policy_fields_through_public_parser() {
         for backend in ["isolation_session", "windows_sandbox", "wslc"] {
             let baseline = parsed_state_aware_hash(&provision_json(backend, ""), backend);
             for extra_fields in [
-                r#","experimental":{}"#.to_string(),
                 r#","telemetry":{}"#.to_string(),
                 r#","_comment":{"user":{"CLIENTSECRET":"ignored"},"UPN":"alice@example.test"}"#
                     .to_string(),
@@ -937,12 +948,20 @@ mod tests {
                     "{backend}: {extra_fields}"
                 );
             }
-            if backend != "windows_sandbox" {
-                let extra_fields = format!(r#","experimental":{{"{backend}":{{}}}}"#);
+            if backend == "isolation_session" {
                 assert_eq!(
                     baseline,
-                    parsed_state_aware_hash(&provision_json(backend, &extra_fields), backend),
-                    "{backend}: an empty backend wrapper is not a provision config"
+                    parsed_state_aware_hash(
+                        &provision_json(backend, r#","isolationSession":{}"#),
+                        backend
+                    ),
+                    "{backend}: an empty backend section is not a provision config"
+                );
+            } else if backend == "wslc" {
+                assert_eq!(
+                    baseline,
+                    parsed_state_aware_hash(&provision_json(backend, r#","wslc":{}"#), backend),
+                    "{backend}: an empty backend section is not a provision config"
                 );
             }
         }
@@ -955,13 +974,13 @@ mod tests {
             };
             let source = |extra_fields: &str| {
                 format!(
-                    r#"{{"version":"0.9.0-alpha","phase":"{phase}","sandboxId":"wsb:deadbeef"{process}{extra_fields}}}"#
+                    r#"{{"version":"0.10.0-alpha","phase":"{phase}","sandboxId":"wsb:deadbeef"{process}{extra_fields}}}"#
                 )
             };
             assert_eq!(
                 parsed_state_aware_hash(&source(""), "windows_sandbox"),
-                parsed_state_aware_hash(&source(r#","experimental":{}"#), "windows_sandbox"),
-                "{phase}: an empty experimental wrapper is not a phase config"
+                parsed_state_aware_hash(&source(r#","telemetry":{}"#), "windows_sandbox"),
+                "{phase}: empty telemetry does not affect policy identity"
             );
         }
     }

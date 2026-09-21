@@ -8,12 +8,10 @@
     "env": [],
     "timeout": 30000
   },
-  "experimental": {
-    "isolation_session": {
-      "unrecognizedSetting": {
-        "nested": "value",
-        "futureField": true
-      }
+  "isolationSession": {
+    "unrecognizedSetting": {
+    "nested": "value",
+    "futureField": true
     }
   },
   "network": {

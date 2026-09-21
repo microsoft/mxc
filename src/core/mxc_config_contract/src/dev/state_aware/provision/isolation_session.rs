@@ -56,7 +56,7 @@ pub struct IsolationSessionProvision {
     pub app_id: OptionalField<String>,
 }
 
-/// State-aware IsolationSession experimental settings.
+/// State-aware IsolationSession settings.
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -64,16 +64,6 @@ pub struct StateAwareIsolationSession {
     /// Optional provision-phase settings.
     #[serde(default)]
     pub provision: OptionalField<IsolationSessionProvision>,
-}
-
-/// Experimental settings accepted by an IsolationSession provision request.
-#[derive(Debug, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct IsolationSessionProvisionExperimental {
-    /// Optional IsolationSession backend settings.
-    #[serde(rename = "isolation_session", default)]
-    pub isolation_session: OptionalField<StateAwareIsolationSession>,
 }
 
 /// A complete state-aware `provision` request for IsolationSession.
@@ -102,9 +92,9 @@ pub struct IsolationSessionProvisionRequest {
     /// Optional telemetry configuration.
     #[serde(default)]
     pub telemetry: OptionalField<Telemetry>,
-    /// Optional closed experimental settings containing only `appId`.
+    /// Optional IsolationSession provision settings.
     #[serde(default)]
-    pub experimental: OptionalField<IsolationSessionProvisionExperimental>,
+    pub isolation_session: OptionalField<StateAwareIsolationSession>,
 }
 
 #[cfg(test)]
@@ -116,7 +106,7 @@ mod tests {
 
     fn provision(fields: &str) -> String {
         format!(
-            r#"{{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session"{fields}}}"#
+            r#"{{"version":"0.10.0-alpha","phase":"provision","containment":"isolation_session"{fields}}}"#
         )
     }
 
@@ -176,14 +166,13 @@ mod tests {
     #[test]
     fn app_id_remains_optional_and_provision_scoped() {
         let fields = format!(
-            r#",{DIRECTIONAL_NETWORK},"experimental":{{"isolation_session":{{"provision":{{"appId":"Contoso.App"}}}}}}"#
+            r#",{DIRECTIONAL_NETWORK},"isolationSession":{{"provision":{{"appId":"Contoso.App"}}}}"#
         );
         let request = parse(&fields).unwrap();
         assert_eq!(
             request
-                .experimental
+                .isolation_session
                 .as_ref()
-                .and_then(|experimental| experimental.isolation_session.as_ref())
                 .and_then(|isolation_session| isolation_session.provision.as_ref())
                 .and_then(|provision| provision.app_id.as_ref())
                 .map(String::as_str),

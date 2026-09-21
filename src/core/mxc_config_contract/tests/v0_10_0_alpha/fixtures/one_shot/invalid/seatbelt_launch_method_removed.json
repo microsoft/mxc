@@ -1,0 +1,10 @@
+{
+  "version": "0.10.0-alpha",
+  "containment": "seatbelt",
+  "process": {
+    "commandLine": "echo removed launch method"
+  },
+  "seatbelt": {
+    "launchMethod": "open"
+  }
+}

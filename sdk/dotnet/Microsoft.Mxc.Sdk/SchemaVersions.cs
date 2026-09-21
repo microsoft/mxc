@@ -17,19 +17,25 @@ public static class SchemaVersions
     public const string Minimum = "0.6.0-alpha";
 
     /// <summary>Newest accepted schema version, including development contracts.</summary>
-    public const string MaximumSupported = "0.9.0-alpha";
+    public const string MaximumSupported = "0.10.0-alpha";
 
     /// <summary>Newest immutable released schema.</summary>
-    public const string LatestStable = "0.8.0-alpha";
+    public const string LatestStable = "0.9.0-alpha";
 
-    /// <summary>Default state-aware version for IsolationSession and Windows Sandbox.</summary>
+    /// <summary>Default state-aware version for IsolationSession.</summary>
     public const string StateAware = "0.9.0-alpha";
+
+    /// <summary>Default state-aware version for Windows Sandbox.</summary>
+    public const string WindowsSandboxStateAware = "0.10.0-alpha";
 
     /// <summary>Default state-aware version for WSLC.</summary>
     public const string WslcStateAware = "0.9.0-alpha";
 
     internal static bool IsPublished(string version) =>
-        version is Minimum or V0_7_0Alpha or LatestStable;
+        version is Minimum or V0_7_0Alpha or "0.8.0-alpha" or LatestStable;
+
+    internal static bool UsesLegacyNetworkDefaults(string version) =>
+        version is Minimum or V0_7_0Alpha or "0.8.0-alpha";
 
     internal static bool IsSupported(string version) =>
         IsPublished(version) || version == MaximumSupported;

@@ -21,6 +21,11 @@
 //!   owned and freed via [`mxc_write_stream_free`] / [`mxc_read_stream_free`].
 //!   Because the streams are distinct owned objects, a caller may read stdout
 //!   and stderr and write stdin **concurrently on separate threads**.
+//! - [`mxc_sandbox_take_native_stdio`] instead transfers owned OS pipe endpoints
+//!   for runtimes that can adopt them directly. Endpoints may duplicate native
+//!   backend pipes or be synthesized from callback-backed streams, and
+//!   unsupported directions remain absent. This operation is once-only and
+//!   mutually exclusive with the opaque stream accessors.
 //! - [`mxc_sandbox_stdout_closer`] / [`mxc_sandbox_stderr_closer`] return
 //!   independent [`MxcStreamCloser`] handles. Calling
 //!   [`mxc_stream_closer_close`] unblocks a read without killing the child.
@@ -30,10 +35,11 @@
 //! Calls that take an [`MxcSandbox`] handle — process control, stream/closer
 //! accessors, warning/metadata getters, and [`mxc_sandbox_free`] — must be
 //! serialized by the caller. A caller that needs a cancellable wait should poll
-//! [`mxc_sandbox_try_wait`] and call [`mxc_sandbox_kill`] from the *same*
-//! thread, rather than blocking one thread in [`mxc_sandbox_wait`] and killing
-//! from another. Handles already returned for streams and closers are separate
-//! objects and are unaffected by this rule.
+//! [`mxc_sandbox_try_wait`] and call [`mxc_sandbox_kill`] or
+//! [`mxc_sandbox_kill_for_timeout`] from the *same* thread, rather than blocking
+//! one thread in [`mxc_sandbox_wait`] and killing from another. Handles already
+//! returned for streams and closers are separate objects and are unaffected by
+//! this rule.
 //!
 //! Each stream handle is likewise single-owner: [`mxc_stream_read`] /
 //! [`mxc_stream_write`] / [`mxc_stream_flush`] borrow the stream mutably, so
@@ -62,15 +68,15 @@ use mxc_sdk::{spawn_sandbox, Sandbox, StreamCloser, WaitOutcome};
 
 use crate::{
     alloc_cstring, cstr_to_str, request, status_from_error_code, MxcErrorDetail,
-    MXC_STATUS_BACKEND_ERROR, MXC_STATUS_INVALID_UTF8, MXC_STATUS_NULL_ARGUMENT, MXC_STATUS_PANIC,
-    MXC_STATUS_SUCCESS,
+    MXC_STATUS_BACKEND_ERROR, MXC_STATUS_BACKEND_UNAVAILABLE, MXC_STATUS_INVALID_UTF8,
+    MXC_STATUS_NULL_ARGUMENT, MXC_STATUS_PANIC, MXC_STATUS_SUCCESS,
 };
 
 // ---------------------------------------------------------------------------
 // Opaque handles
 // ---------------------------------------------------------------------------
 
-/// Opaque live-sandbox handle wrapping an [`mxc_sdk::Sandbox`]. Created by
+/// Opaque sandbox process handle wrapping an [`mxc_sdk::Sandbox`]. Created by
 /// [`mxc_spawn_request`], destroyed by [`mxc_sandbox_free`].
 pub struct MxcSandbox {
     inner: Sandbox,
@@ -101,6 +107,32 @@ pub struct MxcWriteStream {
 /// Opaque closer for a child's stdout or stderr stream.
 pub struct MxcStreamCloser {
     inner: StreamCloser,
+}
+
+/// Caller-owned native stdio endpoints.
+///
+/// Values are Win32 `HANDLE`s on Windows and file descriptors on Unix.
+/// Absent endpoints are `0` on Windows and `-1` on Unix.
+#[repr(C)]
+pub struct MxcNativeStdio {
+    pub stdin_handle: isize,
+    pub stdout_handle: isize,
+    pub stderr_handle: isize,
+}
+
+impl MxcNativeStdio {
+    const fn invalid() -> Self {
+        #[cfg(target_os = "windows")]
+        const INVALID: isize = 0;
+        #[cfg(not(target_os = "windows"))]
+        const INVALID: isize = -1;
+
+        Self {
+            stdin_handle: INVALID,
+            stdout_handle: INVALID,
+            stderr_handle: INVALID,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -252,6 +284,111 @@ pub unsafe extern "C" fn mxc_sandbox_take_stdout(handle: *mut MxcSandbox) -> *mu
 #[no_mangle]
 pub unsafe extern "C" fn mxc_sandbox_take_stderr(handle: *mut MxcSandbox) -> *mut MxcReadStream {
     take_read_stream(handle, |s| s.inner.take_stderr())
+}
+
+/// Transfer the child's native stdio endpoints to the caller.
+///
+/// On success, each non-sentinel endpoint is owned by the caller and must be
+/// adopted by the language runtime or closed with [`mxc_native_pipe_close`].
+/// Backends may duplicate existing native pipes or synthesize pipes from live
+/// callback-backed streams. Unsupported directions use the platform sentinel.
+/// Returns [`MXC_STATUS_BACKEND_UNAVAILABLE`] if the backend cannot expose
+/// native endpoints or the endpoints were already transferred. Returns
+/// [`MXC_STATUS_BACKEND_ERROR`] if an individual stream was already taken or
+/// preparing an endpoint fails.
+///
+/// Returns [`MXC_STATUS_NULL_ARGUMENT`] if `handle` or `out_stdio` is null.
+///
+/// # Safety
+/// - `handle` must be null or a live handle from [`mxc_spawn_request`].
+/// - `out_stdio` must point to writable storage for one [`MxcNativeStdio`].
+#[no_mangle]
+pub unsafe extern "C" fn mxc_sandbox_take_native_stdio(
+    handle: *mut MxcSandbox,
+    out_stdio: *mut MxcNativeStdio,
+) -> i32 {
+    if out_stdio.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+    // SAFETY: caller-guaranteed writable storage. Initialize before fallible
+    // work so failure never exposes stale handles.
+    unsafe { ptr::write(out_stdio, MxcNativeStdio::invalid()) };
+    if handle.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+
+    catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: non-null live handle per the caller contract.
+        let sandbox = unsafe { &mut *handle };
+        match sandbox.inner.take_native_stdio() {
+            Ok(Some(stdio)) => {
+                let result = MxcNativeStdio {
+                    stdin_handle: native_pipe_into_raw(stdio.stdin),
+                    stdout_handle: native_pipe_into_raw(stdio.stdout),
+                    stderr_handle: native_pipe_into_raw(stdio.stderr),
+                };
+                // SAFETY: non-null writable output per the caller contract.
+                unsafe { ptr::write(out_stdio, result) };
+                MXC_STATUS_SUCCESS
+            }
+            Ok(None) => MXC_STATUS_BACKEND_UNAVAILABLE,
+            Err(error) => {
+                crate::report_to_stderr(format_args!(
+                    "mxc_sandbox_take_native_stdio failed: {error}"
+                ));
+                MXC_STATUS_BACKEND_ERROR
+            }
+        }
+    }))
+    .unwrap_or_else(|panic| {
+        crate::report_panic("mxc_sandbox_take_native_stdio", &*panic);
+        MXC_STATUS_PANIC
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn native_pipe_into_raw(pipe: Option<std::os::windows::io::OwnedHandle>) -> isize {
+    use std::os::windows::io::IntoRawHandle;
+    pipe.map_or(0, |handle| handle.into_raw_handle() as isize)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn native_pipe_into_raw(pipe: Option<std::os::fd::OwnedFd>) -> isize {
+    use std::os::fd::IntoRawFd;
+    pipe.map_or(-1, |fd| fd.into_raw_fd() as isize)
+}
+
+/// Close a native endpoint that the caller could not adopt.
+///
+/// # Safety
+/// `handle` must be an owned endpoint returned by
+/// [`mxc_sandbox_take_native_stdio`] and must not have been closed or adopted.
+/// Passing the platform sentinel (`0` on Windows, `-1` on Unix) is a no-op.
+#[no_mangle]
+pub unsafe extern "C" fn mxc_native_pipe_close(handle: isize) {
+    if let Err(panic) = catch_unwind(AssertUnwindSafe(|| close_native_pipe(handle))) {
+        crate::report_panic("mxc_native_pipe_close", &*panic);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn close_native_pipe(handle: isize) {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    if handle != 0 && handle != -1 {
+        // SAFETY: caller transfers one live owned handle to this function.
+        drop(unsafe { OwnedHandle::from_raw_handle(handle as _) });
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn close_native_pipe(handle: isize) {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    if let Ok(fd) = i32::try_from(handle) {
+        if fd >= 0 {
+            // SAFETY: caller transfers one live owned descriptor to this function.
+            drop(unsafe { OwnedFd::from_raw_fd(fd) });
+        }
+    }
 }
 
 /// Return a closer that unblocks reads on stdout without killing the child.
@@ -738,6 +875,34 @@ pub unsafe extern "C" fn mxc_sandbox_kill(handle: *mut MxcSandbox) -> i32 {
     })
 }
 
+/// Kill the child and its whole process tree because the caller's deadline
+/// elapsed. Reaping happens in a subsequent [`mxc_sandbox_wait`] /
+/// [`mxc_sandbox_try_wait`] or in [`mxc_sandbox_free`].
+///
+/// After this call, a later successful terminal observation is reported as
+/// timed out. Call this function only after the deadline has actually elapsed.
+///
+/// # Safety
+/// `handle` must be null or a live handle from [`mxc_spawn_request`].
+#[no_mangle]
+pub unsafe extern "C" fn mxc_sandbox_kill_for_timeout(handle: *mut MxcSandbox) -> i32 {
+    if handle.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+    let status = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: non-null live handle per the caller contract.
+        let sandbox = unsafe { &mut *handle };
+        match sandbox.inner.kill_for_timeout() {
+            Ok(()) => MXC_STATUS_SUCCESS,
+            Err(_) => MXC_STATUS_BACKEND_ERROR,
+        }
+    }));
+    status.unwrap_or_else(|panic| {
+        crate::report_panic("mxc_sandbox_kill_for_timeout", &*panic);
+        MXC_STATUS_PANIC
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Handle destructors
 // ---------------------------------------------------------------------------
@@ -997,6 +1162,10 @@ mod tests {
                 MXC_STATUS_NULL_ARGUMENT
             );
             assert_eq!(mxc_sandbox_kill(ptr::null_mut()), MXC_STATUS_NULL_ARGUMENT);
+            assert_eq!(
+                mxc_sandbox_kill_for_timeout(ptr::null_mut()),
+                MXC_STATUS_NULL_ARGUMENT
+            );
         }
     }
 
@@ -1009,6 +1178,38 @@ mod tests {
             assert!(mxc_sandbox_take_stderr(ptr::null_mut()).is_null());
             assert!(mxc_sandbox_stdout_closer(ptr::null_mut()).is_null());
             assert!(mxc_sandbox_stderr_closer(ptr::null_mut()).is_null());
+        }
+    }
+
+    #[test]
+    fn native_stdio_from_null_handle_initializes_sentinels() {
+        let mut stdio = MxcNativeStdio {
+            stdin_handle: 1,
+            stdout_handle: 2,
+            stderr_handle: 3,
+        };
+
+        // SAFETY: null sandbox handles are rejected and `stdio` is writable.
+        let status = unsafe { mxc_sandbox_take_native_stdio(ptr::null_mut(), &mut stdio) };
+
+        assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
+        let invalid = MxcNativeStdio::invalid();
+        assert_eq!(stdio.stdin_handle, invalid.stdin_handle);
+        assert_eq!(stdio.stdout_handle, invalid.stdout_handle);
+        assert_eq!(stdio.stderr_handle, invalid.stderr_handle);
+    }
+
+    #[test]
+    fn closing_native_stdio_sentinels_is_safe() {
+        // SAFETY: platform sentinel values are explicitly accepted as no-ops.
+        unsafe {
+            #[cfg(target_os = "windows")]
+            {
+                mxc_native_pipe_close(0);
+                mxc_native_pipe_close(-1);
+            }
+            #[cfg(not(target_os = "windows"))]
+            mxc_native_pipe_close(-1);
         }
     }
 
