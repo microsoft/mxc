@@ -41,7 +41,7 @@ on the response, and neither shape carries `containerId`.
 | MXC layer | What's new | What's unchanged |
 |---|---|---|
 | TypeScript SDK (reference §6) | Five new functions: `provisionSandbox`, `startSandbox`, `execInSandbox` / `execInSandboxAsync`, `stopSandbox`, `deprovisionSandbox`. Branded `SandboxId<C>` type tagging ids by backend (`containment` named once at provision, inferred from the id thereafter). Per-(backend, phase) typed `*Config` interfaces (e.g. `IsolationSessionProvisionConfig`) that absorb cross-cutting fields directly — no separate policy parameter. Per-phase typed `*Result` types per backend. `AbortSignal` cancellation via the existing `SandboxSpawnOptions`. Typed `MxcError` class carrying a closed-enum `code`. | `spawnSandbox` family preserved. `ContainmentBackend` extension reused. The wire-format-aligned `Process` / `Filesystem` / `Network` / `UiConfig` interfaces from `sdk/node/src/types.ts` are reused as field types inside state-aware Configs. `SandboxSpawnOptions` reused as the third-arg options bag (gains `signal?: AbortSignal`). `*Config` naming convention reused. |
-| JSON wire format (reference §7) | Top-level `phase` discriminator. Top-level `sandboxId`. `containment` carried on provision only; non-provision phases route via the `sandboxId` prefix. Per-phase nesting under `experimental.<backend>.<phase>`. Named envelope types as a TypeScript discriminated union. Exact roots admit only the cross-cutting fields supported by each backend and phase. | One-shot remains the no-`phase` request mode and uses its own exact versioned roots. |
+| JSON wire format (reference §7) | Top-level `phase` discriminator. Top-level `sandboxId`. `containment` carried on provision only; non-provision phases route via the `sandboxId` prefix. Per-phase nesting under each backend's permanent top-level section. Named envelope types as a TypeScript discriminated union. Exact roots admit only the cross-cutting fields supported by each backend and phase. | One-shot remains the no-`phase` request mode and uses its own exact versioned roots. |
 | Rust executor (reference §9) | Exact registered request roots selected by version, phase, and provision containment; typed neutral operations; checked backend binding; and `StatefulSandboxBackend` dispatch. | `ScriptRunner` trait and the existing one-shot dispatch surface remain. |
 | Error model (reference §8) | Closed enum of 12 codes. `MxcError` class with `code: ErrorCode`. Named structured fields `operation` / `nativeCode` / `remediation`, plus the open `details` object for backend-specific data. Exact-root structural failures precede backend validation. | One-shot retains its existing response surface. |
 | Plug-in surface (reference §11) | Implement `StatefulSandboxBackend`. Define typed per-(backend, phase) `*Config` interfaces. Declare the trait's `ID_PREFIX` and `BACKEND_KEY` consts. Document the cross-cutting honor matrix. | Ephemeral-only backends require no changes. |
@@ -378,7 +378,8 @@ Wire response (raw streaming, no JSON envelope on success):
 
 The SDK constructs `{ stdout: "hello\n", stderr: "", exitCode: 0 }` from PTY events.
 
-The SDK auto-wraps backend-specific config under `experimental.<backend>.<phase>`.
+The SDK places backend-specific config under the backend's permanent top-level
+section and then the phase.
 Cross-backend exec fields flow through top-level `process`. Cross-cutting fields
 (`filesystem` / `network` / `runtimeConfig` / `ui`) on the per-(backend, phase) Config map directly to
 top-level wire fields (backend declares per-phase honor per reference §10.3). The
@@ -436,11 +437,9 @@ Reference §11 has the full guide. Operational checklist:
 
 ## Graduation and scope
 
-- **Graduation rule.** The state-aware API surface ships stable from `0.6.0`.
-  Per-stage config for a backend stays under `experimental.<backend>.<phase>` while
-  that backend's state-aware participation is experimental, and migrates to top-level
-  `<backend>.<phase>` when the backend's state-aware participation graduates. The
-  `phase` discrimination rule applies post-graduation. Reference §13.
+- **Graduation rule.** Per-stage config uses its permanent top-level backend
+  section while development and after publication. Graduation changes contract
+  publication and runtime authorization, not JSON placement. Reference §13.
 - **Out of scope for v1.** Detached / OS-level fire-and-forget execs (JS-async
   fire-and-forget IS supported via don't-await on existing functions); additional
   lifecycle stages; cross-machine `SandboxId` portability; MXC-enforced container-wide

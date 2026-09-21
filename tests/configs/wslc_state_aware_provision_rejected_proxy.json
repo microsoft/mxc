@@ -9,11 +9,9 @@
     "runtimeConfig": {
         "networkProxy": "http://127.0.0.1:8888"
     },
-    "experimental": {
-        "wslc": {
-            "provision": {
-                "image": "alpine:latest"
-            }
+    "wslc": {
+        "provision": {
+        "image": "alpine:latest"
         }
     }
 }

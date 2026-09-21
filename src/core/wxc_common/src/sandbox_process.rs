@@ -22,6 +22,74 @@ use crate::models::{ExecutionRequest, FailurePhase, SandboxOutputMetadata, Scrip
 use crate::script_runner::ScriptRunner;
 use crate::validator::{validate_common, validate_network_policy_support, NetworkPolicySupport};
 
+#[cfg(unix)]
+pub type OwnedPipe = std::os::fd::OwnedFd;
+#[cfg(windows)]
+pub type OwnedPipe = std::os::windows::io::OwnedHandle;
+
+/// Owned native endpoints for a sandbox process.
+///
+/// Each populated endpoint is an OS pipe handle/file descriptor with the
+/// conventional direction: stdin is writable, while stdout and stderr are
+/// readable. A backend may transfer its existing process pipes or synthesize
+/// compatible pipes from another live stream transport.
+///
+/// Taking these endpoints atomically transfers stream ownership to the caller.
+/// Unsupported streams remain `None`; the process retains only lifecycle
+/// control, and its normal `take_*` methods return `None` afterward.
+#[derive(Debug)]
+pub struct NativeStdio {
+    pub stdin: Option<OwnedPipe>,
+    pub stdout: Option<OwnedPipe>,
+    pub stderr: Option<OwnedPipe>,
+}
+
+impl NativeStdio {
+    pub fn is_empty(&self) -> bool {
+        self.stdin.is_none() && self.stdout.is_none() && self.stderr.is_none()
+    }
+}
+
+/// Duplicates available native endpoints, then detaches their stream wrappers.
+///
+/// All duplication completes before any source is taken. If a duplication
+/// fails, every source remains available to the sandbox process.
+pub fn duplicate_and_take_native_stdio<I, O, E>(
+    stdin: &mut Option<I>,
+    stdout: &mut Option<O>,
+    stderr: &mut Option<E>,
+    duplicate_stdin: impl FnOnce(&I) -> std::io::Result<OwnedPipe>,
+    duplicate_stdout: impl FnOnce(&O) -> std::io::Result<OwnedPipe>,
+    duplicate_stderr: impl FnOnce(&E) -> std::io::Result<OwnedPipe>,
+) -> std::io::Result<Option<NativeStdio>> {
+    fn duplicate<T>(
+        stream: Option<&T>,
+        name: &str,
+        duplicate: impl FnOnce(&T) -> std::io::Result<OwnedPipe>,
+    ) -> std::io::Result<Option<OwnedPipe>> {
+        stream.map(duplicate).transpose().map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("failed to duplicate the {name} pipe: {error}"),
+            )
+        })
+    }
+
+    let stdio = NativeStdio {
+        stdin: duplicate(stdin.as_ref(), "stdin", duplicate_stdin)?,
+        stdout: duplicate(stdout.as_ref(), "stdout", duplicate_stdout)?,
+        stderr: duplicate(stderr.as_ref(), "stderr", duplicate_stderr)?,
+    };
+    if stdio.is_empty() {
+        return Ok(None);
+    }
+
+    stdin.take();
+    stdout.take();
+    stderr.take();
+    Ok(Some(stdio))
+}
+
 /// A handle to a running sandboxed process.
 ///
 /// Modelled on [`std::process::Child`]: the caller may `take_*` the std
@@ -85,9 +153,25 @@ pub trait SandboxProcess: Send {
         None
     }
 
+    /// Transfer owned native stdio endpoints to the caller.
+    ///
+    /// Backends may return existing process pipes or synthesize OS pipes from
+    /// another live stream transport. Backends that cannot provide compatible
+    /// endpoints return `Ok(None)`.
+    fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+        Ok(None)
+    }
+
     /// Take ownership of the child's stdin so the caller can write to it.
     /// Returns `None` if already taken. Drop the writer to send EOF.
     fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>>;
+
+    /// A closer that interrupts the stdin stream returned by
+    /// [`take_stdin`](SandboxProcess::take_stdin), including an in-flight
+    /// blocking write. The default returns `None`.
+    fn stdin_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        None
+    }
 
     /// Take ownership of the child's stdout for live reading. Returns `None`
     /// if already taken. A taken stream is **not** drained by
@@ -119,6 +203,17 @@ pub trait SandboxProcess: Send {
     /// object the child is assigned to. Reaping happens in
     /// [`wait`](SandboxProcess::wait).
     fn kill(&mut self) -> std::io::Result<()>;
+
+    /// Request termination because the execution deadline elapsed.
+    ///
+    /// The default uses the same process-tree termination primitive as
+    /// [`kill`](SandboxProcess::kill). Wrappers may override this to preserve
+    /// timeout-specific reporting while delegating the actual termination.
+    /// Once requested, a later successful terminal observation is reported as
+    /// timed out; callers must invoke this only after the deadline elapsed.
+    fn kill_for_timeout(&mut self) -> std::io::Result<()> {
+        self.kill()
+    }
 
     /// Block until the child exits (honouring the request's `scriptTimeout`,
     /// where `0` means wait forever) and return its exit code.
@@ -168,19 +263,20 @@ pub trait SandboxProcess: Send {
     }
 }
 
-/// Abandons reads on one of a [`SandboxProcess`]'s standard streams: a call to
-/// [`close`](StreamCloser::close) makes an in-flight or subsequent read on the
-/// corresponding [`take_stdout`](SandboxProcess::take_stdout) /
-/// [`take_stderr`](SandboxProcess::take_stderr) stream return EOF (`Ok(0)`)
-/// promptly, **without** terminating the child.
+/// Interrupts blocking I/O on one of a [`SandboxProcess`]'s standard streams.
 ///
-/// Obtained from [`stdout_closer`](SandboxProcess::stdout_closer) /
+/// For stdout/stderr, [`close`](StreamCloser::close) makes an in-flight or
+/// subsequent read return EOF (`Ok(0)`) promptly without terminating the
+/// child. For stdin, it closes/cancels the writable path so an in-flight write
+/// can return and the child can observe EOF.
+///
+/// Obtained from [`stdin_closer`](SandboxProcess::stdin_closer),
+/// [`stdout_closer`](SandboxProcess::stdout_closer), or
 /// [`stderr_closer`](SandboxProcess::stderr_closer). `Send + Sync` so a
-/// watchdog thread (separate from the one blocked on the read) can hold and
-/// fire it.
+/// watchdog thread separate from the blocked I/O can hold and fire it.
 pub trait StreamCloser: Send + Sync {
-    /// Promptly EOF the stream this closer was minted for. Idempotent and safe
-    /// to call after the reader has already reached EOF or been dropped.
+    /// Promptly interrupt the stream this closer was minted for. Idempotent and
+    /// safe to call after the stream has already completed or been dropped.
     fn close(&self);
 }
 
@@ -514,6 +610,7 @@ impl<B: SandboxBackend> ScriptRunner for Runner<B> {
 
 #[cfg(test)]
 mod runner_tests {
+    use std::fs::File;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -522,6 +619,77 @@ mod runner_tests {
     use super::*;
 
     struct CompletedProcess;
+
+    struct NativePipeSource;
+
+    fn duplicate_test_pipe() -> std::io::Result<OwnedPipe> {
+        Ok(File::open(std::env::current_exe()?)?.into())
+    }
+
+    #[test]
+    fn native_stdio_transfer_detaches_sources_only_after_all_duplicates_succeed() {
+        let mut stdin = Some(NativePipeSource);
+        let mut stdout = Some(NativePipeSource);
+        let mut stderr = Some(NativePipeSource);
+
+        let stdio = duplicate_and_take_native_stdio(
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+            |_| duplicate_test_pipe(),
+            |_| duplicate_test_pipe(),
+            |_| duplicate_test_pipe(),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(stdio.stdin.is_some());
+        assert!(stdio.stdout.is_some());
+        assert!(stdio.stderr.is_some());
+        assert!(stdin.is_none());
+        assert!(stdout.is_none());
+        assert!(stderr.is_none());
+    }
+
+    #[test]
+    fn native_stdio_transfer_returns_none_when_all_sources_are_empty() {
+        let mut stdin: Option<NativePipeSource> = None;
+        let mut stdout: Option<NativePipeSource> = None;
+        let mut stderr: Option<NativePipeSource> = None;
+
+        let stdio = duplicate_and_take_native_stdio(
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+            |_| duplicate_test_pipe(),
+            |_| duplicate_test_pipe(),
+            |_| duplicate_test_pipe(),
+        )
+        .unwrap();
+
+        assert!(stdio.is_none());
+    }
+
+    #[test]
+    fn native_stdio_transfer_preserves_sources_when_duplication_fails() {
+        let mut stdin = Some(NativePipeSource);
+        let mut stdout = Some(NativePipeSource);
+        let mut stderr = Some(NativePipeSource);
+
+        let result = duplicate_and_take_native_stdio(
+            &mut stdin,
+            &mut stdout,
+            &mut stderr,
+            |_| duplicate_test_pipe(),
+            |_| Err(std::io::Error::other("duplicate failed")),
+            |_| duplicate_test_pipe(),
+        );
+
+        assert!(result.is_err());
+        assert!(stdin.is_some());
+        assert!(stdout.is_some());
+        assert!(stderr.is_some());
+    }
 
     impl SandboxProcess for CompletedProcess {
         fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {

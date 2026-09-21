@@ -10,19 +10,20 @@ import {
   Phase,
   STATE_AWARE_VERSION,
   StateAwareContainmentBackend,
+  WINDOWS_SANDBOX_STATE_AWARE_VERSION,
+  WSLC_STATE_AWARE_VERSION,
 } from './state-aware-types.js';
 import { TelemetryConfig } from './types.js';
 
-export { STATE_AWARE_VERSION };
-
-// Keep the WSLC constant separate because it is part of the public SDK surface
-// and remains independently versioned, even though every state-aware backend
-// currently uses the exact 0.9 development contract.
-export const WSLC_STATE_AWARE_VERSION = '0.9.0-alpha';
+export {
+  STATE_AWARE_VERSION,
+  WINDOWS_SANDBOX_STATE_AWARE_VERSION,
+  WSLC_STATE_AWARE_VERSION,
+};
 
 // Wire-format cross-cutting fields that live at the envelope's top level.
 // Anything else on a per-(backend, phase) Config is backend-specific and is
-// nested under `experimental.<backend>.<phase>`.
+// nested under `<backendSection>.<phase>`.
 export const CROSS_CUTTING_FIELDS = ['filesystem', 'network', 'runtimeConfig', 'ui', 'process', 'telemetry'] as const;
 
 // Per-backend wire-format prefix. Each value mirrors the corresponding
@@ -39,7 +40,7 @@ export const WSLC_ID_PREFIX = 'wslc';
 // global constant.
 const DEFAULT_STATE_AWARE_VERSION: Record<StateAwareContainmentBackend, string> = {
   isolation_session: STATE_AWARE_VERSION,
-  windows_sandbox: STATE_AWARE_VERSION,
+  windows_sandbox: WINDOWS_SANDBOX_STATE_AWARE_VERSION,
   wslc: WSLC_STATE_AWARE_VERSION,
 };
 
@@ -94,7 +95,8 @@ export interface BuildEnvelopeArgs {
  * Constructs the wire-format JSON-shaped envelope for a state-aware request
  * from a per-(backend, phase) Config. Lifts cross-cutting fields
  * (filesystem, network, runtimeConfig, ui, process, telemetry) to envelope top-level; nests any
- * remaining backend-specific fields under `experimental.<backend>.<phase>`.
+ * remaining backend-specific fields under the backend's permanent top-level
+ * section.
  */
 export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string, unknown> {
   const {
@@ -105,7 +107,7 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
     config,
   } = args;
   // Copy of config; fields are removed as they are lifted into the envelope.
-  // Anything left becomes experimental.<backend>.<phase>.
+  // Anything left becomes <backendSection>.<phase>.
   const backendSpecific: Record<string, unknown> = { ...(config ?? {}) };
   const defaultVersion = DEFAULT_STATE_AWARE_VERSION[backendKey] ?? STATE_AWARE_VERSION;
   const telemetry = backendSpecific.telemetry as TelemetryConfig | undefined;
@@ -199,7 +201,12 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   }
 
   if (Object.keys(backendSpecific).length > 0) {
-    envelope.experimental = { [backendKey]: { [phase]: backendSpecific } };
+    const backendSection = {
+      isolation_session: 'isolationSession',
+      windows_sandbox: 'windowsSandbox',
+      wslc: 'wslc',
+    }[backendKey];
+    envelope[backendSection] = { [phase]: backendSpecific };
   }
 
   return envelope;

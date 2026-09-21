@@ -145,7 +145,7 @@ fn processcontainer_capture_denials_output_file() {
     let _ = std::fs::remove_file(&output_path);
 
     let config = serde_json::json!({
-        "version": "0.9.0-alpha",
+        "version": "0.10.0-alpha",
         "process": { "commandLine": "cmd.exe /c echo capture-denials-e2e", "timeout": 30000 },
         "containment": "processcontainer",
         "processContainer": {
@@ -254,7 +254,7 @@ fn processcontainer_capture_denials_output_file() {
 /// otherwise valid policy with E_INVALIDARG.
 fn processcontainer_proxy_capture_uses_native_capture() {
     let config = serde_json::json!({
-        "version": "0.9.0-alpha",
+        "version": "0.10.0-alpha",
         "process": {
             "commandLine": "cmd.exe /d /c echo proxy-capture-launched",
             "timeout": 30000
@@ -762,7 +762,7 @@ fn hyperlight_suite() {
         );
 
         let config = serde_json::json!({
-            "version": "0.9.0-alpha",
+            "version": "0.10.0-alpha",
             "process": { "commandLine": script, "timeout": 30000 },
             "containment": "hyperlight",
             "filesystem": { "readwritePaths": [mount_dir.to_string_lossy()] }
@@ -827,7 +827,7 @@ fn hyperlight_suite() {
         );
 
         let config = serde_json::json!({
-            "version": "0.9.0-alpha",
+            "version": "0.10.0-alpha",
             "process": { "commandLine": script, "timeout": 30000 },
             "containment": "hyperlight",
             "filesystem": {

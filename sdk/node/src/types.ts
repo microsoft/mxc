@@ -126,8 +126,6 @@ export const ExperimentalBackends: readonly (ContainmentType | ContainmentBacken
   'nvx',
   'windows_sandbox',
   'hyperlight',
-  'wslc',
-  'isolation_session',
 ];
 
 /**
@@ -439,11 +437,8 @@ export interface ContainerConfig {
   runtimeConfig?: RuntimeConfig;
   /** Telemetry configuration for TraceLogging ETW support */
   telemetry?: TelemetryConfig;
-  /** Experimental features (only applied when --experimental flag is set) */
-  experimental?: {
-      /** WSLC SDK configuration for Linux containers from Windows */
-    wslc?: WslcConfig;
-  };
+  /** WSLC SDK configuration for Linux containers from Windows */
+  wslc?: WslcConfig;
   /** macOS Seatbelt sandbox configuration (macOS only) */
   seatbelt?: SeatbeltConfig;
   /** Cross-platform UI configuration */

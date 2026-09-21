@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use mxc_config_contract::dev::{
+use mxc_config_contract::published::v0_9_0_alpha::{
     parse_request, ContainmentProbeError, PhaseProbeError, ProvisionRequest, Request,
     RequestParseError,
 };
@@ -17,24 +17,7 @@ fn no_phase_selects_one_shot_request() {
 }
 
 #[test]
-fn isolation_session_one_shot_requires_network() {
-    let json = r#"{
-        "version": "0.9.0-alpha",
-        "containment": "isolation_session",
-        "process": {"commandLine": "echo"}
-    }"#;
-
-    assert!(matches!(
-        parse_request(json).unwrap_err(),
-        RequestParseError::InvalidCombination {
-            contract: "one-shot",
-            message: "IsolationSession requires an explicit network policy",
-        }
-    ));
-}
-
-#[test]
-fn isolation_session_one_shot_accepts_directional_network() {
+fn isolation_session_one_shot_accepts_canonical_directional_network() {
     let json = r#"{
         "version": "0.9.0-alpha",
         "containment": "isolation_session",
@@ -46,6 +29,52 @@ fn isolation_session_one_shot_accepts_directional_network() {
     }"#;
 
     assert!(matches!(parse_request(json).unwrap(), Request::OneShot(_)));
+}
+
+#[test]
+fn isolation_session_one_shot_rejects_missing_partial_mixed_and_proxied_networks() {
+    for fields in [
+        "",
+        r#","network": {}"#,
+        r#","network": {"egress": {"default": "allow"}}"#,
+        r#","network": {"ingress": {"default": "allow", "hostLoopback": "allow"}}"#,
+        r#","network": {
+            "egress": {"default": "allow"},
+            "ingress": {"default": "deny", "hostLoopback": "allow"}
+        }"#,
+        r#","network": {
+            "egress": {"default": "allow", "allow": []},
+            "ingress": {"default": "allow", "hostLoopback": "allow"}
+        }"#,
+        r#","network": {
+            "egress": {"default": "allow"},
+            "ingress": {"default": "allow", "hostLoopback": "allow"}
+        },
+        "runtimeConfig": {"networkProxy": "http://127.0.0.1:8080"}"#,
+    ] {
+        let json = format!(
+            r#"{{
+                "version": "0.9.0-alpha",
+                "containment": "isolation_session",
+                "process": {{"commandLine": "echo"}}
+                {fields}
+            }}"#
+        );
+        let error = parse_request(&json).unwrap_err();
+        assert!(matches!(
+            &error,
+            RequestParseError::InvalidCombination {
+                contract: "one-shot",
+                ..
+            }
+        ));
+        assert!(
+            error
+                .to_string()
+                .contains("IsolationSession requires an explicit network policy"),
+            "{fields}: {error}"
+        );
+    }
 }
 
 #[test]
@@ -138,17 +167,14 @@ fn provision_phase_with_isolation_session_containment_selects_isolation_session_
 }
 
 #[test]
-fn provision_phase_with_windows_sandbox_containment_selects_windows_sandbox_provision_request() {
+fn provision_phase_rejects_windows_sandbox_containment() {
     let json = r#"{
             "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "windows_sandbox"
     }"#;
 
-    assert!(matches!(
-        parse_request(json).unwrap(),
-        Request::Provision(ProvisionRequest::WindowsSandbox(_))
-    ));
+    assert!(parse_request(json).is_err());
 }
 
 #[test]

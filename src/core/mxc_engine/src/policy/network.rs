@@ -234,15 +234,15 @@ pub(super) fn select_network_format(
     has_process_container_network: bool,
 ) -> Result<NetworkFormat, wxc_common::mxc_error::MxcError> {
     let has_legacy = network.is_some_and(NetworkSection::has_legacy_fields);
-    if version == "0.9.0-alpha" {
+    if matches!(version, "0.9.0-alpha" | "0.10.0-alpha") {
         if has_legacy || network.is_some_and(|network| network.legacy_fields_specified) {
-            return Err(wxc_common::mxc_error::MxcError::malformed_request(
-                "schema 0.9.0-alpha no longer accepts legacy network authoring \
+            return Err(wxc_common::mxc_error::MxcError::malformed_request(format!(
+                "schema {version} no longer accepts legacy network authoring \
                  (defaultPolicy, enforcementMode, allowOutbound, allowLocalNetwork, \
                  allowedHosts, blockedHosts, proxy); \
                  use network.egress, network.ingress, and runtimeConfig.networkProxy, \
-                 or select published version 0.8.0-alpha to retain legacy policy semantics",
-            ));
+                 or select published version 0.8.0-alpha to retain legacy policy semantics"
+            )));
         }
         return Ok(NetworkFormat::Directional);
     }

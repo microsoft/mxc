@@ -4,7 +4,7 @@
 use super::super::common::{
     assert_invalid as assert_invalid_request, assert_valid as assert_valid_request,
 };
-use mxc_config_contract::dev::IsolationSessionProvisionRequest;
+use mxc_config_contract::published::v0_9_0_alpha::IsolationSessionProvisionRequest;
 
 fn assert_valid(json: &str) {
     assert_valid_request::<IsolationSessionProvisionRequest>(json);
@@ -83,11 +83,9 @@ fn accepts_provision_request_with_optional_fields() {
         "telemetry": {
             "enabled": true
         },
-        "experimental": {
-            "isolation_session": {
-                "provision": {
-                    "appId": "someAppId"
-                }
+        "isolationSession": {
+            "provision": {
+                "appId": "someAppId"
             }
         }
     }"#;
@@ -95,12 +93,11 @@ fn accepts_provision_request_with_optional_fields() {
 }
 
 #[test]
-fn accepts_empty_provision_experimental_objects() {
+fn accepts_empty_provision_objects() {
     for field in [
-        r#""experimental": {}"#,
         r#""telemetry": {}"#,
-        r#""experimental": {"isolation_session": {}}"#,
-        r#""experimental": {"isolation_session": {"provision": {}}}"#,
+        r#""isolationSession": {}"#,
+        r#""isolationSession": {"provision": {}}"#,
     ] {
         assert_valid(&request_with_additional_fields(field));
     }
@@ -326,7 +323,7 @@ fn rejects_non_string_phase_field() {
 }
 
 #[test]
-fn rejects_non_boolean_experimental_telemetry_enabled_field() {
+fn rejects_non_boolean_telemetry_enabled_field() {
     for enabled in ["123", "\"true\"", "\"false\"", "[]", "{}"] {
         let json = format!(
             r#"{{
@@ -350,15 +347,19 @@ fn rejects_non_boolean_experimental_telemetry_enabled_field() {
 fn rejects_null_optional_fields() {
     for field in [
         r#""$schema": null"#,
-        r#""experimental": null"#,
         r#""telemetry": null"#,
         r#""telemetry": {"enabled": null}"#,
-        r#""experimental": {"isolation_session": null }"#,
-        r#""experimental": {"isolation_session": {"provision": null }}"#,
-        r#""experimental": {"isolation_session": {"provision": {"appId": null }}}"#,
+        r#""isolationSession": null"#,
+        r#""isolationSession": {"provision": null}"#,
+        r#""isolationSession": {"provision": {"appId": null}}"#,
     ] {
         assert_invalid(&request_with_additional_fields(field));
     }
+}
+
+#[test]
+fn rejects_legacy_experimental_wrapper() {
+    assert_invalid(&request_with_additional_fields(r#""experimental": {}"#));
 }
 
 #[test]
@@ -377,24 +378,7 @@ fn rejects_unknown_provision_fields() {
 }
 
 #[test]
-fn rejects_unknown_provision_experimental_fields() {
-    let json = r#"{
-            "version": "0.9.0-alpha",
-            "phase": "provision",
-            "containment": "isolation_session",
-            "network": {
-                "egress": {"default": "allow"},
-                "ingress": {"default": "allow", "hostLoopback": "allow"}
-            },
-            "experimental": {
-                "unknownField": "unknown"
-            }
-    }"#;
-    assert_invalid(json);
-}
-
-#[test]
-fn rejects_unknown_provision_experimental_telemetry_fields() {
+fn rejects_unknown_provision_telemetry_fields() {
     let json = r#"{
             "version": "0.9.0-alpha",
             "phase": "provision",
@@ -411,7 +395,7 @@ fn rejects_unknown_provision_experimental_telemetry_fields() {
 }
 
 #[test]
-fn rejects_unknown_provision_experimental_isolation_session_fields() {
+fn rejects_unknown_provision_isolation_session_fields() {
     let json = r#"{
             "version": "0.9.0-alpha",
             "phase": "provision",
@@ -420,17 +404,15 @@ fn rejects_unknown_provision_experimental_isolation_session_fields() {
                 "egress": {"default": "allow"},
                 "ingress": {"default": "allow", "hostLoopback": "allow"}
             },
-            "experimental": {
-                "isolation_session": {
-                    "unknownField": "unknown"
-                }
+            "isolationSession": {
+                "unknownField": "unknown"
             }
     }"#;
     assert_invalid(json);
 }
 
 #[test]
-fn rejects_unknown_provision_experimental_isolation_session_provision_fields() {
+fn rejects_unknown_provision_isolation_session_provision_fields() {
     let json = r#"{
             "version": "0.9.0-alpha",
             "phase": "provision",
@@ -439,11 +421,9 @@ fn rejects_unknown_provision_experimental_isolation_session_provision_fields() {
                 "egress": {"default": "allow"},
                 "ingress": {"default": "allow", "hostLoopback": "allow"}
             },
-            "experimental": {
-                "isolation_session": {
-                    "provision": {
-                        "unknownField": "unknown"
-                    }
+            "isolationSession": {
+                "provision": {
+                    "unknownField": "unknown"
                 }
             }
     }"#;
@@ -475,10 +455,8 @@ fn rejects_forbidden_fields() {
 fn accepts_app_id_string_values() {
     for app_id in [r#""""#, r#""someAppId""#] {
         let field = format!(
-            r#""experimental": {{
-                "isolation_session": {{
-                    "provision": {{"appId": {app_id}}}
-                }}
+            r#""isolationSession": {{
+                "provision": {{"appId": {app_id}}}
             }}"#
         );
         assert_valid(&request_with_additional_fields(&field));
@@ -489,10 +467,8 @@ fn accepts_app_id_string_values() {
 fn rejects_non_string_app_id() {
     for app_id in ["123", "true", "false", "[]", "{}"] {
         let field = format!(
-            r#""experimental": {{
-                "isolation_session": {{
-                    "provision": {{"appId": {app_id}}}
-                }}
+            r#""isolationSession": {{
+                "provision": {{"appId": {app_id}}}
             }}"#
         );
         assert_invalid(&request_with_additional_fields(&field));
@@ -500,16 +476,15 @@ fn rejects_non_string_app_id() {
 }
 
 #[test]
-fn rejects_non_isolation_session_backend_experimental_fields() {
+fn rejects_non_isolation_session_backend_fields() {
     for field in [
         r#""test": {}"#,
-        r#""windows_sandbox": {}"#,
+        r#""windowsSandbox": {}"#,
         r#""wslc": {}"#,
         r#""seatbelt": {}"#,
         r#""macos_sandbox": {}"#,
     ] {
-        let json = request_with_additional_fields(&format!(r#""experimental": {{{field}}}"#));
-        assert_invalid(&json);
+        assert_invalid(&request_with_additional_fields(field));
     }
 }
 
@@ -528,17 +503,15 @@ fn rejects_duplicate_provision_fields() {
 }
 
 #[test]
-fn rejects_duplicate_provision_experimental_fields() {
-    for experimental in [
+fn rejects_duplicate_provision_nested_fields() {
+    for fields in [
         r#""telemetry": {}, "telemetry": {}"#,
         r#""telemetry": {"enabled": true, "enabled": false}"#,
-        r#""isolation_session": {}, "isolation_session": {}"#,
-        r#""isolation_session": { "provision": {}, "provision": {}}"#,
-        r#""isolation_session": { "provision": {"appId": "appIdA", "appId": "appIdB"}}"#,
+        r#""isolationSession": {}, "isolationSession": {}"#,
+        r#""isolationSession": {"provision": {}, "provision": {}}"#,
+        r#""isolationSession": {"provision": {"appId": "appIdA", "appId": "appIdB"}}"#,
     ] {
-        let json =
-            request_with_additional_fields(&format!(r#""experimental": {{{experimental}}}"#));
-        assert_invalid(&json);
+        assert_invalid(&request_with_additional_fields(fields));
     }
 }
 
@@ -587,10 +560,8 @@ fn rejects_unknown_phase_value() {
 fn rejects_other_isolation_session_phase_keys() {
     for phase in ["start", "exec", "stop", "deprovision"] {
         let field = format!(
-            r#""experimental": {{
-                "isolation_session": {{
-                    "{phase}": {{}}
-                }}
+            r#""isolationSession": {{
+                "{phase}": {{}}
             }}"#
         );
         assert_invalid(&request_with_additional_fields(&field));
@@ -606,24 +577,16 @@ fn rejects_non_string_schema_field() {
 }
 
 #[test]
-fn rejects_invalid_experimental_object_types() {
+fn rejects_invalid_optional_object_types() {
     // Positional-array rejection is intentionally out of scope.
     for value in [r#""invalid""#, "123", "true"] {
-        let json = request_with_additional_fields(&format!(r#""experimental": {value}"#));
-        assert_invalid(&json);
-
-        let json = request_with_additional_fields(&format!(r#""telemetry": {value}"#));
-        assert_invalid(&json);
-
-        let json = request_with_additional_fields(&format!(
-            r#""experimental": {{"isolation_session": {value}}}"#
-        ));
-        assert_invalid(&json);
-
-        let json = request_with_additional_fields(&format!(
-            r#""experimental": {{"isolation_session": {{"provision": {value}}}}}"#
-        ));
-        assert_invalid(&json);
+        for field in [
+            format!(r#""telemetry": {value}"#),
+            format!(r#""isolationSession": {value}"#),
+            format!(r#""isolationSession": {{"provision": {value}}}"#),
+        ] {
+            assert_invalid(&request_with_additional_fields(&field));
+        }
     }
 }
 

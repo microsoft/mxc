@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use mxc_config_contract::dev as contract;
+use mxc_config_contract::published::v0_9_0_alpha as contract;
 use wxc_common::mxc_error::MxcError;
 
 use crate::configs::{
@@ -275,14 +275,8 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::OneShotReques
             })
         })
         .transpose()?;
-    let experimental = match containment {
-        Containment::Wslc(wslc) => {
-            contract::OptionalField::present(contract::OneShotExperimental {
-                test: Default::default(),
-                windows_sandbox: Default::default(),
-                wslc: contract::OptionalField::present(map_wslc(wslc)?),
-            })
-        }
+    let wslc = match containment {
+        Containment::Wslc(wslc) => contract::OptionalField::present(map_wslc(wslc)?),
         _ => Default::default(),
     };
     Ok(contract::OneShotRequest {
@@ -366,6 +360,6 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::OneShotReques
                 })
         ),
         telemetry: Default::default(),
-        experimental,
+        wslc,
     })
 }

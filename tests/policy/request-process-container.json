@@ -55,6 +55,5 @@
   "workingDirectory": "C:\\work",
   "environment": {
     "PARITY": "true"
-  },
-  "experimental": false
+  }
 }

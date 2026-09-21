@@ -133,7 +133,7 @@ function Invoke-StateAware {
 
     if (-not $Request.ContainsKey('version')) {
         $Request = $Request.Clone()
-        $Request['version'] = '0.9.0-alpha'
+        $Request['version'] = '0.10.0-alpha'
     }
     $json = $Request | ConvertTo-Json -Compress -Depth 12
     $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))

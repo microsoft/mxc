@@ -552,5 +552,8 @@ Item **LXC Network #24** (nftables backend) is gated on a real user signal — s
 ## Notes
 
 - **Issue tracking**: [open issues](https://github.com/microsoft/mxc/issues?q=is%3Aissue+is%3Aopen). None of the above are filed yet.
-- **Promotion path**: Bubblewrap and WSLC are both still under `experimental` in the schema; see `docs/versioning.md` for the migration mechanics required for each promotion.
+- **Promotion status**: WSLC was experimental when this roadmap was written and
+  subsequently graduated into published schema `0.9.0-alpha`. Bubblewrap was
+  already published in v0.8 and does not require runtime experimental
+  authorization.
 - **Labels**: re-use `Container-WSLC` and `Area-Executor-LXC`; propose adding `Container-Bubblewrap` (Bwrap #35).

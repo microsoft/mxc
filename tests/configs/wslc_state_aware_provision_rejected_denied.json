@@ -9,11 +9,9 @@
     "network": {
         "egress": { "default": "deny" }
     },
-    "experimental": {
-        "wslc": {
-            "provision": {
-                "image": "alpine:latest"
-            }
+    "wslc": {
+        "provision": {
+        "image": "alpine:latest"
         }
     }
 }

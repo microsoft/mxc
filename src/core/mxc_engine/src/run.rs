@@ -92,10 +92,11 @@ impl ResolvedRunner {
 /// logging the selected isolation tier and any tier-selection warnings to
 /// `logger`, and surfacing the DACL guard in the returned [`ResolvedRunner`].
 ///
-/// Experimental backends require `request.experimental_enabled`; when it is
-/// unset they return a [`malformed_request`](MxcError::malformed_request)
-/// error. Backends that are not available on this host / not compiled in return
-/// an [`unsupported_containment`](MxcError::unsupported_containment) error.
+/// Development backends that still require runtime authorization check
+/// `request.experimental_enabled`; when it is unset they return a
+/// [`malformed_request`](MxcError::malformed_request) error. Backends that are
+/// not available on this host / not compiled in return an
+/// [`unsupported_containment`](MxcError::unsupported_containment) error.
 pub fn resolve_runner(
     request: &ExecutionRequest,
     logger: &mut Logger,
@@ -222,12 +223,7 @@ fn resolve_runner_inner_windows(
         ContainmentBackend::Wslc => {
             #[cfg(feature = "wslc")]
             {
-                if !request.experimental_enabled {
-                    return Err(MxcError::malformed_request(
-                        "WSLC is an experimental feature. Use --experimental flag.",
-                    ));
-                }
-                let _ = writeln!(logger, "Using WSLContainer runner (--experimental)");
+                let _ = writeln!(logger, "Using WSLContainer runner");
                 let wslc_config = request
                     .experimental
                     .wslc
@@ -273,7 +269,7 @@ fn resolve_runner_inner_windows(
                 {
                     let _ = writeln!(
                         logger,
-                        "warning: experimental.windows_sandbox.idleTimeoutMs and daemonPipeName \
+                        "warning: windowsSandbox.idleTimeoutMs and daemonPipeName \
                          are ignored by the one-shot backend; each invocation launches and tears \
                          down a fresh VM"
                     );
@@ -286,11 +282,6 @@ fn resolve_runner_inner_windows(
         ContainmentBackend::IsolationSession => {
             #[cfg(feature = "isolation_session")]
             {
-                if !request.experimental_enabled {
-                    return Err(MxcError::malformed_request(
-                        "Isolation Session is an experimental feature. Use --experimental flag.",
-                    ));
-                }
                 Ok(ResolvedRunner::without_guard(Box::new(
                     isolation_session_common::IsolationSessionRunner::new(),
                 )))
@@ -564,6 +555,21 @@ mod tests {
         assert!(warning.contains("fresh VM"));
     }
 
+    #[cfg(feature = "wslc")]
+    #[test]
+    fn wslc_resolves_without_experimental_optin() {
+        let request = ExecutionRequest {
+            containment: ContainmentBackend::Wslc,
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+
+        resolve_runner_inner_windows(&request, &mut logger)
+            .expect("WSLC selection must not require runtime experimental authorization");
+
+        assert!(!logger.get_buffer().contains("experimental"));
+    }
+
     #[test]
     fn nvx_without_experimental_opt_in_is_rejected_as_malformed_request() {
         let request = nvx_request(false);
@@ -625,7 +631,7 @@ mod tests {
 }
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
-mod tests {
+mod nvx_tests {
     use super::*;
     use wxc_common::logger::Mode;
     use wxc_common::mxc_error::MxcErrorCode;

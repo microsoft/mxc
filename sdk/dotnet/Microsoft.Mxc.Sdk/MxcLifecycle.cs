@@ -22,14 +22,15 @@ public static class MxcLifecycle
     }
 
     /// <summary>
-    /// Default state-aware schema for IsolationSession and Windows Sandbox.
+    /// Default state-aware schema for IsolationSession.
     /// </summary>
     public const string StateAwareVersion = SchemaVersions.StateAware;
 
+    /// <summary>Default state-aware schema for Windows Sandbox.</summary>
+    public const string WindowsSandboxStateAwareVersion = SchemaVersions.WindowsSandboxStateAware;
+
     /// <summary>Default state-aware schema for WSLC.</summary>
     public const string WslcStateAwareVersion = SchemaVersions.WslcStateAware;
-
-    private const string InheritDefaultEnvironmentVersion = "0.9.0-alpha";
 
     /// <summary>IsolationSession containment wire key.</summary>
     public const string IsolationSessionContainment = "isolation_session";
@@ -41,6 +42,7 @@ public static class MxcLifecycle
     public const string WslcContainment = "wslc";
 
     private const int ExperimentalOptIn = 1;
+    private const int NoExperimentalOptIn = 0;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -135,7 +137,7 @@ public static class MxcLifecycle
                 break;
         }
 
-        ApplyTelemetry(envelope, options?.Telemetry, options?.Version);
+        ApplyTelemetry(envelope, options?.Telemetry);
 
         return envelope;
     }
@@ -158,7 +160,7 @@ public static class MxcLifecycle
     {
         ValidateNonExecOptions("start", options);
         var envelope = BuildIdEnvelope("start", id, options?.Version);
-        ApplyTelemetry(envelope, options?.Telemetry, options?.Version);
+        ApplyTelemetry(envelope, options?.Telemetry);
         return envelope;
     }
 
@@ -183,7 +185,7 @@ public static class MxcLifecycle
                 NativeSandbox* handle = null;
                 MxcErrorDetail error = default;
                 var status = NativeMethods.mxc_state_aware_exec(
-                    requestPtr, ExperimentalOptIn, &handle, &error);
+                    requestPtr, ExperimentalOptInFor(id), &handle, &error);
                 if (status != (int)ErrorCode.Success)
                 {
                     try
@@ -221,7 +223,7 @@ public static class MxcLifecycle
                 MxcExecOutcome outcome = default;
                 MxcErrorDetail error = default;
                 var status = NativeMethods.mxc_state_aware_exec_attached(
-                    requestPtr, ExperimentalOptIn, &outcome, &error);
+                    requestPtr, ExperimentalOptInFor(id), &outcome, &error);
                 if (status != (int)ErrorCode.Success)
                 {
                     try
@@ -261,12 +263,7 @@ public static class MxcLifecycle
     {
         ArgumentNullException.ThrowIfNull(command);
         ValidateExecOptions(id, options);
-        var version = options?.Version;
-        if (options?.InheritDefaultEnvironment is not null && version is null)
-        {
-            version = InheritDefaultEnvironmentVersion;
-        }
-        var envelope = BuildIdEnvelope("exec", id, version);
+        var envelope = BuildIdEnvelope("exec", id, options?.Version);
         var process = new JsonObject { ["commandLine"] = command };
         if (options?.WorkingDirectory is { } cwd)
         {
@@ -289,7 +286,7 @@ public static class MxcLifecycle
         {
             envelope["runtimeConfig"] = SerializeToNode(runtime);
         }
-        ApplyTelemetry(envelope, options?.Telemetry, options?.Version);
+        ApplyTelemetry(envelope, options?.Telemetry);
         return envelope;
     }
 
@@ -392,7 +389,7 @@ public static class MxcLifecycle
     {
         ValidateNonExecOptions("stop", options);
         var envelope = BuildIdEnvelope("stop", id, options?.Version);
-        ApplyTelemetry(envelope, options?.Telemetry, options?.Version);
+        ApplyTelemetry(envelope, options?.Telemetry);
         return envelope;
     }
 
@@ -418,7 +415,7 @@ public static class MxcLifecycle
     {
         ValidateNonExecOptions("deprovision", options);
         var envelope = BuildIdEnvelope("deprovision", id, options?.Version);
-        ApplyTelemetry(envelope, options?.Telemetry, options?.Version);
+        ApplyTelemetry(envelope, options?.Telemetry);
         return envelope;
     }
 
@@ -466,15 +463,10 @@ public static class MxcLifecycle
     // caller-supplied correlationVector — that identifier is internal-only.
     private static void ApplyTelemetry(
         JsonObject envelope,
-        TelemetrySettings? telemetry,
-        string? suppliedVersion)
+        TelemetrySettings? telemetry)
     {
         if (telemetry is not null)
         {
-            if (suppliedVersion is null)
-            {
-                envelope["version"] = SchemaVersions.MaximumSupported;
-            }
             envelope["telemetry"] = SerializeToNode(telemetry);
         }
     }
@@ -490,9 +482,15 @@ public static class MxcLifecycle
     };
 
     private static string DefaultVersion(StateAwareContainment containment) =>
-        containment == StateAwareContainment.Wslc
-            ? WslcStateAwareVersion
-            : StateAwareVersion;
+        containment switch
+        {
+            StateAwareContainment.IsolationSession => StateAwareVersion,
+            StateAwareContainment.WindowsSandbox => WindowsSandboxStateAwareVersion,
+            StateAwareContainment.Wslc => WslcStateAwareVersion,
+            _ => throw new MxcException(
+                ErrorCode.UnsupportedContainment,
+                $"unknown state-aware containment '{containment}'"),
+        };
 
     private static string ResolveVersion(
         StateAwareContainment containment,
@@ -671,15 +669,17 @@ public static class MxcLifecycle
         string key,
         JsonNode? value)
     {
-        if (envelope["experimental"] is not JsonObject experimental)
+        var section = backend switch
         {
-            experimental = new JsonObject();
-            envelope["experimental"] = experimental;
-        }
-        if (experimental[backend] is not JsonObject backendConfig)
+            IsolationSessionContainment => "isolationSession",
+            WindowsSandboxContainment => "windowsSandbox",
+            WslcContainment => "wslc",
+            _ => throw new ArgumentException($"Unsupported state-aware backend '{backend}'.", nameof(backend)),
+        };
+        if (envelope[section] is not JsonObject backendConfig)
         {
             backendConfig = new JsonObject();
-            experimental[backend] = backendConfig;
+            envelope[section] = backendConfig;
         }
         if (backendConfig[phase] is not JsonObject phaseConfig)
         {
@@ -701,7 +701,7 @@ public static class MxcLifecycle
                 var status = NativeMethods.mxc_state_aware(
                     requestPtr,
                     dryRun ? 1 : 0,
-                    ExperimentalOptIn,
+                    ExperimentalOptInFor(envelope),
                     &result);
                 try
                 {
@@ -709,6 +709,7 @@ public static class MxcLifecycle
                     {
                         throw NativeError.ToException(status, result.error, "unknown error");
                     }
+
                     var responseJson = PtrToString(result.response_json_utf8) ?? "{}";
                     var root = JsonNode.Parse(responseJson) as JsonObject;
                     return root?["result"] as JsonObject;
@@ -719,6 +720,26 @@ public static class MxcLifecycle
                 }
             }
         }
+    }
+
+    private static int ExperimentalOptInFor(SandboxId id) =>
+        ContainmentForId(id) == StateAwareContainment.WindowsSandbox
+            ? ExperimentalOptIn
+            : NoExperimentalOptIn;
+
+    private static int ExperimentalOptInFor(JsonObject envelope)
+    {
+        if (envelope["containment"]?.GetValue<string>() is { } containment)
+        {
+            return containment == WindowsSandboxContainment
+                ? ExperimentalOptIn
+                : NoExperimentalOptIn;
+        }
+        if (envelope["sandboxId"]?.GetValue<string>() is { } sandboxId)
+        {
+            return ExperimentalOptInFor(new SandboxId(sandboxId));
+        }
+        return NoExperimentalOptIn;
     }
 
     private static JsonNode? SerializeToNode<T>(T value) =>

@@ -17,7 +17,7 @@
 //! and sets a flag so later reads short-circuit to EOF.
 
 use std::io::{self, Read};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -123,6 +123,10 @@ impl InterruptibleReader {
     /// may be minted; they share one cancellation state.
     pub fn canceller(&self) -> ReadCanceller {
         ReadCanceller(Arc::clone(&self.state))
+    }
+
+    pub fn try_clone_owned_fd(&self) -> io::Result<OwnedFd> {
+        self.fd.as_fd().try_clone_to_owned()
     }
 }
 
