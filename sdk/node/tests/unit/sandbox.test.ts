@@ -583,6 +583,36 @@ describe('buildSandboxPayload', () => {
       }
     });
 
+    it('should reject ProcessContainer proxy peer policy for NVX', () => {
+      mockWindows();
+      try {
+        assert.throws(
+          () => buildSandboxPayload(
+            'echo hello',
+            {
+              version: '0.9.0-alpha',
+              runtimeConfig: {
+                networkProxy: 'http://127.0.0.1:8080',
+              },
+              processContainer: {
+                network: {
+                  allowedProxyPeer: 'Contoso.Proxy_1234567890abc',
+                },
+              },
+            },
+            undefined,
+            undefined,
+            'nvx',
+          ),
+          {
+            message: /processContainer\.network\.allowedProxyPeer is supported only by the Windows ProcessContainer backend/,
+          },
+        );
+      } finally {
+        restore();
+      }
+    });
+
   });
 
   describe('WSLC', () => {

@@ -362,6 +362,7 @@ export function createConfigFromPolicy(
     validateTelemetryVersion(policy);
     const directionalNetwork = selectDirectionalNetwork(policy);
     const enumeratePaths = policy.processContainer?.filesystem?.enumeratePaths;
+    const allowedProxyPeer = policy.processContainer?.network?.allowedProxyPeer;
 
     const containerId = containerName ?? generateRandomContainerName();
 
@@ -394,6 +395,12 @@ export function createConfigFromPolicy(
                 'ProcessContainer backend.'
             );
         }
+    }
+    if (containment === 'nvx' && allowedProxyPeer !== undefined) {
+        throw new Error(
+            'processContainer.network.allowedProxyPeer is supported only by the Windows ' +
+            'ProcessContainer backend.'
+        );
     }
 
     config.filesystem = {
@@ -429,11 +436,11 @@ export function createConfigFromPolicy(
                 networkProxy: policy.runtimeConfig.networkProxy,
             };
         }
-        if (policy.processContainer?.network?.allowedProxyPeer !== undefined) {
+        if (allowedProxyPeer !== undefined) {
             config.processContainer = {
                 ...config.processContainer,
                 network: {
-                    allowedProxyPeer: policy.processContainer.network.allowedProxyPeer,
+                    allowedProxyPeer,
                 },
             };
         }
