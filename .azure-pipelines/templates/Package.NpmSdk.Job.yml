@@ -46,9 +46,9 @@ jobs:
       - template: Cargo.Setup.Public.yml@self
 
     - task: UseNode@1
-      displayName: Use Node.js 20
+      displayName: Use Node.js 24
       inputs:
-        version: '20.x'
+        version: '24.x'
 
     - task: Cache@2
       displayName: Cache npm

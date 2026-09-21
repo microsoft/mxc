@@ -64,8 +64,9 @@ use wxc_common::process_util::{
     SendOwnedHandle,
 };
 use wxc_common::sandbox_process::{
-    boxed_closer, cancel_and_join_discard, spawn_discard, take_boxed_read, take_boxed_write,
-    SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
+    boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, spawn_discard,
+    take_boxed_read, take_boxed_write, NativeStdio, SandboxBackend, SandboxProcess, StdioMode,
+    StreamCloser,
 };
 use wxc_common::script_runner::get_timeout_milliseconds;
 use wxc_common::string_util;
@@ -1556,6 +1557,9 @@ struct BaseContainerSandboxProcess {
     stdout_canceller: Option<PipeReadCanceller>,
     stderr_canceller: Option<PipeReadCanceller>,
     timeout_ms: u32,
+    // Retained here, in addition to the optional engine telemetry wrapper, so
+    // callers still receive timeout classification when telemetry is disabled.
+    timeout_requested: bool,
     preserve_policy: bool,
     identity: String,
     proxy_coordinator: ProxyCoordinator,
@@ -1607,6 +1611,7 @@ impl BaseContainerSandboxProcess {
             stdout_canceller,
             stderr_canceller,
             timeout_ms: child.timeout_ms,
+            timeout_requested: false,
             preserve_policy: child.preserve_policy,
             identity: sanitize_identity(&std::mem::take(&mut child.identity)).to_string(),
             proxy_coordinator: std::mem::take(&mut child.proxy_coordinator),
@@ -1859,6 +1864,24 @@ impl BaseContainerSandboxProcess {
         }
     }
 
+    fn timeout_result(&mut self) -> std::io::Result<i32> {
+        wxc_common::telemetry::log_process_event(
+            &self.identity,
+            self.pid,
+            wxc_common::telemetry::ProcessEvent::TimedOut(self.timeout_ms as u64),
+        );
+        if self.audit_enabled() {
+            let record = self
+                .audit(AuditEventName::ProcessTimedOut)
+                .u64("timeout_ms", self.timeout_ms as u64);
+            self.audit_logger.log_audit_event(&record);
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("script timed out after {}ms", self.timeout_ms),
+        ))
+    }
+
     fn terminate_and_reap(&mut self) -> std::io::Result<()> {
         self.kill_process_tree()?;
         unsafe {
@@ -2034,6 +2057,22 @@ impl SandboxProcess for BaseContainerSandboxProcess {
         self.output_metadata.as_ref()
     }
 
+    fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+        let stdio = duplicate_and_take_native_stdio(
+            &mut self.stdin,
+            &mut self.stdout,
+            &mut self.stderr,
+            |stream| stream.try_clone_owned_handle(),
+            |stream| stream.try_clone_owned_handle(),
+            |stream| stream.try_clone_owned_handle(),
+        )?;
+        if stdio.is_some() {
+            self.stdout_canceller.take();
+            self.stderr_canceller.take();
+        }
+        Ok(stdio)
+    }
+
     fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
         take_boxed_write(&mut self.stdin)
     }
@@ -2064,7 +2103,14 @@ impl SandboxProcess for BaseContainerSandboxProcess {
                 // Keep polling non-blocking and independent of captureDenials.
                 // `wait()` or `Drop` owns descendant termination and capture
                 // finalization after the root exit becomes observable.
-                Ok(Some(code as i32))
+                if self.timeout_requested {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "sandbox execution timed out",
+                    ))
+                } else {
+                    Ok(Some(code as i32))
+                }
             }
             WAIT_TIMEOUT => Ok(None),
             _ => Err(std::io::Error::other("WaitForSingleObject failed")),
@@ -2078,6 +2124,11 @@ impl SandboxProcess for BaseContainerSandboxProcess {
     fn kill(&mut self) -> std::io::Result<()> {
         // Tree-kill via the job object when the child was successfully assigned
         // to one; otherwise fall back to terminating the root process.
+        self.kill_process_tree()
+    }
+
+    fn kill_for_timeout(&mut self) -> std::io::Result<()> {
+        self.timeout_requested = true;
         self.kill_process_tree()
     }
 
@@ -2097,6 +2148,8 @@ impl SandboxProcess for BaseContainerSandboxProcess {
                 let mut code: u32 = 0;
                 if unsafe { GetExitCodeProcess(self.process.get(), &mut code) }.is_err() {
                     Err(std::io::Error::other("GetExitCodeProcess failed"))
+                } else if self.timeout_requested {
+                    self.timeout_result()
                 } else {
                     let exit_code = code as i32;
                     wxc_common::telemetry::log_process_event(
@@ -2113,23 +2166,7 @@ impl SandboxProcess for BaseContainerSandboxProcess {
                     Ok(exit_code)
                 }
             }
-            WAIT_TIMEOUT => {
-                wxc_common::telemetry::log_process_event(
-                    &self.identity,
-                    self.pid,
-                    wxc_common::telemetry::ProcessEvent::TimedOut(self.timeout_ms as u64),
-                );
-                if self.audit_enabled() {
-                    let record = self
-                        .audit(AuditEventName::ProcessTimedOut)
-                        .u64("timeout_ms", self.timeout_ms as u64);
-                    self.audit_logger.log_audit_event(&record);
-                }
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!("script timed out after {}ms", self.timeout_ms),
-                ))
-            }
+            WAIT_TIMEOUT => self.timeout_result(),
             _ => Err(std::io::Error::other("WaitForSingleObject failed")),
         };
 
