@@ -51,6 +51,8 @@ ANY_TCP_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_any_tcp.json"
 ANY_ICMP_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_any_icmp.json"
 ANY_PORT_MATCH_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_any_port_match.json"
 ANY_WRONG_PORT_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_any_wrong_port.json"
+ANY_UDP_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_any_udp.json"
+ANY_UDP_WRONG_PORT_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_any_udp_wrong_port.json"
 
 fail() {
     echo "FAIL: $1"
@@ -167,12 +169,19 @@ PEER_HOST_IP="203.0.113.1"
 PEER_IP="203.0.113.2"
 PEER_CIDR="203.0.113.0/24"
 PEER_PORT="443"
+# A UDP echo service, so the protocol-any fan-out can be probed on the half no
+# TCP case reaches.
+PEER_UDP_PORT="8053"
 
 PEER_LISTENER_PID=""
+PEER_UDP_LISTENER_PID=""
 IP_FORWARD_WAS=""
 teardown_peer() {
     if [ -n "$PEER_LISTENER_PID" ]; then
         kill "$PEER_LISTENER_PID" >/dev/null 2>&1 || true
+    fi
+    if [ -n "$PEER_UDP_LISTENER_PID" ]; then
+        kill "$PEER_UDP_LISTENER_PID" >/dev/null 2>&1 || true
     fi
     ip netns del "$PEER_NETNS" >/dev/null 2>&1 || true
     ip link del "$PEER_HOST_VETH" >/dev/null 2>&1 || true
@@ -230,6 +239,37 @@ finally:
     s.close()
 PY
 
+# UDP carries no handshake, so the probe reads a returned payload as the
+# verdict.  An echo service supplies one.
+ip netns exec "$PEER_NETNS" python3 -c "
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(('$PEER_IP', $PEER_UDP_PORT))
+while True:
+    payload, sender = s.recvfrom(1024)
+    s.sendto(payload, sender)
+" >/dev/null 2>&1 &
+PEER_UDP_LISTENER_PID=$!
+sleep 1
+kill -0 "$PEER_UDP_LISTENER_PID" >/dev/null 2>&1 \
+    || fail "the egress peer UDP listener did not start on $PEER_IP:$PEER_UDP_PORT."
+
+# A silent echo service would make the udp allow case read as a firewall block.
+python3 - "$PEER_IP" "$PEER_UDP_PORT" <<'PY' || fail "the egress peer does not echo UDP at $PEER_IP:$PEER_UDP_PORT."
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(5)
+try:
+    s.sendto(b"probe", (sys.argv[1], int(sys.argv[2])))
+    if s.recvfrom(1024)[0] != b"probe":
+        sys.exit(1)
+except OSError as exc:
+    print(exc)
+    sys.exit(1)
+finally:
+    s.close()
+PY
+
 # The ICMP cases below read an unanswered echo as a firewall verdict, so a peer
 # that ignores echo has to fail here as harness breakage instead.
 if command -v ping >/dev/null 2>&1; then
@@ -245,6 +285,7 @@ PEER_TARGETING_CONFIGS=(
     "$PORT_RANGE_INSIDE_CONFIG" "$PORT_RANGE_OUTSIDE_CONFIG"
     "$ANY_TCP_CONFIG" "$ANY_ICMP_CONFIG"
     "$ANY_PORT_MATCH_CONFIG" "$ANY_WRONG_PORT_CONFIG"
+    "$ANY_UDP_CONFIG" "$ANY_UDP_WRONG_PORT_CONFIG"
 )
 PEER_ALLOWING_CONFIGS=(
     "$ALLOW_CONFIG" "$WRONG_PORT_CONFIG"
@@ -252,6 +293,7 @@ PEER_ALLOWING_CONFIGS=(
     "$PORT_RANGE_INSIDE_CONFIG" "$PORT_RANGE_OUTSIDE_CONFIG"
     "$ANY_TCP_CONFIG" "$ANY_ICMP_CONFIG"
     "$ANY_PORT_MATCH_CONFIG" "$ANY_WRONG_PORT_CONFIG"
+    "$ANY_UDP_CONFIG" "$ANY_UDP_WRONG_PORT_CONFIG"
 )
 for cfg in "${PEER_TARGETING_CONFIGS[@]}"; do
     grep -Fq "$PEER_IP" "$cfg" \
@@ -262,7 +304,12 @@ for cfg in "${PEER_ALLOWING_CONFIGS[@]}"; do
         || fail "fixture ${cfg##*/} no longer allows $PEER_CIDR; script and fixture drifted."
 done
 
-echo "Running LXC schema 0.8 egress enforcement test..."
+# Both udp fixtures probe the echo service, so a port the listener does not hold
+# would read as the firewall blocking rather than as drift.
+for cfg in "$ANY_UDP_CONFIG" "$ANY_UDP_WRONG_PORT_CONFIG"; do
+    grep -Fq "$PEER_UDP_PORT" "$cfg" \
+        || fail "fixture ${cfg##*/} no longer probes udp/$PEER_UDP_PORT; script and fixture drifted."
+done
 
 # An egress-only config is the shape a backend claiming only the two egress
 # bits would reject outright, which makes any verdict here a test of the
@@ -317,6 +364,12 @@ assert_allowed "tcp/443 was unreachable while protocol any allowed port 443, so 
 
 run_case "protocol-any case: peer allowed on any port 444, probe tcp/443" "$ANY_WRONG_PORT_CONFIG"
 assert_blocked "tcp/443 succeeded while protocol any allowed only port 444. The fan-out drops the port selector, so any carrying a port opens every port."
+
+run_case "protocol-any case: peer allowed on any port $PEER_UDP_PORT, probe udp/$PEER_UDP_PORT" "$ANY_UDP_CONFIG"
+assert_allowed "udp/$PEER_UDP_PORT was unreachable while protocol any allowed that port. Only the TCP half of the fan-out is reaching the chain, so the tcp cases above prove nothing about udp."
+
+run_case "protocol-any case: peer allowed on any port 8054, probe udp/$PEER_UDP_PORT" "$ANY_UDP_WRONG_PORT_CONFIG"
+assert_blocked "udp/$PEER_UDP_PORT succeeded while protocol any allowed only port 8054. The UDP half of the fan-out ignores the port selector."
 
 echo "PASS: schema 0.8 egress rules filtered by destination, by port, by port range, by protocol, by resolver, by deny rule, and by exclusion."
 echo "LXC schema 0.8 egress enforcement test complete."
