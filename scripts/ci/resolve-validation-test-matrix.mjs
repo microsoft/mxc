@@ -216,7 +216,6 @@ export function resolvePlan(catalog, plan) {
     matrices[family].push(matrixEntry);
   }
 
-  suppressNonMacArm64(matrices);
   sortMatrices(matrices);
   applyDelayedStart(matrices, catalog.backendDelayedStart);
   return matrices;
@@ -260,16 +259,6 @@ function setDefaultDelays(matrices) {
     for (const entry of matrices[family]) {
       entry.startup_delay_seconds = 0;
     }
-  }
-}
-
-// Windows and Linux ARM64 hosted VMs currently lack nested virtualization.
-// Keep their catalog entries intact for future enablement, but never emit them
-// until suitable test hosts are available. macOS remains ARM64-only.
-function suppressNonMacArm64(matrices) {
-  for (const family of ['windows', 'linux']) {
-    matrices[family] = matrices[family]
-      .filter(entry => entry.architecture !== 'arm64');
   }
 }
 

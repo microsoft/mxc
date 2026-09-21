@@ -106,9 +106,9 @@ Current platforms:
 
 | Platform id | Family | x64 pool | arm64 pool | Declared backends (x64) |
 |-------------|--------|----------|------------|--------------------------|
-| `windows-prerelease-process-container` | windows | `1es-mxc-windows-prerelease-t1-x64` | *(dormant)* | process-t1, process-t3, isolation-session, wslc, windows-sandbox, microvm, hyperlight |
-| `windows-prerelease-isolation-session` | windows | *(dormant)* | *(dormant)* | same as above |
-| `windows-canary` | windows | *(dormant)* | *(dormant)* | process-t1, process-t3, wslc, windows-sandbox, microvm, hyperlight |
+| `windows-prerelease-process-container` | windows | `1es-mxc-windows-prerelease-t1-x64` | `1es-mxc-windows-prerelease-t1-arm64` | process-t1, isolation-session, wslc, windows-sandbox, microvm, hyperlight |
+| `windows-prerelease-isolation-session` | windows | `1es-mxc-e2e-win-prerelease-isolationsesh-x64` | *(dormant)* | same as above |
+| `windows-canary` | windows | *(dormant)* | *(dormant)* | process-t1, wslc, windows-sandbox, microvm, hyperlight |
 | `windows-25h2` | windows | `1es-mxc-e2e-windows-25h2-pro-x64` | *(dormant)* | same as above |
 | `windows-24h2` | windows | `1es-mxc-e2e-windows-24h2-pro-x64` | *(dormant)* | same as above |
 | `windows-23h2` | windows | `1es-mxc-e2e-windows-23h2-enterprise-x64` | *(dormant)* | process-t3, wslc, windows-sandbox, microvm, hyperlight |
@@ -119,9 +119,8 @@ Current platforms:
 | `macos-26` | macos | — | runner `macos-26` | seatbelt |
 | `macos-15` | macos | — | runner `macos-15` | seatbelt |
 
-ARM64 is declared throughout but never emitted: no Azure VM SKU offers nested
-virtualization on ARM CPUs yet, so the resolver filters Windows/Linux ARM64 out
-after expansion (`suppressNonMacArm64`). macOS is ARM64-only.
+ARM64 is declared throughout but mostly dormant: no Azure VM SKU offers nested
+virtualization on ARM CPUs yet, so only backends that don't require virtualization are supported. macOS is ARM64-only.
 
 ### Backend ids
 
@@ -488,8 +487,9 @@ cron *and* a job condition *and* a dispatch choice.
 
 ### Enable ARM64
 
-Set the ARM64 `pool` for the platform *and* remove or narrow
-`suppressNonMacArm64` in the resolver. Note that the resolver rejects
+Set the ARM64 `pool` for the platform. That is the whole switch: an
+architecture with an empty pool is skipped during expansion, so filling one in
+is what puts its jobs in the matrix. Note that the resolver rejects
 `hyperlight` and `microvm` on ARM64 outright (x64-only runtimes), and the WSLC
 dispatcher still refuses non-x64.
 
