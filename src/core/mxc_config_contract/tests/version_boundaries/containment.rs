@@ -8,7 +8,6 @@ fn development_containment_values_are_introduced_in_v09() {
     for containment in [
         "vm",
         "windows_sandbox",
-        "microvm",
         "nvx",
         "hyperlight",
         "isolation_session",

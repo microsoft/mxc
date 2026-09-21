@@ -15,7 +15,6 @@ fn accepts_every_containment_value() {
         "seatbelt",
         "vm",
         "windows_sandbox",
-        "microvm",
         "nvx",
         "hyperlight",
         "isolation_session",
@@ -31,6 +30,17 @@ fn accepts_every_containment_value() {
 
         assert_valid(&json);
     }
+}
+
+#[test]
+fn rejects_removed_microvm_containment_value() {
+    assert_invalid(
+        r#"{
+            "version": "0.9.0-alpha",
+            "containment": "microvm",
+            "process": {"commandLine": "echo"}
+        }"#,
+    );
 }
 
 #[test]

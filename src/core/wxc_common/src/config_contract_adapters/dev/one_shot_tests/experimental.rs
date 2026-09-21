@@ -188,10 +188,6 @@ const DEVELOPMENT_CONTAINMENT_CASES: &[DevelopmentContainmentCase] = &[
         expected: "windows_sandbox",
     },
     DevelopmentContainmentCase {
-        input: "microvm",
-        expected: "microvm",
-    },
-    DevelopmentContainmentCase {
         input: "hyperlight",
         expected: "hyperlight",
     },

@@ -25,9 +25,6 @@ pub enum ContainmentBackend {
     Lxc,
     /// VM-based isolation.
     Vm,
-    /// MicroVM isolation via Windows Hypervisor Platform (internally powered by NanVix).
-    #[serde(rename = "microvm")]
-    MicroVm,
     /// NVX Linux micro-VM hosted by OpenVMM.
     Nvx,
     /// MicroVM isolation via Hyperlight + Unikraft, using an embedded
@@ -60,7 +57,6 @@ impl ContainmentBackend {
             ContainmentBackend::Wslc => "wslc",
             ContainmentBackend::Lxc => "lxc",
             ContainmentBackend::Vm => "vm",
-            ContainmentBackend::MicroVm => "microvm",
             ContainmentBackend::Nvx => "nvx",
             ContainmentBackend::Hyperlight => "hyperlight",
             ContainmentBackend::WindowsSandbox => "windows_sandbox",
@@ -83,7 +79,6 @@ impl ContainmentBackend {
             ContainmentBackend::IsolationSession => Some("experimental.isolation_session"),
             ContainmentBackend::Bubblewrap
             | ContainmentBackend::Hyperlight
-            | ContainmentBackend::MicroVm
             | ContainmentBackend::Nvx
             | ContainmentBackend::Vm => None,
         }
@@ -128,7 +123,6 @@ impl From<crate::wire::Containment> for ContainmentBackend {
             }
             W::WindowsSandbox => Self::WindowsSandbox,
             W::Lxc => Self::Lxc,
-            W::Microvm => Self::MicroVm,
             W::Nvx => Self::Nvx,
             W::Hyperlight => Self::Hyperlight,
             W::Wslc => Self::Wslc,

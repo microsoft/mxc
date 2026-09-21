@@ -72,6 +72,8 @@ struct RequestDiscriminator<'a> {
     phase: Option<&'a RawValue>,
     #[serde(borrow, default, deserialize_with = "deserialize_present_raw")]
     experimental: Option<&'a RawValue>,
+    #[serde(borrow, default, deserialize_with = "deserialize_present_raw")]
+    containment: Option<&'a RawValue>,
 }
 
 fn deserialize_present_raw<'de, D>(deserializer: D) -> Result<Option<&'de RawValue>, D::Error>
@@ -79,6 +81,20 @@ where
     D: Deserializer<'de>,
 {
     <&RawValue>::deserialize(deserializer).map(Some)
+}
+
+fn reject_removed_microvm(containment: Option<&RawValue>) -> Result<(), WxcError> {
+    if containment
+        .and_then(|raw| serde_json::from_str::<String>(raw.get()).ok())
+        .as_deref()
+        == Some("microvm")
+    {
+        return Err(WxcError::ConfigParse(
+            "containment \"microvm\" was removed; use \"nvx\" for the NVX micro-VM backend"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn reject_legacy_telemetry_raw(experimental: Option<&str>) -> Result<(), WxcError> {
@@ -165,6 +181,7 @@ pub fn load_request_with_options(
         let json_str = decode_request_input(input, opts.is_base64)?;
         let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(&json_str)
             .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
+        reject_removed_microvm(discriminator.containment)?;
         reject_legacy_telemetry_raw(discriminator.experimental.map(|raw| raw.get()))?;
 
         let cfg: wire::MxcConfig = config_deserialize::from_str(&json_str)
@@ -218,6 +235,7 @@ pub(crate) fn load_request_from_json_with_options(
                     .to_string(),
             ));
         }
+        reject_removed_microvm(discriminator.containment)?;
         reject_legacy_telemetry_raw(discriminator.experimental.map(|raw| raw.get()))?;
 
         let cfg: wire::MxcConfig = config_deserialize::from_str(json_str)
@@ -369,6 +387,7 @@ fn parse_mxc_request_json(
         .map(MxcRequest::StateAware)
         .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string())))
     } else {
+        reject_removed_microvm(discriminator.containment).map_err(ParseError::OneShot)?;
         reject_legacy_telemetry_raw(discriminator.experimental.map(|raw| raw.get()))
             .map_err(ParseError::OneShot)?;
         let cfg: wire::MxcConfig = config_deserialize::from_str(json_str).map_err(|error| {
@@ -817,7 +836,6 @@ fn requested_sandbox_kind(c: Option<&wire::Containment>) -> &'static str {
         Some(wire::Containment::Vm) => "vm",
         Some(wire::Containment::WindowsSandbox) => "windows_sandbox",
         Some(wire::Containment::Lxc) => "lxc",
-        Some(wire::Containment::Microvm) => "microvm",
         Some(wire::Containment::Nvx) => "nvx",
         Some(wire::Containment::Hyperlight) => "hyperlight",
         Some(wire::Containment::Wslc) => "wslc",
@@ -4882,13 +4900,20 @@ mod tests {
     }
 
     #[test]
-    fn containment_microvm_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "microvm"}"#;
-        let encoded = base64_encode(json.as_bytes());
+    fn containment_microvm_rejected_with_nvx_migration_guidance() {
+        let json = r#"{
+            "version": "0.9.0-alpha",
+            "process": {"commandLine": "echo hi"},
+            "containment": "microvm"
+        }"#;
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.containment, ContainmentBackend::MicroVm);
+        let error = load_request_from_json(json, &mut logger)
+            .expect_err("removed microvm containment must be rejected");
+        let message = error.to_string();
+        assert!(message.contains("microvm"));
+        assert!(message.contains("nvx"));
+        assert!(message.contains("removed"));
     }
 
     #[test]

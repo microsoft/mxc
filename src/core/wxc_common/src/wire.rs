@@ -139,8 +139,6 @@ pub enum Containment {
     WindowsSandbox,
     /// Full Linux container.
     Lxc,
-    /// NanVix micro-VM (experimental).
-    Microvm,
     /// NVX micro-VM (experimental).
     Nvx,
     /// Hyperlight micro-VM (experimental).

@@ -16,7 +16,6 @@ fn convert_containment(value: contract::OneShotContainment) -> wire::Containment
         contract::OneShotContainment::Seatbelt => wire::Containment::Seatbelt,
         contract::OneShotContainment::Vm => wire::Containment::Vm,
         contract::OneShotContainment::WindowsSandbox => wire::Containment::WindowsSandbox,
-        contract::OneShotContainment::Microvm => wire::Containment::Microvm,
         contract::OneShotContainment::Nvx => wire::Containment::Nvx,
         contract::OneShotContainment::Hyperlight => wire::Containment::Hyperlight,
         contract::OneShotContainment::Wslc => wire::Containment::Wslc,

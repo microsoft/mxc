@@ -45,7 +45,6 @@ impl CommandLineContext {
             | ContainmentBackend::Bubblewrap => Self::PosixShell,
             ContainmentBackend::ProcessContainer
             | ContainmentBackend::Vm
-            | ContainmentBackend::MicroVm
             | ContainmentBackend::Hyperlight => Self::WindowsCreateProcess,
             ContainmentBackend::Nvx => Self::PosixShell,
         }
