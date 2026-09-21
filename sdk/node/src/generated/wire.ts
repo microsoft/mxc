@@ -69,7 +69,7 @@ export type ClipboardPolicy = "none" | "read" | "write" | "all";
 /**
  * Containment backend (abstract intent or concrete backend).
  */
-export type Containment = "process" | "processcontainer" | "vm" | "windows_sandbox" | "lxc" | "microvm" | "nvx" | "hyperlight" | "wslc" | "seatbelt" | "isolation_session" | "bubblewrap";
+export type Containment = "process" | "processcontainer" | "vm" | "windows_sandbox" | "lxc" | "nvx" | "hyperlight" | "wslc" | "seatbelt" | "isolation_session" | "bubblewrap";
 
 /**
  * Experimental features (only honored with `--experimental`). This block is intentionally **permissive** (no `deny_unknown_fields`): experimental backends are in flux, so the schema documents the known shapes for editor help without rejecting in-progress fields. The strict, closed contract is the stable (top-level) surface.
@@ -354,7 +354,7 @@ export interface Process {
    */
   commandLine?: string | null;
   /**
-   * Working directory for the process. When omitted, backends substitute a directory the sandbox can use rather than inheriting the launcher's cwd: Windows ProcessContainer picks the first `readwritePaths` entry that is an existing directory, else the first such `readonlyPaths` entry, else the system drive root; Seatbelt applies the same precedence with a `/` fallback; LXC/WSL use the container root; NanVix and Hyperlight reject a working directory outright. See `docs/schema.md` ("Working Directory").
+   * Working directory for the process. When omitted, backends substitute a directory the sandbox can use rather than inheriting the launcher's cwd: Windows ProcessContainer picks the first `readwritePaths` entry that is an existing directory, else the first such `readonlyPaths` entry, else the system drive root; Seatbelt applies the same precedence with a `/` fallback; LXC/WSL use the container root; NVX and Hyperlight reject a working directory outright. See `docs/schema.md` ("Working Directory").
    */
   cwd?: string | null;
   /**

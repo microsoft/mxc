@@ -831,13 +831,6 @@
           "type": "string"
         },
         {
-          "description": "Microvm",
-          "enum": [
-            "microvm"
-          ],
-          "type": "string"
-        },
-        {
           "description": "Nvx",
           "enum": [
             "nvx"

@@ -10,8 +10,24 @@ import {
   _setBwrapVersionRunner,
   _setLxcAvailabilityProbe,
 } from '../../src/platform.js';
-import { ContainerConfig, SandboxPolicy, SandboxingMethod } from '../../src/types.js';
+import {
+  ContainerConfig,
+  ContainmentTypes,
+  ExperimentalBackends,
+  SandboxPolicy,
+  SandboxingMethod,
+} from '../../src/types.js';
 import { platformSkip } from './test-helpers.js';
+
+describe('containment exports', () => {
+  it('exposes nvx and no longer exposes microvm', () => {
+    assert.deepStrictEqual(ContainmentTypes, ['process', 'vm']);
+    assert.deepStrictEqual(
+      ExperimentalBackends,
+      ['nvx', 'windows_sandbox', 'hyperlight', 'wslc', 'isolation_session'],
+    );
+  });
+});
 
 describe('buildSandboxPayload', () => {
   const defaultPolicy: SandboxPolicy = { version: '0.6.0-alpha' };
@@ -317,50 +333,6 @@ describe('buildSandboxPayload', () => {
       }
     };
 
-    it('should return minimal config for microvm without filesystem', () => {
-      mockWindows();
-      try {
-        const payload = buildSandboxPayload('print(42)', defaultPolicy, undefined, undefined, 'microvm');
-        assert.strictEqual(payload.containment, 'microvm');
-        assert.strictEqual(payload.filesystem, undefined);
-        assert.strictEqual(payload.processContainer, undefined);
-      } finally {
-        restore();
-      }
-    });
-
-    it('should map clearPolicyOnExit to lifecycle.preservePolicy for microvm when policy has paths', () => {
-      mockWindows();
-      try {
-        const policy: SandboxPolicy = {
-          version: '0.6.0-alpha',
-          filesystem: { readwritePaths: ['/tmp'] },
-        };
-        const payload = buildSandboxPayload('print(42)', policy, undefined, undefined, 'microvm');
-        assert.strictEqual(payload.containment, 'microvm');
-        assert.deepStrictEqual(payload.filesystem!.readwritePaths, ['/tmp']);
-        // clearPolicyOnExit is not a wire `filesystem` field; the intent is
-        // carried canonically by lifecycle.preservePolicy (default clear => not preserved).
-        assert.strictEqual(payload.lifecycle!.preservePolicy, false);
-      } finally {
-        restore();
-      }
-    });
-
-    it('should honor clearPolicyOnExit false for microvm (via lifecycle.preservePolicy)', () => {
-      mockWindows();
-      try {
-        const policy: SandboxPolicy = {
-          version: '0.6.0-alpha',
-          filesystem: { readwritePaths: ['/tmp'], clearPolicyOnExit: false },
-        };
-        const payload = buildSandboxPayload('print(42)', policy, undefined, undefined, 'microvm');
-        assert.strictEqual(payload.lifecycle!.preservePolicy, true);
-      } finally {
-        restore();
-      }
-    });
-
     it('should build processcontainer config on Windows with default process containment', () => {
       mockWindows();
       try {
@@ -371,74 +343,6 @@ describe('buildSandboxPayload', () => {
         const payload = buildSandboxPayload('echo hi', policy);
         assert.ok(payload.processContainer, 'processContainer section should be present');
         assert.ok(payload.processContainer!.capabilities!.includes('internetClient'));
-      } finally {
-        restore();
-      }
-    });
-
-    it('should reject network policies for microvm', () => {
-      mockWindows();
-      try {
-        const policy: SandboxPolicy = {
-          version: '0.6.0-alpha',
-          network: { allowOutbound: true },
-        };
-        assert.throws(
-          () => buildSandboxPayload('print(42)', policy, undefined, undefined, 'microvm'),
-          { message: /does not support network configuration/ },
-        );
-        assert.throws(
-          () => buildSandboxPayload(
-            'print(42)',
-            {
-              version: '0.8.0-alpha',
-              runtimeConfig: { networkProxy: 'http://127.0.0.1:8080' },
-            },
-            undefined,
-            undefined,
-            'microvm',
-          ),
-          { message: /does not support network configuration/ },
-        );
-      } finally {
-        restore();
-      }
-    });
-
-    it('should reject microvm on non-Windows platforms', () => {
-      const orig = Object.getOwnPropertyDescriptor(process, 'platform');
-      Object.defineProperty(process, 'platform', { value: 'linux' });
-      try {
-        assert.throws(
-          () => buildSandboxPayload('print(42)', defaultPolicy, undefined, undefined, 'microvm'),
-          { message: /only supported on Windows/ },
-        );
-      } finally {
-        if (orig) Object.defineProperty(process, 'platform', orig);
-      }
-    });
-
-    it('should preserve lifecycle config for microvm', () => {
-      mockWindows();
-      try {
-        const policy: SandboxPolicy = {
-          version: '0.6.0-alpha',
-          filesystem: { clearPolicyOnExit: false },
-        };
-        const payload = buildSandboxPayload('print(42)', policy, undefined, undefined, 'microvm');
-        assert.strictEqual(payload.lifecycle!.destroyOnExit, true);
-        assert.strictEqual(payload.lifecycle!.preservePolicy, true);
-      } finally {
-        restore();
-      }
-    });
-
-    it('should set process commandLine and containerId for microvm', () => {
-      mockWindows();
-      try {
-        const payload = buildSandboxPayload('print(42)', defaultPolicy, undefined, 'my-container', 'microvm');
-        assert.strictEqual(payload.process!.commandLine, 'print(42)');
-        assert.strictEqual(payload.containerId, 'my-container');
       } finally {
         restore();
       }
@@ -1724,13 +1628,23 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
     );
   });
 
-  it('should accept the abstract intent "microvm" with experimental flag (Windows only)', function (this: { skip: (reason?: string) => void }) {
-    if (process.platform !== 'win32') {
-      this.skip('microvm is Windows-only');
+  it('should reject removed microvm containment with NVX migration guidance', () => {
+    assert.throws(
+      () => resolveExecutableAndArgs(makeConfig('microvm'), {
+        executablePath: fakeExe,
+        experimental: true,
+      }),
+      { message: /microvm.*removed.*nvx/i },
+    );
+  });
+
+  it('should accept nvx with experimental mode on Windows x64', function (this: { skip: (reason?: string) => void }) {
+    if (process.platform !== 'win32' || process.arch !== 'x64') {
+      this.skip('nvx is Windows x64-only');
       return;
     }
     assert.doesNotThrow(() =>
-      resolveExecutableAndArgs(makeConfig('microvm'), {
+      resolveExecutableAndArgs(makeConfig('nvx'), {
         executablePath: fakeExe,
         experimental: true,
       }),

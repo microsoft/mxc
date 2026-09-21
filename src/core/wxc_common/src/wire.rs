@@ -166,7 +166,7 @@ pub struct Process {
     /// Windows ProcessContainer picks the first `readwritePaths` entry that is
     /// an existing directory, else the first such `readonlyPaths` entry, else
     /// the system drive root; Seatbelt applies the same precedence with a `/`
-    /// fallback; LXC/WSL use the container root; NanVix and Hyperlight reject a
+    /// fallback; LXC/WSL use the container root; NVX and Hyperlight reject a
     /// working directory outright. See `docs/schema.md` ("Working Directory").
     pub cwd: Option<String>,
     /// Environment variables as `"KEY=VALUE"` strings.

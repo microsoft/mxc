@@ -45,15 +45,11 @@ export interface LifecycleConfig {
  * - "vm": full hardware-virtualised VM isolation. Resolves to
  *   `windows_sandbox` on Windows; no concrete VM backend exists on other
  *   platforms today.
- * - "microvm": lightweight-VM isolation. Resolves to the current MicroVM
- *   runner (Windows only, experimental); intended to expand as additional
- *   microvm backends (e.g. NanVix) are added.
- *
  * Concrete-only backends (such as `"wslc"`) live on
  * {@link ContainmentBackend} until there is a meaningful abstraction over
  * multiple implementations of the same kind.
  */
-export type ContainmentType = "process" | "vm" | "microvm";
+export type ContainmentType = 'process' | 'vm';
 
 /**
  * Runtime list of {@link ContainmentType} values. Kept in sync with the
@@ -61,7 +57,7 @@ export type ContainmentType = "process" | "vm" | "microvm";
  * abstract intents at run time (the union itself only exists at compile
  * time).
  */
-export const ContainmentTypes: readonly ContainmentType[] = ['process', 'vm', 'microvm'];
+export const ContainmentTypes: readonly ContainmentType[] = ['process', 'vm'];
 
 /**
  * Deprecated containment wire values, mapped to their canonical
@@ -97,7 +93,7 @@ export type ContainmentBackend =
   | 'windows_sandbox'
   | 'wslc'
   | 'lxc'
-  | 'microvm'
+  | 'nvx'
   | 'hyperlight'
   | 'seatbelt'
   | 'isolation_session'
@@ -107,7 +103,13 @@ export type ContainmentBackend =
  * Containment values (abstract intent or concrete backend) that require
  * the `--experimental` flag.
  */
-export const ExperimentalBackends: readonly (ContainmentType | ContainmentBackend)[] = ['microvm', 'windows_sandbox', 'hyperlight', 'wslc', 'isolation_session'];
+export const ExperimentalBackends: readonly (ContainmentType | ContainmentBackend)[] = [
+  'nvx',
+  'windows_sandbox',
+  'hyperlight',
+  'wslc',
+  'isolation_session',
+];
 
 /**
  * Clipboard access policy levels

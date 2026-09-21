@@ -220,36 +220,6 @@ function buildProcessBaseContainerConfig(
 }
 
 /**
- * Builds the MicroVM (NanVix) portion of a ContainerConfig.
- * MicroVM is Windows-only and does not support network or UI policies.
- */
-function buildMicroVmConfig(
-    config: ContainerConfig,
-    policy: SandboxPolicy,
-): ContainerConfig {
-    if (os.platform() !== 'win32') {
-        throw new Error('The microvm backend is only supported on Windows (requires WHP/Hyper-V).');
-    }
-    if (policy.network || usesDirectionalNetwork(policy)) {
-        throw new Error(
-            'The microvm backend does not support network configuration. ' +
-            'Remove network, runtimeConfig, and processContainer.network or use a different backend.'
-        );
-    }
-    if (policy.filesystem?.readwritePaths?.length ||
-        policy.filesystem?.readonlyPaths?.length ||
-        policy.filesystem?.deniedPaths?.length) {
-        config.filesystem = {
-            readwritePaths: policy.filesystem?.readwritePaths,
-            readonlyPaths: policy.filesystem?.readonlyPaths,
-            deniedPaths: policy.filesystem?.deniedPaths,
-        };
-    }
-    config.containment = 'microvm';
-    return config;
-}
-
-/**
  * Creates a ContainerConfig from a SandboxPolicy and optional containment type.
  *
  * This is the primary API for translating user-facing security intent (SandboxPolicy)
@@ -302,12 +272,6 @@ export function createConfigFromPolicy(
             timeout: policy.timeoutMs ?? 0,
         },
     };
-
-    // Microvm: delegate to dedicated builder
-    if (containment === 'microvm') {
-        diagLog(`createConfigFromPolicy: containment=microvm, id=${containerId}`);
-        return buildMicroVmConfig(config, policy);
-    }
 
     config.filesystem = {
         readwritePaths: [...(policy.filesystem?.readwritePaths ?? [])],

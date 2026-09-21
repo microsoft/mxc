@@ -64,7 +64,7 @@ child.on('close', (code) => console.log('exit:', code));
 
 Pick `0.8.0-alpha` for new code on any supported platform.
 
-> **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session`), the `experimental.*` block, and state-aware lifecycle live in `0.9.0-dev`. The parser still accepts them when paired with `--experimental` regardless of which schema your config validates against — schema choice affects editor validation, not runtime behavior.
+> **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `wslc`, `nvx`, `hyperlight`, `isolation_session`), the `experimental.*` block, and state-aware lifecycle live in `0.9.0-dev`. The parser still accepts them when paired with `--experimental` regardless of which schema your config validates against — schema choice affects editor validation, not runtime behavior.
 
 > **Network host allow/block lists are not implemented on Windows.** `network.allowedHosts` / `network.blockedHosts` have no enforcement on this platform — use `network.defaultPolicy` (`allow` / `block`) or `network.proxy` to constrain network access.
 
@@ -138,11 +138,11 @@ for all three connectivity modes and backend-specific support.
 
 | Platform | Default backend | Other backends | Minimum build |
 | --- | --- | --- | --- |
-| Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26340.9212 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26340-9212)) |
+| Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `nvx`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26340.9212 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26340-9212)) |
 | Linux x64 / ARM64 | `bubblewrap` | `lxc` | — |
 | macOS ARM64 (schema `0.7.0-alpha`+) | `seatbelt` | — | — |
 
-The default `processcontainer`, `bubblewrap`, `lxc`, and `seatbelt` backends work out of the box. **Experimental backends** (`windows_sandbox`, `wslc`, `microvm`, `isolation_session`, `hyperlight`) require `{ experimental: true }` in `SandboxSpawnOptions` when you spawn — see [Choosing a Backend](#choosing-a-backend).
+The default `processcontainer`, `bubblewrap`, `lxc`, and `seatbelt` backends work out of the box. **Experimental backends** (`windows_sandbox`, `wslc`, `nvx`, `isolation_session`, `hyperlight`) require `{ experimental: true }` in `SandboxSpawnOptions` when you spawn — see [Choosing a Backend](#choosing-a-backend).
 
 > **Hyperlight** is an opt-in build flavor (Linux x64 and Windows x64) gated by the `--with-hyperlight` cargo feature. Default shipped binaries do not include it; build from source with `build.bat --with-hyperlight` (Windows) or the equivalent cargo invocation on Linux.
 
@@ -177,7 +177,7 @@ const config = createConfigFromPolicy(
     network: { allowOutbound: true },
     timeoutMs: 30_000,
   },
-  'process', // intent: "process" | "vm" | "microvm"
+  'process', // intent: "process" | "vm"
 );
 
 // Add the script and any backend-specific runtime settings on the returned config.
@@ -256,7 +256,7 @@ console.log(result.stdout);
 <details>
 <summary>Table of all backends and links to per-backend guides — click to expand.</summary>
 
-`SandboxPolicy` is cross-platform. The backend is selected by the second argument to `createConfigFromPolicy(policy, containment)`. Pass an **abstract intent** (`"process"`, `"vm"`, `"microvm"`) whenever possible — the SDK and native binary resolve it to the right concrete backend for the host. Pass a **concrete backend name** when you need a specific runner.
+`SandboxPolicy` is cross-platform. The backend is selected by the second argument to `createConfigFromPolicy(policy, containment)`. Pass an **abstract intent** (`"process"`, `"vm"`) whenever possible — the SDK and native binary resolve it to the right concrete backend for the host. Pass a **concrete backend name** when you need a specific runner.
 
 | Backend | Intent | Platforms | Stable? | Guide |
 | --- | --- | --- | --- | --- |
@@ -265,7 +265,7 @@ console.log(result.stdout);
 | `lxc` | (concrete only) | Linux | ✅ | [`docs/lxc-support/lxc-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/lxc-support/lxc-backend.md) |
 | `seatbelt` | `process` | macOS | ✅ (schema `0.7.0-alpha`+) | [`docs/seatbelt/seatbelt-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/seatbelt/seatbelt-backend.md) |
 | `windows_sandbox` | `vm` | Windows | Experimental | [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) |
-| `microvm` | `microvm` | Windows | Experimental | [`docs/nanvix-microvm/nanvix.md`](https://github.com/microsoft/mxc/blob/main/docs/nanvix-microvm/nanvix.md) — MicroVM via NanVix on Windows Hypervisor Platform |
+| `nvx` | (concrete only) | Windows x64 | Experimental | [`docs/nvx-backend-gaps.md`](https://github.com/microsoft/mxc/blob/main/docs/nvx-backend-gaps.md) — structural foundation only; runtime unavailable in Phase 1 |
 | `wslc` | (concrete only) | Windows | Experimental | [`docs/wsl/wsl-container-getting-started.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wsl-container-getting-started.md) |
 | `isolation_session` | (concrete only) | Windows | Experimental | [`docs/isolation-session/oneshot.md`](https://github.com/microsoft/mxc/blob/main/docs/isolation-session/oneshot.md) |
 
@@ -436,8 +436,8 @@ Setting `cwd` (or the `workingDirectory` argument) does **not** add that path to
 | --- | --- | --- |
 | `MXC is not supported on this platform` | `getPlatformSupport()` returned `isSupported: false`. On Linux, neither LXC nor a usable Bubblewrap 0.5.0+ installation is available. On macOS, the Seatbelt platform probe could not find `/usr/bin/sandbox-exec`. | Inspect `support.reason`. On Linux, also inspect `support.unavailableReasons` and install LXC or Bubblewrap 0.5.0+. On macOS, verify that `/usr/bin/sandbox-exec` exists; its absence indicates an incomplete or unsupported macOS installation. |
 | `wxc-exec.exe not found` / `lxc-exec not found` | The SDK couldn't locate the native binary. | Set `MXC_BIN_DIR=<dir>` so `<dir>/<arch>/wxc-exec.exe` (or `lxc-exec`) exists, or pass `options.executablePath` explicitly. |
-| `Invalid containment value '<x>'` | `containment` field doesn't match the parser's accepted values. | Use one of the abstract intents (`process`, `vm`, `microvm`) or a concrete backend listed in [Choosing a Backend](#choosing-a-backend). |
-| `'<x>' containment requires experimental mode` | A `windows_sandbox` / `wslc` / `microvm` / `isolation_session` / `hyperlight` backend was selected without the flag. | Pass `{ experimental: true }` in `SandboxSpawnOptions`. |
+| `Invalid containment value '<x>'` | `containment` field doesn't match the parser's accepted values. | Use one of the abstract intents (`process`, `vm`) or a concrete backend listed in [Choosing a Backend](#choosing-a-backend). |
+| `'<x>' containment requires experimental mode` | A `windows_sandbox` / `wslc` / `nvx` / `isolation_session` / `hyperlight` backend was selected without the flag. | Pass `{ experimental: true }` in `SandboxSpawnOptions`. |
 | `process.commandLine starts with an unquoted Windows path containing a space` | `wxc-exec` rejects unquoted paths with spaces at parse time. | Quote the executable: `'"C:\\Program Files\\…\\foo.exe" args'`. |
 | `Experimental_CreateProcessInSandbox failed: WIN32_ERROR(...)` | Native sandbox API returned an OS-level error, e.g. `448` = device feature not supported (Windows build / WIP feature not enabled). Note `120` (call not implemented / BaseContainer disabled) is now handled automatically — the default `process` backend falls back to AppContainer+DACL, so it no longer surfaces here. | Check the Windows build / WIP requirements for the backend you selected. |
 | Process exits `-1` / `4294967295` with no stdout | Native binary terminated abnormally. | Re-run with `options.debug: true` (or `options.logDir: '<dir>'`) to capture diagnostic logs. |
