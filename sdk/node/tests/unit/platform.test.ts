@@ -636,19 +636,20 @@ describe('bwrap version parsing', () => {
 describe('bwrap subprocess helpers', () => {
   it('publishes a worker result only after the anchor closes', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-anchor-order-'));
-    const anchorPath = path.join(dir, 'delayed-anchor.js');
+    const anchorPath = path.join(dir, 'anchor.js');
     fs.writeFileSync(
       anchorPath,
-      "process.stdout.write('{\"kind\":\"notFound\"}\\n');\n" +
-        'setTimeout(() => process.exit(0), 300);\n',
+      "process.stdout.write('{\"kind\":\"notFound\"}\\n', () => process.exit(0));\n",
     );
     const shared = new SharedArrayBuffer(12 + 1024);
     const header = new Int32Array(shared, 0, 3);
+    const anchorExitBarrier = new Int32Array(new SharedArrayBuffer(4));
     const worker = new Worker(
       new URL('../../src/bwrap-probe-worker.js', import.meta.url),
       {
         workerData: {
           shared,
+          anchorExitBarrier: anchorExitBarrier.buffer,
           anchorPath,
           helperPath: anchorPath,
           probeTimeoutMs: 1000,
@@ -659,12 +660,22 @@ describe('bwrap subprocess helpers', () => {
     );
     worker.on('error', () => {});
     try {
-      const started = Date.now();
-      const waitResult = Atomics.wait(header, 0, 0, 1000);
-      const elapsed = Date.now() - started;
+      const exitWaitResult = Atomics.wait(anchorExitBarrier, 0, 0, 5000);
+      assert.notStrictEqual(exitWaitResult, 'timed-out');
+      assert.strictEqual(
+        Atomics.load(header, 0),
+        0,
+        'worker published from exit instead of waiting for close',
+      );
+      Atomics.store(anchorExitBarrier, 0, 2);
+      Atomics.notify(anchorExitBarrier, 0);
+      const waitResult = Atomics.wait(header, 0, 0, 5000);
       assert.notStrictEqual(waitResult, 'timed-out');
-      assert.ok(elapsed >= 200, `worker published after ${elapsed}ms, before anchor close`);
     } finally {
+      if (Atomics.load(anchorExitBarrier, 0) === 1) {
+        Atomics.store(anchorExitBarrier, 0, 2);
+        Atomics.notify(anchorExitBarrier, 0);
+      }
       worker.unref();
       fs.rmSync(dir, { recursive: true, force: true });
     }
