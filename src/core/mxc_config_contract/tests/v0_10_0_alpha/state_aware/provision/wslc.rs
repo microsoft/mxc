@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use super::super::common::{
+use crate::state_aware::common::{
     assert_invalid as assert_invalid_request, assert_valid as assert_valid_request,
 };
 use mxc_config_contract::dev::WslcProvisionRequest;
