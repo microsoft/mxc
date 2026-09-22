@@ -1,6 +1,6 @@
 {
-    "$schema": "../../schemas/dev/mxc-config.schema.0.10.0-alpha.json",
-    "version": "0.10.0-alpha",
+    "$schema": "../../schemas/dev/mxc-config.schema.1.1.0-alpha.json",
+    "version": "1.1.0-alpha",
     "process": {
         "commandLine": "import pandas as pd, numpy as np\ndf = pd.DataFrame({'x': np.arange(5), 'y': np.arange(5) ** 2})\nprint(df.sum().to_dict())",
         "timeout": 30000

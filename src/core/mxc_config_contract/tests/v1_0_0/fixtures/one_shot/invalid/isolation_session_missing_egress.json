@@ -1,0 +1,13 @@
+{
+  "version": "1.0.0",
+  "containment": "isolation_session",
+  "process": {
+    "commandLine": "echo"
+  },
+  "network": {
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "allow"
+    }
+  }
+}

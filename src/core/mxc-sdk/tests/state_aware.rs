@@ -58,13 +58,13 @@ fn typed_windows_sandbox_requires_the_development_version() {
     )
     .unwrap_err();
     assert_eq!(error.code, ErrorCode::MalformedRequest);
-    assert!(error.message.contains("0.10.0-alpha"));
+    assert!(error.message.contains("1.1.0-alpha"));
 }
 
 #[test]
 fn typed_windows_sandbox_requires_experimental_authorization() {
     let error = sandbox::validate_provision(
-        ProvisionRequest::windows_sandbox("0.10.0-alpha"),
+        ProvisionRequest::windows_sandbox("1.1.0-alpha"),
         OperationOptions::new(false),
     )
     .unwrap_err();
@@ -87,7 +87,7 @@ fn typed_lifecycle_routes_by_sandbox_id() {
 #[test]
 fn typed_exec_dry_run_honors_experimental_authorization() {
     let sandbox_id = SandboxId::parse("wsb:0a1b2c3d").unwrap();
-    let request = ExecRequest::new("0.10.0-alpha", "echo hello");
+    let request = ExecRequest::new("1.1.0-alpha", "echo hello");
     let error = sandbox::validate_exec(&sandbox_id, request.clone(), OperationOptions::new(false))
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::BackendUnavailable);
@@ -255,7 +255,7 @@ fn unregistered_backend_prefix_is_unsupported_containment() {
 /// before backend dispatch on every platform.
 #[test]
 fn experimental_backend_is_refused_without_the_optin() {
-    let json = r#"{"version":"0.10.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
+    let json = r#"{"version":"1.1.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
     let err = run_state_aware_json(json, true, false)
         .expect_err("an experimental backend without the opt-in must be refused");
     assert_eq!(err.code, ErrorCode::BackendUnavailable);
@@ -276,7 +276,7 @@ fn experimental_backend_is_refused_without_the_optin() {
 /// this fails. A dry run keeps it side-effect-free.
 #[test]
 fn the_optin_admits_an_experimental_backend() {
-    let json = r#"{"version":"0.10.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
+    let json = r#"{"version":"1.1.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
     if let Err(err) = run_state_aware_json(json, true, true) {
         assert_ne!(
             err.code,
@@ -292,7 +292,7 @@ fn the_optin_admits_an_experimental_backend() {
 /// offers no hint either.
 #[test]
 fn the_refusal_carries_no_api_call_detail() {
-    let json = r#"{"version":"0.10.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
+    let json = r#"{"version":"1.1.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
     let err = run_state_aware_json(json, true, false).expect_err("must be refused");
     assert_eq!(err.operation, None);
     assert_eq!(err.native_code, None);
@@ -311,7 +311,7 @@ fn the_refusal_carries_no_api_call_detail() {
 /// `backend_unavailable`, which is the very code the gate returns.)
 #[test]
 fn exec_honours_the_optin_on_its_own_path() {
-    let json = r#"{"version":"0.10.0-alpha","phase":"exec","sandboxId":"wsb:0a1b2c3d","process":{"commandLine":"echo hi"}}"#;
+    let json = r#"{"version":"1.1.0-alpha","phase":"exec","sandboxId":"wsb:0a1b2c3d","process":{"commandLine":"echo hi"}}"#;
 
     match exec_sandbox(json, false) {
         Ok(_) => panic!("without the opt-in the gate must refuse"),

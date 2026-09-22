@@ -116,6 +116,7 @@ pub enum ExactOneShotContract {
     V0_7(Box<mxc_config_contract::published::v0_7_0_alpha::Request>),
     V0_8(Box<mxc_config_contract::published::v0_8_0_alpha::Request>),
     V0_9(Box<mxc_config_contract::published::v0_9_0_alpha::OneShotRequest>),
+    V1_0(Box<mxc_config_contract::published::v1_0_0::OneShotRequest>),
     Dev(Box<mxc_config_contract::dev::OneShotRequest>),
 }
 
@@ -142,6 +143,11 @@ pub fn load_one_shot_request_from_contract(
             mxc_config_contract::published::v0_9_0_alpha::validate_one_shot_request(&request)
                 .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
             crate::config_contract_adapters::v0_9::one_shot_into_common_request_ir(*request)
+        }
+        ExactOneShotContract::V1_0(request) => {
+            mxc_config_contract::published::v1_0_0::validate_one_shot_request(&request)
+                .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
+            crate::config_contract_adapters::v1_0::one_shot_into_common_request_ir(*request)
         }
         ExactOneShotContract::Dev(request) => {
             mxc_config_contract::dev::validate_one_shot_request(&request)
@@ -393,6 +399,99 @@ fn parse_exact_v0_9(json: &str, logger: &mut Logger) -> Result<MxcRequest, Parse
     }
 }
 
+fn v1_0_phase_error(error: mxc_config_contract::published::v1_0_0::PhaseProbeError) -> ParseError {
+    let message = match error {
+        mxc_config_contract::published::v1_0_0::PhaseProbeError::InvalidDeclaration(source) => {
+            format!("Invalid phase declaration: {source}")
+        }
+        mxc_config_contract::published::v1_0_0::PhaseProbeError::UnsupportedPhase(_) => {
+            "Unsupported phase".to_string()
+        }
+    };
+    ParseError::StateAware(MxcError::malformed_request(message))
+}
+
+fn v1_0_containment_error(
+    error: mxc_config_contract::published::v1_0_0::ContainmentProbeError,
+) -> ParseError {
+    let message = match error {
+        mxc_config_contract::published::v1_0_0::ContainmentProbeError::InvalidDeclaration(
+            source,
+        ) => format!("Invalid provision containment declaration: {source}"),
+        mxc_config_contract::published::v1_0_0::ContainmentProbeError::UnsupportedContainment(
+            _,
+        ) => "Unsupported containment for provision phase".to_string(),
+    };
+    ParseError::StateAware(MxcError::malformed_request(message))
+}
+
+fn deserialize_v1_0_request(
+    json: &str,
+    phase: Option<mxc_config_contract::published::v1_0_0::Phase>,
+) -> Result<mxc_config_contract::published::v1_0_0::Request, ParseError> {
+    use mxc_config_contract::published::v1_0_0::{
+        self as contract, Containment, Phase, ProvisionRequest, Request,
+    };
+
+    match phase {
+        None => {
+            let request: contract::OneShotRequest =
+                deserialize_development_root(json, "one-shot", "1.0", false)?;
+            contract::validate_one_shot_request(&request)
+                .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
+            Ok(Request::OneShot(Box::new(request)))
+        }
+        Some(Phase::Provision) => {
+            let request = match contract::probe_containment(json).map_err(v1_0_containment_error)? {
+                Containment::IsolationSession => {
+                    deserialize_development_root(json, "IsolationSession provision", "1.0", true)
+                        .map(ProvisionRequest::IsolationSession)
+                }
+                Containment::Wslc => {
+                    deserialize_development_root(json, "WSLC provision", "1.0", true)
+                        .map(ProvisionRequest::Wslc)
+                }
+            }?;
+            Ok(Request::Provision(request))
+        }
+        Some(Phase::Start) => {
+            deserialize_development_root(json, "start", "1.0", true).map(Request::Start)
+        }
+        Some(Phase::Exec) => {
+            deserialize_development_root(json, "exec", "1.0", true).map(Request::Exec)
+        }
+        Some(Phase::Stop) => {
+            deserialize_development_root(json, "stop", "1.0", true).map(Request::Stop)
+        }
+        Some(Phase::Deprovision) => {
+            deserialize_development_root(json, "deprovision", "1.0", true).map(Request::Deprovision)
+        }
+    }
+}
+
+fn parse_exact_v1_0(json: &str, logger: &mut Logger) -> Result<MxcRequest, ParseError> {
+    let phase =
+        mxc_config_contract::published::v1_0_0::probe_phase(json).map_err(v1_0_phase_error)?;
+    let request = deserialize_v1_0_request(json, phase)?;
+    let adapted = crate::config_contract_adapters::v1_0::adapt_request(request)
+        .map_err(|error| ParseError::StateAware(MxcError::malformed_request(error.to_string())))?;
+
+    match adapted {
+        crate::config_contract_adapters::v1_0::AdaptedConfigRequest::OneShot(config) => {
+            normalize_common_request_ir(config, logger, true, false)
+                .map(MxcRequest::OneShot)
+                .map_err(ParseError::OneShot)
+        }
+        crate::config_contract_adapters::v1_0::AdaptedConfigRequest::StateAware(input) => {
+            normalize_state_aware(input, logger, true)
+                .map(MxcRequest::StateAware)
+                .map_err(|error| {
+                    ParseError::StateAware(MxcError::malformed_request(error.to_string()))
+                })
+        }
+    }
+}
+
 fn deserialize_development_request(
     json: &str,
     phase: Option<mxc_config_contract::dev::Phase>,
@@ -402,7 +501,7 @@ fn deserialize_development_request(
     match phase {
         None => {
             let request: mxc_config_contract::dev::OneShotRequest =
-                deserialize_development_root(json, "one-shot", "0.10", false)?;
+                deserialize_development_root(json, "one-shot", "1.1", false)?;
             dev::validate_one_shot_request(&request)
                 .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
             Ok(Request::OneShot(Box::new(request)))
@@ -410,31 +509,32 @@ fn deserialize_development_request(
         Some(Phase::Provision) => {
             let request = match dev::probe_containment(json).map_err(exact_containment_error)? {
                 Containment::WindowsSandbox => {
-                    deserialize_development_root(json, "Windows Sandbox provision", "0.10", true)
+                    deserialize_development_root(json, "Windows Sandbox provision", "1.1", true)
                         .map(ProvisionRequest::WindowsSandbox)
                 }
                 Containment::IsolationSession => {
-                    deserialize_development_root(json, "IsolationSession provision", "0.10", true)
+                    deserialize_development_root(json, "IsolationSession provision", "1.1", true)
                         .map(ProvisionRequest::IsolationSession)
                 }
                 Containment::Wslc => {
-                    deserialize_development_root(json, "WSLC provision", "0.10", true)
+                    deserialize_development_root(json, "WSLC provision", "1.1", true)
                         .map(ProvisionRequest::Wslc)
                 }
             }?;
             Ok(Request::Provision(request))
         }
         Some(Phase::Start) => {
-            deserialize_development_root(json, "start", "0.10", true).map(Request::Start)
+            deserialize_development_root(json, "start", "1.1", true).map(Request::Start)
         }
         Some(Phase::Exec) => {
-            deserialize_development_root(json, "exec", "0.10", true).map(Request::Exec)
+            deserialize_development_root(json, "exec", "1.1", true).map(Request::Exec)
         }
         Some(Phase::Stop) => {
-            deserialize_development_root(json, "stop", "0.10", true).map(Request::Stop)
+            deserialize_development_root(json, "stop", "1.1", true).map(Request::Stop)
         }
-        Some(Phase::Deprovision) => deserialize_development_root(json, "deprovision", "0.10", true)
-            .map(Request::Deprovision),
+        Some(Phase::Deprovision) => {
+            deserialize_development_root(json, "deprovision", "1.1", true).map(Request::Deprovision)
+        }
     }
 }
 
@@ -478,7 +578,8 @@ fn parse_exact_mxc_request_json(json: &str, logger: &mut Logger) -> Result<MxcRe
             crate::config_contract_adapters::v0_8::into_common_request_ir,
         ),
         ContractVersion::V0_9_0Alpha => parse_exact_v0_9(json, logger),
-        ContractVersion::V0_10_0Alpha => parse_exact_development(json, logger),
+        ContractVersion::V1_0_0 => parse_exact_v1_0(json, logger),
+        ContractVersion::V1_1_0Alpha => parse_exact_development(json, logger),
     }
 }
 
@@ -615,11 +716,11 @@ pub fn load_state_aware_request_from_json_with_options(
         let version = probe_version(json_str).map_err(exact_version_error)?;
         if !matches!(
             version,
-            ContractVersion::V0_9_0Alpha | ContractVersion::V0_10_0Alpha
+            ContractVersion::V0_9_0Alpha | ContractVersion::V1_0_0 | ContractVersion::V1_1_0Alpha
         ) {
             return Err(ParseError::StateAware(MxcError::malformed_request(
                 "sandbox lifecycle operations require schema version \
-                 '0.9.0-alpha' or '0.10.0-alpha'",
+                 '0.9.0-alpha', '1.0.0', or '1.1.0-alpha'",
             )));
         }
 
@@ -735,7 +836,23 @@ fn apply_cli_command(json: &str, argv: &[String]) -> Result<(String, Option<Stri
                 }
             })
         }
-        ContractVersion::V0_10_0Alpha => {
+        ContractVersion::V1_0_0 => {
+            let Ok(phase) = mxc_config_contract::published::v1_0_0::probe_phase(json) else {
+                return Ok((json.to_string(), None));
+            };
+            phase.map(|phase| match phase {
+                mxc_config_contract::published::v1_0_0::Phase::Provision => {
+                    ContractPhase::Provision
+                }
+                mxc_config_contract::published::v1_0_0::Phase::Start => ContractPhase::Start,
+                mxc_config_contract::published::v1_0_0::Phase::Exec => ContractPhase::Exec,
+                mxc_config_contract::published::v1_0_0::Phase::Stop => ContractPhase::Stop,
+                mxc_config_contract::published::v1_0_0::Phase::Deprovision => {
+                    ContractPhase::Deprovision
+                }
+            })
+        }
+        ContractVersion::V1_1_0Alpha => {
             let Ok(phase) = probe_phase(json) else {
                 return Ok((json.to_string(), None));
             };
@@ -2107,6 +2224,10 @@ mod tests {
             ("0.8.0-alpha", false),
             ("0.9.0-alpha", false),
             ("0.9.0-alpha", true),
+            ("1.0.0", false),
+            ("1.0.0", true),
+            ("1.1.0-alpha", false),
+            ("1.1.0-alpha", true),
         ] {
             let phase_fields = if state_aware {
                 "  \"phase\": \"exec\",\n  \"sandboxId\": \"iso:abcd1234\",\n"
@@ -2326,6 +2447,34 @@ mod tests {
     }
 
     #[test]
+    fn exact_parser_rejects_pre_v1_aliases_for_v1_contracts() {
+        for version in ["1.0.0", "1.1.0-alpha"] {
+            for (alias, field) in [
+                ("appcontainer", r#""containment": "appcontainer""#),
+                ("appContainer", r#""appContainer": {}"#),
+                ("macos_sandbox", r#""containment": "macos_sandbox""#),
+                ("macos_sandbox", r#""macos_sandbox": {}"#),
+            ] {
+                let json = format!(
+                    r#"{{
+                        "version": "{version}",
+                        "process": {{"commandLine": "echo hello"}},
+                        {field}
+                    }}"#
+                );
+
+                let error = parse_exact_for_test(&json).unwrap_err();
+                assert!(matches!(error, ParseError::OneShot(_)), "got {error:?}");
+                assert!(
+                    error.message().contains(alias),
+                    "{version}: expected {alias} in {}",
+                    error.message()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn exact_parser_rejects_unregistered_nearby_versions_without_fallback() {
         for version in [
             "0.6.0",
@@ -2399,13 +2548,13 @@ mod tests {
     #[test]
     fn exact_parser_accepts_the_development_one_shot_contract() {
         let json = r#"{
-            "version": "0.10.0-alpha",
+            "version": "1.1.0-alpha",
             "process": {"commandLine": "echo dev"}
         }"#;
 
         match parse_exact_for_test(json).unwrap() {
             MxcRequest::OneShot(request) => {
-                assert_eq!(request.source_contract, Some(ContractVersion::V0_10_0Alpha));
+                assert_eq!(request.source_contract, Some(ContractVersion::V1_1_0Alpha));
                 assert_eq!(
                     request.network_enforcement_compatibility,
                     crate::models::NetworkEnforcementCompatibility::Strict
@@ -2429,7 +2578,7 @@ mod tests {
     const DEVELOPMENT_STATE_AWARE_ROOT_CASES: &[DevelopmentStateAwareRootCase] = &[
         DevelopmentStateAwareRootCase {
             name: "Windows Sandbox provision",
-            json: r#"{"version":"0.10.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
+            json: r#"{"version":"1.1.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
             expected_phase: Phase::Provision,
             expected_declared_containment: Some(ContainmentBackend::WindowsSandbox),
             expected_runtime_containment: ContainmentBackend::WindowsSandbox,
@@ -2438,7 +2587,7 @@ mod tests {
         },
         DevelopmentStateAwareRootCase {
             name: "IsolationSession provision",
-            json: r#"{"version":"0.10.0-alpha","phase":"provision","containment":"isolation_session","network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#,
+            json: r#"{"version":"1.1.0-alpha","phase":"provision","containment":"isolation_session","network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#,
             expected_phase: Phase::Provision,
             expected_declared_containment: Some(ContainmentBackend::IsolationSession),
             expected_runtime_containment: ContainmentBackend::IsolationSession,
@@ -2447,7 +2596,7 @@ mod tests {
         },
         DevelopmentStateAwareRootCase {
             name: "WSLC provision",
-            json: r#"{"version":"0.10.0-alpha","phase":"provision","containment":"wslc"}"#,
+            json: r#"{"version":"1.1.0-alpha","phase":"provision","containment":"wslc"}"#,
             expected_phase: Phase::Provision,
             expected_declared_containment: Some(ContainmentBackend::Wslc),
             expected_runtime_containment: ContainmentBackend::Wslc,
@@ -2456,7 +2605,7 @@ mod tests {
         },
         DevelopmentStateAwareRootCase {
             name: "start",
-            json: r#"{"version":"0.10.0-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
+            json: r#"{"version":"1.1.0-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
             expected_phase: Phase::Start,
             expected_declared_containment: None,
             expected_runtime_containment: ContainmentBackend::WindowsSandbox,
@@ -2465,7 +2614,7 @@ mod tests {
         },
         DevelopmentStateAwareRootCase {
             name: "exec",
-            json: r#"{"version":"0.10.0-alpha","phase":"exec","sandboxId":"wslc:abcd1234","process":{"commandLine":"echo state-aware"}}"#,
+            json: r#"{"version":"1.1.0-alpha","phase":"exec","sandboxId":"wslc:abcd1234","process":{"commandLine":"echo state-aware"}}"#,
             expected_phase: Phase::Exec,
             expected_declared_containment: None,
             expected_runtime_containment: ContainmentBackend::Wslc,
@@ -2474,7 +2623,7 @@ mod tests {
         },
         DevelopmentStateAwareRootCase {
             name: "stop",
-            json: r#"{"version":"0.10.0-alpha","phase":"stop","sandboxId":"iso:abcd1234"}"#,
+            json: r#"{"version":"1.1.0-alpha","phase":"stop","sandboxId":"iso:abcd1234"}"#,
             expected_phase: Phase::Stop,
             expected_declared_containment: None,
             expected_runtime_containment: ContainmentBackend::IsolationSession,
@@ -2483,7 +2632,7 @@ mod tests {
         },
         DevelopmentStateAwareRootCase {
             name: "deprovision",
-            json: r#"{"version":"0.10.0-alpha","phase":"deprovision","sandboxId":"wslc:abcd1234"}"#,
+            json: r#"{"version":"1.1.0-alpha","phase":"deprovision","sandboxId":"wslc:abcd1234"}"#,
             expected_phase: Phase::Deprovision,
             expected_declared_containment: None,
             expected_runtime_containment: ContainmentBackend::Wslc,
@@ -2539,7 +2688,7 @@ mod tests {
     fn development_configuration_json(telemetry_enabled: bool) -> String {
         format!(
             r#"{{
-                "version": "0.10.0-alpha",
+                "version": "1.1.0-alpha",
                 "phase": "provision",
                 "containment": "isolation_session",
                 "telemetry": {{"enabled": {telemetry_enabled}}},
@@ -2673,10 +2822,10 @@ mod tests {
             (r#""phase":"stop","sandboxId":"wsb:abcd1234""#, true),
             (r#""phase":"deprovision","sandboxId":"wsb:abcd1234""#, true),
         ] {
-            let valid = format!(r#"{{"version":"0.10.0-alpha",{fields},"telemetry":{{}}}}"#);
+            let valid = format!(r#"{{"version":"1.1.0-alpha",{fields},"telemetry":{{}}}}"#);
             load_mxc_request_from_json(&valid, &mut test_logger()).unwrap();
             let duplicate = format!(
-                r#"{{"version":"0.10.0-alpha",{fields},"telemetry":{{}},"telemetry":{{}}}}"#
+                r#"{{"version":"1.1.0-alpha",{fields},"telemetry":{{}},"telemetry":{{}}}}"#
             );
             let mut logger = test_logger();
             let error = load_mxc_request_from_json(&duplicate, &mut logger).unwrap_err();
@@ -2752,7 +2901,8 @@ mod tests {
             "0.7.0-alpha",
             "0.8.0-alpha",
             "0.9.0-alpha",
-            "0.10.0-alpha",
+            "1.0.0",
+            "1.1.0-alpha",
         ] {
             let json = format!(
                 "{{\n  \"version\": \"{version}\",\n  \"process\": {{\n    \"commandLine\": \"echo hello\",\n    \"cwd\": 42\n  }}\n}}"
@@ -2789,42 +2939,42 @@ mod tests {
         for (root, json, state_aware) in [
             (
                 "one-shot",
-                r#"{"version":"0.10.0-alpha","process":{"commandLine":"echo hello"}}"#,
+                r#"{"version":"1.1.0-alpha","process":{"commandLine":"echo hello"}}"#,
                 false,
             ),
             (
                 "Windows Sandbox provision",
-                r#"{"version":"0.10.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
+                r#"{"version":"1.1.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
                 true,
             ),
             (
                 "IsolationSession provision",
-                r#"{"version":"0.10.0-alpha","phase":"provision","containment":"isolation_session","network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#,
+                r#"{"version":"1.1.0-alpha","phase":"provision","containment":"isolation_session","network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#,
                 true,
             ),
             (
                 "WSLC provision",
-                r#"{"version":"0.10.0-alpha","phase":"provision","containment":"wslc"}"#,
+                r#"{"version":"1.1.0-alpha","phase":"provision","containment":"wslc"}"#,
                 true,
             ),
             (
                 "start",
-                r#"{"version":"0.10.0-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
+                r#"{"version":"1.1.0-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
                 true,
             ),
             (
                 "exec",
-                r#"{"version":"0.10.0-alpha","phase":"exec","sandboxId":"wslc:abcd1234","process":{"commandLine":"echo hello"}}"#,
+                r#"{"version":"1.1.0-alpha","phase":"exec","sandboxId":"wslc:abcd1234","process":{"commandLine":"echo hello"}}"#,
                 true,
             ),
             (
                 "stop",
-                r#"{"version":"0.10.0-alpha","phase":"stop","sandboxId":"iso:abcd1234"}"#,
+                r#"{"version":"1.1.0-alpha","phase":"stop","sandboxId":"iso:abcd1234"}"#,
                 true,
             ),
             (
                 "deprovision",
-                r#"{"version":"0.10.0-alpha","phase":"deprovision","sandboxId":"wslc:abcd1234"}"#,
+                r#"{"version":"1.1.0-alpha","phase":"deprovision","sandboxId":"wslc:abcd1234"}"#,
                 true,
             ),
         ] {
@@ -2852,11 +3002,11 @@ mod tests {
     fn exact_development_parser_preserves_nested_backend_payload_paths() {
         for (json, path) in [
             (
-                r#"{"version":"0.10.0-alpha","phase":"exec","sandboxId":"wslc:abcd1234","process":{"commandLine":"echo hello","cwd":42}}"#,
+                r#"{"version":"1.1.0-alpha","phase":"exec","sandboxId":"wslc:abcd1234","process":{"commandLine":"echo hello","cwd":42}}"#,
                 "process.cwd",
             ),
             (
-                r#"{"version":"0.10.0-alpha","phase":"provision","containment":"wslc","wslc":{"provision":{"image":42}}}"#,
+                r#"{"version":"1.1.0-alpha","phase":"provision","containment":"wslc","wslc":{"provision":{"image":42}}}"#,
                 "wslc.provision.image",
             ),
         ] {
@@ -2869,8 +3019,8 @@ mod tests {
     #[test]
     fn exact_development_parser_uses_shared_diagnostic_escaping_and_redaction() {
         for json in [
-            r#"{"version":"0.10.0-alpha","process":{"commandLine":"echo hello"}}"#,
-            r#"{"version":"0.10.0-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
+            r#"{"version":"1.1.0-alpha","process":{"commandLine":"echo hello"}}"#,
+            r#"{"version":"1.1.0-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
         ] {
             let mut value: serde_json::Value = serde_json::from_str(json).unwrap();
             value["telemetry"] =
@@ -2899,7 +3049,7 @@ mod tests {
 
     #[test]
     fn exact_development_parser_preserves_typed_error_path_and_sanitizes_diagnostics() {
-        let json = "{\n  \"version\": \"0.10.0-alpha\",\n  \"phase\": \"provision\",\n  \"containment\": \"isolation_session\",\n  \"network\": {\"defaultPolicy\": \"block\", \"allowLocalNetwork\": true}\n}";
+        let json = "{\n  \"version\": \"1.1.0-alpha\",\n  \"phase\": \"provision\",\n  \"containment\": \"isolation_session\",\n  \"network\": {\"defaultPolicy\": \"block\", \"allowLocalNetwork\": true}\n}";
 
         let error = parse_exact_for_test(json).unwrap_err();
         assert!(matches!(error, ParseError::StateAware(_)));
@@ -2919,7 +3069,7 @@ mod tests {
         for (json, expected, rejected) in [
             (
                 r#"{
-                    "version": "0.10.0-alpha",
+                    "version": "1.1.0-alpha",
                     "phase": "provision",
                     "containment": "wslc",
                     "network": {"proxy": {"url": "http://proxy.example:8080"}}
@@ -2929,7 +3079,7 @@ mod tests {
             ),
             (
                 r#"{
-                    "version": "0.10.0-alpha",
+                    "version": "1.1.0-alpha",
                     "phase": "provision",
                     "containment": "isolation_session",
                     "network": {"allowedHosts": ["example.com"]}
@@ -2939,7 +3089,7 @@ mod tests {
             ),
             (
                 r#"{
-                    "version": "0.10.0-alpha",
+                    "version": "1.1.0-alpha",
                     "phase": "provision",
                     "containment": "isolation_session",
                     "network": {"defaultPolicy": "allow"}
@@ -2949,7 +3099,7 @@ mod tests {
             ),
         ] {
             let message = parse_exact_for_test(json).unwrap_err().message();
-            assert!(message.contains("schema 0.10 migration"), "{message}");
+            assert!(message.contains("schema 1.1 migration"), "{message}");
             assert!(message.contains(expected), "{message}");
             assert!(!message.contains(rejected), "{message}");
         }
@@ -3058,16 +3208,29 @@ mod tests {
             crate::models::NetworkEnforcementCompatibility::Strict,
         );
 
+        let v1_0 = serde_json::from_str::<mxc_config_contract::published::v1_0_0::OneShotRequest>(
+            r#"{
+                "version": "1.0.0",
+                "process": {"commandLine": "echo hello"}
+            }"#,
+        )
+        .unwrap();
+        assert_exact_contract_bridge(
+            ExactOneShotContract::V1_0(Box::new(v1_0)),
+            ContractVersion::V1_0_0,
+            crate::models::NetworkEnforcementCompatibility::Strict,
+        );
+
         let dev = serde_json::from_str::<mxc_config_contract::dev::OneShotRequest>(
             r#"{
-                "version": "0.10.0-alpha",
+                "version": "1.1.0-alpha",
                 "process": {"commandLine": "echo hello"}
             }"#,
         )
         .unwrap();
         assert_exact_contract_bridge(
             ExactOneShotContract::Dev(Box::new(dev)),
-            ContractVersion::V0_10_0Alpha,
+            ContractVersion::V1_1_0Alpha,
             crate::models::NetworkEnforcementCompatibility::Strict,
         );
     }
@@ -3110,7 +3273,7 @@ mod tests {
     fn exact_development_contract_bridge_requires_isolation_session_network() {
         let request = serde_json::from_str::<mxc_config_contract::dev::OneShotRequest>(
             r#"{
-                "version": "0.10.0-alpha",
+                "version": "1.1.0-alpha",
                 "containment": "isolation_session",
                 "process": {"commandLine": "echo hello"}
             }"#,
@@ -3762,9 +3925,9 @@ mod tests {
             // iso -> IsolationSession -> WindowsCommandProcessor
             ("0.9.0-alpha", "iso:abcd1234", "app.exe \"a&b\""),
             // wsb -> WindowsSandbox -> WindowsCommandProcessor
-            ("0.10.0-alpha", "wsb:abcd1234", "app.exe \"a&b\""),
+            ("1.1.0-alpha", "wsb:abcd1234", "app.exe \"a&b\""),
             // wslc -> Wslc -> PosixShell
-            ("0.10.0-alpha", "wslc:abcd1234", "app.exe 'a&b'"),
+            ("1.1.0-alpha", "wslc:abcd1234", "app.exe 'a&b'"),
         ] {
             let json =
                 format!(r#"{{"version":"{version}","phase":"exec","sandboxId":"{sandbox_id}"}}"#);
@@ -3783,7 +3946,7 @@ mod tests {
     fn apply_cli_command_rejects_a_non_exec_phase_with_an_envelope_error() {
         for json in [
             r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"iso:abcd1234"}"#,
-            r#"{"version":"0.10.0-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
+            r#"{"version":"1.1.0-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
         ] {
             let err = apply_cli_command(json, &argv(&["echo", "hi"])).unwrap_err();
             assert!(matches!(err, ParseError::StateAware(_)), "{json}");
@@ -3804,7 +3967,7 @@ mod tests {
 
     #[test]
     fn apply_cli_command_surfaces_an_unregistered_sandbox_id_prefix() {
-        for version in ["0.9.0-alpha", "0.10.0-alpha"] {
+        for version in ["0.9.0-alpha", "1.0.0", "1.1.0-alpha"] {
             let json =
                 format!(r#"{{"version":"{version}","phase":"exec","sandboxId":"zzz:abcd"}}"#);
             let err = apply_cli_command(&json, &argv(&["app.exe", "--flag"])).unwrap_err();
@@ -4820,9 +4983,13 @@ mod tests {
     // ── Telemetry ────────────────────────────────────────────────────
 
     #[test]
-    fn exact_loaders_reject_seatbelt_launch_method_from_v0_9_and_v0_10() {
-        for version in ["0.9.0-alpha", "0.10.0-alpha"] {
-            for section in ["seatbelt", "macos_sandbox"] {
+    fn exact_loaders_reject_seatbelt_launch_method() {
+        for (version, sections) in [
+            ("0.9.0-alpha", &["seatbelt", "macos_sandbox"][..]),
+            ("1.0.0", &["seatbelt"][..]),
+            ("1.1.0-alpha", &["seatbelt"][..]),
+        ] {
+            for section in sections {
                 let json = format!(
                     r#"{{"version":"{version}","containment":"seatbelt","process":{{"commandLine":"echo hi"}},"{section}":{{"launchMethod":"open"}}}}"#
                 );
@@ -4992,22 +5159,28 @@ mod tests {
             (
                 Phase::Provision,
                 None,
-                r#"{"version":"0.9.0-alpha","containment":"wslc"}"#,
+                r#"{"version":"1.0.0","containment":"wslc"}"#,
             ),
-            (
-                Phase::Start,
-                Some("iso:abc"),
-                r#"{"version":"0.9.0-alpha"}"#,
-            ),
+            (Phase::Start, Some("iso:abc"), r#"{"version":"1.0.0"}"#),
             (
                 Phase::Exec,
                 Some("iso:abc"),
-                r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"}}"#,
+                r#"{"version":"1.0.0","process":{"commandLine":"echo hi"}}"#,
             ),
-            (Phase::Stop, Some("iso:abc"), r#"{"version":"0.9.0-alpha"}"#),
+            (Phase::Stop, Some("iso:abc"), r#"{"version":"1.0.0"}"#),
             (
                 Phase::Deprovision,
                 Some("iso:abc"),
+                r#"{"version":"1.0.0"}"#,
+            ),
+            (
+                Phase::Start,
+                Some("wsb:abc"),
+                r#"{"version":"1.1.0-alpha"}"#,
+            ),
+            (
+                Phase::Start,
+                Some("iso:legacy"),
                 r#"{"version":"0.9.0-alpha"}"#,
             ),
         ];
@@ -5029,8 +5202,8 @@ mod tests {
     #[test]
     fn operation_cli_transport_rejects_json_routing_authorities() {
         for json in [
-            r#"{"version":"0.9.0-alpha","phase":"start"}"#,
-            r#"{"version":"0.9.0-alpha","sandboxId":"iso:json"}"#,
+            r#"{"version":"1.0.0","phase":"start"}"#,
+            r#"{"version":"1.0.0","sandboxId":"iso:json"}"#,
         ] {
             let error = load_state_aware_request_from_json_with_options(
                 json,
@@ -5047,7 +5220,7 @@ mod tests {
     #[test]
     fn operation_cli_transport_validates_sandbox_id_arguments() {
         let provision_error = load_state_aware_request_from_json_with_options(
-            r#"{"version":"0.9.0-alpha","containment":"wslc"}"#,
+            r#"{"version":"1.0.0","containment":"wslc"}"#,
             &mut test_logger(),
             Phase::Provision,
             Some("wslc:abc"),
@@ -5059,7 +5232,7 @@ mod tests {
             .contains("does not accept --sandbox-id"));
 
         let start_error = load_state_aware_request_from_json_with_options(
-            r#"{"version":"0.9.0-alpha"}"#,
+            r#"{"version":"1.0.0"}"#,
             &mut test_logger(),
             Phase::Start,
             None,
@@ -5113,7 +5286,7 @@ mod tests {
         logger.enable_file_sink(&log_path).unwrap();
         let parsed = load_state_aware_request_from_json_with_options(
             r#"{
-                "version":"0.9.0-alpha",
+                "version":"1.0.0",
                 "process":{"commandLine":"policy.exe"}
             }"#,
             &mut logger,

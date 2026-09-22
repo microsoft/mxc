@@ -9,7 +9,7 @@ const {
   validateSdkMajorTargets,
 } = require("../lib/contract-registry.js");
 
-function contract(version = "0.10.0-alpha", status = "development") {
+function contract(version = "1.1.0-alpha", status = "development") {
   return {
     version,
     status,
@@ -61,7 +61,7 @@ test("registry parsing rejects duplicate versions", () => {
         JSON.stringify([contract(), contract()]),
         "test registry"
       ),
-    /repeats version 0\.10\.0-alpha/
+    /repeats version 1\.1\.0-alpha/
   );
 });
 
@@ -81,7 +81,7 @@ test("SDK targets may remain empty before the first stable major line", () => {
   assert.doesNotThrow(() =>
     validateSdkMajorTargets({}, [
       contract("0.9.0-alpha"),
-      contract("0.10.0-alpha"),
+      contract("1.1.0-alpha"),
     ])
   );
 });
