@@ -80,8 +80,8 @@ jobs:
 
       $actualVersion = (& $nodeExe --version).Trim()
       $parsedVersion = [version]($actualVersion.TrimStart('v'))
-      if ($parsedVersion -lt [version]'24.21.0' -or $parsedVersion.Major -ne 24) {
-          throw "The 1ES agent Node runtime is $actualVersion; Node 24.21 or newer is required."
+      if ($parsedVersion -lt [version]'24.0.0' -or $parsedVersion.Major -ne 24) {
+          throw "The 1ES agent Node runtime is $actualVersion; Node 24.x is required."
       }
 
       $license = @(
