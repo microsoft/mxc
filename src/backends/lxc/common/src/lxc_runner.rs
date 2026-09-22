@@ -35,7 +35,11 @@ fn first_routable_ipv4(lxc_info_addresses: &str) -> Option<Ipv4Addr> {
         .lines()
         .filter_map(|line| line.trim().parse::<Ipv4Addr>().ok())
         .find(|address| {
-            !address.is_loopback() && !address.is_unspecified() && !address.is_link_local()
+            !address.is_loopback()
+                && !address.is_unspecified()
+                && !address.is_link_local()
+                && !address.is_multicast()
+                && !address.is_broadcast()
         })
 }
 
@@ -1378,7 +1382,14 @@ mod tests {
     #[test]
     fn an_unusable_ipv4_address_is_not_readiness() {
         // 169.254/16 is what the container assigns itself when DHCP never answers.
-        for unusable in ["127.0.0.1\n", "0.0.0.0\n", "169.254.13.7\n"] {
+        for unusable in [
+            "127.0.0.1\n",
+            "0.0.0.0\n",
+            "169.254.13.7\n",
+            "224.0.0.5\n",
+            "239.1.2.3\n",
+            "255.255.255.255\n",
+        ] {
             assert_eq!(
                 first_routable_ipv4(unusable),
                 None,
@@ -1392,6 +1403,11 @@ mod tests {
         assert_eq!(
             first_routable_ipv4("127.0.0.1\n10.0.3.201\n"),
             Some(Ipv4Addr::new(10, 0, 3, 201))
+        );
+        assert_eq!(
+            first_routable_ipv4("224.0.0.5\n255.255.255.255\n10.0.3.201\n"),
+            Some(Ipv4Addr::new(10, 0, 3, 201)),
+            "an unusable address listed first must not end the wait"
         );
     }
 
