@@ -3,11 +3,11 @@
 
 //! Dependency-injection boundary for the guarded WPR capture fallback.
 //!
-//! `appcontainer_common` implements the AppContainer + BFS and AppContainer +
+//! `process_container_common` implements the AppContainer + BFS and AppContainer +
 //! DACL tiers that a host without the native V2 PSEC + Learning Mode APIs still
 //! needs `captureDenials` on.
 //! Elevated WPR capture lives in `plm` (the host's guarded PLM tool), and
-//! `appcontainer_common` MUST NOT depend on `plm` directly: `plm` links the
+//! `process_container_common` MUST NOT depend on `plm` directly: `plm` links the
 //! Windows ETL decoder (`learning_mode_windows`) and elevation/pipe machinery
 //! that is unrelated to this crate's job. Depending on that host utility would
 //! invert the engine-to-host-tool layering.
@@ -112,7 +112,7 @@ pub trait GuardedCaptureSession: Send {
 /// Starts a [`GuardedCaptureSession`] for the calling (unelevated) process.
 ///
 /// Implementations are constructed by a higher layer (`mxc_engine`) that can
-/// depend on `plm`; `appcontainer_common` only ever sees the trait object.
+/// depend on `plm`; `process_container_common` only ever sees the trait object.
 pub trait GuardedCaptureFactory: Send + Sync {
     /// Whether this factory can transfer the sealed ETL when `retainEtl` is
     /// requested. Implementations that only support analysis keep the default.
@@ -330,7 +330,7 @@ mod tests {
     /// A fake session/factory pair proving both traits are object-safe and
     /// usable behind `dyn` references — the shape the dispatcher stores them
     /// in ([`crate::guarded_capture`] traits are only ever consumed as trait
-    /// objects across the `appcontainer_common` / `mxc_engine` boundary).
+    /// objects across the `process_container_common` / `mxc_engine` boundary).
     struct FakeSession {
         analysis: AnalysisResult,
     }

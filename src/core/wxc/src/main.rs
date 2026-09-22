@@ -9,8 +9,8 @@ use std::process;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-use appcontainer_common::appcontainer_runner::delete_app_container_profile;
 use clap::Parser;
+use process_container_common::appcontainer_runner::delete_app_container_profile;
 use wxc_common::audit::{AuditEvent, AuditEventName, RejectionReason};
 use wxc_common::config_parser::{LoadOptions, ParseError};
 #[cfg(target_os = "windows")]
@@ -999,11 +999,11 @@ fn main() {
         } else {
             wxc_common::models::ExecutionRequest::default()
         };
-        let output = appcontainer_common::probe::run_probe(
+        let output = process_container_common::probe::run_probe(
             &request,
             mxc_engine::guarded_capture_available(),
         );
-        // appcontainer_common has no dependency on the isolation-session
+        // process_container_common has no dependency on the isolation-session
         // backend, so it reports `isolationSessionAvailable` as `false`. When
         // the backend is compiled in, override it with a read-only activation
         // probe of the in-proc service.
@@ -1020,7 +1020,7 @@ fn main() {
             output.probes.hyperlight_available = hyperlight_common::is_whp_available();
             output
         };
-        match appcontainer_common::probe::to_json_pretty(&output) {
+        match process_container_common::probe::to_json_pretty(&output) {
             Ok(s) => println!("{s}"),
             Err(e) => {
                 eprintln!("Error: probe serialization failed: {e}");

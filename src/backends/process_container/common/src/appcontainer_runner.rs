@@ -698,7 +698,7 @@ impl AppContainerScriptRunner {
     /// BaseContainer tier is unavailable) — an `AppContainerScriptRunner`
     /// constructed any other way keeps rejecting `captureDenials` in
     /// [`SandboxBackend::validate`]. See [`crate::guarded_capture`] for the
-    /// full rationale: `appcontainer_common` never depends on `plm`
+    /// full rationale: `process_container_common` never depends on `plm`
     /// directly, so `factory` is a trait object implemented by a higher
     /// layer (`mxc_engine`) that does.
     pub fn with_guarded_capture_factory(mut self, factory: Arc<dyn GuardedCaptureFactory>) -> Self {
