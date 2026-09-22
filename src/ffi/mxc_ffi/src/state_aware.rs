@@ -401,7 +401,7 @@ mod tests {
     use std::ffi::CString;
 
     const WINDOWS_SANDBOX_PROVISION_REQUEST: &str =
-        r#"{"version":"0.10.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
+        r#"{"version":"1.1.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
 
     fn call(json: &str, dry_run: bool) -> MxcStateAwareResult {
         call_opt(json, dry_run, false)
@@ -651,7 +651,7 @@ mod tests {
     #[test]
     fn exec_honours_the_optin_on_its_own_path() {
         let j = CString::new(
-            r#"{"version":"0.10.0-alpha","phase":"exec","sandboxId":"wsb:0a1b2c3d","process":{"commandLine":"echo hi"}}"#,
+            r#"{"version":"1.1.0-alpha","phase":"exec","sandboxId":"wsb:0a1b2c3d","process":{"commandLine":"echo hi"}}"#,
         )
         .unwrap();
 

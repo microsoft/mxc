@@ -852,7 +852,13 @@ mod tests {
     fn host_process_versions() -> &'static [&'static str] {
         #[cfg(target_os = "macos")]
         {
-            &["0.7.0-alpha", "0.8.0-alpha", "0.9.0-alpha", "0.10.0-alpha"]
+            &[
+                "0.7.0-alpha",
+                "0.8.0-alpha",
+                "0.9.0-alpha",
+                "1.0.0",
+                "1.1.0-alpha",
+            ]
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -861,7 +867,8 @@ mod tests {
                 "0.7.0-alpha",
                 "0.8.0-alpha",
                 "0.9.0-alpha",
-                "0.10.0-alpha",
+                "1.0.0",
+                "1.1.0-alpha",
             ]
         }
     }
@@ -1838,14 +1845,14 @@ mod tests {
 
     fn development_policy() -> SandboxPolicy {
         SandboxPolicy {
-            version: "0.10.0-alpha".to_string(),
+            version: "1.1.0-alpha".to_string(),
             ..minimal_policy()
         }
     }
 
     fn development_policy_with_network(network: NetworkSection) -> SandboxPolicy {
         SandboxPolicy {
-            version: "0.10.0-alpha".to_string(),
+            version: "1.1.0-alpha".to_string(),
             filesystem: None,
             network: Some(network),
             ui: None,
@@ -2036,7 +2043,7 @@ mod tests {
         .expect_err("WSLc must reject per-host egress filtering");
         assert!(
             err.message
-                .contains("schema 0.10.0-alpha no longer accepts legacy network authoring"),
+                .contains("schema 1.1.0-alpha no longer accepts legacy network authoring"),
             "got: {}",
             err.message
         );

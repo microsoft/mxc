@@ -354,9 +354,9 @@ policy gap is a design decision, not an implementation challenge.
   value in `map_wire_containment`
 
 ### Schema (modify)
-- `schemas/dev/mxc-config.schema.0.10.0-alpha.json` — regenerate from the exact
+- `schemas/dev/mxc-config.schema.1.1.0-alpha.json` — regenerate from the exact
   development contract; do not edit it by hand
-- `sdk/node/src/generated/v0_10_0_alpha/wire.ts` — regenerate the matching exact
+- `sdk/node/src/generated/v1_1_0_alpha/wire.ts` — regenerate the matching exact
   TypeScript wire artifact
 
 ### TypeScript (modify)

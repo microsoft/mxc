@@ -84,10 +84,8 @@ export const ContainmentTypes: readonly ContainmentType[] = ['process', 'vm', 'm
 
 /**
  * Deprecated containment wire values, mapped to their canonical
- * {@link ContainmentBackend} replacement. The native binary (wxc-exec) accepts
- * the deprecated form via serde aliases; this map mirrors that behavior in
- * the SDK validator so legacy configs are not rejected before reaching the
- * binary.
+ * {@link ContainmentBackend} replacement. Historical v0 contracts accept
+ * these spellings via serde aliases; v1 contracts reject them.
  *
  * The map is intentionally partial: only deprecated keys appear. Use a
  * presence check (e.g. `LegacyContainmentAliases[value] ?? value`) rather
@@ -98,12 +96,17 @@ export const ContainmentTypes: readonly ContainmentType[] = ['process', 'vm', 'm
  * SDK's experimental-mode, platform-support, and availability checks see
  * the canonical backend.
  *
- * Internal to the SDK; not part of the public API. Subject to removal in a
- * future minor release once the deprecation window closes.
+ * Internal to the SDK; not part of the public API.
  */
 export const LegacyContainmentAliases: Readonly<Partial<Record<string, ContainmentBackend>>> = {
   appcontainer: 'processcontainer',
   macos_sandbox: 'seatbelt',
+};
+
+const LegacyConfigAliasVersions: Readonly<Record<string, readonly string[]>> = {
+  appcontainer: ['0.6.0-alpha', '0.7.0-alpha', '0.8.0-alpha', '0.9.0-alpha'],
+  appContainer: ['0.6.0-alpha', '0.7.0-alpha', '0.8.0-alpha', '0.9.0-alpha'],
+  macos_sandbox: ['0.7.0-alpha', '0.8.0-alpha', '0.9.0-alpha'],
 };
 
 /**
@@ -426,13 +429,11 @@ export interface ContainerConfig {
   /** ProcessContainer configuration */
   processContainer?: ProcessContainerConfig;
   /**
-   * Legacy alias of {@link processContainer}. Retained so callers
-   * migrating from pre-0.6 SDK versions can keep their existing code
-   * compiling; the native binary parses both names into the same slot
-   * via a serde alias.
+   * Legacy alias of {@link processContainer}. Retained for raw configurations
+   * targeting the historical v0 contracts that accepted it. Exact v1
+   * contracts reject this spelling.
    *
-   * @deprecated Use {@link processContainer} instead. This alias may be
-   * removed in a future minor release.
+   * @deprecated Use {@link processContainer} instead.
    */
   appContainer?: ProcessContainerConfig;
   /** LXC container configuration (Linux only) */
@@ -453,6 +454,35 @@ export interface ContainerConfig {
   seatbelt?: SeatbeltConfig;
   /** Cross-platform UI configuration */
   ui?: UiConfig;
+}
+
+/** @internal Returns an actionable error when a raw config uses a retired alias. */
+export function legacyConfigAliasUnsupportedReason(config: ContainerConfig): string | undefined {
+  const rawContainment = config.containment as string | undefined;
+  if (
+    rawContainment !== undefined
+    && LegacyContainmentAliases[rawContainment] !== undefined
+    && !LegacyConfigAliasVersions[rawContainment]?.includes(config.version)
+  ) {
+    return `Schema ${config.version} does not support legacy containment alias '${rawContainment}'; use '${LegacyContainmentAliases[rawContainment]}' instead`;
+  }
+
+  if (
+    config.appContainer !== undefined
+    && !LegacyConfigAliasVersions.appContainer.includes(config.version)
+  ) {
+    return `Schema ${config.version} does not support legacy field 'appContainer'; use 'processContainer' instead`;
+  }
+
+  const legacySeatbelt = (config as ContainerConfig & { macos_sandbox?: unknown }).macos_sandbox;
+  if (
+    legacySeatbelt !== undefined
+    && !LegacyConfigAliasVersions.macos_sandbox.includes(config.version)
+  ) {
+    return `Schema ${config.version} does not support legacy field 'macos_sandbox'; use 'seatbelt' instead`;
+  }
+
+  return undefined;
 }
 
 /**

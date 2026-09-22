@@ -1,0 +1,6 @@
+{
+  "version": "1.1.0-alpha",
+  "phase": "provision",
+  "containment": "wslc",
+  "runtimeConfig": {"networkProxy": "http://proxy.example:8080"}
+}
