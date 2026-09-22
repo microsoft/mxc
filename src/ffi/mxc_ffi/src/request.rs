@@ -97,13 +97,14 @@ impl RequestPolicy {
         let telemetry = match self.telemetry {
             TelemetryField::Absent => None,
             TelemetryField::Present(telemetry) => {
-                if let Ok(version) = semver::Version::parse(&self.version) {
-                    if version.major == 0 && version.minor < 9 {
-                        return Err(Error::new(
-                            ErrorCode::MalformedRequest,
-                            "policy.telemetry requires config schema version 0.9.0-alpha or later",
-                        ));
-                    }
+                if matches!(
+                    self.version.as_str(),
+                    "0.6.0-alpha" | "0.7.0-alpha" | "0.8.0-alpha"
+                ) {
+                    return Err(Error::new(
+                        ErrorCode::MalformedRequest,
+                        "policy.telemetry requires config schema version 0.9.0-alpha or later",
+                    ));
                 }
                 telemetry
             }
@@ -695,23 +696,25 @@ mod tests {
 
     #[test]
     fn telemetry_rejects_pre_0_9_policies() {
-        let error = build_request_from_json(
-            r#"{
-                "policy": {
-                    "version": "0.8.0-alpha",
-                    "telemetry": null
-                },
-                "command": "echo hi"
-            }"#,
-        )
-        .expect_err("telemetry must require policy version 0.9 or later");
+        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha"] {
+            let error = build_request_from_json(&format!(
+                r#"{{
+                    "policy": {{
+                        "version": "{version}",
+                        "telemetry": null
+                    }},
+                    "command": "echo hi"
+                }}"#,
+            ))
+            .expect_err("telemetry must require policy version 0.9 or later");
 
-        assert!(
-            error
-                .message
-                .contains("telemetry requires config schema version 0.9.0-alpha"),
-            "unexpected error: {error}"
-        );
+            assert!(
+                error
+                    .message
+                    .contains("telemetry requires config schema version 0.9.0-alpha"),
+                "{version}: unexpected error: {error}"
+            );
+        }
     }
 
     #[test]

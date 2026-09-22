@@ -3,22 +3,24 @@
 
 use super::common::{
     assert_invalid as assert_invalid_request, assert_valid as assert_valid_request,
+    DeprovisionRequest,
 };
-use mxc_config_contract::published::v0_9_0_alpha::StartRequest;
 
 fn assert_valid(json: &str) {
-    assert_valid_request::<StartRequest>(json);
+    let json = crate::exact_test_support::with_contract_version(json, crate::CONTRACT_VERSION);
+    assert_valid_request::<DeprovisionRequest>(&json);
 }
 
 fn assert_invalid(json: &str) {
-    assert_invalid_request::<StartRequest>(json);
+    let json = crate::exact_test_support::with_contract_version(json, crate::CONTRACT_VERSION);
+    assert_invalid_request::<DeprovisionRequest>(&json);
 }
 
 fn request_with_additional_fields(additional_fields: &str) -> String {
     format!(
         r#"{{
             "version": "0.9.0-alpha",
-            "phase": "start",
+            "phase": "deprovision",
             "sandboxId": "test123456",
             {additional_fields}
         }}"#
@@ -26,22 +28,22 @@ fn request_with_additional_fields(additional_fields: &str) -> String {
 }
 
 #[test]
-fn accepts_minimal_start_request() {
+fn accepts_minimal_deprovision_request() {
     let json = r#"{
         "version": "0.9.0-alpha",
-        "phase": "start",
+        "phase": "deprovision",
         "sandboxId": "test123456"
     }"#;
     assert_valid(json);
 }
 
 #[test]
-fn accepts_start_request_with_optional_fields() {
+fn accepts_deprovision_request_with_optional_fields() {
     let json = r#"{
-        "$schema": "https://example.com/start.schema.json",
+        "$schema": "https://example.com/deprovision.schema.json",
         "_comment": "This is a comment",
         "version": "0.9.0-alpha",
-        "phase": "start",
+        "phase": "deprovision",
         "sandboxId": "test123456",
         "telemetry": {
                 "enabled": true
@@ -51,10 +53,10 @@ fn accepts_start_request_with_optional_fields() {
 }
 
 #[test]
-fn accepts_empty_start_telemetry_object() {
+fn accepts_empty_deprovision_telemetry_object() {
     let json = r#"{
         "version": "0.9.0-alpha",
-        "phase": "start",
+        "phase": "deprovision",
         "sandboxId": "test123456",
         "telemetry": {}
     }"#;
@@ -62,12 +64,12 @@ fn accepts_empty_start_telemetry_object() {
 }
 
 #[test]
-fn accepts_start_telemetry_enabled_values() {
+fn accepts_deprovision_telemetry_enabled_values() {
     for enabled in [true, false] {
         let json = format!(
             r#"{{
                 "version": "0.9.0-alpha",
-                "phase": "start",
+                "phase": "deprovision",
                 "sandboxId": "test123456",
                 "telemetry": {{
                     "enabled": {enabled}
@@ -82,15 +84,15 @@ fn accepts_start_telemetry_enabled_values() {
 fn accepts_empty_sandbox_id_structurally() {
     let json = r#"{
         "version": "0.9.0-alpha",
-        "phase": "start",
+        "phase": "deprovision",
         "sandboxId": ""
     }"#;
     assert_valid(json);
 }
 
 #[test]
-fn start_phase_accepts_exact_and_escaped_spelling() {
-    for phase in ["start", "st\\u0061rt"] {
+fn deprovision_phase_accepts_exact_and_escaped_spelling() {
+    for phase in ["deprovision", "deprovis\\u0069on"] {
         let json = format!(
             r#"{{
                 "version": "0.9.0-alpha",
@@ -104,8 +106,8 @@ fn start_phase_accepts_exact_and_escaped_spelling() {
 }
 
 #[test]
-fn start_request_rejects_other_phases() {
-    for phase in ["provision", "exec", "stop", "deprovision"] {
+fn deprovision_request_rejects_other_phases() {
+    for phase in ["provision", "start", "exec", "stop"] {
         let json = format!(
             r#"{{
                 "version": "0.9.0-alpha",
@@ -119,10 +121,10 @@ fn start_request_rejects_other_phases() {
 }
 
 #[test]
-fn rejects_missing_required_start_fields() {
+fn rejects_missing_required_deprovision_fields() {
     let json = r#"{
         "version": "0.9.0-alpha",
-        "phase": "start"
+        "phase": "deprovision"
     }"#;
     assert_invalid(json);
 
@@ -134,7 +136,7 @@ fn rejects_missing_required_start_fields() {
     assert_invalid(json);
 
     let json = r#"{
-        "phase": "start",
+        "phase": "deprovision",
         "sandboxId": "test123456"
     }"#;
 
@@ -142,10 +144,10 @@ fn rejects_missing_required_start_fields() {
 }
 
 #[test]
-fn rejects_null_required_start_fields() {
+fn rejects_null_required_deprovision_fields() {
     let json = r#"{
         "version": null,
-        "phase": "start",
+        "phase": "deprovision",
         "sandboxId": "test123456"
     }"#;
     assert_invalid(json);
@@ -160,7 +162,7 @@ fn rejects_null_required_start_fields() {
 
     let json = r#"{
         "version": "0.9.0-alpha",
-        "phase": "start",
+        "phase": "deprovision",
         "sandboxId": null
     }"#;
 
@@ -187,7 +189,7 @@ fn rejects_non_string_sandbox_id_field() {
         let json = format!(
             r#"{{
                 "version": "0.9.0-alpha",
-                "phase": "start",
+                "phase": "deprovision",
                 "sandboxId": {sandbox_id}
             }}"#
         );
@@ -201,7 +203,7 @@ fn rejects_non_boolean_experimental_telemetry_enabled_field() {
         let json = format!(
             r#"{{
                 "version": "0.9.0-alpha",
-                "phase": "start",
+                "phase": "deprovision",
                 "sandboxId": "test123456",
                 "telemetry": {{
                     "enabled": {enabled}
@@ -226,10 +228,10 @@ fn rejects_null_optional_fields() {
 }
 
 #[test]
-fn rejects_unknown_start_fields() {
+fn rejects_unknown_deprovision_fields() {
     let json = r#"{
         "version": "0.9.0-alpha",
-        "phase": "start",
+        "phase": "deprovision",
         "sandboxId": "test123456",
         "unknownField": "value"
     }"#;
@@ -237,10 +239,10 @@ fn rejects_unknown_start_fields() {
 }
 
 #[test]
-fn rejects_unknown_start_experimental_fields() {
+fn rejects_unknown_deprovision_experimental_fields() {
     let json = r#"{
         "version": "0.9.0-alpha",
-        "phase": "start",
+        "phase": "deprovision",
         "sandboxId": "test123456",
         "experimental": {
             "unknownField": "value"
@@ -250,10 +252,10 @@ fn rejects_unknown_start_experimental_fields() {
 }
 
 #[test]
-fn rejects_unknown_start_experimental_telemetry_fields() {
+fn rejects_unknown_deprovision_experimental_telemetry_fields() {
     let json = r#"{
         "version": "0.9.0-alpha",
-        "phase": "start",
+        "phase": "deprovision",
         "sandboxId": "test123456",
         "telemetry": {
                 "unknownField": "value"
@@ -299,12 +301,12 @@ fn rejects_backend_experimental_fields() {
 }
 
 #[test]
-fn rejects_duplicate_start_fields() {
+fn rejects_duplicate_deprovision_fields() {
     for fields in [
         r#""$schema": "first", "$schema": "second""#,
         r#""_comment": "first", "_comment": "second""#,
         r#""version": "0.9.0-alpha""#,
-        r#""phase": "start""#,
+        r#""phase": "deprovision""#,
         r#""sandboxId": "other""#,
         r#""correlationVector": "first", "correlationVector": "second""#,
         r#""experimental": {}, "experimental": {}"#,
@@ -314,7 +316,7 @@ fn rejects_duplicate_start_fields() {
 }
 
 #[test]
-fn rejects_duplicate_start_experimental_fields() {
+fn rejects_duplicate_deprovision_experimental_fields() {
     for experimental in [
         r#""telemetry": {}, "telemetry": {}"#,
         r#""telemetry": {"enabled": true, "enabled": false}"#,
@@ -339,7 +341,7 @@ fn rejects_invalid_version_field() {
         let json = format!(
             r#"{{
                 "version": {version},
-                "phase": "start",
+                "phase": "deprovision",
                 "sandboxId": "test123456"
             }}"#
         );

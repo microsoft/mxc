@@ -27,9 +27,9 @@
 //! disclosure risk that cannot be undone once hashes are in logs).
 //!
 //! To stop that safety property from silently rotting into a coverage gap,
-//! [`policy_projection`] **exhaustively destructures** `ExecutionRequest` and
-//! `ExperimentalConfig`. Adding a field to either is a compile error until it is
-//! classified as hashed or explicitly excluded with a reason.
+//! [`policy_projection`] **exhaustively destructures** `ExecutionRequest`.
+//! Adding a field is a compile error until it is classified as hashed or
+//! explicitly excluded with a reason.
 //!
 //! # What is excluded, and why
 //!
@@ -37,10 +37,15 @@
 //! |---|---|
 //! | `script_code` | The command line is *what runs*, not the policy under which it runs; it also routinely embeds credentials (`curl -H "Authorization: …"`). |
 //! | `env` | Environment variables are the classic secret carrier. |
-//! | `experimental.telemetry` | Does not affect enforcement. |
+//! | `telemetry`, internal `test_feature` | No enforcement effect. |
 //! | `network_proxy.original_url` | A proxy URL can embed `user:password@`. The host and port *are* hashed. |
 //! | `capture_denials.output_path` | Only decides where the diagnostic JSON deliverable is written; not enforcement. `capture_denials.mode` remains hashed. |
 //! | `dry_run`, `testing_features_enabled` | Invocation modes, not policy. |
+//! | `source_contract` | External JSON provenance used only for diagnostics and telemetry. Normalized network compatibility is hashed separately. |
+//!
+//! `network_enforcement_compatibility` is hashed because it changes how the
+//! normalized network policy is enforced. WSLC and Windows Sandbox
+//! configuration is hashed at the `wslc` and `windowsSandbox` root keys.
 //!
 //! `ContainerPolicy::network_proxy` is `#[serde(skip)]`, so the proxy's
 //! credential-bearing URL cannot reach the hash through the blanket policy
@@ -72,9 +77,7 @@
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use crate::models::{
-    ExecutionRequest, ExperimentalConfig, IsolationSessionProvisionConfig, WslcProvisionConfig,
-};
+use crate::models::{ExecutionRequest, IsolationSessionProvisionConfig, WslcProvisionConfig};
 use crate::state_aware_operation::{StateAwareOperation, StateAwareProvision};
 
 /// Algorithm tag prefixed to the hex digest, so the algorithm can change
@@ -186,7 +189,10 @@ fn hash_canonical_json(canonical: &str) -> String {
 /// that keeps the allow-list from silently falling behind the model.
 fn policy_projection(request: &ExecutionRequest) -> Value {
     let ExecutionRequest {
-        schema_version,
+        // External contract provenance is diagnostics/telemetry attribution,
+        // not enforcement. The normalized compatibility value below is.
+        source_contract: _excluded_source_contract,
+        network_enforcement_compatibility,
         container_id,
         working_directory,
         script_timeout,
@@ -194,11 +200,14 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         lifecycle,
         policy,
         lxc_config,
+        wslc,
         seatbelt,
+        windows_sandbox,
         // Telemetry settings do not affect enforcement.
         telemetry: _excluded_telemetry,
+        // A placeholder feature with no enforcement effect.
+        test_feature: _excluded_test_feature,
         experimental_enabled,
-        experimental,
         // --- deliberately excluded; see the module docs ---
         // The command line is what runs, not the policy it runs under, and it
         // routinely embeds credentials.
@@ -216,8 +225,8 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
     let mut root = Map::new();
 
     root.insert(
-        "schemaVersion".into(),
-        Value::String(schema_version.clone()),
+        "networkEnforcementCompatibility".into(),
+        Value::String(network_enforcement_compatibility.as_str().to_string()),
     );
     root.insert(
         "containment".into(),
@@ -267,44 +276,16 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         "seatbelt".into(),
         serde_json::to_value(seatbelt).unwrap_or(Value::Null),
     );
-    root.insert("experimental".into(), experimental_projection(experimental));
-
-    Value::Object(root)
-}
-
-/// The enforcement-relevant, non-credential parts of the experimental block.
-///
-/// These matter: for `windows_sandbox` and `wslc` the internal experimental
-/// storage carries the sandbox's **entire** filesystem / network / resource
-/// policy.
-/// Omitting it wholesale (the first cut of this module did) would have made two
-/// materially different policies hash identically on those backends.
-///
-/// `ExperimentalConfig` is exhaustively destructured for the same tripwire
-/// reason as [`policy_projection`].
-fn experimental_projection(experimental: &ExperimentalConfig) -> Value {
-    let ExperimentalConfig {
-        windows_sandbox,
-        wslc,
-        // A placeholder feature with no enforcement effect.
-        test: _excluded_test_feature,
-    } = experimental;
-
-    let mut out = Map::new();
-    out.insert(
-        "windows_sandbox".into(),
-        serde_json::to_value(windows_sandbox).unwrap_or(Value::Null),
-    );
-    out.insert(
+    root.insert(
         "wslc".into(),
         serde_json::to_value(wslc).unwrap_or(Value::Null),
     );
-    // IsolationSession has no domain-level experimental config. Keep an
-    // explicit null projection so the canonical shape remains deterministic;
-    // state-aware phase config (including appId) is projected separately.
-    out.insert("isolation_session".into(), Value::Null);
+    root.insert(
+        "windowsSandbox".into(),
+        serde_json::to_value(windows_sandbox).unwrap_or(Value::Null),
+    );
 
-    Value::Object(out)
+    Value::Object(root)
 }
 
 /// The enforcement-relevant, non-credential parts of the proxy configuration:
@@ -452,7 +433,9 @@ mod tests {
 
     fn request() -> ExecutionRequest {
         let mut r = ExecutionRequest {
-            schema_version: "0.7.0-alpha".to_string(),
+            source_contract: Some(mxc_config_contract::ContractVersion::V0_7_0Alpha),
+            network_enforcement_compatibility:
+                crate::models::NetworkEnforcementCompatibility::LegacyCompatible,
             container_id: "test".to_string(),
             script_code: "echo hello".to_string(),
             working_directory: "C:\\work".to_string(),
@@ -482,6 +465,74 @@ mod tests {
     #[test]
     fn identical_policies_hash_identically() {
         assert_eq!(policy_hash(&request()), policy_hash(&request()));
+    }
+
+    #[test]
+    fn source_contract_attribution_does_not_change_the_hash() {
+        let baseline = policy_hash(&request());
+        let mut changed = request();
+        changed.source_contract = None;
+        assert_eq!(baseline, policy_hash(&changed));
+    }
+
+    #[test]
+    fn network_enforcement_compatibility_changes_the_hash() {
+        let baseline = policy_hash(&request());
+        let mut changed = request();
+        changed.network_enforcement_compatibility =
+            crate::models::NetworkEnforcementCompatibility::Strict;
+        assert_ne!(baseline, policy_hash(&changed));
+    }
+
+    #[test]
+    fn backend_policy_uses_root_keys() {
+        let mut request = request();
+        let wslc = crate::models::WslcConfig {
+            image: "python:3.12".to_string(),
+            ..Default::default()
+        };
+        let windows_sandbox = crate::models::WindowsSandboxConfig {
+            idle_timeout_ms: 1_000,
+            ..Default::default()
+        };
+        request.wslc = Some(wslc.clone());
+        request.windows_sandbox = Some(windows_sandbox.clone());
+
+        let Value::Object(projection) = policy_projection(&request) else {
+            panic!("policy projection must be an object");
+        };
+        assert_eq!(
+            projection.get("wslc"),
+            Some(&serde_json::to_value(wslc).expect("WSLC config must serialize"))
+        );
+        assert_eq!(
+            projection.get("windowsSandbox"),
+            Some(
+                &serde_json::to_value(windows_sandbox)
+                    .expect("Windows Sandbox config must serialize")
+            )
+        );
+        assert_eq!(
+            projection
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([
+                "containerId",
+                "containment",
+                "experimentalEnabled",
+                "lifecycle",
+                "lxc",
+                "networkEnforcementCompatibility",
+                "policy",
+                "proxy",
+                "scriptTimeout",
+                "seatbelt",
+                "windowsSandbox",
+                "workingDirectory",
+                "wslc",
+            ])
+        );
     }
 
     #[test]
@@ -733,16 +784,13 @@ mod tests {
     }
 
     #[test]
-    fn experimental_backend_policy_changes_the_hash() {
-        // The experimental block carries the ENTIRE enforcement policy for
-        // windows_sandbox / wslc. Omitting it would make two
-        // materially different policies hash identically on those backends.
+    fn wslc_backend_policy_changes_the_hash() {
         let mut baseline = request();
         baseline.containment = ContainmentBackend::Wslc;
         let before = policy_hash(&baseline);
 
         let mut changed = baseline.clone();
-        changed.experimental.wslc = Some(crate::models::WslcConfig {
+        changed.wslc = Some(crate::models::WslcConfig {
             image: "python:3.12".to_string(),
             gpu: true,
             ..Default::default()
@@ -750,7 +798,7 @@ mod tests {
         assert_ne!(before, policy_hash(&changed));
 
         let mut more = changed.clone();
-        if let Some(cfg) = more.experimental.wslc.as_mut() {
+        if let Some(cfg) = more.wslc.as_mut() {
             cfg.memory_mb = Some(4096);
         }
         assert_ne!(policy_hash(&changed), policy_hash(&more));

@@ -43,9 +43,9 @@ Plus optional `validate_runner()`. This is a perfect fit for bwrap, which is fun
 
 ### 1. Schema Changes
 
-**File:** `schemas/dev/mxc-config.schema.0.6.0-dev.json`
+**Source:** `src/core/mxc_config_contract/src/dev/one_shot.rs`
 
-Add `"bubblewrap"` to the `containment` enum:
+Add `"bubblewrap"` to the exact development contract's `containment` enum:
 ```json
 "containment": {
   "enum": ["process", "processcontainer", "windows_sandbox", "lxc", "microvm",
@@ -56,7 +56,8 @@ Add `"bubblewrap"` to the `containment` enum:
 No backend-specific config block for now. Bubblewrap will use only the shared
 cross-backend fields (`filesystem`, `network`, `process`, `lifecycle`, `ui`).
 Adding backend-specific knobs later would mean introducing a dedicated section
-plus updating the parser's single-backend-section enforcement so it's allowed.
+in the exact development contract, adapting it into `CommonRequestIR`, and
+updating the parser's single-backend-section enforcement so it is allowed.
 
 ### 2. Rust Model Changes
 
@@ -65,24 +66,28 @@ plus updating the parser's single-backend-section enforcement so it's allowed.
 ```rust
 // Add to ContainmentBackend enum:
 /// Bubblewrap — unprivileged Linux sandboxing via user namespaces.
-/// Experimental — requires --experimental flag.
 Bubblewrap,
 ```
 
 No `BubblewrapConfig` struct needed for now — the runner uses only the shared
-`ContainerPolicy` fields on `ExecutionRequest` (filesystem paths, network policy, env, etc.).
-A backend-specific config can be added later under `ExperimentalConfig` if needed.
+`ContainerPolicy` fields on `ExecutionRequest` (filesystem paths, network
+policy, env, etc.). A backend-specific config can be added directly to
+`ExecutionRequest` later if needed.
 
 ### 3. Config Parser Changes
 
-**File:** `src/core/wxc_common/src/wire.rs` and `config_parser.rs`
+**Files:** the exact development contract, its adapter, `wire.rs`,
+`common_request_ir.rs`, and `config_parser.rs`
 
-- Add a `Bubblewrap` variant to the wire `Containment` enum (or rely on the
-  abstract `process` intent resolving to `Bubblewrap` on Linux)
-- Add any backend-specific fields to the wire model (under `experimental` while
-  experimental), then regenerate the applicable rolling and exact schemas with
-  `mxc_schema_gen schema`
-- Map the new `containment` value in `map_wire_containment`
+- Add a `Bubblewrap` variant to the exact development contract and adapt it to
+  the internal wire `Containment` enum (or rely on the abstract `process`
+  intent resolving to `Bubblewrap` on Linux)
+- Add backend-specific fields at their permanent location in the exact
+  development contract and adapt them into `CommonRequestIR`
+- Map the normalized containment value in `map_wire_containment`; this is
+  internal normalization, not the external deserialization boundary
+- Regenerate the registered exact schema and TypeScript wire artifact with
+  `mxc_schema_gen`
 - Optionally: make `"process"` resolve to `Bubblewrap` on Linux when LXC is unavailable
   (or add a `"process"` → bwrap fallback chain)
 
@@ -212,10 +217,6 @@ Adding a `ContainmentBackend::Bubblewrap` arm keeps the SDK binary-resolution un
 ```rust
 // In lxc/src/main.rs, match request.containment:
 ContainmentBackend::Bubblewrap => {
-    if !request.experimental_enabled {
-        eprintln!("Error: Bubblewrap is experimental. Use --experimental.");
-        process::exit(1);
-    }
     Box::new(BubblewrapScriptRunner)
 }
 ```
@@ -231,7 +232,7 @@ export type ContainmentBackend =
   | 'lxc' | 'microvm' | 'seatbelt' | 'isolation_session'
   | 'bubblewrap';  // ← add
 
-export const ExperimentalBackends = ['microvm', 'wslc', 'seatbelt', 'bubblewrap'];
+export const ExperimentalBackends = ['microvm', 'windows_sandbox', 'hyperlight'];
 ```
 
 **`sdk/node/src/platform.ts`:**
@@ -339,15 +340,27 @@ policy gap is a design decision, not an implementation challenge.
 - `src/Cargo.toml` — add `bwrap_common` to workspace members + dependencies
 - `src/core/lxc/Cargo.toml` — add `bwrap_common` dependency
 - `src/core/lxc/src/main.rs` — add dispatch arm for `ContainmentBackend::Bubblewrap`
-- `src/core/wxc_common/src/models.rs` — add `Bubblewrap` variant, `BubblewrapConfig` struct, wire into `ExperimentalConfig` and `ExecutionRequest`
-- `src/core/wxc_common/src/wire.rs` — add the `Bubblewrap` containment variant (and any backend fields), then regenerate the schema
-- `src/core/wxc_common/src/config_parser.rs` — map the new containment value in `map_wire_containment`
+- `src/core/mxc_config_contract/src/dev/one_shot.rs` — add the external
+  `Bubblewrap` containment value and any backend-specific request fields
+- `src/core/wxc_common/src/config_contract_adapters/dev/one_shot.rs` — adapt
+  the exact request into `CommonRequestIR`
+- `src/core/wxc_common/src/common_request_ir.rs` — carry any new normalized
+  backend fields
+- `src/core/wxc_common/src/models.rs` — add the `Bubblewrap` variant and, if
+  needed, a `BubblewrapConfig` field on `ExecutionRequest`
+- `src/core/wxc_common/src/wire.rs` — add the internal normalized
+  `Bubblewrap` containment variant
+- `src/core/wxc_common/src/config_parser.rs` — map the normalized containment
+  value in `map_wire_containment`
 
 ### Schema (modify)
-- `schemas/dev/mxc-config.schema.0.6.0-dev.json` — add `"bubblewrap"` to enum, add config block
+- `schemas/dev/mxc-config.schema.0.10.0-alpha.json` — regenerate from the exact
+  development contract; do not edit it by hand
+- `sdk/node/src/generated/v0_10_0_alpha/wire.ts` — regenerate the matching exact
+  TypeScript wire artifact
 
 ### TypeScript (modify)
-- `sdk/node/src/types.ts` — add `'bubblewrap'` to `ContainmentBackend`, `ExperimentalBackends`
+- `sdk/node/src/types.ts` — add `'bubblewrap'` to `ContainmentBackend`
 - `sdk/node/src/platform.ts` — add `isBubblewrapAvailable()`, update Linux detection
 - `sdk/node/src/sandbox.ts` — add `buildBubblewrapConfig()` builder
 - `sdk/node/src/helper.ts` — no changes needed (lxc-exec handles both backends)

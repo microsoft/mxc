@@ -133,10 +133,11 @@ metadata only. `execInSandbox` returns an `IPty` for live streaming;
 positional argument is the existing `SandboxSpawnOptions` (extended with
 `signal?: AbortSignal` for cancellation), the same options bag one-shot uses.
 `experimental: true` is required when the targeted backend is itself experimental
-(IsolationSession is today); state-awareness as a feature is not gated by an
-experimental flag. Existing policy-discovery helpers (`getAvailableToolsPolicy` and
-friends) produce `FilesystemPolicyResult` fragments that compose directly into a
-state-aware Config's `filesystem` field — no change to the helpers.
+(Windows Sandbox requires it; IsolationSession and WSLC do not).
+State-awareness as a feature is not gated by an experimental flag. Existing
+policy-discovery helpers (`getAvailableToolsPolicy` and friends) produce
+`FilesystemPolicyResult` fragments that compose directly into a state-aware
+Config's `filesystem` field — no change to the helpers.
 
 ## Wire contract
 
@@ -156,7 +157,8 @@ interface OneShotRequest {
   filesystem?: FilesystemConfig;
   network?: NetworkConfig;
   ui?: UiConfig;
-  experimental?: ExperimentalOneShotConfigs;  // existing one-shot shape per docs/schema.md
+  windowsSandbox?: OneShotWindowsSandbox;
+  wslc?: WslcConfig;
   // ...other one-shot fields per docs/schema.md
 }
 
@@ -166,7 +168,12 @@ interface ProvisionStateAwareRequest {
   filesystem?: FilesystemConfig;      // backend declares per-phase honor
   network?: NetworkConfig;
   ui?: UiConfig;
-  experimental?: ExperimentalStateAwareConfigs;
+  isolationSession?: {
+    provision?: { appId?: string };
+  };
+  wslc?: {
+    provision?: { image?: string; imageTarPath?: string };
+  };
 }
 
 interface NonProvisionStateAwareRequest {
@@ -176,26 +183,17 @@ interface NonProvisionStateAwareRequest {
   filesystem?: FilesystemConfig;
   network?: NetworkConfig;
   ui?: UiConfig;
-  experimental?: ExperimentalStateAwareConfigs;
 }
 
 type StateAwareRequest = ProvisionStateAwareRequest | NonProvisionStateAwareRequest;
-
-// Wire-format shape of the `experimental` block on state-aware requests. The SDK
-// builds this from per-(backend, phase) Configs (see TypeScript SDK section above).
-interface ExperimentalStateAwareConfigs {
-  isolation_session?: {
-    provision?: { appId?: string };
-    // start, exec, stop, deprovision omitted — IsolationSession has no
-    // backend-specific config for those phases.
-  };
-  // future state-aware-capable backends add typed entries here
-}
 
 type MxcRequest = OneShotRequest | StateAwareRequest;
 ```
 
 The two shapes do not coexist in a single call — `phase` fully discriminates.
+Backend configuration uses permanent top-level sections such as
+`isolationSession` and `wslc`; runtime experimental authorization is supplied
+separately through `SandboxSpawnOptions.experimental` or `--experimental`.
 
 **Response convention** is phase-aware. `stdout` is reserved for the structured
 response: a single JSON envelope (`{result}` or `{error}`) for non-exec phases, the
@@ -307,8 +305,7 @@ const config: IsolationSessionProvisionConfig = {
 };
 const { sandboxId } = await provisionSandbox(
   'isolation_session',
-  config,
-  { experimental: true },
+  config
 );
 // sandboxId = "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0"
 ```
@@ -349,8 +346,7 @@ backend.provision(&request, None)
 // sandboxId from the provision example above.
 const r = await execInSandboxAsync(
   sandboxId,
-  { process: { commandLine: 'echo hello' } },
-  { experimental: true },
+  { process: { commandLine: 'echo hello' } }
 );
 // r = { stdout: "hello\n", stderr: "", exitCode: 0 }
 ```
@@ -427,8 +423,7 @@ Reference §11 has the full guide. Operational checklist:
    routing and checked binding). Extend the neutral operation and binding helper,
    and add engine dispatch arms for both lifecycle and streaming paths.
 5. Add the backend's shape to the exact development contract and its runtime
-   adapter; keep the retained rolling oracle aligned and regenerate both
-   development artifact sets.
+   adapter; regenerate the exact development schema and TypeScript oracle.
 6. Document policy-honor matrix, idempotence, concurrency, and error mapping in
    `docs/<backend-or-feature>/<plan-name>.md` (e.g.,
    `docs/isolation-session/state-aware-plan.md`).

@@ -3,19 +3,19 @@
 
 //! Controlled input to state-aware common-field normalization.
 
+use crate::common_request_ir::CommonRequestIR;
 use crate::error::WxcError;
 use crate::state_aware_operation::StateAwareOperation;
-use crate::wire;
 
 /// Only the operation owns routing and backend configuration.
 pub(crate) struct StateAwareInput {
-    common: wire::MxcConfig,
+    common: CommonRequestIR,
     operation: StateAwareOperation,
 }
 
 impl StateAwareInput {
     pub(crate) fn new(
-        common: wire::MxcConfig,
+        common: CommonRequestIR,
         operation: StateAwareOperation,
     ) -> Result<Self, WxcError> {
         let mut contradictory = Vec::new();
@@ -28,8 +28,11 @@ impl StateAwareInput {
         if common.containment.is_some() {
             contradictory.push("containment");
         }
-        if common.experimental.is_some() {
-            contradictory.push("experimental");
+        if common.test_feature.is_some() {
+            contradictory.push("test");
+        }
+        if common.windows_sandbox.is_some() {
+            contradictory.push("windowsSandbox");
         }
         if common.container_id.is_some() {
             contradictory.push("containerId");
@@ -46,6 +49,9 @@ impl StateAwareInput {
         if common.lxc.is_some() {
             contradictory.push("lxc");
         }
+        if common.wslc.is_some() {
+            contradictory.push("wslc");
+        }
         if common.lifecycle.is_some() {
             contradictory.push("lifecycle");
         }
@@ -58,7 +64,7 @@ impl StateAwareInput {
         Ok(Self { common, operation })
     }
 
-    pub(crate) fn into_parts(self) -> (wire::MxcConfig, StateAwareOperation) {
+    pub(crate) fn into_parts(self) -> (CommonRequestIR, StateAwareOperation) {
         (self.common, self.operation)
     }
 }

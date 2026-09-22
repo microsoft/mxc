@@ -17,7 +17,7 @@ mxc-sdk = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_ignored = "0.1"
 serde_json = { workspace = true }
-semver = "1"
+
 
 [features]
 # WSL Container backend (Windows only). Both sidecars resolve beside the loaded

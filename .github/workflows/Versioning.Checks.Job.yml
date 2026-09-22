@@ -50,14 +50,8 @@ jobs:
       - name: Check Linux probe-timeout parity (SDK backstop > native worst case)
         run: node scripts/versioning/check-linux-probe-timeouts.js
 
-      - name: Check schema is in sync with the Rust wire model (codegen)
-        run: node scripts/versioning/check-schema-codegen.js
-
       - name: Check PSEC generated contract (provenance + drift)
         run: node scripts/versioning/check-psec-codegen.js
-
-      - name: Check SDK wire types are in sync with the Rust wire model (codegen)
-        run: node scripts/versioning/check-sdk-types-codegen.js
 
       - name: Check exact contract generated artifacts and fixtures
         run: node scripts/versioning/check-contract-codegen.js
@@ -68,5 +62,5 @@ jobs:
       - name: Check C# bindings codegen (regenerates and asserts entry points)
         run: node scripts/check-dotnet-bindings-codegen.js
 
-      - name: Validate config corpus against dev schema
+      - name: Validate config corpus against exact registered schemas
         run: node scripts/versioning/validate-configs.js

@@ -97,7 +97,7 @@ struct Cli {
 
     /// Optional WSLC storage path. When omitted the runner default is used
     /// (`%TEMP%\mxc-wslc-sessions`). Pass the same value here that your
-    /// runtime configs set in `experimental.wslc.storagePath`, otherwise
+    /// runtime configs set in `wslc.storagePath`, otherwise
     /// the runner will not find the pulled image. Requires `--setup-wslc`.
     #[arg(long = "storage-path", requires = "setup_wslc")]
     storage_path: Option<String>,
@@ -486,13 +486,16 @@ fn run_state_aware_main(
         wxc_common::telemetry::log_policy_hash(
             &identity,
             &policy_hash,
-            &parsed.request().schema_version,
+            parsed.request().source_contract_version(),
         );
         if diagnostics_active {
             let record = AuditEvent::new(AuditEventName::PolicyHash)
                 .str("backend", backend)
                 .str("policy_hash", &policy_hash)
-                .str("config_schema_version", &parsed.request().schema_version);
+                .str(
+                    "config_schema_version",
+                    parsed.request().source_contract_version(),
+                );
             logger.log_audit_event(&record);
         }
     }
@@ -2058,7 +2061,7 @@ mod tests {
         let mut logger = test_logger();
         logger.enable_file_sink(&log_path).unwrap();
         let error = MxcError::malformed_request(
-            "Invalid configuration at `experimental.wslc.start.portMappings[0].windowsPort`",
+            "Invalid configuration at `wslc.provision.portMappings[0].windowsPort`",
         );
 
         log_state_aware_dispatch_error(&mut logger, &error);
@@ -2070,7 +2073,7 @@ mod tests {
         drop(logger);
         let log = std::fs::read_to_string(log_path).unwrap();
         assert_eq!(
-            log.matches("experimental.wslc.start.portMappings[0].windowsPort")
+            log.matches("wslc.provision.portMappings[0].windowsPort")
                 .count(),
             1
         );

@@ -40,10 +40,9 @@ fn wslc_maps_expected_internal_wire_fields() {
         Some(super::wire::Containment::Wslc)
     ));
 
-    let experimental = wire
-        .experimental
-        .expect("permanent WSLC settings should map to the internal WSLC slot");
-    let wslc = experimental.wslc.expect("wslc should be populated");
+    assert!(wire.test_feature.is_none());
+    assert!(wire.windows_sandbox.is_none());
+    let wslc = wire.wslc.expect("wslc should be populated");
 
     assert_eq!(wslc.target_os.as_deref(), Some("linux"));
     assert_eq!(wslc.image.as_deref(), Some("alpine:latest"));
@@ -70,15 +69,10 @@ fn wslc_maps_expected_internal_wire_fields() {
         &mappings[1].protocol,
         Some(super::wire::TransportProtocol::Tcp)
     ));
-
-    assert!(experimental.test.is_none());
-    assert!(experimental.windows_sandbox.is_none());
-    assert!(experimental.isolation_session.is_none());
-    assert!(experimental.seatbelt.is_none());
 }
 
 #[test]
-fn absent_wslc_settings_leave_internal_experimental_empty() {
+fn absent_wslc_settings_leave_internal_wslc_empty() {
     let wire = adapt(
         r#"{
             "version": "0.9.0-alpha",
@@ -87,5 +81,7 @@ fn absent_wslc_settings_leave_internal_experimental_empty() {
         }"#,
     );
 
-    assert!(wire.experimental.is_none());
+    assert!(wire.test_feature.is_none());
+    assert!(wire.windows_sandbox.is_none());
+    assert!(wire.wslc.is_none());
 }

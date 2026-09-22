@@ -148,7 +148,8 @@ See §7.9 for why the canonical probe stays in Rust rather than moving into the 
 
 
 ## 5. Testing
-- Every returned `backend` is a valid `wxc_common::wire::Containment` name.
+- Every returned `backend` is a valid
+  `wxc_common::models::ContainmentBackend::wire_name()` value.
 - On Windows the result contains `processcontainer` with a `tier` of one of the three known strings;
 `appcontainer-dacl` is the floor when nothing higher is reachable.
 - On non-Windows, `processcontainer` never appears.

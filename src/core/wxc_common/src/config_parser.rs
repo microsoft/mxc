@@ -8,15 +8,15 @@ use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
     CaptureDenialsConfig, CaptureDenialsMode, ContainerPolicy, ContainmentBackend,
-    ExecutionRequest, ExperimentalConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode,
-    NetworkPolicy, PortMapping, SeatbeltConfig, TelemetryConfig, TestFeatureConfig, UiPolicy,
+    ExecutionRequest, LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy,
+    PortMapping, SeatbeltConfig, TelemetryConfig, TestFeatureConfig, UiPolicy,
     WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
 use crate::network_parser::{host_is_any_loopback, parse_network_policy, NetworkSections};
+use crate::state_aware_input::StateAwareInput;
 use crate::state_aware_operation::{StateAwareOperation, StateAwareProvision};
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
-use crate::state_aware_wire::StateAwareInput;
 use crate::wire;
 use mxc_config_contract::dev::{probe_phase, Phase as ContractPhase};
 use mxc_config_contract::{probe_version, supported_versions, ContractVersion, VersionProbeError};
@@ -112,27 +112,27 @@ pub fn load_one_shot_request_from_contract(
 ) -> Result<ExecutionRequest, WxcError> {
     let config = match request {
         ExactOneShotContract::V0_6(request) => {
-            crate::config_contract_adapters::v0_6::into_wire(*request)
+            crate::config_contract_adapters::v0_6::into_common_request_ir(*request)
         }
         ExactOneShotContract::V0_7(request) => {
-            crate::config_contract_adapters::v0_7::into_wire(*request)
+            crate::config_contract_adapters::v0_7::into_common_request_ir(*request)
         }
         ExactOneShotContract::V0_8(request) => {
-            crate::config_contract_adapters::v0_8::into_wire(*request)
+            crate::config_contract_adapters::v0_8::into_common_request_ir(*request)
         }
         ExactOneShotContract::V0_9(request) => {
             mxc_config_contract::published::v0_9_0_alpha::validate_one_shot_request(&request)
                 .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
-            crate::config_contract_adapters::v0_9::one_shot_into_wire(*request)
+            crate::config_contract_adapters::v0_9::one_shot_into_common_request_ir(*request)
         }
         ExactOneShotContract::Dev(request) => {
             mxc_config_contract::dev::validate_one_shot_request(&request)
                 .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
-            crate::config_contract_adapters::dev::one_shot_into_wire(*request)
+            crate::config_contract_adapters::dev::one_shot_into_common_request_ir(*request)
         }
     };
 
-    let result = convert_wire_config(config, logger, true, false);
+    let result = normalize_common_request_ir(config, logger, true, false);
     log_one_shot_error(logger, &result);
     result
 }
@@ -166,14 +166,14 @@ fn exact_version_error(error: VersionProbeError) -> ParseError {
 fn parse_exact_published_one_shot<T>(
     json: &str,
     logger: &mut Logger,
-    adapt: fn(T) -> wire::MxcConfig,
+    adapt: fn(T) -> crate::common_request_ir::CommonRequestIR,
 ) -> Result<MxcRequest, ParseError>
 where
     T: serde::de::DeserializeOwned,
 {
     let request = config_deserialize::from_str(json)
         .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
-    convert_wire_config(adapt(request), logger, true, false)
+    normalize_common_request_ir(adapt(request), logger, true, false)
         .map(MxcRequest::OneShot)
         .map_err(ParseError::OneShot)
 }
@@ -360,12 +360,12 @@ fn parse_exact_v0_9(json: &str, logger: &mut Logger) -> Result<MxcRequest, Parse
         .map_err(|error| ParseError::StateAware(MxcError::malformed_request(error.to_string())))?;
 
     match adapted {
-        crate::config_contract_adapters::v0_9::AdaptedWireRequest::OneShot(config) => {
-            convert_wire_config(config, logger, true, false)
+        crate::config_contract_adapters::v0_9::AdaptedConfigRequest::OneShot(config) => {
+            normalize_common_request_ir(config, logger, true, false)
                 .map(MxcRequest::OneShot)
                 .map_err(ParseError::OneShot)
         }
-        crate::config_contract_adapters::v0_9::AdaptedWireRequest::StateAware(input) => {
+        crate::config_contract_adapters::v0_9::AdaptedConfigRequest::StateAware(input) => {
             normalize_state_aware(input, logger)
                 .map(MxcRequest::StateAware)
                 .map_err(|error| {
@@ -427,12 +427,12 @@ fn parse_exact_development(json: &str, logger: &mut Logger) -> Result<MxcRequest
         .map_err(|error| ParseError::StateAware(MxcError::malformed_request(error.to_string())))?;
 
     match adapted {
-        crate::config_contract_adapters::dev::AdaptedWireRequest::OneShot(config) => {
-            convert_wire_config(config, logger, true, false)
+        crate::config_contract_adapters::dev::AdaptedConfigRequest::OneShot(config) => {
+            normalize_common_request_ir(config, logger, true, false)
                 .map(MxcRequest::OneShot)
                 .map_err(ParseError::OneShot)
         }
-        crate::config_contract_adapters::dev::AdaptedWireRequest::StateAware(input) => {
+        crate::config_contract_adapters::dev::AdaptedConfigRequest::StateAware(input) => {
             normalize_state_aware(input, logger)
                 .map(MxcRequest::StateAware)
                 .map_err(|error| {
@@ -447,17 +447,17 @@ fn parse_exact_mxc_request_json(json: &str, logger: &mut Logger) -> Result<MxcRe
         ContractVersion::V0_6_0Alpha => parse_exact_published_one_shot(
             json,
             logger,
-            crate::config_contract_adapters::v0_6::into_wire,
+            crate::config_contract_adapters::v0_6::into_common_request_ir,
         ),
         ContractVersion::V0_7_0Alpha => parse_exact_published_one_shot(
             json,
             logger,
-            crate::config_contract_adapters::v0_7::into_wire,
+            crate::config_contract_adapters::v0_7::into_common_request_ir,
         ),
         ContractVersion::V0_8_0Alpha => parse_exact_published_one_shot(
             json,
             logger,
-            crate::config_contract_adapters::v0_8::into_wire,
+            crate::config_contract_adapters::v0_8::into_common_request_ir,
         ),
         ContractVersion::V0_9_0Alpha => parse_exact_v0_9(json, logger),
         ContractVersion::V0_10_0Alpha => parse_exact_development(json, logger),
@@ -534,13 +534,12 @@ pub fn load_mxc_request_with_options(
 
 /// Parse an MXC request from a **raw JSON string** (already decoded — not a file
 /// path or base64). The exact registered version is selected first. Published
-/// versions use their one-shot request contract; the v0.9 development contract
-/// then uses `phase` to select its one-shot or state-aware request root. This
-/// skips the file/base64 decode step so an in-memory JSON string can be parsed
-/// directly.
+/// versions use their registered one-shot or state-aware request root, and the
+/// mutable development version does the same. This skips the file/base64 decode
+/// step so an in-memory JSON string can be parsed directly.
 ///
-/// This loader enforces exact registered contracts. The legacy rolling raw-JSON
-/// loader is not available in production builds:
+/// This loader enforces exact registered contracts. No alternate whole-request
+/// raw-JSON loader is available:
 ///
 /// ```compile_fail
 /// use wxc_common::config_parser::load_request_from_json;
@@ -746,54 +745,6 @@ pub fn decode_request_input(input: &str, is_base64: bool) -> Result<String, WxcE
 
 // ---------- Cross-field validation ----------
 
-/// Maximum supported schema version (major.minor). Configs with a higher major.minor are rejected.
-const SUPPORTED_VERSION: &str = ">=0.6, <=0.10";
-
-/// Canonical "latest" schema version string used in samples and tests. Bump
-/// alongside `SUPPORTED_VERSION`'s upper bound when a new dev schema lands.
-#[cfg(test)]
-const CURRENT_SCHEMA_VERSION: &str = "0.10.0-alpha";
-
-/// Validate that the schema version (semver) is supported by this binary.
-/// Compares major.minor only — patch and pre-release labels are ignored.
-fn validate_schema_version(version: &str) -> Result<(), WxcError> {
-    if version.is_empty() {
-        return Ok(());
-    }
-
-    // Parse the version, stripping pre-release suffix for comparison
-    // (e.g., "0.4.0-alpha" is treated as "0.4.0")
-    let parsed = semver::Version::parse(version).map_err(|_| {
-        WxcError::ConfigParse(format!(
-            "Invalid schema version '{}': must be semver (e.g., 'X.Y.Z' or 'X.Y.Z-alpha')",
-            config_deserialize::escape_diagnostic_text(version)
-        ))
-    })?;
-
-    let req = semver::VersionReq::parse(SUPPORTED_VERSION).unwrap();
-
-    // semver crate treats pre-release as lower precedence, so we compare
-    // against a version without the pre-release label for major.minor check.
-    let comparable = semver::Version::new(parsed.major, parsed.minor, parsed.patch);
-    if !req.matches(&comparable) {
-        let min = semver::VersionReq::parse(">=0.6").unwrap();
-        let safe_version = config_deserialize::escape_diagnostic_text(version);
-        let msg = if !min.matches(&comparable) {
-            format!(
-                "Config schema version '{}' is older than supported (supported: {}). Update your config.",
-                safe_version, SUPPORTED_VERSION
-            )
-        } else {
-            format!(
-                "Config schema version '{}' is newer than supported (supported: {}). Upgrade wxc-exec.",
-                safe_version, SUPPORTED_VERSION
-            )
-        };
-        return Err(WxcError::ConfigParse(msg));
-    }
-    Ok(())
-}
-
 fn validate_filesystem_paths(policy: &ContainerPolicy) -> Result<(), WxcError> {
     validate_paths(&policy.readonly_paths)?;
     validate_paths(&policy.readwrite_paths)?;
@@ -939,9 +890,9 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
     }
 }
 
-// ---------- Conversion from wire model to domain model ----------
+// ---------- Conversion from normalized config input to runtime model ----------
 
-fn present_backend_sections(cfg: &wire::MxcConfig) -> Vec<&'static str> {
+fn present_backend_sections(cfg: &crate::common_request_ir::CommonRequestIR) -> Vec<&'static str> {
     let mut sections: Vec<&'static str> = Vec::new();
     let mut push = |backend: ContainmentBackend| {
         if let Some(path) = backend.section_path() {
@@ -954,19 +905,14 @@ fn present_backend_sections(cfg: &wire::MxcConfig) -> Vec<&'static str> {
     if cfg.lxc.is_some() {
         push(ContainmentBackend::Lxc);
     }
+    if cfg.wslc.is_some() {
+        push(ContainmentBackend::Wslc);
+    }
     if cfg.seatbelt.is_some() {
         push(ContainmentBackend::Seatbelt);
     }
-    if let Some(experimental) = cfg.experimental.as_ref() {
-        if experimental.windows_sandbox.is_some() {
-            push(ContainmentBackend::WindowsSandbox);
-        }
-        if experimental.wslc.is_some() {
-            push(ContainmentBackend::Wslc);
-        }
-        if experimental.isolation_session.is_some() {
-            push(ContainmentBackend::IsolationSession);
-        }
+    if cfg.windows_sandbox.is_some() {
+        push(ContainmentBackend::WindowsSandbox);
     }
     sections
 }
@@ -1122,12 +1068,14 @@ fn validate_capture_denials_output_path(path: &str, logger: &mut Logger) -> Resu
 // mode was fixed at provision, so a proxy-only exec inherits that mode rather
 // than restating `defaultPolicy`. Backend phase validation still rejects every
 // post-provision network-mode or host-filtering field.
-fn convert_wire_config(
-    cfg: wire::MxcConfig,
+fn normalize_common_request_ir(
+    cfg: crate::common_request_ir::CommonRequestIR,
     logger: &mut Logger,
     require_process: bool,
     state_aware_wslc_exec: bool,
 ) -> Result<ExecutionRequest, WxcError> {
+    let _ignored_metadata = (&cfg.schema, &cfg.comment);
+
     // `phase` / `sandboxId` are state-aware-only fields. The state-aware path
     // consumes them before delegating here, so if either is still present the
     // input is a state-aware-shaped payload sent to a one-shot entry point;
@@ -1146,10 +1094,8 @@ fn convert_wire_config(
     // Backend sections present in the config (captured before fields move out).
     let present_backend_sections = present_backend_sections(&cfg);
 
-    let schema_version = cfg.version.unwrap_or_default();
-
-    // Validate the schema version up front so an unsupported version fails fast.
-    validate_schema_version(&schema_version)?;
+    let source_contract = cfg.source_contract;
+    let network_enforcement_compatibility = cfg.network_enforcement_compatibility;
     let container_id = cfg.container_id.unwrap_or_default();
 
     // Process section: required for one-shot and state-aware exec; optional for
@@ -1361,7 +1307,7 @@ fn convert_wire_config(
 
     let parsed_network = parse_network_policy(
         &mut policy,
-        &schema_version,
+        network_enforcement_compatibility,
         NetworkSections {
             network: cfg.network,
             runtime: cfg.runtime_config,
@@ -1641,96 +1587,79 @@ fn convert_wire_config(
         },
     };
 
-    // Experimental section (parsed but only applied when --experimental is set).
-    let experimental = if let Some(raw_exp) = cfg.experimental {
-        let test = raw_exp.test.map(|t| TestFeatureConfig::from_raw(t.message));
-        let windows_sandbox = raw_exp.windows_sandbox.map(|sb| {
-            let mut config = WindowsSandboxConfig::default();
-            if let Some(t) = sb.idle_timeout_ms.or(sb.idle_timeout) {
-                config.idle_timeout_ms = t;
-            }
-            if let Some(name) = sb.daemon_pipe_name {
-                config.daemon_pipe_name = name;
-            }
-            config
-        });
-        let wslc = if let Some(cc) = raw_exp.wslc {
-            let mut config = WslcConfig::default();
-            if let Some(os) = cc.target_os {
-                config.target_os = os;
-            }
-            if let Some(img) = cc.image {
-                config.image = img;
-            }
-            config.image_tar_path = cc.image_tar_path;
-            config.cpu_count = cc.cpu_count;
-            config.memory_mb = cc.memory_mb;
-            if let Some(gpu) = cc.gpu {
-                config.gpu = gpu;
-            }
-            config.storage_path = cc.storage_path;
-            if let Some(mappings) = cc.port_mappings {
-                let mut converted = Vec::with_capacity(mappings.len());
-                for (idx, m) in mappings.into_iter().enumerate() {
-                    if m.windows_port == 0 {
-                        let msg = format!("wslc.portMappings[{idx}]: 'windowsPort' must be > 0");
-                        return Err(WxcError::ConfigParse(msg));
-                    }
-                    if m.container_port == 0 {
-                        let msg = format!("wslc.portMappings[{idx}]: 'containerPort' must be > 0");
-                        return Err(WxcError::ConfigParse(msg));
-                    }
-                    // Only TCP is representable in the wire model
-                    // (TransportProtocol is tcp-only); a `udp` value is rejected
-                    // at deserialize. The WSLC SDK runtime returns E_NOTIMPL for
-                    // UDP, so only TCP is currently supported.
-                    let protocol = "tcp".to_string();
-                    converted.push(PortMapping {
-                        windows_port: m.windows_port,
-                        container_port: m.container_port,
-                        protocol,
-                    });
-                }
-                // Reject duplicate (windowsPort, protocol) entries. Same host
-                // port on TCP+UDP would in principle be legal, but UDP is
-                // rejected at deserialize (the wire model is tcp-only); the
-                // second protocol dimension is retained in the dedupe key in
-                // case UDP support is enabled later.
-                let mut seen: std::collections::HashSet<(u16, &str)> =
-                    std::collections::HashSet::new();
-                for pm in &converted {
-                    if !seen.insert((pm.windows_port, pm.protocol.as_str())) {
-                        let msg = format!(
-                            "wslc.portMappings: duplicate windowsPort {} \
-                             for protocol '{}'",
-                            pm.windows_port, pm.protocol
-                        );
-                        return Err(WxcError::ConfigParse(msg));
-                    }
-                }
-                config.port_mappings = converted;
-            }
-            Some(config)
-        } else {
-            None
-        };
-        if raw_exp.seatbelt.is_some() {
-            let msg = "'experimental.seatbelt' has moved to the stable section; \
-                       use top-level 'seatbelt' instead."
-                .to_string();
-            return Err(WxcError::ConfigParse(msg));
+    let wslc = if let Some(cc) = cfg.wslc {
+        let mut config = WslcConfig::default();
+        if let Some(os) = cc.target_os {
+            config.target_os = os;
         }
-        ExperimentalConfig {
-            test,
-            windows_sandbox,
-            wslc,
+        if let Some(img) = cc.image {
+            config.image = img;
         }
+        config.image_tar_path = cc.image_tar_path;
+        config.cpu_count = cc.cpu_count;
+        config.memory_mb = cc.memory_mb;
+        if let Some(gpu) = cc.gpu {
+            config.gpu = gpu;
+        }
+        config.storage_path = cc.storage_path;
+        if let Some(mappings) = cc.port_mappings {
+            let mut converted = Vec::with_capacity(mappings.len());
+            for (idx, m) in mappings.into_iter().enumerate() {
+                if m.windows_port == 0 {
+                    let msg = format!("wslc.portMappings[{idx}]: 'windowsPort' must be > 0");
+                    return Err(WxcError::ConfigParse(msg));
+                }
+                if m.container_port == 0 {
+                    let msg = format!("wslc.portMappings[{idx}]: 'containerPort' must be > 0");
+                    return Err(WxcError::ConfigParse(msg));
+                }
+                // Only TCP is representable in the wire model
+                // (TransportProtocol is tcp-only); a `udp` value is rejected
+                // at deserialize. The WSLC SDK runtime returns E_NOTIMPL for
+                // UDP, so only TCP is currently supported.
+                converted.push(PortMapping {
+                    windows_port: m.windows_port,
+                    container_port: m.container_port,
+                    protocol: "tcp".to_string(),
+                });
+            }
+            // Reject duplicate (windowsPort, protocol) entries. Same host
+            // port on TCP+UDP would in principle be legal, but UDP is
+            // rejected at deserialize (the wire model is tcp-only); the
+            // second protocol dimension is retained in the dedupe key in
+            // case UDP support is enabled later.
+            let mut seen: std::collections::HashSet<(u16, &str)> = std::collections::HashSet::new();
+            for pm in &converted {
+                if !seen.insert((pm.windows_port, pm.protocol.as_str())) {
+                    let msg = format!(
+                        "wslc.portMappings: duplicate windowsPort {} \
+                         for protocol '{}'",
+                        pm.windows_port, pm.protocol
+                    );
+                    return Err(WxcError::ConfigParse(msg));
+                }
+            }
+            config.port_mappings = converted;
+        }
+        Some(config)
     } else {
-        ExperimentalConfig::default()
+        None
     };
 
-    // Top-level `seatbelt` config. Configs using `experimental.seatbelt` are
-    // rejected above.
+    let test_feature = cfg
+        .test_feature
+        .map(|test| TestFeatureConfig::from_raw(test.message));
+    let windows_sandbox = cfg.windows_sandbox.map(|sandbox| {
+        let mut config = WindowsSandboxConfig::default();
+        if let Some(timeout) = sandbox.idle_timeout_ms.or(sandbox.idle_timeout) {
+            config.idle_timeout_ms = timeout;
+        }
+        if let Some(name) = sandbox.daemon_pipe_name {
+            config.daemon_pipe_name = name;
+        }
+        config
+    });
+
     let seatbelt = cfg.seatbelt.map(make_seatbelt_config);
     let telemetry = cfg.telemetry.map(|raw| TelemetryConfig {
         enabled: raw.enabled,
@@ -1753,7 +1682,8 @@ fn convert_wire_config(
     }
 
     Ok(ExecutionRequest {
-        schema_version,
+        source_contract: Some(source_contract),
+        network_enforcement_compatibility,
         container_id,
         env,
         inherit_default_env,
@@ -1764,11 +1694,13 @@ fn convert_wire_config(
         lifecycle,
         policy,
         lxc_config,
+        wslc,
         seatbelt,
         telemetry,
+        test_feature,
+        windows_sandbox,
         experimental_enabled: false,
         testing_features_enabled: false,
-        experimental,
         dry_run: false,
     })
 }
@@ -1809,7 +1741,7 @@ struct NormalizationContext<'a> {
 }
 
 fn normalize_state_aware_common(
-    mut common: wire::MxcConfig,
+    mut common: crate::common_request_ir::CommonRequestIR,
     context: NormalizationContext<'_>,
     logger: &mut Logger,
 ) -> Result<ExecutionRequest, WxcError> {
@@ -1825,7 +1757,8 @@ fn normalize_state_aware_common(
             .containment
             .as_ref()
             .is_some_and(|value| map_wire_containment(Some(value)) == ContainmentBackend::Wslc);
-    let mut request = convert_wire_config(common, logger, require_process, state_aware_wslc_exec)?;
+    let mut request =
+        normalize_common_request_ir(common, logger, require_process, state_aware_wslc_exec)?;
     if context.phase != Phase::Provision && !network_supplied {
         request.policy.network_egress = None;
         request.policy.network_ingress = None;
@@ -1838,7 +1771,7 @@ mod tests {
     use super::*;
     use crate::encoding::base64_encode;
     use crate::logger::Mode;
-    use crate::models::{ClipboardPolicy, NetworkAction, ProxyAddress};
+    use crate::models::{NetworkAction, ProxyAddress};
     use crate::mxc_error::MxcErrorCode;
     use std::path::{Path, PathBuf};
 
@@ -1850,42 +1783,6 @@ mod tests {
         Logger::new(Mode::Buffer)
     }
 
-    fn normalize_wire_input_for_test(
-        input: &str,
-        logger: &mut Logger,
-        is_base64: bool,
-    ) -> Result<ExecutionRequest, WxcError> {
-        let result = decode_request_input(input, is_base64).and_then(|json| {
-            config_deserialize::from_str::<wire::MxcConfig>(&json)
-                .map_err(|error| WxcError::ConfigParse(error.to_string()))
-                .and_then(|config| convert_wire_config(config, logger, true, false))
-        });
-        log_one_shot_error(logger, &result);
-        result
-    }
-
-    fn normalize_wire_json_for_test(
-        json: &str,
-        logger: &mut Logger,
-    ) -> Result<ExecutionRequest, WxcError> {
-        let result = config_deserialize::from_str::<wire::MxcConfig>(json)
-            .map_err(|error| WxcError::ConfigParse(error.to_string()))
-            .and_then(|config| convert_wire_config(config, logger, true, false));
-        log_one_shot_error(logger, &result);
-        result
-    }
-
-    fn normalize_wire_value_for_test(
-        value: serde_json::Value,
-        logger: &mut Logger,
-    ) -> Result<ExecutionRequest, WxcError> {
-        let result = config_deserialize::from_value::<wire::MxcConfig>(value)
-            .map_err(|error| WxcError::ConfigParse(error.to_string()))
-            .and_then(|config| convert_wire_config(config, logger, true, false));
-        log_one_shot_error(logger, &result);
-        result
-    }
-
     fn repository_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
@@ -1894,11 +1791,23 @@ mod tests {
             .to_path_buf()
     }
 
-    fn assert_exact_contract_bridge(request: ExactOneShotContract, expected_version: &str) {
+    fn assert_exact_contract_bridge(
+        request: ExactOneShotContract,
+        expected_contract: ContractVersion,
+        expected_compatibility: crate::models::NetworkEnforcementCompatibility,
+    ) {
         let mut logger = test_logger();
         let execution = load_one_shot_request_from_contract(request, &mut logger).unwrap();
 
-        assert_eq!(execution.schema_version, expected_version);
+        assert_eq!(execution.source_contract, Some(expected_contract));
+        assert_eq!(
+            execution.network_enforcement_compatibility,
+            expected_compatibility
+        );
+        assert_eq!(
+            execution.source_contract_version(),
+            expected_contract.as_str()
+        );
         assert_eq!(execution.script_code, "echo hello");
     }
 
@@ -2027,7 +1936,11 @@ mod tests {
         for request in [&canonical, &alias] {
             match request {
                 MxcRequest::OneShot(request) => {
-                    assert_eq!(request.schema_version, expected_version, "{case}");
+                    assert_eq!(
+                        request.source_contract.map(ContractVersion::as_str),
+                        Some(expected_version),
+                        "{case}"
+                    );
                 }
                 MxcRequest::StateAware(_) => {
                     panic!("{case}: expected one-shot request");
@@ -2109,7 +2022,10 @@ mod tests {
 
             match parse_exact_for_test(&json).unwrap() {
                 MxcRequest::OneShot(request) => {
-                    assert_eq!(request.schema_version, version);
+                    assert_eq!(
+                        request.source_contract.map(ContractVersion::as_str),
+                        Some(version)
+                    );
                     assert_eq!(request.script_code, command);
                 }
                 MxcRequest::StateAware(_) => {
@@ -2345,7 +2261,11 @@ mod tests {
 
         match parse_exact_for_test(json).unwrap() {
             MxcRequest::OneShot(request) => {
-                assert_eq!(request.schema_version, "0.10.0-alpha");
+                assert_eq!(request.source_contract, Some(ContractVersion::V0_10_0Alpha));
+                assert_eq!(
+                    request.network_enforcement_compatibility,
+                    crate::models::NetworkEnforcementCompatibility::Strict
+                );
                 assert_eq!(request.script_code, "echo dev");
             }
             MxcRequest::StateAware(_) => panic!("expected one-shot request"),
@@ -2948,7 +2868,11 @@ mod tests {
                 }"#,
         )
         .unwrap();
-        assert_exact_contract_bridge(ExactOneShotContract::V0_6(Box::new(v0_6)), "0.6.0-alpha");
+        assert_exact_contract_bridge(
+            ExactOneShotContract::V0_6(Box::new(v0_6)),
+            ContractVersion::V0_6_0Alpha,
+            crate::models::NetworkEnforcementCompatibility::LegacyCompatible,
+        );
 
         let v0_7 = serde_json::from_str::<mxc_config_contract::published::v0_7_0_alpha::Request>(
             r#"{
@@ -2957,7 +2881,11 @@ mod tests {
                 }"#,
         )
         .unwrap();
-        assert_exact_contract_bridge(ExactOneShotContract::V0_7(Box::new(v0_7)), "0.7.0-alpha");
+        assert_exact_contract_bridge(
+            ExactOneShotContract::V0_7(Box::new(v0_7)),
+            ContractVersion::V0_7_0Alpha,
+            crate::models::NetworkEnforcementCompatibility::LegacyCompatible,
+        );
 
         let v0_8 = serde_json::from_str::<mxc_config_contract::published::v0_8_0_alpha::Request>(
             r#"{
@@ -2966,7 +2894,11 @@ mod tests {
                 }"#,
         )
         .unwrap();
-        assert_exact_contract_bridge(ExactOneShotContract::V0_8(Box::new(v0_8)), "0.8.0-alpha");
+        assert_exact_contract_bridge(
+            ExactOneShotContract::V0_8(Box::new(v0_8)),
+            ContractVersion::V0_8_0Alpha,
+            crate::models::NetworkEnforcementCompatibility::Strict,
+        );
 
         let v0_9 =
             serde_json::from_str::<mxc_config_contract::published::v0_9_0_alpha::OneShotRequest>(
@@ -2976,7 +2908,11 @@ mod tests {
             }"#,
             )
             .unwrap();
-        assert_exact_contract_bridge(ExactOneShotContract::V0_9(Box::new(v0_9)), "0.9.0-alpha");
+        assert_exact_contract_bridge(
+            ExactOneShotContract::V0_9(Box::new(v0_9)),
+            ContractVersion::V0_9_0Alpha,
+            crate::models::NetworkEnforcementCompatibility::Strict,
+        );
 
         let dev = serde_json::from_str::<mxc_config_contract::dev::OneShotRequest>(
             r#"{
@@ -2985,7 +2921,11 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert_exact_contract_bridge(ExactOneShotContract::Dev(Box::new(dev)), "0.10.0-alpha");
+        assert_exact_contract_bridge(
+            ExactOneShotContract::Dev(Box::new(dev)),
+            ContractVersion::V0_10_0Alpha,
+            crate::models::NetworkEnforcementCompatibility::Strict,
+        );
     }
 
     #[test]
@@ -3277,9 +3217,9 @@ mod tests {
             let parsed = load_state_aware(&json);
 
             assert_development_configuration(&parsed, telemetry_enabled);
-            assert!(parsed.request().experimental.test.is_none());
-            assert!(parsed.request().experimental.windows_sandbox.is_none());
-            assert!(parsed.request().experimental.wslc.is_none());
+            assert!(parsed.request().test_feature.is_none());
+            assert!(parsed.request().windows_sandbox.is_none());
+            assert!(parsed.request().wslc.is_none());
         }
     }
 
@@ -4003,186 +3943,6 @@ mod tests {
             error.message
         );
     }
-    #[test]
-    fn minimal_config() {
-        let json = r#"{"process": {"commandLine": "echo hello"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.script_code, "echo hello");
-        assert_eq!(req.script_timeout, 0);
-        assert!(req.working_directory.is_empty());
-    }
-
-    #[test]
-    fn load_request_from_value_reports_and_logs_typed_error_path() {
-        let config = serde_json::json!({
-            "process": {
-                "commandLine": "echo hello",
-                "timeout": "soon"
-            }
-        });
-        let mut logger = test_logger();
-
-        let error = normalize_wire_value_for_test(config, &mut logger).unwrap_err();
-        let message = error.to_string();
-        assert!(message.contains("Invalid configuration at `process.timeout`"));
-        assert!(message.contains("expected u32"));
-        assert_eq!(
-            logger
-                .get_buffer()
-                .matches("Invalid configuration at `process.timeout`")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn missing_process_section() {
-        let json = r#"{"containment": "processcontainer"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn missing_command_line() {
-        let json = r#"{"process": {"cwd": "/tmp"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn empty_command_line() {
-        let json = r#"{"process": {"commandLine": ""}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn malicious_command_line() {
-        let json = r#"{"process": {"commandLine": "echo hello\0world"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn full_config() {
-        let json = r#"{
-            "containerId": "TestProfile",
-            "containment": "processcontainer",
-            "process": {
-                "commandLine": "dir",
-                "cwd": "C:\\temp",
-                "timeout": 3000
-            },
-            "processContainer": {
-                "leastPrivilege": true,
-                "capabilities": ["internetClient"]
-            },
-            "filesystem": {
-                "readwritePaths": ["C:\\rw"],
-                "readonlyPaths": ["C:\\ro"],
-                "deniedPaths": ["C:\\denied"]
-            },
-            "network": {
-                "defaultPolicy": "block",
-                "enforcementMode": "firewall",
-                "allowedHosts": ["example.com"],
-                "blockedHosts": ["evil.com"]
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.script_code, "dir");
-        assert_eq!(req.working_directory, "C:\\temp");
-        assert_eq!(req.script_timeout, 3000);
-        assert_eq!(req.container_id, "TestProfile");
-        assert!(req.policy.least_privilege_mode);
-        assert!(req
-            .policy
-            .capabilities
-            .contains(&"internetClient".to_string()));
-        assert_eq!(req.policy.readwrite_paths, vec!["C:\\rw"]);
-        assert_eq!(req.policy.readonly_paths, vec!["C:\\ro"]);
-        assert_eq!(req.policy.denied_paths, vec!["C:\\denied"]);
-        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
-        assert_eq!(
-            req.policy.network_enforcement_mode,
-            NetworkEnforcementMode::Firewall
-        );
-        assert_eq!(req.policy.allowed_hosts, vec!["example.com"]);
-        assert_eq!(req.policy.blocked_hosts, vec!["evil.com"]);
-    }
-
-    #[test]
-    fn invalid_network_policy() {
-        let json =
-            r#"{"process": {"commandLine": "echo x"}, "network": {"defaultPolicy": "invalid"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("unknown variant") && msg.contains("invalid"),
-            "expected serde unknown-variant rejection, got: {msg}"
-        );
-        assert!(
-            msg.contains("Invalid configuration at `network.defaultPolicy`"),
-            "expected the policy path, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn wrong_value_type_reports_path_and_source_location() {
-        let json = r#"{
-            "process": {
-                "commandLine": "echo x",
-                "timeout": "soon"
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let error = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        let message = error.to_string();
-        assert!(
-            message.contains("Invalid configuration at `process.timeout`"),
-            "expected the field path, got: {message}"
-        );
-        assert!(
-            message.contains("invalid type") && message.contains("expected u32"),
-            "expected the type mismatch, got: {message}"
-        );
-        assert!(
-            message.contains("line 4"),
-            "expected the source line, got: {message}"
-        );
-        assert_eq!(
-            logger
-                .get_buffer()
-                .lines()
-                .filter(|line| line.contains("process.timeout"))
-                .count(),
-            1,
-            "the path-aware diagnostic should be logged once"
-        );
-    }
 
     #[test]
     fn state_aware_parse_errors_reach_diagnostic_file_without_stderr_duplication() {
@@ -4202,166 +3962,6 @@ mod tests {
         drop(logger);
         let log = std::fs::read_to_string(log_path).unwrap();
         assert!(log.contains("Unsupported phase"));
-    }
-
-    #[test]
-    fn out_of_range_value_reports_path() {
-        let json =
-            r#"{"process":{"commandLine":"echo x"},"network":{"proxy":{"localhost":70000}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let error = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        let message = error.to_string();
-        assert!(
-            message.contains("Invalid configuration at `network.proxy.localhost`"),
-            "expected the field path, got: {message}"
-        );
-        assert!(
-            message.contains("70000") && message.contains("expected u16"),
-            "expected the range mismatch, got: {message}"
-        );
-    }
-
-    #[test]
-    fn malformed_json_is_reported_as_syntax_not_policy_data() {
-        let json = r#"{"process":{"commandLine":"echo x"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let error = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        let message = error.to_string();
-        assert!(
-            message.contains("Invalid JSON syntax:"),
-            "expected a syntax error, got: {message}"
-        );
-        assert!(
-            !message.contains("Invalid configuration at"),
-            "syntax errors should not claim a policy path: {message}"
-        );
-    }
-
-    #[test]
-    fn invalid_enforcement_mode() {
-        let json =
-            r#"{"process": {"commandLine": "echo x"}, "network": {"enforcementMode": "invalid"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("unknown variant") && msg.contains("invalid"),
-            "expected serde unknown-variant rejection, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn load_from_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("config.json");
-        std::fs::write(&file_path, r#"{"process": {"commandLine": "whoami"}}"#).unwrap();
-
-        let mut logger = test_logger();
-        let req =
-            normalize_wire_input_for_test(file_path.to_str().unwrap(), &mut logger, false).unwrap();
-        assert_eq!(req.script_code, "whoami");
-    }
-
-    #[test]
-    fn file_not_found() {
-        let mut logger = test_logger();
-        let result = normalize_wire_input_for_test("nonexistent.json", &mut logger, false);
-        assert!(result.is_err());
-        assert_eq!(
-            logger
-                .get_buffer()
-                .matches("Configuration file not found: nonexistent.json")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn file_not_found_path_with_newline_is_escaped() {
-        // A file path is untrusted input and may contain a newline on
-        // Linux/macOS; the diagnostic must escape it so it cannot inject a
-        // forged multi-line log entry.
-        let mut logger = test_logger();
-        let result = normalize_wire_input_for_test("missing\nfile.json", &mut logger, false);
-        assert!(result.is_err());
-
-        let message = match result.unwrap_err() {
-            WxcError::ConfigParse(message) => message,
-            other => panic!("expected ConfigParse error, got: {other:?}"),
-        };
-        assert!(!message.contains('\n'), "raw newline leaked: {message}");
-        assert!(message.contains("missing\\nfile.json"), "got: {message}");
-    }
-
-    #[test]
-    fn empty_file_path_error_is_logged_once() {
-        let mut logger = test_logger();
-        let result = normalize_wire_input_for_test("", &mut logger, false);
-        assert!(result.is_err());
-        assert_eq!(
-            logger
-                .get_buffer()
-                .matches("Configuration file not found:")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn file_read_error_is_logged_once() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut logger = test_logger();
-        let result =
-            normalize_wire_input_for_test(directory.path().to_str().unwrap(), &mut logger, false);
-        assert!(result.is_err());
-        assert_eq!(
-            logger
-                .get_buffer()
-                .matches("Failed to read configuration file")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn invalid_base64() {
-        let mut logger = test_logger();
-        let result = normalize_wire_input_for_test("not-valid-base64!!!", &mut logger, true);
-        assert!(result.is_err());
-        assert_eq!(
-            logger
-                .get_buffer()
-                .lines()
-                .filter(|line| line.contains("Failed to decode base64 configuration"))
-                .count(),
-            1,
-            "the fatal diagnostic should be logged once"
-        );
-    }
-
-    #[test]
-    fn console_mode_logs_decode_errors_once() {
-        let directory = tempfile::tempdir().unwrap();
-        let log_path = directory.path().join("mxc.log");
-        let mut logger = Logger::new(Mode::Console);
-        logger.enable_file_sink(&log_path).unwrap();
-
-        let result = normalize_wire_input_for_test("not-valid-base64!!!", &mut logger, true);
-        assert!(result.is_err());
-
-        drop(logger);
-        let log = std::fs::read_to_string(log_path).unwrap();
-        assert_eq!(
-            log.matches("Failed to decode base64 configuration").count(),
-            1,
-            "console mode should emit one decode diagnostic"
-        );
     }
 
     #[test]
@@ -4391,2198 +3991,6 @@ mod tests {
     }
 
     #[test]
-    fn invalid_json() {
-        let encoded = base64_encode(b"{ not json }");
-        let mut logger = test_logger();
-        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
-        assert!(result.is_err());
-        assert!(logger.get_buffer().contains("Invalid JSON syntax:"));
-    }
-
-    #[test]
-    fn learning_mode_boolean_maps_to_deny_and_record_capability() {
-        let json = r#"{"process": {"commandLine": "echo x"}, "containment": "processcontainer", "processContainer": {"learningMode": true}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req
-            .policy
-            .capabilities
-            .contains(&"learningModeLogging".to_string()));
-        // The boolean must NOT inject the allow-all permissive capability.
-        assert!(!req
-            .policy
-            .capabilities
-            .contains(&"permissiveLearningMode".to_string()));
-    }
-
-    #[test]
-    fn explicit_learning_mode_capabilities_are_rejected_case_insensitively() {
-        for capability in [
-            "learningModeLogging",
-            "LearningModeLogging",
-            "permissiveLearningMode",
-            "PERMISSIVELEARNINGMODE",
-        ] {
-            let json = format!(
-                r#"{{"process": {{"commandLine": "echo x"}}, "containment": "processcontainer", "processContainer": {{"capabilities": ["{capability}"]}}}}"#
-            );
-            let encoded = base64_encode(json.as_bytes());
-            let mut logger = test_logger();
-
-            let error = normalize_wire_input_for_test(&encoded, &mut logger, true)
-                .expect_err("reserved learning-mode capability must be rejected");
-            let message = error.to_string();
-            assert!(message.contains("reserved learning-mode capability"));
-            assert!(message.contains(capability));
-        }
-    }
-
-    #[test]
-    fn comma_delimited_capability_entries_are_rejected() {
-        for capability in [
-            "internetClient,permissiveLearningMode",
-            "learningModeLogging,internetClient",
-            "internetClient,privateNetworkClientServer",
-        ] {
-            let json = format!(
-                r#"{{"process": {{"commandLine": "echo x"}}, "containment": "processcontainer", "processContainer": {{"capabilities": ["{capability}"]}}}}"#
-            );
-            let encoded = base64_encode(json.as_bytes());
-            let mut logger = test_logger();
-
-            let error = normalize_wire_input_for_test(&encoded, &mut logger, true)
-                .expect_err("comma-delimited capability entry must be rejected");
-            let message = error.to_string();
-            assert!(message.contains("must not contain a comma"));
-            assert!(message.contains("separate JSON array entries"));
-            assert!(message.contains(capability));
-        }
-    }
-
-    // ====== Tests ported from C++ ConfigurationParserTests.cpp ======
-
-    #[test]
-    fn script_with_timeout() {
-        let json =
-            r#"{"process": {"commandLine": "import sys\nprint(sys.version)", "timeout": 60000}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.script_timeout, 60000);
-    }
-
-    #[test]
-    fn process_container_capabilities() {
-        let json = r#"{
-            "process": {"commandLine": "print('test')"},
-            "containment": "processcontainer",
-            "processContainer": {
-                "capabilities": ["internetClient", "privateNetworkClientServer", "documentsLibrary"]
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.policy.capabilities.len(), 3);
-        assert_eq!(req.policy.capabilities[0], "internetClient");
-        assert_eq!(req.policy.capabilities[1], "privateNetworkClientServer");
-        assert_eq!(req.policy.capabilities[2], "documentsLibrary");
-    }
-
-    #[test]
-    fn capture_denials_absent_leaves_policy_none() {
-        let json = r#"{
-            "process": {"commandLine": "print('test')"},
-            "containment": "processcontainer",
-            "processContainer": {}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.capture_denials.is_none());
-    }
-
-    #[test]
-    fn capture_denials_presence_enables_capture_without_path() {
-        let json = r#"{
-            "process": {"commandLine": "print('test')"},
-            "containment": "processcontainer",
-            "processContainer": {"captureDenials": {}}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        let cd = req
-            .policy
-            .capture_denials
-            .expect("captureDenials presence should enable capture");
-        assert!(cd.output_path.is_none());
-        assert!(!cd.retain_etl);
-        // Omitting `mode` defaults to the safe block behavior.
-        assert_eq!(cd.mode, CaptureDenialsMode::Block);
-    }
-
-    #[test]
-    fn capture_denials_retain_etl_is_parsed() {
-        let json = r#"{
-            "process": {"commandLine": "print('test')"},
-            "containment": "processcontainer",
-            "processContainer": {"captureDenials": {"retainEtl": true}}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        let cd = req.policy.capture_denials.expect("captureDenials present");
-        assert!(cd.retain_etl);
-    }
-
-    #[test]
-    fn capture_denials_mode_block_is_parsed() {
-        let json = r#"{
-            "process": {"commandLine": "print('test')"},
-            "containment": "processcontainer",
-            "processContainer": {"captureDenials": {"mode": "block"}}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        let cd = req.policy.capture_denials.expect("captureDenials present");
-        assert_eq!(cd.mode, CaptureDenialsMode::Block);
-    }
-
-    #[test]
-    fn capture_denials_mode_allow_is_parsed() {
-        let json = r#"{
-            "process": {"commandLine": "print('test')"},
-            "containment": "processcontainer",
-            "processContainer": {"captureDenials": {"mode": "allow"}}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        let cd = req.policy.capture_denials.expect("captureDenials present");
-        assert_eq!(cd.mode, CaptureDenialsMode::Allow);
-    }
-
-    #[test]
-    fn capture_denials_block_injects_learning_mode_logging_capability() {
-        let json = r#"{
-            "process": {"commandLine": "print('test')"},
-            "containment": "processcontainer",
-            "processContainer": {"captureDenials": {"mode": "block"}}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(
-            req.policy
-                .capabilities
-                .contains(&"learningModeLogging".to_string()),
-            "block capture must additively inject learningModeLogging: {:?}",
-            req.policy.capabilities
-        );
-        assert!(
-            !req.policy
-                .capabilities
-                .contains(&"permissiveLearningMode".to_string()),
-            "block must not inject permissiveLearningMode"
-        );
-    }
-
-    #[test]
-    fn capture_denials_allow_injects_permissive_learning_mode_capability() {
-        let json = r#"{
-            "process": {"commandLine": "print('test')"},
-            "containment": "processcontainer",
-            "processContainer": {"captureDenials": {"mode": "allow"}}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(
-            req.policy
-                .capabilities
-                .contains(&"permissiveLearningMode".to_string()),
-            "allow capture must inject permissiveLearningMode: {:?}",
-            req.policy.capabilities
-        );
-    }
-
-    #[test]
-    fn capture_denials_default_injects_learning_mode_logging_capability() {
-        let json = r#"{
-            "process": {"commandLine": "print('test')"},
-            "containment": "processcontainer",
-            "processContainer": {"captureDenials": {}}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(
-            req.policy
-                .capabilities
-                .contains(&"learningModeLogging".to_string()),
-            "default (block) capture must inject learningModeLogging: {:?}",
-            req.policy.capabilities
-        );
-    }
-
-    #[test]
-    fn capture_denials_allow_overrides_learning_mode_boolean() {
-        let json = r#"{
-            "process": {"commandLine": "print('test')"},
-            "containment": "processcontainer",
-            "processContainer": {
-                "learningMode": true,
-                "capabilities": ["internetClient"],
-                "captureDenials": {"mode": "allow"}
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(
-            req.policy
-                .capabilities
-                .contains(&"internetClient".to_string()),
-            "the workload's own capabilities must be preserved"
-        );
-        assert!(
-            req.policy
-                .capabilities
-                .contains(&"permissiveLearningMode".to_string()),
-            "allow capture must inject permissiveLearningMode"
-        );
-        assert!(
-            !req.policy
-                .capabilities
-                .contains(&"learningModeLogging".to_string()),
-            "allow capture must remove deny-and-record mode"
-        );
-        assert!(
-            !logger.get_buffer().contains("restrictions remain enforced"),
-            "parser must not log the superseded deny-and-record mode"
-        );
-    }
-
-    #[test]
-    fn capture_denials_unknown_mode_rejected() {
-        let json = r#"{
-            "process": {"commandLine": "print('test')"},
-            "containment": "processcontainer",
-            "processContainer": {"captureDenials": {"mode": "audit"}}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true)
-            .expect_err("an unknown captureDenials mode must be rejected");
-        // serde surfaces the accepted variants; the message must name both so
-        // the error is actionable.
-        let msg = format!("{err:?}");
-        assert!(
-            msg.contains("block") && msg.contains("allow"),
-            "error should list the valid modes: {msg}"
-        );
-    }
-
-    #[test]
-    fn capture_denials_accepts_valid_absolute_output_path() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join("denials.json");
-        let path_json = serde_json::to_string(&path.to_string_lossy()).unwrap();
-        let json = format!(
-            r#"{{
-                "process": {{"commandLine": "print('test')"}},
-                "containment": "processcontainer",
-                "processContainer": {{"captureDenials": {{"outputPath": {path_json}}}}}
-            }}"#
-        );
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        let cd = req.policy.capture_denials.expect("captureDenials present");
-        assert_eq!(
-            cd.output_path.as_deref(),
-            Some(path.to_string_lossy().as_ref())
-        );
-    }
-
-    #[test]
-    fn capture_denials_relative_output_path_rejected() {
-        let json = r#"{
-            "process": {"commandLine": "print('test')"},
-            "containment": "processcontainer",
-            "processContainer": {"captureDenials": {"outputPath": "relative/denials.json"}}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true)
-            .expect_err("a relative outputPath must be rejected");
-        assert!(
-            format!("{err:?}").contains("absolute"),
-            "error should mention the absolute-path requirement: {err:?}"
-        );
-    }
-
-    #[test]
-    fn capture_denials_missing_parent_dir_rejected() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        // Parent directory `nonexistent` is never created.
-        let path = dir.path().join("nonexistent").join("denials.json");
-        let path_json = serde_json::to_string(&path.to_string_lossy()).unwrap();
-        let json = format!(
-            r#"{{
-                "process": {{"commandLine": "print('test')"}},
-                "containment": "processcontainer",
-                "processContainer": {{"captureDenials": {{"outputPath": {path_json}}}}}
-            }}"#
-        );
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true)
-            .expect_err("an outputPath whose parent is missing must be rejected");
-        assert!(
-            format!("{err:?}").contains("parent directory does not"),
-            "error should mention the missing parent directory: {err:?}"
-        );
-    }
-
-    #[test]
-    fn capture_denials_filesystem_root_output_path_rejected() {
-        // A bare filesystem root has no parent (`Path::parent()` == None) and
-        // cannot name a trace file. Use a platform-appropriate root.
-        let root = if cfg!(windows) { "C:\\" } else { "/" };
-        let root_json = serde_json::to_string(root).unwrap();
-        let json = format!(
-            r#"{{
-                "process": {{"commandLine": "print('test')"}},
-                "containment": "processcontainer",
-                "processContainer": {{"captureDenials": {{"outputPath": {root_json}}}}}
-            }}"#
-        );
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true)
-            .expect_err("a filesystem-root outputPath must be rejected");
-        assert!(
-            format!("{err:?}").contains("directory root"),
-            "error should mention the directory-root rejection: {err:?}"
-        );
-    }
-
-    #[test]
-    fn capture_denials_existing_directory_output_path_rejected() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let path_json = serde_json::to_string(&dir.path().to_string_lossy()).unwrap();
-        let json = format!(
-            r#"{{
-                "process": {{"commandLine": "print('test')"}},
-                "containment": "processcontainer",
-                "processContainer": {{"captureDenials": {{"outputPath": {path_json}}}}}
-            }}"#
-        );
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true)
-            .expect_err("an existing directory outputPath must be rejected");
-        assert!(
-            format!("{err:?}").contains("existing directory"),
-            "error should identify the directory path: {err:?}"
-        );
-    }
-
-    #[test]
-    fn least_privilege_mode() {
-        let json = r#"{"process": {"commandLine": "print('test')"}, "containment": "processcontainer", "processContainer": {"leastPrivilege": true}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.least_privilege_mode);
-    }
-
-    #[test]
-    fn network_default_policy_allow() {
-        let json = r#"{"process": {"commandLine": "print('test')"}, "network": {"defaultPolicy": "allow"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Allow);
-    }
-
-    #[test]
-    fn network_default_policy_block() {
-        let json = r#"{"process": {"commandLine": "print('test')"}, "network": {"defaultPolicy": "block"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
-    }
-
-    #[test]
-    fn network_default_policy_absent_defaults_to_block_on_any_version() {
-        // wxc-exec is the trust boundary -- absent `defaultPolicy`
-        // resolves to `Block` regardless of declared schema version.
-        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha", "0.9.0-alpha"] {
-            let json = format!(
-                r#"{{"version": "{}", "process": {{"commandLine": "echo x"}}}}"#,
-                version
-            );
-            let encoded = base64_encode(json.as_bytes());
-            let mut logger = test_logger();
-            let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-            assert_eq!(
-                req.policy.default_network_policy,
-                NetworkPolicy::Block,
-                "version {} should default to Block",
-                version
-            );
-        }
-    }
-
-    #[test]
-    fn network_enforcement_mode_capabilities() {
-        let json = r#"{"process": {"commandLine": "print('test')"}, "network": {"enforcementMode": "capabilities"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(
-            req.policy.network_enforcement_mode,
-            NetworkEnforcementMode::Capabilities
-        );
-    }
-
-    #[test]
-    fn network_enforcement_mode_firewall() {
-        let json = r#"{"process": {"commandLine": "print('test')"}, "network": {"enforcementMode": "firewall"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(
-            req.policy.network_enforcement_mode,
-            NetworkEnforcementMode::Firewall
-        );
-    }
-
-    #[test]
-    fn network_enforcement_mode_both() {
-        let json = r#"{"process": {"commandLine": "print('test')"}, "network": {"enforcementMode": "both"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(
-            req.policy.network_enforcement_mode,
-            NetworkEnforcementMode::Both
-        );
-    }
-
-    #[test]
-    fn network_hosts() {
-        let json = r#"{
-            "process": {"commandLine": "print('test')"},
-            "network": {
-                "allowedHosts": ["example.com", "api.trusted.com"],
-                "blockedHosts": ["malicious.com", "tracker.net"]
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.policy.allowed_hosts.len(), 2);
-        assert_eq!(req.policy.allowed_hosts[0], "example.com");
-        assert_eq!(req.policy.allowed_hosts[1], "api.trusted.com");
-        assert_eq!(req.policy.blocked_hosts.len(), 2);
-        assert_eq!(req.policy.blocked_hosts[0], "malicious.com");
-        assert_eq!(req.policy.blocked_hosts[1], "tracker.net");
-    }
-
-    #[test]
-    fn network_allow_local_network() {
-        let json = r#"{
-            "process": {"commandLine": "print('test')"},
-            "network": {"allowLocalNetwork": true}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.allow_local_network);
-    }
-
-    #[test]
-    fn network_allow_local_network_defaults_false() {
-        let json = r#"{
-            "process": {"commandLine": "print('test')"},
-            "network": {}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(!req.policy.allow_local_network);
-    }
-
-    #[test]
-    fn network_specified_true_when_network_present() {
-        // An empty `network: {}` object still counts as "supplied".
-        let json = r#"{
-            "process": {"commandLine": "echo x"},
-            "network": {}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.network_specified);
-    }
-
-    #[test]
-    fn network_specified_false_when_network_absent() {
-        let json = r#"{"process": {"commandLine": "echo x"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(!req.policy.network_specified);
-    }
-
-    #[test]
-    fn ui_specified_true_when_ui_present() {
-        // An empty `ui: {}` still counts as "supplied" — the twin of
-        // `network_specified`. Backends with no UI primitive refuse on
-        // presence, because `UiPolicy::default()` is full lockdown and so an
-        // explicit lockdown `ui` is indistinguishable from an absent one.
-        let json = r#"{"process": {"commandLine": "echo x"}, "ui": {}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.ui_specified);
-    }
-
-    #[test]
-    fn ui_specified_false_when_ui_absent() {
-        let json = r#"{"process": {"commandLine": "echo x"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(!req.policy.ui_specified);
-    }
-    #[test]
-    fn filesystem_paths() {
-        let json = r#"{
-            "process": {"commandLine": "print('test')"},
-            "filesystem": {
-                "readwritePaths": ["C:\\Users\\Public", "C:\\Temp\\Data"],
-                "deniedPaths": ["C:\\Windows\\System32", "C:\\Program Files"]
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.policy.readwrite_paths.len(), 2);
-        assert_eq!(req.policy.readwrite_paths[0], "C:\\Users\\Public");
-        assert_eq!(req.policy.readwrite_paths[1], "C:\\Temp\\Data");
-        assert_eq!(req.policy.denied_paths.len(), 2);
-        assert_eq!(req.policy.denied_paths[0], "C:\\Windows\\System32");
-        assert_eq!(req.policy.denied_paths[1], "C:\\Program Files");
-    }
-
-    #[test]
-    fn block_evil_filesystem_paths() {
-        let json = r#"{
-            "process": {"commandLine": "print('test')"},
-            "filesystem": {
-                "readwritePaths": ["C:\\My \"Evil\\Path"]
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
-        assert!(result.is_err());
-    }
-
-    /// A blank grant names nothing and must be rejected before backend
-    /// execution, rather than being interpreted as an unset path.
-    #[test]
-    fn block_blank_filesystem_paths() {
-        for blank in ["", "   "] {
-            let json = format!(
-                r#"{{
-                "process": {{"commandLine": "print('test')"}},
-                "filesystem": {{ "readwritePaths": ["{blank}", "C:\\workspace"] }}
-            }}"#
-            );
-            let encoded = base64_encode(json.as_bytes());
-            let mut logger = test_logger();
-
-            let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
-            let err = result.expect_err("blank path should be rejected");
-            assert!(
-                format!("{err}").contains("empty"),
-                "unexpected error for {blank:?}: {err}"
-            );
-        }
-    }
-
-    /// An interior NUL truncates the path once converted to a C/UTF-16 string,
-    /// so the grant enforced would not be the one requested.
-    #[test]
-    fn block_filesystem_paths_with_embedded_nul() {
-        let json = r#"{
-            "process": {"commandLine": "print('test')"},
-            "filesystem": {
-                "readonlyPaths": ["C:\\workspace\u0000\\..\\secrets"]
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
-        let err = result.expect_err("embedded NUL should be rejected");
-        assert!(format!("{err}").contains("NUL"), "unexpected error: {err}");
-    }
-
-    #[test]
-    fn base64_complex_config() {
-        let json = r#"{
-            "containerId": "TestContainer",
-            "containment": "processcontainer",
-            "process": {
-                "commandLine": "import sys\nprint(sys.version)",
-                "timeout": 10000
-            },
-            "processContainer": {
-                "capabilities": ["internetClient", "privateNetworkClientServer"]
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.script_code, "import sys\nprint(sys.version)");
-        assert_eq!(req.script_timeout, 10000);
-        assert_eq!(req.container_id, "TestContainer");
-        assert_eq!(req.policy.capabilities.len(), 2);
-    }
-
-    #[test]
-    fn invalid_json_syntax() {
-        let json = r#"{"process": {"commandLine": "print('test')"}, INVALID_JSON}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn default_timeout_is_zero() {
-        let json = r#"{"process": {"commandLine": "echo hello"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.script_timeout, 0);
-    }
-
-    #[test]
-    fn allow_dacl_mutation_default_true() {
-        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.fallback.allow_dacl_mutation);
-    }
-
-    #[test]
-    fn allow_dacl_mutation_explicit_false() {
-        let json = r#"{
-            "process": {"commandLine": "echo hi"},
-            "fallback": {"allowDaclMutation": false}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(!req.policy.fallback.allow_dacl_mutation);
-    }
-
-    #[test]
-    fn allow_dacl_mutation_explicit_true() {
-        let json = r#"{
-            "process": {"commandLine": "echo hi"},
-            "fallback": {"allowDaclMutation": true}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.fallback.allow_dacl_mutation);
-    }
-
-    // ====== Containment backend selection tests ======
-
-    #[test]
-    fn default_containment_resolves_per_target() {
-        // Omitted `containment` resolves to the OS-native process sandbox:
-        // ProcessContainer on Windows, Bubblewrap on Linux, Seatbelt on macOS.
-        let json = r#"{"process": {"commandLine": "echo hello"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-
-        #[cfg(target_os = "linux")]
-        assert_eq!(req.containment, ContainmentBackend::Bubblewrap);
-        #[cfg(target_os = "macos")]
-        assert_eq!(req.containment, ContainmentBackend::Seatbelt);
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        assert_eq!(req.containment, ContainmentBackend::ProcessContainer);
-    }
-
-    #[test]
-    fn explicit_processcontainer_containment() {
-        let json =
-            r#"{"process": {"commandLine": "echo hello"}, "containment": "processcontainer"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.containment, ContainmentBackend::ProcessContainer);
-    }
-
-    #[test]
-    fn process_containment_resolves_per_target() {
-        // Abstract intent "process" resolves to the OS-native process sandbox:
-        // ProcessContainer on Windows, Bubblewrap on Linux, Seatbelt on macOS.
-        // Callers who want LXC (a full container) must request it explicitly
-        // via `"containment": "lxc"`.
-        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "process"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-
-        #[cfg(target_os = "linux")]
-        assert_eq!(req.containment, ContainmentBackend::Bubblewrap);
-        #[cfg(target_os = "macos")]
-        assert_eq!(req.containment, ContainmentBackend::Seatbelt);
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        assert_eq!(req.containment, ContainmentBackend::ProcessContainer);
-    }
-
-    #[test]
-    fn explicit_lxc_containment_unaffected_by_default_shift() {
-        // Regression guard: making bubblewrap the Linux default for the
-        // abstract `"process"` intent must NOT change how explicit `"lxc"`
-        // resolves. LXC remains available to any caller that asks for it.
-        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "lxc"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.containment, ContainmentBackend::Lxc);
-    }
-
-    #[test]
-    fn explicit_bubblewrap_containment_parses_cleanly() {
-        // Bubblewrap no longer requires gating in the parser/SDK; explicit
-        // `"bubblewrap"` should parse to the concrete backend on every
-        // target without error. (Host availability is checked at runtime by
-        // the runner, not here.)
-        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "bubblewrap"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.containment, ContainmentBackend::Bubblewrap);
-    }
-
-    #[test]
-    fn hyperlight_containment_value_parses() {
-        // Lock in that `"hyperlight"` is accepted by the parser (the
-        // `map_wire_containment` arm handles both one-shot and state-aware).
-        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "hyperlight"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.containment, ContainmentBackend::Hyperlight);
-    }
-
-    #[test]
-    fn vm_containment_resolves_per_target() {
-        // Abstract intent "vm" resolves to Windows Sandbox on Windows. On
-        // other targets there is no concrete VM backend yet, so the parser
-        // returns the historical `Vm` placeholder variant which the host
-        // binaries surface as a "not implemented" error.
-        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "vm"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-
-        #[cfg(target_os = "windows")]
-        assert_eq!(req.containment, ContainmentBackend::WindowsSandbox);
-        #[cfg(not(target_os = "windows"))]
-        assert_eq!(req.containment, ContainmentBackend::Vm);
-    }
-
-    #[test]
-    fn sandbox_containment() {
-        let json =
-            r#"{"process": {"commandLine": "echo hello"}, "containment": "windows_sandbox"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.containment, ContainmentBackend::WindowsSandbox);
-    }
-
-    #[test]
-    fn invalid_containment_value() {
-        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "docker"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("unknown variant") && msg.contains("docker"),
-            "expected serde unknown-variant rejection, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn sandbox_config_defaults() {
-        let json = r#"{"process": {"commandLine": "echo hello"}, "containment": "windows_sandbox", "experimental": {"windows_sandbox": {}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        let sandbox = req.experimental.windows_sandbox.unwrap();
-        assert_eq!(sandbox.idle_timeout_ms, 300_000);
-        assert_eq!(sandbox.daemon_pipe_name, "wxc-windows-sandbox");
-    }
-
-    #[test]
-    fn sandbox_config_custom_values() {
-        let json = r#"{
-            "process": {"commandLine": "echo hello"},
-            "containment": "windows_sandbox",
-            "experimental": {
-                "windows_sandbox": {
-                    "idleTimeoutMs": 60000,
-                    "daemonPipeName": "my-custom-pipe"
-                }
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        let sandbox = req.experimental.windows_sandbox.unwrap();
-        assert_eq!(sandbox.idle_timeout_ms, 60000);
-        assert_eq!(sandbox.daemon_pipe_name, "my-custom-pipe");
-    }
-
-    // ====== Network proxy configuration tests ======
-
-    #[test]
-    fn no_proxy_leaves_default() {
-        let json =
-            r#"{"process": {"commandLine": "echo test"}, "network": {"defaultPolicy": "block"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(!req.policy.network_proxy.is_enabled());
-    }
-
-    #[test]
-    fn proxy_localhost_port() {
-        let json = r#"{
-            "process": {"commandLine": "echo test"},
-            "containment": "processcontainer",
-            "network": {
-                "proxy": { "localhost": 8080 }
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.network_proxy.is_enabled());
-        assert_eq!(
-            req.policy.network_proxy.address.as_ref().unwrap().port(),
-            8080
-        );
-    }
-
-    #[test]
-    fn proxy_url_parsed() {
-        let json = r#"{
-            "process": {"commandLine": "echo test"},
-            "containment": "processcontainer",
-            "network": {
-                "proxy": { "url": "http://localhost:3128" }
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.network_proxy.is_enabled());
-        let addr = req.policy.network_proxy.address.as_ref().unwrap();
-        assert_eq!(addr.port(), 3128);
-        assert_eq!(addr.host(), "localhost");
-    }
-
-    #[test]
-    fn proxy_url_non_localhost() {
-        let json = r#"{
-            "process": {"commandLine": "echo test"},
-            "containment": "processcontainer",
-            "network": {
-                "proxy": { "url": "http://proxy.example.com:8080" }
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        let addr = req.policy.network_proxy.address.as_ref().unwrap();
-        assert_eq!(addr.port(), 8080);
-        assert_eq!(addr.host(), "proxy.example.com");
-    }
-
-    #[test]
-    fn proxy_url_missing_port() {
-        let json =
-            r#"{"process":{"commandLine":"x"},"network":{"proxy":{"url":"http://localhost"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn proxy_url_ipv6_loopback() {
-        let json = r#"{
-            "process": {"commandLine": "echo test"},
-            "containment": "processcontainer",
-            "network": {
-                "proxy": { "url": "http://[::1]:8080" }
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        let addr = req.policy.network_proxy.address.as_ref().unwrap();
-        assert_eq!(addr.port(), 8080);
-        assert_eq!(addr.host(), "[::1]");
-    }
-
-    #[test]
-    fn proxy_with_firewall_fields() {
-        let json = r#"{
-            "process": {"commandLine": "echo test"},
-            "containment": "processcontainer",
-            "network": {
-                "defaultPolicy": "block",
-                "allowedHosts": ["api.github.com"],
-                "proxy": { "localhost": 9090 }
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(
-            req.policy.network_proxy.address.as_ref().unwrap().port(),
-            9090
-        );
-        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
-    }
-
-    #[test]
-    fn proxy_rejected_with_an_unsupported_backend() {
-        let json = r#"{"process":{"commandLine":"x"},"containment":"vm","network":{"proxy":{"localhost":8080}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        assert!(
-            format!("{}", err).contains("Network proxy is only supported"),
-            "expected the supported-backend gate to reject 'vm', got: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn proxy_accepted_with_lxc() {
-        // LXC requires a routable proxy host: localhost/127.0.0.1 is the
-        // container loopback and unreachable, so use network.proxy.url.
-        // A firewall mode is required, because that is what makes the proxy an
-        // exception to deny-all rather than an unenforced suggestion.
-        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://proxy.example.com:8080"},"enforcementMode":"firewall"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.network_proxy.is_enabled());
-        let addr = req.policy.network_proxy.address.as_ref().unwrap();
-        assert_eq!(addr.host(), "proxy.example.com");
-        assert_eq!(addr.port(), 8080);
-    }
-
-    #[test]
-    fn proxy_with_lxc_accepts_both_mode() {
-        // 'both' also installs the iptables rules, so it satisfies the guard.
-        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://proxy.example.com:8080"},"enforcementMode":"both"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.network_proxy.is_enabled());
-    }
-
-    #[test]
-    fn proxy_with_lxc_and_omitted_enforcement_mode_is_rejected() {
-        // enforcementMode defaults to 'capabilities', under which
-        // apply_firewall_rules installs nothing. Accepting this config would
-        // inject HTTP(S)_PROXY while leaving direct egress unrestricted, so
-        // anything ignoring the environment variables bypasses the proxy.
-        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://proxy.example.com:8080"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        assert!(
-            format!("{}", err).contains("network.proxy requires network.enforcementMode"),
-            "expected the LXC enforcement-mode rejection, got: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn proxy_with_lxc_and_explicit_capabilities_mode_is_rejected() {
-        // Stating 'capabilities' explicitly is the same fail-open as omitting
-        // it, so it must be rejected identically rather than read as consent.
-        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://proxy.example.com:8080"},"enforcementMode":"capabilities"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        assert!(
-            format!("{}", err).contains("network.proxy requires network.enforcementMode"),
-            "expected the LXC enforcement-mode rejection, got: {}",
-            err
-        );
-    }
-
-    // The credential guard runs after `convert_wire_proxy`, so a
-    // credential-bearing URL that fails an *earlier* check never reaches it.
-    // Those earlier errors have to redact on their own, or they leak the
-    // password the guard exists to keep out of the diagnostic stream.
-    #[test]
-    fn a_malformed_credential_bearing_proxy_url_does_not_leak_the_password() {
-        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://alice:hunter2@proxy.example.com"},"enforcementMode":"firewall"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let msg = format!(
-            "{}",
-            normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err()
-        );
-
-        assert!(
-            msg.contains("must include a port"),
-            "expected the port diagnostic, got: {msg}"
-        );
-        assert!(
-            !msg.contains("hunter2"),
-            "the password leaked into the port diagnostic: {msg}"
-        );
-        assert!(
-            !msg.contains("alice:hunter2"),
-            "the userinfo leaked into the port diagnostic: {msg}"
-        );
-    }
-    #[test]
-    fn proxy_url_with_credentials_is_rejected_for_lxc() {
-        // LXC forwards the URL to lxc-attach as `--set-var=HTTP_PROXY=...`, and
-        // argv is world-readable via /proc/<pid>/cmdline, so accepting this
-        // would publish the password to every local user.
-        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://alice:hunter2@proxy.example.com:8080"},"enforcementMode":"firewall"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{}", err);
-        assert!(
-            msg.contains("must not carry credentials"),
-            "expected the LXC credential rejection, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn the_lxc_credential_rejection_does_not_leak_the_password() {
-        // The error is the one place a rejected secret could still escape, so
-        // it must name the URL only in redacted form.
-        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://alice:hunter2@proxy.example.com:8080"},"enforcementMode":"firewall"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let msg = format!(
-            "{}",
-            normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err()
-        );
-        assert!(
-            !msg.contains("hunter2") && !msg.contains("alice"),
-            "credentials leaked into the rejection: {msg}"
-        );
-        assert!(
-            msg.contains("***@proxy.example.com:8080"),
-            "expected the redacted authority in the rejection: {msg}"
-        );
-    }
-
-    #[test]
-    fn a_credential_free_proxy_url_is_still_accepted_for_lxc() {
-        // Negative control: without this, a guard that rejected every LXC
-        // proxy URL would pass both tests above.
-        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://proxy.example.com:8080"},"enforcementMode":"firewall"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.network_proxy.is_enabled());
-    }
-
-    #[test]
-    fn an_at_sign_in_the_path_is_not_mistaken_for_credentials() {
-        // `@` after the authority is an ordinary path character. Rejecting on
-        // a bare `@` would refuse a URL that carries no secret at all.
-        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://proxy.example.com:8080/route@v2"},"enforcementMode":"firewall"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.network_proxy.is_enabled());
-    }
-
-    #[test]
-    fn proxy_localhost_rejected_with_lxc() {
-        // network.proxy.localhost maps to 127.0.0.1, unreachable from inside
-        // the LXC network namespace — it must be rejected at parse time.
-        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"localhost":8080}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        assert!(
-            format!("{}", err).contains("network.proxy.localhost is not reachable"),
-            "expected the LXC localhost rejection, got: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn proxy_loopback_url_rejected_with_lxc() {
-        // The url form names the container's own loopback just as the
-        // localhost shorthand does, so it is rejected for the same reason.
-        // WSLc is deliberately the other way: see
-        // `proxy_loopback_url_accepted_with_wslc`.
-        for url in [
-            "http://localhost:8080",
-            "http://127.0.0.1:8080",
-            "http://[::1]:8080",
-        ] {
-            let json = format!(
-                r#"{{"process":{{"commandLine":"x"}},"containment":"lxc","network":{{"proxy":{{"url":"{}"}}}}}}"#,
-                url
-            );
-            let encoded = base64_encode(json.as_bytes());
-            let mut logger = test_logger();
-
-            let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-            assert!(
-                format!("{}", err).contains("loopback address"),
-                "expected the LXC loopback-url rejection for {}, got: {}",
-                url,
-                err
-            );
-        }
-    }
-
-    #[test]
-    fn proxy_builtin_test_server_rejected_with_lxc() {
-        // LXC enforces a configured proxy address with iptables; it does not
-        // launch the builtin testing proxy.
-        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"builtinTestServer":true}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        assert!(format!("{}", err).contains("builtinTestServer is not supported"));
-    }
-
-    #[test]
-    fn proxy_rejects_port_zero() {
-        let json = r#"{"process":{"commandLine":"x"},"network":{"proxy":{"localhost":0}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn proxy_rejects_missing_localhost() {
-        let json = r#"{"process":{"commandLine":"x"},"network":{"proxy":{}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn proxy_rejects_non_object() {
-        let json = r#"{"process":{"commandLine":"x"},"network":{"proxy":true}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn proxy_builtin_test_server() {
-        let json = r#"{
-            "process": {"commandLine": "echo test"},
-            "containment": "processcontainer",
-            "network": {
-                "proxy": { "builtinTestServer": true }
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.network_proxy.is_enabled());
-        assert!(req.policy.network_proxy.builtin_test_server);
-        assert!(req.policy.network_proxy.address.is_some());
-    }
-
-    #[test]
-    fn proxy_builtin_test_server_rejects_extra_keys() {
-        let json = r#"{"process":{"commandLine":"x"},"network":{"proxy":{"builtinTestServer":true,"localhost":8080}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn proxy_builtin_test_server_rejects_false() {
-        let json =
-            r#"{"process":{"commandLine":"x"},"network":{"proxy":{"builtinTestServer":false}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn proxy_builtin_test_server_rejected_with_non_processcontainer() {
-        // lxc is not allowed -- proxy is gated to processcontainer + bubblewrap.
-        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"builtinTestServer":true}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn proxy_accepted_with_bubblewrap() {
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containment": "bubblewrap",
-            "process": {"commandLine": "echo hi"},
-            "network": {"proxy": {"builtinTestServer": true}}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.network_proxy.is_enabled());
-        assert!(req.policy.network_proxy.builtin_test_server);
-    }
-
-    #[test]
-    fn proxy_accepted_with_seatbelt() {
-        let json = r#"{
-            "version": "0.7.0-alpha",
-            "containment": "seatbelt",
-            "process": {"commandLine": "echo hi"},
-            "network": {"proxy": {"builtinTestServer": true}}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.network_proxy.is_enabled());
-        assert!(req.policy.network_proxy.builtin_test_server);
-    }
-
-    #[test]
-    fn proxy_url_accepted_with_seatbelt() {
-        let json = r#"{
-            "version": "0.7.0-alpha",
-            "containment": "seatbelt",
-            "process": {"commandLine": "echo hi"},
-            "network": {"proxy": {"url": "http://127.0.0.1:8080"}}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.network_proxy.is_enabled());
-        assert!(!req.policy.network_proxy.builtin_test_server);
-        let addr = req.policy.network_proxy.address.as_ref().unwrap();
-        assert_eq!(addr.port(), 8080);
-    }
-
-    #[test]
-    fn proxy_with_bubblewrap_and_firewall_enforcement_is_rejected() {
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containment": "bubblewrap",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "proxy": {"builtinTestServer": true},
-                "enforcementMode": "firewall",
-                "allowedHosts": ["example.com"]
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{}", err);
-        assert!(
-            msg.contains("network.proxy cannot be combined with"),
-            "unexpected error message: {}",
-            msg
-        );
-    }
-
-    #[test]
-    fn proxy_with_bubblewrap_and_both_enforcement_is_rejected() {
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containment": "bubblewrap",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "proxy": {"builtinTestServer": true},
-                "enforcementMode": "both",
-                "blockedHosts": ["evil.example"]
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        assert!(normalize_wire_input_for_test(&encoded, &mut logger, true).is_err());
-    }
-
-    #[test]
-    fn proxy_with_bubblewrap_and_capabilities_enforcement_is_accepted() {
-        // Capabilities mode never invokes iptables, so combining it with a
-        // proxy is fine and must NOT trigger the conflict guard.
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containment": "bubblewrap",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "proxy": {"builtinTestServer": true},
-                "enforcementMode": "capabilities",
-                "allowedHosts": ["example.com"]
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.network_proxy.is_enabled());
-        assert_eq!(req.policy.allowed_hosts, vec!["example.com".to_string()]);
-    }
-
-    #[test]
-    fn external_proxy_url_with_bubblewrap_and_allowed_hosts_is_rejected() {
-        // The external proxy enforces its own policy; the runner does not
-        // forward host lists to it. Combining the two is a silent
-        // policy-weakening trap and must be rejected at parse time.
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containment": "bubblewrap",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "proxy": {"url": "http://127.0.0.1:8080"},
-                "allowedHosts": ["api.github.com"]
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{}", err);
-        assert!(
-            msg.contains("external network.proxy") && msg.contains("allowedHosts"),
-            "unexpected error message: {}",
-            msg
-        );
-    }
-
-    #[test]
-    fn external_proxy_localhost_with_bubblewrap_and_blocked_hosts_is_rejected() {
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containment": "bubblewrap",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "proxy": {"localhost": 8080},
-                "blockedHosts": ["evil.example.com"]
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        assert!(format!("{}", err).contains("external network.proxy"));
-    }
-
-    #[test]
-    fn external_proxy_with_bubblewrap_and_default_block_is_rejected() {
-        // defaultPolicy=block is a hard-block intent; pairing it with an
-        // external proxy whose policy we don't control silently weakens
-        // enforcement.
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containment": "bubblewrap",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "proxy": {"url": "http://127.0.0.1:8080"},
-                "defaultPolicy": "block"
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        assert!(format!("{}", err).contains("defaultPolicy"));
-    }
-
-    #[test]
-    fn external_proxy_with_bubblewrap_and_no_host_policy_is_accepted() {
-        // Pure delegate-to-external-proxy with no MXC-side host policy is
-        // the supported external-proxy use case. Under deny-by-default,
-        // callers must explicitly set `defaultPolicy: "allow"` to opt
-        // into trusting the external proxy with full policy delegation.
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containment": "bubblewrap",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "proxy": {"url": "http://127.0.0.1:8080"},
-                "defaultPolicy": "allow"
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.network_proxy.is_enabled());
-        assert!(!req.policy.network_proxy.builtin_test_server);
-    }
-
-    #[test]
-    fn builtin_proxy_with_bubblewrap_and_host_policy_is_accepted() {
-        // The builtin proxy DOES enforce host lists at the proxy layer, so
-        // combining it with allowedHosts is fine.
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containment": "bubblewrap",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "proxy": {"builtinTestServer": true},
-                "allowedHosts": ["api.github.com"],
-                "defaultPolicy": "block"
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.network_proxy.builtin_test_server);
-        assert_eq!(req.policy.allowed_hosts, vec!["api.github.com".to_string()]);
-    }
-
-    #[test]
-    fn bubblewrap_proxy_with_default_block_and_empty_allowlist_warns() {
-        // Cooperative mode with no allowlist denies HTTP_PROXY-aware clients
-        // but raw-socket clients still reach the host network. Parser must
-        // surface a warning (does not reject).
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containment": "bubblewrap",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "proxy": {"builtinTestServer": true},
-                "defaultPolicy": "block"
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.network_proxy.is_enabled());
-        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
-        assert!(
-            logger
-                .take_warnings()
-                .iter()
-                .any(|warning| warning.contains("Bubblewrap network.proxy")),
-            "warning should be retained for callers"
-        );
-    }
-
-    #[test]
-    fn proxy_url_with_credentials_is_rejected_for_bubblewrap() {
-        // Bubblewrap serializes the URL into a `bwrap --setenv HTTP_PROXY ...`
-        // argument, and argv is world-readable via /proc/<pid>/cmdline, so
-        // accepting this would publish the password to every local user.
-        let json = r#"{"process":{"commandLine":"x"},"containment":"bubblewrap","network":{"proxy":{"url":"http://alice:hunter2@proxy.example.com:8080"},"defaultPolicy":"allow"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{}", err);
-        assert!(
-            msg.contains("must not carry credentials"),
-            "expected the Bubblewrap credential rejection, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn the_bubblewrap_credential_rejection_does_not_leak_the_password() {
-        // The rejection is the one place a refused secret could still escape,
-        // so it must name the URL only in redacted form.
-        let json = r#"{"process":{"commandLine":"x"},"containment":"bubblewrap","network":{"proxy":{"url":"http://alice:hunter2@proxy.example.com:8080"},"defaultPolicy":"allow"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let msg = format!(
-            "{}",
-            normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err()
-        );
-        assert!(
-            !msg.contains("hunter2") && !msg.contains("alice"),
-            "credentials leaked into the rejection: {msg}"
-        );
-        assert!(
-            msg.contains("***@proxy.example.com:8080"),
-            "expected the redacted authority in the rejection: {msg}"
-        );
-    }
-
-    #[test]
-    fn a_credential_free_proxy_url_is_still_accepted_for_bubblewrap() {
-        // Negative control: the guard must reject only credential-bearing URLs,
-        // not every Bubblewrap proxy URL.
-        let json = r#"{"process":{"commandLine":"x"},"containment":"bubblewrap","network":{"proxy":{"url":"http://proxy.example.com:8080"},"defaultPolicy":"allow"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.network_proxy.is_enabled());
-    }
-
-    #[test]
-    fn proxy_accepted_with_wslc_url_form() {
-        // WSLc supports the cooperative env-var proxy via a routable `url`.
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containment": "wslc",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "proxy": {"url": "http://proxy.example:8080"},
-                "defaultPolicy": "allow"
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.network_proxy.is_enabled());
-        assert!(!req.policy.network_proxy.builtin_test_server);
-        let addr = req.policy.network_proxy.address.as_ref().unwrap();
-        assert_eq!(addr.to_url(), "http://proxy.example:8080");
-    }
-
-    #[test]
-    fn proxy_rejects_wslc_localhost_form() {
-        // The localhost form implies a host-loopback proxy, which a WSLc
-        // container (own network namespace) cannot reach. Must be rejected.
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containment": "wslc",
-            "process": {"commandLine": "echo hi"},
-            "network": {"proxy": {"localhost": 8080}}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        assert!(
-            format!("{err}").contains("WSLc: network.proxy must use the 'url' form"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn proxy_rejects_wslc_builtin_test_server() {
-        // builtinTestServer spins up an MXC-run in-host proxy, unreachable
-        // from a WSLc container. Must be rejected with the url-form message.
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containment": "wslc",
-            "process": {"commandLine": "echo hi"},
-            "network": {"proxy": {"builtinTestServer": true}}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        assert!(
-            format!("{err}").contains("WSLc: network.proxy must use the 'url' form"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn proxy_loopback_url_accepted_with_wslc() {
-        // A WSLc container runs in its own network namespace, and the supported
-        // topology puts the proxy *inside* it. `tests/configs/wslc_network_proxy.json`
-        // starts a marker server on 127.0.0.1:8888 and points the proxy at it,
-        // because loopback is the only address both the client and a self-hosted
-        // proxy can reach -- `run_wslc_proxy_test.ps1` says so directly.
-        //
-        // The `localhost` and `builtinTestServer` forms stay rejected above:
-        // those name a proxy MXC runs on the *host*, which is the unreachable
-        // one. The distinction is which side of the namespace the proxy is on,
-        // not whether the literal is a loopback address.
-        for url in [
-            "http://localhost:8080",
-            "http://127.0.0.1:8080",
-            "http://[::1]:8080",
-        ] {
-            let json = format!(
-                r#"{{"process":{{"commandLine":"x"}},"containment":"wslc","network":{{"proxy":{{"url":"{}"}},"defaultPolicy":"allow"}}}}"#,
-                url
-            );
-            let encoded = base64_encode(json.as_bytes());
-            let mut logger = test_logger();
-
-            let req =
-                normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_or_else(|e| {
-                    panic!("WSLc must accept its in-container proxy {url}, got: {e}")
-                });
-            assert_eq!(
-                req.policy
-                    .network_proxy
-                    .address
-                    .as_ref()
-                    .expect("the proxy address must survive parsing")
-                    .to_url(),
-                url
-            );
-        }
-    }
-
-    #[test]
-    fn proxy_rejects_non_http_scheme() {
-        // Non-HTTP schemes are silently ignored by many clients when injected
-        // as HTTP(S)_PROXY, which fails open. Reject at parse time.
-        for url in ["socks5://proxy.example:1080", "ftp://proxy.example:21"] {
-            let json = format!(
-                r#"{{
-                    "process": {{"commandLine": "echo hi"}},
-                    "containment": "processcontainer",
-                    "network": {{"proxy": {{"url": "{url}"}}}}
-                }}"#
-            );
-            let encoded = base64_encode(json.as_bytes());
-            let mut logger = test_logger();
-            let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-            assert!(
-                format!("{err}").contains("must use the 'http' or 'https' scheme"),
-                "expected scheme rejection for {url}, got: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn proxy_scheme_error_redacts_credentials() {
-        // A rejected proxy URL must not echo embedded `user:password@`
-        // userinfo into the error (which reaches the diagnostic/log stream).
-        let json = r#"{
-            "process": {"commandLine": "echo hi"},
-            "containment": "processcontainer",
-            "network": {"proxy": {"url": "socks5://alice:s3cr3t@proxy.example:1080"}}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("must use the 'http' or 'https' scheme"),
-            "expected scheme rejection, got: {msg}"
-        );
-        assert!(
-            !msg.contains("s3cr3t") && !msg.contains("alice:s3cr3t"),
-            "credentials leaked into error: {msg}"
-        );
-        assert!(
-            msg.contains("***@proxy.example"),
-            "expected redacted userinfo in error: {msg}"
-        );
-    }
-
-    #[test]
-    fn proxy_rejects_wslc_url_with_block_default() {
-        // A WSLc url proxy needs outbound networking; the default 'block'
-        // policy (defaultPolicy omitted) leaves the proxy unreachable.
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containment": "wslc",
-            "process": {"commandLine": "echo hi"},
-            "network": {"proxy": {"url": "http://proxy.example:8080"}}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        assert!(
-            format!("{err}").contains("requires network.defaultPolicy='allow'"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn proxy_rejects_wslc_url_with_host_lists() {
-        // Host lists are not forwarded to the proxy; reject to avoid silently
-        // weaker enforcement.
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containment": "wslc",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "proxy": {"url": "http://proxy.example:8080"},
-                "defaultPolicy": "allow",
-                "allowedHosts": ["example.com"]
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        assert!(
-            format!("{err}").contains("allowedHosts/blockedHosts"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn wslc_rejects_host_filtering_block_with_allowed_hosts() {
-        // 'block' default + an allowlist is the doomed in-container iptables path
-        // (Privileged != CAP_NET_ADMIN). Reject at parse time instead of failing
-        // the run at exec.
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containment": "wslc",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "defaultPolicy": "block",
-                "allowedHosts": ["example.com"]
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        assert!(
-            format!("{err}").contains("per-host egress filtering"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn wslc_rejects_host_filtering_allow_with_blocked_hosts() {
-        // 'allow' default + a blocklist is the other in-container iptables path.
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containment": "wslc",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "defaultPolicy": "allow",
-                "blockedHosts": ["evil.example"]
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        assert!(
-            format!("{err}").contains("per-host egress filtering"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn wslc_accepts_block_default_without_host_lists() {
-        // 'block' with no allowlist is a full cutoff (NetworkingMode::None) --
-        // enforceable, so it must NOT be rejected.
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containment": "wslc",
-            "process": {"commandLine": "echo hi"},
-            "network": {"defaultPolicy": "block"}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
-        assert!(req.policy.allowed_hosts.is_empty());
-    }
-
-    #[test]
-    fn wslc_accepts_allow_default_without_host_lists() {
-        // 'allow' with no blocklist is full NAT (Bridged) -- enforceable, not rejected.
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containment": "wslc",
-            "process": {"commandLine": "echo hi"},
-            "network": {"defaultPolicy": "allow"}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Allow);
-        assert!(req.policy.blocked_hosts.is_empty());
-    }
-
-    #[test]
-    fn wslc_rejects_allow_local_network_true() {
-        // A blanket inbound-listen grant is silently ignored by the WSLc runner
-        // (only explicit portMappings have inbound effect), so accepting it would
-        // promise reachability the backend never delivers. Reject at parse time.
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containment": "wslc",
-            "process": {"commandLine": "echo hi"},
-            "network": {"allowLocalNetwork": true}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        assert!(
-            format!("{err}").contains("allowLocalNetwork=true is not supported"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn wslc_accepts_allow_local_network_false() {
-        // The default/explicit `false` is a no-op and must be accepted.
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containment": "wslc",
-            "process": {"commandLine": "echo hi"},
-            "network": {"allowLocalNetwork": false}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(!req.policy.allow_local_network);
-    }
-
-    #[test]
-    fn new_toplevel_fields_parsed() {
-        let json = r#"{"version": "0.6.0-alpha", "containerId": "abc-123", "containment": "lxc", "process": {"commandLine": "echo hi"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.schema_version, "0.6.0-alpha");
-        assert_eq!(req.container_id, "abc-123");
-    }
-
-    #[test]
-    fn new_toplevel_fields_default_when_absent() {
-        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.schema_version, "");
-        assert_eq!(req.container_id, "");
-    }
-
-    #[test]
-    fn process_section_env_parsed() {
-        let json = r#"{
-            "process": {
-                "commandLine": "echo hi",
-                "env": ["FOO=bar", "BAZ=qux"]
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(
-            req.env,
-            Some(vec!["FOO=bar".to_string(), "BAZ=qux".to_string()])
-        );
-    }
-
-    #[test]
-    fn process_section_cwd_parsed() {
-        let json = r#"{
-            "process": {
-                "commandLine": "echo hi",
-                "cwd": "/workspace"
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.working_directory, "/workspace");
-    }
-
-    #[test]
-    fn process_section_timeout_parsed() {
-        let json = r#"{
-            "process": {
-                "commandLine": "echo hi",
-                "timeout": 9000
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.script_timeout, 9000);
-    }
-
-    #[test]
-    fn containment_microvm_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "microvm"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.containment, ContainmentBackend::MicroVm);
-    }
-
-    #[test]
-    fn unknown_top_level_field_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "bogusField": true}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
-        assert!(
-            result.is_err(),
-            "unknown top-level field should be rejected"
-        );
-    }
-
-    #[test]
-    fn filesystem_typo_rejected() {
-        // `fileSystem` (capital S) used to be silently dropped, so the policy
-        // never applied. It must now be rejected as an unknown field.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "fileSystem": {"readwritePaths": ["C:\\x"]}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
-        assert!(result.is_err(), "fileSystem typo should be rejected");
-    }
-
-    #[test]
-    fn nested_unknown_field_rejected() {
-        // The stable surface is closed at every level (deny_unknown_fields):
-        // an unknown *nested* field must be rejected, not just top-level ones.
-        let json = r#"{"process": {"commandLine": "echo hi", "bogus": 1}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("unknown field") && msg.contains("bogus"),
-            "nested unknown field should be rejected, got: {msg}"
-        );
-        assert!(
-            msg.contains("Invalid configuration at `process.bogus`"),
-            "expected the unknown field path, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn nested_proxy_unknown_field_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "processcontainer", "network": {"proxy": {"localhost": 8080, "unexpected": true}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("unknown field") && msg.contains("unexpected"),
-            "nested proxy unknown field should be rejected, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn invalid_clipboard_rejected() {
-        // Strict enum: an out-of-range clipboard value is rejected at deserialize.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "ui": {"clipboard": "bogus"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("unknown variant") && msg.contains("bogus"),
-            "invalid clipboard value should be rejected, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn experimental_port_mapping_unknown_field_accepted() {
-        // The experimental surface is intentionally permissive (forward-compat):
-        // an unknown field on a nested experimental struct must be tolerated and
-        // the known fields preserved.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "futureField": "ignored"}]}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        let wslc = req.experimental.wslc.expect("wslc config present");
-        assert_eq!(wslc.port_mappings.len(), 1);
-        assert_eq!(wslc.port_mappings[0].windows_port, 8080);
-        assert_eq!(wslc.port_mappings[0].container_port, 80);
-    }
-
-    #[test]
-    fn one_shot_ignores_stray_isolation_session_config_rather_than_rejecting() {
-        // The one-shot surface takes no backend configuration at all, and the
-        // `experimental` block is deliberately permissive, so an unrecognised
-        // key there is silently ignored rather than rejected. Parsing must
-        // succeed and select the backend normally.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"unrecognizedSetting": {"nested": "value", "futureField": true}}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true)
-            .expect("one-shot must accept and ignore a stray isolation_session key");
-        assert_eq!(req.containment, ContainmentBackend::IsolationSession);
-    }
-
-    #[test]
-    fn one_shot_accepts_empty_isolation_session_block() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.containment, ContainmentBackend::IsolationSession);
-    }
-
-    #[test]
-    fn one_shot_rejects_phase_field() {
-        // A state-aware-shaped payload (carries `phase`) sent to a one-shot
-        // entry point must be rejected, not silently run as a one-shot.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "phase": "provision"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("phase") && msg.contains("state-aware"),
-            "one-shot path should reject 'phase', got: {msg}"
-        );
-    }
-
-    #[test]
-    fn one_shot_rejects_sandbox_id_field() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "sandboxId": "abc"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("sandboxId") && msg.contains("state-aware"),
-            "one-shot path should reject 'sandboxId', got: {msg}"
-        );
-    }
-
-    #[test]
-    fn correlation_vector_is_not_an_accepted_wire_field() {
-        // The correlation vector is purely internal to MXC and generated from
-        // the state-aware `sandboxId`; no config surface accepts one from a
-        // caller. `deny_unknown_fields` rejects it like any other unknown key.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "correlationVector": "AAAAAAAAAAAAAAAAAAAAAA.0"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("correlationVector"),
-            "unknown field 'correlationVector' should be rejected, got: {msg}"
-        );
-    }
-
-    #[test]
     fn state_aware_request_rejects_correlation_vector_field() {
         let json = r#"{
             "version": "0.9.0-alpha",
@@ -6604,38 +4012,6 @@ mod tests {
             msg.contains("correlationVector"),
             "state-aware path should reject 'correlationVector', got: {msg}"
         );
-    }
-
-    #[test]
-    fn top_level_macos_sandbox_alias_maps_to_seatbelt() {
-        // The deprecated `macos_sandbox` section-key alias on the top-level
-        // `seatbelt` field is still accepted and maps to `req.seatbelt`.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "macos_sandbox": {"guiAccess": true}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        let sb = req.seatbelt.expect("seatbelt config present via alias");
-        assert!(
-            sb.gui_access,
-            "guiAccess should be carried through the alias"
-        );
-    }
-
-    #[test]
-    fn top_level_annotations_allowed() {
-        // `$schema` and `_comment` are permitted but ignored.
-        let json = r#"{
-            "$schema": "../schemas/dev/mxc-config.schema.0.7.0-dev.json",
-            "_comment": "annotation that the parser ignores",
-            "version": "0.7.0-alpha",
-            "process": {"commandLine": "echo hi"}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.script_code, "echo hi");
     }
 
     #[test]
@@ -7194,106 +4570,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_max_accepted() {
-        let json = format!(
-            r#"{{"process": {{"commandLine": "echo hi"}}, "version": "{}"}}"#,
-            CURRENT_SCHEMA_VERSION
-        );
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.schema_version, CURRENT_SCHEMA_VERSION);
-    }
-
-    #[test]
-    fn schema_version_below_min_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.5.0-alpha"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        assert!(
-            err.to_string().contains("older than supported"),
-            "expected an older-than-supported error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn schema_version_min_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.6.0-alpha"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.schema_version, "0.6.0-alpha");
-    }
-
-    #[test]
-    fn schema_version_between_bounds_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.7.0-alpha"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.schema_version, "0.7.0-alpha");
-    }
-
-    #[test]
-    fn schema_version_above_max_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.11.0-alpha"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        assert!(
-            err.to_string().contains("newer than supported"),
-            "expected a newer-than-supported error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn full_config_with_0_6_0_alpha_accepted() {
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containerId": "test-060",
-            "containment": "processcontainer",
-            "process": { "commandLine": "echo hello", "timeout": 5000 },
-            "filesystem": { "readwritePaths": ["C:\\workspace"] },
-            "network": { "defaultPolicy": "block" }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.schema_version, "0.6.0-alpha");
-        assert_eq!(req.container_id, "test-060");
-        assert_eq!(req.script_timeout, 5000);
-        assert_eq!(req.policy.readwrite_paths, vec!["C:\\workspace"]);
-    }
-
-    #[test]
-    fn schema_version_absent_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.schema_version, "");
-    }
-
-    #[test]
-    fn schema_version_non_semver_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "x"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn malformed_schema_version_precedes_directional_field_gate() {
+    fn malformed_contract_version_precedes_directional_field_gate() {
         let json = r#"{
             "version": "0.8x",
             "process": {"commandLine": "echo hi"},
@@ -7313,855 +4590,80 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_major_only_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "2"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let result = normalize_wire_input_for_test(&encoded, &mut logger, true);
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn schema_version_error_escapes_control_characters() {
-        // The invalid version is free-form user input echoed into a manual
-        // (non-serde) diagnostic; it must not carry raw ESC / newline bytes.
-        let error = validate_schema_version("1.\u{1b}[31m0\nX").unwrap_err();
-        let message = error.to_string();
+        let json = r#"{
+            "version": "1.\u001b[31m0\nX",
+            "process": {"commandLine": "echo hi"}
+        }"#;
+        let message = match load_mxc(json) {
+            Err(ParseError::Version(error)) => error.to_string(),
+            other => panic!("expected version rejection, got: {other:?}"),
+        };
+
         assert!(!message.contains('\u{1b}'), "got: {message}");
         assert!(!message.contains('\n'), "got: {message}");
-        assert!(
-            message.contains("\\u{1b}") || message.contains("\\x1b"),
-            "got: {message}"
-        );
+        assert!(message.contains("Unsupported contract version"));
     }
 
     #[test]
-    fn root_object_expecting_text_is_pinned() {
-        let wire_err = match config_deserialize::from_str::<wire::MxcConfig>(r#""not an object""#) {
-            Ok(_) => panic!("non-object root must fail wire parse"),
-            Err(error) => error,
-        };
-
-        assert!(wire_err
-            .to_string()
-            .contains("expected a configuration object"));
-    }
-
-    #[test]
-    fn sandbox_idle_timeout_ms_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "windows_sandbox", "experimental": {"windows_sandbox": {"idleTimeoutMs": 60000}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(
-            req.experimental.windows_sandbox.unwrap().idle_timeout_ms,
-            60000
-        );
-    }
-
-    #[test]
-    fn sandbox_idle_timeout_ms_overrides_idle_timeout() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "windows_sandbox", "experimental": {"windows_sandbox": {"idleTimeout": 10000, "idleTimeoutMs": 60000}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(
-            req.experimental.windows_sandbox.unwrap().idle_timeout_ms,
-            60000
-        );
-    }
-
-    #[test]
-    fn container_id_parsed() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containerId": "my-container"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.container_id, "my-container");
-    }
-
-    #[test]
-    fn lifecycle_destroy_on_exit_parsed() {
-        let json =
-            r#"{"process": {"commandLine": "echo hi"}, "lifecycle": {"destroyOnExit": false}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(!req.lifecycle.destroy_on_exit);
-    }
-
-    #[test]
-    fn lifecycle_preserve_policy_parsed() {
-        let json =
-            r#"{"process": {"commandLine": "echo hi"}, "lifecycle": {"preservePolicy": true}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.lifecycle.preserve_policy);
-    }
-
-    #[test]
-    fn lifecycle_defaults_when_absent() {
-        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.lifecycle.destroy_on_exit);
-        assert!(!req.lifecycle.preserve_policy);
-    }
-
-    #[test]
-    fn wslc_section_parsed() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        let wslc = req.experimental.wslc.unwrap();
-        assert_eq!(wslc.image, "python:3.12");
-        assert!(wslc.image_tar_path.is_none());
-    }
-
-    #[test]
-    fn wslc_image_tar_path_parsed() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "my-image:latest", "imageTarPath": "C:\\images\\alpine.tar"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        let wslc = req.experimental.wslc.unwrap();
-        assert_eq!(wslc.image, "my-image:latest");
-        assert_eq!(
-            wslc.image_tar_path.as_deref(),
-            Some("C:\\images\\alpine.tar")
-        );
-    }
-
-    #[test]
-    fn wslc_port_mapping_basic_tcp_parsed() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "protocol": "tcp"}]}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        let wslc = req.experimental.wslc.unwrap();
-        assert_eq!(wslc.port_mappings.len(), 1);
-        assert_eq!(wslc.port_mappings[0].windows_port, 8080);
-        assert_eq!(wslc.port_mappings[0].container_port, 80);
-        assert_eq!(wslc.port_mappings[0].protocol, "tcp");
-    }
-
-    #[test]
-    fn wslc_port_mappings_default_protocol_is_tcp() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80}]}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        let wslc = req.experimental.wslc.unwrap();
-        assert_eq!(wslc.port_mappings[0].protocol, "tcp");
-    }
-
-    #[test]
-    fn wslc_port_mapping_uppercase_protocol_rejected() {
-        // Strict enums are case-sensitive: "TCP" is not the lowercase wire
-        // value "tcp", so it is rejected at deserialize as an unknown variant.
-        // Only lowercase "tcp" is accepted (see wslc_port_mapping_basic_tcp_parsed).
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "protocol": "TCP"}]}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{}", err);
-        assert!(
-            msg.contains("unknown variant"),
-            "expected strict-enum rejection of uppercase protocol, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn wslc_port_mapping_udp_rejected() {
-        // The wire model's TransportProtocol is tcp-only (the WSLC SDK runtime
-        // returns E_NOTIMPL for UDP), so "udp" is rejected at
-        // deserialize as an unknown enum variant.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 5353, "containerPort": 53, "protocol": "udp"}]}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{}", err);
-        assert!(
-            msg.contains("udp") && msg.contains("unknown variant"),
-            "got: {msg}"
-        );
-    }
-
-    #[test]
-    fn wslc_port_mapping_missing_windows_port_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"containerPort": 80}]}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{}", err);
-        assert!(
-            msg.contains("windows_port") || msg.contains("windowsPort"),
-            "expected serde missing-field error mentioning windowsPort, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn wslc_port_mapping_missing_container_port_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080}]}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{}", err);
-        assert!(
-            msg.contains("container_port") || msg.contains("containerPort"),
-            "expected serde missing-field error mentioning containerPort, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn wslc_port_mapping_zero_windows_port_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 0, "containerPort": 80}]}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{}", err);
-        assert!(
-            msg.contains("windowsPort") && msg.contains("> 0"),
-            "got: {msg}"
-        );
-    }
-
-    #[test]
-    fn wslc_port_mapping_zero_container_port_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 0}]}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{}", err);
-        assert!(
-            msg.contains("containerPort") && msg.contains("> 0"),
-            "got: {msg}"
-        );
-    }
-
-    #[test]
-    fn wslc_port_mapping_unsupported_protocol_rejected() {
-        // An unknown protocol like "sctp" is rejected at deserialize: the
-        // tcp-only TransportProtocol enum has no matching variant.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "protocol": "sctp"}]}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{}", err);
-        assert!(
-            msg.contains("sctp") && msg.contains("unknown variant"),
-            "got: {msg}"
-        );
-    }
-
-    #[test]
-    fn wslc_port_mapping_duplicate_host_port_same_protocol_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80}, {"windowsPort": 8080, "containerPort": 81}]}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{}", err);
-        assert!(
-            msg.contains("duplicate") && msg.contains("8080"),
-            "got: {msg}"
-        );
-    }
-
-    #[test]
-    fn wslc_port_mapping_empty_list_default() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        let wslc = req.experimental.wslc.unwrap();
-        assert!(wslc.port_mappings.is_empty());
-    }
-
-    // ---------- Experimental feature tests ----------
-
-    #[test]
-    fn experimental_section_parsed_when_present() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"test": {"message": "world"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.experimental.test.is_some());
-        assert_eq!(req.experimental.test.unwrap().message, "world");
-    }
-
-    #[test]
-    fn experimental_section_absent_is_ok() {
-        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.experimental.test.is_none());
-    }
-
-    #[test]
-    fn experimental_enabled_defaults_to_false() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"test": {"message": "check"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(!req.experimental_enabled);
-    }
-
-    #[test]
-    fn unknown_experimental_fields_ignored() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"futureFeature": {"x": 1}, "test": {"message": "hi"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.experimental.test.is_some());
-    }
-
-    #[test]
-    fn experimental_test_message_parsed() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"test": {"message": "greetings"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        let test = req.experimental.test.unwrap();
-        assert_eq!(test.message, "greetings");
-    }
-
-    #[test]
-    fn experimental_test_default_message() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"test": {}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        let test = req.experimental.test.unwrap();
-        assert!(test.message.is_empty());
-    }
-
-    #[test]
-    fn ui_section_parsed() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "ui": {"disable": false, "clipboard": "read", "injection": true}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(!req.policy.ui.disable);
-        assert_eq!(req.policy.ui.clipboard, ClipboardPolicy::Read);
-        assert!(req.policy.ui.injection);
-    }
-
-    #[test]
-    fn ui_section_defaults_when_omitted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.ui.disable); // default-deny: UI disabled
-        assert_eq!(req.policy.ui.clipboard, ClipboardPolicy::None);
-        assert!(!req.policy.ui.injection);
-    }
-
-    #[test]
-    fn ui_clipboard_all_parsed() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "ui": {"clipboard": "all"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.policy.ui.clipboard, ClipboardPolicy::All);
-    }
-
-    // ====== Isolation Session containment and config tests ======
-
-    #[test]
-    fn containment_isolation_session_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.containment, ContainmentBackend::IsolationSession);
-    }
-
-    #[test]
-    fn isolation_session_section_still_marks_a_configured_backend() {
-        // `experimental.isolation_session` no longer maps to any domain
-        // config, but its presence on the WIRE model is what
-        // `present_backend_sections` reads to detect a configured backend.
-        // Pairing it with another backend section must still be refused, or
-        // removing the domain slot would have silently dropped the check.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {}, "wslc": {"image": "alpine:latest"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true)
-            .expect_err("two backend sections must be refused");
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("experimental.wslc") || msg.contains("isolation_session"),
-            "expected the conflicting section to be named, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn containment_seatbelt_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.containment, ContainmentBackend::Seatbelt);
-    }
-
-    #[test]
-    fn seatbelt_config_defaults() {
-        // When no seatbelt block is provided the parser leaves it unset.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.seatbelt.is_none());
-    }
-
-    #[test]
-    fn seatbelt_profile_override_passed_through() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"profileOverride": "(version 1)(deny default)"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        let cfg = req.seatbelt.expect("seatbelt should be populated");
-        assert_eq!(
-            cfg.profile_override.as_deref(),
-            Some("(version 1)(deny default)")
-        );
-    }
-
-    #[test]
-    fn seatbelt_nested_pty_defaults_to_true_when_block_present_but_field_absent() {
-        // seatbelt block is present but nestedPty is not specified;
-        // the parser should fill in true to match the schema default.
-        let json =
-            r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        let cfg = req.seatbelt.expect("seatbelt should be populated");
-        assert!(cfg.nested_pty);
-        assert!(!cfg.keychain_access);
-    }
-
-    #[test]
-    fn seatbelt_nested_pty_and_keychain_access_pass_through() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"nestedPty": false, "keychainAccess": true}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        let cfg = req.seatbelt.expect("seatbelt should be populated");
-        assert!(!cfg.nested_pty);
-        assert!(cfg.keychain_access);
-    }
-
-    #[test]
-    fn top_level_seatbelt_config_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"nestedPty": false, "keychainAccess": true}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        let cfg = req.seatbelt.expect("seatbelt should be populated");
-        assert!(!cfg.nested_pty);
-        assert!(cfg.keychain_access);
-    }
-
-    #[test]
-    fn experimental_seatbelt_errors_with_migration_message() {
-        // After promotion, configs using experimental.seatbelt must error.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "experimental": {"seatbelt": {"nestedPty": true}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{:?}", err);
-        assert!(
-            msg.contains("has moved to the stable section"),
-            "expected migration error, got: {}",
-            msg
-        );
-    }
-
-    // Legacy wire-name aliases. The parser accepts the pre-0.6 wire vocabulary
-    // (`appcontainer`, `macos_sandbox`, and the `appContainer` /
-    // `experimental.macos_sandbox` sub-block keys) regardless of the declared
-    // schema version, so configs carried forward from older spellings still
-    // parse. Each alias maps to the canonical backend / sub-block and emits a
-    // deprecation log so callers know to migrate.
-
-    #[test]
-    fn legacy_appcontainer_wire_value_aliases_processcontainer() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "appcontainer"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.containment, ContainmentBackend::ProcessContainer);
-    }
-
-    #[test]
-    fn legacy_macos_sandbox_wire_value_aliases_seatbelt() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "macos_sandbox"}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.containment, ContainmentBackend::Seatbelt);
-    }
-
-    #[test]
-    fn legacy_app_container_subblock_alias_accepted() {
-        // The `appContainer` JSON key is a deprecated spelling; serde's alias
-        // routes it to the same `processContainer` parsing path regardless of
-        // the declared schema version.
-        let json = r#"{
-            "process": {"commandLine": "print('test')"},
-            "containment": "processcontainer",
-            "appContainer": {
-                "leastPrivilege": true,
-                "capabilities": ["internetClient"]
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.least_privilege_mode);
-        assert_eq!(req.policy.capabilities, vec!["internetClient".to_string()]);
-    }
-
-    #[test]
-    fn legacy_experimental_macos_sandbox_subblock_alias_rejected() {
-        // `experimental.macos_sandbox` is the pre-rename key; after promotion
-        // it should be rejected with a migration error.
-        let json = r#"{
-            "process": {"commandLine": "echo hi"},
-            "containment": "macos_sandbox",
-            "experimental": {"macos_sandbox": {"profileOverride": "(version 1)(allow default)"}}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{:?}", err);
-        assert!(
-            msg.contains("has moved to the stable section"),
-            "expected migration error, got: {}",
-            msg
-        );
-    }
-
-    // ---- Single-backend-section enforcement ----
-
-    fn make_multi_backend_config(containment: &str, extra_json: &str) -> String {
-        let json = format!(
-            r#"{{ "containment": "{containment}", "process": {{"commandLine": "echo hi"}}, {extra_json} }}"#
-        );
-        base64_encode(json.as_bytes())
-    }
-
-    fn assert_multi_backend_rejected(containment: &str, extra_json: &str, expected_extra: &str) {
-        let encoded = make_multi_backend_config(containment, extra_json);
-        let mut logger = test_logger();
-        let err = normalize_wire_input_for_test(&encoded, &mut logger, true)
-            .expect_err("expected rejection but got Ok");
-        let msg = format!("{err:?}");
-        assert!(
-            msg.contains("Multiple containment backends configured"),
-            "error did not mention multi-backend rejection: {msg}"
-        );
-        assert!(
-            msg.contains(expected_extra),
-            "error did not name the foreign section '{expected_extra}': {msg}"
-        );
-    }
-
-    fn assert_config_accepted(containment: &str, extra_json: &str) {
-        let encoded = make_multi_backend_config(containment, extra_json);
-        let mut logger = test_logger();
-        normalize_wire_input_for_test(&encoded, &mut logger, true)
-            .unwrap_or_else(|err| panic!("expected accept, got error: {err:?}"));
-    }
-
-    #[test]
-    fn lxc_containment_with_processcontainer_section_rejected() {
-        assert_multi_backend_rejected(
-            "lxc",
-            r#""lxc": {"distribution": "alpine", "release": "3.20"}, "processContainer": {"leastPrivilege": true}"#,
-            "processContainer",
-        );
-    }
-
-    // appContainer is a deprecated alias for processContainer.
-    #[test]
-    fn lxc_containment_with_legacy_app_container_alias_rejected() {
-        assert_multi_backend_rejected(
-            "lxc",
-            r#""lxc": {"distribution": "alpine", "release": "3.20"}, "appContainer": {"leastPrivilege": true}"#,
-            "processContainer",
-        );
-    }
-
-    #[test]
-    fn processcontainer_containment_with_lxc_section_rejected() {
-        assert_multi_backend_rejected(
-            "processcontainer",
-            r#""lxc": {"distribution": "alpine", "release": "3.20"}"#,
-            "lxc",
-        );
-    }
-
-    // Per-backend blocks nested under `experimental` are subject to the same
-    // check as top-level blocks.
-    #[test]
-    fn experimental_backend_section_for_other_containment_rejected() {
-        // seatbelt is now top-level, so use it to test cross-backend rejection
-        assert_multi_backend_rejected(
-            "processcontainer",
-            r#""seatbelt": {"guiAccess": true}"#,
-            "seatbelt",
-        );
-    }
-
-    // Sectionless backend: bubblewrap doesn't own any per-backend block, so
-    // any backend block is foreign.
-    #[test]
-    fn bubblewrap_containment_with_lxc_section_rejected() {
-        assert_multi_backend_rejected(
-            "bubblewrap",
-            r#""lxc": {"distribution": "alpine", "release": "3.20"}"#,
-            "lxc",
-        );
-    }
-
-    #[test]
-    fn bubblewrap_containment_with_process_container_section_rejected() {
-        assert_multi_backend_rejected(
-            "bubblewrap",
-            r#""processContainer": {"leastPrivilege": true}"#,
-            "processContainer",
-        );
-    }
-
-    #[test]
-    fn lxc_containment_with_matching_lxc_section_accepted() {
-        assert_config_accepted(
-            "lxc",
-            r#""lxc": {"distribution": "alpine", "release": "3.20"}"#,
-        );
-    }
-
-    // `experimental.test` is a generic test feature, not a backend block,
-    // so it should not trigger the multi-backend check.
-    #[test]
-    fn experimental_test_section_does_not_count_as_backend() {
-        assert_config_accepted(
-            "lxc",
-            r#""lxc": {"distribution": "alpine", "release": "3.20"}, "experimental": {"test": {"message": "hello"}}"#,
-        );
-    }
-    // ---- Abstract-intent coverage ----
-    // Backend sections paired with `containment: "process"` / "vm" must be
-    // accepted iff the intent resolves to the owning backend on this OS.
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn abstract_process_with_process_container_accepted_on_windows() {
-        let json = r#"{
-            "process": {"commandLine": "echo hi"},
-            "containment": "process",
-            "processContainer": {}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        normalize_wire_input_for_test(&encoded, &mut logger, true)
-            .expect("process resolves to ProcessContainer on Windows");
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn abstract_process_with_seatbelt_accepted_on_macos() {
-        let json = r#"{
-            "process": {"commandLine": "echo hi"},
-            "containment": "process",
-            "seatbelt": {}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        normalize_wire_input_for_test(&encoded, &mut logger, true)
-            .expect("process resolves to Seatbelt on macOS");
-    }
-
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    #[test]
-    fn abstract_process_with_process_container_rejected_off_windows() {
-        let json = r#"{
-            "process": {"commandLine": "echo hi"},
-            "containment": "process",
-            "processContainer": {}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        normalize_wire_input_for_test(&encoded, &mut logger, true)
-            .expect_err("processContainer is foreign when process resolves off Windows");
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn abstract_vm_with_windows_sandbox_accepted_on_windows() {
-        let json = r#"{
-            "process": {"commandLine": "echo hi"},
-            "containment": "vm",
-            "experimental": {"windows_sandbox": {}}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        normalize_wire_input_for_test(&encoded, &mut logger, true)
-            .expect("vm resolves to WindowsSandbox on Windows");
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    #[test]
-    fn abstract_vm_with_windows_sandbox_rejected_off_windows() {
-        let json = r#"{
-            "process": {"commandLine": "echo hi"},
-            "containment": "vm",
-            "experimental": {"windows_sandbox": {}}
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        normalize_wire_input_for_test(&encoded, &mut logger, true)
-            .expect_err("vm has no resolver off Windows");
-    }
-
-    // --- Filesystem policy normalization tests (most-restrictive-wins) ---
-
-    #[test]
-    fn same_path_in_readwrite_and_denied_becomes_denied() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readwritePaths": ["C:\\workspace"], "deniedPaths": ["C:\\workspace"]}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(
-            req.policy.readwrite_paths.is_empty(),
-            "path should be removed from readwritePaths (denied wins)"
-        );
-        assert_eq!(req.policy.denied_paths, vec!["C:\\workspace"]);
-    }
-
-    #[test]
-    fn same_path_in_readwrite_and_readonly_becomes_readonly() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readwritePaths": ["C:\\workspace"], "readonlyPaths": ["C:\\workspace"]}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(
-            req.policy.readwrite_paths.is_empty(),
-            "path should be removed from readwritePaths (readonly wins)"
-        );
-        assert_eq!(req.policy.readonly_paths, vec!["C:\\workspace"]);
-    }
-
-    #[test]
-    fn dev_contract_maps_enumerate_paths() {
+    fn exact_v0_9_maps_enumerate_paths() {
         let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"containment":"processcontainer","processContainer":{"filesystem":{"enumeratePaths":["C:\\tools"]}}}"#;
-        let MxcRequest::OneShot(req) =
+        let MxcRequest::OneShot(request) =
             load_mxc_request_from_json(json, &mut test_logger()).unwrap()
         else {
             panic!("expected one-shot request");
         };
 
-        assert_eq!(req.policy.enumerate_paths, vec!["C:\\tools"]);
+        assert_eq!(request.policy.enumerate_paths, vec!["C:\\tools"]);
     }
 
     #[test]
-    fn same_path_in_readonly_and_enumerate_becomes_enumerate() {
+    fn exact_v0_9_readonly_and_enumerate_prefers_enumerate() {
         let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"containment":"processcontainer","filesystem":{"readonlyPaths":["C:\\tools"]},"processContainer":{"filesystem":{"enumeratePaths":["C:\\tools"]}}}"#;
-        let MxcRequest::OneShot(req) =
+        let MxcRequest::OneShot(request) =
             load_mxc_request_from_json(json, &mut test_logger()).unwrap()
         else {
             panic!("expected one-shot request");
         };
 
-        assert!(req.policy.readonly_paths.is_empty());
-        assert_eq!(req.policy.enumerate_paths, vec!["C:\\tools"]);
+        assert!(request.policy.readonly_paths.is_empty());
+        assert_eq!(request.policy.enumerate_paths, vec!["C:\\tools"]);
     }
 
     #[test]
-    fn same_path_in_readwrite_and_enumerate_becomes_enumerate() {
+    fn exact_v0_9_readwrite_and_enumerate_prefers_enumerate() {
         let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"containment":"processcontainer","filesystem":{"readwritePaths":["C:\\tools"]},"processContainer":{"filesystem":{"enumeratePaths":["C:\\tools"]}}}"#;
         let mut logger = test_logger();
-        let MxcRequest::OneShot(req) = load_mxc_request_from_json(json, &mut logger).unwrap()
+        let MxcRequest::OneShot(request) = load_mxc_request_from_json(json, &mut logger).unwrap()
         else {
             panic!("expected one-shot request");
         };
 
-        assert!(req.policy.readwrite_paths.is_empty());
-        assert_eq!(req.policy.enumerate_paths, vec!["C:\\tools"]);
+        assert!(request.policy.readwrite_paths.is_empty());
+        assert_eq!(request.policy.enumerate_paths, vec!["C:\\tools"]);
         assert!(logger
             .get_buffer()
             .contains("applying most-restrictive intent (enumerate)"));
     }
 
     #[test]
-    fn same_path_in_enumerate_and_denied_becomes_denied() {
+    fn exact_v0_9_enumerate_and_denied_prefers_denied() {
         let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"containment":"processcontainer","filesystem":{"deniedPaths":["C:\\tools"]},"processContainer":{"filesystem":{"enumeratePaths":["C:\\tools"]}}}"#;
         let mut logger = test_logger();
-        let MxcRequest::OneShot(req) = load_mxc_request_from_json(json, &mut logger).unwrap()
+        let MxcRequest::OneShot(request) = load_mxc_request_from_json(json, &mut logger).unwrap()
         else {
             panic!("expected one-shot request");
         };
 
-        assert!(req.policy.enumerate_paths.is_empty());
-        assert_eq!(req.policy.denied_paths, vec!["C:\\tools"]);
+        assert!(request.policy.enumerate_paths.is_empty());
+        assert_eq!(request.policy.denied_paths, vec!["C:\\tools"]);
         assert!(logger
             .get_buffer()
             .contains("applying most-restrictive intent (denied)"));
     }
 
     #[test]
-    fn enumerate_path_conflict_diagnostic_escapes_control_characters() {
+    fn exact_v0_9_enumerate_conflict_diagnostic_escapes_control_characters() {
         let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"containment":"processcontainer","filesystem":{"readonlyPaths":["C:\\tools\nforged"]},"processContainer":{"filesystem":{"enumeratePaths":["C:\\tools\nforged"]}}}"#;
         let mut logger = test_logger();
 
@@ -8171,86 +4673,7 @@ mod tests {
         assert!(logger.get_buffer().contains("C:\\tools\\nforged"));
     }
 
-    #[test]
-    fn same_path_in_readonly_and_denied_becomes_denied() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readonlyPaths": ["C:\\tools"], "deniedPaths": ["C:\\tools"]}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(
-            req.policy.readonly_paths.is_empty(),
-            "path should be removed from readonlyPaths (denied wins)"
-        );
-        assert_eq!(req.policy.denied_paths, vec!["C:\\tools"]);
-    }
-
-    #[test]
-    fn same_path_in_all_three_lists_becomes_denied() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readwritePaths": ["C:\\x"], "readonlyPaths": ["C:\\x"], "deniedPaths": ["C:\\x"]}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.readwrite_paths.is_empty());
-        assert!(req.policy.readonly_paths.is_empty());
-        assert_eq!(req.policy.denied_paths, vec!["C:\\x"]);
-    }
-
-    #[test]
-    fn distinct_paths_across_lists_preserved() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readwritePaths": ["C:\\workspace"], "readonlyPaths": ["C:\\tools"], "deniedPaths": ["C:\\secrets"]}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        // Distinct paths — nothing dropped.
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.policy.readwrite_paths, vec!["C:\\workspace"]);
-        assert_eq!(req.policy.readonly_paths, vec!["C:\\tools"]);
-        assert_eq!(req.policy.denied_paths, vec!["C:\\secrets"]);
-    }
-
-    #[test]
-    fn empty_filesystem_lists_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "process", "filesystem": {"readwritePaths": [], "readonlyPaths": [], "deniedPaths": []}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-    }
-
     // ── Telemetry ────────────────────────────────────────────────────
-
-    #[test]
-    fn telemetry_not_set() {
-        let json = r#"{"process":{"commandLine":"echo hi"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        assert!(req.telemetry.is_none());
-    }
-
-    #[test]
-    fn telemetry_consent_maintenance_is_not_an_execution_request() {
-        let json = r#"{"command":"telemetryConsent","action":"status"}"#;
-        let mut logger = test_logger();
-        let error = normalize_wire_json_for_test(json, &mut logger).unwrap_err();
-        assert!(
-            error.to_string().contains("unknown field `command`"),
-            "got {error:?}"
-        );
-    }
-
-    #[test]
-    fn telemetry_enabled_true() {
-        let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"telemetry":{"enabled":true}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        let telem = req.telemetry.expect("telemetry should be set");
-        assert_eq!(telem.enabled, Some(true));
-        assert_eq!(telem.requested_sandbox_kind, Some("process"));
-    }
 
     #[test]
     fn exact_loaders_reject_seatbelt_launch_method_from_v0_9_and_v0_10() {
@@ -8395,46 +4818,6 @@ mod tests {
         let mut logger = test_logger();
         load_mxc_request_from_json(state_aware, &mut logger)
             .expect("0.9 state-aware inheritance should parse");
-    }
-
-    #[test]
-    fn telemetry_records_abstract_requested_sandbox_kind() {
-        let json = r#"{"process":{"commandLine":"echo hi"},"containment":"vm","telemetry":{"enabled":true}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        let telem = req.telemetry.expect("telemetry should be set");
-        assert_eq!(telem.requested_sandbox_kind, Some("vm"));
-    }
-
-    #[test]
-    fn telemetry_enabled_false() {
-        let json = r#"{"process":{"commandLine":"echo hi"},"telemetry":{"enabled":false}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        let telem = req.telemetry.expect("telemetry should be set");
-        assert_eq!(telem.enabled, Some(false));
-    }
-
-    #[test]
-    fn telemetry_empty_object() {
-        let json = r#"{"process":{"commandLine":"echo hi"},"telemetry":{}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let req = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap();
-        let telem = req.telemetry.expect("telemetry should be set");
-        assert_eq!(telem.enabled, None);
-    }
-
-    #[test]
-    fn telemetry_rejects_unknown_fields() {
-        let json = r#"{"process":{"commandLine":"echo hi"},"telemetry":{"enable":true}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        let error = normalize_wire_input_for_test(&encoded, &mut logger, true).unwrap_err();
-
-        assert!(error.to_string().contains("telemetry.enable"));
     }
 
     #[test]

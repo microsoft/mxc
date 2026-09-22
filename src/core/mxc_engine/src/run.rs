@@ -105,15 +105,20 @@ pub fn log_policy_hash(request: &ExecutionRequest, logger: &mut Logger) {
     }
 
     let policy_hash = wxc_common::policy_identity::policy_hash(request);
+    let config_schema_version = config_schema_version(request);
     if wxc_common::telemetry::is_active() {
         let identity = policy_hash_identity(&request.container_id);
-        wxc_common::telemetry::log_policy_hash(&identity, &policy_hash, &request.schema_version);
+        wxc_common::telemetry::log_policy_hash(&identity, &policy_hash, config_schema_version);
     }
     let record = AuditEvent::new(AuditEventName::PolicyHash)
         .str("backend", request.containment.wire_name())
         .str("policy_hash", &policy_hash)
-        .str("config_schema_version", &request.schema_version);
+        .str("config_schema_version", config_schema_version);
     logger.log_audit_event(&record);
+}
+
+fn config_schema_version(request: &ExecutionRequest) -> &'static str {
+    request.source_contract_version()
 }
 
 fn policy_hash_identity(container_id: &str) -> String {
@@ -123,6 +128,55 @@ fn policy_hash_identity(container_id: &str) -> String {
         container_id
     };
     wxc_common::policy_identity::redact_identity(identity)
+}
+
+#[cfg(test)]
+mod attribution_tests {
+    use super::config_schema_version;
+    use crate::policy::{build_request, SandboxPolicy};
+    use wxc_common::logger::{Logger, Mode};
+    use wxc_common::models::NetworkEnforcementCompatibility;
+    use wxc_common::state_aware_request::MxcRequest;
+
+    #[test]
+    fn telemetry_attributes_exact_json_but_not_typed_sdk_requests() {
+        let mut logger = Logger::new(Mode::Buffer);
+        let parsed = wxc_common::config_parser::load_mxc_request_from_json(
+            r#"{
+                "version": "0.7.0-alpha",
+                "process": {"commandLine": "echo exact"}
+            }"#,
+            &mut logger,
+        )
+        .unwrap();
+        let MxcRequest::OneShot(exact) = parsed else {
+            panic!("expected one-shot request");
+        };
+        assert_eq!(config_schema_version(&exact), "0.7.0-alpha");
+        assert_eq!(
+            exact.network_enforcement_compatibility,
+            NetworkEnforcementCompatibility::LegacyCompatible
+        );
+
+        let direct = build_request(
+            &SandboxPolicy {
+                version: "0.7.0-alpha".to_string(),
+                filesystem: None,
+                network: None,
+                ui: None,
+                timeout_ms: None,
+            },
+            "echo direct",
+            None,
+        )
+        .unwrap();
+        assert_eq!(config_schema_version(&direct.inner), "");
+        assert_eq!(direct.inner.source_contract, None);
+        assert_eq!(
+            direct.inner.network_enforcement_compatibility,
+            NetworkEnforcementCompatibility::LegacyCompatible
+        );
+    }
 }
 
 /// Resolve a runner for the `wxc-exec --audit` compatibility workflow.
@@ -209,12 +263,7 @@ fn resolve_runner_inner_windows(
             #[cfg(feature = "wslc")]
             {
                 let _ = writeln!(logger, "Using WSLContainer runner");
-                let wslc_config = request
-                    .experimental
-                    .wslc
-                    .as_ref()
-                    .cloned()
-                    .unwrap_or_default();
+                let wslc_config = request.wslc.as_ref().cloned().unwrap_or_default();
                 Ok(ResolvedRunner::without_guard(Box::new(
                     wslc_common::wsl_container_runner::WSLContainerRunner::new(&wslc_config),
                 )))
@@ -265,7 +314,7 @@ fn resolve_runner_inner_windows(
                     "Windows Sandbox is an experimental feature. Use --experimental flag.",
                 ));
             }
-            if let Some(ws) = &request.experimental.windows_sandbox {
+            if let Some(ws) = &request.windows_sandbox {
                 let default = wxc_common::models::WindowsSandboxConfig::default();
                 if ws.idle_timeout_ms != default.idle_timeout_ms
                     || ws.daemon_pipe_name != default.daemon_pipe_name
@@ -478,16 +527,13 @@ fn resolve_hyperlight(request: &ExecutionRequest) -> Result<ResolvedRunner, MxcE
 mod tests {
     use super::*;
     use wxc_common::logger::Mode;
-    use wxc_common::models::{ExperimentalConfig, WindowsSandboxConfig};
+    use wxc_common::models::WindowsSandboxConfig;
 
     fn windows_sandbox_request(config: Option<WindowsSandboxConfig>) -> ExecutionRequest {
         ExecutionRequest {
             containment: ContainmentBackend::WindowsSandbox,
             experimental_enabled: true,
-            experimental: ExperimentalConfig {
-                windows_sandbox: config,
-                ..Default::default()
-            },
+            windows_sandbox: config,
             ..Default::default()
         }
     }
