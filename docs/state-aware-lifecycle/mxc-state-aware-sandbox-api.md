@@ -469,16 +469,22 @@ function startSandbox<C extends StateAwareContainmentBackend>(
   options?: SandboxSpawnOptions,
 ): Promise<StartResult<C>>;
 
-function execInSandbox<C extends StateAwareContainmentBackend>(
-  sandboxId: SandboxId<C>,
-  config: ExecConfigFor<C>,
+function execInSandbox(
+  sandboxId: SandboxId<'isolation_session'>,
+  config: IsolationSessionExecConfig,
   options?: StateAwareStreamingOptions,
 ): MxcSandboxProcess;
+
+function execInSandboxAsync(
+  sandboxId: SandboxId<'isolation_session'>,
+  config: IsolationSessionExecConfig,
+  options?: SandboxSpawnOptions,
+): Promise<ExecResult>;
 
 function execInSandboxAsync<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
   config: ExecConfigFor<C>,
-  options?: SandboxSpawnOptions,
+  options: SandboxSpawnOptions & { dryRun: true },
 ): Promise<ExecResult>;
 
 function stopSandbox<C extends StateAwareContainmentBackend>(
@@ -494,9 +500,12 @@ function deprovisionSandbox<C extends StateAwareContainmentBackend>(
 ): Promise<DeprovisionResult<C>>;
 ```
 
-`execInSandbox` returns an owning `MxcSandboxProcess` for live stdin/stdout/stderr,
-waiting, termination, and disposal. `execInSandboxAsync` is a buffered convenience
-that accumulates output and resolves on exit.
+For IsolationSession, `execInSandbox` returns an owning `MxcSandboxProcess` for
+live stdin/stdout/stderr, waiting, termination, and disposal.
+`execInSandboxAsync` is a buffered convenience that accumulates output and
+resolves on exit. Windows Sandbox and WSLC do not expose piped native exec
+streams, so Node supports only `execInSandboxAsync(..., { dryRun: true })` for
+their exec requests.
 
 `provisionSandbox` takes `containment` as its first argument, binding the backend choice
 into the returned `SandboxId<C>`. Subsequent calls (`startSandbox`, `execInSandbox` /
@@ -506,10 +515,10 @@ branded id and do not restate it. The wire envelope mirrors this: provision carr
 
 Promise-returning operations accept `SandboxSpawnOptions`, including
 `signal?: AbortSignal` for cancellation. Live `execInSandbox` accepts
-`StateAwareStreamingOptions` and exposes cancellation through the returned process's
-`kill()` method. State-aware calls require experimental authorization only when the
-selected backend or policy is experimental. Windows Sandbox requires backend
-authorization; IsolationSession and WSLC do not.
+`StateAwareStreamingOptions` and exposes cancellation through the returned
+process's `kill()` method. State-aware calls require experimental authorization
+only when the selected backend or policy is experimental. Windows Sandbox
+requires backend authorization; IsolationSession and WSLC do not.
 
 ### 6.3 Example
 
@@ -952,7 +961,7 @@ const r = await execInSandboxAsync(
 // Parser populates request.script_code = "echo hello", request.script_timeout =
 // 5000 from the wire-format `process` block (same path as one-shot). The
 // dispatcher then calls:
-backend.exec("iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0", &request, /* config */ None, ExecStdio::Relayed)
+backend.exec("iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0", &request, /* config */ None, ExecStdio::Piped)
 // returns Ok(ExecHandle { ... pipe handles + waiter ... })
 ```
 

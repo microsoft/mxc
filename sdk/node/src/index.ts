@@ -160,6 +160,8 @@ export {
   deprovisionSandbox,
 } from './state-aware.js';
 
+export { MxcSandboxProcess } from './sandbox-process.js';
+
 // Export telemetry consent functions and types
 export {
   TelemetryConfig,

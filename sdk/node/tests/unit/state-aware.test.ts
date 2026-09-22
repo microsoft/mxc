@@ -29,7 +29,6 @@ import {
   type NativeLifecycleDriver,
   type NativeLifecycleStatus,
 } from '../../src/sandbox-process.js';
-import { platformSkip } from './test-helpers.js';
 
 function requestEnvelope(request: BindingStateAwareRequest): Record<string, unknown> {
   return JSON.parse(request.requestJson) as Record<string, unknown>;
@@ -60,6 +59,8 @@ class FakeStateAwareExecBinding implements NativeLifecycleDriver {
   readonly standardOutput = new PassThrough();
   readonly standardError = new PassThrough();
   killed = false;
+  killCount = 0;
+  killError: Error | undefined;
   freed = false;
   polls = 0;
   private status: NativeLifecycleStatus = {
@@ -109,6 +110,8 @@ class FakeStateAwareExecBinding implements NativeLifecycleDriver {
 
   kill(): void {
     this.killed = true;
+    this.killCount += 1;
+    if (this.killError !== undefined) throw this.killError;
   }
 
   killForTimeout(): void {
@@ -468,7 +471,7 @@ describe('parseNonExecResponse', () => {
   });
 });
 
-describe('provisionSandbox', { skip: platformSkip }, () => {
+describe('provisionSandbox', () => {
   // The unrestricted-network posture is a required member of
   // IsolationSessionProvisionConfig, so `provisionSandbox` will not accept an
   // omitted config for this backend. Tests below that are not about the config
@@ -561,7 +564,7 @@ describe('provisionSandbox', { skip: platformSkip }, () => {
   });
 });
 
-describe('startSandbox', { skip: platformSkip }, () => {
+describe('startSandbox', () => {
   it('infers backend from sandboxId prefix and sends no per-phase start config', async () => {
     const request = installStateAwareReply('{"result":{}}');
     const id = 'iso:reg-abc:prov-1' as SandboxId<'isolation_session'>;
@@ -595,7 +598,7 @@ describe('startSandbox', { skip: platformSkip }, () => {
 
 });
 
-describe('stopSandbox', { skip: platformSkip }, () => {
+describe('stopSandbox', () => {
   it('builds a minimal stop envelope', async () => {
     const request = installStateAwareReply('{"result":{}}');
     const id = 'iso:abc' as SandboxId<'isolation_session'>;
@@ -625,7 +628,7 @@ describe('stopSandbox', { skip: platformSkip }, () => {
   });
 });
 
-describe('deprovisionSandbox', { skip: platformSkip }, () => {
+describe('deprovisionSandbox', () => {
   it('builds a minimal deprovision envelope', async () => {
     const request = installStateAwareReply('{"result":{}}');
     const id = 'iso:abc' as SandboxId<'isolation_session'>;
@@ -643,7 +646,7 @@ describe('deprovisionSandbox', { skip: platformSkip }, () => {
   });
 });
 
-describe('execInSandboxAsync', { skip: platformSkip }, () => {
+describe('execInSandboxAsync', () => {
   it('does not require experimental authorization for stable backends', async () => {
     installStateAwareExecBinding(
       () => new FakeStateAwareExecBinding(16, 'stable\n', ''),
@@ -691,7 +694,7 @@ describe('execInSandboxAsync', { skip: platformSkip }, () => {
     _setStateAwareBindingSandboxProcessFactory(() => {
       throw new MxcError('stale_id', 'id expired');
     });
-    const id = 'wsb:prov-1' as SandboxId<'windows_sandbox'>;
+    const id = 'iso:prov-1' as SandboxId<'isolation_session'>;
     await assert.rejects(
       () => execInSandboxAsync(
         id,
@@ -762,6 +765,7 @@ describe('execInSandboxAsync', { skip: platformSkip }, () => {
 
   it('kills and disposes the live process when AbortSignal fires', async () => {
     const ac = new AbortController();
+    const reason = new Error('cancelled by caller');
     const exec = installStateAwareExecBinding(
       () => new FakeStateAwareExecBinding(19, '', '', Number.MAX_SAFE_INTEGER),
     );
@@ -771,9 +775,10 @@ describe('execInSandboxAsync', { skip: platformSkip }, () => {
       { process: { commandLine: 'echo hi' } },
       { signal: ac.signal },
     );
-    ac.abort();
-    await assert.rejects(promise);
+    ac.abort(reason);
+    await assert.rejects(promise, (error: unknown) => error === reason);
     assert.strictEqual(exec.binding().killed, true);
+    assert.strictEqual(exec.binding().killCount, 1);
     assert.strictEqual(exec.binding().freed, true);
   });
 
@@ -805,6 +810,30 @@ describe('execInSandboxAsync', { skip: platformSkip }, () => {
     assert.strictEqual(exec.binding().freed, true);
   });
 
+  it('preserves the abort reason when native cancellation cleanup fails', async () => {
+    const ac = new AbortController();
+    const reason = new Error('cancelled by caller');
+    const binding = new FakeStateAwareExecBinding(
+      21,
+      '',
+      '',
+      Number.MAX_SAFE_INTEGER,
+    );
+    binding.killError = new Error('native kill failed');
+    const exec = installStateAwareExecBinding(() => binding);
+    const promise = execInSandboxAsync(
+      'iso:abc' as SandboxId<'isolation_session'>,
+      { process: { commandLine: 'echo hi' } },
+      { signal: ac.signal },
+    );
+
+    ac.abort(reason);
+    await assert.rejects(promise, (error: unknown) => error === reason);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.strictEqual(exec.binding().killCount, 2);
+    assert.strictEqual(exec.binding().freed, true);
+  });
+
   it('rejects unsupported options', async () => {
     const id = 'iso:abc' as SandboxId<'isolation_session'>;
     for (const [option, value] of [
@@ -826,7 +855,7 @@ describe('execInSandboxAsync', { skip: platformSkip }, () => {
   });
 });
 
-describe('execInSandbox', { skip: platformSkip }, () => {
+describe('execInSandbox', () => {
   it('returns a live MxcSandboxProcess backed by the shared FFI controller', async () => {
     const exec = installStateAwareExecBinding(
       () => new FakeStateAwareExecBinding(22, 'live\n', '', 0, { exitCode: 0, timedOut: false }, ['warning']),
@@ -920,7 +949,7 @@ describe('windows_sandbox state-aware lifecycle', () => {
     assert.strictEqual(env.experimental, undefined);
   });
 
-  describe('round-trip via the typed API', { skip: platformSkip }, () => {
+  describe('round-trip via the typed API', () => {
     it('provisionSandbox builds a windows_sandbox envelope and routes back via the wsb: prefix', async () => {
       const request = installStateAwareReply('{"result":{"sandboxId":"wsb:prov-1"}}');
       const result = await provisionSandbox(
@@ -946,18 +975,29 @@ describe('windows_sandbox state-aware lifecycle', () => {
       assert.strictEqual(envelope.experimental, undefined);
     });
 
-    it('execInSandboxAsync places process at top-level for a wsb: id', async () => {
-      const exec = installStateAwareExecBinding(
-        () => new FakeStateAwareExecBinding(20, 'hello-from-wsb\n', '', 0, { exitCode: 0, timedOut: false }),
-      );
+    it('execInSandboxAsync rejects live execution for a wsb: id', async () => {
       const id = 'wsb:prov-1' as SandboxId<'windows_sandbox'>;
-      const result = await execInSandboxAsync(
+      await assert.rejects(
+        () => execInSandboxAsync(
+          id as unknown as SandboxId<'isolation_session'>,
+          { process: { commandLine: 'echo hello-from-wsb' } },
+          { experimental: true },
+        ),
+        (error: unknown) =>
+          error instanceof MxcError &&
+          error.code === 'unsupported_containment',
+      );
+    });
+
+    it('execInSandboxAsync can dry-run a wsb exec request', async () => {
+      const request = installStateAwareReply('{"result":{"validated":true}}');
+      const id = 'wsb:prov-1' as SandboxId<'windows_sandbox'>;
+      await execInSandboxAsync(
         id,
         { process: { commandLine: 'echo hello-from-wsb' } },
-        { experimental: true },
+        { dryRun: true, experimental: true },
       );
-      assert.deepStrictEqual(result, { stdout: 'hello-from-wsb\n', stderr: '', exitCode: 0 });
-      assert.deepStrictEqual(exec.request().process, { commandLine: 'echo hello-from-wsb' });
+      assert.strictEqual(requestEnvelope(request()).phase, 'exec');
     });
 
     it('stopSandbox and deprovisionSandbox build minimal envelopes for a wsb: id', async () => {
@@ -1062,7 +1102,7 @@ describe('wslc state-aware lifecycle', () => {
     assert.strictEqual(env.experimental, undefined);
   });
 
-  describe('round-trip via the typed API', { skip: platformSkip }, () => {
+  describe('round-trip via the typed API', () => {
     it('provisionSandbox builds a wslc envelope and routes back via the wslc: prefix', async () => {
       const request = installStateAwareReply('{"result":{"sandboxId":"wslc:0123abcd"}}');
       const result = await provisionSandbox(
@@ -1092,17 +1132,17 @@ describe('wslc state-aware lifecycle', () => {
       assert.strictEqual(envelope.experimental, undefined);
     });
 
-    it('execInSandboxAsync places process at top-level for a wslc: id', async () => {
-      const exec = installStateAwareExecBinding(
-        () => new FakeStateAwareExecBinding(21, 'hello-from-wslc\n', '', 0, { exitCode: 0, timedOut: false }),
-      );
+    it('execInSandboxAsync rejects live execution for a wslc: id', async () => {
       const id = 'wslc:0123abcd' as SandboxId<'wslc'>;
-      const result = await execInSandboxAsync(
-        id,
-        { process: { commandLine: 'echo hello-from-wslc' } },
+      await assert.rejects(
+        () => execInSandboxAsync(
+          id as unknown as SandboxId<'isolation_session'>,
+          { process: { commandLine: 'echo hello-from-wslc' } },
+        ),
+        (error: unknown) =>
+          error instanceof MxcError &&
+          error.code === 'unsupported_containment',
       );
-      assert.deepStrictEqual(result, { stdout: 'hello-from-wslc\n', stderr: '', exitCode: 0 });
-      assert.deepStrictEqual(exec.request().process, { commandLine: 'echo hello-from-wslc' });
     });
 
     it('stopSandbox and deprovisionSandbox build minimal envelopes for a wslc: id', async () => {

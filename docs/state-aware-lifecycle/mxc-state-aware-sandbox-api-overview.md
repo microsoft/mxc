@@ -24,6 +24,7 @@ function signatures throughout. One-line summaries; full definitions live in
 | `ProcessConfig` | `sdk/node/src/types.ts` | Per-process settings: `commandLine`, `cwd`, `env`, `timeout`. Reused inside state-aware exec Configs. |
 | `FilesystemConfig`, `NetworkConfig`, `UiConfig` | `sdk/node/src/types.ts` | Wire-format-aligned cross-cutting interfaces. Reused inline as field types inside the per-(backend, phase) state-aware Configs. |
 | `SandboxSpawnOptions` | `sdk/node/src/sandbox.ts` | Options for experimental authorization, dry-run validation, and cancellation on promise-returning operations. Live `execInSandbox` callers use the returned process's `kill()` method. |
+| `StateAwareStreamingOptions` | `sdk/node/src/state-aware.ts` | Options for live IsolationSession exec. Contains only `experimental?`; cancellation is owned by the returned process. |
 | `MxcSandboxProcess` | `sdk/node/src/sandbox-process.ts` | Owning live-process handle with stdin/stdout/stderr streams, `waitAsync()`, `kill()`, and `dispose()`. Returned by `execInSandbox`. |
 | `getAvailableToolsPolicy`, `getUserProfilePolicy`, `getTemporaryFilesPolicy` | `sdk/node/src/policy.ts` | Filesystem-policy discovery helpers. Produce `FilesystemPolicyResult` fragments that compose into a state-aware Config's `filesystem` field. |
 | `ContainmentBackend` (Rust) | `wxc_common::models` | Rust dispatch enum (one variant per backend). State-aware adds `IsolationSession` and future variants. |
@@ -94,16 +95,22 @@ function startSandbox<C extends StateAwareContainmentBackend>(
   options?: SandboxSpawnOptions,
 ): Promise<StartResult<C>>;
 
-function execInSandbox<C extends StateAwareContainmentBackend>(
-  sandboxId: SandboxId<C>,
-  config: ExecConfigFor<C>,
+function execInSandbox(
+  sandboxId: SandboxId<'isolation_session'>,
+  config: IsolationSessionExecConfig,
   options?: StateAwareStreamingOptions,
 ): MxcSandboxProcess;
+
+function execInSandboxAsync(
+  sandboxId: SandboxId<'isolation_session'>,
+  config: IsolationSessionExecConfig,
+  options?: SandboxSpawnOptions,
+): Promise<ExecResult>;
 
 function execInSandboxAsync<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
   config: ExecConfigFor<C>,
-  options?: SandboxSpawnOptions,
+  options: SandboxSpawnOptions & { dryRun: true },
 ): Promise<ExecResult>;
 
 function stopSandbox<C extends StateAwareContainmentBackend>(
@@ -128,9 +135,12 @@ fields declare a Config carrying only `version?`. `containment` is named once at
 `provisionSandbox` and inferred from the branded `SandboxId<C>` on every subsequent
 call. Each non-exec phase returns a typed `<Phase>Result<C>`: provision carries
 `sandboxId` plus optional metadata; start, stop, and deprovision carry optional
-metadata only. `execInSandbox` returns an `MxcSandboxProcess` for live streaming;
-`execInSandboxAsync` is a buffered convenience that resolves on exit. Promise-returning
-operations accept `SandboxSpawnOptions`, including `signal?: AbortSignal`.
+metadata only. For IsolationSession, `execInSandbox` returns an
+`MxcSandboxProcess` for live streaming and `execInSandboxAsync` is a buffered
+convenience that resolves on exit. Windows Sandbox and WSLC do not expose
+piped native exec streams, so Node supports only dry-run validation for their
+exec requests. Promise-returning operations accept `SandboxSpawnOptions`,
+including `signal?: AbortSignal`.
 Live `execInSandbox` accepts `StateAwareStreamingOptions` and callers cancel through
 the returned process's `kill()` method.
 State-aware calls require experimental authorization only when the selected backend
@@ -364,7 +374,7 @@ const r = await execInSandboxAsync(
 ```rust
 // Parser populates request.script_code = "echo hello" from the wire-format `process`
 // block (same path as one-shot). The dispatcher then calls:
-backend.exec("iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0", &request, /* config */ None, ExecStdio::Relayed)
+backend.exec("iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0", &request, /* config */ None, ExecStdio::Piped)
 // returns Ok(ExecHandle { stdout, stderr, stdin, waiter, terminator })
 ```
 
@@ -383,9 +393,10 @@ Cross-backend exec fields flow through top-level `process`. Cross-cutting fields
 top-level wire fields (backend declares per-phase honor per reference §10.3). The
 SDK Config exposes only the cross-cutting fields the runtime currently honors —
 for IsolationSession, provision requires the cross-cutting directional
-all-allow network posture and rejects filesystem grants. WSLC exec can supply
-`runtimeConfig.networkProxy` without restating the network posture fixed at
-provision.
+all-allow network posture and rejects filesystem grants. WSLC exec requests can
+supply `runtimeConfig.networkProxy` without restating the network posture fixed
+at provision; the Node SDK can currently validate that request via dry-run but
+cannot execute it because WSLC does not expose piped native streams.
 
 ## Error codes
 

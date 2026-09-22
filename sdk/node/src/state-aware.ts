@@ -13,6 +13,7 @@ import {
   EveryBackendConfigIsOptional,
   ExecConfigFor,
   ExecResult,
+  IsolationSessionExecConfig,
   ProvisionConfigFor,
   ProvisionMetadataFor,
   ProvisionResult,
@@ -47,35 +48,49 @@ export interface StateAwareStreamingOptions {
   experimental?: boolean;
 }
 
-function unsupportedStateAwareOption(
-  options: SandboxSpawnOptions,
-  entryPointSupportsDryRun: boolean,
-): string | undefined {
-  if (options.debug === true) return 'debug';
-  if (options.allowTestingFeatures === true) return 'allowTestingFeatures';
-  if (options.inheritDefaultEnv !== undefined) return 'inheritDefaultEnv';
-  if (options.executablePath !== undefined) return 'executablePath';
-  if (options.skipPlatformCheck === true) return 'skipPlatformCheck';
-  if (options.ptyOptions !== undefined) return 'ptyOptions';
-  if (!entryPointSupportsDryRun && options.dryRun === true) return 'dryRun';
-  if (options.logDir !== undefined) return 'logDir';
-  if (options.usePty === true) return 'usePty';
-  return undefined;
-}
+type StateAwareOptionSupport = 'supported' | 'unsupported-when-true' | 'unsupported-when-defined';
+
+const STATE_AWARE_OPTION_SUPPORT = {
+  debug: 'unsupported-when-true',
+  experimental: 'supported',
+  allowTestingFeatures: 'unsupported-when-true',
+  inheritDefaultEnv: 'unsupported-when-defined',
+  executablePath: 'unsupported-when-defined',
+  skipPlatformCheck: 'unsupported-when-true',
+  ptyOptions: 'unsupported-when-defined',
+  dryRun: 'supported',
+  logDir: 'unsupported-when-defined',
+  usePty: 'unsupported-when-true',
+  signal: 'supported',
+} satisfies Record<keyof SandboxSpawnOptions, StateAwareOptionSupport>;
 
 function assertStateAwareOptions(
   apiName: string,
   options: SandboxSpawnOptions,
-  entryPointSupportsDryRun: boolean,
 ): void {
-  const unsupportedOption = unsupportedStateAwareOption(
-    options,
-    entryPointSupportsDryRun,
-  );
-  if (unsupportedOption !== undefined) {
+  for (const key of Object.keys(options) as Array<keyof SandboxSpawnOptions>) {
+    const support = STATE_AWARE_OPTION_SUPPORT[key];
+    const value = options[key];
+    const unsupported = support === 'unsupported-when-true'
+      ? value === true
+      : support === 'unsupported-when-defined' && value !== undefined;
+    if (!unsupported) continue;
     throw new MxcError(
       'malformed_request',
-      `${apiName} does not support option '${unsupportedOption}'`,
+      `${apiName} does not support option '${key}'`,
+    );
+  }
+}
+
+function assertNativeExecBackend(
+  apiName: string,
+  sandboxId: SandboxId<StateAwareContainmentBackend>,
+): void {
+  const backend = backendForSandboxId(sandboxId);
+  if (backend !== 'isolation_session') {
+    throw new MxcError(
+      'unsupported_containment',
+      `${apiName} supports native execution only for IsolationSession; ${backend} does not expose piped native exec streams.`,
     );
   }
 }
@@ -128,7 +143,7 @@ async function runStateAwareEnvelopeRequest(
   envelope: Record<string, unknown>,
   options: SandboxSpawnOptions,
 ): Promise<string> {
-  assertStateAwareOptions(apiName, options, true);
+  assertStateAwareOptions(apiName, options);
 
   const signal = options.signal;
   if (signal?.aborted) {
@@ -203,7 +218,8 @@ function spawnStateAwareExecProcess<C extends StateAwareContainmentBackend>(
   options: SandboxSpawnOptions,
   apiName: string,
 ): MxcSandboxProcess {
-  assertStateAwareOptions(apiName, options, false);
+  assertStateAwareOptions(apiName, options);
+  assertNativeExecBackend(apiName, sandboxId);
   return spawnStateAwareBindingSandboxProcess(
     JSON.stringify(buildExecEnvelope(sandboxId, config)),
     options.experimental === true,
@@ -314,14 +330,13 @@ export async function startSandbox<C extends StateAwareContainmentBackend>(
 }
 
 /**
- * Streams a script execution inside a started sandbox over Node pipes,
- * returning the shared `MxcSandboxProcess` controller used by
- * `spawnSandbox()`.
- *
+ * Streams a script execution inside a started IsolationSession over Node
+ * pipes, returning an owning `MxcSandboxProcess` for waiting, termination,
+ * stream access, and disposal.
  */
-export function execInSandbox<C extends StateAwareContainmentBackend>(
-  sandboxId: SandboxId<C>,
-  config: ExecConfigFor<C>,
+export function execInSandbox(
+  sandboxId: SandboxId<'isolation_session'>,
+  config: IsolationSessionExecConfig,
   options: StateAwareStreamingOptions = {},
 ): MxcSandboxProcess {
   const uncheckedOptions = options as SandboxSpawnOptions;
@@ -350,6 +365,16 @@ export function execInSandbox<C extends StateAwareContainmentBackend>(
  * on script completion. Native dispatch failures reject with `MxcError`;
  * workload failures are returned through the process exit code and streams.
  */
+export async function execInSandboxAsync<C extends StateAwareContainmentBackend>(
+  sandboxId: SandboxId<C>,
+  config: ExecConfigFor<C>,
+  options: SandboxSpawnOptions & { dryRun: true },
+): Promise<ExecResult>;
+export async function execInSandboxAsync(
+  sandboxId: SandboxId<'isolation_session'>,
+  config: IsolationSessionExecConfig,
+  options?: SandboxSpawnOptions,
+): Promise<ExecResult>;
 export async function execInSandboxAsync<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
   config: ExecConfigFor<C>,
@@ -385,14 +410,23 @@ export async function execInSandboxAsync<C extends StateAwareContainmentBackend>
   const waitPromise = Promise.all([proc.waitAsync(), stdoutPromise, stderrPromise]);
   const abort = createAbortPromise(proc, options.signal);
 
+  let failed = false;
   try {
     const [result, stdout, stderr] = abort.promise
       ? await Promise.race([waitPromise, abort.promise])
       : await waitPromise;
     return { stdout, stderr, exitCode: result.exitCode };
+  } catch (error) {
+    failed = true;
+    throw error;
   } finally {
     abort.cleanup();
-    proc.dispose();
+    try {
+      proc.dispose();
+    } catch (error) {
+      if (!failed) throw error;
+      logBackgroundFailure('disposing buffered exec after failure', error);
+    }
   }
 }
 
