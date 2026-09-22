@@ -2834,7 +2834,7 @@ mod tests {
     #[test]
     fn cli_command_quoting_for_command_processor_in_resolved_request() {
         let policy = r#"{
-            "version": "0.10.0-alpha",
+            "version": "1.1.0-alpha",
             "containment": "windows_sandbox",
             "process": {}
         }"#;

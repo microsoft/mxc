@@ -60,7 +60,7 @@ describe('StateAwareSchemaVersion', () => {
     ];
     assert.deepStrictEqual(versions, [
       '0.9.0-alpha',
-      '0.10.0-alpha',
+      '1.1.0-alpha',
       '0.9.0-alpha',
     ]);
   });
@@ -93,20 +93,20 @@ describe('IsolationSessionProvisionConfig', () => {
   describe('backend-specific state-aware versions', () => {
     it('accepts only the registered version for each backend config', () => {
       const isolation: IsolationSessionStartConfig = { version: '0.9.0-alpha' };
-      const windowsSandbox: WindowsSandboxStartConfig = { version: '0.10.0-alpha' };
+      const windowsSandbox: WindowsSandboxStartConfig = { version: '1.1.0-alpha' };
       const wslc: WslcStartConfig = { version: '0.9.0-alpha' };
 
       const wrongIsolation: IsolationSessionStartConfig = {
         // @ts-expect-error — IsolationSession is registered at v0.9.
-        version: '0.10.0-alpha',
+        version: '1.1.0-alpha',
       };
       const wrongWindowsSandbox: WindowsSandboxStartConfig = {
-        // @ts-expect-error — Windows Sandbox is registered at v0.10.
+        // @ts-expect-error — Windows Sandbox is registered at v1.1.
         version: '0.9.0-alpha',
       };
       const wrongWslc: WslcStartConfig = {
         // @ts-expect-error — WSLC is registered at v0.9.
-        version: '0.10.0-alpha',
+        version: '1.1.0-alpha',
       };
 
       assert.ok(isolation);
@@ -314,7 +314,7 @@ describe('ConfigsForBackend', () => {
 
   it('selects the WindowsSandbox bundle for the windows_sandbox backend', () => {
     const bundle: ConfigsForBackend<'windows_sandbox'> = {
-      provision: { version: '0.10.0-alpha', filesystem: { readwritePaths: ['C:\\workspace'] } },
+      provision: { version: '1.1.0-alpha', filesystem: { readwritePaths: ['C:\\workspace'] } },
       start: {},
       exec: { process: { commandLine: 'echo' } },
       stop: {},
@@ -327,7 +327,7 @@ describe('ConfigsForBackend', () => {
 describe('WindowsSandboxProvisionConfig', () => {
   it('accepts version and filesystem (incl. deniedPaths)', () => {
     const cfg: WindowsSandboxProvisionConfig = {
-      version: '0.10.0-alpha',
+      version: '1.1.0-alpha',
       filesystem: {
         readwritePaths: ['C:\\workspace'],
         readonlyPaths: ['C:\\inputs'],
@@ -361,8 +361,8 @@ describe('WindowsSandboxProvisionConfig', () => {
 
 describe('WindowsSandboxStartConfig', () => {
   it('carries only version (no configurationId, no backend-specific fields)', () => {
-    const ok: WindowsSandboxStartConfig = { version: '0.10.0-alpha' };
-    assert.strictEqual(ok.version, '0.10.0-alpha');
+    const ok: WindowsSandboxStartConfig = { version: '1.1.0-alpha' };
+    assert.strictEqual(ok.version, '1.1.0-alpha');
 
     const withConfigurationId: WindowsSandboxStartConfig = {
       // @ts-expect-error — windows_sandbox start has no configurationId.

@@ -4,7 +4,7 @@
 use super::common::{adapt, request_with_containment};
 
 const TEST_FEATURE_AND_TELEMETRY_REQUEST_JSON: &str = r#"{
-    "version": "0.10.0-alpha",
+    "version": "1.1.0-alpha",
     "containment": "process",
     "process": {
         "commandLine": "echo hello"
@@ -18,7 +18,7 @@ const TEST_FEATURE_AND_TELEMETRY_REQUEST_JSON: &str = r#"{
 }"#;
 
 const WINDOWS_SANDBOX_REQUEST_JSON: &str = r#"{
-    "version": "0.10.0-alpha",
+    "version": "1.1.0-alpha",
     "containment": "windows_sandbox",
     "process": {
         "commandLine": "echo hello"

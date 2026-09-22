@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Wire types for the mutable `0.10.0-alpha` configuration contract.
+//! Wire types for the mutable `1.1.0-alpha` configuration contract.
 //!
 //! These types validate the JSON structure and value constraints of the
 //! in-development contract. They preserve omitted optional fields for a later
@@ -213,21 +213,21 @@ string_enum! {
     /// The exact version marker accepted by this contract.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Version {
-        /// The development `0.10.0-alpha` contract.
-        V0_10_0Alpha => ["0.10.0-alpha"],
+        /// The development `1.1.0-alpha` contract.
+        V1_1_0Alpha => ["1.1.0-alpha"],
     }
 }
 
 mod experimental;
 mod network;
-/// The development `0.10.0-alpha` one-shot configuration contract.
+/// The development `1.1.0-alpha` one-shot configuration contract.
 mod one_shot;
 mod primitives;
 mod request;
 #[cfg(feature = "schema-gen")]
 mod schema;
 mod stable;
-/// The development `0.10.0-alpha` state-aware configuration contract.
+/// The development `1.1.0-alpha` state-aware configuration contract.
 mod state_aware;
 mod wslc;
 

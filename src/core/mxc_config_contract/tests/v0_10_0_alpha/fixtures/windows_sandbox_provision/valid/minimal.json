@@ -1,5 +1,0 @@
-{
-  "version": "0.10.0-alpha",
-  "phase": "provision",
-  "containment": "windows_sandbox"
-}

@@ -14,3 +14,5 @@ pub mod v0_7_0_alpha;
 pub mod v0_8_0_alpha;
 /// The published `0.9.0-alpha` configuration contract.
 pub mod v0_9_0_alpha;
+/// The published `1.0.0` configuration contract.
+pub mod v1_0_0;
