@@ -46,6 +46,15 @@ class FakeNative implements StreamingNativeFacade {
     return this.spawnStatus;
   }
 
+  stateAwareExec(
+    _request: string,
+    _experimental: number,
+    outHandle: unknown[],
+    error: unknown,
+  ): number {
+    return this.spawn('', outHandle, error);
+  }
+
   id(): number {
     return 23;
   }

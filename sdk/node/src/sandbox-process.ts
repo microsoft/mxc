@@ -186,7 +186,8 @@ export class MxcSandboxProcess {
 
   /**
    * Waits for process completion. Untaken stdin is closed and untaken output
-   * streams are drained internally to prevent pipe-buffer deadlocks.
+   * streams are drained internally to prevent pipe-buffer deadlocks. The
+   * native process handle is released before the promise resolves.
    */
   waitAsync(): Promise<SandboxWaitResult> {
     this.throwIfDisposed();

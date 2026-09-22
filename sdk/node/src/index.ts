@@ -151,6 +151,7 @@ export {
 
 // Export state-aware lifecycle functions
 export {
+  type StateAwareStreamingOptions,
   provisionSandbox,
   startSandbox,
   execInSandbox,

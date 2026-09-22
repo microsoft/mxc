@@ -190,7 +190,7 @@ export const lxcNetworkSkipReason = skipLxcNetworkTests
 
 /**
  * Wraps a state-aware SDK call, skipping the test (rather than failing) when
- * the executor reports `backend_unavailable` or `unsupported_phase` — either
+ * the native runtime reports `backend_unavailable` or `unsupported_phase` — either
  * indicates this environment cannot exercise the lifecycle. Other errors
  * propagate.
  */
@@ -207,11 +207,11 @@ export async function runOrSkipIfBackendUnavailable<T>(
       return undefined;
     }
     if (err instanceof MxcError && err.code === 'unsupported_phase') {
-      // wxc-exec was built without the backend's feature flag, so the
+      // mxc_ffi was built without the backend's feature flag, so the
       // state-aware dispatch path is compiled out. Same outcome from the
       // test's perspective as a host without the runtime: cannot exercise
       // the lifecycle, skip rather than fail.
-      t.skip(`${label}: wxc-exec lacks the backend feature; rebuild with the feature flag to run this test`);
+      t.skip(`${label}: mxc_ffi lacks the backend feature; rebuild with the feature flag to run this test`);
       return undefined;
     }
     throw err;
@@ -302,14 +302,14 @@ export async function probeStateAwareRuntime<C extends StateAwareContainmentBack
       return `${containment} runtime unavailable on this host`;
     }
     if (err instanceof MxcError && err.code === 'unsupported_phase') {
-      return `wxc-exec lacks the ${containment} feature; rebuild with --features ${containment} to run this test`;
+      return `mxc_ffi lacks the ${containment} feature; rebuild with --features ${containment} to run this test`;
     }
     throw err;
   }
 }
 
 /**
- * Probes whether `wxc-exec` was built WITH the IsolationSession feature,
+ * Probes whether `mxc_ffi` was built WITH the IsolationSession feature,
  * independently of whether this host can activate a real session. Returns a
  * skip-reason string when the feature is absent, `undefined` when it is
  * present. Other errors propagate so genuine failures aren't masked as
@@ -350,7 +350,7 @@ export async function probeIsolationSessionFeature(): Promise<string | undefined
       (err.code === 'unsupported_phase' ||
         (err.code === 'backend_unavailable' && err.operation === undefined))
     ) {
-      return 'wxc-exec lacks the isolation_session feature; rebuild with `--features isolation_session` (or `build.bat --with-isolation-session`) to run this test';
+      return 'mxc_ffi lacks the isolation_session feature; rebuild with `--features isolation_session` (or `build.bat --with-isolation-session`) to run this test';
     }
 
     if (err instanceof MxcError && err.code === 'policy_validation') {

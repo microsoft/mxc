@@ -258,10 +258,8 @@ implicitly copies `process.env` into the child.
 The `await`-friendly API runs the abstract `process` containment intent and
 resolves with `{ stdout, stderr, exitCode }`. That intent maps to the native
 process backend for each host and selects Windows ProcessContainer when the
-policy contains ProcessContainer-specific settings. Requests run in-process
-through `mxc_ffi`, with separate stdout and stderr. Executor-only options such
-as `dryRun`, `executablePath`, and testing-only proxy support are rejected; the
-API never falls back to an executor.
+policy contains ProcessContainer-specific settings. Requests execute through
+`mxc_ffi` and return separate stdout and stderr.
 
 ```typescript
 import {
@@ -369,12 +367,10 @@ For long-lived sandboxes where you provision once, exec many times, and tear dow
 
 ```typescript
 import {
-  provisionSandbox, startSandbox, execInSandboxAsync,
+  provisionSandbox, startSandbox, execInSandbox, execInSandboxAsync,
   stopSandbox, deprovisionSandbox,
 } from '@microsoft/mxc-sdk';
 
-// Every call takes a single options object (3rd arg). Experimental backends
-// must pass `experimental: true`.
 // isolation_session provision requires its actual unrestricted network posture.
 const { sandboxId } = await provisionSandbox(
   'isolation_session',
@@ -384,17 +380,22 @@ const { sandboxId } = await provisionSandbox(
       ingress: { default: 'allow', hostLoopback: 'allow' },
     },
   },
-  { experimental: true },
 );
-const opts = { experimental: true };
 
-await startSandbox(sandboxId, undefined, opts);
+await startSandbox(sandboxId);
 
-const r1 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'echo hello' } }, opts);
-const r2 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'whoami' } }, opts);
+const r1 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'echo hello' } });
+const r2 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'whoami' } });
 
-await stopSandbox(sandboxId, undefined, opts);
-await deprovisionSandbox(sandboxId, undefined, opts);
+const sandboxProcess = execInSandbox(
+  sandboxId,
+  { process: { commandLine: 'echo streamed' } },
+);
+sandboxProcess.standardOutput?.on('data', (chunk) => process.stdout.write(chunk));
+await sandboxProcess.waitAsync();
+
+await stopSandbox(sandboxId);
+await deprovisionSandbox(sandboxId);
 ```
 
 `IsolationSessionProvisionConfig.network` requires the standard directional
@@ -441,7 +442,7 @@ for the per-phase config matrix.
 import { MxcError } from '@microsoft/mxc-sdk';
 
 try {
-  await startSandbox(sandboxId, {}, { experimental: true });
+  await startSandbox(sandboxId);
 } catch (err) {
   if (err instanceof MxcError) {
     if (err.code === 'stale_id') { /* the sandbox is gone -- re-provision */ }
@@ -580,7 +581,7 @@ spawnSandboxAsync(script, policy, ...) → Promise<{ stdout, stderr, exitCode }>
 // optional otherwise (windows_sandbox, wslc).
 provisionSandbox(containment, config, options?)  → Promise<ProvisionResult>
 startSandbox(sandboxId, config?, options?)       → Promise<StartResult>
-execInSandbox(sandboxId, config, options?)       → IPty             // streaming
+execInSandbox(sandboxId, config, options)         → MxcSandboxProcess // streaming
 execInSandboxAsync(sandboxId, config, options?)  → Promise<ExecResult>
 stopSandbox(sandboxId, config?, options?)        → Promise<StopResult>
 deprovisionSandbox(sandboxId, config?, options?) → Promise<DeprovisionResult>
