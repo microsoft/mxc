@@ -384,6 +384,7 @@ force a particular backend.
 |-------|------------|
 | `"process"` | `processcontainer` on Windows, `bubblewrap` on Linux, `seatbelt` on macOS |
 | `"vm"` | Full hardware-virtualised VM isolation. Resolves to `windows_sandbox` on Windows. |
+| `"microvm"` | Compatibility-preserved public MicroVM identity. The same wire value directly selects the concrete MicroVM backend, implemented internally by NVX. |
 
 #### Concrete backends
 
