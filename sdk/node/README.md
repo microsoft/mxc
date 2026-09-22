@@ -295,7 +295,7 @@ console.log(result.stdout);
 <details>
 <summary>Table of all backends and links to per-backend guides — click to expand.</summary>
 
-`SandboxPolicy` is cross-platform. The backend is selected by the second argument to `createConfigFromPolicy(policy, containment)`. Pass an **abstract intent** (`"process"`, `"vm"`) whenever possible — the SDK and native binary resolve it to the right concrete backend for the host. Pass a **concrete backend name** when you need a specific runner.
+`SandboxPolicy` is cross-platform. The backend is selected by the second argument to `createConfigFromPolicy(policy, containment)`. Pass an **abstract intent** (`"process"`, `"vm"`, or the compatibility-preserved `"microvm"` public identity) whenever possible — the SDK and native binary resolve it to the right concrete backend for the host. Pass a **concrete backend name** when you need a specific runner.
 
 | Backend | Intent | Platforms | Minimum schema | Stable? | Guide |
 | --- | --- | --- | --- | --- | --- |
@@ -304,14 +304,15 @@ console.log(result.stdout);
 | `lxc` | (concrete only) | Linux | `0.6.0-alpha` | ✅ | [`docs/lxc-support/lxc-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/lxc-support/lxc-backend.md) |
 | `seatbelt` | `process` | macOS | `0.7.0-alpha` | ✅ | [`docs/seatbelt/seatbelt-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/seatbelt/seatbelt-backend.md) |
 | `windows_sandbox` | `vm` | Windows | `0.10.0-alpha` | Experimental | [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) |
-| `microvm` | (concrete only) | Windows x64 | `0.10.0-alpha` | Experimental | [`docs/nvx-backend-gaps.md`](https://github.com/microsoft/mxc/blob/main/docs/nvx-backend-gaps.md) — implemented by NVX; structural foundation only; runtime unavailable in Phase 1 |
+| `microvm` | `microvm` | Windows x64 | `0.10.0-alpha` | Experimental | [`docs/nvx-backend-gaps.md`](https://github.com/microsoft/mxc/blob/main/docs/nvx-backend-gaps.md) — public MicroVM identity implemented internally by NVX; structural foundation only; runtime unavailable in Phase 1 |
 | `hyperlight` | (concrete only) | Windows x64 / Linux x64 | `0.10.0-alpha` | Experimental | No dedicated guide |
 | `wslc` | (concrete only) | Windows | `0.9.0-alpha` | Stable | [`docs/wsl/wsl-container-getting-started.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wsl-container-getting-started.md) |
 | `isolation_session` | (concrete only) | Windows | `0.9.0-alpha` | Stable | [`docs/isolation-session/oneshot.md`](https://github.com/microsoft/mxc/blob/main/docs/isolation-session/oneshot.md) |
 
 The abstract `process` intent therefore requires `0.7.0-alpha` on macOS,
 where it resolves to Seatbelt, but retains the `0.6.0-alpha` floor on Windows
-and Linux. The abstract `vm` intent requires `0.10.0-alpha`.
+and Linux. The abstract `vm` intent and the compatibility-preserved `microvm`
+identity require `0.10.0-alpha`.
 
 Experimental backends require `{ experimental: true }` in `SandboxSpawnOptions`:
 
@@ -545,7 +546,7 @@ granting file content reads. It requires a BaseContainer host with PSEC 1.1
 | --- | --- | --- |
 | `MXC is not supported on this platform` | `getPlatformSupport()` returned `isSupported: false`. On Linux, neither LXC nor a usable Bubblewrap 0.5.0+ installation is available. On macOS, the Seatbelt platform probe could not find `/usr/bin/sandbox-exec`. | Inspect `support.reason`. On Linux, also inspect `support.unavailableReasons` and install LXC or Bubblewrap 0.5.0+. On macOS, verify that `/usr/bin/sandbox-exec` exists; its absence indicates an incomplete or unsupported macOS installation. |
 | `wxc-exec.exe not found` / `lxc-exec not found` | The SDK couldn't locate the native binary. | Set `MXC_BIN_DIR=<dir>` so `<dir>/<arch>/wxc-exec.exe` (or `lxc-exec`) exists, or pass `options.executablePath` explicitly. |
-| `Invalid containment value '<x>'` | `containment` field doesn't match the parser's accepted values. | Use one of the abstract intents (`process`, `vm`) or a concrete backend listed in [Choosing a Backend](#choosing-a-backend). |
+| `Invalid containment value '<x>'` | `containment` field doesn't match the parser's accepted values. | Use one of the public intents (`process`, `vm`, `microvm`) or a concrete backend listed in [Choosing a Backend](#choosing-a-backend). |
 | `'<x>' containment requires experimental mode` | A `windows_sandbox` / `microvm` / `hyperlight` backend was selected without the flag. | Pass `{ experimental: true }` in `SandboxSpawnOptions`. |
 | `process.commandLine starts with an unquoted Windows path containing a space` | `wxc-exec` rejects unquoted paths with spaces at parse time. | Quote the executable: `'"C:\\Program Files\\…\\foo.exe" args'`. |
 | `CreateProcessW(PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT) failed: ...` | The process security environment launch returned an OS-level error. Backend-unavailable failures automatically fall through to an AppContainer tier during selection. | Check the Windows build requirements for the backend you selected. |

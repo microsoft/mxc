@@ -80,7 +80,7 @@ describe('exact-version network authoring', () => {
 
 describe('containment exports', () => {
   it('exposes microvm and not the internal nvx implementation name', () => {
-    assert.deepStrictEqual(ContainmentTypes, ['process', 'vm']);
+    assert.deepStrictEqual(ContainmentTypes, ['process', 'vm', 'microvm']);
     assert.deepStrictEqual(ExperimentalBackends, ['microvm', 'windows_sandbox', 'hyperlight']);
   });
 });

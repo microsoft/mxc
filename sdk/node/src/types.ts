@@ -64,11 +64,15 @@ export interface LifecycleConfig {
  * - "vm": full hardware-virtualised VM isolation. Resolves to
  *   `windows_sandbox` on Windows; no concrete VM backend exists on other
  *   platforms today.
+ * - "microvm": the public MicroVM identity. It is retained as an intent for
+ *   source and runtime compatibility while NVX remains its internal
+ *   implementation. The same wire value also appears in
+ *   {@link ContainmentBackend} because it directly selects that backend.
  * Concrete-only backends (such as `"wslc"`) live on
  * {@link ContainmentBackend} until there is a meaningful abstraction over
  * multiple implementations of the same kind.
  */
-export type ContainmentType = 'process' | 'vm';
+export type ContainmentType = 'process' | 'vm' | 'microvm';
 
 /**
  * Runtime list of {@link ContainmentType} values. Kept in sync with the
@@ -76,7 +80,7 @@ export type ContainmentType = 'process' | 'vm';
  * abstract intents at run time (the union itself only exists at compile
  * time).
  */
-export const ContainmentTypes: readonly ContainmentType[] = ['process', 'vm'];
+export const ContainmentTypes: readonly ContainmentType[] = ['process', 'vm', 'microvm'];
 
 /**
  * Deprecated containment wire values, mapped to their canonical
