@@ -38,34 +38,6 @@ const SECRET_PATH_MARKERS: &[&str] = &[
 /// never leaks one.
 const SECRET_PATH_SEGMENTS: &[&str] = &["user"];
 
-/// Whether a single (not-yet-lower-cased) JSON object key is secret-bearing,
-/// per [`SECRET_PATH_SEGMENTS`] (whole-field match) and [`SECRET_PATH_MARKERS`]
-/// (substring match) — an ASCII-case-insensitive equivalent of
-/// [`is_secret_path_field`] for callers that only need the yes/no decision and
-/// would otherwise allocate a lower-cased copy of `field` just to ask it.
-#[cfg(test)]
-pub(crate) fn is_secret_path_field_ci(field: &str) -> bool {
-    SECRET_PATH_SEGMENTS
-        .iter()
-        .any(|segment| field.eq_ignore_ascii_case(segment))
-        || SECRET_PATH_MARKERS
-            .iter()
-            .any(|marker| contains_ignore_ascii_case(field, marker))
-}
-
-/// ASCII-case-insensitive `str::contains`, without allocating a lower-cased
-/// copy of `haystack`. `needle` is always one of the ASCII lower-case
-/// constants above.
-#[cfg(test)]
-fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
-    let (haystack, needle) = (haystack.as_bytes(), needle.as_bytes());
-    needle.is_empty()
-        || (needle.len() <= haystack.len()
-            && haystack
-                .windows(needle.len())
-                .any(|window| window.eq_ignore_ascii_case(needle)))
-}
-
 /// Whether a single lower-cased JSON object key is secret-bearing, per
 /// [`SECRET_PATH_SEGMENTS`] (whole-field match) and [`SECRET_PATH_MARKERS`]
 /// (substring match). Shared by error-path redaction (this module) and raw
@@ -86,7 +58,7 @@ pub(crate) struct ConfigDeserializeError {
     source: serde_json::Error,
     /// Whole-file `(line, column)` that overrides the location baked into
     /// `source` when the error was produced from a sub-slice of a larger
-    /// request (e.g. a state-aware `experimental.<backend>.<phase>` fragment).
+    /// request (e.g. a state-aware `<backendSection>.<phase>` fragment).
     /// `None` leaves `source`'s own location untouched.
     location_override: Option<(usize, usize)>,
 }
@@ -122,12 +94,6 @@ impl ConfigDeserializeError {
     pub(crate) fn source_line_column(&self) -> Option<(usize, usize)> {
         let line = self.source.line();
         (line > 0).then(|| (line, self.source.column()))
-    }
-
-    /// Whether serde classified this failure as malformed JSON syntax.
-    #[cfg(test)]
-    pub(crate) fn is_syntax_error(&self) -> bool {
-        matches!(self.source.classify(), Category::Syntax | Category::Eof)
     }
 
     /// Prefix a path produced while deserializing a JSON subtree with its path
@@ -168,6 +134,11 @@ impl fmt::Display for ConfigDeserializeError {
             Some((line, column)) => rewrite_trailing_location(&source, line, column),
             None => source,
         };
+        let source = if self.source.classify() == Category::Data && self.path.is_none() {
+            normalize_root_object_expectation(source)
+        } else {
+            source
+        };
         let source = escape_control_characters(&source);
         match self.source.classify() {
             Category::Syntax | Category::Eof => {
@@ -186,6 +157,23 @@ impl fmt::Display for ConfigDeserializeError {
             Category::Io => write!(formatter, "Unable to read JSON configuration: {source}"),
         }
     }
+}
+
+fn normalize_root_object_expectation(source: String) -> String {
+    const EXPECTED_STRUCT: &str = ", expected struct ";
+    let Some(expectation_start) = source.rfind(EXPECTED_STRUCT) else {
+        return source;
+    };
+    let type_start = expectation_start + EXPECTED_STRUCT.len();
+    let type_end = source[type_start..]
+        .find(" at line ")
+        .map(|offset| type_start + offset)
+        .unwrap_or(source.len());
+    format!(
+        "{}, expected a configuration object{}",
+        &source[..expectation_start],
+        &source[type_end..]
+    )
 }
 
 fn redact_secret_value(source: &serde_json::Error) -> String {
@@ -513,11 +501,57 @@ mod tests {
 
     #[test]
     fn root_level_errors_have_no_policy_path_or_rust_type_name() {
-        let error = from_str::<crate::wire::MxcConfig>(r#""not an object""#).unwrap_err();
-        assert_eq!(error.path.as_deref(), None);
+        fn assert_exact_root<T>()
+        where
+            T: serde::de::DeserializeOwned + std::fmt::Debug,
+        {
+            let error = from_str::<T>(r#""not an object""#).unwrap_err();
+            assert_eq!(error.path.as_deref(), None);
+            let message = error.to_string();
+            assert!(message.contains("expected a configuration object"));
+            let rust_type_name = std::any::type_name::<T>()
+                .rsplit("::")
+                .next()
+                .unwrap_or_default();
+            assert!(!message.contains(rust_type_name), "{message}");
+        }
+
+        assert_exact_root::<mxc_config_contract::published::v0_6_0_alpha::Request>();
+        assert_exact_root::<mxc_config_contract::published::v0_7_0_alpha::Request>();
+        assert_exact_root::<mxc_config_contract::published::v0_8_0_alpha::Request>();
+        assert_exact_root::<mxc_config_contract::published::v0_9_0_alpha::OneShotRequest>();
+        assert_exact_root::<
+            mxc_config_contract::published::v0_9_0_alpha::IsolationSessionProvisionRequest,
+        >();
+        assert_exact_root::<mxc_config_contract::published::v0_9_0_alpha::WslcProvisionRequest>();
+        assert_exact_root::<mxc_config_contract::published::v0_9_0_alpha::StartRequest>();
+        assert_exact_root::<mxc_config_contract::published::v0_9_0_alpha::ExecRequest>();
+        assert_exact_root::<mxc_config_contract::published::v0_9_0_alpha::StopRequest>();
+        assert_exact_root::<mxc_config_contract::published::v0_9_0_alpha::DeprovisionRequest>();
+        assert_exact_root::<mxc_config_contract::dev::OneShotRequest>();
+        assert_exact_root::<mxc_config_contract::dev::WindowsSandboxProvisionRequest>();
+        assert_exact_root::<mxc_config_contract::dev::IsolationSessionProvisionRequest>();
+        assert_exact_root::<mxc_config_contract::dev::WslcProvisionRequest>();
+        assert_exact_root::<mxc_config_contract::dev::StartRequest>();
+        assert_exact_root::<mxc_config_contract::dev::ExecRequest>();
+        assert_exact_root::<mxc_config_contract::dev::StopRequest>();
+        assert_exact_root::<mxc_config_contract::dev::DeprovisionRequest>();
+    }
+
+    #[test]
+    fn root_expectation_rewrite_uses_the_final_serde_marker() {
+        let error = from_str::<mxc_config_contract::dev::OneShotRequest>(
+            r#""marker, expected struct Decoy at line 7 column 9""#,
+        )
+        .unwrap_err();
         let message = error.to_string();
+
+        assert!(message.contains("marker, expected struct Decoy at line 7 column 9"));
         assert!(message.contains("expected a configuration object"));
-        assert!(!message.contains("MxcConfig"));
+        assert!(
+            !message.contains(", expected struct Request at line"),
+            "{message}"
+        );
     }
 
     #[test]

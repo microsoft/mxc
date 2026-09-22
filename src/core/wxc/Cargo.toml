@@ -20,7 +20,7 @@ windows.workspace = true
 hyperlight_common = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
-appcontainer_common = { workspace = true }
+process_container_common = { workspace = true }
 nanvix_binaries = { path = "../../backends/nanvix/binaries", optional = true }
 wslc_common = { workspace = true, optional = true }
 # Shared PLM dep: coordination, guarded lifecycle, and restricted WPR control.
@@ -44,8 +44,8 @@ hyperlight = ["dep:hyperlight_common", "hyperlight_common/hyperlight", "mxc_engi
 isolation_session = ["mxc_engine/isolation_session"]
 # Builds a test executor that honors MXC_FORCE_TIER. Never enable in production.
 force-tier-testing = [
-    "appcontainer_common/force-tier-testing",
+    "process_container_common/force-tier-testing",
     "mxc_engine/force-tier-testing",
 ]
-# Forwards appcontainer_common/tier2_bfs. OFF by default; see appcontainer_common/Cargo.toml.
-tier2_bfs = ["appcontainer_common/tier2_bfs", "mxc_engine/tier2_bfs"]
+# Forwards process_container_common/tier2_bfs. OFF by default; see process_container_common/Cargo.toml.
+tier2_bfs = ["process_container_common/tier2_bfs", "mxc_engine/tier2_bfs"]

@@ -1,0 +1,23 @@
+{
+  "version": "0.9.0-alpha",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "echo wslc"
+  },
+  "wslc": {
+    "targetOs": "linux",
+    "image": "alpine:latest",
+    "imageTarPath": "C:\\images\\alpine.tar",
+    "cpuCount": 2,
+    "memoryMb": 4096,
+    "gpu": false,
+    "storagePath": "C:\\wslc",
+    "portMappings": [
+      {
+        "windowsPort": 8080,
+        "containerPort": 80,
+        "protocol": "tcp"
+      }
+    ]
+  }
+}

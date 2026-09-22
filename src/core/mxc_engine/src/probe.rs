@@ -40,7 +40,7 @@ pub enum BackendCapability {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AvailableBackend {
-    /// Canonical [`wxc_common::wire::Containment`] wire name.
+    /// Canonical [`ContainmentBackend::wire_name`] value.
     pub backend: String,
     /// Highest-isolation tier the host supports for this backend (a canonical
     /// `IsolationTier::as_str()` name); `None`, and omitted from JSON, for
@@ -90,19 +90,19 @@ pub fn available_backends() -> Vec<AvailableBackend> {
     }
     #[cfg(target_os = "windows")]
     {
-        use appcontainer_common::fallback_detector::is_base_container_usable;
+        use process_container_common::fallback_detector::is_base_container_usable;
 
         let tier = select_tier(is_base_container_usable(), cfg!(feature = "tier2_bfs"));
         windows_backends(
             tier,
             ProcessContainerCapabilities {
                 capture_denials: capture_denials_available(
-                    appcontainer_common::base_container_runner::BaseContainerRunner::is_capture_denials_usable(),
+                    process_container_common::base_container_runner::BaseContainerRunner::is_capture_denials_usable(),
                     guarded_capture::is_available(),
                 ),
-                filesystem_denied_paths: appcontainer_common::base_container_runner::BaseContainerRunner::supports_native_denied_paths(),
-                filesystem_enumerate_paths: appcontainer_common::base_container_runner::BaseContainerRunner::supports_enumerate_paths(),
-                ingress_host_loopback_allow: appcontainer_common::base_container_runner::BaseContainerRunner::supports_ingress_host_loopback_allow(),
+                filesystem_denied_paths: process_container_common::base_container_runner::BaseContainerRunner::supports_native_denied_paths(),
+                filesystem_enumerate_paths: process_container_common::base_container_runner::BaseContainerRunner::supports_enumerate_paths(),
+                ingress_host_loopback_allow: process_container_common::base_container_runner::BaseContainerRunner::supports_ingress_host_loopback_allow(),
             },
         )
     }
@@ -177,7 +177,7 @@ fn capture_denials_available(native_capture: bool, guarded_capture: bool) -> boo
 
 #[cfg(target_os = "windows")]
 fn windows_backends(
-    tier: appcontainer_common::fallback_detector::IsolationTier,
+    tier: process_container_common::fallback_detector::IsolationTier,
     support: ProcessContainerCapabilities,
 ) -> Vec<AvailableBackend> {
     // `processcontainer` is always present and the only backend with a tier
@@ -186,7 +186,7 @@ fn windows_backends(
     if support.capture_denials {
         capabilities.push(BackendCapability::CaptureDenials);
     }
-    if tier == appcontainer_common::fallback_detector::IsolationTier::BaseContainer {
+    if tier == process_container_common::fallback_detector::IsolationTier::BaseContainer {
         if support.filesystem_denied_paths {
             capabilities.push(BackendCapability::FilesystemDeniedPaths);
         }
@@ -255,8 +255,8 @@ fn windows_backends(
 fn select_tier(
     base_container_usable: bool,
     tier2_bfs_enabled: bool,
-) -> appcontainer_common::fallback_detector::IsolationTier {
-    use appcontainer_common::fallback_detector::IsolationTier;
+) -> process_container_common::fallback_detector::IsolationTier {
+    use process_container_common::fallback_detector::IsolationTier;
     if base_container_usable {
         IsolationTier::BaseContainer
     } else if tier2_bfs_enabled {
@@ -269,32 +269,33 @@ fn select_tier(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::wire::Containment;
+    use wxc_common::models::ContainmentBackend;
 
-    fn wire_name(containment: &Containment) -> String {
-        serde_json::to_string(containment)
-            .expect("Containment serializes")
-            .trim_matches('"')
-            .to_string()
+    const CANONICAL_BACKEND_NAMES: &[(ContainmentBackend, &str)] = &[
+        (ContainmentBackend::ProcessContainer, "processcontainer"),
+        (ContainmentBackend::Wslc, "wslc"),
+        (ContainmentBackend::Lxc, "lxc"),
+        (ContainmentBackend::Vm, "vm"),
+        (ContainmentBackend::MicroVm, "microvm"),
+        (ContainmentBackend::Hyperlight, "hyperlight"),
+        (ContainmentBackend::WindowsSandbox, "windows_sandbox"),
+        (ContainmentBackend::IsolationSession, "isolation_session"),
+        (ContainmentBackend::Seatbelt, "seatbelt"),
+        (ContainmentBackend::Bubblewrap, "bubblewrap"),
+    ];
+
+    fn all_containment_names() -> Vec<String> {
+        CANONICAL_BACKEND_NAMES
+            .iter()
+            .map(|(_, name)| (*name).to_string())
+            .collect()
     }
 
-    fn all_wire_names() -> Vec<String> {
-        [
-            Containment::Process,
-            Containment::ProcessContainer,
-            Containment::Vm,
-            Containment::WindowsSandbox,
-            Containment::Lxc,
-            Containment::Microvm,
-            Containment::Hyperlight,
-            Containment::Wslc,
-            Containment::Seatbelt,
-            Containment::IsolationSession,
-            Containment::Bubblewrap,
-        ]
-        .iter()
-        .map(wire_name)
-        .collect()
+    #[test]
+    fn backend_wire_names_match_the_canonical_table() {
+        for (backend, expected) in CANONICAL_BACKEND_NAMES {
+            assert_eq!(backend.wire_name(), *expected, "{backend:?}");
+        }
     }
 
     const CANONICAL_TIERS: [&str; 3] = ["base-container", "appcontainer-bfs", "appcontainer-dacl"];
@@ -396,44 +397,13 @@ mod tests {
     }
 
     #[test]
-    fn every_reported_backend_is_a_real_wire_name() {
-        let known = all_wire_names();
+    fn every_reported_backend_uses_a_canonical_name() {
+        let known = all_containment_names();
         for entry in available_backends() {
             assert!(
                 known.contains(&entry.backend),
-                "reported backend {:?} is not a Containment wire name",
+                "reported backend {:?} is not a canonical backend name",
                 entry.backend
-            );
-        }
-    }
-
-    /// Every backend the probe can emit, across all platforms/features — derived
-    /// from `ContainmentBackend` (the same source as the `push` calls) so the
-    /// emitted names can't be typo'd, and checked against the `wire::Containment`
-    /// serde names so the two enums can't drift.
-    const EMITTABLE_BACKENDS: [ContainmentBackend; 8] = [
-        ContainmentBackend::Seatbelt,
-        ContainmentBackend::Bubblewrap,
-        ContainmentBackend::Lxc,
-        ContainmentBackend::ProcessContainer,
-        ContainmentBackend::WindowsSandbox,
-        ContainmentBackend::Wslc,
-        ContainmentBackend::IsolationSession,
-        ContainmentBackend::Hyperlight,
-    ];
-
-    /// Complements [`every_reported_backend_is_a_real_wire_name`] (host subset)
-    /// by checking every emittable backend unconditionally, so a mismatch for a
-    /// backend this host or feature doesn't exercise (e.g. `wslc`) still can't
-    /// drift between `ContainmentBackend::wire_name` and `wire::Containment`.
-    #[test]
-    fn all_emittable_backend_names_are_real_wire_names() {
-        let known = all_wire_names();
-        for backend in EMITTABLE_BACKENDS {
-            assert!(
-                known.contains(&backend.wire_name().to_string()),
-                "emittable backend {backend:?} wire name {:?} is not a Containment wire name",
-                backend.wire_name()
             );
         }
     }
@@ -454,7 +424,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn canonical_tier_strings_match_isolation_tier() {
-        use appcontainer_common::fallback_detector::IsolationTier;
+        use process_container_common::fallback_detector::IsolationTier;
         assert_eq!(IsolationTier::BaseContainer.as_str(), CANONICAL_TIERS[0]);
         assert_eq!(IsolationTier::AppContainerBfs.as_str(), CANONICAL_TIERS[1]);
         assert_eq!(IsolationTier::AppContainerDacl.as_str(), CANONICAL_TIERS[2]);
@@ -491,7 +461,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_reports_capture_denials_from_combined_provider_result() {
-        use appcontainer_common::fallback_detector::IsolationTier;
+        use process_container_common::fallback_detector::IsolationTier;
 
         for capture_denials_available in [false, true] {
             let backends = windows_backends(
@@ -517,7 +487,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_reports_policy_capabilities_for_base_container() {
-        use appcontainer_common::fallback_detector::IsolationTier;
+        use process_container_common::fallback_detector::IsolationTier;
 
         let backends = windows_backends(
             IsolationTier::BaseContainer,
@@ -546,7 +516,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_omits_base_container_capabilities_from_lower_tiers() {
-        use appcontainer_common::fallback_detector::IsolationTier;
+        use process_container_common::fallback_detector::IsolationTier;
 
         for tier in [
             IsolationTier::AppContainerBfs,
@@ -573,7 +543,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn tier_precedence_prefers_the_strongest_reachable_rung() {
-        use appcontainer_common::fallback_detector::IsolationTier;
+        use process_container_common::fallback_detector::IsolationTier;
         // BaseContainer wins whenever usable, regardless of tier2_bfs.
         assert_eq!(select_tier(true, false), IsolationTier::BaseContainer);
         assert_eq!(select_tier(true, true), IsolationTier::BaseContainer);

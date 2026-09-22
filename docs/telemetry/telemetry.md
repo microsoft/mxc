@@ -621,8 +621,8 @@ describes what actually ran, not what was requested.
 An allow-list is deliberate: a field added to the model later is excluded until
 someone opts it in, which fails safe rather than accidentally hashing a secret.
 To stop that from rotting into a silent coverage gap, the projection
-**exhaustively destructures** `ExecutionRequest` and `ExperimentalConfig` — adding
-a field to either is a compile error until it is classified.
+**exhaustively destructures** `ExecutionRequest` — adding a field is a compile
+error until it is classified.
 
 Excluded, and why:
 
@@ -630,14 +630,19 @@ Excluded, and why:
 |---|---|
 | `script_code` | The command line is *what runs*, not the policy it runs under; it routinely embeds credentials. |
 | `env` | Environment variables are the classic secret carrier. |
-| `experimental.telemetry`, `experimental.test` | No enforcement effect. |
-| `experimental.*.user` | Carries identity credentials. Stripped recursively; the rest of the isolation-session section *is* hashed. |
+| `source_contract` | External exact-contract provenance used for diagnostics and telemetry attribution, not enforcement. |
+| `telemetry`, internal `test` feature | No enforcement effect. |
 | proxy `original_url` | Can embed `user:password@`. The host and port *are* hashed. |
 | `dry_run`, `testing_features_enabled` | Invocation modes, not policy. |
 
-The rest of `experimental` **is** hashed — `windows_sandbox`, `wslc`, and
-`isolation_session` carry those backends' entire enforcement policy, so omitting
-them would make two materially different policies hash identically.
+`network_enforcement_compatibility` is included because it changes how the
+normalized network policy is interpreted and enforced.
+
+Enforcement-relevant backend configuration is hashed from
+`ExecutionRequest.windows_sandbox` and `ExecutionRequest.wslc`. The canonical
+projection exposes them at the `windowsSandbox` and `wslc` root keys.
+IsolationSession has no corresponding one-shot runtime configuration in this
+projection.
 
 `config_schema_version` is named for the *schema*: it does not change when the
 policy changes and must never be read as a policy version.

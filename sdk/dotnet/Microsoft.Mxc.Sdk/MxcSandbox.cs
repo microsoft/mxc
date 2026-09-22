@@ -40,7 +40,7 @@ public static class MxcSandbox
     };
 
     private static JsonSerializerOptions PolicyJsonOptions(string version) =>
-        SchemaVersions.IsPublished(version)
+        SchemaVersions.UsesLegacyNetworkDefaults(version)
             ? PublishedPolicyJsonOptions
             : JsonOptions;
 
@@ -288,10 +288,10 @@ public static class MxcSandbox
                 nameof(policy));
         }
 
-        if (policy.Version == SchemaVersions.MaximumSupported)
+        if (policy.Version is "0.9.0-alpha" or "0.10.0-alpha")
         {
             throw new ArgumentException(
-                $"Schema 0.9 no longer supports authored network.{field}, including null. Legacy network authoring "
+                $"Schema {policy.Version} no longer supports authored network.{field}, including null. Legacy network authoring "
                     + "(AllowOutbound, AllowLocalNetwork, AllowedHosts, BlockedHosts, Proxy). "
                     + "Use Network.Egress/Ingress and Network.RuntimeConfig.NetworkProxy explicitly, "
                     + "or retain schema 0.8.0-alpha. Hostnames are not converted to CIDRs.",

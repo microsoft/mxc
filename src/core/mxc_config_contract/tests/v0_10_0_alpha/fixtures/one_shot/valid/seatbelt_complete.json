@@ -1,0 +1,17 @@
+{
+  "version": "0.10.0-alpha",
+  "containment": "seatbelt",
+  "process": {
+    "commandLine": "echo seatbelt complete"
+  },
+  "seatbelt": {
+    "profileOverride": "(version 1) (allow default)",
+    "guiAccess": true,
+    "nestedPty": false,
+    "keychainAccess": true,
+    "extraMachLookups": [
+      "com.apple.SecurityServer",
+      "com.apple.coreservices.launchservicesd"
+    ]
+  }
+}

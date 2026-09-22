@@ -148,7 +148,7 @@ struct WslcSandboxProcess {
 // `CoInitializeEx` is nonetheless per-thread, so moving this handle to a thread
 // that never initialized COM would otherwise leave the SDK on the stack of an
 // apartment-less thread. Every entry point that calls the SDK joins the MTA for
-// the duration via `ComApartment`, mirroring `appcontainer_common`'s guard:
+// the duration via `ComApartment`, mirroring `process_container_common`'s guard:
 // `StartedContainer`'s `wait_for_exit` / `destroy` / `stop` / `exit_code`, and
 // — because a `Send` handle can be *dropped* on such a thread too — the
 // `Drop` impls of the `WslcSessionGuard` / `WslcContainerGuard` /

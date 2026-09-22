@@ -37,8 +37,13 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $ConfigPath = Join-Path $RepoRoot "tests\configs\wslc_network_proxy.json"
 
-# Resolve the binary: explicit path, then target-specific and default dirs.
-$Target = "x86_64-pc-windows-msvc"
+# Find binary -- prefer explicit path, then probe target-specific and default
+# dirs. Use the host arch to determine which target to use. 
+$Target = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') {
+    'aarch64-pc-windows-msvc'
+} else {
+    'x86_64-pc-windows-msvc'
+}
 $Profile = if ($Debug) { "debug" } else { "release" }
 if ($WxcExecPath) {
     $WxcExec = $WxcExecPath
@@ -57,7 +62,7 @@ if (-not $WxcExec -or -not (Test-Path $WxcExec)) {
 Write-Host "Running WSLC cooperative proxy functional test..."
 Write-Host "Binary: $WxcExec" -ForegroundColor Gray
 
-$wxcArgs = @("--experimental")
+$wxcArgs = @()
 if ($Debug) { $wxcArgs += "--debug" }
 $wxcArgs += $ConfigPath
 

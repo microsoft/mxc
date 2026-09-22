@@ -13,9 +13,7 @@
     "egress": { "default": "allow" },
     "ingress": { "default": "allow", "hostLoopback": "allow" }
   },
-  "experimental": {
-    "wslc": {
-      "image": "alpine:latest"
-    }
+  "wslc": {
+    "image": "alpine:latest"
   }
 }

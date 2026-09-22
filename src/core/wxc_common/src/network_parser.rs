@@ -6,8 +6,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use crate::error::WxcError;
 use crate::models::{
     unbracket_host, ContainerPolicy, ContainmentBackend, NetworkAction, NetworkCidr,
-    NetworkEgressPolicy, NetworkIngressPolicy, NetworkPeer, NetworkPort, NetworkProtocol,
-    NetworkRule, ProxyAddress, ProxyConfig,
+    NetworkEgressPolicy, NetworkEnforcementCompatibility, NetworkIngressPolicy, NetworkPeer,
+    NetworkPort, NetworkProtocol, NetworkRule, ProxyAddress, ProxyConfig,
 };
 use crate::wire;
 
@@ -33,19 +33,6 @@ fn has_process_container_network_fields(network: &wire::ProcessContainerNetwork)
         .allowed_proxy_peer
         .as_ref()
         .is_some_and(|peer| !peer.trim().is_empty())
-}
-
-/// Returns directional-network support for a valid schema version.
-///
-/// `None` leaves malformed-version diagnostics to the schema parser.
-pub fn directional_network_support(version: &str) -> Option<bool> {
-    semver::Version::parse(version)
-        .ok()
-        .map(|version| version.major > 0 || version.minor >= 8)
-}
-
-pub fn supports_directional_network(version: &str) -> bool {
-    directional_network_support(version).unwrap_or(false)
 }
 
 pub(crate) fn directional_network_version_error() -> WxcError {
@@ -182,7 +169,7 @@ pub(crate) fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcE
 }
 
 fn select_network_format(
-    version: &str,
+    compatibility: NetworkEnforcementCompatibility,
     sections: &NetworkSections,
 ) -> Result<NetworkFormat, WxcError> {
     let has_legacy = sections.network.as_ref().is_some_and(has_legacy_fields);
@@ -199,7 +186,7 @@ fn select_network_format(
         has_directional_policy || has_runtime_config || has_process_container_network;
     let has_directional_section =
         sections.runtime.is_some() || sections.process_container.is_some();
-    let supports_directional = supports_directional_network(version);
+    let supports_directional = compatibility == NetworkEnforcementCompatibility::Strict;
 
     if has_legacy && has_directional {
         return Err(WxcError::ConfigParse(
@@ -228,11 +215,11 @@ fn select_network_format(
 /// Returns metadata when backend-specific validation is still required.
 pub(crate) fn parse_network_policy(
     policy: &mut ContainerPolicy,
-    version: &str,
+    compatibility: NetworkEnforcementCompatibility,
     sections: NetworkSections,
     containment: &ContainmentBackend,
 ) -> Result<Option<NetworkMetadata>, WxcError> {
-    match select_network_format(version, &sections)? {
+    match select_network_format(compatibility, &sections)? {
         NetworkFormat::Legacy => apply_legacy_network(policy, sections.network),
         NetworkFormat::Directional => {
             apply_directional_network(policy, sections, containment)?;
@@ -649,7 +636,7 @@ mod proxy_policy_tests {
         let mut policy = ContainerPolicy::default();
         parse_network_policy(
             &mut policy,
-            "0.9.0-alpha",
+            NetworkEnforcementCompatibility::Strict,
             directional_sections("http://proxy.example:8080"),
             &ContainmentBackend::Wslc,
         )
@@ -670,7 +657,7 @@ mod proxy_policy_tests {
         let mut policy = ContainerPolicy::default();
         let error = parse_network_policy(
             &mut policy,
-            "0.9.0-alpha",
+            NetworkEnforcementCompatibility::Strict,
             directional_sections("http://proxy.example:8080"),
             &ContainmentBackend::ProcessContainer,
         )
@@ -680,7 +667,7 @@ mod proxy_policy_tests {
         let mut policy = ContainerPolicy::default();
         let error = parse_network_policy(
             &mut policy,
-            "0.9.0-alpha",
+            NetworkEnforcementCompatibility::Strict,
             directional_sections("http://127.0.0.1:8080"),
             &ContainmentBackend::ProcessContainer,
         )

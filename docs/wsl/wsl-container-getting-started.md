@@ -3,9 +3,9 @@
 This guide walks you through setting up the WSL Container (WSLC) backend for
 MXC, which lets you run Linux containers on Windows using the WSLC SDK.
 
-> **Note:** WSLC is an **experimental** feature. It requires the `--experimental`
-> CLI flag, `{ experimental: true }` in TypeScript SDK spawn options, or
-> `SandboxRequest::set_experimental(true)` in the Rust SDK.
+> **Note:** WSLC is a stable v0.9 backend and does not require a runtime
+> experimental opt-in. Rust/native builds still require the compile-time
+> `wslc` feature and the external WSLC SDK/runtime prerequisites below.
 
 ## Prerequisites
 
@@ -101,6 +101,11 @@ Verify the binary starts without errors:
 .\src\target\x86_64-pc-windows-msvc\release\wxc-exec.exe --help
 ```
 
+> **Note:** paths in this guide use the x64 target directory. On an ARM64 host
+> `build.bat` targets `aarch64-pc-windows-msvc`, so substitute that directory.
+> The WSLC scripts under `scripts\` and `tests\scripts\` pick the host-arch
+> directory themselves.
+
 > **Note:** `wxc-exec.exe` does **not** require `wslcsdk.dll` at startup. The
 > DLL is loaded at runtime only when the WSLC backend is invoked. All other
 > backends (Process Container, Windows Sandbox) work without it.
@@ -128,7 +133,7 @@ cost once per image, not once per run.
 
 > **Storage path consistency:** the cache lives under the WSLC
 > `storage_path` (default `%TEMP%\mxc-wslc-sessions`). If your runtime
-> configs override `experimental.wslc.storagePath`, pass the same
+> configs override `wslc.storagePath`, pass the same
 > value here with `-StoragePath` (or `--storage-path` on
 > `wxc-exec.exe`), otherwise the runner will not find what you just
 > pulled.
@@ -144,7 +149,7 @@ Run the included hello world example config from the repo root:
 
 ```powershell
 cd <repo-root>
-.\src\target\x86_64-pc-windows-msvc\release\wxc-exec.exe --experimental --debug examples\wslc_hello_world.json
+.\src\target\x86_64-pc-windows-msvc\release\wxc-exec.exe --debug examples\wslc_hello_world.json
 ```
 
 Expected output:
@@ -163,8 +168,7 @@ Once setup is done, the day-to-day flow is two distinct commands:
 .\scripts\setup-wslc.ps1 -Image <image>
 
 # (any number of times) execute against the cached image
-.\src\target\x86_64-pc-windows-msvc\release\wxc-exec.exe `
-    --experimental my-config.json
+.\src\target\x86_64-pc-windows-msvc\release\wxc-exec.exe my-config.json
 ```
 
 This separation keeps `wxc-exec.exe` hermetic and fast at run time —
@@ -191,15 +195,15 @@ const policy = {
 
 const config = createConfigFromPolicy(policy, 'wslc');
 config.process!.commandLine = 'python3 -c "print(\'Hello from WSLC\')"';
-config.experimental!.wslc!.image = 'python:3.12-alpine';
-config.experimental!.wslc!.cpuCount = 2;
-config.experimental!.wslc!.memoryMb = 1024;
+config.wslc!.image = 'python:3.12-alpine';
+config.wslc!.cpuCount = 2;
+config.wslc!.memoryMb = 1024;
 
 // PTY mode (interactive terminal):
-const ptyProcess = spawnSandboxFromConfig(config, { experimental: true });
+const ptyProcess = spawnSandboxFromConfig(config);
 
 // Non-PTY mode (reliable exit codes, separate stdout/stderr):
-const child = spawnSandboxFromConfig(config, { experimental: true, usePty: false });
+const child = spawnSandboxFromConfig(config, { usePty: false });
 child.stdout?.on('data', (data) => console.log(data.toString()));
 child.on('close', (code) => console.log('Exit code:', code));
 ```
@@ -208,8 +212,7 @@ child.on('close', (code) => console.log('Exit code:', code));
 
 The Rust SDK (`mxc-sdk`) runs WSLC **in-process** — it does not spawn
 `wxc-exec.exe`. Build the crate with its `wslc` feature, select the backend with
-`build_request_with_containment`, and opt into experimental features on the
-request (the library-side equivalent of `--experimental`):
+`build_request_with_containment`, and run the request directly:
 
 ```toml
 # Cargo.toml
@@ -237,9 +240,7 @@ let wslc = WslcSection {
     ..Default::default()
 };
 
-let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), "python3 -c \"print('Hello from WSLC')\"", None)?;
-request
-    .set_experimental(true);
+let request = build_request_with_containment(&policy, &Containment::Wslc(wslc), "python3 -c \"print('Hello from WSLC')\"", None)?;
 
 // Run to completion, capturing output…
 let output = run(request.clone())?;
@@ -250,7 +251,7 @@ let mut sandbox = spawn_sandbox(request)?;
 let stdout = sandbox.take_stdout().expect("stdout");
 ```
 
-`WslcSection` mirrors the `experimental.wslc` block below;
+`WslcSection` mirrors the `wslc` block below;
 `WslcSection::default()` matches the SDK default (`alpine:latest`). Settings go
 through the same parser the executor uses, so a rejected value (e.g. a port
 mapping with a zero or duplicated host port) fails at
@@ -272,7 +273,7 @@ Notes and limits:
 
 ### JSON config
 
-WSLC-specific settings go under `experimental.wslc` in the JSON config:
+WSLC-specific settings go under `wslc` in the JSON config:
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -296,7 +297,7 @@ WSLC-specific settings go under `experimental.wslc` in the JSON config:
 ```
 
 ```json
-"experimental": { "wslc": { "image": "alpine:latest" } }
+"wslc": { "image": "alpine:latest" }
 ```
 
 **2. Pre-pulled from a custom registry (no auth):**
@@ -306,7 +307,7 @@ WSLC-specific settings go under `experimental.wslc` in the JSON config:
 ```
 
 ```json
-"experimental": { "wslc": { "image": "ghcr.io/linuxserver/baseimage-alpine:3.21" } }
+"wslc": { "image": "ghcr.io/linuxserver/baseimage-alpine:3.21" }
 ```
 
 Tested registries: DockerHub, `mcr.microsoft.com`, `ghcr.io`, `quay.io`.
@@ -314,11 +315,9 @@ Tested registries: DockerHub, `mcr.microsoft.com`, `ghcr.io`, `quay.io`.
 **3. Import from a local tar file (no pre-pull needed):**
 
 ```json
-"experimental": {
-  "wslc": {
-    "image": "my-image:latest",
-    "imageTarPath": "C:\\path\\to\\image.tar"
-  }
+"wslc": {
+  "image": "my-image:latest",
+  "imageTarPath": "C:\\path\\to\\image.tar"
 }
 ```
 
@@ -379,7 +378,7 @@ address the container can reach:
     "ingress": { "default": "allow", "hostLoopback": "allow" }
   },
   "runtimeConfig": { "networkProxy": "http://proxy.example:8080" },
-  "experimental": { "wslc": { "image": "alpine:latest" } }
+  "wslc": { "image": "alpine:latest" }
 }
 ```
 
@@ -427,7 +426,7 @@ rather than refused merely for being present.
 inbound connections) is **rejected at config-parse time** for WSLC. A WSLC
 container runs in the NAT'd WSL2 VM and MXC does not honor a blanket
 inbound-listen grant — only explicit host→container forwards via
-`experimental.wslc` `portMappings` have any inbound effect, so accepting the
+`wslc` `portMappings` have any inbound effect, so accepting the
 flag would silently promise reachability the backend never delivers. Expose
 specific ports with `portMappings` instead. (`allowLocalNetwork: false`, the
 default, is a no-op and is accepted.)
@@ -490,9 +489,7 @@ explicit `provision` / `deprovision` phases rather than by per-run flags.
 | `Failed to load wslcsdk.dll` | DLL not in same directory as `wxc-exec.exe` | Copy `wslcsdk.dll` next to the binary |
 | `WSLC runtime unavailable` | WSL runtime package is missing, older than 2.9.9, or the Virtual Machine Platform optional component is disabled | Update WSL with `wsl --update --pre-release`, verify the installed version with `wsl --version`, and enable the Virtual Machine Platform optional component if required. The WSLC SDK DLL is a separate dependency and does not replace the WSL runtime package. |
 | `WSLC runtime unavailable. Missing components: SdkNeedsUpdate` | The opposite direction: your installed WSL is **newer** than the WSLc SDK this MXC build ships (pinned by `WSLC_SDK_VERSION` in `src/backends/wslc/common/build.rs`) | Update MXC to a build with a newer pinned SDK. Do **not** update WSL — it is already ahead, and updating it further will not clear this. |
-| `WSLC image '<name>' not found locally` | Image was not pre-pulled, and no `imageTarPath` is set | Run `.\scripts\setup-wslc.ps1 -Image <name>` (or `wxc-exec.exe --setup-wslc --image <name>`); match the `-StoragePath` to your config's `experimental.wslc.storagePath` if set |
-| `WSLC is an experimental feature` | Missing `--experimental` flag | Add `--experimental` to CLI or `{ experimental: true }` in SDK |
-| `experimental mode` error in SDK | `SandboxSpawnOptions.experimental` not set | Pass `{ experimental: true }` to spawn functions |
+| `WSLC image '<name>' not found locally` | Image was not pre-pulled, and no `imageTarPath` is set | Run `.\scripts\setup-wslc.ps1 -Image <name>` (or `wxc-exec.exe --setup-wslc --image <name>`); match the `-StoragePath` to your config's `wslc.storagePath` if set |
 | Container exits with code -1 | Process failed or timed out | Check stderr output with `--debug` flag |
 
 ## Example Configs

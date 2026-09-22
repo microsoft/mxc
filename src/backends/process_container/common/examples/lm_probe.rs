@@ -13,7 +13,7 @@
 //! feature-enabled Windows build to confirm the runtime FFI resolves against the real API.
 //!
 //! ```text
-//! cargo run -p appcontainer_common --example lm_probe
+//! cargo run -p process_container_common --example lm_probe
 //! ```
 
 fn main() {
@@ -30,15 +30,15 @@ fn run_probe() -> i32 {
         Err(e) => println!("LearningModeApi::load = ERR ({e})"),
     }
 
-    let secenv_available = appcontainer_common::is_security_environment_api_available();
+    let secenv_available = process_container_common::is_security_environment_api_available();
     println!("is_security_environment_api_available = {secenv_available}");
 
-    let report = appcontainer_common::probe_security_environment_exports();
+    let report = process_container_common::probe_security_environment_exports();
     println!("  create export = {:?}", report.create);
     println!("  query support = {:?}", report.query_support);
     println!("  close  export = {:?}", report.close);
 
-    match appcontainer_common::ProcessSecurityEnvironmentApi::load() {
+    match process_container_common::ProcessSecurityEnvironmentApi::load() {
         Ok(api) => println!("ProcessSecurityEnvironmentApi::load = OK  ({api:?})"),
         Err(e) => println!("ProcessSecurityEnvironmentApi::load = ERR ({e})"),
     }

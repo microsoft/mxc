@@ -24,15 +24,24 @@ import {
   type BindingRunResult,
 } from './bindings/run.js';
 
+// High-level calls currently emit canonical exact-contract JSON, so this
+// producer validates the selected contract before launching the executor. The
+// v1 SDK split will make SandboxPolicy version-free while retaining versions
+// for raw ContainerConfig input.
 const MIN_VERSION = '0.6.0-alpha';
-const SUPPORTED_VERSION = '0.9.0-alpha';
+const SUPPORTED_VERSION = '0.10.0-alpha';
 const REGISTERED_VERSION_VALUES = [
     '0.6.0-alpha',
     '0.7.0-alpha',
     '0.8.0-alpha',
     '0.9.0-alpha',
+    '0.10.0-alpha',
 ];
 const REGISTERED_VERSIONS = new Set(REGISTERED_VERSION_VALUES);
+const DIRECTIONAL_ONLY_VERSIONS = new Set([
+    '0.9.0-alpha',
+    '0.10.0-alpha',
+]);
 const REGISTERED_VERSION_ORDER = new Map(
     REGISTERED_VERSION_VALUES.map((version, index) => [version, index]),
 );
@@ -108,14 +117,15 @@ function validateContainmentVersion(
     const minimumVersion =
         effectiveContainment === 'seatbelt'
             ? '0.7.0-alpha'
-            : effectiveContainment === 'vm' ||
+            : effectiveContainment === 'isolation_session'
+              || effectiveContainment === 'wslc'
+              ? '0.9.0-alpha'
+              : effectiveContainment === 'vm' ||
                 effectiveContainment === 'microvm' ||
                 effectiveContainment === 'windows_sandbox' ||
-                effectiveContainment === 'wslc' ||
-                effectiveContainment === 'hyperlight' ||
-                effectiveContainment === 'isolation_session'
-              ? '0.9.0-alpha'
-              : '0.6.0-alpha';
+                effectiveContainment === 'hyperlight'
+                ? '0.10.0-alpha'
+                : '0.6.0-alpha';
 
     const versionOrder = REGISTERED_VERSION_ORDER.get(version);
     const minimumOrder = REGISTERED_VERSION_ORDER.get(minimumVersion);
@@ -165,13 +175,20 @@ function hasProcessContainerPolicy(policy: SandboxPolicy): boolean {
         policy.processContainer?.network?.allowedProxyPeer !== undefined;
 }
 
+function requiresDirectionalNetwork(version: string): boolean {
+    return DIRECTIONAL_ONLY_VERSIONS.has(version);
+}
+
 function selectDirectionalNetwork(policy: SandboxPolicy): boolean {
     const network = policy.network;
-    if (policy.version === '0.9.0-alpha' && network !== undefined) {
+    if (
+        requiresDirectionalNetwork(policy.version) &&
+        network !== undefined
+    ) {
         for (const field of LEGACY_NETWORK_FIELDS) {
             if (network !== null && (network as Record<string, unknown>)[field] !== undefined) {
                 throw new Error(
-                    `Schema 0.9.0-alpha no longer supports network.${field}. ` +
+                    `Schema ${policy.version} no longer supports network.${field}. ` +
                     'Author network.egress/network.ingress and runtimeConfig.networkProxy explicitly, ' +
                     'or retain schema 0.8.0-alpha for legacy networking. Hostnames are not converted to CIDRs.',
                 );
@@ -207,7 +224,7 @@ function selectDirectionalNetwork(policy: SandboxPolicy): boolean {
 /**
  * Builds the WSLC (WSL Container) portion of a ContainerConfig.
  * WSLC runs Linux containers on Windows via the WSL Container SDK.
- * Config goes under `experimental.wslc` since WSLC is experimental.
+ * The exact contract location is independent of the runtime experimental gate.
  */
 function buildWslcContainerConfig(
     config: ContainerConfig,
@@ -217,10 +234,8 @@ function buildWslcContainerConfig(
     config.containment = 'wslc';
     config.containerId = containerId;
 
-    config.experimental = {
-        wslc: {
-            image: 'alpine:latest',
-        },
+    config.wslc = {
+        image: 'alpine:latest',
     };
 
     // WSLC uses its own networking mode (None/Bridged) derived from
@@ -311,7 +326,11 @@ function buildProcessBaseContainerConfig(
     };
 
     // Network enforcement: use firewall only when host filtering is needed (requires admin)
-    if (config.network && policy.version !== '0.9.0-alpha' && !usesDirectionalNetwork(policy)) {
+    if (
+        config.network &&
+        !requiresDirectionalNetwork(policy.version) &&
+        !usesDirectionalNetwork(policy)
+    ) {
         if (config.network.allowedHosts?.length || config.network.blockedHosts?.length) {
             config.network.enforcementMode = 'both';
         } else {
@@ -447,9 +466,9 @@ export function createConfigFromPolicy(
     }
 
     if (enumeratePaths?.length) {
-        if (policy.version !== '0.9.0-alpha') {
+        if (policy.version !== '0.9.0-alpha' && policy.version !== '0.10.0-alpha') {
             throw new Error(
-                'processContainer.filesystem.enumeratePaths requires schema version 0.9.0-alpha.'
+                'processContainer.filesystem.enumeratePaths requires schema version 0.9.0-alpha or later.'
             );
         }
         const targetsWindowsProcessContainer =
@@ -483,7 +502,8 @@ export function createConfigFromPolicy(
     };
 
     if (directionalNetwork) {
-        if ((policy.version === '0.9.0-alpha' && policy.network !== undefined) ||
+        if ((requiresDirectionalNetwork(policy.version) &&
+            policy.network !== undefined) ||
             policy.network?.egress !== undefined || policy.network?.ingress !== undefined) {
             config.network = {
                 egress: policy.network?.egress,

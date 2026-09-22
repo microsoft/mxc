@@ -204,7 +204,7 @@ describe('buildSandboxPayload', () => {
 
     it('should reject ProcessContainer enumeration policy for non-ProcessContainer targets', () => {
       const policy: SandboxPolicy = {
-        version: '0.9.0-alpha',
+        version: '0.10.0-alpha',
         processContainer: { filesystem: { enumeratePaths: ['C:\\tools'] } },
       };
       for (const [platform, containment] of [
@@ -247,11 +247,15 @@ describe('buildSandboxPayload', () => {
           'hyperlight',
           'isolation_session',
         ] as const) {
+          const minimumVersion =
+            containment === 'isolation_session' || containment === 'wslc'
+              ? '0.9.0-alpha'
+              : '0.10.0-alpha';
           assert.throws(
             () => createConfigFromPolicy({ version: '0.8.0-alpha' }, containment),
             {
               message: new RegExp(
-                `does not support containment '${containment}'.*0\\.9\\.0-alpha`,
+                `does not support containment '${containment}'.*${minimumVersion.replaceAll('.', '\\.')}`,
               ),
             },
           );
@@ -261,7 +265,7 @@ describe('buildSandboxPayload', () => {
       }
     });
 
-    it('should accept the exact 0.9 boundary for every development containment', () => {
+    it('should accept each development containment at its exact boundary', () => {
       mockWindows();
       try {
         for (const containment of [
@@ -272,8 +276,12 @@ describe('buildSandboxPayload', () => {
           'hyperlight',
           'isolation_session',
         ] as const) {
+          const version =
+            containment === 'isolation_session' || containment === 'wslc'
+              ? '0.9.0-alpha'
+              : '0.10.0-alpha';
           try {
-            createConfigFromPolicy({ version: '0.9.0-alpha' }, containment);
+            createConfigFromPolicy({ version }, containment);
           } catch (error) {
             assert.doesNotMatch(
               (error as Error).message,
@@ -496,7 +504,7 @@ describe('buildSandboxPayload', () => {
 
   describe('Containment override', () => {
     let originalPlatform: PropertyDescriptor | undefined;
-    const developmentPolicy: SandboxPolicy = { version: '0.9.0-alpha' };
+    const developmentPolicy: SandboxPolicy = { version: '0.10.0-alpha' };
 
     const mockWindows = () => {
       originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
@@ -525,7 +533,7 @@ describe('buildSandboxPayload', () => {
       mockWindows();
       try {
         const policy: SandboxPolicy = {
-          version: '0.9.0-alpha',
+          version: '0.10.0-alpha',
           filesystem: { readwritePaths: ['/tmp'] },
         };
         const payload = buildSandboxPayload('print(42)', policy, undefined, undefined, 'microvm');
@@ -543,7 +551,7 @@ describe('buildSandboxPayload', () => {
       mockWindows();
       try {
         const policy: SandboxPolicy = {
-          version: '0.9.0-alpha',
+          version: '0.10.0-alpha',
           filesystem: { readwritePaths: ['/tmp'], clearPolicyOnExit: false },
         };
         const payload = buildSandboxPayload('print(42)', policy, undefined, undefined, 'microvm');
@@ -557,7 +565,7 @@ describe('buildSandboxPayload', () => {
       mockWindows();
       try {
         const policy: SandboxPolicy = {
-          version: '0.9.0-alpha',
+          version: '0.10.0-alpha',
           network: { egress: { default: 'allow' } },
         };
         const payload = buildSandboxPayload('echo hi', policy);
@@ -573,7 +581,7 @@ describe('buildSandboxPayload', () => {
       try {
         for (const action of ['allow', 'deny'] as const) {
           const policy: SandboxPolicy = {
-            version: '0.9.0-alpha',
+            version: '0.10.0-alpha',
             network: {
               egress: { default: action },
               ingress: { default: action, hostLoopback: action },
@@ -600,7 +608,7 @@ describe('buildSandboxPayload', () => {
           () => buildSandboxPayload(
             'print(42)',
             {
-              version: '0.9.0-alpha',
+              version: '0.10.0-alpha',
               runtimeConfig: { networkProxy: 'http://127.0.0.1:8080' },
             },
             undefined,
@@ -613,7 +621,7 @@ describe('buildSandboxPayload', () => {
           () => buildSandboxPayload(
             'print(42)',
             {
-              version: '0.9.0-alpha',
+              version: '0.10.0-alpha',
               processContainer: {
                 network: { allowedProxyPeer: 'Contoso.Proxy_123' },
               },
@@ -628,7 +636,7 @@ describe('buildSandboxPayload', () => {
           () => buildSandboxPayload(
             'print(42)',
             {
-              version: '0.9.0-alpha',
+              version: '0.10.0-alpha',
               network: {
                 egress: {
                   default: 'allow',
@@ -647,7 +655,7 @@ describe('buildSandboxPayload', () => {
           () => buildSandboxPayload(
             'print(42)',
             {
-              version: '0.9.0-alpha',
+              version: '0.10.0-alpha',
               network: {
                 egress: { default: 'allow' },
                 ingress: { default: 'deny', hostLoopback: 'deny' },
@@ -671,7 +679,7 @@ describe('buildSandboxPayload', () => {
           () => buildSandboxPayload(
             'print(42)',
             {
-              version: '0.9.0-alpha',
+              version: '0.10.0-alpha',
               processContainer: {
                 filesystem: { enumeratePaths: ['C:\\tools'] },
               },
@@ -704,7 +712,7 @@ describe('buildSandboxPayload', () => {
       mockWindows();
       try {
         const policy: SandboxPolicy = {
-          version: '0.9.0-alpha',
+          version: '0.10.0-alpha',
           filesystem: { clearPolicyOnExit: false },
         };
         const payload = buildSandboxPayload('print(42)', policy, undefined, undefined, 'microvm');
@@ -735,10 +743,10 @@ describe('buildSandboxPayload', () => {
       assert.strictEqual(payload.process!.commandLine, 'echo hello');
     });
 
-    it('should populate experimental.wslc with default image', () => {
+    it('should populate wslc with default image', () => {
       const payload = buildSandboxPayload('echo hello', { version: '0.9.0-alpha' }, undefined, undefined, 'wslc');
-      assert.ok(payload.experimental?.wslc);
-      assert.strictEqual(payload.experimental!.wslc!.image, 'alpine:latest');
+      assert.ok(payload.wslc);
+      assert.strictEqual(payload.wslc.image, 'alpine:latest');
     });
 
     it('should not set processContainer or lxc config', () => {
@@ -1839,11 +1847,11 @@ describe('createConfigFromPolicy', () => {
   });
 
   describe('WSLC', () => {
-    it('should set containment to wslc and populate experimental.wslc', () => {
+    it('should set containment to wslc and populate wslc config', () => {
       const config = createConfigFromPolicy({ version: '0.9.0-alpha' }, 'wslc');
       assert.strictEqual(config.containment, 'wslc');
-      assert.ok(config.experimental?.wslc);
-      assert.strictEqual(config.experimental!.wslc!.image, 'alpine:latest');
+      assert.ok(config.wslc);
+      assert.strictEqual(config.wslc.image, 'alpine:latest');
     });
 
     it('should forward schema 0.8 ProcessContainer peer policy for native rejection', () => {
@@ -1935,74 +1943,14 @@ describe('createConfigFromPolicy', () => {
       assert.strictEqual(config.containerId, 'my-container');
     });
 
-    it('should throw from spawnSandbox when experimental backend is used via config', () => {
+    it('should not require experimental mode at the spawn boundary', () => {
       const config = createConfigFromPolicy({ version: '0.9.0-alpha' }, 'wslc');
       config.process!.commandLine = 'echo hello';
-      assert.throws(
-        () => spawnSandboxFromConfig(config),
-        { message: /experimental mode/ },
+      const resolved = resolveExecutableAndArgs(
+        config,
+        { executablePath: process.execPath, skipPlatformCheck: true },
       );
-    });
-
-    it('should throw from spawnSandboxFromConfig when experimental is not set', () => {
-      const config = createConfigFromPolicy({ version: '0.9.0-alpha' }, 'wslc');
-      config.process!.commandLine = 'echo hello';
-      assert.throws(
-        () => spawnSandboxFromConfig(config),
-        { message: /experimental mode/ },
-      );
-    });
-
-    it('should apply inheritDefaultEnv without replacing the supplied environment', () => {
-      const config = createConfigFromPolicy({ version: '0.9.0-alpha' }, 'wslc');
-      config.process!.commandLine = 'echo hello';
-      config.process!.env = ['GREETING=hello'];
-
-      assert.throws(
-        () => spawnSandboxFromConfig(config, { inheritDefaultEnv: true }),
-        { message: /experimental mode/ },
-      );
-      assert.deepStrictEqual(config.process!.env, ['GREETING=hello']);
-      assert.strictEqual(config.process!.inheritDefaultEnv, true);
-    });
-
-    it('should leave inheritDefaultEnv version validation to the native engine', () => {
-      const config = createConfigFromPolicy({ version: '0.9.0-alpha' }, 'wslc');
-      config.process!.commandLine = 'echo hello';
-
-      assert.throws(
-        () => spawnSandboxFromConfig(config, { inheritDefaultEnv: true }),
-        { message: /experimental mode/ },
-      );
-      assert.equal(config.version, '0.9.0-alpha');
-      assert.strictEqual(config.process!.inheritDefaultEnv, true);
-    });
-
-    it('should leave non-PTY inheritDefaultEnv version validation to the native engine', () => {
-      const config = createConfigFromPolicy({ version: '0.9.0-alpha' }, 'wslc');
-      config.process!.commandLine = 'echo hello';
-
-      assert.throws(
-        () => spawnSandboxFromConfig(config, {
-          usePty: false,
-          inheritDefaultEnv: true,
-        }),
-        { message: /experimental mode/ },
-      );
-      assert.equal(config.version, '0.9.0-alpha');
-      assert.strictEqual(config.process!.inheritDefaultEnv, true);
-    });
-
-    it('should allow explicit false to disable inheritDefaultEnv in a supplied config', () => {
-      const config = createConfigFromPolicy({ version: '0.9.0-alpha' }, 'wslc');
-      config.process!.commandLine = 'echo hello';
-      config.process!.inheritDefaultEnv = true;
-
-      assert.throws(
-        () => spawnSandboxFromConfig(config, { inheritDefaultEnv: false }),
-        { message: /experimental mode/ },
-      );
-      assert.strictEqual(config.process!.inheritDefaultEnv, undefined);
+      assert.ok(!resolved.args.includes('--experimental'));
     });
   });
 
@@ -2156,8 +2104,10 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
 
   function makeConfig(containment: string): ContainerConfig {
     const version =
-      ['microvm', 'vm', 'wslc', 'isolation_session', 'windows_sandbox'].includes(containment)
+      containment === 'isolation_session' || containment === 'wslc'
         ? '0.9.0-alpha'
+        : ['microvm', 'vm', 'hyperlight', 'windows_sandbox'].includes(containment)
+        ? '0.10.0-alpha'
         : ['seatbelt', 'macos_sandbox'].includes(containment)
           ? '0.7.0-alpha'
           : '0.6.0-alpha';
@@ -2240,10 +2190,20 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
     }
   });
 
-  it('should still require experimental mode for experimental backends like wslc', () => {
-    assert.throws(
-      () => resolveExecutableAndArgs(makeConfig('wslc'), { executablePath: fakeExe }),
-      { message: /experimental mode/ },
+  it('should not require experimental mode for wslc', () => {
+    const resolved = resolveExecutableAndArgs(
+      makeConfig('wslc'),
+      { executablePath: fakeExe, skipPlatformCheck: true },
+    );
+    assert.ok(!resolved.args.includes('--experimental'));
+  });
+
+  it('should not require experimental mode for isolation_session', () => {
+    assert.doesNotThrow(() =>
+      resolveExecutableAndArgs(makeConfig('isolation_session'), {
+        executablePath: fakeExe,
+        skipPlatformCheck: true,
+      }),
     );
   });
 
@@ -2439,7 +2399,8 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
           skipPlatformCheck: true,
         });
 
-        assert.strictEqual(decodeConfig(args).experimental, experimental);
+        const decoded = decodeConfig(args) as ContainerConfig & { experimental?: unknown };
+        assert.strictEqual(decoded.experimental, experimental);
       });
     }
   });

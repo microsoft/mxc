@@ -1,0 +1,66 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+use crate::published::v0_9_0_alpha::state_aware::provision::ProvisionPhase;
+use crate::published::v0_9_0_alpha::{Filesystem, Network, Telemetry};
+use crate::published::v0_9_0_alpha::{OptionalField, Version};
+use serde::Deserialize;
+
+string_marker! {
+    /// The `wslc` containment of the state-aware configuration contract.
+    pub struct WslcContainment => "wslc";
+}
+
+/// WSLC settings accepted during provisioning.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WslcProvision {
+    /// Optional container image reference.
+    #[serde(default)]
+    pub image: OptionalField<String>,
+    /// Optional path to a local container image archive.
+    #[serde(default)]
+    pub image_tar_path: OptionalField<String>,
+}
+
+/// State-aware WSLC settings.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StateAwareWslc {
+    /// Optional provision-phase settings.
+    #[serde(default)]
+    pub provision: OptionalField<WslcProvision>,
+}
+
+/// A complete state-aware `provision` request for WSLC.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WslcProvisionRequest {
+    /// Optional JSON Schema reference for editor validation.
+    #[serde(rename = "$schema", default)]
+    pub schema: OptionalField<String>,
+    /// Optional human-readable annotation ignored by the runtime.
+    #[serde(rename = "_comment", default)]
+    pub comment: OptionalField<serde_json::Value>,
+    /// Exact published contract version.
+    pub version: Version,
+    /// Exact `provision` phase marker.
+    pub phase: ProvisionPhase,
+    /// Exact `wslc` containment marker.
+    pub containment: WslcContainment,
+    /// Optional filesystem policy fixed at provision time.
+    #[serde(default)]
+    pub filesystem: OptionalField<Filesystem>,
+    /// Optional network policy fixed at provision time.
+    #[serde(default)]
+    pub network: OptionalField<Network>,
+    /// Optional telemetry configuration.
+    #[serde(default)]
+    pub telemetry: OptionalField<Telemetry>,
+    /// Optional WSLC provision settings.
+    #[serde(default)]
+    pub wslc: OptionalField<StateAwareWslc>,
+}

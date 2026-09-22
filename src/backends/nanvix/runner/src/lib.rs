@@ -1231,7 +1231,7 @@ mod tests {
     fn directional_filter_requests_are_rejected_before_execution() {
         for rules in ["allow", "deny"] {
             let source = format!(
-                r#"{{"version":"0.9.0-alpha","containment":"microvm",
+                r#"{{"version":"0.10.0-alpha","containment":"microvm",
                     "process":{{"commandLine":"print(1)"}},
                     "network":{{"egress":{{"default":"allow","{rules}":[{{"to":[{{"cidr":"203.0.113.0/24"}}]}}]}},
                                "ingress":{{"default":"allow","hostLoopback":"allow"}}}}}}"#
@@ -1281,7 +1281,10 @@ mod tests {
 
     #[test]
     fn legacy_launch_arguments_preserve_network_defaults_and_host_filters() {
-        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha"] {
+        for compatibility in [
+            wxc_common::models::NetworkEnforcementCompatibility::LegacyCompatible,
+            wxc_common::models::NetworkEnforcementCompatibility::Strict,
+        ] {
             for (default, allow, block, expected_prefix) in [
                 (NetworkPolicy::Block, vec![], vec![], vec![]),
                 (
@@ -1304,7 +1307,7 @@ mod tests {
                 ),
             ] {
                 let request = ExecutionRequest {
-                    schema_version: version.to_string(),
+                    network_enforcement_compatibility: compatibility,
                     policy: ContainerPolicy {
                         default_network_policy: default,
                         allowed_hosts: allow.into_iter().map(str::to_owned).collect(),
@@ -1321,11 +1324,14 @@ mod tests {
                 .unwrap();
                 let expected: Vec<String> =
                     expected_prefix.into_iter().map(str::to_owned).collect();
-                assert!(arguments.starts_with(&expected), "{version}: {arguments:?}");
+                assert!(
+                    arguments.starts_with(&expected),
+                    "{compatibility:?}: {arguments:?}"
+                );
                 assert_eq!(
                     arguments.iter().any(|arg| arg == "-allow-host-networking"),
                     !expected.is_empty(),
-                    "{version}: {arguments:?}"
+                    "{compatibility:?}: {arguments:?}"
                 );
             }
         }

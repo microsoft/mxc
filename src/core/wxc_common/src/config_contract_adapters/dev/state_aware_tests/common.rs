@@ -1,52 +1,36 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::config_contract_adapters::dev::{adapt_request, AdaptedWireRequest};
-use crate::config_parser::parse_rolling_state_aware_wire_input;
+use crate::config_contract_adapters::dev::{adapt_request, AdaptedConfigRequest};
+use crate::state_aware_input::StateAwareInput;
 use crate::state_aware_operation::StateAwareOperation;
-use crate::state_aware_wire::StateAwareInput;
 use crate::wire;
 use mxc_config_contract::dev as contract;
-use serde_json::value::RawValue;
 
-pub(super) fn adapt(source: &str) -> (wire::MxcConfig, StateAwareOperation) {
-    let AdaptedWireRequest::StateAware(input) =
+pub(super) fn adapt(
+    source: &str,
+) -> (
+    crate::common_request_ir::CommonRequestIR,
+    StateAwareOperation,
+) {
+    let AdaptedConfigRequest::StateAware(input) =
         adapt_request(contract::parse_request(source).unwrap()).unwrap()
     else {
         panic!("expected state-aware request");
     };
     input.into_parts()
 }
-
-pub(super) fn assert_common_matches_legacy(source: &str, common: &wire::MxcConfig) {
-    #[derive(serde::Deserialize)]
-    struct Probe<'a> {
-        #[serde(borrow, default)]
-        experimental: Option<&'a RawValue>,
-    }
-    let probe: Probe<'_> = serde_json::from_str(source).unwrap();
-    let mut legacy = parse_rolling_state_aware_wire_input(source, probe.experimental)
-        .unwrap()
-        .config;
-    // Routing and payload observations are asserted separately, not serialized.
-    legacy.phase = None;
-    legacy.containment = None;
-    legacy.sandbox_id = None;
-    assert_eq!(
-        serde_json::to_value(common).unwrap(),
-        serde_json::to_value(legacy).unwrap()
-    );
-}
-
-pub(super) fn assert_clean_common(common: &wire::MxcConfig) {
+pub(super) fn assert_clean_common(common: &crate::common_request_ir::CommonRequestIR) {
     assert!(common.phase.is_none());
     assert!(common.sandbox_id.is_none());
     assert!(common.containment.is_none());
-    assert!(common.experimental.is_none());
+    assert!(common.test_feature.is_none());
+    assert!(common.windows_sandbox.is_none());
     assert!(common.container_id.is_none());
     assert!(common.lifecycle.is_none());
     assert!(common.process_container.is_none());
     assert!(common.lxc.is_none());
+    assert!(common.wslc.is_none());
     assert!(common.seatbelt.is_none());
     assert!(common.fallback.is_none());
     assert!(common.ui.is_none());
@@ -55,18 +39,38 @@ pub(super) fn assert_clean_common(common: &wire::MxcConfig) {
 #[test]
 fn controlled_input_rejects_every_routing_and_one_shot_field() {
     for field in [
-        r#""phase":"start""#,
-        r#""sandboxId":"""#,
-        r#""containment":"wslc""#,
-        r#""experimental":{}"#,
-        r#""containerId":"container""#,
-        r#""fallback":{}"#,
-        r#""seatbelt":{}"#,
-        r#""processContainer":{}"#,
-        r#""lxc":{}"#,
-        r#""lifecycle":{}"#,
+        "phase",
+        "sandboxId",
+        "containment",
+        "test",
+        "windowsSandbox",
+        "containerId",
+        "fallback",
+        "seatbelt",
+        "processContainer",
+        "lxc",
+        "wslc",
+        "lifecycle",
     ] {
-        let common = serde_json::from_str(&format!("{{{field}}}")).unwrap();
+        let (mut common, _) =
+            adapt(r#"{"version":"0.10.0-alpha","phase":"start","sandboxId":"iso:example"}"#);
+        match field {
+            "phase" => common.phase = Some(wire::Phase::Start),
+            "sandboxId" => common.sandbox_id = Some(String::new()),
+            "containment" => common.containment = Some(wire::Containment::Wslc),
+            "test" => common.test_feature = Some(wire::TestFeature::default()),
+            "windowsSandbox" => common.windows_sandbox = Some(wire::WindowsSandbox::default()),
+            "containerId" => common.container_id = Some("container".to_string()),
+            "fallback" => common.fallback = Some(wire::Fallback::default()),
+            "seatbelt" => common.seatbelt = Some(wire::Seatbelt::default()),
+            "processContainer" => {
+                common.process_container = Some(wire::ProcessContainer::default())
+            }
+            "lxc" => common.lxc = Some(wire::Lxc::default()),
+            "wslc" => common.wslc = Some(wire::Wslc::default()),
+            "lifecycle" => common.lifecycle = Some(wire::Lifecycle::default()),
+            _ => unreachable!(),
+        }
         assert!(
             StateAwareInput::new(
                 common,
@@ -90,13 +94,12 @@ pub(super) fn assert_no_config_phase(phase: &str) {
     ] {
         for fields in [
             "",
-            r#","experimental":{}"#,
             r#","telemetry":{}"#,
             r#","telemetry":{"enabled":false},"_comment":null"#,
             r#","$schema":"https://example.com/schema","_comment":"comment","telemetry":{"enabled":true}"#,
         ] {
             let source = format!(
-                r#"{{"version":"0.9.0-alpha","phase":"{phase}","sandboxId":"{id}"{fields}}}"#
+                r#"{{"version":"0.10.0-alpha","phase":"{phase}","sandboxId":"{id}"{fields}}}"#
             );
             let (common, operation) = adapt(&source);
             assert_eq!(operation.phase().as_str(), phase);
@@ -106,8 +109,10 @@ pub(super) fn assert_no_config_phase(phase: &str) {
             assert!(common.process.is_none());
             assert!(common.filesystem.is_none());
             assert!(common.network.is_none());
-            assert_eq!(common.version.as_deref(), Some("0.9.0-alpha"));
-            assert_common_matches_legacy(&source, &common);
+            assert_eq!(
+                common.source_contract,
+                mxc_config_contract::ContractVersion::V0_10_0Alpha
+            );
             if fields.contains("$schema") {
                 assert_eq!(common.schema.as_deref(), Some("https://example.com/schema"));
                 assert_eq!(common.comment, Some(serde_json::json!("comment")));

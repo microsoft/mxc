@@ -1,4 +1,7 @@
 # Force LF line endings for shell scripts (prevents CRLF issues in WSL/Linux)
 *.sh text eol=lf
+# Preserve these historically CRLF files so focused edits do not rewrite every line.
+docs/telemetry/telemetry.md -text whitespace=cr-at-eol
+sdk/node/src/types.ts -text whitespace=cr-at-eol
 .github/copilot-instructions.md whitespace=cr-at-eol
 .github/workflows/*.lock.yml linguist-generated=true

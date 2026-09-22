@@ -2,13 +2,12 @@
 // Licensed under the MIT License.
 
 use crate::config_contract_adapters::dev::common::{
-    convert_filesystem, convert_network, convert_process, convert_runtime_config,
-    convert_telemetry, convert_version,
+    convert_filesystem, convert_network, convert_process, convert_runtime_config, convert_telemetry,
 };
 use crate::error::WxcError;
 use crate::models::{IsolationSessionProvisionConfig, WslcProvisionConfig};
+use crate::state_aware_input::StateAwareInput;
 use crate::state_aware_operation::{StateAwareOperation, StateAwareProvision};
-use crate::state_aware_wire::StateAwareInput;
 use crate::wire;
 use mxc_config_contract::dev as contract;
 
@@ -28,15 +27,6 @@ fn convert_isolation_session_provision(
     IsolationSessionProvisionConfig {
         app_id: app_id.into_option(),
     }
-}
-
-fn convert_isolation_session_provision_experimental(
-    value: contract::IsolationSessionProvisionExperimental,
-) -> Option<IsolationSessionProvisionConfig> {
-    let contract::IsolationSessionProvisionExperimental { isolation_session } = value;
-    isolation_session
-        .into_option()
-        .and_then(convert_state_aware_isolation_session)
 }
 
 fn convert_isolation_session_network(value: contract::IsolationSessionNetwork) -> wire::Network {
@@ -67,10 +57,6 @@ fn convert_isolation_session_network(value: contract::IsolationSessionNetwork) -
     }
 }
 
-fn consume_windows_sandbox_experimental(value: contract::WindowsSandboxExperimental) {
-    let contract::WindowsSandboxExperimental {} = value;
-}
-
 fn convert_wslc_provision(value: contract::WslcProvision) -> WslcProvisionConfig {
     let contract::WslcProvision {
         image,
@@ -87,41 +73,20 @@ fn convert_state_aware_wslc(value: contract::StateAwareWslc) -> Option<WslcProvi
     provision.into_option().map(convert_wslc_provision)
 }
 
-fn convert_wslc_provision_experimental(
-    value: contract::WslcProvisionExperimental,
-) -> Option<WslcProvisionConfig> {
-    let contract::WslcProvisionExperimental { wslc } = value;
-    wslc.into_option().and_then(convert_state_aware_wslc)
-}
-
-fn consume_start_experimental(value: contract::StartExperimental) {
-    let contract::StartExperimental {} = value;
-}
-
-fn consume_exec_experimental(value: contract::ExecExperimental) {
-    let contract::ExecExperimental {} = value;
-}
-
-fn consume_stop_experimental(value: contract::StopExperimental) {
-    let contract::StopExperimental {} = value;
-}
-
-fn consume_deprovision_experimental(value: contract::DeprovisionExperimental) {
-    let contract::DeprovisionExperimental {} = value;
-}
-
 fn state_aware_common(
     schema: contract::OptionalField<String>,
     comment: contract::OptionalField<serde_json::Value>,
-    version: contract::Version,
+    _version: contract::Version,
     telemetry: contract::OptionalField<contract::Telemetry>,
-) -> wire::MxcConfig {
-    wire::MxcConfig {
+) -> crate::common_request_ir::CommonRequestIR {
+    crate::common_request_ir::CommonRequestIR {
         schema: schema.into_option(),
         comment: comment.into_option(),
-        version: Some(convert_version(version).to_owned()),
+        source_contract: mxc_config_contract::ContractVersion::V0_10_0Alpha,
+        network_enforcement_compatibility: crate::models::NetworkEnforcementCompatibility::Strict,
         phase: None,
-        experimental: None,
+        test_feature: None,
+        windows_sandbox: None,
         containment: None,
         container_id: None,
         sandbox_id: None,
@@ -133,6 +98,7 @@ fn state_aware_common(
         telemetry: telemetry.into_option().map(convert_telemetry),
         lifecycle: None,
         lxc: None,
+        wslc: None,
         process_container: None,
         seatbelt: None,
         ui: None,
@@ -164,11 +130,11 @@ fn isolation_session_provision_into_input(
         containment: contract::IsolationSessionContainment,
         network,
         telemetry,
-        experimental,
+        isolation_session,
     } = request;
-    let provision = experimental
+    let provision = isolation_session
         .into_option()
-        .and_then(convert_isolation_session_provision_experimental);
+        .and_then(convert_state_aware_isolation_session);
     let mut common = state_aware_common(schema, comment, version, telemetry);
     common.network = Some(convert_isolation_session_network(network));
     StateAwareInput::new(
@@ -188,11 +154,7 @@ fn windows_sandbox_provision_into_input(
         containment: contract::WindowsSandboxContainment,
         filesystem,
         telemetry,
-        experimental,
     } = request;
-    if let Some(experimental) = experimental.into_option() {
-        consume_windows_sandbox_experimental(experimental);
-    }
     let mut common = state_aware_common(schema, comment, version, telemetry);
     common.filesystem = filesystem.into_option().map(convert_filesystem);
     StateAwareInput::new(
@@ -213,11 +175,9 @@ fn wslc_provision_into_input(
         filesystem,
         network,
         telemetry,
-        experimental,
+        wslc,
     } = request;
-    let provision = experimental
-        .into_option()
-        .and_then(convert_wslc_provision_experimental);
+    let provision = wslc.into_option().and_then(convert_state_aware_wslc);
     let mut common = state_aware_common(schema, comment, version, telemetry);
     common.filesystem = filesystem.into_option().map(convert_filesystem);
     common.network = network.into_option().map(convert_network);
@@ -237,11 +197,7 @@ pub(super) fn start_into_input(
         phase: contract::StartPhase,
         sandbox_id,
         telemetry,
-        experimental,
     } = request;
-    if let Some(experimental) = experimental.into_option() {
-        consume_start_experimental(experimental);
-    }
     let common = state_aware_common(schema, comment, version, telemetry);
     StateAwareInput::new(common, StateAwareOperation::Start { sandbox_id })
 }
@@ -257,11 +213,7 @@ pub(super) fn exec_into_input(request: contract::ExecRequest) -> Result<StateAwa
         network,
         runtime_config,
         telemetry,
-        experimental,
     } = request;
-    if let Some(experimental) = experimental.into_option() {
-        consume_exec_experimental(experimental);
-    }
     let mut common = state_aware_common(schema, comment, version, telemetry);
     common.process = Some(convert_process(process));
     common.network = network.into_option().map(convert_network);
@@ -277,11 +229,7 @@ pub(super) fn stop_into_input(request: contract::StopRequest) -> Result<StateAwa
         phase: contract::StopPhase,
         sandbox_id,
         telemetry,
-        experimental,
     } = request;
-    if let Some(experimental) = experimental.into_option() {
-        consume_stop_experimental(experimental);
-    }
     let common = state_aware_common(schema, comment, version, telemetry);
     StateAwareInput::new(common, StateAwareOperation::Stop { sandbox_id })
 }
@@ -296,11 +244,7 @@ pub(super) fn deprovision_into_input(
         phase: contract::DeprovisionPhase,
         sandbox_id,
         telemetry,
-        experimental,
     } = request;
-    if let Some(experimental) = experimental.into_option() {
-        consume_deprovision_experimental(experimental);
-    }
     let common = state_aware_common(schema, comment, version, telemetry);
     StateAwareInput::new(common, StateAwareOperation::Deprovision { sandbox_id })
 }

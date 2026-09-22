@@ -9,8 +9,8 @@ use std::process;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-use appcontainer_common::appcontainer_runner::delete_app_container_profile;
 use clap::Parser;
+use process_container_common::appcontainer_runner::delete_app_container_profile;
 use wxc_common::audit::{AuditEvent, AuditEventName, RejectionReason};
 use wxc_common::config_parser::{LoadOptions, ParseError};
 #[cfg(target_os = "windows")]
@@ -24,7 +24,7 @@ use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest};
 use wxc_common::telemetry;
 
 #[derive(Parser)]
-#[command(name = "wxc-exec", version, about = "Windows Container Executor")]
+#[command(name = "wxc-exec", about = "Windows Container Executor")]
 struct Cli {
     /// Path to config JSON file (positional)
     #[arg(value_name = "CONFIG_PATH")]
@@ -97,7 +97,7 @@ struct Cli {
 
     /// Optional WSLC storage path. When omitted the runner default is used
     /// (`%TEMP%\mxc-wslc-sessions`). Pass the same value here that your
-    /// runtime configs set in `experimental.wslc.storagePath`, otherwise
+    /// runtime configs set in `wslc.storagePath`, otherwise
     /// the runner will not find the pulled image. Requires `--setup-wslc`.
     #[arg(long = "storage-path", requires = "setup_wslc")]
     storage_path: Option<String>,
@@ -486,13 +486,16 @@ fn run_state_aware_main(
         wxc_common::telemetry::log_policy_hash(
             &identity,
             &policy_hash,
-            &parsed.request().schema_version,
+            parsed.request().source_contract_version(),
         );
         if diagnostics_active {
             let record = AuditEvent::new(AuditEventName::PolicyHash)
                 .str("backend", backend)
                 .str("policy_hash", &policy_hash)
-                .str("config_schema_version", &parsed.request().schema_version);
+                .str(
+                    "config_schema_version",
+                    parsed.request().source_contract_version(),
+                );
             logger.log_audit_event(&record);
         }
     }
@@ -996,11 +999,11 @@ fn main() {
         } else {
             wxc_common::models::ExecutionRequest::default()
         };
-        let output = appcontainer_common::probe::run_probe(
+        let output = process_container_common::probe::run_probe(
             &request,
             mxc_engine::guarded_capture_available(),
         );
-        // appcontainer_common has no dependency on the isolation-session
+        // process_container_common has no dependency on the isolation-session
         // backend, so it reports `isolationSessionAvailable` as `false`. When
         // the backend is compiled in, override it with a read-only activation
         // probe of the in-proc service.
@@ -1017,7 +1020,7 @@ fn main() {
             output.probes.hyperlight_available = hyperlight_common::is_whp_available();
             output
         };
-        match appcontainer_common::probe::to_json_pretty(&output) {
+        match process_container_common::probe::to_json_pretty(&output) {
             Ok(s) => println!("{s}"),
             Err(e) => {
                 eprintln!("Error: probe serialization failed: {e}");
@@ -1638,24 +1641,6 @@ mod tests {
             .normalize_named_config_command()
     }
 
-    #[test]
-    fn cli_version_flags_work_without_config() {
-        for flag in ["--version", "-V"] {
-            let error = match Cli::try_parse_from(["wxc-exec", flag]) {
-                Err(error) => error,
-                Ok(_) => panic!("{flag} should display the version and exit"),
-            };
-
-            assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
-            assert_eq!(error.exit_code(), 0);
-            assert!(!error.use_stderr());
-            assert_eq!(
-                error.to_string(),
-                format!("wxc-exec {}\n", env!("CARGO_PKG_VERSION"))
-            );
-        }
-    }
-
     fn encoded_policy(json: &str) -> String {
         base64_encode(json.as_bytes())
     }
@@ -1954,8 +1939,8 @@ mod tests {
             "phase":"exec",
             "sandboxId":"wsb:abcd1234",
             "process":{"commandLine":"echo hello"},
-            "experimental":{},
-            "experimental":{}
+            "telemetry":{},
+            "telemetry":{}
         }"#;
         let mut logger = test_logger();
         let error = wxc_common::config_parser::load_mxc_request_from_json(state_aware, &mut logger)
@@ -1966,14 +1951,14 @@ mod tests {
         let envelope: serde_json::Value =
             serde_json::from_str(&error_envelope_string(error)).unwrap();
         assert_eq!(envelope["error"]["code"], "malformed_request");
-        assert!(error.message.contains("duplicate field `experimental`"));
+        assert!(error.message.contains("duplicate field `telemetry`"));
         assert!(logger.get_buffer().is_empty());
 
         let one_shot = r#"{
             "version":"0.9.0-alpha",
             "process":{"commandLine":"echo hello"},
-            "experimental":{},
-            "experimental":{}
+            "telemetry":{},
+            "telemetry":{}
         }"#;
         let mut logger = test_logger();
         let error = wxc_common::config_parser::load_mxc_request_from_json(one_shot, &mut logger)
@@ -1982,9 +1967,7 @@ mod tests {
             request_error_route(&error),
             RequestErrorRoute::Diagnostic
         ));
-        assert!(logger
-            .get_buffer()
-            .contains("duplicate field `experimental`"));
+        assert!(logger.get_buffer().contains("duplicate field `telemetry`"));
     }
 
     fn resolve_with_cli(
@@ -2078,7 +2061,7 @@ mod tests {
         let mut logger = test_logger();
         logger.enable_file_sink(&log_path).unwrap();
         let error = MxcError::malformed_request(
-            "Invalid configuration at `experimental.wslc.start.portMappings[0].windowsPort`",
+            "Invalid configuration at `wslc.provision.portMappings[0].windowsPort`",
         );
 
         log_state_aware_dispatch_error(&mut logger, &error);
@@ -2090,7 +2073,7 @@ mod tests {
         drop(logger);
         let log = std::fs::read_to_string(log_path).unwrap();
         assert_eq!(
-            log.matches("experimental.wslc.start.portMappings[0].windowsPort")
+            log.matches("wslc.provision.portMappings[0].windowsPort")
                 .count(),
             1
         );
@@ -2448,7 +2431,7 @@ mod tests {
     #[test]
     fn cli_command_quoting_for_command_processor_in_resolved_request() {
         let policy = r#"{
-            "version": "0.9.0-alpha",
+            "version": "0.10.0-alpha",
             "containment": "windows_sandbox",
             "process": {}
         }"#;

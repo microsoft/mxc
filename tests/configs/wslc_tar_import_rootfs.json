@@ -8,10 +8,8 @@
   "network": {
     "egress": { "default": "deny" }
   },
-  "experimental": {
-    "wslc": {
-      "image": "alpine-export:latest",
-      "imageTarPath": "C:\\workspace\\alpine.tar"
-    }
+  "wslc": {
+    "image": "alpine-export:latest",
+    "imageTarPath": "C:\\workspace\\alpine.tar"
   }
 }

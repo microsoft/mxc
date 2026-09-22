@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Wire types for the mutable `0.9.0-alpha` state-aware configuration
+//! Wire types for the mutable `0.10.0-alpha` state-aware configuration
 //! contract.
 
 macro_rules! string_marker {
@@ -62,22 +62,17 @@ mod provision;
 mod start;
 mod stop;
 
-pub use deprovision::{DeprovisionExperimental, DeprovisionPhase, DeprovisionRequest};
-pub use exec::{ExecExperimental, ExecPhase, ExecRequest};
+pub use deprovision::{DeprovisionPhase, DeprovisionRequest};
+pub use exec::{ExecPhase, ExecRequest};
 pub use phase::{probe_phase, Phase, PhaseProbeError};
 pub use provision::{probe_containment, Containment, ContainmentProbeError};
 pub use provision::{
     IsolationSessionContainment, IsolationSessionNetwork, IsolationSessionNetworkAllow,
     IsolationSessionNetworkEgress, IsolationSessionNetworkIngress, IsolationSessionProvision,
-    IsolationSessionProvisionExperimental, IsolationSessionProvisionRequest,
-    StateAwareIsolationSession,
+    IsolationSessionProvisionRequest, StateAwareIsolationSession,
 };
 pub use provision::{ProvisionPhase, ProvisionRequest};
-pub use provision::{
-    StateAwareWslc, WslcContainment, WslcProvision, WslcProvisionExperimental, WslcProvisionRequest,
-};
-pub use provision::{
-    WindowsSandboxContainment, WindowsSandboxExperimental, WindowsSandboxProvisionRequest,
-};
-pub use start::{StartExperimental, StartPhase, StartRequest};
-pub use stop::{StopExperimental, StopPhase, StopRequest};
+pub use provision::{StateAwareWslc, WslcContainment, WslcProvision, WslcProvisionRequest};
+pub use provision::{WindowsSandboxContainment, WindowsSandboxProvisionRequest};
+pub use start::{StartPhase, StartRequest};
+pub use stop::{StopPhase, StopRequest};
