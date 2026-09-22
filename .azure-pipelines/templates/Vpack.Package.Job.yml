@@ -201,7 +201,12 @@ extends:
                   if ("$($manifests.feature.branch_name)" -ne 'mxc_iso_session_feature') {
                       throw "Feature test bundle branch is '$($manifests.feature.branch_name)', not 'mxc_iso_session_feature'."
                   }
-                  if ("$($manifests.main.build_id)" -ne "$($manifests.feature.build_id)") {
+                  $mainBuildId = "$($manifests.main.build_id)"
+                  $featureBuildId = "$($manifests.feature.build_id)"
+                  if ([string]::IsNullOrWhiteSpace($mainBuildId) -or [string]::IsNullOrWhiteSpace($featureBuildId)) {
+                      throw "Main and feature test bundle manifests must declare a build_id."
+                  }
+                  if ($mainBuildId -ne $featureBuildId) {
                       throw "Main and feature test bundles came from different MXC-Iso-Session builds."
                   }
 
