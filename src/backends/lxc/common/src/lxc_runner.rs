@@ -39,11 +39,6 @@ const FALLBACK_HOME: &str = "/tmp";
 /// unset; it does not make a tool believe it has a terminal, which is `isatty`.
 const DEFAULT_TERM: &str = "xterm-256color";
 
-/// Whether this schema version supplies a default environment.
-fn supports_default_env(version: &str) -> bool {
-    semver::Version::parse(version).is_ok_and(|v| v.major > 0 || v.minor >= 9)
-}
-
 /// The directory the child is actually started in, if any.
 ///
 /// [`LxcContainer::attach_run`] wraps the command in a `cd` for exactly this
@@ -80,7 +75,7 @@ fn default_env(request: &ExecutionRequest) -> Vec<(String, String)> {
 /// Below 0.9 the caller's entries are passed through untouched and the
 /// `lxc-attach` baseline is the only default.
 fn resolved_env(request: &ExecutionRequest) -> Vec<String> {
-    if !supports_default_env(&request.schema_version) {
+    if !request.supplies_default_env() {
         return request.env_entries().to_vec();
     }
 
@@ -1001,10 +996,11 @@ mod tests {
     /// `process.env` resolution, which schema 0.9 gave a default block.
     mod env {
         use super::*;
+        use wxc_common::ContractVersion;
 
-        fn request(version: &str) -> ExecutionRequest {
+        fn request(version: ContractVersion) -> ExecutionRequest {
             ExecutionRequest {
-                schema_version: version.into(),
+                source_contract: Some(version),
                 ..Default::default()
             }
         }
@@ -1018,19 +1014,32 @@ mod tests {
         #[test]
         fn below_0_9_the_caller_env_passes_through_untouched() {
             // Pre-0.9 the only default is whatever `lxc-attach` supplies.
-            for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha", "bogus"] {
+            for version in [
+                ContractVersion::V0_6_0Alpha,
+                ContractVersion::V0_7_0Alpha,
+                ContractVersion::V0_8_0Alpha,
+            ] {
                 let mut r = request(version);
                 r.env = None;
-                assert!(resolved_env(&r).is_empty(), "{version}");
+                assert!(resolved_env(&r).is_empty(), "{version:?}");
 
                 r.env = Some(vec!["FOO=bar".into()]);
-                assert_eq!(resolved_env(&r), vec!["FOO=bar".to_string()], "{version}");
+                assert_eq!(resolved_env(&r), vec!["FOO=bar".to_string()], "{version:?}");
             }
+        }
+
+        /// A direct typed SDK request has no external contract attribution and
+        /// takes the current behavior.
+        #[test]
+        fn a_direct_sdk_request_gets_the_default_block() {
+            let r = ExecutionRequest::default();
+            assert_eq!(r.source_contract, None);
+            assert_eq!(value(&resolved_env(&r), "PATH"), Some(DEFAULT_PATH));
         }
 
         #[test]
         fn an_omitted_env_gets_the_default_block() {
-            let mut r = request("0.9.0-alpha");
+            let mut r = request(ContractVersion::V0_9_0Alpha);
             r.env = None;
             let entries = resolved_env(&r);
             assert_eq!(value(&entries, "PATH"), Some(DEFAULT_PATH));
@@ -1050,21 +1059,21 @@ mod tests {
 
         #[test]
         fn an_explicitly_empty_env_stays_empty() {
-            let mut r = request("0.9.0-alpha");
+            let mut r = request(ContractVersion::V0_9_0Alpha);
             r.env = Some(vec![]);
             assert!(resolved_env(&r).is_empty());
         }
 
         #[test]
         fn a_supplied_env_is_used_verbatim() {
-            let mut r = request("0.9.0-alpha");
+            let mut r = request(ContractVersion::V0_9_0Alpha);
             r.env = Some(vec!["FOO=bar".into()]);
             assert_eq!(resolved_env(&r), vec!["FOO=bar".to_string()]);
         }
 
         #[test]
         fn inherit_default_env_layers_over_the_default_block() {
-            let mut r = request("0.9.0-alpha");
+            let mut r = request(ContractVersion::V0_9_0Alpha);
             r.env = Some(vec!["FOO=bar".into(), "PATH=/only/mine".into()]);
             r.inherit_default_env = true;
             let entries = resolved_env(&r);
@@ -1082,7 +1091,7 @@ mod tests {
 
         #[test]
         fn home_follows_the_directory_the_child_starts_in() {
-            let mut r = request("0.9.0-alpha");
+            let mut r = request(ContractVersion::V0_9_0Alpha);
             r.env = None;
             r.working_directory = "/workspace".into();
             assert_eq!(value(&resolved_env(&r), "HOME"), Some("/workspace"));
@@ -1094,7 +1103,7 @@ mod tests {
         /// `HOME`.
         #[test]
         fn a_policy_grant_alone_does_not_become_home() {
-            let mut r = request("0.9.0-alpha");
+            let mut r = request(ContractVersion::V0_9_0Alpha);
             r.env = None;
             r.working_directory = String::new();
             // A real directory, so the shared resolver's `is_dir` probe would
@@ -1110,7 +1119,7 @@ mod tests {
         #[test]
         fn home_and_the_attach_directory_agree() {
             for cwd in ["", "/workspace"] {
-                let mut r = request("0.9.0-alpha");
+                let mut r = request(ContractVersion::V0_9_0Alpha);
                 r.env = None;
                 r.working_directory = cwd.into();
                 assert_eq!(

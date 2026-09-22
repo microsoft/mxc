@@ -39,6 +39,10 @@ pub mod telemetry;
 pub mod ui_policy;
 pub mod validator;
 
+// The type of `ExecutionRequest::source_contract`, so consumers of that public
+// field can name it without taking their own dependency on the contract crate.
+pub use mxc_config_contract::ContractVersion;
+
 // Reusable DTOs shared by exact-contract adapters and typed SDK builders.
 pub(crate) mod wire;
 

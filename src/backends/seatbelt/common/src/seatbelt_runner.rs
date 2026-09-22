@@ -42,7 +42,7 @@ use wxc_common::validator::{
     validate_common, validate_network_policy_support, NetworkPolicySupport,
 };
 
-use crate::default_env::{resolved_env, supports_default_env, DEFAULT_SANDBOX_PATH};
+use crate::default_env::{resolved_env, DEFAULT_SANDBOX_PATH};
 use crate::profile_builder::build_profile_with_proxy;
 
 /// Env var keys the cooperative proxy manages. When a proxy is active these
@@ -882,7 +882,7 @@ fn apply_clean_environment(
     command.env_clear();
     // From 0.9 `resolved_env` carries `PATH`, and an explicitly empty
     // `process.env` must stay empty rather than keep a floor under it.
-    if !supports_default_env(&request.schema_version) {
+    if !request.supplies_default_env() {
         command.env("PATH", DEFAULT_SANDBOX_PATH);
     }
     for (key, value) in resolve_environment(request, proxy_address, working_directory) {
@@ -989,6 +989,9 @@ mod tests {
     #[allow(clippy::field_reassign_with_default)]
     fn base_request() -> ExecutionRequest {
         let mut request = ExecutionRequest::default();
+        // Pre-0.9, so a test opts into the default environment block by naming
+        // the contract that introduced it.
+        request.source_contract = Some(wxc_common::ContractVersion::V0_8_0Alpha);
         request.experimental_enabled = true;
         request.seatbelt = Some(SeatbeltConfig::default());
         request
@@ -999,7 +1002,7 @@ mod tests {
         // The 0.9 default block must not bypass the proxy stripping in
         // `resolve_environment`.
         let mut request = base_request();
-        request.schema_version = "0.9.0-alpha".into();
+        request.source_contract = Some(wxc_common::ContractVersion::V0_9_0Alpha);
         request.env = Some(vec!["HTTP_PROXY=http://attacker.example:9999".into()]);
         request.inherit_default_env = true;
         let addr = ProxyAddress::new("127.0.0.1".into(), 8888);
@@ -1515,7 +1518,7 @@ mod tests {
         );
 
         let mut modern = base_request();
-        modern.schema_version = "0.9.0-alpha".into();
+        modern.source_contract = Some(wxc_common::ContractVersion::V0_9_0Alpha);
         let pairs = resolve_environment(&modern, None, None);
         assert_eq!(
             env_value(&pairs, "HOME"),
@@ -1529,7 +1532,7 @@ mod tests {
     #[test]
     fn home_follows_the_directory_the_child_starts_in() {
         let mut request = base_request();
-        request.schema_version = "0.9.0-alpha".into();
+        request.source_contract = Some(wxc_common::ContractVersion::V0_9_0Alpha);
         let pairs = resolve_environment(&request, None, Some("/Users/someone/work"));
         assert_eq!(env_value(&pairs, "HOME"), Some("/Users/someone/work"));
     }

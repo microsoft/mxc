@@ -22,11 +22,6 @@ pub const FALLBACK_HOME: &str = "/tmp";
 /// unset; it does not make a tool believe it has a terminal, which is `isatty`.
 pub const DEFAULT_TERM: &str = "xterm-256color";
 
-/// Whether this schema version supplies a default environment.
-pub fn supports_default_env(version: &str) -> bool {
-    semver::Version::parse(version).is_ok_and(|v| v.major > 0 || v.minor >= 9)
-}
-
 /// The default environment, from schema 0.9: `PATH`, `HOME`, and `TERM`.
 ///
 /// `PATH` is the same value Seatbelt has always supplied; 0.9 adds the other
@@ -58,7 +53,7 @@ fn default_env(working_directory: Option<&str>) -> Vec<(String, String)> {
 /// Below 0.9 the caller's entries are passed through untouched and the runner
 /// supplies the baseline `PATH` as it always did.
 pub fn resolved_env(request: &ExecutionRequest, working_directory: Option<&str>) -> Vec<String> {
-    if !supports_default_env(&request.schema_version) {
+    if !request.supplies_default_env() {
         return request.env_entries().to_vec();
     }
 
@@ -88,10 +83,11 @@ pub fn resolved_env(request: &ExecutionRequest, working_directory: Option<&str>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wxc_common::ContractVersion;
 
-    fn request(version: &str) -> ExecutionRequest {
+    fn request(version: Option<ContractVersion>) -> ExecutionRequest {
         ExecutionRequest {
-            schema_version: version.into(),
+            source_contract: version,
             ..Default::default()
         }
     }
@@ -106,23 +102,39 @@ mod tests {
     fn below_0_9_the_caller_env_passes_through_untouched() {
         // Pre-0.9 the baseline PATH comes from the runner, not from here, so a
         // supplied env still gets one.
-        for version in ["0.7.0-alpha", "0.8.0-alpha", "bogus"] {
-            let mut r = request(version);
+        for version in [
+            ContractVersion::V0_6_0Alpha,
+            ContractVersion::V0_7_0Alpha,
+            ContractVersion::V0_8_0Alpha,
+        ] {
+            let mut r = request(Some(version));
             r.env = None;
-            assert!(resolved_env(&r, None).is_empty(), "{version}");
+            assert!(resolved_env(&r, None).is_empty(), "{version:?}");
 
             r.env = Some(vec!["FOO=bar".into()]);
             assert_eq!(
                 resolved_env(&r, None),
                 vec!["FOO=bar".to_string()],
-                "{version}"
+                "{version:?}"
             );
         }
     }
 
+    /// A direct typed SDK request has no external contract attribution and
+    /// takes the current behavior.
+    #[test]
+    fn a_direct_sdk_request_gets_the_default_block() {
+        let mut r = request(None);
+        r.env = None;
+        assert_eq!(
+            value(&resolved_env(&r, None), "PATH"),
+            Some(DEFAULT_SANDBOX_PATH)
+        );
+    }
+
     #[test]
     fn an_omitted_env_gets_the_default_block() {
-        let mut r = request("0.9.0-alpha");
+        let mut r = request(Some(ContractVersion::V0_9_0Alpha));
         r.env = None;
         let entries = resolved_env(&r, None);
         assert_eq!(value(&entries, "PATH"), Some(DEFAULT_SANDBOX_PATH));
@@ -132,7 +144,7 @@ mod tests {
 
     #[test]
     fn an_explicitly_empty_env_stays_empty() {
-        let mut r = request("0.9.0-alpha");
+        let mut r = request(Some(ContractVersion::V0_9_0Alpha));
         r.env = Some(vec![]);
         assert!(resolved_env(&r, None).is_empty());
     }
@@ -140,14 +152,14 @@ mod tests {
     #[test]
     fn a_supplied_env_is_used_verbatim() {
         // The 0.9 behavior change: no implicit PATH under a supplied env.
-        let mut r = request("0.9.0-alpha");
+        let mut r = request(Some(ContractVersion::V0_9_0Alpha));
         r.env = Some(vec!["FOO=bar".into()]);
         assert_eq!(resolved_env(&r, None), vec!["FOO=bar".to_string()]);
     }
 
     #[test]
     fn inherit_default_env_layers_over_the_default_block() {
-        let mut r = request("0.9.0-alpha");
+        let mut r = request(Some(ContractVersion::V0_9_0Alpha));
         r.env = Some(vec!["FOO=bar".into(), "PATH=/only/mine".into()]);
         r.inherit_default_env = true;
         let entries = resolved_env(&r, None);
@@ -166,7 +178,7 @@ mod tests {
     /// deliberately does not re-derive it from the request.
     #[test]
     fn home_follows_the_directory_the_child_starts_in() {
-        let mut r = request("0.9.0-alpha");
+        let mut r = request(Some(ContractVersion::V0_9_0Alpha));
         r.env = None;
         assert_eq!(
             value(&resolved_env(&r, Some("/workspace")), "HOME"),
@@ -178,7 +190,7 @@ mod tests {
     /// writable fallback rather than following the child to `/`.
     #[test]
     fn an_unresolved_working_directory_falls_back() {
-        let mut r = request("0.9.0-alpha");
+        let mut r = request(Some(ContractVersion::V0_9_0Alpha));
         r.env = None;
         // Set on the request but never resolved by the runner: only what the
         // runner passes in counts.

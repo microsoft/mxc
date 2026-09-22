@@ -1098,6 +1098,27 @@ impl ExecutionRequest {
             .unwrap_or_default()
     }
 
+    /// Whether this request's contract supplies the backend default
+    /// environment block, introduced by `0.9.0-alpha`.
+    ///
+    /// Only the three contracts that predate it opt out. Direct typed SDK
+    /// requests carry no external contract attribution and take the current
+    /// behavior: they are written against today's API, where
+    /// [`ExecutionRequest::env`] and [`ExecutionRequest::inherit_default_env`]
+    /// only have meaning alongside a default block.
+    pub fn supplies_default_env(&self) -> bool {
+        use mxc_config_contract::ContractVersion;
+
+        !matches!(
+            self.source_contract,
+            Some(
+                ContractVersion::V0_6_0Alpha
+                    | ContractVersion::V0_7_0Alpha
+                    | ContractVersion::V0_8_0Alpha
+            )
+        )
+    }
+
     /// The caller's environment entries, with "not supplied" and "supplied but
     /// empty" flattened to the same empty slice.
     ///
