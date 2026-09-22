@@ -106,16 +106,15 @@ Current platforms:
 
 | Platform id | Family | x64 pool | arm64 pool | Declared backends (x64) |
 |-------------|--------|----------|------------|--------------------------|
-| `windows-prerelease-process-container` | windows | `1es-mxc-windows-prerelease-t1-x64` | `1es-mxc-windows-prerelease-t1-arm64` | process-t1, isolation-session, wslc, windows-sandbox, microvm, hyperlight |
+| `windows-prerelease-process-container` | windows | `1es-mxc-windows-prerelease-t1-x64` | `1es-mxc-windows-prerelease-t1-arm64` | process-t1, isolation-session, wslc, windows-sandbox, microvm |
 | `windows-prerelease-isolation-session` | windows | `1es-mxc-e2e-win-prerelease-isolationsesh-x64` | *(dormant)* | same as above |
-| `windows-canary` | windows | *(dormant)* | *(dormant)* | process-t1, wslc, windows-sandbox, microvm, hyperlight |
-| `windows-25h2` | windows | `1es-mxc-e2e-windows-25h2-pro-x64` | *(dormant)* | same as above |
-| `windows-24h2` | windows | `1es-mxc-e2e-windows-24h2-pro-x64` | *(dormant)* | same as above |
-| `windows-23h2` | windows | `1es-mxc-e2e-windows-23h2-enterprise-x64` | *(dormant)* | process-t3, wslc, windows-sandbox, microvm, hyperlight |
-| `ubuntu-26.04` | linux | `1es-mxc-e2e-ubuntu-26.04-x64` | *(dormant)* | bubblewrap, hyperlight, lxc |
-| `ubuntu-24.04` | linux | `1es-mxc-e2e-ubuntu-24.04-x64` | *(dormant)* | bubblewrap, microvm, hyperlight, lxc |
-| `rhel-10` | linux | `1es-mxc-e2e-rhel-10-x64` | *(dormant)* | bubblewrap, hyperlight, lxc |
-| `debian-13` | linux | `1es-mxc-e2e-debian-13-x64` | *(dormant)* | bubblewrap, hyperlight, lxc |
+| `windows-25h2` | windows | `1es-mxc-e2e-windows-25h2-pro-x64` | `1es-mxc-e2e-windows-25h2-pro-arm64` | same as above |
+| `windows-24h2` | windows | `1es-mxc-e2e-windows-24h2-pro-x64` | `1es-mxc-e2e-windows-25h2-pro-arm64` | same as above |
+| `windows-23h2` | windows | `1es-mxc-e2e-windows-23h2-enterprise-x64` | *(dormant)* | process-t3, wslc, windows-sandbox, microvm |
+| `ubuntu-26.04` | linux | `1es-mxc-e2e-ubuntu-26.04-x64` | *(dormant)* | bubblewrap, lxc |
+| `ubuntu-24.04` | linux | `1es-mxc-e2e-ubuntu-24.04-x64` | *(dormant)* | bubblewrap, microvm, lxc |
+| `rhel-10` | linux | `1es-mxc-e2e-rhel-10-x64` | *(dormant)* | bubblewrap, lxc |
+| `debian-13` | linux | `1es-mxc-e2e-debian-13-x64` | *(dormant)* | bubblewrap, lxc |
 | `macos-26` | macos | — | runner `macos-26` | seatbelt |
 | `macos-15` | macos | — | runner `macos-15` | seatbelt |
 
@@ -229,7 +228,6 @@ get fixed or wired.
 | IsolationSession | ✅ Good | Runs the one-shot suite plus state aware tests (provision/start/exec/stop/deprovision lifecycle). |
 | Windows Sandbox | ⛔ Blocked | Images don't support `Containers-DisposableClientVM` opt. feature |
 | MicroVM | ⛔ Not working | Windows cold and warm starts hang; no Linux suite. The artifact payload is currently commented out in the build jobs. |
-| Hyperlight | ⛔ Not implemented | No suite on any platform. |
 | Seatbelt | ✅ Good | Failures are genuine MXC bugs. |
 
 ## Host preparation
@@ -279,7 +277,6 @@ a process-container job selects follows from that build.
   is in place. On RHEL-likes it needs EPEL first, because Red Hat dropped LXC
   after RHEL 7 and ships no replacement.
 - `microvm` — asserts the NanVix payload exists.
-- `hyperlight` — no-op.
 
 Every install above goes through two shared helpers rather than its own
 package-manager chain: `resolve_package_manager` picks the first of `apt-get`,
@@ -497,7 +494,7 @@ cron *and* a job condition *and* a dispatch choice.
 Set the ARM64 `pool` for the platform. That is the whole switch: an
 architecture with an empty pool is skipped during expansion, so filling one in
 is what puts its jobs in the matrix. Note that the resolver rejects
-`hyperlight` and `microvm` on ARM64 outright (x64-only runtimes), and the WSLC
+`microvm` on ARM64 outright (x64-only runtimes), and the WSLC
 dispatcher still refuses non-x64.
 
 ## Testing Your Changes to the Validation Infrastructure

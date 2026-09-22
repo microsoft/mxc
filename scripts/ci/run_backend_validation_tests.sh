@@ -28,12 +28,6 @@ case "$backend" in
         echo "The MicroVM CI backend is not wired to an artifact-only Linux test entry point yet." >&2
         exit 2
         ;;
-    hyperlight)
-        # Keep unwired commands explicit so accidental activation fails loudly.
-        # Future test script: run_hyperlight_tests.sh
-        echo "The Hyperlight CI backend is not wired to an existing test entry point yet." >&2
-        exit 2
-        ;;
     bubblewrap)
         # Existing Linux shell tests locate binaries under src/target/release.
         test -x "$binary_directory/lxc-exec"

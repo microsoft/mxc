@@ -23,8 +23,7 @@ param(
         'isolation-session',
         'wslc',
         'windows-sandbox',
-        'microvm',
-        'hyperlight'
+        'microvm'
     )]
     [string]$Backend,
 

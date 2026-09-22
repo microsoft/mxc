@@ -15,8 +15,7 @@ param(
         'isolation-session',
         'windows-sandbox',
         'wslc',
-        'microvm',
-        'hyperlight'
+        'microvm'
     )]
     [string]$Backend,
 
@@ -208,9 +207,5 @@ switch ($Backend) {
         Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_microvm_tests.ps1') -Arguments @{
             BinDir = $binaryDirectoryPath
         }
-    }
-    'hyperlight' {
-        # Keep unwired backends explicit so accidental activation fails loudly.
-        throw 'The Hyperlight CI backend is not wired to an existing test entry point yet.'
     }
 }

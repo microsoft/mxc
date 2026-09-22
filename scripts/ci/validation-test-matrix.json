@@ -16,8 +16,7 @@
             "isolation-session",
             "wslc",
             "windows-sandbox",
-            "microvm",
-            "hyperlight"
+            "microvm"
           ]
         },
         "arm64": {
@@ -45,8 +44,7 @@
             "isolation-session",
             "wslc",
             "windows-sandbox",
-            "microvm",
-            "hyperlight"
+            "microvm"
           ]
         },
         "arm64": {
@@ -56,35 +54,6 @@
           "backends": [
             "process-t1",
             "isolation-session",
-            "wslc",
-            "windows-sandbox"
-          ]
-        }
-      }
-    },
-    {
-      "id": "windows-canary",
-      "displayName": "Windows Canary",
-      "family": "windows",
-      "architectures": {
-        "x64": {
-          "target": "x86_64-pc-windows-msvc",
-          "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
-          "pool": "",
-          "backends": [
-            "process-t1",
-            "wslc",
-            "windows-sandbox",
-            "microvm",
-            "hyperlight"
-          ]
-        },
-        "arm64": {
-          "target": "aarch64-pc-windows-msvc",
-          "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
-          "pool": "",
-          "backends": [
-            "process-t1",
             "wslc",
             "windows-sandbox"
           ]
@@ -104,18 +73,15 @@
             "process-t1",
             "wslc",
             "windows-sandbox",
-            "microvm",
-            "hyperlight"
+            "microvm"
           ]
         },
         "arm64": {
           "target": "aarch64-pc-windows-msvc",
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
-          "pool": "",
+          "pool": "1es-mxc-e2e-windows-25h2-pro-arm64",
           "backends": [
-            "process-t1",
-            "wslc",
-            "windows-sandbox"
+            "process-t1"
           ]
         }
       }
@@ -133,18 +99,15 @@
             "process-t1",
             "wslc",
             "windows-sandbox",
-            "microvm",
-            "hyperlight"
+            "microvm"
           ]
         },
         "arm64": {
           "target": "aarch64-pc-windows-msvc",
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
-          "pool": "",
+          "pool": "1es-mxc-e2e-windows-24h2-pro-arm64",
           "backends": [
-            "process-t1",
-            "wslc",
-            "windows-sandbox"
+            "process-t1"
           ]
         }
       }
@@ -162,18 +125,7 @@
             "process-t3",
             "wslc",
             "windows-sandbox",
-            "microvm",
-            "hyperlight"
-          ]
-        },
-        "arm64": {
-          "target": "aarch64-pc-windows-msvc",
-          "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
-          "pool": "",
-          "backends": [
-            "process-t3",
-            "wslc",
-            "windows-sandbox"
+            "microvm"
           ]
         }
       }
@@ -189,7 +141,6 @@
           "pool": "1es-mxc-e2e-ubuntu-26.04-x64",
           "backends": [
             "bubblewrap",
-            "hyperlight",
             "lxc"
           ]
         },
@@ -216,7 +167,6 @@
           "backends": [
             "bubblewrap",
             "microvm",
-            "hyperlight",
             "lxc"
           ]
         },
@@ -242,7 +192,6 @@
           "pool": "1es-mxc-e2e-rhel-10-x64",
           "backends": [
             "bubblewrap",
-            "hyperlight",
             "lxc"
           ]
         },
@@ -268,7 +217,6 @@
           "pool": "1es-mxc-e2e-debian-13-x64",
           "backends": [
             "bubblewrap",
-            "hyperlight",
             "lxc"
           ]
         },
