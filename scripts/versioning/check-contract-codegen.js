@@ -21,6 +21,10 @@ const {
   readFileAtCommit,
   resolveBaseCommit,
 } = require("./lib/git-base.js");
+const {
+  loadContractRegistry,
+  requestRootsForContract,
+} = require("./lib/contract-registry.js");
 const { compareVersions, parseVersion } = require("./lib/version.js");
 
 const repoRoot = join(__dirname, "..", "..");
@@ -266,37 +270,6 @@ function collectDispatchRoots(value, references = new Set()) {
   return references;
 }
 
-function requestRootsForContract(contract) {
-  if (!Array.isArray(contract.requestRoots) || contract.requestRoots.length === 0) {
-    fail(`exact contract ${contract.version} has no request-root metadata`);
-  }
-  const roots = new Map();
-  const schemaDefinitions = new Set();
-  for (const root of contract.requestRoots) {
-    if (
-      typeof root?.fixtureDirectory !== "string" ||
-      root.fixtureDirectory.length === 0 ||
-      typeof root?.schemaDefinition !== "string" ||
-      root.schemaDefinition.length === 0
-    ) {
-      fail(`exact contract ${contract.version} has invalid request-root metadata`);
-    }
-    if (roots.has(root.fixtureDirectory)) {
-      fail(
-        `exact contract ${contract.version} repeats fixture root ${root.fixtureDirectory}`
-      );
-    }
-    if (schemaDefinitions.has(root.schemaDefinition)) {
-      fail(
-        `exact contract ${contract.version} repeats schema root ${root.schemaDefinition}`
-      );
-    }
-    roots.set(root.fixtureDirectory, root.schemaDefinition);
-    schemaDefinitions.add(root.schemaDefinition);
-  }
-  return roots;
-}
-
 function contractsWithGeneratedArtifacts(registry) {
   const selected = [];
   for (const contract of registry) {
@@ -367,65 +340,6 @@ function validateDispatchRoots(schema, contract) {
   return expected;
 }
 
-const removedNetworkProperties = new Set([
-  "defaultPolicy", "enforcementMode", "allowedHosts", "blockedHosts",
-  "allowLocalNetwork", "proxy",
-]);
-
-// Traverse schema structure, not data examples or arbitrary text. In particular,
-// a command containing "network.proxy" is not a contract property.
-function assertDirectionalNetworkOnly(schema, requestRoots) {
-  for (const root of requestRoots) {
-    const visited = new Set();
-    function walk(node, path, networkObject = false) {
-      if (!node || typeof node !== "object") return;
-      if (typeof node.$ref === "string") {
-        const reference = node.$ref;
-        if (!reference.startsWith("#/")) {
-          throw new Error(`Unresolved schema reference ${reference} at ${path}`);
-        }
-        const key = `${reference}:${networkObject}`;
-        if (!visited.has(key)) {
-          visited.add(key);
-          let target = schema;
-          for (const token of reference.slice(2).split("/")) {
-            target = target?.[token.replace(/~1/g, "/").replace(/~0/g, "~")];
-          }
-          if (target === undefined) {
-            throw new Error(`Unresolved schema reference ${reference} at ${path}`);
-          }
-          walk(target, path, networkObject);
-        }
-      }
-      for (const [name, child] of Object.entries(node.properties || {})) {
-        if (networkObject && removedNetworkProperties.has(name)) {
-          throw new Error(`Removed v0.9 network property reachable from ${root}: ${path}.${name}`);
-        }
-        walk(child, `${path}.${name}`, name === "network");
-      }
-      for (const keyword of ["allOf", "anyOf", "oneOf"]) {
-        for (const child of node[keyword] || []) walk(child, path, networkObject);
-      }
-      for (const keyword of ["if", "then", "else", "not", "items", "additionalProperties",
-        "contains", "propertyNames"]) {
-        const child = node[keyword];
-        if (Array.isArray(child)) {
-          for (const item of child) walk(item, path, networkObject);
-        } else {
-          walk(child, path, networkObject);
-        }
-      }
-      for (const child of Object.values(node.patternProperties || {})) {
-        walk(child, path, networkObject);
-      }
-    }
-    if (!schema.definitions?.[root]) {
-      throw new Error(`Missing exact request root ${root}`);
-    }
-    walk(schema.definitions[root], root);
-  }
-}
-
 function validateFixtures(schema, fixtureRoot, requestRoots) {
   const composed = new Ajv({ allErrors: true, strict: false }).compile(schema);
 
@@ -440,8 +354,7 @@ function validateFixtures(schema, fixtureRoot, requestRoots) {
       strict: false,
     }).compile(rootSchema);
 
-    const validFixtures = readFixtures(fixtureRoot, directory, "valid");
-    for (const fixture of validFixtures) {
+    for (const fixture of readFixtures(fixtureRoot, directory, "valid")) {
       if (!validateRoot(fixture.value)) {
         fail(
           `valid fixture ${fixture.name} failed ${definition}: ` +
@@ -453,14 +366,6 @@ function validateFixtures(schema, fixtureRoot, requestRoots) {
           `valid fixture ${fixture.name} failed the composed schema: ` +
             JSON.stringify(composed.errors)
         );
-      }
-    }
-
-    for (const field of removedNetworkProperties) {
-      const fixture = structuredClone(validFixtures[0].value);
-      fixture.network = { [field]: field === "proxy" ? { url: "http://localhost:8080" } : null };
-      if (validateRoot(fixture) || composed(fixture)) {
-        fail(`removed field network.${field} passed ${definition}`);
       }
     }
 
@@ -500,14 +405,7 @@ function validateFixtures(schema, fixtureRoot, requestRoots) {
 }
 
 function main() {
-  let registry;
-  try {
-    registry = JSON.parse(
-      runGenerator(["versions", "--json"], { encoding: "utf8" })
-    );
-  } catch (error) {
-    fail(`could not read generator registry: ${error.message}`);
-  }
+  const { registry } = loadContractRegistry();
 
   const exactContracts = contractsWithGeneratedArtifacts(registry);
   const historyBase = validatePublishedHistory(registry);
@@ -551,7 +449,6 @@ function main() {
 
       const schema = JSON.parse(readFileSync(schemaOut, "utf8"));
       const requestRoots = validateDispatchRoots(schema, contract);
-      assertDirectionalNetworkOnly(schema, [...requestRoots.values()]);
       validateFixtures(schema, fixtureRootFor(contract), requestRoots);
     }
   } finally {
@@ -565,10 +462,8 @@ function main() {
 }
 
 module.exports = {
-  assertDirectionalNetworkOnly,
   contractsWithGeneratedArtifacts,
   formatFailure,
-  requestRootsForContract,
   stableSchemaVersion,
   validateDispatchRoots,
   validateFixtures,

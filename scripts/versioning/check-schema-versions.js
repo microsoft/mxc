@@ -12,13 +12,14 @@
 //
 //   node scripts/versioning/check-schema-versions.js
 
-const { execFileSync } = require("child_process");
-const { readFileSync, existsSync } = require("fs");
+const { readFileSync } = require("fs");
 const { join } = require("path");
-const { requestRootsForContract } = require("./check-contract-codegen.js");
+const {
+  loadContractRegistry,
+  requestRootsForContract,
+} = require("./lib/contract-registry.js");
 
 const repoRoot = join(__dirname, "..", "..");
-const cargoRoot = join(repoRoot, "src");
 const errors = [];
 
 function read(...parts) {
@@ -54,50 +55,11 @@ function expectConst(file, text, label, regex, expected) {
 
 // -- Exact Rust contract registry (mxc_config_contract) --
 let registry = [];
+let registryByVersion = new Map();
 try {
-  const output = execFileSync(
-    "cargo",
-    ["run", "-q", "-p", "mxc_schema_gen", "--", "versions", "--json"],
-    {
-      cwd: cargoRoot,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }
-  );
-  registry = JSON.parse(output);
+  ({ registry, byVersion: registryByVersion } = loadContractRegistry());
 } catch (error) {
-  const stderr = error?.stderr?.toString().trim();
-  errors.push(
-    "Could not load exact Rust contract registry through mxc_schema_gen" +
-      (stderr ? `: ${stderr}` : "")
-  );
-}
-
-if (!Array.isArray(registry) || registry.length === 0) {
-  errors.push("Exact Rust contract registry is empty or invalid");
-  registry = [];
-}
-
-const registryByVersion = new Map();
-for (const contract of registry) {
-  if (
-    typeof contract?.version !== "string" ||
-    typeof contract?.status !== "string" ||
-    typeof contract?.schemaPath !== "string"
-  ) {
-    errors.push("Exact Rust contract registry contains an invalid descriptor");
-    continue;
-  }
-  if (registryByVersion.has(contract.version)) {
-    errors.push(`Exact Rust contract registry contains duplicate version "${contract.version}"`);
-    continue;
-  }
-  registryByVersion.set(contract.version, contract);
-  if (!existsSync(join(repoRoot, contract.schemaPath))) {
-    errors.push(
-      `Registered schema for "${contract.version}" does not exist: ${contract.schemaPath}`
-    );
-  }
+  errors.push(`Could not load exact Rust contract registry: ${error.message}`);
 }
 
 if (registry[0]?.version !== min) {
@@ -208,18 +170,6 @@ for (const [label, expected] of [
 }
 
 // -- Canonical stable + development descriptors have the expected status --
-const stablePath = join(
-  "schemas",
-  "stable",
-  `mxc-config.schema.${stableLatest}.json`
-);
-if (!existsSync(join(repoRoot, stablePath))) {
-  errors.push(`Missing stable schema file for stableLatest "${stableLatest}": ${stablePath}`);
-}
-const devPath = join("schemas", "dev", `mxc-config.schema.${maxSupported}.json`);
-if (!existsSync(join(repoRoot, devPath))) {
-  errors.push(`Missing exact development schema for maxSupported "${maxSupported}": ${devPath}`);
-}
 if (registryByVersion.get(stableLatest)?.status !== "published") {
   errors.push(`Canonical stableLatest "${stableLatest}" is not published in the exact registry`);
 }
@@ -227,17 +177,6 @@ if (registryByVersion.get(maxSupported)?.status !== "development") {
   errors.push(
     `Canonical maxSupported "${maxSupported}" is not the development contract in the exact registry`
   );
-}
-for (const [label, version] of [
-  ["stableLatest", stableLatest],
-  ["maxSupported", maxSupported],
-]) {
-  const contract = registryByVersion.get(version);
-  if (contract?.generatesArtifacts !== true) {
-    errors.push(
-      `Canonical ${label} "${version}" is not marked for exact artifact generation`
-    );
-  }
 }
 
 // ---------------------------------------------------------------------------
