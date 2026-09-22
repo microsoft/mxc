@@ -84,11 +84,12 @@ them for this backend:
 
 ## Schema changes
 
-The rolling `0.10.0-dev` and exact `0.10.0-alpha` development contracts include
-`containment: "microvm"` in their generated schemas and TypeScript wire types.
-The internal `nvx` implementation name is not accepted as a public containment
-value. Published stable schemas remain unchanged. An `experimental.nvx.provision` section is necessary
-only if images remain caller-configurable.
+The exact `0.10.0-alpha` development contract includes
+`containment: "microvm"` in its generated schema and TypeScript wire types. The
+internal `nvx` implementation name is not accepted as a public containment
+value. Published stable schemas remain unchanged. An
+`experimental.nvx.provision` section is necessary only if images remain
+caller-configurable.
 
 Future state-aware provision design:
 
@@ -198,7 +199,7 @@ surfaces, capability advertisement, and MXC-native E2E/CI coverage.
 
 This is the current direct OpenVMM/NVX capability baseline after the merged
 policy work. An MXC backend adapter still needs to select these controls from
-the exact schema 0.9 request and expose their outcomes through MXC APIs.
+the exact `0.10.0-alpha` request and expose their outcomes through MXC APIs.
 
 | Area | Supported today | Limitation for MXC |
 | --- | --- | --- |
@@ -240,7 +241,7 @@ emits the legacy `allowOutbound`, `allowLocalNetwork`, and `network.proxy`
 fields. It no longer provides a raw `sandbox.config` passthrough.
 
 Before the CLI can use the MicroVM (NVX) backend, it must migrate its generated policy
-to schema 0.8+:
+to the exact `0.10.0-alpha` development contract:
 
 - map outbound allow/block to `network.egress.default`;
 - map local-network intent to `network.ingress.default` and
