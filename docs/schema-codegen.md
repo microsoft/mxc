@@ -1,15 +1,11 @@
 # Schema codegen
 
-MXC has two generated schema families:
+MXC generates artifacts from exact registered configuration contracts:
 
 | Artifact family | Rust source | Purpose |
 | --- | --- | --- |
-| Rolling legacy | `src/core/wxc_common/src/wire.rs` | Temporary SDK/codegen migration oracle |
 | Exact `0.9.0-alpha` | `src/core/mxc_config_contract/src/published/v0_9_0_alpha/` | Authoritative closed published contract and versioned TypeScript oracle |
 | Exact `0.10.0-alpha` | `src/core/mxc_config_contract/src/dev/` | Authoritative closed development contract and versioned TypeScript oracle |
-
-Neither family is hand-authored. Exact version dispatch is authoritative; the
-rolling family remains temporarily as an SDK/codegen migration oracle.
 
 Published schemas under `schemas/stable/` are immutable release artifacts.
 `mxc_schema_gen` renders published v0.9 into temporary output so
@@ -19,10 +15,6 @@ pre-existing stable schemas with the merge base and validates their registry
 identities.
 
 ## Sources of truth
-
-`src/core/wxc_common/src/wire.rs` defines the legacy rolling wire model
-(`MxcConfig` and its nested types). Its permissive `experimental` block is
-retained for SDK conformance and codegen migration, not production dispatch.
 
 `src/core/mxc_config_contract/src/dev/` defines the exact mutable
 `0.10.0-alpha` contract. Its one-shot and seven state-aware request roots are
@@ -36,21 +28,18 @@ state-aware roots. It remains renderable for verification; generation does
 not make the stable artifact mutable.
 
 `mxc_schema_support` owns shared integer normalization, deterministic root
-rendering, and TypeScript emission without depending on either model. It is a
-separate crate rather than a module because both `wxc_common` and
-`mxc_schema_gen` consume it across crate boundaries; putting it inside either
-consumer would invert dependencies or duplicate the implementation.
+rendering, and TypeScript emission. `mxc_schema_gen` uses those helpers for
+every renderable exact contract.
+
+`wxc_common::common_request_ir::CommonRequestIR` is the internal whole-request
+normalization boundary that replaced the former deserializable
+`wire::MxcConfig` root. Exact contract adapters assemble it, and it may contain
+reusable nested DTOs from `wire.rs`, but it has no JSON deserialization or
+schema-generation surface of its own.
 
 ## Generating
 
-Rolling artifacts:
-
-```text
-cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --legacy-wire --out schemas/dev/mxc-config.schema.0.10.0-dev.json
-cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- types --legacy-wire --out sdk/node/src/generated/wire.ts
-```
-
-Exact development-contract artifacts:
+Development-contract artifacts:
 
 ```text
 cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0.10.0-alpha --out schemas/dev/mxc-config.schema.0.10.0-alpha.json
@@ -69,8 +58,8 @@ metadata. Published v0.9 and development v0.10 dispatch to their own exact
 models. Older published versions without renderable exact models return an
 explicit error; no version falls back to another model.
 
-Both Rust model crates gate Schemars behind `schema-gen`, so normal builds do
-not carry it. The exact `OptionalField<T>` schema is transparent and
+The exact contract crate gates Schemars behind `schema-gen`, so normal builds
+do not carry it. The exact `OptionalField<T>` schema is transparent and
 non-referenceable: omitted fields remain optional while explicit `null` stays
 rejected.
 
@@ -85,214 +74,49 @@ dispatch:
    (Windows Sandbox, IsolationSession, or WSLC in v0.10; IsolationSession or
    WSLC in published v0.9).
 
-This structure evaluates only the relevant branch and gives substantially more
-focused editor diagnostics than a bare eight-branch `oneOf`. One-shot and exec
-require `process`; the other lifecycle roots do not. Every reachable object,
-including all experimental objects, has `additionalProperties: false`.
+This structure evaluates only the relevant branch and gives more focused
+editor diagnostics than a bare request-root union. One-shot and exec require
+`process`; the other lifecycle roots do not. Every reachable object has
+`additionalProperties: false`.
 
 Each exact schema is both the authoring contract and the runtime contract for
-its registered version. Repository config validation chooses an exact schema
-from each document's declared version; it does not validate the whole corpus
-against the rolling schema.
-
-The v0.9 cutover guard follows request-root references recursively and rejects
-any reachable legacy network field (`defaultPolicy`, `enforcementMode`,
-`allowedHosts`, `blockedHosts`, `allowLocalNetwork`, or `proxy` under a network
-policy). State-aware exec uses `runtimeConfig.networkProxy`; IsolationSession
-provision requires its explicit backend acknowledgment. The retained rolling
-schema may describe compatibility fields, but cannot make those fields valid
-in an exact v0.9 request.
+its registered version. Repository config validation obtains schema paths from
+`mxc_schema_gen versions --json` and selects the exact schema named by each
+document's declared version.
 
 The CLI command-override entry point splices `process.commandLine` before exact
-parsing. Therefore the exact contract and schema correctly require `process`
-and a non-empty `process.commandLine`; a pre-splice policy document is not
-itself contract-valid, and no relaxed schema twin is generated.
+parsing. Therefore the exact contract and schema require `process` and a
+non-empty `process.commandLine`; a pre-splice policy document is not itself
+contract-valid, and no relaxed schema twin is generated.
 
 ### Adding a state-aware provision containment
-
-A backend that adds a new state-aware `provision` containment needs an exact
-request root as well as runtime support:
 
 1. Define and export the closed provision request and containment marker under
    `src/core/mxc_config_contract/src/dev/state_aware/provision/`.
 2. Add its subschema and containment discriminator to `provision_dispatch()` in
-   `dev/schema.rs`, then include the root in `ROOT_NAMES` and the discriminator
-   assertions there.
-3. Add the root-name mapping to `developmentRoots` in
-   `scripts/versioning/check-contract-codegen.js` and create matching
-   `valid/` and `invalid/` fixture directories under
+   `dev/schema.rs`, then include the root in `ROOT_NAMES`.
+3. Add the root-name mapping to `expectedRootsByVersion` in
+   `scripts/versioning/check-contract-codegen.js` and create matching valid and
+   invalid fixture directories under
    `tests/v0_10_0_alpha/fixtures/`.
-4. Regenerate the exact schema and versioned TypeScript oracle with the
-   commands above; the contract codegen gate verifies that the new root is
-   dispatched, closed, referenced consistently, and covered by fixtures.
+4. Regenerate the exact schema and versioned TypeScript oracle.
 5. Wire the request through the exact-contract adapter and state-aware runtime
-   dispatcher when the backend is implemented. Schema registration alone does
-   not make the containment executable.
+   dispatcher.
 
-## CI gates (`Versioning Checks` job)
+## CI gates
 
-- **`check-schema-codegen.js`** — regenerates the schema and fails if the
-  rolling committed schema differs.
-- **`check-sdk-types-codegen.js`** — regenerates the rolling TypeScript oracle.
-- **`check-contract-codegen.js`** — discovers renderable exact artifacts
-  through `mxc_schema_gen versions --json`, regenerates v0.9 and v0.10 schema
-  and TypeScript outputs, validates each version's exact expected roots and
-  fixture corpus, and checks a malformed exec request produces focused
-  `if`/`then` diagnostics. It also rejects changes or removals of stable
-  schemas present at the merge base and validates published registry
-  identities.
-- **`validate-configs.js`** — validates the `tests/examples` + `tests/configs`
-  corpus against the rolling schema until that corpus migrates to exact
-  contracts.
-- **`check-schema-versions.js`** / **`check-version-sync.js`** — version-constant
-  and product-version sync.
+- `check-contract-codegen.js` discovers renderable exact artifacts through
+  `mxc_schema_gen versions --json`, regenerates v0.9 and v0.10 schema and
+  TypeScript outputs, validates each version's expected roots and fixture
+  corpus, and protects stable schema history and published registry identities.
+- `validate-configs.js` validates the repository config corpus against exact
+  registered schemas discovered from the same registry command.
+- `wire-conformance.test.ts` checks the Node one-shot public-to-raw v0.10
+  mapping against the exact generated v0.10 oracle.
+- `wire-conformance-state-aware.test.ts` checks backend-specific state-aware
+  public types against the exact v0.9 and v0.10 oracles.
+- `check-schema-versions.js` and `check-version-sync.js` enforce schema and
+  product version synchronization.
 
-Public SDK conformance remains attached to the rolling
-`sdk/node/src/generated/wire.ts` until the public SDK migrates to exact
-contracts. The versioned `v0_9_0_alpha/wire.ts` file must compile, but is not
-exported and is not yet compared to the hand-written public SDK types.
-
-## Deliberate exact-versus-rolling differences
-
-| Difference | Reason |
-| --- | --- |
-| Eight discriminated roots instead of one permissive root | Expresses phase-specific fields and requirements |
-| `process` required on one-shot and exec | Matches exact contracts and the pre-parse command splice |
-| No nullable wrappers for optional fields | Exact contracts reject explicit `null` |
-| `builtinTestServer` is the literal `true` | Matches its constrained deserializer |
-| `appContainer` and `macos_sandbox` aliases are advertised | Exact contracts preserve these compatibility spellings |
-| Experimental objects are recursively closed | Typos and unsupported fields are contract errors |
-
-## What the rolling schema does NOT contain
-
-Cross-field constraints — the single-backend-section rule and phase-scoping that
-the hand-written schema expressed with top-level `allOf` — are **not** in the
-generated schema. They are enforced by the parser (`wxc_common::config_parser`),
-which is the trust boundary. The schema is an editor/CI convenience, never the
-gate; the parser rejects a backend/containment mismatch regardless of what the
-schema says.
-
-## Rolling-schema equivalence to the previous hand-written schema
-
-The generated schema replaced a hand-maintained one. Because the schema is a
-convenience and not the trust boundary, equivalence is judged **behaviorally**,
-not by diffing the JSON line-by-line (the encodings differ: the hand schema
-inlined every object, while schemars emits a `definitions` block with `$ref`
-indirection and wraps optionals as `anyOf: [{ $ref }, { "type": "null" }]`, so
-the file roughly doubled in size with no change in meaning). Three lenses:
-
-1. **Accept side** — every config in the `tests/examples` + `tests/configs`
-   corpus must still validate. The `validate-configs.js` gate enforces this.
-2. **Reject side** — the *effective* per-property constraints (allowed keys,
-   enum value sets, `additionalProperties` open/closed, `required`) after
-   resolving `$ref`s.
-3. **Delegation** — constraints a JSON Schema expresses awkwardly are
-   deliberately moved to the parser.
-
-Comparing the generated schema against the prior hand-written one on lens (2):
-
-- **Enums are identical** on every canonical path (`containment`,
-  `network.defaultPolicy`, `network.enforcementMode`, `ui.clipboard`,
-  `processContainer.ui.isolation`, `seatbelt.launchMethod`, port `protocol`).
-- **The generated schema is stricter:** it closes the stable nested objects
-  (`process`, `network`, `filesystem`, `lifecycle`, `ui`, `lxc`, `fallback`,
-  `processContainer`/`.ui`, `seatbelt`) with
-  `additionalProperties: false`, matching the wire model's `deny_unknown_fields`.
-  The hand schema left several of these open, so the generated one catches
-  nested typos the old one silently accepted.
-- **The generated schema is more complete:** it documents surface the hand
-  schema omitted — `processContainer.learningMode`,
-  `windowsSandbox.idleTimeout` (legacy alias),
-  `experimental.seatbelt` (pre-promotion alias), and the per-phase
-  `isolation_session.provision` nesting.
-
-Two reductions are intentional, each compensated by the parser:
-
-| Dropped from the schema | Why it's safe |
-| --- | --- |
-| Top-level `allOf` cross-field rules (single-backend-section; `appContainer` alias note) | Semantic rules the parser enforces at runtime; the editor no longer pre-flags them, but a backend/containment mismatch is still rejected. |
-| `appContainer` alias path is undocumented; `network.proxy.builtinTestServer` widened from `const: true` to `boolean` | The serde alias still parses, and `convert_wire_proxy` still rejects `builtinTestServer: false`. |
-
-Root metadata (`$id`, `title`, `description`) is preserved: `title` comes from a
-`#[schemars(title = …)]` attribute on `MxcConfig`, `description` from its doc
-comment, and `$id` is injected in the post-process step of
-`generate_config_schema_json` (schemars does not emit one).
-
-Net: the generated schema is **equivalent-or-stricter** on values and structure,
-**more complete** in coverage, and **less expressive only** on the cross-field
-rules — gaps consciously owned by the parser. The equivalence is not a
-one-time review: the codegen gate regenerates the schema from the types on every
-CI run, and the corpus gate pins the accept-side behavior.
-
-## Generated SDK types (drift oracle, Rust emitter)
-
-The SDK's wire TypeScript types are generated too — by a **Rust emitter**, with
-no third-party generator. `mxc_schema_gen types` walks the generated schema
-value and `mxc_schema_support` emits the selected oracle. The rolling file is
-**not public API** — it is a drift oracle. The unit test
-`sdk/node/tests/unit/wire-conformance.test.ts` asserts (at `tsc` time) that the
-hand-written public types in `sdk/node/src/types.ts` still conform to it, and
-`check-sdk-types-codegen.js` is a CI gate (running the emitter and diffing the
-committed file) that fails on drift. So a wire-model change ripples to all three
-surfaces — Rust ⇄ schema ⇄ TS — and a forgotten SDK update fails CI instead of
-drifting silently. The emitter handles only the JSON Schema constructs the MXC
-schema uses (enums, closed/open objects, `$ref`, `anyOf [T, null]`, arrays,
-named scalars, externally tagged object unions, and mutually exclusive aliases);
-extending the wire model with a new construct may require teaching the emitter
-about it.
-
-The conformance check covers both SDK surfaces: `wire-conformance.test.ts` pins
-the one-shot public types in `sdk/node/src/types.ts`, and
-`wire-conformance-state-aware.test.ts` pins the state-aware lifecycle types in
-`sdk/node/src/state-aware-types.ts` (the `Phase` enum and each phase's own wire
-field set — provision is compared against its wire type, and the phases that
-take no wire object must expose no backend-specific field) against the same
-generated wire defs. Both share the
-assertion helpers in `sdk/node/tests/unit/conformance-helpers.ts` and check
-drift in both directions (public→wire and wire→public) so a new wire field the
-SDK forgets to expose also fails the build. The state-aware file additionally
-pins the derived key sets to their expected contents, so a mistake in the
-derivation fails loudly instead of quietly making the assertions vacuous.
-
-### Why a hand-written emitter (alternatives considered)
-
-The generated `wire.ts` is a **drift oracle, not the public API**. The public
-SDK types (`sdk/node/src/types.ts`, `sdk/node/src/state-aware-types.ts`) stay
-hand-written, and the conformance test asserts they match the oracle. Two other
-approaches were evaluated and rejected:
-
-- **Generate the public API directly (generate-and-replace).** The public types
-  are a *curated* surface a raw generator can't reproduce: JSDoc, the branded
-  `SandboxId<C>`, and
-  a per-call-phase organization that deliberately does **not** map 1:1 to the
-  wire defs. Replacing them from a generator would either ship an un-ergonomic
-  API or get hand-massaged anyway, and would churn the public surface (and its
-  review diffs) on every wire tweak. The oracle gives identical, CI-enforced,
-  bidirectional drift safety without coupling the public ergonomics to generator
-  output.
-- **A third-party schema→TS generator (e.g. `json-schema-to-typescript`).** It
-  pulls ~15 transitive npm dependencies onto the public `MxcDependencies` feed,
-  where new transitive packages 401 until manually seeded — a recurring CI/
-  supply-chain cost. The in-repo emitter is a few hundred lines, has **zero
-  dependencies**, and handles exactly the constructs our schema uses, giving
-  exact control over the output so the conformance comparison stays precise.
-
-Either alternative could revisit the "devs run a script and check in" workflow,
-but that workflow already exists here (`mxc_schema_gen types`, enforced by the
-codegen gate) — only the *oracle* is generated, not the curated public types. A
-larger move (e.g. describing the config in a FlatBuffers IDL to emit both Rust
-and TS) would replace the JSON config contract itself and trade away
-human-authorable config files and `$schema` editor validation; out of scope
-here.
-
-## Roadmap
-
-- The rolling wire model and the exact development contract generate separate
-  committed artifacts, each guarded by codegen gates.
-- Production parsing dispatches to the exact registered contract. The rolling
-  parser remains only for differential characterization while migration
-  classifications are retired.
-- The rolling SDK TypeScript wire types are generated from the same wire model
-  (`sdk/node/src/generated/wire.ts`, via `mxc_schema_support`),
-  guarded by a conformance test plus the `check-sdk-types-codegen.js` gate, and
-  the hand-maintained `*-strict.json` stable view has been retired.
+The generated TypeScript files are drift oracles, not public SDK exports. The
+public SDK types remain hand-written and are checked at TypeScript compile time.

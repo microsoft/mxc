@@ -6,13 +6,11 @@
 > into a *new* stable schema file at promotion time (per
 > [Promoting to Stable](#promoting-to-stable) below).
 >
-> **Stable schemas document only the non-experimental surface.**
-> Experimental backends, the `experimental.*` block, and any in-progress
-> shapes live solely in `schemas/dev/` — they must not be mirrored into
-> a stable file. Configs that need editor validation for experimental
-> fields should point `$schema` at the dev file. The `--experimental`
-> runtime gate is unchanged: it still controls execution regardless of
-> which schema validated the config.
+> **Development features use permanent field locations.**
+> Add an in-progress backend or feature at its intended top-level location in
+> the mutable development contract. Do not place it under an
+> `experimental` JSON wrapper. The `--experimental` runtime gate controls
+> execution until graduation regardless of which schema validated the config.
 
 ## Prerequisites
 
@@ -113,36 +111,35 @@ Adding a feature may touch these files:
 | File | What to change |
 |------|----------------|
 | `src/core/mxc_config_contract/src/dev/` | Add the field to the authoritative closed mutable development contract |
-| `src/core/wxc_common/src/wire.rs` | Mirror the field in the rolling differential model while that characterization oracle remains |
-| `src/core/mxc_engine/src/policy/exact/v0_10.rs` | If the Rust SDK exposes the field, update the production exact development builder |
-| `schemas/dev/mxc-config.schema.0.10.0-dev.json` | **Generated rolling artifact** — do not hand-edit |
+| `src/core/wxc_common/src/config_contract_adapters/dev/` | Adapt the exact field into private `CommonRequestIR` |
+| `src/core/wxc_common/src/wire.rs` | Add only reusable nested normalization DTOs needed by the adapter; never add a whole-request root |
+| `src/core/mxc_engine/src/policy/exact/v0_10.rs` | If the Rust SDK exposes the field, update the production development builder |
 | `schemas/dev/mxc-config.schema.0.10.0-alpha.json` | **Generated exact artifact** — do not hand-edit |
-| `src/core/wxc_common/src/models.rs` | Add `GpuIsolationConfig` struct, add field to `ExperimentalConfig` |
-| `src/core/wxc_common/src/config_parser.rs` | Map the new wire field to the domain struct in `convert_wire_config` |
+| `sdk/node/src/generated/v0_10_0_alpha/wire.ts` | **Generated exact artifact** — do not hand-edit |
+| `src/core/wxc_common/src/models.rs` | Add `GpuIsolationConfig` and an optional field on `ExecutionRequest` |
+| `src/core/wxc_common/src/config_parser.rs` | Map the new config-input field into `ExecutionRequest.gpu_isolation` |
 | Runner (`appcontainer.rs` or `lxc_runner.rs`) | Feature logic, guarded behind `experimental_enabled` |
 | `tests/configs/` | Test config exercising your feature |
 
-## Step 1: Add the field to the exact contract and rolling oracle
+## Step 1: Add the field to the development contract and config input
 
 Add the feature to the authoritative closed request types under
-`src/core/mxc_config_contract/src/dev/`, then mirror it in the rolling Rust wire
-model (`src/core/wxc_common/src/wire.rs`) while differential characterization
-remains. The rolling experimental struct remains permissive; the exact
-development contract and every nested experimental object are recursively
-closed.
+`src/core/mxc_config_contract/src/dev/`, then adapt it into the shared internal
+config input used by semantic normalization.
+The development request and every nested object are recursively closed.
 
 ```rust
-// in wire.rs
-pub struct Experimental {
-    pub compartments: Option<Compartments>,
-    pub gpu_isolation: Option<GpuIsolation>,            // ← add this
-    // ...
+// in mxc_config_contract/src/dev/one_shot.rs
+pub struct Request {
+    // Existing permanent fields...
+    #[serde(default)]
+    pub gpu_isolation: OptionalField<GpuIsolation>,
 }
 
 /// GPU device isolation (experimental).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GpuIsolation {
     /// GPU device index to assign to the container.
     pub device_index: Option<u32>,
@@ -157,19 +154,17 @@ The `///` doc comments become schema `description`s and `#[schemars(...)]`
 attributes become constraints. Then regenerate the committed schema:
 
 ```
-cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --legacy-wire --out schemas/dev/mxc-config.schema.0.10.0-dev.json
-cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- types --legacy-wire --out sdk/node/src/generated/wire.ts
 cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0.10.0-alpha --out schemas/dev/mxc-config.schema.0.10.0-alpha.json
 cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- types --version 0.10.0-alpha --out sdk/node/src/generated/v0_10_0_alpha/wire.ts
 ```
 
-The rolling and exact codegen gates fail if any committed artifact drifts, so
-all applicable regeneration steps are mandatory.
+The exact codegen gate fails if either committed artifact drifts, so both
+regeneration steps are mandatory.
 
-## Step 2: Add the model struct
+## Step 2: Add the runtime model field
 
-In `src/core/wxc_common/src/models.rs`, `ExperimentalConfig` already exists with
-`compartments`. Add your `GpuIsolationConfig` struct and a field for it:
+In `src/core/wxc_common/src/models.rs`, add `GpuIsolationConfig` and an optional
+field directly on `ExecutionRequest`:
 
 ```rust
 /// GPU isolation settings (experimental).
@@ -181,57 +176,49 @@ pub struct GpuIsolationConfig {
 }
 ```
 
-Add it to the existing `ExperimentalConfig`:
-
 ```rust
-pub struct ExperimentalConfig {
-    pub compartments: Option<CompartmentsConfig>,
-    pub gpu_isolation: Option<GpuIsolationConfig>,   // ← add this
+pub struct ExecutionRequest {
+    // ... existing fields ...
+    pub gpu_isolation: Option<GpuIsolationConfig>,
+    pub experimental_enabled: bool,
 }
 ```
 
-## Step 3: Map the wire field to the domain model
+## Step 3: Map the normalization field to the runtime model
 
 Production parsing first deserializes JSON into the exact registered request
-contract. The version-specific adapter then converts that closed type into the
-shared `wire::MxcConfig` representation used by semantic normalization. Add the
-adapter mapping for your exact contract field, then map the corresponding wire
-field to the domain struct inside `convert_wire_config`:
+contract. The version-specific adapter converts that closed type into the
+shared private `common_request_ir::CommonRequestIR` used by semantic
+normalization. `CommonRequestIR` replaces the former whole-request wire model,
+but its fields may still use reusable nested DTOs from `wire.rs`. Add the
+adapter mapping for the contract field, then map the corresponding
+normalization DTO into `models::GpuIsolationConfig` inside
+`normalize_common_request_ir`:
 
 ```rust
-let experimental = if let Some(raw_exp) = cfg.experimental {
-    // ... existing feature mappings ...
-    let gpu_isolation = raw_exp.gpu_isolation.map(|g| GpuIsolationConfig {
-        device_index: g.device_index.unwrap_or(0),
-        memory_limit_mb: g.memory_limit_mb.unwrap_or(0),
-        allow_cuda: g.allow_cuda.unwrap_or(false),
-    });
-    ExperimentalConfig {
-        // ... existing fields ...
-        gpu_isolation,
-    }
-} else {
-    ExperimentalConfig::default()
-};
+let gpu_isolation = cfg.gpu_isolation.map(|raw| GpuIsolationConfig {
+    device_index: raw.device_index.unwrap_or(0),
+    memory_limit_mb: raw.memory_limit_mb.unwrap_or(0),
+    allow_cuda: raw.allow_cuda.unwrap_or(false),
+});
 ```
 
-Prefer destructuring the wire struct (`let wire::GpuIsolation { device_index, .. }`)
-in any standalone mapping helper so that adding a wire field without mapping it
+Prefer destructuring the exact contract struct
+(`let dev::one_shot::GpuIsolation { device_index, .. } = raw`) in any
+standalone adapter helper so that adding a contract field without mapping it
 becomes a compile error rather than a silent runtime drop.
 
 Add tests to verify:
 - `gpuIsolation` is accepted by the exact request root and maps through its
-  adapter to `ExecutionRequest.experimental`
+  adapter to `ExecutionRequest.gpu_isolation`
 - Missing optional fields use defaults
-- Unknown fields under exact `experimental` objects are rejected
-- The rolling parser's permissive behavior remains characterized separately
-  while that differential oracle exists
+- Unknown fields in the exact feature object are rejected
+- Version-boundary tests reject the field from contracts that predate it
 
 ## Step 4: Implement the feature in the runner
 
 > The `--experimental` CLI flag and `experimental_enabled` field on
-> `ExecutionRequest` already exist from when `compartments` was added. No changes
-> needed in `main.rs`.
+> `ExecutionRequest` already exist. No changes are needed in `main.rs`.
 
 The full flow is:
 
@@ -239,7 +226,7 @@ The full flow is:
 main.rs: cli.experimental → request.experimental_enabled = true
 main.rs: runner.run(&request, &mut logger)
   → runner checks request.experimental_enabled
-    → reads request.experimental.gpu_isolation
+    → reads request.gpu_isolation
       → applies the feature
 ```
 
@@ -251,13 +238,7 @@ fn run(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResp
     // ... normal execution (filesystem, network, etc.) ...
 
     if request.experimental_enabled {
-        // existing experimental feature
-        if let Some(ref compartments) = request.experimental.compartments {
-            self.apply_compartments(compartments, logger)?;
-        }
-
-        // new experimental feature
-        if let Some(ref gpu) = request.experimental.gpu_isolation {
+        if let Some(ref gpu) = request.gpu_isolation {
             self.apply_gpu_isolation(gpu, logger)?;
         }
     }
@@ -332,27 +313,22 @@ The SDK passes `--experimental` to the underlying binary when this is set.
 
 When your experimental feature is ready to ship:
 
-1. Move the field from `experimental` to the top-level stable-candidate surface
-   in both transitional Rust models, then regenerate all rolling and exact
-   artifacts with `mxc_schema_gen`
-2. Move the struct from `ExperimentalConfig` to `ExecutionRequest`
-3. Map the now-top-level wire field in `convert_wire_config` (and add
-   `deny_unknown_fields` to the wire struct so the promoted, stable surface is
-   closed)
-4. Remove the `if request.experimental_enabled` guard
-5. Bump the minor version
-6. Add a parser error for configs still referencing the feature under
-   `experimental`: `"gpuIsolation has moved to the stable section"`.
-   This error should persist for at least one release cycle so users have
-   time to migrate, then it can be relaxed to the standard "unknown field"
-   behavior.
+1. Carry the field from the mutable development contract into the next
+   published contract at the same permanent location, then regenerate its
+   schema and TypeScript artifacts with `mxc_schema_gen`
+2. Add the published contract adapter mapping while retaining the existing
+   `normalize_common_request_ir` domain normalization
+3. Remove the `if request.experimental_enabled` guard
+4. Bump the minor version
+5. Preserve every published contract unchanged; older contracts continue to
+   reject the field structurally.
 
 ## Checklist
 
-- [ ] Rolling and exact development contract types updated
-- [ ] Rolling and exact generated schemas and TypeScript oracles regenerated
+- [ ] Development contract and adapter updated
+- [ ] Generated schema and TypeScript oracle regenerated
 - [ ] Model struct added to `models.rs`
-- [ ] Exact contract adapter and domain mapping added with unit tests
+- [ ] Contract adapter and runtime-model mapping added with unit tests
 - [ ] `--experimental` flag wired through (if not already)
 - [ ] Feature logic guarded behind `experimental_enabled` in the runner
 - [ ] Test config created and verified with and without `--experimental`

@@ -3,11 +3,6 @@
 
 //! ProcessContainer-specific configuration types and wire mapping.
 
-#[cfg(test)]
-use crate::policy::network::{has_host_rules, NetworkFormat};
-#[cfg(test)]
-use crate::policy::{NetworkAction, SandboxPolicy};
-
 /// How denial capture handles ungranted access checks.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -18,16 +13,6 @@ pub enum CaptureDenialsMode {
     Block,
     /// Allow the access and record what would have been denied.
     Allow,
-}
-
-impl CaptureDenialsMode {
-    #[cfg(test)]
-    pub(crate) fn wire(self) -> &'static str {
-        match self {
-            Self::Block => "block",
-            Self::Allow => "allow",
-        }
-    }
 }
 
 /// ProcessContainer denial-capture settings.
@@ -143,18 +128,6 @@ pub enum ProcessContainerSystemSettings {
     None,
 }
 
-impl ProcessContainerSystemSettings {
-    #[cfg(test)]
-    fn wire(self) -> &'static str {
-        match self {
-            Self::All => "all",
-            Self::Parameters => "parameters",
-            Self::Display => "display",
-            Self::None => "none",
-        }
-    }
-}
-
 /// Desktop-resource isolation level for BaseProcessContainer.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -166,153 +139,19 @@ pub enum ProcessContainerUiIsolation {
     Container,
 }
 
-impl ProcessContainerUiIsolation {
-    #[cfg(test)]
-    fn wire(self) -> &'static str {
-        match self {
-            Self::Desktop => "desktop",
-            Self::Handles => "handles",
-            Self::Atoms => "atoms",
-            Self::Container => "container",
-        }
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn apply(
-    config: &mut serde_json::Value,
-    policy: &SandboxPolicy,
-    process_container: &ProcessContainer,
-    network_format: NetworkFormat,
-    containment: &str,
-) -> Result<(), wxc_common::mxc_error::MxcError> {
-    use serde_json::json;
-
-    config["containment"] = json!(containment);
-
-    if wxc_common::directional_network_support(&policy.version) == Some(false) {
-        if process_container.learning_mode {
-            return Err(wxc_common::mxc_error::MxcError::malformed_request(
-                "processContainer.learningMode requires schema version 0.8 or later",
-            ));
-        }
-        if process_container.capture_denials.is_some() {
-            return Err(wxc_common::mxc_error::MxcError::malformed_request(
-                "processContainer.captureDenials requires schema version 0.8 or later",
-            ));
-        }
-    }
-    if process_container
-        .filesystem
-        .as_ref()
-        .is_some_and(|filesystem| !filesystem.enumerate_paths.is_empty())
-        && policy.version != "0.9.0-alpha"
-    {
-        return Err(wxc_common::mxc_error::MxcError::malformed_request(
-            "processContainer.filesystem.enumeratePaths requires schema version 0.9.0-alpha",
-        ));
-    }
-
-    let mut capabilities = process_container.capabilities.clone();
-    if let Some(net) = &policy.network {
-        let (allows_internet, allows_local_network) = match network_format {
-            NetworkFormat::Legacy => (net.allow_outbound, net.allow_local_network),
-            NetworkFormat::Directional => {
-                let allows_internet = net.egress.as_ref().is_some_and(|egress| {
-                    egress.default == Some(NetworkAction::Allow)
-                        || egress.allow.as_ref().is_some_and(|rules| !rules.is_empty())
-                });
-                let allows_local_network = net
-                    .ingress
-                    .as_ref()
-                    .is_some_and(|ingress| ingress.default == Some(NetworkAction::Allow));
-                (allows_internet, allows_local_network)
-            }
-        };
-        if allows_internet
-            && !capabilities
-                .iter()
-                .any(|capability| capability.eq_ignore_ascii_case("internetClient"))
-        {
-            capabilities.push("internetClient".to_string());
-        }
-        if allows_local_network
-            && !capabilities
-                .iter()
-                .any(|capability| capability.eq_ignore_ascii_case("privateNetworkClientServer"))
-        {
-            capabilities.push("privateNetworkClientServer".to_string());
-        }
-    }
-
-    config["processContainer"] = json!({
-        "leastPrivilege": process_container.least_privilege,
-        "capabilities": capabilities,
-    });
-    if process_container.learning_mode {
-        config["processContainer"]["learningMode"] = json!(true);
-    }
-    if let Some(ui) = &process_container.ui {
-        config["processContainer"]["ui"] = json!({
-            "isolation": ui.isolation.wire(),
-            "desktopSystemControl": ui.desktop_system_control,
-            "systemSettings": ui.system_settings.wire(),
-            "ime": ui.ime,
-        });
-    }
-    if let Some(filesystem) = &process_container.filesystem {
-        if !filesystem.enumerate_paths.is_empty() {
-            config["processContainer"]["filesystem"] = json!({
-                "enumeratePaths": filesystem.enumerate_paths,
-            });
-        }
-    }
-    if let Some(allowed_proxy_peer) = process_container
-        .network
-        .as_ref()
-        .and_then(|network| network.allowed_proxy_peer.as_ref())
-    {
-        config["processContainer"]["network"] = json!({
-            "allowedProxyPeer": allowed_proxy_peer,
-        });
-    }
-    if let Some(capture_denials) = &process_container.capture_denials {
-        let mut capture = json!({
-            "mode": capture_denials.mode.wire(),
-            "retainEtl": capture_denials.retain_etl,
-        });
-        if let Some(output_path) = &capture_denials.output_path {
-            capture["outputPath"] = json!(output_path);
-        }
-        config["processContainer"]["captureDenials"] = capture;
-    }
-    if network_format == NetworkFormat::Legacy {
-        if let Some(network) = config.get_mut("network") {
-            let mode = if has_host_rules(network) {
-                "both"
-            } else {
-                "capabilities"
-            };
-            network["enforcementMode"] = json!(mode);
-        }
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::policy::{
-        build_wire_config, NetworkEgressSection, NetworkIngressSection, NetworkSection,
-        RuntimeConfigSection,
+        build_request_with_containment, Containment, NetworkAction, NetworkEgressSection,
+        NetworkIngressSection, NetworkSection, RuntimeConfigSection, SandboxPolicy,
+    };
+    use wxc_common::models::{
+        CaptureDenialsMode as RuntimeCaptureDenialsMode, ContainmentBackend,
+        NetworkEnforcementCompatibility,
     };
 
     const TEST_COMMAND: &str = "echo hello";
-
-    fn policy(network: Option<NetworkSection>) -> SandboxPolicy {
-        policy_for_version("0.8.0-alpha", network)
-    }
 
     fn policy_for_version(version: &str, network: Option<NetworkSection>) -> SandboxPolicy {
         SandboxPolicy {
@@ -326,13 +165,17 @@ mod tests {
 
     #[test]
     fn maps_backend_specific_config() {
+        let output_path = std::env::temp_dir()
+            .join("mxc-phase13-process-container-denials.json")
+            .to_string_lossy()
+            .into_owned();
         let process_container = ProcessContainer {
             least_privilege: true,
             learning_mode: true,
             capabilities: vec!["registryRead".to_string()],
             capture_denials: Some(CaptureDenials {
                 mode: CaptureDenialsMode::Allow,
-                output_path: Some("C:\\capture\\denials.json".to_string()),
+                output_path: Some(output_path.clone()),
                 retain_etl: true,
             }),
             ui: Some(ProcessContainerUi {
@@ -344,48 +187,67 @@ mod tests {
             filesystem: Some(ProcessContainerFilesystem {
                 enumerate_paths: vec!["C:\\tools".to_string()],
             }),
-            network: Some(ProcessContainerNetwork {
-                allowed_proxy_peer: Some("Contoso.Proxy_123".to_string()),
-            }),
+            network: None,
         };
 
-        let config = build_wire_config(
+        let request = build_request_with_containment(
             &policy_for_version("0.9.0-alpha", None),
-            &crate::policy::Containment::ProcessContainer(process_container),
+            &Containment::ProcessContainer(process_container),
             TEST_COMMAND,
             Some("sdk-test"),
         )
-        .expect("ProcessContainer config should build");
+        .expect("ProcessContainer request should build");
 
-        assert_eq!(config["containment"], "processcontainer");
-        assert_eq!(config["processContainer"]["leastPrivilege"], true);
-        assert_eq!(config["processContainer"]["learningMode"], true);
+        let inner = &request.inner;
+        assert_eq!(inner.source_contract, None);
         assert_eq!(
-            config["processContainer"]["capabilities"],
-            serde_json::json!(["registryRead"])
+            inner.network_enforcement_compatibility,
+            NetworkEnforcementCompatibility::Strict
         );
-        assert_eq!(config["processContainer"]["ui"]["isolation"], "atoms");
+        assert_eq!(inner.containment, ContainmentBackend::ProcessContainer);
+        assert!(inner.policy.least_privilege_mode);
+        assert!(inner
+            .policy
+            .capabilities
+            .iter()
+            .any(|capability| capability == "registryRead"));
+        assert!(inner
+            .policy
+            .capabilities
+            .iter()
+            .any(|capability| capability == "permissiveLearningMode"));
+        assert!(!inner
+            .policy
+            .capabilities
+            .iter()
+            .any(|capability| capability == "learningModeLogging"));
+        assert_eq!(inner.policy.base_process_ui.isolation, "atoms");
+        assert!(inner.policy.base_process_ui.desktop_system_control);
+        assert_eq!(inner.policy.base_process_ui.system_settings, "parameters");
+        assert!(inner.policy.base_process_ui.ime);
+        assert_eq!(inner.policy.enumerate_paths, vec!["C:\\tools"]);
+        assert_eq!(inner.policy.allowed_proxy_peer, None);
         assert_eq!(
-            config["processContainer"]["ui"]["systemSettings"],
-            "parameters"
+            inner
+                .policy
+                .capture_denials
+                .as_ref()
+                .map(|capture| capture.mode),
+            Some(RuntimeCaptureDenialsMode::Allow)
         );
         assert_eq!(
-            config["processContainer"]["filesystem"]["enumeratePaths"],
-            serde_json::json!(["C:\\tools"])
+            inner
+                .policy
+                .capture_denials
+                .as_ref()
+                .and_then(|capture| capture.output_path.as_deref()),
+            Some(output_path.as_str())
         );
-        assert_eq!(
-            config["processContainer"]["network"]["allowedProxyPeer"],
-            "Contoso.Proxy_123"
-        );
-        assert!(config.get("network").is_none());
-        assert_eq!(
-            config["processContainer"]["captureDenials"]["mode"],
-            "allow"
-        );
-        assert_eq!(
-            config["processContainer"]["captureDenials"]["retainEtl"],
-            true
-        );
+        assert!(inner
+            .policy
+            .capture_denials
+            .as_ref()
+            .is_some_and(|capture| capture.retain_etl));
     }
 
     #[test]
@@ -396,8 +258,8 @@ mod tests {
                 ..Default::default()
             }),
             ingress: Some(NetworkIngressSection {
-                default: Some(NetworkAction::Deny),
-                host_loopback: Some(NetworkAction::Allow),
+                default: Some(NetworkAction::Allow),
+                host_loopback: Some(NetworkAction::Deny),
             }),
             runtime_config: Some(RuntimeConfigSection {
                 network_proxy: Some("http://127.0.0.1:8080".to_string()),
@@ -411,21 +273,49 @@ mod tests {
             ..Default::default()
         };
 
-        let config = build_wire_config(
-            &policy(Some(network)),
-            &crate::policy::Containment::ProcessContainer(process_container),
+        let request = build_request_with_containment(
+            &policy_for_version("0.8.0-alpha", Some(network)),
+            &Containment::ProcessContainer(process_container),
             TEST_COMMAND,
             None,
         )
-        .expect("directional network config should build");
+        .expect("directional network request should build");
 
-        assert_eq!(config["network"]["egress"]["default"], "deny");
-        assert_eq!(config["network"]["ingress"]["hostLoopback"], "allow");
         assert_eq!(
-            config["runtimeConfig"]["networkProxy"],
-            "http://127.0.0.1:8080"
+            request
+                .inner
+                .policy
+                .network_egress
+                .as_ref()
+                .map(|egress| egress.default),
+            Some(wxc_common::models::NetworkAction::Deny)
         );
-        assert!(config["network"].get("defaultPolicy").is_none());
+        assert_eq!(
+            request
+                .inner
+                .policy
+                .network_ingress
+                .as_ref()
+                .map(|ingress| (ingress.default, ingress.host_loopback)),
+            Some((
+                wxc_common::models::NetworkAction::Allow,
+                wxc_common::models::NetworkAction::Deny
+            ))
+        );
+        assert_eq!(
+            request
+                .inner
+                .policy
+                .network_proxy
+                .address
+                .as_ref()
+                .and_then(|address| address.original_url.as_deref()),
+            Some("http://127.0.0.1:8080")
+        );
+        assert_eq!(
+            request.inner.policy.allowed_proxy_peer.as_deref(),
+            Some("Contoso.Proxy_123")
+        );
     }
 
     #[test]
@@ -442,49 +332,47 @@ mod tests {
             ..Default::default()
         };
 
-        let config = build_wire_config(
-            &policy(Some(network)),
-            &crate::policy::Containment::ProcessContainer(ProcessContainer::default()),
+        let request = build_request_with_containment(
+            &policy_for_version("0.8.0-alpha", Some(network)),
+            &Containment::ProcessContainer(ProcessContainer::default()),
             TEST_COMMAND,
             None,
         )
-        .expect("directional network config should build");
+        .expect("directional network request should build");
 
-        assert_eq!(
-            config["processContainer"]["capabilities"],
-            serde_json::json!(["internetClient", "privateNetworkClientServer"])
-        );
+        assert!(request
+            .inner
+            .policy
+            .capabilities
+            .iter()
+            .any(|capability| capability == "internetClient"));
+        assert!(request
+            .inner
+            .policy
+            .capabilities
+            .iter()
+            .any(|capability| capability == "privateNetworkClientServer"));
     }
 
     #[test]
-    fn omits_absent_v0_8_optional_fields() {
-        let network = NetworkSection {
-            egress: Some(NetworkEgressSection {
-                default: Some(NetworkAction::Deny),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
+    fn maps_capture_defaults_without_manufacturing_optional_values() {
         let process_container = ProcessContainer {
             capture_denials: Some(CaptureDenials::default()),
             ..Default::default()
         };
 
-        let config = build_wire_config(
-            &policy(Some(network)),
-            &crate::policy::Containment::ProcessContainer(process_container),
+        let request = build_request_with_containment(
+            &policy_for_version("0.8.0-alpha", None),
+            &Containment::ProcessContainer(process_container),
             TEST_COMMAND,
             None,
         )
-        .expect("schema 0.8 config should build");
+        .expect("schema 0.8 request should build");
 
-        assert!(config["network"].get("ingress").is_none());
-        assert!(config["network"]["egress"].get("allow").is_none());
-        assert!(config["network"]["egress"].get("deny").is_none());
-        assert!(config["processContainer"].get("learningMode").is_none());
-        assert!(config["processContainer"]["captureDenials"]
-            .get("outputPath")
-            .is_none());
+        let capture = request.inner.policy.capture_denials.as_ref().unwrap();
+        assert_eq!(capture.mode, RuntimeCaptureDenialsMode::Block);
+        assert_eq!(capture.output_path, None);
+        assert!(!capture.retain_etl);
     }
 
     #[test]
@@ -505,9 +393,9 @@ mod tests {
                 "captureDenials",
             ),
         ] {
-            let error = build_wire_config(
+            let error = build_request_with_containment(
                 &policy_for_version("0.7.0-alpha", None),
-                &crate::policy::Containment::ProcessContainer(process_container),
+                &Containment::ProcessContainer(process_container),
                 TEST_COMMAND,
                 None,
             )
@@ -520,16 +408,21 @@ mod tests {
 
     #[test]
     fn legacy_process_container_omits_v0_8_defaults() {
-        let config = build_wire_config(
+        let request = build_request_with_containment(
             &policy_for_version("0.7.0-alpha", None),
-            &crate::policy::Containment::ProcessContainer(ProcessContainer::default()),
+            &Containment::ProcessContainer(ProcessContainer::default()),
             TEST_COMMAND,
             None,
         )
         .expect("default ProcessContainer should remain valid for schema 0.7");
 
-        assert!(config["processContainer"].get("learningMode").is_none());
-        assert!(config["processContainer"].get("captureDenials").is_none());
+        assert!(request.inner.policy.capture_denials.is_none());
+        assert!(!request
+            .inner
+            .policy
+            .capabilities
+            .iter()
+            .any(|capability| capability == "learningModeLogging"));
     }
 
     #[test]
@@ -545,9 +438,9 @@ mod tests {
             ..Default::default()
         };
 
-        let error = build_wire_config(
-            &policy(Some(network)),
-            &crate::policy::Containment::ProcessContainer(process_container),
+        let error = build_request_with_containment(
+            &policy_for_version("0.8.0-alpha", Some(network)),
+            &Containment::ProcessContainer(process_container),
             TEST_COMMAND,
             None,
         )

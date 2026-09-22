@@ -17,7 +17,7 @@ pub(super) fn request_with_containment(containment: &str) -> String {
         }}"#
     )
 }
-pub(super) fn adapt(json: &str) -> wire::MxcConfig {
+pub(super) fn adapt(json: &str) -> crate::common_request_ir::CommonRequestIR {
     let request: contract::OneShotRequest = serde_json::from_str(json).unwrap();
-    into_wire(request)
+    into_common_request_ir(request)
 }

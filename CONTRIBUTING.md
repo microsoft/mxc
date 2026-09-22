@@ -97,7 +97,14 @@ Some changes require careful thought and a written design before implementation.
 
 ### Experimental features
 
-New, in-development features in MXC live behind an `experimental` JSON section in configuration and are only active when the binary is invoked with `--experimental`. If you're adding a new feature, follow the step-by-step checklist in [`docs/authoring-a-new-feature.md`](./docs/authoring-a-new-feature.md), which walks through the schema, Rust, and test-config changes required. The schema versioning model and promotion path from experimental to stable are described in [`docs/versioning.md`](./docs/versioning.md).
+New, in-development features use their permanent JSON locations in the mutable
+development contract. They may still require the binary's `--experimental`
+runtime authorization until graduation; that gate is independent of JSON
+placement. If you're adding a new feature, follow the step-by-step checklist in
+[`docs/authoring-a-new-feature.md`](./docs/authoring-a-new-feature.md), which
+walks through the schema, Rust, and test-config changes required. The schema
+versioning model and promotion path from experimental to stable are described
+in [`docs/versioning.md`](./docs/versioning.md).
 
 ### Help Wanted
 

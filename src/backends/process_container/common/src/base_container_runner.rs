@@ -369,7 +369,6 @@ impl BaseContainerRunner {
         static USABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         *USABLE.get_or_init(|| {
             let request = ExecutionRequest {
-                schema_version: "0.8.0-alpha".to_string(),
                 ..Default::default()
             };
             let specification = build_psec_spec(&request, ResolvedPsecContract::baseline());
@@ -412,7 +411,6 @@ impl BaseContainerRunner {
         }
 
         let request = ExecutionRequest {
-            schema_version: "0.8.0-alpha".to_string(),
             ..Default::default()
         };
         let specification = build_psec_spec(&request, ResolvedPsecContract::baseline());
@@ -2366,8 +2364,8 @@ mod tests {
     use process_security_environment_spec::process_security_environment_layout as psec_layout;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use wxc_common::models::{
-        ContainerPolicy, NetworkAction, NetworkCidr, NetworkPeer, NetworkPolicy, NetworkPort,
-        NetworkProtocol, NetworkRule, ProxyConfig,
+        ContainerPolicy, NetworkAction, NetworkCidr, NetworkEnforcementCompatibility, NetworkPeer,
+        NetworkPolicy, NetworkPort, NetworkProtocol, NetworkRule, ProxyConfig,
     };
     use wxc_common::ui_policy::EffectiveUiRestrictions;
 
@@ -2502,7 +2500,7 @@ mod tests {
 
     fn capture_request_with_denied_path() -> ExecutionRequest {
         let mut request = ExecutionRequest {
-            schema_version: "0.8.0-alpha".to_string(),
+            network_enforcement_compatibility: NetworkEnforcementCompatibility::Strict,
             ..Default::default()
         };
         request.policy.capture_denials = Some(Default::default());
@@ -3635,17 +3633,20 @@ mod tests {
     }
 
     #[test]
-    fn process_security_environment_preference_is_schema_independent() {
-        for version in ["", "0.6.0-alpha", "0.7.99", "0.8.0-alpha", "1.0.0"] {
+    fn process_security_environment_preference_is_network_compatibility_independent() {
+        for compatibility in [
+            NetworkEnforcementCompatibility::LegacyCompatible,
+            NetworkEnforcementCompatibility::Strict,
+        ] {
             let request = ExecutionRequest {
-                schema_version: version.to_string(),
+                network_enforcement_compatibility: compatibility,
                 ..Default::default()
             };
             assert!(
                 BaseContainerRunner::should_use_process_security_environment(
                     &request, true, true, true,
                 ),
-                "PSEC should be preferred for schema version {version}"
+                "PSEC should be preferred for {compatibility:?}"
             );
         }
     }
@@ -3653,7 +3654,7 @@ mod tests {
     #[test]
     fn psec_is_used_only_when_runtime_probe_succeeds() {
         let request = ExecutionRequest {
-            schema_version: "0.6.0-alpha".to_string(),
+            network_enforcement_compatibility: NetworkEnforcementCompatibility::LegacyCompatible,
             ..Default::default()
         };
 
@@ -4023,7 +4024,7 @@ mod tests {
         });
         let runner = BaseContainerRunner::with_capture_components(factory.clone(), support.clone());
         let request = ExecutionRequest {
-            schema_version: "0.6.0-alpha".to_string(),
+            network_enforcement_compatibility: NetworkEnforcementCompatibility::LegacyCompatible,
             ..Default::default()
         };
 
@@ -4050,7 +4051,7 @@ mod tests {
         });
         let runner = BaseContainerRunner::with_capture_components(factory.clone(), support.clone());
         let mut request = ExecutionRequest {
-            schema_version: "0.6.0-alpha".to_string(),
+            network_enforcement_compatibility: NetworkEnforcementCompatibility::LegacyCompatible,
             dry_run: true,
             ..Default::default()
         };
@@ -4080,7 +4081,7 @@ mod tests {
         });
         let runner = BaseContainerRunner::with_capture_components(factory.clone(), support.clone());
         let mut request = ExecutionRequest {
-            schema_version: "0.7.0-alpha".to_string(),
+            network_enforcement_compatibility: NetworkEnforcementCompatibility::LegacyCompatible,
             dry_run: true,
             ..Default::default()
         };

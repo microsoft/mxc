@@ -3,13 +3,6 @@
 
 use crate::wire;
 use mxc_config_contract::published::v0_7_0_alpha as contract;
-use mxc_config_contract::ContractVersion;
-
-fn convert_version(value: contract::Version) -> &'static str {
-    match value {
-        contract::Version::V0_7_0Alpha => ContractVersion::V0_7_0Alpha.as_str(),
-    }
-}
 
 fn convert_containment(value: contract::Containment) -> wire::Containment {
     match value {
@@ -237,11 +230,13 @@ fn convert_seatbelt(value: contract::Seatbelt) -> wire::Seatbelt {
     }
 }
 
-pub(crate) fn into_wire(request: contract::Request) -> wire::MxcConfig {
+pub(crate) fn into_common_request_ir(
+    request: contract::Request,
+) -> crate::common_request_ir::CommonRequestIR {
     let contract::Request {
         schema,
         comment,
-        version,
+        version: _,
         container_id,
         containment,
         lifecycle,
@@ -254,10 +249,12 @@ pub(crate) fn into_wire(request: contract::Request) -> wire::MxcConfig {
         ui,
         seatbelt,
     } = request;
-    wire::MxcConfig {
+    crate::common_request_ir::CommonRequestIR {
         schema: schema.into_option(),
         comment: comment.into_option(),
-        version: Some(convert_version(version).to_owned()),
+        source_contract: mxc_config_contract::ContractVersion::V0_7_0Alpha,
+        network_enforcement_compatibility:
+            crate::models::NetworkEnforcementCompatibility::LegacyCompatible,
         phase: None,
         sandbox_id: None,
         telemetry: None,
@@ -269,13 +266,15 @@ pub(crate) fn into_wire(request: contract::Request) -> wire::MxcConfig {
             .into_option()
             .map(convert_process_container),
         lxc: lxc.into_option().map(convert_lxc),
+        wslc: None,
         filesystem: filesystem.into_option().map(convert_filesystem),
         fallback: fallback.into_option().map(convert_fallback),
         network: network.into_option().map(convert_network),
         runtime_config: None,
         ui: ui.into_option().map(convert_ui),
         seatbelt: seatbelt.into_option().map(convert_seatbelt),
-        experimental: None,
+        test_feature: None,
+        windows_sandbox: None,
     }
 }
 
@@ -642,11 +641,14 @@ mod tests {
         let json = MINIMAL_REQUEST_JSON;
 
         let request: super::contract::Request = serde_json::from_str(json).unwrap();
-        let wire = super::into_wire(request);
+        let wire = super::into_common_request_ir(request);
 
         assert!(wire.schema.is_none());
         assert!(wire.comment.is_none());
-        assert_eq!(wire.version, Some("0.7.0-alpha".to_string()));
+        assert_eq!(
+            wire.source_contract,
+            mxc_config_contract::ContractVersion::V0_7_0Alpha
+        );
         assert!(wire.phase.is_none());
         assert!(wire.sandbox_id.is_none());
         assert!(wire.container_id.is_none());
@@ -666,7 +668,8 @@ mod tests {
         assert!(wire.network.is_none());
         assert!(wire.ui.is_none());
         assert!(wire.seatbelt.is_none());
-        assert!(wire.experimental.is_none());
+        assert!(wire.test_feature.is_none());
+        assert!(wire.windows_sandbox.is_none());
     }
 
     #[test]
@@ -674,11 +677,14 @@ mod tests {
         let json = COMPLETE_PROCESS_CONTAINER_REQUEST_JSON;
 
         let request: super::contract::Request = serde_json::from_str(json).unwrap();
-        let wire = super::into_wire(request);
+        let wire = super::into_common_request_ir(request);
 
         assert!(wire.schema.is_none());
         assert!(wire.comment.is_none());
-        assert_eq!(wire.version, Some("0.7.0-alpha".to_string()));
+        assert_eq!(
+            wire.source_contract,
+            mxc_config_contract::ContractVersion::V0_7_0Alpha
+        );
         assert!(wire.phase.is_none());
         assert!(wire.sandbox_id.is_none());
         assert_eq!(wire.container_id.as_deref(), Some("container-id"));
@@ -776,11 +782,14 @@ mod tests {
         let json = COMPLETE_LXC_REQUEST_JSON;
 
         let request: super::contract::Request = serde_json::from_str(json).unwrap();
-        let wire = super::into_wire(request);
+        let wire = super::into_common_request_ir(request);
 
         assert!(wire.schema.is_none());
         assert!(wire.comment.is_none());
-        assert_eq!(wire.version, Some("0.7.0-alpha".to_string()));
+        assert_eq!(
+            wire.source_contract,
+            mxc_config_contract::ContractVersion::V0_7_0Alpha
+        );
         assert!(wire.phase.is_none());
         assert!(wire.sandbox_id.is_none());
         assert_eq!(wire.container_id.as_deref(), Some("container-id"));
@@ -848,11 +857,14 @@ mod tests {
         let json = COMPLETE_SEATBELT_REQUEST_JSON;
 
         let request: super::contract::Request = serde_json::from_str(json).unwrap();
-        let wire = super::into_wire(request);
+        let wire = super::into_common_request_ir(request);
 
         assert!(wire.schema.is_none());
         assert!(wire.comment.is_none());
-        assert_eq!(wire.version, Some("0.7.0-alpha".to_string()));
+        assert_eq!(
+            wire.source_contract,
+            mxc_config_contract::ContractVersion::V0_7_0Alpha
+        );
         assert!(wire.phase.is_none());
         assert!(wire.sandbox_id.is_none());
         assert!(wire.container_id.is_none());
@@ -920,7 +932,7 @@ mod tests {
     fn empty_optional_sections_map_to_present_empty_wire_sections() {
         let request: super::contract::Request =
             serde_json::from_str(EMPTY_OPTIONAL_SECTIONS_REQUEST_JSON).unwrap();
-        let wire = super::into_wire(request);
+        let wire = super::into_common_request_ir(request);
 
         let lifecycle = wire.lifecycle.expect("lifecycle should be populated");
         assert!(lifecycle.destroy_on_exit.is_none());
@@ -952,7 +964,7 @@ mod tests {
     fn empty_process_container_section_maps_to_present_empty_wire_section() {
         let request: super::contract::Request =
             serde_json::from_str(EMPTY_PROCESS_CONTAINER_SECTION_REQUEST_JSON).unwrap();
-        let wire = super::into_wire(request);
+        let wire = super::into_common_request_ir(request);
 
         let process_container = wire
             .process_container
@@ -968,7 +980,7 @@ mod tests {
     fn empty_process_container_ui_section_maps_to_present_empty_wire_section() {
         let request: super::contract::Request =
             serde_json::from_str(EMPTY_PROCESS_CONTAINER_UI_SECTION_REQUEST_JSON).unwrap();
-        let wire = super::into_wire(request);
+        let wire = super::into_common_request_ir(request);
 
         let process_container = wire
             .process_container
@@ -991,7 +1003,7 @@ mod tests {
     fn empty_seatbelt_section_maps_to_present_empty_wire_section() {
         let request: super::contract::Request =
             serde_json::from_str(EMPTY_SEATBELT_SECTION_REQUEST_JSON).unwrap();
-        let wire = super::into_wire(request);
+        let wire = super::into_common_request_ir(request);
 
         let seatbelt = wire.seatbelt.expect("seatbelt should be populated");
         assert!(seatbelt.profile_override.is_none());
@@ -1012,7 +1024,7 @@ mod tests {
         }"#;
 
         let request: super::contract::Request = serde_json::from_str(json).unwrap();
-        let wire = super::into_wire(request);
+        let wire = super::into_common_request_ir(request);
 
         assert_eq!(
             wire.schema.as_deref(),
@@ -1062,7 +1074,7 @@ mod tests {
             let json = request_with_comment(case.json);
 
             let request: super::contract::Request = serde_json::from_str(&json).unwrap();
-            let wire = super::into_wire(request);
+            let wire = super::into_common_request_ir(request);
 
             assert_eq!(
                 wire.comment.as_ref(),
@@ -1078,7 +1090,7 @@ mod tests {
         let json = request_with_comment("null");
 
         let request: super::contract::Request = serde_json::from_str(&json).unwrap();
-        let wire = super::into_wire(request);
+        let wire = super::into_common_request_ir(request);
 
         assert_eq!(wire.comment.as_ref(), Some(&serde_json::Value::Null));
     }
@@ -1089,7 +1101,7 @@ mod tests {
             let json = request_with_proxy(case.json);
 
             let request: super::contract::Request = serde_json::from_str(&json).unwrap();
-            let wire = super::into_wire(request);
+            let wire = super::into_common_request_ir(request);
             let proxy = wire
                 .network
                 .expect("network should be populated")
@@ -1107,7 +1119,7 @@ mod tests {
         for case in CONTAINMENT_CASES {
             let json = request_with_containment(case.input);
             let request: super::contract::Request = serde_json::from_str(&json).unwrap();
-            let wire = super::into_wire(request);
+            let wire = super::into_common_request_ir(request);
 
             assert_eq!(
                 serde_json::to_value(wire.containment.unwrap()).unwrap(),
@@ -1118,7 +1130,7 @@ mod tests {
         for default_network_policy in DEFAULT_NETWORK_POLICY_CASES {
             let json = request_with_default_network_policy(default_network_policy);
             let request: super::contract::Request = serde_json::from_str(&json).unwrap();
-            let wire = super::into_wire(request);
+            let wire = super::into_common_request_ir(request);
 
             assert_eq!(
                 serde_json::to_value(
@@ -1135,7 +1147,7 @@ mod tests {
         for network_enforcement_mode in NETWORK_ENFORCEMENT_MODE_CASES {
             let json = request_with_network_enforcement_mode(network_enforcement_mode);
             let request: super::contract::Request = serde_json::from_str(&json).unwrap();
-            let wire = super::into_wire(request);
+            let wire = super::into_common_request_ir(request);
 
             assert_eq!(
                 serde_json::to_value(
@@ -1152,7 +1164,7 @@ mod tests {
         for ui_clipboard in UI_CLIPBOARD_CASES {
             let json = request_with_ui_clipboard(ui_clipboard);
             let request: super::contract::Request = serde_json::from_str(&json).unwrap();
-            let wire = super::into_wire(request);
+            let wire = super::into_common_request_ir(request);
 
             assert_eq!(
                 serde_json::to_value(
@@ -1169,7 +1181,7 @@ mod tests {
         for process_container_ui_isolation in PROCESS_CONTAINER_UI_ISOLATION_CASES {
             let json = request_with_process_container_ui_isolation(process_container_ui_isolation);
             let request: super::contract::Request = serde_json::from_str(&json).unwrap();
-            let wire = super::into_wire(request);
+            let wire = super::into_common_request_ir(request);
 
             assert_eq!(
                 serde_json::to_value(
@@ -1188,7 +1200,7 @@ mod tests {
         for launch_method in SEATBELT_LAUNCH_METHOD_CASES {
             let json = request_with_seatbelt_launch_method(launch_method);
             let request: super::contract::Request = serde_json::from_str(&json).unwrap();
-            let wire = super::into_wire(request);
+            let wire = super::into_common_request_ir(request);
 
             assert_eq!(
                 serde_json::to_value(
@@ -1207,7 +1219,7 @@ mod tests {
     fn app_container_section_alias_maps_expected_wire_fields() {
         let request: super::contract::Request =
             serde_json::from_str(APP_CONTAINER_SECTION_ALIAS_REQUEST_JSON).unwrap();
-        let wire = super::into_wire(request);
+        let wire = super::into_common_request_ir(request);
         let process_container = wire
             .process_container
             .expect("appContainer should map to process_container");
@@ -1226,7 +1238,7 @@ mod tests {
     fn macos_sandbox_section_alias_maps_expected_wire_fields() {
         let request: super::contract::Request =
             serde_json::from_str(MACOS_SANDBOX_SECTION_ALIAS_REQUEST_JSON).unwrap();
-        let wire = super::into_wire(request);
+        let wire = super::into_common_request_ir(request);
         let seatbelt = wire.seatbelt.expect("macos_sandbox should map to seatbelt");
 
         assert_eq!(

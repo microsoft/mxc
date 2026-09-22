@@ -71,17 +71,61 @@ test("published exact contracts with TypeScript oracles are regenerated", () => 
     {
       version: "0.9.0-alpha",
       status: "published",
+      schemaPath: "schemas/stable/mxc-config.schema.0.9.0-alpha.json",
       typescriptPath: "sdk/node/src/generated/v0_9_0_alpha/wire.ts",
     },
     {
       version: "0.10.0-alpha",
       status: "development",
+      schemaPath: "schemas/dev/mxc-config.schema.0.10.0-alpha.json",
       typescriptPath: "sdk/node/src/generated/v0_10_0_alpha/wire.ts",
     },
   ]);
   assert.deepEqual(
     selected.map(contract => contract.version),
     ["0.9.0-alpha", "0.10.0-alpha"]
+  );
+
+  assert.throws(
+    () => contractsWithTypeScriptOracles([
+      { version: "0.9.0-alpha", schemaPath: "v0.9.json", typescriptPath: null },
+      {
+        version: "0.10.0-alpha",
+        schemaPath: "v0.10.json",
+        typescriptPath: "v0.10.ts",
+      },
+    ]),
+    /0\.9\.0-alpha has no TypeScript oracle path/
+  );
+  assert.throws(
+    () => contractsWithTypeScriptOracles([
+      {
+        version: "0.9.0-alpha",
+        schemaPath: "v0.9.json",
+        typescriptPath: "v0.9.ts",
+      },
+    ]),
+    /0\.10\.0-alpha is absent from the registry/
+  );
+  assert.throws(
+    () => contractsWithTypeScriptOracles([
+      {
+        version: "0.9.0-alpha",
+        schemaPath: "v0.9.json",
+        typescriptPath: "v0.9.ts",
+      },
+      {
+        version: "0.10.0-alpha",
+        schemaPath: "v0.10.json",
+        typescriptPath: "v0.10.ts",
+      },
+      {
+        version: "0.11.0-alpha",
+        schemaPath: "v0.11.json",
+        typescriptPath: "v0.11.ts",
+      },
+    ]),
+    /0\.11\.0-alpha has no expected request-root set/
   );
 });
 

@@ -89,7 +89,6 @@ mxc/schemas/
 │   ├── mxc-config.schema.0.8.0-alpha.json  (shipped)
 │   └── mxc-config.schema.0.9.0-alpha.json  (shipped — current stable)
 └── dev/
-    ├── mxc-config.schema.0.10.0-dev.json    (rolling differential oracle)
     └── mxc-config.schema.0.10.0-alpha.json  (exact closed development contract)
 ```
 
@@ -97,23 +96,16 @@ Retired stable schema files are **kept as immutable historical artifacts** — t
 parser simply stops accepting those versions (the supported floor is
 `0.6.0-alpha`). Released schemas are never edited or deleted.
 
-The two development artifacts coexist during migration:
-
-- `mxc-config.schema.0.10.0-dev.json` is generated from the rolling
-  `wxc_common::wire` model. It is retained as an SDK/codegen migration oracle,
-  not a production parser.
-- `mxc-config.schema.0.10.0-alpha.json` is generated from the exact
+The development artifact is generated from the exact
   `mxc_config_contract::dev` model. It describes all eight closed one-shot and
   state-aware roots, including recursively closed experimental structures, and
   is the authoritative contract for declared `0.10.0-alpha` requests.
 
 The runtime parser and Rust SDK policy builders dispatch through the exact
-contract registered for the declared version. The test-only rolling parser and
-executable equivalence harness have been removed. The rolling schema and
-TypeScript model remain temporarily as SDK/codegen migration oracles. Corpus
-validation selects the exact registered schema from each document's `version`.
+contract registered for the declared version. Corpus validation selects the
+exact registered schema from each document's `version`.
 
-Both files are generated development artifacts rather than released schemas.
+Only the v0.10 file under `schemas/dev/` is a generated development artifact.
 Published v0.9 is represented by its exact Rust contract and immutable stable
 schema. Exact fixtures and adapter/runtime tests remain ordinary mutable tests
 so they can gain regression coverage as implementations evolve. See
@@ -146,13 +138,27 @@ same backend meaning need not survive. WSLC uses runtime-owned
 default. Top-level telemetry and network/UI presence flags remain in common
 normalization. Source-aware errors remain at exact structural deserialization.
 
-Independent test-only rolling observations retain legacy payload extraction for
-differential coverage, including intentional exact-stricter rejections such as
-`appId: null`. They are not production request types or dispatch inputs.
-Recording backends cover binding, configuration delivery, validation order,
-dry-run behavior, and both exec topologies without requiring live sandboxes.
-That representation-only migration changed no registered JSON contract or
-generated schema/type artifact.
+Exact fixtures cover structural acceptance and rejection, including
+`appId: null`. Recording backends cover binding, configuration delivery,
+validation order, dry-run behavior, and both exec topologies without requiring
+live sandboxes.
+
+Version-specific adapters convert registered JSON contract types into the
+private `CommonRequestIR` intermediate representation. Shared normalization in
+`normalize_common_request_ir` then validates and converts that representation
+into the runtime `ExecutionRequest`; adapters do not perform this second stage.
+`ExecutionRequest.source_contract` records the originating registered contract
+for diagnostics and telemetry only. Direct typed SDK requests clear that
+attribution after exact validation because they did not originate as external
+configuration JSON.
+
+Runtime behavior is selected from explicit normalized semantics rather than by
+comparing contract-version strings. In particular,
+`NetworkEnforcementCompatibility::LegacyCompatible` preserves the accepted
+v0.6/v0.7 network behavior for both JSON and direct typed SDK inputs, while
+`Strict` applies to v0.8 and later inputs. Direct typed SDK construction clears
+only source-contract attribution; it retains the compatibility selected by the
+exact version adapter.
 
 ### IsolationSession directional networking
 
@@ -175,10 +181,10 @@ The policy continues through the ordinary cross-cutting network model and
 policy identity. No backend-specific acknowledgment field, transport, or hash
 projection is introduced.
 
-The stable v0.9 schema, TypeScript oracle, accepted/rejected fixture corpus, and
-adapter/runtime observations are frozen at publication. The mutable v0.10
-contract retains the ungraduated development backends, and the test-only
-rolling reference remains available for characterization.
+The stable v0.9 schema and TypeScript oracle are regenerated from the
+published Rust model and compared in CI. Exact fixture and adapter/runtime
+tests remain editable so regression coverage can grow without changing the
+published JSON contract.
 
 ### Trust boundary vs schema defaults
 
@@ -277,53 +283,37 @@ Add the field to the applicable closed request type under
 `src/core/mxc_config_contract/src/dev/`, including the backend and phase roots
 that admit it.
 
-**In `wire.rs` (the rolling differential oracle and shared normalized
-representation):**
+**In the exact adapter and common request IR:**
 ```rust
-pub struct MxcConfig {
+pub(crate) struct CommonRequestIR {
     // ... stable fields ...
-    pub experimental: Option<Experimental>,
-}
-
-// The `experimental` block is intentionally permissive (no deny_unknown_fields)
-// so in-flux feature shapes stay forward-compatible.
-pub struct Experimental {
-    pub compartments: Option<Compartments>,
-    pub gpu_isolation: Option<GpuIsolation>,
-    // ... add new experimental features here ...
+    pub(crate) gpu_isolation: Option<GpuIsolation>,
 }
 ```
 
-While the differential oracle remains, edit both the rolling `wire.rs` model
-and the authoritative closed mutable contract under
-`src/core/mxc_config_contract/src/dev/`. Regenerate both schemas:
+Edit the authoritative closed mutable contract under
+`src/core/mxc_config_contract/src/dev/`, then adapt the exact field into
+`CommonRequestIR`. Regenerate the exact schema:
 
 ```text
-cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --legacy-wire --out schemas/dev/mxc-config.schema.0.10.0-dev.json
 cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0.10.0-alpha --out schemas/dev/mxc-config.schema.0.10.0-alpha.json
 ```
 
-Also regenerate their TypeScript oracles with the corresponding
-`mxc_schema_gen types` commands. Do not hand-edit generated artifacts.
+Also regenerate the exact TypeScript oracle with the corresponding
+`mxc_schema_gen types --version` command. Do not hand-edit generated artifacts.
 
 **In `models.rs`:**
 ```rust
-pub struct ExperimentalConfig {
-    pub compartments: Option<CompartmentsConfig>,
-    pub gpu_isolation: Option<GpuIsolationConfig>,
-}
-
 pub struct ExecutionRequest {
     // ... stable fields ...
+    pub gpu_isolation: Option<GpuIsolationConfig>,
     pub experimental_enabled: bool,  // set by --experimental flag
-    pub experimental: ExperimentalConfig,
 }
 ```
 
 **In the version-specific adapter and `config_parser.rs`:** map the exact
-contract field into the shared wire representation, then map the wire
-`Experimental` field to the domain `ExperimentalConfig` inside
-`convert_wire_config`.
+contract field into the common request IR, then map its DTO directly to the
+corresponding `ExecutionRequest` field inside `normalize_common_request_ir`.
 
 **In the runner (e.g., `appcontainer.rs`):**
 ```rust
@@ -332,10 +322,7 @@ fn run(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResp
 
     // Experimental features only applied when flag is set
     if request.experimental_enabled {
-        if let Some(ref compartments) = request.experimental.compartments {
-            self.apply_compartments(compartments, logger);
-        }
-        if let Some(ref gpu) = request.experimental.gpu_isolation {
+        if let Some(ref gpu) = request.gpu_isolation {
             self.apply_gpu_isolation(gpu, logger);
         }
     }
@@ -343,37 +330,19 @@ fn run(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResp
 ```
 
 **Promotion process:** When an experimental feature is ready to ship:
-1. Move the field from the wire `Experimental` struct to top-level `MxcConfig`
-   (e.g., `experimental.gpuIsolation` → top-level `gpuIsolation`), then
-   regenerate the schema with `mxc_schema_gen`
-2. Move the struct from `ExperimentalConfig` to `ExecutionRequest`
-3. Map the now-top-level wire field in `convert_wire_config`; add
-   `deny_unknown_fields` to the wire struct so the promoted stable surface is
-   closed
-4. Remove the `if request.experimental_enabled` guard
-5. Bump the minor version
-6. Add a parser error for configs still referencing the feature under
-   `experimental`: `"<feature> has moved to the stable section"`.
-   This error should persist for at least one release cycle so users have
-   time to migrate, then it can be relaxed to the standard "unknown field"
-   behavior.
-7. If the feature is a containment backend with a per-backend config
-   section, update the single-backend-section enforcement when it graduates
-   from experimental to top-level:
+1. Carry the field from the mutable development contract into the next exact
+   stable contract at the same permanent JSON location, then regenerate its
+   exact schema and TypeScript artifacts with `mxc_schema_gen`
+2. Add the stable contract adapter mapping while retaining the existing
+   `normalize_common_request_ir` domain normalization
+3. Remove the `if request.experimental_enabled` guard
+4. Bump the minor version
+5. Preserve every published contract unchanged; older contracts continue to
+   reject the field structurally.
 
-   - In `wxc_common::config_parser`, rename the matching entry in
-     `present_backend_sections` (and update `validate_single_backend_section`)
-     from `experimental.<name>` to `<name>`.
-
-   The single-backend-section rule is a cross-field constraint enforced by the
-   parser (the trust boundary), **not** by the JSON schema — the generated
-   schema intentionally omits the old top-level `allOf` `if/then` clauses. So
-   there is no schema edit for this step; the parser change is sufficient.
-
-   The rule itself is unchanged: a backend section requires `containment` to be
-   set, and the value must be either the concrete backend name or any abstract
-   intent that resolves to it on at least one platform (for example,
-   `processContainer` accepts both `processcontainer` and `process`).
+Backend-section validation does not move during promotion: an experimental
+backend's exact-contract section already occupies its permanent top-level
+location. Existing containment/section consistency rules continue unchanged.
 
 ## Data Flow
 
@@ -405,7 +374,7 @@ Create process security environment, then launch with CreateProcessW
 Process runs in sandbox
 ```
 
-## Exact Contract, Normalized Wire, and Runtime Models
+## Exact Contract, Common Request IR, and Runtime Models
 
 MXC deliberately keeps three Rust representations rather than sharing one type
 across trust-boundary parsing, common normalization, and backend execution:
@@ -414,10 +383,10 @@ across trust-boundary parsing, common normalization, and backend execution:
   backend-specific closed request roots. These are the production JSON
   deserialization boundary and the source for authoritative schemas and
   generated exact TypeScript wire types.
-- **Normalized wire model** (`wxc_common::wire::MxcConfig`) — the common
+- **Common request IR**
+  (`wxc_common::common_request_ir::CommonRequestIR`) — the private common
   representation produced by version-specific adapters and consumed by shared
-  semantic normalization. It also remains the source of the rolling schema and
-  TypeScript differential oracles, but is not a production parse target.
+  semantic normalization. It is not a JSON parse or schema generation target.
 - **Runtime / domain model** (`models::ExecutionRequest` and friends) — the
   validated, defaults-applied, invariant-rich model the backends consume:
   abstract containment resolved to a concrete backend, `process.commandLine`
@@ -425,59 +394,54 @@ across trust-boundary parsing, common normalization, and backend execution:
   no longer optional.
 
 The exact contract rejects structural errors first. Version-specific adapters
-then produce the normalized wire representation, and `config_parser` applies
-shared semantic validation and maps it to the runtime model.
+then perform structural conversion into `CommonRequestIR`.
+`normalize_common_request_ir` applies shared defaults and semantic validation
+and constructs the runtime model.
 
-### Why two layers (pros)
+Reusable nested DTOs under `wxc_common::wire` help adapters share representations
+for common fields. They are not a whole-request deserialization boundary and do
+not generate schemas or public SDK types.
 
+### Benefits
+
+- **Exact version boundaries.** Each registered contract owns its accepted JSON
+  shape, generated schema, and generated exact TypeScript types. A field cannot
+  leak into another version or request phase through a shared permissive root.
 - **One validate/normalize boundary.** Defaults, invariant enforcement,
   abstract→concrete backend resolution, and field reshaping all happen in exactly
   one place; backends receive a type whose invariants already hold.
 - **Parse, don't validate.** The domain type makes illegal states
   unrepresentable (required fields non-`Option`, enums resolved, containment
   always concrete), so a backend never re-checks "is this set / known?".
-- **The wire model stays a pure schema/DTO source.** Being exactly the JSON shape
-  is what makes schemars-from-types and SDK TS codegen clean — and it is what the
-  per-field stability attributes (stable/experimental/deprecated, for the
-  stable-vs-dev schema views and the promotion guard) hang on. A merged type would
-  entangle schema-generation concerns with runtime fields.
-- **Decoupled evolution.** The wire format can change (rename, alias, restructure
-  `experimental`) without touching backend code, and vice-versa; the blast radius
-  of either is bounded by the parser.
+- **Shared normalization without shared acceptance.** Exact adapters converge on
+  `CommonRequestIR`, so semantic rules stay common without making every version
+  deserialize through one rolling request type.
+- **Decoupled evolution.** An exact contract can rename, alias, or restructure a
+  field without exposing those JSON details to backend code.
 - **Backends don't couple to JSON quirks** — camelCase renames, deprecated-spelling
-  serde aliases, the raw-`Value` experimental block, `$schema`/`_comment`
-  passthrough — none leak into runner code.
+  serde aliases, `$schema`/`_comment` passthrough, and request-root differences
+  do not leak into runner code.
 
-### Costs (cons)
+### Costs
 
-- **Boilerplate.** Two definitions plus a mapping for each object; adding a field
-  touches the wire struct, the domain struct, and the parser (`From` impls only
-  soften the trivial cases).
-- **Internal drift risk.** The two Rust types can fall out of sync. This is
-  mitigated by destructuring wire structs without `..` in conversions (a new wire
-  field then fails to compile until mapped), but that is a convention, not a
-  guarantee everywhere.
-- **Indirection.** Tracing one field means hopping wire struct → mapping → domain
-  struct → runner.
+- **Adapter work.** Adding a field touches each exact contract that accepts it,
+  its adapter, `CommonRequestIR` or a phase-specific runtime config, and the
+  runtime model when the field survives normalization.
+- **Internal drift risk.** Exact adapters and common normalization can diverge.
+  Exhaustive destructuring without `..` makes newly added contract fields fail
+  compilation until they are deliberately mapped.
+- **Indirection.** Tracing one field means following exact request → adapter →
+  `CommonRequestIR` → `ExecutionRequest` → backend.
 
 ### Why the split is the right call for MXC
 
-It earns its keep because of three load-bearing facts: (a) the wire model is
-*also* the schema + SDK codegen source, a job that wants a pure JSON-shaped type;
-(b) there is genuine wire↔runtime impedance (containment resolution, field
-reshaping, defaults, deprecated-spelling aliases) that must live somewhere, and
-concentrating it in the parser beats scattering it across backends; (c) the
-per-field stability attributes need the wire model as a distinct annotatable
-layer. For a config that was a thin pass-through, a single layer would be the
-better call — here it is not.
-
-The real costs (boilerplate, internal drift) are addressable **without merging**
-— e.g. a derive/macro for the trivial wire→domain `From` impls, or a compile-time
-totality check on the mapping — which captures most of the single-layer ergonomics
-while preserving the separation the schema/SDK codegen and stability-attribute work
-depend on. No planned phase merges the two models; 2B already reduced three layers
-(`Raw*` → … → domain) to two (wire → domain), and a single layer is explicitly not
-on the roadmap.
+The exact contracts must remain JSON-shaped because they define each published
+trust boundary and generate its schema and TypeScript representation.
+`CommonRequestIR` gives those version-specific contracts one private convergence
+point, while `ExecutionRequest` gives backends stable, validated runtime
+semantics. Combining any two would either weaken exact-version closure, duplicate
+normalization across versions, or expose JSON-specific optionality and aliases to
+backends.
 
 ## Version Negotiation
 
@@ -489,7 +453,9 @@ Stage 1 — Exact contract selection (the trust boundary, `config_parser`)
   Does config.version name an exact registered contract?
     missing / malformed → declaration error
     unregistered        → unsupported contract version error
-    registered          → deserialize that contract, then validate policy
+    registered          → deserialize that contract
+                          → adapt to CommonRequestIR
+                          → normalize and validate into ExecutionRequest
   Patch and prerelease spelling are significant; there is no range fallback.
 
 Stage 2 — Containment resolve (independent of schema version)
@@ -625,14 +591,12 @@ mirrors that behavior. We do *not* gate alias acceptance on schema version (i.e.
    complexity in every layer that re-checks containment.
 
 **Observability.** Legacy *value* aliases are mapped to their canonical form by
-serde (`#[serde(alias = "...")]`) during deserialization, so the Rust parser no
-longer emits a per-value deprecation hint for them — serde normalizes the alias
-before any parser code runs, and the wire model is the trust boundary. Aliases
-are still accepted; they are simply silent in the native parser. The TypeScript
-SDK validator may still surface a deprecation hint via `diagLog` where it
-inspects the raw config before serialization. (Earlier revisions emitted a
-`Logger` line from the hand-written parser for each legacy value; that path was
-removed when the parser was rewired onto the wire model.)
+serde (`#[serde(alias = "...")]`) while deserializing the selected exact
+contract, so the Rust parser no longer emits a per-value deprecation hint for
+them — serde normalizes the alias at the trust boundary before adapter or
+normalization code runs. Aliases are still accepted; they are simply silent in
+the native parser. The TypeScript SDK validator may still surface a deprecation
+hint via `diagLog` where it inspects the raw config before serialization.
 
 **Removal.** When an alias is removed in a future release, the change goes
 through the same promotion-style migration: a single release that turns the

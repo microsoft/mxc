@@ -1,10 +1,9 @@
 {
-  "$comment": "Canonical source of truth for MXC CONFIG SCHEMA versions. min/maxSupported define exact parser and SDK support; stableLatest is the newest immutable schema; stateAware is the IsolationSession lifecycle version; stateAwareWindowsSandbox and stateAwareWslc are independently versioned backend lifecycle defaults; devSchemaFile names the rolling migration oracle.",
+  "$comment": "Canonical source of truth for MXC CONFIG SCHEMA versions. min/maxSupported define exact parser and SDK support; stableLatest is the newest immutable schema; stateAware is the IsolationSession lifecycle version; stateAwareWindowsSandbox and stateAwareWslc are the independently versioned backend lifecycle defaults.",
   "min": "0.6.0-alpha",
   "maxSupported": "0.10.0-alpha",
   "stateAware": "0.9.0-alpha",
   "stateAwareWindowsSandbox": "0.10.0-alpha",
   "stateAwareWslc": "0.9.0-alpha",
-  "stableLatest": "0.9.0-alpha",
-  "devSchemaFile": "0.10.0-dev"
+  "stableLatest": "0.9.0-alpha"
 }
