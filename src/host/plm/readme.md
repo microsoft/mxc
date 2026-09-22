@@ -68,6 +68,38 @@ Only one hidden guarded `start` operation is launched with `ShellExecuteExW("run
 
 There is no public or hidden standalone elevated stop/cancel entry point and no parent-to-child singleton handoff.
 
+### Recovering guarded WPR state
+
+The recovery marker normally lives at
+`%ProgramData%\Microsoft\MXC\PLM\active.marker`. PLM resolves ProgramData through
+the Windows known-folder API and includes the actual path in actionable start
+errors. A stale marker is evidence that trace cleanup was uncertain, not proof
+that WPR is still active. If a later guarded start succeeds, PLM calls
+`RecoveryMarker::recovered()` and removes the stale marker during normal
+cleanup.
+
+If start continues to fail, an administrator must recover the host from an
+elevated terminal:
+
+1. Inspect the active recording with `wpr -status profiles` and
+   `wpr -status collectors -details`.
+2. Determine whether the recording belongs to another tool or must be
+   preserved.
+3. Use `wpr -stop <chosen-output.etl>` to preserve it, or deliberately use
+   `wpr -cancel` when it is known to be disposable.
+4. Confirm `wpr -status` reports no active recording.
+5. Delete the exact recovery-marker path reported by PLM (normally
+   `%ProgramData%\Microsoft\MXC\PLM\active.marker`).
+6. Retry the denial capture or audit.
+
+Deleting the marker before resolving WPR state is unsafe: it does not stop the
+recording and hides PLM's durable indication that ownership and cleanup were
+not proven. PLM deliberately does not automate this procedure because the
+marker contains no WPR session identity, owner PID, profile evidence, or trace
+destination with which to distinguish PLM's orphan from an unrelated
+host-wide recording. Recovery changes only host-side WPR bookkeeping; it does
+not alter sandbox policy or enforcement.
+
 ## CLI
 
 ### `plm stop`

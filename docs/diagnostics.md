@@ -187,6 +187,54 @@ analysis writes the actionable and verbose JSON pair.
 > UAC; a compatible legacy tier may use the guarded-WPR fallback, whose
 > fixed-operation guardian prompts for elevation.
 
+#### Recovering guarded-WPR state
+
+If the guarded-WPR fallback is interrupted before it can prove that WPR
+stopped, MXC preserves an administrator-protected recovery marker. MXC will not
+automatically stop or cancel the host-wide WPR recording because it may belong
+to another tool or user. A later successful PLM start clears a stale marker
+automatically. If start continues to fail, the error reports the exact marker
+path and an administrator must resolve WPR state before removing it.
+
+From an elevated PowerShell window:
+
+1. Inspect the active recording:
+
+   ```powershell
+   wpr -status profiles
+   wpr -status collectors -details
+   ```
+
+2. Determine whether the recording is valuable or belongs to another tool or
+   user. Preserve it when in doubt:
+
+   ```powershell
+   wpr -stop "$env:TEMP\recovered-wpr-trace.etl"
+   ```
+
+   If the recording is known to be disposable, deliberately discard it
+   instead:
+
+   ```powershell
+   wpr -cancel
+   ```
+
+3. Run `wpr -status` and confirm that WPR reports no active recording.
+4. Delete the exact recovery-marker path reported by MXC. Its normal location
+   is `%ProgramData%\Microsoft\MXC\PLM\active.marker`.
+
+   ```powershell
+   Remove-Item -LiteralPath "$env:ProgramData\Microsoft\MXC\PLM\active.marker"
+   ```
+
+5. Retry `captureDenials` or `wxc-exec.exe --audit`.
+
+> **Do not delete the marker first.** Removing it neither stops WPR nor proves
+> that the recording is safe to discard. It only removes MXC's durable warning
+> that host trace state could not be verified. This recovery procedure changes
+> only host-side WPR bookkeeping; it does not change sandbox policy or
+> enforcement.
+
 ## What Gets Logged
 
 - Input JSON config and parsed `ExecutionRequest` (env values redacted, script truncated)
