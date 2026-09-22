@@ -16,8 +16,6 @@ default = []
 wslc = ["mxc_engine/wslc"]
 # IsolationSession backend (Windows only).
 isolation_session = ["mxc_engine/isolation_session"]
-# MicroVM backend foundation implemented by NVX (experimental).
-microvm = ["mxc_engine/microvm"]
 # Exposes the debug-only telemetry test seams to downstream binding tests.
 test-support = ["wxc_common/test-support"]
 
