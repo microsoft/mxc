@@ -517,9 +517,10 @@ dropping the handle tears the session down synchronously rather than in the
 background. Reach its multi-call lifecycle through
 `run_state_aware_json` plus `exec_attached` or `exec_sandbox`.
 
-Backends with no variant at all — Windows Sandbox, NVX, and Hyperlight —
-cannot be named from this crate; use the executor binaries. Windows Sandbox is
-still reachable here through the state-aware lifecycle.
+Backends with no variant at all — Windows Sandbox, MicroVM (implemented by
+NVX), and Hyperlight — cannot be named from this crate; use the executor
+binaries. Windows Sandbox is still reachable here through the state-aware
+lifecycle.
 
 `Containment::Lxc` models explicit LXC distribution settings, but `run` and
 `spawn_sandbox` reject it because the LXC backend does not expose captured
