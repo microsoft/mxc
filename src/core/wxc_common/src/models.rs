@@ -25,8 +25,8 @@ pub enum ContainmentBackend {
     Lxc,
     /// VM-based isolation.
     Vm,
-    /// NVX Linux micro-VM hosted by OpenVMM.
-    Nvx,
+    /// MicroVM isolation implemented by NVX and hosted by OpenVMM.
+    Microvm,
     /// MicroVM isolation via Hyperlight + Unikraft, using an embedded
     /// warmed-up CPython snapshot. ~100 ms cold start per invocation,
     /// hermetic via snapshot restore. Experimental — requires
@@ -56,7 +56,7 @@ impl ContainmentBackend {
             ContainmentBackend::Wslc => "wslc",
             ContainmentBackend::Lxc => "lxc",
             ContainmentBackend::Vm => "vm",
-            ContainmentBackend::Nvx => "nvx",
+            ContainmentBackend::Microvm => "microvm",
             ContainmentBackend::Hyperlight => "hyperlight",
             ContainmentBackend::WindowsSandbox => "windows_sandbox",
             ContainmentBackend::IsolationSession => "isolation_session",
@@ -78,7 +78,7 @@ impl ContainmentBackend {
             ContainmentBackend::IsolationSession => Some("isolationSession"),
             ContainmentBackend::Bubblewrap
             | ContainmentBackend::Hyperlight
-            | ContainmentBackend::Nvx
+            | ContainmentBackend::Microvm
             | ContainmentBackend::Vm => None,
         }
     }
@@ -122,7 +122,7 @@ impl From<crate::wire::Containment> for ContainmentBackend {
             }
             W::WindowsSandbox => Self::WindowsSandbox,
             W::Lxc => Self::Lxc,
-            W::Nvx => Self::Nvx,
+            W::Microvm => Self::Microvm,
             W::Hyperlight => Self::Hyperlight,
             W::Wslc => Self::Wslc,
             W::Seatbelt => Self::Seatbelt,

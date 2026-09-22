@@ -2019,7 +2019,7 @@ mod tests {
             ContainmentBackend::WindowsSandbox,
             ContainmentBackend::Wslc,
             ContainmentBackend::IsolationSession,
-            ContainmentBackend::Nvx,
+            ContainmentBackend::Microvm,
         ] {
             let containment_name = containment.wire_name();
             request.containment = containment;
@@ -2576,11 +2576,11 @@ mod tests {
     }
 
     #[test]
-    fn nvx_cli_command_uses_posix_shell_quoting() {
+    fn microvm_cli_command_uses_posix_shell_quoting() {
         let cli = parse_cli(&["wxc-exec", "policy.json", "--", "echo", "safe&whoami"]);
         let command_override = cmdline_from_argv_for_context(
             &cli.command,
-            CommandLineContext::for_backend(&ContainmentBackend::Nvx),
+            CommandLineContext::for_backend(&ContainmentBackend::Microvm),
         )
         .unwrap();
 

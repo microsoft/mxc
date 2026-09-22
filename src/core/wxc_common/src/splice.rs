@@ -225,7 +225,7 @@ mod tests {
             "vm",
             "windows_sandbox",
             "lxc",
-            "nvx",
+            "microvm",
             "hyperlight",
             "wslc",
             "seatbelt",

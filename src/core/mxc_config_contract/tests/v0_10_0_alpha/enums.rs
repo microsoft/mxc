@@ -14,7 +14,7 @@ fn accepts_every_containment_value() {
         "seatbelt",
         "vm",
         "windows_sandbox",
-        "nvx",
+        "microvm",
         "hyperlight",
         "isolation_session",
         "wslc",
@@ -37,6 +37,17 @@ fn rejects_invalid_containment_value() {
         r#"{
             "version": "0.10.0-alpha",
             "containment": "invalid",
+            "process": {"commandLine": "echo"}
+        }"#,
+    );
+}
+
+#[test]
+fn rejects_internal_nvx_containment_value() {
+    assert_invalid(
+        r#"{
+            "version": "0.10.0-alpha",
+            "containment": "nvx",
             "process": {"commandLine": "echo"}
         }"#,
     );

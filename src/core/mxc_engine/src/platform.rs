@@ -282,7 +282,7 @@ mod tests {
             Containment::Vm,
             Containment::WindowsSandbox,
             Containment::Lxc,
-            Containment::Nvx,
+            Containment::Microvm,
             Containment::Hyperlight,
             Containment::Wslc,
             Containment::Seatbelt,
@@ -321,27 +321,27 @@ mod tests {
         }
     }
 
-    fn assert_nvx_method_is_omitted() {
+    fn assert_microvm_method_is_omitted() {
         let support = platform_support();
         assert!(
             support
                 .available_methods
                 .iter()
-                .all(|method| method != "nvx"),
-            "platform_support must not advertise NVX while runtime is incomplete"
+                .all(|method| method != "microvm"),
+            "platform_support must not advertise MicroVM while runtime is incomplete"
         );
     }
 
-    #[cfg(not(feature = "nvx"))]
+    #[cfg(not(feature = "microvm"))]
     #[test]
-    fn nvx_is_not_advertised_without_feature() {
-        assert_nvx_method_is_omitted();
+    fn microvm_is_not_advertised_without_feature() {
+        assert_microvm_method_is_omitted();
     }
 
-    #[cfg(feature = "nvx")]
+    #[cfg(feature = "microvm")]
     #[test]
-    fn nvx_is_not_advertised_with_feature_enabled() {
-        assert_nvx_method_is_omitted();
+    fn microvm_is_not_advertised_with_feature_enabled() {
+        assert_microvm_method_is_omitted();
     }
 
     #[cfg(target_os = "linux")]

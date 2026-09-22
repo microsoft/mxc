@@ -6,11 +6,11 @@ The original NVX prototype accepted a real MXC `0.9.0-dev` JSON, validated it
 against the schema, and adapted supported fields into typed NVX launch plans.
 The prototype first exercised those plans on Windows through OpenVMM and WHP.
 
-NVX is now the sole micro-VM backend identity in the active MXC development
-contract. The retired NanVix-backed `microvm` value is rejected with migration
-guidance to `nvx`. An NVX-enabled build returns a typed backend-unavailable
-error for execution, and capability probes do not advertise NVX while the
-runtime is incomplete.
+MicroVM remains the sole public MXC backend identity in the active development
+contract, selected with `containment: "microvm"`. NVX is the concrete
+implementation behind that abstraction. A MicroVM-enabled build returns a
+typed backend-unavailable error for execution, and capability probes do not
+advertise MicroVM while the runtime is incomplete.
 
 ## Current architecture
 
@@ -84,10 +84,10 @@ them for this backend:
 
 ## Schema changes
 
-The rolling `0.10.0-dev` and exact `0.10.0-alpha` development contracts now
-include `containment: "nvx"` in their generated schemas and TypeScript wire
-types. The retired `microvm` identifier is absent from both development artifact sets.
-Published stable schemas remain unchanged. An `experimental.nvx.provision` section is necessary
+The rolling `0.10.0-dev` and exact `0.10.0-alpha` development contracts include
+`containment: "microvm"` in their generated schemas and TypeScript wire types.
+The internal `nvx` implementation name is not accepted as a public containment
+value. Published stable schemas remain unchanged. An `experimental.nvx.provision` section is necessary
 only if images remain caller-configurable.
 
 Future state-aware provision design:
@@ -101,7 +101,7 @@ Future state-aware provision design:
   "$schema": "https://aka.ms/mxc/schemas/0.10.0-alpha.json",
   "version": "0.10.0-alpha",
   "phase": "provision",
-  "containment": "nvx",
+  "containment": "microvm",
   "filesystem": {
     "readonlyPaths": [
       "C:\\workspace\\source"
@@ -150,7 +150,7 @@ Future state-aware provision design:
 
 ## Binary acquisition and packaging
 
-`build.bat --with-nvx` enables the incomplete x64 Windows/WHP foundation. It is
+`build.bat --with-microvm` enables the incomplete x64 Windows/WHP foundation. It is
 the only active micro-VM packaging path.
 
 The build pins the exact `microsoft/nvx` release tag, platform asset name, and
@@ -168,7 +168,8 @@ writable scratch image required to run a workload.
 ## Remaining MXC integration work
 
 The schema/wire, policy/model, typed-unavailable dispatch, and pinned Windows
-artifact-acquisition foundations now replace the removed NanVix integration.
+artifact-acquisition foundations preserve MicroVM as the public abstraction
+while replacing the removed NanVix implementation with NVX.
 Phase 2 runtime remains blocked on all of the following:
 
 - NVX-produced distro and runtime EROFS images plus a writable scratch image;
@@ -238,7 +239,7 @@ The current GitHub Copilot CLI builds MXC policy version `0.7.0-alpha` and
 emits the legacy `allowOutbound`, `allowLocalNetwork`, and `network.proxy`
 fields. It no longer provides a raw `sandbox.config` passthrough.
 
-Before the CLI can use the NVX backend, it must migrate its generated policy
+Before the CLI can use the MicroVM (NVX) backend, it must migrate its generated policy
 to schema 0.8+:
 
 - map outbound allow/block to `network.egress.default`;

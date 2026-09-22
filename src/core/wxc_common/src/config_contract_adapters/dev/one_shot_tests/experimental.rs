@@ -163,8 +163,8 @@ const DEVELOPMENT_CONTAINMENT_CASES: &[DevelopmentContainmentCase] = &[
         expected: "vm",
     },
     DevelopmentContainmentCase {
-        input: "nvx",
-        expected: "nvx",
+        input: "microvm",
+        expected: "microvm",
     },
     DevelopmentContainmentCase {
         input: "windows_sandbox",

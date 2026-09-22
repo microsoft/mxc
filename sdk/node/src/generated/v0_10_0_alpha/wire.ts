@@ -354,7 +354,7 @@ export interface NetworkRule {
 
 export type NonEmptyString = string;
 
-export type OneShotContainment = "process" | "processcontainer" | "appcontainer" | "lxc" | "bubblewrap" | "seatbelt" | "macos_sandbox" | "vm" | "windows_sandbox" | "nvx" | "hyperlight" | "wslc" | "isolation_session";
+export type OneShotContainment = "process" | "processcontainer" | "appcontainer" | "lxc" | "bubblewrap" | "seatbelt" | "macos_sandbox" | "vm" | "windows_sandbox" | "microvm" | "hyperlight" | "wslc" | "isolation_session";
 
 /**
  * A complete one-shot `0.10.0-alpha` configuration request.

@@ -79,9 +79,9 @@ describe('exact-version network authoring', () => {
 });
 
 describe('containment exports', () => {
-  it('exposes nvx and no longer exposes microvm', () => {
+  it('exposes microvm and not the internal nvx implementation name', () => {
     assert.deepStrictEqual(ContainmentTypes, ['process', 'vm']);
-    assert.deepStrictEqual(ExperimentalBackends, ['nvx', 'windows_sandbox', 'hyperlight']);
+    assert.deepStrictEqual(ExperimentalBackends, ['microvm', 'windows_sandbox', 'hyperlight']);
   });
 });
 
@@ -254,7 +254,7 @@ describe('buildSandboxPayload', () => {
       try {
         for (const containment of [
           'vm',
-          'nvx',
+          'microvm',
           'windows_sandbox',
           'wslc',
           'hyperlight',
@@ -283,7 +283,7 @@ describe('buildSandboxPayload', () => {
       try {
         for (const containment of [
           'vm',
-          'nvx',
+          'microvm',
           'windows_sandbox',
           'wslc',
           'hyperlight',
@@ -564,12 +564,12 @@ describe('buildSandboxPayload', () => {
           'echo hello',
           policy,
           '/',
-          'nvx-test',
-          'nvx',
+          'microvm-test',
+          'microvm',
         );
 
-        assert.strictEqual(payload.containment, 'nvx');
-        assert.strictEqual(payload.containerId, 'nvx-test');
+        assert.strictEqual(payload.containment, 'microvm');
+        assert.strictEqual(payload.containerId, 'microvm-test');
         assert.deepStrictEqual(payload.process, {
           commandLine: 'echo hello',
           timeout: 0,
@@ -588,7 +588,7 @@ describe('buildSandboxPayload', () => {
       }
     });
 
-    it('should reject ProcessContainer proxy peer policy for NVX', () => {
+    it('should reject ProcessContainer proxy peer policy for MicroVM', () => {
       mockWindows();
       try {
         assert.throws(
@@ -607,7 +607,7 @@ describe('buildSandboxPayload', () => {
             },
             undefined,
             undefined,
-            'nvx',
+            'microvm',
           ),
           {
             message: /processContainer\.network\.allowedProxyPeer is supported only by the Windows ProcessContainer backend/,
@@ -1990,7 +1990,7 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
     const version =
       containment === 'isolation_session' || containment === 'wslc'
         ? '0.9.0-alpha'
-        : ['nvx', 'vm', 'hyperlight', 'windows_sandbox'].includes(containment)
+        : ['microvm', 'vm', 'hyperlight', 'windows_sandbox'].includes(containment)
         ? '0.10.0-alpha'
         : ['seatbelt', 'macos_sandbox'].includes(containment)
           ? '0.7.0-alpha'
@@ -2011,23 +2011,23 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
     );
   });
 
-  it('should reject removed microvm containment with NVX migration guidance', () => {
+  it('should reject the internal nvx implementation name', () => {
     assert.throws(
-      () => resolveExecutableAndArgs(makeConfig('microvm'), {
+      () => resolveExecutableAndArgs(makeConfig('nvx'), {
         executablePath: fakeExe,
         experimental: true,
       }),
-      { message: /microvm.*removed.*nvx/i },
+      { message: /nvx.*not available/i },
     );
   });
 
-  it('should accept nvx with experimental mode on Windows x64', function (this: { skip: (reason?: string) => void }) {
+  it('should accept microvm with experimental mode on Windows x64', function (this: { skip: (reason?: string) => void }) {
     if (process.platform !== 'win32' || process.arch !== 'x64') {
-      this.skip('nvx is Windows x64-only');
+      this.skip('microvm is Windows x64-only');
       return;
     }
     assert.doesNotThrow(() =>
-      resolveExecutableAndArgs(makeConfig('nvx'), {
+      resolveExecutableAndArgs(makeConfig('microvm'), {
         executablePath: fakeExe,
         experimental: true,
       }),

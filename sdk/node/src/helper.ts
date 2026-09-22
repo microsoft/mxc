@@ -243,11 +243,6 @@ export function resolveExecutableAndArgs(
   // ExperimentalBackends under their alias) and produce a confusing
   // "not available on this platform" error instead.
   const rawContainment: string | undefined = config.containment;
-  if (rawContainment === 'microvm') {
-    throw new Error(
-      'containment "microvm" was removed; use "nvx" for the NVX micro-VM backend'
-    );
-  }
   const effectiveContainment = rawContainment
     ? (LegacyContainmentAliases[rawContainment] ?? rawContainment)
     : undefined;
@@ -272,12 +267,12 @@ export function resolveExecutableAndArgs(
     throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);
   }
 
-  // Hard platform requirement: NVX needs OpenVMM/WHP on Windows x64. This guard
+  // Hard platform requirement: MicroVM (NVX) needs OpenVMM/WHP on Windows x64. This guard
   // runs even when `skipPlatformCheck` is set because it's not a build-version
   // check — the backend literally cannot run on non-Windows hosts.
-  if (effectiveContainment === 'nvx' &&
+  if (effectiveContainment === 'microvm' &&
       (os.platform() !== 'win32' || os.arch() !== 'x64')) {
-    throw new Error('The nvx backend is only supported on Windows x64.');
+    throw new Error('The microvm backend is only supported on Windows x64.');
   }
 
   // Validate containment against platform

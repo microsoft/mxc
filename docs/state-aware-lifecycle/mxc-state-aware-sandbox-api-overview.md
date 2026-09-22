@@ -20,7 +20,7 @@ function signatures throughout. One-line summaries; full definitions live in
 
 | Type | Where | Role |
 |---|---|---|
-| `ContainmentType` / `ContainmentBackend` | `sdk/node/src/types.ts` | Two-tier containment names: `ContainmentType` for abstract intents (`'process' \| 'vm'`); `ContainmentBackend` for concrete runners (`'processcontainer' \| 'windows_sandbox' \| 'lxc' \| 'wslc' \| 'nvx' \| 'hyperlight' \| 'seatbelt' \| 'isolation_session'`). Wire `containment` accepts either. The deprecated alias `SandboxingMethod = ContainmentType \| ContainmentBackend` is retained for back-compat. |
+| `ContainmentType` / `ContainmentBackend` | `sdk/node/src/types.ts` | Two-tier containment names: `ContainmentType` for abstract intents (`'process' \| 'vm'`); `ContainmentBackend` for concrete runners (`'processcontainer' \| 'windows_sandbox' \| 'lxc' \| 'wslc' \| 'microvm' \| 'hyperlight' \| 'seatbelt' \| 'isolation_session'`). Wire `containment` accepts either. The deprecated alias `SandboxingMethod = ContainmentType \| ContainmentBackend` is retained for back-compat. |
 | `ProcessConfig` | `sdk/node/src/types.ts` | Per-process settings: `commandLine`, `cwd`, `env`, `timeout`. Reused inside state-aware exec Configs. |
 | `FilesystemConfig`, `NetworkConfig`, `UiConfig` | `sdk/node/src/types.ts` | Wire-format-aligned cross-cutting interfaces. Reused inline as field types inside the per-(backend, phase) state-aware Configs. |
 | `SandboxSpawnOptions` | `sdk/node/src/sandbox.ts` | Existing options bag (debug, dryRun, logDir, executablePath, ptyOptions, usePty, experimental). State-aware reuses it as the third positional arg, extended with `signal?: AbortSignal` for cancellation. |

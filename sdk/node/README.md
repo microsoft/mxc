@@ -64,10 +64,10 @@ child.on('close', (code) => console.log('exit:', code));
 | `0.10.0-alpha` | Dev (remaining experimental backends and development fields) | [`schemas/dev/mxc-config.schema.0.10.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/dev/mxc-config.schema.0.10.0-alpha.json) |
 
 Pick `0.9.0-alpha` for new code using current stable backends. Windows Sandbox,
-NVX, and Hyperlight require `0.10.0-alpha`; Seatbelt requires `0.7.0-alpha`
+MicroVM, and Hyperlight require `0.10.0-alpha`; Seatbelt requires `0.7.0-alpha`
 or later.
 
-> **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `nvx`, `hyperlight`) and their permanent backend sections are defined by the mutable `0.10.0-alpha` development contract. IsolationSession and WSLC, including their state-aware lifecycles, are part of exact v0.9 and do not require `--experimental`. Production executors dispatch through the exact contract selected by the declared version; the rolling `wxc_common::wire` model remains temporarily as an SDK/codegen migration oracle.
+> **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `microvm`, `hyperlight`) and their permanent backend sections are defined by the mutable `0.10.0-alpha` development contract. IsolationSession and WSLC, including their state-aware lifecycles, are part of exact v0.9 and do not require `--experimental`. Production executors dispatch through the exact contract selected by the declared version; the rolling `wxc_common::wire` model remains temporarily as an SDK/codegen migration oracle.
 
 > **Network host allow/block lists are not implemented on Windows.** Exact
 > v0.9/v0.10 requests use `network.egress` / `network.ingress` for directional
@@ -144,11 +144,11 @@ for all three connectivity modes and backend-specific support.
 
 | Platform | Default backend | Other backends | Minimum build |
 | --- | --- | --- | --- |
-| Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `nvx`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26340.9212 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26340-9212)) |
+| Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26340.9212 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26340-9212)) |
 | Linux x64 / ARM64 | `bubblewrap` | `lxc` | — |
 | macOS ARM64 (schema `0.7.0-alpha`+) | `seatbelt` | — | — |
 
-The default `processcontainer`, `bubblewrap`, `lxc`, `seatbelt`, `wslc`, and `isolation_session` backends work without an experimental opt-in. **Experimental backends** (`windows_sandbox`, `nvx`, `hyperlight`) require `{ experimental: true }` in `SandboxSpawnOptions` when you spawn — see [Choosing a Backend](#choosing-a-backend).
+The default `processcontainer`, `bubblewrap`, `lxc`, `seatbelt`, `wslc`, and `isolation_session` backends work without an experimental opt-in. **Experimental backends** (`windows_sandbox`, `microvm`, `hyperlight`) require `{ experimental: true }` in `SandboxSpawnOptions` when you spawn — see [Choosing a Backend](#choosing-a-backend).
 
 > **Hyperlight** is an opt-in build flavor (Linux x64 and Windows x64) gated by the `--with-hyperlight` cargo feature. Default shipped binaries do not include it; build from source with `build.bat --with-hyperlight` (Windows) or the equivalent cargo invocation on Linux.
 
@@ -301,7 +301,7 @@ console.log(result.stdout);
 | `lxc` | (concrete only) | Linux | `0.6.0-alpha` | ✅ | [`docs/lxc-support/lxc-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/lxc-support/lxc-backend.md) |
 | `seatbelt` | `process` | macOS | `0.7.0-alpha` | ✅ | [`docs/seatbelt/seatbelt-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/seatbelt/seatbelt-backend.md) |
 | `windows_sandbox` | `vm` | Windows | `0.10.0-alpha` | Experimental | [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) |
-| `nvx` | (concrete only) | Windows x64 | `0.10.0-alpha` | Experimental | [`docs/nvx-backend-gaps.md`](https://github.com/microsoft/mxc/blob/main/docs/nvx-backend-gaps.md) — structural foundation only; runtime unavailable in Phase 1 |
+| `microvm` | (concrete only) | Windows x64 | `0.10.0-alpha` | Experimental | [`docs/nvx-backend-gaps.md`](https://github.com/microsoft/mxc/blob/main/docs/nvx-backend-gaps.md) — implemented by NVX; structural foundation only; runtime unavailable in Phase 1 |
 | `hyperlight` | (concrete only) | Windows x64 / Linux x64 | `0.10.0-alpha` | Experimental | No dedicated guide |
 | `wslc` | (concrete only) | Windows | `0.9.0-alpha` | Stable | [`docs/wsl/wsl-container-getting-started.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wsl-container-getting-started.md) |
 | `isolation_session` | (concrete only) | Windows | `0.9.0-alpha` | Stable | [`docs/isolation-session/oneshot.md`](https://github.com/microsoft/mxc/blob/main/docs/isolation-session/oneshot.md) |
@@ -543,13 +543,13 @@ granting file content reads. It requires a BaseContainer host with PSEC 1.1
 | `MXC is not supported on this platform` | `getPlatformSupport()` returned `isSupported: false`. On Linux, neither LXC nor a usable Bubblewrap 0.5.0+ installation is available. On macOS, the Seatbelt platform probe could not find `/usr/bin/sandbox-exec`. | Inspect `support.reason`. On Linux, also inspect `support.unavailableReasons` and install LXC or Bubblewrap 0.5.0+. On macOS, verify that `/usr/bin/sandbox-exec` exists; its absence indicates an incomplete or unsupported macOS installation. |
 | `wxc-exec.exe not found` / `lxc-exec not found` | The SDK couldn't locate the native binary. | Set `MXC_BIN_DIR=<dir>` so `<dir>/<arch>/wxc-exec.exe` (or `lxc-exec`) exists, or pass `options.executablePath` explicitly. |
 | `Invalid containment value '<x>'` | `containment` field doesn't match the parser's accepted values. | Use one of the abstract intents (`process`, `vm`) or a concrete backend listed in [Choosing a Backend](#choosing-a-backend). |
-| `'<x>' containment requires experimental mode` | A `windows_sandbox` / `nvx` / `hyperlight` backend was selected without the flag. | Pass `{ experimental: true }` in `SandboxSpawnOptions`. |
+| `'<x>' containment requires experimental mode` | A `windows_sandbox` / `microvm` / `hyperlight` backend was selected without the flag. | Pass `{ experimental: true }` in `SandboxSpawnOptions`. |
 | `process.commandLine starts with an unquoted Windows path containing a space` | `wxc-exec` rejects unquoted paths with spaces at parse time. | Quote the executable: `'"C:\\Program Files\\…\\foo.exe" args'`. |
 | `CreateProcessW(PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT) failed: ...` | The process security environment launch returned an OS-level error. Backend-unavailable failures automatically fall through to an AppContainer tier during selection. | Check the Windows build requirements for the backend you selected. |
 | Process exits `-1` / `4294967295` with no stdout | Native binary terminated abnormally. | Re-run with `options.debug: true` (or `options.logDir: '<dir>'`) to capture diagnostic logs. |
 | `Policy version '<x>' is older than supported` / `newer than supported` | Version is outside the supported version lines. | Use an exact registered version: `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, `0.9.0-alpha`, or `0.10.0-alpha`. See [Compatibility](#compatibility). |
 | `Policy version '<x>' is not a registered schema contract` / `Unsupported contract version` | The declaration is not registered, even if it falls between supported versions (for example, `0.6.1-alpha`). | Use an exact version from [Compatibility](#compatibility); IsolationSession and WSLC state-aware requests use `0.9.0-alpha`, while Windows Sandbox uses `0.10.0-alpha`. |
-| `Schema <x> does not support containment '<backend>'` | The selected backend was introduced after the declared schema version. | Use the backend's minimum version from [Choosing a Backend](#choosing-a-backend). Seatbelt requires `0.7.0-alpha`; IsolationSession and WSLC require `0.9.0-alpha`; Windows Sandbox, NVX, and Hyperlight require `0.10.0-alpha`. |
+| `Schema <x> does not support containment '<backend>'` | The selected backend was introduced after the declared schema version. | Use the backend's minimum version from [Choosing a Backend](#choosing-a-backend). Seatbelt requires `0.7.0-alpha`; IsolationSession and WSLC require `0.9.0-alpha`; Windows Sandbox, MicroVM, and Hyperlight require `0.10.0-alpha`. |
 
 For backend-specific errors, see the per-backend guide linked from the [Choosing a Backend](#choosing-a-backend) table.
 

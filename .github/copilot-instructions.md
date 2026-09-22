@@ -37,7 +37,7 @@ The Rust toolchain is pinned by `src/rust-toolchain.toml`. Run Rust commands fro
 
 ```text
 build.bat
-build.bat --with-nvx       # Include the incomplete NVX foundation (Windows x64)
+build.bat --with-microvm   # Include the incomplete MicroVM (NVX) foundation (Windows x64)
 
 ./build.sh
 

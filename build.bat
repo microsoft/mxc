@@ -5,7 +5,7 @@ setlocal enabledelayedexpansion
 set "BUILD_CONFIG=release"
 set "BUILD_ARCH="
 set "BUILD_ALL=0"
-set "WITH_NVX=0"
+set "WITH_MICROVM=0"
 set "WITH_WSLC=0"
 set "WITH_ISOLATION_SESSION=0"
 set "WITH_HYPERLIGHT=0"
@@ -18,7 +18,7 @@ if /i "%~1"=="--release" ( set "BUILD_CONFIG=release"  & shift & goto :parse_arg
 if /i "%~1"=="--x64"     ( set "BUILD_ARCH=x86_64-pc-windows-msvc"   & shift & goto :parse_args )
 if /i "%~1"=="--arm64"   ( set "BUILD_ARCH=aarch64-pc-windows-msvc"  & shift & goto :parse_args )
 if /i "%~1"=="--all"     ( set "BUILD_ALL=1"           & shift & goto :parse_args )
-if /i "%~1"=="--with-nvx"     ( set "WITH_NVX=1"       & shift & goto :parse_args )
+if /i "%~1"=="--with-microvm" ( set "WITH_MICROVM=1"   & shift & goto :parse_args )
 if /i "%~1"=="--with-wslc"    ( set "WITH_WSLC=1"      & shift & goto :parse_args )
 if /i "%~1"=="--with-isolation-session" ( set "WITH_ISOLATION_SESSION=1" & shift & goto :parse_args )
 if /i "%~1"=="--with-hyperlight" ( set "WITH_HYPERLIGHT=1" & shift & goto :parse_args )
@@ -37,13 +37,13 @@ if "%BUILD_ALL%"=="0" if "%BUILD_ARCH%"=="" (
     )
 )
 
-if "%WITH_NVX%"=="1" (
+if "%WITH_MICROVM%"=="1" (
     if "%BUILD_ALL%"=="1" (
-        echo ERROR: --with-nvx supports x64 only and cannot be combined with --all.
+        echo ERROR: --with-microvm supports x64 only and cannot be combined with --all.
         exit /b 1
     )
     if /i not "%BUILD_ARCH%"=="x86_64-pc-windows-msvc" (
-        echo ERROR: --with-nvx supports x64 only. Use --x64 on an ARM64 host.
+        echo ERROR: --with-microvm supports x64 only. Use --x64 on an ARM64 host.
         exit /b 1
     )
 )
@@ -55,7 +55,7 @@ if "%BUILD_CONFIG%"=="release" set "CARGO_FLAGS=--release --target"
 :: workspace feature flags above, so it uses its own profile/target-only flags.
 set "PLM_FLAGS=--target"
 if "%BUILD_CONFIG%"=="release" set "PLM_FLAGS=--release --target"
-if "%WITH_NVX%"=="1" set "CARGO_FLAGS=--features nvx %CARGO_FLAGS%"
+if "%WITH_MICROVM%"=="1" set "CARGO_FLAGS=--features microvm %CARGO_FLAGS%"
 if "%WITH_WSLC%"=="1" set "CARGO_FLAGS=--features wslc %CARGO_FLAGS%"
 if "%WITH_ISOLATION_SESSION%"=="1" set "CARGO_FLAGS=--features isolation_session %CARGO_FLAGS%"
 if "%WITH_HYPERLIGHT%"=="1" set "CARGO_FLAGS=--features hyperlight %CARGO_FLAGS%"
@@ -138,10 +138,10 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
             echo   Copied !SDK_ARCH!\mxc_ffi.dll
         )
         if "%%T"=="x86_64-pc-windows-msvc" (
-            if "%WITH_NVX%"=="1" (
+            if "%WITH_MICROVM%"=="1" (
                 for %%B in (bin\openvmm.exe guest\vmlinux guest\initramfs.cpio.gz) do (
                     if not exist "!BIN_DIR!\%%B" (
-                        echo ERROR: NVX-enabled Node runtime is missing !BIN_DIR!\%%B
+                        echo ERROR: MicroVM ^(NVX^) Node runtime is missing !BIN_DIR!\%%B
                         exit /b 1
                     )
                 )
@@ -150,7 +150,7 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
                     if exist "!BIN_DIR!\%%B" set /A NVX_WORKLOAD_IMAGE_COUNT+=1
                 )
                 if not "!NVX_WORKLOAD_IMAGE_COUNT!"=="0" if not "!NVX_WORKLOAD_IMAGE_COUNT!"=="3" (
-                    echo ERROR: NVX-enabled Node runtime has an incomplete workload-image bundle.
+                    echo ERROR: MicroVM ^(NVX^) Node runtime has an incomplete workload-image bundle.
                     exit /b 1
                 )
                 for %%B in (images\distro.erofs images\runtime.erofs images\scratch.ext4) do (
@@ -333,7 +333,7 @@ echo   --release   Build release configuration
 echo   --x64       Build for x64 only
 echo   --arm64     Build for ARM64 only
 echo   --all             Build for both x64 and ARM64
-echo   --with-nvx        Add the incomplete NVX foundation and platform artifacts (x64)
+echo   --with-microvm    Add the incomplete MicroVM (NVX) foundation and platform artifacts (x64)
 echo                     Runtime preflight remains unavailable until NVX publishes
 echo                     the workload image bundle
 echo   --with-wslc       Build with WSL Container (WSLC SDK) support

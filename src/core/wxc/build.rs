@@ -9,7 +9,7 @@ fn main() {
     #[cfg(windows)]
     check_test_prerequisites();
 
-    #[cfg(feature = "nvx")]
+    #[cfg(feature = "microvm")]
     stage_nvx_for_target();
 
     // Delay-load winhvplatform.dll so WHP-less hosts don't crash before main().
@@ -79,7 +79,7 @@ fn check_test_prerequisites() {
     }
 }
 
-#[cfg(feature = "nvx")]
+#[cfg(feature = "microvm")]
 fn stage_nvx_for_target() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
@@ -94,12 +94,14 @@ fn stage_nvx_for_target() {
     }
 }
 
-#[cfg(feature = "nvx")]
+#[cfg(feature = "microvm")]
 fn copy_nvx_binaries() {
     use std::path::Path;
 
     let nvx_bin_dir = std::env::var("DEP_NVX_BINARIES_BIN_DIR").unwrap_or_else(|error| {
-        panic!("wxc build.rs: DEP_NVX_BINARIES_BIN_DIR is required for the nvx feature: {error}")
+        panic!(
+            "wxc build.rs: DEP_NVX_BINARIES_BIN_DIR is required for the microvm feature: {error}"
+        )
     });
 
     nvx_build_common::stage_artifacts_next_to_exe(Path::new(&nvx_bin_dir))

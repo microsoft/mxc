@@ -393,7 +393,7 @@ force a particular backend.
 | `"windows_sandbox"` | Windows Sandbox VM isolation. Dual-mode: a transient **one-shot** runner that launches a fresh disposable VM per execution, and a **state-aware** lifecycle backed by a long-lived per-sandbox daemon. |
 | `"wslc"` | Linux containers via the WSL Container SDK |
 | `"lxc"` | Native LXC container isolation. No abstract intent resolves to LXC; request it explicitly. |
-| `"nvx"` | NVX Linux micro-VM hosted by OpenVMM/WHP (experimental, Windows x64 foundation; runtime unavailable in Phase 1) |
+| `"microvm"` | MicroVM isolation implemented by NVX and hosted by OpenVMM/WHP (experimental, Windows x64 foundation; runtime unavailable in Phase 1) |
 | `"hyperlight"` | MicroVM isolation via Hyperlight + Unikraft with an embedded CPython snapshot (experimental) |
 | `"isolation_session"` | Windows isolation session — runs the workload as a freshly-provisioned, per-execution isolated user account in its own OS-managed session. Dual-mode: one-shot and state-aware. |
 | `"seatbelt"` | macOS sandbox isolation (Seatbelt). Requires macOS 15 or later — see [`docs/seatbelt/seatbelt-backend.md`](seatbelt/seatbelt-backend.md). |

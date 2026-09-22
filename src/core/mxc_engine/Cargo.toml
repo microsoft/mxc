@@ -49,7 +49,7 @@ default = []
 # Enables constructing the run-to-completion runner for optional backends.
 # Mirrors the executor binaries' feature set so backend selection can live in
 # one place. Build-time binary staging remains with the executor crates.
-nvx = ["dep:nvx_runner", "nvx_runner/nvx"]
+microvm = ["dep:nvx_runner", "nvx_runner/nvx"]
 wslc = ["dep:wslc_common", "wslc_common/link-wslcsdk"]
 hyperlight = ["dep:hyperlight_common", "hyperlight_common/hyperlight"]
 isolation_session = [

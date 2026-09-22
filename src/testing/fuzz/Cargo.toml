@@ -18,12 +18,14 @@ cargo-fuzz = true
 # These pull in heavier deps so they're opt-in for local dev.
 hyperlight = ["dep:hyperlight_common", "hyperlight_common/hyperlight"]
 isolation_session = ["dep:isolation_session_common"]
+microvm = ["dep:nvx_runner", "nvx_runner/nvx"]
 
 [dependencies]
 libfuzzer-sys = "0.4"
 wxc_common = { path = "../../core/wxc_common" }
 hyperlight_common = { path = "../../backends/hyperlight/common", optional = true }
 isolation_session_common = { path = "../../backends/isolation_session/common", optional = true }
+nvx_runner = { path = "../../backends/nvx/runner", optional = true }
 
 [[bin]]
 name = "config_parser"

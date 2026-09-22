@@ -126,7 +126,7 @@ for them **cannot be built just yet**.
 | --- | --- | --- | --- |
 | `windows_sandbox` | DISM/registry check of the *Containers-DisposableClientVM* optional feature | only a private "is the `.exe` on disk" check | reports available when the feature is off → launch fails |
 | `isolation_session` | activation of the in-proc `Windows.AI.IsolationSession.Preview` `IsoSessionOps` runtime class succeeds (the API class is registered on the OS **and** its OS feature gate is on) **and** the backend feature is compiled | as of #761, detection queries whether the API class is registered rather than gating on a build number; a `CLASS_E_CLASSNOTAVAILABLE` / `REGDB_E_CLASSNOTREG` activation failure means unavailable | none for false-availability now — a machine without the API registered fails activation cleanly; still needs a cheap probe seam so callers don't have to attempt a real activation |
-| `nvx` | feature compiled, pinned NVX runtime files staged, and WHP usable on Windows x64 | nothing | checking only a hypervisor can report availability when required runtime files are missing |
+| `microvm` | feature compiled, pinned NVX runtime files staged, and WHP usable on Windows x64 | nothing | checking only a hypervisor can report availability when required runtime files are missing |
 | `hyperlight` | hypervisor present + feature compiled | nothing | same VM-boot risk |
 
 ### 4.2 The parity rule: detect once, project into TS
@@ -167,7 +167,7 @@ test host happens to have `slirp4netns` installed.
 - A serde snapshot pins the camelCase capability name (`"proxyEnforcement"`) and verifies that
 `capabilities` and `warnings` are **omitted** when empty.
 - `wslc` appears when `WslcSdk::load()` resolves `wslcsdk.dll`; the remaining VM group
-(`windows_sandbox`, `isolation_session`, `nvx`, `hyperlight`) never appears until its detector lands.
+(`windows_sandbox`, `isolation_session`, `microvm`, `hyperlight`) never appears until its detector lands.
 - The TypeScript `getPlatformSupport()` output matches the native probe (parity by projection, §4.2),
  guarding against the two layers drifting.
 
@@ -176,7 +176,7 @@ test host happens to have `slirp4netns` installed.
 Writing the missing detectors and wiring the TypeScript projection, one issue each:
 1. `windows_sandbox` - optional-feature (DISM/registry) detector.
 2. `isolation_session` - probe whether the `Windows.AI.IsolationSession.Preview` `IsoSessionOps` API class is registered on the OS (activation-factory resolvable), replacing the old build-number gate (see #761), and expose it to Rust.
-3. `nvx` / `hyperlight` - hypervisor-presence probe.
+3. `microvm` / `hyperlight` - hypervisor-presence probe.
 4. `lxc` - port the `lxc-ls` presence check from TypeScript to Rust,
 so the probe (not just the SDK) can report it (§4.2, step 1).
 5. TypeScript projection - make `getPlatformSupport()` read the native backend availability via a

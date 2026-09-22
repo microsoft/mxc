@@ -144,9 +144,9 @@
           "type": "string"
         },
         {
-          "description": "NVX micro-VM (experimental).",
+          "description": "MicroVM isolation implemented by NVX (experimental).",
           "enum": [
-            "nvx"
+            "microvm"
           ],
           "type": "string"
         },

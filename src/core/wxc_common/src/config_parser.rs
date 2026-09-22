@@ -422,7 +422,6 @@ fn deserialize_development_request(
 
 fn parse_exact_development(json: &str, logger: &mut Logger) -> Result<MxcRequest, ParseError> {
     let phase = mxc_config_contract::dev::probe_phase(json).map_err(exact_phase_error)?;
-    reject_removed_microvm(json, phase)?;
     let request = deserialize_development_request(json, phase)?;
     let adapted = crate::config_contract_adapters::dev::adapt_request(request)
         .map_err(|error| ParseError::StateAware(MxcError::malformed_request(error.to_string())))?;
@@ -441,27 +440,6 @@ fn parse_exact_development(json: &str, logger: &mut Logger) -> Result<MxcRequest
                     ParseError::StateAware(MxcError::malformed_request(error.to_string()))
                 })
         }
-    }
-}
-
-fn reject_removed_microvm(
-    json: &str,
-    phase: Option<mxc_config_contract::dev::Phase>,
-) -> Result<(), ParseError> {
-    let Ok(root) = serde_json::from_str::<serde_json::Value>(json) else {
-        return Ok(());
-    };
-    if root.get("containment").and_then(serde_json::Value::as_str) != Some("microvm") {
-        return Ok(());
-    }
-
-    let message = "containment \"microvm\" was removed; use \"nvx\" for the NVX micro-VM backend";
-    if phase.is_some() {
-        Err(ParseError::StateAware(MxcError::malformed_request(message)))
-    } else {
-        Err(ParseError::OneShot(WxcError::ConfigParse(
-            message.to_string(),
-        )))
     }
 }
 
@@ -1078,7 +1056,7 @@ fn requested_sandbox_kind(c: Option<&wire::Containment>) -> &'static str {
         Some(wire::Containment::Vm) => "vm",
         Some(wire::Containment::WindowsSandbox) => "windows_sandbox",
         Some(wire::Containment::Lxc) => "lxc",
-        Some(wire::Containment::Nvx) => "nvx",
+        Some(wire::Containment::Microvm) => "microvm",
         Some(wire::Containment::Hyperlight) => "hyperlight",
         Some(wire::Containment::Wslc) => "wslc",
         Some(wire::Containment::Seatbelt) => "seatbelt",
@@ -6434,50 +6412,33 @@ mod tests {
     }
 
     #[test]
-    fn containment_microvm_rejected_with_nvx_migration_guidance() {
+    fn containment_microvm_accepted() {
         let json = r#"{
             "version": "0.10.0-alpha",
-            "process": {"commandLine": "echo hi"},
+            "process": {"commandLine": "/bin/true"},
             "containment": "microvm"
         }"#;
 
-        let error =
-            parse_exact_for_test(json).expect_err("removed microvm containment must be rejected");
-        assert!(matches!(error, ParseError::OneShot(_)));
-        assert!(error.message().contains("microvm"));
-        assert!(error.message().contains("nvx"));
-        assert!(error.message().contains("removed"));
+        let request = parse_exact_for_test(json).unwrap();
+        let MxcRequest::OneShot(request) = request else {
+            panic!("expected one-shot MicroVM request");
+        };
+        assert_eq!(request.containment, ContainmentBackend::Microvm);
     }
 
     #[test]
-    fn state_aware_microvm_rejected_with_nvx_migration_guidance() {
-        let json = r#"{
-            "version": "0.10.0-alpha",
-            "phase": "provision",
-            "containment": "microvm"
-        }"#;
-
-        let error = parse_exact_for_test(json)
-            .expect_err("removed state-aware microvm containment must be rejected");
-        assert!(matches!(error, ParseError::StateAware(_)));
-        assert!(error.message().contains("microvm"));
-        assert!(error.message().contains("nvx"));
-        assert!(error.message().contains("removed"));
-    }
-
-    #[test]
-    fn containment_nvx_accepted() {
+    fn containment_nvx_gets_normal_unknown_enum_rejection() {
         let json = r#"{
             "version": "0.10.0-alpha",
             "process": {"commandLine": "/bin/true"},
             "containment": "nvx"
         }"#;
 
-        let request = parse_exact_for_test(json).unwrap();
-        let MxcRequest::OneShot(request) = request else {
-            panic!("expected one-shot NVX request");
-        };
-        assert_eq!(request.containment, ContainmentBackend::Nvx);
+        let error = parse_exact_for_test(json)
+            .expect_err("internal NVX implementation name must not be accepted");
+        assert!(matches!(error, ParseError::OneShot(_)));
+        assert!(error.message().contains("unknown variant `nvx`"));
+        assert!(!error.message().contains("use"));
     }
 
     #[test]

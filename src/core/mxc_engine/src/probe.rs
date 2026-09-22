@@ -285,7 +285,7 @@ mod tests {
             Containment::Vm,
             Containment::WindowsSandbox,
             Containment::Lxc,
-            Containment::Nvx,
+            Containment::Microvm,
             Containment::Hyperlight,
             Containment::Wslc,
             Containment::Seatbelt,
@@ -407,25 +407,25 @@ mod tests {
         }
     }
 
-    fn assert_nvx_backend_is_omitted() {
+    fn assert_microvm_backend_is_omitted() {
         assert!(
             available_backends()
                 .iter()
-                .all(|backend| backend.backend != "nvx"),
-            "available_backends must not advertise NVX while runtime is incomplete"
+                .all(|backend| backend.backend != "microvm"),
+            "available_backends must not advertise MicroVM while runtime is incomplete"
         );
     }
 
-    #[cfg(not(feature = "nvx"))]
+    #[cfg(not(feature = "microvm"))]
     #[test]
-    fn nvx_is_not_advertised_without_feature() {
-        assert_nvx_backend_is_omitted();
+    fn microvm_is_not_advertised_without_feature() {
+        assert_microvm_backend_is_omitted();
     }
 
-    #[cfg(feature = "nvx")]
+    #[cfg(feature = "microvm")]
     #[test]
-    fn nvx_is_not_advertised_with_feature_enabled() {
-        assert_nvx_backend_is_omitted();
+    fn microvm_is_not_advertised_with_feature_enabled() {
+        assert_microvm_backend_is_omitted();
     }
 
     /// Every backend the probe can emit, across all platforms/features — derived

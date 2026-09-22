@@ -112,7 +112,7 @@ export type ContainmentBackend =
   | 'windows_sandbox'
   | 'wslc'
   | 'lxc'
-  | 'nvx'
+  | 'microvm'
   | 'hyperlight'
   | 'seatbelt'
   | 'isolation_session'
@@ -123,7 +123,7 @@ export type ContainmentBackend =
  * the `--experimental` flag.
  */
 export const ExperimentalBackends: readonly (ContainmentType | ContainmentBackend)[] = [
-  'nvx',
+  'microvm',
   'windows_sandbox',
   'hyperlight',
 ];

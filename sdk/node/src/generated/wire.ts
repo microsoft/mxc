@@ -69,7 +69,7 @@ export type ClipboardPolicy = "none" | "read" | "write" | "all";
 /**
  * Containment backend (abstract intent or concrete backend).
  */
-export type Containment = "process" | "processcontainer" | "vm" | "windows_sandbox" | "lxc" | "nvx" | "hyperlight" | "wslc" | "seatbelt" | "isolation_session" | "bubblewrap";
+export type Containment = "process" | "processcontainer" | "vm" | "windows_sandbox" | "lxc" | "microvm" | "hyperlight" | "wslc" | "seatbelt" | "isolation_session" | "bubblewrap";
 
 /**
  * Experimental features (only honored with `--experimental`). This block is intentionally **permissive** (no `deny_unknown_fields`): experimental backends are in flux, so the schema documents the known shapes for editor help without rejecting in-progress fields. The strict, closed contract is the stable (top-level) surface.

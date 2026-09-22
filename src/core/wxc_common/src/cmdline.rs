@@ -46,7 +46,7 @@ impl CommandLineContext {
             ContainmentBackend::ProcessContainer
             | ContainmentBackend::Vm
             | ContainmentBackend::Hyperlight => Self::WindowsCreateProcess,
-            ContainmentBackend::Nvx => Self::PosixShell,
+            ContainmentBackend::Microvm => Self::PosixShell,
         }
     }
 }
@@ -382,9 +382,9 @@ mod tests {
     }
 
     #[test]
-    fn nvx_backend_uses_posix_shell_context() {
+    fn microvm_backend_uses_posix_shell_context() {
         assert_eq!(
-            CommandLineContext::for_backend(&ContainmentBackend::Nvx),
+            CommandLineContext::for_backend(&ContainmentBackend::Microvm),
             CommandLineContext::PosixShell
         );
     }

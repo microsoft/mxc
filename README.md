@@ -9,7 +9,7 @@ MXC is a **sandboxed code execution system** for running untrusted code (model o
 
 - **Cross-platform**: Windows, Linux, and macOS support with platform-appropriate containment backends
 - **JSON-based Configuration**: Define execution parameters and security policies via a versioned JSON schema
-- **Multiple Containment Backends**: ProcessContainer, Windows Sandbox, LXC, Bubblewrap, Seatbelt (macOS), NVX, Hyperlight, IsolationSession, and WSLC
+- **Multiple Containment Backends**: ProcessContainer, Windows Sandbox, LXC, Bubblewrap, Seatbelt (macOS), MicroVM (NVX), Hyperlight, IsolationSession, and WSLC
 - **Policy-driven Sandboxing**:
     - **Filesystem Policy**: Read-only and read-write path lists (denied paths not yet supported on Windows)
     - **Network Policy**: Proxy support (cooperative on Linux/macOS), allow/block outbound, and backend-dependent host filtering
@@ -26,7 +26,7 @@ MXC ships a native container wrapper plus a TypeScript SDK — see the [SDK READ
 
 | Platform | Default backend | Other backends | Minimum build |
 | --- | --- | --- | --- |
-| Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `nvx`, `hyperlight`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26340.9212 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26340-9212)) |
+| Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26340.9212 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26340-9212)) |
 | Linux x64 / ARM64 | `bubblewrap` | `lxc`, `hyperlight` | — |
 | macOS ARM64 / x64 (schema `0.7.0-alpha`+) | `seatbelt` | — | — |
 
@@ -35,7 +35,7 @@ The stable one-shot backends (`processcontainer`, `bubblewrap`, `lxc`,
 `seatbelt`, `wslc`, and `isolation_session`) do not require experimental mode;
 Linux hosts also need the matching runtime installed: bwrap (Bubblewrap) for
 the default backend, or the lxc toolset for the lxc backend. **Experimental
-backends** (`windows_sandbox`, `nvx`, and `hyperlight`) require
+backends** (`windows_sandbox`, `microvm`, and `hyperlight`) require
 `{ experimental: true }` in `SandboxSpawnOptions` or the `--experimental` CLI
 flag.
 
@@ -70,20 +70,19 @@ layout, crate responsibilities, dependency direction, and execution surfaces.
 build.bat                  # Release build for current architecture
 build.bat --debug          # Debug build
 build.bat --all            # Release build for both x64 and ARM64
-build.bat --with-nvx       # Include the incomplete NVX foundation (Windows x64)
+build.bat --with-microvm   # Include the incomplete MicroVM (NVX) foundation (Windows x64)
 ```
 
-`--with-nvx` acquires the pinned NVX platform archive at build time and verifies every staged file by
+`--with-microvm` acquires the pinned NVX platform archive at build time and verifies every staged file by
 SHA-256; sandbox launches never download artifacts. Set `NVX_BIN` to a
 pre-fetched, checksum-verifiable bundle directory for an offline build. The
 current pin, `v0.1.0-dev.5c86da3dff02`, contains only `openvmm.exe`, the guest
 kernel, and the guest initramfs, not the workload-image bundle.
 
-The experimental NanVix-backed `microvm` containment value was removed. Use
-`containment: "nvx"` and build with `--with-nvx`. An NVX-enabled binary parses
-the new value, but execution
-returns a typed backend-unavailable error and capability probes do not advertise
-NVX. Runtime work remains blocked on NVX-produced distro/runtime EROFS images
+The experimental `microvm` containment value is implemented by NVX. Build with
+`--with-microvm`; execution currently returns a typed backend-unavailable error,
+and capability probes do not advertise MicroVM while the runtime is incomplete.
+Runtime work remains blocked on NVX-produced distro/runtime EROFS images
 and scratch image, a proven combined managed-sandbox/virtio-fs contract, and the
 required WHP runner.
 

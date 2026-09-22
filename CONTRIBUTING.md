@@ -143,7 +143,7 @@ MXC has a Rust core (under `src/`) and a TypeScript SDK (under `sdk/node/`). The
 build.bat                  :: Release build for current architecture
 build.bat --debug          :: Debug build
 build.bat --all            :: Release build for both x64 and ARM64
-build.bat --with-nvx       :: Include the NVX foundation (Windows x64)
+build.bat --with-microvm   :: Include the MicroVM (NVX) foundation (Windows x64)
 ```
 
 **Linux** — `./build.sh`:

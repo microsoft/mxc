@@ -36,11 +36,11 @@ nvx_build_common = { workspace = true, optional = true }
 [features]
 default = []
 test-support = ["wxc_common/test-support"]
-nvx = [
+microvm = [
     "dep:nvx_binaries",
     "nvx_binaries/nvx",
     "dep:nvx_build_common",
-    "mxc_engine/nvx",
+    "mxc_engine/microvm",
 ]
 wslc = ["dep:wslc_common", "wslc_common/link-wslcsdk", "mxc_engine/wslc"]
 hyperlight = ["dep:hyperlight_common", "hyperlight_common/hyperlight", "mxc_engine/hyperlight"]

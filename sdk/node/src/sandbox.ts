@@ -121,7 +121,7 @@ function validateContainmentVersion(
               || effectiveContainment === 'wslc'
               ? '0.9.0-alpha'
               : effectiveContainment === 'vm' ||
-                effectiveContainment === 'nvx' ||
+                effectiveContainment === 'microvm' ||
                 effectiveContainment === 'windows_sandbox' ||
                 effectiveContainment === 'hyperlight'
                 ? '0.10.0-alpha'
@@ -415,7 +415,7 @@ export function createConfigFromPolicy(
             );
         }
     }
-    if (containment === 'nvx' && allowedProxyPeer !== undefined) {
+    if (containment === 'microvm' && allowedProxyPeer !== undefined) {
         throw new Error(
             'processContainer.network.allowedProxyPeer is supported only by the Windows ' +
             'ProcessContainer backend.'
@@ -512,9 +512,9 @@ export function createConfigFromPolicy(
     }
 
     // Backend-specific config based on containment type
-    if (containment === 'nvx') {
-        diagLog(`createConfigFromPolicy: containment=nvx, id=${containerId}`);
-        config.containment = 'nvx';
+    if (containment === 'microvm') {
+        diagLog(`createConfigFromPolicy: containment=microvm, id=${containerId}`);
+        config.containment = 'microvm';
         return config;
     }
 

@@ -7,6 +7,7 @@
 // path that `--dry-run` takes through the binary.
 //
 // Runner-specific validation coverage:
+//   - MicroVM (NVX): requires `--features microvm`
 //   - Hyperlight: requires `--features hyperlight`
 //   - IsolationSession: requires `--features isolation_session`
 //   - Seatbelt: macOS-only, not available in Windows fuzz builds
@@ -33,6 +34,10 @@ fuzz_target!(|data: &[u8]| {
         // Dispatch to runner-specific validation based on backend.
         #[cfg(target_os = "windows")]
         match req.containment {
+            #[cfg(feature = "microvm")]
+            ContainmentBackend::Microvm => {
+                let _ = nvx_runner::preflight();
+            }
             #[cfg(feature = "hyperlight")]
             ContainmentBackend::Hyperlight => {
                 let runner = hyperlight_common::HyperlightScriptRunner::new();

@@ -771,9 +771,9 @@
           "type": "string"
         },
         {
-          "description": "Nvx",
+          "description": "Microvm",
           "enum": [
-            "nvx"
+            "microvm"
           ],
           "type": "string"
         },

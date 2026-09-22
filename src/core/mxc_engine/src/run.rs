@@ -36,19 +36,20 @@ use wxc_common::script_runner::ScriptRunner;
 use crate::error::Error;
 
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
-const ERR_NVX_EXPERIMENTAL_OPT_IN_REQUIRED: &str =
-    "NVX is an experimental feature. Use --experimental flag.";
+const ERR_MICROVM_EXPERIMENTAL_OPT_IN_REQUIRED: &str =
+    "MicroVM (NVX) is an experimental feature. Use --experimental flag.";
 #[cfg(all(
-    not(feature = "nvx"),
+    not(feature = "microvm"),
     any(target_os = "windows", target_os = "linux", target_os = "macos")
 ))]
-const ERR_NVX_FEATURE_REQUIRED: &str = "NVX backend not compiled in (build with --features nvx)";
+const ERR_MICROVM_FEATURE_REQUIRED: &str =
+    "MicroVM backend not compiled in (build with --features microvm)";
 #[cfg(all(
-    feature = "nvx",
+    feature = "microvm",
     any(target_os = "windows", target_os = "linux", target_os = "macos")
 ))]
-const ERR_NVX_RUNTIME_IMPLEMENTATION_MISSING: &str =
-    "NVX runtime implementation is not present in this build";
+const ERR_MICROVM_RUNTIME_IMPLEMENTATION_MISSING: &str =
+    "MicroVM (NVX) runtime implementation is not present in this build";
 
 /// A backend runner resolved for an [`ExecutionRequest`], ready to run.
 ///
@@ -254,7 +255,7 @@ fn resolve_runner_inner_windows(
         ContainmentBackend::Vm => Err(MxcError::unsupported_containment(
             "VM backend not yet implemented",
         )),
-        ContainmentBackend::Nvx => resolve_nvx_backend(request),
+        ContainmentBackend::Microvm => resolve_microvm_backend(request),
         ContainmentBackend::Hyperlight => resolve_hyperlight(request),
         ContainmentBackend::WindowsSandbox => {
             if !request.experimental_enabled {
@@ -310,7 +311,7 @@ fn resolve_runner_inner(
 
     match request.containment {
         ContainmentBackend::Hyperlight => resolve_hyperlight(request),
-        ContainmentBackend::Nvx => resolve_nvx_backend(request),
+        ContainmentBackend::Microvm => resolve_microvm_backend(request),
         ContainmentBackend::Bubblewrap => Ok(ResolvedRunner::without_guard(Box::new(Runner::new(
             bwrap_common::bwrap_runner::BubblewrapScriptRunner::new(),
         )))),
@@ -340,8 +341,8 @@ fn resolve_runner_inner(
 ) -> Result<ResolvedRunner, MxcError> {
     use wxc_common::sandbox_process::Runner;
 
-    if request.containment == ContainmentBackend::Nvx {
-        return resolve_nvx_backend(request);
+    if request.containment == ContainmentBackend::Microvm {
+        return resolve_microvm_backend(request);
     }
 
     if request.containment != ContainmentBackend::Seatbelt {
@@ -423,35 +424,37 @@ fn resolve_runner_inner(
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
-fn resolve_nvx_backend(request: &ExecutionRequest) -> Result<ResolvedRunner, MxcError> {
+fn resolve_microvm_backend(request: &ExecutionRequest) -> Result<ResolvedRunner, MxcError> {
     if !request.experimental_enabled {
         return Err(MxcError::malformed_request(
-            ERR_NVX_EXPERIMENTAL_OPT_IN_REQUIRED,
+            ERR_MICROVM_EXPERIMENTAL_OPT_IN_REQUIRED,
         ));
     }
 
-    #[cfg(feature = "nvx")]
+    #[cfg(feature = "microvm")]
     {
-        resolve_nvx_backend_with_preflight(nvx_runner::preflight)
+        resolve_microvm_backend_with_preflight(nvx_runner::preflight)
     }
 
-    #[cfg(not(feature = "nvx"))]
+    #[cfg(not(feature = "microvm"))]
     {
-        Err(MxcError::unsupported_containment(ERR_NVX_FEATURE_REQUIRED))
+        Err(MxcError::unsupported_containment(
+            ERR_MICROVM_FEATURE_REQUIRED,
+        ))
     }
 }
 
 #[cfg(all(
-    feature = "nvx",
+    feature = "microvm",
     any(target_os = "windows", target_os = "linux", target_os = "macos")
 ))]
-fn resolve_nvx_backend_with_preflight<F>(preflight: F) -> Result<ResolvedRunner, MxcError>
+fn resolve_microvm_backend_with_preflight<F>(preflight: F) -> Result<ResolvedRunner, MxcError>
 where
     F: FnOnce() -> Result<(), MxcError>,
 {
     preflight()?;
     Err(MxcError::backend_unavailable(
-        ERR_NVX_RUNTIME_IMPLEMENTATION_MISSING,
+        ERR_MICROVM_RUNTIME_IMPLEMENTATION_MISSING,
     ))
 }
 
@@ -509,9 +512,9 @@ mod tests {
         }
     }
 
-    fn nvx_request(experimental_enabled: bool) -> ExecutionRequest {
+    fn microvm_request(experimental_enabled: bool) -> ExecutionRequest {
         ExecutionRequest {
-            containment: ContainmentBackend::Nvx,
+            containment: ContainmentBackend::Microvm,
             experimental_enabled,
             ..Default::default()
         }
@@ -571,8 +574,8 @@ mod tests {
     }
 
     #[test]
-    fn nvx_without_experimental_opt_in_is_rejected_as_malformed_request() {
-        let request = nvx_request(false);
+    fn microvm_without_experimental_opt_in_is_rejected_as_malformed_request() {
+        let request = microvm_request(false);
         let mut logger = Logger::new(Mode::Buffer);
 
         let err = match resolve_runner_inner_windows(&request, &mut logger) {
@@ -581,13 +584,13 @@ mod tests {
         };
 
         assert_eq!(err.code, MxcErrorCode::MalformedRequest);
-        assert_eq!(err.message, ERR_NVX_EXPERIMENTAL_OPT_IN_REQUIRED);
+        assert_eq!(err.message, ERR_MICROVM_EXPERIMENTAL_OPT_IN_REQUIRED);
     }
 
-    #[cfg(not(feature = "nvx"))]
+    #[cfg(not(feature = "microvm"))]
     #[test]
-    fn nvx_without_feature_returns_typed_unsupported_containment() {
-        let request = nvx_request(true);
+    fn microvm_without_feature_returns_typed_unsupported_containment() {
+        let request = microvm_request(true);
         let mut logger = Logger::new(Mode::Buffer);
 
         let err = match resolve_runner_inner_windows(&request, &mut logger) {
@@ -596,13 +599,13 @@ mod tests {
         };
 
         assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
-        assert_eq!(err.message, ERR_NVX_FEATURE_REQUIRED);
+        assert_eq!(err.message, ERR_MICROVM_FEATURE_REQUIRED);
     }
 
-    #[cfg(feature = "nvx")]
+    #[cfg(feature = "microvm")]
     #[test]
-    fn nvx_with_feature_propagates_preflight_backend_unavailable() {
-        let request = nvx_request(true);
+    fn microvm_with_feature_propagates_preflight_backend_unavailable() {
+        let request = microvm_request(true);
         let mut logger = Logger::new(Mode::Buffer);
 
         let err = match resolve_runner_inner_windows(&request, &mut logger) {
@@ -617,16 +620,16 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "nvx")]
+    #[cfg(feature = "microvm")]
     #[test]
-    fn nvx_without_runtime_returns_backend_unavailable_even_if_preflight_succeeds() {
-        let err = match resolve_nvx_backend_with_preflight(|| Ok(())) {
+    fn microvm_without_runtime_returns_backend_unavailable_even_if_preflight_succeeds() {
+        let err = match resolve_microvm_backend_with_preflight(|| Ok(())) {
             Ok(_) => panic!("runtime stub must not resolve a runner"),
             Err(err) => err,
         };
 
         assert_eq!(err.code, MxcErrorCode::BackendUnavailable);
-        assert_eq!(err.message, ERR_NVX_RUNTIME_IMPLEMENTATION_MISSING);
+        assert_eq!(err.message, ERR_MICROVM_RUNTIME_IMPLEMENTATION_MISSING);
     }
 }
 
@@ -636,17 +639,17 @@ mod nvx_tests {
     use wxc_common::logger::Mode;
     use wxc_common::mxc_error::MxcErrorCode;
 
-    fn nvx_request(experimental_enabled: bool) -> ExecutionRequest {
+    fn microvm_request(experimental_enabled: bool) -> ExecutionRequest {
         ExecutionRequest {
-            containment: ContainmentBackend::Nvx,
+            containment: ContainmentBackend::Microvm,
             experimental_enabled,
             ..Default::default()
         }
     }
 
     #[test]
-    fn nvx_without_experimental_opt_in_is_rejected_as_malformed_request() {
-        let request = nvx_request(false);
+    fn microvm_without_experimental_opt_in_is_rejected_as_malformed_request() {
+        let request = microvm_request(false);
         let mut logger = Logger::new(Mode::Buffer);
 
         let err = match resolve_runner_inner(&request, &mut logger) {
@@ -655,13 +658,13 @@ mod nvx_tests {
         };
 
         assert_eq!(err.code, MxcErrorCode::MalformedRequest);
-        assert_eq!(err.message, ERR_NVX_EXPERIMENTAL_OPT_IN_REQUIRED);
+        assert_eq!(err.message, ERR_MICROVM_EXPERIMENTAL_OPT_IN_REQUIRED);
     }
 
-    #[cfg(not(feature = "nvx"))]
+    #[cfg(not(feature = "microvm"))]
     #[test]
-    fn nvx_without_feature_returns_typed_unsupported_containment() {
-        let request = nvx_request(true);
+    fn microvm_without_feature_returns_typed_unsupported_containment() {
+        let request = microvm_request(true);
         let mut logger = Logger::new(Mode::Buffer);
 
         let err = match resolve_runner_inner(&request, &mut logger) {
@@ -670,13 +673,13 @@ mod nvx_tests {
         };
 
         assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
-        assert_eq!(err.message, ERR_NVX_FEATURE_REQUIRED);
+        assert_eq!(err.message, ERR_MICROVM_FEATURE_REQUIRED);
     }
 
-    #[cfg(feature = "nvx")]
+    #[cfg(feature = "microvm")]
     #[test]
-    fn nvx_with_feature_propagates_preflight_backend_unavailable() {
-        let request = nvx_request(true);
+    fn microvm_with_feature_propagates_preflight_backend_unavailable() {
+        let request = microvm_request(true);
         let mut logger = Logger::new(Mode::Buffer);
 
         let err = match resolve_runner_inner(&request, &mut logger) {
@@ -691,15 +694,15 @@ mod nvx_tests {
         );
     }
 
-    #[cfg(feature = "nvx")]
+    #[cfg(feature = "microvm")]
     #[test]
-    fn nvx_without_runtime_returns_backend_unavailable_even_if_preflight_succeeds() {
-        let err = match resolve_nvx_backend_with_preflight(|| Ok(())) {
+    fn microvm_without_runtime_returns_backend_unavailable_even_if_preflight_succeeds() {
+        let err = match resolve_microvm_backend_with_preflight(|| Ok(())) {
             Ok(_) => panic!("runtime stub must not resolve a runner"),
             Err(err) => err,
         };
 
         assert_eq!(err.code, MxcErrorCode::BackendUnavailable);
-        assert_eq!(err.message, ERR_NVX_RUNTIME_IMPLEMENTATION_MISSING);
+        assert_eq!(err.message, ERR_MICROVM_RUNTIME_IMPLEMENTATION_MISSING);
     }
 }

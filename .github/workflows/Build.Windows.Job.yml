@@ -66,13 +66,13 @@ jobs:
              --no-default-features
              --features "${{ matrix.features }}"
 
-      # Keep NVX out of the uploaded release executable while its workload
+      # Keep MicroVM (NVX) out of the uploaded release executable while its workload
       # image bundle is unavailable, but verify its opt-in build and staging.
-      - name: Check opt-in NVX packaging
+      - name: Check opt-in MicroVM packaging
         if: matrix.arch == 'x64'
         run: cargo check --locked --target ${{ matrix.target }} -p wxc
              --no-default-features
-             --features nvx
+             --features microvm
 
       - name: Test telemetry consent and policy in release mode
         run: |

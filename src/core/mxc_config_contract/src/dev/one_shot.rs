@@ -31,8 +31,8 @@ string_enum! {
         Vm => ["vm"],
         /// Select the Windows Sandbox backend.
         WindowsSandbox => ["windows_sandbox"],
-        /// Select the NVX micro-VM backend.
-        Nvx => ["nvx"],
+        /// Select the MicroVM backend implemented by NVX.
+        Microvm => ["microvm"],
         /// Select the Hyperlight micro-VM backend.
         Hyperlight => ["hyperlight"],
         /// Select the WSL container backend.
