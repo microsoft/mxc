@@ -1,0 +1,8 @@
+[package]
+name = "mxc-wslc-state-aware-sample"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+mxc-sdk = { path = "../../src/core/mxc-sdk", features = ["wslc"] }
