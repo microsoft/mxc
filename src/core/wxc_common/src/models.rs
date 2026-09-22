@@ -35,7 +35,7 @@ pub enum ContainmentBackend {
     Hyperlight,
     /// Windows Sandbox — full VM isolation (experimental, requires --experimental flag).
     WindowsSandbox,
-    /// Isolation Session — process isolation via the IsolationSession API (experimental).
+    /// Isolation Session — process isolation via the IsolationSession API.
     #[serde(rename = "isolation_session")]
     IsolationSession,
     /// macOS Seatbelt sandbox backend.
@@ -73,10 +73,10 @@ impl ContainmentBackend {
         match self {
             ContainmentBackend::ProcessContainer => Some("processContainer"),
             ContainmentBackend::Lxc => Some("lxc"),
-            ContainmentBackend::WindowsSandbox => Some("experimental.windows_sandbox"),
-            ContainmentBackend::Wslc => Some("experimental.wslc"),
+            ContainmentBackend::WindowsSandbox => Some("windowsSandbox"),
+            ContainmentBackend::Wslc => Some("wslc"),
             ContainmentBackend::Seatbelt => Some("seatbelt"),
-            ContainmentBackend::IsolationSession => Some("experimental.isolation_session"),
+            ContainmentBackend::IsolationSession => Some("isolationSession"),
             ContainmentBackend::Bubblewrap
             | ContainmentBackend::Hyperlight
             | ContainmentBackend::MicroVm
@@ -256,7 +256,7 @@ impl Default for WindowsSandboxConfig {
 }
 
 /// State-aware provision-phase config for the Isolation Session backend.
-/// Nested under `experimental.isolation_session.provision`. The one-shot
+/// Nested under `isolationSession.provision`. The one-shot
 /// surface takes no backend configuration.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -975,7 +975,7 @@ pub struct ExperimentalConfig {
     /// Windows Sandbox backend (experimental).
     #[serde(rename = "windows_sandbox")]
     pub windows_sandbox: Option<WindowsSandboxConfig>,
-    /// WSL Container (WSLC SDK) backend (experimental).
+    /// WSL Container (WSLC SDK) backend configuration.
     pub wslc: Option<WslcConfig>,
 }
 

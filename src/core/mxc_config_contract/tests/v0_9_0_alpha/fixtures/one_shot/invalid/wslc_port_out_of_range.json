@@ -1,0 +1,15 @@
+{
+  "version": "0.9.0-alpha",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "echo invalid port"
+  },
+  "wslc": {
+    "portMappings": [
+      {
+        "windowsPort": 65536,
+        "containerPort": 80
+      }
+    ]
+  }
+}

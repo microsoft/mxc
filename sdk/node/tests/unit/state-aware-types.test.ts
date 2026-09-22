@@ -19,11 +19,13 @@ import {
   StopConfigFor,
   WindowsSandboxProvisionConfig,
   WindowsSandboxStartConfig,
+  WINDOWS_SANDBOX_STATE_AWARE_VERSION,
   WslcProvisionConfig,
   WslcStartConfig,
   WslcExecConfig,
   WslcStopConfig,
   WslcDeprovisionConfig,
+  WSLC_STATE_AWARE_VERSION,
 } from '../../src/state-aware-types.js';
 import { backendForSandboxId } from '../../src/state-aware-helper.js';
 
@@ -50,9 +52,17 @@ describe('SandboxId<C> brand', () => {
 });
 
 describe('StateAwareSchemaVersion', () => {
-  it('is derived from the canonical runtime constant', () => {
-    const version: StateAwareSchemaVersion = STATE_AWARE_VERSION;
-    assert.strictEqual(version, '0.9.0-alpha');
+  it('contains every backend-specific runtime constant', () => {
+    const versions: StateAwareSchemaVersion[] = [
+      STATE_AWARE_VERSION,
+      WINDOWS_SANDBOX_STATE_AWARE_VERSION,
+      WSLC_STATE_AWARE_VERSION,
+    ];
+    assert.deepStrictEqual(versions, [
+      '0.9.0-alpha',
+      '0.10.0-alpha',
+      '0.9.0-alpha',
+    ]);
   });
 });
 
@@ -78,6 +88,34 @@ describe('IsolationSessionProvisionConfig', () => {
     // @ts-expect-error — network is required; provision must acknowledge the unrestricted network.
     const missing: IsolationSessionProvisionConfig = { version: '0.9.0-alpha' };
     assert.ok(missing);
+  });
+
+  describe('backend-specific state-aware versions', () => {
+    it('accepts only the registered version for each backend config', () => {
+      const isolation: IsolationSessionStartConfig = { version: '0.9.0-alpha' };
+      const windowsSandbox: WindowsSandboxStartConfig = { version: '0.10.0-alpha' };
+      const wslc: WslcStartConfig = { version: '0.9.0-alpha' };
+
+      const wrongIsolation: IsolationSessionStartConfig = {
+        // @ts-expect-error — IsolationSession is registered at v0.9.
+        version: '0.10.0-alpha',
+      };
+      const wrongWindowsSandbox: WindowsSandboxStartConfig = {
+        // @ts-expect-error — Windows Sandbox is registered at v0.10.
+        version: '0.9.0-alpha',
+      };
+      const wrongWslc: WslcStartConfig = {
+        // @ts-expect-error — WSLC is registered at v0.9.
+        version: '0.10.0-alpha',
+      };
+
+      assert.ok(isolation);
+      assert.ok(windowsSandbox);
+      assert.ok(wslc);
+      assert.ok(wrongIsolation);
+      assert.ok(wrongWindowsSandbox);
+      assert.ok(wrongWslc);
+    });
   });
 
   it('cannot be skipped by omitting the config argument entirely', async () => {
@@ -276,7 +314,7 @@ describe('ConfigsForBackend', () => {
 
   it('selects the WindowsSandbox bundle for the windows_sandbox backend', () => {
     const bundle: ConfigsForBackend<'windows_sandbox'> = {
-      provision: { version: '0.9.0-alpha', filesystem: { readwritePaths: ['C:\\workspace'] } },
+      provision: { version: '0.10.0-alpha', filesystem: { readwritePaths: ['C:\\workspace'] } },
       start: {},
       exec: { process: { commandLine: 'echo' } },
       stop: {},
@@ -289,7 +327,7 @@ describe('ConfigsForBackend', () => {
 describe('WindowsSandboxProvisionConfig', () => {
   it('accepts version and filesystem (incl. deniedPaths)', () => {
     const cfg: WindowsSandboxProvisionConfig = {
-      version: '0.9.0-alpha',
+      version: '0.10.0-alpha',
       filesystem: {
         readwritePaths: ['C:\\workspace'],
         readonlyPaths: ['C:\\inputs'],
@@ -323,8 +361,8 @@ describe('WindowsSandboxProvisionConfig', () => {
 
 describe('WindowsSandboxStartConfig', () => {
   it('carries only version (no configurationId, no backend-specific fields)', () => {
-    const ok: WindowsSandboxStartConfig = { version: '0.9.0-alpha' };
-    assert.strictEqual(ok.version, '0.9.0-alpha');
+    const ok: WindowsSandboxStartConfig = { version: '0.10.0-alpha' };
+    assert.strictEqual(ok.version, '0.10.0-alpha');
 
     const withConfigurationId: WindowsSandboxStartConfig = {
       // @ts-expect-error — windows_sandbox start has no configurationId.

@@ -672,7 +672,7 @@ describe('bwrap subprocess helpers', () => {
 
   it('ignores anchor stderr so diagnostics cannot stall cleanup', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-anchor-stderr-'));
-    const anchorPath = path.join(dir, 'noisy-anchor.js');
+    const anchorPath = path.join(dir, 'noisy-anchor.cjs');
     fs.writeFileSync(
       anchorPath,
       "const fs = require('node:fs');\n" +

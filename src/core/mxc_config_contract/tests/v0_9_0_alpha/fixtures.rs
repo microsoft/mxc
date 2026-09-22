@@ -1,9 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use mxc_config_contract::dev::{
+use mxc_config_contract::published::v0_9_0_alpha::{
     parse_request, DeprovisionRequest, ExecRequest, IsolationSessionProvisionRequest, Request,
-    StartRequest, StopRequest, WindowsSandboxProvisionRequest, WslcProvisionRequest,
+    StartRequest, StopRequest, WslcProvisionRequest,
 };
 use serde::de::DeserializeOwned;
 use std::fs;
@@ -93,7 +93,6 @@ fn assert_one_shot_fixtures() {
 #[test]
 fn accepts_and_rejects_every_discovered_fixture() {
     assert_one_shot_fixtures();
-    assert_root_fixtures::<WindowsSandboxProvisionRequest>("windows_sandbox_provision");
     assert_root_fixtures::<IsolationSessionProvisionRequest>("isolation_session_provision");
     assert_root_fixtures::<WslcProvisionRequest>("wslc_provision");
     assert_root_fixtures::<StartRequest>("start");

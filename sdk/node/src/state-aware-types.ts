@@ -37,12 +37,21 @@ export type SandboxId<C extends StateAwareContainmentBackend> =
 /** The exact contract currently registered for state-aware requests. */
 export const STATE_AWARE_VERSION = '0.9.0-alpha' as const;
 
-/** Exact contract versions accepted by state-aware config types. */
-export type StateAwareSchemaVersion = typeof STATE_AWARE_VERSION;
+/** Exact state-aware contract used by Windows Sandbox. */
+export const WINDOWS_SANDBOX_STATE_AWARE_VERSION = '0.10.0-alpha' as const;
 
-interface StateAwareConfig {
+/** Exact state-aware contract used by WSLC. */
+export const WSLC_STATE_AWARE_VERSION = '0.9.0-alpha' as const;
+
+/** Exact contract versions accepted by state-aware config types. */
+export type StateAwareSchemaVersion =
+  | typeof STATE_AWARE_VERSION
+  | typeof WINDOWS_SANDBOX_STATE_AWARE_VERSION
+  | typeof WSLC_STATE_AWARE_VERSION;
+
+interface StateAwareConfig<V extends StateAwareSchemaVersion> {
   /** Schema version. Omit to use the current state-aware contract. */
-  version?: StateAwareSchemaVersion;
+  version?: V;
   /** Optional telemetry request for this phase. */
   telemetry?: TelemetryConfig;
 }
@@ -52,7 +61,7 @@ interface StateAwareConfig {
 // what the backend honors per the policy honor matrix and currently
 // implements. TypeScript rejects passing fields outside this set.
 
-export interface IsolationSessionProvisionConfig extends StateAwareConfig {
+export interface IsolationSessionProvisionConfig extends StateAwareConfig<typeof STATE_AWARE_VERSION> {
   /**
    * Required unrestricted network posture. All three directional axes must be
    * explicitly `allow`; rules, proxies, mixed postures, and legacy fields are
@@ -94,15 +103,15 @@ export interface IsolationSessionNetworkConfig {
   };
 }
 
-export type IsolationSessionStartConfig = StateAwareConfig;
+export type IsolationSessionStartConfig = StateAwareConfig<typeof STATE_AWARE_VERSION>;
 
-export interface IsolationSessionExecConfig extends StateAwareConfig {
+export interface IsolationSessionExecConfig extends StateAwareConfig<typeof STATE_AWARE_VERSION> {
   process: ProcessConfig;
 }
 
-export type IsolationSessionStopConfig = StateAwareConfig;
+export type IsolationSessionStopConfig = StateAwareConfig<typeof STATE_AWARE_VERSION>;
 
-export type IsolationSessionDeprovisionConfig = StateAwareConfig;
+export type IsolationSessionDeprovisionConfig = StateAwareConfig<typeof STATE_AWARE_VERSION>;
 
 /**
  * IsolationSession's provision-phase metadata surfaced to the caller: the
@@ -122,7 +131,8 @@ export interface IsolationSessionProvisionMetadata {
 // (readwrite/readonly/denied HOST paths) is honored at provision and is
 // immutable thereafter.
 
-export interface WindowsSandboxProvisionConfig extends StateAwareConfig {
+export interface WindowsSandboxProvisionConfig
+  extends StateAwareConfig<typeof WINDOWS_SANDBOX_STATE_AWARE_VERSION> {
   /**
    * Filesystem policy applied at provision and frozen for the life of the
    * sandbox. `readwritePaths` / `readonlyPaths` are mapped into the guest at
@@ -134,15 +144,19 @@ export interface WindowsSandboxProvisionConfig extends StateAwareConfig {
   filesystem?: FilesystemConfig;
 }
 
-export type WindowsSandboxStartConfig = StateAwareConfig;
+export type WindowsSandboxStartConfig =
+  StateAwareConfig<typeof WINDOWS_SANDBOX_STATE_AWARE_VERSION>;
 
-export interface WindowsSandboxExecConfig extends StateAwareConfig {
+export interface WindowsSandboxExecConfig
+  extends StateAwareConfig<typeof WINDOWS_SANDBOX_STATE_AWARE_VERSION> {
   process: ProcessConfig;
 }
 
-export type WindowsSandboxStopConfig = StateAwareConfig;
+export type WindowsSandboxStopConfig =
+  StateAwareConfig<typeof WINDOWS_SANDBOX_STATE_AWARE_VERSION>;
 
-export type WindowsSandboxDeprovisionConfig = StateAwareConfig;
+export type WindowsSandboxDeprovisionConfig =
+  StateAwareConfig<typeof WINDOWS_SANDBOX_STATE_AWARE_VERSION>;
 
 // WSLc per-(backend, phase) Configs. WSLc runs each sandbox as a warm
 // container behind a persistent host-side daemon (one amortized WSL session
@@ -150,7 +164,7 @@ export type WindowsSandboxDeprovisionConfig = StateAwareConfig;
 // provision and frozen for the sandbox's lifetime; a cooperative env-var proxy
 // may be injected per-exec.
 
-export interface WslcProvisionConfig extends StateAwareConfig {
+export interface WslcProvisionConfig extends StateAwareConfig<typeof WSLC_STATE_AWARE_VERSION> {
   /**
    * Filesystem policy applied at provision and frozen for the life of the
    * sandbox. `readwritePaths` / `readonlyPaths` become container volume mounts
@@ -172,19 +186,19 @@ export interface WslcProvisionConfig extends StateAwareConfig {
   /**
    * Container image reference (e.g. `alpine:latest`). Defaults to
    * `alpine:latest` when omitted. Nested under
-   * `experimental.wslc.provision.image` on the wire.
+   * `wslc.provision.image` on the wire.
    */
   image?: string;
   /**
    * Path to a local image tarball to import instead of pulling. Nested under
-   * `experimental.wslc.provision.imageTarPath` on the wire.
+   * `wslc.provision.imageTarPath` on the wire.
    */
   imageTarPath?: string;
 }
 
-export type WslcStartConfig = StateAwareConfig;
+export type WslcStartConfig = StateAwareConfig<typeof WSLC_STATE_AWARE_VERSION>;
 
-export interface WslcExecConfig extends StateAwareConfig {
+export interface WslcExecConfig extends StateAwareConfig<typeof WSLC_STATE_AWARE_VERSION> {
   process: ProcessConfig;
   /**
    * Per-exec runtime values. `networkProxy` injects a
@@ -196,9 +210,9 @@ export interface WslcExecConfig extends StateAwareConfig {
   runtimeConfig?: RuntimeConfig;
 }
 
-export type WslcStopConfig = StateAwareConfig;
+export type WslcStopConfig = StateAwareConfig<typeof WSLC_STATE_AWARE_VERSION>;
 
-export type WslcDeprovisionConfig = StateAwareConfig;
+export type WslcDeprovisionConfig = StateAwareConfig<typeof WSLC_STATE_AWARE_VERSION>;
 
 /**
  * The five per-phase Config slots every state-aware backend must declare.

@@ -178,12 +178,14 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::Request, MxcE
     let policy = input.policy;
     let containment = input.containment;
     let network_format = input.network_format;
-    if matches!(
-        containment,
-        Containment::Wslc(_) | Containment::IsolationSession
-    ) {
+    if matches!(containment, Containment::Wslc(_)) {
         return Err(error(
-            "selected containment requires schema version 0.9.0-alpha",
+            "WSLC containment requires schema version 0.9.0-alpha",
+        ));
+    }
+    if matches!(containment, Containment::IsolationSession) {
+        return Err(error(
+            "IsolationSession containment requires schema version 0.9.0-alpha",
         ));
     }
     let process_container = selected_process_container(containment);

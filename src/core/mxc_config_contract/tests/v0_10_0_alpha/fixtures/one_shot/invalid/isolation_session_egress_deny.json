@@ -1,0 +1,16 @@
+{
+  "version": "0.10.0-alpha",
+  "containment": "isolation_session",
+  "process": {
+    "commandLine": "echo"
+  },
+  "network": {
+    "egress": {
+      "default": "deny"
+    },
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "allow"
+    }
+  }
+}

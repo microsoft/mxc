@@ -170,7 +170,7 @@ function Invoke-StateAware {
 
     $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
 
-    $argList = @('--experimental')
+    $argList = @()
     if ($DryRun) { $argList += '--dry-run' }
     if ($Debug) { $argList += '--debug' }
     $argList += @('--config-base64', $b64)
@@ -248,7 +248,7 @@ function Invoke-StateAwareStreaming {
     }
 
     $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
-    $argList = @('--experimental')
+    $argList = @()
     if ($Debug) { $argList += '--debug' }
     $argList += @('--config-base64', $b64)
 
@@ -747,7 +747,7 @@ foreach ($egress in @('deny', 'allow')) {
                         egress = @{ default = $egress }
                         ingress = @{ default = $ingress; hostLoopback = $hostLoopback }
                     }
-                    experimental = @{ wslc = @{ provision = @{ image = 'alpine:latest' } } }
+                    wslc = @{ provision = @{ image = 'alpine:latest' } }
                 }
                 $r = Invoke-StateAware -Request $req -DryRun
                 Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
@@ -764,7 +764,7 @@ Run-StateAwareTest "D: provision (bridged with omitted ingress deny defaults rej
         phase = 'provision'
         containment = 'wslc'
         network = @{ egress = @{ default = 'allow' } }
-        experimental = @{ wslc = @{ provision = @{ image = 'alpine:latest' } } }
+        wslc = @{ provision = @{ image = 'alpine:latest' } }
     }
     $r = Invoke-StateAware -Request $req -DryRun
     Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
@@ -803,7 +803,7 @@ foreach ($phase in @('provision', 'exec')) {
             }
             if ($phase -eq 'provision') {
                 $req.containment = 'wslc'
-                $req.experimental = @{ wslc = @{ provision = @{ image = 'alpine:latest' } } }
+                $req.wslc = @{ provision = @{ image = 'alpine:latest' } }
             } else {
                 $req.sandboxId = 'wslc:0123456789abcdef0123456789abcdef'
                 $req.process = @{ commandLine = 'echo LEGACY_NETWORK_MUST_NOT_RUN' }
@@ -820,9 +820,9 @@ foreach ($phase in @('provision', 'exec')) {
     }
 }
 
-# The exact exec root rejects a directional posture before dispatch, preserving
-# the provision-time network mode across later process invocations.
-Run-StateAwareTest "D: exec (directional network change rejected structurally)" {
+# The exec contract accepts directional network syntax, then the backend rejects
+# changing the network mode bound during provision.
+Run-StateAwareTest "D: exec (directional network change rejected by policy)" {
     $req = @{
         phase = 'exec'
         sandboxId = 'wslc:0123456789abcdef0123456789abcdef'
@@ -833,12 +833,12 @@ Run-StateAwareTest "D: exec (directional network change rejected structurally)" 
         }
     }
     $r = Invoke-StateAware -Request $req -DryRun
-    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (contract rejected)"
+    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
     $envObj = Parse-Envelope -Stdout $r.Stdout
     $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
-    Assert-True ($code -eq 'malformed_request') "error.code is 'malformed_request' (got '$code')"
+    Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
     $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
-    Assert-True ($msg -match 'at `network`.*unknown field `network`') `
+    Assert-True ($msg -match 'network mode is bound to the provision phase') `
         "error.message identifies immutable exec network policy (got '$msg')"
 } | Out-Null
 

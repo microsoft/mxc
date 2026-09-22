@@ -183,7 +183,7 @@ export function bindingRequestUnsupportedReason(config: ContainerConfig): string
   if (containment !== 'lxc' && hasSettings(config.lxc)) {
     return "LXC-specific settings require containment 'lxc'";
   }
-  if (containment !== 'wslc' && hasSettings(config.experimental?.wslc)) {
+  if (containment !== 'wslc' && hasSettings(config.wslc)) {
     return "WSLC-specific settings require containment 'wslc'";
   }
   if (containment === 'lxc' && config.lxc?.destroyOnExit === false) {
@@ -191,7 +191,7 @@ export function bindingRequestUnsupportedReason(config: ContainerConfig): string
   }
   if (
     containment === 'wslc'
-    && config.experimental?.wslc?.portMappings?.some(
+    && config.wslc?.portMappings?.some(
       mapping => mapping.protocol !== undefined && mapping.protocol !== 'tcp',
     )
   ) {
@@ -305,7 +305,7 @@ function projectContainment(
       targetOs: _targetOs,
       portMappings,
       ...wslc
-    } = config.experimental?.wslc ?? {};
+    } = config.wslc ?? {};
     return {
       type: 'wslc',
       ...wslc,

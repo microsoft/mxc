@@ -135,8 +135,8 @@ pub fn platform_support() -> PlatformSupport {
         // `windows_sandbox` is a host-capability backend the SDK can't launch,
         // so it is reported by `available_backends()` rather than here.
         //
-        // WSLC and IsolationSession are additional, opt-in backends rather than
-        // fallbacks: report each only when the host has it.
+        // WSLC and IsolationSession are additional explicit backends rather
+        // than fallbacks: report each only when the host has it.
         if wslc_available() {
             available_methods.push("wslc".to_string());
         }

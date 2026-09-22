@@ -4,7 +4,7 @@
 use super::primitives::OptionalField;
 use std::num::NonZeroU16;
 
-/// Placeholder feature used to exercise experimental configuration plumbing.
+/// Placeholder development feature used to exercise feature plumbing.
 #[derive(Debug, serde::Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -82,20 +82,4 @@ pub struct OneShotWslc {
     /// Optional host-to-container TCP port mappings.
     #[serde(default)]
     pub port_mappings: OptionalField<Vec<PortMapping>>,
-}
-
-/// Experimental settings.
-#[derive(Debug, serde::Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct OneShotExperimental {
-    /// Optional placeholder test feature.
-    #[serde(default)]
-    pub test: OptionalField<TestFeature>,
-    /// Optional one-shot Windows Sandbox compatibility settings.
-    #[serde(rename = "windows_sandbox", default)]
-    pub windows_sandbox: OptionalField<OneShotWindowsSandbox>,
-    /// Optional one-shot WSLC backend settings.
-    #[serde(default)]
-    pub wslc: OptionalField<OneShotWslc>,
 }

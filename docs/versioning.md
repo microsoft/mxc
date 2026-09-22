@@ -56,12 +56,15 @@ reasons:
 | **Host capability** | What the *running OS* can actually enforce (e.g. whether the BaseContainer sandbox API is usable, velocity keys, Hyper-V). | Negotiated at runtime — **never a string in the config**. | The host, probed at execution time. |
 
 - **Schema version** selects an exact registered contract at the trust boundary:
-  `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, or `0.9.0-alpha`.
+  `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, `0.9.0-alpha`, or
+  `0.10.0-alpha`.
   Patch and prerelease spelling are significant; `0.6.1-alpha` and `0.8.0-dev`
   are not registered and are rejected. A missing declaration is rejected too.
-  The SDK enforces the same exact set, and state-aware requests require
-  `0.9.0-alpha`. The compatibility constants in `schemas/schema-version.json`
-  do not authorize other versions within their minimum/maximum range.
+  The SDK enforces the same exact set. IsolationSession and WSLC state-aware
+  requests use `0.9.0-alpha`; Windows Sandbox state-aware requests use
+  `0.10.0-alpha`. The compatibility constants in
+  `schemas/schema-version.json` do not authorize other versions within their
+  minimum/maximum range.
 - **Product version** tracks the shipped artifacts and moves independently of the
   schema version; a binary release can fix bugs without changing the config shape.
   `scripts/check-version-sync.js` keeps the Rust workspace and npm versions in
@@ -83,36 +86,39 @@ mxc/schemas/
 │   ├── mxc-config.schema.0.5.0-alpha.json  (retired — below the supported floor)
 │   ├── mxc-config.schema.0.6.0-alpha.json  (minimum supported)
 │   ├── mxc-config.schema.0.7.0-alpha.json  (shipped)
-│   └── mxc-config.schema.0.8.0-alpha.json  (shipped — current stable)
+│   ├── mxc-config.schema.0.8.0-alpha.json  (shipped)
+│   └── mxc-config.schema.0.9.0-alpha.json  (shipped — current stable)
 └── dev/
-    ├── mxc-config.schema.0.9.0-dev.json    (rolling differential oracle)
-    └── mxc-config.schema.0.9.0-alpha.json  (exact closed development contract)
+    ├── mxc-config.schema.0.10.0-dev.json    (rolling differential oracle)
+    └── mxc-config.schema.0.10.0-alpha.json  (exact closed development contract)
 ```
 
 Retired stable schema files are **kept as immutable historical artifacts** — the
 parser simply stops accepting those versions (the supported floor is
 `0.6.0-alpha`). Released schemas are never edited or deleted.
 
-The two development schemas coexist for production parsing and differential
-characterization:
+The two development artifacts coexist during migration:
 
-- `mxc-config.schema.0.9.0-dev.json` is generated from the rolling
-  `wxc_common::wire` model. It is retained as a migration oracle for
-  differential parser and SDK-conformance tests.
-- `mxc-config.schema.0.9.0-alpha.json` is generated from the exact
+- `mxc-config.schema.0.10.0-dev.json` is generated from the rolling
+  `wxc_common::wire` model. It is retained as an SDK/codegen migration oracle,
+  not a production parser.
+- `mxc-config.schema.0.10.0-alpha.json` is generated from the exact
   `mxc_config_contract::dev` model. It describes all eight closed one-shot and
   state-aware roots, including recursively closed experimental structures, and
-  is the authoritative contract for declared `0.9.0-alpha` requests.
+  is the authoritative contract for declared `0.10.0-alpha` requests.
 
 The runtime parser and Rust SDK policy builders dispatch through the exact
-contract registered for the declared version. The rolling parser and builder
-remain only to characterize intentional migration differences and detect
-unplanned drift. Corpus validation likewise selects the exact registered schema
-from each document's `version`.
+contract registered for the declared version. The test-only rolling parser and
+executable equivalence harness have been removed. The rolling schema and
+TypeScript model remain temporarily as SDK/codegen migration oracles. Corpus
+validation selects the exact registered schema from each document's `version`.
 
 Both files are generated development artifacts rather than released schemas.
-See [Schema Code Generation](schema-codegen.md) for their regeneration commands
-and independent drift gates.
+Published v0.9 is represented by its exact Rust contract and immutable stable
+schema. Exact fixtures and adapter/runtime tests remain ordinary mutable tests
+so they can gain regression coverage as implementations evolve. See
+[Schema Code Generation](schema-codegen.md) for the regeneration commands and
+independent drift/history gates.
 
 ### Typed state-aware dispatch
 
@@ -134,8 +140,8 @@ phase method. It does not deserialize backend payloads.
 
 Configuration presence is preserved: absent provision configuration is `None`,
 a present empty object is `Some(Config { ...: None })`, and an explicit empty
-`appId` remains `Some("")`. Outer absent/empty experimental wrappers that have
-the same backend meaning need not survive. WSLC uses runtime-owned
+`appId` remains `Some("")`. Outer absent/empty backend sections that have the
+same backend meaning need not survive. WSLC uses runtime-owned
 `models::WslcProvisionConfig`; the backend still chooses an omitted image's
 default. Top-level telemetry and network/UI presence flags remain in common
 normalization. Source-aware errors remain at exact structural deserialization.
@@ -145,12 +151,12 @@ differential coverage, including intentional exact-stricter rejections such as
 `appId: null`. They are not production request types or dispatch inputs.
 Recording backends cover binding, configuration delivery, validation order,
 dry-run behavior, and both exec topologies without requiring live sandboxes.
-This migration changes no registered JSON contract or generated schema/type
-artifact.
+That representation-only migration changed no registered JSON contract or
+generated schema/type artifact.
 
 ### IsolationSession directional networking
 
-The mutable `0.9.0-alpha` contract now accepts the standard directional
+The published `0.9.0-alpha` contract accepts the standard directional
 all-allow posture for IsolationSession:
 
 ```json
@@ -169,9 +175,10 @@ The policy continues through the ordinary cross-cutting network model and
 policy identity. No backend-specific acknowledgment field, transport, or hash
 projection is introduced.
 
-The affected development schema and TypeScript oracles are regenerated from
-their Rust sources. Published v0.6/v0.7/v0.8 contracts are unchanged, and the
-test-only rolling reference remains available for characterization.
+The stable v0.9 schema, TypeScript oracle, accepted/rejected fixture corpus, and
+adapter/runtime observations are frozen at publication. The mutable v0.10
+contract retains the ungraduated development backends, and the test-only
+rolling reference remains available for characterization.
 
 ### Trust boundary vs schema defaults
 
@@ -190,21 +197,33 @@ must set the field explicitly.
 
 ### Shipped vs Experimental
 
-Each experimental feature is a typed property under `experimental` — the same
-pattern as stable features (`filesystem`, `network`) under the top-level
-config. This gives editors full autocomplete and validation for experimental
-configs. Today, the `--experimental` flag is a global toggle that enables all
-experimental features; per-feature gating (e.g., `--experimental compartments`)
-is under consideration.
+Development features use their intended permanent top-level locations in the
+mutable exact contract. JSON location, publication eligibility, and runtime
+authorization are separate concerns. This gives editors full autocomplete and
+validation without requiring a later field move when a feature graduates.
+Today, the `--experimental` flag is a global runtime toggle that enables all
+features which still require authorization; per-feature gating is under
+consideration.
 
 **Rules:**
-- **Stable section** (top) — shipped, stable, supported. Always executed.
-- **Experimental section** — an object containing experimental features as
-  typed properties, only applied when the experimental flag is enabled (see
-  below). Each feature defines its own schema. As long as experimental code
-  doesn't break what is shipped, developers are free to iterate.
-- **Promotion:** When an experimental feature is ready to ship, move it from
-  `experimental` to the top-level section and bump the minor version.
+- **Published contract contents** — shipped, stable, and immutable.
+- **Development contract contents** — mutable fields and roots at their
+  permanent locations. Inclusion does not imply runtime authorization.
+- **Promotion:** When a feature is ready to ship, include it in the published
+  exact contract and remove its runtime experimental gate. Its JSON location
+  does not change.
+
+### Published-contract history
+
+`scripts/versioning/check-contract-codegen.js` compares every stable schema
+present at the merge base with the current tree. A published schema cannot be
+changed or removed. New stable schemas are allowed because they have no
+merge-base predecessor.
+
+The same gate requires exactly one development contract and verifies that
+every supported stable schema has a published registry entry with the same
+version, schema path, and schema identifier. Git already content-addresses the
+files, so no separate digest manifest is recorded.
 
 ### Experimental Flag
 
@@ -218,13 +237,14 @@ lxc-exec config.json --experimental
 wxc-exec.exe --experimental config.json
 ```
 
-The parser **always** parses and preserves the `experimental` section regardless
-of the flag; parsing is flag-independent. The `--experimental` flag only sets
+The parser **always** parses fields defined by the selected exact contract
+regardless of the flag; parsing is flag-independent. The `--experimental` flag only sets
 `request.experimental_enabled`:
 - When set, the runners apply the parsed experimental features alongside the
   stable features
 - When unset, `experimental_enabled` is false and the runners **ignore** the
-  parsed experimental section — no error, the features are just not applied
+  parsed features that still require authorization — no error, those features
+  are just not applied
 
 **2. SDK (`@microsoft/mxc-sdk`):**
 ```typescript
@@ -279,8 +299,8 @@ and the authoritative closed mutable contract under
 `src/core/mxc_config_contract/src/dev/`. Regenerate both schemas:
 
 ```text
-cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --legacy-wire --out schemas/dev/mxc-config.schema.0.9.0-dev.json
-cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0.9.0-alpha --out schemas/dev/mxc-config.schema.0.9.0-alpha.json
+cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --legacy-wire --out schemas/dev/mxc-config.schema.0.10.0-dev.json
+cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0.10.0-alpha --out schemas/dev/mxc-config.schema.0.10.0-alpha.json
 ```
 
 Also regenerate their TypeScript oracles with the corresponding
@@ -538,7 +558,7 @@ Negotiation failures are **typed and actionable** — never a silent fallback:
   the full policy path (for example, `network.proxy.localhost`), retain Serde's
   expected type/value information, and include source line/column when parsing
   directly from request text. State-aware per-backend configuration errors are
-  prefixed with their full `experimental.<backend>.<phase>` location. Diagnostic
+  prefixed with their full `<backendSection>.<phase>` location. Diagnostic
   text escapes control characters, and errors at secret-bearing paths redact the
   submitted value. After the root JSON value, only whitespace is accepted;
   trailing JSON values or other trailing content are rejected as malformed
@@ -575,11 +595,10 @@ development tool, not a production feature.
 all experimental features in the config are active. There is no per-feature
 enable/disable mechanism — simplicity over granularity.
 
-**Migration after promotion:** When an experimental feature is promoted to the
-stable section (moved from `experimental.X` to top-level `X` in a stable
-schema), configs that still reference it under `experimental` will receive
-an error: "feature X has moved to the stable section." The parser will not
-silently fall back — explicit migration is required.
+**Migration after promotion:** Promotion changes publication and runtime
+authorization, not the feature's JSON path. Old contracts retain their exact
+historical shapes; new requests must use the shape defined by their declared
+exact version.
 
 ## Deprecation Aliases
 

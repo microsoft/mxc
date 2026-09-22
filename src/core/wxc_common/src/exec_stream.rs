@@ -49,7 +49,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use crate::mxc_error::MxcError;
-use crate::sandbox_process::{boxed_closer, cancel_and_join_discard, SandboxProcess, StreamCloser};
+use crate::sandbox_process::{
+    boxed_closer, cancel_and_join_discard, NativeStdio, OwnedPipe, SandboxProcess, StreamCloser,
+};
 use crate::state_aware_backend::{ExecHandle, ExecOutcome, PipeHandle};
 
 /// The platform's closer for a cancellable read — fired to make an in-flight
@@ -69,9 +71,22 @@ type ReadStream = (Box<dyn Read + Send>, StreamCanceller);
 /// A pipe reaches EOF only once every write handle closes, so dropping the
 /// caller's duplicate is not enough: the backend keeps its own. Dropping this
 /// closes both, in that order.
+type StdinCloseCallback = Box<dyn FnOnce() + Send>;
+
+#[derive(Clone)]
+struct StdinCloser(Arc<Mutex<Option<StdinCloseCallback>>>);
+
+impl StreamCloser for StdinCloser {
+    fn close(&self) {
+        if let Some(close) = self.0.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            close();
+        }
+    }
+}
+
 struct StdinWriter {
     writer: Option<Box<dyn Write + Send>>,
-    backend_closer: Option<Box<dyn FnOnce() + Send>>,
+    backend_closer: Option<StdinCloser>,
 }
 
 impl Write for StdinWriter {
@@ -93,8 +108,8 @@ impl Write for StdinWriter {
 impl Drop for StdinWriter {
     fn drop(&mut self) {
         drop(self.writer.take());
-        if let Some(close) = self.backend_closer.take() {
-            close();
+        if let Some(closer) = self.backend_closer.take() {
+            closer.close();
         }
     }
 }
@@ -104,6 +119,8 @@ struct PreparedStreams {
     stdout: Option<ReadStream>,
     stderr: Option<ReadStream>,
     stdin: Option<Box<dyn Write + Send>>,
+    stdin_closer: Option<StdinCloser>,
+    native_stdio: NativeStdio,
 }
 
 /// A streaming [`SandboxProcess`] backed by a state-aware [`ExecHandle`].
@@ -111,6 +128,7 @@ pub struct ExecSandboxProcess {
     stdout: Option<Box<dyn Read + Send>>,
     stderr: Option<Box<dyn Read + Send>>,
     stdin: Option<Box<dyn Write + Send>>,
+    stdin_closer: Option<StdinCloser>,
     /// Closers for the two readable streams, kept whether or not the caller
     /// takes them: [`wait`](SandboxProcess::wait) fires one to end its own
     /// safety-drain, and [`stdout_closer`](SandboxProcess::stdout_closer) hands
@@ -124,6 +142,10 @@ pub struct ExecSandboxProcess {
     /// Kills the process tree. Taken by the first [`kill`](SandboxProcess::kill)
     /// or by `Drop`.
     terminator: Option<Box<dyn FnOnce() -> Result<(), MxcError> + Send>>,
+    /// Owned duplicates reserved for a possible native stdio transfer.
+    native_stdio: Option<NativeStdio>,
+    /// Whether the caller selected the individual-stream access mode.
+    individual_stdio_taken: bool,
     /// The waiter's outcome once joined, so repeat waits are idempotent. Holds
     /// the outcome rather than a code because a timeout has no code.
     exit: Option<ExecOutcome>,
@@ -186,7 +208,9 @@ impl ExecSandboxProcess {
             ));
         }
 
-        let streams = wrap_cancellable_read_checked(stdout, "stdout").and_then(|out| {
+        let stdin_closer = stdin_closer.map(|close| StdinCloser(Arc::new(Mutex::new(Some(close)))));
+        let streams = prepare_native_stdio(stdin, stdout, stderr).and_then(|native_stdio| {
+            let out = wrap_cancellable_read_checked(stdout, "stdout")?;
             let err = wrap_cancellable_read_checked(stderr, "stderr")?;
             let input = wrap_write_checked(stdin, "stdin")?;
             Ok(PreparedStreams {
@@ -195,9 +219,11 @@ impl ExecSandboxProcess {
                 stdin: input.map(|writer| {
                     Box::new(StdinWriter {
                         writer: Some(writer),
-                        backend_closer: stdin_closer,
+                        backend_closer: stdin_closer.clone(),
                     }) as Box<dyn Write + Send>
                 }),
+                stdin_closer,
+                native_stdio,
             })
         });
 
@@ -219,6 +245,8 @@ impl ExecSandboxProcess {
             stdout,
             stderr,
             stdin,
+            stdin_closer,
+            native_stdio,
         } = match streams {
             Ok(streams) => streams,
             Err(error) => {
@@ -278,10 +306,13 @@ impl ExecSandboxProcess {
             stdout,
             stderr,
             stdin,
+            stdin_closer,
             stdout_canceller,
             stderr_canceller,
             waiter: Some(waiter_thread),
             terminator: Some(terminator),
+            native_stdio: Some(native_stdio),
+            individual_stdio_taken: false,
             exit: None,
             kill_refused: false,
         })
@@ -332,6 +363,10 @@ impl ExecSandboxProcess {
     /// [`stdout_closer`](SandboxProcess::stdout_closer) that `wait` "already
     /// cancels its own internal safety-drain".
     fn drain_and_join(&mut self) -> std::io::Result<i32> {
+        // Waiting selects the ordinary stream path permanently. Close the
+        // reserved native duplicates first so they cannot keep pipe endpoints
+        // alive after the safety-drains are cancelled.
+        self.native_stdio.take();
         self.stdin.take();
 
         // Deliberately **not** gated on `self.exit`. A cached exit code means a
@@ -452,16 +487,69 @@ fn spawn_discard_checked(
 }
 
 impl SandboxProcess for ExecSandboxProcess {
+    fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+        if self.individual_stdio_taken {
+            return Err(std::io::Error::other(
+                "native stdio must be taken before taking individual streams",
+            ));
+        }
+        let Some(source) = self.native_stdio.as_ref() else {
+            return Ok(None);
+        };
+        if (source.stdin.is_some() && self.stdin.is_none())
+            || (source.stdout.is_some() && self.stdout.is_none())
+            || (source.stderr.is_some() && self.stderr.is_none())
+        {
+            return Err(std::io::Error::other(
+                "native stdio must be taken before taking individual streams",
+            ));
+        }
+
+        if source.is_empty() {
+            return Ok(None);
+        }
+        let stdio = self
+            .native_stdio
+            .take()
+            .expect("native stdio was checked immediately before transfer");
+        self.stdin.take();
+        self.stdout.take();
+        self.stderr.take();
+        self.stdin_closer.take();
+        self.stdout_canceller.take();
+        self.stderr_canceller.take();
+        Ok(Some(stdio))
+    }
+
     fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
-        self.stdin.take()
+        let stream = self.stdin.take();
+        if stream.is_some() {
+            self.individual_stdio_taken = true;
+            self.native_stdio.take();
+        }
+        stream
+    }
+
+    fn stdin_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        boxed_closer(&self.stdin_closer)
     }
 
     fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
-        self.stdout.take()
+        let stream = self.stdout.take();
+        if stream.is_some() {
+            self.individual_stdio_taken = true;
+            self.native_stdio.take();
+        }
+        stream
     }
 
     fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
-        self.stderr.take()
+        let stream = self.stderr.take();
+        if stream.is_some() {
+            self.individual_stdio_taken = true;
+            self.native_stdio.take();
+        }
+        stream
     }
 
     /// A closer for a stdout the caller **took** and is reading, so it can
@@ -654,6 +742,54 @@ fn dup_handle_to_file(handle: PipeHandle) -> Option<std::fs::File> {
     dup_handle_to_owned(handle).map(std::fs::File::from)
 }
 
+/// Records a non-null Windows `HANDLE` for later duplication.
+///
+/// This neither duplicates nor takes ownership of the backend's handle.
+#[cfg(target_os = "windows")]
+fn native_pipe_source(handle: PipeHandle) -> Option<isize> {
+    (!is_null_pipe(handle)).then_some(handle.0 as isize)
+}
+
+/// Duplicates a recorded Windows pipe `HANDLE`.
+///
+/// The non-Windows implementation with the same name instead duplicates a
+/// Unix file descriptor. Exactly one implementation is compiled per target.
+#[cfg(target_os = "windows")]
+fn duplicate_native_pipe(
+    source: Option<isize>,
+    stream: &str,
+) -> std::io::Result<Option<OwnedPipe>> {
+    use std::os::windows::io::BorrowedHandle;
+    let Some(raw) = source else {
+        return Ok(None);
+    };
+    // SAFETY: the caller records this handle only long enough to duplicate it
+    // during construction, before backend lifecycle ownership can be released.
+    let borrowed = unsafe { BorrowedHandle::borrow_raw(raw as _) };
+    borrowed.try_clone_to_owned().map(Some).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("failed to duplicate the exec {stream} pipe handle: {error}"),
+        )
+    })
+}
+
+fn prepare_native_stdio(
+    stdin: PipeHandle,
+    stdout: PipeHandle,
+    stderr: PipeHandle,
+) -> Result<NativeStdio, MxcError> {
+    let duplicate = |handle, stream| {
+        duplicate_native_pipe(native_pipe_source(handle), stream)
+            .map_err(|error| MxcError::backend_error(error.to_string()))
+    };
+    Ok(NativeStdio {
+        stdin: duplicate(stdin, "stdin")?,
+        stdout: duplicate(stdout, "stdout")?,
+        stderr: duplicate(stderr, "stderr")?,
+    })
+}
+
 #[cfg(not(target_os = "windows"))]
 fn wrap_read(handle: PipeHandle) -> Option<Box<dyn Read + Send>> {
     dup_fd_to_file(handle).map(|f| Box::new(f) as Box<dyn Read + Send>)
@@ -748,6 +884,45 @@ fn dup_fd_to_file(handle: PipeHandle) -> Option<std::fs::File> {
     // duplicate it (dup) and never take ownership of the original.
     let borrowed = unsafe { BorrowedFd::borrow_raw(handle) };
     borrowed.try_clone_to_owned().ok().map(std::fs::File::from)
+}
+
+/// Records a non-null Unix file descriptor for later duplication.
+///
+/// This neither duplicates nor takes ownership of the backend's descriptor.
+#[cfg(not(target_os = "windows"))]
+fn native_pipe_source(handle: PipeHandle) -> Option<isize> {
+    (!is_null_pipe(handle)).then_some(handle as isize)
+}
+
+/// Duplicates a recorded Unix pipe file descriptor using `dup`.
+///
+/// The Windows implementation with the same name instead duplicates a native
+/// `HANDLE`. Exactly one implementation is compiled per target.
+#[cfg(not(target_os = "windows"))]
+fn duplicate_native_pipe(
+    source: Option<isize>,
+    stream: &str,
+) -> std::io::Result<Option<OwnedPipe>> {
+    use std::os::fd::BorrowedFd;
+    let Some(raw) = source else {
+        return Ok(None);
+    };
+    let handle = i32::try_from(raw).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("the exec {stream} pipe fd is out of range"),
+        )
+    })?;
+    // SAFETY: the caller records this descriptor only long enough to duplicate
+    // it during construction, before backend lifecycle ownership can be
+    // released.
+    let borrowed = unsafe { BorrowedFd::borrow_raw(handle) };
+    borrowed.try_clone_to_owned().map(Some).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("failed to duplicate the exec {stream} pipe fd: {error}"),
+        )
+    })
 }
 
 #[cfg(test)]
@@ -1630,6 +1805,109 @@ mod tests {
         reader.read_to_string(&mut buf).unwrap();
         assert_eq!(buf, "fed-via-adapter");
         assert_eq!(proc.wait().unwrap(), 0);
+    }
+
+    /// Native transfer drops the adapter's wrapped writer after duplicating
+    /// the caller-facing handle, which must also fire the backend stdin closer.
+    #[test]
+    fn taking_native_stdio_closes_the_backend_stdin_end() {
+        use std::sync::mpsc;
+
+        let (_reader, writer) = std::io::pipe().expect("pipe");
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let handle = ExecHandle {
+            stdout: null_pipe_handle(),
+            stderr: null_pipe_handle(),
+            stdin: writer_handle(&writer),
+            waiter: Box::new(|| Ok(ExecOutcome::Exited(0))),
+            terminator: Box::new(|| Ok(())),
+            stdin_closer: Some(Box::new(move || {
+                let _ = closed_tx.send(());
+            })),
+        };
+        let mut proc = ExecSandboxProcess::from_exec_handle(handle).unwrap();
+
+        let stdio = proc
+            .take_native_stdio()
+            .expect("native stdio transfer should succeed")
+            .expect("stdin should be transferable");
+
+        assert!(
+            closed_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok(),
+            "native transfer must close the backend's retained stdin end"
+        );
+        drop(stdio);
+        drop(writer);
+        assert_eq!(proc.wait().unwrap(), 0);
+    }
+
+    #[test]
+    fn native_stdio_survives_backend_handle_release_after_try_wait() {
+        use std::io::{Read, Write};
+
+        let (reader, mut writer) = std::io::pipe().expect("pipe");
+        writer.write_all(b"retained-native-output").unwrap();
+        drop(writer);
+        let stdout = reader_handle(&reader);
+        let handle = ExecHandle {
+            stdout,
+            stderr: null_pipe_handle(),
+            stdin: null_pipe_handle(),
+            waiter: Box::new(|| Ok(ExecOutcome::Exited(0))),
+            terminator: Box::new(move || {
+                drop(reader);
+                Ok(())
+            }),
+            stdin_closer: None,
+        };
+        let mut proc = ExecSandboxProcess::from_exec_handle(handle).unwrap();
+
+        proc.kill().unwrap();
+        let started = Instant::now();
+        while proc.try_wait().unwrap().is_none() {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the waiter should have completed"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let mut stdio = proc
+            .take_native_stdio()
+            .expect("native transfer should remain valid")
+            .expect("stdout should be transferable");
+        let mut stdout =
+            std::fs::File::from(stdio.stdout.take().expect("stdout should be present"));
+        let mut output = String::new();
+        stdout.read_to_string(&mut output).unwrap();
+        assert_eq!(output, "retained-native-output");
+    }
+
+    #[test]
+    fn taking_an_individual_stream_prevents_native_transfer() {
+        let (reader, writer) = std::io::pipe().expect("pipe");
+        let handle = ExecHandle {
+            stdout: reader_handle(&reader),
+            stderr: null_pipe_handle(),
+            stdin: null_pipe_handle(),
+            waiter: Box::new(|| Ok(ExecOutcome::Exited(0))),
+            terminator: Box::new(|| Ok(())),
+            stdin_closer: None,
+        };
+        let mut proc = ExecSandboxProcess::from_exec_handle(handle).unwrap();
+
+        let _stdout = proc.take_stdout().expect("stdout should be present");
+        let error = proc
+            .take_native_stdio()
+            .expect_err("individual and native access must stay mutually exclusive");
+        assert!(error
+            .to_string()
+            .contains("before taking individual streams"));
+
+        drop(writer);
+        drop(reader);
     }
 
     /// The backend keeps its own write end, as `IsoSessionProcess` does. EOF

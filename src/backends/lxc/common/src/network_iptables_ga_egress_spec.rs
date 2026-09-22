@@ -836,3 +836,66 @@ fn a_parsed_v08_request_without_a_network_section_drops_the_dns_exemption() {
         "input=0.8 with no network section; expected no chain at all, so no rule can open DNS"
     );
 }
+
+fn unresolvable_peer() -> NetworkPeer {
+    // A prefix past the family's width resolves to no destination, and
+    // `NetworkCidr`'s fields are public, so a direct caller can build one.
+    NetworkPeer {
+        cidr: NetworkCidr {
+            address: packet_address("203.0.113.0"),
+            prefix_length: 33,
+        },
+        except: Vec::new(),
+    }
+}
+
+#[test]
+fn an_unresolvable_directional_deny_is_fatal_under_an_allow_egress_default() {
+    let policy = ContainerPolicy {
+        default_network_policy: NetworkPolicy::Block,
+        ..directional_policy(
+            NetworkAction::Allow,
+            Vec::new(),
+            vec![rule(vec![unresolvable_peer()], Vec::new())],
+        )
+    };
+    let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+
+    let error = NetworkIptablesManager::build_policy_rules_logged(
+        "MXC-test",
+        &policy,
+        uses_directional_keys(&policy),
+        &mut logger,
+    )
+    .expect_err(
+        "input=egress.default=allow with an unresolvable deny, legacy default_network_policy=block; expected a refusal, since reading the legacy field instead would close the chain with ACCEPT and leave the denied destination reachable",
+    );
+
+    assert!(
+        error.contains("deny"),
+        "expected the refusal to name the deny it could not program, got: {error}"
+    );
+}
+
+#[test]
+fn an_unresolvable_directional_deny_is_tolerated_under_a_deny_egress_default() {
+    let policy = ContainerPolicy {
+        default_network_policy: NetworkPolicy::Allow,
+        ..directional_policy(
+            NetworkAction::Deny,
+            Vec::new(),
+            vec![rule(vec![unresolvable_peer()], Vec::new())],
+        )
+    };
+    let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+
+    NetworkIptablesManager::build_policy_rules_logged(
+        "MXC-test",
+        &policy,
+        uses_directional_keys(&policy),
+        &mut logger,
+    )
+    .expect(
+        "input=egress.default=deny with an unresolvable deny, legacy default_network_policy=allow; expected no refusal, since the closing DROP already covers what the deny could not program",
+    );
+}

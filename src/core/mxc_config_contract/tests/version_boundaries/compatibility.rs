@@ -1,13 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use mxc_config_contract::dev::{
-    OneShotContainment as V09Containment, OneShotRequest as V09Request,
-};
 use mxc_config_contract::published::{
     v0_6_0_alpha::{Containment as V06Containment, Request as V06Request},
     v0_7_0_alpha::{Containment as V07Containment, Request as V07Request},
     v0_8_0_alpha::{Containment as V08Containment, Request as V08Request},
+    v0_9_0_alpha::{OneShotContainment as V09Containment, OneShotRequest as V09Request},
 };
 
 #[test]
@@ -188,7 +186,7 @@ fn app_container_section_alias_remains_accepted_across_registered_contracts() {
             .as_ref()
             .expect("0.9 capabilities")
             .iter()
-            .map(mxc_config_contract::dev::ProcessContainerCapability::as_str)
+            .map(mxc_config_contract::published::v0_9_0_alpha::ProcessContainerCapability::as_str,)
             .collect::<Vec<_>>(),
         vec!["internetClient"]
     );

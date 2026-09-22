@@ -33,6 +33,8 @@ use crate::state_aware_binding::{BoundStateAwareOperation, BoundStateAwareReques
 use crate::state_aware_request::{ParsedStateAwareRequest, Phase};
 use crate::validator::validate_exec_common;
 
+const WINDOWS_SANDBOX_STATE_AWARE_VERSION: &str = "0.10.0-alpha";
+
 /// Outcome of dispatching one state-aware request. Distinguishes the two
 /// success modes: non-exec phases produce a JSON envelope; exec phases stream
 /// their output live and exit with the script's exit code.
@@ -158,7 +160,17 @@ pub fn resolve_backend(parsed: &ParsedStateAwareRequest) -> Result<ContainmentBa
     }
     let sandbox_id = parsed.sandbox_id_required()?;
     let prefix = parse_sandbox_id_prefix(sandbox_id)?;
-    backend_from_prefix(prefix)
+    let backend = backend_from_prefix(prefix)?;
+    if backend == ContainmentBackend::WindowsSandbox
+        && parsed.request().schema_version != WINDOWS_SANDBOX_STATE_AWARE_VERSION
+    {
+        return Err(MxcError::unsupported_containment(format!(
+            "Windows Sandbox state-aware lifecycle requires schema version \
+             {WINDOWS_SANDBOX_STATE_AWARE_VERSION}; request declared {}",
+            parsed.request().schema_version
+        )));
+    }
+    Ok(backend)
 }
 
 /// Maps a state-aware sandbox-id prefix to its `ContainmentBackend`.
@@ -1022,7 +1034,7 @@ mod tests {
     fn misplaced_phase_configuration_is_rejected_before_dispatch() {
         let err = crate::config_parser::load_mxc_request_from_json(
             r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"iso:abc",
-                "experimental":{"isolation_session":{"provision":{"appId":"small"}}}}"#,
+                "isolationSession":{"provision":{"appId":"small"}}}"#,
             &mut crate::logger::Logger::new(crate::logger::Mode::Buffer),
         )
         .unwrap_err();
@@ -1031,7 +1043,7 @@ mod tests {
         };
         assert_eq!(err.code, MxcErrorCode::MalformedRequest);
         assert!(
-            err.message.contains("experimental"),
+            err.message.contains("isolationSession"),
             "expected envelope-ready error path, got: {}",
             err.message
         );
@@ -1066,7 +1078,7 @@ mod tests {
 
     #[test]
     fn resolve_backend_for_iso_prefix_returns_isolation_session() {
-        let p = parsed_start("iso:wxc-abcd1234");
+        let p = parsed_start("0.9.0-alpha", "iso:wxc-abcd1234");
         assert_eq!(
             resolve_backend(&p).unwrap(),
             ContainmentBackend::IsolationSession
@@ -1075,7 +1087,7 @@ mod tests {
 
     #[test]
     fn resolve_backend_for_wsb_prefix_returns_windows_sandbox() {
-        let p = parsed_start("wsb:deadbeef");
+        let p = parsed_start("0.10.0-alpha", "wsb:deadbeef");
         assert_eq!(
             resolve_backend(&p).unwrap(),
             ContainmentBackend::WindowsSandbox
@@ -1083,30 +1095,64 @@ mod tests {
     }
 
     #[test]
+    fn v09_requests_cannot_route_to_windows_sandbox_by_id() {
+        for phase in ["start", "exec", "stop", "deprovision"] {
+            let process = if phase == "exec" {
+                r#","process":{"commandLine":"echo hi"}"#
+            } else {
+                ""
+            };
+            let json = format!(
+                r#"{{"version":"0.9.0-alpha","phase":"{phase}","sandboxId":"wsb:deadbeef"{process}}}"#
+            );
+            let request = crate::config_parser::load_mxc_request_from_json(
+                &json,
+                &mut crate::logger::Logger::new(crate::logger::Mode::Buffer),
+            )
+            .unwrap();
+            let crate::state_aware_request::MxcRequest::StateAware(parsed) = request else {
+                panic!("expected state-aware request for {phase}");
+            };
+
+            let error = resolve_backend(&parsed).unwrap_err();
+            assert_eq!(error.code, MxcErrorCode::UnsupportedContainment);
+            assert!(
+                error.message.contains(WINDOWS_SANDBOX_STATE_AWARE_VERSION),
+                "unexpected error for {phase}: {}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
     fn resolve_backend_for_wslc_prefix_returns_wslc() {
-        let p = parsed_start("wslc:deadbeef");
+        let p = parsed_start("0.9.0-alpha", "wslc:deadbeef");
         assert_eq!(resolve_backend(&p).unwrap(), ContainmentBackend::Wslc);
     }
 
     #[test]
     fn resolve_backend_for_unknown_prefix_returns_unsupported_containment() {
-        let p = parsed_start("unknownxyz:abc");
+        let p = parsed_start("0.9.0-alpha", "unknownxyz:abc");
         let err = resolve_backend(&p).unwrap_err();
         assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
     }
 
     #[test]
     fn resolve_backend_for_malformed_id_surfaces_malformed_id() {
-        let p = parsed_start("no-colon");
+        let p = parsed_start("0.9.0-alpha", "no-colon");
         let err = resolve_backend(&p).unwrap_err();
         assert_eq!(err.code, MxcErrorCode::MalformedId);
     }
 
     // ===== stdio topology per entry point ===================================
 
-    fn parsed_start(id: &str) -> ParsedStateAwareRequest {
+    fn parsed_start(version: &str, id: &str) -> ParsedStateAwareRequest {
+        let request = ExecutionRequest {
+            schema_version: version.to_string(),
+            ..ExecutionRequest::default()
+        };
         ParsedStateAwareRequest::new(
-            ExecutionRequest::default(),
+            request,
             StateAwareOperation::Start {
                 sandbox_id: id.into(),
             },

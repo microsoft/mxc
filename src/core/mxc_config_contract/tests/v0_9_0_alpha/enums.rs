@@ -12,10 +12,6 @@ fn accepts_every_containment_value() {
         "lxc",
         "bubblewrap",
         "seatbelt",
-        "vm",
-        "windows_sandbox",
-        "microvm",
-        "hyperlight",
         "isolation_session",
         "wslc",
     ] {
@@ -202,7 +198,7 @@ fn rejects_invalid_capture_denials_mode_value() {
     );
 }
 
-use mxc_config_contract::dev::{OneShotContainment, OneShotRequest};
+use mxc_config_contract::published::v0_9_0_alpha::{OneShotContainment, OneShotRequest};
 
 #[test]
 fn appcontainer_containment_value_alias_maps_to_process_container() {

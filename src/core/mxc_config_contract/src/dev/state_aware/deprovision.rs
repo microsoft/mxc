@@ -9,12 +9,6 @@ string_marker! {
     pub struct DeprovisionPhase => "deprovision";
 }
 
-/// Experimental settings accepted by the `deprovision` phase.
-#[derive(Debug, serde::Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct DeprovisionExperimental {}
-
 /// A complete state-aware `deprovision` request.
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
@@ -36,8 +30,4 @@ pub struct DeprovisionRequest {
     /// Optional telemetry configuration.
     #[serde(default)]
     pub telemetry: OptionalField<Telemetry>,
-
-    /// Optional closed post-provision experimental settings.
-    #[serde(default)]
-    pub experimental: OptionalField<DeprovisionExperimental>,
 }
