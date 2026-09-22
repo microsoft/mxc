@@ -9,247 +9,268 @@ Licensed under the MIT License.
 >
 > September 22, 2026
 
-## 1. “Isn’t this massively overengineered for parsing some JSON?”
+## Why Version Policy?
 
-It would be overengineered if configuration were ephemeral. It is not:
-configs are stored, generated, copied into automation, and executed by
-different releases. Exact contracts make compatibility explicit instead of
-depending on accidental Serde behavior.
+### 1. “Isn’t this massively overengineered for parsing some JSON?”
 
-## 2. “Why can’t we just keep adding optional fields to one struct forever?”
+The JSON carries execution and security policy. It is produced by humans,
+SDKs, automation, templates, LLMs, and agents; it may be stored and executed
+by another release. Exact contracts give that policy a durable meaning rather
+than depending on the shape of whichever Rust type happens to exist today.
 
-Because the resulting superset accepts combinations that were never legal in
-any released version. It also makes removing or changing behavior nearly
-impossible. An exact contract tells us what a specific release actually
-promised.
+### 2. “Why can’t we keep adding optional fields to one struct forever?”
 
-## 3. “If SDKs target a major version, why do wire contracts need exact minor
-versions?”
+A rolling superset eventually accepts combinations that never belonged to any
+released contract. It also spreads historical compatibility decisions through
+the current runtime.
 
-They solve different problems:
+Exact contracts preserve the shape promised by each release. Version-specific
+adapters then translate those shapes into one current runtime model.
 
-- The **SDK major line** provides source compatibility for application
-  developers.
-- The **exact wire contract** gives the native boundary an unambiguous
-  document shape.
-
-The SDK absorbs compatible minor-version wire differences so consumers do not
-have to.
-
-## 4. “Does every minor SDK release silently change the config version?”
-
-The SDK may select a newer exact contract within the same major line, but
-existing API usage must continue to produce equivalent behavior. A consumer
-only opts into new behavior by using a newly introduced field or API.
-
-The exact selection and compatibility rules are part of the v1 implementation
-work, not something developers should assume already happens today.
-
-## 5. “Why is v1.0 based on v0.9 instead of the newer v0.10?”
-
-Because v0.9 is the published baseline. v0.10 is a mutable development
-contract containing work that has not received a v1.0 compatibility
-commitment.
-
-Starting v1.0 from v0.9 gives us a deliberate baseline rather than
-accidentally declaring every experiment in v0.10 stable.
-
-## 6. “Aren’t we throwing away the v0.10 work?”
-
-No. Its features move to v1.1 development. The implementation work remains
-useful; it simply does not become part of the v1.0 compatibility promise.
-
-## 7. “Why are Windows Sandbox, Hyperlight, and MicroVM being held back?”
-
-Their exclusion is about contract maturity, not necessarily implementation
-quality. Once something enters v1.0, its shape becomes part of the
-major-version compatibility promise. Deferring it to v1.1 gives us another
-development cycle without delaying the stable baseline.
-
-## 8. “Why not put experimental features in v1.0 and mark them experimental?”
-
-Because “experimental” does not erase a shipped wire shape. Users will still
-create configs and SDK code around it. Deferring the fields is a clearer
-promise than shipping them while claiming they do not count.
-
-## 9. “Why are published `alpha` contracts immutable? They say alpha.”
-
-`alpha` communicates product maturity; it does not make an already published
-document safe to reinterpret. A stored `0.9.0-alpha` config must not acquire a
-different meaning because the repository later changed its struct.
-
-## 10. “Why reject unknown fields? Wouldn’t ignoring them be more
+### 3. “Why reject unknown fields? Isn’t ignoring them more
 forward-compatible?”
 
-Ignoring an unknown security or policy field is dangerous. A human, SDK,
-automation system, or LLM may believe it requested isolation that the runtime
-silently discarded.
+An unknown field may represent security policy that the author believes MXC
+will enforce. Silently discarding it would turn an invalid request into a
+successful execution with weaker policy.
 
-MXC fails closed: if the selected contract cannot represent a field, the
-request is rejected.
+MXC fails closed: the selected exact contract must recognize the field in that
+location.
 
-## 11. “Why can’t a backend just ignore policy it doesn’t support?”
+### 4. “Why can’t a backend ignore policy it doesn’t support?”
 
-For the same reason: a successful execution would imply that the requested
-policy was honored. Unsupported policy must produce an explicit validation
-error, not a success-shaped fallback.
+A successful execution communicates that the requested policy was honored.
+Backend validation therefore accepts the policy the backend can enforce and
+returns an explicit error for the rest.
 
-## 12. “Why do we need both schema validation and Rust deserialization tests?”
+### 5. “Why JSON and JSON Schema instead of Protobuf or another format?”
 
-They protect different published surfaces:
+MXC configurations serve human, SDK, automation, and agent workflows. JSON is
+portable across all of them, and JSON Schema provides a machine-readable
+contract for editors, generators, LLMs, agents, and preflight validation.
 
-- Rust tests prove the exact native request type accepts or rejects a
-  document.
-- AJV tests prove the generated JSON Schema makes the same decision.
+Another serialization format would still require exact message definitions,
+evolution rules, adapters, and runtime normalization.
 
-If they disagree, editor, generator, or agent validation can disagree with
-runtime validation. That is a real compatibility bug.
+### 6. “Why are published `alpha` contracts immutable? They say alpha.”
 
-## 13. “Why commit generated schemas and TypeScript files? Just generate them
-during the build.”
+`alpha` describes product maturity. Publication still creates documents that
+people store, copy, and execute. A stored `0.9.0-alpha` request retains the
+meaning it had when published.
 
-Because they are reviewable compatibility artifacts and drift oracles.
-Committing them makes contract changes visible in a pull request and lets CI
-prove that the checked-in artifacts came from the authoritative Rust types.
+The v1 line uses stable semantic versions such as `1.0.0` and `1.1.0`; registry
+status identifies the mutable development contract.
 
-They are generated, but they are still part of the product contract.
+## Exact Contracts and SDK Compatibility
 
-## 14. “Won’t one Rust type per version create endless maintenance?”
+### 7. “If SDKs target a major line, why does the wire need exact minor
+versions?”
 
-There is a cost, but it is bounded and intentional:
+They provide two different compatibility promises:
 
-- Published types are largely frozen.
-- Common runtime behavior is normalized into one internal model.
-- Shared test and adapter helpers remove mechanical duplication.
-- Only the contract boundary remains version-specific.
+- The **exact wire contract** gives MXC an unambiguous document shape.
+- The **SDK major line** gives application developers source and behavioral
+  continuity across compatible minor releases.
 
-The alternative is cheaper initially but moves complexity into permanent
-conditional logic throughout the runtime.
+Exactness belongs at the native trust boundary. Compatibility belongs at the
+high-level SDK boundary.
 
-## 15. “Are we going to have `if version >= ...` checks throughout the code?”
+### 8. “Which exact contract does an SDK use?”
 
-No. That is specifically what the design avoids.
+Each SDK release targets the latest minor contract in its major line:
 
-Version selection and shape differences are handled before normalization.
-Backends receive `ExecutionRequest`, not a historical wire document. Runtime
-version checks should be exceptional and treated as a design warning.
+- SDK 1.0 targets exact contract `1.0.0`.
+- SDK 1.1 targets exact contract `1.1.0`.
 
-## 16. “What exactly counts as a breaking change?”
+Upgrading the SDK package advances the exact contract automatically. Existing
+source must continue to compile and express the same intent; consumers use new
+code when they opt into a new capability.
+
+### 9. “Do raw JSON users rewrite their config for every minor release?”
+
+No. A published exact document remains valid for runtimes that support that
+contract. Authors change the version when they intentionally adopt another
+exact contract.
+
+Raw APIs retain exact-version control. High-level SDK APIs own their
+package-selected exact target.
+
+### 10. “What counts as a breaking change within a major line?”
 
 Examples include:
 
-- removing or renaming an accepted field;
+- removing or renaming a field or request root;
 - changing a field's type;
-- making an optional field required;
-- changing a default in a way that changes existing behavior;
-- moving a field to another request root;
-- narrowing an accepted enum;
-- changing the meaning of an existing value; or
-- changing an existing SDK signature incompatibly.
+- making optional input required;
+- narrowing an enum, range, or pattern;
+- changing a default or presence rule in a way that changes existing intent;
+- reinterpreting an existing value; or
+- making an incompatible public SDK API change.
 
-Adding an optional capability can fit a compatible minor version, provided
-existing usage retains its behavior.
+Compatible minor evolution uses additive optional fields, roots, APIs, and
+capabilities while preserving established meaning.
 
-## 17. “Can a minor version add a new required field?”
+### 11. “Can a minor version add a required field?”
 
-Not to an existing API or request shape used by existing consumers. A
-compatible minor may add an optional field or a new opt-in API. Making old code
-supply new information is a breaking change.
+It can introduce a new opt-in API or request root with its own requirements.
+It cannot make existing consumers provide new input to continue expressing
+the same policy.
 
-## 18. “Can we fix bugs in an old published contract?”
+### 12. “What happens if the SDK is newer than the native runtime?”
 
-We can fix implementation bugs while preserving the contract's documented
-meaning. We cannot redefine the accepted JSON shape or intentionally
-reinterpret existing fields.
+The SDK and runtime have an exact contract boundary. The runtime accepts
+registered exact versions and reports an unsupported version explicitly.
 
-If the old behavior was itself ambiguous, the fix needs explicit
-compatibility analysis rather than quietly changing the contract.
+The v1 release plan validates and releases paired SDK and runtime versions
+together. Any future negotiation mechanism must be explicit and tested; exact
+dispatch remains the source of truth.
 
-## 19. “What stops somebody from accidentally changing a published
-contract?”
+### 13. “Is the entire v1 model implemented today?”
 
-Multiple gates:
+The current architecture already provides:
 
-- published schema history comparison;
-- regenerated artifact byte comparison;
-- Rust valid and invalid fixtures;
-- AJV validation of the same fixtures;
-- root and registry metadata checks; and
-- SDK/type conformance checks.
+- exact registered contracts;
+- closed version-specific request types;
+- version-specific adapters;
+- shared normalization;
+- generated schemas and TypeScript wire oracles; and
+- artifact and fixture gates.
 
-A published-contract edit should create visible artifact or fixture failures.
+Phase 14 adds the v1 SDK major-line behavior, `1.0.0` and `1.1.0` identities,
+and the v1 compatibility gates.
 
-## 20. “What happens when the SDK is newer than the installed native binary?”
+## Architecture and Lifecycle
 
-The SDK cannot assume the native binary understands a newer exact contract. It
-must select a contract supported by the paired/runtime binary or fail clearly.
+### 14. “Won’t one Rust type per version create endless maintenance?”
 
-Automatic negotiation should not be claimed unless that negotiation is
-explicitly implemented and tested. Exact version rejection is the safe
-fallback.
+Published types are largely frozen. Shared adapters, normalization, fixtures,
+and test support handle the reusable mechanics. Version-specific types remain
+at the boundary where their differences are intentional and reviewable.
 
-## 21. “Do users have to rewrite their raw JSON config for every minor
-release?”
+That gives MXC one current runtime model rather than permanent compatibility
+branches throughout every backend.
 
-No. An exact published config remains valid for runtimes that continue to
-support that contract. Users change its declared version when they
-intentionally adopt a newer contract, not merely because a newer release
-exists.
+### 15. “Are we going to have `if version >= ...` checks throughout the
+runtime?”
 
-## 22. “Why JSON and JSON Schema rather than Protobuf or another serialization
-system?”
+Version selection and shape differences are resolved before normalization.
+Backends receive `ExecutionRequest`, which represents current runtime
+semantics.
 
-MXC configurations are produced by humans, SDKs, automation, templates, LLMs,
-and agents. JSON works across all of those producers, while JSON Schema
-provides a machine-readable contract for editors, generators, agents, and
-preflight validation.
+A backend that needs to compare configuration-version strings signals that a
+wire concern has escaped the contract boundary.
 
-Another serialization format would not eliminate the compatibility problem.
-We would still need exact version definitions, evolution rules, adapters, and
-runtime normalization.
-
-## 23. “Is the v1 model already implemented?”
-
-Two parts should be distinguished:
-
-- **Implemented now:** exact registered contracts, closed version-specific
-  request types, adapters, shared normalization, generated artifacts, and
-  drift gates.
-- **Planned for v1:** high-level SDK APIs targeting a major line, with
-  compatible minor upgrades that do not require consumer code changes.
-
-Do not present the planned SDK behavior as already shipped.
-
-## 24. “If a field exists in one-shot, can I use it during state-aware
+### 16. “If a field exists in one-shot, can I use it during state-aware
 provision?”
 
-No. Only if the provision request root explicitly includes it. Similar intent
-does not make the two request shapes interchangeable.
+Only when the provision request root explicitly includes it.
 
 One-shot carries policy and process together for one execution. State-aware
-provision establishes a persistent sandbox and its policy; later phases refer
-to that sandbox by ID. A feature author must decide whether a field applies to
-one-shot, state-aware, or both and, for state-aware operation, which phase owns
-it.
+provision establishes a persistent sandbox and its policy, and later phases
+refer to that sandbox by ID. A feature author chooses whether a field applies
+to one-shot, state-aware, or both.
 
-## 25. “Why can’t every state-aware phase accept the full policy?”
+### 17. “Why can’t every state-aware phase accept the full policy?”
 
-Because most policy is established when the sandbox is provisioned. Accepting
-it again during start, exec, stop, or deprovision would imply that the policy
-can be mutated at that phase or that the runtime may silently ignore it.
-Either interpretation is misleading.
+Provision establishes the persistent policy. Start, exec, stop, and
+deprovision perform different operations against that provisioned sandbox.
 
-State-aware is not “one-shot split into five JSON calls.” Provision, start,
-exec, stop, and deprovision are separate closed request roots. Each admits only
-the fields meaningful for that operation, while later phases inherit the
-provisioned posture.
+Each phase therefore has its own closed request root. The shape communicates
+which input is meaningful at that point in the lifecycle.
 
-## 26. “What is the one rule I need to remember before opening a PR?”
+## The v1 Path
+
+### 18. “Why does `1.0.0` come from v0.9 instead of v0.10?”
+
+Published `0.9.0-alpha` is the established baseline. It already contains WSLC,
+IsolationSession, directional networking, and the common state-aware
+lifecycle.
+
+`1.0.0` uses that published baseline and establishes the canonical v1 names
+and SDK boundary.
+
+### 19. “Are we throwing away the v0.10 work?”
+
+No. The complete v0.10 development lineage becomes development `1.1.0`.
+
+The transition renames its contract identity, artifacts, fixtures, adapters,
+tests, and documentation. It preserves the feature content rather than
+deleting and reconstructing it.
+
+### 20. “Why are Windows Sandbox, Hyperlight, and MicroVM in `1.1.0`?”
+
+Those surfaces were developed in v0.10. Since `1.0.0` derives from the
+published v0.9 baseline, the v0.10 additions naturally become the additive
+`1.1.0` contract.
+
+This lineage makes the compatibility comparison explicit:
+`1.0.0` to `1.1.0`.
+
+### 21. “Why not put experimental structures into `1.0.0`?”
+
+Published v0.9 has no experimental structures, so the `1.0.0` baseline has
+none to carry forward.
+
+New capabilities enter `1.1.0` at their intended permanent JSON locations.
+Publication eligibility and runtime authorization are separate decisions from
+field placement.
+
+### 22. “Why change the old aliases at the v1 boundary?”
+
+The major-version boundary is the appropriate place to establish one
+canonical vocabulary. `1.0.0` uses `processContainer` and `seatbelt`.
+
+The immutable v0.x contracts continue to recognize the spellings they
+published. Raw users retain access to those exact historical contracts.
+
+## Gates and Developer Workflow
+
+### 23. “Why do we need both Rust deserialization and JSON Schema tests?”
+
+They protect two externally visible boundaries:
+
+- Rust fixtures prove what the exact native request type accepts.
+- AJV fixtures prove what the generated JSON Schema describes.
+
+Running the same valid and invalid corpus through both detects drift between
+tooling-time validation and runtime parsing.
+
+### 24. “Why commit generated schemas and TypeScript wire files?”
+
+They are reviewable compatibility artifacts and drift oracles. A pull request
+shows the exact wire change, and CI proves that the committed artifacts were
+generated from the authoritative Rust contracts.
+
+The public SDK types remain high-level, hand-designed policy APIs.
+
+### 25. “Can we fix bugs in a published contract?”
+
+Implementation fixes may restore the contract's established meaning. Changes
+to its accepted JSON shape or the intended meaning of existing fields require
+a new compatible minor addition or a new major boundary, depending on the
+change.
+
+Ambiguous cases receive explicit compatibility and semantic review.
+
+### 26. “What protects a published contract from accidental change?”
+
+The protection is layered:
+
+- stable-schema history checks;
+- regenerated artifact comparison;
+- exact Rust fixtures;
+- AJV validation of the same fixture corpus;
+- registry and request-root metadata checks;
+- adjacent-contract structural classification;
+- semantic review manifests; and
+- SDK source and behavioral compatibility fixtures.
+
+### 27. “What is the one question I should ask before opening a PR?”
 
 Ask:
 
-> **Which exact contract first owns this field, and what compatibility promise
-> does adding it create?**
+> **Which exact contract and request root own this feature, and what
+> compatibility promise does it create?**
 
-If the answer is unclear, the change is not ready to be wired into the schema
-or SDK.
+Then identify its normalized runtime meaning, backend enforcement, generated
+artifacts, fixtures, and high-level SDK surface.
