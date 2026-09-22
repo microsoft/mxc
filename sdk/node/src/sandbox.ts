@@ -421,6 +421,9 @@ export function createConfigFromPolicy(
             'ProcessContainer backend.'
         );
     }
+    if (containment === 'microvm' && policy.ui !== undefined) {
+        throw new Error('SandboxPolicy.ui is not supported by the MicroVM backend.');
+    }
 
     config.filesystem = {
         readwritePaths: [...(policy.filesystem?.readwritePaths ?? [])],
@@ -435,12 +438,14 @@ export function createConfigFromPolicy(
         };
     }
 
-    // SandboxPolicy defaults are fail-closed, so omission still emits lockdown.
-    config.ui = {
-        disable: !(policy.ui?.allowWindows ?? false),
-        clipboard: policy.ui?.clipboard ?? "none",
-        injection: policy.ui?.allowInputInjection ?? false,
-    };
+    if (containment !== 'microvm') {
+        // SandboxPolicy defaults are fail-closed, so omission still emits lockdown.
+        config.ui = {
+            disable: !(policy.ui?.allowWindows ?? false),
+            clipboard: policy.ui?.clipboard ?? "none",
+            injection: policy.ui?.allowInputInjection ?? false,
+        };
+    }
 
     if (directionalNetwork) {
         if ((requiresDirectionalNetwork(policy.version) &&

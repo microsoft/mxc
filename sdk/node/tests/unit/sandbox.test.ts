@@ -581,6 +581,7 @@ describe('buildSandboxPayload', () => {
           deniedPaths: [],
         });
         assert.deepStrictEqual(payload.network, policy.network);
+        assert.strictEqual(payload.ui, undefined);
         assert.strictEqual(payload.processContainer, undefined);
         assert.strictEqual(payload.lxc, undefined);
       } finally {
@@ -611,6 +612,33 @@ describe('buildSandboxPayload', () => {
           ),
           {
             message: /processContainer\.network\.allowedProxyPeer is supported only by the Windows ProcessContainer backend/,
+          },
+        );
+      } finally {
+        restore();
+      }
+    });
+
+    it('should reject UI policy for MicroVM', () => {
+      mockWindows();
+      try {
+        assert.throws(
+          () => buildSandboxPayload(
+            'echo hello',
+            {
+              version: '0.10.0-alpha',
+              ui: {
+                allowWindows: false,
+                clipboard: 'none',
+                allowInputInjection: false,
+              },
+            },
+            undefined,
+            undefined,
+            'microvm',
+          ),
+          {
+            message: /SandboxPolicy\.ui is not supported by the MicroVM backend/,
           },
         );
       } finally {

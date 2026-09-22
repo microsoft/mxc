@@ -200,7 +200,7 @@ const config = createConfigFromPolicy(
     network: { allowOutbound: true },
     timeoutMs: 30_000,
   },
-  'process', // intent: "process" | "vm"
+  'process', // intent: "process" | "vm" | "microvm"
 );
 
 // Add the script and any backend-specific runtime settings on the returned config.
