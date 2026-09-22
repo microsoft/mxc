@@ -71,7 +71,7 @@ jobs:
   - checkout: ${{ parameters.checkoutRepo }}
     path: s
 
-  - task: NodeTool@1
+  - task: UseNode@1
     displayName: Use Node.js 24.21
     inputs:
       version: '24.21.0'
@@ -310,7 +310,12 @@ jobs:
           pipeline       = "$(Build.DefinitionName)"
           triplet        = "x86_64-pc-windows-msvc"
           package        = "${{ parameters.packageName }}"
-          features       = @('isolation_session')
+          features       = @(
+              'isolation_session',
+              'dotnetsdk',
+              'test-support',
+              'node-sdk-integration'
+          )
       }
       $manifest | ConvertTo-Json -Depth 3 | Set-Content "$out/manifest.json" -Encoding UTF8
       Write-Host "  -> manifest.json"
@@ -442,6 +447,11 @@ jobs:
       }
       if (($testList -join "`n") -notmatch 'Microsoft\.Mxc\.Sdk\.Tests') {
           throw "Packaged .NET test discovery did not find any tests"
+      }
+
+      & $testExe -class 'Microsoft.Mxc.Sdk.Tests.MxcTelemetryTests' -noLogo
+      if ($LASTEXITCODE -ne 0) {
+          throw "Packaged .NET telemetry tests failed with exit code $LASTEXITCODE"
       }
     displayName: 'Validate packaged .NET tests'
 
