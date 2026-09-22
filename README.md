@@ -45,7 +45,7 @@ For which filesystem, network, and UI-restriction policy aspects the Windows `pr
 ### Requirements
 
 - [Rust toolchain](https://rustup.rs/) — version pinned to **1.93** via `src/rust-toolchain.toml` (auto-selected by `rustup`)
-- Node.js **≥ 18**
+- Node.js **≥ 24** (Windows requires **24.21.0+ within Node.js 24, or 26.8.0+**; **26.8.0+ is recommended**)
 - npm (for SDK and CLI builds)
 
 ### Project Structure

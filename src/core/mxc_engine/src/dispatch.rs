@@ -235,7 +235,7 @@ fn spawn_wslc(
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     use wxc_common::sandbox_process::{SandboxBackend, StdioMode};
 
-    let config = request.experimental.wslc.clone().unwrap_or_default();
+    let config = request.wslc.clone().unwrap_or_default();
     let mut runner = wslc_common::WSLContainerRunner::new(&config);
     runner
         .spawn(request, logger, StdioMode::Pipes)

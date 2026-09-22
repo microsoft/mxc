@@ -75,7 +75,11 @@ impl<'a> CommandSource<'a> {
             MemberMatch::Missing => None,
             MemberMatch::Duplicate => return None,
             MemberMatch::Unique(value) => {
-                serde_json::from_str::<Option<wire::Containment>>(value.get()).ok()?
+                let name = serde_json::from_str::<Option<String>>(value.get()).ok()?;
+                match name {
+                    Some(name) => Some(wire::Containment::parse_wire_name(&name)?),
+                    None => None,
+                }
             }
         };
 
@@ -232,8 +236,7 @@ mod tests {
             "macos_sandbox",
             "isolation_session",
         ] {
-            let wire: wire::Containment =
-                serde_json::from_str(&format!(r#""{spelling}""#)).unwrap();
+            let wire = wire::Containment::parse_wire_name(spelling).unwrap();
             let json = format!(r#"{{"containment":"{spelling}"}}"#);
             let source = CommandSource::parse(&json).unwrap();
             assert_eq!(

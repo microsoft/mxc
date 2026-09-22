@@ -43,30 +43,6 @@ function fixtureRootFor(contract) {
   );
 }
 
-const fixtureRoots = {
-  one_shot: "OneShotRequest",
-  windows_sandbox_provision: "WindowsSandboxProvisionRequest",
-  isolation_session_provision: "IsolationSessionProvisionRequest",
-  wslc_provision: "WslcProvisionRequest",
-  start: "StartRequest",
-  exec: "ExecRequest",
-  stop: "StopRequest",
-  deprovision: "DeprovisionRequest",
-};
-
-const expectedRootsByVersion = new Map([
-  ["0.9.0-alpha", [
-    ["one_shot", "OneShotRequest"],
-    ["isolation_session_provision", "IsolationSessionProvisionRequest"],
-    ["wslc_provision", "WslcProvisionRequest"],
-    ["start", "StartRequest"],
-    ["exec", "ExecRequest"],
-    ["stop", "StopRequest"],
-    ["deprovision", "DeprovisionRequest"],
-  ]],
-  ["0.10.0-alpha", Object.entries(fixtureRoots)],
-]);
-
 function fail(message) {
   throw new Error(message);
 }
@@ -290,20 +266,84 @@ function collectDispatchRoots(value, references = new Set()) {
   return references;
 }
 
-function contractsWithTypeScriptOracles(registry) {
-  return registry.filter((contract) => contract.typescriptPath);
-}
-
-function expectedRequestRoots(version) {
-  const roots = expectedRootsByVersion.get(version);
-  if (!roots) {
-    fail(`exact contract ${version} has no expected request-root set`);
+function requestRootsForContract(contract) {
+  if (!Array.isArray(contract.requestRoots) || contract.requestRoots.length === 0) {
+    fail(`exact contract ${contract.version} has no request-root metadata`);
   }
-  return new Map(roots);
+  const roots = new Map();
+  const schemaDefinitions = new Set();
+  for (const root of contract.requestRoots) {
+    if (
+      typeof root?.fixtureDirectory !== "string" ||
+      root.fixtureDirectory.length === 0 ||
+      typeof root?.schemaDefinition !== "string" ||
+      root.schemaDefinition.length === 0
+    ) {
+      fail(`exact contract ${contract.version} has invalid request-root metadata`);
+    }
+    if (roots.has(root.fixtureDirectory)) {
+      fail(
+        `exact contract ${contract.version} repeats fixture root ${root.fixtureDirectory}`
+      );
+    }
+    if (schemaDefinitions.has(root.schemaDefinition)) {
+      fail(
+        `exact contract ${contract.version} repeats schema root ${root.schemaDefinition}`
+      );
+    }
+    roots.set(root.fixtureDirectory, root.schemaDefinition);
+    schemaDefinitions.add(root.schemaDefinition);
+  }
+  return roots;
 }
 
-function validateDispatchRoots(schema, version) {
-  const expected = expectedRequestRoots(version);
+function contractsWithGeneratedArtifacts(registry) {
+  const selected = [];
+  for (const contract of registry) {
+    if (typeof contract.generatesArtifacts !== "boolean") {
+      fail(
+        `exact contract ${contract.version} has no boolean generatesArtifacts value`
+      );
+    }
+    if (
+      typeof contract.schemaPath !== "string" ||
+      contract.schemaPath.length === 0
+    ) {
+      fail(`exact contract ${contract.version} has no schema path`);
+    }
+    const hasTypeScriptPath =
+      typeof contract.typescriptPath === "string" &&
+      contract.typescriptPath.length > 0;
+    if (contract.generatesArtifacts && !hasTypeScriptPath) {
+      fail(
+        `renderable exact contract ${contract.version} has no TypeScript oracle path`
+      );
+    }
+    if (!contract.generatesArtifacts && contract.typescriptPath !== null) {
+      fail(
+        `non-renderable exact contract ${contract.version} has a TypeScript oracle path`
+      );
+    }
+    if (contract.generatesArtifacts) {
+      requestRootsForContract(contract);
+      selected.push(contract);
+    } else if (
+      !Array.isArray(contract.requestRoots) ||
+      contract.requestRoots.length !== 0
+    ) {
+      fail(
+        `non-renderable exact contract ${contract.version} has request-root metadata`
+      );
+    }
+  }
+  if (selected.length === 0) {
+    fail("registry has no exact contracts with generated artifacts");
+  }
+  return selected;
+}
+
+function validateDispatchRoots(schema, contract) {
+  const expected = requestRootsForContract(contract);
   const dispatched = collectDispatchRoots(schema);
   const expectedDefinitions = new Set(expected.values());
   const missing = [...expectedDefinitions].filter(
@@ -320,7 +360,9 @@ function validateDispatchRoots(schema, version) {
     if (unexpected.length) {
       errors.push(`unexpected dispatched roots: ${unexpected.join(", ")}`);
     }
-    fail(`exact contract ${version} request roots do not match: ${errors.join("; ")}`);
+    fail(
+      `exact contract ${contract.version} request roots do not match: ${errors.join("; ")}`
+    );
   }
   return expected;
 }
@@ -332,10 +374,7 @@ const removedNetworkProperties = new Set([
 
 // Traverse schema structure, not data examples or arbitrary text. In particular,
 // a command containing "network.proxy" is not a contract property.
-function assertDirectionalNetworkOnly(
-  schema,
-  requestRoots = Object.values(fixtureRoots)
-) {
+function assertDirectionalNetworkOnly(schema, requestRoots) {
   for (const root of requestRoots) {
     const visited = new Set();
     function walk(node, path, networkObject = false) {
@@ -432,26 +471,31 @@ function validateFixtures(schema, fixtureRoot, requestRoots) {
     }
   }
 
-  const malformedExec = readFixture(
-    fixtureRoot,
-    "exec",
-    "invalid",
-    "missing_process.json"
-  );
-  if (composed(malformedExec.value)) {
-    fail("malformed exec diagnostic fixture unexpectedly passed");
-  }
-  const diagnostics = JSON.stringify(composed.errors);
-  if (
-    !diagnostics.includes('"missingProperty":"process"') ||
-    diagnostics.includes("OneShotRequest") ||
-    diagnostics.includes("StartRequest") ||
-    diagnostics.includes("StopRequest")
-  ) {
-    fail(
-      "if/then dispatch produced unfocused diagnostics for malformed exec: " +
-        diagnostics
+  const execDirectory = [...requestRoots].find(
+    ([, definition]) => definition === "ExecRequest"
+  )?.[0];
+  if (execDirectory) {
+    const malformedExec = readFixture(
+      fixtureRoot,
+      execDirectory,
+      "invalid",
+      "missing_process.json"
     );
+    if (composed(malformedExec.value)) {
+      fail("malformed exec diagnostic fixture unexpectedly passed");
+    }
+    const diagnostics = JSON.stringify(composed.errors);
+    if (
+      !diagnostics.includes('"missingProperty":"process"') ||
+      diagnostics.includes("OneShotRequest") ||
+      diagnostics.includes("StartRequest") ||
+      diagnostics.includes("StopRequest")
+    ) {
+      fail(
+        "if/then dispatch produced unfocused diagnostics for malformed exec: " +
+          diagnostics
+      );
+    }
   }
 }
 
@@ -465,7 +509,7 @@ function main() {
     fail(`could not read generator registry: ${error.message}`);
   }
 
-  const exactContracts = contractsWithTypeScriptOracles(registry);
+  const exactContracts = contractsWithGeneratedArtifacts(registry);
   const historyBase = validatePublishedHistory(registry);
 
   const temporary = mkdtempSync(join(os.tmpdir(), "mxc-contract-codegen-"));
@@ -506,7 +550,7 @@ function main() {
       );
 
       const schema = JSON.parse(readFileSync(schemaOut, "utf8"));
-      const requestRoots = validateDispatchRoots(schema, contract.version);
+      const requestRoots = validateDispatchRoots(schema, contract);
       assertDirectionalNetworkOnly(schema, [...requestRoots.values()]);
       validateFixtures(schema, fixtureRootFor(contract), requestRoots);
     }
@@ -522,10 +566,12 @@ function main() {
 
 module.exports = {
   assertDirectionalNetworkOnly,
-  contractsWithTypeScriptOracles,
+  contractsWithGeneratedArtifacts,
   formatFailure,
+  requestRootsForContract,
   stableSchemaVersion,
   validateDispatchRoots,
+  validateFixtures,
   validatePublishedRegistry,
   validateStableHistory,
 };

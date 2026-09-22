@@ -51,6 +51,11 @@ child.on('close', (code) => console.log('exit:', code));
   When a new schema graduates or a new backend ships, update only this block.
 -->
 
+**Node.js:** 24 or later. On Windows, the native stdio binding requires Node.js
+24.21.0 or later within the Node.js 24 release line, or Node.js 26.8.0 or later,
+for the `windowsHandle` option used by `fs.ReadStream` and `fs.WriteStream`.
+Node.js 26.8.0 or later is recommended.
+
 **Policy / config schema versions:**
 
 | Version | Status | Schema file |
@@ -67,7 +72,7 @@ Pick `0.9.0-alpha` for new code using current stable backends. Windows Sandbox,
 MicroVM, and Hyperlight require `0.10.0-alpha`; Seatbelt requires `0.7.0-alpha`
 or later.
 
-> **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `microvm`, `hyperlight`) and their permanent backend sections are defined by the mutable `0.10.0-alpha` development contract. IsolationSession and WSLC, including their state-aware lifecycles, are part of exact v0.9 and do not require `--experimental`. Production executors dispatch through the exact contract selected by the declared version; the rolling `wxc_common::wire` model remains temporarily as an SDK/codegen migration oracle.
+> **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `microvm`, `hyperlight`) and their permanent backend sections are defined by the mutable development contract. IsolationSession and WSLC, including their state-aware lifecycles, are part of exact v0.9 and do not require `--experimental`. Production executors dispatch through the exact contract selected by the declared version, whose adapter normalizes it into the private runtime input.
 
 > **Network host allow/block lists are not implemented on Windows.** Exact
 > v0.9/v0.10 requests use `network.egress` / `network.ingress` for directional
@@ -167,8 +172,6 @@ if (network.proxyEnforcement !== 'supported') {
 ```
 
 It is reported **fail closed**: if the probe cannot run, the result is `'unsupported'` with the reason in `warnings`, never absent. The check is advisory — the runner still verifies the dependencies at launch, since the probe runs in a different process at an earlier time. See [the Bubblewrap backend guide](../../docs/bwrap-support/bubblewrap-backend.md#checking-host-support-before-you-run).
-
-**Node.js:** ≥ 18.
 
 ---
 

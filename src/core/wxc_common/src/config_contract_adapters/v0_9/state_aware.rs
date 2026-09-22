@@ -2,13 +2,12 @@
 // Licensed under the MIT License.
 
 use crate::config_contract_adapters::v0_9::common::{
-    convert_filesystem, convert_network, convert_process, convert_runtime_config,
-    convert_telemetry, convert_version,
+    convert_filesystem, convert_network, convert_process, convert_runtime_config, convert_telemetry,
 };
 use crate::error::WxcError;
 use crate::models::{IsolationSessionProvisionConfig, WslcProvisionConfig};
+use crate::state_aware_input::StateAwareInput;
 use crate::state_aware_operation::{StateAwareOperation, StateAwareProvision};
-use crate::state_aware_wire::StateAwareInput;
 use crate::wire;
 use mxc_config_contract::published::v0_9_0_alpha as contract;
 
@@ -77,15 +76,17 @@ fn convert_state_aware_wslc(value: contract::StateAwareWslc) -> Option<WslcProvi
 fn state_aware_common(
     schema: contract::OptionalField<String>,
     comment: contract::OptionalField<serde_json::Value>,
-    version: contract::Version,
+    _version: contract::Version,
     telemetry: contract::OptionalField<contract::Telemetry>,
-) -> wire::MxcConfig {
-    wire::MxcConfig {
+) -> crate::common_request_ir::CommonRequestIR {
+    crate::common_request_ir::CommonRequestIR {
         schema: schema.into_option(),
         comment: comment.into_option(),
-        version: Some(convert_version(version).to_owned()),
+        source_contract: mxc_config_contract::ContractVersion::V0_9_0Alpha,
+        network_enforcement_compatibility: crate::models::NetworkEnforcementCompatibility::Strict,
         phase: None,
-        experimental: None,
+        test_feature: None,
+        windows_sandbox: None,
         containment: None,
         container_id: None,
         sandbox_id: None,
@@ -97,6 +98,7 @@ fn state_aware_common(
         telemetry: telemetry.into_option().map(convert_telemetry),
         lifecycle: None,
         lxc: None,
+        wslc: None,
         process_container: None,
         seatbelt: None,
         ui: None,

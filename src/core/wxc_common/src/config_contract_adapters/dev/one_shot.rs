@@ -2,8 +2,7 @@
 // Licensed under the MIT License.
 
 use crate::config_contract_adapters::dev::common::{
-    convert_filesystem, convert_network, convert_process, convert_runtime_config,
-    convert_telemetry, convert_version,
+    convert_filesystem, convert_network, convert_process, convert_runtime_config, convert_telemetry,
 };
 use crate::wire;
 use mxc_config_contract::dev as contract;
@@ -258,31 +257,13 @@ fn convert_wslc(value: contract::OneShotWslc) -> wire::Wslc {
     }
 }
 
-fn convert_development_fields(
-    test: contract::OptionalField<contract::TestFeature>,
-    windows_sandbox: contract::OptionalField<contract::OneShotWindowsSandbox>,
-    wslc: contract::OptionalField<contract::OneShotWslc>,
-) -> Option<wire::Experimental> {
-    let test = test.into_option().map(convert_test);
-    let windows_sandbox = windows_sandbox.into_option().map(convert_windows_sandbox);
-    let wslc = wslc.into_option().map(convert_wslc);
-    if test.is_none() && windows_sandbox.is_none() && wslc.is_none() {
-        return None;
-    }
-    Some(wire::Experimental {
-        test,
-        windows_sandbox,
-        wslc,
-        isolation_session: None,
-        seatbelt: None,
-    })
-}
-
-pub(super) fn into_wire(request: contract::OneShotRequest) -> wire::MxcConfig {
+pub(super) fn into_common_request_ir(
+    request: contract::OneShotRequest,
+) -> crate::common_request_ir::CommonRequestIR {
     let contract::OneShotRequest {
         schema,
         comment,
-        version,
+        version: _,
         container_id,
         containment,
         lifecycle,
@@ -300,10 +281,11 @@ pub(super) fn into_wire(request: contract::OneShotRequest) -> wire::MxcConfig {
         windows_sandbox,
         wslc,
     } = request;
-    wire::MxcConfig {
+    crate::common_request_ir::CommonRequestIR {
         schema: schema.into_option(),
         comment: comment.into_option(),
-        version: Some(convert_version(version).to_owned()),
+        source_contract: mxc_config_contract::ContractVersion::V0_10_0Alpha,
+        network_enforcement_compatibility: crate::models::NetworkEnforcementCompatibility::Strict,
         phase: None,
         sandbox_id: None,
         container_id: container_id.into_option(),
@@ -314,6 +296,7 @@ pub(super) fn into_wire(request: contract::OneShotRequest) -> wire::MxcConfig {
             .into_option()
             .map(convert_process_container),
         lxc: lxc.into_option().map(convert_lxc),
+        wslc: wslc.into_option().map(convert_wslc),
         filesystem: filesystem.into_option().map(convert_filesystem),
         fallback: fallback.into_option().map(convert_fallback),
         network: network.into_option().map(convert_network),
@@ -321,7 +304,8 @@ pub(super) fn into_wire(request: contract::OneShotRequest) -> wire::MxcConfig {
         telemetry: telemetry.into_option().map(convert_telemetry),
         ui: ui.into_option().map(convert_ui),
         seatbelt: seatbelt.into_option().map(convert_seatbelt),
-        experimental: convert_development_fields(test, windows_sandbox, wslc),
+        test_feature: test.into_option().map(convert_test),
+        windows_sandbox: windows_sandbox.into_option().map(convert_windows_sandbox),
     }
 }
 

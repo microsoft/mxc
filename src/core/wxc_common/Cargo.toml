@@ -5,9 +5,6 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-# Enables JSON Schema generation from the dedicated wire model. Off by default
-# so normal builds don't carry schemars.
-schema-gen = ["dep:mxc_schema_support", "dep:schemars"]
 # Exposes telemetry test harnesses to downstream integration tests.
 test-support = []
 
@@ -22,10 +19,7 @@ base64 = { workspace = true }
 cidr = { workspace = true }
 url = { workspace = true }
 getrandom = { workspace = true }
-semver = "1"
-schemars = { workspace = true, optional = true }
 mxc_config_contract = { workspace = true }
-mxc_schema_support = { workspace = true, optional = true }
 mxc_telemetry = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
