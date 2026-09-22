@@ -56,6 +56,9 @@ variables:
 extends:
   template: v1/1ES.Official.PipelineTemplate.yml@1ESPipelineTemplates
   parameters:
+    settings:
+      networkIsolationAdditionalDomainAllowList:
+      - nodejs.org
     pool:
       name: Azure-Pipelines-1ESPT-ExDShared
       image: windows-2022

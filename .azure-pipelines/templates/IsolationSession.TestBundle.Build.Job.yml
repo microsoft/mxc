@@ -71,32 +71,10 @@ jobs:
   - checkout: ${{ parameters.checkoutRepo }}
     path: s
 
-  - powershell: |
-      $nodeRoot = Join-Path $env:AGENT_HOMEDIRECTORY 'externals\node24'
-      $nodeExe = Join-Path $nodeRoot 'bin\node.exe'
-      if (-not (Test-Path -LiteralPath $nodeExe -PathType Leaf)) {
-          throw "The 1ES agent does not contain its expected Node 24 runtime: $nodeExe"
-      }
-
-      $actualVersion = (& $nodeExe --version).Trim()
-      $parsedVersion = [version]($actualVersion.TrimStart('v'))
-      if ($parsedVersion -lt [version]'24.0.0' -or $parsedVersion.Major -ne 24) {
-          throw "The 1ES agent Node runtime is $actualVersion; Node 24.x is required."
-      }
-
-      $license = @(
-          (Join-Path $nodeRoot 'LICENSE'),
-          (Join-Path $nodeRoot 'bin\LICENSE')
-      ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
-      if (-not $license) {
-          throw "The 1ES agent Node runtime does not include its required LICENSE file."
-      }
-
-      Write-Host "Using network-isolation-safe agent runtime $nodeExe ($actualVersion)"
-      Write-Host "##vso[task.prependpath]$(Split-Path -Parent $nodeExe)"
-      Write-Host "##vso[task.setvariable variable=mxcNodeExe]$nodeExe"
-      Write-Host "##vso[task.setvariable variable=mxcNodeLicense]$license"
-    displayName: Use 1ES agent Node.js 24
+  - task: UseNode@1
+    displayName: Use Node.js 24.21
+    inputs:
+      version: '24.21.0'
 
   - script: node "$(Pipeline.Workspace)/lock-check/scripts/versioning/check-package-lock-integrity.js"
     displayName: 'Check package locks use npmjs and SHA-512 integrity'
@@ -252,8 +230,11 @@ jobs:
       Write-Host "  -> dotnet/Microsoft.Mxc.Sdk.Tests.exe"
 
       # Self-contained Node runtime for the SDK integration tests
-      $nodeExe = "$(mxcNodeExe)"
-      $nodeLicense = "$(mxcNodeLicense)"
+      $nodeExe = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+      $nodeLicense = Join-Path (Split-Path -Parent $nodeExe) "LICENSE"
+      if (-not (Test-Path -LiteralPath $nodeLicense -PathType Leaf)) {
+          throw "Node.js license not found alongside the UseNode runtime: $nodeLicense"
+      }
       Copy-Item $nodeExe "$out/node/node.exe"
       Copy-Item $nodeLicense "$out/node/LICENSE"
       Write-Host "  -> node/node.exe"
