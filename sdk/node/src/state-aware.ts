@@ -49,7 +49,7 @@ export interface StateAwareStreamingOptions {
 
 function unsupportedStateAwareOption(
   options: SandboxSpawnOptions,
-  allowDryRun: boolean,
+  entryPointSupportsDryRun: boolean,
 ): string | undefined {
   if (options.debug === true) return 'debug';
   if (options.allowTestingFeatures === true) return 'allowTestingFeatures';
@@ -57,7 +57,7 @@ function unsupportedStateAwareOption(
   if (options.executablePath !== undefined) return 'executablePath';
   if (options.skipPlatformCheck === true) return 'skipPlatformCheck';
   if (options.ptyOptions !== undefined) return 'ptyOptions';
-  if (!allowDryRun && options.dryRun === true) return 'dryRun';
+  if (!entryPointSupportsDryRun && options.dryRun === true) return 'dryRun';
   if (options.logDir !== undefined) return 'logDir';
   if (options.usePty === true) return 'usePty';
   return undefined;
@@ -66,9 +66,12 @@ function unsupportedStateAwareOption(
 function assertStateAwareOptions(
   apiName: string,
   options: SandboxSpawnOptions,
-  allowDryRun: boolean,
+  entryPointSupportsDryRun: boolean,
 ): void {
-  const unsupportedOption = unsupportedStateAwareOption(options, allowDryRun);
+  const unsupportedOption = unsupportedStateAwareOption(
+    options,
+    entryPointSupportsDryRun,
+  );
   if (unsupportedOption !== undefined) {
     throw new MxcError(
       'malformed_request',
