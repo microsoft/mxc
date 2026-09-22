@@ -137,6 +137,11 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
             copy /Y "!BIN_DIR!\mxc_ffi.dll" "sdk\node\bin\!SDK_ARCH!\" >nul
             echo   Copied !SDK_ARCH!\mxc_ffi.dll
         )
+        for %%B in (nanvixd.exe nanvix_rootfs.img python3.initrd bin\kernel.elf snapshots\kernel.vmem snapshots\kernel.whp.cbor) do (
+            if exist "sdk\node\bin\!SDK_ARCH!\%%B" del /Q "sdk\node\bin\!SDK_ARCH!\%%B"
+        )
+        if exist "sdk\node\bin\!SDK_ARCH!\snapshots" rd "sdk\node\bin\!SDK_ARCH!\snapshots" 2>nul
+        if exist "sdk\node\bin\!SDK_ARCH!\bin" rd "sdk\node\bin\!SDK_ARCH!\bin" 2>nul
         if "%%T"=="x86_64-pc-windows-msvc" (
             if "%WITH_MICROVM%"=="1" (
                 for %%B in (bin\openvmm.exe guest\vmlinux guest\initramfs.cpio.gz) do (
