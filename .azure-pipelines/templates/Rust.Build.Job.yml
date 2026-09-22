@@ -46,6 +46,7 @@ jobs:
         workingDirectory: $(Build.SourcesDirectory)/src
         # Explicit feature set (no --all-features): tier2_bfs must NOT ship
         # on Win 11 25H2 (bfscfg.exe risks an OS hang).
+        # Keep the x64-only MicroVM feature coupled to its published NVX payload.
         ${{ if eq(item.arch, 'x64') }}:
           cargoFeatures: hyperlight isolation_session microvm wslc
           microvmSignPattern: bin/openvmm.exe
