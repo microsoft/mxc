@@ -14,12 +14,12 @@ wxc_common.workspace = true
 mxc_config_contract.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
-nvx_runner = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 hyperlight_common = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+nvx_runner = { workspace = true, optional = true }
 appcontainer_common = { workspace = true }
 windows_sandbox_lifecycle = { workspace = true }
 isolation_session_common = { workspace = true, optional = true }

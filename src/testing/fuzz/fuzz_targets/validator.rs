@@ -19,6 +19,10 @@ use libfuzzer_sys::fuzz_target;
 use wxc_common::config_parser::load_mxc_request;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::ContainmentBackend;
+#[cfg(all(
+    target_os = "windows",
+    any(feature = "hyperlight", feature = "isolation_session")
+))]
 use wxc_common::script_runner::ScriptRunner;
 use wxc_common::state_aware_request::MxcRequest;
 use wxc_common::validator::validate_common;

@@ -10,7 +10,6 @@ path = "src/main.rs"
 
 [features]
 hyperlight = ["dep:hyperlight_common", "hyperlight_common/hyperlight", "mxc_engine/hyperlight"]
-microvm = ["mxc_engine/microvm"]
 
 [build-dependencies]
 mxc_build_common.workspace = true

@@ -25,6 +25,8 @@ libfuzzer-sys = "0.4"
 wxc_common = { path = "../../core/wxc_common" }
 hyperlight_common = { path = "../../backends/hyperlight/common", optional = true }
 isolation_session_common = { path = "../../backends/isolation_session/common", optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
 nvx_runner = { path = "../../backends/nvx/runner", optional = true }
 
 [[bin]]
