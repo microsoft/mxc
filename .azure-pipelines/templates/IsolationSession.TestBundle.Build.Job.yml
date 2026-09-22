@@ -305,6 +305,9 @@ jobs:
           format_version = 1
           produced_at    = (Get-Date).ToUniversalTime().ToString('o')
           branch_name    = "${{ parameters.checkoutRepo }}"
+          # The ref actually checked out for the repository resource, so
+          # consumers validate the real source ref rather than the alias.
+          source_ref     = "$(resources.repositories.${{ parameters.checkoutRepo }}.ref)"
           commit_sha     = (git -C "$(Build.SourcesDirectory)" rev-parse HEAD).Trim()
           build_id       = "$(Build.BuildId)"
           pipeline       = "$(Build.DefinitionName)"

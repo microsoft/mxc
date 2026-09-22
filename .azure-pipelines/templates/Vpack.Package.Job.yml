@@ -201,6 +201,19 @@ extends:
                   if ("$($manifests.feature.branch_name)" -ne 'mxc_iso_session_feature') {
                       throw "Feature test bundle branch is '$($manifests.feature.branch_name)', not 'mxc_iso_session_feature'."
                   }
+                  # branch_name above is only the repository resource alias; the
+                  # refs those aliases resolve to are configured separately, so
+                  # validate the ref each bundle was actually built from.
+                  $expectedRefs = @{
+                      main = 'refs/heads/main'
+                      feature = 'refs/heads/feature/isolation-session-internal'
+                  }
+                  foreach ($package in $expectedRefs.Keys) {
+                      $actualRef = "$($manifests[$package].source_ref)"
+                      if ($actualRef -ne $expectedRefs[$package]) {
+                          throw "$package test bundle was built from ref '$actualRef', not '$($expectedRefs[$package])'."
+                      }
+                  }
                   $mainBuildId = "$($manifests.main.build_id)"
                   $featureBuildId = "$($manifests.feature.build_id)"
                   if ([string]::IsNullOrWhiteSpace($mainBuildId) -or [string]::IsNullOrWhiteSpace($featureBuildId)) {
