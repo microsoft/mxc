@@ -13,7 +13,7 @@ fn source(backend: &str, fields: &str) -> String {
         ""
     };
     format!(
-        r#"{{"version":"0.10.0-alpha","phase":"provision","containment":"{backend}"{network}{fields}}}"#
+        r#"{{"version":"1.1.0-alpha","phase":"provision","containment":"{backend}"{network}{fields}}}"#
     )
 }
 
@@ -69,7 +69,7 @@ fn isolation_session_unrestricted_network_forms_map_without_loss() {
     let directional = r#""network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}"#;
     let request = |fields: &str| {
         format!(
-            r#"{{"version":"0.10.0-alpha","phase":"provision","containment":"isolation_session"{fields}}}"#
+            r#"{{"version":"1.1.0-alpha","phase":"provision","containment":"isolation_session"{fields}}}"#
         )
     };
 
@@ -110,7 +110,7 @@ fn isolation_session_provision_requires_a_complete_unrestricted_posture() {
         r#","network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"deny"}}"#,
     ] {
         let json = format!(
-            r#"{{"version":"0.10.0-alpha","phase":"provision","containment":"isolation_session"{fields}}}"#
+            r#"{{"version":"1.1.0-alpha","phase":"provision","containment":"isolation_session"{fields}}}"#
         );
         assert!(contract::parse_request(&json).is_err(), "{json}");
     }
@@ -120,7 +120,7 @@ fn isolation_session_provision_requires_a_complete_unrestricted_posture() {
 fn isolation_session_network_is_provision_only() {
     for phase in ["start", "stop", "deprovision"] {
         let json = format!(
-            r#"{{"version":"0.10.0-alpha","phase":"{phase}","sandboxId":"iso:example","network":{{"egress":{{"default":"allow"}},"ingress":{{"default":"allow","hostLoopback":"allow"}}}}}}"#
+            r#"{{"version":"1.1.0-alpha","phase":"{phase}","sandboxId":"iso:example","network":{{"egress":{{"default":"allow"}},"ingress":{{"default":"allow","hostLoopback":"allow"}}}}}}"#
         );
         assert!(contract::parse_request(&json).is_err(), "{json}");
     }
@@ -185,7 +185,7 @@ fn provision_common_fields_are_independent_of_backend_payload() {
             assert_clean_common(&common);
             assert_eq!(
                 common.source_contract,
-                mxc_config_contract::ContractVersion::V0_10_0Alpha
+                mxc_config_contract::ContractVersion::V1_1_0Alpha
             );
             assert_eq!(operation.phase().as_str(), "provision");
             assert!(operation.sandbox_id().is_none());
@@ -273,19 +273,19 @@ fn non_provision_phases_reject_backend_payloads_and_invalid_wrappers() {
         for backend in ["isolation_session", "windows_sandbox", "wslc"] {
             let experimental = serde_json::json!({backend: {phase: {}}});
             let json = format!(
-                r#"{{"version":"0.10.0-alpha","phase":"{phase}","sandboxId":"id"{process},"experimental":{experimental}}}"#
+                r#"{{"version":"1.1.0-alpha","phase":"{phase}","sandboxId":"id"{process},"experimental":{experimental}}}"#
             );
             assert!(contract::parse_request(&json).is_err(), "{json}");
         }
         for invalid in ["null", "42", "[42]", "true", r#""text""#] {
             let json = format!(
-                r#"{{"version":"0.10.0-alpha","phase":"{phase}","sandboxId":"id"{process},"experimental":{invalid}}}"#
+                r#"{{"version":"1.1.0-alpha","phase":"{phase}","sandboxId":"id"{process},"experimental":{invalid}}}"#
             );
             assert!(contract::parse_request(&json).is_err(), "{json}");
         }
 
         let json = format!(
-            r#"{{"version":"0.10.0-alpha","phase":"{phase}","sandboxId":"id"{process},"experimental":{{}},"experimental":{{}}}}"#
+            r#"{{"version":"1.1.0-alpha","phase":"{phase}","sandboxId":"id"{process},"experimental":{{}},"experimental":{{}}}}"#
         );
         assert!(contract::parse_request(&json).is_err(), "{json}");
     }

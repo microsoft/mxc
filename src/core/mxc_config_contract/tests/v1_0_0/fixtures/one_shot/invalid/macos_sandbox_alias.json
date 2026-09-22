@@ -1,0 +1,10 @@
+{
+  "version": "1.0.0",
+  "containment": "macos_sandbox",
+  "process": {
+    "commandLine": "echo alias"
+  },
+  "macos_sandbox": {
+    "guiAccess": true
+  }
+}

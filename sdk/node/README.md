@@ -66,16 +66,17 @@ Node.js 26.8.0 or later is recommended.
 | `0.7.0-alpha` | Stable | [`schemas/stable/mxc-config.schema.0.7.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.7.0-alpha.json) |
 | `0.8.0-alpha` | Stable | [`schemas/stable/mxc-config.schema.0.8.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.8.0-alpha.json) |
 | `0.9.0-alpha` | Stable (includes IsolationSession and WSLC one-shot and state-aware lifecycle) | [`schemas/stable/mxc-config.schema.0.9.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.9.0-alpha.json) |
-| `0.10.0-alpha` | Dev (remaining experimental backends and development fields) | [`schemas/dev/mxc-config.schema.0.10.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/dev/mxc-config.schema.0.10.0-alpha.json) |
+| `1.0.0` | Stable (canonical pre-v1 aliases removed) | [`schemas/stable/mxc-config.schema.1.0.0.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.1.0.0.json) |
+| `1.1.0-alpha` | Dev (remaining experimental backends and development fields) | [`schemas/dev/mxc-config.schema.1.1.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/dev/mxc-config.schema.1.1.0-alpha.json) |
 
-Pick `0.9.0-alpha` for new code using current stable backends. Windows Sandbox,
-MicroVM, and Hyperlight require `0.10.0-alpha`; Seatbelt requires `0.7.0-alpha`
+Pick `1.0.0` for new code using current stable backends. Windows Sandbox,
+MicroVM, and Hyperlight require `1.1.0-alpha`; Seatbelt requires `0.7.0-alpha`
 or later.
 
 > **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `microvm`, `hyperlight`) and their permanent backend sections are defined by the mutable development contract. IsolationSession and WSLC, including their state-aware lifecycles, are part of exact v0.9 and do not require `--experimental`. Production executors dispatch through the exact contract selected by the declared version, whose adapter normalizes it into the private runtime input.
 
 > **Network host allow/block lists are not implemented on Windows.** Exact
-> v0.9/v0.10 requests use `network.egress` / `network.ingress` for directional
+> v0.9/v1.0/v1.1 requests use `network.egress` / `network.ingress` for directional
 > posture and, where supported, `runtimeConfig.networkProxy` for proxy
 > configuration. Historical contracts retain their registered legacy fields.
 
@@ -301,15 +302,15 @@ console.log(result.stdout);
 | `bubblewrap` | `process` | Linux | `0.6.0-alpha` | ✅ | [`docs/bwrap-support/bubblewrap-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/bwrap-support/bubblewrap-backend.md) |
 | `lxc` | (concrete only) | Linux | `0.6.0-alpha` | ✅ | [`docs/lxc-support/lxc-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/lxc-support/lxc-backend.md) |
 | `seatbelt` | `process` | macOS | `0.7.0-alpha` | ✅ | [`docs/seatbelt/seatbelt-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/seatbelt/seatbelt-backend.md) |
-| `windows_sandbox` | `vm` | Windows | `0.10.0-alpha` | Experimental | [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) |
-| `microvm` | `microvm` | Windows | `0.10.0-alpha` | Experimental | [`docs/nanvix-microvm/nanvix.md`](https://github.com/microsoft/mxc/blob/main/docs/nanvix-microvm/nanvix.md) — MicroVM via NanVix on Windows Hypervisor Platform |
-| `hyperlight` | (concrete only) | Windows x64 / Linux x64 | `0.10.0-alpha` | Experimental | [`docs/hyperlight/hyperlight-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/hyperlight/hyperlight-backend.md) — Hyperlight + Unikraft micro-VM on KVM / WHP; `hyperlight.runtime` selects the guest image: `agent` (default), `python`, `python-shell`, `node`, `bash` or `dotnet-jit` |
+| `windows_sandbox` | `vm` | Windows | `1.1.0-alpha` | Experimental | [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) |
+| `microvm` | `microvm` | Windows | `1.1.0-alpha` | Experimental | [`docs/nanvix-microvm/nanvix.md`](https://github.com/microsoft/mxc/blob/main/docs/nanvix-microvm/nanvix.md) — MicroVM via NanVix on Windows Hypervisor Platform |
+| `hyperlight` | (concrete only) | Windows x64 / Linux x64 | `1.1.0-alpha` | Experimental | [`docs/hyperlight/hyperlight-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/hyperlight/hyperlight-backend.md) — Hyperlight + Unikraft micro-VM on KVM / WHP; `hyperlight.runtime` selects the guest image: `agent` (default), `python`, `python-shell`, `node`, `bash` or `dotnet-jit` |
 | `wslc` | (concrete only) | Windows | `0.9.0-alpha` | Stable | [`docs/wsl/wsl-container-getting-started.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wsl-container-getting-started.md) |
 | `isolation_session` | (concrete only) | Windows | `0.9.0-alpha` | Stable | [`docs/isolation-session/oneshot.md`](https://github.com/microsoft/mxc/blob/main/docs/isolation-session/oneshot.md) |
 
 The abstract `process` intent therefore requires `0.7.0-alpha` on macOS,
 where it resolves to Seatbelt, but retains the `0.6.0-alpha` floor on Windows
-and Linux. The abstract `vm` intent requires `0.10.0-alpha`.
+and Linux. The abstract `vm` intent requires `1.1.0-alpha`.
 
 Experimental backends require `{ experimental: true }` in `SandboxSpawnOptions`:
 
@@ -430,7 +431,7 @@ Provision may also supply `filesystem.readwritePaths` / `readonlyPaths`
 timeouts, and cancellation. WSLC does not currently expose process stdin.
 
 IsolationSession state-aware requests default to published `0.9.0-alpha`.
-Windows Sandbox requests default to development `0.10.0-alpha`; WSLC requests
+Windows Sandbox requests default to development `1.1.0-alpha`; WSLC requests
 default to stable `0.9.0-alpha`. See
 [`docs/wsl/wslc-state-aware.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wslc-state-aware.md)
 for the per-phase config matrix.
@@ -550,9 +551,9 @@ granting file content reads. It requires a BaseContainer host with PSEC 1.1
 | `process.commandLine starts with an unquoted Windows path containing a space` | `wxc-exec` rejects unquoted paths with spaces at parse time. | Quote the executable: `'"C:\\Program Files\\…\\foo.exe" args'`. |
 | `CreateProcessW(PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT) failed: ...` | The process security environment launch returned an OS-level error. Backend-unavailable failures automatically fall through to an AppContainer tier during selection. | Check the Windows build requirements for the backend you selected. |
 | Process exits `-1` / `4294967295` with no stdout | Native binary terminated abnormally. | Re-run with `options.debug: true` (or `options.logDir: '<dir>'`) to capture diagnostic logs. |
-| `Policy version '<x>' is older than supported` / `newer than supported` | Version is outside the supported version lines. | Use an exact registered version: `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, `0.9.0-alpha`, or `0.10.0-alpha`. See [Compatibility](#compatibility). |
-| `Policy version '<x>' is not a registered schema contract` / `Unsupported contract version` | The declaration is not registered, even if it falls between supported versions (for example, `0.6.1-alpha`). | Use an exact version from [Compatibility](#compatibility); IsolationSession and WSLC state-aware requests use `0.9.0-alpha`, while Windows Sandbox uses `0.10.0-alpha`. |
-| `Schema <x> does not support containment '<backend>'` | The selected backend was introduced after the declared schema version. | Use the backend's minimum version from [Choosing a Backend](#choosing-a-backend). Seatbelt requires `0.7.0-alpha`; IsolationSession and WSLC require `0.9.0-alpha`; Windows Sandbox, MicroVM, and Hyperlight require `0.10.0-alpha`. |
+| `Policy version '<x>' is older than supported` / `newer than supported` | Version is outside the supported version lines. | Use an exact registered version: `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, `0.9.0-alpha`, `1.0.0`, or `1.1.0-alpha`. See [Compatibility](#compatibility). |
+| `Policy version '<x>' is not a registered schema contract` / `Unsupported contract version` | The declaration is not registered, even if it falls between supported versions (for example, `0.6.1-alpha`). | Use an exact version from [Compatibility](#compatibility); IsolationSession and WSLC state-aware requests use `0.9.0-alpha`, while Windows Sandbox uses `1.1.0-alpha`. |
+| `Schema <x> does not support containment '<backend>'` | The selected backend was introduced after the declared schema version. | Use the backend's minimum version from [Choosing a Backend](#choosing-a-backend). Seatbelt requires `0.7.0-alpha`; IsolationSession and WSLC require `0.9.0-alpha`; Windows Sandbox, MicroVM, and Hyperlight require `1.1.0-alpha`. |
 
 For backend-specific errors, see the per-backend guide linked from the [Choosing a Backend](#choosing-a-backend) table.
 

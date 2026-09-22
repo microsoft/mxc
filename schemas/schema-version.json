@@ -1,10 +1,12 @@
 {
-  "$comment": "Canonical source of truth for MXC CONFIG SCHEMA versions. min/maxSupported define exact parser support; stableLatest is the newest immutable schema; stateAware is the IsolationSession lifecycle version; stateAwareWindowsSandbox and stateAwareWslc are the independently versioned backend lifecycle defaults. sdkMajorTargets maps each high-level SDK major line to the latest exact Rust contract it targets.",
+  "$comment": "Canonical source of truth for MXC CONFIG SCHEMA versions. min/maxSupported define exact parser support; stableLatest is the newest immutable schema; stateAware is the IsolationSession lifecycle version; stateAwareWindowsSandbox and stateAwareWslc are the independently versioned backend lifecycle defaults. sdkMajorTargets maps each high-level SDK major line to its latest published exact Rust contract.",
   "min": "0.6.0-alpha",
-  "maxSupported": "0.10.0-alpha",
+  "maxSupported": "1.1.0-alpha",
   "stateAware": "0.9.0-alpha",
-  "stateAwareWindowsSandbox": "0.10.0-alpha",
+  "stateAwareWindowsSandbox": "1.1.0-alpha",
   "stateAwareWslc": "0.9.0-alpha",
-  "stableLatest": "0.9.0-alpha",
-  "sdkMajorTargets": {}
+  "stableLatest": "1.0.0",
+  "sdkMajorTargets": {
+    "1": "1.0.0"
+  }
 }

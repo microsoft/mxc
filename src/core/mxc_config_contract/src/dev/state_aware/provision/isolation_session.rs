@@ -106,7 +106,7 @@ mod tests {
 
     fn provision(fields: &str) -> String {
         format!(
-            r#"{{"version":"0.10.0-alpha","phase":"provision","containment":"isolation_session"{fields}}}"#
+            r#"{{"version":"1.1.0-alpha","phase":"provision","containment":"isolation_session"{fields}}}"#
         )
     }
 

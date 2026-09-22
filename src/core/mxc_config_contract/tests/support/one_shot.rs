@@ -338,7 +338,7 @@ fn accepts_process_container() {
 }
 
 #[test]
-fn accepts_app_container_section_alias() {
+fn validates_app_container_section_alias_by_contract() {
     let json = r#"{
         "version": "0.9.0-alpha",
         "appContainer": {
@@ -349,7 +349,11 @@ fn accepts_app_container_section_alias() {
         "process": {"commandLine": "echo"}
     }"#;
 
-    assert_valid(json);
+    if crate::COMPATIBILITY_ALIASES {
+        assert_valid(json);
+    } else {
+        assert_invalid(json);
+    }
 }
 
 #[test]

@@ -194,6 +194,43 @@ describe('native binding request', () => {
     });
   });
 
+  it('rejects retired aliases for v1 exact contracts', () => {
+    for (const version of ['1.0.0', '1.1.0-alpha']) {
+      for (const config of [
+        {
+          version,
+          containment: 'appcontainer',
+          process: { commandLine: 'echo hello' },
+        },
+        {
+          version,
+          containment: 'macos_sandbox',
+          process: { commandLine: 'echo hello' },
+        },
+        {
+          version,
+          containment: 'processcontainer',
+          process: { commandLine: 'echo hello' },
+          appContainer: {},
+        },
+        {
+          version,
+          containment: 'seatbelt',
+          process: { commandLine: 'echo hello' },
+          macos_sandbox: {},
+        },
+      ]) {
+        assert.throws(
+          () => prepareRequestSpec(config as ContainerConfig),
+          (error: unknown) =>
+            error instanceof MxcError
+            && error.code === 'malformed_request'
+            && /does not support legacy/.test(error.message),
+        );
+      }
+    }
+  });
+
   it('defaults a partial UI config to no window access', () => {
     const request = prepareRequestSpec({
       version: '0.9.0-alpha',

@@ -1,0 +1,9 @@
+{
+  "version": "1.0.0",
+  "process": {
+    "commandLine": "echo lxc"
+  },
+  "lxc": {
+    "distribution": "ubuntu"
+  }
+}

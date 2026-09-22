@@ -113,9 +113,9 @@ Adding a feature may touch these files:
 | `src/core/mxc_config_contract/src/dev/` | Add the field to the authoritative closed mutable development contract |
 | `src/core/wxc_common/src/config_contract_adapters/dev/` | Adapt the exact field into private `CommonRequestIR` |
 | `src/core/wxc_common/src/wire.rs` | Add only reusable nested normalization DTOs needed by the adapter; never add a whole-request root |
-| `src/core/mxc_engine/src/policy/exact/v0_10.rs` | If the Rust SDK exposes the field, update the production development builder |
-| `schemas/dev/mxc-config.schema.0.10.0-alpha.json` | **Generated exact artifact** — do not hand-edit |
-| `sdk/node/src/generated/v0_10_0_alpha/wire.ts` | **Generated exact artifact** — do not hand-edit |
+| `src/core/mxc_engine/src/policy/exact/v1_1.rs` | If the Rust SDK exposes the field, update the production development builder |
+| `schemas/dev/mxc-config.schema.1.1.0-alpha.json` | **Generated exact artifact** — do not hand-edit |
+| `sdk/node/src/generated/v1_1_0_alpha/wire.ts` | **Generated exact artifact** — do not hand-edit |
 | `src/core/wxc_common/src/models.rs` | Add `GpuIsolationConfig` and an optional field on `ExecutionRequest` |
 | `src/core/wxc_common/src/config_parser.rs` | Map the new config-input field into `ExecutionRequest.gpu_isolation` |
 | Runner (`appcontainer.rs` or `lxc_runner.rs`) | Feature logic, guarded behind `experimental_enabled` |
@@ -154,8 +154,8 @@ The `///` doc comments become schema `description`s and `#[schemars(...)]`
 attributes become constraints. Then regenerate the committed schema:
 
 ```
-cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0.10.0-alpha --out schemas/dev/mxc-config.schema.0.10.0-alpha.json
-cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- types --version 0.10.0-alpha --out sdk/node/src/generated/v0_10_0_alpha/wire.ts
+cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 1.1.0-alpha --out schemas/dev/mxc-config.schema.1.1.0-alpha.json
+cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- types --version 1.1.0-alpha --out sdk/node/src/generated/v1_1_0_alpha/wire.ts
 ```
 
 The exact codegen gate fails if either committed artifact drifts, so both
@@ -264,7 +264,7 @@ Create a test config that exercises your feature:
 
 ```json
 {
-  "version": "0.10.0-alpha",
+  "version": "1.1.0-alpha",
   "containment": "processcontainer",
   "process": {
     "commandLine": "cmd.exe /c echo gpu isolation test"

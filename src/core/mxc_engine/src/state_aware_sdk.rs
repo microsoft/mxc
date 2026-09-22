@@ -499,11 +499,11 @@ fn parse_state_aware_version(version: &str) -> Result<ContractVersion, MxcError>
         .ok_or_else(|| MxcError::malformed_request(format!("Invalid schema version: {version}")))?;
     if !matches!(
         version,
-        ContractVersion::V0_9_0Alpha | ContractVersion::V0_10_0Alpha
+        ContractVersion::V0_9_0Alpha | ContractVersion::V1_0_0 | ContractVersion::V1_1_0Alpha
     ) {
         return Err(MxcError::malformed_request(format!(
             "typed state-aware Rust SDK requests require schema version \
-             0.9.0-alpha or 0.10.0-alpha, got {}",
+             0.9.0-alpha, 1.0.0, or 1.1.0-alpha, got {}",
             version.as_str()
         )));
     }

@@ -24,9 +24,9 @@ $ErrorActionPreference = 'Stop'
 foreach ($name in @('hyperlight_networking.json', 'hyperlight_networking_blocked.json')) {
     $path = Join-Path $ConfigDir $name
     $config = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
-    if ($config.version -ne '0.10.0-alpha' -or $config.containment -ne 'hyperlight' -or
+    if ($config.version -ne '1.1.0-alpha' -or $config.containment -ne 'hyperlight' -or
         @($config.network.allowedHosts).Count -ne 1 -or $config.network.allowedHosts[0] -ne 'example.com') {
-        throw "$name no longer contains the exact v0.10 hostname migration case"
+        throw "$name no longer contains the exact v1.1 hostname migration case"
     }
 
     $info = [System.Diagnostics.ProcessStartInfo]::new()

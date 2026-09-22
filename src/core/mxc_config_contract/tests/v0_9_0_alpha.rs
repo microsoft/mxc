@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 pub(crate) const CONTRACT_VERSION: &str = "0.9.0-alpha";
+pub(crate) const COMPATIBILITY_ALIASES: bool = true;
 pub(crate) use mxc_config_contract::published::v0_9_0_alpha::{
     DeprovisionRequest, ExecRequest, IsolationSessionProvisionRequest, OneShotRequest,
     StartRequest, StopRequest,

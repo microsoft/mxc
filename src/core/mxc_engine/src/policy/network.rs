@@ -238,7 +238,7 @@ pub(super) fn select_network_format(
     let has_legacy = network.is_some_and(NetworkSection::has_legacy_fields);
     if matches!(
         version,
-        ContractVersion::V0_9_0Alpha | ContractVersion::V0_10_0Alpha
+        ContractVersion::V0_9_0Alpha | ContractVersion::V1_0_0 | ContractVersion::V1_1_0Alpha
     ) {
         if has_legacy || network.is_some_and(|network| network.legacy_fields_specified) {
             return Err(wxc_common::mxc_error::MxcError::malformed_request(format!(

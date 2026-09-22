@@ -53,7 +53,7 @@ fn controlled_input_rejects_every_routing_and_one_shot_field() {
         "lifecycle",
     ] {
         let (mut common, _) =
-            adapt(r#"{"version":"0.10.0-alpha","phase":"start","sandboxId":"iso:example"}"#);
+            adapt(r#"{"version":"1.1.0-alpha","phase":"start","sandboxId":"iso:example"}"#);
         match field {
             "phase" => common.phase = Some(wire::Phase::Start),
             "sandboxId" => common.sandbox_id = Some(String::new()),
@@ -99,7 +99,7 @@ pub(super) fn assert_no_config_phase(phase: &str) {
             r#","$schema":"https://example.com/schema","_comment":"comment","telemetry":{"enabled":true}"#,
         ] {
             let source = format!(
-                r#"{{"version":"0.10.0-alpha","phase":"{phase}","sandboxId":"{id}"{fields}}}"#
+                r#"{{"version":"1.1.0-alpha","phase":"{phase}","sandboxId":"{id}"{fields}}}"#
             );
             let (common, operation) = adapt(&source);
             assert_eq!(operation.phase().as_str(), phase);
@@ -111,7 +111,7 @@ pub(super) fn assert_no_config_phase(phase: &str) {
             assert!(common.network.is_none());
             assert_eq!(
                 common.source_contract,
-                mxc_config_contract::ContractVersion::V0_10_0Alpha
+                mxc_config_contract::ContractVersion::V1_1_0Alpha
             );
             if fields.contains("$schema") {
                 assert_eq!(common.schema.as_deref(), Some("https://example.com/schema"));

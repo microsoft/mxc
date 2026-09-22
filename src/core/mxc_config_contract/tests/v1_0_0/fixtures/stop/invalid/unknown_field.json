@@ -1,0 +1,6 @@
+{
+  "version": "1.0.0",
+  "phase": "stop",
+  "sandboxId": "example:12345678",
+  "unknown": true
+}
