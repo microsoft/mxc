@@ -92,7 +92,15 @@ function Invoke-ProcessContainerTests {
     # Out-Null does not touch), so discarding the success stream keeps the
     # return value a scalar even if a phase leaks a stray object.
     [OutputType([int])]
-    param()
+    param(
+        # The tier this matrix entry exists to exercise. Passed through to the
+        # harness, which aborts when the host selects a different one. Without
+        # it a mis-provisioned process-t1 runner would silently run the T3
+        # assertions and report green, proving nothing about BaseContainer.
+        [Parameter(Mandatory)]
+        [ValidateSet('base-container', 'appcontainer-dacl')]
+        [string]$RequireTier
+    )
 
     # The existing harness expects separate debug and release layouts. CI
     # intentionally tests one release artifact, so stage it in both slots.
@@ -107,30 +115,29 @@ function Invoke-ProcessContainerTests {
     Copy-Item -LiteralPath $uiProbe -Destination (Join-Path $debugDirectory 'wxc-ui-probe.exe') -Force
     Copy-Item -LiteralPath $uiProbe -Destination (Join-Path $releaseDirectory 'wxc-ui-probe.exe') -Force
 
-    $script = Join-Path $testScriptRoot 'WinProcessContainer-Tests.ps1'
-    # -KeepArtifacts stops the harness deleting its scratch tree on a clean
-    # run, so a passing job still uploads its per-test logs and configs.
-    # Skip build and Cargo phases because this job consumes a previously
-    # built artifact; retain the host and containment behavior phases.
-    $phases = @(
-        'Probes',
-        'T3Forced',
-        'T1DenyForced',
-        'UiMitigationMatrix',
-        'GlobalAtomIsolation',
-        'DaclDisabled',
-        'CrashRecovery'
-    )
+    # wxc-exec resolves these next to its own image: plm.exe backs the guarded-WPR
+    # captureDenials fallback and winhttp-proxy-shim.exe backs the legacy proxy
+    # path. Absent, those areas fail as launch errors instead of policy results.
+    foreach ($sidecar in 'plm.exe', 'winhttp-proxy-shim.exe') {
+        $source = Join-Path $binaryDirectoryPath $sidecar
+        Assert-File -Path $source
+        Copy-Item -LiteralPath $source -Destination (Join-Path $debugDirectory $sidecar) -Force
+        Copy-Item -LiteralPath $source -Destination (Join-Path $releaseDirectory $sidecar) -Force
+    }
+
+    $script = Join-Path $testScriptRoot 'run_processcontainer_all_tests.ps1'
+    # -KeepArtifacts stops the suite deleting its scratch tree on a clean run,
+    # so a passing job still uploads its per-area logs, configs, and result
+    # documents.
     $global:LASTEXITCODE = 0
     & $script `
         -SkipBuild `
-        -SkipReleaseLane `
+        -RequireTier $RequireTier `
         -WxcDebug (Join-Path $debugDirectory 'wxc-exec.exe') `
         -WxcRelease (Join-Path $releaseDirectory 'wxc-exec.exe') `
         -UiProbeDebug (Join-Path $debugDirectory 'wxc-ui-probe.exe') `
         -UiProbeRelease (Join-Path $releaseDirectory 'wxc-ui-probe.exe') `
-        -KeepArtifacts `
-        -Phases $phases | Out-Null
+        -KeepArtifacts | Out-Null
     return $LASTEXITCODE
 }
 
@@ -153,36 +160,12 @@ function Invoke-T3WorkloadTests {
 
 Redirect-TempToRunnerTemp
 
-# The matrix entry names the tier the job exists to exercise, but the tier is
-# chosen by the host at run time. Without this check a runner that selects a
-# different tier would run the suite anyway and report green, proving nothing
-# about the tier the entry was scheduled for.
-function Assert-ContainmentTier {
-    param([Parameter(Mandatory)][string]$ExpectedTier)
-
-    $global:LASTEXITCODE = 0
-    $probeJson = & $wxc --probe 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 0) {
-        throw "wxc-exec --probe failed with exit code $LASTEXITCODE`: $probeJson"
-    }
-
-    try {
-        $probe = $probeJson | ConvertFrom-Json
-    } catch {
-        throw "wxc-exec --probe did not return JSON: $probeJson"
-    }
-
-    $actualTier = $probe.tier
-    Write-Host "Host selected containment tier '$actualTier' (expected '$ExpectedTier')."
-    if ($actualTier -ne $ExpectedTier) {
-        throw "Host selected tier '$actualTier' but this matrix entry tests '$ExpectedTier'."
-    }
-}
-
+# The matrix entry names the tier the job exists to exercise, but the host picks
+# the tier at run time. -RequireTier makes the suite abort instead of testing
+# whichever tier it landed on and reporting green for the wrong entry.
 switch ($Backend) {
     'process-t1' {
-        Assert-ContainmentTier -ExpectedTier 'base-container'
-        $primitives = Invoke-ProcessContainerTests
+        $primitives = Invoke-ProcessContainerTests -RequireTier 'base-container'
         if ($primitives -ne 0) {
             throw "Process Container tests failed with exit code $primitives."
         }
@@ -190,7 +173,7 @@ switch ($Backend) {
     'process-t3' {
         # Run both suites before reporting. Stopping at the first failure would
         # hide the other suite's result, costing an extra nightly run to triage.
-        $primitives = Invoke-ProcessContainerTests
+        $primitives = Invoke-ProcessContainerTests -RequireTier 'appcontainer-dacl'
         $workloads = Invoke-T3WorkloadTests
         if ($primitives -ne 0 -or $workloads -ne 0) {
             throw "process-t3 tests failed (primitives exit=$primitives, workloads exit=$workloads)."

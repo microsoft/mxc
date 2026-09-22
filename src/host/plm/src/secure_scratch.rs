@@ -381,6 +381,10 @@ impl RecoveryMarker {
         self.stale
     }
 
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn preserve(&mut self) {
         self.delete_on_drop = false;
     }
@@ -873,12 +877,16 @@ mod tests {
         assert_eq!(RECOVERY_MARKER_FILE, "active.marker");
 
         let mut marker = RecoveryMarker {
-            path: PathBuf::new(),
+            path: PathBuf::from(r"C:\ProgramData\Microsoft\MXC\PLM\active.marker"),
             file: None,
             _ancestor_handles: Vec::new(),
             stale: true,
             delete_on_drop: false,
         };
+        assert_eq!(
+            marker.path(),
+            Path::new(r"C:\ProgramData\Microsoft\MXC\PLM\active.marker")
+        );
         assert!(marker.is_stale());
         marker.recovered();
         assert!(!marker.is_stale());

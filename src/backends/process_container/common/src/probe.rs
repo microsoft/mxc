@@ -75,7 +75,7 @@ pub struct ProbeFacts {
     /// `network.ingress.hostLoopback = "allow"`.
     pub base_container_supports_ingress_host_loopback_allow: bool,
     /// Whether the in-proc IsolationSession service can be activated on this
-    /// host. Always `false` here — `appcontainer_common` has no dependency on
+    /// host. Always `false` here — `process_container_common` has no dependency on
     /// the isolation-session backend; `wxc-exec --probe` overrides it when
     /// that backend is compiled in.
     pub isolation_session_available: bool,

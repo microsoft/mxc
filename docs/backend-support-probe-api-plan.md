@@ -104,7 +104,7 @@ ones.
 
 Only the Windows process-container backend has a within-backend tier ladder. The
 three tiers, and the **policy-free** checks that decide whether each is
-reachable, already exist in `appcontainer_common`:
+reachable, already exist in `process_container_common`:
 
 | Tier | Reachable when | Detector |
 | --- | --- | --- |

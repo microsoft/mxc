@@ -252,6 +252,18 @@ fn emit_diag(tag: &str, reason: &str) {
     println!("{}=DIAG {}", tag, reason);
 }
 
+/// `user32.dll` would not load, so the probe never ran.
+///
+/// This is the normal outcome under `ui.disable=true`: the Win32k
+/// syscall-disable mitigation blocks user32's initialization, taking the whole
+/// GUI subsystem with it. Reporting FAIL here would claim the restriction was
+/// *not* enforced, which is the opposite of what happened, and would mask a
+/// real regression.
+fn user32_unavailable(tag: &str) {
+    emit_diag(tag, "user32.dll not loadable (GUI subsystem unavailable)");
+    emit_inconclusive(tag);
+}
+
 /// Block until `path` exists or `timeout` elapses. Returns whether the file
 /// exists at the end. Used for the GLOBALATOMS guest->host handshake so the
 /// probe never hangs indefinitely if the host fails to release it.
@@ -876,60 +888,36 @@ fn run_probe(tag: &str, user32: Option<Hmodule>, probe_args: &ProbeArgs) {
         "GLOBALATOMS" => probe_globalatoms(probe_args),
         "READCLIPBOARD" => match user32 {
             Some(h) => probe_readclipboard(h),
-            None => {
-                emit_diag("READCLIPBOARD", "user32.dll not loadable");
-                emit_fail("READCLIPBOARD");
-            }
+            None => user32_unavailable("READCLIPBOARD"),
         },
         "WRITECLIPBOARD" => match user32 {
             Some(h) => probe_writeclipboard(h),
-            None => {
-                emit_diag("WRITECLIPBOARD", "user32.dll not loadable");
-                emit_fail("WRITECLIPBOARD");
-            }
+            None => user32_unavailable("WRITECLIPBOARD"),
         },
         "SYSTEMPARAMETERS" => match user32 {
             Some(h) => probe_systemparameters(h),
-            None => {
-                emit_diag("SYSTEMPARAMETERS", "user32.dll not loadable");
-                emit_fail("SYSTEMPARAMETERS");
-            }
+            None => user32_unavailable("SYSTEMPARAMETERS"),
         },
         "DISPLAYSETTINGS" => match user32 {
             Some(h) => probe_displaysettings(h),
-            None => {
-                emit_diag("DISPLAYSETTINGS", "user32.dll not loadable");
-                emit_fail("DISPLAYSETTINGS");
-            }
+            None => user32_unavailable("DISPLAYSETTINGS"),
         },
         "DESKTOP" => match user32 {
             Some(h) => probe_desktop(h),
-            None => {
-                emit_diag("DESKTOP", "user32.dll not loadable");
-                emit_fail("DESKTOP");
-            }
+            None => user32_unavailable("DESKTOP"),
         },
         "EXITWINDOWS" => match user32 {
             Some(h) if destructive_probe_allowed() => probe_exitwindows(h),
             Some(_) => refuse_destructive("EXITWINDOWS"),
-            None => {
-                emit_diag("EXITWINDOWS", "user32.dll not loadable");
-                emit_fail("EXITWINDOWS");
-            }
+            None => user32_unavailable("EXITWINDOWS"),
         },
         "HANDLES" => match user32 {
             Some(h) => probe_handles(h, probe_args),
-            None => {
-                emit_diag("HANDLES", "user32.dll not loadable");
-                emit_fail("HANDLES");
-            }
+            None => user32_unavailable("HANDLES"),
         },
         "INJECTION" => match user32 {
             Some(h) => probe_injection(h),
-            None => {
-                emit_diag("INJECTION", "user32.dll not loadable");
-                emit_fail("INJECTION");
-            }
+            None => user32_unavailable("INJECTION"),
         },
         "WIN32K" => match user32 {
             Some(h) if destructive_probe_allowed() => probe_win32k(h),

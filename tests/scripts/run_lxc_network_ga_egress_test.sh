@@ -42,6 +42,8 @@ DNS_ALLOWED_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_dns_allowed.js
 DENY_RULE_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_deny_rule.json"
 EXCEPT_EXCLUDED_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_except_excluded.json"
 EXCEPT_SIBLING_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_except_sibling.json"
+EXCEPT_SHADOW_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_except_shadow.json"
+EXCEPT_SHADOW_CONTROL_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_except_shadow_control.json"
 ICMP_ALLOWED_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_icmp_allowed.json"
 ICMP_NO_TCP_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_icmp_no_tcp.json"
 ICMP_DENIED_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_icmp_denied.json"
@@ -283,6 +285,7 @@ fi
 # stale address and prove nothing.
 PEER_TARGETING_CONFIGS=(
     "$DENY_CONFIG" "$ALLOW_CONFIG" "$WRONG_PORT_CONFIG"
+    "$EXCEPT_SHADOW_CONFIG" "$EXCEPT_SHADOW_CONTROL_CONFIG"
     "$ICMP_ALLOWED_CONFIG" "$ICMP_NO_TCP_CONFIG" "$ICMP_DENIED_CONFIG"
     "$PORT_RANGE_INSIDE_CONFIG" "$PORT_RANGE_OUTSIDE_CONFIG" "$PORT_RANGE_ABOVE_CONFIG"
     "$ANY_TCP_CONFIG" "$ANY_ICMP_CONFIG"
@@ -291,6 +294,7 @@ PEER_TARGETING_CONFIGS=(
 )
 PEER_ALLOWING_CONFIGS=(
     "$ALLOW_CONFIG" "$WRONG_PORT_CONFIG"
+    "$EXCEPT_SHADOW_CONFIG" "$EXCEPT_SHADOW_CONTROL_CONFIG"
     "$ICMP_ALLOWED_CONFIG" "$ICMP_NO_TCP_CONFIG" "$ICMP_DENIED_CONFIG"
     "$PORT_RANGE_INSIDE_CONFIG" "$PORT_RANGE_OUTSIDE_CONFIG" "$PORT_RANGE_ABOVE_CONFIG"
     "$ANY_TCP_CONFIG" "$ANY_ICMP_CONFIG"
@@ -340,6 +344,14 @@ assert_blocked "an address named in except was reachable through the rule that e
 run_case "except case: same policy, probe an address the exclusion does not cover" "$EXCEPT_SIBLING_CONFIG"
 assert_allowed "an address inside the allowed range but outside except was unreachable. The exclusion is over-blocking, so the case above proves only that the whole rule failed to install."
 
+# The chain is first-match-wins, so a carve-out programmed as its own accept
+# rule would answer for the peer before the second rule's deny is reached.
+run_case "shadow case: deny the peer's range except the peer, then deny the peer outright" "$EXCEPT_SHADOW_CONFIG"
+assert_blocked "a destination denied by its own rule was reachable because an earlier rule excluded it. An except carve-out is escaping the rule that declared it and accepting traffic a later deny names, which turns a deny into an allow."
+
+run_case "shadow-control case: the same first rule with no second deny" "$EXCEPT_SHADOW_CONTROL_CONFIG"
+assert_allowed "an address excluded from a deny was unreachable under egress.default allow. The exclusion is not narrowing its own rule, so the shadow case above proves only that everything was blocked."
+
 run_case "icmp case: egress.default deny, peer allowed on protocol icmp" "$ICMP_ALLOWED_CONFIG"
 assert_allowed "an ICMP echo to a peer allowed on protocol icmp was unreachable. Either the icmp selector never reached the chain, or the container cannot open a raw socket at all, which would make the icmp-denied case below pass without filtering anything."
 
@@ -379,5 +391,5 @@ assert_allowed "udp/$PEER_UDP_PORT was unreachable while protocol any allowed th
 run_case "protocol-any case: peer allowed on any port 8054, probe udp/$PEER_UDP_PORT" "$ANY_UDP_WRONG_PORT_CONFIG"
 assert_blocked "udp/$PEER_UDP_PORT succeeded while protocol any allowed only port 8054. The UDP half of the fan-out ignores the port selector."
 
-echo "PASS: schema 0.8 egress rules filtered by destination, by port, by port range, by protocol, by resolver, by deny rule, and by exclusion."
+echo "PASS: schema 0.8 egress rules filtered by destination, by port, by port range, by protocol, by resolver, by deny rule, and by exclusion, and no exclusion answered for a destination a later rule denied."
 echo "LXC schema 0.8 egress enforcement test complete."

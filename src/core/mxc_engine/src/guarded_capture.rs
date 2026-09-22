@@ -2,19 +2,19 @@
 // Licensed under the MIT License.
 
 //! Adapts `plm::elevated`'s guarded WPR capture protocol to
-//! `appcontainer_common::guarded_capture`'s DI traits.
+//! `process_container_common::guarded_capture`'s DI traits.
 //!
-//! `appcontainer_common` cannot depend on `plm` directly (see
-//! `appcontainer_common::guarded_capture`'s module docs for the crate-layering
+//! `process_container_common` cannot depend on `plm` directly (see
+//! `process_container_common::guarded_capture`'s module docs for the crate-layering
 //! rationale). `mxc_engine` sits above both — it already has the Windows
 //! backend crates as dependencies — so it owns the concrete adapter and hands
 //! it to the dispatcher only for requests that actually need the fallback
 //! (`request.policy.capture_denials.is_some()` on a non-native tier).
 
-use appcontainer_common::guarded_capture::{
+use learning_mode_core::AnalysisResult;
+use process_container_common::guarded_capture::{
     AnalyzedTrace, GuardedCaptureFactory, GuardedCaptureSession,
 };
-use learning_mode_core::AnalysisResult;
 const GUARDIAN_CONFIRM_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 const MAX_GUARDIAN_CONFIRM_ATTEMPTS: usize = 3;
 /// Bounded per-attempt deadline for confirming that the guardian released the

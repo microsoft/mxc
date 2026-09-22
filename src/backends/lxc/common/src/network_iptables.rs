@@ -10,6 +10,7 @@ use wxc_common::models::{
     ContainerPolicy, NetworkAction, NetworkCidr, NetworkEgressPolicy, NetworkPeer, NetworkPolicy,
     NetworkPort, NetworkProtocol, NetworkRule, ProxyAddress, ProxyHostPin,
 };
+use wxc_common::network_blocks::{self, AddressBlock, IpFamily, MAX_EGRESS_ENTRIES};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NetworkPlan {
@@ -93,12 +94,6 @@ pub(crate) fn needs_network(policy: &ContainerPolicy) -> bool {
 struct ProxyEndpoint {
     ip: String,
     port: u16,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IpFamily {
-    V4,
-    V6,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -845,10 +840,21 @@ impl NetworkIptablesManager {
         }
     }
 
-    fn lower_egress(policy: &ContainerPolicy, uses_directional_keys: bool) -> Vec<EgressEntry> {
+    /// Lower the egress policy for its refusals alone, discarding the rules.
+    pub(crate) fn validate_egress_lowering(
+        policy: &ContainerPolicy,
+        uses_directional_keys: bool,
+    ) -> Result<(), String> {
+        Self::lower_egress(policy, uses_directional_keys).map(|_| ())
+    }
+
+    fn lower_egress(
+        policy: &ContainerPolicy,
+        uses_directional_keys: bool,
+    ) -> Result<Vec<EgressEntry>, String> {
         match Self::stated_egress(policy, uses_directional_keys) {
             Some(egress) => Self::lower_directional_egress(egress),
-            None => Self::lower_legacy_hosts(policy),
+            None => Ok(Self::lower_legacy_hosts(policy)),
         }
     }
 
@@ -876,27 +882,24 @@ impl NetworkIptablesManager {
 
     // Deny rules precede allow rules for the same first-match-wins reason
     // as the legacy lowering.
-    fn lower_directional_egress(egress: &NetworkEgressPolicy) -> Vec<EgressEntry> {
+    fn lower_directional_egress(egress: &NetworkEgressPolicy) -> Result<Vec<EgressEntry>, String> {
         let mut entries = Vec::new();
-        let default_action = match egress.default {
-            NetworkAction::Allow => RuleAction::Allow,
-            NetworkAction::Deny => RuleAction::Deny,
-        };
+        let mut remaining = MAX_EGRESS_ENTRIES;
         for rule in &egress.deny {
-            Self::lower_rule(rule, RuleAction::Deny, default_action, &mut entries);
+            Self::lower_rule(rule, RuleAction::Deny, &mut entries, &mut remaining)?;
         }
         for rule in &egress.allow {
-            Self::lower_rule(rule, RuleAction::Allow, default_action, &mut entries);
+            Self::lower_rule(rule, RuleAction::Allow, &mut entries, &mut remaining)?;
         }
-        entries
+        Ok(entries)
     }
 
     fn lower_rule(
         rule: &NetworkRule,
         action: RuleAction,
-        default_action: RuleAction,
         entries: &mut Vec<EgressEntry>,
-    ) {
+        remaining: &mut usize,
+    ) -> Result<(), String> {
         let matches = Self::lower_port_selectors(&rule.ports);
         let wildcard_peers;
         let peers = if rule.to.is_empty() {
@@ -907,25 +910,47 @@ impl NetworkIptablesManager {
         };
 
         for peer in peers {
-            for matching in &matches {
-                // `except` excludes the range from the rule rather than reversing it.
-                // Agreeing verdicts push nothing.
-                if default_action != action {
-                    for excluded in &peer.except {
-                        entries.push(EgressEntry {
-                            destination: Self::cidr_destination(excluded),
-                            action: default_action,
-                            matching: *matching,
-                        });
+            for destination in Self::peer_destinations(peer)? {
+                for matching in &matches {
+                    if *remaining == 0 {
+                        return Err(format!(
+                            "network.egress expands into more than {MAX_EGRESS_ENTRIES} firewall \
+                             rules. A rule becomes every destination block it resolves to in \
+                             every port it names, so narrow the peers, the exclusions, or the \
+                             ports."
+                        ));
                     }
+                    *remaining -= 1;
+                    entries.push(EgressEntry {
+                        destination: destination.clone(),
+                        action,
+                        matching: *matching,
+                    });
                 }
-                entries.push(EgressEntry {
-                    destination: Self::cidr_destination(&peer.cidr),
-                    action,
-                    matching: *matching,
-                });
             }
         }
+        Ok(())
+    }
+
+    /// The destinations a peer covers once its exclusions are removed.
+    ///
+    /// An `iptables` rule matches one destination block and cannot carry an
+    /// exclusion, so the exclusion is subtracted from the peer instead.
+    fn peer_destinations(peer: &NetworkPeer) -> Result<Vec<String>, String> {
+        // Passing an out-of-range prefix through unchanged keeps it on the path
+        // that reports a destination resolving to no address.
+        let Some((family, blocks)) = network_blocks::peer_blocks(peer)? else {
+            return Ok(vec![Self::cidr_destination(&peer.cidr)]);
+        };
+
+        Ok(blocks
+            .into_iter()
+            .map(|block| Self::block_destination(block, family))
+            .collect())
+    }
+
+    fn block_destination(block: AddressBlock, family: IpFamily) -> String {
+        format!("{}/{}", block.address(family), block.prefix())
     }
 
     // A v4 chain and a v6 chain are programmed separately.  Neither wildcard
@@ -950,7 +975,7 @@ impl NetworkIptablesManager {
     }
 
     fn cidr_destination(cidr: &NetworkCidr) -> String {
-        format!("{}/{}", cidr.address, cidr.prefix_length)
+        network_blocks::cidr_text(cidr)
     }
 
     fn lower_port_selectors(ports: &[NetworkPort]) -> Vec<RuleMatch> {
@@ -1010,7 +1035,7 @@ impl NetworkIptablesManager {
         let mut args = FirewallRuleArgs::default();
         let mut unresolved_denies: Vec<&str> = Vec::new();
         let mut catch_all_allows: Vec<&str> = Vec::new();
-        let entries = Self::lower_egress(policy, uses_directional_keys);
+        let entries = Self::lower_egress(policy, uses_directional_keys)?;
         for entry in &entries {
             let host = entry.destination.as_str();
             let action = entry.action;

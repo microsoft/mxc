@@ -177,8 +177,9 @@ function Initialize-ProcessContainerHost {
     #
     # This runs for process-t1 as well as process-t3. A T1 host selects
     # BaseContainer for most policies, but the suite deliberately drives the
-    # AppContainer fallback tiers too, and an unprepared host fails the launch
-    # with WIN32_ERROR(5) instead of reporting a policy result.
+    # AppContainer fallback tiers too (and an unprepared host fails the launch
+    # with WIN32_ERROR(5) rather than reporting a policy result), so the T1 job
+    # needs the same preparation to test anything beyond config validation.
     & $hostPrep prepare-system-drive
     if ($LASTEXITCODE -ne 0) {
         Exit-WithError "wxc-host-prep prepare-system-drive failed with exit code $LASTEXITCODE"

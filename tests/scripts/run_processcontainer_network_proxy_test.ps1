@@ -1,0 +1,226 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+#
+# runtimeConfig.networkProxy and proxy peer identity.
+#
+# Runs standalone, or under run_processcontainer_all_tests.ps1.
+
+[CmdletBinding()]
+param(
+    [string]$ContextJson,
+
+    [string]$ResultsJson,
+    [string]$RequireTier,
+    [switch]$SkipNetwork,
+    [switch]$KeepArtifacts
+)
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+
+. (Join-Path $PSScriptRoot 'lib\WinProcessContainer.Common.ps1')
+
+Initialize-WpcContext @PSBoundParameters
+
+
+# Phase 8e — schema 0.8 runtime proxy (model 2).
+#
+# Per docs/process-container/networking.md: HTTP(S)_PROXY (both cases) point
+# at the loopback endpoint, NO_PROXY must not carry it, direct egress is
+# blocked, egress rules do not apply, identity-less proxy requires
+# hostLoopback allow, and no fallback to an AppContainer tier.
+#
+# The workload prints its own environment: an MXC log line saying a proxy was
+# configured does not prove the child received it. A host-side listener stands
+# in for the proxy so one case can go further and prove the endpoint is
+# actually reachable from inside the container.
+function Phase-NetworkProxy {
+    Section 'Phase 8e: schema 0.8 runtime proxy (model 2)'
+
+    if ($SkipNetwork) {
+        Record-Result -Phase 'P8e' -Name 'runtime proxy' -Status 'skip' -Detail '-SkipNetwork'
+        return
+    }
+
+    $fs = Get-NetFsGrants
+    $psec = Test-PsecEligible
+
+    # A live listener, not just a reserved port. With nothing listening, every
+    # workload below either dumps its environment or bypasses the proxy, so the
+    # phase would pass without any traffic ever reaching the endpoint MXC
+    # configured — which is the one thing model 2 promises.
+    $proxy = Start-LoopbackListener
+    if (-not $proxy) {
+        Record-Result -Phase 'P8e' -Name 'runtime proxy listener' -Pass $false `
+            -Detail 'could not bind a listener on 127.0.0.1; cannot assert the proxy endpoint is reachable'
+        return
+    }
+    try {
+        Invoke-NetworkProxyAssertions -ProxyPort $proxy.Port -Fs $fs -Psec $psec
+    } finally {
+        & $proxy.Stop
+    }
+}
+
+# Body of phase 8e, split out only so the listener above has a lifetime.
+function Invoke-NetworkProxyAssertions {
+    param(
+        [Parameter(Mandatory)] [int]$ProxyPort,
+        [Parameter(Mandatory)] $Fs,
+        [Parameter(Mandatory)] [bool]$Psec
+    )
+
+    $fs = $Fs
+    $psec = $Psec
+    $port = $ProxyPort
+    $proxyUrl = "http://127.0.0.1:$port"
+
+    # Identity-less deployment: no allowedProxyPeer, so the doc requires
+    # ingress.default=allow AND hostLoopback=allow. Workload dumps its env.
+    $envDump = "$env:SystemRoot\System32\cmd.exe /c set"
+    $cfgEnv = New-Config -Name 'net-proxy-envvars' -CommandLine $envDump `
+        -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+        -EgressDefault 'deny' -IngressDefault 'allow' -HostLoopback 'allow' `
+        -NetworkProxy $proxyUrl -TimeoutMs 25000
+    $envRun = Invoke-NetRun -Name 'net-proxy-envvars' -ConfigPath $cfgEnv
+
+    if ($psec) {
+        $out = $envRun.Result.Stdout
+        $ran = [bool]($out -match '(?im)^SystemRoot=')
+        # networking.md: hostLoopback=allow needs the PSEC 1.1 ingress contract
+        # and "is rejected when the PSEC 1.1 ingress contract is unavailable".
+        # Only two outcomes are documented, so a bare OS error is a failure even
+        # on a 1.0-only host -- the caller cannot act on E_INVALIDARG.
+        $rejectedCleanly = Test-WasRejected $envRun
+        Record-Result -Phase 'P8e' -Name 'identity-less proxy config either runs or is rejected cleanly (never a bare OS error)' `
+            -Pass ($ran -or $rejectedCleanly) `
+            -Detail ("ran=$ran; rejectedAtValidation=$rejectedCleanly; exit=$($envRun.Result.ExitCode); " +
+                     "stderr=$(Format-Snippet $envRun.Result.Stderr)")
+        if ($ran) {
+            foreach ($v in @('HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy')) {
+                # cmd.exe `set` upper-cases nothing, but Windows env lookup is
+                # case-insensitive and duplicate-insensitive, so a variable set
+                # twice in different cases collapses. Match case-insensitively
+                # on the name and require the endpoint as the value.
+                $hit = [bool]($out -match ("(?im)^" + [regex]::Escape($v) + "=.*" + [regex]::Escape("127.0.0.1:$port")))
+                Record-Result -Phase 'P8e' -Name "child env carries $v = proxy endpoint" `
+                    -Pass $hit -Detail "endpoint=127.0.0.1:$port"
+            }
+            # NO_PROXY is a bypass list. Carrying the endpoint there would tell
+            # cooperating clients to bypass the very proxy they must use.
+            $noProxyPoisoned = [bool]($out -match ("(?im)^no_proxy=.*" + [regex]::Escape("127.0.0.1:$port")))
+            Record-Result -Phase 'P8e' -Name 'NO_PROXY does NOT carry the proxy endpoint' `
+                -Pass (-not $noProxyPoisoned) -Detail 'NO_PROXY is a bypass list, not a proxy setting'
+
+            # The env vars prove only that MXC told the child where the proxy
+            # is. This proves the child can get there: the fetch is routed to
+            # the endpoint by those same variables, and the host-side listener
+            # answers it. The target host is deliberately unresolvable — under
+            # a proxy the workload never resolves or contacts it, so REACHED
+            # can only mean the proxy endpoint was reachable, and the
+            # assertion needs no external connectivity.
+            $cfgVia = New-Config -Name 'net-proxy-via-endpoint' `
+                -CommandLine (Get-AnchorFetchCommand -Url 'http://mxc-proxy-probe.invalid/') `
+                -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+                -EgressDefault 'deny' -IngressDefault 'allow' -HostLoopback 'allow' `
+                -NetworkProxy $proxyUrl -TimeoutMs 25000
+            $via = Invoke-NetRun -Name 'net-proxy-via-endpoint' -ConfigPath $cfgVia
+            Record-Result -Phase 'P8e' -Name 'a proxied fetch reaches the configured proxy endpoint' `
+                -Pass ($via.Verdict -eq 'REACHED') `
+                -Detail ("verdict=$($via.Verdict); endpoint=127.0.0.1:$port; " +
+                         'target is unresolvable, so REACHED is attributable to the proxy alone')
+        }
+
+        # Direct egress must be blocked while the proxy is configured. The
+        # fetch bypasses the proxy env vars, so a REACHED verdict means the
+        # workload really went straight out rather than just failing to reach
+        # a proxy that is not listening. Skipped when the identity-less shape
+        # is not startable here -- NORUN would otherwise read as BLOCKED.
+        if (-not $ran) {
+            Record-Result -Phase 'P8e' -Name 'direct egress blocked while runtime proxy is configured' -Status 'skip' `
+                -Detail 'the identity-less proxy shape does not start on this host; a NORUN cannot prove egress was blocked'
+        } else {
+            $cfgDirect = New-Config -Name 'net-proxy-direct-blocked' `
+                -CommandLine (Get-AnchorFetchCommand -IgnoreProxyEnv) `
+                -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+                -EgressDefault 'deny' -IngressDefault 'allow' -HostLoopback 'allow' `
+                -NetworkProxy $proxyUrl -TimeoutMs 25000
+            $direct = Invoke-NetRun -Name 'net-proxy-direct-blocked' -ConfigPath $cfgDirect
+            Record-Result -Phase 'P8e' -Name 'direct egress blocked while runtime proxy is configured' `
+                -Pass ($direct.Verdict -eq 'BLOCKED') `
+                -Detail "verdict=$($direct.Verdict); WFP scopes egress to the proxy endpoint only"
+        }
+    } else {
+        # "schema 0.8 runtime proxy requests do not fall back because
+        # AppContainer cannot preserve their peer or host-loopback
+        # requirements."
+        $rejected = Test-WasRejected $envRun
+        Record-Result -Phase 'P8e' -Name 'non-PSEC tier rejects schema 0.8 runtime proxy (no fallback)' `
+            -Pass $rejected `
+            -Detail "exit=$($envRun.Result.ExitCode); timedOut=$($envRun.Result.TimedOut); tier=$($Script:ExpectedTier)"
+    }
+
+    # --- Model-2 shape requirements, independent of tier. -----------------
+    # Identity-scoped: allowedProxyPeer present, hostLoopback stays deny.
+    $cfgPeer = New-Config -Name 'net-proxy-identity-scoped' -CommandLine $envDump `
+        -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+        -EgressDefault 'deny' -IngressDefault 'allow' -HostLoopback 'deny' `
+        -NetworkProxy $proxyUrl -AllowedProxyPeer 'Contoso.Proxy_8wekyb3d8bbwe' -TimeoutMs 25000
+    $peer = Invoke-NetRun -Name 'net-proxy-identity-scoped' -ConfigPath $cfgPeer
+    if ($psec) {
+        # The peer does not exist on this host, so a launch failure is
+        # expected; what must NOT happen is the config being refused as an
+        # invalid SHAPE. "No rejection message" alone is not evidence — an
+        # empty stderr, a harness timeout, or a binary that never started all
+        # look the same — so positive proof that the config cleared validation
+        # is required too.
+        $peerLog = Remove-ConfigEcho $peer.Log
+        $shapeRejected = [bool]("$($peer.Result.Stderr)" -match '(?i)policy_validation|unsupported.*polic|invalid.*(polic|config|network)')
+        $gotPastValidation = ($peer.Result.ExitCode -eq 0) -or ($peerLog -match '(?i)selected isolation tier')
+        Record-Result -Phase 'P8e' -Name 'identity-scoped proxy shape (peer + hostLoopback=deny) is a valid policy' `
+            -Pass ($gotPastValidation -and -not $shapeRejected) `
+            -Detail ("exit=$($peer.Result.ExitCode); pastValidation=$gotPastValidation; " +
+                     "stderr=$(Format-Snippet $peer.Result.Stderr)")
+    } else {
+        Record-Result -Phase 'P8e' -Name 'non-PSEC tier rejects allowedProxyPeer' `
+            -Pass (Test-WasRejected $peer) `
+            -Detail "exit=$($peer.Result.ExitCode); timedOut=$($peer.Result.TimedOut); tier=$($Script:ExpectedTier)"
+    }
+
+    # The two shape rules below are only meaningful on PSEC. On a non-PSEC
+    # tier the phase has already asserted that EVERY schema 0.8 runtime-proxy
+    # config is refused, so asserting "this particular one is refused" would be
+    # green by construction and would test nothing about the rule it names.
+    if (-not $psec) {
+        Record-Result -Phase 'P8e' -Name 'model-2 shape rules (hostLoopback / ingress.default)' -Status 'skip' `
+            -Detail "tier=$($Script:ExpectedTier) refuses all 0.8 runtime proxies, so a shape-specific rejection is not attributable"
+        return
+    }
+
+    # Identity-less proxy WITHOUT hostLoopback=allow. The doc says this
+    # deployment requires it, so the configuration is incomplete and must be
+    # refused rather than run with a proxy the container cannot reach.
+    $cfgNoLoopback = New-Config -Name 'net-proxy-identityless-no-loopback' -CommandLine $envDump `
+        -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+        -EgressDefault 'deny' -IngressDefault 'allow' -HostLoopback 'deny' `
+        -NetworkProxy $proxyUrl -TimeoutMs 25000
+    $noLoopback = Invoke-NetRun -Name 'net-proxy-identityless-no-loopback' -ConfigPath $cfgNoLoopback
+    Record-Result -Phase 'P8e' -Name 'identity-less proxy without hostLoopback=allow is rejected' `
+        -Pass (Test-WasRejected $noLoopback) `
+        -Detail "exit=$($noLoopback.Result.ExitCode); timedOut=$($noLoopback.Result.TimedOut); doc requires hostLoopback=allow when allowedProxyPeer is omitted"
+
+    # Model 2 requires ingress.default=allow. Without it the client container
+    # never gets privateNetworkClientServer and cannot reach a loopback proxy.
+    $cfgNoIngress = New-Config -Name 'net-proxy-no-ingress-allow' -CommandLine $envDump `
+        -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
+        -EgressDefault 'deny' -IngressDefault 'deny' -HostLoopback 'allow' `
+        -NetworkProxy $proxyUrl -TimeoutMs 25000
+    $noIngress = Invoke-NetRun -Name 'net-proxy-no-ingress-allow' -ConfigPath $cfgNoIngress
+    Record-Result -Phase 'P8e' -Name 'runtime proxy without ingress.default=allow is rejected' `
+        -Pass (Test-WasRejected $noIngress) `
+        -Detail "exit=$($noIngress.Result.ExitCode); timedOut=$($noIngress.Result.TimedOut); model 2 requires egress deny + ingress allow"
+}
+
+Invoke-WpcPhase -Key 'NetworkProxy' -Body { Phase-NetworkProxy }
+Complete-WpcChild
+

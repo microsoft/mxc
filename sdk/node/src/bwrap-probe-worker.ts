@@ -12,6 +12,8 @@ delete spawnEnv.NODE_OPTIONS;
 
 interface ProbeWorkerData {
   shared: SharedArrayBuffer;
+  // Test-only: pause after exit so the unit test can observe pre-close state.
+  anchorExitBarrier?: SharedArrayBuffer;
   anchorPath: string;
   helperPath: string;
   probeTimeoutMs: number;
@@ -22,6 +24,9 @@ interface ProbeWorkerData {
 const data = workerData as ProbeWorkerData;
 const header = new Int32Array(data.shared, 0, 3);
 const payload = new Uint8Array(data.shared, 12);
+const anchorExitBarrier = data.anchorExitBarrier
+  ? new Int32Array(data.anchorExitBarrier)
+  : undefined;
 let anchor: ChildProcessByStdio<null, Readable, null> | undefined;
 let output = '';
 let finished = false;
@@ -124,6 +129,11 @@ if (Atomics.load(header, 0) === 0) {
     });
     spawnedAnchor.on('exit', () => {
       anchorExited = true;
+      if (anchorExitBarrier) {
+        Atomics.store(anchorExitBarrier, 0, 1);
+        Atomics.notify(anchorExitBarrier, 0);
+        Atomics.wait(anchorExitBarrier, 0, 1);
+      }
     });
     spawnedAnchor.on('close', () => {
       anchorClosed = true;

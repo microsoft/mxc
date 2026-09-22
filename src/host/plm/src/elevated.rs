@@ -1916,17 +1916,34 @@ fn start_owned_trace(owner: &mut GuardedOwner) -> Result<()> {
         }
         Err(error) if crate::start::may_have_changed_wpr_state(&error) => {
             owner.recovery_marker.preserve();
-            Err(error).context(
+            Err(recovery_required_error(
+                error,
+                owner.recovery_marker.path(),
                 "WPR start failed after the control process launched; preserved the recovery \
                  marker because the host trace state may have changed",
-            )
+            ))
         }
-        Err(error) if stale => Err(error).context(
-            "WPR start failed while a protected stale-recovery marker exists; \
-             refusing to cancel an unverified WPR session",
-        ),
+        Err(error) if stale => Err(recovery_required_error(
+            error,
+            owner.recovery_marker.path(),
+            "WPR start failed while a protected stale-recovery marker exists",
+        )),
         Err(error) => Err(error),
     }
+}
+
+fn recovery_required_error(
+    error: anyhow::Error,
+    marker_path: &Path,
+    reason: &str,
+) -> anyhow::Error {
+    error.context(format!(
+        "{reason}; recovery marker: {}; refusing to stop or cancel unverified host-wide WPR \
+         state. From an elevated terminal, inspect the recording, preserve or discard it, \
+         confirm WPR is inactive, and only then delete the marker. See \"Recovering guarded-WPR \
+         state\" in docs/diagnostics.md",
+        marker_path.display()
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2812,6 +2829,24 @@ mod tests {
     struct ChunkedResponseBytes {
         bytes: Cursor<Vec<u8>>,
         max_chunk: usize,
+    }
+
+    #[test]
+    fn recovery_error_reports_marker_and_requires_wpr_resolution_first() {
+        let marker = Path::new(r"C:\ProgramData\Microsoft\MXC\PLM\active.marker");
+        let error = recovery_required_error(
+            anyhow::anyhow!("wpr start diagnostic"),
+            marker,
+            "WPR start failed while a protected stale-recovery marker exists",
+        );
+        let message = format!("{error:#}");
+
+        assert!(message.contains(marker.to_string_lossy().as_ref()));
+        assert!(message.contains("inspect the recording"));
+        assert!(message.contains("confirm WPR is inactive"));
+        assert!(message.contains("only then delete the marker"));
+        assert!(message.contains("docs/diagnostics.md"));
+        assert!(message.contains("wpr start diagnostic"));
     }
 
     impl ChunkedResponseBytes {

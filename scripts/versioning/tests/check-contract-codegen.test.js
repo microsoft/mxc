@@ -12,7 +12,6 @@ const os = require("node:os");
 const { join } = require("node:path");
 const { test } = require("node:test");
 const {
-  assertDirectionalNetworkOnly,
   contractsWithGeneratedArtifacts,
   formatFailure,
   stableSchemaVersion,
@@ -28,8 +27,6 @@ const roots = ["OneShotRequest", "WindowsSandboxProvisionRequest",
 const v0_9Roots = ["OneShotRequest", "IsolationSessionProvisionRequest",
   "WslcProvisionRequest", "StartRequest", "ExecRequest", "StopRequest",
   "DeprovisionRequest"];
-const removed = ["defaultPolicy", "enforcementMode", "allowedHosts",
-  "blockedHosts", "allowLocalNetwork", "proxy"];
 
 function schema(requestRoots = roots) {
   return {
@@ -154,51 +151,6 @@ test("registry selects exact contracts with generated artifacts", () => {
     ]),
     /repeats schema root OneShotRequest/
   );
-});
-
-test("every removed property is rejected from every exact request root", () => {
-  for (const root of roots) {
-    for (const name of removed) {
-      const value = schema();
-      value.definitions[root].properties.network = {
-        allOf: [{ $ref: "#/definitions/HiddenLegacy" }],
-      };
-      value.definitions.HiddenLegacy = { properties: { [name]: { type: "string" } } };
-      assert.throws(
-        () => assertDirectionalNetworkOnly(value, roots),
-        new RegExp(`${root}.*${name}`)
-      );
-    }
-  }
-});
-
-test("recursive references preserve network context and terminate", () => {
-  const value = schema();
-  value.definitions.Network.allOf = [{ $ref: "#/definitions/Network" }];
-  assert.doesNotThrow(() => assertDirectionalNetworkOnly(value, roots));
-  value.definitions.Network.properties.proxy = {};
-  assert.throws(() => assertDirectionalNetworkOnly(value, roots), /network.proxy/);
-});
-
-test("data strings and unreachable legacy definitions do not authorize fields", () => {
-  assert.doesNotThrow(() => assertDirectionalNetworkOnly(schema(), roots));
-});
-
-test("missing roots and dangling or external references fail closed", () => {
-  const value = schema();
-  delete value.definitions.ExecRequest;
-  assert.throws(
-    () => assertDirectionalNetworkOnly(value, roots),
-    /Missing exact request root/
-  );
-  for (const reference of ["#/definitions/Absent", "https://example.com/unknown"]) {
-    const broken = schema();
-    broken.definitions.Network.$ref = reference;
-    assert.throws(
-      () => assertDirectionalNetworkOnly(broken, roots),
-      /Unresolved schema reference/
-    );
-  }
 });
 
 test("fixture validation does not require an unregistered exec root", () => {

@@ -11,7 +11,6 @@ const BUILD_RS = resolve(
   __dirname,
   "..",
   "..",
-  "..",
   "src",
   "ffi",
   "mxc_ffi",

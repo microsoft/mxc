@@ -12,7 +12,7 @@
 //! Only the backends with a streaming path are handled here: ProcessContainer
 //! (Windows AppContainer / BaseContainer, with the full three-tier fallback —
 //! BaseContainer, AppContainer + BFS, AppContainer + DACL — shared with the
-//! run-to-completion path via `appcontainer_common::dispatcher`), Bubblewrap
+//! run-to-completion path via `process_container_common::dispatcher`), Bubblewrap
 //! (Linux), Seatbelt (macOS), WSLC, and IsolationSession (Windows,
 //! behind the `wslc` and `isolation_session` features). Every other backend —
 //! including the remaining experimental ones (Windows Sandbox, MicroVM,
@@ -155,7 +155,7 @@ fn spawn_process_container(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
-    use appcontainer_common::dispatcher::{
+    use process_container_common::dispatcher::{
         spawn_with_fallback_and_capture, DispatchError, SpawnDispatchError,
     };
     use std::fmt::Write;

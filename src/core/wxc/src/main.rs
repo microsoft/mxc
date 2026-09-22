@@ -9,8 +9,8 @@ use std::process;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-use appcontainer_common::appcontainer_runner::delete_app_container_profile;
 use clap::Parser;
+use process_container_common::appcontainer_runner::delete_app_container_profile;
 use wxc_common::audit::{AuditEvent, AuditEventName, RejectionReason};
 use wxc_common::config_parser::{LoadOptions, ParseError};
 #[cfg(target_os = "windows")]
@@ -938,8 +938,8 @@ fn main() {
     // Best-effort: reap any orphaned DACL state files left behind by
     // crashed prior MXC runs. Runs BEFORE the `--probe` arm because
     // `wxc-exec --probe` is the canonical recovery trigger consumers
-    // (WinProcessContainer-Tests Phase 6, SDK warm-start) rely on. Errors here
-    // are non-fatal and only surface via stderr. On a healthy host
+    // (run_processcontainer_crash_recovery_test.ps1, SDK warm-start) rely on. Errors
+    // here are non-fatal and only surface via stderr. On a healthy host
     // with zero state files this is sub-millisecond.
     match wxc_common::filesystem_dacl::recover_orphaned_state() {
         Ok(report) => {
@@ -999,11 +999,11 @@ fn main() {
         } else {
             wxc_common::models::ExecutionRequest::default()
         };
-        let output = appcontainer_common::probe::run_probe(
+        let output = process_container_common::probe::run_probe(
             &request,
             mxc_engine::guarded_capture_available(),
         );
-        // appcontainer_common has no dependency on the isolation-session
+        // process_container_common has no dependency on the isolation-session
         // backend, so it reports `isolationSessionAvailable` as `false`. When
         // the backend is compiled in, override it with a read-only activation
         // probe of the in-proc service.
@@ -1020,7 +1020,7 @@ fn main() {
             output.probes.hyperlight_available = hyperlight_common::is_whp_available();
             output
         };
-        match appcontainer_common::probe::to_json_pretty(&output) {
+        match process_container_common::probe::to_json_pretty(&output) {
             Ok(s) => println!("{s}"),
             Err(e) => {
                 eprintln!("Error: probe serialization failed: {e}");

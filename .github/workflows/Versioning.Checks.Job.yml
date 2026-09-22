@@ -4,8 +4,8 @@ on:
   workflow_call:
 
 jobs:
-  versioning-checks:
-    name: Versioning Checks
+  versioning-and-exact-contracts:
+    name: Versioning and exact contracts
     runs-on: ubuntu-latest
     env:
       MXC_VERSIONING_BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event_name == 'push' && github.event.before || 'HEAD^' }}
@@ -35,8 +35,40 @@ jobs:
         working-directory: scripts/versioning
         run: npm test
 
+      - name: Generate exact contract registry snapshot
+        working-directory: src
+        shell: bash
+        run: |
+          set -euo pipefail
+          registry_path="$RUNNER_TEMP/mxc-contract-registry.json"
+          cargo run --locked -q -p mxc_schema_gen -- versions --json > "$registry_path"
+          echo "MXC_CONTRACT_REGISTRY_PATH=$registry_path" >> "$GITHUB_ENV"
+
+      - name: Test exact contracts with all features
+        working-directory: src
+        run: cargo test --locked -p mxc_config_contract --all-features
+
       - name: Check schema version sync
         run: node scripts/versioning/check-schema-versions.js
+
+      - name: Check exact contract generated artifacts and fixtures
+        run: node scripts/versioning/check-contract-codegen.js
+
+      - name: Validate config corpus against exact registered schemas
+        run: node scripts/versioning/validate-configs.js
+
+  repository-consistency:
+    name: Repository consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Setup Rust toolchain
+        run: rustup update stable
 
       - name: Check Rust toolchain sync (rust-toolchain.toml == ADO template)
         run: node scripts/versioning/check-rust-toolchain-sync.js
@@ -53,14 +85,31 @@ jobs:
       - name: Check PSEC generated contract (provenance + drift)
         run: node scripts/versioning/check-psec-codegen.js
 
-      - name: Check exact contract generated artifacts and fixtures
-        run: node scripts/versioning/check-contract-codegen.js
-
       - name: Check telemetry policy binding parity
         run: node scripts/check-telemetry-policy-parity.js
+
+      - name: Test C# bindings build-script scanner
+        run: node --test scripts/tests/build-rs-inputs.test.js
 
       - name: Check C# bindings codegen (regenerates and asserts entry points)
         run: node scripts/check-dotnet-bindings-codegen.js
 
-      - name: Validate config corpus against exact registered schemas
-        run: node scripts/versioning/validate-configs.js
+  # Preserve the stable required-check context while the detailed jobs retain
+  # separate ownership and failure reporting.
+  versioning-checks:
+    name: Versioning Checks
+    needs:
+      - versioning-and-exact-contracts
+      - repository-consistency
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm detailed checks passed
+        env:
+          VERSIONING_RESULT: ${{ needs.versioning-and-exact-contracts.result }}
+          CONSISTENCY_RESULT: ${{ needs.repository-consistency.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$VERSIONING_RESULT" = success
+          test "$CONSISTENCY_RESULT" = success

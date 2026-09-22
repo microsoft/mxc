@@ -83,26 +83,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
-name = "appcontainer_common"
-version = "0.8.0"
-dependencies = [
- "flatbuffers",
- "getrandom 0.2.17",
- "learning_mode_core",
- "learning_mode_windows",
- "process_security_environment_spec",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "widestring",
- "windows",
- "windows-core",
- "winreg",
- "wxc_common",
-]
-
-[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1538,7 +1518,6 @@ dependencies = [
 name = "mxc_engine"
 version = "0.8.0"
 dependencies = [
- "appcontainer_common",
  "bwrap_common",
  "getrandom 0.2.17",
  "hyperlight_common",
@@ -1549,6 +1528,7 @@ dependencies = [
  "mxc_config_contract",
  "nanvix_runner",
  "plm",
+ "process_container_common",
  "seatbelt_common",
  "serde",
  "serde_json",
@@ -1827,6 +1807,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "process_container_common"
+version = "0.8.0"
+dependencies = [
+ "flatbuffers",
+ "getrandom 0.2.17",
+ "learning_mode_core",
+ "learning_mode_windows",
+ "process_security_environment_spec",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "widestring",
+ "windows",
+ "windows-core",
+ "winreg",
+ "wxc_common",
 ]
 
 [[package]]
@@ -3186,7 +3186,6 @@ name = "wxc"
 version = "0.8.0"
 dependencies = [
  "anyhow",
- "appcontainer_common",
  "clap",
  "hyperlight_common",
  "learning_mode_core",
@@ -3195,6 +3194,7 @@ dependencies = [
  "nanvix_binaries",
  "nanvix_build_common",
  "plm",
+ "process_container_common",
  "serde_json",
  "tempfile",
  "windows",
