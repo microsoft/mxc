@@ -93,3 +93,23 @@ jobs:
 
       - name: Check C# bindings codegen (regenerates and asserts entry points)
         run: node scripts/check-dotnet-bindings-codegen.js
+
+  # Preserve the stable required-check context while the detailed jobs retain
+  # separate ownership and failure reporting.
+  versioning-checks:
+    name: Versioning Checks
+    needs:
+      - versioning-and-exact-contracts
+      - repository-consistency
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm detailed checks passed
+        env:
+          VERSIONING_RESULT: ${{ needs.versioning-and-exact-contracts.result }}
+          CONSISTENCY_RESULT: ${{ needs.repository-consistency.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$VERSIONING_RESULT" = success
+          test "$CONSISTENCY_RESULT" = success
