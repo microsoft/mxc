@@ -26,7 +26,7 @@ wxc_common = { path = "../../core/wxc_common" }
 hyperlight_common = { path = "../../backends/hyperlight/common", optional = true }
 isolation_session_common = { path = "../../backends/isolation_session/common", optional = true }
 
-[target.'cfg(target_os = "windows")'.dependencies]
+[target.'cfg(all(target_os = "windows", target_arch = "x86_64"))'.dependencies]
 nvx_runner = { path = "../../backends/nvx/runner", optional = true }
 
 [[bin]]

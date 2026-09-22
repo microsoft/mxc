@@ -18,8 +18,10 @@ serde_json = { workspace = true }
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 hyperlight_common = { workspace = true, optional = true }
 
-[target.'cfg(target_os = "windows")'.dependencies]
+[target.'cfg(all(target_os = "windows", target_arch = "x86_64"))'.dependencies]
 nvx_runner = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
 appcontainer_common = { workspace = true }
 windows_sandbox_lifecycle = { workspace = true }
 isolation_session_common = { workspace = true, optional = true }

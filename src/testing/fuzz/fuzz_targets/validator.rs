@@ -38,7 +38,7 @@ fuzz_target!(|data: &[u8]| {
         // Dispatch to runner-specific validation based on backend.
         #[cfg(target_os = "windows")]
         match req.containment {
-            #[cfg(feature = "microvm")]
+            #[cfg(all(feature = "microvm", target_arch = "x86_64"))]
             ContainmentBackend::Microvm => {
                 let _ = nvx_runner::preflight();
             }

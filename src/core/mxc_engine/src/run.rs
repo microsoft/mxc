@@ -38,12 +38,19 @@ use crate::error::Error;
 #[cfg(target_os = "windows")]
 const ERR_MICROVM_EXPERIMENTAL_OPT_IN_REQUIRED: &str =
     "MicroVM (NVX) is an experimental feature. Use --experimental flag.";
-#[cfg(all(not(feature = "microvm"), target_os = "windows"))]
+#[cfg(all(
+    not(feature = "microvm"),
+    target_os = "windows",
+    target_arch = "x86_64"
+))]
 const ERR_MICROVM_FEATURE_REQUIRED: &str =
     "MicroVM backend not compiled in (build with --features microvm)";
-#[cfg(all(feature = "microvm", target_os = "windows"))]
+#[cfg(all(feature = "microvm", target_os = "windows", target_arch = "x86_64"))]
 const ERR_MICROVM_RUNTIME_IMPLEMENTATION_MISSING: &str =
     "MicroVM (NVX) runtime implementation is not present in this build";
+#[cfg(all(target_os = "windows", not(target_arch = "x86_64")))]
+const ERR_MICROVM_ARCHITECTURE_UNSUPPORTED: &str =
+    "MicroVM (NVX) requires Windows x64; this Windows architecture is unsupported";
 
 /// A backend runner resolved for an [`ExecutionRequest`], ready to run.
 ///
@@ -517,20 +524,27 @@ fn resolve_microvm_backend(request: &ExecutionRequest) -> Result<ResolvedRunner,
         ));
     }
 
-    #[cfg(feature = "microvm")]
+    #[cfg(all(feature = "microvm", target_arch = "x86_64"))]
     {
         resolve_microvm_backend_with_preflight(nvx_runner::preflight)
     }
 
-    #[cfg(not(feature = "microvm"))]
+    #[cfg(all(not(feature = "microvm"), target_arch = "x86_64"))]
     {
         Err(MxcError::unsupported_containment(
             ERR_MICROVM_FEATURE_REQUIRED,
         ))
     }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        Err(MxcError::unsupported_containment(
+            ERR_MICROVM_ARCHITECTURE_UNSUPPORTED,
+        ))
+    }
 }
 
-#[cfg(all(feature = "microvm", target_os = "windows"))]
+#[cfg(all(feature = "microvm", target_os = "windows", target_arch = "x86_64"))]
 fn resolve_microvm_backend_with_preflight<F>(preflight: F) -> Result<ResolvedRunner, MxcError>
 where
     F: FnOnce() -> Result<(), MxcError>,
@@ -667,7 +681,7 @@ mod tests {
         assert_eq!(err.message, ERR_MICROVM_EXPERIMENTAL_OPT_IN_REQUIRED);
     }
 
-    #[cfg(not(feature = "microvm"))]
+    #[cfg(all(not(feature = "microvm"), target_arch = "x86_64"))]
     #[test]
     fn microvm_without_feature_returns_typed_unsupported_containment() {
         let request = microvm_request(true);
@@ -682,7 +696,7 @@ mod tests {
         assert_eq!(err.message, ERR_MICROVM_FEATURE_REQUIRED);
     }
 
-    #[cfg(feature = "microvm")]
+    #[cfg(all(feature = "microvm", target_arch = "x86_64"))]
     #[test]
     fn microvm_with_feature_propagates_preflight_backend_unavailable() {
         let request = microvm_request(true);
@@ -700,7 +714,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "microvm")]
+    #[cfg(all(feature = "microvm", target_arch = "x86_64"))]
     #[test]
     fn microvm_without_runtime_returns_backend_unavailable_even_if_preflight_succeeds() {
         let err = match resolve_microvm_backend_with_preflight(|| Ok(())) {
@@ -710,5 +724,20 @@ mod tests {
 
         assert_eq!(err.code, MxcErrorCode::BackendUnavailable);
         assert_eq!(err.message, ERR_MICROVM_RUNTIME_IMPLEMENTATION_MISSING);
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    #[test]
+    fn microvm_is_rejected_on_unsupported_windows_architecture() {
+        let request = microvm_request(true);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let err = match resolve_runner_inner_windows(&request, &mut logger) {
+            Ok(_) => panic!("expected unsupported_containment"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
+        assert_eq!(err.message, ERR_MICROVM_ARCHITECTURE_UNSUPPORTED);
     }
 }
