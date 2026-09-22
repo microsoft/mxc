@@ -94,6 +94,21 @@ function Phase-CapabilityRejections {
 }
 
 
+# Reads processContainer.capabilities presence out of an emitted config.
+# StrictMode turns a missing property into a terminating error, and the
+# omitted case emits no processContainer object at all -- which is precisely
+# what the assertion below is checking for.
+function Test-EmitsCapabilitiesKey {
+    param([string]$Path)
+    if (-not ($Path -and (Test-Path -LiteralPath $Path))) { return $false }
+    $root = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    $pcProp = $root.PSObject.Properties['processContainer']
+    if (-not $pcProp) { return $false }
+    $pc = $pcProp.Value
+    if (-not $pc) { return $false }
+    return [bool]$pc.PSObject.Properties['capabilities']
+}
+
 # Phase 12b -- the open contract
 #
 # `capabilities` is an open string list, so a misspelled capability is
@@ -145,13 +160,8 @@ function Phase-CapabilityContract {
         -Detail "exit=$($omit.ExitCode); rejectedAtValidation=$omitRejected"
 
     # Without this the two cases above could be the same run twice.
-    $emptyHasKey = $false
-    if ($emptyCfgPath -and (Test-Path -LiteralPath $emptyCfgPath)) {
-        $emptyPc = (Get-Content -LiteralPath $emptyCfgPath -Raw | ConvertFrom-Json).processContainer
-        $emptyHasKey = [bool]($emptyPc -and $emptyPc.PSObject.Properties['capabilities'])
-    }
-    $omitPc = (Get-Content -LiteralPath $omitCfg -Raw | ConvertFrom-Json).processContainer
-    $omitHasKey = [bool]($omitPc -and $omitPc.PSObject.Properties['capabilities'])
+    $emptyHasKey = Test-EmitsCapabilitiesKey $emptyCfgPath
+    $omitHasKey  = Test-EmitsCapabilitiesKey $omitCfg
     Record-Result -Phase 'P12b' -Name 'the empty-list and omitted cases emit different configs' `
         -Pass ($emptyHasKey -and (-not $omitHasKey)) `
         -Detail "emptyCaseEmitsKey=$emptyHasKey (expected True); omittedCaseEmitsKey=$omitHasKey (expected False)"
