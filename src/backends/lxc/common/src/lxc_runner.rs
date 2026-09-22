@@ -298,6 +298,15 @@ impl LxcScriptRunner {
             }
         }
 
+        // The policy lowers to the same rules with or without a container, so
+        // one that cannot be programmed is refused before a container exists.
+        if let Err(msg) = NetworkIptablesManager::validate_egress_lowering(
+            &request.policy,
+            uses_directional_keys(&request.policy),
+        ) {
+            return ScriptResponse::error(&msg);
+        }
+
         if self.destroy_on_exit {
             signal_cleanup::set_active(&container_name);
         }
@@ -1421,6 +1430,55 @@ mod tests {
         assert!(
             destroyed,
             "a reused container must be destroyed on readiness timeout when destroyOnExit=true"
+        );
+    }
+
+    /// A policy whose `except` entry is malformed, so lowering refuses it.
+    fn request_with_unlowerable_egress() -> ExecutionRequest {
+        use wxc_common::models::{NetworkAction, NetworkCidr, NetworkPeer, NetworkRule};
+
+        let mut request = ExecutionRequest::default();
+        request.policy.network_egress = Some(NetworkEgressPolicy {
+            default: NetworkAction::Deny,
+            allow: vec![NetworkRule {
+                to: vec![NetworkPeer {
+                    cidr: NetworkCidr {
+                        address: "10.0.0.0".parse().expect("literal"),
+                        prefix_length: 8,
+                    },
+                    except: vec![NetworkCidr {
+                        address: "10.10.0.0".parse().expect("literal"),
+                        prefix_length: 40,
+                    }],
+                }],
+                ports: Vec::new(),
+            }],
+            deny: Vec::new(),
+        });
+        request
+    }
+
+    #[test]
+    fn an_egress_policy_that_cannot_be_lowered_is_refused_before_a_container_exists() {
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let response =
+            runner_for_guard_tests().run_internal(&request_with_unlowerable_egress(), &mut logger);
+
+        assert_ne!(
+            response.exit_code, 0,
+            "input=allow.to=[{{cidr:10.0.0.0/8, except:[10.10.0.0/40]}}]; expected a refusal; output={response:?}"
+        );
+        assert!(
+            response
+                .error_message
+                .contains("wider than its address family"),
+            "expected the lowering's refusal rather than a container failure, got: {response:?}"
+        );
+        assert!(
+            !logger.get_buffer().contains("Creating LXC container"),
+            "the refusal must land before the container is created; log={}",
+            logger.get_buffer()
         );
     }
 }

@@ -44,12 +44,29 @@ Linux / macOS (`.sh`):
 | `run_isolation_session_tests.ps1` | IsolationSession one-shot E2E suite | Interactive local session; OS-side IsolationSession service |
 | `run_isolation_session_state_aware_tests.ps1` | IsolationSession provision/start/exec/stop/deprovision E2E suite | Interactive local session; OS-side IsolationSession service |
 | `run_wslc_all_tests.ps1` | All WSLC one-shot and state-aware E2E tests | WSL2, WSLC SDK, staged daemon, and network access for image setup (or pre-pulled images with `-SkipSetup`) |
-| `run_processcontainer_proxy_tests.ps1` | Process container proxy tests | `wxc-exec.exe` |
-| `WinProcessContainer-Tests.ps1` | Process container (AppContainer / BaseContainer) primitives suite — tier probes, rw/ro/denied matrix, UI mitigations, DACL restore, crash recovery | `wxc-exec.exe`, `wxc-ui-probe.exe` |
+| `run_processcontainer_all_tests.ps1` | Process container (AppContainer / BaseContainer) primitives suite — tier probes, rw/ro/denied matrix, enumeration-only grants, UI mitigations, DACL restore, crash recovery, schema 0.8 networking. Dispatches to the per-area `run_processcontainer_*_test.ps1` scripts | `wxc-exec.exe`, `wxc-ui-probe.exe`, `plm.exe` and `winhttp-proxy-shim.exe` beside `wxc-exec.exe` |
 | `T3-Workloads.ps1` | Real workloads (pwsh, git, node, python, cmd) on top of the T3 primitives. A missing interpreter is reported as a skip, not a failure | `wxc-exec.exe`; `pwsh` / `git` / `node` / `python` each optional, gating their own cases |
 | `run_telemetry_consent_smoke_test.ps1` | Consent maintenance, presentation, policy, and exit-code smoke tests | Debug `wxc-exec.exe` built with `test-support` |
 | `run_telemetry_etw_smoke_test.ps1` | Isolated consent flow plus public-provider ETW capture | Debug `wxc-exec.exe` built with `test-support`; ETW tooling |
 | `run_on_repeat.ps1` | Stress test (loops core tests) | `wxc-exec.exe` |
+
+Each `run_processcontainer_<area>_test.ps1` also runs standalone against a
+built tree, which is the fastest way to iterate on one area:
+
+```powershell
+tests\scripts\run_processcontainer_network_proxy_test.ps1 -RequireTier base-container
+```
+
+Shared helpers live in `tests/scripts/lib/WinProcessContainer.Common.ps1`. It
+must be **dot-sourced, not imported as a module** — `Initialize-WpcContext`
+publishes the suite context into the calling script's scope, which only works
+because dot-sourcing merges scopes.
+
+T2 (`appcontainer-bfs`) is out of scope: it is off by default behind the
+`tier2_bfs` Cargo feature and is not in use, so the suite records no assertions
+about it. The remaining `bfscfg` checks are guards, not coverage — invoking
+`bfscfg.exe` hard-locks the `bfs.sys` minifilter on 25H2, so a run that detects
+one raises MXC-FATAL and stops the whole suite (child exit code 78).
 
 ### Unix suites
 
@@ -83,12 +100,12 @@ these dispatchers, which map a matrix backend id to the suites above:
 
 Pass the backend id exactly as it appears in the catalog — there is no separate
 handler name. Ids that share a suite have their own case in the dispatcher:
-`process-t1` and `process-t3` both run `WinProcessContainer-Tests.ps1`, which
-determines the tier it expects from the host's own `wxc-exec --probe`.
-`process-t1` additionally fails the job up front if `--probe` does not report
-`base-container`, so a host that fell back to another tier cannot report green.
-`process-t3` additionally runs `T3-Workloads.ps1`; both suites run even if the
-first one fails, and the job reports their exit codes together.
+`process-t1` and `process-t3` both run `run_processcontainer_all_tests.ps1`,
+which determines the tier it expects from the host's own `wxc-exec --probe` and
+is passed `-RequireTier` so a mis-provisioned runner aborts rather than quietly
+testing the other tier. `process-t3` additionally runs `T3-Workloads.ps1`; both
+suites run even if the first one fails, and the job reports their exit codes
+together.
 
 ```powershell
 scripts\ci\run_backend_validation_tests.ps1 -Backend process-t1 `

@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use std::net::{IpAddr, Ipv6Addr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 use std::process::Command;
 
 use sha2::{Digest, Sha256};
@@ -100,6 +100,33 @@ enum IpFamily {
     V4,
     V6,
 }
+
+/// A destination CIDR as a number, with `base` masked to the block's first
+/// address so comparisons are integer ordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DestinationBlock {
+    base: u128,
+    prefix: u8,
+}
+
+/// `::ffff:0:0/96`, the range a destination is rewritten out of and programmed
+/// as IPv4 in.
+const IPV4_MAPPED_BLOCK: DestinationBlock = DestinationBlock {
+    base: 0xffff_0000_0000,
+    prefix: 96,
+};
+
+/// Ceiling on the blocks one peer may expand into.
+///
+/// Subtracting an exclusion splits the surrounding block once per prefix level,
+/// so a `/32` taken out of a `/8` is 24 blocks and several exclusions add up.
+const MAX_BLOCKS_PER_PEER: usize = 256;
+
+/// Ceiling on the entries one egress policy may lower into.
+///
+/// An entry is a cross product of blocks and ports, and the wire contract
+/// bounds neither the peer list, the port list, nor the rule list.
+const MAX_EGRESS_ENTRIES: usize = 65_536;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuleAction {
@@ -845,10 +872,21 @@ impl NetworkIptablesManager {
         }
     }
 
-    fn lower_egress(policy: &ContainerPolicy, uses_directional_keys: bool) -> Vec<EgressEntry> {
+    /// Lower the egress policy for its refusals alone, discarding the rules.
+    pub(crate) fn validate_egress_lowering(
+        policy: &ContainerPolicy,
+        uses_directional_keys: bool,
+    ) -> Result<(), String> {
+        Self::lower_egress(policy, uses_directional_keys).map(|_| ())
+    }
+
+    fn lower_egress(
+        policy: &ContainerPolicy,
+        uses_directional_keys: bool,
+    ) -> Result<Vec<EgressEntry>, String> {
         match Self::stated_egress(policy, uses_directional_keys) {
             Some(egress) => Self::lower_directional_egress(egress),
-            None => Self::lower_legacy_hosts(policy),
+            None => Ok(Self::lower_legacy_hosts(policy)),
         }
     }
 
@@ -876,27 +914,24 @@ impl NetworkIptablesManager {
 
     // Deny rules precede allow rules for the same first-match-wins reason
     // as the legacy lowering.
-    fn lower_directional_egress(egress: &NetworkEgressPolicy) -> Vec<EgressEntry> {
+    fn lower_directional_egress(egress: &NetworkEgressPolicy) -> Result<Vec<EgressEntry>, String> {
         let mut entries = Vec::new();
-        let default_action = match egress.default {
-            NetworkAction::Allow => RuleAction::Allow,
-            NetworkAction::Deny => RuleAction::Deny,
-        };
+        let mut remaining = MAX_EGRESS_ENTRIES;
         for rule in &egress.deny {
-            Self::lower_rule(rule, RuleAction::Deny, default_action, &mut entries);
+            Self::lower_rule(rule, RuleAction::Deny, &mut entries, &mut remaining)?;
         }
         for rule in &egress.allow {
-            Self::lower_rule(rule, RuleAction::Allow, default_action, &mut entries);
+            Self::lower_rule(rule, RuleAction::Allow, &mut entries, &mut remaining)?;
         }
-        entries
+        Ok(entries)
     }
 
     fn lower_rule(
         rule: &NetworkRule,
         action: RuleAction,
-        default_action: RuleAction,
         entries: &mut Vec<EgressEntry>,
-    ) {
+        remaining: &mut usize,
+    ) -> Result<(), String> {
         let matches = Self::lower_port_selectors(&rule.ports);
         let wildcard_peers;
         let peers = if rule.to.is_empty() {
@@ -907,25 +942,223 @@ impl NetworkIptablesManager {
         };
 
         for peer in peers {
-            for matching in &matches {
-                // `except` excludes the range from the rule rather than reversing it.
-                // Agreeing verdicts push nothing.
-                if default_action != action {
-                    for excluded in &peer.except {
-                        entries.push(EgressEntry {
-                            destination: Self::cidr_destination(excluded),
-                            action: default_action,
-                            matching: *matching,
-                        });
+            for destination in Self::peer_destinations(peer)? {
+                for matching in &matches {
+                    if *remaining == 0 {
+                        return Err(format!(
+                            "network.egress expands into more than {MAX_EGRESS_ENTRIES} firewall \
+                             rules. A rule becomes every destination block it resolves to in \
+                             every port it names, so narrow the peers, the exclusions, or the \
+                             ports."
+                        ));
                     }
+                    *remaining -= 1;
+                    entries.push(EgressEntry {
+                        destination: destination.clone(),
+                        action,
+                        matching: *matching,
+                    });
                 }
-                entries.push(EgressEntry {
-                    destination: Self::cidr_destination(&peer.cidr),
-                    action,
-                    matching: *matching,
-                });
             }
         }
+        Ok(())
+    }
+
+    /// The destinations a peer covers once its exclusions are removed.
+    ///
+    /// An `iptables` rule matches one destination block and cannot carry an
+    /// exclusion, so the exclusion is subtracted from the peer instead.
+    fn peer_destinations(peer: &NetworkPeer) -> Result<Vec<String>, String> {
+        // Run before the peer resolves, so a malformed exclusion is refused
+        // even when its peer names no address.
+        for excluded in &peer.except {
+            let excluded_width = Self::family_width(match excluded.address {
+                IpAddr::V4(_) => IpFamily::V4,
+                IpAddr::V6(_) => IpFamily::V6,
+            });
+            if excluded.prefix_length > excluded_width {
+                return Err(format!(
+                    "network.egress peer '{}' carries the 'except' entry '{}/{}', whose prefix \
+                     is wider than its address family (max /{excluded_width}).",
+                    Self::cidr_destination(&peer.cidr),
+                    excluded.address,
+                    excluded.prefix_length
+                ));
+            }
+        }
+
+        // Passing an out-of-range prefix through unchanged keeps it on the path
+        // that reports a destination resolving to no address.
+        let Some((family, block)) = Self::resolve_block(&peer.cidr) else {
+            return Ok(vec![Self::cidr_destination(&peer.cidr)]);
+        };
+        let width = Self::family_width(family);
+
+        let mut exclusions = Vec::new();
+        for excluded in &peer.except {
+            // An out-of-range prefix is refused above, so every entry resolves.
+            let Some((excluded_family, excluded_block)) = Self::resolve_block(excluded) else {
+                continue;
+            };
+            if excluded_family != family {
+                return Err(format!(
+                    "network.egress peer '{}' carries the 'except' entry '{}/{}', which is \
+                     programmed for the other address family and so names no address the peer \
+                     covers. State an exclusion inside the peer's own range.",
+                    Self::cidr_destination(&peer.cidr),
+                    excluded.address,
+                    excluded.prefix_length
+                ));
+            }
+            exclusions.push(excluded_block);
+        }
+
+        let mut blocks = Vec::new();
+        let mut remaining = MAX_BLOCKS_PER_PEER;
+        Self::subtract_blocks(block, &exclusions, width, &mut blocks, &mut remaining)?;
+
+        // A generated block inside `::ffff:0:0/96` is programmed as IPv4, so
+        // subtraction must not hand back a piece that opens addresses an IPv6
+        // peer never named.
+        if family == IpFamily::V6 && !Self::block_contains(IPV4_MAPPED_BLOCK, block, width) {
+            if let Some(crossing) = blocks
+                .iter()
+                .find(|candidate| Self::block_contains(IPV4_MAPPED_BLOCK, **candidate, width))
+            {
+                return Err(format!(
+                    "network.egress peer '{}' cannot carry an 'except' that splits the \
+                     IPv4-mapped range: removing it leaves '{}', which is programmed as IPv4 \
+                     and would open addresses this IPv6 peer never named. State the IPv4 \
+                     range as its own peer instead.",
+                    Self::cidr_destination(&peer.cidr),
+                    Self::block_destination(*crossing, family)
+                ));
+            }
+        }
+
+        Ok(blocks
+            .into_iter()
+            .map(|block| Self::block_destination(block, family))
+            .collect())
+    }
+
+    /// `block` minus `exclusions`, as the smallest set of whole CIDR blocks.
+    fn subtract_blocks(
+        block: DestinationBlock,
+        exclusions: &[DestinationBlock],
+        width: u8,
+        out: &mut Vec<DestinationBlock>,
+        remaining: &mut usize,
+    ) -> Result<(), String> {
+        if exclusions
+            .iter()
+            .any(|excluded| Self::block_contains(*excluded, block, width))
+        {
+            return Ok(());
+        }
+
+        if !exclusions
+            .iter()
+            .any(|excluded| Self::blocks_intersect(*excluded, block, width))
+        {
+            if *remaining == 0 {
+                return Err(format!(
+                    "a network.egress peer expands into more than {MAX_BLOCKS_PER_PEER} address \
+                     blocks once its 'except' entries are removed. Narrow the peer's CIDR or use \
+                     fewer exclusions."
+                ));
+            }
+            *remaining -= 1;
+            out.push(block);
+            return Ok(());
+        }
+
+        // Part of the block survives, so split it and test each half. A single
+        // address never reaches here: it is contained or disjoint.
+        if block.prefix >= width {
+            return Ok(());
+        }
+
+        let child_prefix = block.prefix + 1;
+        let step = Self::host_mask(width - child_prefix) + 1;
+        for base in [block.base, block.base + step] {
+            Self::subtract_blocks(
+                DestinationBlock {
+                    base,
+                    prefix: child_prefix,
+                },
+                exclusions,
+                width,
+                out,
+                remaining,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn family_width(family: IpFamily) -> u8 {
+        match family {
+            IpFamily::V4 => 32,
+            IpFamily::V6 => 128,
+        }
+    }
+
+    /// Mask covering the low `bits` bits, saturating at the full width.
+    fn host_mask(bits: u8) -> u128 {
+        if bits >= 128 {
+            u128::MAX
+        } else {
+            (1u128 << bits) - 1
+        }
+    }
+
+    fn block_last(block: DestinationBlock, width: u8) -> u128 {
+        block.base | Self::host_mask(width - block.prefix)
+    }
+
+    fn block_contains(outer: DestinationBlock, inner: DestinationBlock, width: u8) -> bool {
+        outer.base <= inner.base && Self::block_last(inner, width) <= Self::block_last(outer, width)
+    }
+
+    fn blocks_intersect(left: DestinationBlock, right: DestinationBlock, width: u8) -> bool {
+        left.base <= Self::block_last(right, width) && right.base <= Self::block_last(left, width)
+    }
+
+    /// A CIDR as the family it is programmed in and the block it covers there.
+    fn resolve_block(cidr: &NetworkCidr) -> Option<(IpFamily, DestinationBlock)> {
+        let (family, raw, prefix) = match cidr.address {
+            IpAddr::V4(ip) => (IpFamily::V4, u128::from(u32::from(ip)), cidr.prefix_length),
+            IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
+                // Below /96 the block reaches outside the mapped range, so it
+                // stays IPv6 and keeps covering what it actually names.
+                Some(v4) if cidr.prefix_length >= 96 => (
+                    IpFamily::V4,
+                    u128::from(u32::from(v4)),
+                    cidr.prefix_length - 96,
+                ),
+                _ => (IpFamily::V6, u128::from(ip), cidr.prefix_length),
+            },
+        };
+
+        let width = Self::family_width(family);
+        if prefix > width {
+            return None;
+        }
+        Some((
+            family,
+            DestinationBlock {
+                base: raw & !Self::host_mask(width - prefix),
+                prefix,
+            },
+        ))
+    }
+
+    fn block_destination(block: DestinationBlock, family: IpFamily) -> String {
+        let address = match family {
+            IpFamily::V4 => IpAddr::V4(Ipv4Addr::from(block.base as u32)),
+            IpFamily::V6 => IpAddr::V6(Ipv6Addr::from(block.base)),
+        };
+        format!("{}/{}", address, block.prefix)
     }
 
     // A v4 chain and a v6 chain are programmed separately.  Neither wildcard
@@ -1010,7 +1243,7 @@ impl NetworkIptablesManager {
         let mut args = FirewallRuleArgs::default();
         let mut unresolved_denies: Vec<&str> = Vec::new();
         let mut catch_all_allows: Vec<&str> = Vec::new();
-        let entries = Self::lower_egress(policy, uses_directional_keys);
+        let entries = Self::lower_egress(policy, uses_directional_keys)?;
         for entry in &entries {
             let host = entry.destination.as_str();
             let action = entry.action;

@@ -152,6 +152,26 @@ fn new_connection_action<'a>(
         })
 }
 
+/// The verdict the whole chain gives a packet, including the closing default a
+/// destination no rule names falls through to.
+fn chain_verdict(
+    rules: &[Vec<String>],
+    default: NetworkAction,
+    destination: std::net::IpAddr,
+    protocol: &str,
+    port: Option<u16>,
+) -> String {
+    match matching_emitted_rule(rules, destination, protocol, port)
+        .and_then(|rule| argument_after(rule, "-j"))
+    {
+        Some(verdict) => verdict.to_string(),
+        None => match default {
+            NetworkAction::Allow => "ACCEPT".to_string(),
+            NetworkAction::Deny => "DROP".to_string(),
+        },
+    }
+}
+
 #[test]
 fn explicit_deny_precedes_an_overlapping_allow_in_both_families() {
     let ipv4 = "198.51.100.0/24";
@@ -179,7 +199,7 @@ fn explicit_deny_precedes_an_overlapping_allow_in_both_families() {
 }
 
 #[test]
-fn an_allow_peer_exclusion_is_denied_before_its_parent_cidr_is_allowed() {
+fn an_allow_peer_exclusion_is_not_accepted_alongside_its_parent() {
     let parent = "10.0.0.0/8";
     let exclusion = "10.10.0.0/16";
     let policy = directional_policy(
@@ -188,16 +208,29 @@ fn an_allow_peer_exclusion_is_denied_before_its_parent_cidr_is_allowed() {
         Vec::new(),
     );
     let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
-    let exclusion_position = rule_position(&rules.ipv4, exclusion, "DROP");
-    let parent_position = rule_position(&rules.ipv4, parent, "ACCEPT");
 
-    assert!(
-        matches!(
-            (exclusion_position, parent_position),
-            (Some(exclusion_position), Some(parent_position))
-                if exclusion_position < parent_position
+    assert_eq!(
+        chain_verdict(
+            &rules.ipv4,
+            NetworkAction::Deny,
+            packet_address("10.10.1.1"),
+            "tcp",
+            Some(443)
         ),
-        "input=default deny, allow.to=[{{cidr:{parent}, except:[{exclusion}]}}]; expected exclusion DROP before parent ACCEPT; positions={exclusion_position:?}/{parent_position:?}; output={:?}",
+        "DROP",
+        "input=default deny, allow.to=[{{cidr:{parent}, except:[{exclusion}]}}], packet=10.10.1.1/tcp/443; the exclusion is outside the allow, so the chain's closing deny covers it; output={:?}",
+        rules.ipv4
+    );
+    assert_eq!(
+        chain_verdict(
+            &rules.ipv4,
+            NetworkAction::Deny,
+            packet_address("10.20.1.1"),
+            "tcp",
+            Some(443)
+        ),
+        "ACCEPT",
+        "input=default deny, allow.to=[{{cidr:{parent}, except:[{exclusion}]}}], packet=10.20.1.1/tcp/443; the rest of the parent is still allowed; output={:?}",
         rules.ipv4
     );
 }
@@ -214,8 +247,9 @@ fn a_deny_peer_exclusion_remains_outside_the_deny() {
     let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
 
     assert_eq!(
-        new_connection_action(
+        chain_verdict(
             &rules.ipv4,
+            NetworkAction::Allow,
             packet_address("10.10.1.1"),
             "tcp",
             Some(443)
@@ -225,8 +259,9 @@ fn a_deny_peer_exclusion_remains_outside_the_deny() {
         rules.ipv4
     );
     assert_eq!(
-        new_connection_action(
+        chain_verdict(
             &rules.ipv4,
+            NetworkAction::Allow,
             packet_address("10.20.1.1"),
             "tcp",
             Some(443)
@@ -249,7 +284,13 @@ fn an_exclusion_inside_an_allow_rule_under_an_allow_default_stays_reachable() {
     let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
 
     assert_eq!(
-        new_connection_action(&rules.ipv4, packet_address("10.10.1.1"), "tcp", Some(443)),
+        chain_verdict(
+            &rules.ipv4,
+            NetworkAction::Allow,
+            packet_address("10.10.1.1"),
+            "tcp",
+            Some(443)
+        ),
         "ACCEPT",
         "input=default allow, allow.to=[{{cidr:{parent}, except:[{exclusion}]}}], packet=10.10.1.1/tcp/443; an exclusion narrows its own rule and never reverses the direction default; output={:?}",
         rules.ipv4
@@ -274,7 +315,13 @@ fn an_exclusion_inside_a_deny_rule_under_a_deny_default_stays_blocked() {
     let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
 
     assert_eq!(
-        new_connection_action(&rules.ipv4, packet_address("10.10.1.1"), "tcp", Some(443)),
+        chain_verdict(
+            &rules.ipv4,
+            NetworkAction::Deny,
+            packet_address("10.10.1.1"),
+            "tcp",
+            Some(443)
+        ),
         "DROP",
         "input=default deny, deny.to=[{{cidr:{parent}, except:[{exclusion}]}}], packet=10.10.1.1/tcp/443; an exclusion narrows its own rule and never reverses the direction default; output={:?}",
         rules.ipv4
@@ -836,6 +883,197 @@ fn a_parsed_v08_request_without_a_network_section_drops_the_dns_exemption() {
         "input=0.8 with no network section; expected no chain at all, so no rule can open DNS"
     );
 }
+#[test]
+fn an_exclusion_does_not_shadow_a_later_rule_that_names_it() {
+    let policy = directional_policy(
+        NetworkAction::Allow,
+        Vec::new(),
+        vec![
+            rule(vec![peer("10.0.0.0/8", &["10.10.0.0/16"])], Vec::new()),
+            rule(vec![peer("10.10.1.0/24", &[])], Vec::new()),
+        ],
+    );
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+
+    assert_eq!(
+        chain_verdict(
+            &rules.ipv4,
+            NetworkAction::Allow,
+            packet_address("10.10.1.1"),
+            "tcp",
+            Some(443)
+        ),
+        "DROP",
+        "input=default allow, deny.to=[{{cidr:10.0.0.0/8, except:[10.10.0.0/16]}}] then deny.to=[{{cidr:10.10.1.0/24}}], packet=10.10.1.1/tcp/443; the second rule denies this address outright, so the first rule's exclusion must not accept it first; output={:?}",
+        rules.ipv4
+    );
+    assert_eq!(
+        chain_verdict(
+            &rules.ipv4,
+            NetworkAction::Allow,
+            packet_address("10.10.2.1"),
+            "tcp",
+            Some(443)
+        ),
+        "ACCEPT",
+        "input=as above, packet=10.10.2.1/tcp/443; this address is excluded from the deny and named by no later rule, so the default still reaches it; output={:?}",
+        rules.ipv4
+    );
+}
+
+#[test]
+fn the_emitted_blocks_cover_the_peer_without_its_exclusion() {
+    let policy = directional_policy(
+        NetworkAction::Deny,
+        vec![rule(
+            vec![peer("10.0.0.0/8", &["10.10.0.0/16"])],
+            Vec::new(),
+        )],
+        Vec::new(),
+    );
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+
+    for reachable in ["10.0.0.1", "10.9.255.255", "10.11.0.0", "10.255.255.255"] {
+        assert_eq!(
+            chain_verdict(
+                &rules.ipv4,
+                NetworkAction::Deny,
+                packet_address(reachable),
+                "tcp",
+                Some(443)
+            ),
+            "ACCEPT",
+            "input=allow.to=[{{cidr:10.0.0.0/8, except:[10.10.0.0/16]}}], packet={reachable}; inside the peer and outside the exclusion; output={:?}",
+            rules.ipv4
+        );
+    }
+
+    for excluded in ["10.10.0.0", "10.10.255.255"] {
+        assert_eq!(
+            chain_verdict(
+                &rules.ipv4,
+                NetworkAction::Deny,
+                packet_address(excluded),
+                "tcp",
+                Some(443)
+            ),
+            "DROP",
+            "input=allow.to=[{{cidr:10.0.0.0/8, except:[10.10.0.0/16]}}], packet={excluded}; inside the exclusion; output={:?}",
+            rules.ipv4
+        );
+    }
+}
+
+#[test]
+fn an_ipv6_exclusion_is_subtracted_within_its_own_family() {
+    let policy = directional_policy(
+        NetworkAction::Deny,
+        vec![rule(
+            vec![peer("2001:db8::/32", &["2001:db8:1::/48"])],
+            Vec::new(),
+        )],
+        Vec::new(),
+    );
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+
+    assert_eq!(
+        chain_verdict(
+            &rules.ipv6,
+            NetworkAction::Deny,
+            packet_address("2001:db8:2::1"),
+            "tcp",
+            Some(443)
+        ),
+        "ACCEPT",
+        "input=allow.to=[{{cidr:2001:db8::/32, except:[2001:db8:1::/48]}}], packet=2001:db8:2::1; output={:?}",
+        rules.ipv6
+    );
+    assert_eq!(
+        chain_verdict(
+            &rules.ipv6,
+            NetworkAction::Deny,
+            packet_address("2001:db8:1::1"),
+            "tcp",
+            Some(443)
+        ),
+        "DROP",
+        "input=allow.to=[{{cidr:2001:db8::/32, except:[2001:db8:1::/48]}}], packet=2001:db8:1::1; output={:?}",
+        rules.ipv6
+    );
+    assert!(
+        rules.ipv4.is_empty(),
+        "an IPv6 peer must program no IPv4 rule; output={:?}",
+        rules.ipv4
+    );
+}
+
+#[test]
+fn a_peer_that_expands_past_the_block_ceiling_is_refused() {
+    // Each /32 removed from a /8 splits the surrounding space 24 times, so a
+    // handful of scattered exclusions outgrows the per-peer ceiling.
+    let exclusions: Vec<String> = (0..32).map(|n| format!("10.{n}.0.1/32")).collect();
+    let borrowed: Vec<&str> = exclusions.iter().map(String::as_str).collect();
+    let policy = directional_policy(
+        NetworkAction::Deny,
+        vec![rule(vec![peer("10.0.0.0/8", &borrowed)], Vec::new())],
+        Vec::new(),
+    );
+    let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+
+    let error =
+        NetworkIptablesManager::build_policy_rules_logged("MXC-test", &policy, true, &mut logger)
+            .expect_err(
+                "a peer expanding past the ceiling must be refused rather than partly installed",
+            );
+
+    assert!(
+        error.contains("except"),
+        "expected the refusal to name the exclusions that caused the expansion, got: {error}"
+    );
+}
+
+#[test]
+fn an_ipv4_mapped_peer_still_reaches_the_ipv4_chain_after_subtraction() {
+    let policy = directional_policy(
+        NetworkAction::Deny,
+        vec![rule(
+            vec![peer("::ffff:10.0.0.0/104", &["::ffff:10.10.0.0/112"])],
+            Vec::new(),
+        )],
+        Vec::new(),
+    );
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+
+    assert_eq!(
+        chain_verdict(
+            &rules.ipv4,
+            NetworkAction::Deny,
+            packet_address("10.11.0.1"),
+            "tcp",
+            Some(443)
+        ),
+        "ACCEPT",
+        "input=allow.to=[{{cidr:::ffff:10.0.0.0/104, except:[::ffff:10.10.0.0/112]}}], packet=10.11.0.1; a mapped peer is programmed on the IPv4 chain; output={:?}",
+        rules.ipv4
+    );
+    assert_eq!(
+        chain_verdict(
+            &rules.ipv4,
+            NetworkAction::Deny,
+            packet_address("10.10.0.1"),
+            "tcp",
+            Some(443)
+        ),
+        "DROP",
+        "input=as above, packet=10.10.0.1; inside the exclusion; output={:?}",
+        rules.ipv4
+    );
+    assert!(
+        rules.ipv6.is_empty(),
+        "a mapped peer must program no IPv6 rule; output={:?}",
+        rules.ipv6
+    );
+}
 
 fn unresolvable_peer() -> NetworkPeer {
     // A prefix past the family's width resolves to no destination, and
@@ -897,5 +1135,217 @@ fn an_unresolvable_directional_deny_is_tolerated_under_a_deny_egress_default() {
     )
     .expect(
         "input=egress.default=deny with an unresolvable deny, legacy default_network_policy=allow; expected no refusal, since the closing DROP already covers what the deny could not program",
+    );
+}
+
+fn lowering_error(policy: &ContainerPolicy) -> String {
+    let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+    NetworkIptablesManager::build_policy_rules_logged("MXC-test", policy, true, &mut logger)
+        .expect_err("expected the policy to be refused")
+}
+
+fn allow_peer_policy(peers: Vec<NetworkPeer>) -> ContainerPolicy {
+    directional_policy(
+        NetworkAction::Deny,
+        vec![rule(peers, Vec::new())],
+        Vec::new(),
+    )
+}
+
+#[test]
+fn an_ipv6_peer_whose_exclusion_names_the_mapped_range_is_refused() {
+    let policy = allow_peer_policy(vec![peer("::/0", &["::ffff:10.0.0.0/104"])]);
+    let error = lowering_error(&policy);
+
+    assert!(
+        error.contains("other address family"),
+        "input=allow.to=[{{cidr:::/0, except:[::ffff:10.0.0.0/104]}}]; the exclusion is programmed as IPv4 while the peer is programmed as IPv6, so it narrows nothing and must be refused rather than ignored; got: {error}"
+    );
+}
+
+#[test]
+fn an_ipv4_peer_subtracts_an_exclusion_written_in_mapped_notation() {
+    let policy = allow_peer_policy(vec![peer("10.0.0.0/8", &["::ffff:10.10.0.0/112"])]);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+
+    assert_eq!(
+        chain_verdict(
+            &rules.ipv4,
+            NetworkAction::Deny,
+            packet_address("10.10.1.1"),
+            "tcp",
+            Some(443)
+        ),
+        "DROP",
+        "input=allow.to=[{{cidr:10.0.0.0/8, except:[::ffff:10.10.0.0/112]}}], packet=10.10.1.1; the exclusion names 10.10.0.0/16 in mapped notation, so it must narrow the peer rather than be discarded; output={:?}",
+        rules.ipv4
+    );
+    assert_eq!(
+        chain_verdict(
+            &rules.ipv4,
+            NetworkAction::Deny,
+            packet_address("10.11.1.1"),
+            "tcp",
+            Some(443)
+        ),
+        "ACCEPT",
+        "input=as above, packet=10.11.1.1; the rest of the peer is still allowed; output={:?}",
+        rules.ipv4
+    );
+}
+
+#[test]
+fn a_mapped_peer_subtracts_an_exclusion_written_in_plain_ipv4() {
+    let policy = allow_peer_policy(vec![peer("::ffff:10.0.0.0/104", &["10.10.0.0/16"])]);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+
+    assert_eq!(
+        chain_verdict(
+            &rules.ipv4,
+            NetworkAction::Deny,
+            packet_address("10.10.1.1"),
+            "tcp",
+            Some(443)
+        ),
+        "DROP",
+        "input=allow.to=[{{cidr:::ffff:10.0.0.0/104, except:[10.10.0.0/16]}}], packet=10.10.1.1; the peer is programmed as IPv4, so a plain IPv4 exclusion must narrow it; output={:?}",
+        rules.ipv4
+    );
+    assert_eq!(
+        chain_verdict(
+            &rules.ipv4,
+            NetworkAction::Deny,
+            packet_address("10.11.1.1"),
+            "tcp",
+            Some(443)
+        ),
+        "ACCEPT",
+        "input=as above, packet=10.11.1.1; the rest of the peer is still allowed; output={:?}",
+        rules.ipv4
+    );
+}
+
+#[test]
+fn an_exclusion_in_the_other_family_is_refused_rather_than_dropped() {
+    let policy = allow_peer_policy(vec![peer("10.0.0.0/8", &["2001:db8::/32"])]);
+    let error = lowering_error(&policy);
+
+    assert!(
+        error.contains("other address family"),
+        "input=allow.to=[{{cidr:10.0.0.0/8, except:[2001:db8::/32]}}]; discarding the exclusion would allow the whole parent under a deny default, and the parser refuses this shape too; got: {error}"
+    );
+}
+
+#[test]
+fn an_ipv4_exclusion_on_an_ipv6_peer_is_refused_in_the_same_way() {
+    let policy = allow_peer_policy(vec![peer("2001:db8::/32", &["10.10.0.0/16"])]);
+    let error = lowering_error(&policy);
+
+    assert!(
+        error.contains("other address family"),
+        "input=allow.to=[{{cidr:2001:db8::/32, except:[10.10.0.0/16]}}]; the refusal must not depend on which family the peer is in; got: {error}"
+    );
+}
+
+#[test]
+fn an_ipv6_peer_whose_exclusion_neighbours_the_mapped_range_is_refused() {
+    // The exclusion is outside the mapped range, but removing it still splits
+    // `::/0` down to a `::ffff:0:0/96` sibling, which renders as `0.0.0.0/0`.
+    let policy = allow_peer_policy(vec![peer("::/0", &["::fffe:0:0/96"])]);
+    let error = lowering_error(&policy);
+
+    assert!(
+        error.contains("IPv4-mapped"),
+        "input=allow.to=[{{cidr:::/0, except:[::fffe:0:0/96]}}]; an exclusion beside the mapped range still yields the whole mapped block, which is programmed as 0.0.0.0/0; got: {error}"
+    );
+}
+
+#[test]
+fn an_ipv6_peer_far_from_the_mapped_range_still_subtracts() {
+    let policy = allow_peer_policy(vec![peer("2001:db8::/32", &["2001:db8:1::/48"])]);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+
+    assert!(
+        rules.ipv4.is_empty(),
+        "input=allow.to=[{{cidr:2001:db8::/32, except:[2001:db8:1::/48]}}]; no block is inside the mapped range, so nothing may reach the IPv4 chain; output={:?}",
+        rules.ipv4
+    );
+    assert_eq!(
+        chain_verdict(
+            &rules.ipv6,
+            NetworkAction::Deny,
+            packet_address("2001:db8:2::1"),
+            "tcp",
+            Some(443)
+        ),
+        "ACCEPT",
+        "input=as above, packet=2001:db8:2::1; the guard must not refuse an ordinary IPv6 subtraction; output={:?}",
+        rules.ipv6
+    );
+}
+
+#[test]
+fn an_ipv6_catch_all_without_an_exclusion_is_untouched_by_the_guard() {
+    let policy = allow_peer_policy(vec![peer("::/0", &[])]);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+
+    assert!(
+        rules.ipv4.is_empty(),
+        "input=allow.to=[{{cidr:::/0}}]; a wildcard with no exclusion emits one IPv6 block and must not reach the IPv4 chain; output={:?}",
+        rules.ipv4
+    );
+    assert_eq!(
+        chain_verdict(
+            &rules.ipv6,
+            NetworkAction::Deny,
+            packet_address("2001:db8::1"),
+            "tcp",
+            Some(443)
+        ),
+        "ACCEPT",
+        "input=as above; the guard must not refuse a bare IPv6 wildcard; output={:?}",
+        rules.ipv6
+    );
+}
+
+#[test]
+fn an_exclusion_with_a_prefix_past_its_family_is_refused() {
+    let policy = allow_peer_policy(vec![NetworkPeer {
+        cidr: NetworkCidr {
+            address: packet_address("10.0.0.0"),
+            prefix_length: 8,
+        },
+        except: vec![NetworkCidr {
+            address: packet_address("10.10.0.0"),
+            prefix_length: 40,
+        }],
+    }]);
+    let error = lowering_error(&policy);
+
+    assert!(
+        error.contains("wider than its address family"),
+        "input=allow.to=[{{cidr:10.0.0.0/8, except:[10.10.0.0/40]}}]; discarding the malformed exclusion would accept the whole /8 it was written to narrow; got: {error}"
+    );
+}
+
+#[test]
+fn an_other_family_exclusion_is_validated_before_it_is_filtered_out() {
+    // The peer's family drops this entry, so an unvalidated prefix would never
+    // be seen at all.
+    let policy = allow_peer_policy(vec![NetworkPeer {
+        cidr: NetworkCidr {
+            address: packet_address("10.0.0.0"),
+            prefix_length: 8,
+        },
+        except: vec![NetworkCidr {
+            address: packet_address("2001:db8::"),
+            prefix_length: 200,
+        }],
+    }]);
+    let error = lowering_error(&policy);
+
+    assert!(
+        error.contains("wider than its address family"),
+        "input=allow.to=[{{cidr:10.0.0.0/8, except:[2001:db8::/200]}}]; got: {error}"
     );
 }

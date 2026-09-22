@@ -15,7 +15,7 @@
 const { readFileSync, existsSync, readdirSync, rmSync, statSync } = require("fs");
 const { join } = require("path");
 const { execFileSync } = require("child_process");
-const { scanBuildRs } = require("./versioning/lib/build-rs-inputs");
+const { scanBuildRs } = require("./lib/build-rs-inputs");
 
 const repoRoot = join(__dirname, "..");
 const generated = join(
