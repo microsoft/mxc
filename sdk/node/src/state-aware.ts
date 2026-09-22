@@ -53,7 +53,9 @@ function unsupportedStateAwareOption(
 ): string | undefined {
   if (options.debug === true) return 'debug';
   if (options.allowTestingFeatures === true) return 'allowTestingFeatures';
+  if (options.inheritDefaultEnv !== undefined) return 'inheritDefaultEnv';
   if (options.executablePath !== undefined) return 'executablePath';
+  if (options.skipPlatformCheck === true) return 'skipPlatformCheck';
   if (options.ptyOptions !== undefined) return 'ptyOptions';
   if (!allowDryRun && options.dryRun === true) return 'dryRun';
   if (options.logDir !== undefined) return 'logDir';
@@ -108,7 +110,10 @@ function scheduleAbortedProvisionCleanup(
       dryRun: false,
       experimental,
     }).catch((error: unknown) => {
-      logBackgroundFailure('aborted provision cleanup', error);
+      logBackgroundFailure(
+        `aborted provision cleanup for sandbox '${sandboxId}'`,
+        error,
+      );
     });
   } catch (error) {
     logBackgroundFailure('preparing aborted provision cleanup', error);
@@ -160,7 +165,10 @@ async function runStateAwareEnvelopeRequest(
       }
       finish(() => resolve(responseJson));
     }, (error) => {
-      if (aborted) return;
+      if (aborted) {
+        logBackgroundFailure(`${apiName} after cancellation`, error);
+        return;
+      }
       finish(() => reject(error));
     });
   });
@@ -346,11 +354,21 @@ export async function execInSandboxAsync<C extends StateAwareContainmentBackend>
 ): Promise<ExecResult> {
   const envelope = buildExecEnvelope(sandboxId, config);
   if (options.dryRun === true) {
+    const responseJson = await runStateAwareEnvelopeRequest(
+      'execInSandboxAsync',
+      envelope,
+      options,
+    );
+    parseNonExecResponse<unknown>(responseJson);
     return {
-      stdout: await runStateAwareEnvelopeRequest('execInSandboxAsync', envelope, options),
+      stdout: responseJson,
       stderr: '',
       exitCode: 0,
     };
+  }
+
+  if (options.signal?.aborted) {
+    throw abortReason(options.signal);
   }
 
   const proc = spawnStateAwareExecProcess(

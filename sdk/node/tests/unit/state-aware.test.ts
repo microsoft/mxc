@@ -75,7 +75,14 @@ class FakeStateAwareExecBinding implements NativeLifecycleDriver {
     private readonly runningPolls = 0,
     private readonly waitResult = { exitCode: 0, timedOut: false },
     private readonly warningValues: readonly string[] = [],
+    endStreams = true,
   ) {
+    if (endStreams) {
+      this.completeStreams(stdout, stderr);
+    }
+  }
+
+  completeStreams(stdout = '', stderr = ''): void {
     this.standardOutput.end(stdout);
     this.standardError.end(stderr);
   }
@@ -714,6 +721,45 @@ describe('execInSandboxAsync', { skip: platformSkip }, () => {
     assert.strictEqual(requestEnvelope(request()).phase, 'exec');
   });
 
+  it('throws a typed MxcError when dry-run validation returns an error envelope', async () => {
+    installStateAwareReply(
+      '{"error":{"code":"policy_validation","message":"invalid exec policy"}}',
+    );
+    const id = 'iso:abc' as SandboxId<'isolation_session'>;
+
+    await assert.rejects(
+      () => execInSandboxAsync(
+        id,
+        { process: { commandLine: 'cat' } },
+        { dryRun: true },
+      ),
+      (error: unknown) =>
+        error instanceof MxcError &&
+        error.code === 'policy_validation',
+    );
+  });
+
+  it('does not dispatch when AbortSignal is already aborted', async () => {
+    const ac = new AbortController();
+    ac.abort(new Error('cancelled before dispatch'));
+    let dispatchCount = 0;
+    _setStateAwareBindingSandboxProcessFactory(() => {
+      dispatchCount += 1;
+      throw new Error('must not dispatch');
+    });
+    const id = 'iso:abc' as SandboxId<'isolation_session'>;
+
+    await assert.rejects(
+      () => execInSandboxAsync(
+        id,
+        { process: { commandLine: 'echo hi' } },
+        { signal: ac.signal },
+      ),
+      /cancelled before dispatch/,
+    );
+    assert.strictEqual(dispatchCount, 0);
+  });
+
   it('kills and disposes the live process when AbortSignal fires', async () => {
     const ac = new AbortController();
     const exec = installStateAwareExecBinding(
@@ -731,14 +777,52 @@ describe('execInSandboxAsync', { skip: platformSkip }, () => {
     assert.strictEqual(exec.binding().freed, true);
   });
 
+  it('cancels while stdout and stderr are still active', async () => {
+    const ac = new AbortController();
+    const exec = installStateAwareExecBinding(
+      () => new FakeStateAwareExecBinding(
+        20,
+        '',
+        '',
+        Number.MAX_SAFE_INTEGER,
+        { exitCode: 0, timedOut: false },
+        [],
+        false,
+      ),
+    );
+    const id = 'iso:abc' as SandboxId<'isolation_session'>;
+    const promise = execInSandboxAsync(
+      id,
+      { process: { commandLine: 'echo hi' } },
+      { signal: ac.signal },
+    );
+
+    ac.abort();
+    await assert.rejects(promise);
+    assert.strictEqual(exec.binding().standardOutput.destroyed, true);
+    assert.strictEqual(exec.binding().standardError.destroyed, true);
+    assert.strictEqual(exec.binding().killed, true);
+    assert.strictEqual(exec.binding().freed, true);
+  });
+
   it('rejects unsupported options', async () => {
     const id = 'iso:abc' as SandboxId<'isolation_session'>;
-    await assert.rejects(
-      () => execInSandboxAsync(id, { process: { commandLine: 'echo hi' } }, {
-        executablePath: 'wxc-exec.exe',
-      }),
-      (err: unknown) => err instanceof MxcError && err.message.includes("does not support option 'executablePath'"),
-    );
+    for (const [option, value] of [
+      ['executablePath', 'wxc-exec.exe'],
+      ['skipPlatformCheck', true],
+      ['inheritDefaultEnv', true],
+    ] as const) {
+      await assert.rejects(
+        () => execInSandboxAsync(
+          id,
+          { process: { commandLine: 'echo hi' } },
+          { [option]: value },
+        ),
+        (err: unknown) =>
+          err instanceof MxcError &&
+          err.message.includes(`does not support option '${option}'`),
+      );
+    }
   });
 });
 

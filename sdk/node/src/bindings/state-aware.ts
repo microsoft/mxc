@@ -14,7 +14,7 @@ import {
   type AbiErrorDetail,
 } from './native-error.js';
 
-interface AbiStateAwareResult {
+export interface StateAwareNativeResult {
   status: number;
   responseJsonUtf8: unknown | null;
   error: AbiErrorDetail;
@@ -36,31 +36,50 @@ type StateAwareFunction = (
   request: string,
   dryRun: number,
   experimental: number,
-  result: AbiStateAwareResult,
+  result: StateAwareNativeResult,
 ) => number;
-type FreeFunction = (result: AbiStateAwareResult) => void;
+type FreeFunction = (result: StateAwareNativeResult) => void;
 
-function bindStateAwareFunctions(native: ReturnType<typeof loadMxcFfi>) {
+type StateAwareCompletion = (error: Error | null, status: number) => void;
+
+export interface StateAwareNativeFacade {
+  run(
+    request: string,
+    dryRun: number,
+    experimental: number,
+    result: StateAwareNativeResult,
+    completion: StateAwareCompletion,
+  ): void;
+  free(result: StateAwareNativeResult): void;
+}
+
+function bindStateAwareNativeFacade(
+  native: ReturnType<typeof loadMxcFfi>,
+): StateAwareNativeFacade {
+  const run = bindNativeFunction<StateAwareFunction>(native.handle, {
+    symbol: 'mxc_state_aware',
+    result: 'int32_t',
+    parameters: [
+      'const char *',
+      'int32_t',
+      'int32_t',
+      koffi.out(koffi.pointer(AbiStateAwareResultType)),
+    ],
+  });
+  const free = bindNativeFunction<FreeFunction>(native.handle, {
+    symbol: 'mxc_state_aware_result_free',
+    result: 'void',
+    parameters: [koffi.pointer(AbiStateAwareResultType)],
+  });
   return {
-    run: bindNativeFunction<StateAwareFunction>(native.handle, {
-      symbol: 'mxc_state_aware',
-      result: 'int32_t',
-      parameters: [
-        'const char *',
-        'int32_t',
-        'int32_t',
-        koffi.out(koffi.pointer(AbiStateAwareResultType)),
-      ],
-    }),
-    free: bindNativeFunction<FreeFunction>(native.handle, {
-      symbol: 'mxc_state_aware_result_free',
-      result: 'void',
-      parameters: [koffi.pointer(AbiStateAwareResultType)],
-    }),
+    run(request, dryRun, experimental, result, completion) {
+      run.async(request, dryRun, experimental, result, completion);
+    },
+    free,
   };
 }
 
-function createStateAwareResult(): AbiStateAwareResult {
+function createStateAwareResult(): StateAwareNativeResult {
   return {
     status: 0,
     responseJsonUtf8: null,
@@ -75,7 +94,7 @@ function createStateAwareResult(): AbiStateAwareResult {
 
 function decodeStateAwareResult(
   nativeStatus: number,
-  result: AbiStateAwareResult,
+  result: StateAwareNativeResult,
 ): string {
   if (nativeStatus !== 0 || result.status !== 0) {
     throw nativeStatusError(
@@ -87,35 +106,44 @@ function decodeStateAwareResult(
   return decodeString(result.responseJsonUtf8) ?? '{}';
 }
 
+export async function runBindingStateAwareRequestWithNative(
+  request: BindingStateAwareRequest,
+  native: StateAwareNativeFacade,
+): Promise<string> {
+  const result = createStateAwareResult();
+  let ownsResult = false;
+  try {
+    const nativeStatus = await new Promise<number>((resolve, reject) => {
+      native.run(
+        request.requestJson,
+        request.dryRun ? 1 : 0,
+        request.experimental ? 1 : 0,
+        result,
+        (error, status) => {
+          if (error !== null) {
+            reject(error);
+            return;
+          }
+          ownsResult = true;
+          resolve(status);
+        },
+      );
+    });
+    return decodeStateAwareResult(nativeStatus, result);
+  } finally {
+    if (ownsResult) native.free(result);
+  }
+}
+
 async function runBindingStateAwareRequestAsyncNative(
   request: BindingStateAwareRequest,
 ): Promise<string> {
   const native = loadMxcFfi();
   try {
-    const { run, free } = bindStateAwareFunctions(native);
-    const result = createStateAwareResult();
-    let ownsResult = false;
-    try {
-      const nativeStatus = await new Promise<number>((resolve, reject) => {
-        run.async(
-          request.requestJson,
-          request.dryRun ? 1 : 0,
-          request.experimental ? 1 : 0,
-          result,
-          (error, status) => {
-            if (error !== null) {
-              reject(error);
-              return;
-            }
-            ownsResult = true;
-            resolve(status);
-          },
-        );
-      });
-      return decodeStateAwareResult(nativeStatus, result);
-    } finally {
-      if (ownsResult) free(result);
-    }
+    return await runBindingStateAwareRequestWithNative(
+      request,
+      bindStateAwareNativeFacade(native),
+    );
   } finally {
     native.handle.unload();
   }

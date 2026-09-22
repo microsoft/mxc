@@ -465,6 +465,25 @@ export function spawnBindingSandboxProcess(
   return createSandboxProcess(driver, request.policy.timeoutMs);
 }
 
+/** Internal state-aware constructor with injectable native dependencies. */
+export function createStateAwareStreamingDriver(
+  requestJson: string,
+  experimental: boolean,
+  native: StreamingNativeFacade,
+  factory: NativeStreamFactory,
+): NativeLifecycleDriver {
+  return createStreamingDriverFromSpawn(
+    native,
+    factory,
+    (outHandle, error) => native.stateAwareExec(
+      requestJson,
+      experimental ? 1 : 0,
+      outHandle,
+      error,
+    ),
+  );
+}
+
 function createSandboxProcess(
   driver: NativeLifecycleDriver,
   timeoutMs?: number,
@@ -503,15 +522,11 @@ export function spawnStateAwareBindingSandboxProcess(
 
   ensureSupportedNodeVersion();
   const native = getNative();
-  const driver = createStreamingDriverFromSpawn(
+  const driver = createStateAwareStreamingDriver(
+    requestJson,
+    experimental,
     native,
     nodeStreamFactory,
-    (outHandle, error) => native.stateAwareExec(
-      requestJson,
-      experimental ? 1 : 0,
-      outHandle,
-      error,
-    ),
   );
   return createSandboxProcess(driver, timeoutMs);
 }
