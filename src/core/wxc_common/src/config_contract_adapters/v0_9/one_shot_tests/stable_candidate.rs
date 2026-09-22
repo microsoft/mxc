@@ -347,7 +347,10 @@ fn minimal_request_maps_expected_wire_fields() {
 
     assert!(wire.schema.is_none());
     assert!(wire.comment.is_none());
-    assert_eq!(wire.version, Some("0.9.0-alpha".to_string()));
+    assert_eq!(
+        wire.source_contract,
+        mxc_config_contract::ContractVersion::V0_9_0Alpha
+    );
     assert!(wire.phase.is_none());
     assert!(wire.sandbox_id.is_none());
     assert!(wire.container_id.is_none());
@@ -368,7 +371,8 @@ fn minimal_request_maps_expected_wire_fields() {
     assert!(wire.ui.is_none());
     assert!(wire.seatbelt.is_none());
     assert!(wire.telemetry.is_none());
-    assert!(wire.experimental.is_none());
+    assert!(wire.test_feature.is_none());
+    assert!(wire.windows_sandbox.is_none());
 }
 
 #[test]
@@ -379,7 +383,10 @@ fn process_container_request_maps_expected_wire_fields() {
 
     assert!(wire.schema.is_none());
     assert!(wire.comment.is_none());
-    assert_eq!(wire.version, Some("0.9.0-alpha".to_string()));
+    assert_eq!(
+        wire.source_contract,
+        mxc_config_contract::ContractVersion::V0_9_0Alpha
+    );
     assert!(wire.phase.is_none());
     assert!(wire.sandbox_id.is_none());
     assert_eq!(wire.container_id.as_deref(), Some("container-id"));
@@ -478,7 +485,10 @@ fn lxc_request_maps_expected_wire_fields() {
 
     assert!(wire.schema.is_none());
     assert!(wire.comment.is_none());
-    assert_eq!(wire.version, Some("0.9.0-alpha".to_string()));
+    assert_eq!(
+        wire.source_contract,
+        mxc_config_contract::ContractVersion::V0_9_0Alpha
+    );
     assert!(wire.phase.is_none());
     assert!(wire.sandbox_id.is_none());
     assert_eq!(wire.container_id.as_deref(), Some("container-id"));
@@ -548,7 +558,10 @@ fn seatbelt_request_maps_expected_wire_fields() {
 
     assert!(wire.schema.is_none());
     assert!(wire.comment.is_none());
-    assert_eq!(wire.version, Some("0.9.0-alpha".to_string()));
+    assert_eq!(
+        wire.source_contract,
+        mxc_config_contract::ContractVersion::V0_9_0Alpha
+    );
     assert!(wire.phase.is_none());
     assert!(wire.sandbox_id.is_none());
     assert!(wire.container_id.is_none());

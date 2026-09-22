@@ -3,6 +3,10 @@
 
 use serde::de::DeserializeOwned;
 
+pub(crate) use mxc_config_contract::dev::{
+    DeprovisionRequest, ExecRequest, StartRequest, StopRequest,
+};
+
 pub(crate) fn assert_valid<T>(json: &str)
 where
     T: DeserializeOwned,

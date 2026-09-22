@@ -101,6 +101,11 @@ Verify the binary starts without errors:
 .\src\target\x86_64-pc-windows-msvc\release\wxc-exec.exe --help
 ```
 
+> **Note:** paths in this guide use the x64 target directory. On an ARM64 host
+> `build.bat` targets `aarch64-pc-windows-msvc`, so substitute that directory.
+> The WSLC scripts under `scripts\` and `tests\scripts\` pick the host-arch
+> directory themselves.
+
 > **Note:** `wxc-exec.exe` does **not** require `wslcsdk.dll` at startup. The
 > DLL is loaded at runtime only when the WSLC backend is invoked. All other
 > backends (Process Container, Windows Sandbox) work without it.
@@ -163,8 +168,7 @@ Once setup is done, the day-to-day flow is two distinct commands:
 .\scripts\setup-wslc.ps1 -Image <image>
 
 # (any number of times) execute against the cached image
-.\src\target\x86_64-pc-windows-msvc\release\wxc-exec.exe `
-    --experimental my-config.json
+.\src\target\x86_64-pc-windows-msvc\release\wxc-exec.exe my-config.json
 ```
 
 This separation keeps `wxc-exec.exe` hermetic and fast at run time —
@@ -208,8 +212,7 @@ child.on('close', (code) => console.log('Exit code:', code));
 
 The Rust SDK (`mxc-sdk`) runs WSLC **in-process** — it does not spawn
 `wxc-exec.exe`. Build the crate with its `wslc` feature, select the backend with
-`build_request_with_containment`, and opt into experimental features on the
-request (the library-side equivalent of `--experimental`):
+`build_request_with_containment`, and run the request directly:
 
 ```toml
 # Cargo.toml

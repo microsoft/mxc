@@ -1,0 +1,26 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-LXC-GA-Egress-Any-Udp",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "sh -c \"echo probe | timeout 8 nc -u -w 3 203.0.113.2 8053 2>/dev/null | grep -q probe && echo MXC_NET_ALLOWED || echo MXC_NET_BLOCKED\""
+  },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  },
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [{ "cidr": "203.0.113.0/24" }],
+          "ports": [{ "protocol": "any", "port": 8053 }]
+        }
+      ]
+    }
+  }
+}

@@ -15,7 +15,7 @@
     and become visible to subsequent runtime executions.
 
     The storage path you pass here MUST match the value used at run time
-    (the `experimental.wslc.storagePath` field of the config, or the
+    (the `wslc.storagePath` field of the config, or the
     runner's default of `%TEMP%\mxc-wslc-sessions` when omitted).
 
 .PARAMETER Image
@@ -32,7 +32,7 @@
 .PARAMETER StoragePath
     WSLC storage path to populate. When omitted, the runner default
     (`%TEMP%\mxc-wslc-sessions`) is used. Set this if your runtime configs
-    override `experimental.wslc.storagePath`.
+    override `wslc.storagePath`.
 
 .PARAMETER DebugLogs
     Enable verbose logging from wxc-exec (passes `--debug`).
@@ -66,7 +66,11 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 
 # Discover wxc-exec.exe -- prefer explicit path, then probe target dirs.
-$Target = "x86_64-pc-windows-msvc"
+$Target = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') {
+    'aarch64-pc-windows-msvc'
+} else {
+    'x86_64-pc-windows-msvc'
+}
 if ($WxcExecPath) {
     $WxcExec = $WxcExecPath
 } else {

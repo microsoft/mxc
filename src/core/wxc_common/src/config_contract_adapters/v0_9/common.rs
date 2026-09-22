@@ -3,14 +3,7 @@
 
 use crate::wire;
 use mxc_config_contract::published::v0_9_0_alpha as contract;
-use mxc_config_contract::ContractVersion;
 use std::num::NonZeroU16;
-
-pub(super) fn convert_version(value: contract::Version) -> &'static str {
-    match value {
-        contract::Version::V0_9_0Alpha => ContractVersion::V0_9_0Alpha.as_str(),
-    }
-}
 
 pub(super) fn convert_process(value: contract::Process) -> wire::Process {
     let contract::Process {

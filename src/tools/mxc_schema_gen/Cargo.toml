@@ -3,13 +3,12 @@ name = "mxc_schema_gen"
 version.workspace = true
 edition.workspace = true
 
-# Emits versioned MXC config schemas and TypeScript wire oracles.
+# Emits exact versioned MXC config schemas and TypeScript wire oracles.
 [dependencies]
 clap.workspace = true
 mxc_config_contract = { workspace = true, features = ["schema-gen"] }
 mxc_schema_support.workspace = true
 serde_json.workspace = true
-wxc_common = { path = "../../core/wxc_common", features = ["schema-gen"] }
 
 [dev-dependencies]
 tempfile.workspace = true

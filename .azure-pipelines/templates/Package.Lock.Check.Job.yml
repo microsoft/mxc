@@ -12,9 +12,9 @@ jobs:
   - checkout: self
 
   - task: NodeTool@1
-    displayName: Use Node.js 20
+    displayName: Use Node.js 24
     inputs:
-      version: '20.x'
+      version: '24.x'
 
   - script: node scripts/versioning/check-package-lock-integrity.js
     displayName: Check package locks use npmjs and SHA-512 integrity

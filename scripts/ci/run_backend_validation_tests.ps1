@@ -217,10 +217,6 @@ switch ($Backend) {
         }
     }
     'wslc' {
-        # The current WSLC helper hardcodes the x64 target when locating assets.
-        if ($Architecture -ne 'x64') {
-            throw 'The existing WSLC test harness is not architecture-portable yet.'
-        }
         Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_wslc_all_tests.ps1') -Arguments @{
             WxcExecPath = $wxc
         }

@@ -205,6 +205,10 @@ pty.onExit((e) => console.log('Exit:', e.exitCode));
   established flows, and DNS, with no carve-out for DHCP. A container that
   outlives its lease loses its address; one that finishes within the lease period
   is unaffected.
+- **IPv6 egress is not supported.** An `egress` rule naming an IPv6 destination
+  installs and reports success, but no IPv6 traffic reaches that destination.
+  Stock `lxcbr0` gives the container no IPv6 address, so this surfaces only on a
+  host that provides one.
 - **No proxied egress.** See [Proxy](#proxy).
 - **No state-aware lifecycle.** LXC implements `ScriptRunner` only (one-shot),
   not `StatefulSandboxBackend`. A state-aware request is rejected.

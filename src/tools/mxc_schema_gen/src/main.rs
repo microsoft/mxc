@@ -34,83 +34,63 @@ enum Command {
 #[derive(Debug, Args)]
 struct GenerateArgs {
     /// Exact registered contract version.
-    #[arg(long, conflicts_with = "legacy_wire")]
-    version: Option<String>,
-    /// Generate from the rolling legacy wire model.
-    #[arg(long, conflicts_with = "version")]
-    legacy_wire: bool,
+    #[arg(long)]
+    version: String,
     /// Output path. Omit to write the artifact to standard output.
     #[arg(long)]
     out: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum Target {
-    LegacyWire,
-    Contract(ContractVersion),
-}
-
-fn target(args: &GenerateArgs) -> Result<Target, String> {
-    match (&args.version, args.legacy_wire) {
-        (Some(version), false) => ContractVersion::parse_exact(version)
-            .map(Target::Contract)
-            .ok_or_else(|| format!("unsupported exact contract version: {version}")),
-        (None, true) => Ok(Target::LegacyWire),
-        (None, false) => Err("one of --version <exact> or --legacy-wire is required".to_string()),
-        _ => unreachable!("clap rejects conflicting target options"),
-    }
+fn target(args: &GenerateArgs) -> Result<ContractVersion, String> {
+    ContractVersion::parse_exact(&args.version)
+        .ok_or_else(|| format!("unsupported exact contract version: {}", args.version))
 }
 
 fn exact_schema(version: ContractVersion) -> Result<(Value, ContractDescriptor), String> {
     let descriptor = descriptor(version);
-    let mut schema = match version {
-        ContractVersion::V0_9_0Alpha => {
-            mxc_config_contract::published::v0_9_0_alpha::published_schema()
-        }
-        ContractVersion::V0_10_0Alpha => mxc_config_contract::dev::development_schema(),
-        ContractVersion::V0_6_0Alpha
-        | ContractVersion::V0_7_0Alpha
-        | ContractVersion::V0_8_0Alpha => {
-            return Err(format!(
-                "published contract {} has no renderable exact model",
-                version.as_str()
-            ));
-        }
-    };
+    if !descriptor.generates_artifacts() {
+        return Err(format!(
+            "published contract {} has no renderable exact model",
+            version.as_str()
+        ));
+    }
+    let mut schema = renderable_exact_schema(version)?;
     mxc_schema_support::prepare_schema(&mut schema, descriptor.schema_id());
     Ok((schema, descriptor))
 }
 
-fn schema_content(target: Target) -> Result<String, String> {
-    match target {
-        Target::LegacyWire => Ok(format!(
-            "{}\n",
-            wxc_common::wire::generate_config_schema_json()
-        )),
-        Target::Contract(version) => {
-            let (schema, _) = exact_schema(version)?;
-            let root = schema
-                .as_object()
-                .ok_or_else(|| "generated contract schema root is not an object".to_string())?;
-            Ok(format!(
-                "{}\n",
-                mxc_schema_support::render_root_ordered(root)
-            ))
+fn renderable_exact_schema(version: ContractVersion) -> Result<Value, String> {
+    match version {
+        ContractVersion::V0_9_0Alpha => {
+            Ok(mxc_config_contract::published::v0_9_0_alpha::published_schema())
         }
+        ContractVersion::V0_10_0Alpha => Ok(mxc_config_contract::dev::development_schema()),
+        ContractVersion::V0_6_0Alpha
+        | ContractVersion::V0_7_0Alpha
+        | ContractVersion::V0_8_0Alpha => Err(format!(
+            "contract registry marks {} as renderable, but no exact model is available",
+            version.as_str()
+        )),
     }
 }
 
-fn types_content(target: Target) -> Result<String, String> {
-    match target {
-        Target::LegacyWire => Ok(wxc_common::wire::generate_sdk_types_ts()),
-        Target::Contract(version) => {
-            let (schema, _) = exact_schema(version)?;
-            Ok(mxc_schema_support::emit_contract_ts(
-                &schema,
-                version.as_str(),
-            ))
-        }
-    }
+fn schema_content(version: ContractVersion) -> Result<String, String> {
+    let (schema, _) = exact_schema(version)?;
+    let root = schema
+        .as_object()
+        .ok_or_else(|| "generated contract schema root is not an object".to_string())?;
+    Ok(format!(
+        "{}\n",
+        mxc_schema_support::render_root_ordered(root)
+    ))
+}
+
+fn types_content(version: ContractVersion) -> Result<String, String> {
+    let (schema, _) = exact_schema(version)?;
+    Ok(mxc_schema_support::emit_contract_ts(
+        &schema,
+        version.as_str(),
+    ))
 }
 
 fn write_artifact(content: &str, path: Option<&Path>, label: &str) -> Result<(), String> {
@@ -148,7 +128,12 @@ fn versions_json() -> Value {
                     "status": descriptor.status().as_str(),
                     "schemaId": descriptor.schema_id(),
                     "schemaPath": descriptor.schema_path(),
-                    "typescriptPath": descriptor.typescript_path()
+                    "typescriptPath": descriptor.typescript_path(),
+                    "generatesArtifacts": descriptor.generates_artifacts(),
+                    "requestRoots": descriptor.request_roots().iter().map(|root| json!({
+                        "fixtureDirectory": root.fixture_directory(),
+                        "schemaDefinition": root.schema_definition()
+                    })).collect::<Vec<_>>()
                 })
             })
             .collect(),
@@ -221,6 +206,13 @@ mod tests {
             development["typescriptPath"],
             "sdk/node/src/generated/v0_10_0_alpha/wire.ts"
         );
+        assert_eq!(development["generatesArtifacts"], true);
+        assert!(development["requestRoots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|root| root["fixtureDirectory"] == "wslc_provision"
+                && root["schemaDefinition"] == "WslcProvisionRequest"));
     }
 
     #[test]
@@ -233,7 +225,7 @@ mod tests {
             "https://github.com/microsoft/mxc/schemas/stable/mxc-config.schema.0.9.0-alpha.json"
         );
         assert!(schema["definitions"]["OneShotRequest"].is_object());
-        let types = types_content(Target::Contract(ContractVersion::V0_9_0Alpha)).unwrap();
+        let types = types_content(ContractVersion::V0_9_0Alpha).unwrap();
         assert!(types.contains("Emitted from the exact MXC 0.9.0-alpha contract"));
         assert!(types.contains("export type OneShotRequest"));
     }
@@ -243,6 +235,17 @@ mod tests {
         let error = exact_schema(ContractVersion::V0_8_0Alpha).unwrap_err();
         assert!(
             error.contains("published contract 0.8.0-alpha has no renderable exact model"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn inconsistent_renderable_registry_metadata_is_rejected() {
+        let error = renderable_exact_schema(ContractVersion::V0_8_0Alpha).unwrap_err();
+        assert!(
+            error.contains(
+                "contract registry marks 0.8.0-alpha as renderable, but no exact model is available"
+            ),
             "{error}"
         );
     }

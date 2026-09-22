@@ -37,7 +37,7 @@
     provision so the spawned daemon inherits them.
 
 .PARAMETER WxcExecPath
-    Path to wxc-exec.exe. Default probes the x64 target release/debug dirs.
+    Path to wxc-exec.exe. Default probes the host-arch target release/debug dirs.
 
 .PARAMETER ConfigDir
     Directory holding the state-aware request fixtures. Defaults to
@@ -66,7 +66,13 @@ $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 
 # ---------------- Locate wxc-exec.exe + daemon ----------------
 
-$Target = "x86_64-pc-windows-msvc"
+# Find binary -- prefer explicit path, then probe target-specific and default
+# dirs. Use the host arch to determine which target to use. 
+$Target = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') {
+    'aarch64-pc-windows-msvc'
+} else {
+    'x86_64-pc-windows-msvc'
+}
 $Prof = if ($Debug) { "debug" } else { "release" }
 
 if ($WxcExecPath) {

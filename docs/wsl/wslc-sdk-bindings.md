@@ -108,7 +108,7 @@ match the pinned SDK.
    staged next to `wxc-exec.exe`, then:
 
    ```powershell
-   cargo build -p wxc --features wslc --release --target x86_64-pc-windows-msvc
+   cargo build -p wxc --features wslc --release --target x86_64-pc-windows-msvc  # aarch64-pc-windows-msvc on ARM64
    .\tests\scripts\run_wslc_all_tests.ps1
    ```
 
