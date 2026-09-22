@@ -289,6 +289,34 @@ gate consumes this metadata directly, so a generated contract cannot silently
 omit a request root. Legacy v0.6-v0.8 contracts intentionally advertise no
 generated request roots.
 
+### High-level SDK major targets
+
+`schemas/schema-version.json` owns `sdkMajorTargets`, the canonical mapping
+from each high-level SDK major line to the latest published stable exact
+contract that line targets. The map remains empty until a stable contract is
+published for that major. SDK v1.0 adds `"1": "1.0.0"`; opening mutable
+`1.1.0-alpha` development does not advance that value. Publishing stable
+`1.1.0` does.
+
+The exact Rust contract registry is authoritative. The schema-version gate
+loads that registry through `mxc_schema_gen` and verifies that each mapping:
+
+- names a registered exact stable-version contract;
+- stays within the named major line;
+- selects the latest published stable contract in that line;
+- exists for every published stable major line beginning with v1.
+
+Generated schemas remain derived artifacts and drift oracles. They do not
+define the SDK target or the accepted contract shape.
+
+Compatibility comparison and SDK API baselines are intentionally deferred
+until the relevant artifacts exist. When published stable `1.0.0` and `1.1.0`
+coexist, structural tooling may compare temporary projections generated
+directly from their exact Rust types, while explicit Rust and fixture tests
+cover semantic meaning. Rust, Node, and .NET API baselines are captured when
+the v1.0 SDK surface is established rather than through empty placeholder
+descriptors.
+
 ### Experimental Flag
 
 The experimental flag must be supported at every layer of the stack:

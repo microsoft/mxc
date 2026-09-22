@@ -17,6 +17,7 @@ const { join } = require("path");
 const {
   loadContractRegistry,
   requestRootsForContract,
+  validateSdkMajorTargets,
 } = require("./lib/contract-registry.js");
 
 const repoRoot = join(__dirname, "..", "..");
@@ -37,6 +38,7 @@ const {
   stateAwareWindowsSandbox,
   stateAwareWslc,
   stableLatest,
+  sdkMajorTargets,
 } = schemaVer;
 
 // Assert a regex captures exactly `expected` in `text`.
@@ -178,6 +180,11 @@ if (registryByVersion.get(maxSupported)?.status !== "development") {
     `Canonical maxSupported "${maxSupported}" is not the development contract in the exact registry`
   );
 }
+try {
+  validateSdkMajorTargets(sdkMajorTargets, registry);
+} catch (error) {
+  errors.push(`Invalid SDK major targets: ${error.message}`);
+}
 
 // ---------------------------------------------------------------------------
 // Report
@@ -194,5 +201,5 @@ if (errors.length > 0) {
 console.log(
   `Schema version sync OK: maxSupported ${maxSupported} ` +
     `(min ${min}, state-aware ${stateAware}, Windows Sandbox state-aware ${stateAwareWindowsSandbox}, WSLC state-aware ${stateAwareWslc}, ` +
-    `stable ${stableLatest})`
+    `stable ${stableLatest}, SDK major targets ${Object.keys(sdkMajorTargets).length})`
 );

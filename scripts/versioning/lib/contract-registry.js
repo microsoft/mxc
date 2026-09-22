@@ -4,7 +4,7 @@
 const { execFileSync } = require("child_process");
 const { readFileSync } = require("fs");
 const { join, resolve } = require("path");
-const { parseVersion } = require("./version.js");
+const { compareVersions, parseVersion } = require("./version.js");
 
 const repoRoot = resolve(__dirname, "..", "..", "..");
 const cargoRoot = join(repoRoot, "src");
@@ -111,6 +111,88 @@ function parseContractRegistry(content, source) {
   return { registry, byVersion };
 }
 
+function validateSdkMajorTargets(targets, registry) {
+  if (
+    !targets ||
+    typeof targets !== "object" ||
+    Array.isArray(targets) ||
+    Object.getPrototypeOf(targets) !== Object.prototype
+  ) {
+    fail("sdkMajorTargets must be an object");
+  }
+
+  const stableContractsByMajor = new Map();
+  const byVersion = new Map();
+  for (const contract of registry) {
+    const parsed = parseVersion(contract.version);
+    if (!parsed) {
+      fail(`exact contract descriptor has invalid version ${contract.version}`);
+    }
+    byVersion.set(contract.version, contract);
+    if (
+      parsed.major < 1 ||
+      contract.status !== "published" ||
+      parsed.prerelease ||
+      parsed.build
+    ) {
+      continue;
+    }
+    const contracts = stableContractsByMajor.get(parsed.major) ?? [];
+    contracts.push({ contract, parsed });
+    stableContractsByMajor.set(parsed.major, contracts);
+  }
+
+  const configuredMajors = new Set();
+  for (const [majorText, targetVersion] of Object.entries(targets)) {
+    if (!/^[1-9]\d*$/.test(majorText) || !Number.isSafeInteger(Number(majorText))) {
+      fail(`sdkMajorTargets key "${majorText}" is not a canonical positive major`);
+    }
+    const major = Number(majorText);
+    configuredMajors.add(major);
+
+    const parsedTarget = parseVersion(targetVersion);
+    if (!parsedTarget || parsedTarget.prerelease || parsedTarget.build) {
+      fail(
+        `sdkMajorTargets.${majorText} must identify an exact stable contract`
+      );
+    }
+    if (parsedTarget.major !== major) {
+      fail(
+        `sdkMajorTargets.${majorText} targets ${targetVersion}, ` +
+          `which is not in major ${major}`
+      );
+    }
+    const targetContract = byVersion.get(targetVersion);
+    if (!targetContract) {
+      fail(
+        `sdkMajorTargets.${majorText} targets unregistered exact contract ` +
+          targetVersion
+      );
+    }
+    if (targetContract.status !== "published") {
+      fail(
+        `sdkMajorTargets.${majorText} must identify a published exact stable contract`
+      );
+    }
+
+    const contracts = stableContractsByMajor.get(major) ?? [];
+    contracts.sort((left, right) => compareVersions(left.parsed, right.parsed));
+    const latest = contracts.at(-1)?.contract.version;
+    if (latest !== targetVersion) {
+      fail(
+        `sdkMajorTargets.${majorText} is ${targetVersion}, but the latest ` +
+          `published stable major ${major} exact contract is ${latest}`
+      );
+    }
+  }
+
+  for (const major of stableContractsByMajor.keys()) {
+    if (!configuredMajors.has(major)) {
+      fail(`published stable major ${major} exact contracts have no SDK target`);
+    }
+  }
+}
+
 function loadContractRegistry() {
   const snapshot = process.env.MXC_CONTRACT_REGISTRY_PATH;
   if (snapshot) {
@@ -149,4 +231,5 @@ module.exports = {
   loadContractRegistry,
   parseContractRegistry,
   requestRootsForContract,
+  validateSdkMajorTargets,
 };
