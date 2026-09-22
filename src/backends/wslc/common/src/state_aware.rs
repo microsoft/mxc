@@ -305,16 +305,18 @@ fn connect_daemon() -> Result<DaemonClient, MxcError> {
 }
 
 /// Map a typed [`DaemonError`] onto the matching wire-format [`MxcError`] code.
-/// The daemon's `NotProvisioned` / `NotStarted` tokens carry straight across;
-/// transient and protocol conditions collapse to `backend_error`.
 fn map_daemon_error(err: DaemonError) -> MxcError {
     match err {
         DaemonError::Daemon { kind, message } => match kind {
             ErrKind::NotProvisioned => MxcError::not_provisioned(message),
             ErrKind::NotStarted => MxcError::not_started(message),
-            ErrKind::Busy | ErrKind::NotReady | ErrKind::Protocol | ErrKind::Backend => {
-                MxcError::backend_error(message)
-            }
+            ErrKind::Unavailable => MxcError::backend_unavailable(message),
+            ErrKind::Rejected => MxcError::policy_validation(message),
+            ErrKind::Busy
+            | ErrKind::NotReady
+            | ErrKind::Protocol
+            | ErrKind::Backend
+            | ErrKind::Unknown => MxcError::backend_error(message),
         },
         DaemonError::Transport(e) => MxcError::backend_error(format!("{e:#}")),
     }
@@ -972,6 +974,39 @@ mod tests {
         let err = map_daemon_error(DaemonError::Daemon {
             kind: ErrKind::Busy,
             message: "busy".to_string(),
+        });
+        assert_eq!(err.code, wxc_common::mxc_error::MxcErrorCode::BackendError);
+    }
+
+    #[test]
+    fn map_daemon_error_preserves_unavailable() {
+        let err = map_daemon_error(DaemonError::Daemon {
+            kind: ErrKind::Unavailable,
+            message: "WSLc components are missing".to_string(),
+        });
+        assert_eq!(
+            err.code,
+            wxc_common::mxc_error::MxcErrorCode::BackendUnavailable
+        );
+    }
+
+    #[test]
+    fn map_daemon_error_preserves_rejected() {
+        let err = map_daemon_error(DaemonError::Daemon {
+            kind: ErrKind::Rejected,
+            message: "network.allowLocalNetwork=true is not supported".to_string(),
+        });
+        assert_eq!(
+            err.code,
+            wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+        );
+    }
+
+    #[test]
+    fn map_daemon_error_degrades_unknown_to_backend_error() {
+        let err = map_daemon_error(DaemonError::Daemon {
+            kind: ErrKind::Unknown,
+            message: "from a newer daemon".to_string(),
         });
         assert_eq!(err.code, wxc_common::mxc_error::MxcErrorCode::BackendError);
     }
