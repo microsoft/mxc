@@ -888,6 +888,25 @@ mod tests {
                 request.inner.network_enforcement_compatibility, expected,
                 "{version}"
             );
+
+            // A typed SDK request built against an exact pre-0.9 contract keeps
+            // the pre-0.9 environment behavior even though its source
+            // attribution was cleared above.
+            let expected_env = if matches!(*version, "0.6.0-alpha" | "0.7.0-alpha" | "0.8.0-alpha")
+            {
+                wxc_common::models::DefaultEnvCompatibility::LegacyCompatible
+            } else {
+                wxc_common::models::DefaultEnvCompatibility::DefaultBlock
+            };
+            assert_eq!(
+                request.inner.default_env_compatibility, expected_env,
+                "{version}"
+            );
+            assert_eq!(
+                request.inner.supplies_default_env(),
+                expected_env == wxc_common::models::DefaultEnvCompatibility::DefaultBlock,
+                "{version}"
+            );
         }
     }
 

@@ -982,16 +982,16 @@ fn cleanup_files(paths: &[&str]) {
 mod tests {
     use super::*;
     use wxc_common::models::{
-        ExecutionRequest, NetworkAction, NetworkEgressPolicy, NetworkPolicy, ProxyAddress,
-        SeatbeltConfig,
+        DefaultEnvCompatibility, ExecutionRequest, NetworkAction, NetworkEgressPolicy,
+        NetworkPolicy, ProxyAddress, SeatbeltConfig,
     };
 
     #[allow(clippy::field_reassign_with_default)]
     fn base_request() -> ExecutionRequest {
         let mut request = ExecutionRequest::default();
-        // Pre-0.9, so a test opts into the default environment block by naming
-        // the contract that introduced it.
-        request.source_contract = Some(wxc_common::ContractVersion::V0_8_0Alpha);
+        // Pre-0.9, so a test opts into the default environment block
+        // explicitly.
+        request.default_env_compatibility = DefaultEnvCompatibility::LegacyCompatible;
         request.experimental_enabled = true;
         request.seatbelt = Some(SeatbeltConfig::default());
         request
@@ -1002,7 +1002,7 @@ mod tests {
         // The 0.9 default block must not bypass the proxy stripping in
         // `resolve_environment`.
         let mut request = base_request();
-        request.source_contract = Some(wxc_common::ContractVersion::V0_9_0Alpha);
+        request.default_env_compatibility = DefaultEnvCompatibility::DefaultBlock;
         request.env = Some(vec!["HTTP_PROXY=http://attacker.example:9999".into()]);
         request.inherit_default_env = true;
         let addr = ProxyAddress::new("127.0.0.1".into(), 8888);
@@ -1518,7 +1518,7 @@ mod tests {
         );
 
         let mut modern = base_request();
-        modern.source_contract = Some(wxc_common::ContractVersion::V0_9_0Alpha);
+        modern.default_env_compatibility = DefaultEnvCompatibility::DefaultBlock;
         let pairs = resolve_environment(&modern, None, None);
         assert_eq!(
             env_value(&pairs, "HOME"),
@@ -1532,7 +1532,7 @@ mod tests {
     #[test]
     fn home_follows_the_directory_the_child_starts_in() {
         let mut request = base_request();
-        request.source_contract = Some(wxc_common::ContractVersion::V0_9_0Alpha);
+        request.default_env_compatibility = DefaultEnvCompatibility::DefaultBlock;
         let pairs = resolve_environment(&request, None, Some("/Users/someone/work"));
         assert_eq!(env_value(&pairs, "HOME"), Some("/Users/someone/work"));
     }

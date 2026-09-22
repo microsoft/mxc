@@ -81,7 +81,8 @@ use windows::Win32::System::Threading::{
 /// Honors the three states of [`ExecutionRequest::env`]:
 ///
 /// * `None` — no environment supplied. The child gets a clean default user
-///   profile block (never the `wxc-exec` process's own variables).
+///   profile block (never the `wxc-exec` process's own variables). Below
+///   schema 0.9 an explicitly empty environment resolves here too.
 /// * `Some(entries)` — the caller's environment, used **verbatim**. MXC adds
 ///   nothing to it, including when `entries` is empty: an explicitly empty
 ///   environment produces an empty block, not the default one. Proxy variables
@@ -98,7 +99,7 @@ fn build_child_env_block(request: &ExecutionRequest) -> Result<Option<Vec<u16>>,
         None
     };
 
-    let entries = match request.env.as_deref() {
+    let entries = match request.supplied_env() {
         None => {
             let mut entries = crate::appcontainer_runner::create_default_env_entries()?;
             if let Some(address) = proxy_address {
@@ -1163,7 +1164,7 @@ impl BaseContainerRunner {
             let diagnostic_env = if request.inherit_default_env {
                 None
             } else {
-                request.env.as_deref()
+                request.supplied_env()
             };
             let diag = diagnose_missing_required_env(err.0, diagnostic_env).unwrap_or_else(|| {
                 diagnose_create_process_failure(
@@ -2364,8 +2365,9 @@ mod tests {
     use process_security_environment_spec::process_security_environment_layout as psec_layout;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use wxc_common::models::{
-        ContainerPolicy, NetworkAction, NetworkCidr, NetworkEnforcementCompatibility, NetworkPeer,
-        NetworkPolicy, NetworkPort, NetworkProtocol, NetworkRule, ProxyConfig,
+        ContainerPolicy, DefaultEnvCompatibility, NetworkAction, NetworkCidr,
+        NetworkEnforcementCompatibility, NetworkPeer, NetworkPolicy, NetworkPort, NetworkProtocol,
+        NetworkRule, ProxyConfig,
     };
     use wxc_common::ui_policy::EffectiveUiRestrictions;
 
@@ -3026,6 +3028,26 @@ mod tests {
             "an empty block still requires two terminators"
         );
         assert_eq!(environment, vec![0u16, 0u16]);
+    }
+
+    #[test]
+    fn below_0_9_an_explicitly_empty_env_still_gets_the_default_block() {
+        // Pre-0.9 contracts never distinguished an omitted environment from an
+        // empty one, so an empty one must keep resolving to the profile block
+        // rather than launching a child with nothing.
+        let request = ExecutionRequest {
+            env: Some(Vec::new()),
+            default_env_compatibility: DefaultEnvCompatibility::LegacyCompatible,
+            ..Default::default()
+        };
+
+        let environment = build_child_env_block(&request)
+            .expect("environment")
+            .expect("legacy block");
+        assert!(
+            environment.len() > 2,
+            "a pre-0.9 empty env must resolve to the default profile block"
+        );
     }
 
     #[test]

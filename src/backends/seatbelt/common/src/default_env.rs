@@ -83,11 +83,11 @@ pub fn resolved_env(request: &ExecutionRequest, working_directory: Option<&str>)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::ContractVersion;
+    use wxc_common::models::DefaultEnvCompatibility;
 
-    fn request(version: Option<ContractVersion>) -> ExecutionRequest {
+    fn request(compatibility: DefaultEnvCompatibility) -> ExecutionRequest {
         ExecutionRequest {
-            source_contract: version,
+            default_env_compatibility: compatibility,
             ..Default::default()
         }
     }
@@ -102,30 +102,19 @@ mod tests {
     fn below_0_9_the_caller_env_passes_through_untouched() {
         // Pre-0.9 the baseline PATH comes from the runner, not from here, so a
         // supplied env still gets one.
-        for version in [
-            ContractVersion::V0_6_0Alpha,
-            ContractVersion::V0_7_0Alpha,
-            ContractVersion::V0_8_0Alpha,
-        ] {
-            let mut r = request(Some(version));
-            r.env = None;
-            assert!(resolved_env(&r, None).is_empty(), "{version:?}");
+        let mut r = request(DefaultEnvCompatibility::LegacyCompatible);
+        r.env = None;
+        assert!(resolved_env(&r, None).is_empty());
 
-            r.env = Some(vec!["FOO=bar".into()]);
-            assert_eq!(
-                resolved_env(&r, None),
-                vec!["FOO=bar".to_string()],
-                "{version:?}"
-            );
-        }
+        r.env = Some(vec!["FOO=bar".into()]);
+        assert_eq!(resolved_env(&r, None), vec!["FOO=bar".to_string()]);
     }
 
-    /// A direct typed SDK request has no external contract attribution and
-    /// takes the current behavior.
+    /// A direct typed SDK request that named no contract takes the current
+    /// behavior.
     #[test]
     fn a_direct_sdk_request_gets_the_default_block() {
-        let mut r = request(None);
-        r.env = None;
+        let r = ExecutionRequest::default();
         assert_eq!(
             value(&resolved_env(&r, None), "PATH"),
             Some(DEFAULT_SANDBOX_PATH)
@@ -134,7 +123,7 @@ mod tests {
 
     #[test]
     fn an_omitted_env_gets_the_default_block() {
-        let mut r = request(Some(ContractVersion::V0_9_0Alpha));
+        let mut r = request(DefaultEnvCompatibility::DefaultBlock);
         r.env = None;
         let entries = resolved_env(&r, None);
         assert_eq!(value(&entries, "PATH"), Some(DEFAULT_SANDBOX_PATH));
@@ -144,7 +133,7 @@ mod tests {
 
     #[test]
     fn an_explicitly_empty_env_stays_empty() {
-        let mut r = request(Some(ContractVersion::V0_9_0Alpha));
+        let mut r = request(DefaultEnvCompatibility::DefaultBlock);
         r.env = Some(vec![]);
         assert!(resolved_env(&r, None).is_empty());
     }
@@ -152,14 +141,14 @@ mod tests {
     #[test]
     fn a_supplied_env_is_used_verbatim() {
         // The 0.9 behavior change: no implicit PATH under a supplied env.
-        let mut r = request(Some(ContractVersion::V0_9_0Alpha));
+        let mut r = request(DefaultEnvCompatibility::DefaultBlock);
         r.env = Some(vec!["FOO=bar".into()]);
         assert_eq!(resolved_env(&r, None), vec!["FOO=bar".to_string()]);
     }
 
     #[test]
     fn inherit_default_env_layers_over_the_default_block() {
-        let mut r = request(Some(ContractVersion::V0_9_0Alpha));
+        let mut r = request(DefaultEnvCompatibility::DefaultBlock);
         r.env = Some(vec!["FOO=bar".into(), "PATH=/only/mine".into()]);
         r.inherit_default_env = true;
         let entries = resolved_env(&r, None);
@@ -178,7 +167,7 @@ mod tests {
     /// deliberately does not re-derive it from the request.
     #[test]
     fn home_follows_the_directory_the_child_starts_in() {
-        let mut r = request(Some(ContractVersion::V0_9_0Alpha));
+        let mut r = request(DefaultEnvCompatibility::DefaultBlock);
         r.env = None;
         assert_eq!(
             value(&resolved_env(&r, Some("/workspace")), "HOME"),
@@ -190,7 +179,7 @@ mod tests {
     /// writable fallback rather than following the child to `/`.
     #[test]
     fn an_unresolved_working_directory_falls_back() {
-        let mut r = request(Some(ContractVersion::V0_9_0Alpha));
+        let mut r = request(DefaultEnvCompatibility::DefaultBlock);
         r.env = None;
         // Set on the request but never resolved by the runner: only what the
         // runner passes in counts.

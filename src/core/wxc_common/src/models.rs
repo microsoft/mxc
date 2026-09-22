@@ -972,6 +972,8 @@ pub struct ExecutionRequest {
     /// Whether backends preserve pre-v0.8 network compatibility behavior or
     /// enforce the current strict posture.
     pub network_enforcement_compatibility: NetworkEnforcementCompatibility,
+    /// Whether backends supply the default `process.env` block.
+    pub default_env_compatibility: DefaultEnvCompatibility,
     /// Externally assigned container identifier.
     pub container_id: String,
     /// Environment variables as "KEY=VALUE" strings (from `process.env`).
@@ -981,10 +983,10 @@ pub struct ExecutionRequest {
     /// * `None` — the caller supplied no environment. Backends provide a
     ///   default: on Windows, the user's profile block; on LXC, Bubblewrap, and
     ///   Seatbelt, `PATH` + `HOME` + `TERM`.
-    /// * `Some(vec![])` — the caller asked for an *empty* environment. This is
-    ///   not the same as `None`, and on the Windows process container it is
-    ///   expected to fail at process creation, because the OS requires certain
-    ///   names to be present (see `REQUIRED_CHILD_ENV_VARS`).
+    /// * `Some(vec![])` — the caller asked for an *empty* environment. From
+    ///   schema 0.9 this is not the same as `None`, and on the Windows process
+    ///   container it is expected to fail at process creation, because the OS
+    ///   requires certain names to be present (see `REQUIRED_CHILD_ENV_VARS`).
     /// * `Some(entries)` — the caller's environment, used verbatim. MXC does
     ///   not add to it; callers that want the default block or the calling
     ///   process's variables must merge them in themselves, or set
@@ -1046,6 +1048,25 @@ pub enum NetworkEnforcementCompatibility {
     Strict,
 }
 
+/// Backend `process.env` behavior after exact contract normalization.
+///
+/// Normalized from the contract version rather than read back from
+/// [`ExecutionRequest::source_contract`], which is external-JSON attribution
+/// and is cleared for typed SDK requests. A typed request built against an
+/// exact pre-0.9 contract keeps the pre-0.9 environment behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DefaultEnvCompatibility {
+    /// Preserve behavior required by exact v0.6, v0.7, and v0.8 JSON: the
+    /// caller's entries pass through untouched, and each backend's own
+    /// baseline is the only default.
+    LegacyCompatible,
+    /// Supply the default block introduced by v0.9, which also makes the four
+    /// states of `process.env` distinct.
+    #[default]
+    DefaultBlock,
+}
+
 fn serialize_source_contract<S>(
     value: &Option<mxc_config_contract::ContractVersion>,
     serializer: S,
@@ -1064,6 +1085,16 @@ impl NetworkEnforcementCompatibility {
         match self {
             Self::LegacyCompatible => "legacy-compatible",
             Self::Strict => "strict",
+        }
+    }
+}
+
+impl DefaultEnvCompatibility {
+    /// Stable diagnostic spelling for tests.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LegacyCompatible => "legacy-compatible",
+            Self::DefaultBlock => "default-block",
         }
     }
 }
@@ -1100,23 +1131,23 @@ impl ExecutionRequest {
 
     /// Whether this request's contract supplies the backend default
     /// environment block, introduced by `0.9.0-alpha`.
-    ///
-    /// Only the three contracts that predate it opt out. Direct typed SDK
-    /// requests carry no external contract attribution and take the current
-    /// behavior: they are written against today's API, where
-    /// [`ExecutionRequest::env`] and [`ExecutionRequest::inherit_default_env`]
-    /// only have meaning alongside a default block.
     pub fn supplies_default_env(&self) -> bool {
-        use mxc_config_contract::ContractVersion;
+        self.default_env_compatibility == DefaultEnvCompatibility::DefaultBlock
+    }
 
-        !matches!(
-            self.source_contract,
-            Some(
-                ContractVersion::V0_6_0Alpha
-                    | ContractVersion::V0_7_0Alpha
-                    | ContractVersion::V0_8_0Alpha
-            )
-        )
+    /// The caller's environment, or `None` when the backend should build its
+    /// own default block instead.
+    ///
+    /// Below 0.9 an explicitly empty `process.env` is indistinguishable from an
+    /// omitted one, so it resolves to the default rather than to an empty
+    /// environment. For backends whose default block is non-empty — the Windows
+    /// process container's user profile block — where the two produce very
+    /// different children.
+    pub fn supplied_env(&self) -> Option<&[String]> {
+        match self.env.as_deref() {
+            Some([]) if !self.supplies_default_env() => None,
+            other => other,
+        }
     }
 
     /// The caller's environment entries, with "not supplied" and "supplied but

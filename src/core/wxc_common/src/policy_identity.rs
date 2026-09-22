@@ -42,6 +42,7 @@
 //! | `capture_denials.output_path` | Only decides where the diagnostic JSON deliverable is written; not enforcement. `capture_denials.mode` remains hashed. |
 //! | `dry_run`, `testing_features_enabled` | Invocation modes, not policy. |
 //! | `source_contract` | External JSON provenance used only for diagnostics and telemetry. Normalized network compatibility is hashed separately. |
+//! | `default_env_compatibility` | Decides whether a default environment block is supplied, which is process launch behavior rather than enforcement. |
 //!
 //! `network_enforcement_compatibility` is hashed because it changes how the
 //! normalized network policy is enforced. WSLC and Windows Sandbox
@@ -193,6 +194,7 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         // not enforcement. The normalized compatibility value below is.
         source_contract: _excluded_source_contract,
         network_enforcement_compatibility,
+        default_env_compatibility: _excluded_default_env_compatibility,
         container_id,
         working_directory,
         script_timeout,

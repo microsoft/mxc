@@ -1094,7 +1094,8 @@ impl AppContainerScriptRunner {
         //      to layer the environment on the default block.
         //   2. If the caller supplied none, call CreateEnvironmentBlock(bInherit=FALSE)
         //      for a clean default user environment and merge proxy vars if needed.
-        let env_block: Vec<u16> = match request.env.as_deref() {
+        //      Below schema 0.9 an explicitly empty environment resolves here too.
+        let env_block: Vec<u16> = match request.supplied_env() {
             Some(supplied) if request.inherit_default_env => {
                 let entries = build_inherited_entries(supplied, self.proxy_address.as_ref())?;
                 encode_env_block(&entries)
@@ -1164,7 +1165,7 @@ impl AppContainerScriptRunner {
                 if request.inherit_default_env {
                     None
                 } else {
-                    request.env.as_deref()
+                    request.supplied_env()
                 },
             )
         })?;
