@@ -48,8 +48,16 @@ jobs:
         # on Win 11 25H2 (bfscfg.exe risks an OS hang).
         ${{ if eq(item.arch, 'x64') }}:
           cargoFeatures: hyperlight isolation_session microvm wslc
+          microvmSignPattern: bin/openvmm.exe
+          microvmArtifactPattern: |
+            bin/openvmm.exe
+            guest/vmlinux
+            guest/initramfs.cpio.gz
+            images/**
         ${{ else }}:
           cargoFeatures: hyperlight isolation_session wslc
+          microvmSignPattern: ''
+          microvmArtifactPattern: ''
         signPattern: |
             wxc-exec.exe
             plm.exe
@@ -68,6 +76,8 @@ jobs:
         artifactPrefix: lxc-binaries
         workingDirectory: $(Build.SourcesDirectory)/src/core/lxc
         cargoFeatures: hyperlight
+        microvmSignPattern: ''
+        microvmArtifactPattern: ''
         signPattern: |
           lxc-exec
           unix-test-proxy
@@ -172,6 +182,7 @@ jobs:
           FolderPath: $(targetTripleDir)
           Pattern: |
             $(signPattern)
+            $(microvmSignPattern)
           UseMinimatch: true
           signConfigType: 'inlineSignParams'
           inlineOperation: >-
@@ -204,6 +215,7 @@ jobs:
           sourceFolder: $(targetTripleDir)
           contents: |
             $(signPattern)
+            $(microvmArtifactPattern)
           targetFolder: $(outputDirectory)/$(targetTriple)
 
       # Copy wslcsdk.dll
