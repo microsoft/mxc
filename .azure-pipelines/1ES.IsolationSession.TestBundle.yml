@@ -57,7 +57,7 @@ extends:
   template: v1/1ES.Official.PipelineTemplate.yml@1ESPipelineTemplates
   parameters:
     settings:
-      networkIsolationPolicy: Preferred,NodeTool
+      networkIsolationPolicy: Preferred,GitHub,ESRP,NodeTool
     pool:
       name: Azure-Pipelines-1ESPT-ExDShared
       image: windows-2022
