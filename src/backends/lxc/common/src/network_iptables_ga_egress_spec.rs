@@ -1153,26 +1153,13 @@ fn allow_peer_policy(peers: Vec<NetworkPeer>) -> ContainerPolicy {
 }
 
 #[test]
-fn an_ipv6_peer_whose_exclusion_splits_the_mapped_range_opens_no_ipv4() {
+fn an_ipv6_peer_whose_exclusion_names_the_mapped_range_is_refused() {
     let policy = allow_peer_policy(vec![peer("::/0", &["::ffff:10.0.0.0/104"])]);
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+    let error = lowering_error(&policy);
 
     assert!(
-        rules.ipv4.is_empty(),
-        "input=allow.to=[{{cidr:::/0, except:[::ffff:10.0.0.0/104]}}]; the exclusion names mapped addresses, which are programmed as IPv4, so this IPv6 allow must reach the IPv4 chain with nothing; output={:?}",
-        rules.ipv4
-    );
-    assert_eq!(
-        chain_verdict(
-            &rules.ipv4,
-            NetworkAction::Deny,
-            packet_address("10.10.1.1"),
-            "tcp",
-            Some(443)
-        ),
-        "DROP",
-        "input=as above, packet=10.10.1.1; the direction default still covers IPv4; output={:?}",
-        rules.ipv4
+        error.contains("other address family"),
+        "input=allow.to=[{{cidr:::/0, except:[::ffff:10.0.0.0/104]}}]; the exclusion is programmed as IPv4 while the peer is programmed as IPv6, so it narrows nothing and must be refused rather than ignored; got: {error}"
     );
 }
 
@@ -1239,21 +1226,24 @@ fn a_mapped_peer_subtracts_an_exclusion_written_in_plain_ipv4() {
 }
 
 #[test]
-fn an_exclusion_that_cannot_overlap_its_peer_is_dropped_rather_than_applied() {
+fn an_exclusion_in_the_other_family_is_refused_rather_than_dropped() {
     let policy = allow_peer_policy(vec![peer("10.0.0.0/8", &["2001:db8::/32"])]);
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
+    let error = lowering_error(&policy);
 
-    assert_eq!(
-        chain_verdict(
-            &rules.ipv4,
-            NetworkAction::Deny,
-            packet_address("10.10.1.1"),
-            "tcp",
-            Some(443)
-        ),
-        "ACCEPT",
-        "input=allow.to=[{{cidr:10.0.0.0/8, except:[2001:db8::/32]}}], packet=10.10.1.1; an IPv6 range cannot lie inside an IPv4 peer, so the peer is unnarrowed rather than refused; output={:?}",
-        rules.ipv4
+    assert!(
+        error.contains("other address family"),
+        "input=allow.to=[{{cidr:10.0.0.0/8, except:[2001:db8::/32]}}]; discarding the exclusion would allow the whole parent under a deny default, and the parser refuses this shape too; got: {error}"
+    );
+}
+
+#[test]
+fn an_ipv4_exclusion_on_an_ipv6_peer_is_refused_in_the_same_way() {
+    let policy = allow_peer_policy(vec![peer("2001:db8::/32", &["10.10.0.0/16"])]);
+    let error = lowering_error(&policy);
+
+    assert!(
+        error.contains("other address family"),
+        "input=allow.to=[{{cidr:2001:db8::/32, except:[10.10.0.0/16]}}]; the refusal must not depend on which family the peer is in; got: {error}"
     );
 }
 

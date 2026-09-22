@@ -299,8 +299,7 @@ impl LxcScriptRunner {
         }
 
         // The policy lowers to the same rules with or without a container, so
-        // one that cannot be programmed is refused before a container exists
-        // rather than after it has been created, started, and torn down again.
+        // one that cannot be programmed is refused before a container exists.
         if let Err(msg) = NetworkIptablesManager::validate_egress_lowering(
             &request.policy,
             uses_directional_keys(&request.policy),
@@ -1461,8 +1460,6 @@ mod tests {
 
     #[test]
     fn an_egress_policy_that_cannot_be_lowered_is_refused_before_a_container_exists() {
-        // Reaching LXC would fail on a host without it, so an error carrying
-        // the lowering's own words is what shows the refusal came first.
         let mut logger = Logger::new(Mode::Buffer);
 
         let response =

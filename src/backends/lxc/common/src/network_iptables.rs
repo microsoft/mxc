@@ -969,9 +969,8 @@ impl NetworkIptablesManager {
     /// An `iptables` rule matches one destination block and cannot carry an
     /// exclusion, so the exclusion is subtracted from the peer instead.
     fn peer_destinations(peer: &NetworkPeer) -> Result<Vec<String>, String> {
-        // Checked against each entry's own family, before the peer's family
-        // selects which ones apply: dropping a malformed exclusion would widen
-        // the rule it was written to narrow.
+        // Run before the peer resolves, so a malformed exclusion is refused
+        // even when its peer names no address.
         for excluded in &peer.except {
             let excluded_width = Self::family_width(match excluded.address {
                 IpAddr::V4(_) => IpFamily::V4,
@@ -995,26 +994,32 @@ impl NetworkIptablesManager {
         };
         let width = Self::family_width(family);
 
-        // Compared after the mapped rewriting, so an exclusion written in the
-        // other notation for the same addresses still narrows its peer. An
-        // exclusion in the other family cannot overlap the peer at all, so it
-        // is dropped rather than compared as a meaningless integer.
-        let exclusions: Vec<DestinationBlock> = peer
-            .except
-            .iter()
-            .filter_map(Self::resolve_block)
-            .filter(|(excluded_family, _)| *excluded_family == family)
-            .map(|(_, block)| block)
-            .collect();
+        let mut exclusions = Vec::new();
+        for excluded in &peer.except {
+            // An out-of-range prefix is refused above, so every entry resolves.
+            let Some((excluded_family, excluded_block)) = Self::resolve_block(excluded) else {
+                continue;
+            };
+            if excluded_family != family {
+                return Err(format!(
+                    "network.egress peer '{}' carries the 'except' entry '{}/{}', which is \
+                     programmed for the other address family and so names no address the peer \
+                     covers. State an exclusion inside the peer's own range.",
+                    Self::cidr_destination(&peer.cidr),
+                    excluded.address,
+                    excluded.prefix_length
+                ));
+            }
+            exclusions.push(excluded_block);
+        }
 
         let mut blocks = Vec::new();
         let mut remaining = MAX_BLOCKS_PER_PEER;
         Self::subtract_blocks(block, &exclusions, width, &mut blocks, &mut remaining)?;
 
-        // A destination inside `::ffff:0:0/96` is programmed as IPv4. A peer
-        // inside that range resolves to IPv4 as a whole, which is the caller's
-        // own writing; a peer outside it must not have subtraction hand back a
-        // piece that crosses over and opens IPv4 the peer never named.
+        // A generated block inside `::ffff:0:0/96` is programmed as IPv4, so
+        // subtraction must not hand back a piece that opens addresses an IPv6
+        // peer never named.
         if family == IpFamily::V6 && !Self::block_contains(IPV4_MAPPED_BLOCK, block, width) {
             if let Some(crossing) = blocks
                 .iter()
@@ -1120,11 +1125,6 @@ impl NetworkIptablesManager {
     }
 
     /// A CIDR as the family it is programmed in and the block it covers there.
-    ///
-    /// An IPv4-mapped address is programmed as IPv4, because Linux puts a
-    /// genuine IPv4 packet on the wire for one. `NetworkCidr` has public fields
-    /// and validates only through `FromStr`, so a programmatic request reaches
-    /// here with a prefix the parser refuses.
     fn resolve_block(cidr: &NetworkCidr) -> Option<(IpFamily, DestinationBlock)> {
         let (family, raw, prefix) = match cidr.address {
             IpAddr::V4(ip) => (IpFamily::V4, u128::from(u32::from(ip)), cidr.prefix_length),
