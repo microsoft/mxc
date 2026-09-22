@@ -47,6 +47,7 @@ jobs:
     configTomlPath: $(Pipeline.Workspace)/s/.cargo/config.toml
     npmrcPath: '$(Agent.TempDirectory)/mxc.npmrc'
     NPM_CONFIG_USERCONFIG: '$(npmrcPath)'
+    sourceRepositoryRef: $[ resources.repositories.${{ parameters.checkoutRepo }}.ref ]
 
   templateContext:
     rust:
@@ -307,7 +308,7 @@ jobs:
           branch_name    = "${{ parameters.checkoutRepo }}"
           # The ref actually checked out for the repository resource, so
           # consumers validate the real source ref rather than the alias.
-          source_ref     = "$(resources.repositories.${{ parameters.checkoutRepo }}.ref)"
+          source_ref     = "$(sourceRepositoryRef)"
           commit_sha     = (git -C "$(Build.SourcesDirectory)" rev-parse HEAD).Trim()
           build_id       = "$(Build.BuildId)"
           pipeline       = "$(Build.DefinitionName)"
