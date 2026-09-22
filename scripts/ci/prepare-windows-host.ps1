@@ -162,7 +162,14 @@ function Write-HostOsVersion {
 
     Write-Host "Host OS: $caption"
     Write-Host "Host OS release: $release (build $build)"
-    Write-Host "Host OS edition: $($values['EditionID']); architecture: $env:PROCESSOR_ARCHITECTURE"
+    # PROCESSOR_ARCHITECTURE describes this process, which reads as AMD64 when
+    # the runner starts an emulated shell on an Arm64 host; the machine
+    # environment block keeps the native value.
+    $archKey = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' `
+        -Name PROCESSOR_ARCHITECTURE -ErrorAction SilentlyContinue
+    $architecture = if ($archKey) { $archKey.PROCESSOR_ARCHITECTURE } else { $env:PROCESSOR_ARCHITECTURE }
+
+    Write-Host "Host OS edition: $($values['EditionID']); architecture: $architecture"
 }
 
 function Initialize-ProcessContainerHost {
@@ -217,7 +224,6 @@ function Assert-WorkloadInterpreters {
     foreach ($tool in $interpreters) {
         $resolved = $null
         foreach ($candidate in $tool.Candidates) {
-            $found = Get-Command $candidate -ErrorAction SilentlyContinue
             # A command resolving into WindowsApps is normally a Microsoft Store
             # AppExecutionAlias stub: a 0-byte redirect that opens the Store
             # rather than running, which the suite deliberately ignores.
@@ -227,7 +233,17 @@ function Assert-WorkloadInterpreters {
             # size (both are 0-byte reparse points). So entries that ship that
             # way opt out of the filter via AllowStoreAlias; blanket-filtering
             # them reports an installed tool as missing.
-            if ($found -and ($tool['AllowStoreAlias'] -or $found.Source -notlike '*\WindowsApps\*')) {
+            #
+            # -All is required: a stub shadows the real interpreter whenever
+            # WindowsApps precedes the install directory on PATH, and without
+            # every match the search would stop at the stub and report a tool
+            # that is installed as absent.
+            $found = Get-Command $candidate -All -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $_.Source -and ($tool['AllowStoreAlias'] -or $_.Source -notlike '*\WindowsApps\*')
+                } |
+                Select-Object -First 1
+            if ($found) {
                 $resolved = $found.Source
                 break
             }
@@ -365,8 +381,12 @@ function Resolve-Interpreter {
     param([Parameter(Mandatory)][string[]]$Candidates)
 
     foreach ($candidate in $Candidates) {
-        $found = Get-Command $candidate -ErrorAction SilentlyContinue
-        if ($found -and $found.Source -notlike '*\WindowsApps\*') {
+        # -All is required: a Store alias stub shadows the real interpreter
+        # whenever WindowsApps precedes the install directory on PATH.
+        $found = Get-Command $candidate -All -ErrorAction SilentlyContinue |
+            Where-Object { $_.Source -and $_.Source -notlike '*\WindowsApps\*' } |
+            Select-Object -First 1
+        if ($found) {
             return $found.Source
         }
     }
