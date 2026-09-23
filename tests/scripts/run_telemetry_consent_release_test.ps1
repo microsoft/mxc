@@ -63,6 +63,9 @@ $localAppData = [Environment]::GetFolderPath('LocalApplicationData')
 if (-not $localAppData) { throw 'Could not resolve the LocalApplicationData known folder.' }
 $mxcDir = Join-Path $localAppData 'mxc'
 $consentFile = Join-Path $mxcDir 'telemetry-consent.json'
+# The executor creates this alongside the store and leaves it behind once the
+# lock is released, so cleanup has to account for it too.
+$lockFile = Join-Path $mxcDir 'telemetry-consent.lock'
 $policyKey = 'HKLM:\SOFTWARE\Policies\Mxc'
 
 $expectedBody = @'
@@ -368,6 +371,7 @@ if ($RequirePolicyCeiling -and -not $isAdmin) {
 
 $mxcDirPreexisted = Test-Path $mxcDir
 $consentBackup = if (Test-Path $consentFile) { [IO.File]::ReadAllBytes($consentFile) } else { $null }
+$lockFilePreexisted = Test-Path $lockFile
 $policyKeyPreexisted = Test-Path $policyKey
 $policyValueBackup = $null
 if ($policyKeyPreexisted) {
@@ -407,6 +411,10 @@ finally {
     }
     else {
         Remove-Item -Recurse -Force $mxcDir -ErrorAction SilentlyContinue
+    }
+
+    if ($mxcDirPreexisted -and -not $lockFilePreexisted) {
+        Remove-Item -Force $lockFile -ErrorAction SilentlyContinue
     }
 
     if ($isAdmin) {
