@@ -205,6 +205,11 @@ pty.onExit((e) => console.log('Exit:', e.exitCode));
   established flows, and DNS, with no carve-out for DHCP. A container that
   outlives its lease loses its address; one that finishes within the lease period
   is unaffected.
+- **A container that needs a network waits for an IPv4 address.** A dual-stack
+  `lxcbr0` answers router solicitation seconds before its DHCP lease arrives, and
+  the bridge NATs IPv4 only, so an IPv6 address alone does not mean the container
+  can reach the destinations its policy names. A bridge that never provides an
+  IPv4 address fails the run rather than starting a workload that reaches nothing.
 - **IPv6 egress is not supported.** An `egress` rule naming an IPv6 destination
   installs and reports success, but no IPv6 traffic reaches that destination.
   Stock `lxcbr0` gives the container no IPv6 address, so this surfaces only on a

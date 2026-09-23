@@ -151,6 +151,7 @@ export {
 
 // Export state-aware lifecycle functions
 export {
+  type StateAwareStreamingOptions,
   provisionSandbox,
   startSandbox,
   execInSandbox,
@@ -158,6 +159,8 @@ export {
   stopSandbox,
   deprovisionSandbox,
 } from './state-aware.js';
+
+export { MxcSandboxProcess } from './sandbox-process.js';
 
 // Export telemetry consent functions and types
 export {

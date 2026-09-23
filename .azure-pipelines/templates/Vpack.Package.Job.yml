@@ -133,6 +133,100 @@ extends:
               artifact: mxc-iso-test-bundle-feature-x64
 
             - task: PowerShell@2
+              displayName: Validate isolation_session test bundles
+              inputs:
+                targetType: inline
+                script: |
+                  $expectedMainCommit = "$(Build.SourceVersion)".ToLowerInvariant()
+                  $bundleRoot = "$(Pipeline.Workspace)\IsoSession-TestPackage"
+                  $requiredFiles = @(
+                      'manifest.json',
+                      'bin\x64\wxc-exec.exe',
+                      'inproc\mxc-sdk-isolation-session-tests.exe',
+                      'inproc\sta_probe.exe',
+                      'dotnet\Microsoft.Mxc.Sdk.Tests.exe',
+                      'dotnet\mxc_ffi.dll',
+                      'dotnet\plm.exe',
+                      'node\node.exe',
+                      'node\LICENSE',
+                      'sdk-integration\package.json',
+                      'sdk-integration\run-tests.js',
+                      'test_scripts\run_isolation_session_tests.ps1',
+                      'test_scripts\run_isolation_session_state_aware_tests.ps1',
+                      'test_scripts\run_isolation_session_resize_smoke.ps1'
+                  )
+                  $requiredFeatures = @(
+                      'isolation_session',
+                      'dotnetsdk',
+                      'test-support',
+                      'node-sdk-integration'
+                  )
+                  $packages = @{
+                      main = 'mxc-iso-test-bundle-main-x64'
+                      feature = 'mxc-iso-test-bundle-feature-x64'
+                  }
+
+                  $manifests = @{}
+                  foreach ($package in $packages.Keys) {
+                      $root = Join-Path $bundleRoot $packages[$package]
+                      foreach ($relativePath in $requiredFiles) {
+                          $path = Join-Path $root $relativePath
+                          if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                              throw "$package test bundle is missing required file '$relativePath'."
+                          }
+                      }
+
+                      $manifestPath = Join-Path $root 'manifest.json'
+                      $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+                      $manifests[$package] = $manifest
+                      if ("$($manifest.package)" -ne $package) {
+                          throw "$package test bundle manifest identifies package '$($manifest.package)'."
+                      }
+                      if ("$($manifest.pipeline)" -ne 'MXC-Iso-Session') {
+                          throw "$package test bundle came from '$($manifest.pipeline)', not MXC-Iso-Session."
+                      }
+                      foreach ($feature in $requiredFeatures) {
+                          if (@($manifest.features) -notcontains $feature) {
+                              throw "$package test bundle does not declare required feature '$feature'."
+                          }
+                      }
+                  }
+
+                  $actualMainCommit = "$($manifests.main.commit_sha)".ToLowerInvariant()
+                  if ($actualMainCommit -ne $expectedMainCommit) {
+                      throw "Refusing to publish stale main test bundle '$actualMainCommit'; vpack source is '$expectedMainCommit'."
+                  }
+                  if ("$($manifests.main.branch_name)" -ne 'mxc_main') {
+                      throw "Main test bundle branch is '$($manifests.main.branch_name)', not 'mxc_main'."
+                  }
+                  if ("$($manifests.feature.branch_name)" -ne 'mxc_iso_session_feature') {
+                      throw "Feature test bundle branch is '$($manifests.feature.branch_name)', not 'mxc_iso_session_feature'."
+                  }
+                  # branch_name above is only the repository resource alias; the
+                  # refs those aliases resolve to are configured separately, so
+                  # validate the ref each bundle was actually built from.
+                  $expectedRefs = @{
+                      main = 'refs/heads/main'
+                      feature = 'refs/heads/feature/isolation-session-internal'
+                  }
+                  foreach ($package in $expectedRefs.Keys) {
+                      $actualRef = "$($manifests[$package].source_ref)"
+                      if ($actualRef -ne $expectedRefs[$package]) {
+                          throw "$package test bundle was built from ref '$actualRef', not '$($expectedRefs[$package])'."
+                      }
+                  }
+                  $mainBuildId = "$($manifests.main.build_id)"
+                  $featureBuildId = "$($manifests.feature.build_id)"
+                  if ([string]::IsNullOrWhiteSpace($mainBuildId) -or [string]::IsNullOrWhiteSpace($featureBuildId)) {
+                      throw "Main and feature test bundle manifests must declare a build_id."
+                  }
+                  if ($mainBuildId -ne $featureBuildId) {
+                      throw "Main and feature test bundles came from different MXC-Iso-Session builds."
+                  }
+
+                  Write-Host "Validated current MXC-Iso-Session bundle build $($manifests.main.build_id)."
+
+            - task: PowerShell@2
               displayName: Stage binaries for vpack
               inputs:
                 targetType: inline

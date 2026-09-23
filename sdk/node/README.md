@@ -258,10 +258,8 @@ implicitly copies `process.env` into the child.
 The `await`-friendly API runs the abstract `process` containment intent and
 resolves with `{ stdout, stderr, exitCode }`. That intent maps to the native
 process backend for each host and selects Windows ProcessContainer when the
-policy contains ProcessContainer-specific settings. Requests run in-process
-through `mxc_ffi`, with separate stdout and stderr. Executor-only options such
-as `dryRun`, `executablePath`, and testing-only proxy support are rejected; the
-API never falls back to an executor.
+policy contains ProcessContainer-specific settings. Requests execute through
+`mxc_ffi` and return separate stdout and stderr.
 
 ```typescript
 import {
@@ -365,16 +363,14 @@ capability names are reserved and must not be added directly to
 
 For long-lived sandboxes where you provision once, exec many times, and tear down at the end (e.g. agentic loops), use the state-aware lifecycle.
 
-> **Backend support:** the state-aware lifecycle is currently implemented for `isolation_session`, `windows_sandbox`, and `wslc` (all Windows-only). IsolationSession and WSLC do not require an experimental opt-in; Windows Sandbox does. The one-shot spawn APIs (`spawnSandbox` / `spawnSandboxFromConfig`) are the supported path for every other backend.
+> **Backend support:** the state-aware lifecycle is currently implemented for `isolation_session`, `windows_sandbox`, and `wslc` (all Windows-only). Node live and buffered exec require native piped streams and currently support only IsolationSession; `execInSandboxAsync(..., { dryRun: true })` can validate exec requests for all three backends. IsolationSession and WSLC do not require an experimental opt-in; Windows Sandbox does. The one-shot spawn APIs (`spawnSandbox` / `spawnSandboxFromConfig`) are the supported execution path for every other backend.
 
 ```typescript
 import {
-  provisionSandbox, startSandbox, execInSandboxAsync,
+  provisionSandbox, startSandbox, execInSandbox, execInSandboxAsync,
   stopSandbox, deprovisionSandbox,
 } from '@microsoft/mxc-sdk';
 
-// Every call takes a single options object (3rd arg). Experimental backends
-// must pass `experimental: true`.
 // isolation_session provision requires its actual unrestricted network posture.
 const { sandboxId } = await provisionSandbox(
   'isolation_session',
@@ -384,25 +380,36 @@ const { sandboxId } = await provisionSandbox(
       ingress: { default: 'allow', hostLoopback: 'allow' },
     },
   },
-  { experimental: true },
 );
-const opts = { experimental: true };
 
-await startSandbox(sandboxId, undefined, opts);
+await startSandbox(sandboxId);
 
-const r1 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'echo hello' } }, opts);
-const r2 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'whoami' } }, opts);
+const r1 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'echo hello' } });
+const r2 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'whoami' } });
 
-await stopSandbox(sandboxId, undefined, opts);
-await deprovisionSandbox(sandboxId, undefined, opts);
+const sandboxProcess = execInSandbox(
+  sandboxId,
+  { process: { commandLine: 'echo streamed' } },
+);
+sandboxProcess.standardOutput?.on('data', (chunk) => process.stdout.write(chunk));
+await sandboxProcess.waitAsync();
+
+await stopSandbox(sandboxId);
+await deprovisionSandbox(sandboxId);
 ```
 
 `IsolationSessionProvisionConfig.network` requires the standard directional
 all-allow shape shown above; legacy fields are rejected. Rules,
-proxies, mixed postures, and omission are rejected. The shared lifecycle
-signatures and other backends are unchanged.
+proxies, mixed postures, and omission are rejected. The other lifecycle phases
+remain available for every state-aware backend.
 
-`windows_sandbox` follows the same shape (substitute the containment string and provide `filesystem.readwritePaths` / `readonlyPaths` at provision if needed). See [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) for the per-phase config matrix.
+`windows_sandbox` follows the same provision/start/stop/deprovision shape
+(substitute the containment string and provide `filesystem.readwritePaths` /
+`readonlyPaths` at provision if needed). Node can dry-run its exec requests,
+but live or buffered execution is not available because the backend does not
+expose piped native exec streams. See
+[`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md)
+for the per-phase config matrix.
 
 `wslc` needs no provision config (it defaults to an `alpine:latest`
 container with no network). A bridged container uses the directional all-allow
@@ -419,15 +426,9 @@ const provisioned = await provisionSandbox('wslc', {
 
 Provision may also supply `filesystem.readwritePaths` / `readonlyPaths`
 (mounted for the sandbox's lifetime) and a backend-specific `image` /
-`imageTarPath`. Inject a cooperative proxy during exec with
-`runtimeConfig.networkProxy`:
-
-```typescript
-await execInSandboxAsync(provisioned.sandboxId, {
-  process: { commandLine: 'curl https://example.com' },
-  runtimeConfig: { networkProxy: 'http://proxy.example:8080' },
-});
-```
+`imageTarPath`. Node can dry-run WSLC exec requests, including
+`runtimeConfig.networkProxy`, but live or buffered execution is not available
+because WSLC does not expose piped native exec streams.
 
 IsolationSession state-aware requests default to published `0.9.0-alpha`.
 Windows Sandbox requests default to development `0.10.0-alpha`; WSLC requests
@@ -441,7 +442,7 @@ for the per-phase config matrix.
 import { MxcError } from '@microsoft/mxc-sdk';
 
 try {
-  await startSandbox(sandboxId, {}, { experimental: true });
+  await startSandbox(sandboxId);
 } catch (err) {
   if (err instanceof MxcError) {
     if (err.code === 'stale_id') { /* the sandbox is gone -- re-provision */ }
@@ -580,8 +581,9 @@ spawnSandboxAsync(script, policy, ...) → Promise<{ stdout, stderr, exitCode }>
 // optional otherwise (windows_sandbox, wslc).
 provisionSandbox(containment, config, options?)  → Promise<ProvisionResult>
 startSandbox(sandboxId, config?, options?)       → Promise<StartResult>
-execInSandbox(sandboxId, config, options?)       → IPty             // streaming
-execInSandboxAsync(sandboxId, config, options?)  → Promise<ExecResult>
+execInSandbox(isolationSessionId, config, options) → MxcSandboxProcess // streaming
+execInSandboxAsync(isolationSessionId, config, options?) → Promise<ExecResult>
+execInSandboxAsync(sandboxId, config, { dryRun: true }) → Promise<ExecResult>
 stopSandbox(sandboxId, config?, options?)        → Promise<StopResult>
 deprovisionSandbox(sandboxId, config?, options?) → Promise<DeprovisionResult>
 

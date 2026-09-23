@@ -94,6 +94,7 @@ export class MxcSandboxProcess {
   private outputDrained = false;
   private errorDrained = false;
   private phase: ProcessPhase = 'active';
+  private killRequested = false;
   private warningsValue: readonly string[];
   private metadataValue: unknown | undefined;
   private resolveWait!: (result: SandboxWaitResult) => void;
@@ -186,7 +187,8 @@ export class MxcSandboxProcess {
 
   /**
    * Waits for process completion. Untaken stdin is closed and untaken output
-   * streams are drained internally to prevent pipe-buffer deadlocks.
+   * streams are drained internally to prevent pipe-buffer deadlocks. The
+   * native process handle is released before the promise resolves.
    */
   waitAsync(): Promise<SandboxWaitResult> {
     this.throwIfDisposed();
@@ -200,7 +202,9 @@ export class MxcSandboxProcess {
 
   kill(): void {
     this.throwIfDisposed();
-    if (this.phase === 'active') this.driver.kill();
+    if (this.phase !== 'active' || this.killRequested) return;
+    this.driver.kill();
+    this.killRequested = true;
   }
 
   dispose(): void {
@@ -208,9 +212,10 @@ export class MxcSandboxProcess {
     const previousPhase = this.phase;
     this.phase = 'disposed';
     let firstError: Error | undefined;
-    if (previousPhase === 'active') {
+    if (previousPhase === 'active' && !this.killRequested) {
       try {
         this.driver.kill();
+        this.killRequested = true;
       } catch (error) {
         firstError = asError(error);
       }

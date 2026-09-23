@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 use std::fmt::Write;
+use std::net::Ipv4Addr;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,6 +26,22 @@ const HOSTS_PIN_MARKER: &str = "#mxc-proxy-pin";
 
 /// The `/etc/hosts` rewrites are short shell commands and must not inherit the script timeout.
 const HOSTS_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+
+// lxcbr0 answers router solicitation in about a second while its DHCP lease
+// arrives around nine, and the bridge NATs IPv4 only.  Reading the IPv6
+// address as readiness starts the workload with no route to anything.
+fn first_routable_ipv4(lxc_info_addresses: &str) -> Option<Ipv4Addr> {
+    lxc_info_addresses
+        .lines()
+        .filter_map(|line| line.trim().parse::<Ipv4Addr>().ok())
+        .find(|address| {
+            !address.is_loopback()
+                && !address.is_unspecified()
+                && !address.is_link_local()
+                && !address.is_multicast()
+                && !address.is_broadcast()
+        })
+}
 
 #[derive(Clone, Copy)]
 enum ContainerRelease {
@@ -72,12 +89,11 @@ impl LxcScriptRunner {
 
             if let Ok(out) = output {
                 let stdout = String::from_utf8_lossy(&out.stdout);
-                let ip = stdout.trim();
-                if !ip.is_empty() {
+                if let Some(address) = first_routable_ipv4(&stdout) {
                     let _ = writeln!(
                         logger,
                         "Container network ready (IP: {}, waited {:.1}s)",
-                        ip,
+                        address,
                         start.elapsed().as_secs_f64()
                     );
                     return true;
@@ -215,8 +231,10 @@ impl LxcScriptRunner {
         Self::report_release_failure(release, release_container(release), logger);
 
         Some(ScriptResponse::error(&format!(
-            "Container network did not initialize within {:.0}s; \
-             check that lxc-net/dnsmasq is running and able to assign an IP.",
+            "Container did not receive an IPv4 address within {:.0}s; \
+             check that lxc-net/dnsmasq is running and able to assign one. \
+             A bridge offering only IPv6 leaves the container unable to reach \
+             the IPv4 destinations its policy names.",
             timeout.as_secs_f64()
         )))
     }
@@ -1332,6 +1350,76 @@ mod tests {
         );
     }
 
+    // `lxc-info -iH` prints one address per line, in whatever order the
+    // container acquired them.
+    #[test]
+    fn an_ipv6_address_alone_is_not_readiness() {
+        assert_eq!(
+            first_routable_ipv4("fc42:5009:ba4b:5ab0:247d:98ff:fecf:c8b7\n"),
+            None,
+            "a SLAAC address arrives seconds before the DHCP lease; accepting it \
+             starts the workload with no route to an IPv4 destination"
+        );
+    }
+
+    #[test]
+    fn an_ipv4_address_is_readiness() {
+        assert_eq!(
+            first_routable_ipv4("10.0.3.201\n"),
+            Some(Ipv4Addr::new(10, 0, 3, 201))
+        );
+    }
+
+    #[test]
+    fn a_dual_stack_container_is_ready_on_its_ipv4_address() {
+        let both = "fc42:5009:ba4b:5ab0:247d:98ff:fecf:c8b7\n10.0.3.201\n";
+
+        assert_eq!(
+            first_routable_ipv4(both),
+            Some(Ipv4Addr::new(10, 0, 3, 201)),
+            "the IPv4 address must be found whatever order lxc-info lists it in"
+        );
+    }
+
+    #[test]
+    fn no_address_is_not_readiness() {
+        for empty in ["", "\n", "   \n"] {
+            assert_eq!(first_routable_ipv4(empty), None, "input was {empty:?}");
+        }
+    }
+
+    #[test]
+    fn an_unusable_ipv4_address_is_not_readiness() {
+        // 169.254/16 is what the container assigns itself when DHCP never answers.
+        for unusable in [
+            "127.0.0.1\n",
+            "0.0.0.0\n",
+            "169.254.13.7\n",
+            "224.0.0.5\n",
+            "239.1.2.3\n",
+            "255.255.255.255\n",
+        ] {
+            assert_eq!(
+                first_routable_ipv4(unusable),
+                None,
+                "{unusable:?} reaches nothing off the container"
+            );
+        }
+    }
+
+    #[test]
+    fn a_usable_address_is_still_found_beside_an_unusable_one() {
+        assert_eq!(
+            first_routable_ipv4("127.0.0.1\n10.0.3.201\n"),
+            Some(Ipv4Addr::new(10, 0, 3, 201))
+        );
+        assert_eq!(
+            first_routable_ipv4("224.0.0.5\n255.255.255.255\n10.0.3.201\n"),
+            Some(Ipv4Addr::new(10, 0, 3, 201)),
+            "an unusable address listed first must not end the wait"
+        );
+    }
+
     #[test]
     fn network_readiness_timeout_returns_the_fail_closed_error_response() {
         let runner = runner_for_network_readiness_tests(false);
@@ -1340,7 +1428,7 @@ mod tests {
         assert!(
             response
                 .error_message
-                .contains("Container network did not initialize within 1s"),
+                .contains("Container did not receive an IPv4 address within 1s"),
             "the fail-closed readiness timeout message changed unexpectedly: {}",
             response.error_message
         );

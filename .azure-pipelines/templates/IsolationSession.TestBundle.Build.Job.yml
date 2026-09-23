@@ -47,6 +47,7 @@ jobs:
     configTomlPath: $(Pipeline.Workspace)/s/.cargo/config.toml
     npmrcPath: '$(Agent.TempDirectory)/mxc.npmrc'
     NPM_CONFIG_USERCONFIG: '$(npmrcPath)'
+    sourceRepositoryRef: $[ resources.repositories.${{ parameters.checkoutRepo }}.ref ]
 
   templateContext:
     rust:
@@ -71,7 +72,7 @@ jobs:
   - checkout: ${{ parameters.checkoutRepo }}
     path: s
 
-  - task: NodeTool@1
+  - task: UseNode@1
     displayName: Use Node.js 24.21
     inputs:
       version: '24.21.0'
@@ -165,7 +166,26 @@ jobs:
       New-Item -ItemType Directory -Force -Path $sdkBin | Out-Null
       Copy-Item "$(CARGO_TARGET_DIR)/x86_64-pc-windows-msvc/release/wxc-exec.exe" "$sdkBin/"
       Write-Host "  -> sdk/node/bin/x64/wxc-exec.exe"
-    displayName: 'Stage wxc-exec into SDK bin'
+
+      Push-Location "$(workingDirectory)"
+      try {
+          & cargo build --locked --release --target "$(triplet)" `
+              -p mxc_ffi --features isolation_session
+          if ($LASTEXITCODE -ne 0) {
+              throw "Building the Node SDK native library failed with exit code $LASTEXITCODE"
+          }
+      }
+      finally {
+          Pop-Location
+      }
+
+      $nodeFfi = "$(CARGO_TARGET_DIR)/$(triplet)/release/mxc_ffi.dll"
+      if (-not (Test-Path -LiteralPath $nodeFfi -PathType Leaf)) {
+          throw "The Node SDK native build did not produce $nodeFfi"
+      }
+      Copy-Item $nodeFfi "$sdkBin/"
+      Write-Host "  -> sdk/node/bin/x64/mxc_ffi.dll"
+    displayName: 'Stage native Node SDK binaries'
 
   - script: npm ci && npm run build
     displayName: 'Build SDK (@microsoft/mxc-sdk)'
@@ -196,6 +216,20 @@ jobs:
       if ($LASTEXITCODE -ne 0) {
           throw "Publishing Microsoft.Mxc.Sdk.Tests failed with exit code $LASTEXITCODE"
       }
+
+      $nativeTarget = Join-Path $env:AGENT_TEMPDIRECTORY 'mxc-dotnet-test-native'
+      & cargo build --locked --target "$(triplet)" --target-dir $nativeTarget `
+          -p mxc_ffi --features 'dotnetsdk,test-support,isolation_session' `
+          --manifest-path "$(workingDirectory)/Cargo.toml"
+      if ($LASTEXITCODE -ne 0) {
+          throw "Building the .NET test-support native library failed with exit code $LASTEXITCODE"
+      }
+
+      $testNative = Join-Path $nativeTarget "$(triplet)/debug/mxc_ffi.dll"
+      if (-not (Test-Path -LiteralPath $testNative -PathType Leaf)) {
+          throw "The .NET test-support native build did not produce $testNative"
+      }
+      Copy-Item $testNative (Join-Path $out 'mxc_ffi.dll') -Force
 
       foreach ($name in @('Microsoft.Mxc.Sdk.Tests.exe', 'mxc_ffi.dll', 'plm.exe')) {
           $required = Join-Path $out $name
@@ -233,7 +267,7 @@ jobs:
       $nodeExe = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
       $nodeLicense = Join-Path (Split-Path -Parent $nodeExe) "LICENSE"
       if (-not (Test-Path -LiteralPath $nodeLicense -PathType Leaf)) {
-          throw "Node.js license not found alongside the NodeTool runtime: $nodeLicense"
+          throw "Node.js license not found alongside the UseNode runtime: $nodeLicense"
       }
       Copy-Item $nodeExe "$out/node/node.exe"
       Copy-Item $nodeLicense "$out/node/LICENSE"
@@ -305,12 +339,20 @@ jobs:
           format_version = 1
           produced_at    = (Get-Date).ToUniversalTime().ToString('o')
           branch_name    = "${{ parameters.checkoutRepo }}"
+          # The ref actually checked out for the repository resource, so
+          # consumers validate the real source ref rather than the alias.
+          source_ref     = "$(sourceRepositoryRef)"
           commit_sha     = (git -C "$(Build.SourcesDirectory)" rev-parse HEAD).Trim()
           build_id       = "$(Build.BuildId)"
           pipeline       = "$(Build.DefinitionName)"
           triplet        = "x86_64-pc-windows-msvc"
           package        = "${{ parameters.packageName }}"
-          features       = @('isolation_session')
+          features       = @(
+              'isolation_session',
+              'dotnetsdk',
+              'test-support',
+              'node-sdk-integration'
+          )
       }
       $manifest | ConvertTo-Json -Depth 3 | Set-Content "$out/manifest.json" -Encoding UTF8
       Write-Host "  -> manifest.json"
@@ -385,7 +427,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
               throw "Packaged SDK test discovery failed with exit code $LASTEXITCODE"
           }
-          if (($testOutput -join "`n") -notmatch '(?m)^# tests [1-9][0-9]*\r?$') {
+          if (($testOutput -join "`n") -notmatch '(?m)^[^A-Za-z0-9]*tests\s+[1-9][0-9]*\r?$') {
               throw "Packaged SDK test discovery did not find any tests"
           }
       }
@@ -442,6 +484,11 @@ jobs:
       }
       if (($testList -join "`n") -notmatch 'Microsoft\.Mxc\.Sdk\.Tests') {
           throw "Packaged .NET test discovery did not find any tests"
+      }
+
+      & $testExe -class 'Microsoft.Mxc.Sdk.Tests.MxcTelemetryTests' -noLogo
+      if ($LASTEXITCODE -ne 0) {
+          throw "Packaged .NET telemetry tests failed with exit code $LASTEXITCODE"
       }
     displayName: 'Validate packaged .NET tests'
 

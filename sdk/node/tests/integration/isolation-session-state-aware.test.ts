@@ -3,15 +3,15 @@
 
 // SDK end-to-end tests for the IsolationSession state-aware lifecycle.
 //
-// These tests invoke real wxc-exec.exe and exercise the full lifecycle:
+// These tests invoke the real in-process mxc_ffi API and exercise the full lifecycle:
 // provision -> start -> exec -> stop -> deprovision. The whole suite skips
 // at module evaluation time when this host lacks IsolationSession runtime
-// support (or when wxc-exec was built without `--features isolation_session`),
+// support (or when mxc_ffi was built without `--features isolation_session`),
 // so the suite runs cleanly on any Windows host but only meaningfully on
 // a host with IsolationSession runtime support.
 //
 // Build prerequisites:
-//   - wxc-exec.exe built with `--features isolation_session`
+//   - mxc_ffi.dll built with `--features isolation_session`
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
@@ -19,6 +19,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'os';
 import {
+  execInSandbox,
   execInSandboxAsync,
   MxcError,
   provisionSandbox,
@@ -41,6 +42,20 @@ import {
  */
 const wellFormedSandboxId = (agentUserName: string): string =>
   `iso:${Buffer.from(JSON.stringify({ version: 1, agentUserName }), 'utf8').toString('base64url')}`;
+
+function readStreamText(stream: NodeJS.ReadableStream | null): Promise<string> {
+  if (stream === null) {
+    return Promise.resolve('');
+  }
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    stream.on('data', (chunk: Buffer | string) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+    stream.once('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    stream.once('error', reject);
+  });
+}
 
 const platformSkipReason =
   os.platform() !== 'win32' ? 'IsolationSession is Windows-only' : undefined;
@@ -114,6 +129,36 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
         `stdout did not contain 'hello': ${result.stdout}`,
       );
 
+      await stopSandbox(sandboxId, undefined);
+    } finally {
+      await safeDeprovision(sandboxId);
+    }
+  });
+
+  it('streams exec through MxcSandboxProcess', async () => {
+    const provisionResult = await provisionSandbox(
+      'isolation_session',
+      { network: isolationSessionNetwork },
+    );
+    const sandboxId = provisionResult.sandboxId;
+
+    try {
+      await startSandbox(sandboxId, {});
+      const sandboxProcess = execInSandbox(
+        sandboxId,
+        { process: { commandLine: 'cmd /c echo streamed' } },
+      );
+      try {
+        const stdout = readStreamText(sandboxProcess.standardOutput);
+        const stderr = readStreamText(sandboxProcess.standardError);
+        const result = await sandboxProcess.waitAsync();
+        assert.strictEqual(result.exitCode, 0);
+        assert.strictEqual(result.timedOut, false);
+        assert.ok((await stdout).includes('streamed'));
+        assert.strictEqual(await stderr, '');
+      } finally {
+        sandboxProcess.dispose();
+      }
       await stopSandbox(sandboxId, undefined);
     } finally {
       await safeDeprovision(sandboxId);
@@ -208,7 +253,7 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
 // Policy rejections are raised by MXC's own validation, before any
 // IsolationSession API call: the dispatcher runs `validate_provision` ahead of
 // `provision`, and `IsolationSessionRunner` is a stateless marker whose
-// construction touches no WinRT. So these need a `wxc-exec.exe` built with
+// construction touches no WinRT. So these need an `mxc_ffi.dll` built with
 // `--features isolation_session` (which CI builds) but *not* a host that can
 // actually run isolation sessions.
 //

@@ -724,13 +724,11 @@ export interface SandboxSpawnOptions {
   usePty?: boolean;
 
   /**
-   * Optional cancellation signal. When it aborts, the SDK kills the
-   * spawned executor process and rejects any pending result promise with
-   * the signal's reason. Honored by the state-aware lifecycle functions;
-   * one-shot spawn currently ignores it (kill the returned IPty /
-   * ChildProcess directly instead).
+   * Optional cancellation signal for promise-returning state-aware lifecycle
+   * functions, including `execInSandboxAsync`. Live `execInSandbox` uses
+   * `StateAwareStreamingOptions`; call `kill()` on its returned process.
    *
-   * Cancellation is best-effort: killing the executor mid-call leaves
+   * Cancellation is best-effort: cancelling a call may leave
    * any backend-side state (e.g. a partially-provisioned IsolationSession)
    * wherever it landed. Callers may need a follow-up `deprovisionSandbox`
    * (or its equivalent) to clean up an orphaned sandbox after an abort.
