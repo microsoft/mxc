@@ -113,7 +113,7 @@ describe('getPlatformSupport host-services projection', () => {
     _setPlatformSupportSnapshotReader(() => ({
       platformSupportJson: JSON.stringify({
         isSupported: true,
-        availableMethods: ['processcontainer', 'wslc'],
+        availableMethods: ['processcontainer', 'wslc', 'isolation_session'],
         isolationTier: 'appcontainer-bfs',
         isolationWarnings: ['Base Container is unavailable; using AppContainer + BFS.'],
         uiCapabilities: {
@@ -141,6 +141,7 @@ describe('getPlatformSupport host-services projection', () => {
     assert.deepStrictEqual(support.availableMethods, [
       'processcontainer',
       'wslc',
+      'isolation_session',
     ]);
     assert.deepStrictEqual(support.isolationWarnings, [
       'Base Container is unavailable; using AppContainer + BFS.',

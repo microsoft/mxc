@@ -185,7 +185,7 @@ if (network.proxyEnforcement !== 'supported') {
 }
 ```
 
-It is reported **fail closed**: if the probe cannot run, the result is `'unsupported'` with the reason in `warnings`, never absent. The check is advisory — the runner still verifies the dependencies at launch, since the probe runs in a different process at an earlier time. See [the Bubblewrap backend guide](../../docs/bwrap-support/bubblewrap-backend.md#checking-host-support-before-you-run).
+It is reported **fail closed**: if the probe cannot run, the result is `'unsupported'` with the reason in `warnings`, never absent. The check is advisory — the runner still verifies the dependencies at launch because host state can change after the cached probe. See [the Bubblewrap backend guide](../../docs/bwrap-support/bubblewrap-backend.md#checking-host-support-before-you-run).
 
 `getPlatformSupport()` is cached for the module lifetime, so its
 `bubblewrapNetwork` field can become stale if host networking dependencies
