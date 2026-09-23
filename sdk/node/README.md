@@ -672,8 +672,8 @@ telemetry remains off. On non-Windows hosts requests and withdrawals return
 `queryTelemetryConsentAsync()` fails closed to `'undetermined'` rather than
 `'granted'`. Its `error` field is present when the native query fails or
 returns an invalid response. A valid native fail-closed response can return
-`'undetermined'` or a blocked policy without `error`; any accompanying native
-diagnostic is reported once through `console.warn`:
+`'undetermined'` or a blocked policy without `error`; native diagnostics are
+written to the process's standard error stream:
 
 ```typescript
 const { effectiveState, storedState, needsPrompt, policy, error } =

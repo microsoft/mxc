@@ -18,12 +18,22 @@ import {
 } from '../../src/bindings/telemetry.js';
 
 class FakeWorker extends EventEmitter implements BindingTelemetryWorkerLike {
+  terminated = false;
+
   reply(message: TelemetryRequestWorkerMessage): void {
     queueMicrotask(() => this.emit('message', message));
   }
 
+  fail(error: Error): void {
+    queueMicrotask(() => this.emit('error', error));
+  }
+
   exit(code: number): void {
     queueMicrotask(() => this.emit('exit', code));
+  }
+
+  terminate(): void {
+    this.terminated = true;
   }
 }
 
@@ -135,5 +145,80 @@ describe('telemetry consent request worker', () => {
     assert.strictEqual(observedSignal?.aborted, true);
     assert.strictEqual(Atomics.load(decision, 0), 1);
     assert.strictEqual(Atomics.load(decision, 1), TELEMETRY_CONSENT_PRESENTER_ERROR);
+  });
+
+  it('aborts the presenter and preserves a worker error', async () => {
+    let observedSignal: AbortSignal | undefined;
+    const promise = runTelemetryConsentRequestAsync(undefined, async (_promptJson, signal) => {
+      observedSignal = signal;
+      await new Promise(() => {});
+      return TELEMETRY_CONSENT_DECISION_YES;
+    });
+    await waitFor(() => workerData !== undefined);
+    const decision = new Int32Array(workerData!.decisionShared);
+
+    worker.reply({
+      kind: 'present',
+      promptJson: '{"resourceVersion":1,"locale":"en-US","title":{"id":"title","text":"Help improve MXC"},"body":{"id":"body","text":"body"},"affirmativeLabel":{"id":"yes","text":"Yes"},"negativeLabel":{"id":"no","text":"No"},"learnMoreLabel":{"id":"learn","text":"Learn more"},"learnMoreUrl":"https://example.microsoft.com/privacy"}',
+    });
+    await waitFor(() => observedSignal !== undefined);
+
+    worker.fail(new Error('worker crashed'));
+
+    await assert.rejects(promise, /worker crashed/);
+    assert.strictEqual(observedSignal?.aborted, true);
+    assert.strictEqual(Atomics.load(decision, 0), 1);
+    assert.strictEqual(Atomics.load(decision, 1), TELEMETRY_CONSENT_PRESENTER_ERROR);
+  });
+
+  it('rejects unexpected worker messages', async () => {
+    const promise = runTelemetryConsentRequestAsync(
+      undefined,
+      () => TELEMETRY_CONSENT_DECISION_YES,
+    );
+    await waitFor(() => workerData !== undefined);
+
+    worker.reply({ kind: 'unknown' } as unknown as TelemetryRequestWorkerMessage);
+
+    await assert.rejects(promise, /unexpected message/);
+  });
+
+  it('terminates a worker that stops making native progress', async () => {
+    const promise = runTelemetryConsentRequestAsync(
+      undefined,
+      () => TELEMETRY_CONSENT_DECISION_YES,
+      10,
+    );
+    await waitFor(() => workerData !== undefined);
+
+    await assert.rejects(promise, /timed out/);
+    assert.strictEqual(worker.terminated, true);
+  });
+
+  it('pauses the native deadline while the presenter is deciding', async () => {
+    let resolvePresenter: ((decision: number) => void) | undefined;
+    const promise = runTelemetryConsentRequestAsync(
+      undefined,
+      () => new Promise<number>((resolve) => {
+        resolvePresenter = resolve;
+      }),
+      100,
+    );
+    await waitFor(() => workerData !== undefined);
+
+    worker.reply({
+      kind: 'present',
+      promptJson: '{"resourceVersion":1,"locale":"en-US","title":{"id":"title","text":"Help improve MXC"},"body":{"id":"body","text":"body"},"affirmativeLabel":{"id":"yes","text":"Yes"},"negativeLabel":{"id":"no","text":"No"},"learnMoreLabel":{"id":"learn","text":"Learn more"},"learnMoreUrl":"https://example.microsoft.com/privacy"}',
+    });
+    await waitFor(() => resolvePresenter !== undefined);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.strictEqual(worker.terminated, false);
+
+    resolvePresenter!(TELEMETRY_CONSENT_DECISION_YES);
+    const decision = new Int32Array(workerData!.decisionShared);
+    await waitFor(() => Atomics.load(decision, 0) === 1);
+    worker.reply({ kind: 'payload', payload: '{"result":"granted"}' });
+
+    assert.strictEqual(await promise, '{"result":"granted"}');
   });
 });

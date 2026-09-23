@@ -21,9 +21,12 @@ export interface BindingTelemetryWorkerLike {
   on(event: 'message', listener: (message: TelemetryRequestWorkerMessage) => void): this;
   on(event: 'error', listener: (error: Error) => void): this;
   on(event: 'exit', listener: (code: number) => void): this;
+  terminate(): void;
 }
 
 type WorkerFactory = (data: TelemetryRequestWorkerData) => BindingTelemetryWorkerLike;
+
+const DEFAULT_TELEMETRY_REQUEST_TIMEOUT_MS = 30_000;
 
 const defaultWorkerFactory: WorkerFactory = (data) => new Worker(
   new URL('./telemetry-request-worker-entry.js', import.meta.url),
@@ -43,6 +46,7 @@ function serializeUnknownError(error: unknown): Error {
 export function runTelemetryConsentRequestAsync(
   locale: string | undefined,
   presenter: (promptJson: string, signal: AbortSignal) => number | Promise<number>,
+  timeoutMs = DEFAULT_TELEMETRY_REQUEST_TIMEOUT_MS,
 ): Promise<string> {
   const decision = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 2));
   return new Promise((resolve, reject) => {
@@ -54,6 +58,9 @@ export function runTelemetryConsentRequestAsync(
     let presenterAbort: AbortController | null = null;
     let presenterError: Error | undefined;
     let decisionWritten = false;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    let deadlineStartedAt = 0;
+    let deadlineRemainingMs = timeoutMs;
 
     const writeDecision = (code: number): void => {
       if (decisionWritten) {
@@ -65,11 +72,30 @@ export function runTelemetryConsentRequestAsync(
       Atomics.notify(decision, 0);
     };
 
+    const clearDeadline = (): void => {
+      if (deadline !== undefined) {
+        clearTimeout(deadline);
+        deadline = undefined;
+      }
+    };
+
+    const pauseDeadline = (): void => {
+      if (deadline === undefined) {
+        return;
+      }
+      deadlineRemainingMs = Math.max(
+        0,
+        deadlineRemainingMs - (Date.now() - deadlineStartedAt),
+      );
+      clearDeadline();
+    };
+
     const finish = (action: () => void) => {
       if (settled) {
         return;
       }
       settled = true;
+      clearDeadline();
       presenterAbort?.abort();
       if (!decisionWritten) {
         writeDecision(TELEMETRY_CONSENT_PRESENTER_ERROR);
@@ -77,8 +103,26 @@ export function runTelemetryConsentRequestAsync(
       action();
     };
 
+    const armDeadline = (): void => {
+      if (settled || deadline !== undefined) {
+        return;
+      }
+      deadlineStartedAt = Date.now();
+      deadline = setTimeout(() => {
+        finish(() => {
+          worker.terminate();
+          reject(new Error('telemetry consent request timed out'));
+        });
+      }, deadlineRemainingMs);
+    };
+
     worker.on('message', (message) => {
       if (message.kind === 'present') {
+        if (presenterAbort !== null) {
+          finish(() => reject(new Error('telemetry request worker requested presentation twice')));
+          return;
+        }
+        pauseDeadline();
         presenterAbort = new AbortController();
         void (async () => {
           try {
@@ -90,6 +134,8 @@ export function runTelemetryConsentRequestAsync(
           } catch (error) {
             presenterError = serializeUnknownError(error);
             writeDecision(TELEMETRY_CONSENT_PRESENTER_ERROR);
+          } finally {
+            armDeadline();
           }
         })();
         return;
@@ -115,5 +161,6 @@ export function runTelemetryConsentRequestAsync(
       code: 'backend_error',
       message: `telemetry worker exited before returning a result (code ${code})`,
     }))));
+    armDeadline();
   });
 }

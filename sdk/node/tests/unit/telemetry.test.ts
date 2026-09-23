@@ -30,6 +30,8 @@ class FakeWorker extends EventEmitter implements BindingTelemetryWorkerLike {
   reply(message: TelemetryRequestWorkerMessage): void {
     queueMicrotask(() => this.emit('message', message));
   }
+
+  terminate(): void {}
 }
 
 const prompt: TelemetryConsentPrompt = {
