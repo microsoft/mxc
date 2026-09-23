@@ -242,7 +242,7 @@ export function resolveExecutableAndArgs(
   // bypass the experimental-mode gate (because they are not in
   // ExperimentalBackends under their alias) and produce a confusing
   // "not available on this platform" error instead.
-  const rawContainment = config.containment;
+  const rawContainment: string | undefined = config.containment;
   const effectiveContainment = rawContainment
     ? (LegacyContainmentAliases[rawContainment] ?? rawContainment)
     : undefined;
@@ -252,7 +252,9 @@ export function resolveExecutableAndArgs(
 
   // Check experimental mode before anything else so the caller gets a clear
   // message about the missing flag rather than a platform/binary error.
-  if (effectiveContainment && ExperimentalBackends.includes(effectiveContainment) && !options.experimental) {
+  if (effectiveContainment &&
+      (ExperimentalBackends as readonly string[]).includes(effectiveContainment) &&
+      !options.experimental) {
     throw new Error(
       `'${rawContainment}' containment requires experimental mode. Set 'experimental: true' in SandboxSpawnOptions.`
     );
@@ -265,16 +267,17 @@ export function resolveExecutableAndArgs(
     throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);
   }
 
-  // Hard platform requirement: microvm needs WHP/Hyper-V on Windows. This guard
+  // Hard platform requirement: MicroVM (NVX) needs OpenVMM/WHP on Windows x64. This guard
   // runs even when `skipPlatformCheck` is set because it's not a build-version
   // check — the backend literally cannot run on non-Windows hosts.
-  if (effectiveContainment === 'microvm' && os.platform() !== 'win32') {
-    throw new Error('The microvm backend is only supported on Windows (requires WHP/Hyper-V).');
+  if (effectiveContainment === 'microvm' &&
+      (os.platform() !== 'win32' || os.arch() !== 'x64')) {
+    throw new Error('The microvm backend is only supported on Windows x64.');
   }
 
   // Validate containment against platform
   if (effectiveContainment && !options.skipPlatformCheck) {
-    // Abstract intents (process, microvm) are resolved by the native binary
+    // Abstract intents are resolved by the native binary
     // at run time, so the SDK accepts them without checking against the
     // host's concrete backend list.
     const isIntent = (ContainmentTypes as readonly string[]).includes(effectiveContainment);

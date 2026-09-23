@@ -14,12 +14,12 @@ wxc_common.workspace = true
 mxc_config_contract.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
-# MicroVM runner — used by the Windows and Linux run-to-completion bodies under
-# the `microvm` feature. Never built on hosts/features that don't select it.
-nanvix_runner = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 hyperlight_common = { workspace = true, optional = true }
+
+[target.'cfg(all(target_os = "windows", target_arch = "x86_64"))'.dependencies]
+nvx_runner = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 process_container_common = { workspace = true }
@@ -50,9 +50,8 @@ seatbelt_common = { workspace = true }
 default = []
 # Enables constructing the run-to-completion runner for optional backends.
 # Mirrors the executor binaries' feature set so backend selection can live in
-# one place. The build-time binary-staging that some backends also need (e.g.
-# NanVix's `nanvix_binaries`) stays with the executor crates.
-microvm = ["dep:nanvix_runner"]
+# one place. Build-time binary staging remains with the executor crates.
+microvm = ["dep:nvx_runner", "nvx_runner/nvx"]
 wslc = ["dep:wslc_common", "wslc_common/link-wslcsdk"]
 hyperlight = ["dep:hyperlight_common", "hyperlight_common/hyperlight"]
 isolation_session = [

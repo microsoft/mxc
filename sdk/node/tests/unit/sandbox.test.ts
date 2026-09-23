@@ -10,7 +10,13 @@ import {
   _setBwrapVersionRunner,
   _setLxcAvailabilityProbe,
 } from '../../src/platform.js';
-import { ContainerConfig, SandboxPolicy, SandboxingMethod } from '../../src/types.js';
+import {
+  ContainerConfig,
+  ContainmentTypes,
+  ExperimentalBackends,
+  SandboxPolicy,
+  SandboxingMethod,
+} from '../../src/types.js';
 import { MxcError } from '../../src/errors.js';
 import { platformSkip } from './test-helpers.js';
 
@@ -69,6 +75,13 @@ describe('exact-version network authoring', () => {
     });
     assert.strictEqual(proxy.network, undefined);
     assert.deepStrictEqual(proxy.runtimeConfig, { networkProxy: 'http://127.0.0.1:8080' });
+  });
+});
+
+describe('containment exports', () => {
+  it('exposes microvm and not the internal nvx implementation name', () => {
+    assert.deepStrictEqual(ContainmentTypes, ['process', 'vm', 'microvm']);
+    assert.deepStrictEqual(ExperimentalBackends, ['microvm', 'windows_sandbox', 'hyperlight']);
   });
 });
 
@@ -236,7 +249,7 @@ describe('buildSandboxPayload', () => {
       }
     });
 
-    it('should enforce the minimum schema for every development-only containment', () => {
+    it('should enforce the minimum schema for each versioned containment', () => {
       mockWindows();
       try {
         for (const containment of [
@@ -248,7 +261,9 @@ describe('buildSandboxPayload', () => {
           'isolation_session',
         ] as const) {
           const minimumVersion =
-            containment === 'isolation_session' || containment === 'wslc'
+            containment === 'isolation_session' ||
+            containment === 'wslc' ||
+            containment === 'microvm'
               ? '0.9.0-alpha'
               : '0.10.0-alpha';
           assert.throws(
@@ -265,7 +280,7 @@ describe('buildSandboxPayload', () => {
       }
     });
 
-    it('should accept each development containment at its exact boundary', () => {
+    it('should accept each versioned containment at its exact boundary', () => {
       mockWindows();
       try {
         for (const containment of [
@@ -277,7 +292,9 @@ describe('buildSandboxPayload', () => {
           'isolation_session',
         ] as const) {
           const version =
-            containment === 'isolation_session' || containment === 'wslc'
+            containment === 'isolation_session' ||
+            containment === 'wslc' ||
+            containment === 'microvm'
               ? '0.9.0-alpha'
               : '0.10.0-alpha';
           try {
@@ -286,7 +303,7 @@ describe('buildSandboxPayload', () => {
             assert.doesNotMatch(
               (error as Error).message,
               /Schema .* does not support containment/,
-              `${containment} must pass the 0.9 schema floor before backend-specific validation`,
+              `${containment} must pass its ${version} schema floor before backend-specific validation`,
             );
           }
         }
@@ -517,50 +534,6 @@ describe('buildSandboxPayload', () => {
       }
     };
 
-    it('should return minimal config for microvm without filesystem', () => {
-      mockWindows();
-      try {
-        const payload = buildSandboxPayload('print(42)', developmentPolicy, undefined, undefined, 'microvm');
-        assert.strictEqual(payload.containment, 'microvm');
-        assert.strictEqual(payload.filesystem, undefined);
-        assert.strictEqual(payload.processContainer, undefined);
-      } finally {
-        restore();
-      }
-    });
-
-    it('should map clearPolicyOnExit to lifecycle.preservePolicy for microvm when policy has paths', () => {
-      mockWindows();
-      try {
-        const policy: SandboxPolicy = {
-          version: '0.10.0-alpha',
-          filesystem: { readwritePaths: ['/tmp'] },
-        };
-        const payload = buildSandboxPayload('print(42)', policy, undefined, undefined, 'microvm');
-        assert.strictEqual(payload.containment, 'microvm');
-        assert.deepStrictEqual(payload.filesystem!.readwritePaths, ['/tmp']);
-        // clearPolicyOnExit is not a wire `filesystem` field; the intent is
-        // carried canonically by lifecycle.preservePolicy (default clear => not preserved).
-        assert.strictEqual(payload.lifecycle!.preservePolicy, false);
-      } finally {
-        restore();
-      }
-    });
-
-    it('should honor clearPolicyOnExit false for microvm (via lifecycle.preservePolicy)', () => {
-      mockWindows();
-      try {
-        const policy: SandboxPolicy = {
-          version: '0.10.0-alpha',
-          filesystem: { readwritePaths: ['/tmp'], clearPolicyOnExit: false },
-        };
-        const payload = buildSandboxPayload('print(42)', policy, undefined, undefined, 'microvm');
-        assert.strictEqual(payload.lifecycle!.preservePolicy, true);
-      } finally {
-        restore();
-      }
-    });
-
     it('should build processcontainer config on Windows with default process containment', () => {
       mockWindows();
       try {
@@ -576,159 +549,102 @@ describe('buildSandboxPayload', () => {
       }
     });
 
-    it('should forward coherent directional network policies for microvm', () => {
-      mockWindows();
-      try {
-        for (const action of ['allow', 'deny'] as const) {
-          const policy: SandboxPolicy = {
-            version: '0.10.0-alpha',
-            network: {
-              egress: { default: action },
-              ingress: { default: action, hostLoopback: action },
-            },
-          };
-          const payload = buildSandboxPayload(
-            'print(42)',
-            policy,
-            undefined,
-            undefined,
-            'microvm',
-          );
-          assert.deepStrictEqual(payload.network, policy.network);
-        }
-      } finally {
-        restore();
-      }
-    });
-
-    it('should reject unsupported network policies for microvm', () => {
-      mockWindows();
-      try {
-        assert.throws(
-          () => buildSandboxPayload(
-            'print(42)',
-            {
-              version: '0.10.0-alpha',
-              runtimeConfig: { networkProxy: 'http://127.0.0.1:8080' },
-            },
-            undefined,
-            undefined,
-            'microvm',
-          ),
-          { message: /does not support network proxy configuration/ },
-        );
-        assert.throws(
-          () => buildSandboxPayload(
-            'print(42)',
-            {
-              version: '0.10.0-alpha',
-              processContainer: {
-                network: { allowedProxyPeer: 'Contoso.Proxy_123' },
-              },
-            },
-            undefined,
-            undefined,
-            'microvm',
-          ),
-          { message: /does not support network proxy configuration/ },
-        );
-        assert.throws(
-          () => buildSandboxPayload(
-            'print(42)',
-            {
-              version: '0.10.0-alpha',
-              network: {
-                egress: {
-                  default: 'allow',
-                  allow: [{ to: [{ cidr: '203.0.113.0/24' }] }],
-                },
-                ingress: { default: 'allow', hostLoopback: 'allow' },
-              },
-            },
-            undefined,
-            undefined,
-            'microvm',
-          ),
-          { message: /does not support directional network rules/ },
-        );
-        assert.throws(
-          () => buildSandboxPayload(
-            'print(42)',
-            {
-              version: '0.10.0-alpha',
-              network: {
-                egress: { default: 'allow' },
-                ingress: { default: 'deny', hostLoopback: 'deny' },
-              },
-            },
-            undefined,
-            undefined,
-            'microvm',
-          ),
-          { message: /to be all deny or all allow/ },
-        );
-      } finally {
-        restore();
-      }
-    });
-
-    it('should reject ProcessContainer enumeration policy for microvm', () => {
-      mockWindows();
-      try {
-        assert.throws(
-          () => buildSandboxPayload(
-            'print(42)',
-            {
-              version: '0.10.0-alpha',
-              processContainer: {
-                filesystem: { enumeratePaths: ['C:\\tools'] },
-              },
-            },
-            undefined,
-            undefined,
-            'microvm',
-          ),
-          { message: /does not support processContainer\.filesystem\.enumeratePaths/ },
-        );
-      } finally {
-        restore();
-      }
-    });
-
-    it('should reject microvm on non-Windows platforms', () => {
-      const orig = Object.getOwnPropertyDescriptor(process, 'platform');
-      Object.defineProperty(process, 'platform', { value: 'linux' });
-      try {
-        assert.throws(
-          () => buildSandboxPayload('print(42)', developmentPolicy, undefined, undefined, 'microvm'),
-          { message: /only supported on Windows/ },
-        );
-      } finally {
-        if (orig) Object.defineProperty(process, 'platform', orig);
-      }
-    });
-
-    it('should preserve lifecycle config for microvm', () => {
+    it('should build an NVX payload for the native backend', () => {
       mockWindows();
       try {
         const policy: SandboxPolicy = {
-          version: '0.10.0-alpha',
-          filesystem: { clearPolicyOnExit: false },
+          version: '0.9.0-alpha',
+          filesystem: {
+            readonlyPaths: ['C:\\workspace\\source'],
+            readwritePaths: ['C:\\workspace\\output'],
+          },
+          network: {
+            egress: { default: 'deny' },
+            ingress: { default: 'deny', hostLoopback: 'deny' },
+          },
         };
-        const payload = buildSandboxPayload('print(42)', policy, undefined, undefined, 'microvm');
-        assert.strictEqual(payload.lifecycle!.destroyOnExit, true);
-        assert.strictEqual(payload.lifecycle!.preservePolicy, true);
+
+        const payload = buildSandboxPayload(
+          'echo hello',
+          policy,
+          '/',
+          'microvm-test',
+          'microvm',
+        );
+
+        assert.strictEqual(payload.containment, 'microvm');
+        assert.strictEqual(payload.containerId, 'microvm-test');
+        assert.deepStrictEqual(payload.process, {
+          commandLine: 'echo hello',
+          timeout: 0,
+          cwd: '/',
+        });
+        assert.deepStrictEqual(payload.filesystem, {
+          readonlyPaths: ['C:\\workspace\\source'],
+          readwritePaths: ['C:\\workspace\\output'],
+          deniedPaths: [],
+        });
+        assert.deepStrictEqual(payload.network, policy.network);
+        assert.strictEqual(payload.ui, undefined);
+        assert.strictEqual(payload.processContainer, undefined);
+        assert.strictEqual(payload.lxc, undefined);
       } finally {
         restore();
       }
     });
 
-    it('should set process commandLine and containerId for microvm', () => {
+    it('should reject ProcessContainer proxy peer policy for MicroVM', () => {
       mockWindows();
       try {
-        const payload = buildSandboxPayload('print(42)', developmentPolicy, undefined, 'my-container', 'microvm');
-        assert.strictEqual(payload.process!.commandLine, 'print(42)');
-        assert.strictEqual(payload.containerId, 'my-container');
+        assert.throws(
+          () => buildSandboxPayload(
+            'echo hello',
+            {
+              version: '0.9.0-alpha',
+              runtimeConfig: {
+                networkProxy: 'http://127.0.0.1:8080',
+              },
+              processContainer: {
+                network: {
+                  allowedProxyPeer: 'Contoso.Proxy_1234567890abc',
+                },
+              },
+            },
+            undefined,
+            undefined,
+            'microvm',
+          ),
+          {
+            message: /processContainer\.network\.allowedProxyPeer is supported only by the Windows ProcessContainer backend/,
+          },
+        );
+      } finally {
+        restore();
+      }
+    });
+
+    it('should reject UI policy for MicroVM', () => {
+      mockWindows();
+      try {
+        assert.throws(
+          () => buildSandboxPayload(
+            'echo hello',
+            {
+              version: '0.9.0-alpha',
+              ui: {
+                allowWindows: false,
+                clipboard: 'none',
+                allowInputInjection: false,
+              },
+            },
+            undefined,
+            undefined,
+            'microvm',
+          ),
+          {
+            message: /SandboxPolicy\.ui is not supported by the MicroVM backend/,
+          },
+        );
       } finally {
         restore();
       }
@@ -2104,9 +2020,11 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
 
   function makeConfig(containment: string): ContainerConfig {
     const version =
-      containment === 'isolation_session' || containment === 'wslc'
+      containment === 'isolation_session' ||
+      containment === 'wslc' ||
+      containment === 'microvm'
         ? '0.9.0-alpha'
-        : ['microvm', 'vm', 'hyperlight', 'windows_sandbox'].includes(containment)
+        : ['vm', 'hyperlight', 'windows_sandbox'].includes(containment)
         ? '0.10.0-alpha'
         : ['seatbelt', 'macos_sandbox'].includes(containment)
           ? '0.7.0-alpha'
@@ -2127,9 +2045,19 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
     );
   });
 
-  it('should accept the abstract intent "microvm" with experimental flag (Windows only)', function (this: { skip: (reason?: string) => void }) {
-    if (process.platform !== 'win32') {
-      this.skip('microvm is Windows-only');
+  it('should reject the internal nvx implementation name', () => {
+    assert.throws(
+      () => resolveExecutableAndArgs(makeConfig('nvx'), {
+        executablePath: fakeExe,
+        experimental: true,
+      }),
+      { message: /nvx.*not available/i },
+    );
+  });
+
+  it('should accept microvm with experimental mode on Windows x64', function (this: { skip: (reason?: string) => void }) {
+    if (process.platform !== 'win32' || process.arch !== 'x64') {
+      this.skip('microvm is Windows x64-only');
       return;
     }
     assert.doesNotThrow(() =>

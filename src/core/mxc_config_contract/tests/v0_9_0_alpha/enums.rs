@@ -12,6 +12,7 @@ fn accepts_every_containment_value() {
         "lxc",
         "bubblewrap",
         "seatbelt",
+        "microvm",
         "isolation_session",
         "wslc",
     ] {
@@ -33,6 +34,17 @@ fn rejects_invalid_containment_value() {
         r#"{
             "version": "0.9.0-alpha",
             "containment": "invalid",
+            "process": {"commandLine": "echo"}
+        }"#,
+    );
+}
+
+#[test]
+fn rejects_internal_nvx_containment_value() {
+    assert_invalid(
+        r#"{
+            "version": "0.9.0-alpha",
+            "containment": "nvx",
             "process": {"commandLine": "echo"}
         }"#,
     );

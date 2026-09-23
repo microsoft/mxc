@@ -14,11 +14,11 @@ jobs:
             runner: windows-2025
             target: x86_64-pc-windows-msvc
             # tier2_bfs must NOT ship on Win 11 25H2 (bfscfg.exe hangs the host).
-            features: hyperlight isolation_session microvm wslc
+            features: hyperlight isolation_session wslc
           - arch: arm64
             runner: windows-11-arm
             target: aarch64-pc-windows-msvc
-            # Hyperlight and MicroVM runtimes are x64-only.
+            # Hyperlight is x64-only.
             features: isolation_session wslc
     runs-on: ${{ matrix.runner }}
     defaults:
@@ -65,6 +65,14 @@ jobs:
         run: cargo build --locked --release --target ${{ matrix.target }}
              --no-default-features
              --features "${{ matrix.features }}"
+
+      # Keep MicroVM (NVX) out of the uploaded release executable while its workload
+      # image bundle is unavailable, but verify its opt-in build and staging.
+      - name: Check opt-in MicroVM packaging
+        if: matrix.arch == 'x64'
+        run: cargo check --locked --target ${{ matrix.target }} -p wxc
+             --no-default-features
+             --features microvm
 
       - name: Test telemetry consent and policy in release mode
         run: |

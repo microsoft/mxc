@@ -279,7 +279,8 @@ use:
 | Windows ProcessContainer (AppContainer / BaseContainer) | First `readwritePaths` entry that is an existing directory, else the first such `readonlyPaths` entry, else the system drive root (`%SystemDrive%\`). Never `NULL`. |
 | Seatbelt (macOS) | Same precedence, with `~` expanded as the profile expands it; falls back to `/`. |
 | LXC / WSL Container | The container root — see [`docs/lxc-support/lxc-backend.md`](lxc-support/lxc-backend.md). |
-| MicroVM (NanVix) / Hyperlight | Not applicable — these backends reject a working directory outright. |
+| NVX | Guest root when omitted; a caller-supplied guest path is preserved. |
+| Hyperlight | Not applicable — this backend rejects a working directory outright. |
 
 Policy entries that are blank, name a file, or do not exist yet are skipped:
 a process cannot be launched in any of them.
@@ -383,7 +384,12 @@ force a particular backend.
 |-------|------------|
 | `"process"` | `processcontainer` on Windows, `bubblewrap` on Linux, `seatbelt` on macOS |
 | `"vm"` | Full hardware-virtualised VM isolation. Resolves to `windows_sandbox` on Windows. |
-| `"microvm"` | MicroVM on Windows (NanVix via the Windows Hypervisor Platform). Experimental. |
+| `"microvm"` | Compatibility-preserved public MicroVM identity. The same wire value directly selects the concrete MicroVM backend, implemented internally by NVX. |
+
+The one-shot `microvm` value is available in the published exact
+`0.9.0-alpha` contract. It remains runtime-experimental and Windows x64-only;
+publication does not remove the `--experimental` authorization requirement.
+The abstract `vm` intent remains development-only in `0.10.0-alpha`.
 
 #### Concrete backends
 
@@ -393,7 +399,7 @@ force a particular backend.
 | `"windows_sandbox"` | Windows Sandbox VM isolation. Dual-mode: a transient **one-shot** runner that launches a fresh disposable VM per execution, and a **state-aware** lifecycle backed by a long-lived per-sandbox daemon. |
 | `"wslc"` | Linux containers via the WSL Container SDK |
 | `"lxc"` | Native LXC container isolation. No abstract intent resolves to LXC; request it explicitly. |
-| `"microvm"` | MicroVM isolation via Windows HyperV Platform (NanVix microkernel) |
+| `"microvm"` | MicroVM isolation implemented by NVX and hosted by OpenVMM/WHP (experimental, Windows x64 foundation; runtime unavailable in Phase 1) |
 | `"hyperlight"` | MicroVM isolation via Hyperlight + Unikraft with an embedded CPython snapshot (experimental) |
 | `"isolation_session"` | Windows isolation session — runs the workload as a freshly-provisioned, per-execution isolated user account in its own OS-managed session. Dual-mode: one-shot and state-aware. |
 | `"seatbelt"` | macOS sandbox isolation (Seatbelt). Requires macOS 15 or later — see [`docs/seatbelt/seatbelt-backend.md`](seatbelt/seatbelt-backend.md). |
@@ -474,7 +480,7 @@ Registered contracts:
 | `"0.6.0-alpha"` | Published; minimum supported |
 | `"0.7.0-alpha"` | Published |
 | `"0.8.0-alpha"` | Published |
-| `"0.9.0-alpha"` | Published; current stable |
+| `"0.9.0-alpha"` | Published; current stable; includes one-shot `microvm` |
 | `"0.10.0-alpha"` | Mutable development contract |
 
 An absent version, a retired version, or any unregistered spelling such as

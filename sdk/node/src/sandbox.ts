@@ -119,9 +119,9 @@ function validateContainmentVersion(
             ? '0.7.0-alpha'
             : effectiveContainment === 'isolation_session'
               || effectiveContainment === 'wslc'
+              || effectiveContainment === 'microvm'
               ? '0.9.0-alpha'
               : effectiveContainment === 'vm' ||
-                effectiveContainment === 'microvm' ||
                 effectiveContainment === 'windows_sandbox' ||
                 effectiveContainment === 'hyperlight'
                 ? '0.10.0-alpha'
@@ -342,66 +342,6 @@ function buildProcessBaseContainerConfig(
 }
 
 /**
- * Builds the MicroVM (NanVix) portion of a ContainerConfig.
- * MicroVM is Windows-only and supports isolated or unrestricted networking.
- */
-function buildMicroVmConfig(
-    config: ContainerConfig,
-    policy: SandboxPolicy,
-): ContainerConfig {
-    if (os.platform() !== 'win32') {
-        throw new Error('The microvm backend is only supported on Windows (requires WHP/Hyper-V).');
-    }
-    if (policy.network && hasLegacyNetworkFields(policy.network)) {
-        throw new Error(
-            'The microvm backend supports only directional network.egress/network.ingress configuration.'
-        );
-    }
-    if (policy.runtimeConfig?.networkProxy !== undefined ||
-        policy.processContainer?.network?.allowedProxyPeer !== undefined) {
-        throw new Error('The microvm backend does not support network proxy configuration.');
-    }
-    if (policy.network?.egress?.allow?.length || policy.network?.egress?.deny?.length) {
-        throw new Error(
-            'The microvm backend does not support directional network rules. ' +
-            'Use fully isolated or explicitly unrestricted networking without rules.'
-        );
-    }
-    if (policy.network !== undefined) {
-        const egressDefault = policy.network.egress?.default ?? 'deny';
-        const ingressDefault = policy.network.ingress?.default ?? 'deny';
-        const hostLoopback = policy.network.ingress?.hostLoopback ?? 'deny';
-        if (egressDefault !== ingressDefault || ingressDefault !== hostLoopback) {
-            throw new Error(
-                'The microvm backend requires network.egress.default, network.ingress.default, ' +
-                'and network.ingress.hostLoopback to be all deny or all allow.'
-            );
-        }
-        config.network = {
-            egress: policy.network.egress,
-            ingress: policy.network.ingress,
-        };
-    }
-    if (policy.filesystem?.readwritePaths?.length ||
-        policy.filesystem?.readonlyPaths?.length ||
-        policy.filesystem?.deniedPaths?.length) {
-        config.filesystem = {
-            readwritePaths: policy.filesystem?.readwritePaths,
-            readonlyPaths: policy.filesystem?.readonlyPaths,
-            deniedPaths: policy.filesystem?.deniedPaths,
-        };
-    }
-    if (policy.processContainer?.filesystem?.enumeratePaths?.length) {
-        throw new Error(
-            'The microvm backend does not support processContainer.filesystem.enumeratePaths. ' +
-            'Remove it or use the Windows ProcessContainer backend.'
-        );
-    }
-    config.containment = 'microvm';
-    return config;
-}
-
-/**
  * Creates a ContainerConfig from a SandboxPolicy and optional containment type.
  *
  * This is the primary API for translating user-facing security intent (SandboxPolicy)
@@ -441,6 +381,7 @@ export function createConfigFromPolicy(
     validateTelemetryVersion(policy);
     const directionalNetwork = selectDirectionalNetwork(policy);
     const enumeratePaths = policy.processContainer?.filesystem?.enumeratePaths;
+    const allowedProxyPeer = policy.processContainer?.network?.allowedProxyPeer;
 
     const containerId = containerName ?? generateRandomContainerName();
 
@@ -459,12 +400,6 @@ export function createConfigFromPolicy(
         telemetry: policy.telemetry === undefined ? undefined : { ...policy.telemetry },
     };
 
-    // Microvm: delegate to dedicated builder
-    if (containment === 'microvm') {
-        diagLog(`createConfigFromPolicy: containment=microvm, id=${containerId}`);
-        return buildMicroVmConfig(config, policy);
-    }
-
     if (enumeratePaths?.length) {
         if (policy.version !== '0.9.0-alpha' && policy.version !== '0.10.0-alpha') {
             throw new Error(
@@ -480,6 +415,15 @@ export function createConfigFromPolicy(
             );
         }
     }
+    if (containment === 'microvm' && allowedProxyPeer !== undefined) {
+        throw new Error(
+            'processContainer.network.allowedProxyPeer is supported only by the Windows ' +
+            'ProcessContainer backend.'
+        );
+    }
+    if (containment === 'microvm' && policy.ui !== undefined) {
+        throw new Error('SandboxPolicy.ui is not supported by the MicroVM backend.');
+    }
 
     config.filesystem = {
         readwritePaths: [...(policy.filesystem?.readwritePaths ?? [])],
@@ -494,12 +438,14 @@ export function createConfigFromPolicy(
         };
     }
 
-    // SandboxPolicy defaults are fail-closed, so omission still emits lockdown.
-    config.ui = {
-        disable: !(policy.ui?.allowWindows ?? false),
-        clipboard: policy.ui?.clipboard ?? "none",
-        injection: policy.ui?.allowInputInjection ?? false,
-    };
+    if (containment !== 'microvm') {
+        // SandboxPolicy defaults are fail-closed, so omission still emits lockdown.
+        config.ui = {
+            disable: !(policy.ui?.allowWindows ?? false),
+            clipboard: policy.ui?.clipboard ?? "none",
+            injection: policy.ui?.allowInputInjection ?? false,
+        };
+    }
 
     if (directionalNetwork) {
         if ((requiresDirectionalNetwork(policy.version) &&
@@ -515,11 +461,11 @@ export function createConfigFromPolicy(
                 networkProxy: policy.runtimeConfig.networkProxy,
             };
         }
-        if (policy.processContainer?.network?.allowedProxyPeer !== undefined) {
+        if (allowedProxyPeer !== undefined) {
             config.processContainer = {
                 ...config.processContainer,
                 network: {
-                    allowedProxyPeer: policy.processContainer.network.allowedProxyPeer,
+                    allowedProxyPeer,
                 },
             };
         }
@@ -571,6 +517,12 @@ export function createConfigFromPolicy(
     }
 
     // Backend-specific config based on containment type
+    if (containment === 'microvm') {
+        diagLog(`createConfigFromPolicy: containment=microvm, id=${containerId}`);
+        config.containment = 'microvm';
+        return config;
+    }
+
     if (containment === 'wslc') {
         return buildWslcContainerConfig(config, policy, containerId);
     }

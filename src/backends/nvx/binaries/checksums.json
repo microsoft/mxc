@@ -1,0 +1,5 @@
+{
+  "bin/openvmm.exe": "9ded05b56389ebd9fd2c7fc245779ecea203ce1b1e16488fd275cf31bc442913",
+  "guest/vmlinux": "1678a788ce5329db3e0e97ebc8703c1263da553dd2c682b502d9d5e6fbd0f3bb",
+  "guest/initramfs.cpio.gz": "0f0324d6a1a959f5156f2e8ab94195b3befe34523892d31933bf6e3d7bf7bae4"
+}

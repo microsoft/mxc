@@ -237,7 +237,7 @@ mod tests {
         (ContainmentBackend::Wslc, "wslc"),
         (ContainmentBackend::Lxc, "lxc"),
         (ContainmentBackend::Vm, "vm"),
-        (ContainmentBackend::MicroVm, "microvm"),
+        (ContainmentBackend::Microvm, "microvm"),
         (ContainmentBackend::Hyperlight, "hyperlight"),
         (ContainmentBackend::WindowsSandbox, "windows_sandbox"),
         (ContainmentBackend::IsolationSession, "isolation_session"),
@@ -308,6 +308,29 @@ mod tests {
                 "reported method {method:?} is not a Containment wire name"
             );
         }
+    }
+
+    fn assert_microvm_method_is_omitted() {
+        let support = platform_support();
+        assert!(
+            support
+                .available_methods
+                .iter()
+                .all(|method| method != "microvm"),
+            "platform_support must not advertise MicroVM while runtime is incomplete"
+        );
+    }
+
+    #[cfg(not(feature = "microvm"))]
+    #[test]
+    fn microvm_is_not_advertised_without_feature() {
+        assert_microvm_method_is_omitted();
+    }
+
+    #[cfg(feature = "microvm")]
+    #[test]
+    fn microvm_is_not_advertised_with_feature_enabled() {
+        assert_microvm_method_is_omitted();
     }
 
     #[cfg(target_os = "linux")]

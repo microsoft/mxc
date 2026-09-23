@@ -2272,6 +2272,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn containment_microvm_accepted() {
+        let json = r#"{
+            "version": "0.9.0-alpha",
+            "process": {"commandLine": "/bin/true"},
+            "containment": "microvm"
+        }"#;
+
+        let request = parse_exact_for_test(json).unwrap();
+        let MxcRequest::OneShot(request) = request else {
+            panic!("expected one-shot MicroVM request");
+        };
+        assert_eq!(request.containment, ContainmentBackend::Microvm);
+    }
+
+    #[test]
+    fn containment_nvx_gets_normal_unknown_enum_rejection() {
+        let json = r#"{
+            "version": "0.9.0-alpha",
+            "process": {"commandLine": "/bin/true"},
+            "containment": "nvx"
+        }"#;
+
+        let error = parse_exact_for_test(json)
+            .expect_err("internal NVX implementation name must not be accepted");
+        assert!(matches!(error, ParseError::OneShot(_)));
+        assert!(error.message().contains("unknown variant `nvx`"));
+        assert!(!error.message().contains("use"));
+    }
+
     struct DevelopmentStateAwareRootCase {
         name: &'static str,
         json: &'static str,

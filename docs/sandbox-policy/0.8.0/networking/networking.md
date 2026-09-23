@@ -557,7 +557,7 @@ limit it hit; neither is silently truncated, and no partial policy is installed.
   reserved for the backend migration work; until that lands, callers must continue using the legacy unrestricted
   acknowledgment. Other network/proxy policy is rejected.
   In GA for process isolation only (identity, lifecycle).
-- **Hyperlight, Nanvix:** Not in this GA scope doc. Additional follow up is needed to confirm their capabilities and whether they align with this doc.
+- **Hyperlight, NVX:** Not in this GA scope doc. Additional follow up is needed to confirm their capabilities and whether they align with this doc.
 
 ## Gaps and limitations
 

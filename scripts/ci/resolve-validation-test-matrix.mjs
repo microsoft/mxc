@@ -10,7 +10,7 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 const FAMILIES = ['windows', 'linux', 'macos'];
-const ARM64_UNSUPPORTED_BACKENDS = new Set(['hyperlight', 'microvm']);
+const ARM64_UNSUPPORTED_BACKENDS = new Set(['hyperlight']);
 
 function assertNonEmptyString(value, label) {
   if (typeof value !== 'string' || value.trim() === '') {

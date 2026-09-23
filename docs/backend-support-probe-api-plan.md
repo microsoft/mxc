@@ -126,7 +126,7 @@ for them **cannot be built just yet**.
 | --- | --- | --- | --- |
 | `windows_sandbox` | DISM/registry check of the *Containers-DisposableClientVM* optional feature | only a private "is the `.exe` on disk" check | reports available when the feature is off → launch fails |
 | `isolation_session` | activation of the in-proc `Windows.AI.IsolationSession.Preview` `IsoSessionOps` runtime class succeeds (the API class is registered on the OS **and** its OS feature gate is on) **and** the backend feature is compiled | as of #761, detection queries whether the API class is registered rather than gating on a build number; a `CLASS_E_CLASSNOTAVAILABLE` / `REGDB_E_CLASSNOTREG` activation failure means unavailable | none for false-availability now — a machine without the API registered fails activation cleanly; still needs a cheap probe seam so callers don't have to attempt a real activation |
-| `microvm` | feature compiled, NanVix runtime files staged, and WHP usable on Windows or `/dev/kvm` readable/writable on Linux | nothing | checking only a hypervisor can report availability when required runtime files are missing |
+| `microvm` | feature compiled, pinned NVX runtime files staged, and WHP usable on Windows x64 | nothing | checking only a hypervisor can report availability when required runtime files are missing |
 | `hyperlight` | hypervisor present + feature compiled | nothing | same VM-boot risk |
 
 ### 4.2 The parity rule: detect once, project into TS

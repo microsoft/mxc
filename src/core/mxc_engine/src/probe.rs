@@ -276,7 +276,7 @@ mod tests {
         (ContainmentBackend::Wslc, "wslc"),
         (ContainmentBackend::Lxc, "lxc"),
         (ContainmentBackend::Vm, "vm"),
-        (ContainmentBackend::MicroVm, "microvm"),
+        (ContainmentBackend::Microvm, "microvm"),
         (ContainmentBackend::Hyperlight, "hyperlight"),
         (ContainmentBackend::WindowsSandbox, "windows_sandbox"),
         (ContainmentBackend::IsolationSession, "isolation_session"),
@@ -408,6 +408,26 @@ mod tests {
         }
     }
 
+    fn assert_microvm_backend_is_omitted() {
+        assert!(
+            available_backends()
+                .iter()
+                .all(|backend| backend.backend != "microvm"),
+            "available_backends must not advertise MicroVM while runtime is incomplete"
+        );
+    }
+
+    #[cfg(not(feature = "microvm"))]
+    #[test]
+    fn microvm_is_not_advertised_without_feature() {
+        assert_microvm_backend_is_omitted();
+    }
+
+    #[cfg(feature = "microvm")]
+    #[test]
+    fn microvm_is_not_advertised_with_feature_enabled() {
+        assert_microvm_backend_is_omitted();
+    }
     #[test]
     fn every_reported_tier_is_a_canonical_tier_string() {
         for entry in available_backends() {

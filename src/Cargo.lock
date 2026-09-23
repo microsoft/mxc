@@ -1374,8 +1374,6 @@ dependencies = [
  "lxc_common",
  "mxc_build_common",
  "mxc_engine",
- "nanvix_binaries",
- "nanvix_build_common",
  "wxc_common",
 ]
 
@@ -1526,7 +1524,7 @@ dependencies = [
  "learning_mode_core",
  "lxc_common",
  "mxc_config_contract",
- "nanvix_runner",
+ "nvx_runner",
  "plm",
  "process_container_common",
  "seatbelt_common",
@@ -1588,40 +1586,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nanvix_binaries"
-version = "0.8.0"
-dependencies = [
- "nanvix_build_common",
- "nanvix_common",
-]
-
-[[package]]
-name = "nanvix_build_common"
-version = "0.8.0"
-dependencies = [
- "nanvix_common",
-]
-
-[[package]]
-name = "nanvix_common"
-version = "0.8.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "nanvix_runner"
-version = "0.8.0"
-dependencies = [
- "libc",
- "nanvix_common",
- "uuid",
- "windows",
- "wxc_common",
-]
-
-[[package]]
 name = "nix"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1662,6 +1626,40 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "nvx_binaries"
+version = "0.8.0"
+dependencies = [
+ "nvx_build_common",
+ "nvx_common",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "nvx_build_common"
+version = "0.8.0"
+dependencies = [
+ "nvx_common",
+ "tempfile",
+]
+
+[[package]]
+name = "nvx_common"
+version = "0.8.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nvx_runner"
+version = "0.8.0"
+dependencies = [
+ "nvx_binaries",
+ "wxc_common",
 ]
 
 [[package]]
@@ -3191,8 +3189,8 @@ dependencies = [
  "learning_mode_core",
  "mxc_build_common",
  "mxc_engine",
- "nanvix_binaries",
- "nanvix_build_common",
+ "nvx_binaries",
+ "nvx_build_common",
  "plm",
  "process_container_common",
  "serde_json",
@@ -3213,7 +3211,6 @@ dependencies = [
  "libc",
  "mxc_config_contract",
  "mxc_telemetry",
- "nanvix_common",
  "serde",
  "serde_json",
  "serde_path_to_error",
@@ -3222,7 +3219,6 @@ dependencies = [
  "thiserror",
  "unicode-general-category",
  "url",
- "uuid",
  "widestring",
  "windows",
  "windows-core",

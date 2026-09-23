@@ -92,9 +92,12 @@ mxc/schemas/
     └── mxc-config.schema.0.10.0-alpha.json  (exact closed development contract)
 ```
 
-Retired stable schema files are **kept as immutable historical artifacts** — the
-parser simply stops accepting those versions (the supported floor is
-`0.6.0-alpha`). Released schemas are never edited or deleted.
+Retired stable schema files are **kept as revision-locked historical
+artifacts** — the parser simply stops accepting those versions (the supported
+floor is `0.6.0-alpha`). Published schemas are never edited by hand or deleted.
+An exceptional contract amendment requires an intentional one-step publication
+revision bump in `schemas/schema-version.json`, and CI rejects either side of
+that change without the other.
 
 The development artifact is generated from the exact
   `mxc_config_contract::dev` model. It describes all eight closed one-shot and
@@ -106,9 +109,11 @@ contract registered for the declared version. Corpus validation selects the
 exact registered schema from each document's `version`.
 
 Only the v0.10 file under `schemas/dev/` is a generated development artifact.
-Published v0.9 is represented by its exact Rust contract and immutable stable
-schema. Exact fixtures and adapter/runtime tests remain ordinary mutable tests
-so they can gain regression coverage as implementations evolve. See
+Published v0.9 is represented by its exact Rust contract and revision-locked
+stable schema. Its second publication revision adds the experimental one-shot
+`microvm` value while preserving NVX as an internal implementation detail.
+Exact fixtures and adapter/runtime tests remain ordinary mutable tests so they
+can gain regression coverage as implementations evolve. See
 [Schema Code Generation](schema-codegen.md) for the regeneration commands and
 independent drift/history gates.
 
@@ -188,10 +193,11 @@ published JSON contract.
 
 ### Trust boundary vs schema defaults
 
-Schemas in `stable/` are immutable: they document the input shape that was
-promised at release. They are **not** authoritative for runtime security
-defaults. `wxc-exec` is the trust boundary and may apply stricter defaults
-than a stable schema declares when a security issue requires it.
+Schemas in `stable/` are revision-locked: they document the input shape
+promised by a specific publication revision. They are **not** authoritative
+for runtime security defaults. `wxc-exec` is the trust boundary and may apply
+stricter defaults than a stable schema declares when a security issue requires
+it.
 
 For example, an older stable schema may declare
 `network.defaultPolicy` defaulting to `"allow"`. The runtime may treat an
@@ -212,7 +218,8 @@ features which still require authorization; per-feature gating is under
 consideration.
 
 **Rules:**
-- **Published contract contents** — shipped, stable, and immutable.
+- **Published contract contents** — shipped, stable, and revision-locked.
+  Exceptional amendments require an explicit publication revision increment.
 - **Development contract contents** — mutable fields and roots at their
   permanent locations. Inclusion does not imply runtime authorization.
 - **Promotion:** When a feature is ready to ship, include it in the published
@@ -223,8 +230,10 @@ consideration.
 
 `scripts/versioning/check-contract-codegen.js` compares every stable schema
 present at the merge base with the current tree. A published schema cannot be
-changed or removed. New stable schemas are allowed because they have no
-merge-base predecessor.
+removed. It can change only when its positive integer in
+`schema-version.json::stableRevisions` increments by exactly one in the same
+change; a revision-only bump also fails. New stable schemas are allowed because
+they have no merge-base predecessor.
 
 The same gate requires exactly one development contract and verifies that
 every supported stable schema has a published registry entry with the same
@@ -337,8 +346,9 @@ fn run(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResp
    `normalize_common_request_ir` domain normalization
 3. Remove the `if request.experimental_enabled` guard
 4. Bump the minor version
-5. Preserve every published contract unchanged; older contracts continue to
-   reject the field structurally.
+5. Preserve every published contract unchanged unless an exceptional amendment
+   follows the explicit publication-revision process; older contracts continue
+   to reject the field structurally.
 
 Backend-section validation does not move during promotion: an experimental
 backend's exact-contract section already occupies its permanent top-level

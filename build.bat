@@ -5,7 +5,7 @@ setlocal enabledelayedexpansion
 set "BUILD_CONFIG=release"
 set "BUILD_ARCH="
 set "BUILD_ALL=0"
-set "WITH_NANVIX=0"
+set "WITH_MICROVM=0"
 set "WITH_WSLC=0"
 set "WITH_ISOLATION_SESSION=0"
 set "WITH_HYPERLIGHT=0"
@@ -18,7 +18,7 @@ if /i "%~1"=="--release" ( set "BUILD_CONFIG=release"  & shift & goto :parse_arg
 if /i "%~1"=="--x64"     ( set "BUILD_ARCH=x86_64-pc-windows-msvc"   & shift & goto :parse_args )
 if /i "%~1"=="--arm64"   ( set "BUILD_ARCH=aarch64-pc-windows-msvc"  & shift & goto :parse_args )
 if /i "%~1"=="--all"     ( set "BUILD_ALL=1"           & shift & goto :parse_args )
-if /i "%~1"=="--with-microvm" ( set "WITH_NANVIX=1"    & shift & goto :parse_args )
+if /i "%~1"=="--with-microvm" ( set "WITH_MICROVM=1"   & shift & goto :parse_args )
 if /i "%~1"=="--with-wslc"    ( set "WITH_WSLC=1"      & shift & goto :parse_args )
 if /i "%~1"=="--with-isolation-session" ( set "WITH_ISOLATION_SESSION=1" & shift & goto :parse_args )
 if /i "%~1"=="--with-hyperlight" ( set "WITH_HYPERLIGHT=1" & shift & goto :parse_args )
@@ -37,6 +37,17 @@ if "%BUILD_ALL%"=="0" if "%BUILD_ARCH%"=="" (
     )
 )
 
+if "%WITH_MICROVM%"=="1" (
+    if "%BUILD_ALL%"=="1" (
+        echo ERROR: --with-microvm supports x64 only and cannot be combined with --all.
+        exit /b 1
+    )
+    if /i not "%BUILD_ARCH%"=="x86_64-pc-windows-msvc" (
+        echo ERROR: --with-microvm supports x64 only. Use --x64 on an ARM64 host.
+        exit /b 1
+    )
+)
+
 :: Build flags
 set "CARGO_FLAGS=--target"
 if "%BUILD_CONFIG%"=="release" set "CARGO_FLAGS=--release --target"
@@ -44,7 +55,7 @@ if "%BUILD_CONFIG%"=="release" set "CARGO_FLAGS=--release --target"
 :: workspace feature flags above, so it uses its own profile/target-only flags.
 set "PLM_FLAGS=--target"
 if "%BUILD_CONFIG%"=="release" set "PLM_FLAGS=--release --target"
-if "%WITH_NANVIX%"=="1" set "CARGO_FLAGS=--features microvm %CARGO_FLAGS%"
+if "%WITH_MICROVM%"=="1" set "CARGO_FLAGS=--features microvm %CARGO_FLAGS%"
 if "%WITH_WSLC%"=="1" set "CARGO_FLAGS=--features wslc %CARGO_FLAGS%"
 if "%WITH_ISOLATION_SESSION%"=="1" set "CARGO_FLAGS=--features isolation_session %CARGO_FLAGS%"
 if "%WITH_HYPERLIGHT%"=="1" set "CARGO_FLAGS=--features hyperlight %CARGO_FLAGS%"
@@ -126,24 +137,74 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
             copy /Y "!BIN_DIR!\mxc_ffi.dll" "sdk\node\bin\!SDK_ARCH!\" >nul
             echo   Copied !SDK_ARCH!\mxc_ffi.dll
         )
-        if "%WITH_NANVIX%"=="1" (
-            for %%B in (nanvixd.exe nanvix_rootfs.img python3.initrd) do (
-                if exist "!BIN_DIR!\%%B" (
-                    copy /Y "!BIN_DIR!\%%B" "sdk\node\bin\!SDK_ARCH!\" >nul
+        for %%B in (nanvixd.exe nanvix_rootfs.img python3.initrd bin\kernel.elf snapshots\kernel.vmem snapshots\kernel.whp.cbor) do (
+            if exist "sdk\node\bin\!SDK_ARCH!\%%B" del /Q "sdk\node\bin\!SDK_ARCH!\%%B"
+        )
+        if exist "sdk\node\bin\!SDK_ARCH!\snapshots" rd "sdk\node\bin\!SDK_ARCH!\snapshots" 2>nul
+        if exist "sdk\node\bin\!SDK_ARCH!\bin" rd "sdk\node\bin\!SDK_ARCH!\bin" 2>nul
+        if "%%T"=="x86_64-pc-windows-msvc" (
+            if "%WITH_MICROVM%"=="1" (
+                for %%B in (bin\openvmm.exe guest\vmlinux guest\initramfs.cpio.gz) do (
+                    if not exist "!BIN_DIR!\%%B" (
+                        echo ERROR: MicroVM ^(NVX^) Node runtime is missing !BIN_DIR!\%%B
+                        exit /b 1
+                    )
+                )
+                set "NVX_WORKLOAD_IMAGE_COUNT=0"
+                for %%B in (images\distro.erofs images\runtime.erofs images\scratch.ext4) do (
+                    if exist "!BIN_DIR!\%%B" set /A NVX_WORKLOAD_IMAGE_COUNT+=1
+                )
+                if not "!NVX_WORKLOAD_IMAGE_COUNT!"=="0" if not "!NVX_WORKLOAD_IMAGE_COUNT!"=="3" (
+                    echo ERROR: MicroVM ^(NVX^) Node runtime has an incomplete workload-image bundle.
+                    exit /b 1
+                )
+                for %%B in (images\distro.erofs images\runtime.erofs images\scratch.ext4) do (
+                    if exist "sdk\node\bin\!SDK_ARCH!\%%B" del /Q "sdk\node\bin\!SDK_ARCH!\%%B"
+                )
+                if exist "sdk\node\bin\!SDK_ARCH!\images" rd "sdk\node\bin\!SDK_ARCH!\images" 2>nul
+                for %%B in (bin\openvmm.exe guest\vmlinux guest\initramfs.cpio.gz) do (
+                    for %%D in ("sdk\node\bin\!SDK_ARCH!\%%B") do (
+                        if not exist "%%~dpD" (
+                            mkdir "%%~dpD"
+                            if errorlevel 1 (
+                                echo ERROR: Failed to create NVX Node runtime directory %%~dpD
+                                exit /b 1
+                            )
+                        )
+                    )
+                    copy /Y "!BIN_DIR!\%%B" "sdk\node\bin\!SDK_ARCH!\%%B" >nul
+                    if errorlevel 1 (
+                        echo ERROR: Failed to copy NVX Node runtime artifact %%B
+                        exit /b 1
+                    )
                     echo   Copied !SDK_ARCH!\%%B
                 )
-            )
-            if exist "!BIN_DIR!\bin\kernel.elf" (
-                if not exist "sdk\node\bin\!SDK_ARCH!\bin" mkdir "sdk\node\bin\!SDK_ARCH!\bin"
-                copy /Y "!BIN_DIR!\bin\kernel.elf" "sdk\node\bin\!SDK_ARCH!\bin\" >nul
-                echo   Copied !SDK_ARCH!\bin\kernel.elf
-            )
-            for %%S in (kernel.vmem kernel.whp.cbor) do (
-                if exist "!BIN_DIR!\snapshots\%%S" (
-                    if not exist "sdk\node\bin\!SDK_ARCH!\snapshots" mkdir "sdk\node\bin\!SDK_ARCH!\snapshots"
-                    copy /Y "!BIN_DIR!\snapshots\%%S" "sdk\node\bin\!SDK_ARCH!\snapshots\" >nul
-                    echo   Copied !SDK_ARCH!\snapshots\%%S
+                if "!NVX_WORKLOAD_IMAGE_COUNT!"=="3" (
+                    for %%B in (images\distro.erofs images\runtime.erofs images\scratch.ext4) do (
+                        for %%D in ("sdk\node\bin\!SDK_ARCH!\%%B") do (
+                            if not exist "%%~dpD" (
+                                mkdir "%%~dpD"
+                                if errorlevel 1 (
+                                    echo ERROR: Failed to create NVX Node runtime directory %%~dpD
+                                    exit /b 1
+                                )
+                            )
+                        )
+                        copy /Y "!BIN_DIR!\%%B" "sdk\node\bin\!SDK_ARCH!\%%B" >nul
+                        if errorlevel 1 (
+                            echo ERROR: Failed to copy NVX Node runtime artifact %%B
+                            exit /b 1
+                        )
+                        echo   Copied !SDK_ARCH!\%%B
+                    )
                 )
+            ) else (
+                for %%B in (bin\openvmm.exe guest\vmlinux guest\initramfs.cpio.gz images\distro.erofs images\runtime.erofs images\scratch.ext4) do (
+                    if exist "sdk\node\bin\!SDK_ARCH!\%%B" del /Q "sdk\node\bin\!SDK_ARCH!\%%B"
+                )
+                if exist "sdk\node\bin\!SDK_ARCH!\bin" rd "sdk\node\bin\!SDK_ARCH!\bin" 2>nul
+                if exist "sdk\node\bin\!SDK_ARCH!\guest" rd "sdk\node\bin\!SDK_ARCH!\guest" 2>nul
+                if exist "sdk\node\bin\!SDK_ARCH!\images" rd "sdk\node\bin\!SDK_ARCH!\images" 2>nul
             )
         )
         if "!COPY_WSLC_RUNTIME!"=="1" (
@@ -277,7 +338,9 @@ echo   --release   Build release configuration
 echo   --x64       Build for x64 only
 echo   --arm64     Build for ARM64 only
 echo   --all             Build for both x64 and ARM64
-echo   --with-microvm    Download and include NanVix micro-VM binaries
+echo   --with-microvm    Add the incomplete MicroVM (NVX) foundation and platform artifacts (x64)
+echo                     Runtime preflight remains unavailable until NVX publishes
+echo                     the workload image bundle
 echo   --with-wslc       Build with WSL Container (WSLC SDK) support
 echo   --with-isolation-session   Build with IsolationSession backend (IsoEnvBroker)
 echo   --with-hyperlight         Build with Hyperlight (micro-VM) backend (x86_64 only)

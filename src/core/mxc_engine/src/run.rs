@@ -35,6 +35,23 @@ use wxc_common::script_runner::ScriptRunner;
 
 use crate::error::Error;
 
+#[cfg(target_os = "windows")]
+const ERR_MICROVM_EXPERIMENTAL_OPT_IN_REQUIRED: &str =
+    "MicroVM (NVX) is an experimental feature. Use --experimental flag.";
+#[cfg(all(
+    not(feature = "microvm"),
+    target_os = "windows",
+    target_arch = "x86_64"
+))]
+const ERR_MICROVM_FEATURE_REQUIRED: &str =
+    "MicroVM backend not compiled in (build with --features microvm)";
+#[cfg(all(feature = "microvm", target_os = "windows", target_arch = "x86_64"))]
+const ERR_MICROVM_RUNTIME_IMPLEMENTATION_MISSING: &str =
+    "MicroVM (NVX) runtime implementation is not present in this build";
+#[cfg(all(target_os = "windows", not(target_arch = "x86_64")))]
+const ERR_MICROVM_ARCHITECTURE_UNSUPPORTED: &str =
+    "MicroVM (NVX) requires Windows x64; this Windows architecture is unsupported";
+
 /// A backend runner resolved for an [`ExecutionRequest`], ready to run.
 ///
 /// On Windows, `dacl_manager` — when present — is the guard for the
@@ -289,25 +306,7 @@ fn resolve_runner_inner_windows(
         ContainmentBackend::Vm => Err(MxcError::unsupported_containment(
             "VM backend not yet implemented",
         )),
-        ContainmentBackend::MicroVm => {
-            if !request.experimental_enabled {
-                return Err(MxcError::malformed_request(
-                    "MicroVM is an experimental feature. Use --experimental flag.",
-                ));
-            }
-            #[cfg(feature = "microvm")]
-            {
-                Ok(ResolvedRunner::without_guard(Box::new(
-                    nanvix_runner::NanVixScriptRunner::new(),
-                )))
-            }
-            #[cfg(not(feature = "microvm"))]
-            {
-                Err(MxcError::unsupported_containment(
-                    "MicroVM backend not compiled in (build with --features microvm)",
-                ))
-            }
-        }
+        ContainmentBackend::Microvm => resolve_microvm_backend(request),
         ContainmentBackend::Hyperlight => resolve_hyperlight(request),
         ContainmentBackend::WindowsSandbox => {
             if !request.experimental_enabled {
@@ -350,7 +349,7 @@ fn resolve_runner_inner_windows(
 }
 
 // ---------------------------------------------------------------------------
-// Linux: Bubblewrap, LXC, and the experimental Hyperlight / MicroVM backends.
+// Linux: Bubblewrap, LXC, and the experimental Hyperlight backend.
 // A concrete backend selected for another host must fail closed.
 // ---------------------------------------------------------------------------
 
@@ -363,25 +362,6 @@ fn resolve_runner_inner(
 
     match request.containment {
         ContainmentBackend::Hyperlight => resolve_hyperlight(request),
-        ContainmentBackend::MicroVm => {
-            if !request.experimental_enabled {
-                return Err(MxcError::malformed_request(
-                    "MicroVM is an experimental feature. Use --experimental flag.",
-                ));
-            }
-            #[cfg(feature = "microvm")]
-            {
-                Ok(ResolvedRunner::without_guard(Box::new(
-                    nanvix_runner::NanVixScriptRunner::new(),
-                )))
-            }
-            #[cfg(not(feature = "microvm"))]
-            {
-                Err(MxcError::unsupported_containment(
-                    "MicroVM backend not compiled in (build with --features microvm)",
-                ))
-            }
-        }
         ContainmentBackend::Bubblewrap => Ok(ResolvedRunner::without_guard(Box::new(Runner::new(
             bwrap_common::bwrap_runner::BubblewrapScriptRunner::new(),
         )))),
@@ -446,6 +426,30 @@ mod linux_tests {
         );
         assert!(error.message.contains("seatbelt"));
     }
+
+    #[test]
+    fn microvm_is_rejected_as_unavailable_on_linux() {
+        let request = ExecutionRequest {
+            containment: ContainmentBackend::Microvm,
+            experimental_enabled: true,
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let error = match resolve_runner_inner(&request, &mut logger) {
+            Ok(_) => panic!("NVX-backed MicroVM must remain Windows-only"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.code,
+            wxc_common::mxc_error::MxcErrorCode::UnsupportedContainment
+        );
+        assert_eq!(
+            error.message,
+            "the 'microvm' backend is not available on Linux"
+        );
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -472,6 +476,30 @@ mod macos_tests {
         );
         assert!(error.message.contains("lxc"));
     }
+
+    #[test]
+    fn microvm_is_rejected_as_unavailable_on_macos() {
+        let request = ExecutionRequest {
+            containment: ContainmentBackend::Microvm,
+            experimental_enabled: true,
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let error = match resolve_runner_inner(&request, &mut logger) {
+            Ok(_) => panic!("NVX-backed MicroVM must remain Windows-only"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.code,
+            wxc_common::mxc_error::MxcErrorCode::UnsupportedContainment
+        );
+        assert_eq!(
+            error.message,
+            "the 'microvm' backend is not available on macOS"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -486,6 +514,45 @@ fn resolve_runner_inner(
     Err(MxcError::unsupported_containment(
         "the mxc engine has no run-to-completion backend for this host OS \
          (supported: Windows, Linux, macOS)",
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_microvm_backend(request: &ExecutionRequest) -> Result<ResolvedRunner, MxcError> {
+    if !request.experimental_enabled {
+        return Err(MxcError::malformed_request(
+            ERR_MICROVM_EXPERIMENTAL_OPT_IN_REQUIRED,
+        ));
+    }
+
+    #[cfg(all(feature = "microvm", target_arch = "x86_64"))]
+    {
+        resolve_microvm_backend_with_preflight(nvx_runner::preflight)
+    }
+
+    #[cfg(all(not(feature = "microvm"), target_arch = "x86_64"))]
+    {
+        Err(MxcError::unsupported_containment(
+            ERR_MICROVM_FEATURE_REQUIRED,
+        ))
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        Err(MxcError::unsupported_containment(
+            ERR_MICROVM_ARCHITECTURE_UNSUPPORTED,
+        ))
+    }
+}
+
+#[cfg(all(feature = "microvm", target_os = "windows", target_arch = "x86_64"))]
+fn resolve_microvm_backend_with_preflight<F>(preflight: F) -> Result<ResolvedRunner, MxcError>
+where
+    F: FnOnce() -> Result<(), MxcError>,
+{
+    preflight()?;
+    Err(MxcError::backend_unavailable(
+        ERR_MICROVM_RUNTIME_IMPLEMENTATION_MISSING,
     ))
 }
 
@@ -529,12 +596,21 @@ mod tests {
     use super::*;
     use wxc_common::logger::Mode;
     use wxc_common::models::WindowsSandboxConfig;
+    use wxc_common::mxc_error::MxcErrorCode;
 
     fn windows_sandbox_request(config: Option<WindowsSandboxConfig>) -> ExecutionRequest {
         ExecutionRequest {
             containment: ContainmentBackend::WindowsSandbox,
             experimental_enabled: true,
             windows_sandbox: config,
+            ..Default::default()
+        }
+    }
+
+    fn microvm_request(experimental_enabled: bool) -> ExecutionRequest {
+        ExecutionRequest {
+            containment: ContainmentBackend::Microvm,
+            experimental_enabled,
             ..Default::default()
         }
     }
@@ -590,5 +666,79 @@ mod tests {
             .expect("WSLC selection must not require runtime experimental authorization");
 
         assert!(!logger.get_buffer().contains("experimental"));
+    }
+
+    #[test]
+    fn microvm_without_experimental_opt_in_is_rejected_as_malformed_request() {
+        let request = microvm_request(false);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let err = match resolve_runner_inner_windows(&request, &mut logger) {
+            Ok(_) => panic!("expected malformed_request"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.code, MxcErrorCode::MalformedRequest);
+        assert_eq!(err.message, ERR_MICROVM_EXPERIMENTAL_OPT_IN_REQUIRED);
+    }
+
+    #[cfg(all(not(feature = "microvm"), target_arch = "x86_64"))]
+    #[test]
+    fn microvm_without_feature_returns_typed_unsupported_containment() {
+        let request = microvm_request(true);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let err = match resolve_runner_inner_windows(&request, &mut logger) {
+            Ok(_) => panic!("expected unsupported_containment"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
+        assert_eq!(err.message, ERR_MICROVM_FEATURE_REQUIRED);
+    }
+
+    #[cfg(all(feature = "microvm", target_arch = "x86_64"))]
+    #[test]
+    fn microvm_with_feature_propagates_preflight_backend_unavailable() {
+        let request = microvm_request(true);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let err = match resolve_runner_inner_windows(&request, &mut logger) {
+            Ok(_) => panic!("expected backend_unavailable"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.code, MxcErrorCode::BackendUnavailable);
+        assert_eq!(
+            err.message,
+            nvx_runner::ERR_WORKLOAD_IMAGE_ASSET_UNAVAILABLE
+        );
+    }
+
+    #[cfg(all(feature = "microvm", target_arch = "x86_64"))]
+    #[test]
+    fn microvm_without_runtime_returns_backend_unavailable_even_if_preflight_succeeds() {
+        let err = match resolve_microvm_backend_with_preflight(|| Ok(())) {
+            Ok(_) => panic!("runtime stub must not resolve a runner"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.code, MxcErrorCode::BackendUnavailable);
+        assert_eq!(err.message, ERR_MICROVM_RUNTIME_IMPLEMENTATION_MISSING);
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    #[test]
+    fn microvm_is_rejected_on_unsupported_windows_architecture() {
+        let request = microvm_request(true);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let err = match resolve_runner_inner_windows(&request, &mut logger) {
+            Ok(_) => panic!("expected unsupported_containment"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
+        assert_eq!(err.message, ERR_MICROVM_ARCHITECTURE_UNSUPPORTED);
     }
 }

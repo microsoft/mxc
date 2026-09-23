@@ -1,0 +1,26 @@
+[package]
+name = "nvx_binaries"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Build-time acquisition of pinned NVX release artifacts"
+links = "nvx_binaries"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+# Expensive download and verification work is disabled for default workspace
+# builds and enabled only by future NVX backend consumers.
+nvx = []
+
+[dependencies]
+nvx_common = { workspace = true }
+
+[build-dependencies]
+nvx_build_common = { workspace = true }
+nvx_common = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

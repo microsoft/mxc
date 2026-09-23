@@ -2022,7 +2022,7 @@ mod tests {
             ContainmentBackend::WindowsSandbox,
             ContainmentBackend::Wslc,
             ContainmentBackend::IsolationSession,
-            ContainmentBackend::MicroVm,
+            ContainmentBackend::Microvm,
         ] {
             let containment_name = containment.wire_name();
             request.containment = containment;
@@ -2574,6 +2574,18 @@ mod tests {
         let cli = parse_cli(&["wxc-exec", "policy.json", "--", "echo", "safe&whoami"]);
         let command_override =
             cmdline_from_argv_for_context(&cli.command, CommandLineContext::PosixShell).unwrap();
+
+        assert_eq!(command_override, "echo 'safe&whoami'");
+    }
+
+    #[test]
+    fn microvm_cli_command_uses_posix_shell_quoting() {
+        let cli = parse_cli(&["wxc-exec", "policy.json", "--", "echo", "safe&whoami"]);
+        let command_override = cmdline_from_argv_for_context(
+            &cli.command,
+            CommandLineContext::for_backend(&ContainmentBackend::Microvm),
+        )
+        .unwrap();
 
         assert_eq!(command_override, "echo 'safe&whoami'");
     }

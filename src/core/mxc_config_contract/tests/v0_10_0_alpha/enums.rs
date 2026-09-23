@@ -43,6 +43,17 @@ fn rejects_invalid_containment_value() {
 }
 
 #[test]
+fn rejects_internal_nvx_containment_value() {
+    assert_invalid(
+        r#"{
+            "version": "0.10.0-alpha",
+            "containment": "nvx",
+            "process": {"commandLine": "echo"}
+        }"#,
+    );
+}
+
+#[test]
 fn rejects_every_removed_default_network_policy_value() {
     for default_network_policy in ["allow", "block"] {
         let json = format!(

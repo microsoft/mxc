@@ -1449,11 +1449,9 @@ that shape and reuses `ExecutionRequest` for five concrete reasons:
 
 1. **The field-ignore precedent is established across every existing backend.** Every
    `ScriptRunner` impl in the workspace today (`AppContainer`, `BaseContainer`,
-   `NanVix`, `WindowsSandbox`, `IsolationSession`, `Lxc`, `Wslc`) takes
-   `&ExecutionRequest` and reads only the fields it needs. `NanVix` and
-   `IsolationSession` go further and actively reject fields they cannot honor (e.g.,
-   `NanVixScriptRunner::validate_runner` rejects filesystem paths, network rules,
-   network proxy, and a non-empty working directory). State-aware follows the same
+   `WindowsSandbox`, `IsolationSession`, `Lxc`, `Wslc`) takes
+   `&ExecutionRequest` and reads only the fields it needs. `IsolationSession`
+   goes further and actively rejects fields it cannot honor. State-aware follows the same
    pattern, so the trait ergonomic stays consistent across one-shot and state-aware
    surfaces.
 

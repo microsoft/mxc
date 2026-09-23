@@ -79,14 +79,81 @@ function stableSchemaVersion(path) {
     null;
 }
 
-function validateStableHistory(baseSchemas, currentSchemas) {
+function stableRevision(revisions, version) {
+  const revision = revisions?.[version] ?? 1;
+  return Number.isSafeInteger(revision) && revision > 0 ? revision : null;
+}
+
+function validateStableHistory(
+  baseSchemas,
+  currentSchemas,
+  baseRevisions = {},
+  currentRevisions = {}
+) {
   const errors = [];
+  const changedVersions = new Set();
   for (const [path, before] of baseSchemas) {
     const after = currentSchemas.get(path);
     if (after === undefined) {
       errors.push(`stable schema was removed: ${path}`);
     } else if (normalize(before) !== normalize(after)) {
-      errors.push(`stable schema changed after publication: ${path}`);
+      const version = stableSchemaVersion(path);
+      const beforeRevision = stableRevision(baseRevisions, version);
+      const afterRevision = stableRevision(currentRevisions, version);
+      if (beforeRevision === null || afterRevision === null) {
+        errors.push(`stable schema ${path} has an invalid publication revision`);
+      } else if (afterRevision !== beforeRevision + 1) {
+        errors.push(
+          `stable schema changed after publication without incrementing its ` +
+            `publication revision exactly once: ${path} ` +
+            `(${beforeRevision} -> ${afterRevision})`
+        );
+      } else {
+        changedVersions.add(version);
+      }
+    }
+  }
+
+  for (const [version, after] of Object.entries(currentRevisions ?? {})) {
+    const before = stableRevision(baseRevisions, version);
+    const current = stableRevision(currentRevisions, version);
+    if (before === null || current === null) {
+      errors.push(`stable schema ${version} has an invalid publication revision`);
+    } else if (current !== before && !changedVersions.has(version)) {
+      errors.push(
+        `stable schema publication revision changed without an artifact ` +
+          `amendment: ${version} (${before} -> ${after})`
+      );
+    }
+  }
+  return errors;
+}
+
+function validateStableRevisions(stableSchemas, revisions) {
+  const errors = [];
+  if (
+    revisions === null ||
+    typeof revisions !== "object" ||
+    Array.isArray(revisions)
+  ) {
+    return ["schema-version.json stableRevisions must be an object"];
+  }
+
+  const schemaVersions = new Set(
+    [...stableSchemas.keys()].map(stableSchemaVersion).filter(Boolean)
+  );
+  for (const version of schemaVersions) {
+    if (stableRevision(revisions, version) === null || !(version in revisions)) {
+      errors.push(
+        `stable schema ${version} has no positive integer publication revision`
+      );
+    }
+  }
+  for (const version of Object.keys(revisions)) {
+    if (!schemaVersions.has(version)) {
+      errors.push(
+        `publication revision ${version} has no matching stable schema`
+      );
     }
   }
   return errors;
@@ -185,11 +252,26 @@ function validatePublishedHistory(registry) {
     })
   );
   const currentSchemas = currentStableSchemas();
+  const baseSchemaVersionsText = readFileAtCommit(
+    repoRoot,
+    commit,
+    "schemas/schema-version.json"
+  );
+  if (baseSchemaVersionsText === null) {
+    fail(`could not read schemas/schema-version.json at ${commit}`);
+  }
+  const baseSchemaVersions = JSON.parse(baseSchemaVersionsText);
   const schemaVersions = JSON.parse(
     readFileSync(join(repoRoot, "schemas", "schema-version.json"), "utf8")
   );
   const errors = [
-    ...validateStableHistory(baseSchemas, currentSchemas),
+    ...validateStableRevisions(currentSchemas, schemaVersions.stableRevisions),
+    ...validateStableHistory(
+      baseSchemas,
+      currentSchemas,
+      baseSchemaVersions.stableRevisions,
+      schemaVersions.stableRevisions
+    ),
     ...validatePublishedRegistry(registry, currentSchemas, schemaVersions.min),
   ];
   if (errors.length > 0) {
@@ -469,6 +551,7 @@ module.exports = {
   validateFixtures,
   validatePublishedRegistry,
   validateStableHistory,
+  validateStableRevisions,
 };
 if (require.main === module) {
   try {

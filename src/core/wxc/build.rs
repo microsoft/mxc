@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Build script for wxc — embeds Windows VersionInfo and copies NanVix binaries.
+//! Build script for wxc — embeds Windows VersionInfo and stages backend artifacts.
 
 fn main() {
     mxc_build_common::embed_version_info("MXC sandbox executor", "wxc-exec.exe");
@@ -9,8 +9,8 @@ fn main() {
     #[cfg(windows)]
     check_test_prerequisites();
 
-    #[cfg(all(windows, feature = "microvm"))]
-    copy_nanvix_binaries();
+    #[cfg(feature = "microvm")]
+    stage_nvx_for_target();
 
     // Delay-load winhvplatform.dll so WHP-less hosts don't crash before main().
     // CARGO_CFG_TARGET_* (not #[cfg]) because build.rs cfg gates are host, not target.
@@ -79,20 +79,31 @@ fn check_test_prerequisites() {
     }
 }
 
-#[cfg(all(windows, feature = "microvm"))]
-fn copy_nanvix_binaries() {
+#[cfg(feature = "microvm")]
+fn stage_nvx_for_target() {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+
+    let target = std::env::var("TARGET").expect("wxc build.rs: TARGET is not set by Cargo");
+    let should_stage =
+        nvx_build_common::should_stage_nvx(&target, &target_os, &target_arch, &target_env)
+            .unwrap_or_else(|error| panic!("wxc build.rs: {error}"));
+    if should_stage {
+        copy_nvx_binaries();
+    }
+}
+
+#[cfg(feature = "microvm")]
+fn copy_nvx_binaries() {
     use std::path::Path;
 
-    let nanvix_bin_dir = match std::env::var("DEP_NANVIX_BINARIES_BIN_DIR") {
-        Ok(dir) => dir,
-        Err(_) => {
-            eprintln!("wxc build.rs: DEP_NANVIX_BINARIES_BIN_DIR not set, skipping copy");
-            return;
-        }
-    };
+    let nvx_bin_dir = std::env::var("DEP_NVX_BINARIES_BIN_DIR").unwrap_or_else(|error| {
+        panic!(
+            "wxc build.rs: DEP_NVX_BINARIES_BIN_DIR is required for the microvm feature: {error}"
+        )
+    });
 
-    // Stage the artifacts next to the executable and emit rerun triggers. All
-    // of the staging logic (target-dir derivation, snapshot trust, copy/purge,
-    // rerun emission) lives in the build-only `nanvix_build_common` crate.
-    nanvix_build_common::stage_artifacts_next_to_exe(Path::new(&nanvix_bin_dir));
+    nvx_build_common::stage_artifacts_next_to_exe(Path::new(&nvx_bin_dir))
+        .unwrap_or_else(|error| panic!("wxc build.rs: failed to stage NVX artifacts: {error}"));
 }

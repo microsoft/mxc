@@ -106,14 +106,14 @@ Current platforms:
 
 | Platform id | Family | x64 pool | arm64 pool | Declared backends (x64) |
 |-------------|--------|----------|------------|--------------------------|
-| `windows-prerelease-process-container` | windows | `1es-mxc-windows-prerelease-t1-x64` | *(dormant)* | process-t1, process-t3, isolation-session, wslc, windows-sandbox, microvm, hyperlight |
+| `windows-prerelease-process-container` | windows | `1es-mxc-windows-prerelease-t1-x64` | *(dormant)* | process-t1, process-t3, isolation-session, wslc, windows-sandbox, hyperlight |
 | `windows-prerelease-isolation-session` | windows | *(dormant)* | *(dormant)* | same as above |
-| `windows-canary` | windows | *(dormant)* | *(dormant)* | process-t1, process-t3, wslc, windows-sandbox, microvm, hyperlight |
+| `windows-canary` | windows | *(dormant)* | *(dormant)* | process-t1, process-t3, wslc, windows-sandbox, hyperlight |
 | `windows-25h2` | windows | `1es-mxc-e2e-windows-25h2-pro-x64` | *(dormant)* | same as above |
 | `windows-24h2` | windows | `1es-mxc-e2e-windows-24h2-pro-x64` | *(dormant)* | same as above |
-| `windows-23h2` | windows | `1es-mxc-e2e-windows-23h2-enterprise-x64` | *(dormant)* | process-t3, wslc, windows-sandbox, microvm, hyperlight |
+| `windows-23h2` | windows | `1es-mxc-e2e-windows-23h2-enterprise-x64` | *(dormant)* | process-t3, wslc, windows-sandbox, hyperlight |
 | `ubuntu-26.04` | linux | `1es-mxc-e2e-ubuntu-26.04-x64` | *(dormant)* | bubblewrap, hyperlight, lxc |
-| `ubuntu-24.04` | linux | `1es-mxc-e2e-ubuntu-24.04-x64` | *(dormant)* | bubblewrap, microvm, hyperlight, lxc |
+| `ubuntu-24.04` | linux | `1es-mxc-e2e-ubuntu-24.04-x64` | *(dormant)* | bubblewrap, hyperlight, lxc |
 | `rhel-10` | linux | `1es-mxc-e2e-rhel-10-x64` | *(dormant)* | bubblewrap, hyperlight, lxc |
 | `debian-13` | linux | `1es-mxc-e2e-debian-13-x64` | *(dormant)* | bubblewrap, hyperlight, lxc |
 | `macos-26` | macos | — | runner `macos-26` | seatbelt |
@@ -229,7 +229,6 @@ get fixed or wired.
 | WSLC | ✅ Good | Might have to retry hung jobs - this is an issue with overzealous agent reclaiming. |
 | IsolationSession | ✅ Good | Runs the one-shot suite plus state aware tests (provision/start/exec/stop/deprovision lifecycle). |
 | Windows Sandbox | ⛔ Blocked | Images don't support `Containers-DisposableClientVM` opt. feature |
-| MicroVM | ⛔ Not working | Windows cold and warm starts hang; no Linux suite. The artifact payload is currently commented out in the build jobs. |
 | Hyperlight | ⛔ Not implemented | No suite on any platform. |
 | Seatbelt | ✅ Good | Failures are genuine MXC bugs. |
 
@@ -245,9 +244,6 @@ every entry.
   `prepare-null-device --no-sacl`. T1 needs them too: the suite deliberately
   drives the AppContainer fallback tiers, and an unprepared host fails those
   launches with `WIN32_ERROR(5)` instead of reporting a policy result.
-- `microvm` — asserts the NanVix payload is in the artifact, adds a Defender
-  exclusion for the binary directory, and requires the Windows Hypervisor
-  Platform feature *and* a running hypervisor.
 - `wslc` — asserts `wslcsdk.dll` shipped, requires the WSL and
   VirtualMachinePlatform optional features to be baked into the image, then
   installs/updates the WSL runtime (including the pre-release ring) up to the
@@ -279,7 +275,6 @@ a process-container job selects follows from that build.
   for `lxcbr0`, enables bridge netfilter, and makes sure the bridge's NAT rule
   is in place. On RHEL-likes it needs EPEL first, because Red Hat dropped LXC
   after RHEL 7 and ships no replacement.
-- `microvm` — asserts the NanVix payload exists.
 - `hyperlight` — no-op.
 
 Every install above goes through two shared helpers rather than its own
@@ -497,7 +492,7 @@ cron *and* a job condition *and* a dispatch choice.
 
 Set the ARM64 `pool` for the platform *and* remove or narrow
 `suppressNonMacArm64` in the resolver. Note that the resolver rejects
-`hyperlight` and `microvm` on ARM64 outright (x64-only runtimes), and the WSLC
+`hyperlight` on ARM64 outright (x64-only runtime), and the WSLC
 dispatcher still refuses non-x64.
 
 ## Testing Your Changes to the Validation Infrastructure

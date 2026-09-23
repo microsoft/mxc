@@ -40,8 +40,8 @@ The workspace members and shared Rust dependencies are declared in
 
 `wxc_common` provides the backend-neutral foundation. Backend crates generally
 depend on it, while `mxc_engine` depends on the platform backends and owns
-dispatch. The existing optional `wxc_common` dependency on `nanvix_common`
-provides shared MicroVM data and constants.
+dispatch. Backend-specific build helpers such as `nvx_build_common` own
+artifact staging and acquisition without creating runtime cross-dependencies.
 
 ## Backend layout
 
@@ -55,7 +55,7 @@ logic. Backends with additional processes use several crates:
 | Windows Sandbox | `common/`, `lifecycle/`, `daemon/`, and `guest/` |
 | WSLC | `common/` and `daemon/` |
 | IsolationSession | bindings and `common/` |
-| NanVix | common data, build support, binaries, and runner crates |
+| NVX | common data, build support, binaries, and runner crates |
 | Windows Learning Mode | Windows implementation over `learning_mode_core` |
 
 Shared parsing and normalization live in `wxc_common`; backend-specific policy

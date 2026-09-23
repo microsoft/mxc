@@ -272,7 +272,7 @@ fn main() {
     // Dispatch by containment backend. Backend selection and runner
     // construction — Bubblewrap (the Linux default for abstract intents), LXC
     // (explicit `containment: "lxc"`, plus the catch-all for anything else such
-    // as `processcontainer`), and the experimental Hyperlight / MicroVM
+    // as `processcontainer`), and the experimental Hyperlight
     // backends — live in `mxc_engine::run`, the single home for one-shot backend
     // dispatch. It runs the selected backend to completion and returns the
     // response; experimental backends that require `--experimental` (or that

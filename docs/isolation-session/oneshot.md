@@ -312,7 +312,7 @@ A test runner at `tests/scripts/run_isolation_session_tests.ps1` invokes
 both configs via `wxc-exec.exe`, validates exit codes and
 expected output substrings, and reports a pass/fail summary. Pattern
 follows the existing per-backend integration scripts (e.g.
-`run_microvm_tests.ps1`, `run_wslc_all_tests.ps1`).
+`run_wslc_all_tests.ps1`).
 
 The script must run **interactively** on the test host. The OS-side service's
 calling-process identity check rejects network-logon tokens, so

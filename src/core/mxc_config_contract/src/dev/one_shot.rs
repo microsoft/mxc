@@ -26,12 +26,12 @@ string_enum! {
         /// Select the macOS Seatbelt backend.
         Seatbelt => ["seatbelt", "macos_sandbox"],
 
-        // Development-only values.
+        // Additional values carried by the development contract.
         /// Select the host's VM-class containment backend.
         Vm => ["vm"],
         /// Select the Windows Sandbox backend.
         WindowsSandbox => ["windows_sandbox"],
-        /// Select the NanVix micro-VM backend.
+        /// Select the MicroVM backend implemented by NVX.
         Microvm => ["microvm"],
         /// Select the Hyperlight micro-VM backend.
         Hyperlight => ["hyperlight"],

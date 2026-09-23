@@ -25,6 +25,8 @@ string_enum! {
         Bubblewrap => ["bubblewrap"],
         /// Select the macOS Seatbelt backend.
         Seatbelt => ["seatbelt", "macos_sandbox"],
+        /// Select the MicroVM backend implemented by NVX.
+        Microvm => ["microvm"],
 
         /// Select the Windows IsolationSession backend.
         IsolationSession => ["isolation_session"],

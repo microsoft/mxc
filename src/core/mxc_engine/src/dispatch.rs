@@ -15,11 +15,12 @@
 //! run-to-completion path via `process_container_common::dispatcher`), Bubblewrap
 //! (Linux), Seatbelt (macOS), WSLC, and IsolationSession (Windows,
 //! behind the `wslc` and `isolation_session` features). Every other backend —
-//! including the remaining experimental ones (Windows Sandbox, MicroVM,
-//! Hyperlight) and LXC (no streaming path suitable for the library) — returns
-//! [`MxcError::unsupported_containment`]; callers that need those must drive the
-//! standalone executor binaries (whose run-to-completion path will, in a later
-//! increment, also route through this engine).
+//! including the remaining experimental ones (Windows Sandbox, MicroVM
+//! implemented by NVX, and Hyperlight) and LXC (no streaming path suitable for
+//! the library) — returns [`MxcError::unsupported_containment`]; callers that
+//! need those must drive the standalone executor binaries (whose
+//! run-to-completion path will, in a later increment, also route through this
+//! engine).
 
 use wxc_common::logger::Logger;
 use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};

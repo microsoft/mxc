@@ -10,18 +10,15 @@
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
 use wxc_e2e_tests::{
     assert_exit, assert_pwsh, assert_python, assert_success,
     assert_success_or_skip_missing_prerequisite, examples_dir, has_hyperlight_snapshot,
-    has_nanvix_binaries, has_test_driver, has_windows_sandbox_feature, has_wxc_exe, repo_root,
-    run_test_driver, run_wxc_config, run_wxc_config_value, run_wxc_example, run_wxc_state_aware,
-    test_configs_dir, TempDirs,
+    has_test_driver, has_windows_sandbox_feature, has_wxc_exe, run_test_driver, run_wxc_config,
+    run_wxc_config_value, run_wxc_example, run_wxc_state_aware, test_configs_dir, TempDirs,
 };
 
 static HAS_WXC_EXE: OnceLock<bool> = OnceLock::new();
 static HAS_TEST_DRIVER: OnceLock<bool> = OnceLock::new();
-static HAS_NANVIX_BINARIES: OnceLock<bool> = OnceLock::new();
 static HAS_WINDOWS_SANDBOX: OnceLock<bool> = OnceLock::new();
 static HAS_HYPERLIGHT: OnceLock<bool> = OnceLock::new();
 static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -35,11 +32,6 @@ fn cached_has_wxc_exe() -> bool {
 /// Caches the test driver probe for the duration of the test process.
 fn cached_has_test_driver() -> bool {
     *HAS_TEST_DRIVER.get_or_init(has_test_driver)
-}
-
-/// Caches the NanVix binary probe to avoid repeated prerequisite work.
-fn cached_has_nanvix_binaries() -> bool {
-    *HAS_NANVIX_BINARIES.get_or_init(has_nanvix_binaries)
 }
 
 /// Caches the Windows Sandbox feature probe.
@@ -120,99 +112,6 @@ fn examples() {
     let _temp = TempDirs::create(&["C:\\temp\\wxc_sandbox", "C:\\temp\\wxc_combined_test"]);
     let result = run_test_driver(&examples_dir(), &[]);
     assert_success(&result);
-}
-
-fn microvm_basic() {
-    assert_wxc_success("microvm_hello.json", &["--debug", "--experimental"]);
-}
-
-fn microvm_network() {
-    // Drives the `-allow-host-networking` path: the guest opens a loopback TCP
-    // socket, completes a ping/pong round-trip, and prints NET_OK. Without host
-    // networking enabled the guest's socket() call fails (errno 134) and the
-    // process exits non-zero, so a clean exit + marker proves the flag wiring.
-    let result = run_wxc_config("microvm_network.json", &["--debug", "--experimental"]);
-    assert_eq!(
-        result.code,
-        Some(0),
-        "expected exit 0, got {:?}\nstdout: {}\nstderr: {}",
-        result.code,
-        result.stdout,
-        result.stderr
-    );
-    let combined = result.combined_output_with_decoded_base64();
-    assert!(
-        combined.contains("NET_OK"),
-        "guest network round-trip marker missing\ncombined: {}",
-        combined
-    );
-}
-
-/// Full network isolation is supported; directional filtering is separately
-/// rejected because the legacy guest filter does not implement that contract.
-fn microvm_network_blocked() {
-    let source = "import _socket\n\
-                  try:\n\
-                  \x20   s = _socket.socket(2, 1, 0)\n\
-                  \x20   print('UNEXPECTED_NETWORK', flush=True)\n\
-                  except OSError as e:\n\
-                  \x20   print('RESULT ERRNO %d' % (e.errno,), flush=True)\n";
-    let blocked = serde_json::json!({
-        "version": "0.10.0-alpha",
-        "process": { "commandLine": source, "timeout": 30000 },
-        "containment": "microvm",
-        "network": {
-            "egress": { "default": "deny" },
-            "ingress": { "default": "deny", "hostLoopback": "deny" }
-        }
-    });
-    let blocked_result = run_wxc_config_value(
-        "microvm_network_blocked",
-        &blocked,
-        &["--debug", "--experimental"],
-    );
-    let blocked_out = blocked_result.combined_output_with_decoded_base64();
-    assert_eq!(
-        blocked_result.code,
-        Some(0),
-        "isolated run should exit cleanly (the guest catches the error)\ncombined: {}",
-        blocked_out
-    );
-    assert!(
-        blocked_out.contains("RESULT ERRNO 134"),
-        "isolated guest sockets should remain unavailable (errno 134)\ncombined: {}",
-        blocked_out
-    );
-
-    let filtered = serde_json::json!({
-        "version": "0.10.0-alpha",
-        "process": { "commandLine": "print('UNEXPECTED_EXECUTION')", "timeout": 30000 },
-        "containment": "microvm",
-        "network": {
-            "egress": {
-                "default": "allow",
-                "deny": [{ "to": [{ "cidr": "203.0.113.0/24" }] }]
-            },
-            "ingress": { "default": "allow", "hostLoopback": "allow" }
-        }
-    });
-    let filtered_result = run_wxc_config_value(
-        "microvm_directional_filter_rejected",
-        &filtered,
-        &["--debug", "--experimental"],
-    );
-    let filtered_out = filtered_result.combined_output_with_decoded_base64();
-    assert_ne!(
-        filtered_result.code,
-        Some(0),
-        "unsupported directional filtering must fail before execution\ncombined: {}",
-        filtered_out
-    );
-    assert!(
-        filtered_out.contains("NanVix cannot enforce directional egress rules"),
-        "expected the backend's explicit unsupported-filtering error\ncombined: {}",
-        filtered_out
-    );
 }
 
 fn processcontainer_proxy() {
@@ -609,39 +508,6 @@ fn test_examples() {
 }
 
 #[test]
-fn test_microvm_basic() {
-    if !cached_has_wxc_exe() {
-        return;
-    }
-    if !cached_has_nanvix_binaries() {
-        return;
-    }
-    with_test_lock(microvm_basic);
-}
-
-#[test]
-fn test_microvm_network() {
-    if !cached_has_wxc_exe() {
-        return;
-    }
-    if !cached_has_nanvix_binaries() {
-        return;
-    }
-    with_test_lock(microvm_network);
-}
-
-#[test]
-fn test_microvm_network_blocked() {
-    if !cached_has_wxc_exe() {
-        return;
-    }
-    if !cached_has_nanvix_binaries() {
-        return;
-    }
-    with_test_lock(microvm_network_blocked);
-}
-
-#[test]
 fn test_windows_sandbox() {
     if !cached_has_wxc_exe() {
         return;
@@ -651,17 +517,6 @@ fn test_windows_sandbox() {
     }
     // State-aware coverage lives in run_windows_sandbox_state_aware_tests.ps1.
     with_test_lock(windows_sandbox_suite);
-}
-
-#[test]
-fn test_microvm_suite() {
-    if !cached_has_wxc_exe() {
-        return;
-    }
-    if !cached_has_nanvix_binaries() {
-        return;
-    }
-    with_test_lock(microvm_suite);
 }
 
 #[test]
@@ -817,161 +672,6 @@ fn run_sandbox_case(case: &SandboxCase) {
         case.expected_exit.unwrap_or(0),
         case.output_contains,
     );
-}
-
-// ---------------------------------------------------------------------------
-// MicroVM suite
-// ---------------------------------------------------------------------------
-
-#[derive(Debug)]
-struct MicrovmCase {
-    config: &'static str,
-    expected_exit: Option<i32>,
-    description: &'static str,
-    output_contains: Option<&'static str>,
-    expect_non_zero: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct MicrovmPerfOutput {
-    commit: String,
-    timestamp: String,
-    results: Vec<MicrovmPerfEntry>,
-}
-
-#[derive(Debug, Serialize)]
-struct MicrovmPerfEntry {
-    test: String,
-    description: String,
-    wall_time_ms: u128,
-    exit_code: Option<i32>,
-    status: String,
-}
-
-fn microvm_suite() {
-    let cases = [
-        MicrovmCase {
-            config: "microvm_hello.json",
-            expected_exit: Some(0),
-            description: "Hello world",
-            output_contains: Some("sum=100"),
-            expect_non_zero: false,
-        },
-        MicrovmCase {
-            config: "microvm_exit_code.json",
-            expected_exit: Some(42),
-            description: "Exit code propagation",
-            output_contains: None,
-            expect_non_zero: false,
-        },
-        MicrovmCase {
-            config: "microvm_multiline.json",
-            expected_exit: Some(0),
-            description: "Multi-line script (fibonacci)",
-            output_contains: Some("fib("),
-            expect_non_zero: false,
-        },
-        MicrovmCase {
-            config: "microvm_stdlib.json",
-            expected_exit: Some(0),
-            description: "Stdlib (json, math, hashlib)",
-            output_contains: Some("pi"),
-            expect_non_zero: false,
-        },
-        MicrovmCase {
-            config: "microvm_large_output.json",
-            expected_exit: Some(0),
-            description: "Large stdout (1000 lines)",
-            output_contains: Some("line 999"),
-            expect_non_zero: false,
-        },
-        MicrovmCase {
-            config: "microvm_error.json",
-            expected_exit: Some(1),
-            description: "Python exception",
-            output_contains: Some("ValueError"),
-            expect_non_zero: false,
-        },
-        MicrovmCase {
-            config: "microvm_timeout.json",
-            expected_exit: None,
-            description: "Timeout kills VM",
-            output_contains: None,
-            expect_non_zero: true,
-        },
-    ];
-
-    let mut perf_entries = Vec::new();
-    let mut failures = Vec::new();
-
-    for case in cases {
-        let config_path = test_configs_dir().join(case.config);
-        if !config_path.exists() {
-            println!("SKIPPED: config not found: {}", config_path.display());
-            continue;
-        }
-
-        println!("--- {} ({}) ---", case.description, case.config);
-        let result = run_wxc_config(case.config, &["--debug", "--experimental"]);
-        let status = if command_matches(&result, &case) {
-            "PASS"
-        } else {
-            failures.push(format!(
-                "{} expected {}, got {:?}",
-                case.config,
-                expected_exit_description(&case),
-                result.code
-            ));
-            "FAIL"
-        };
-
-        perf_entries.push(MicrovmPerfEntry {
-            test: case.config.to_string(),
-            description: case.description.to_string(),
-            wall_time_ms: result.wall_time_ms,
-            exit_code: result.code,
-            status: status.to_string(),
-        });
-
-        if status == "FAIL" {
-            println!(
-                "--- stdout ---\n{}\n--- stderr ---\n{}",
-                result.stdout, result.stderr
-            );
-        }
-    }
-
-    write_microvm_perf_results(perf_entries);
-
-    if !failures.is_empty() {
-        panic!("MicroVM E2E failures:\n{}", failures.join("\n"));
-    }
-}
-
-fn command_matches(result: &wxc_e2e_tests::CommandResult, case: &MicrovmCase) -> bool {
-    if case.expect_non_zero {
-        if result.code == Some(0) {
-            return false;
-        }
-    } else if result.code != case.expected_exit {
-        return false;
-    }
-
-    let Some(expected) = case.output_contains else {
-        return true;
-    };
-
-    result
-        .combined_output_with_decoded_base64()
-        .contains(expected)
-}
-
-fn expected_exit_description(case: &MicrovmCase) -> String {
-    if case.expect_non_zero {
-        "non-zero exit".to_string()
-    } else {
-        format!("exit {}", case.expected_exit.unwrap_or(0))
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1187,25 +887,4 @@ fn test_hyperlight_suite() {
         return;
     }
     with_test_lock(hyperlight_suite);
-}
-
-// ---------------------------------------------------------------------------
-// MicroVM perf results
-// ---------------------------------------------------------------------------
-
-fn write_microvm_perf_results(results: Vec<MicrovmPerfEntry>) {
-    let output = MicrovmPerfOutput {
-        commit: std::env::var("GITHUB_SHA").unwrap_or_else(|_| "local".to_string()),
-        timestamp: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_secs().to_string())
-            .unwrap_or_else(|_| "unknown".to_string()),
-        results,
-    };
-    let json = serde_json::to_string_pretty(&output)
-        .expect("microvm performance results should serialize");
-    let path = repo_root().join("microvm-perf-results.json");
-    std::fs::write(&path, json)
-        .unwrap_or_else(|error| panic!("failed to write {}: {error}", path.display()));
-    println!("Performance results written to {}", path.display());
 }

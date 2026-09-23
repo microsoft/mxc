@@ -17,7 +17,6 @@
             "isolation-session",
             "wslc",
             "windows-sandbox",
-            "microvm",
             "hyperlight"
           ]
         },
@@ -51,7 +50,6 @@
             "isolation-session",
             "wslc",
             "windows-sandbox",
-            "microvm",
             "hyperlight"
           ]
         },
@@ -83,7 +81,6 @@
             "process-t3",
             "wslc",
             "windows-sandbox",
-            "microvm",
             "hyperlight"
           ]
         },
@@ -114,7 +111,6 @@
             "process-t3",
             "wslc",
             "windows-sandbox",
-            "microvm",
             "hyperlight"
           ]
         },
@@ -145,7 +141,6 @@
             "process-t3",
             "wslc",
             "windows-sandbox",
-            "microvm",
             "hyperlight"
           ]
         },
@@ -175,7 +170,6 @@
             "process-t3",
             "wslc",
             "windows-sandbox",
-            "microvm",
             "hyperlight"
           ]
         },
@@ -228,7 +222,6 @@
           "pool": "1es-mxc-e2e-ubuntu-24.04-x64",
           "backends": [
             "bubblewrap",
-            "microvm",
             "hyperlight",
             "lxc"
           ]

@@ -64,15 +64,15 @@ export interface LifecycleConfig {
  * - "vm": full hardware-virtualised VM isolation. Resolves to
  *   `windows_sandbox` on Windows; no concrete VM backend exists on other
  *   platforms today.
- * - "microvm": lightweight-VM isolation. Resolves to the current MicroVM
- *   runner (Windows only, experimental); intended to expand as additional
- *   microvm backends (e.g. NanVix) are added.
- *
+ * - "microvm": the public MicroVM identity. It is retained as an intent for
+ *   source and runtime compatibility while NVX remains its internal
+ *   implementation. The same wire value also appears in
+ *   {@link ContainmentBackend} because it directly selects that backend.
  * Concrete-only backends (such as `"wslc"`) live on
  * {@link ContainmentBackend} until there is a meaningful abstraction over
  * multiple implementations of the same kind.
  */
-export type ContainmentType = "process" | "vm" | "microvm";
+export type ContainmentType = 'process' | 'vm' | 'microvm';
 
 /**
  * Runtime list of {@link ContainmentType} values. Kept in sync with the
@@ -126,7 +126,11 @@ export type ContainmentBackend =
  * Containment values (abstract intent or concrete backend) that require
  * the `--experimental` flag.
  */
-export const ExperimentalBackends: readonly (ContainmentType | ContainmentBackend)[] = ['microvm', 'windows_sandbox', 'hyperlight'];
+export const ExperimentalBackends: readonly (ContainmentType | ContainmentBackend)[] = [
+  'microvm',
+  'windows_sandbox',
+  'hyperlight',
+];
 
 /**
  * Clipboard access policy levels

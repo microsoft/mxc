@@ -13,10 +13,10 @@ MXC (Microsoft eXecution Container) is a cross-platform sandboxed code execution
 ## Architecture invariants
 
 - `wxc_common` is the cross-platform foundation. Do not move backend execution or enforcement into it, or add new backend implementation dependencies.
-- Backend crates generally depend on `wxc_common`; avoid cross-dependencies between backend crates. The existing optional `nanvix_common` dependency supplies shared MicroVM data/constants rather than backend dispatch.
+- Backend crates generally depend on `wxc_common`; avoid cross-dependencies between backend crates.
 - `mxc_engine` is the single execution engine. Executor binaries and `mxc-sdk` delegate backend routing to it.
 - Keep `wxc`, `lxc`, and `mxc_darwin` thin. Do not add backend-selection matches to the binaries.
-- Keep build-time staging in `mxc_build_common` or `nanvix_build_common`, not runtime crates.
+- Keep build-time staging in `mxc_build_common` or backend-specific build helpers such as `nvx_build_common`, not runtime crates.
 - Use `#[cfg(target_os = "...")]` and existing Cargo feature gates for platform-specific code.
 - Preserve the distinction between run-to-completion, streaming, and state-aware lifecycle APIs.
 - Unsupported policy must fail closed. Do not accept a field that the selected backend cannot enforce.
@@ -37,6 +37,7 @@ The Rust toolchain is pinned by `src/rust-toolchain.toml`. Run Rust commands fro
 
 ```text
 build.bat
+build.bat --with-microvm   # Include the incomplete MicroVM (NVX) foundation (Windows x64)
 
 ./build.sh
 
