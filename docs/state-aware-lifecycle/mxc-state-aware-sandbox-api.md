@@ -765,15 +765,18 @@ the executor CLI represents the same outcomes through stdout, stderr, and its ex
 | Phase / outcome | stdout | stderr |
 |---|---|---|
 | Non-exec (provision, start, stop, deprovision), success or failure | Single JSON envelope (`{result}` or `{error}`) | Buffered MXC diagnostics and warnings, when produced; may be empty |
+| Exec dry-run, success or failure | Single JSON envelope (`{result}` or `{error}`) | Buffered MXC diagnostics and warnings, when produced; may be empty |
 | Exec, dispatch succeeded | Script's stdout | Script's stderr plus buffered MXC diagnostics and warnings, when produced |
-| Exec, dispatch failed | Single JSON envelope (`{error}`) | Buffered MXC diagnostics and warnings, when produced; may be empty |
+| Exec, dispatch failed | Script's stdout, up to the point of failure | Single JSON envelope (`{error}`), after the script's stderr and any buffered MXC diagnostics |
 
-`stdout` is authoritative: for non-exec phases it carries exactly one envelope; for exec
-it carries either the script's output (success) or exactly one envelope (failure).
-`stderr` is informational. MXC routes its diagnostic logger output to `stderr` in
-state-aware mode so `stdout` remains parseable without sentinels. (One-shot dispatch
-keeps its existing `stdout` logger behaviour — the stricter routing applies to
-state-aware only.)
+`stdout` is authoritative: for non-exec phases and exec dry-run it carries exactly one
+envelope; for a non-dry-run exec it carries the script's output and nothing else. An exec
+can fail after the script has already streamed output, so its error envelope goes to
+`stderr` — appending it to `stdout` would leave neither the script's output nor the
+envelope parseable. `stderr` is otherwise informational. MXC routes its diagnostic logger
+output to `stderr` in state-aware mode so `stdout` remains parseable without sentinels.
+(One-shot dispatch keeps its existing `stdout` logger behaviour — the stricter routing
+applies to state-aware only.)
 
 When `--operation` is present, the executor selects the lifecycle contract before
 reading or decoding the configuration source. Every failure from that point onward —

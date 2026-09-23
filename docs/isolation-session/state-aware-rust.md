@@ -190,10 +190,10 @@ wrong-nesting cases are rejected as `malformed_request`.
 **Config (none).** Exec uses only the cross-cutting `process` block on the
 top-level wire envelope (`commandLine`, `cwd`, `env`, `timeout`).
 
-**Output.** Stdout is the agent process's live-streamed output (the SDK
-discriminates this from a JSON envelope by exit code + stdout-parseability;
-the dispatcher never emits a JSON envelope on stdout for exec on success).
-The wxc-exec process exit code is the agent process's exit code.
+**Output.** Stdout is the agent process's live-streamed output; the dispatcher
+never emits a JSON envelope on stdout for a non-dry-run exec, so a failure's
+`{error}` envelope goes to stderr instead. The wxc-exec process exit code is the
+agent process's exit code.
 
 ### Stop
 

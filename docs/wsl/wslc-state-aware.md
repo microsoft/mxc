@@ -83,10 +83,12 @@ as `--sandbox-id`; the dispatcher derives the backend from the `wslc:` prefix (l
 For attached execution, a **successful** `exec` relays the script's raw stdout/stderr live from
 daemon frames and exits with the script's own exit code — it does **not** wrap the result in an
 envelope. Piped execution writes those same live frames into separate anonymous stdout/stderr
-pipes returned to the in-process SDK caller; no stdin pipe is returned. Callers discriminate
-attached dispatch failures via the exit code + whether stdout parses as an envelope. A timeout
-on the attached relay surfaces as a backend error because that path cannot return a typed timeout;
-the piped path reports it through its wait result.
+pipes returned to the in-process SDK caller; no stdin pipe is returned. An attached dispatch
+**failure** writes its `{error}` envelope to stderr, because the script's output may already own
+stdout by the time the failure is known — so stdout carries the script's output either way, and a
+caller reads the typed error from stderr. A timeout on the attached relay surfaces as a backend
+error because that path cannot return a typed timeout; the piped path reports it through its wait
+result.
 
 ### exec admission, cancellation, and failure containment
 
