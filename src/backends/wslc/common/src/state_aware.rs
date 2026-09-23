@@ -361,9 +361,14 @@ fn exec_piped(
                 .map_err(map_daemon_error);
             stdout_writer.close();
             stderr_writer.close();
-            let _ = stdout_pump.join();
-            let _ = stderr_pump.join();
             let _ = done_tx.send(result);
+            // Caller-owned pipes can remain full when the caller uses
+            // `try_wait` or drops without draining. Joining the pumps here
+            // would then block terminal completion and create a Drop cycle.
+            // Dropping a JoinHandle detaches the pump; closing the read end
+            // during ExecHandle teardown lets the blocked write unwind.
+            drop(stdout_pump);
+            drop(stderr_pump);
         })
         .map_err(|error| {
             MxcError::backend_error(format!("start WSLC exec stream thread: {error}"))

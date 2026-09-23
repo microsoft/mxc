@@ -24,7 +24,7 @@
 //! `deprovision` stop + delete. The completion reply carries the exit code;
 //! output flows over the sink. (Client `Stdin` forwarding is a later fill-in.)
 
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -249,15 +249,53 @@ type ActiveExecs = Arc<Mutex<HashMap<String, Weak<AtomicBool>>>>;
 pub(crate) struct ExecRegistration {
     exec_id: String,
     active_execs: ActiveExecs,
+    cancellation: Weak<AtomicBool>,
 }
 
 impl Drop for ExecRegistration {
     fn drop(&mut self) {
-        self.active_execs
+        let mut active_execs = self
+            .active_execs
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&self.exec_id);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active_execs
+            .get(&self.exec_id)
+            .is_some_and(|current| current.ptr_eq(&self.cancellation))
+        {
+            active_execs.remove(&self.exec_id);
+        }
     }
+}
+
+fn register_exec(
+    active_execs: &ActiveExecs,
+    exec_id: &str,
+    cancellation: &Arc<AtomicBool>,
+) -> Result<ExecRegistration, WorkerError> {
+    let cancellation = Arc::downgrade(cancellation);
+    let mut active_execs_guard = active_execs
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match active_execs_guard.entry(exec_id.to_string()) {
+        Entry::Occupied(mut entry) if entry.get().upgrade().is_none() => {
+            entry.insert(cancellation.clone());
+        }
+        Entry::Occupied(_) => {
+            return Err(WorkerError::Rejected(anyhow::anyhow!(
+                "exec id {exec_id:?} is already active"
+            )));
+        }
+        Entry::Vacant(entry) => {
+            entry.insert(cancellation.clone());
+        }
+    }
+    drop(active_execs_guard);
+
+    Ok(ExecRegistration {
+        exec_id: exec_id.to_string(),
+        active_execs: Arc::clone(active_execs),
+        cancellation,
+    })
 }
 
 /// A cheap, clonable handle async tasks use to drive the worker thread.
@@ -309,14 +347,7 @@ impl SessionHandle {
             enqueue_output(&stream_tx, &sink_overflowed, kind, bytes);
         });
         let cancellation = Arc::new(AtomicBool::new(false));
-        self.active_execs
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(config.exec_id.clone(), Arc::downgrade(&cancellation));
-        let registration = ExecRegistration {
-            exec_id: config.exec_id.clone(),
-            active_execs: Arc::clone(&self.active_execs),
-        };
+        let registration = register_exec(&self.active_execs, &config.exec_id, &cancellation)?;
         self.send(WorkerCommand::Exec {
             config,
             sink,
@@ -941,6 +972,86 @@ mod tests {
         handle.cancel_exec("exec-1");
 
         assert!(cancellation.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn duplicate_live_exec_id_is_rejected_without_replacing_registration() {
+        let active_execs = Arc::new(Mutex::new(HashMap::new()));
+        let first = Arc::new(AtomicBool::new(false));
+        let second = Arc::new(AtomicBool::new(false));
+        let registration = register_exec(&active_execs, "exec-1", &first).unwrap();
+
+        let error = register_exec(&active_execs, "exec-1", &second).unwrap_err();
+
+        assert_eq!(error.kind(), ErrKind::Rejected);
+        let registered = active_execs
+            .lock()
+            .unwrap()
+            .get("exec-1")
+            .and_then(Weak::upgrade)
+            .unwrap();
+        assert!(Arc::ptr_eq(&registered, &first));
+        drop(registration);
+    }
+
+    #[test]
+    fn stale_exec_id_can_be_registered_again() {
+        let stale = Arc::new(AtomicBool::new(false));
+        let active_execs = Arc::new(Mutex::new(HashMap::from([(
+            "exec-1".to_string(),
+            Arc::downgrade(&stale),
+        )])));
+        drop(stale);
+        let cancellation = Arc::new(AtomicBool::new(false));
+
+        let registration = register_exec(&active_execs, "exec-1", &cancellation).unwrap();
+
+        let registered = active_execs
+            .lock()
+            .unwrap()
+            .get("exec-1")
+            .and_then(Weak::upgrade)
+            .unwrap();
+        assert!(Arc::ptr_eq(&registered, &cancellation));
+        drop(registration);
+        assert!(!active_execs.lock().unwrap().contains_key("exec-1"));
+    }
+
+    #[test]
+    fn older_registration_does_not_remove_replacement() {
+        let active_execs = Arc::new(Mutex::new(HashMap::new()));
+        let first = Arc::new(AtomicBool::new(false));
+        let first_registration = register_exec(&active_execs, "exec-1", &first).unwrap();
+        let second = Arc::new(AtomicBool::new(false));
+        active_execs
+            .lock()
+            .unwrap()
+            .insert("exec-1".to_string(), Arc::downgrade(&second));
+
+        drop(first_registration);
+
+        let registered = active_execs
+            .lock()
+            .unwrap()
+            .get("exec-1")
+            .and_then(Weak::upgrade)
+            .unwrap();
+        assert!(Arc::ptr_eq(&registered, &second));
+    }
+
+    #[test]
+    fn cancelling_unknown_or_stale_exec_id_is_a_no_op() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let stale = Arc::new(AtomicBool::new(false));
+        let active_execs = Arc::new(Mutex::new(HashMap::from([(
+            "stale".to_string(),
+            Arc::downgrade(&stale),
+        )])));
+        drop(stale);
+        let handle = SessionHandle { tx, active_execs };
+
+        handle.cancel_exec("unknown");
+        handle.cancel_exec("stale");
     }
 
     #[tokio::test]

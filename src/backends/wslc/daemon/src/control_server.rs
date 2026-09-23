@@ -47,10 +47,16 @@ use wslc_common::daemon_protocol::{
 
 use crate::session_manager::{ExecCompletion, ExecStream, SessionHandle, WorkerError};
 
-/// Upper bound on concurrently-serviced client connections. At capacity the
-/// accept loop applies backpressure (a new connection waits for a slot) instead
-/// of spawning an unbounded number of handler tasks.
-const MAX_CONCURRENT_CLIENTS: usize = 128;
+/// Upper bound on long-running exec streams.
+const MAX_CONCURRENT_EXECS: usize = 128;
+
+/// Capacity reserved for cancellation and lifecycle requests while all exec
+/// stream slots are occupied.
+const CONTROL_CLIENT_RESERVE: usize = 8;
+
+/// Upper bound on concurrently-serviced client connections. Connections beyond
+/// this bound are refused without blocking the accept loop.
+const MAX_CONCURRENT_CLIENTS: usize = MAX_CONCURRENT_EXECS + CONTROL_CLIENT_RESERVE;
 
 /// Deadline for a freshly-connected client to send its first (request) frame. A
 /// client that connects and then stalls must not pin a handler task — and a
@@ -103,7 +109,8 @@ pub async fn run(
         draining,
     } = signals;
     let mut server = first_instance;
-    let limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_CLIENTS));
+    let client_limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_CLIENTS));
+    let exec_limiter = Arc::new(Semaphore::new(MAX_CONCURRENT_EXECS));
     let mut clients: JoinSet<()> = JoinSet::new();
 
     // A create-instance failure that persists past its retry budget is fatal:
@@ -155,12 +162,12 @@ pub async fn run(
                 // does not abandon a connection we already accepted.
                 spawn_client_handler(
                     &mut clients,
-                    &limiter,
+                    &client_limiter,
+                    &exec_limiter,
                     &session,
                     &active_clients,
                     connected,
-                )
-                .await;
+                );
 
                 match next {
                     Ok(n) => server = n,
@@ -194,29 +201,28 @@ pub async fn run(
     }
 }
 
-/// Acquire a concurrency slot (backpressure at capacity) and spawn a task to
-/// service one accepted client connection, tracking it in `active_clients` for
-/// the idle watchdog.
-async fn spawn_client_handler(
+/// Spawn a bounded task to service one accepted client connection.
+fn spawn_client_handler(
     clients: &mut JoinSet<()>,
-    limiter: &Arc<Semaphore>,
+    client_limiter: &Arc<Semaphore>,
+    exec_limiter: &Arc<Semaphore>,
     session: &SessionHandle,
     active_clients: &Arc<AtomicUsize>,
     connected: NamedPipeServer,
 ) {
-    // Bound concurrency: acquire a slot before spawning. At capacity this awaits
-    // a free slot (backpressure) rather than spawning an unbounded task. The
-    // semaphore is never closed, so acquire cannot fail.
-    let permit = Semaphore::acquire_owned(limiter.clone())
-        .await
-        .expect("client semaphore is never closed");
+    let Ok(permit) = client_limiter.clone().try_acquire_owned() else {
+        // The connection is already accepted, so dropping it is the only
+        // bounded refusal path that cannot stall the accept loop.
+        return;
+    };
 
     let session = session.clone();
+    let exec_limiter = Arc::clone(exec_limiter);
     let active = active_clients.clone();
     active.fetch_add(1, Ordering::SeqCst);
     clients.spawn(async move {
         let _permit = permit;
-        if let Err(e) = handle_client(connected, session).await {
+        if let Err(e) = handle_client(connected, session, exec_limiter).await {
             eprintln!("[wslc-daemon] client connection error: {e:#}");
         }
         active.fetch_sub(1, Ordering::SeqCst);
@@ -372,7 +378,11 @@ fn current_user_sid_string() -> Result<String> {
 }
 
 /// Service exactly one request on a freshly-connected pipe instance.
-async fn handle_client(mut pipe: NamedPipeServer, session: SessionHandle) -> Result<()> {
+async fn handle_client(
+    mut pipe: NamedPipeServer,
+    session: SessionHandle,
+    exec_limiter: Arc<Semaphore>,
+) -> Result<()> {
     // Bound the wait for the request frame so a client that connects and then
     // stalls cannot pin this handler (and its concurrency slot) indefinitely.
     let request: DaemonRequest = timeout(FIRST_FRAME_TIMEOUT, read_frame(&mut pipe))
@@ -402,7 +412,18 @@ async fn handle_client(mut pipe: NamedPipeServer, session: SessionHandle) -> Res
             write_frame(&mut pipe, &resp).await?;
         }
         DaemonRequest::Exec(config) => {
-            handle_exec(pipe, session, config).await?;
+            let Ok(exec_permit) = exec_limiter.try_acquire_owned() else {
+                write_frame(
+                    &mut pipe,
+                    &DaemonResponse::Err {
+                        kind: wslc_common::daemon_protocol::ErrKind::Busy,
+                        message: "WSLc daemon exec capacity is exhausted".to_string(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            };
+            handle_exec(pipe, session, config, exec_permit).await?;
         }
         DaemonRequest::CancelExec(config) => {
             session.cancel_exec(&config.exec_id);
@@ -434,6 +455,7 @@ async fn handle_exec(
     mut pipe: NamedPipeServer,
     session: SessionHandle,
     config: wslc_common::daemon_protocol::ExecConfig,
+    _exec_permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Result<()> {
     // Await the worker's admission decision before writing anything: a rejected
     // exec is a pre-admission typed error, never a post-admission stream frame.

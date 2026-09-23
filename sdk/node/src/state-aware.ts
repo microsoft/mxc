@@ -47,10 +47,11 @@ export interface StateAwareStreamingOptions {
   experimental?: boolean;
 }
 
-type PipedExecBackend = Extract<
-  StateAwareContainmentBackend,
-  'isolation_session' | 'wslc'
->;
+const PIPED_EXEC_BACKENDS = [
+  'isolation_session',
+  'wslc',
+] as const satisfies readonly StateAwareContainmentBackend[];
+type PipedExecBackend = typeof PIPED_EXEC_BACKENDS[number];
 
 type StateAwareOptionSupport = 'supported' | 'unsupported-when-true' | 'unsupported-when-defined';
 
@@ -91,7 +92,8 @@ function assertPipedExecBackend(
   sandboxId: SandboxId<StateAwareContainmentBackend>,
 ): void {
   const backend = backendForSandboxId(sandboxId);
-  if (backend !== 'isolation_session' && backend !== 'wslc') {
+  const supportedBackends: readonly StateAwareContainmentBackend[] = PIPED_EXEC_BACKENDS;
+  if (!supportedBackends.includes(backend)) {
     throw new MxcError(
       'unsupported_containment',
       `${apiName} requires piped native exec streams; ${backend} does not expose them.`,

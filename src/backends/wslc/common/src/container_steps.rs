@@ -1000,6 +1000,23 @@ pub enum ProcessCompletion {
     TerminationUnconfirmed,
 }
 
+fn classify_completion(exit_wait: ExitWait, confirmed: bool, exit_code: i32) -> ProcessCompletion {
+    match exit_wait {
+        ExitWait::Interrupted(ExecInterruption::TimedOut) if confirmed => {
+            ProcessCompletion::TimedOut
+        }
+        ExitWait::Interrupted(ExecInterruption::Cancelled) if confirmed => {
+            ProcessCompletion::Cancelled
+        }
+        ExitWait::Interrupted(_) | ExitWait::Failed { .. } => {
+            ProcessCompletion::TerminationUnconfirmed
+        }
+        ExitWait::Signalled => ProcessCompletion::Exited(exit_code),
+        ExitWait::NoEvent if confirmed => ProcessCompletion::Exited(exit_code),
+        ExitWait::NoEvent => ProcessCompletion::TerminationUnconfirmed,
+    }
+}
+
 /// Result of a daemon `exec`, including captured output retained by callbacks.
 #[derive(Debug)]
 pub struct ExecOutcome {
@@ -1138,46 +1155,38 @@ pub unsafe fn exec_in_container(
         .clone();
 
     // Resolve the reported outcome from positive evidence only.
-    let completion = match exit_wait {
-        ExitWait::Interrupted(interruption) if confirmed => {
+    let completion = classify_completion(exit_wait, confirmed, exit_code);
+    match completion {
+        ProcessCompletion::TimedOut => {
             let _ = writeln!(
                 logger,
                 "[WSLC][daemon] Process killed after {}",
-                interruption.get_interruption_word()
+                ExecInterruption::TimedOut.get_interruption_word()
             );
-            match interruption {
-                ExecInterruption::TimedOut => ProcessCompletion::TimedOut,
-                ExecInterruption::Cancelled => ProcessCompletion::Cancelled,
-            }
         }
-        ExitWait::Interrupted(_) | ExitWait::Failed { .. } => {
-            ProcessCompletion::TerminationUnconfirmed
+        ProcessCompletion::Cancelled => {
+            let _ = writeln!(
+                logger,
+                "[WSLC][daemon] Process killed after {}",
+                ExecInterruption::Cancelled.get_interruption_word()
+            );
         }
-        ExitWait::Signalled => {
+        ProcessCompletion::Exited(exit_code) => {
             let _ = writeln!(
                 logger,
                 "[WSLC][daemon] Process exited with code {}",
                 exit_code
             );
-            ProcessCompletion::Exited(exit_code)
         }
-        ExitWait::NoEvent if confirmed => {
-            let _ = writeln!(
-                logger,
-                "[WSLC][daemon] Process exited with code {}",
-                exit_code
-            );
-            ProcessCompletion::Exited(exit_code)
-        }
-        ExitWait::NoEvent => {
+        ProcessCompletion::TerminationUnconfirmed if matches!(exit_wait, ExitWait::NoEvent) => {
             let _ = writeln!(
                 logger,
                 "[WSLC][daemon] Warning: exec never reported an exit (no exit event, no exit \
                  callback); container state is unknown"
             );
-            ProcessCompletion::TerminationUnconfirmed
         }
-    };
+        ProcessCompletion::TerminationUnconfirmed => {}
+    }
 
     Ok(ExecOutcome {
         completion,
@@ -1312,6 +1321,49 @@ mod tests {
                 Duration::from_millis(10),
             ),
             Some(ExecInterruption::TimedOut)
+        );
+    }
+
+    #[test]
+    fn completion_classification_requires_positive_exit_evidence() {
+        assert_eq!(
+            classify_completion(ExitWait::Signalled, false, 7),
+            ProcessCompletion::Exited(7)
+        );
+        assert_eq!(
+            classify_completion(ExitWait::NoEvent, true, 8),
+            ProcessCompletion::Exited(8)
+        );
+        assert_eq!(
+            classify_completion(ExitWait::Interrupted(ExecInterruption::TimedOut), true, -1,),
+            ProcessCompletion::TimedOut
+        );
+        assert_eq!(
+            classify_completion(ExitWait::Interrupted(ExecInterruption::Cancelled), true, -1,),
+            ProcessCompletion::Cancelled
+        );
+        assert_eq!(
+            classify_completion(
+                ExitWait::Interrupted(ExecInterruption::Cancelled),
+                false,
+                -1,
+            ),
+            ProcessCompletion::TerminationUnconfirmed
+        );
+        assert_eq!(
+            classify_completion(
+                ExitWait::Failed {
+                    wait_result: 1,
+                    last_error: 2,
+                },
+                true,
+                0,
+            ),
+            ProcessCompletion::TerminationUnconfirmed
+        );
+        assert_eq!(
+            classify_completion(ExitWait::NoEvent, false, -1),
+            ProcessCompletion::TerminationUnconfirmed
         );
     }
 }
