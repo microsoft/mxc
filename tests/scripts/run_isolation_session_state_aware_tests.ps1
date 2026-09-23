@@ -311,6 +311,14 @@ function Parse-Envelope {
     try { $Stdout | ConvertFrom-Json } catch { $null }
 }
 
+# The executor writes the exec error envelope after any warnings and the
+# diagnostic buffer, so it is the last non-empty line on stderr.
+function Parse-StderrEnvelope {
+    param([string]$Stderr)
+    $last = ($Stderr -split '\r?\n' | Where-Object { $_.Trim() } | Select-Object -Last 1)
+    Parse-Envelope -Stdout $last
+}
+
 # Decodes the `iso:<base64url-nopad(JSON)>` sandbox id payload. Returns $null
 # if the id is not in that shape. base64url differs from standard base64 in two
 # ways that both have to be undone before [Convert] will accept it: the '-' and
@@ -927,7 +935,7 @@ try {
             }
             $r = Invoke-StateAware -Request $req
             Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
-            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $envObj = Parse-StderrEnvelope -Stderr $r.Stderr
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
             Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
             $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
