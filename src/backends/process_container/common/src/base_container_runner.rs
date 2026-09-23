@@ -99,7 +99,7 @@ fn build_child_env_block(request: &ExecutionRequest) -> Result<Option<Vec<u16>>,
         None
     };
 
-    let entries = match request.supplied_env() {
+    let entries = match request.env.as_deref() {
         None => {
             let mut entries = crate::appcontainer_runner::create_default_env_entries()?;
             if let Some(address) = proxy_address {
@@ -1164,7 +1164,7 @@ impl BaseContainerRunner {
             let diagnostic_env = if request.inherit_default_env {
                 None
             } else {
-                request.supplied_env()
+                request.env.as_deref()
             };
             let diag = diagnose_missing_required_env(err.0, diagnostic_env).unwrap_or_else(|| {
                 diagnose_create_process_failure(
@@ -3031,10 +3031,10 @@ mod tests {
     }
 
     #[test]
-    fn below_0_9_an_explicitly_empty_env_still_gets_the_default_block() {
-        // Pre-0.9 contracts never distinguished an omitted environment from an
-        // empty one, so an empty one must keep resolving to the profile block
-        // rather than launching a child with nothing.
+    fn below_0_9_an_explicitly_empty_env_is_still_empty() {
+        // The Windows contract distinguishes omitted from empty at every schema
+        // version; `default_env_compatibility` gates only the Linux and macOS
+        // default block.
         let request = ExecutionRequest {
             env: Some(Vec::new()),
             default_env_compatibility: DefaultEnvCompatibility::LegacyCompatible,
@@ -3043,11 +3043,8 @@ mod tests {
 
         let environment = build_child_env_block(&request)
             .expect("environment")
-            .expect("legacy block");
-        assert!(
-            environment.len() > 2,
-            "a pre-0.9 empty env must resolve to the default profile block"
-        );
+            .expect("an explicitly empty env must still produce a block");
+        assert_eq!(environment, vec![0u16, 0u16]);
     }
 
     #[test]

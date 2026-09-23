@@ -544,15 +544,21 @@ const FALLBACK_HOME: &str = "/tmp";
 /// unset; it does not make a tool believe it has a terminal, which is `isatty`.
 const DEFAULT_TERM: &str = "xterm-256color";
 
-/// The directory the child is actually started in, if any.
+/// The directory the child is actually started in, if any, normalized against
+/// the sandbox root.
 ///
 /// [`build_args_classified_with_mode`] emits `--chdir` for exactly this value
 /// and [`default_env`] points `HOME` at it, so the two cannot name different
-/// directories. A policy grant is deliberately *not* consulted: bwrap enters
-/// one only when `process.cwd` names it, so treating it as the start directory
-/// would put `HOME` somewhere the child never went.
-fn start_directory(request: &ExecutionRequest) -> Option<&str> {
-    Some(request.working_directory.as_str()).filter(|dir| !dir.is_empty())
+/// directories — a relative `--chdir` would otherwise resolve against whatever
+/// cwd bwrap carried into the namespace, leaving `HOME` naming a different
+/// directory than the one the child landed in. A policy grant is deliberately
+/// *not* consulted: bwrap enters one only when `process.cwd` names it, so
+/// treating it as the start directory would put `HOME` somewhere the child
+/// never went.
+fn start_directory(request: &ExecutionRequest) -> Option<String> {
+    Some(request.working_directory.as_str())
+        .filter(|dir| !dir.is_empty())
+        .map(wxc_common::models::sandbox_absolute_path)
 }
 
 /// The default environment: `PATH`, `HOME`, and `TERM`.
@@ -562,9 +568,7 @@ fn start_directory(request: &ExecutionRequest) -> Option<&str> {
 /// bind-mount policy would not have made visible. With no start directory it
 /// is [`FALLBACK_HOME`], which `build_args` always mounts as a fresh tmpfs.
 fn default_env(request: &ExecutionRequest) -> Vec<(String, String)> {
-    let home = start_directory(request)
-        .unwrap_or(FALLBACK_HOME)
-        .to_string();
+    let home = start_directory(request).unwrap_or_else(|| FALLBACK_HOME.to_string());
 
     vec![
         ("PATH".to_string(), DEFAULT_PATH.to_string()),
@@ -741,7 +745,7 @@ pub(crate) fn build_args_classified_with_mode(
 
     // -- Working directory -------------------------------------------------
     if let Some(dir) = start_directory(request) {
-        args.extend(["--chdir".into(), dir.to_string()]);
+        args.extend(["--chdir".into(), dir]);
     }
 
     // -- Environment -------------------------------------------------------
@@ -972,7 +976,7 @@ mod tests {
         /// different directories.
         #[test]
         fn home_and_chdir_agree() {
-            for cwd in ["", "/workspace"] {
+            for cwd in ["", "/workspace", "work", "./work", "a/../b", "/x/../y/./z"] {
                 let mut r = request(DefaultEnvCompatibility::DefaultBlock);
                 r.env = None;
                 r.working_directory = cwd.into();
@@ -988,6 +992,21 @@ mod tests {
                     Some(chdir.unwrap_or_else(|| FALLBACK_HOME.to_string())),
                     "HOME must name the directory the child starts in (cwd {cwd:?})"
                 );
+            }
+        }
+
+        #[test]
+        fn a_relative_start_directory_is_anchored_to_the_sandbox_root() {
+            for (cwd, expected) in [
+                ("work", "/work"),
+                ("./work", "/work"),
+                ("a/../b", "/b"),
+                ("/x/../y/./z", "/y/z"),
+            ] {
+                let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+                r.env = None;
+                r.working_directory = cwd.into();
+                assert_eq!(value(&resolved_env(&r), "HOME"), Some(expected));
             }
         }
 

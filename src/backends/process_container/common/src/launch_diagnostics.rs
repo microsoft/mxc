@@ -91,13 +91,12 @@ fn missing_required_env_diagnostic(supplied_env: &[String]) -> Option<LaunchDiag
 /// Windows process-container launch APIs.
 ///
 /// An omitted environment and `process.inheritDefaultEnv = true` are valid
-/// because MXC supplies the default user environment in those cases. Below
-/// schema 0.9 an explicitly empty environment is one of those cases too.
+/// because MXC supplies the default user environment in those cases.
 pub fn validate_required_child_env(request: &ExecutionRequest) -> Result<(), ScriptResponse> {
     if request.inherit_default_env {
         return Ok(());
     }
-    let Some(supplied_env) = request.supplied_env() else {
+    let Some(supplied_env) = request.env.as_deref() else {
         return Ok(());
     };
     let Some(diagnostic) = missing_required_env_diagnostic(supplied_env) else {
@@ -510,18 +509,22 @@ mod tests {
     }
 
     #[test]
-    fn validation_accepts_a_pre_0_9_empty_environment() {
-        // Pre-0.9 an empty environment resolves to the default profile block,
-        // which already carries the required variables, so rejecting it here
-        // would refuse a request the runner can launch.
-        let request = ExecutionRequest {
-            env: Some(Vec::new()),
-            default_env_compatibility:
-                wxc_common::models::DefaultEnvCompatibility::LegacyCompatible,
-            ..Default::default()
-        };
+    fn validation_rejects_an_empty_environment_at_every_schema_version() {
+        for compatibility in [
+            wxc_common::models::DefaultEnvCompatibility::LegacyCompatible,
+            wxc_common::models::DefaultEnvCompatibility::DefaultBlock,
+        ] {
+            let request = ExecutionRequest {
+                env: Some(Vec::new()),
+                default_env_compatibility: compatibility,
+                ..Default::default()
+            };
 
-        assert!(validate_required_child_env(&request).is_ok());
+            assert!(
+                validate_required_child_env(&request).is_err(),
+                "an empty caller-owned block omits the required variables ({compatibility:?})"
+            );
+        }
     }
 
     // -- diagnose_create_process_failure tests --

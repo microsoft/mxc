@@ -985,18 +985,19 @@ pub struct ExecutionRequest {
     ///   Seatbelt, `PATH` + `HOME` + `TERM`. `HOME` names the directory the
     ///   child is started in; Seatbelt omits it when none resolves, while LXC
     ///   and Bubblewrap fall back to `/tmp`, which both provide writable.
-    /// * `Some(vec![])` — the caller asked for an *empty* environment. From
-    ///   schema 0.9 this is not the same as `None`, and on the Windows process
-    ///   container it is expected to fail at process creation, because the OS
-    ///   requires certain names to be present (see `REQUIRED_CHILD_ENV_VARS`).
+    /// * `Some(vec![])` — the caller asked for an *empty* environment. This is
+    ///   not the same as `None`, and on the Windows process container it is
+    ///   rejected before launch, because the OS requires certain names to be
+    ///   present (see `REQUIRED_CHILD_ENV_VARS`).
     /// * `Some(entries)` — the caller's environment, used verbatim. MXC does
     ///   not add to it; callers that want the default block or the calling
     ///   process's variables must merge them in themselves, or set
     ///   [`ExecutionRequest::inherit_default_env`].
     ///
-    /// The distinction is honored from schema 0.9 by the Windows process
-    /// container, LXC, Bubblewrap, and Seatbelt. Below 0.9, and on IsolationSession
-    /// and WSLc at every version, `None` and `Some(vec![])` are treated alike.
+    /// The Windows process container honors the distinction at every schema
+    /// version; LXC, Bubblewrap, and Seatbelt honor it from 0.9. Below 0.9 on
+    /// those three, and on IsolationSession and WSLc at every version, `None`
+    /// and `Some(vec![])` are treated alike.
     pub env: Option<Vec<String>>,
 
     /// Layer [`ExecutionRequest::env`] on top of the backend's default
@@ -1120,6 +1121,28 @@ pub struct ResolvedWorkingDirectory<'a> {
     pub source: WorkingDirectorySource,
 }
 
+/// Normalize `path` to an absolute, lexically clean path inside a sandbox whose
+/// root is `/`.
+///
+/// Backends that start the child with a `chdir` relative to the guest root use
+/// this so the directory the child lands in and the `HOME` naming it cannot
+/// disagree. `.` segments are dropped and `..` pops the previous segment
+/// without escaping the root. Purely lexical: no symlink resolution, and the
+/// path is not probed.
+pub fn sandbox_absolute_path(path: &str) -> String {
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            other => segments.push(other),
+        }
+    }
+    format!("/{}", segments.join("/"))
+}
+
 impl ExecutionRequest {
     /// Exact external contract spelling for diagnostics and telemetry.
     ///
@@ -1135,21 +1158,6 @@ impl ExecutionRequest {
     /// environment block, introduced by `0.9.0-alpha`.
     pub fn supplies_default_env(&self) -> bool {
         self.default_env_compatibility == DefaultEnvCompatibility::DefaultBlock
-    }
-
-    /// The caller's environment, or `None` when the backend should build its
-    /// own default block instead.
-    ///
-    /// Below 0.9 an explicitly empty `process.env` is indistinguishable from an
-    /// omitted one, so it resolves to the default rather than to an empty
-    /// environment. For backends whose default block is non-empty — the Windows
-    /// process container's user profile block — where the two produce very
-    /// different children.
-    pub fn supplied_env(&self) -> Option<&[String]> {
-        match self.env.as_deref() {
-            Some([]) if !self.supplies_default_env() => None,
-            other => other,
-        }
     }
 
     /// The caller's environment entries, with "not supplied" and "supplied but
@@ -1346,6 +1354,23 @@ impl ScriptResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sandbox_paths_normalize_against_the_root() {
+        for (input, expected) in [
+            ("/workspace", "/workspace"),
+            ("work", "/work"),
+            ("./work", "/work"),
+            ("a/../b", "/b"),
+            ("/x/../y/./z", "/y/z"),
+            ("/a//b/", "/a/b"),
+            ("../../etc", "/etc"),
+            ("", "/"),
+            ("/", "/"),
+        ] {
+            assert_eq!(sandbox_absolute_path(input), expected, "input {input:?}");
+        }
+    }
 
     #[test]
     fn directional_network_defaults_deny() {

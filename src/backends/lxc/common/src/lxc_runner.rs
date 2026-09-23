@@ -40,25 +40,21 @@ const FALLBACK_HOME: &str = "/tmp";
 /// unset; it does not make a tool believe it has a terminal, which is `isatty`.
 const DEFAULT_TERM: &str = "xterm-256color";
 
-/// The directory the child is actually started in, if any.
+/// The directory the child is actually started in, if any, normalized against
+/// the container root.
 ///
 /// [`LxcContainer::attach_run`] wraps the command in a `cd` for exactly this
 /// value and [`default_env`] points `HOME` at it, so the two cannot name
-/// different directories. A policy grant is deliberately *not* consulted: with
-/// `process.cwd` omitted the child starts at the container root, so treating a
-/// grant as the start directory would put `HOME` somewhere it never went.
-fn start_directory(request: &ExecutionRequest) -> Option<&str> {
-    Some(request.working_directory.as_str()).filter(|dir| !dir.is_empty())
-}
-
-/// `lxc-attach` starts at the container root, so a relative start directory
-/// resolves against `/` and `HOME` must name the same absolute path.
-fn container_absolute(dir: &str) -> String {
-    if dir.starts_with('/') {
-        dir.to_string()
-    } else {
-        format!("/{}", dir.trim_start_matches("./"))
-    }
+/// different directories — `lxc-attach` starts at the container root, so a
+/// relative `process.cwd` would otherwise leave `HOME` naming a different
+/// directory than the one the child landed in. A policy grant is deliberately
+/// *not* consulted: with `process.cwd` omitted the child starts at the
+/// container root, so treating a grant as the start directory would put `HOME`
+/// somewhere it never went.
+fn start_directory(request: &ExecutionRequest) -> Option<String> {
+    Some(request.working_directory.as_str())
+        .filter(|dir| !dir.is_empty())
+        .map(wxc_common::models::sandbox_absolute_path)
 }
 
 /// The default environment, from schema 0.9: `PATH`, `HOME`, and `TERM`.
@@ -67,9 +63,7 @@ fn container_absolute(dir: &str) -> String {
 /// container has rather than a host path that was never mounted. With no start
 /// directory it is [`FALLBACK_HOME`], which every image provides writable.
 fn default_env(request: &ExecutionRequest) -> Vec<(String, String)> {
-    let home = start_directory(request)
-        .map(container_absolute)
-        .unwrap_or_else(|| FALLBACK_HOME.to_string());
+    let home = start_directory(request).unwrap_or_else(|| FALLBACK_HOME.to_string());
 
     vec![
         ("PATH".to_string(), DEFAULT_PATH.to_string()),
@@ -649,7 +643,7 @@ impl LxcScriptRunner {
         // environment, proxy variables and credentials included.
         let result = container.attach_run(
             &request.script_code,
-            start_directory(request).unwrap_or_default(),
+            start_directory(request).unwrap_or_default().as_str(),
             &exec_env,
             true,
             timeout,
@@ -1129,13 +1123,18 @@ mod tests {
 
         #[test]
         fn a_relative_start_directory_is_anchored_to_the_container_root() {
-            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
-            r.env = None;
-            r.working_directory = "work".into();
-            assert_eq!(value(&resolved_env(&r), "HOME"), Some("/work"));
-
-            r.working_directory = "./work".into();
-            assert_eq!(value(&resolved_env(&r), "HOME"), Some("/work"));
+            for (cwd, expected) in [
+                ("work", "/work"),
+                ("./work", "/work"),
+                ("a/../b", "/b"),
+                ("/x/../y/./z", "/y/z"),
+            ] {
+                let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+                r.env = None;
+                r.working_directory = cwd.into();
+                assert_eq!(value(&resolved_env(&r), "HOME"), Some(expected));
+                assert_eq!(start_directory(&r).as_deref(), Some(expected));
+            }
         }
 
         /// A policy grant is not a working directory: with `process.cwd`
@@ -1159,13 +1158,17 @@ mod tests {
         /// resolution, so they cannot name different directories.
         #[test]
         fn home_and_the_attach_directory_agree() {
-            for cwd in ["", "/workspace"] {
+            for cwd in ["", "/workspace", "work", "./work", "a/../b", "/x/../y/./z"] {
                 let mut r = request(DefaultEnvCompatibility::DefaultBlock);
                 r.env = None;
                 r.working_directory = cwd.into();
                 assert_eq!(
                     value(&resolved_env(&r), "HOME"),
-                    Some(start_directory(&r).unwrap_or(FALLBACK_HOME)),
+                    Some(
+                        start_directory(&r)
+                            .unwrap_or_else(|| FALLBACK_HOME.to_string())
+                            .as_str()
+                    ),
                     "HOME must name the directory the child starts in (cwd {cwd:?})"
                 );
             }
