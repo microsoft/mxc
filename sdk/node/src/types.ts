@@ -642,6 +642,27 @@ export interface BubblewrapNetworkSupport {
   warnings: string[];
 }
 
+/** Optional feature supported by a backend on the current host. */
+export type BackendCapability =
+  | 'captureDenials'
+  | 'filesystemDeniedPaths'
+  | 'filesystemEnumeratePaths'
+  | 'ingressHostLoopbackAllow'
+  | 'proxyEnforcement'
+  | 'unknown';
+
+/** One host-available backend and its probed capabilities. */
+export interface AvailableBackend {
+  /** Concrete backend, or `unknown` when a newer native library adds one. */
+  backend: ContainmentBackend | 'unknown';
+  /** Strongest available ProcessContainer tier, when the backend has a tier ladder. */
+  tier?: IsolationTier | 'unknown';
+  /** Optional capabilities available at the reported tier. */
+  capabilities: BackendCapability[];
+  /** Diagnostics for optional capabilities that could not be provided. */
+  warnings: string[];
+}
+
 /**
  * Platform support information
  */

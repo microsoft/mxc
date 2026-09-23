@@ -157,7 +157,19 @@ The default `processcontainer`, `bubblewrap`, `lxc`, `seatbelt`, `wslc`, and `is
 
 > **Hyperlight** is an opt-in build flavor (Linux x64 and Windows x64) gated by the `--with-hyperlight` cargo feature. Default shipped binaries do not include it; build from source with `build.bat --with-hyperlight` (Windows) or the equivalent cargo invocation on Linux.
 
-`getPlatformSupport()` reports backend availability and, when the native probe can determine it, `uiCapabilities`: a platform-neutral view of which UI restrictions the host can enforce. This is currently populated only by the Windows native probe, where it is derived from `JOB_OBJECT_UILIMIT_*` support; Linux and macOS omit the field until their probes expose equivalent data. On Linux, `unavailableReasons` provides a diagnostic for each unavailable LXC or Bubblewrap backend even when the other backend keeps the platform supported.
+`getPlatformSupport()` reports whether the native in-process SDK can launch on
+this host and the backends it can launch. `getAvailableBackends()` separately
+reports every host-capability backend detected by the native probe, including
+backends that this SDK surface cannot necessarily launch. It also returns each
+backend's effective isolation tier, optional capabilities, and capability
+warnings.
+
+When the native platform probe can determine it, `getPlatformSupport()` also
+reports `uiCapabilities`: a platform-neutral view of which UI restrictions the
+host can enforce. This is currently populated only by the Windows native probe,
+where it is derived from `JOB_OBJECT_UILIMIT_*` support; Linux and macOS omit
+the field until their probes expose equivalent data. On Linux,
+`unavailableReasons` provides a diagnostic for unavailable SDK backends.
 
 On Linux, when Bubblewrap is available, `getPlatformSupport()` also reports `bubblewrapNetwork`: whether this host can enforce **proxy-only egress** (schema `0.8.0-alpha`+ proxy mode, which runs the sandbox in a private network namespace and default-drops everything except the proxy). That mode has no fallback — a policy the host cannot satisfy fails rather than silently degrading — so check it before spawning:
 
@@ -589,6 +601,7 @@ deprovisionSandbox(sandboxId, config?, options?) → Promise<DeprovisionResult>
 
 // Platform & policy discovery
 getPlatformSupport() → PlatformSupport
+getAvailableBackends() → AvailableBackend[]
 getAvailableToolsPolicy(env?, options?) → FilesystemPolicyResult
 getUserProfilePolicy()                  → FilesystemPolicyResult
 getTemporaryFilesPolicy(env?)           → FilesystemPolicyResult
@@ -599,7 +612,7 @@ requestTelemetryConsent(presenter, locale?) → Promise<TelemetryConsentOutcome>
 withdrawTelemetryConsentAsync()   → Promise<TelemetryConsentOutcome>
 
 // Capability types
-UiCapabilitySupport, BubblewrapNetworkSupport
+AvailableBackend, BackendCapability, UiCapabilitySupport, BubblewrapNetworkSupport
 
 // Errors (typed wire-format errors from wxc-exec)
 ErrorCode, MxcError, MxcErrorFields

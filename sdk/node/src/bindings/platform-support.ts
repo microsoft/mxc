@@ -39,17 +39,29 @@ function readOwnedJson(
   }
 }
 
-export function readPlatformSupportSnapshotJson(): PlatformSupportSnapshotJson {
+function readNativeOwnedJson(exportName: string): string {
   const native = loadMxcFfi();
   try {
-    const platformSupport = native.handle.func('mxc_platform_support_json', 'void *', []) as OwnedStringFunction;
-    const availableBackends = native.handle.func('mxc_available_backends_json', 'void *', []) as OwnedStringFunction;
+    const readJson = native.handle.func(exportName, 'void *', []) as OwnedStringFunction;
     const stringFree = native.handle.func('mxc_string_free', 'void', ['char *']) as StringFreeFunction;
-    return {
-      platformSupportJson: readOwnedJson(platformSupport, stringFree, 'mxc_platform_support_json'),
-      availableBackendsJson: readOwnedJson(availableBackends, stringFree, 'mxc_available_backends_json'),
-    };
+    return readOwnedJson(readJson, stringFree, exportName);
   } finally {
     native.handle.unload();
   }
+}
+
+export function readPlatformSupportJson(): string {
+  return readNativeOwnedJson('mxc_platform_support_json');
+}
+
+export function readAvailableBackendsJson(): string {
+  return readNativeOwnedJson('mxc_available_backends_json');
+}
+
+/** @internal Reads both discovery surfaces for deterministic tests. */
+export function readPlatformSupportSnapshotJson(): PlatformSupportSnapshotJson {
+  return {
+    platformSupportJson: readPlatformSupportJson(),
+    availableBackendsJson: readAvailableBackendsJson(),
+  };
 }

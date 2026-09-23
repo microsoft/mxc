@@ -8,6 +8,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { Worker } from 'node:worker_threads';
 import {
+  getAvailableBackends,
   getPlatformSupport,
   _resetPlatformSupportCache,
   _setPlatformSupportSnapshotReader,
@@ -104,7 +105,9 @@ describe('getPlatformSupport host-services projection', () => {
 
   it('projects bubblewrap network support from native capabilities', { skip: os.platform() !== 'linux' }, () => {
     _setPlatformSupportSnapshotReader(() => ({
-      platformSupportJson: '{"isSupported":true,"availableMethods":["bubblewrap"]}',
+      platformSupportJson:
+        '{"isSupported":true,"availableMethods":["bubblewrap"],'
+        + '"bubblewrapNetwork":{"proxyEnforcement":"supported","warnings":[]}}',
       availableBackendsJson:
         '[{"backend":"bubblewrap","capabilities":["proxyEnforcement"]}]',
     }));
@@ -199,8 +202,6 @@ describe('getPlatformSupport host-services projection', () => {
     assert.strictEqual(support.isolationTier, 'appcontainer-bfs');
     assert.deepStrictEqual(support.availableMethods, [
       'processcontainer',
-      'windows_sandbox',
-      'hyperlight',
       'wslc',
     ]);
     assert.deepStrictEqual(support.isolationWarnings, [
@@ -220,7 +221,7 @@ describe('getPlatformSupport host-services projection', () => {
     });
   });
 
-  it('keeps Linux supported when LXC is available and Bubblewrap is not', { skip: os.platform() !== 'linux' }, () => {
+  it('does not merge host-only LXC into the SDK-launchable platform result', { skip: os.platform() !== 'linux' }, () => {
     _setPlatformSupportSnapshotReader(() => ({
       platformSupportJson: JSON.stringify({
         isSupported: false,
@@ -230,10 +231,14 @@ describe('getPlatformSupport host-services projection', () => {
       availableBackendsJson: '[{"backend":"lxc"}]',
     }));
     const support = getPlatformSupport();
-    assert.strictEqual(support.isSupported, true);
-    assert.deepStrictEqual(support.availableMethods, ['lxc']);
-    assert.strictEqual(support.reason, undefined);
+    assert.strictEqual(support.isSupported, false);
+    assert.deepStrictEqual(support.availableMethods, []);
+    assert.strictEqual(
+      support.reason,
+      'Neither LXC nor Bubblewrap is available on this system (Bubblewrap (bwrap) 0.4.1 is too old.)',
+    );
     assert.deepStrictEqual(support.unavailableReasons, {
+      lxc: 'LXC is not installed or not available on this system.',
       bubblewrap: 'Bubblewrap (bwrap) 0.4.1 is too old.',
     });
   });
@@ -258,6 +263,72 @@ describe('getPlatformSupport host-services projection', () => {
       lxc: 'LXC is not installed or not available on this system.',
       bubblewrap: 'Bubblewrap (bwrap) 0.4.1 is too old.',
     });
+  });
+});
+
+describe('getAvailableBackends host capability projection', () => {
+  afterEach(() => {
+    _setPlatformSupportSnapshotReader(null);
+  });
+
+  it('keeps host-capability backends separate from platform support', () => {
+    _setPlatformSupportSnapshotReader(() => ({
+      platformSupportJson:
+        '{"isSupported":true,"availableMethods":["processcontainer"]}',
+      availableBackendsJson: JSON.stringify([
+        {
+          backend: 'processcontainer',
+          tier: 'base-container',
+          capabilities: [
+            'captureDenials',
+            'filesystemDeniedPaths',
+            'filesystemEnumeratePaths',
+            'ingressHostLoopbackAllow',
+          ],
+        },
+        {
+          backend: 'windows_sandbox',
+          warnings: ['optional feature probe was inconclusive'],
+        },
+      ]),
+    }));
+
+    assert.deepStrictEqual(getPlatformSupport().availableMethods, ['processcontainer']);
+    assert.deepStrictEqual(getAvailableBackends(), [
+      {
+        backend: 'processcontainer',
+        tier: 'base-container',
+        capabilities: [
+          'captureDenials',
+          'filesystemDeniedPaths',
+          'filesystemEnumeratePaths',
+          'ingressHostLoopbackAllow',
+        ],
+        warnings: [],
+      },
+      {
+        backend: 'windows_sandbox',
+        tier: undefined,
+        capabilities: [],
+        warnings: ['optional feature probe was inconclusive'],
+      },
+    ]);
+  });
+
+  it('maps newer backend probe values to forward-compatible unknowns', () => {
+    _setPlatformSupportSnapshotReader(() => ({
+      platformSupportJson: '{"isSupported":false,"availableMethods":[]}',
+      availableBackendsJson:
+        '[{"backend":"future_backend","tier":"future-tier",'
+        + '"capabilities":["futureCapability"]}]',
+    }));
+
+    assert.deepStrictEqual(getAvailableBackends(), [{
+      backend: 'unknown',
+      tier: 'unknown',
+      capabilities: ['unknown'],
+      warnings: [],
+    }]);
   });
 });
 

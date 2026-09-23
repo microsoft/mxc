@@ -7,10 +7,13 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { Worker, type WorkerOptions } from 'node:worker_threads';
 import {
-  readPlatformSupportSnapshotJson,
+  readAvailableBackendsJson,
+  readPlatformSupportJson,
   type PlatformSupportSnapshotJson,
 } from './bindings/platform-support.js';
 import {
+  AvailableBackend,
+  BackendCapability,
   BubblewrapNetworkSupport,
   ContainmentBackend,
   IsolationTier,
@@ -60,6 +63,13 @@ const KNOWN_BACKENDS: readonly ContainmentBackend[] = [
   'bubblewrap',
 ];
 const KNOWN_TIERS: readonly IsolationTier[] = ['base-container', 'appcontainer-bfs', 'appcontainer-dacl'];
+const KNOWN_CAPABILITIES: readonly Exclude<BackendCapability, 'unknown'>[] = [
+  'captureDenials',
+  'filesystemDeniedPaths',
+  'filesystemEnumeratePaths',
+  'ingressHostLoopbackAllow',
+  'proxyEnforcement',
+];
 
 /**
  * Get platform support information.
@@ -92,11 +102,11 @@ export function _resetPlatformSupportCache(): void {
 
 type PlatformSupportSnapshotReader = () => PlatformSupportSnapshotJson;
 
-let platformSupportSnapshotReader: PlatformSupportSnapshotReader = readPlatformSupportSnapshotJson;
+let platformSupportSnapshotReader: PlatformSupportSnapshotReader | null = null;
 
 /** @internal Test-only: override native host-services reads. */
 export function _setPlatformSupportSnapshotReader(reader: PlatformSupportSnapshotReader | null): void {
-  platformSupportSnapshotReader = reader ?? readPlatformSupportSnapshotJson;
+  platformSupportSnapshotReader = reader;
 }
 
 interface NativePlatformSupportPayload {
@@ -106,13 +116,7 @@ interface NativePlatformSupportPayload {
   isolationTier?: IsolationTier;
   isolationWarnings?: string[];
   uiCapabilities?: UiCapabilitySupport;
-}
-
-interface NativeAvailableBackendPayload {
-  backend: string;
-  tier?: string;
-  capabilities: string[];
-  warnings: string[];
+  bubblewrapNetwork?: BubblewrapNetworkSupport;
 }
 
 function isContainmentBackend(value: unknown): value is ContainmentBackend {
@@ -121,6 +125,23 @@ function isContainmentBackend(value: unknown): value is ContainmentBackend {
 
 function isIsolationTier(value: unknown): value is IsolationTier {
   return typeof value === 'string' && (KNOWN_TIERS as readonly string[]).includes(value);
+}
+
+function isBackendCapability(value: unknown): value is Exclude<BackendCapability, 'unknown'> {
+  return typeof value === 'string'
+    && (KNOWN_CAPABILITIES as readonly string[]).includes(value);
+}
+
+function isBubblewrapNetworkSupport(value: unknown): value is BubblewrapNetworkSupport {
+  if (value === null || typeof value !== 'object') {
+    return false;
+  }
+  const network = value as Record<string, unknown>;
+  return (
+    (network.proxyEnforcement === 'supported' || network.proxyEnforcement === 'unsupported')
+    && Array.isArray(network.warnings)
+    && network.warnings.every((warning) => typeof warning === 'string')
+  );
 }
 
 const UI_CAPABILITY_FIELDS: readonly (keyof UiCapabilitySupport)[] = [
@@ -172,6 +193,12 @@ function parsePlatformSupportPayload(json: string): NativePlatformSupportPayload
   if (value.uiCapabilities !== undefined && !isUiCapabilitySupport(value.uiCapabilities)) {
     throw new Error('mxc_platform_support_json returned malformed JSON');
   }
+  if (
+    value.bubblewrapNetwork !== undefined
+    && !isBubblewrapNetworkSupport(value.bubblewrapNetwork)
+  ) {
+    throw new Error('mxc_platform_support_json returned malformed JSON');
+  }
   return {
     isSupported: value.isSupported,
     reason: typeof value.reason === 'string' ? value.reason : undefined,
@@ -179,10 +206,11 @@ function parsePlatformSupportPayload(json: string): NativePlatformSupportPayload
     isolationTier: value.isolationTier,
     isolationWarnings: value.isolationWarnings,
     uiCapabilities: value.uiCapabilities,
+    bubblewrapNetwork: value.bubblewrapNetwork,
   };
 }
 
-function parseAvailableBackendsPayload(json: string): NativeAvailableBackendPayload[] {
+function parseAvailableBackendsPayload(json: string): AvailableBackend[] {
   const parsed: unknown = JSON.parse(json);
   if (!Array.isArray(parsed)) {
     throw new Error('mxc_available_backends_json returned malformed JSON');
@@ -195,38 +223,37 @@ function parseAvailableBackendsPayload(json: string): NativeAvailableBackendPayl
     if (typeof value.backend !== 'string') {
       throw new Error('mxc_available_backends_json returned malformed JSON');
     }
-    if (value.tier !== undefined && !isIsolationTier(value.tier)) {
+    if (value.tier !== undefined && typeof value.tier !== 'string') {
       throw new Error('mxc_available_backends_json returned malformed JSON');
     }
-    const capabilities = Array.isArray(value.capabilities)
-      ? value.capabilities.filter((item): item is string => typeof item === 'string')
-      : [];
-    const warnings = Array.isArray(value.warnings)
-      ? value.warnings.filter((item): item is string => typeof item === 'string')
-      : [];
+    if (
+      value.capabilities !== undefined
+      && (
+        !Array.isArray(value.capabilities)
+        || value.capabilities.some((item) => typeof item !== 'string')
+      )
+    ) {
+      throw new Error('mxc_available_backends_json returned malformed JSON');
+    }
+    if (
+      value.warnings !== undefined
+      && (
+        !Array.isArray(value.warnings)
+        || value.warnings.some((item) => typeof item !== 'string')
+      )
+    ) {
+      throw new Error('mxc_available_backends_json returned malformed JSON');
+    }
     return {
-      backend: value.backend,
-      tier: value.tier,
-      capabilities,
-      warnings,
+      backend: isContainmentBackend(value.backend) ? value.backend : 'unknown',
+      tier: value.tier === undefined
+        ? undefined
+        : isIsolationTier(value.tier) ? value.tier : 'unknown',
+      capabilities: (value.capabilities ?? []).map((capability) =>
+        isBackendCapability(capability) ? capability : 'unknown'),
+      warnings: value.warnings ?? [],
     };
   });
-}
-
-function mergeAvailableMethods(
-  platformSupportMethods: readonly string[],
-  availableBackends: readonly NativeAvailableBackendPayload[],
-): ContainmentBackend[] {
-  const methods: ContainmentBackend[] = [];
-  for (const method of [
-    ...availableBackends.map((entry) => entry.backend),
-    ...platformSupportMethods,
-  ]) {
-    if (isContainmentBackend(method) && !methods.includes(method)) {
-      methods.push(method);
-    }
-  }
-  return methods;
 }
 
 function linuxUnavailableReasons(
@@ -244,12 +271,11 @@ function linuxUnavailableReasons(
   return Object.keys(reasons).length === 0 ? undefined : reasons;
 }
 
-function adaptPlatformSupport(snapshot: PlatformSupportSnapshotJson): PlatformSupport {
-  const nativeSupport = parsePlatformSupportPayload(snapshot.platformSupportJson);
-  const availableBackends = parseAvailableBackendsPayload(snapshot.availableBackendsJson);
-  const availableMethods = mergeAvailableMethods(nativeSupport.availableMethods, availableBackends);
+function adaptPlatformSupport(json: string): PlatformSupport {
+  const nativeSupport = parsePlatformSupportPayload(json);
+  const availableMethods = nativeSupport.availableMethods.filter(isContainmentBackend);
   const support: PlatformSupport = {
-    isSupported: nativeSupport.isSupported || availableMethods.length > 0,
+    isSupported: nativeSupport.isSupported,
     availableMethods,
   };
 
@@ -258,16 +284,8 @@ function adaptPlatformSupport(snapshot: PlatformSupportSnapshotJson): PlatformSu
     if (unavailableReasons) {
       support.unavailableReasons = unavailableReasons;
     }
-    const bubblewrap = availableBackends.find((entry) => entry.backend === 'bubblewrap');
-    if (bubblewrap) {
-      support.bubblewrapNetwork = bubblewrap.capabilities.includes('proxyEnforcement')
-        ? { proxyEnforcement: 'supported', warnings: [] }
-        : {
-            proxyEnforcement: 'unsupported',
-            warnings: bubblewrap.warnings.length > 0
-              ? bubblewrap.warnings
-              : ['proxy-only egress is not supported on this host'],
-          };
+    if (nativeSupport.bubblewrapNetwork) {
+      support.bubblewrapNetwork = nativeSupport.bubblewrapNetwork;
     }
     if (!support.isSupported) {
       support.reason = nativeSupport.reason
@@ -431,7 +449,9 @@ export function _probeBubblewrapNetwork(): BubblewrapNetworkSupport {
 
 function computeSupport(): PlatformSupport {
   try {
-    return adaptPlatformSupport(platformSupportSnapshotReader());
+    const json = platformSupportSnapshotReader?.().platformSupportJson
+      ?? readPlatformSupportJson();
+    return adaptPlatformSupport(json);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     platformDiagnosticLogger(`getPlatformSupport: native host-services probe failed — ${detail}`);
@@ -441,6 +461,18 @@ function computeSupport(): PlatformSupport {
       availableMethods: [],
     };
   }
+}
+
+/**
+ * Probe every containment backend the current host can run.
+ *
+ * This includes host-capability backends that the Node SDK cannot necessarily
+ * launch. Use {@link getPlatformSupport} for the SDK-launchable subset.
+ */
+export function getAvailableBackends(): AvailableBackend[] {
+  const json = platformSupportSnapshotReader?.().availableBackendsJson
+    ?? readAvailableBackendsJson();
+  return parseAvailableBackendsPayload(json);
 }
 
 /**

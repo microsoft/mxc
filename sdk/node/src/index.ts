@@ -62,6 +62,8 @@ export {
   DirectionalNetworkConfig,
   RuntimeConfig,
   PlatformSupport,
+  AvailableBackend,
+  BackendCapability,
   UiCapabilitySupport,
   BubblewrapNetworkSupport,
 } from './types.js';
@@ -69,6 +71,7 @@ export {
 // Export platform detection functions
 export {
   getPlatformSupport,
+  getAvailableBackends,
 } from './platform.js';
 
 // Export sandbox spawning functions
