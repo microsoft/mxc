@@ -2275,7 +2275,7 @@ mod tests {
     #[test]
     fn containment_microvm_accepted() {
         let json = r#"{
-            "version": "0.10.0-alpha",
+            "version": "0.9.0-alpha",
             "process": {"commandLine": "/bin/true"},
             "containment": "microvm"
         }"#;
@@ -2290,7 +2290,7 @@ mod tests {
     #[test]
     fn containment_nvx_gets_normal_unknown_enum_rejection() {
         let json = r#"{
-            "version": "0.10.0-alpha",
+            "version": "0.9.0-alpha",
             "process": {"commandLine": "/bin/true"},
             "containment": "nvx"
         }"#;

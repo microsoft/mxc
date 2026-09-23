@@ -7,12 +7,15 @@ MXC generates artifacts from exact registered configuration contracts:
 | Exact `0.9.0-alpha` | `src/core/mxc_config_contract/src/published/v0_9_0_alpha/` | Authoritative closed published contract and versioned TypeScript oracle |
 | Exact `0.10.0-alpha` | `src/core/mxc_config_contract/src/dev/` | Authoritative closed development contract and versioned TypeScript oracle |
 
-Published schemas under `schemas/stable/` are immutable release artifacts.
+Published schemas under `schemas/stable/` are revision-locked release artifacts.
 `mxc_schema_gen` renders published v0.9 into temporary output so
 `check-contract-codegen.js` can compare the enforcing Rust model with the
 committed stable schema and TypeScript oracle. The gate also compares
 pre-existing stable schemas with the merge base and validates their registry
-identities.
+identities. A deliberate published-contract amendment must increment that
+version's `stableRevisions` entry in `schemas/schema-version.json` exactly once;
+an artifact change without the bump, or a bump without an artifact change,
+fails validation.
 
 ## Sources of truth
 
@@ -23,9 +26,9 @@ and `string_marker!` macros implement `JsonSchema` so deserialization and
 generated constants cannot drift.
 
 `src/core/mxc_config_contract/src/published/v0_9_0_alpha/` defines the exact
-published v0.9 contract, including IsolationSession and WSLC one-shot and
-state-aware roots. It remains renderable for verification; generation does
-not make the stable artifact mutable.
+published v0.9 contract, including MicroVM one-shot and IsolationSession and
+WSLC one-shot and state-aware roots. It remains renderable for verification;
+generation does not by itself authorize a published-contract amendment.
 
 `mxc_schema_support` owns shared integer normalization, deterministic root
 rendering, and TypeScript emission. `mxc_schema_gen` uses those helpers for

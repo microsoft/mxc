@@ -19,6 +19,7 @@ const {
   validateFixtures,
   validatePublishedRegistry,
   validateStableHistory,
+  validateStableRevisions,
 } = require("../check-contract-codegen.js");
 
 const roots = ["OneShotRequest", "WindowsSandboxProvisionRequest",
@@ -200,7 +201,7 @@ test("stable schema history allows initial publication", () => {
   assert.deepEqual(validateStableHistory(base, unchanged), []);
 });
 
-test("stable schema history rejects mutation and removal", () => {
+test("stable schema history requires an explicit publication revision", () => {
   const base = new Map([
     ["schemas/stable/mxc-config.schema.0.8.0-alpha.json", "{\"v\":1}\r\n"],
   ]);
@@ -212,11 +213,57 @@ test("stable schema history rejects mutation and removal", () => {
         ["schemas/stable/mxc-config.schema.0.8.0-alpha.json", "{\"v\":2}\n"],
       ])
     ).join("\n"),
-    /changed after publication/
+    /changed after publication without incrementing its publication revision/
+  );
+  assert.deepEqual(
+    validateStableHistory(
+      base,
+      new Map([
+        ["schemas/stable/mxc-config.schema.0.8.0-alpha.json", "{\"v\":2}\n"],
+      ]),
+      { "0.8.0-alpha": 1 },
+      { "0.8.0-alpha": 2 }
+    ),
+    []
+  );
+  assert.match(
+    validateStableHistory(
+      base,
+      base,
+      { "0.8.0-alpha": 1 },
+      { "0.8.0-alpha": 2 }
+    ).join("\n"),
+    /publication revision changed without an artifact amendment/
   );
   assert.match(
     validateStableHistory(base, new Map()).join("\n"),
     /was removed/
+  );
+});
+
+test("stable publication revisions cover exactly the stable artifacts", () => {
+  const stable = new Map([
+    ["schemas/stable/mxc-config.schema.0.8.0-alpha.json", "{}"],
+    ["schemas/stable/mxc-config.schema.0.9.0-alpha.json", "{}"],
+  ]);
+  assert.deepEqual(
+    validateStableRevisions(stable, {
+      "0.8.0-alpha": 1,
+      "0.9.0-alpha": 2,
+    }),
+    []
+  );
+  assert.match(
+    validateStableRevisions(stable, { "0.8.0-alpha": 1 }).join("\n"),
+    /0\.9\.0-alpha has no positive integer publication revision/
+  );
+  assert.match(
+    validateStableRevisions(stable, {
+      "0.8.0-alpha": 1,
+      "0.9.0-alpha": 2,
+      "1.0.0-alpha": 1,
+    }).join("\n"),
+    /1\.0\.0-alpha has no matching stable schema/
   );
 });
 

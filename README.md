@@ -79,9 +79,10 @@ pre-fetched, checksum-verifiable bundle directory for an offline build. The
 current pin, `v0.1.0-dev.5c86da3dff02`, contains only `openvmm.exe`, the guest
 kernel, and the guest initramfs, not the workload-image bundle.
 
-The experimental `microvm` containment value is implemented by NVX. Build with
-`--with-microvm`; execution currently returns a typed backend-unavailable error,
-and capability probes do not advertise MicroVM while the runtime is incomplete.
+The exact `0.9.0-alpha` contract exposes the experimental `microvm` containment
+value, implemented internally by NVX. Build with `--with-microvm`; execution
+currently returns a typed backend-unavailable error, and capability probes do
+not advertise MicroVM while the runtime is incomplete.
 Runtime work remains blocked on NVX-produced distro/runtime EROFS images
 and scratch image, a proven combined managed-sandbox/virtio-fs contract, and the
 required WHP runner.
@@ -240,7 +241,7 @@ See the [SDK README](sdk/node/README.md) for full API documentation.
 
 ## Schema Versions
 
-Released, immutable stable schemas live in [`schemas/stable/`](schemas/stable); the in-progress dev schema (experimental backends, state-aware lifecycle) lives in [`schemas/dev/`](schemas/dev). The current stable and dev versions are tracked canonically in [`schemas/schema-version.json`](schemas/schema-version.json).
+Released, revision-locked stable schemas live in [`schemas/stable/`](schemas/stable); the in-progress dev schema (remaining development backends and fields) lives in [`schemas/dev/`](schemas/dev). The current stable and dev versions, plus auditable publication revisions, are tracked canonically in [`schemas/schema-version.json`](schemas/schema-version.json).
 
 Pick the latest stable schema for new code on any supported platform. See [docs/versioning.md](docs/versioning.md) for the full versioning design.
 

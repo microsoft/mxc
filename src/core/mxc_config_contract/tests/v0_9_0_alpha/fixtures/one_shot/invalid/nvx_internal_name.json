@@ -1,0 +1,7 @@
+{
+  "version": "0.9.0-alpha",
+  "containment": "nvx",
+  "process": {
+    "commandLine": "echo nvx"
+  }
+}

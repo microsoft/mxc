@@ -249,7 +249,7 @@ describe('buildSandboxPayload', () => {
       }
     });
 
-    it('should enforce the minimum schema for every development-only containment', () => {
+    it('should enforce the minimum schema for each versioned containment', () => {
       mockWindows();
       try {
         for (const containment of [
@@ -261,7 +261,9 @@ describe('buildSandboxPayload', () => {
           'isolation_session',
         ] as const) {
           const minimumVersion =
-            containment === 'isolation_session' || containment === 'wslc'
+            containment === 'isolation_session' ||
+            containment === 'wslc' ||
+            containment === 'microvm'
               ? '0.9.0-alpha'
               : '0.10.0-alpha';
           assert.throws(
@@ -278,7 +280,7 @@ describe('buildSandboxPayload', () => {
       }
     });
 
-    it('should accept each development containment at its exact boundary', () => {
+    it('should accept each versioned containment at its exact boundary', () => {
       mockWindows();
       try {
         for (const containment of [
@@ -290,7 +292,9 @@ describe('buildSandboxPayload', () => {
           'isolation_session',
         ] as const) {
           const version =
-            containment === 'isolation_session' || containment === 'wslc'
+            containment === 'isolation_session' ||
+            containment === 'wslc' ||
+            containment === 'microvm'
               ? '0.9.0-alpha'
               : '0.10.0-alpha';
           try {
@@ -299,7 +303,7 @@ describe('buildSandboxPayload', () => {
             assert.doesNotMatch(
               (error as Error).message,
               /Schema .* does not support containment/,
-              `${containment} must pass the 0.9 schema floor before backend-specific validation`,
+              `${containment} must pass its ${version} schema floor before backend-specific validation`,
             );
           }
         }
@@ -549,7 +553,7 @@ describe('buildSandboxPayload', () => {
       mockWindows();
       try {
         const policy: SandboxPolicy = {
-          version: '0.10.0-alpha',
+          version: '0.9.0-alpha',
           filesystem: {
             readonlyPaths: ['C:\\workspace\\source'],
             readwritePaths: ['C:\\workspace\\output'],
@@ -596,7 +600,7 @@ describe('buildSandboxPayload', () => {
           () => buildSandboxPayload(
             'echo hello',
             {
-              version: '0.10.0-alpha',
+              version: '0.9.0-alpha',
               runtimeConfig: {
                 networkProxy: 'http://127.0.0.1:8080',
               },
@@ -626,7 +630,7 @@ describe('buildSandboxPayload', () => {
           () => buildSandboxPayload(
             'echo hello',
             {
-              version: '0.10.0-alpha',
+              version: '0.9.0-alpha',
               ui: {
                 allowWindows: false,
                 clipboard: 'none',
@@ -2016,9 +2020,11 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
 
   function makeConfig(containment: string): ContainerConfig {
     const version =
-      containment === 'isolation_session' || containment === 'wslc'
+      containment === 'isolation_session' ||
+      containment === 'wslc' ||
+      containment === 'microvm'
         ? '0.9.0-alpha'
-        : ['microvm', 'vm', 'hyperlight', 'windows_sandbox'].includes(containment)
+        : ['vm', 'hyperlight', 'windows_sandbox'].includes(containment)
         ? '0.10.0-alpha'
         : ['seatbelt', 'macos_sandbox'].includes(containment)
           ? '0.7.0-alpha'

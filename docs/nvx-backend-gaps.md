@@ -6,11 +6,11 @@ The original NVX prototype accepted a real MXC `0.9.0-dev` JSON, validated it
 against the schema, and adapted supported fields into typed NVX launch plans.
 The prototype first exercised those plans on Windows through OpenVMM and WHP.
 
-MicroVM remains the sole public MXC backend identity in the active development
-contract, selected with `containment: "microvm"`. NVX is the concrete
-implementation behind that abstraction. A MicroVM-enabled build returns a
-typed backend-unavailable error for execution, and capability probes do not
-advertise MicroVM while the runtime is incomplete.
+MicroVM remains the sole public MXC backend identity in the published exact
+`0.9.0-alpha` one-shot contract, selected with `containment: "microvm"`. NVX is
+the concrete implementation behind that abstraction. A MicroVM-enabled build
+returns a typed backend-unavailable error for execution, and capability probes
+do not advertise MicroVM while the runtime is incomplete.
 
 ## Current architecture
 
@@ -84,12 +84,12 @@ them for this backend:
 
 ## Schema changes
 
-The exact `0.10.0-alpha` development contract includes
-`containment: "microvm"` in its generated schema and TypeScript wire types. The
-internal `nvx` implementation name is not accepted as a public containment
-value. Published stable schemas remain unchanged. An
-`experimental.nvx.provision` section is necessary only if images remain
-caller-configurable.
+The published exact `0.9.0-alpha` one-shot contract includes
+`containment: "microvm"` in its generated schema and TypeScript wire types.
+The broader `0.10.0-alpha` development contract accepts the same public value
+for forward compatibility. The internal `nvx` implementation name is not
+accepted as a public containment value. An `experimental.nvx.provision`
+section is necessary only if images remain caller-configurable.
 
 Future state-aware provision design:
 
@@ -240,8 +240,8 @@ The current GitHub Copilot CLI builds MXC policy version `0.7.0-alpha` and
 emits the legacy `allowOutbound`, `allowLocalNetwork`, and `network.proxy`
 fields. It no longer provides a raw `sandbox.config` passthrough.
 
-Before the CLI can use the MicroVM (NVX) backend, it must migrate its generated policy
-to the exact `0.10.0-alpha` development contract:
+Before the CLI can use the MicroVM (NVX) backend, it must migrate its generated
+policy to the exact published `0.9.0-alpha` contract:
 
 - map outbound allow/block to `network.egress.default`;
 - map local-network intent to `network.ingress.default` and

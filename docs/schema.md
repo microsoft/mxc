@@ -386,6 +386,11 @@ force a particular backend.
 | `"vm"` | Full hardware-virtualised VM isolation. Resolves to `windows_sandbox` on Windows. |
 | `"microvm"` | Compatibility-preserved public MicroVM identity. The same wire value directly selects the concrete MicroVM backend, implemented internally by NVX. |
 
+The one-shot `microvm` value is available in the published exact
+`0.9.0-alpha` contract. It remains runtime-experimental and Windows x64-only;
+publication does not remove the `--experimental` authorization requirement.
+The abstract `vm` intent remains development-only in `0.10.0-alpha`.
+
 #### Concrete backends
 
 | Value | Description |
@@ -475,7 +480,7 @@ Registered contracts:
 | `"0.6.0-alpha"` | Published; minimum supported |
 | `"0.7.0-alpha"` | Published |
 | `"0.8.0-alpha"` | Published |
-| `"0.9.0-alpha"` | Published; current stable |
+| `"0.9.0-alpha"` | Published; current stable; includes one-shot `microvm` |
 | `"0.10.0-alpha"` | Mutable development contract |
 
 An absent version, a retired version, or any unregistered spelling such as

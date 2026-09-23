@@ -742,6 +742,13 @@
           "type": "string"
         },
         {
+          "description": "Microvm",
+          "enum": [
+            "microvm"
+          ],
+          "type": "string"
+        },
+        {
           "description": "IsolationSession",
           "enum": [
             "isolation_session"

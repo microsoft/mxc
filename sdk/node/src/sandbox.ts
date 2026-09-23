@@ -119,9 +119,9 @@ function validateContainmentVersion(
             ? '0.7.0-alpha'
             : effectiveContainment === 'isolation_session'
               || effectiveContainment === 'wslc'
+              || effectiveContainment === 'microvm'
               ? '0.9.0-alpha'
               : effectiveContainment === 'vm' ||
-                effectiveContainment === 'microvm' ||
                 effectiveContainment === 'windows_sandbox' ||
                 effectiveContainment === 'hyperlight'
                 ? '0.10.0-alpha'

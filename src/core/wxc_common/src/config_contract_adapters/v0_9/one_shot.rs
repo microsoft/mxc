@@ -14,6 +14,7 @@ fn convert_containment(value: contract::OneShotContainment) -> wire::Containment
         contract::OneShotContainment::Lxc => wire::Containment::Lxc,
         contract::OneShotContainment::Bubblewrap => wire::Containment::Bubblewrap,
         contract::OneShotContainment::Seatbelt => wire::Containment::Seatbelt,
+        contract::OneShotContainment::Microvm => wire::Containment::Microvm,
         contract::OneShotContainment::IsolationSession => wire::Containment::IsolationSession,
         contract::OneShotContainment::Wslc => wire::Containment::Wslc,
     }
