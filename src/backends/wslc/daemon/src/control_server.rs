@@ -378,11 +378,14 @@ fn current_user_sid_string() -> Result<String> {
 }
 
 /// Service exactly one request on a freshly-connected pipe instance.
-async fn handle_client(
-    mut pipe: NamedPipeServer,
+async fn handle_client<S>(
+    mut pipe: S,
     session: SessionHandle,
     exec_limiter: Arc<Semaphore>,
-) -> Result<()> {
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     // Bound the wait for the request frame so a client that connects and then
     // stalls cannot pin this handler (and its concurrency slot) indefinitely.
     let request: DaemonRequest = timeout(FIRST_FRAME_TIMEOUT, read_frame(&mut pipe))
@@ -451,12 +454,15 @@ async fn handle_client(
 /// unavailable. Piped stdin would require a handle-mode rearchitecture (no
 /// callbacks; `ReadFile` threads for stdout/stderr + `WriteFile` for stdin) and
 /// is deferred; stdin forwarding is tracked in issue #804.
-async fn handle_exec(
-    mut pipe: NamedPipeServer,
+async fn handle_exec<S>(
+    mut pipe: S,
     session: SessionHandle,
     config: wslc_common::daemon_protocol::ExecConfig,
     _exec_permit: tokio::sync::OwnedSemaphorePermit,
-) -> Result<()> {
+) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
     // Await the worker's admission decision before writing anything: a rejected
     // exec is a pre-admission typed error, never a post-admission stream frame.
     write_exec_result(&mut pipe, session.exec(config).await).await
@@ -612,9 +618,68 @@ async fn write_frame<S: AsyncWrite + Unpin, T: Serialize>(pipe: &mut S, msg: &T)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session_manager::spawn;
     use tokio::io::duplex;
     use tokio::sync::mpsc;
-    use wslc_common::daemon_protocol::ErrKind;
+    use wslc_common::daemon_protocol::{CancelExecConfig, ErrKind, ExecConfig};
+
+    #[tokio::test]
+    async fn exhausted_exec_capacity_returns_busy() {
+        let session = spawn().unwrap();
+        let exec_limiter = Arc::new(Semaphore::new(1));
+        let _permit = exec_limiter.clone().acquire_owned().await.unwrap();
+        let (mut client, server) = duplex(64 * 1024);
+        write_frame(
+            &mut client,
+            &DaemonRequest::Exec(ExecConfig {
+                exec_id: "exec-busy".to_string(),
+                sandbox_id: "wslc:test".to_string(),
+                script_code: "echo hi".to_string(),
+                working_directory: String::new(),
+                env: Vec::new(),
+                timeout_ms: 0,
+            }),
+        )
+        .await
+        .unwrap();
+
+        handle_client(server, session.clone(), exec_limiter)
+            .await
+            .unwrap();
+
+        let response: DaemonResponse = read_frame(&mut client).await.unwrap();
+        assert_eq!(
+            response,
+            DaemonResponse::Err {
+                kind: ErrKind::Busy,
+                message: "WSLc daemon exec capacity is exhausted".to_string(),
+            }
+        );
+        session.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancel_exec_request_dispatches_successfully() {
+        let session = spawn().unwrap();
+        let exec_limiter = Arc::new(Semaphore::new(1));
+        let (mut client, server) = duplex(64 * 1024);
+        write_frame(
+            &mut client,
+            &DaemonRequest::CancelExec(CancelExecConfig {
+                exec_id: "unknown-exec".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        handle_client(server, session.clone(), exec_limiter)
+            .await
+            .unwrap();
+
+        let response: DaemonResponse = read_frame(&mut client).await.unwrap();
+        assert_eq!(response, DaemonResponse::Ok);
+        session.shutdown().await.unwrap();
+    }
 
     /// Admit an exec whose output channel is already closed (no live output),
     /// so `write_exec_result` goes straight from `Ok` to the terminal frame.

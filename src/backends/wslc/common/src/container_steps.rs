@@ -912,12 +912,16 @@ enum ExitWait {
     Failed { wait_result: u32, last_error: u32 },
 }
 
-fn wait_slice_ms(timeout: Option<Duration>, elapsed: Duration) -> u32 {
-    let slice = timeout
+fn wait_slice(timeout: Option<Duration>, elapsed: Duration) -> Duration {
+    timeout
         .map(|limit| limit.saturating_sub(elapsed))
         .unwrap_or(EXEC_WAIT_POLL_INTERVAL)
-        .min(EXEC_WAIT_POLL_INTERVAL);
-    u32::try_from(slice.as_millis()).expect("poll interval is bounded to 100ms")
+        .min(EXEC_WAIT_POLL_INTERVAL)
+}
+
+fn wait_slice_ms(timeout: Option<Duration>, elapsed: Duration) -> u32 {
+    u32::try_from(wait_slice(timeout, elapsed).as_millis())
+        .expect("poll interval is bounded to 100ms")
 }
 
 fn requested_interruption(
@@ -941,15 +945,27 @@ fn requested_interruption(
 /// of this call.
 unsafe fn wait_for_exit_event(
     exit_event: HANDLE,
+    io_ctx: &IoContext,
     timeout: Option<Duration>,
     cancellation: &AtomicBool,
 ) -> ExitWait {
-    if exit_event.is_null() {
-        return ExitWait::NoEvent;
-    }
-
     let started = Instant::now();
     loop {
+        if let Some(interruption) = requested_interruption(
+            cancellation.load(Ordering::Acquire),
+            timeout,
+            started.elapsed(),
+        ) {
+            return ExitWait::Interrupted(interruption);
+        }
+
+        if exit_event.is_null() {
+            if wait_for_exit_callback_slice(io_ctx, wait_slice(timeout, started.elapsed())) {
+                return ExitWait::NoEvent;
+            }
+            continue;
+        }
+
         let wait_result = unsafe {
             windows::Win32::System::Threading::WaitForSingleObject(
                 windows::Win32::Foundation::HANDLE(exit_event),
@@ -966,27 +982,23 @@ unsafe fn wait_for_exit_event(
                 last_error: last_error.0,
             };
         }
-
-        if let Some(interruption) = requested_interruption(
-            cancellation.load(Ordering::Acquire),
-            timeout,
-            started.elapsed(),
-        ) {
-            return ExitWait::Interrupted(interruption);
-        }
     }
 }
 
-fn wait_for_exit_callback(io_ctx: &IoContext) -> bool {
+fn wait_for_exit_callback_slice(io_ctx: &IoContext, wait: Duration) -> bool {
     let (lock, cvar) = &*io_ctx.exited;
     let mut exited = lock.lock().unwrap_or_else(|e| e.into_inner());
     if !*exited {
         let result = cvar
-            .wait_timeout(exited, EXIT_CALLBACK_WAIT)
+            .wait_timeout(exited, wait)
             .unwrap_or_else(|e| e.into_inner());
         exited = result.0;
     }
     *exited
+}
+
+fn wait_for_exit_callback(io_ctx: &IoContext) -> bool {
+    wait_for_exit_callback_slice(io_ctx, EXIT_CALLBACK_WAIT)
 }
 
 /// Terminal state of a daemon container process.
@@ -1000,7 +1012,16 @@ pub enum ProcessCompletion {
     TerminationUnconfirmed,
 }
 
+fn natural_exit_confirmed(exit_wait: ExitWait, callback_confirmed: bool) -> bool {
+    matches!(exit_wait, ExitWait::Signalled)
+        || (matches!(exit_wait, ExitWait::NoEvent) && callback_confirmed)
+}
+
 fn classify_completion(exit_wait: ExitWait, confirmed: bool, exit_code: i32) -> ProcessCompletion {
+    if natural_exit_confirmed(exit_wait, confirmed) {
+        return ProcessCompletion::Exited(exit_code);
+    }
+
     match exit_wait {
         ExitWait::Interrupted(ExecInterruption::TimedOut) if confirmed => {
             ProcessCompletion::TimedOut
@@ -1011,9 +1032,7 @@ fn classify_completion(exit_wait: ExitWait, confirmed: bool, exit_code: i32) -> 
         ExitWait::Interrupted(_) | ExitWait::Failed { .. } => {
             ProcessCompletion::TerminationUnconfirmed
         }
-        ExitWait::Signalled => ProcessCompletion::Exited(exit_code),
-        ExitWait::NoEvent if confirmed => ProcessCompletion::Exited(exit_code),
-        ExitWait::NoEvent => ProcessCompletion::TerminationUnconfirmed,
+        ExitWait::NoEvent | ExitWait::Signalled => ProcessCompletion::TerminationUnconfirmed,
     }
 }
 
@@ -1078,7 +1097,8 @@ pub unsafe fn exec_in_container(
     }
 
     let timeout = (timeout_ms > 0).then(|| Duration::from_millis(u64::from(timeout_ms)));
-    let exit_wait = wait_for_exit_event(exit_event, timeout, cancellation);
+    let exit_wait =
+        wait_for_exit_event(exit_event, process_settings.io_ctx(), timeout, cancellation);
 
     if let ExitWait::Failed {
         wait_result,
@@ -1135,10 +1155,16 @@ pub unsafe fn exec_in_container(
 
     let mut exit_code: i32 = -1;
     let hr = sdk.WslcGetProcessExitCode(process_guard.as_raw(), &mut exit_code);
-    let natural_exit_confirmed = matches!(exit_wait, ExitWait::Signalled)
-        || (matches!(exit_wait, ExitWait::NoEvent) && confirmed);
-    if hr != S_OK && natural_exit_confirmed {
-        return Err(sdk_error("WslcGetProcessExitCode failed", hr, ""));
+    if hr != S_OK {
+        if natural_exit_confirmed(exit_wait, confirmed) {
+            return Err(sdk_error("WslcGetProcessExitCode failed", hr, ""));
+        }
+        let _ = writeln!(
+            logger,
+            "[WSLC][daemon] Warning: WslcGetProcessExitCode failed while termination was \
+             unconfirmed (hr=0x{:08X})",
+            hr as u32
+        );
     }
 
     let stdout = process_settings
@@ -1273,6 +1299,11 @@ mod tests {
 
     #[test]
     fn wait_slice_is_bounded_by_poll_interval_and_deadline() {
+        assert_eq!(wait_slice(None, Duration::ZERO), Duration::from_millis(100));
+        assert_eq!(
+            wait_slice(Some(Duration::from_millis(250)), Duration::from_millis(225),),
+            Duration::from_millis(25)
+        );
         assert_eq!(wait_slice_ms(None, Duration::ZERO), 100);
         assert_eq!(
             wait_slice_ms(Some(Duration::from_millis(250)), Duration::from_millis(25)),
@@ -1365,5 +1396,35 @@ mod tests {
             classify_completion(ExitWait::NoEvent, false, -1),
             ProcessCompletion::TerminationUnconfirmed
         );
+    }
+
+    #[test]
+    fn null_exit_event_still_observes_cancellation() {
+        let io_ctx = IoContext {
+            stdout: Arc::new(Mutex::new(Vec::new())),
+            stderr: Arc::new(Mutex::new(Vec::new())),
+            exited: Arc::new((Mutex::new(false), Condvar::new())),
+            sink: None,
+        };
+        let cancellation = AtomicBool::new(true);
+
+        let result = unsafe { wait_for_exit_event(ptr::null_mut(), &io_ctx, None, &cancellation) };
+
+        assert_eq!(result, ExitWait::Interrupted(ExecInterruption::Cancelled));
+    }
+
+    #[test]
+    fn null_exit_event_uses_callback_as_natural_exit_evidence() {
+        let io_ctx = IoContext {
+            stdout: Arc::new(Mutex::new(Vec::new())),
+            stderr: Arc::new(Mutex::new(Vec::new())),
+            exited: Arc::new((Mutex::new(true), Condvar::new())),
+            sink: None,
+        };
+        let cancellation = AtomicBool::new(false);
+
+        let result = unsafe { wait_for_exit_event(ptr::null_mut(), &io_ctx, None, &cancellation) };
+
+        assert_eq!(result, ExitWait::NoEvent);
     }
 }

@@ -329,12 +329,10 @@ fn exec_piped(
         .map_err(|error| MxcError::backend_error(format!("start WSLC stderr pump: {error}")))?;
     let stdout = windows::Win32::Foundation::HANDLE(stdout_reader.as_raw_handle());
     let stderr = windows::Win32::Foundation::HANDLE(stderr_reader.as_raw_handle());
-    let cancel_client = client.clone();
-    let admission_cancel_client = client.clone();
-    let admission_exec_id = exec_id.clone();
-    let cancellation_requested = Arc::new(AtomicBool::new(false));
-    let admission_cancellation_requested = Arc::clone(&cancellation_requested);
-    let terminator_cancellation_requested = Arc::clone(&cancellation_requested);
+    let terminator_client = client.clone();
+    let relay_exec_id = exec_id.clone();
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let relay_cancellation = Arc::clone(&cancellation);
     let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
 
     std::thread::Builder::new()
@@ -343,8 +341,8 @@ fn exec_piped(
             let result = client
                 .admit_exec(config)
                 .and_then(|exec| {
-                    if admission_cancellation_requested.load(Ordering::Acquire) {
-                        let _ = admission_cancel_client.cancel_exec(admission_exec_id);
+                    if relay_cancellation.load(Ordering::Acquire) {
+                        let _ = client.cancel_exec(relay_exec_id);
                     }
                     exec.read_to_completion(|stream, bytes| match stream {
                         OutStream::Stdout => stdout_writer.write(bytes),
@@ -390,8 +388,10 @@ fn exec_piped(
             })?
         }),
         terminator: Box::new(move || {
-            terminator_cancellation_requested.store(true, Ordering::Release);
-            cancel_client.cancel_exec(exec_id).map_err(map_daemon_error)
+            cancellation.store(true, Ordering::Release);
+            terminator_client
+                .cancel_exec(exec_id)
+                .map_err(map_daemon_error)
         }),
     })
 }
