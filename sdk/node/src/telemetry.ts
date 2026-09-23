@@ -354,10 +354,10 @@ export async function requestTelemetryConsent(
   presenter: TelemetryConsentPresenter,
   locale?: string,
 ): Promise<TelemetryConsentOutcome> {
-  validateLocale(locale);
   if (!isWindows()) {
     return notApplicable('request');
   }
+  validateLocale(locale);
   const json = await runTelemetryConsentRequestAsync(
     locale,
     (promptJson, signal) => presentConsentDecision(presenter, promptJson, signal),

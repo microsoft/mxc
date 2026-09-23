@@ -276,10 +276,13 @@ describe('telemetry consent is Windows-only', () => {
         return new FakeWorker();
       });
 
-      const request = await requestTelemetryConsent(() => {
-        called = true;
-        return 'yes';
-      });
+      const request = await requestTelemetryConsent(
+        () => {
+          called = true;
+          return 'yes';
+        },
+        'en-US\0dev',
+      );
       assert.strictEqual(request.result, 'notApplicable');
       assert.strictEqual((await queryTelemetryConsentAsync()).state, 'not-applicable');
       assert.strictEqual((await withdrawTelemetryConsentAsync()).result, 'notApplicable');

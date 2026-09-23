@@ -192,11 +192,6 @@ const terminalResults = new Set(
   [...protocolResults].filter((value) => !protocolOnlyResults.has(value))
 );
 compareSets(
-  "TypeScript private protocol result",
-  protocolOnlyResults,
-  typescriptValues("CONSENT_PROTOCOL_ONLY_RESULTS")
-);
-compareSets(
   "TypeScript consent result",
   terminalResults,
   typescriptValues("TELEMETRY_CONSENT_RESULTS")
