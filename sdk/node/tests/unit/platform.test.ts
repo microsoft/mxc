@@ -139,6 +139,23 @@ describe('getPlatformSupport host-services projection', () => {
     assert.deepStrictEqual(support.availableMethods, []);
   });
 
+  it('fails closed when native Windows capability details are malformed', () => {
+    _setPlatformSupportSnapshotReader(() => ({
+      platformSupportJson: JSON.stringify({
+        isSupported: true,
+        availableMethods: ['processcontainer'],
+        uiCapabilities: {
+          canBlockClipboardRead: 'yes',
+        },
+      }),
+      availableBackendsJson: '[{"backend":"processcontainer","tier":"base-container"}]',
+    }));
+    const support = getPlatformSupport();
+    assert.strictEqual(support.isSupported, false);
+    assert.strictEqual(support.reason, 'mxc_platform_support_json returned malformed JSON');
+    assert.deepStrictEqual(support.availableMethods, []);
+  });
+
   it('still returns the base PlatformSupport shape on non-Windows', { skip: isWindows }, () => {
     _setPlatformSupportSnapshotReader(() => ({
       platformSupportJson: '{"isSupported":true,"availableMethods":["seatbelt"]}',
@@ -151,9 +168,26 @@ describe('getPlatformSupport host-services projection', () => {
     assert.ok(Array.isArray(support.availableMethods));
   });
 
-  it('projects the processcontainer isolation tier from available backends', { skip: !isWindows }, () => {
+  it('projects Windows isolation and UI details from native platform support', { skip: !isWindows }, () => {
     _setPlatformSupportSnapshotReader(() => ({
-      platformSupportJson: '{"isSupported":true,"availableMethods":["processcontainer","wslc"]}',
+      platformSupportJson: JSON.stringify({
+        isSupported: true,
+        availableMethods: ['processcontainer', 'wslc'],
+        isolationTier: 'appcontainer-bfs',
+        isolationWarnings: ['Base Container is unavailable; using AppContainer + BFS.'],
+        uiCapabilities: {
+          canBlockClipboardRead: true,
+          canBlockClipboardWrite: true,
+          canBlockInputInjection: true,
+          canBlockInputMethodChanges: true,
+          canBlockExternalUiObjects: true,
+          canBlockGlobalUiNamespace: true,
+          canBlockDesktopSwitching: true,
+          canBlockLogoffOrShutdown: true,
+          canBlockSystemParameterChanges: true,
+          canBlockDisplaySettingsChanges: true,
+        },
+      }),
       availableBackendsJson: '['
         + '{"backend":"processcontainer","tier":"appcontainer-bfs"},'
         + '{"backend":"windows_sandbox"},'
@@ -169,8 +203,21 @@ describe('getPlatformSupport host-services projection', () => {
       'hyperlight',
       'wslc',
     ]);
-    assert.strictEqual(support.isolationWarnings, undefined);
-    assert.strictEqual(support.uiCapabilities, undefined);
+    assert.deepStrictEqual(support.isolationWarnings, [
+      'Base Container is unavailable; using AppContainer + BFS.',
+    ]);
+    assert.deepStrictEqual(support.uiCapabilities, {
+      canBlockClipboardRead: true,
+      canBlockClipboardWrite: true,
+      canBlockInputInjection: true,
+      canBlockInputMethodChanges: true,
+      canBlockExternalUiObjects: true,
+      canBlockGlobalUiNamespace: true,
+      canBlockDesktopSwitching: true,
+      canBlockLogoffOrShutdown: true,
+      canBlockSystemParameterChanges: true,
+      canBlockDisplaySettingsChanges: true,
+    });
   });
 
   it('keeps Linux supported when LXC is available and Bubblewrap is not', { skip: os.platform() !== 'linux' }, () => {

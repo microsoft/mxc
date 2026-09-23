@@ -30,6 +30,50 @@ pub struct BubblewrapNetworkSupport {
     pub warnings: Vec<String>,
 }
 
+/// Host support for enforcing sandbox UI restrictions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiCapabilitySupport {
+    /// Whether the host can block reads from the clipboard.
+    pub can_block_clipboard_read: bool,
+    /// Whether the host can block writes to the clipboard.
+    pub can_block_clipboard_write: bool,
+    /// Whether the host can block synthetic keyboard and mouse input.
+    pub can_block_input_injection: bool,
+    /// Whether the host can block input method and IME changes.
+    pub can_block_input_method_changes: bool,
+    /// Whether the host can block access to external UI object handles.
+    pub can_block_external_ui_objects: bool,
+    /// Whether the host can block access to global UI namespaces.
+    pub can_block_global_ui_namespace: bool,
+    /// Whether the host can block desktop switching.
+    pub can_block_desktop_switching: bool,
+    /// Whether the host can block logoff and shutdown requests.
+    pub can_block_logoff_or_shutdown: bool,
+    /// Whether the host can block system parameter changes.
+    pub can_block_system_parameter_changes: bool,
+    /// Whether the host can block display settings changes.
+    pub can_block_display_settings_changes: bool,
+}
+
+#[cfg(target_os = "windows")]
+impl From<process_container_common::probe::UiCapabilitySupport> for UiCapabilitySupport {
+    fn from(value: process_container_common::probe::UiCapabilitySupport) -> Self {
+        Self {
+            can_block_clipboard_read: value.can_block_clipboard_read,
+            can_block_clipboard_write: value.can_block_clipboard_write,
+            can_block_input_injection: value.can_block_input_injection,
+            can_block_input_method_changes: value.can_block_input_method_changes,
+            can_block_external_ui_objects: value.can_block_external_ui_objects,
+            can_block_global_ui_namespace: value.can_block_global_ui_namespace,
+            can_block_desktop_switching: value.can_block_desktop_switching,
+            can_block_logoff_or_shutdown: value.can_block_logoff_or_shutdown,
+            can_block_system_parameter_changes: value.can_block_system_parameter_changes,
+            can_block_display_settings_changes: value.can_block_display_settings_changes,
+        }
+    }
+}
+
 /// Platform support information — the Rust analogue of the SDK
 /// `PlatformSupport` type.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -42,6 +86,15 @@ pub struct PlatformSupport {
     /// Containment backends available on this host, by wire name
     /// (e.g. `"seatbelt"`, `"bubblewrap"`, `"processcontainer"`).
     pub available_methods: Vec<String>,
+    /// ProcessContainer isolation tier selected for an empty policy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub isolation_tier: Option<&'static str>,
+    /// Operator-visible ProcessContainer degradation warnings.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub isolation_warnings: Vec<String>,
+    /// UI restrictions the ProcessContainer backend can enforce.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ui_capabilities: Option<UiCapabilitySupport>,
     /// Bubblewrap host network capability. `None` off Linux, and when
     /// `bubblewrap` itself is unavailable.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -131,6 +184,10 @@ pub fn platform_support() -> PlatformSupport {
 
     #[cfg(target_os = "windows")]
     {
+        let probe = process_container_common::probe::run_probe(
+            &wxc_common::models::ExecutionRequest::default(),
+            crate::guarded_capture_available(),
+        );
         let mut available_methods = vec!["processcontainer".to_string()];
         // `windows_sandbox` is a host-capability backend the SDK can't launch,
         // so it is reported by `available_backends()` rather than here.
@@ -146,6 +203,9 @@ pub fn platform_support() -> PlatformSupport {
         PlatformSupport {
             is_supported: true,
             available_methods,
+            isolation_tier: probe.tier,
+            isolation_warnings: probe.warnings,
+            ui_capabilities: Some(probe.probes.ui_capabilities.into()),
             ..Default::default()
         }
     }

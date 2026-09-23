@@ -87,6 +87,11 @@ fn extern_discovery_returns_owned_json() {
     let support_value: serde_json::Value = serde_json::from_str(support_json).unwrap();
     assert!(support_value.get("isSupported").is_some());
     assert!(support_value.get("availableMethods").is_some());
+    #[cfg(target_os = "windows")]
+    assert!(
+        support_value.get("uiCapabilities").is_some(),
+        "Windows platform support must preserve the ProcessContainer UI capability probe"
+    );
 
     // SAFETY: both strings are owned results from the FFI.
     unsafe {

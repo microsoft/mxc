@@ -66,9 +66,8 @@ const KNOWN_TIERS: readonly IsolationTier[] = ['base-container', 'appcontainer-b
  *
  * This projects the native host-services exports onto the SDK's existing
  * `PlatformSupport` shape. `availableMethods`, Linux `unavailableReasons`
- * and `bubblewrapNetwork`, and the Windows `isolationTier` are preserved.
- * The narrower FFI surface does not currently expose `isolationWarnings` or
- * `uiCapabilities`, so those fields remain omitted.
+ * and `bubblewrapNetwork`, and the Windows isolation and UI capability
+ * details are preserved.
  *
  * The result is cached for the lifetime of the SDK module — the underlying
  * machine state is not expected to change at runtime.
@@ -104,6 +103,9 @@ interface NativePlatformSupportPayload {
   isSupported: boolean;
   reason?: string;
   availableMethods: string[];
+  isolationTier?: IsolationTier;
+  isolationWarnings?: string[];
+  uiCapabilities?: UiCapabilitySupport;
 }
 
 interface NativeAvailableBackendPayload {
@@ -121,6 +123,27 @@ function isIsolationTier(value: unknown): value is IsolationTier {
   return typeof value === 'string' && (KNOWN_TIERS as readonly string[]).includes(value);
 }
 
+const UI_CAPABILITY_FIELDS: readonly (keyof UiCapabilitySupport)[] = [
+  'canBlockClipboardRead',
+  'canBlockClipboardWrite',
+  'canBlockInputInjection',
+  'canBlockInputMethodChanges',
+  'canBlockExternalUiObjects',
+  'canBlockGlobalUiNamespace',
+  'canBlockDesktopSwitching',
+  'canBlockLogoffOrShutdown',
+  'canBlockSystemParameterChanges',
+  'canBlockDisplaySettingsChanges',
+];
+
+function isUiCapabilitySupport(value: unknown): value is UiCapabilitySupport {
+  if (value === null || typeof value !== 'object') {
+    return false;
+  }
+  const capabilities = value as Record<keyof UiCapabilitySupport, unknown>;
+  return UI_CAPABILITY_FIELDS.every((field) => typeof capabilities[field] === 'boolean');
+}
+
 function parsePlatformSupportPayload(json: string): NativePlatformSupportPayload {
   const parsed: unknown = JSON.parse(json);
   if (parsed === null || typeof parsed !== 'object') {
@@ -134,10 +157,28 @@ function parsePlatformSupportPayload(json: string): NativePlatformSupportPayload
   ) {
     throw new Error('mxc_platform_support_json returned malformed JSON');
   }
+  if (value.isolationTier !== undefined && !isIsolationTier(value.isolationTier)) {
+    throw new Error('mxc_platform_support_json returned malformed JSON');
+  }
+  if (
+    value.isolationWarnings !== undefined
+    && (
+      !Array.isArray(value.isolationWarnings)
+      || value.isolationWarnings.some((warning) => typeof warning !== 'string')
+    )
+  ) {
+    throw new Error('mxc_platform_support_json returned malformed JSON');
+  }
+  if (value.uiCapabilities !== undefined && !isUiCapabilitySupport(value.uiCapabilities)) {
+    throw new Error('mxc_platform_support_json returned malformed JSON');
+  }
   return {
     isSupported: value.isSupported,
     reason: typeof value.reason === 'string' ? value.reason : undefined,
     availableMethods: value.availableMethods,
+    isolationTier: value.isolationTier,
+    isolationWarnings: value.isolationWarnings,
+    uiCapabilities: value.uiCapabilities,
   };
 }
 
@@ -237,9 +278,14 @@ function adaptPlatformSupport(snapshot: PlatformSupportSnapshotJson): PlatformSu
     support.reason = nativeSupport.reason ?? 'MXC is not supported on this platform';
   }
 
-  const processContainer = availableBackends.find((entry) => entry.backend === 'processcontainer');
-  if (isIsolationTier(processContainer?.tier)) {
-    support.isolationTier = processContainer.tier;
+  if (nativeSupport.isolationTier) {
+    support.isolationTier = nativeSupport.isolationTier;
+  }
+  if (nativeSupport.isolationWarnings && nativeSupport.isolationWarnings.length > 0) {
+    support.isolationWarnings = nativeSupport.isolationWarnings;
+  }
+  if (nativeSupport.uiCapabilities) {
+    support.uiCapabilities = nativeSupport.uiCapabilities;
   }
   return support;
 }

@@ -262,12 +262,23 @@ describe('lxc-exec --available-backends contract', {
       pathToFileURL(path.join(getSdkPackageRoot(), 'dist', 'platform.js')).href
     ) as {
       getPlatformSupport(): { bubblewrapNetwork?: { proxyEnforcement: string; warnings: string[] } };
-      _setLinuxProbeRunner(runner: (() => string) | null): void;
+      _setPlatformSupportSnapshotReader(
+        reader: (() => {
+          platformSupportJson: string;
+          availableBackendsJson: string;
+        }) | null,
+      ): void;
       _resetPlatformSupportCache(): void;
     };
 
     try {
-      platform._setLinuxProbeRunner(() => stdout);
+      platform._setPlatformSupportSnapshotReader(() => ({
+        platformSupportJson: JSON.stringify({
+          isSupported: true,
+          availableMethods: ['bubblewrap'],
+        }),
+        availableBackendsJson: stdout,
+      }));
       platform._resetPlatformSupportCache();
       const network = platform.getPlatformSupport().bubblewrapNetwork;
 
@@ -290,7 +301,7 @@ describe('lxc-exec --available-backends contract', {
         }
       }
     } finally {
-      platform._setLinuxProbeRunner(null);
+      platform._setPlatformSupportSnapshotReader(null);
       platform._resetPlatformSupportCache();
     }
   });
