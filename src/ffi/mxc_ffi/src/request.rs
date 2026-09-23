@@ -621,6 +621,28 @@ mod tests {
     }
 
     #[test]
+    fn telemetry_with_unregistered_version_reaches_exact_version_validation() {
+        let error = build_request_from_json(
+            r#"{
+                "policy": {
+                    "version": "0.8.1-alpha",
+                    "telemetry": null
+                },
+                "command": "echo hi"
+            }"#,
+        )
+        .expect_err("unregistered versions must fail exact version validation");
+
+        assert_eq!(error.code, ErrorCode::MalformedRequest);
+        assert!(
+            error
+                .message
+                .contains("Invalid schema version: 0.8.1-alpha"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn telemetry_rejects_malformed_enabled_values() {
         let error = build_request_from_json(
             r#"{

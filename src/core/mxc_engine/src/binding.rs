@@ -81,8 +81,14 @@ fn validate_telemetry_version(version: &str, telemetry: &TelemetryField) -> Resu
     if !matches!(telemetry, TelemetryField::Present(_)) {
         return Ok(());
     }
-    if semver::Version::parse(version).is_ok_and(|version| version.major == 0 && version.minor < 9)
-    {
+    if matches!(
+        ContractVersion::parse_exact(version),
+        Some(
+            ContractVersion::V0_6_0Alpha
+                | ContractVersion::V0_7_0Alpha
+                | ContractVersion::V0_8_0Alpha
+        )
+    ) {
         return Err(malformed(
             "policy.telemetry requires config schema version 0.9.0-alpha or later",
         ));
@@ -171,27 +177,23 @@ mod tests {
 
     #[test]
     fn every_present_telemetry_shape_requires_schema_09() {
-        for telemetry in ["null", "{}", r#"{"enabled":null}"#, r#"{"enabled":true}"#] {
-            let policy = format!(r#"{{"version":"0.8.0-alpha","telemetry":{telemetry}}}"#);
-            assert_malformed(&policy, "requires config schema version 0.9.0-alpha");
+        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha"] {
+            for telemetry in ["null", "{}", r#"{"enabled":null}"#, r#"{"enabled":true}"#] {
+                let policy = format!(r#"{{"version":"{version}","telemetry":{telemetry}}}"#);
+                assert_malformed(&policy, "requires config schema version 0.9.0-alpha");
+            }
         }
     }
 
     #[test]
-    fn semver_valid_pre_09_versions_preserve_the_telemetry_diagnostic() {
-        for version in ["0.8.0", "0.8.1-alpha"] {
-            assert_malformed(
-                &format!(r#"{{"version":"{version}","telemetry":null}}"#),
-                "requires config schema version 0.9.0-alpha",
-            );
+    fn unregistered_versions_are_preserved_for_exact_policy_validation() {
+        for version in ["0.8.0", "0.8.1-alpha", "0.11.0"] {
+            let parsed = parse(&format!(
+                r#"{{"version":"{version}","telemetry":{{"enabled":true}}}}"#
+            ));
+            assert_eq!(parsed.policy.version, version);
+            assert_eq!(parsed.telemetry_enabled, Some(true));
         }
-    }
-
-    #[test]
-    fn unsupported_post_09_versions_are_deferred_to_the_exact_policy_builder() {
-        let parsed = parse(r#"{"version":"0.11.0","telemetry":{"enabled":true}}"#);
-        assert_eq!(parsed.policy.version, "0.11.0");
-        assert_eq!(parsed.telemetry_enabled, Some(true));
     }
 
     #[test]
