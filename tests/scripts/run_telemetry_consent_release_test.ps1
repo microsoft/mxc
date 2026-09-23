@@ -69,7 +69,8 @@ $lockFile = Join-Path $mxcDir 'telemetry-consent.lock'
 # A pending marker means an interrupted withdrawal, which reads fail-closed.
 # Every consent write clears it, so it has to be backed up and restored.
 $withdrawalFile = Join-Path $mxcDir 'telemetry-consent.withdrawal-pending'
-$policyKey = 'HKLM:\SOFTWARE\Policies\Mxc'
+$policySubKey = 'SOFTWARE\Policies\Mxc'
+$policyKey = "HKLM:\$policySubKey"
 
 $expectedBody = @'
 Help improve MXC and other Microsoft product including Windows by sharing optional diagnostic data with Microsoft.
@@ -383,8 +384,22 @@ if (Test-Path $withdrawalFile) {
 }
 $policyKeyPreexisted = Test-Path $policyKey
 $policyValueBackup = $null
+# The value kind is part of the state: policy.rs fail-closes on a non-DWORD
+# AllowTelemetry, so restoring a REG_SZ as a DWORD would change the machine.
+$policyValueKind = $null
 if ($policyKeyPreexisted) {
-    $policyValueBackup = (Get-ItemProperty -Path $policyKey -Name AllowTelemetry -ErrorAction SilentlyContinue).AllowTelemetry
+    $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($policySubKey)
+    if ($key) {
+        try {
+            $policyValueBackup = $key.GetValue(
+                'AllowTelemetry', $null,
+                [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            if ($null -ne $policyValueBackup) {
+                $policyValueKind = $key.GetValueKind('AllowTelemetry')
+            }
+        }
+        finally { $key.Dispose() }
+    }
 }
 
 Write-Host "Release executor : $exe"
@@ -440,11 +455,13 @@ finally {
         if (-not $policyKeyPreexisted) {
             Remove-Item -Recurse -Force $policyKey -ErrorAction SilentlyContinue
         }
-        elseif ($null -eq $policyValueBackup) {
+        elseif ($null -eq $policyValueKind) {
             Remove-ItemProperty -Path $policyKey -Name AllowTelemetry -ErrorAction SilentlyContinue
         }
         else {
-            Set-ItemProperty -Path $policyKey -Name AllowTelemetry -Value $policyValueBackup -Type DWord
+            $key = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey($policySubKey)
+            try { $key.SetValue('AllowTelemetry', $policyValueBackup, $policyValueKind) }
+            finally { $key.Dispose() }
         }
     }
 }
