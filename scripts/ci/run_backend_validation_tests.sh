@@ -6,7 +6,7 @@ set -euo pipefail
 # explicitly rather than reporting a false-success placeholder job.
 
 usage() {
-    echo "Usage: $0 <bubblewrap|lxc|microvm|hyperlight|seatbelt> <binary-directory>" >&2
+    echo "Usage: $0 <bubblewrap|lxc|microvm|seatbelt> <binary-directory>" >&2
 }
 
 if [[ $# -ne 2 ]]; then
