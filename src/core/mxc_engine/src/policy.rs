@@ -674,8 +674,9 @@ impl SandboxRequest {
     /// profile block, obtainable only from the OS, so it cannot be assembled by
     /// a caller. Entries in `extra` override same-named defaults.
     ///
-    /// On backends whose default environment is empty (LXC, Bubblewrap,
-    /// Seatbelt, WSLc) this is equivalent to [`Self::set_env`].
+    /// From schema 0.9 LXC, Bubblewrap, and Seatbelt supply `PATH` + `HOME` +
+    /// `TERM`. Below 0.9, and on WSLc at every version, their default is empty
+    /// and this is equivalent to [`Self::set_env`].
     pub fn inherit_default_env<K, V>(
         &mut self,
         extra: impl IntoIterator<Item = (K, V)>,
