@@ -580,7 +580,7 @@ spawnSandboxAsync(script, policy, ...) → Promise<{ stdout, stderr, exitCode }>
 // optional otherwise (windows_sandbox, wslc).
 provisionSandbox(containment, config, options?)  → Promise<ProvisionResult>
 startSandbox(sandboxId, config?, options?)       → Promise<StartResult>
-execInSandbox(isolationSessionOrWslcId, config, options) → MxcSandboxProcess // streaming
+execInSandbox(isolationSessionOrWslcId, config, options?) → MxcSandboxProcess // streaming
 execInSandboxAsync(isolationSessionOrWslcId, config, options?) → Promise<ExecResult>
 execInSandboxAsync(sandboxId, config, { dryRun: true }) → Promise<ExecResult>
 stopSandbox(sandboxId, config?, options?)        → Promise<StopResult>
