@@ -30,8 +30,9 @@ use std::fmt::Write as FmtWrite;
 use std::os::fd::AsFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::time::Duration;
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use lxc_common::network_iptables::{EgressHookPoint, NetworkIptablesManager};
 use wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
@@ -39,8 +40,8 @@ use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, ScriptResponse};
 use wxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, group_kill,
-    spawn_discard, take_boxed_read, take_boxed_write, wait_with_timeout, NativeStdio,
-    SandboxBackend, SandboxProcess, StdioMode, StreamCloser, WaitError,
+    spawn_discard, take_boxed_read, take_boxed_write, NativeStdio, SandboxBackend, SandboxProcess,
+    StdioMode, StreamCloser,
 };
 use wxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
 use wxc_common::validator::{
@@ -49,7 +50,9 @@ use wxc_common::validator::{
 
 use crate::{
     bwrap_command::{self, ResolvedNetworkMode},
-    bwrap_version, network_rules, proxy_network,
+    bwrap_version, network_rules,
+    provider_monitor::ProviderMonitor,
+    proxy_network,
 };
 
 /// Bubblewrap sandbox runner. Uses only shared `ContainerPolicy` fields —
@@ -691,6 +694,14 @@ impl BubblewrapScriptRunner {
             Some(Duration::from_millis(u64::from(request.script_timeout)))
         };
 
+        let child = Arc::new(Mutex::new(child));
+        // Armed only now: until the gate was released a dead provider surfaced
+        // as a startup failure instead.
+        let monitor = proxy_network
+            .as_mut()
+            .and_then(|network| network.take_liveness_watch())
+            .map(|watch| ProviderMonitor::watch(watch, Arc::clone(&child), group));
+
         Ok(BwrapChild {
             child,
             stdin,
@@ -702,6 +713,7 @@ impl BubblewrapScriptRunner {
             proxy,
             proxy_network,
             fw_manager,
+            monitor,
             timeout,
         })
     }
@@ -710,7 +722,9 @@ impl BubblewrapScriptRunner {
 /// A spawned `bwrap` sandbox: the child process, its parent-side pipe ends,
 /// and the per-run network proxy / iptables state torn down once it exits.
 struct BwrapChild {
-    child: Child,
+    /// The lock is what keeps [`ProviderMonitor`]'s thread from signalling a
+    /// pid this side has already reaped.
+    child: Arc<Mutex<Child>>,
     stdin: Option<ChildStdin>,
     stdout: Option<InterruptibleReader>,
     stderr: Option<InterruptibleReader>,
@@ -725,13 +739,22 @@ struct BwrapChild {
     proxy: UnixProxyCoordinator,
     proxy_network: Option<proxy_network::ProxyNetworkNamespace>,
     fw_manager: Option<NetworkIptablesManager>,
+    monitor: Option<ProviderMonitor>,
     timeout: Option<Duration>,
 }
 
 impl BwrapChild {
+    fn lock_child(&self) -> MutexGuard<'_, Child> {
+        self.child.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Tear down per-run network state (iptables rules + proxy). Idempotent at
     /// the manager level.
     fn cleanup(&mut self, logger: &mut Logger) {
+        // Stopping the supervisor closes the descriptor the monitor watches, so
+        // disarming first is what keeps a normal teardown from reading as a
+        // provider that died.
+        self.monitor.take();
         cleanup_iptables(&mut self.fw_manager, logger);
         if let Some(mut network) = self.proxy_network.take() {
             network.stop(logger);
@@ -764,6 +787,66 @@ impl BubblewrapSandboxProcess {
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
         self.inner.cleanup(&mut logger);
     }
+
+    fn provider_lost(&self) -> bool {
+        self.inner
+            .monitor
+            .as_ref()
+            .is_some_and(ProviderMonitor::provider_lost)
+    }
+
+    /// Wait for the sandbox to exit, its deadline to pass, or its network
+    /// provider to disappear.
+    fn await_outcome(&mut self) -> BwrapOutcome {
+        const MIN_POLL: Duration = Duration::from_millis(1);
+        const MAX_POLL: Duration = Duration::from_millis(50);
+
+        let deadline = self.inner.timeout.map(|timeout| Instant::now() + timeout);
+        let mut interval = MIN_POLL;
+        loop {
+            let exited = match self.inner.lock_child().try_wait() {
+                Ok(exited) => exited,
+                Err(error) => return BwrapOutcome::Io(error),
+            };
+            // Checked after the exit rather than before it: the monitor kills
+            // the sandbox, so a provider death shows up here as an ordinary
+            // exit that would otherwise be reported as the workload's own.
+            if self.provider_lost() {
+                return BwrapOutcome::ProviderLost;
+            }
+            if let Some(status) = exited {
+                return BwrapOutcome::Exited(status);
+            }
+
+            let now = Instant::now();
+            let mut nap = interval;
+            if let Some(deadline) = deadline {
+                if now >= deadline {
+                    return BwrapOutcome::Timeout;
+                }
+                nap = nap.min(deadline - now);
+            }
+            std::thread::sleep(nap);
+            interval = (interval * 2).min(MAX_POLL);
+        }
+    }
+
+    fn lost_provider_message(&mut self) -> String {
+        match self.inner.proxy_network.as_mut() {
+            Some(network) => network.lost_provider_detail(),
+            None => "Bubblewrap: the sandbox lost its network provider while the workload \
+                     was running"
+                .to_string(),
+        }
+    }
+}
+
+/// How a `bwrap` run ended.
+enum BwrapOutcome {
+    Exited(ExitStatus),
+    Timeout,
+    ProviderLost,
+    Io(std::io::Error),
 }
 
 impl SandboxProcess for BubblewrapSandboxProcess {
@@ -806,32 +889,33 @@ impl SandboxProcess for BubblewrapSandboxProcess {
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
         Ok(self
             .inner
-            .child
+            .lock_child()
             .try_wait()?
             .map(|status| status.code().unwrap_or(-1)))
     }
 
     fn id(&self) -> u32 {
-        self.inner.child.id()
+        self.inner.lock_child().id()
     }
 
     fn kill(&mut self) -> std::io::Result<()> {
         // No-op once the child has exited and been reaped: its pid/pgid can be
         // recycled, so signaling it could hit an unrelated process (group). A
         // reaped `Child` returns its cached status here without a syscall.
-        if self.inner.child.try_wait()?.is_some() {
+        let mut child = self.inner.lock_child();
+        if child.try_wait()?.is_some() {
             return Ok(());
         }
         if self.inner.group {
             // Pipes mode: bwrap leads its own process group — tree-kill it.
-            group_kill(&mut self.inner.child)
+            group_kill(&mut child)
         } else {
             // Inherit mode: bwrap shares the executor's group (no
             // `process_group(0)`), so a group-kill would hit the executor.
             // Killing bwrap alone suffices because `--die-with-parent` makes
             // the sandbox die with it — bwrap is *not* pid 1 of the namespace
             // (it forks), so without that flag descendants would survive.
-            self.inner.child.kill()
+            child.kill()
         }
     }
 
@@ -845,26 +929,31 @@ impl SandboxProcess for BubblewrapSandboxProcess {
         let stdout_thread = spawn_discard(self.inner.stdout.take());
         let stderr_thread = spawn_discard(self.inner.stderr.take());
 
-        let result = match wait_with_timeout(&mut self.inner.child, self.inner.timeout) {
-            Ok(status) => Ok(status.code().unwrap_or(-1)),
-            Err(WaitError::Timeout) => {
+        let result = match self.await_outcome() {
+            BwrapOutcome::Exited(status) => Ok(status.code().unwrap_or(-1)),
+            BwrapOutcome::ProviderLost => {
+                let _ = self.kill();
+                let _ = self.inner.lock_child().wait();
+                Err(std::io::Error::other(self.lost_provider_message()))
+            }
+            BwrapOutcome::Timeout => {
                 // Tree-kill so descendants die too and release any stdout/stderr
                 // pipe write-ends (else the drain threads below could block).
                 // `kill()` group-kills in Pipes mode; in Inherit mode it kills
                 // bwrap, which `--die-with-parent` turns into a full teardown.
                 let _ = self.kill();
-                let _ = self.inner.child.wait();
+                let _ = self.inner.lock_child().wait();
                 Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "Bubblewrap: script timed out",
                 ))
             }
-            Err(WaitError::Io(error)) => {
+            BwrapOutcome::Io(error) => {
                 // The child may still be alive; kill+reap it before
                 // `run_teardown()` removes the iptables/proxy enforcement out
                 // from under it.
                 let _ = self.kill();
-                let _ = self.inner.child.wait();
+                let _ = self.inner.lock_child().wait();
                 Err(std::io::Error::other(format!(
                     "Bubblewrap: wait failed: {error}"
                 )))
@@ -880,13 +969,16 @@ impl SandboxProcess for BubblewrapSandboxProcess {
 
 impl Drop for BubblewrapSandboxProcess {
     fn drop(&mut self) {
+        // Disarmed first so the monitor cannot be holding the child lock while
+        // the reap below waits on it.
+        self.inner.monitor.take();
         // Kill and reap the child *before* removing network enforcement —
         // otherwise an abandoned-but-running sandbox would keep egressing after
         // its iptables/proxy rules were torn down, and the child would leak as
         // a zombie. `kill()` group-kills in `Pipes` mode and relies on
         // `--die-with-parent` otherwise, then we reap.
         let _ = self.kill();
-        let _ = self.inner.child.wait();
+        let _ = self.inner.lock_child().wait();
         self.run_teardown();
     }
 }

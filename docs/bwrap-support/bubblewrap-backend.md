@@ -673,6 +673,41 @@ request fails if its private namespace cannot be configured.
    the `allowedHosts` / `blockedHosts` lists. Non-cooperating clients are not
    merely unrouted — their traffic is dropped by the egress chain.
 
+### Losing the network provider mid-run
+
+`slirp4netns` carries the sandbox's only route, so a slirp that dies under a
+running workload leaves the sandbox running against a dead network: every
+connection fails with a generic transport error, and the run is attributed to
+whatever the workload reported. Two checks close that, and both apply to
+firewall-enforcement mode as well, since it stands up the same supervisor and
+the same slirp.
+
+**Before the workload starts.** Readiness is latched, not revoked — it says
+slirp *came up*, not that it is still up — so it can already be stale by the
+time the startup gate opens. The supervisor is re-checked immediately before
+the gate is released. Any exit fails the run, including a successful one:
+slirp's exit code says nothing about whether the sandbox still has a route.
+
+**For the lifetime of the workload.** The supervisor inherits the write end of
+a pipe nothing ever writes to, and slirp inherits it in turn; the runner keeps
+only the read end. That descriptor reaches EOF when *both* have exited, which
+is what separates a dead network from an orphaned slirp still carrying traffic
+after its supervisor was killed. A monitor thread in the executor watches the
+descriptor, terminates the sandbox when it closes, and fails the run naming the
+supervisor's exit status and a bounded tail of its stderr:
+
+```text
+wait failed: Bubblewrap: the sandbox lost its network provider while the
+workload was running; the proxy network supervisor exited with exit status: 137
+(stderr: sent tapfd=7 for tap0
+received tapfd=7
+Killed)
+```
+
+The monitor is disarmed *before* teardown stops the supervisor, so an ordinary
+shutdown — which closes the same descriptor — is never reported as a loss. Only
+an exit is detected; see [Limitations](#limitations).
+
 ### Example: builtin test proxy with allowlist
 
 ```json
@@ -932,3 +967,6 @@ Test configs are in `tests/configs/bubblewrap_*.json`.
   retained for compatibility but does not filter unprivileged.
 - **No state-aware lifecycle** — Bubblewrap implements `ScriptRunner` only
   (one-shot), not `StatefulSandboxBackend`
+- **Provider-loss detection is exit-based** — in the private-namespace modes a
+  `slirp4netns` that exits mid-run fails the run; one that is alive but wedged
+  is not detected, and reaches the workload as an unreachable network

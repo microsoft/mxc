@@ -114,6 +114,12 @@ const INGRESS_CHAIN: &str = "MXC_INGRESS";
 /// a redirection, which is the whole reason the parent pins them.
 const SUPERVISOR_PID_FD: RawFd = 3;
 const SUPERVISOR_EXIT_FD: RawFd = 4;
+/// Held open by the supervisor and inherited by slirp, never written to.
+///
+/// The parent keeps only the read end, so it reaches EOF exactly when both
+/// have exited -- an orphaned slirp still carries the sandbox's route, and
+/// holding the descriptor is what keeps that case from reading as a loss.
+const SUPERVISOR_LIVENESS_FD: RawFd = 5;
 /// Descriptors are staged above every target before being landed, so a source
 /// already sitting on a target cannot be clobbered mid-remap.
 const FD_STAGING_BASE: RawFd = 10;
@@ -631,6 +637,9 @@ pub(crate) struct ProxyNetworkNamespace {
     userns: Option<File>,
     /// Hosts file mounted over `/etc/hosts`, when the endpoint is a hostname.
     hosts: Option<PathBuf>,
+    /// Read end of the descriptor the supervisor and slirp hold open, taken by
+    /// the monitor that watches for the network provider dying mid-run.
+    liveness_reader: Option<OwnedFd>,
     /// Restore transactions the supervisor will apply, which sizes the
     /// readiness budget in [`Self::attach`].
     transactions: usize,
@@ -689,6 +698,9 @@ impl ProxyNetworkNamespace {
             pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("Bubblewrap: pipe failed: {error}"))?;
         let (pid_reader, pid_writer) =
             pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("Bubblewrap: pipe failed: {error}"))?;
+        let (liveness_reader, liveness_writer) =
+            pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("Bubblewrap: pipe failed: {error}"))?;
+        set_nonblocking(liveness_reader.as_raw_fd())?;
 
         let mut command = Command::new("unshare");
         command
@@ -715,6 +727,7 @@ impl ProxyNetworkNamespace {
             [
                 (pid_reader.as_raw_fd(), SUPERVISOR_PID_FD),
                 (exit_reader.as_raw_fd(), SUPERVISOR_EXIT_FD),
+                (liveness_writer.as_raw_fd(), SUPERVISOR_LIVENESS_FD),
             ],
         );
 
@@ -723,6 +736,10 @@ impl ProxyNetworkNamespace {
         })?;
         drop(exit_reader);
         drop(pid_reader);
+
+        // The supervisor tree is now the only holder of the write end, which is
+        // what makes the read end reach EOF when it dies.
+        drop(liveness_writer);
 
         if let Err(error) = wait_for_file(
             state_dir.path().join("userns.ready"),
@@ -771,6 +788,7 @@ impl ProxyNetworkNamespace {
             pid_writer: Some(pid_writer),
             userns: Some(userns),
             hosts,
+            liveness_reader: Some(liveness_reader),
             transactions,
             script_timeout_ms,
         })
@@ -887,6 +905,26 @@ impl ProxyNetworkNamespace {
                  the workload: {error}"
             )),
         }
+    }
+
+    /// Take the descriptor a [`ProviderMonitor`] watches for provider loss.
+    pub(crate) fn take_liveness_watch(&mut self) -> Option<OwnedFd> {
+        self.liveness_reader.take()
+    }
+
+    /// Describe the provider loss a monitor observed, for the error the run
+    /// fails with.
+    pub(crate) fn lost_provider_detail(&mut self) -> String {
+        let status = match self.supervisor.try_wait() {
+            Ok(Some(status)) => format!("exited with {status}"),
+            Ok(None) => "is still running, so slirp4netns died on its own".to_string(),
+            Err(error) => format!("could not be inspected: {error}"),
+        };
+        format!(
+            "Bubblewrap: the sandbox lost its network provider while the workload was \
+             running; the proxy network supervisor {status} ({})",
+            stderr_detail(&self.state_dir.path().join("supervisor.stderr"))
+        )
     }
 
     /// Stop slirp and reap the namespace supervisor.
@@ -4685,6 +4723,7 @@ exec sleep 30
             pid_writer: None,
             userns: None,
             hosts: None,
+            liveness_reader: None,
             transactions: 0,
             script_timeout_ms: 0,
         }
