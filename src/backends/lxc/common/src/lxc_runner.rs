@@ -51,6 +51,16 @@ fn start_directory(request: &ExecutionRequest) -> Option<&str> {
     Some(request.working_directory.as_str()).filter(|dir| !dir.is_empty())
 }
 
+/// `lxc-attach` starts at the container root, so a relative start directory
+/// resolves against `/` and `HOME` must name the same absolute path.
+fn container_absolute(dir: &str) -> String {
+    if dir.starts_with('/') {
+        dir.to_string()
+    } else {
+        format!("/{}", dir.trim_start_matches("./"))
+    }
+}
+
 /// The default environment, from schema 0.9: `PATH`, `HOME`, and `TERM`.
 ///
 /// `HOME` names the directory the child actually runs in, so it is a path the
@@ -58,8 +68,8 @@ fn start_directory(request: &ExecutionRequest) -> Option<&str> {
 /// directory it is [`FALLBACK_HOME`], which every image provides writable.
 fn default_env(request: &ExecutionRequest) -> Vec<(String, String)> {
     let home = start_directory(request)
-        .unwrap_or(FALLBACK_HOME)
-        .to_string();
+        .map(container_absolute)
+        .unwrap_or_else(|| FALLBACK_HOME.to_string());
 
     vec![
         ("PATH".to_string(), DEFAULT_PATH.to_string()),
@@ -1115,6 +1125,17 @@ mod tests {
             r.env = None;
             r.working_directory = "/workspace".into();
             assert_eq!(value(&resolved_env(&r), "HOME"), Some("/workspace"));
+        }
+
+        #[test]
+        fn a_relative_start_directory_is_anchored_to_the_container_root() {
+            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+            r.env = None;
+            r.working_directory = "work".into();
+            assert_eq!(value(&resolved_env(&r), "HOME"), Some("/work"));
+
+            r.working_directory = "./work".into();
+            assert_eq!(value(&resolved_env(&r), "HOME"), Some("/work"));
         }
 
         /// A policy grant is not a working directory: with `process.cwd`

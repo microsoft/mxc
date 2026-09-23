@@ -236,23 +236,29 @@ fn spawn_exec(
     // Always start from a cleared environment so untrusted sandboxed code never
     // inherits the host's env. When a proxy is active its HTTP_PROXY/HTTPS_PROXY
     // vars are injected here (and caller-supplied proxy vars stripped).
-    let resolved_cwd = resolved_working_directory_opt(request);
-    apply_clean_environment(
-        &mut command,
-        request,
-        proxy.address(),
-        resolved_cwd.as_deref(),
-    );
-
-    // Working directory. Resolved once, and handed to `apply_clean_environment`
-    // above so the default `HOME` names the directory the child is actually
-    // started in rather than a separately-derived one.
     //
+    // The cwd is anchored first: `current_dir` resolves a relative value against
+    // the launching process, so `HOME` must name that same absolute path.
+    let resolved_cwd = resolved_working_directory_opt(request);
+    let cwd = match absolute_working_directory(
+        resolved_cwd
+            .as_deref()
+            .unwrap_or(UNRESOLVED_WORKING_DIRECTORY),
+    ) {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            return Err(error_response(format!(
+                "failed to read the current directory to anchor the relative seatbelt working directory: {e}"
+            )))
+        }
+    };
+    let home_dir = resolved_cwd.as_ref().map(|_| cwd.as_str());
+    apply_clean_environment(&mut command, request, proxy.address(), home_dir);
+
     // Also export `PWD` so the child's `getcwd()` uses its
     // fast `$PWD` path (a single stat) instead of walking parent directories
     // the sandbox may not let it read — which otherwise leaks
     // "getcwd: ... Operation not permitted" to stderr.
-    let cwd = resolved_cwd.unwrap_or_else(|| UNRESOLVED_WORKING_DIRECTORY.to_string());
     command.current_dir(&cwd);
     command.env("PWD", &cwd);
 
