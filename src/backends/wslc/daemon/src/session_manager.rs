@@ -145,7 +145,7 @@ pub enum WorkerCommand {
         /// bytes arrive, alongside the capped capture buffers.
         sink: OutputSink,
         cancellation: Arc<AtomicBool>,
-        registration: ExecRegistration,
+        registration: Arc<ExecRegistration>,
         admit: oneshot::Sender<Result<(), WorkerError>>,
         done: oneshot::Sender<Result<ExecCompletion, WorkerError>>,
     },
@@ -234,13 +234,15 @@ fn enqueue_output(
 /// An admitted exec: the completion receiver (the run's exit code), the
 /// live-output receiver the pipe handler drains into `Stdout`/`Stderr` frames,
 /// and the `overflowed` latch the sink sets when it had to drop output because a
-/// slow client let the bounded queue fill. The pipe handler reports a set latch
-/// as a terminal `Error` frame.
+/// slow client let the bounded queue fill. The registration keeps the exec id
+/// reserved until the pipe handler finishes terminal delivery. The pipe handler
+/// reports a set overflow latch as a terminal `Error` frame.
 #[derive(Debug)]
 pub struct ExecStream {
     pub done: oneshot::Receiver<Result<ExecCompletion, WorkerError>>,
     pub output: mpsc::Receiver<OutputChunk>,
     pub overflowed: Arc<AtomicBool>,
+    pub(crate) registration: Arc<ExecRegistration>,
 }
 
 type ActiveExecs = Arc<Mutex<HashMap<String, Weak<AtomicBool>>>>;
@@ -249,7 +251,7 @@ type ActiveExecs = Arc<Mutex<HashMap<String, Weak<AtomicBool>>>>;
 pub(crate) struct ExecRegistration {
     exec_id: String,
     active_execs: ActiveExecs,
-    cancellation: Weak<AtomicBool>,
+    cancellation: Arc<AtomicBool>,
 }
 
 impl Drop for ExecRegistration {
@@ -260,25 +262,25 @@ impl Drop for ExecRegistration {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if active_execs
             .get(&self.exec_id)
-            .is_some_and(|current| current.ptr_eq(&self.cancellation))
+            .is_some_and(|current| current.ptr_eq(&Arc::downgrade(&self.cancellation)))
         {
             active_execs.remove(&self.exec_id);
         }
     }
 }
 
-fn register_exec(
+pub(crate) fn register_exec(
     active_execs: &ActiveExecs,
     exec_id: &str,
     cancellation: &Arc<AtomicBool>,
 ) -> Result<ExecRegistration, WorkerError> {
-    let cancellation = Arc::downgrade(cancellation);
+    let weak_cancellation = Arc::downgrade(cancellation);
     let mut active_execs_guard = active_execs
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     match active_execs_guard.entry(exec_id.to_string()) {
         Entry::Occupied(mut entry) if entry.get().upgrade().is_none() => {
-            entry.insert(cancellation.clone());
+            entry.insert(weak_cancellation);
         }
         Entry::Occupied(_) => {
             return Err(WorkerError::Rejected(anyhow::anyhow!(
@@ -286,7 +288,7 @@ fn register_exec(
             )));
         }
         Entry::Vacant(entry) => {
-            entry.insert(cancellation.clone());
+            entry.insert(weak_cancellation);
         }
     }
     drop(active_execs_guard);
@@ -294,7 +296,7 @@ fn register_exec(
     Ok(ExecRegistration {
         exec_id: exec_id.to_string(),
         active_execs: Arc::clone(active_execs),
-        cancellation,
+        cancellation: Arc::clone(cancellation),
     })
 }
 
@@ -347,12 +349,16 @@ impl SessionHandle {
             enqueue_output(&stream_tx, &sink_overflowed, kind, bytes);
         });
         let cancellation = Arc::new(AtomicBool::new(false));
-        let registration = register_exec(&self.active_execs, &config.exec_id, &cancellation)?;
+        let registration = Arc::new(register_exec(
+            &self.active_execs,
+            &config.exec_id,
+            &cancellation,
+        )?);
         self.send(WorkerCommand::Exec {
             config,
             sink,
             cancellation,
-            registration,
+            registration: Arc::clone(&registration),
             admit,
             done,
         })?;
@@ -361,6 +367,7 @@ impl SessionHandle {
             done: done_rx,
             output,
             overflowed,
+            registration,
         })
     }
 

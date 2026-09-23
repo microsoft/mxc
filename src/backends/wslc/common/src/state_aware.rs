@@ -14,8 +14,11 @@
 //! Windows-only: the daemon and its pipe transport are a Windows feature.
 
 use std::io::Write;
+#[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
+#[cfg(windows)]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(windows)]
 use std::sync::Arc;
 
 use wxc_common::logger::{Logger, Mode};
@@ -38,7 +41,9 @@ use crate::daemon_protocol::{
 use crate::policy::{
     exec_proxy_url, validate_exec_policy, validate_post_provision_policy, validate_provision_policy,
 };
+#[cfg(windows)]
 use crate::sandbox::prepare_native_output;
+#[cfg(windows)]
 use crate::stream_buffer::bounded_stream_pair;
 
 /// Default image when a provision request omits `wslc.provision.image`.
@@ -49,6 +54,7 @@ const DEFAULT_IMAGE: &str = "alpine:latest";
 /// The relay must keep consuming until the terminal frame, so it cannot block
 /// when a caller leaves its native pipe unread. Crossing this ceiling drops the
 /// remaining output and turns an otherwise successful exit into an error.
+#[cfg(windows)]
 const PIPE_BRIDGE_MAX_BUFFERED_BYTES: usize = 8 * 1024 * 1024;
 
 /// State-aware WSLc backend. Zero-sized: every phase opens a fresh
@@ -317,6 +323,7 @@ fn exec_relayed(client: DaemonClient, config: ExecConfig) -> Result<ExecHandle, 
     })
 }
 
+#[cfg(windows)]
 fn exec_piped(
     client: DaemonClient,
     config: ExecConfig,
@@ -414,6 +421,17 @@ fn exec_piped(
                 .map_err(map_daemon_error)
         }),
     })
+}
+
+#[cfg(not(windows))]
+fn exec_piped(
+    _client: DaemonClient,
+    _config: ExecConfig,
+    _exec_id: String,
+) -> Result<ExecHandle, MxcError> {
+    Err(MxcError::backend_unavailable(
+        "WSLc piped execution is available only on Windows",
+    ))
 }
 
 /// Discover (or spawn) the daemon. A discovery/spawn failure is a

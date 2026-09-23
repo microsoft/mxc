@@ -482,6 +482,7 @@ async fn write_exec_result<S: AsyncWrite + Unpin>(
         done,
         mut output,
         overflowed,
+        registration: _registration,
     } = match admission {
         Ok(stream) => stream,
         Err(e) => {
@@ -618,10 +619,16 @@ async fn write_frame<S: AsyncWrite + Unpin, T: Serialize>(pipe: &mut S, msg: &T)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session_manager::spawn;
+    use crate::session_manager::{register_exec, spawn};
     use tokio::io::duplex;
     use tokio::sync::mpsc;
     use wslc_common::daemon_protocol::{CancelExecConfig, ErrKind, ExecConfig};
+
+    fn test_registration() -> Arc<crate::session_manager::ExecRegistration> {
+        let active_execs = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let cancellation = Arc::new(AtomicBool::new(false));
+        Arc::new(register_exec(&active_execs, "test-exec", &cancellation).unwrap())
+    }
 
     #[tokio::test]
     async fn exhausted_exec_capacity_returns_busy() {
@@ -692,6 +699,7 @@ mod tests {
             done,
             output,
             overflowed: Arc::new(AtomicBool::new(false)),
+            registration: test_registration(),
         })
     }
 
@@ -788,6 +796,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exec_id_stays_registered_until_terminal_delivery() {
+        let active_execs = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let registration = Arc::new(register_exec(&active_execs, "exec-1", &cancellation).unwrap());
+        let worker_registration = Arc::clone(&registration);
+        let (mut server, mut client) = duplex(1);
+        let (done_tx, done_rx) = oneshot::channel::<Result<ExecCompletion, WorkerError>>();
+        done_tx.send(Ok(ExecCompletion::Exited(0))).unwrap();
+        let (output_tx, output) = mpsc::channel(1);
+        drop(output_tx);
+
+        let writer = tokio::spawn(async move {
+            write_exec_result(
+                &mut server,
+                Ok(ExecStream {
+                    done: done_rx,
+                    output,
+                    overflowed: Arc::new(AtomicBool::new(false)),
+                    registration,
+                }),
+            )
+            .await
+        });
+
+        assert_eq!(
+            read_frame::<_, DaemonResponse>(&mut client).await.unwrap(),
+            DaemonResponse::Ok
+        );
+        drop(worker_registration);
+        tokio::task::yield_now().await;
+
+        let replacement = Arc::new(AtomicBool::new(false));
+        let error = register_exec(&active_execs, "exec-1", &replacement).unwrap_err();
+        assert_eq!(error.kind(), ErrKind::Rejected);
+
+        assert_eq!(
+            read_frame::<_, StreamFrame>(&mut client).await.unwrap(),
+            StreamFrame::Exit { code: 0 }
+        );
+        writer.await.unwrap().unwrap();
+
+        let replacement_registration =
+            register_exec(&active_execs, "exec-1", &replacement).unwrap();
+        drop(replacement_registration);
+    }
+
+    #[tokio::test]
     async fn timeout_writes_a_typed_terminal_frame() {
         let (mut server, mut client) = duplex(64 * 1024);
         let (done_tx, done_rx) = oneshot::channel::<Result<ExecCompletion, WorkerError>>();
@@ -856,6 +911,7 @@ mod tests {
                 done: done_rx,
                 output,
                 overflowed: Arc::new(AtomicBool::new(false)),
+                registration: test_registration(),
             }),
         )
         .await
@@ -915,6 +971,7 @@ mod tests {
                 done: done_rx,
                 output,
                 overflowed: Arc::new(AtomicBool::new(false)),
+                registration: test_registration(),
             }),
         )
         .await
@@ -988,6 +1045,7 @@ mod tests {
                     done: done_rx,
                     output,
                     overflowed: Arc::new(AtomicBool::new(false)),
+                    registration: test_registration(),
                 }),
             ),
         )
@@ -1041,6 +1099,7 @@ mod tests {
                 done: done_rx,
                 output,
                 overflowed,
+                registration: test_registration(),
             }),
         )
         .await
