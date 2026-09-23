@@ -1518,7 +1518,8 @@ mod tests {
         let pairs = resolve_environment(&modern, None, None);
         assert_eq!(
             env_value(&pairs, "HOME"),
-            Some(crate::default_env::FALLBACK_HOME)
+            None,
+            "0.9 leaves HOME unset when no directory resolves"
         );
     }
 
