@@ -168,77 +168,10 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
             timeout_ms: request.script_timeout,
         };
 
-        if stdio == ExecStdio::Piped {
-            return exec_piped(client, config, exec_id);
+        match stdio {
+            ExecStdio::Relayed => exec_relayed(client, config),
+            ExecStdio::Piped => exec_piped(client, config, exec_id),
         }
-
-        // Relay each chunk to our own stdio as it arrives. Hold the stdout/stderr
-        // locks for the whole relay so we don't reacquire the handle per chunk,
-        // and coalesce flushes: `std::io::Stdout`/`Stderr` are line-buffered, so
-        // newline-terminated output already reaches the consumer promptly; we only
-        // force a flush for a chunk that does *not* end in a newline (progress
-        // output — prompts, spinners) so it isn't stranded in the line buffer.
-        // This avoids a flush syscall per bulk chunk while preserving low latency.
-        // Best-effort: a failed local write must not mask the container's exit code.
-        let stdout = std::io::stdout();
-        let stderr = std::io::stderr();
-        let exit_code = {
-            let mut out = stdout.lock();
-            let mut err = stderr.lock();
-            let result = client.exec_streaming(
-                config,
-                || {},
-                |stream, bytes| match stream {
-                    OutStream::Stdout => {
-                        let _ = out.write_all(bytes);
-                        if bytes.last() != Some(&b'\n') {
-                            let _ = out.flush();
-                        }
-                    }
-                    OutStream::Stderr => {
-                        let _ = err.write_all(bytes);
-                        if bytes.last() != Some(&b'\n') {
-                            let _ = err.flush();
-                        }
-                    }
-                },
-            );
-            let _ = out.flush();
-            let _ = err.flush();
-            // Drop the locks before mapping the error so error conversion never
-            // contends with the writers we just held.
-            drop((out, err));
-            result.map_err(map_daemon_error)?
-        };
-
-        let exit_code = match exit_code {
-            DaemonExecOutcome::Exited(code) => code,
-            DaemonExecOutcome::TimedOut => {
-                return Err(MxcError::backend_error(format!(
-                    "WSLc exec timed out after {}ms",
-                    request.script_timeout
-                )))
-            }
-            DaemonExecOutcome::Cancelled => {
-                return Err(MxcError::backend_error(
-                    "WSLc relayed exec was cancelled unexpectedly",
-                ))
-            }
-        };
-
-        Ok(ExecHandle {
-            stdout: null_pipe_handle(),
-            stderr: null_pipe_handle(),
-            stdin: null_pipe_handle(),
-            stdin_closer: None,
-            // Relayed execution has already completed before this handle is
-            // returned; timeouts were surfaced above as an error because the
-            // relay adapter has no typed timeout result.
-            waiter: Box::new(move || Ok(ExecOutcome::Exited(exit_code))),
-            // Nothing to terminate: the workload is already gone. `Ok(())` is
-            // the truthful answer here, not a placeholder.
-            terminator: Box::new(|| Ok(())),
-        })
     }
 
     fn validate_provision(
@@ -310,6 +243,73 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
     }
 }
 
+fn exec_relayed(client: DaemonClient, config: ExecConfig) -> Result<ExecHandle, MxcError> {
+    let timeout_ms = config.timeout_ms;
+
+    // Relay each chunk to our own stdio as it arrives. Hold the stdout/stderr
+    // locks for the whole relay so we don't reacquire the handle per chunk,
+    // and coalesce flushes: `std::io::Stdout`/`Stderr` are line-buffered, so
+    // newline-terminated output already reaches the consumer promptly; we only
+    // force a flush for a chunk that does *not* end in a newline (progress
+    // output — prompts, spinners) so it isn't stranded in the line buffer.
+    // This avoids a flush syscall per bulk chunk while preserving low latency.
+    // Best-effort: a failed local write must not mask the container's exit code.
+    let stdout = std::io::stdout();
+    let stderr = std::io::stderr();
+    let exit_code = {
+        let mut out = stdout.lock();
+        let mut err = stderr.lock();
+        let result = client.exec_streaming(config, |stream, bytes| match stream {
+            OutStream::Stdout => {
+                let _ = out.write_all(bytes);
+                if bytes.last() != Some(&b'\n') {
+                    let _ = out.flush();
+                }
+            }
+            OutStream::Stderr => {
+                let _ = err.write_all(bytes);
+                if bytes.last() != Some(&b'\n') {
+                    let _ = err.flush();
+                }
+            }
+        });
+        let _ = out.flush();
+        let _ = err.flush();
+        // Drop the locks before mapping the error so error conversion never
+        // contends with the writers we just held.
+        drop((out, err));
+        result.map_err(map_daemon_error)?
+    };
+
+    let exit_code = match exit_code {
+        DaemonExecOutcome::Exited(code) => code,
+        DaemonExecOutcome::TimedOut => {
+            return Err(MxcError::backend_error(format!(
+                "WSLc exec timed out after {timeout_ms}ms"
+            )))
+        }
+        DaemonExecOutcome::Cancelled => {
+            return Err(MxcError::backend_error(
+                "WSLc relayed exec was cancelled unexpectedly",
+            ))
+        }
+    };
+
+    Ok(ExecHandle {
+        stdout: null_pipe_handle(),
+        stderr: null_pipe_handle(),
+        stdin: null_pipe_handle(),
+        stdin_closer: None,
+        // Relayed execution has already completed before this handle is
+        // returned; timeouts were surfaced above as an error because the
+        // relay adapter has no typed timeout result.
+        waiter: Box::new(move || Ok(ExecOutcome::Exited(exit_code))),
+        // Nothing to terminate: the workload is already gone. `Ok(())` is
+        // the truthful answer here, not a placeholder.
+        terminator: Box::new(|| Ok(())),
+    })
+}
+
 fn exec_piped(
     client: DaemonClient,
     config: ExecConfig,
@@ -341,18 +341,16 @@ fn exec_piped(
         .name("wslc-state-aware-exec".to_string())
         .spawn(move || {
             let result = client
-                .exec_streaming(
-                    config,
-                    move || {
-                        if admission_cancellation_requested.load(Ordering::Acquire) {
-                            let _ = admission_cancel_client.cancel_exec(admission_exec_id);
-                        }
-                    },
-                    |stream, bytes| match stream {
+                .admit_exec(config)
+                .and_then(|exec| {
+                    if admission_cancellation_requested.load(Ordering::Acquire) {
+                        let _ = admission_cancel_client.cancel_exec(admission_exec_id);
+                    }
+                    exec.read_to_completion(|stream, bytes| match stream {
                         OutStream::Stdout => stdout_writer.write(bytes),
                         OutStream::Stderr => stderr_writer.write(bytes),
-                    },
-                )
+                    })
+                })
                 .map(|outcome| match outcome {
                     DaemonExecOutcome::Exited(code) => ExecOutcome::Exited(code),
                     DaemonExecOutcome::TimedOut => ExecOutcome::TimedOut,
