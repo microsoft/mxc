@@ -478,9 +478,15 @@ Ok(())
 ```
 
 Three backends implement the state-aware lifecycle — IsolationSession, WSLc and
-Windows Sandbox. Only IsolationSession serves `exec_sandbox`.
+Windows Sandbox. IsolationSession and WSLc serve `exec_sandbox`; WSLc exposes
+stdout/stderr only because its SDK has no process-input API. Windows Sandbox
+supports attached exec but cannot return native exec pipes.
 
-`exec_attached` is verified against **IsolationSession** only.
+All three state-aware backends serve `exec_attached`. IsolationSession also
+forwards stdin through a pseudo-console; WSLc has no process-input API. An
+attached WSLc timeout is returned as `ErrorCode::BackendError` because the
+relay cannot represent a typed timeout; use `exec_sandbox` to receive
+`WaitOutcome::TimedOut`.
 
 What an unavailable backend returns differs, so branch on the code rather than
 assuming one: a build without the `wslc` or `isolation_session` feature answers
@@ -642,6 +648,8 @@ discarded by `wait()`.
 Under `exec_attached`, IsolationSession allocates a pseudo-console and forwards
 stdin, so interactive shells render and resize. A pseudo-console has one output
 stream, so the sandbox's stderr arrives merged into stdout.
+
+Windows Sandbox and WSLc relay attached output without interactive stdin.
 
 `exec_attached` refuses with `MalformedRequest` unless this process's stdout and
 stdin are both terminals; use `exec_sandbox` for a workload with no terminal.

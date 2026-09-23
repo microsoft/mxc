@@ -71,16 +71,20 @@ dispatcher derives the backend from the `wslc:` prefix (they do **not** repeat `
 |-------|--------------------------|
 | provision | Load SDK, `WslcCreateSession`, resolve/import image, `WslcCreateContainer` with a keepalive init process (so the container survives across separate `exec` phases). The container is created **not started** (`started: false`). |
 | start | `WslcStartContainer` — starts the container minted at provision-time (the keepalive init keeps it warm across later `exec` phases); marks it `started`. |
-| exec | `WslcCreateContainerProcess` in the warm container; stream stdout/stderr, forward stdin, return the process exit code. A timeout SIGKILLs the **process**, not the container. |
+| exec | `WslcCreateContainerProcess` in the warm container; stream stdout/stderr and return the process exit code. Stdin is unavailable because the WSLc SDK exposes no process-input API. A timeout or caller cancellation SIGKILLs the **process**, not the container. |
 | stop | `WslcStopContainer`. |
 | deprovision | `WslcDeleteContainer`; release the session + SDK when the last container is gone (daemon may then exit / idle-time out). |
 
 ### exec output semantics
 
 `provision` / `start` / `stop` / `deprovision` return a JSON `{result | error}` envelope on stdout.
-A **successful** `exec` streams the script's raw stdout (relayed from the daemon-captured buffers)
-and exits with the script's own exit code — it does **not** wrap the result in an envelope. Callers
-discriminate via the exit code + whether stdout parses as an envelope.
+For attached execution, a **successful** `exec` relays the script's raw stdout/stderr live from
+daemon frames and exits with the script's own exit code — it does **not** wrap the result in an
+envelope. Piped execution writes those same live frames into separate anonymous stdout/stderr
+pipes returned to the in-process SDK caller; no stdin pipe is returned. Callers discriminate
+attached dispatch failures via the exit code + whether stdout parses as an envelope. A timeout
+on the attached relay surfaces as a backend error because that path cannot return a typed timeout;
+the piped path reports it through its wait result.
 
 ## Policy honor matrix
 

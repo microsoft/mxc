@@ -135,12 +135,13 @@ fields declare a Config carrying only `version?`. `containment` is named once at
 `provisionSandbox` and inferred from the branded `SandboxId<C>` on every subsequent
 call. Each non-exec phase returns a typed `<Phase>Result<C>`: provision carries
 `sandboxId` plus optional metadata; start, stop, and deprovision carry optional
-metadata only. For IsolationSession, `execInSandbox` returns an
-`MxcSandboxProcess` for live streaming and `execInSandboxAsync` is a buffered
-convenience that resolves on exit. Windows Sandbox and WSLC do not expose
-piped native exec streams, so Node supports only dry-run validation for their
-exec requests. Promise-returning operations accept `SandboxSpawnOptions`,
-including `signal?: AbortSignal`.
+metadata only. For IsolationSession and WSLC, `execInSandbox` returns an
+`MxcSandboxProcess` for live output, waiting, termination, and disposal;
+`execInSandboxAsync` is a buffered convenience that resolves on exit. WSLC
+exposes stdout/stderr only because its SDK has no process-input API. Windows
+Sandbox does not expose piped native exec streams, so Node supports only dry-run
+validation for its exec requests. Promise-returning operations accept
+`SandboxSpawnOptions`, including `signal?: AbortSignal`.
 Live `execInSandbox` accepts `StateAwareStreamingOptions` and callers cancel through
 the returned process's `kill()` method.
 State-aware calls require experimental authorization only when the selected backend

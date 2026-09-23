@@ -883,23 +883,26 @@ SandboxWaitResult outcome =
 
 `ExecInSandbox` and `ExecInSandboxAsync` hand the workload ordinary pipes and
 leave this process's console untouched. On backends that support streaming
-state-aware exec (currently IsolationSession), their wait results report
+state-aware exec (currently IsolationSession and WSLC), their wait results report
 `StateAwareExecOptions.TimeoutMs` expirations through `TimedOut`, matching
-one-shot execution. Windows Sandbox and WSLC do not support these streaming
-forms.
+one-shot execution. WSLC exposes stdout and stderr but no stdin because the
+WSLC SDK provides no process-input API. Windows Sandbox does not support these
+streaming forms.
 
 `ExecInSandboxAttached` relays the workload onto this process's stdio instead,
-so a shell inside the sandbox gets a real terminal and renders and resizes
-normally; it returns no handle and no captured output. WSLC supports this
-attached form, but currently reports a daemon-enforced workload timeout as an
-exit outcome rather than setting `TimedOut`. It refuses with
+returning no handle or captured output. For IsolationSession it allocates a
+pseudo-console and forwards stdin, so an interactive shell renders and resizes
+normally; the workload owns the console for the call's duration, including
+`Ctrl-C`, and stderr is merged into the pseudo-console's single output stream.
+Windows Sandbox and WSLC relay output but do not provide interactive stdin on
+this path. WSLC supports this attached form, but a daemon-enforced timeout
+surfaces as `ErrorCode.BackendError` because the attached relay cannot return a
+typed timeout result; use a streaming form when `TimedOut` must remain
+distinct. The API refuses with
 `ErrorCode.MalformedRequest` when this process's stdout and stdin are not both
 terminals, and when another attached exec is already running — one runs at a
-time per process. A pseudo-console carries one output stream, so the sandbox's
-stderr arrives merged into stdout. For its duration the workload owns the
-console: raw VT, so no echo and no line input, and keystrokes — `Ctrl-C`
-included — reach the workload rather than your process. The console is restored
-on return.
+time per process. Any console state changed for IsolationSession is restored on
+return.
 
 `ProvisionResult.MetadataJson` carries backend-typed provision metadata, such as
 the per-instance agent user identity. IsolationSession metadata is also
@@ -907,8 +910,9 @@ available as `ProvisionResult.IsolationSessionMetadata`.
 
 Every phase has a `DryRun...` counterpart that parses and validates the request
 without creating, starting, executing in, stopping, or destroying a sandbox.
-Windows Sandbox and WSLC support attached exec and exec dry-run, but not the
-streaming `ExecInSandbox` / `ExecInSandboxAsync` forms.
+Windows Sandbox supports attached exec and exec dry-run, but not the streaming
+`ExecInSandbox` / `ExecInSandboxAsync` forms. WSLC supports both attached and
+streaming exec.
 
 Cross-cutting policy (`Network`, `Filesystem`) is sent as supplied. A backend
 that cannot honour a value rejects it with `ErrorCode.PolicyValidation` rather

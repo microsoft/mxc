@@ -125,13 +125,17 @@
 //! ordinary pipes and allocates no pty. [`run`] captures both streams; with
 //! [`spawn_sandbox`] or [`exec_sandbox`], stream the handle's
 //! `take_stdout`/`take_stderr`, or let [`wait`](Sandbox::wait) drain and
-//! discard any untaken stream.
+//! discard any untaken stream. WSLC exposes no stdin because its SDK has no
+//! process-input API.
 //!
 //! Under [`exec_attached`], IsolationSession allocates a pseudo-console and
 //! forwards stdin, so interactive shells render and resize. A pseudo-console
 //! has one output stream, so the sandbox's stderr arrives merged into stdout.
 //!
-//! [`exec_attached`] is verified against IsolationSession only.
+//! IsolationSession, WSLC, and Windows Sandbox serve [`exec_attached`].
+//! IsolationSession additionally forwards stdin through a pseudo-console;
+//! Windows Sandbox drops terminal input pending PTY support, and WSLC has no
+//! process-input API.
 //!
 //! Policy and operational warnings are available through [`Sandbox::warnings`]
 //! and [`Output::warnings`]. [`exec_attached`] has no returned handle, so it
@@ -227,15 +231,17 @@ pub fn run_state_aware_json(
 }
 
 /// Run the `exec` phase of a state-aware request (as a JSON string) as a **live
-/// streaming** process, returning a [`Sandbox`] handle for bidirectional stdio,
-/// waiting, and termination — exactly like [`spawn_sandbox`].
+/// streaming** process, returning a [`Sandbox`] handle for output streaming,
+/// waiting, and termination — exactly like [`spawn_sandbox`]. Backends that
+/// expose process input also make [`Sandbox::take_stdin`] available.
 ///
 /// The request JSON must be an `exec`-phase state-aware request (with a
 /// `sandboxId` identifying a started sandbox). No pty is allocated.
 ///
-/// **IsolationSession is the only backend that serves this**, and only with this
-/// crate's `isolation_session` feature; the others cannot hand back pipes and
-/// refuse. `experimental` opts in to the experimental backends, as for
+/// IsolationSession and WSLC serve this with the crate's corresponding
+/// `isolation_session` or `wslc` feature. WSLC returns separate stdout/stderr
+/// pipes but no stdin. Windows Sandbox cannot hand back pipes and refuses.
+/// `experimental` opts in to experimental backends, as for
 /// [`run_state_aware_json`].
 ///
 /// [`Sandbox::kill`] reaches only the foreground process here; a descendant the
@@ -255,9 +261,10 @@ pub fn exec_sandbox(request_json: &str, experimental: bool) -> Result<Sandbox, E
 /// **This process's stdout and stdin must both be terminals**, or the call is
 /// refused with [`ErrorCode::MalformedRequest`] and nothing is run.
 ///
-/// A spent `scriptTimeout` arrives as [`WaitOutcome::Exited`]: a backend
-/// relaying to a caller's stdio reports an exit code, and the relay rejects
-/// anything else.
+/// Attached execution has no process handle on which to report a typed timeout.
+/// A backend-native timeout that cannot be represented as an exit code is
+/// returned as an [`Error`]. Use [`exec_sandbox`] when timeout must remain a
+/// distinct [`WaitOutcome::TimedOut`] result.
 ///
 /// `experimental` opts in to the experimental backends, as for
 /// [`run_state_aware_json`].
