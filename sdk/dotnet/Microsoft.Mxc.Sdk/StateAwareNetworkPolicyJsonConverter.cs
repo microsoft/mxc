@@ -48,29 +48,29 @@ internal sealed class StateAwareNetworkPolicyJsonConverter
             switch (name)
             {
                 case "egress":
-                    network.Egress = property.Value.Deserialize<NetworkEgressPolicy>(options);
+                    network.Egress = property.Value.Deserialize(MxcJson.TypeInfo<NetworkEgressPolicy>(options));
                     break;
                 case "ingress":
-                    network.Ingress = property.Value.Deserialize<NetworkIngressPolicy>(options);
+                    network.Ingress = property.Value.Deserialize(MxcJson.TypeInfo<NetworkIngressPolicy>(options));
                     break;
                 case "defaultPolicy":
                     network.DefaultPolicy =
-                        property.Value.Deserialize<StateAwareNetworkDefault?>(options);
+                        property.Value.Deserialize(MxcJson.TypeInfo<StateAwareNetworkDefault?>(options));
                     break;
                 case "enforcementMode":
                     network.AuthoredEnforcementMode = property.Value.Clone();
                     break;
                 case "allowLocalNetwork":
-                    network.AllowLocalNetwork = property.Value.Deserialize<bool?>(options);
+                    network.AllowLocalNetwork = property.Value.Deserialize(MxcJson.TypeInfo<bool?>(options));
                     break;
                 case "allowedHosts":
-                    network.AllowedHosts = property.Value.Deserialize<List<string>?>(options);
+                    network.AllowedHosts = property.Value.Deserialize(MxcJson.TypeInfo<List<string>>(options));
                     break;
                 case "blockedHosts":
-                    network.BlockedHosts = property.Value.Deserialize<List<string>?>(options);
+                    network.BlockedHosts = property.Value.Deserialize(MxcJson.TypeInfo<List<string>>(options));
                     break;
                 case "proxy":
-                    network.Proxy = property.Value.Deserialize<NetworkProxyPolicy?>(options);
+                    network.Proxy = property.Value.Deserialize(MxcJson.TypeInfo<NetworkProxyPolicy>(options));
                     break;
                 default:
                     if (options.UnmappedMemberHandling == JsonUnmappedMemberHandling.Disallow)
@@ -116,6 +116,6 @@ internal sealed class StateAwareNetworkPolicyJsonConverter
         JsonSerializerOptions options)
     {
         writer.WritePropertyName(name);
-        JsonSerializer.Serialize(writer, value, options);
+        JsonSerializer.Serialize(writer, value, MxcJson.TypeInfo<T>(options));
     }
 }

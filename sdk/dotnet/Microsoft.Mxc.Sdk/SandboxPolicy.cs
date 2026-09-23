@@ -50,8 +50,21 @@ public sealed class SandboxPolicy
         "Set ProcessContainerContainment.CaptureDenials instead. Removed in 1.0.",
         DiagnosticId = "MXC0001",
         UrlFormat = "https://github.com/microsoft/mxc/blob/main/sdk/dotnet/README.md#{0}")]
-    [JsonPropertyName("captureDenials")]
+    [JsonIgnore]
     public CaptureDenialsPolicy? CaptureDenials { get; set; }
+
+    // Serialized alias of the obsolete property. Source-generated metadata
+    // references the member it serializes, so binding it to the obsolete
+    // property directly would raise MXC0001 inside generated code.
+    [JsonInclude]
+    [JsonPropertyName("captureDenials")]
+    internal CaptureDenialsPolicy? SerializedCaptureDenials
+    {
+#pragma warning disable MXC0001 // Keeps the legacy wire field round-tripping.
+        get => CaptureDenials;
+        set => CaptureDenials = value;
+#pragma warning restore MXC0001
+    }
 
     /// <summary>Execution timeout in milliseconds (<c>null</c> = no timeout).</summary>
     [JsonPropertyName("timeoutMs")]

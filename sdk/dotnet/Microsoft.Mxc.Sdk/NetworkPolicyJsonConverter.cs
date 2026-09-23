@@ -57,28 +57,28 @@ internal sealed class NetworkPolicyJsonConverter : JsonConverter<NetworkPolicy>
             switch (name)
             {
                 case "allowOutbound":
-                    network.AllowOutbound = property.Value.Deserialize<bool>(options);
+                    network.AllowOutbound = property.Value.Deserialize(MxcJson.TypeInfo<bool>(options));
                     break;
                 case "allowLocalNetwork":
-                    network.AllowLocalNetwork = property.Value.Deserialize<bool>(options);
+                    network.AllowLocalNetwork = property.Value.Deserialize(MxcJson.TypeInfo<bool>(options));
                     break;
                 case "allowedHosts":
-                    network.AllowedHosts = property.Value.Deserialize<List<string>>(options)!;
+                    network.AllowedHosts = property.Value.Deserialize(MxcJson.TypeInfo<List<string>>(options))!;
                     break;
                 case "blockedHosts":
-                    network.BlockedHosts = property.Value.Deserialize<List<string>>(options)!;
+                    network.BlockedHosts = property.Value.Deserialize(MxcJson.TypeInfo<List<string>>(options))!;
                     break;
                 case "proxy":
-                    network.Proxy = property.Value.Deserialize<NetworkProxyPolicy>(options);
+                    network.Proxy = property.Value.Deserialize(MxcJson.TypeInfo<NetworkProxyPolicy>(options));
                     break;
                 case "egress":
-                    network.Egress = property.Value.Deserialize<NetworkEgressPolicy>(options);
+                    network.Egress = property.Value.Deserialize(MxcJson.TypeInfo<NetworkEgressPolicy>(options));
                     break;
                 case "ingress":
-                    network.Ingress = property.Value.Deserialize<NetworkIngressPolicy>(options);
+                    network.Ingress = property.Value.Deserialize(MxcJson.TypeInfo<NetworkIngressPolicy>(options));
                     break;
                 case "runtimeConfig":
-                    network.RuntimeConfig = property.Value.Deserialize<NetworkRuntimeConfig>(options);
+                    network.RuntimeConfig = property.Value.Deserialize(MxcJson.TypeInfo<NetworkRuntimeConfig>(options));
                     break;
                 default:
                     if (options.UnmappedMemberHandling == JsonUnmappedMemberHandling.Disallow)
@@ -129,6 +129,6 @@ internal sealed class NetworkPolicyJsonConverter : JsonConverter<NetworkPolicy>
         JsonSerializerOptions options)
     {
         writer.WritePropertyName(name);
-        JsonSerializer.Serialize(writer, value, options);
+        JsonSerializer.Serialize(writer, value, MxcJson.TypeInfo<T>(options));
     }
 }

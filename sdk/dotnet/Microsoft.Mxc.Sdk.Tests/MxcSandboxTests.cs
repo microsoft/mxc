@@ -1346,6 +1346,22 @@ public class MxcSandboxTests
     }
 
     [Fact]
+    public void SandboxOutputMetadata_SdkDeserializationKeepsDefaultsForOmittedMembers()
+    {
+        const string json = """
+            {
+              "captureDenialsError": {
+                "message": "decode failed"
+              }
+            }
+            """;
+
+        var metadata = MxcJson.ReadOutputMetadata(json);
+
+        Assert.Equal(string.Empty, metadata?.CaptureDenialsError?.EtlPath);
+    }
+
+    [Fact]
     public void SandboxPolicy_CaptureDenialsIsObsoleteWithMigrationGuidance()
     {
 #pragma warning disable MXC0001 // Verifies the obsolete migration contract.

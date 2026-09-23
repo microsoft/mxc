@@ -24,20 +24,17 @@ public static class MxcSandbox
         NativeLibraryResolver.Initialize();
     }
 
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-        Converters =
-        {
-            new JsonStringEnumConverter(JsonNamingPolicy.CamelCase),
-            new NetworkProxyPolicyJsonConverter(),
-        },
-    };
+    private static readonly JsonSerializerOptions JsonOptions =
+        MxcJson.CreateOptions(propertyNamingPolicy: null);
 
-    private static readonly JsonSerializerOptions PublishedPolicyJsonOptions = new(JsonOptions)
+    private static readonly JsonSerializerOptions PublishedPolicyJsonOptions = CreatePublishedPolicyJsonOptions();
+
+    private static JsonSerializerOptions CreatePublishedPolicyJsonOptions()
     {
-        Converters = { new NetworkPolicyJsonConverter(includeLegacyDefaults: true) },
-    };
+        var options = MxcJson.CreateOptions(propertyNamingPolicy: null);
+        options.Converters.Add(new NetworkPolicyJsonConverter(includeLegacyDefaults: true));
+        return options;
+    }
 
     private static JsonSerializerOptions PolicyJsonOptions(string version) =>
         SchemaVersions.UsesLegacyNetworkDefaults(version)
@@ -88,7 +85,7 @@ public static class MxcSandbox
     /// </remarks>
     internal static IReadOnlyList<AvailableBackend> ParseAvailableBackends(string json)
     {
-        var backends = JsonSerializer.Deserialize<NativeAvailableBackend[]>(json, JsonOptions)
+        var backends = JsonSerializer.Deserialize(json, MxcJson.TypeInfo<NativeAvailableBackend[]>(JsonOptions))
             ?? throw new JsonException("Native backend discovery returned null JSON.");
         return backends.Select(MapAvailableBackend).ToArray();
     }
@@ -104,7 +101,7 @@ public static class MxcSandbox
             var json = ReadOwnedJson(
                 NativeMethods.mxc_platform_support_json(),
                 "probing platform support");
-            var support = JsonSerializer.Deserialize<NativePlatformSupport>(json, JsonOptions)
+            var support = JsonSerializer.Deserialize(json, MxcJson.TypeInfo<NativePlatformSupport>(JsonOptions))
                 ?? throw new JsonException("Native platform support returned null JSON.");
             return new PlatformSupport
             {
@@ -262,14 +259,18 @@ public static class MxcSandbox
     {
         ArgumentNullException.ThrowIfNull(policy);
         ValidateNetworkVersion(policy);
-        return JsonSerializer.Serialize(policy, PolicyJsonOptions(policy.Version));
+        return JsonSerializer.Serialize(
+            policy,
+            MxcJson.TypeInfo<SandboxPolicy>(PolicyJsonOptions(policy.Version)));
     }
 
     internal static string SerializeRequest(SandboxRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
         ValidateNetworkVersion(request.Policy);
-        return JsonSerializer.Serialize(PrepareRequest(request), PolicyJsonOptions(request.Policy.Version));
+        return JsonSerializer.Serialize(
+            PrepareRequest(request),
+            MxcJson.TypeInfo<SandboxRequest>(PolicyJsonOptions(request.Policy.Version)));
     }
 
     private static void ValidateNetworkVersion(SandboxPolicy policy)
@@ -444,10 +445,11 @@ public static class MxcSandbox
     private static SandboxOutputMetadata? DeserializeOutputMetadata(string? json) =>
         string.IsNullOrEmpty(json)
             ? null
-            : JsonSerializer.Deserialize<SandboxOutputMetadata>(json);
+            : MxcJson.ReadOutputMetadata(json);
 
     private static IReadOnlyList<string> DeserializeWarnings(string? json) =>
         string.IsNullOrEmpty(json)
             ? Array.Empty<string>()
-            : JsonSerializer.Deserialize<string[]>(json) ?? Array.Empty<string>();
+            : JsonSerializer.Deserialize(json, MxcJson.TypeInfo<string[]>(MxcJson.DefaultOptions))
+                ?? Array.Empty<string>();
 }

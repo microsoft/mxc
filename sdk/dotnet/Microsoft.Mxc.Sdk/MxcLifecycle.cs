@@ -44,16 +44,8 @@ public static class MxcLifecycle
     private const int ExperimentalOptIn = 1;
     private const int NoExperimentalOptIn = 0;
 
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-        Converters =
-        {
-            new JsonStringEnumConverter(JsonNamingPolicy.CamelCase),
-            new NetworkProxyPolicyJsonConverter(),
-        },
-    };
+    private static readonly JsonSerializerOptions JsonOptions =
+        MxcJson.CreateOptions(JsonNamingPolicy.CamelCase);
 
     /// <summary>Provision a new sandbox.</summary>
     /// <exception cref="MxcException">Provisioning failed.</exception>
@@ -78,9 +70,9 @@ public static class MxcLifecycle
             IsolationSessionMetadata =
                 containment == StateAwareContainment.IsolationSession
                 && metadataJson is not null
-                    ? JsonSerializer.Deserialize<IsolationSessionProvisionMetadata>(
+                    ? JsonSerializer.Deserialize(
                         metadataJson,
-                        JsonOptions)
+                        MxcJson.TypeInfo<IsolationSessionProvisionMetadata>(JsonOptions))
                     : null,
         };
     }
@@ -743,7 +735,7 @@ public static class MxcLifecycle
     }
 
     private static JsonNode? SerializeToNode<T>(T value) =>
-        JsonSerializer.SerializeToNode(value, JsonOptions);
+        JsonSerializer.SerializeToNode(value, MxcJson.TypeInfo<T>(JsonOptions));
 
     private static byte[] ToNullTerminatedUtf8(string value)
     {

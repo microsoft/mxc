@@ -10,6 +10,9 @@
     <AssemblyName>Microsoft.Mxc.Sdk</AssemblyName>
     <Version>0.8.0</Version>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- Enables the trim, single-file, and AOT analyzers so NativeAOT
+         consumers get a binding that compiles without reflection fallbacks. -->
+    <IsAotCompatible>true</IsAotCompatible>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <Description>C# SDK for MXC (Microsoft eXecution Container), binding the native mxc_ffi library.</Description>
   </PropertyGroup>

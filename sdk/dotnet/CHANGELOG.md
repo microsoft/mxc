@@ -58,6 +58,12 @@ a 0.8.x patch**. Package versions are bumped in a dedicated release PR (see
 
 ### Fixed
 
+- The SDK now works in trimmed and NativeAOT applications. Every JSON shape
+  is resolved through source-generated `System.Text.Json` metadata instead of
+  reflection, and the package is marked `IsAotCompatible`, so the trim and AOT
+  analyzers guard it. Previously, provisioning, backend discovery, and
+  streaming warnings failed at run time when reflection-based serialization
+  was disabled.
 - `Wait()` / `WaitAsync()` no longer grant a second full timeout budget. Once
   the managed deadline elapsed, the wait delegated to the native blocking wait,
   which takes no deadline and re-applies the policy timeout as a duration from
