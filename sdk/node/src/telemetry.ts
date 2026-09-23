@@ -2,16 +2,13 @@
 // Licensed under the MIT License.
 
 import {
+  readTelemetryConsentStatusJsonAsync,
   TELEMETRY_CONSENT_DECISION_DISMISSED,
   TELEMETRY_CONSENT_DECISION_NO,
   TELEMETRY_CONSENT_DECISION_YES,
-  type TelemetryConsentSnapshot,
+  withdrawTelemetryConsentJsonAsync,
 } from './bindings/telemetry.js';
-import {
-  runTelemetryConsentQueryAsync,
-  runTelemetryConsentRequestAsync,
-  runTelemetryConsentWithdrawAsync,
-} from './bindings/telemetry-worker.js';
+import { runTelemetryConsentRequestAsync } from './bindings/telemetry-request-worker.js';
 
 const TELEMETRY_CONSENT_STATES = ['granted', 'denied', 'undetermined', 'not-applicable'] as const;
 const TELEMETRY_POLICY_STATES = ['unrestricted', 'allowed', 'blocked', 'not-applicable'] as const;
@@ -252,20 +249,6 @@ function decisionCode(decision: TelemetryConsentDecision): number {
   }
 }
 
-function validateSnapshot(snapshot: TelemetryConsentSnapshot): TelemetryConsentStatusPayload {
-  const status = parseStatusPayload(snapshot.statusJson);
-  if (
-    !isConsentState(snapshot.consent)
-    || !isPolicyState(snapshot.policy)
-    || snapshot.consent !== status.effectiveState
-    || snapshot.policy !== status.policy
-    || snapshot.needsPrompt !== shouldPrompt(status.effectiveState, status.policy)
-  ) {
-    throw invalidTelemetryOutput(snapshot.statusJson);
-  }
-  return status;
-}
-
 function tryRegisterFailureCategory(category: string): boolean {
   if (
     reportedFailureCategories.has(category)
@@ -352,13 +335,12 @@ export async function queryTelemetryConsentAsync(): Promise<TelemetryConsentQuer
     };
   }
   try {
-    const snapshot = await runTelemetryConsentQueryAsync();
-    const status = validateSnapshot(snapshot);
+    const status = parseStatusPayload(await readTelemetryConsentStatusJsonAsync());
     return {
       state: status.effectiveState,
       storedState: status.storedState,
       effectiveState: status.effectiveState,
-      needsPrompt: snapshot.needsPrompt,
+      needsPrompt: shouldPrompt(status.effectiveState, status.policy),
       policy: status.policy,
     };
   } catch (error) {
@@ -388,7 +370,7 @@ export async function withdrawTelemetryConsentAsync(): Promise<TelemetryConsentO
     return notApplicable('withdraw');
   }
   try {
-    const json = await runTelemetryConsentWithdrawAsync();
+    const json = await withdrawTelemetryConsentJsonAsync();
     return parseConsentOutcome(json, 'withdraw');
   } catch (error) {
     throw new Error(

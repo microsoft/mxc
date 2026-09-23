@@ -1,23 +1,17 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Synchronous native bindings for telemetry consent and administrative policy.
+// Native bindings for telemetry consent and administrative policy.
 
 import koffi, { type KoffiFunc } from 'koffi';
 import { loadMxcFfi } from '../native-library.js';
 import { decodeString, nativeStatusError } from './native-error.js';
+import { bindNativeFunction } from './native-function.js';
 
 export const TELEMETRY_CONSENT_DECISION_NO = 0;
 export const TELEMETRY_CONSENT_DECISION_YES = 1;
 export const TELEMETRY_CONSENT_DECISION_DISMISSED = 2;
 export const TELEMETRY_CONSENT_PRESENTER_ERROR = -1;
-
-export interface TelemetryConsentSnapshot {
-  consent: string;
-  statusJson: string;
-  policy: string;
-  needsPrompt: boolean;
-}
 
 const TelemetryConsentPresenter = koffi.proto(
   'MxcNodeTelemetryConsentPresenter',
@@ -25,37 +19,71 @@ const TelemetryConsentPresenter = koffi.proto(
   ['const char *', 'void *'],
 );
 
-type StringOutFunction = KoffiFunc<(out: unknown[]) => number>;
-type BoolOutFunction = KoffiFunc<(out: number[]) => number>;
-type StringFreeFunction = KoffiFunc<(value: unknown) => void>;
-type RequestConsentFunction = KoffiFunc<(
+type StringOutSignature = (out: unknown[]) => number;
+type StringFreeSignature = (value: unknown) => void;
+type RequestConsentSignature = (
   locale: string | null,
   presenter: ((promptJson: string, context: unknown) => number) | null,
   context: unknown | null,
   out: unknown[],
-) => number>;
+) => number;
+type StringOutFunction = KoffiFunc<StringOutSignature>;
+type StringFreeFunction = KoffiFunc<StringFreeSignature>;
+type RequestConsentFunction = KoffiFunc<RequestConsentSignature>;
 
 interface TelemetryApi {
-  getConsent: StringOutFunction;
   getConsentStatus: StringOutFunction;
-  getPolicy: StringOutFunction;
-  needsConsentPrompt: BoolOutFunction;
   withdrawConsent: StringOutFunction;
   requestConsent: RequestConsentFunction;
   stringFree: StringFreeFunction;
+}
+
+export interface TelemetryAsyncImplementation {
+  readConsentStatusJson(): Promise<string>;
+  withdrawConsentJson(): Promise<string>;
+}
+
+function bindTelemetryApi(native: ReturnType<typeof loadMxcFfi>): TelemetryApi {
+  const stringOutParameters = [koffi.out(koffi.pointer('char', 2))];
+  return {
+    getConsentStatus: bindNativeFunction<StringOutSignature>(native.handle, {
+      symbol: 'mxc_telemetry_get_consent_status',
+      result: 'int32_t',
+      parameters: stringOutParameters,
+    }),
+    withdrawConsent: bindNativeFunction<StringOutSignature>(native.handle, {
+      symbol: 'mxc_telemetry_withdraw_consent',
+      result: 'int32_t',
+      parameters: stringOutParameters,
+    }),
+    requestConsent: bindNativeFunction<RequestConsentSignature>(native.handle, {
+      symbol: 'mxc_telemetry_request_consent',
+      result: 'int32_t',
+      parameters: [
+        'const char *',
+        koffi.pointer(TelemetryConsentPresenter),
+        'void *',
+        koffi.out(koffi.pointer('char', 2)),
+      ],
+    }),
+    stringFree: bindNativeFunction<StringFreeSignature>(native.handle, {
+      symbol: 'mxc_string_free',
+      result: 'void',
+      parameters: ['char *'],
+    }),
+  };
 }
 
 function isNonNullPointer(value: unknown): boolean {
   return value !== null && value !== undefined && value !== 0 && value !== 0n;
 }
 
-function readRequiredString(
-  invoke: (out: unknown[]) => number,
+function decodeRequiredString(
+  status: number,
+  out: unknown[],
   stringFree: StringFreeFunction,
   message: string,
 ): string {
-  const out = [null] as unknown[];
-  const status = invoke(out);
   if (status !== 0) {
     throw nativeStatusError(status, {}, message);
   }
@@ -75,108 +103,100 @@ function readRequiredString(
   }
 }
 
-function readBoolean(invoke: BoolOutFunction, message: string): boolean {
-  const out = [0];
-  const status = invoke(out);
-  if (status !== 0) {
-    throw nativeStatusError(status, {}, message);
-  }
-  return out[0] !== 0;
+function readRequiredString(
+  invoke: (out: unknown[]) => number,
+  stringFree: StringFreeFunction,
+  message: string,
+): string {
+  const out = [null] as unknown[];
+  return decodeRequiredString(invoke(out), out, stringFree, message);
 }
 
-function withTelemetryApi<T>(action: (api: TelemetryApi) => T): T {
+function readRequiredStringAsync(
+  invoke: StringOutFunction,
+  stringFree: StringFreeFunction,
+  message: string,
+): Promise<string> {
+  const out = [null] as unknown[];
+  return new Promise((resolve, reject) => {
+    invoke.async(out, (error, status) => {
+      if (error !== null) {
+        reject(error);
+        return;
+      }
+      try {
+        resolve(decodeRequiredString(status, out, stringFree, message));
+      } catch (decodeError) {
+        reject(decodeError);
+      }
+    });
+  });
+}
+
+async function readTelemetryStringAsync(
+  select: (api: TelemetryApi) => StringOutFunction,
+  message: string,
+): Promise<string> {
   const native = loadMxcFfi();
   try {
-    const handle = native.handle;
-    const api: TelemetryApi = {
-      getConsent: handle.func(
-        'mxc_telemetry_get_consent',
-        'int32_t',
-        [koffi.out(koffi.pointer('char', 2))],
-      ) as StringOutFunction,
-      getConsentStatus: handle.func(
-        'mxc_telemetry_get_consent_status',
-        'int32_t',
-        [koffi.out(koffi.pointer('char', 2))],
-      ) as StringOutFunction,
-      getPolicy: handle.func(
-        'mxc_telemetry_get_policy',
-        'int32_t',
-        [koffi.out(koffi.pointer('char', 2))],
-      ) as StringOutFunction,
-      needsConsentPrompt: handle.func(
-        'mxc_telemetry_needs_consent_prompt',
-        'int32_t',
-        [koffi.out(koffi.pointer('int32_t'))],
-      ) as BoolOutFunction,
-      withdrawConsent: handle.func(
-        'mxc_telemetry_withdraw_consent',
-        'int32_t',
-        [koffi.out(koffi.pointer('char', 2))],
-      ) as StringOutFunction,
-      requestConsent: handle.func(
-        'mxc_telemetry_request_consent',
-        'int32_t',
-        ['const char *', koffi.pointer(TelemetryConsentPresenter), 'void *', koffi.out(koffi.pointer('char', 2))],
-      ) as RequestConsentFunction,
-      stringFree: handle.func('mxc_string_free', 'void', ['char *']) as StringFreeFunction,
-    };
-    return action(api);
+    const api = bindTelemetryApi(native);
+    return await readRequiredStringAsync(select(api), api.stringFree, message);
   } finally {
     native.handle.unload();
   }
 }
 
-export function readTelemetryConsentSnapshot(): TelemetryConsentSnapshot {
-  return withTelemetryApi((api) => ({
-    consent: readRequiredString(
-      (out) => api.getConsent(out),
-      api.stringFree,
-      'reading telemetry consent failed',
-    ),
-    statusJson: readRequiredString(
-      (out) => api.getConsentStatus(out),
-      api.stringFree,
-      'reading telemetry consent status failed',
-    ),
-    policy: readRequiredString(
-      (out) => api.getPolicy(out),
-      api.stringFree,
-      'reading telemetry policy failed',
-    ),
-    needsPrompt: readBoolean(
-      api.needsConsentPrompt,
-      'checking telemetry consent prompt eligibility failed',
-    ),
-  }));
+const defaultAsyncImplementation: TelemetryAsyncImplementation = {
+  readConsentStatusJson: () => readTelemetryStringAsync(
+    (api) => api.getConsentStatus,
+    'reading telemetry consent status failed',
+  ),
+  withdrawConsentJson: () => readTelemetryStringAsync(
+    (api) => api.withdrawConsent,
+    'withdrawing telemetry consent failed',
+  ),
+};
+let asyncImplementation = defaultAsyncImplementation;
+
+/** @internal Replaces async native calls for one process's unit tests. */
+export function _setBindingTelemetryAsyncImplementation(
+  implementation?: TelemetryAsyncImplementation,
+): void {
+  asyncImplementation = implementation ?? defaultAsyncImplementation;
 }
 
-export function withdrawTelemetryConsentJson(): string {
-  return withTelemetryApi((api) => readRequiredString(
-    (out) => api.withdrawConsent(out),
-    api.stringFree,
-    'withdrawing telemetry consent failed',
-  ));
+export function readTelemetryConsentStatusJsonAsync(): Promise<string> {
+  return asyncImplementation.readConsentStatusJson();
+}
+
+export function withdrawTelemetryConsentJsonAsync(): Promise<string> {
+  return asyncImplementation.withdrawConsentJson();
 }
 
 export function requestTelemetryConsentJson(
   locale: string | undefined,
   presenter: (promptJson: string) => number,
 ): string {
-  return withTelemetryApi((api) => readRequiredString(
-    (out) => api.requestConsent(
-      locale ?? null,
-      (promptJson) => {
-        try {
-          return presenter(promptJson);
-        } catch {
-          return TELEMETRY_CONSENT_PRESENTER_ERROR;
-        }
-      },
-      null,
-      out,
-    ),
-    api.stringFree,
-    'requesting telemetry consent failed',
-  ));
+  const native = loadMxcFfi();
+  try {
+    const api = bindTelemetryApi(native);
+    return readRequiredString(
+      (out) => api.requestConsent(
+        locale ?? null,
+        (promptJson) => {
+          try {
+            return presenter(promptJson);
+          } catch {
+            return TELEMETRY_CONSENT_PRESENTER_ERROR;
+          }
+        },
+        null,
+        out,
+      ),
+      api.stringFree,
+      'requesting telemetry consent failed',
+    );
+  } finally {
+    native.handle.unload();
+  }
 }

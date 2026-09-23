@@ -14,27 +14,21 @@ import {
   type TelemetryConsentPrompt,
 } from '../../src/telemetry.js';
 import {
-  _setBindingTelemetryWorkerFactory,
-  type BindingTelemetryWorkerLike,
-  type TelemetryWorkerData,
-  type TelemetryWorkerMessage,
-} from '../../src/bindings/telemetry-worker.js';
-import {
+  _setBindingTelemetryAsyncImplementation,
   TELEMETRY_CONSENT_DECISION_YES,
   TELEMETRY_CONSENT_PRESENTER_ERROR,
+  type TelemetryAsyncImplementation,
 } from '../../src/bindings/telemetry.js';
+import {
+  _setBindingTelemetryWorkerFactory,
+  type BindingTelemetryWorkerLike,
+  type TelemetryRequestWorkerData,
+  type TelemetryRequestWorkerMessage,
+} from '../../src/bindings/telemetry-request-worker.js';
 
 class FakeWorker extends EventEmitter implements BindingTelemetryWorkerLike {
-  reply(message: TelemetryWorkerMessage): void {
+  reply(message: TelemetryRequestWorkerMessage): void {
     queueMicrotask(() => this.emit('message', message));
-  }
-
-  fail(error: Error): void {
-    queueMicrotask(() => this.emit('error', error));
-  }
-
-  exit(code: number): void {
-    queueMicrotask(() => this.emit('exit', code));
   }
 }
 
@@ -49,6 +43,19 @@ const prompt: TelemetryConsentPrompt = {
   learnMoreUrl: 'https://go.microsoft.com/fwlink/?linkid=521839',
 };
 const promptJson = JSON.stringify(prompt);
+const grantedStatusJson =
+  '{"storedState":"granted","effectiveState":"granted","reason":null,"policy":"allowed"}';
+const withdrawnJson =
+  '{"result":"withdrawn","storedState":"denied","effectiveState":"denied","reason":null,"policy":"unrestricted"}';
+
+function setAsyncImplementation(
+  overrides: Partial<TelemetryAsyncImplementation>,
+): void {
+  _setBindingTelemetryAsyncImplementation({
+    readConsentStatusJson: overrides.readConsentStatusJson ?? (async () => grantedStatusJson),
+    withdrawConsentJson: overrides.withdrawConsentJson ?? (async () => withdrawnJson),
+  });
+}
 
 function waitFor(condition: () => boolean, timeoutMs = 3_000): Promise<void> {
   const started = Date.now();
@@ -70,28 +77,16 @@ function waitFor(condition: () => boolean, timeoutMs = 3_000): Promise<void> {
 describe('telemetry consent', () => {
   beforeEach(() => {
     _setTelemetryPlatform('win32');
+    setAsyncImplementation({});
   });
 
   afterEach(() => {
+    _setBindingTelemetryAsyncImplementation();
     _setBindingTelemetryWorkerFactory();
     _setTelemetryPlatform(null);
   });
 
   it('parses typed stored/effective status from a consistent native snapshot', async () => {
-    _setBindingTelemetryWorkerFactory(() => {
-      const worker = new FakeWorker();
-      worker.reply({
-        kind: 'snapshot',
-        snapshot: {
-          consent: 'granted',
-          statusJson: '{"storedState":"granted","effectiveState":"granted","reason":null,"policy":"allowed"}',
-          policy: 'allowed',
-          needsPrompt: false,
-        },
-      });
-      return worker;
-    });
-
     assert.deepStrictEqual(await queryTelemetryConsentAsync(), {
       state: 'granted',
       storedState: 'granted',
@@ -101,19 +96,9 @@ describe('telemetry consent', () => {
     });
   });
 
-  it('fails closed when the native snapshot is internally inconsistent', async () => {
-    _setBindingTelemetryWorkerFactory(() => {
-      const worker = new FakeWorker();
-      worker.reply({
-        kind: 'snapshot',
-        snapshot: {
-          consent: 'granted',
-          statusJson: '{"storedState":"granted","effectiveState":"granted","reason":null,"policy":"allowed"}',
-          policy: 'blocked',
-          needsPrompt: false,
-        },
-      });
-      return worker;
+  it('fails closed when the native status payload is invalid', async () => {
+    setAsyncImplementation({
+      readConsentStatusJson: async () => '{"storedState":"granted"}',
     });
 
     const query = await queryTelemetryConsentAsync();
@@ -138,20 +123,9 @@ describe('telemetry consent', () => {
     let call = 0;
     console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(' '));
     try {
-      _setBindingTelemetryWorkerFactory(() => {
-        const worker = new FakeWorker();
-        const statusJson = call === 0 ? 'not json' : '{"storedState":1}';
-        call += 1;
-        worker.reply({
-          kind: 'snapshot',
-          snapshot: {
-            consent: 'undetermined',
-            statusJson,
-            policy: 'blocked',
-            needsPrompt: false,
-          },
-        });
-        return worker;
+      setAsyncImplementation({
+        readConsentStatusJson: async () =>
+          call++ === 0 ? 'not json' : '{"storedState":1}',
       });
       assert.strictEqual((await queryTelemetryConsentAsync()).effectiveState, 'undetermined');
       assert.strictEqual((await queryTelemetryConsentAsync()).effectiveState, 'undetermined');
@@ -163,7 +137,7 @@ describe('telemetry consent', () => {
   });
 
   it('maps a typed presenter decision onto the native callback result', async () => {
-    let requestData: TelemetryWorkerData | undefined;
+    let requestData: TelemetryRequestWorkerData | undefined;
     const worker = new FakeWorker();
     _setBindingTelemetryWorkerFactory((data) => {
       requestData = data;
@@ -174,8 +148,8 @@ describe('telemetry consent', () => {
       assert.deepStrictEqual(value, prompt);
       return 'yes';
     }, 'en-US');
-    await waitFor(() => requestData?.operation === 'request');
-    const decision = new Int32Array((requestData as Extract<TelemetryWorkerData, { operation: 'request' }>).decisionShared);
+    await waitFor(() => requestData !== undefined);
+    const decision = new Int32Array(requestData!.decisionShared);
 
     worker.reply({ kind: 'present', promptJson });
     await waitFor(() => Atomics.load(decision, 0) === 1);
@@ -193,11 +167,11 @@ describe('telemetry consent', () => {
       needsPrompt: false,
       policy: 'allowed',
     });
-    assert.strictEqual((requestData as Extract<TelemetryWorkerData, { operation: 'request' }>).locale, 'en-US');
+    assert.strictEqual(requestData!.locale, 'en-US');
   });
 
   it('rejects invalid presenter decisions and returns the original failure', async () => {
-    let requestData: TelemetryWorkerData | undefined;
+    let requestData: TelemetryRequestWorkerData | undefined;
     const worker = new FakeWorker();
     _setBindingTelemetryWorkerFactory((data) => {
       requestData = data;
@@ -205,8 +179,8 @@ describe('telemetry consent', () => {
     });
 
     const promise = requestTelemetryConsent(() => 'maybe' as unknown as 'yes');
-    await waitFor(() => requestData?.operation === 'request');
-    const decision = new Int32Array((requestData as Extract<TelemetryWorkerData, { operation: 'request' }>).decisionShared);
+    await waitFor(() => requestData !== undefined);
+    const decision = new Int32Array(requestData!.decisionShared);
 
     worker.reply({ kind: 'present', promptJson });
     await waitFor(() => Atomics.load(decision, 0) === 1);
@@ -232,30 +206,7 @@ describe('telemetry consent', () => {
     assert.strictEqual(called, false);
   });
 
-  it('parses and withdraws through the worker-backed binding', async () => {
-    let call = 0;
-    _setBindingTelemetryWorkerFactory(() => {
-      const worker = new FakeWorker();
-      if (call === 0) {
-        worker.reply({
-          kind: 'snapshot',
-          snapshot: {
-            consent: 'granted',
-            statusJson: '{"storedState":"granted","effectiveState":"granted","reason":null,"policy":"allowed"}',
-            policy: 'allowed',
-            needsPrompt: false,
-          },
-        });
-      } else {
-        worker.reply({
-          kind: 'payload',
-          payload: '{"result":"withdrawn","storedState":"denied","effectiveState":"denied","reason":null,"policy":"unrestricted"}',
-        });
-      }
-      call += 1;
-      return worker;
-    });
-
+  it('parses and withdraws through the native binding', async () => {
     assert.strictEqual((await queryTelemetryConsentAsync()).effectiveState, 'granted');
     assert.deepStrictEqual(await withdrawTelemetryConsentAsync(), {
       action: 'withdraw',
@@ -268,13 +219,9 @@ describe('telemetry consent', () => {
   });
 
   it('rejects withdrawal responses with invalid results', async () => {
-    _setBindingTelemetryWorkerFactory(() => {
-      const worker = new FakeWorker();
-      worker.reply({
-        kind: 'payload',
-        payload: '{"result":"status","storedState":"denied","effectiveState":"denied","reason":null,"policy":"blocked"}',
-      });
-      return worker;
+    setAsyncImplementation({
+      withdrawConsentJson: async () =>
+        '{"result":"status","storedState":"denied","effectiveState":"denied","reason":null,"policy":"blocked"}',
     });
     await assert.rejects(withdrawTelemetryConsentAsync(), /unrecognised telemetry consent output/);
   });
@@ -282,6 +229,7 @@ describe('telemetry consent', () => {
 
 describe('telemetry consent is Windows-only', () => {
   afterEach(() => {
+    _setBindingTelemetryAsyncImplementation();
     _setBindingTelemetryWorkerFactory();
     _setTelemetryPlatform(null);
   });
@@ -290,6 +238,16 @@ describe('telemetry consent is Windows-only', () => {
     it(`does not query or present consent on ${platform}`, async () => {
       _setTelemetryPlatform(platform);
       let called = false;
+      setAsyncImplementation({
+        readConsentStatusJson: async () => {
+          called = true;
+          return grantedStatusJson;
+        },
+        withdrawConsentJson: async () => {
+          called = true;
+          return withdrawnJson;
+        },
+      });
       _setBindingTelemetryWorkerFactory(() => {
         called = true;
         return new FakeWorker();
