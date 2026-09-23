@@ -99,22 +99,33 @@ By default, the backend supplies `PATH`
 (`xterm-256color`), and — only when `process.cwd` resolves one — `HOME` (the
 directory the child is started in).
 
-| `process.env` | `inheritDefaultEnv` | Result |
-|---------------|---------------------|--------|
+| `process.env` | `inheritDefaultEnv` | Entries MXC supplies |
+|---------------|---------------------|----------------------|
 | omitted | — | the default block |
-| `[]` | — | nothing | 
+| `[]` | — | nothing |
 | `["FOO=bar"]` | `false` (default) | `FOO` only |
 | `["FOO=bar"]` | `true` | the default block plus `FOO`; a same-named entry wins |
+
+This is what MXC passes to `lxc-attach`, not what the child observes: liblxc
+adds a baseline `PATH` whenever MXC supplies none. So `[]` is observed as that
+baseline `PATH` alone, and `["FOO=bar"]` as the baseline plus `FOO`. A `PATH`
+in `process.env` replaces it.
 
 > ⚠️ **`HOME` is only set when `process.cwd` is supplied.** MXC has no private
 > directory it can guarantee otherwise: a policy grant can bind a host path over
 > the container's `/tmp`, and a reused container keeps whatever its image left
 > there. Pass `"HOME=…"` in `process.env` if your command needs it.
 
+> ⚠️ **`HOME` is the working directory.** Dotfiles inside it — `.gitconfig`,
+> `.npmrc`, `.curlrc`, `.config/*` — are therefore read as *user-level* tool
+> configuration, not just project input. Pass `"HOME=…"` to point elsewhere
+> when the workspace is untrusted.
+
 Below 0.9 only `process.env` is passed through and `inheritDefaultEnv` is
 rejected.
 
-Since liblxc always supplies a baseline `PATH` when one is omitted - there is no way to get a truly empty environment when setting `process.env`. Shells like bash also have a fallback `PATH`. Setting a non-empty `PATH` in `process.env` will overwrite liblxc's baseline. 
+Shells like bash also have a fallback `PATH`, so a truly empty environment is
+not reachable through `process.env`.
 
 ## Network Policy
 

@@ -204,6 +204,11 @@ directory the child is started in):
 > after `--tmpfs /tmp` and therefore replaces it, so `/tmp` may be the host's
 > shared directory. Pass `"HOME=…"` in `process.env` if your command needs it.
 
+> ⚠️ **`HOME` is the working directory.** Dotfiles inside it — `.gitconfig`,
+> `.npmrc`, `.curlrc`, `.config/*` — are therefore read as *user-level* tool
+> configuration, not just project input. Pass `"HOME=…"` to point elsewhere
+> when the workspace is untrusted.
+
 The table is the environment MXC hands the child. Bubblewrap runs the workload
 under the host's `/bin/sh`, and a shell started without these assigns its own:
 dash (Debian, Ubuntu) fabricates a `PATH` that happens to equal the default

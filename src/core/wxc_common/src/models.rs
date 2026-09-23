@@ -1092,16 +1092,6 @@ impl NetworkEnforcementCompatibility {
     }
 }
 
-impl DefaultEnvCompatibility {
-    /// Stable diagnostic spelling for tests.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::LegacyCompatible => "legacy-compatible",
-            Self::DefaultBlock => "default-block",
-        }
-    }
-}
-
 /// Where a [`ResolvedWorkingDirectory`] came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkingDirectorySource {

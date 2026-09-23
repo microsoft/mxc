@@ -435,6 +435,10 @@ empty from inside the workload.
 > ⚠️ **`HOME` is only set when a working directory resolves.** It names the
 > directory the child is started in, so when `process.cwd` is omitted *and* no
 > policy path supplies one, `HOME` is left unset — the pre-0.9 behavior.
+> Because `HOME` is the working directory, dotfiles inside it — `.gitconfig`,
+> `.npmrc`, `.curlrc`, `.config/*` — are read as *user-level* tool
+> configuration, not just project input. Pass `"HOME=…"` to point elsewhere
+> when the workspace is untrusted.
 
 > ⚠️ **Behavior change.** Before 0.9 a supplied `process.env` was layered onto
 > the baseline `PATH`. At 0.9 it is used verbatim. Set
