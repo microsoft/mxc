@@ -301,6 +301,17 @@ describe('buildStateAwareEnvelope', () => {
     assert.equal(env.version, '0.6.5-alpha');
   });
 
+  it('preserves an explicit null version for native validation', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'provision',
+      backendKey: 'isolation_session',
+      containment: 'isolation_session',
+      config: { version: null },
+    });
+    const wire = JSON.parse(JSON.stringify(env));
+    assert.strictEqual(wire.version, null);
+  });
+
   it('nests provision appId under isolationSession.provision', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',

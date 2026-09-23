@@ -108,7 +108,7 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   const defaultVersion = DEFAULT_STATE_AWARE_VERSION[backendKey];
   const telemetry = backendSpecific.telemetry as TelemetryConfig | undefined;
   const requestedVersion = backendSpecific.version;
-  const version = requestedVersion ?? defaultVersion;
+  const version = requestedVersion === undefined ? defaultVersion : requestedVersion;
   delete backendSpecific.version;
 
   const fail = (message: string): never => {
