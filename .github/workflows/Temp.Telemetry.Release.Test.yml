@@ -8,7 +8,9 @@
 name: TEMP - Telemetry release-path test
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - user/emichlin/telemetry-smoke-arm64
 
 permissions:
   contents: read
