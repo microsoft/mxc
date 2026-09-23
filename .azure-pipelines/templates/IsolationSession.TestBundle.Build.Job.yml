@@ -166,7 +166,26 @@ jobs:
       New-Item -ItemType Directory -Force -Path $sdkBin | Out-Null
       Copy-Item "$(CARGO_TARGET_DIR)/x86_64-pc-windows-msvc/release/wxc-exec.exe" "$sdkBin/"
       Write-Host "  -> sdk/node/bin/x64/wxc-exec.exe"
-    displayName: 'Stage wxc-exec into SDK bin'
+
+      Push-Location "$(workingDirectory)"
+      try {
+          & cargo build --locked --release --target "$(triplet)" `
+              -p mxc_ffi --features isolation_session
+          if ($LASTEXITCODE -ne 0) {
+              throw "Building the Node SDK native library failed with exit code $LASTEXITCODE"
+          }
+      }
+      finally {
+          Pop-Location
+      }
+
+      $nodeFfi = "$(CARGO_TARGET_DIR)/$(triplet)/release/mxc_ffi.dll"
+      if (-not (Test-Path -LiteralPath $nodeFfi -PathType Leaf)) {
+          throw "The Node SDK native build did not produce $nodeFfi"
+      }
+      Copy-Item $nodeFfi "$sdkBin/"
+      Write-Host "  -> sdk/node/bin/x64/mxc_ffi.dll"
+    displayName: 'Stage native Node SDK binaries'
 
   - script: npm ci && npm run build
     displayName: 'Build SDK (@microsoft/mxc-sdk)'
@@ -197,6 +216,20 @@ jobs:
       if ($LASTEXITCODE -ne 0) {
           throw "Publishing Microsoft.Mxc.Sdk.Tests failed with exit code $LASTEXITCODE"
       }
+
+      $nativeTarget = Join-Path $env:AGENT_TEMPDIRECTORY 'mxc-dotnet-test-native'
+      & cargo build --locked --target "$(triplet)" --target-dir $nativeTarget `
+          -p mxc_ffi --features 'dotnetsdk,test-support,isolation_session' `
+          --manifest-path "$(workingDirectory)/Cargo.toml"
+      if ($LASTEXITCODE -ne 0) {
+          throw "Building the .NET test-support native library failed with exit code $LASTEXITCODE"
+      }
+
+      $testNative = Join-Path $nativeTarget "$(triplet)/debug/mxc_ffi.dll"
+      if (-not (Test-Path -LiteralPath $testNative -PathType Leaf)) {
+          throw "The .NET test-support native build did not produce $testNative"
+      }
+      Copy-Item $testNative (Join-Path $out 'mxc_ffi.dll') -Force
 
       foreach ($name in @('Microsoft.Mxc.Sdk.Tests.exe', 'mxc_ffi.dll', 'plm.exe')) {
           $required = Join-Path $out $name
