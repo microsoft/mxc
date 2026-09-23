@@ -572,7 +572,7 @@ directory.
 | File | Needed by | Built by |
 |------|-----------|----------|
 | `wslcsdk.dll` | every WSLC path, including the host probe | the `wslc` feature, automatically |
-| `wxc-wslc-daemon.exe` | the state-aware lifecycle only | `cargo build -p wxc_wslc_daemon` |
+| `wxc-wslc-daemon.exe` | the state-aware lifecycle only | a separate `wxc_wslc_daemon` build (below) |
 
 Building with `--features wslc` downloads the pinned `Microsoft.WSL.Containers`
 package from the MxcDependencies Azure Artifacts feed and copies `wslcsdk.dll`
@@ -586,9 +586,11 @@ pre-fetched `wslcsdk.dll` to build offline. See
 resolution order, the pinned version, and the feed URL.
 
 `--features wslc` does not pull the daemon into your dependency graph. Build it
-from a checkout of this repository — `cargo build -p wxc_wslc_daemon --release`
-— then copy `wxc-wslc-daemon.exe` beside your binary before driving the
-state-aware lifecycle with `Containment::Wslc`.
+from a checkout of this repository —
+`cargo build -p wxc_wslc_daemon --release --target <triple>` — then copy
+`wxc-wslc-daemon.exe` beside your binary before running a state-aware request
+with `"containment": "wslc"`. Use the same `--target` as your own build: the
+daemon loads the staged `wslcsdk.dll` from the directory they share.
 
 **`cargo install` carries neither file.** It copies the executable out of the
 profile directory and leaves the staged DLL behind, so an installed binary
