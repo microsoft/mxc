@@ -536,10 +536,6 @@ pub(crate) fn local_network_diagnostic_for_mode(
 /// `sbin` directories. Setting it explicitly removes the dependency.
 const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
-/// `HOME` when the request resolves no working directory. `build_args` always
-/// mounts a fresh tmpfs at `/tmp`, so this is always writable.
-const FALLBACK_HOME: &str = "/tmp";
-
 /// `TERM` for the sandboxed child. Curses-based tools error out when it is
 /// unset; it does not make a tool believe it has a terminal, which is `isatty`.
 const DEFAULT_TERM: &str = "xterm-256color";
@@ -561,20 +557,23 @@ fn start_directory(request: &ExecutionRequest) -> Option<String> {
         .map(wxc_common::models::sandbox_absolute_path)
 }
 
-/// The default environment: `PATH`, `HOME`, and `TERM`.
+/// The default environment: `PATH`, `TERM`, and — when one resolves — `HOME`.
 ///
 /// `HOME` names the directory the child actually runs in, so it is a path the
 /// sandbox can reach rather than the launching user's real home, which the
 /// bind-mount policy would not have made visible. With no start directory it
-/// is [`FALLBACK_HOME`], which `build_args` always mounts as a fresh tmpfs.
+/// is left unset: policy mounts are emitted after `--tmpfs /tmp` and therefore
+/// win, so a `/tmp` fallback could be the host's shared directory rather than
+/// a private one.
 fn default_env(request: &ExecutionRequest) -> Vec<(String, String)> {
-    let home = start_directory(request).unwrap_or_else(|| FALLBACK_HOME.to_string());
+    let mut entries = vec![("PATH".to_string(), DEFAULT_PATH.to_string())];
 
-    vec![
-        ("PATH".to_string(), DEFAULT_PATH.to_string()),
-        ("HOME".to_string(), home),
-        ("TERM".to_string(), DEFAULT_TERM.to_string()),
-    ]
+    if let Some(home) = start_directory(request) {
+        entries.push(("HOME".to_string(), home));
+    }
+
+    entries.push(("TERM".to_string(), DEFAULT_TERM.to_string()));
+    entries
 }
 
 /// The entries the child should get, as `KEY=VALUE` strings.
@@ -843,9 +842,10 @@ mod tests {
         fn an_omitted_env_gets_the_default_block() {
             let mut r = request(DefaultEnvCompatibility::DefaultBlock);
             r.env = None;
+            r.working_directory = "/workspace".into();
             let entries = resolved_env(&r);
             assert_eq!(value(&entries, "PATH"), Some(DEFAULT_PATH));
-            assert_eq!(value(&entries, "HOME"), Some(FALLBACK_HOME));
+            assert_eq!(value(&entries, "HOME"), Some("/workspace"));
             assert_eq!(value(&entries, "TERM"), Some(DEFAULT_TERM));
         }
 
@@ -964,7 +964,7 @@ mod tests {
             // accept it if `HOME` consulted the policy.
             r.policy.readwrite_paths = vec![std::env::temp_dir().display().to_string()];
 
-            assert_eq!(value(&resolved_env(&r), "HOME"), Some(FALLBACK_HOME));
+            assert_eq!(value(&resolved_env(&r), "HOME"), None);
             let args = build_args(&r, None);
             assert!(
                 !args.iter().any(|a| a == "--chdir"),
@@ -988,8 +988,7 @@ mod tests {
                     .map(|w| w[1].clone());
                 let home = value(&resolved_env(&r), "HOME").map(str::to_string);
                 assert_eq!(
-                    home,
-                    Some(chdir.unwrap_or_else(|| FALLBACK_HOME.to_string())),
+                    home, chdir,
                     "HOME must name the directory the child starts in (cwd {cwd:?})"
                 );
             }

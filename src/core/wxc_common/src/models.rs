@@ -982,9 +982,9 @@ pub struct ExecutionRequest {
     ///
     /// * `None` — the caller supplied no environment. Backends provide a
     ///   default: on Windows, the user's profile block; on LXC, Bubblewrap, and
-    ///   Seatbelt, `PATH` + `HOME` + `TERM`. `HOME` names the directory the
-    ///   child is started in; Seatbelt omits it when none resolves, while LXC
-    ///   and Bubblewrap fall back to `/tmp`, which both provide writable.
+    ///   Seatbelt, `PATH` + `TERM`, plus `HOME` naming the directory the child
+    ///   is started in. Those three omit `HOME` when no working directory
+    ///   resolves, having no private directory to point it at.
     /// * `Some(vec![])` — the caller asked for an *empty* environment. This is
     ///   not the same as `None`, and on the Windows process container it is
     ///   rejected before launch, because the OS requires certain names to be

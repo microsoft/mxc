@@ -92,6 +92,13 @@ expect_ok "an omitted env gets TERM" "TERM=[xterm-256color]"
 expect_ok "a host environment variable does not leak in" "LEAK=[]"
 expect_absent "the host value itself does not appear" "BWRAP_HOST_ENV_LEAKED"
 
+# No `process.cwd` resolves no directory, so no HOME -- policy mounts land
+# after `--tmpfs /tmp`, so /tmp is not guaranteed private.
+run_config bwrap_env_09_no_cwd.json
+expect_ok "an unresolved working directory leaves HOME unset" "HOME=[]"
+expect_ok "the rest of the default block still applies" "PATH=[$DEFAULT_PATH]"
+expect_ok "an unset HOME is not the host's" "LEAK=[]"
+
 run_config bwrap_env_09_empty.json
 expect_ok "an empty env runs" "ENV_PROBE_DONE"
 expect_ok "an empty env suppresses HOME" "HOME=[]"

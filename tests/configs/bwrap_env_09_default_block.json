@@ -5,6 +5,7 @@
   "containment": "bubblewrap",
   "process": {
     "commandLine": "echo \"PATH=[$PATH]\"; echo \"HOME=[$HOME]\"; echo \"TERM=[$TERM]\"; echo \"FOO=[$FOO]\"; echo \"LEAK=[$MXC_LEAK_PROBE]\"; echo ENV_PROBE_DONE",
+    "cwd": "/tmp",
     "timeout": 20000
   }
 }

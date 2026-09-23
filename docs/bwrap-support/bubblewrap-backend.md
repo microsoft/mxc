@@ -188,9 +188,9 @@ The host environment is never inherited — the sandbox is built with
 `--clearenv`, so host secrets can't leak into untrusted code.
 
 **From schema 0.9** the child gets a default block of `PATH`
-(`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`), `HOME` (the
-directory the child is started in — `process.cwd`, else `/tmp`), and `TERM`
-(`xterm-256color`):
+(`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`), `TERM`
+(`xterm-256color`), and — only when `process.cwd` resolves one — `HOME` (the
+directory the child is started in):
 
 | `process.env` | `inheritDefaultEnv` | Result |
 | --- | --- | --- |
@@ -198,6 +198,11 @@ directory the child is started in — `process.cwd`, else `/tmp`), and `TERM`
 | `[]` | — | nothing at all |
 | `["FOO=bar"]` | `false` (default) | `FOO` only — **no `PATH`** |
 | `["FOO=bar"]` | `true` | the default block plus `FOO`; a same-named entry wins |
+
+> ⚠️ **`HOME` is only set when `process.cwd` is supplied.** MXC has no private
+> directory it can guarantee otherwise: a `readwritePaths` grant is bind-mounted
+> after `--tmpfs /tmp` and therefore replaces it, so `/tmp` may be the host's
+> shared directory. Pass `"HOME=…"` in `process.env` if your command needs it.
 
 The table is the environment MXC hands the child. Bubblewrap runs the workload
 under the host's `/bin/sh`, and a shell started without these assigns its own:

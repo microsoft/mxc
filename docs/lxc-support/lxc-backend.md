@@ -95,9 +95,9 @@ environment variables do not leak into the container.
 ### Default environment (schema 0.9+)
 
 By default, the backend supplies `PATH`
-(`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`), `HOME` (the
-directory the child is started in, else `/tmp`), and `TERM`
-(`xterm-256color`).
+(`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`), `TERM`
+(`xterm-256color`), and — only when `process.cwd` resolves one — `HOME` (the
+directory the child is started in).
 
 | `process.env` | `inheritDefaultEnv` | Result |
 |---------------|---------------------|--------|
@@ -105,6 +105,11 @@ directory the child is started in, else `/tmp`), and `TERM`
 | `[]` | — | nothing | 
 | `["FOO=bar"]` | `false` (default) | `FOO` only |
 | `["FOO=bar"]` | `true` | the default block plus `FOO`; a same-named entry wins |
+
+> ⚠️ **`HOME` is only set when `process.cwd` is supplied.** MXC has no private
+> directory it can guarantee otherwise: a policy grant can bind a host path over
+> the container's `/tmp`, and a reused container keeps whatever its image left
+> there. Pass `"HOME=…"` in `process.env` if your command needs it.
 
 Below 0.9 only `process.env` is passed through and `inheritDefaultEnv` is
 rejected.

@@ -79,6 +79,13 @@ expect_ok "an omitted env gets TERM" "TERM=[xterm-256color]"
 expect_ok "a host environment variable does not leak in" "LEAK=[]"
 expect_absent "the host value itself does not appear" "LXC_HOST_ENV_LEAKED"
 
+# No `process.cwd` resolves no directory, so no HOME -- a policy grant can bind
+# a host path over the container's /tmp, and a reused container keeps its own.
+run_config lxc_env_09_no_cwd.json
+expect_ok "an unresolved working directory leaves HOME unset" "HOME=[]"
+expect_ok "the rest of the default block still applies" "PATH=[$DEFAULT_PATH]"
+expect_ok "an unset HOME is not the host's" "LEAK=[]"
+
 # Unlike bwrap and Seatbelt, an empty env is not a wholly empty environment:
 # `lxc-attach` injects its own baseline under everything MXC supplies. What
 # 0.9 guarantees is that MXC adds nothing on top of it.
