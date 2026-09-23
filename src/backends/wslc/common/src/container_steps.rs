@@ -888,6 +888,7 @@ pub unsafe fn start_daemon_container(
 pub struct ExecOutcome {
     pub exit_code: i32,
     pub timed_out: bool,
+    pub cancelled: bool,
     /// Set when the process could not be positively confirmed to have ended:
     /// no exit event and no exit callback, or a timeout `SIGKILL` that did not
     /// land. The container is then in an unknown state and the caller must
@@ -916,6 +917,7 @@ pub unsafe fn exec_in_container(
     env: &[String],
     working_directory: &str,
     timeout_ms: u32,
+    cancellation: &std::sync::atomic::AtomicBool,
     sink: Option<OutputSink>,
     logger: &mut Logger,
 ) -> Result<ExecOutcome, ScriptResponse> {
@@ -948,57 +950,71 @@ pub unsafe fn exec_in_container(
         return Err(sdk_error("WslcGetProcessExitEvent failed", hr, ""));
     }
 
-    let wait_ms = if timeout_ms > 0 { timeout_ms } else { u32::MAX };
-
     // Positive-confirmation tracking. Reporting a clean exit requires proof the
     // process actually ended — either the exit event signalling or the SDK's
     // exit callback firing. Without either, `WslcGetProcessExitCode` returns
     // `STILL_ACTIVE` for a process that is very much still running, so it must
     // never be reported as an exit code.
     let mut timed_out = false;
+    let mut cancelled = false;
     let mut exit_signalled = false;
     // Set when the process cannot be confirmed terminated (no exit proof, or a
     // timeout SIGKILL that did not land); the container is then compromised.
     let mut terminated_unconfirmed = false;
 
     if !exit_event.is_null() {
-        let wait_result = windows::Win32::System::Threading::WaitForSingleObject(
-            windows::Win32::Foundation::HANDLE(exit_event),
-            wait_ms,
-        );
-        if wait_result == windows::Win32::Foundation::WAIT_OBJECT_0 {
-            exit_signalled = true;
-        } else if wait_result == windows::Win32::Foundation::WAIT_TIMEOUT {
-            timed_out = true;
-            let _ = writeln!(
-                logger,
-                "[WSLC][daemon] exec timeout ({}ms) reached — killing process",
-                wait_ms
+        let started = std::time::Instant::now();
+        loop {
+            let wait_ms = match timeout_ms {
+                0 => 100,
+                value => value
+                    .saturating_sub(started.elapsed().as_millis().min(u32::MAX as u128) as u32)
+                    .min(100),
+            };
+            let wait_result = windows::Win32::System::Threading::WaitForSingleObject(
+                windows::Win32::Foundation::HANDLE(exit_event),
+                wait_ms,
             );
-            // Kill only this process; the keepalive init keeps the container up.
-            let kill_hr =
-                sdk.WslcSignalProcess(process_guard.as_raw(), WslcSignal::WSLC_SIGNAL_SIGKILL);
-            if kill_hr != S_OK {
+            if wait_result == windows::Win32::Foundation::WAIT_OBJECT_0 {
+                exit_signalled = true;
+                break;
+            }
+            if wait_result != windows::Win32::Foundation::WAIT_TIMEOUT {
+                // WAIT_FAILED / WAIT_ABANDONED / anything else: the wait told us
+                // nothing about the process, so it cannot be claimed exited or
+                // killed. Treat the container as compromised.
+                let last_error = windows::Win32::Foundation::GetLastError();
                 let _ = writeln!(
                     logger,
-                    "[WSLC][daemon] Warning: WslcSignalProcess(SIGKILL) failed (hr=0x{:08X}); \
-                     process may still be running",
-                    kill_hr as u32
+                    "[WSLC][daemon] Warning: waiting on the exec exit event failed: \
+                     WaitForSingleObject returned 0x{:08X} (GetLastError 0x{:08X}); \
+                     container state is unknown",
+                    wait_result.0, last_error.0
                 );
+                terminated_unconfirmed = true;
+                break;
             }
-        } else {
-            // WAIT_FAILED / WAIT_ABANDONED / anything else: the wait told us
-            // nothing about the process, so it cannot be claimed exited or
-            // killed. Treat the container as compromised.
-            let last_error = windows::Win32::Foundation::GetLastError();
-            let _ = writeln!(
-                logger,
-                "[WSLC][daemon] Warning: waiting on the exec exit event failed: \
-                 WaitForSingleObject returned 0x{:08X} (GetLastError 0x{:08X}); \
-                 container state is unknown",
-                wait_result.0, last_error.0
-            );
-            terminated_unconfirmed = true;
+
+            cancelled = cancellation.load(std::sync::atomic::Ordering::Acquire);
+            timed_out = !cancelled
+                && timeout_ms > 0
+                && started.elapsed() >= Duration::from_millis(u64::from(timeout_ms));
+            if cancelled || timed_out {
+                let reason = if cancelled { "cancelled" } else { "timed out" };
+                let _ = writeln!(logger, "[WSLC][daemon] exec {reason} — killing process");
+                // Kill only this process; the keepalive init keeps the container up.
+                let kill_hr =
+                    sdk.WslcSignalProcess(process_guard.as_raw(), WslcSignal::WSLC_SIGNAL_SIGKILL);
+                if kill_hr != S_OK {
+                    let _ = writeln!(
+                        logger,
+                        "[WSLC][daemon] Warning: WslcSignalProcess(SIGKILL) failed (hr=0x{:08X}); \
+                         process may still be running",
+                        kill_hr as u32
+                    );
+                }
+                break;
+            }
         }
     }
 
@@ -1017,7 +1033,7 @@ pub unsafe fn exec_in_container(
     };
 
     let mut confirmed = wait_for_exit_callback();
-    if timed_out && !confirmed {
+    if (timed_out || cancelled) && !confirmed {
         // The SIGKILL was only a request and plainly has not landed yet; give
         // the callback one more bounded chance before declaring the outcome
         // unconfirmed.
@@ -1033,7 +1049,7 @@ pub unsafe fn exec_in_container(
 
     let mut exit_code: i32 = -1;
     let hr = sdk.WslcGetProcessExitCode(process_guard.as_raw(), &mut exit_code);
-    if hr != S_OK && !timed_out {
+    if hr != S_OK && !timed_out && !cancelled {
         return Err(sdk_error("WslcGetProcessExitCode failed", hr, ""));
     }
 
@@ -1051,9 +1067,10 @@ pub unsafe fn exec_in_container(
         .clone();
 
     // Resolve the reported outcome from positive evidence only.
-    if timed_out {
+    if timed_out || cancelled {
         if confirmed {
-            let _ = writeln!(logger, "[WSLC][daemon] Process killed after timeout");
+            let reason = if cancelled { "cancellation" } else { "timeout" };
+            let _ = writeln!(logger, "[WSLC][daemon] Process killed after {reason}");
         } else {
             terminated_unconfirmed = true;
         }
@@ -1075,12 +1092,13 @@ pub unsafe fn exec_in_container(
     }
 
     Ok(ExecOutcome {
-        exit_code: if timed_out || terminated_unconfirmed {
+        exit_code: if timed_out || cancelled || terminated_unconfirmed {
             -1
         } else {
             exit_code
         },
         timed_out,
+        cancelled,
         terminated_unconfirmed,
         stdout,
         stderr,

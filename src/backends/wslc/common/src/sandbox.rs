@@ -250,14 +250,14 @@ impl WslcSandboxProcess {
     }
 }
 
-struct PreparedNativeOutput {
+pub(crate) struct PreparedNativeOutput {
     reader: Option<OwnedPipe>,
     start: Option<SyncSender<StreamReader>>,
     pump: Option<std::thread::JoinHandle<()>>,
 }
 
 impl PreparedNativeOutput {
-    fn activate(
+    pub(crate) fn activate(
         mut self,
         source: StreamReader,
     ) -> std::io::Result<(OwnedPipe, std::thread::JoinHandle<()>)> {
@@ -327,7 +327,7 @@ fn pin_output_pump_module() -> std::io::Result<()> {
 /// block independently, and failing to drain either stream can stall the
 /// container. Keep the explicit one-pump-per-output tradeoff until the WSLC SDK
 /// exposes a waitable or cancellable asynchronous read primitive.
-fn prepare_native_output() -> std::io::Result<PreparedNativeOutput> {
+pub(crate) fn prepare_native_output() -> std::io::Result<PreparedNativeOutput> {
     pin_output_pump_module()?;
     let (reader, writer) = create_local_pipe().map_err(std::io::Error::other)?;
     let mut destination = PipeWriter::new(writer);

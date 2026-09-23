@@ -40,8 +40,9 @@ use serde::Serialize;
 
 use crate::container_steps::OutStream;
 use crate::daemon_protocol::{
-    encode_frame, DaemonRequest, DaemonResponse, DeprovisionConfig, ErrKind, ExecConfig,
-    ProvisionConfig, StartConfig, StopConfig, StreamFrame, MAX_FRAME_SIZE, PROTOCOL_VERSION,
+    encode_frame, CancelExecConfig, DaemonRequest, DaemonResponse, DeprovisionConfig, ErrKind,
+    ExecConfig, ProvisionConfig, StartConfig, StopConfig, StreamFrame, MAX_FRAME_SIZE,
+    PROTOCOL_VERSION,
 };
 use crate::daemon_record::{live_daemon, DaemonRecord, TransitionLock};
 
@@ -134,6 +135,14 @@ pub struct ExecResult {
     pub stderr: Vec<u8>,
 }
 
+/// Terminal outcome of a streaming daemon exec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonExecOutcome {
+    Exited(i32),
+    TimedOut,
+    Cancelled,
+}
+
 /// A typed failure from a daemon call. `Daemon` carries the daemon's stable
 /// [`ErrKind`] token so the state-aware backend can map it onto the matching
 /// `MxcError` code (e.g. `NotProvisioned` / `NotStarted`) without string
@@ -178,6 +187,7 @@ pub type DaemonResult<T> = std::result::Result<T, DaemonError>;
 /// resolved pipe name plus the daemon's trusted identity (PID + creation time
 /// from the discovery record), and opens a fresh pipe connection per request
 /// (one request per connection, matching the server).
+#[derive(Clone)]
 pub struct DaemonClient {
     pipe_name: String,
     /// PID of the daemon process this client trusts, from the discovery record.
@@ -301,10 +311,21 @@ impl DaemonClient {
     pub fn exec(&self, config: ExecConfig) -> DaemonResult<ExecResult> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let exit_code = self.exec_streaming(config, |stream, data| match stream {
-            OutStream::Stdout => stdout.extend_from_slice(data),
-            OutStream::Stderr => stderr.extend_from_slice(data),
-        })?;
+        let outcome = self.exec_streaming(
+            config,
+            || {},
+            |stream, data| match stream {
+                OutStream::Stdout => stdout.extend_from_slice(data),
+                OutStream::Stderr => stderr.extend_from_slice(data),
+            },
+        )?;
+        let exit_code = match outcome {
+            DaemonExecOutcome::Exited(code) => code,
+            DaemonExecOutcome::TimedOut => return Err(DaemonError::transport("exec timed out")),
+            DaemonExecOutcome::Cancelled => {
+                return Err(DaemonError::transport("exec was cancelled"))
+            }
+        };
         Ok(ExecResult {
             exit_code,
             stdout,
@@ -318,19 +339,19 @@ impl DaemonClient {
     ///
     /// After the daemon admits the exec with `Ok`, this reads the
     /// [`StreamFrame`] data phase, dispatching `Stdout`/`Stderr` chunks to the
-    /// callback until the terminal [`StreamFrame::Exit`] (or
-    /// [`StreamFrame::Error`]). Unlike [`exec`](Self::exec), nothing is buffered
-    /// here — the caller decides what to do with each chunk.
+    /// callback until the terminal frame. Unlike [`exec`](Self::exec), nothing
+    /// is buffered here — the caller decides what to do with each chunk.
     pub fn exec_streaming(
         &self,
         config: ExecConfig,
+        on_admitted: impl FnOnce(),
         mut on_output: impl FnMut(OutStream, &[u8]),
-    ) -> DaemonResult<i32> {
+    ) -> DaemonResult<DaemonExecOutcome> {
         let mut pipe = self.open_pipe()?;
         write_frame(&mut pipe, &DaemonRequest::Exec(config))?;
 
         match read_frame::<DaemonResponse>(&mut pipe)? {
-            DaemonResponse::Ok => {}
+            DaemonResponse::Ok => on_admitted(),
             DaemonResponse::Err { kind, message } => {
                 return Err(DaemonError::Daemon { kind, message })
             }
@@ -345,7 +366,9 @@ impl DaemonClient {
             match read_frame::<StreamFrame>(&mut pipe)? {
                 StreamFrame::Stdout { data } => on_output(OutStream::Stdout, &data),
                 StreamFrame::Stderr { data } => on_output(OutStream::Stderr, &data),
-                StreamFrame::Exit { code } => return Ok(code),
+                StreamFrame::Exit { code } => return Ok(DaemonExecOutcome::Exited(code)),
+                StreamFrame::TimedOut => return Ok(DaemonExecOutcome::TimedOut),
+                StreamFrame::Cancelled => return Ok(DaemonExecOutcome::Cancelled),
                 StreamFrame::Error { message } => {
                     return Err(DaemonError::transport(format!("exec failed: {message}")))
                 }
@@ -356,6 +379,12 @@ impl DaemonClient {
                 }
             }
         }
+    }
+
+    /// Request termination of an admitted exec. The request is idempotent: a
+    /// late cancellation after natural completion is still success.
+    pub fn cancel_exec(&self, exec_id: String) -> DaemonResult<()> {
+        expect_ok(self.call(&DaemonRequest::CancelExec(CancelExecConfig { exec_id }))?)
     }
 
     /// Issue a single non-streaming request on a fresh connection and return the

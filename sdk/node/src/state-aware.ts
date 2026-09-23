@@ -13,7 +13,6 @@ import {
   EveryBackendConfigIsOptional,
   ExecConfigFor,
   ExecResult,
-  IsolationSessionExecConfig,
   ProvisionConfigFor,
   ProvisionMetadataFor,
   ProvisionResult,
@@ -47,6 +46,11 @@ export interface StateAwareStreamingOptions {
   /** Authorizes a backend that is experimental in the selected contract. */
   experimental?: boolean;
 }
+
+type NativeExecBackend = Extract<
+  StateAwareContainmentBackend,
+  'isolation_session' | 'wslc'
+>;
 
 type StateAwareOptionSupport = 'supported' | 'unsupported-when-true' | 'unsupported-when-defined';
 
@@ -87,10 +91,10 @@ function assertNativeExecBackend(
   sandboxId: SandboxId<StateAwareContainmentBackend>,
 ): void {
   const backend = backendForSandboxId(sandboxId);
-  if (backend !== 'isolation_session') {
+  if (backend !== 'isolation_session' && backend !== 'wslc') {
     throw new MxcError(
       'unsupported_containment',
-      `${apiName} supports native execution only for IsolationSession; ${backend} does not expose piped native exec streams.`,
+      `${apiName} requires piped native exec streams; ${backend} does not expose them.`,
     );
   }
 }
@@ -330,13 +334,13 @@ export async function startSandbox<C extends StateAwareContainmentBackend>(
 }
 
 /**
- * Streams a script execution inside a started IsolationSession over Node
+ * Streams a script execution inside a started IsolationSession or WSLC sandbox over Node
  * pipes, returning an owning `MxcSandboxProcess` for waiting, termination,
  * stream access, and disposal.
  */
-export function execInSandbox(
-  sandboxId: SandboxId<'isolation_session'>,
-  config: IsolationSessionExecConfig,
+export function execInSandbox<C extends NativeExecBackend>(
+  sandboxId: SandboxId<C>,
+  config: ExecConfigFor<C>,
   options: StateAwareStreamingOptions = {},
 ): MxcSandboxProcess {
   const uncheckedOptions = options as SandboxSpawnOptions;
@@ -370,9 +374,9 @@ export async function execInSandboxAsync<C extends StateAwareContainmentBackend>
   config: ExecConfigFor<C>,
   options: SandboxSpawnOptions & { dryRun: true },
 ): Promise<ExecResult>;
-export async function execInSandboxAsync(
-  sandboxId: SandboxId<'isolation_session'>,
-  config: IsolationSessionExecConfig,
+export async function execInSandboxAsync<C extends NativeExecBackend>(
+  sandboxId: SandboxId<C>,
+  config: ExecConfigFor<C>,
   options?: SandboxSpawnOptions,
 ): Promise<ExecResult>;
 export async function execInSandboxAsync<C extends StateAwareContainmentBackend>(

@@ -363,7 +363,7 @@ capability names are reserved and must not be added directly to
 
 For long-lived sandboxes where you provision once, exec many times, and tear down at the end (e.g. agentic loops), use the state-aware lifecycle.
 
-> **Backend support:** the state-aware lifecycle is currently implemented for `isolation_session`, `windows_sandbox`, and `wslc` (all Windows-only). Node live and buffered exec require native piped streams and currently support only IsolationSession; `execInSandboxAsync(..., { dryRun: true })` can validate exec requests for all three backends. IsolationSession and WSLC do not require an experimental opt-in; Windows Sandbox does. The one-shot spawn APIs (`spawnSandbox` / `spawnSandboxFromConfig`) are the supported execution path for every other backend.
+> **Backend support:** the state-aware lifecycle is currently implemented for `isolation_session`, `windows_sandbox`, and `wslc` (all Windows-only). Node live and buffered exec require native piped streams and support IsolationSession and WSLC; `execInSandboxAsync(..., { dryRun: true })` can validate exec requests for all three backends. IsolationSession and WSLC do not require an experimental opt-in; Windows Sandbox does. The one-shot spawn APIs (`spawnSandbox` / `spawnSandboxFromConfig`) are the supported execution path for every other backend.
 
 ```typescript
 import {
@@ -426,9 +426,8 @@ const provisioned = await provisionSandbox('wslc', {
 
 Provision may also supply `filesystem.readwritePaths` / `readonlyPaths`
 (mounted for the sandbox's lifetime) and a backend-specific `image` /
-`imageTarPath`. Node can dry-run WSLC exec requests, including
-`runtimeConfig.networkProxy`, but live or buffered execution is not available
-because WSLC does not expose piped native exec streams.
+`imageTarPath`. Node live and buffered WSLC exec support stdout/stderr streaming,
+timeouts, and cancellation. WSLC does not currently expose process stdin.
 
 IsolationSession state-aware requests default to published `0.9.0-alpha`.
 Windows Sandbox requests default to development `0.10.0-alpha`; WSLC requests
@@ -581,8 +580,8 @@ spawnSandboxAsync(script, policy, ...) → Promise<{ stdout, stderr, exitCode }>
 // optional otherwise (windows_sandbox, wslc).
 provisionSandbox(containment, config, options?)  → Promise<ProvisionResult>
 startSandbox(sandboxId, config?, options?)       → Promise<StartResult>
-execInSandbox(isolationSessionId, config, options) → MxcSandboxProcess // streaming
-execInSandboxAsync(isolationSessionId, config, options?) → Promise<ExecResult>
+execInSandbox(isolationSessionOrWslcId, config, options) → MxcSandboxProcess // streaming
+execInSandboxAsync(isolationSessionOrWslcId, config, options?) → Promise<ExecResult>
 execInSandboxAsync(sandboxId, config, { dryRun: true }) → Promise<ExecResult>
 stopSandbox(sandboxId, config?, options?)        → Promise<StopResult>
 deprovisionSandbox(sandboxId, config?, options?) → Promise<DeprovisionResult>

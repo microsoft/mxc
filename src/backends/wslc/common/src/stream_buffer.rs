@@ -80,6 +80,12 @@ impl StreamWriter {
     }
 }
 
+impl Drop for StreamWriter {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
 /// The consuming end, handed to the caller as the sandbox's stdout/stderr.
 pub(crate) struct StreamReader(Arc<Shared>);
 
@@ -163,6 +169,15 @@ mod tests {
         let n = reader.read(&mut buf).expect("read data");
         assert_eq!(&buf[..n], b"hello");
         assert_eq!(reader.read(&mut buf).expect("read eof"), 0);
+    }
+
+    #[test]
+    fn dropping_writer_reports_eof() {
+        let (writer, mut reader) = stream_pair();
+        drop(writer);
+
+        let mut buf = [0u8; 1];
+        assert_eq!(reader.read(&mut buf).unwrap(), 0);
     }
 
     #[test]

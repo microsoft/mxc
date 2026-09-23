@@ -26,7 +26,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 
 use anyhow::Result;
 use tokio::sync::mpsc::error::TrySendError;
@@ -144,8 +144,10 @@ pub enum WorkerCommand {
         /// stdout/stderr callbacks push chunks through it to the pipe handler as
         /// bytes arrive, alongside the capped capture buffers.
         sink: OutputSink,
+        cancellation: Arc<AtomicBool>,
+        registration: ExecRegistration,
         admit: oneshot::Sender<Result<(), WorkerError>>,
-        done: oneshot::Sender<Result<i32, WorkerError>>,
+        done: oneshot::Sender<Result<ExecCompletion, WorkerError>>,
     },
     Stop {
         config: StopConfig,
@@ -164,6 +166,14 @@ pub enum WorkerCommand {
 /// A chunk of live process output streamed from the worker to the pipe handler:
 /// which stream it came from and the bytes (owned, so it can cross the channel).
 pub type OutputChunk = (OutStream, Vec<u8>);
+
+/// Terminal outcome of an admitted exec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecCompletion {
+    Exited(i32),
+    TimedOut,
+    Cancelled,
+}
 
 /// Bound on the number of unconsumed live-output chunks buffered between the
 /// SDK's I/O callback threads and the pipe handler. The channel is bounded (not
@@ -228,15 +238,33 @@ fn enqueue_output(
 /// as a terminal `Error` frame.
 #[derive(Debug)]
 pub struct ExecStream {
-    pub done: oneshot::Receiver<Result<i32, WorkerError>>,
+    pub done: oneshot::Receiver<Result<ExecCompletion, WorkerError>>,
     pub output: mpsc::Receiver<OutputChunk>,
     pub overflowed: Arc<AtomicBool>,
+}
+
+type ActiveExecs = Arc<Mutex<HashMap<String, Weak<AtomicBool>>>>;
+
+#[derive(Debug)]
+pub(crate) struct ExecRegistration {
+    exec_id: String,
+    active_execs: ActiveExecs,
+}
+
+impl Drop for ExecRegistration {
+    fn drop(&mut self) {
+        self.active_execs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.exec_id);
+    }
 }
 
 /// A cheap, clonable handle async tasks use to drive the worker thread.
 #[derive(Clone)]
 pub struct SessionHandle {
     tx: mpsc::UnboundedSender<WorkerCommand>,
+    active_execs: ActiveExecs,
 }
 
 impl SessionHandle {
@@ -280,9 +308,20 @@ impl SessionHandle {
         let sink: OutputSink = Box::new(move |kind, bytes| {
             enqueue_output(&stream_tx, &sink_overflowed, kind, bytes);
         });
+        let cancellation = Arc::new(AtomicBool::new(false));
+        self.active_execs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(config.exec_id.clone(), Arc::downgrade(&cancellation));
+        let registration = ExecRegistration {
+            exec_id: config.exec_id.clone(),
+            active_execs: Arc::clone(&self.active_execs),
+        };
         self.send(WorkerCommand::Exec {
             config,
             sink,
+            cancellation,
+            registration,
             admit,
             done,
         })?;
@@ -292,6 +331,20 @@ impl SessionHandle {
             output,
             overflowed,
         })
+    }
+
+    /// Signal an admitted exec without waiting for the apartment-affine worker,
+    /// which is blocked in that exec until the process exits.
+    pub fn cancel_exec(&self, exec_id: &str) {
+        if let Some(cancellation) = self
+            .active_execs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(exec_id)
+            .and_then(Weak::upgrade)
+        {
+            cancellation.store(true, Ordering::Release);
+        }
     }
 
     /// Stop a running container.
@@ -498,7 +551,8 @@ impl Worker {
         config: ExecConfig,
         container: WslcContainer,
         sink: OutputSink,
-    ) -> Result<i32, WorkerError> {
+        cancellation: &AtomicBool,
+    ) -> Result<ExecCompletion, WorkerError> {
         let sdk = self
             .sdk
             .as_ref()
@@ -520,6 +574,7 @@ impl Worker {
                 &env,
                 &config.working_directory,
                 config.timeout_ms,
+                cancellation,
                 Some(sink),
                 &mut self.logger,
             )
@@ -546,14 +601,14 @@ impl Worker {
         }
 
         if outcome.timed_out {
-            return Err(WorkerError::Backend(anyhow::anyhow!(
-                "exec timed out after {}ms",
-                config.timeout_ms
-            )));
+            return Ok(ExecCompletion::TimedOut);
+        }
+        if outcome.cancelled {
+            return Ok(ExecCompletion::Cancelled);
         }
         // outcome.stdout/stderr were captured (and already streamed live via the
         // sink); the completion reply carries only the exit code.
-        Ok(outcome.exit_code)
+        Ok(ExecCompletion::Exited(outcome.exit_code))
     }
 
     fn stop(&mut self, config: StopConfig) -> Result<(), WorkerError> {
@@ -638,6 +693,7 @@ impl Worker {
 /// is received or the command channel closes.
 pub fn spawn() -> Result<SessionHandle> {
     let (tx, mut rx) = mpsc::unbounded_channel::<WorkerCommand>();
+    let active_execs = Arc::new(Mutex::new(HashMap::new()));
 
     std::thread::Builder::new()
         .name("wslc-session-worker".to_string())
@@ -663,6 +719,8 @@ pub fn spawn() -> Result<SessionHandle> {
                     WorkerCommand::Exec {
                         config,
                         sink,
+                        cancellation,
+                        registration: _registration,
                         admit,
                         done,
                     } => {
@@ -679,7 +737,7 @@ pub fn spawn() -> Result<SessionHandle> {
                             // every other lifecycle command for its full timeout.
                             Ok(container) if admit.send(Ok(())).is_ok() => {
                                 let sandbox_id = config.sandbox_id.clone();
-                                let outcome = worker.exec(config, container, sink);
+                                let outcome = worker.exec(config, container, sink, &cancellation);
                                 if let Err(orphaned) = done.send(outcome) {
                                     // The client handler is gone (e.g. its
                                     // post-admission Ok write failed) but the run
@@ -713,7 +771,7 @@ pub fn spawn() -> Result<SessionHandle> {
         })
         .map_err(|e| anyhow::anyhow!("spawn WSLc worker thread: {e}"))?;
 
-    Ok(SessionHandle { tx })
+    Ok(SessionHandle { tx, active_execs })
 }
 
 /// RAII guard that keeps the calling thread in the COM MTA for the WSLc SDK.
@@ -804,6 +862,7 @@ mod tests {
         let handle = spawn().unwrap();
         let err = handle
             .exec(ExecConfig {
+                exec_id: "unknown-1".to_string(),
                 sandbox_id: "wslc:does-not-exist".to_string(),
                 script_code: "echo hi".to_string(),
                 working_directory: String::new(),
@@ -861,6 +920,7 @@ mod tests {
         let handle = spawn().unwrap();
         let err = handle
             .exec(ExecConfig {
+                exec_id: "unknown-2".to_string(),
                 sandbox_id: "wslc:does-not-exist".to_string(),
                 script_code: "echo hi".to_string(),
                 working_directory: String::new(),
@@ -871,6 +931,21 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.kind(), ErrKind::NotProvisioned);
         handle.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn cancel_exec_marks_the_registered_run() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let active_execs = Arc::new(Mutex::new(HashMap::from([(
+            "exec-1".to_string(),
+            Arc::downgrade(&cancellation),
+        )])));
+        let handle = SessionHandle { tx, active_execs };
+
+        handle.cancel_exec("exec-1");
+
+        assert!(cancellation.load(Ordering::Acquire));
     }
 
     #[tokio::test]
@@ -939,6 +1014,7 @@ mod tests {
 
         let mut exec = handle
             .exec(ExecConfig {
+                exec_id: "full-lifecycle".to_string(),
                 sandbox_id: id.clone(),
                 script_code: "echo hi".to_string(),
                 working_directory: String::new(),
@@ -955,7 +1031,7 @@ mod tests {
             }
         }
         let code = exec.done.await.unwrap().unwrap();
-        assert_eq!(code, 0);
+        assert_eq!(code, ExecCompletion::Exited(0));
         assert_eq!(String::from_utf8_lossy(&stdout).trim(), "hi");
 
         handle

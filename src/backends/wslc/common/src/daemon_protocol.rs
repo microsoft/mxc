@@ -37,7 +37,7 @@ pub const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 /// from the same build, so in normal operation both sides always match; the
 /// version guards against a stale daemon left running by a different mxc
 /// install. Bump only for incompatible changes to framing or message shape.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Per-phase config structs (daemon-internal; NOT the public wire schema)
@@ -97,6 +97,8 @@ pub struct StartConfig {
 /// stdio back over the pipe.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecConfig {
+    /// Correlates this run with an out-of-band [`DaemonRequest::CancelExec`].
+    pub exec_id: String,
     pub sandbox_id: String,
     /// Command line to run inside the container (shell-interpreted, mirroring
     /// the one-shot runner's `script_code`).
@@ -126,6 +128,13 @@ pub struct DeprovisionConfig {
     pub sandbox_id: String,
 }
 
+/// Inputs to `cancel_exec`: request termination of one admitted exec without
+/// stopping its warm container.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelExecConfig {
+    pub exec_id: String,
+}
+
 // ---------------------------------------------------------------------------
 // Control frames
 // ---------------------------------------------------------------------------
@@ -139,8 +148,10 @@ pub enum DaemonRequest {
     /// Boot the created container. Replies [`DaemonResponse::Ok`].
     Start(StartConfig),
     /// Run a command and stream its stdio. After an [`DaemonResponse::Ok`]
-    /// admission, both sides exchange [`StreamFrame`]s until [`StreamFrame::Exit`].
+    /// admission, the daemon streams output followed by one terminal frame.
     Exec(ExecConfig),
+    /// Request termination of one admitted exec. Replies [`DaemonResponse::Ok`].
+    CancelExec(CancelExecConfig),
     /// Stop the running container. Replies [`DaemonResponse::Ok`].
     Stop(StopConfig),
     /// Delete the container (refcount--). Replies [`DaemonResponse::Ok`].
@@ -209,7 +220,7 @@ pub enum ErrKind {
 /// A frame exchanged during the exec data phase (after an admitted
 /// [`DaemonRequest::Exec`]). Client→daemon carries [`StreamFrame::Stdin`];
 /// daemon→client carries [`StreamFrame::Stdout`] / [`StreamFrame::Stderr`] and
-/// a terminal [`StreamFrame::Exit`] (or [`StreamFrame::Error`]).
+/// one terminal exit, timeout, cancellation, or error frame.
 ///
 /// The raw byte payloads are base64-encoded on the wire (see [`base64_bytes`]).
 /// serde_json renders a `Vec<u8>` as a JSON array of decimal integers (`[104,
@@ -239,6 +250,12 @@ pub enum StreamFrame {
     /// Daemon→client: terminal frame; the process exited with `code`. No more
     /// stream frames follow.
     Exit { code: i32 },
+    /// Daemon→client: terminal frame; the request timeout elapsed and the
+    /// process was confirmed terminated.
+    TimedOut,
+    /// Daemon→client: terminal frame; an explicit cancellation request was
+    /// accepted and the process was confirmed terminated.
+    Cancelled,
     /// Daemon→client: terminal frame; the exec failed before or during the run.
     Error { message: String },
 }
@@ -355,11 +372,15 @@ mod tests {
             sandbox_id: "wslc:abc123".to_string(),
         }));
         roundtrip(DaemonRequest::Exec(ExecConfig {
+            exec_id: "exec-1".to_string(),
             sandbox_id: "wslc:abc123".to_string(),
             script_code: "echo hi".to_string(),
             working_directory: "/work".to_string(),
             env: vec![("PATH".to_string(), "/usr/bin".to_string())],
             timeout_ms: 30_000,
+        }));
+        roundtrip(DaemonRequest::CancelExec(CancelExecConfig {
+            exec_id: "exec-1".to_string(),
         }));
         roundtrip(DaemonRequest::Stop(StopConfig {
             sandbox_id: "wslc:abc123".to_string(),
@@ -420,6 +441,8 @@ mod tests {
             data: b"err".to_vec(),
         });
         roundtrip(StreamFrame::Exit { code: 42 });
+        roundtrip(StreamFrame::TimedOut);
+        roundtrip(StreamFrame::Cancelled);
         roundtrip(StreamFrame::Error {
             message: "spawn failed".to_string(),
         });
