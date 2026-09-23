@@ -242,7 +242,13 @@ function compareStructFields(
 }
 
 const rustPolicy = read("src", "core", "mxc_engine", "src", "policy.rs");
-const rustRequest = read("src", "ffi", "mxc_ffi", "src", "request.rs");
+const rustBinding = read(
+  "src",
+  "core",
+  "mxc_engine",
+  "src",
+  "binding.rs"
+);
 const rustWire = read(
   "src",
   "core",
@@ -340,9 +346,9 @@ compare(
   rustStructFields(rustPolicy, "SandboxPolicy")
 );
 
-// Telemetry is execution metadata, not a containment restriction. The FFI
-// RequestSpec adapter removes it from the binding policy before constructing
-// the Rust SandboxPolicy, then applies it to SandboxRequest explicitly.
+// Telemetry is execution metadata, not a containment restriction. The shared
+// binding parser removes it before constructing the Rust SandboxPolicy, then
+// returns it separately for the binding adapter to apply to SandboxRequest.
 compare(
   "sandbox policy binding telemetry field",
   managedSandboxPolicyFields.filter((field) => field === "telemetry"),
@@ -350,8 +356,8 @@ compare(
 );
 compareStructFields(
   "telemetry settings",
-  rustRequest,
-  "TelemetrySpec",
+  rustBinding,
+  "TelemetrySection",
   managedPolicy,
   "TelemetrySettings"
 );
