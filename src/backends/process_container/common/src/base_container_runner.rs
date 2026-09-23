@@ -81,8 +81,7 @@ use windows::Win32::System::Threading::{
 /// Honors the three states of [`ExecutionRequest::env`]:
 ///
 /// * `None` — no environment supplied. The child gets a clean default user
-///   profile block (never the `wxc-exec` process's own variables). Below
-///   schema 0.9 an explicitly empty environment resolves here too.
+///   profile block (never the `wxc-exec` process's own variables).
 /// * `Some(entries)` — the caller's environment, used **verbatim**. MXC adds
 ///   nothing to it, including when `entries` is empty: an explicitly empty
 ///   environment produces an empty block, not the default one. Proxy variables

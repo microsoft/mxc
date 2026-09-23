@@ -36,21 +36,29 @@ const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/s
 /// unset; it does not make a tool believe it has a terminal, which is `isatty`.
 const DEFAULT_TERM: &str = "xterm-256color";
 
-/// The directory the child is actually started in, if any, normalized against
-/// the container root.
+/// The directory the child is actually started in, if any.
 ///
 /// [`LxcContainer::attach_run`] wraps the command in a `cd` for exactly this
 /// value and [`default_env`] points `HOME` at it, so the two cannot name
 /// different directories — `lxc-attach` starts at the container root, so a
 /// relative `process.cwd` would otherwise leave `HOME` naming a different
-/// directory than the one the child landed in. A policy grant is deliberately
-/// *not* consulted: with `process.cwd` omitted the child starts at the
-/// container root, so treating a grant as the start directory would put `HOME`
-/// somewhere it never went.
+/// directory than the one the child landed in. Normalizing against the
+/// container root is what makes them agree, so it is gated on the schema that
+/// introduced `HOME`; below 0.9 the caller's spelling reaches `cd` untouched.
+///
+/// A policy grant is deliberately *not* consulted: with `process.cwd` omitted
+/// the child starts at the container root, so treating a grant as the start
+/// directory would put `HOME` somewhere it never went.
 fn start_directory(request: &ExecutionRequest) -> Option<String> {
     Some(request.working_directory.as_str())
         .filter(|dir| !dir.is_empty())
-        .map(wxc_common::models::sandbox_absolute_path)
+        .map(|dir| {
+            if request.supplies_default_env() {
+                wxc_common::models::sandbox_absolute_path(dir)
+            } else {
+                dir.to_string()
+            }
+        })
 }
 
 /// The default environment, from schema 0.9: `PATH`, `TERM`, and -- when one
@@ -1108,6 +1116,15 @@ mod tests {
                 r.working_directory = cwd.into();
                 assert_eq!(value(&resolved_env(&r), "HOME"), Some(expected));
                 assert_eq!(start_directory(&r).as_deref(), Some(expected));
+            }
+        }
+
+        #[test]
+        fn below_0_9_a_relative_start_directory_reaches_cd_untouched() {
+            for cwd in ["work", "./work", "a/../b"] {
+                let mut r = request(DefaultEnvCompatibility::LegacyCompatible);
+                r.working_directory = cwd.into();
+                assert_eq!(start_directory(&r).as_deref(), Some(cwd), "cwd {cwd:?}");
             }
         }
 
