@@ -1023,9 +1023,9 @@ mod tests {
     }
 
     #[test]
-    fn non_piped_backends_refuse_streaming_after_typed_binding_without_running() {
+    fn windows_sandbox_refuses_streaming_after_typed_binding_without_running() {
         for (backend, id, available) in backend_cases() {
-            if !available || backend == "isolation_session" {
+            if !available || backend != "windows_sandbox" {
                 continue;
             }
             let json = lifecycle_fixture(backend, id, Phase::Exec);

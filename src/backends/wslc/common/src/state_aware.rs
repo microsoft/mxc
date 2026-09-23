@@ -39,10 +39,17 @@ use crate::policy::{
     exec_proxy_url, validate_exec_policy, validate_post_provision_policy, validate_provision_policy,
 };
 use crate::sandbox::prepare_native_output;
-use crate::stream_buffer::stream_pair;
+use crate::stream_buffer::bounded_stream_pair;
 
 /// Default image when a provision request omits `wslc.provision.image`.
 const DEFAULT_IMAGE: &str = "alpine:latest";
+
+/// Per-stream ceiling between daemon frames and the synthesized native pipe.
+///
+/// The relay must keep consuming until the terminal frame, so it cannot block
+/// when a caller leaves its native pipe unread. Crossing this ceiling drops the
+/// remaining output and turns an otherwise successful exit into an error.
+const PIPE_BRIDGE_MAX_BUFFERED_BYTES: usize = 8 * 1024 * 1024;
 
 /// State-aware WSLc backend. Zero-sized: every phase opens a fresh
 /// [`DaemonClient`] connection (the daemon holds all persistent state).
@@ -319,8 +326,10 @@ fn exec_piped(
         .map_err(|error| MxcError::backend_error(format!("create WSLC stdout pipe: {error}")))?;
     let stderr_pipe = prepare_native_output()
         .map_err(|error| MxcError::backend_error(format!("create WSLC stderr pipe: {error}")))?;
-    let (stdout_writer, stdout_source) = stream_pair();
-    let (stderr_writer, stderr_source) = stream_pair();
+    let (stdout_writer, stdout_source, stdout_overflow) =
+        bounded_stream_pair(PIPE_BRIDGE_MAX_BUFFERED_BYTES);
+    let (stderr_writer, stderr_source, stderr_overflow) =
+        bounded_stream_pair(PIPE_BRIDGE_MAX_BUFFERED_BYTES);
     let (stdout_reader, stdout_pump) = stdout_pipe
         .activate(stdout_source)
         .map_err(|error| MxcError::backend_error(format!("start WSLC stdout pump: {error}")))?;
@@ -357,6 +366,17 @@ fn exec_piped(
                     DaemonExecOutcome::Cancelled => ExecOutcome::Exited(-1),
                 })
                 .map_err(map_daemon_error);
+            let result = match result {
+                Ok(ExecOutcome::Exited(_))
+                    if stdout_overflow.has_overflowed() || stderr_overflow.has_overflowed() =>
+                {
+                    Err(MxcError::backend_error(
+                        "WSLc live output was truncated because the caller did not drain the \
+                         synthesized stdout/stderr pipes fast enough",
+                    ))
+                }
+                other => other,
+            };
             stdout_writer.close();
             stderr_writer.close();
             let _ = done_tx.send(result);
