@@ -5,7 +5,7 @@ All notable changes to `Microsoft.Mxc.Sdk` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.0]
 
 The state-aware lifecycle surface shipped in 0.8.0 was incomplete: it could
 provision only a single implicit backend, and several phases had no way to
@@ -13,6 +13,13 @@ carry per-phase policy. Completing it required changing signatures that 0.8.0
 had already published, so **the next release must be a minor bump (0.9.0), not
 a 0.8.x patch**. Package versions are bumped in a dedicated release PR (see
 "Update package versions to 0.8.0", #1006), not here.
+
+### Added
+
+- WSLC state-aware `ExecInSandbox` and `ExecInSandboxAsync` now return native
+  stdout/stderr streams, typed timeout results, and process termination through
+  the same `MxcSandboxProcess` surface as IsolationSession. WSLC does not expose
+  stdin because its SDK has no process-input API.
 
 ### Removed
 

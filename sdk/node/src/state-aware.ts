@@ -47,7 +47,7 @@ export interface StateAwareStreamingOptions {
   experimental?: boolean;
 }
 
-type NativeExecBackend = Extract<
+type PipedExecBackend = Extract<
   StateAwareContainmentBackend,
   'isolation_session' | 'wslc'
 >;
@@ -86,7 +86,7 @@ function assertStateAwareOptions(
   }
 }
 
-function assertNativeExecBackend(
+function assertPipedExecBackend(
   apiName: string,
   sandboxId: SandboxId<StateAwareContainmentBackend>,
 ): void {
@@ -223,7 +223,7 @@ function spawnStateAwareExecProcess<C extends StateAwareContainmentBackend>(
   apiName: string,
 ): MxcSandboxProcess {
   assertStateAwareOptions(apiName, options);
-  assertNativeExecBackend(apiName, sandboxId);
+  assertPipedExecBackend(apiName, sandboxId);
   return spawnStateAwareBindingSandboxProcess(
     JSON.stringify(buildExecEnvelope(sandboxId, config)),
     options.experimental === true,
@@ -338,7 +338,7 @@ export async function startSandbox<C extends StateAwareContainmentBackend>(
  * pipes, returning an owning `MxcSandboxProcess` for waiting, termination,
  * stream access, and disposal.
  */
-export function execInSandbox<C extends NativeExecBackend>(
+export function execInSandbox<C extends PipedExecBackend>(
   sandboxId: SandboxId<C>,
   config: ExecConfigFor<C>,
   options: StateAwareStreamingOptions = {},
@@ -369,21 +369,17 @@ export function execInSandbox<C extends NativeExecBackend>(
  * on script completion. Native dispatch failures reject with `MxcError`;
  * workload failures are returned through the process exit code and streams.
  */
-export async function execInSandboxAsync<C extends StateAwareContainmentBackend>(
-  sandboxId: SandboxId<C>,
-  config: ExecConfigFor<C>,
-  options: SandboxSpawnOptions & { dryRun: true },
-): Promise<ExecResult>;
-export async function execInSandboxAsync<C extends NativeExecBackend>(
+export async function execInSandboxAsync<C extends PipedExecBackend>(
   sandboxId: SandboxId<C>,
   config: ExecConfigFor<C>,
   options?: SandboxSpawnOptions,
 ): Promise<ExecResult>;
-export async function execInSandboxAsync<C extends StateAwareContainmentBackend>(
+export async function execInSandboxAsync<C extends PipedExecBackend>(
   sandboxId: SandboxId<C>,
   config: ExecConfigFor<C>,
   options: SandboxSpawnOptions = {},
 ): Promise<ExecResult> {
+  assertPipedExecBackend('execInSandboxAsync', sandboxId);
   const envelope = buildExecEnvelope(sandboxId, config);
   if (options.dryRun === true) {
     const responseJson = await runStateAwareEnvelopeRequest(

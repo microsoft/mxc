@@ -896,24 +896,10 @@ enum ExecInterruption {
 }
 
 impl ExecInterruption {
-    fn past_tense(self) -> &'static str {
-        match self {
-            Self::TimedOut => "timed out",
-            Self::Cancelled => "cancelled",
-        }
-    }
-
-    fn noun(self) -> &'static str {
+    fn get_interruption_word(self) -> &'static str {
         match self {
             Self::TimedOut => "timeout",
             Self::Cancelled => "cancellation",
-        }
-    }
-
-    fn completion(self) -> ProcessCompletion {
-        match self {
-            Self::TimedOut => ProcessCompletion::TimedOut,
-            Self::Cancelled => ProcessCompletion::Cancelled,
         }
     }
 }
@@ -1098,7 +1084,7 @@ pub unsafe fn exec_in_container(
         let _ = writeln!(
             logger,
             "[WSLC][daemon] exec {} — killing process",
-            interruption.past_tense()
+            interruption.get_interruption_word()
         );
         // Kill only this process; the keepalive init keeps the container up.
         let kill_hr =
@@ -1157,9 +1143,12 @@ pub unsafe fn exec_in_container(
             let _ = writeln!(
                 logger,
                 "[WSLC][daemon] Process killed after {}",
-                interruption.noun()
+                interruption.get_interruption_word()
             );
-            interruption.completion()
+            match interruption {
+                ExecInterruption::TimedOut => ProcessCompletion::TimedOut,
+                ExecInterruption::Cancelled => ProcessCompletion::Cancelled,
+            }
         }
         ExitWait::Interrupted(_) | ExitWait::Failed { .. } => {
             ProcessCompletion::TerminationUnconfirmed

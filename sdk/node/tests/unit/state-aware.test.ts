@@ -989,15 +989,26 @@ describe('windows_sandbox state-aware lifecycle', () => {
       );
     });
 
-    it('execInSandboxAsync can dry-run a wsb exec request', async () => {
-      const request = installStateAwareReply('{"result":{"validated":true}}');
+    it('execInSandboxAsync rejects dry-run execution for a wsb: id', async () => {
       const id = 'wsb:prov-1' as SandboxId<'windows_sandbox'>;
-      await execInSandboxAsync(
-        id,
-        { process: { commandLine: 'echo hello-from-wsb' } },
-        { dryRun: true, experimental: true },
+      if (false) {
+        void execInSandboxAsync(
+          // @ts-expect-error Windows Sandbox cannot execute through this API, including dry-run.
+          id,
+          { process: { commandLine: 'echo hello-from-wsb' } },
+          { dryRun: true, experimental: true },
+        );
+      }
+      await assert.rejects(
+        () => execInSandboxAsync(
+          id as unknown as SandboxId<'isolation_session'>,
+          { process: { commandLine: 'echo hello-from-wsb' } },
+          { dryRun: true, experimental: true },
+        ),
+        (error: unknown) =>
+          error instanceof MxcError &&
+          error.code === 'unsupported_containment',
       );
-      assert.strictEqual(requestEnvelope(request()).phase, 'exec');
     });
 
     it('stopSandbox and deprovisionSandbox build minimal envelopes for a wsb: id', async () => {

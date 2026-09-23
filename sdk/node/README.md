@@ -363,7 +363,7 @@ capability names are reserved and must not be added directly to
 
 For long-lived sandboxes where you provision once, exec many times, and tear down at the end (e.g. agentic loops), use the state-aware lifecycle.
 
-> **Backend support:** the state-aware lifecycle is currently implemented for `isolation_session`, `windows_sandbox`, and `wslc` (all Windows-only). Node live and buffered exec require native piped streams and support IsolationSession and WSLC; `execInSandboxAsync(..., { dryRun: true })` can validate exec requests for all three backends. IsolationSession and WSLC do not require an experimental opt-in; Windows Sandbox does. The one-shot spawn APIs (`spawnSandbox` / `spawnSandboxFromConfig`) are the supported execution path for every other backend.
+> **Backend support:** the state-aware lifecycle is currently implemented for `isolation_session`, `windows_sandbox`, and `wslc` (all Windows-only). Node exposes live, buffered, and dry-run exec only for backends that support native piped execution: IsolationSession and WSLC. Windows Sandbox supports provision, start, stop, and deprovision through Node, but its exec APIs are unavailable because the backend cannot return native pipes. IsolationSession and WSLC do not require an experimental opt-in; Windows Sandbox does. The one-shot spawn APIs (`spawnSandbox` / `spawnSandboxFromConfig`) are the supported execution path for every other backend.
 
 ```typescript
 import {
@@ -405,9 +405,9 @@ remain available for every state-aware backend.
 
 `windows_sandbox` follows the same provision/start/stop/deprovision shape
 (substitute the containment string and provide `filesystem.readwritePaths` /
-`readonlyPaths` at provision if needed). Node can dry-run its exec requests,
-but live or buffered execution is not available because the backend does not
-expose piped native exec streams. See
+`readonlyPaths` at provision if needed). Node does not expose its exec phase,
+including dry-run, because the backend cannot execute through the native piped
+contract used by `execInSandbox` and `execInSandboxAsync`. See
 [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md)
 for the per-phase config matrix.
 
@@ -580,9 +580,8 @@ spawnSandboxAsync(script, policy, ...) → Promise<{ stdout, stderr, exitCode }>
 // optional otherwise (windows_sandbox, wslc).
 provisionSandbox(containment, config, options?)  → Promise<ProvisionResult>
 startSandbox(sandboxId, config?, options?)       → Promise<StartResult>
-execInSandbox(isolationSessionOrWslcId, config, options?) → MxcSandboxProcess // streaming
-execInSandboxAsync(isolationSessionOrWslcId, config, options?) → Promise<ExecResult>
-execInSandboxAsync(sandboxId, config, { dryRun: true }) → Promise<ExecResult>
+execInSandbox(sandboxId, config, options?)        → MxcSandboxProcess // streaming
+execInSandboxAsync(sandboxId, config, options?)   → Promise<ExecResult>
 stopSandbox(sandboxId, config?, options?)        → Promise<StopResult>
 deprovisionSandbox(sandboxId, config?, options?) → Promise<DeprovisionResult>
 

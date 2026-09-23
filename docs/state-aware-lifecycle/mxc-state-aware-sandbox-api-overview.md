@@ -95,22 +95,16 @@ function startSandbox<C extends StateAwareContainmentBackend>(
   options?: SandboxSpawnOptions,
 ): Promise<StartResult<C>>;
 
-function execInSandbox(
-  sandboxId: SandboxId<'isolation_session'>,
-  config: IsolationSessionExecConfig,
+function execInSandbox<C extends 'isolation_session' | 'wslc'>(
+  sandboxId: SandboxId<C>,
+  config: ExecConfigFor<C>,
   options?: StateAwareStreamingOptions,
 ): MxcSandboxProcess;
 
-function execInSandboxAsync(
-  sandboxId: SandboxId<'isolation_session'>,
-  config: IsolationSessionExecConfig,
-  options?: SandboxSpawnOptions,
-): Promise<ExecResult>;
-
-function execInSandboxAsync<C extends StateAwareContainmentBackend>(
+function execInSandboxAsync<C extends 'isolation_session' | 'wslc'>(
   sandboxId: SandboxId<C>,
   config: ExecConfigFor<C>,
-  options: SandboxSpawnOptions & { dryRun: true },
+  options?: SandboxSpawnOptions,
 ): Promise<ExecResult>;
 
 function stopSandbox<C extends StateAwareContainmentBackend>(
@@ -139,8 +133,8 @@ metadata only. For IsolationSession and WSLC, `execInSandbox` returns an
 `MxcSandboxProcess` for live output, waiting, termination, and disposal;
 `execInSandboxAsync` is a buffered convenience that resolves on exit. WSLC
 exposes stdout/stderr only because its SDK has no process-input API. Windows
-Sandbox does not expose piped native exec streams, so Node supports only dry-run
-validation for its exec requests. Promise-returning operations accept
+Sandbox does not expose piped native exec streams, so Node does not expose its
+exec phase, including dry-run. Promise-returning operations accept
 `SandboxSpawnOptions`, including `signal?: AbortSignal`.
 Live `execInSandbox` accepts `StateAwareStreamingOptions` and callers cancel through
 the returned process's `kill()` method.

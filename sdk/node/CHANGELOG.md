@@ -5,6 +5,23 @@ All notable changes to `@microsoft/mxc-sdk` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0]
+
+### Added
+
+- State-aware provision, start, stop, and deprovision calls run in-process
+  through `mxc_ffi` rather than spawning `wxc-exec`.
+- Native live, buffered, and dry-run exec support for IsolationSession and
+  WSLC. WSLC exposes stdout/stderr, waiting, timeout, and cancellation, but no
+  stdin because the WSLC SDK has no process-input API.
+
+### Changed (breaking)
+
+- `execInSandbox` and `execInSandboxAsync` accept only sandbox ids whose
+  backends expose native piped exec streams. Windows Sandbox remains available
+  for provision, start, stop, and deprovision, but Node no longer exposes exec
+  dry-run for a backend it cannot execute through those APIs.
+
 ## [0.7.0]
 
 ### Added (additive — no breaking changes)
