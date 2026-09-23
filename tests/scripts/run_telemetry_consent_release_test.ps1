@@ -165,6 +165,7 @@ function Invoke-ConsentRequest {
     $finalRead = $process.StandardOutput.ReadLineAsync()
     if (-not $finalRead.Wait(5000)) {
         $process.Kill()
+        $process.WaitForExit()
         throw 'Consent process waited for stdin EOF instead of accepting the decision line.'
     }
     $process.StandardInput.Close()
