@@ -640,13 +640,11 @@ impl BubblewrapScriptRunner {
             let startup_result = startup
                 .child_pid(&mut child)
                 .and_then(|child_pid| {
-                    proxy_network
-                        .as_mut()
-                        .ok_or_else(|| {
-                            "Bubblewrap: proxy network lifecycle disappeared during startup"
-                                .to_string()
-                        })?
-                        .attach(child_pid, logger)
+                    let network = proxy_network.as_mut().ok_or_else(|| {
+                        "Bubblewrap: proxy network lifecycle disappeared during startup".to_string()
+                    })?;
+                    network.attach(child_pid, logger)?;
+                    network.check_alive()
                 })
                 .and_then(|()| startup.release());
             if let Err(error) = startup_result {
