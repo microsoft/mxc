@@ -89,6 +89,17 @@ jobs:
         shell: pwsh
         run: tests\scripts\run_telemetry_etw_smoke_test.ps1 -BinDir src\target\debug
 
+      # Mutates the real consent store and HKLM policy, so it is confined to
+      # the ephemeral GitHub-hosted runners this job declares.
+      - name: Run release-path telemetry consent test
+        working-directory: ${{ github.workspace }}
+        shell: pwsh
+        run: |
+          tests\scripts\run_telemetry_consent_release_test.ps1 `
+            -BinDir src\target\${{ matrix.target }}\release `
+            -AcceptRealMachineMutation `
+            -RequirePolicyCeiling
+
       - name: Upload binaries
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
