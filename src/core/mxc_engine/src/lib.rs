@@ -29,6 +29,9 @@
 //! - [`Error`] / [`ErrorCode`] — the crate-owned error facade over
 //!   `wxc_common`'s internal error type.
 
+#[cfg(feature = "ffi-internals")]
+#[doc(hidden)]
+pub mod binding;
 pub mod configs;
 mod dispatch;
 mod error;

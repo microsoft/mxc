@@ -107,6 +107,8 @@ jobs:
           set -euo pipefail
           cargo test --locked --release --target "${{ matrix.target }}" -p wxc_common --lib
           cargo test --locked --release --target "${{ matrix.target }}" -p wxc_common --doc
+          cargo test --locked --release --target "${{ matrix.target }}" -p mxc_engine --features ffi-internals --lib binding::tests
+          cargo test --locked --release --target "${{ matrix.target }}" -p mxc_ffi --lib request::tests
           cargo test --locked --release --target "${{ matrix.target }}" -p mxc_engine -p mxc_ffi --lib state_aware
           cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk --test state_aware
 

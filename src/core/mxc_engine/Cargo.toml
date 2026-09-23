@@ -12,7 +12,9 @@ path = "src/lib.rs"
 [dependencies]
 wxc_common.workspace = true
 mxc_config_contract.workspace = true
+semver = { workspace = true, optional = true }
 serde = { workspace = true }
+serde_ignored = { workspace = true, optional = true }
 serde_json = { workspace = true }
 # MicroVM runner — used by the Windows and Linux run-to-completion bodies under
 # the `microvm` feature. Never built on hosts/features that don't select it.
@@ -48,6 +50,9 @@ seatbelt_common = { workspace = true }
 
 [features]
 default = []
+# Enables the hidden policy-JSON bridge consumed by co-versioned language
+# bindings through mxc-sdk.
+ffi-internals = ["dep:semver", "dep:serde_ignored"]
 # Enables constructing the run-to-completion runner for optional backends.
 # Mirrors the executor binaries' feature set so backend selection can live in
 # one place. The build-time binary-staging that some backends also need (e.g.

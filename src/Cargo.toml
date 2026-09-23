@@ -92,7 +92,9 @@ plm = { path = "host/plm" }
 quick-xml = "0.41"
 seatbelt_common = { path = "backends/seatbelt/common" }
 same-file = "1"
+semver = "1"
 serde = { version = "1", features = ["derive"] }
+serde_ignored = "0.1"
 serde_json = { version = "1", features = ["raw_value"] }
 serde_path_to_error = "0.1"
 schemars = "0.8"

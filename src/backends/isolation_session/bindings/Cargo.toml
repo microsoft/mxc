@@ -14,4 +14,4 @@ windows-future = "0.3"
 windows = { workspace = true, features = ["Foundation", "UI"] }
 
 [build-dependencies]
-semver = "1"
+semver = { workspace = true }

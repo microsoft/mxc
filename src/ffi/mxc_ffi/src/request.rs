@@ -9,18 +9,16 @@ use mxc_sdk::configs::{
     CaptureDenials, Lxc, ProcessContainer, ProcessContainerFilesystem, ProcessContainerNetwork,
     ProcessContainerSystemSettings, ProcessContainerUi, ProcessContainerUiIsolation, Seatbelt,
 };
-use mxc_sdk::policy::{FilesystemSection, NetworkSection, UiSection};
 use mxc_sdk::{
-    build_request_with_containment, Containment, Error, ErrorCode, SandboxPolicy, SandboxRequest,
-    WslcSection,
+    build_request_with_containment, Containment, Error, ErrorCode, SandboxRequest, WslcSection,
 };
-use serde::de::{Error as _, IgnoredAny};
-use serde::{Deserialize, Deserializer};
+use serde_json::value::RawValue;
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RequestSpec {
-    policy: RequestPolicy,
+struct RequestSpec<'a> {
+    #[serde(borrow)]
+    policy: &'a RawValue,
     command: String,
     #[serde(default)]
     containment: RequestContainment,
@@ -34,92 +32,6 @@ struct RequestSpec {
     inherit_default_env: bool,
     #[serde(default)]
     experimental: bool,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RequestPolicy {
-    version: String,
-    #[serde(default)]
-    filesystem: Option<FilesystemSection>,
-    #[serde(default)]
-    network: Option<NetworkSection>,
-    #[serde(default)]
-    ui: Option<UiSection>,
-    #[serde(default)]
-    timeout_ms: Option<u32>,
-    #[serde(
-        default,
-        rename = "captureDenials",
-        deserialize_with = "reject_legacy_capture_denials"
-    )]
-    _capture_denials: (),
-    #[serde(default)]
-    telemetry: TelemetryField,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct TelemetrySpec {
-    #[serde(default)]
-    enabled: Option<bool>,
-}
-
-#[derive(Default)]
-enum TelemetryField {
-    #[default]
-    Absent,
-    Present(Option<TelemetrySpec>),
-}
-
-impl<'de> Deserialize<'de> for TelemetryField {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Option::<TelemetrySpec>::deserialize(deserializer).map(Self::Present)
-    }
-}
-
-fn reject_legacy_capture_denials<'de, D>(deserializer: D) -> Result<(), D::Error>
-where
-    D: Deserializer<'de>,
-{
-    IgnoredAny::deserialize(deserializer)?;
-    Err(D::Error::custom(
-        "policy.captureDenials is not supported; set containment.type to \
-         processContainer and use containment.captureDenials",
-    ))
-}
-
-impl RequestPolicy {
-    fn into_sdk(self) -> Result<(SandboxPolicy, Option<TelemetrySpec>), Error> {
-        let telemetry = match self.telemetry {
-            TelemetryField::Absent => None,
-            TelemetryField::Present(telemetry) => {
-                if matches!(
-                    self.version.as_str(),
-                    "0.6.0-alpha" | "0.7.0-alpha" | "0.8.0-alpha"
-                ) {
-                    return Err(Error::new(
-                        ErrorCode::MalformedRequest,
-                        "policy.telemetry requires config schema version 0.9.0-alpha or later",
-                    ));
-                }
-                telemetry
-            }
-        };
-        Ok((
-            SandboxPolicy {
-                version: self.version,
-                filesystem: self.filesystem,
-                network: self.network,
-                ui: self.ui,
-                timeout_ms: self.timeout_ms,
-            },
-            telemetry,
-        ))
-    }
 }
 
 #[derive(Default, serde::Deserialize)]
@@ -389,26 +301,18 @@ impl ProcessContainerNetworkSpec {
 pub(crate) fn build_request_from_json(request_json: &str) -> Result<SandboxRequest, Error> {
     let mut deserializer = serde_json::Deserializer::from_str(request_json);
     let mut ignored_paths = Vec::new();
-    let spec: RequestSpec = serde_ignored::deserialize(&mut deserializer, |path| {
+    let spec: RequestSpec<'_> = serde_ignored::deserialize(&mut deserializer, |path| {
         ignored_paths.push(path.to_string().replace(".?.", "."));
     })
     .map_err(malformed_request)?;
     deserializer.end().map_err(malformed_request)?;
-    // The SDK authoring model recognizes these wire-only legacy names only to
-    // preserve their presence for the version-specific migration diagnostic.
-    let accepts_wire_legacy_names = spec.policy.version == "0.9.0-alpha";
-    if let Some(path) = ignored_paths.iter().find(|path| {
-        !(accepts_wire_legacy_names
-            && matches!(
-                path.as_str(),
-                "policy.network.defaultPolicy" | "policy.network.enforcementMode"
-            ))
-    }) {
+    if let Some(path) = ignored_paths.first() {
         return Err(Error::new(
             ErrorCode::MalformedRequest,
             format!("unknown request field `{path}`"),
         ));
     }
+    let parsed = mxc_sdk::ffi_internals::parse_policy_json(spec.policy.get())?;
     if let Some(name) = spec.environment.as_ref().and_then(|environment| {
         environment
             .keys()
@@ -419,12 +323,11 @@ pub(crate) fn build_request_from_json(request_json: &str) -> Result<SandboxReque
             format!("invalid environment variable name `{name}`"),
         ));
     }
-    let (policy, telemetry) = spec.policy.into_sdk()?;
     let containment = spec.containment.into_sdk();
     let wslc = matches!(&containment, Containment::Wslc(_));
 
     let mut request = build_request_with_containment(
-        &policy,
+        &parsed.policy,
         &containment,
         &spec.command,
         spec.container_name.as_deref(),
@@ -442,7 +345,7 @@ pub(crate) fn build_request_from_json(request_json: &str) -> Result<SandboxReque
     if !wslc {
         request.set_experimental(spec.experimental);
     }
-    if let Some(enabled) = telemetry.and_then(|telemetry| telemetry.enabled) {
+    if let Some(enabled) = parsed.telemetry_enabled {
         request.set_telemetry_opt_in(enabled);
     }
     Ok(request)
@@ -504,9 +407,11 @@ mod tests {
                 .map(String::as_str),
             Some("true")
         );
-        assert_eq!(process_spec.policy.timeout_ms, Some(30_000));
-        let filesystem = process_spec
-            .policy
+        let process_policy = mxc_sdk::ffi_internals::parse_policy_json(process_spec.policy.get())
+            .expect("process-container policy parses")
+            .policy;
+        assert_eq!(process_policy.timeout_ms, Some(30_000));
+        let filesystem = process_policy
             .filesystem
             .as_ref()
             .expect("filesystem policy is preserved");
@@ -514,16 +419,11 @@ mod tests {
         assert_eq!(filesystem.readonly_paths, ["C:\\input"]);
         assert_eq!(filesystem.denied_paths, ["C:\\secret"]);
         assert_eq!(filesystem.clear_policy_on_exit, Some(true));
-        let ui = process_spec
-            .policy
-            .ui
-            .as_ref()
-            .expect("UI policy is preserved");
+        let ui = process_policy.ui.as_ref().expect("UI policy is preserved");
         assert!(!ui.allow_windows);
         assert_eq!(ui.clipboard, mxc_sdk::policy::ClipboardPolicy::Read);
         assert!(!ui.allow_input_injection);
-        let authored_network = process_spec
-            .policy
+        let authored_network = process_policy
             .network
             .as_ref()
             .expect("network policy is preserved");
@@ -578,8 +478,10 @@ mod tests {
             network_spec.containment,
             RequestContainment::Process
         ));
-        let network = network_spec
-            .policy
+        let network_policy = mxc_sdk::ffi_internals::parse_policy_json(network_spec.policy.get())
+            .expect("directional-network policy parses")
+            .policy;
+        let network = network_policy
             .network
             .as_ref()
             .expect("directional network policy is preserved");
@@ -714,6 +616,7 @@ mod tests {
                     .contains("telemetry requires config schema version 0.9.0-alpha"),
                 "{version}: unexpected error: {error}"
             );
+            assert_eq!(error.code, ErrorCode::MalformedRequest);
         }
     }
 
@@ -784,7 +687,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_legacy_network_names_are_exempt_only_for_v0_9_migration_errors() {
+    fn wire_legacy_network_names_reach_registered_migration_errors() {
         for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha"] {
             for (field, value) in [
                 ("defaultPolicy", r#""allow""#),
@@ -808,27 +711,31 @@ mod tests {
             }
         }
 
-        for (field, value) in [
-            ("defaultPolicy", r#""allow""#),
-            ("enforcementMode", r#""capabilities""#),
-        ] {
-            let request_json = format!(
-                r#"{{
-                    "policy": {{
-                        "version": "0.9.0-alpha",
-                        "network": {{ "{field}": {value} }}
-                    }},
-                    "command": "echo hi"
-                }}"#
-            );
-            let error = build_request_from_json(&request_json)
-                .expect_err("v0.9 wire-only network names must reach migration validation");
-            assert!(
-                error
-                    .message
-                    .contains("no longer accepts legacy network authoring"),
-                "unexpected error for v0.9 {field}: {error}"
-            );
+        for version in ["0.9.0-alpha", "0.10.0-alpha"] {
+            for (field, value) in [
+                ("defaultPolicy", r#""allow""#),
+                ("enforcementMode", r#""capabilities""#),
+            ] {
+                let request_json = format!(
+                    r#"{{
+                        "policy": {{
+                            "version": "{version}",
+                            "network": {{ "{field}": {value} }}
+                        }},
+                        "command": "echo hi"
+                    }}"#
+                );
+                let error = build_request_from_json(&request_json).expect_err(
+                    "wire-only network names must reach registered migration validation",
+                );
+                assert!(
+                    error
+                        .message
+                        .contains("no longer accepts legacy network authoring"),
+                    "unexpected error for {version} {field}: {error}"
+                );
+                assert_eq!(error.code, ErrorCode::MalformedRequest);
+            }
         }
     }
 
@@ -898,6 +805,31 @@ mod tests {
                 "unexpected error for {name:?}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn nested_policy_errors_precede_invalid_environment_variable_names() {
+        let error = build_request_from_json(
+            r#"{
+                "policy": {
+                    "version": "0.9.0-alpha",
+                    "filesystem": {
+                        "unexpected": true
+                    }
+                },
+                "command": "echo hi",
+                "environment": {
+                    "A=B": "value"
+                }
+            }"#,
+        )
+        .expect_err("the invalid policy and environment must fail");
+
+        assert_eq!(error.code, ErrorCode::MalformedRequest);
+        assert_eq!(
+            error.message,
+            "unknown request field `policy.filesystem.unexpected`"
+        );
     }
 
     #[test]

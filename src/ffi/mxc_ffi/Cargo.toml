@@ -13,11 +13,10 @@ name = "mxc_ffi"
 crate-type = ["cdylib", "staticlib", "lib"]
 
 [dependencies]
-mxc-sdk = { workspace = true }
+mxc-sdk = { workspace = true, features = ["ffi-internals"] }
 serde = { workspace = true, features = ["derive"] }
-serde_ignored = "0.1"
+serde_ignored = { workspace = true }
 serde_json = { workspace = true }
-
 
 [features]
 # WSL Container backend (Windows only). Both sidecars resolve beside the loaded
