@@ -1096,6 +1096,7 @@ fn normalize_common_request_ir(
 
     let source_contract = cfg.source_contract;
     let network_enforcement_compatibility = cfg.network_enforcement_compatibility;
+    let default_env_compatibility = cfg.default_env_compatibility;
     let container_id = cfg.container_id.unwrap_or_default();
 
     // Process section: required for one-shot and state-aware exec; optional for
@@ -1684,6 +1685,7 @@ fn normalize_common_request_ir(
     Ok(ExecutionRequest {
         source_contract: Some(source_contract),
         network_enforcement_compatibility,
+        default_env_compatibility,
         container_id,
         env,
         inherit_default_env,

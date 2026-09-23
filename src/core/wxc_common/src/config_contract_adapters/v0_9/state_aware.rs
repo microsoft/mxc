@@ -83,6 +83,7 @@ fn state_aware_common(
         schema: schema.into_option(),
         comment: comment.into_option(),
         source_contract: mxc_config_contract::ContractVersion::V0_9_0Alpha,
+        default_env_compatibility: crate::models::DefaultEnvCompatibility::DefaultBlock,
         network_enforcement_compatibility: crate::models::NetworkEnforcementCompatibility::Strict,
         phase: None,
         test_feature: None,

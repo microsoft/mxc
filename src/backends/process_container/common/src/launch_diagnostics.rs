@@ -508,6 +508,25 @@ mod tests {
         assert!(validate_required_child_env(&ExecutionRequest::default()).is_ok());
     }
 
+    #[test]
+    fn validation_rejects_an_empty_environment_at_every_schema_version() {
+        for compatibility in [
+            wxc_common::models::DefaultEnvCompatibility::LegacyCompatible,
+            wxc_common::models::DefaultEnvCompatibility::DefaultBlock,
+        ] {
+            let request = ExecutionRequest {
+                env: Some(Vec::new()),
+                default_env_compatibility: compatibility,
+                ..Default::default()
+            };
+
+            assert!(
+                validate_required_child_env(&request).is_err(),
+                "an empty caller-owned block omits the required variables ({compatibility:?})"
+            );
+        }
+    }
+
     // -- diagnose_create_process_failure tests --
 
     #[test]

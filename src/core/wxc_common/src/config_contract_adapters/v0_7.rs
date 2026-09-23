@@ -253,6 +253,7 @@ pub(crate) fn into_common_request_ir(
         schema: schema.into_option(),
         comment: comment.into_option(),
         source_contract: mxc_config_contract::ContractVersion::V0_7_0Alpha,
+        default_env_compatibility: crate::models::DefaultEnvCompatibility::LegacyCompatible,
         network_enforcement_compatibility:
             crate::models::NetworkEnforcementCompatibility::LegacyCompatible,
         phase: None,

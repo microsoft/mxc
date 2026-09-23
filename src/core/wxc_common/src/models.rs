@@ -972,6 +972,8 @@ pub struct ExecutionRequest {
     /// Whether backends preserve pre-v0.8 network compatibility behavior or
     /// enforce the current strict posture.
     pub network_enforcement_compatibility: NetworkEnforcementCompatibility,
+    /// Whether backends supply the default `process.env` block.
+    pub default_env_compatibility: DefaultEnvCompatibility,
     /// Externally assigned container identifier.
     pub container_id: String,
     /// Environment variables as "KEY=VALUE" strings (from `process.env`).
@@ -979,26 +981,30 @@ pub struct ExecutionRequest {
     /// Three states, deliberately distinct:
     ///
     /// * `None` — the caller supplied no environment. Backends provide a
-    ///   default: on Windows, the user's profile block.
+    ///   default: on Windows, the user's profile block; on LXC, Bubblewrap, and
+    ///   Seatbelt, `PATH` + `TERM`, plus `HOME` naming the directory the child
+    ///   is started in. Those three omit `HOME` when no working directory
+    ///   resolves, having no private directory to point it at.
     /// * `Some(vec![])` — the caller asked for an *empty* environment. This is
     ///   not the same as `None`, and on the Windows process container it is
-    ///   expected to fail at process creation, because the OS requires certain
-    ///   names to be present (see `REQUIRED_CHILD_ENV_VARS`).
+    ///   rejected before launch, because the OS requires certain names to be
+    ///   present (see `REQUIRED_CHILD_ENV_VARS`).
     /// * `Some(entries)` — the caller's environment, used verbatim. MXC does
-    ///   not add to it; callers that want the profile block or the calling
-    ///   process's variables must merge them in themselves.
+    ///   not add to it; callers that want the default block or the calling
+    ///   process's variables must merge them in themselves, or set
+    ///   [`ExecutionRequest::inherit_default_env`].
     ///
-    /// The distinction is currently honored only by the Windows process
-    /// container. The LXC, Bubblewrap, Seatbelt, and WSLc backends treat `None`
-    /// and `Some(vec![])` alike, as they did before the field became optional.
+    /// The Windows process container honors the distinction at every schema
+    /// version; LXC, Bubblewrap, and Seatbelt honor it from 0.9. Below 0.9 on
+    /// those three, and on IsolationSession and WSLc at every version, `None`
+    /// and `Some(vec![])` are treated alike.
     pub env: Option<Vec<String>>,
 
     /// Layer [`ExecutionRequest::env`] on top of the backend's default
     /// environment instead of replacing it (from `process.inheritDefaultEnv`).
     ///
     /// Only meaningful when `env` is `Some`: with `None` the child already gets
-    /// the default. Only the Windows process container has a non-empty default
-    /// (the user's profile block), so elsewhere this is inert.
+    /// the default. Rejected below schema 0.9 by the config parser.
     pub inherit_default_env: bool,
     pub script_code: String,
     pub working_directory: String,
@@ -1045,6 +1051,25 @@ pub enum NetworkEnforcementCompatibility {
     Strict,
 }
 
+/// Backend `process.env` behavior after exact contract normalization.
+///
+/// Normalized from the contract version rather than read back from
+/// [`ExecutionRequest::source_contract`], which is external-JSON attribution
+/// and is cleared for typed SDK requests. A typed request built against an
+/// exact pre-0.9 contract keeps the pre-0.9 environment behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DefaultEnvCompatibility {
+    /// Preserve behavior required by exact v0.6, v0.7, and v0.8 JSON: the
+    /// caller's entries pass through untouched, and each backend's own
+    /// baseline is the only default.
+    LegacyCompatible,
+    /// Supply the default block introduced by v0.9, which also makes the four
+    /// states of `process.env` distinct.
+    #[default]
+    DefaultBlock,
+}
+
 fn serialize_source_contract<S>(
     value: &Option<mxc_config_contract::ContractVersion>,
     serializer: S,
@@ -1086,6 +1111,28 @@ pub struct ResolvedWorkingDirectory<'a> {
     pub source: WorkingDirectorySource,
 }
 
+/// Normalize `path` to an absolute, lexically clean path inside a sandbox whose
+/// root is `/`.
+///
+/// Backends that start the child with a `chdir` relative to the guest root use
+/// this so the directory the child lands in and the `HOME` naming it cannot
+/// disagree. `.` segments are dropped and `..` pops the previous segment
+/// without escaping the root. Purely lexical: no symlink resolution, and the
+/// path is not probed.
+pub fn sandbox_absolute_path(path: &str) -> String {
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            other => segments.push(other),
+        }
+    }
+    format!("/{}", segments.join("/"))
+}
+
 impl ExecutionRequest {
     /// Exact external contract spelling for diagnostics and telemetry.
     ///
@@ -1097,18 +1144,20 @@ impl ExecutionRequest {
             .unwrap_or_default()
     }
 
+    /// Whether this request's contract supplies the backend default
+    /// environment block, introduced by `0.9.0-alpha`.
+    pub fn supplies_default_env(&self) -> bool {
+        self.default_env_compatibility == DefaultEnvCompatibility::DefaultBlock
+    }
+
     /// The caller's environment entries, with "not supplied" and "supplied but
     /// empty" flattened to the same empty slice.
     ///
-    /// For backends that build the child's environment additively from a
-    /// cleared base — LXC, Bubblewrap, Seatbelt, WSLc — the two cases are
-    /// already indistinguishable in the result, so they use this and keep the
-    /// behavior they had before [`ExecutionRequest::env`] became optional.
-    ///
-    /// The Windows process container must *not* use this: there, `None` means
-    /// "give the child the user's profile block" and `Some(vec![])` means "give
-    /// the child nothing", which are very different outcomes. It matches on
-    /// [`ExecutionRequest::env`] directly.
+    /// Only for backends that have no default environment to distinguish them
+    /// against — IsolationSession and WSLc, plus every backend below schema
+    /// 0.9. A backend with a default block must match on
+    /// [`ExecutionRequest::env`] directly, since `None` means "give the child
+    /// the default" and `Some(vec![])` means "give the child nothing".
     pub fn env_entries(&self) -> &[String] {
         self.env.as_deref().unwrap_or(&[])
     }
@@ -1295,6 +1344,23 @@ impl ScriptResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sandbox_paths_normalize_against_the_root() {
+        for (input, expected) in [
+            ("/workspace", "/workspace"),
+            ("work", "/work"),
+            ("./work", "/work"),
+            ("a/../b", "/b"),
+            ("/x/../y/./z", "/y/z"),
+            ("/a//b/", "/a/b"),
+            ("../../etc", "/etc"),
+            ("", "/"),
+            ("/", "/"),
+        ] {
+            assert_eq!(sandbox_absolute_path(input), expected, "input {input:?}");
+        }
+    }
 
     #[test]
     fn directional_network_defaults_deny() {

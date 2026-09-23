@@ -1,0 +1,10 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
+  "version": "0.9.0-alpha",
+  "containerId": "CLI-bubblewrap-Env-09-no_cwd",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "echo \"PATH=[$PATH]\"; echo \"HOME=[$HOME]\"; echo \"TERM=[$TERM]\"; echo \"LEAK=[$MXC_LEAK_PROBE]\"; echo ENV_PROBE_DONE",
+    "timeout": 20000
+  }
+}

@@ -674,8 +674,9 @@ impl SandboxRequest {
     /// profile block, obtainable only from the OS, so it cannot be assembled by
     /// a caller. Entries in `extra` override same-named defaults.
     ///
-    /// On backends whose default environment is empty (LXC, Bubblewrap,
-    /// Seatbelt, WSLc) this is equivalent to [`Self::set_env`].
+    /// From schema 0.9 LXC, Bubblewrap, and Seatbelt supply `PATH` + `HOME` +
+    /// `TERM`. Below 0.9, and on WSLc at every version, their default is empty
+    /// and this is equivalent to [`Self::set_env`].
     pub fn inherit_default_env<K, V>(
         &mut self,
         extra: impl IntoIterator<Item = (K, V)>,
@@ -886,6 +887,25 @@ mod tests {
             };
             assert_eq!(
                 request.inner.network_enforcement_compatibility, expected,
+                "{version}"
+            );
+
+            // A typed SDK request built against an exact pre-0.9 contract keeps
+            // the pre-0.9 environment behavior even though its source
+            // attribution was cleared above.
+            let expected_env = if matches!(*version, "0.6.0-alpha" | "0.7.0-alpha" | "0.8.0-alpha")
+            {
+                wxc_common::models::DefaultEnvCompatibility::LegacyCompatible
+            } else {
+                wxc_common::models::DefaultEnvCompatibility::DefaultBlock
+            };
+            assert_eq!(
+                request.inner.default_env_compatibility, expected_env,
+                "{version}"
+            );
+            assert_eq!(
+                request.inner.supplies_default_env(),
+                expected_env == wxc_common::models::DefaultEnvCompatibility::DefaultBlock,
                 "{version}"
             );
         }

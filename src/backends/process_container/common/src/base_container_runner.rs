@@ -2364,8 +2364,9 @@ mod tests {
     use process_security_environment_spec::process_security_environment_layout as psec_layout;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use wxc_common::models::{
-        ContainerPolicy, NetworkAction, NetworkCidr, NetworkEnforcementCompatibility, NetworkPeer,
-        NetworkPolicy, NetworkPort, NetworkProtocol, NetworkRule, ProxyConfig,
+        ContainerPolicy, DefaultEnvCompatibility, NetworkAction, NetworkCidr,
+        NetworkEnforcementCompatibility, NetworkPeer, NetworkPolicy, NetworkPort, NetworkProtocol,
+        NetworkRule, ProxyConfig,
     };
     use wxc_common::ui_policy::EffectiveUiRestrictions;
 
@@ -3025,6 +3026,23 @@ mod tests {
             2,
             "an empty block still requires two terminators"
         );
+        assert_eq!(environment, vec![0u16, 0u16]);
+    }
+
+    #[test]
+    fn below_0_9_an_explicitly_empty_env_is_still_empty() {
+        // The Windows contract distinguishes omitted from empty at every schema
+        // version; `default_env_compatibility` gates only the Linux and macOS
+        // default block.
+        let request = ExecutionRequest {
+            env: Some(Vec::new()),
+            default_env_compatibility: DefaultEnvCompatibility::LegacyCompatible,
+            ..Default::default()
+        };
+
+        let environment = build_child_env_block(&request)
+            .expect("environment")
+            .expect("an explicitly empty env must still produce a block");
         assert_eq!(environment, vec![0u16, 0u16]);
     }
 

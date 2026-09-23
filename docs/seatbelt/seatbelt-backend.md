@@ -407,19 +407,59 @@ baseline `/Library` and `/System` allows.
 cleared environment, so host secrets (cloud credentials, API tokens) can't leak
 into untrusted code. This is unconditional.
 
-- `PATH` defaults to `/usr/bin:/bin:/usr/sbin:/sbin`
-- `process.env` is an array of `"KEY=VALUE"` strings, not an object. Each entry
-  adds to or overrides that baseline.
-- Tools installed outside the default `PATH` need both an env entry **and** a
-  `readonlyPaths` grant — e.g. Homebrew on Apple silicon needs
-  `"PATH=/opt/homebrew/bin:…"` plus `readonlyPaths: ["/opt/homebrew"]`.
+`process.env` is an array of `"KEY=VALUE"` strings, not an object.
 
-> ⚠️ **`$HOME` is unset inside the sandbox unless you set it.** Policy paths
-> still accept `~` (expanded against the *host's* `$HOME` when the config is
-> parsed), but a script running inside the sandbox cannot use `~` — the shell
-> expands it to an empty string. `getpwuid()` doesn't help either, since
-> directory services aren't reachable. Pass `"HOME=…"` in `process.env` if your
-> command needs it.
+### Schema 0.9 and later
+
+The child gets a default block of `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`),
+`HOME` (the directory the child is started in), and `TERM`
+(`xterm-256color`). What you supply decides what happens to it:
+
+| `process.env` | `inheritDefaultEnv` | Result |
+| --- | --- | --- |
+| omitted | — | the default block |
+| `[]` | — | nothing else at all |
+| `["FOO=bar"]` | `false` (default) | `FOO` only — **no `PATH`** |
+| `["FOO=bar"]` | `true` | the default block plus `FOO`; a same-named entry wins |
+
+`PWD` sits outside the table: it is always exported, set to the resolved
+working directory. It is applied *after* everything above. It exists so the 
+child's `getcwd()` takes its fast `$PWD` path
+instead of walking parent directories the sandbox may not let it read, which
+would otherwise leak a "getcwd: … Operation not permitted" line onto stderr.
+
+The table is the environment MXC hands the child. macOS `/bin/sh` assigns its
+own `PATH` and `TERM` when it starts without them, so neither reads back as
+empty from inside the workload.
+
+> ⚠️ **`HOME` is only set when a working directory resolves.** It names the
+> directory the child is started in, so when `process.cwd` is omitted *and* no
+> policy path supplies one, `HOME` is left unset — the pre-0.9 behavior.
+> Because `HOME` is the working directory, dotfiles inside it — `.gitconfig`,
+> `.npmrc`, `.curlrc`, `.config/*` — are read as *user-level* tool
+> configuration, not just project input. Pass `"HOME=…"` to point elsewhere
+> when the workspace is untrusted.
+
+> ⚠️ **Behavior change.** Before 0.9 a supplied `process.env` was layered onto
+> the baseline `PATH`. At 0.9 it is used verbatim. Set
+> `"inheritDefaultEnv": true` to get the old behavior, or supply `PATH`
+> yourself.
+
+Tools installed outside the default `PATH` need both an env entry **and** a
+`readonlyPaths` grant — e.g. Homebrew on Apple silicon needs
+`"PATH=/opt/homebrew/bin:…"` plus `readonlyPaths: ["/opt/homebrew"]`.
+
+### Before schema 0.9
+
+`PATH` defaults to `/usr/bin:/bin:/usr/sbin:/sbin` and each `process.env` entry
+adds to or overrides that baseline. `inheritDefaultEnv` is rejected.
+
+> ⚠️ **`$HOME` and `TERM` are unset inside the sandbox unless you set them.**
+> Policy paths still accept `~` (expanded against the *host's* `$HOME` when the
+> config is parsed), but a script running inside the sandbox cannot use `~` —
+> the shell expands it against an unset `HOME`. `getpwuid()` doesn't help
+> either, since directory services aren't reachable. Pass `"HOME=…"` in
+> `process.env` if your command needs it.
 
 ## Working directory
 

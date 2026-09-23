@@ -1,6 +1,7 @@
 {
   "$comment": "Config files under tests/examples or tests/configs that are INTENTIONALLY invalid against the dev schema (e.g. negative parser tests). validate-configs.js requires each listed file to FAIL validation; if one starts passing, the gate fails so this list cannot rot. Paths are repo-root-relative with forward slashes. Keep this empty unless a config is deliberately malformed.",
   "intentionallyInvalid": [
+    "tests/configs/bwrap_env_08_inherit_rejected.json",
     "tests/configs/hyperlight_networking.json",
     "tests/configs/hyperlight_networking_blocked.json",
     "tests/configs/isolation_session_configid_rejected.json",
