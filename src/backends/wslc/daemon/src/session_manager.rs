@@ -581,34 +581,29 @@ impl Worker {
         }
         .map_err(sr_err)?;
 
-        if outcome.terminated_unconfirmed {
-            // The process could not be confirmed dead, so the container may
-            // still be running untrusted work and must not be reused for a
-            // later exec. Quarantine it: best-effort delete, then drop the
-            // handle so a subsequent exec fails with "unknown sandbox".
-            if let Some(sdk) = self.sdk.as_ref() {
-                // SAFETY: `sdk` is valid and `container` is a live handle.
-                let _ = unsafe {
-                    container_steps::delete_daemon_container(sdk, container, &mut self.logger)
-                };
+        match outcome.completion {
+            container_steps::ProcessCompletion::TerminationUnconfirmed => {
+                // The process could not be confirmed dead, so the container may
+                // still be running untrusted work and must not be reused for a
+                // later exec. Quarantine it: best-effort delete, then drop the
+                // handle so a subsequent exec fails with "unknown sandbox".
+                if let Some(sdk) = self.sdk.as_ref() {
+                    // SAFETY: `sdk` is valid and `container` is a live handle.
+                    let _ = unsafe {
+                        container_steps::delete_daemon_container(sdk, container, &mut self.logger)
+                    };
+                }
+                self.containers.remove(&config.sandbox_id);
+                Err(WorkerError::Backend(anyhow::anyhow!(
+                    "exec on sandbox {} could not be confirmed terminated; the container was \
+                     quarantined",
+                    config.sandbox_id
+                )))
             }
-            self.containers.remove(&config.sandbox_id);
-            return Err(WorkerError::Backend(anyhow::anyhow!(
-                "exec on sandbox {} could not be confirmed terminated; the container was \
-                 quarantined",
-                config.sandbox_id
-            )));
+            container_steps::ProcessCompletion::TimedOut => Ok(ExecCompletion::TimedOut),
+            container_steps::ProcessCompletion::Cancelled => Ok(ExecCompletion::Cancelled),
+            container_steps::ProcessCompletion::Exited(code) => Ok(ExecCompletion::Exited(code)),
         }
-
-        if outcome.timed_out {
-            return Ok(ExecCompletion::TimedOut);
-        }
-        if outcome.cancelled {
-            return Ok(ExecCompletion::Cancelled);
-        }
-        // outcome.stdout/stderr were captured (and already streamed live via the
-        // sink); the completion reply carries only the exit code.
-        Ok(ExecCompletion::Exited(outcome.exit_code))
     }
 
     fn stop(&mut self, config: StopConfig) -> Result<(), WorkerError> {
