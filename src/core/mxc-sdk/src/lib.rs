@@ -56,11 +56,17 @@
 //! pipe-based execution. Use the standalone `lxc-exec` binary for LXC.
 //!
 //! WSLC requires the crate's `wslc` build feature, and IsolationSession
-//! requires the `isolation_session` build feature; neither requires a runtime
-//! experimental opt-in. WSLC's container has no stdin (the WSLC SDK exposes no
-//! process-input API), so [`Sandbox::take_stdin`] returns `None` for it.
+//! requires the `isolation_session` build feature. WSLC's container has no
+//! stdin (the WSLC SDK exposes no process-input API), so
+//! [`Sandbox::take_stdin`] returns `None` for it.
 //! IsolationSession is also reachable through the state-aware lifecycle below,
 //! which additionally serves an attached, pseudo-console exec.
+//!
+//! The `wslc` feature stages `wslcsdk.dll` into the cargo profile directory,
+//! and WSLC loads it from beside the module holding this code, so an executable
+//! copied or installed out of that directory needs the DLL brought along. The
+//! crate README covers that and the separate `wxc-wslc-daemon.exe` that the
+//! state-aware lifecycle needs.
 //!
 //! A concrete backend selected on another host returns an [`Error`] with
 //! [`ErrorCode::UnsupportedContainment`].

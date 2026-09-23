@@ -404,8 +404,7 @@ The handle is modelled on [`std::process::Child`]:
 
 Streaming is implemented for **Seatbelt (macOS)**, **Bubblewrap (Linux)**,
 **Windows ProcessContainer (AppContainer + BaseContainer)**, and — behind their
-compile-time features — **WSLC** and **IsolationSession**. Neither WSLC nor
-IsolationSession requires a runtime experimental opt-in.
+compile-time features — **WSLC** and **IsolationSession**.
 
 > **Windows note:** the ProcessContainer backend resolves to a concrete
 > isolation tier by host capability, using the **same** three-tier fallback as
@@ -437,9 +436,9 @@ state-aware sandbox lifecycle from a wire-format request JSON string:
 Both take the same request JSON and differ only in where the workload's stdio
 goes.
 
-Windows Sandbox requires `experimental`; WSLC and IsolationSession do not. The
-parameter is the in-process equivalent of the executor's `--experimental` flag
-and is not a field in the request JSON.
+Windows Sandbox requires `experimental`. The parameter is the in-process
+equivalent of the executor's `--experimental` flag and is not a field in the
+request JSON.
 
 The example needs this crate's `isolation_session` feature and a host running the
 OS-side service.
@@ -511,8 +510,8 @@ Constructing the listed variants is unaffected.
 
 `Containment::IsolationSession` names the isolation-session backend, served by
 `run` and `spawn_sandbox` with piped stdio. It requires the
-`isolation_session` build feature but no runtime experimental opt-in. Its exec has no host
-process id (`Sandbox::id()` is `0`), `kill()` stops the whole session, and
+`isolation_session` build feature. Its exec has no host process id
+(`Sandbox::id()` is `0`), `kill()` stops the whole session, and
 dropping the handle tears the session down synchronously rather than in the
 background. Reach its multi-call lifecycle through
 `run_state_aware_json` plus `exec_attached` or `exec_sandbox`.
@@ -528,13 +527,11 @@ pipe-based execution. Use the standalone `lxc-exec` binary for LXC.
 ### WSLC
 
 WSLC runs a Linux container on a Windows host through the WSLC SDK. It is
-available when this crate is built with its **`wslc` feature**; no runtime
-experimental opt-in is required. Its settings — image, vCPUs, memory, GPU,
-storage path, port forwards — are carried by the [`WslcSection`] inside
-[`Containment::Wslc`] and go through the same production parser as the
-executor, so a rejected value
-(e.g. a port mapping with a zero or duplicated host port) fails at build time,
-not at spawn.
+available when this crate is built with its **`wslc` feature**. Its settings —
+image, vCPUs, memory, GPU, storage path, port forwards — are carried by the
+[`WslcSection`] inside [`Containment::Wslc`] and go through the same production
+parser as the executor, so a rejected value (e.g. a port mapping with a zero or
+duplicated host port) fails at build time, not at spawn.
 
 ```rust,no_run
 use std::error::Error;
@@ -564,6 +561,44 @@ Two WSLC-specific limits follow from the SDK's surface: the container has no
 stdin (`Sandbox::take_stdin()` returns `None`), and its process has no host
 process id (`Sandbox::id()` is `0`) — `kill()` stops the whole container.
 [`platform_support`] reports `"wslc"` only on a host that can actually run it.
+
+#### Native runtime files
+
+WSLC needs native files that cargo places on no search path. They are resolved
+**beside the module holding this crate's code** — your executable for a Rust
+binary, `mxc_ffi.dll` for the C ABI — never from `PATH` or the working
+directory.
+
+| File | Needed by | Built by |
+|------|-----------|----------|
+| `wslcsdk.dll` | every WSLC path, including the host probe | the `wslc` feature, automatically |
+| `wxc-wslc-daemon.exe` | the state-aware lifecycle only | `cargo build -p wxc_wslc_daemon` |
+
+Building with `--features wslc` downloads the pinned `Microsoft.WSL.Containers`
+package from the MxcDependencies Azure Artifacts feed and copies `wslcsdk.dll`
+into the cargo profile directory — `target/<profile>/`, or
+`target/<triple>/<profile>/` under an explicit target. That is where your own
+binary lands, so `cargo run` and anything launched from that directory find it.
+A build that cannot acquire the SDK at all fails rather than producing a binary
+that cannot load the DLL; set `WSLC_SDK_PATH` to a directory holding a
+pre-fetched `wslcsdk.dll` to build offline. See
+[`external/wslc-sdk/README.md`](../../../external/wslc-sdk/README.md) for the
+resolution order, the pinned version, and the feed URL.
+
+`--features wslc` does not pull the daemon into your dependency graph. Build it
+from a checkout of this repository — `cargo build -p wxc_wslc_daemon --release`
+— then copy `wxc-wslc-daemon.exe` beside your binary before driving the
+state-aware lifecycle with `Containment::Wslc`.
+
+**`cargo install` carries neither file.** It copies the executable out of the
+profile directory and leaves the staged DLL behind, so an installed binary
+cannot run WSLC until you copy `wslcsdk.dll` — and the daemon, if you need the
+state-aware lifecycle — into the install directory beside it.
+
+A `wslcsdk.dll` that is missing or fails to load is not a startup error: the
+host probe fails closed, which is why [`platform_support`] drops `"wslc"`, and a
+`Containment::Wslc` run then fails with an error naming the directory it
+searched.
 
 ## Telemetry consent
 

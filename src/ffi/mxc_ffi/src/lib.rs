@@ -36,6 +36,10 @@
 //!   mirror `mxc_sdk::ErrorCode` one-for-one (plus a few FFI-local codes).
 //! - **Per-invocation telemetry opt-in**: request JSON uses
 //!   `policy.telemetry.enabled`.
+//! - **WSLC native co-location** (`wslc` feature, Windows): `wslcsdk.dll`, plus
+//!   `wxc-wslc-daemon.exe` for the state-aware lifecycle, must sit beside this
+//!   library rather than beside the application host, because both resolve
+//!   against the loaded module.
 //! - **Telemetry consent** — [`mxc_telemetry_get_consent`],
 //!   [`mxc_telemetry_get_consent_status`], [`mxc_telemetry_request_consent`],
 //!   [`mxc_telemetry_withdraw_consent`], [`mxc_telemetry_needs_consent_prompt`],
