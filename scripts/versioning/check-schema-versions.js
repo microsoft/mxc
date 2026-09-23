@@ -13,6 +13,7 @@
 //   node scripts/versioning/check-schema-versions.js
 
 const { readFileSync } = require("fs");
+const { execFileSync } = require("child_process");
 const { join } = require("path");
 const {
   loadContractRegistry,
@@ -24,6 +25,23 @@ const errors = [];
 
 function read(...parts) {
   return readFileSync(join(repoRoot, ...parts), "utf8");
+}
+
+try {
+  execFileSync(
+    process.execPath,
+    [join(__dirname, "generate-schema-version-metadata.js"), "--check"],
+    {
+      cwd: repoRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }
+  );
+} catch (error) {
+  const stderr = error?.stderr?.toString().trim();
+  errors.push(
+    "Generated schema-version metadata is stale" + (stderr ? `: ${stderr}` : "")
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -38,20 +56,6 @@ const {
   stateAwareWslc,
   stableLatest,
 } = schemaVer;
-
-// Assert a regex captures exactly `expected` in `text`.
-function expectConst(file, text, label, regex, expected) {
-  const m = regex.exec(text);
-  if (!m) {
-    errors.push(`${file}: could not find ${label} (pattern ${regex})`);
-    return;
-  }
-  if (m[1] !== expected) {
-    errors.push(
-      `${file}: ${label} is "${m[1]}" but canonical schema-version expects "${expected}"`
-    );
-  }
-}
 
 // -- Exact Rust contract registry (mxc_config_contract) --
 let registry = [];
@@ -105,68 +109,6 @@ for (const [label, version, requiredRoot] of [
       `Canonical ${label} version "${version}" has no exact request-root matrix: ${error.message}`
     );
   }
-}
-
-// -- SDK (sandbox.ts, state-aware-types.ts, state-aware-helper.ts) --
-const sandboxTs = read("sdk", "node", "src", "sandbox.ts");
-expectConst(
-  "sandbox.ts",
-  sandboxTs,
-  "SUPPORTED_VERSION",
-  /const SUPPORTED_VERSION\s*=\s*'([^']+)'/,
-  maxSupported
-);
-expectConst(
-  "sandbox.ts",
-  sandboxTs,
-  "MIN_VERSION",
-  /const MIN_VERSION\s*=\s*'([^']+)'/,
-  min
-);
-const stateAwareTs = read("sdk", "node", "src", "state-aware-types.ts");
-expectConst(
-  "state-aware-types.ts",
-  stateAwareTs,
-  "STATE_AWARE_VERSION",
-  /const STATE_AWARE_VERSION\s*=\s*'([^']+)'/,
-  stateAware
-);
-expectConst(
-  "state-aware-types.ts",
-  stateAwareTs,
-  "WINDOWS_SANDBOX_STATE_AWARE_VERSION",
-  /const WINDOWS_SANDBOX_STATE_AWARE_VERSION\s*=\s*'([^']+)'/,
-  stateAwareWindowsSandbox
-);
-expectConst(
-  "state-aware-types.ts",
-  stateAwareTs,
-  "WSLC_STATE_AWARE_VERSION",
-  /const WSLC_STATE_AWARE_VERSION\s*=\s*'([^']+)'/,
-  stateAwareWslc
-);
-// -- C# SDK (sdk/dotnet/Microsoft.Mxc.Sdk/SchemaVersions.cs) --
-const schemaVersionsCs = read(
-  "sdk",
-  "dotnet",
-  "Microsoft.Mxc.Sdk",
-  "SchemaVersions.cs"
-);
-for (const [label, expected] of [
-  ["Minimum", min],
-  ["MaximumSupported", maxSupported],
-  ["LatestStable", stableLatest],
-  ["StateAware", stateAware],
-  ["WindowsSandboxStateAware", stateAwareWindowsSandbox],
-  ["WslcStateAware", stateAwareWslc],
-]) {
-  expectConst(
-    "SchemaVersions.cs",
-    schemaVersionsCs,
-    label,
-    new RegExp(`const string ${label}\\s*=\\s*"([^"]+)"`),
-    expected
-  );
 }
 
 // -- Canonical stable + development descriptors have the expected status --

@@ -125,8 +125,9 @@ public sealed class StateAwareFilesystemPolicy
 public abstract class StateAwareProvisionOptions
 {
     /// <summary>
-    /// Optional explicit state-aware schema version. It must equal the
-    /// registered version for the selected backend.
+    /// Optional explicit state-aware schema version. When omitted, the SDK
+    /// stamps the selected backend's default. Native validation rejects an
+    /// explicit version that does not apply to the backend.
     /// </summary>
     public string? Version { get; set; }
 
@@ -208,8 +209,9 @@ public sealed class ProvisionSandboxOptions : StateAwareProvisionOptions
 public class StateAwarePhaseOptions
 {
     /// <summary>
-    /// Optional explicit state-aware schema version. It must equal the
-    /// registered version inferred from the sandbox id.
+    /// Optional explicit state-aware schema version. When omitted, the SDK
+    /// stamps the default inferred from the sandbox id. Native validation
+    /// rejects an explicit version that does not apply to that backend.
     /// </summary>
     public string? Version { get; set; }
 

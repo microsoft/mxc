@@ -154,6 +154,19 @@ public class MxcLifecycleTests
     }
 
     [Fact]
+    public void StopSandbox_InapplicableVersion_IsRejectedByNative()
+    {
+        var options = new StateAwarePhaseOptions { Version = "0.10.0-alpha" };
+
+        var ex = Assert.Throws<MxcException>(
+            () => MxcLifecycle.StopSandbox(new SandboxId("iso:abc"), options));
+
+        Assert.Equal(ErrorCode.MalformedRequest, ex.Code);
+        Assert.Contains("require schema version '0.9.0-alpha'", ex.Message);
+        Assert.Contains("got '0.10.0-alpha'", ex.Message);
+    }
+
+    [Fact]
     public void StopSandbox_EmptyPrefix_ThrowsMalformedId()
     {
         // ":payload" clears the ctor's null/empty check and has a colon, but an
@@ -753,18 +766,17 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void BuildExecEnvelope_RejectsWrongVersionForWslc()
+    public void BuildExecEnvelope_PreservesExplicitVersionForWslc()
     {
-        var ex = Assert.Throws<ArgumentException>(
-            () => MxcLifecycle.BuildExecEnvelope(
-                new SandboxId("wslc:0123456789abcdef0123456789abcdef"),
-                "echo hi",
-                new WslcExecOptions
-                {
-                    Version = "0.8.0-alpha",
-                }));
+        var root = MxcLifecycle.BuildExecEnvelope(
+            new SandboxId("wslc:0123456789abcdef0123456789abcdef"),
+            "echo hi",
+            new WslcExecOptions
+            {
+                Version = "0.8.0-alpha",
+            });
 
-        Assert.Contains("require schema version '0.9.0-alpha'", ex.Message);
+        Assert.Equal("0.8.0-alpha", root["version"]?.GetValue<string>());
     }
 
     [Fact]
@@ -871,14 +883,13 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void IdPhases_RejectUnregisteredVersionOverrides()
+    public void IdPhases_PreserveExplicitVersionOverrides()
     {
         var options = new StateAwarePhaseOptions { Version = "0.8.0-alpha" };
 
-        var ex = Assert.Throws<ArgumentException>(
-            () => MxcLifecycle.BuildStopEnvelope(new SandboxId("iso:abc"), options));
+        var root = MxcLifecycle.BuildStopEnvelope(new SandboxId("iso:abc"), options);
 
-        Assert.Contains("require schema version '0.9.0-alpha'", ex.Message);
+        Assert.Equal("0.8.0-alpha", root["version"]?.GetValue<string>());
     }
 
     [Fact]
@@ -1013,7 +1024,7 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void BuildStartEnvelope_RejectsUnregisteredVersionWhenTelemetryIsPresent()
+    public void BuildStartEnvelope_PreservesExplicitVersionWhenTelemetryIsPresent()
     {
         var options = new StateAwarePhaseOptions
         {
@@ -1021,10 +1032,9 @@ public class MxcLifecycleTests
             Telemetry = new TelemetrySettings { Enabled = false },
         };
 
-        var ex = Assert.Throws<ArgumentException>(
-            () => MxcLifecycle.BuildStartEnvelope(new SandboxId("iso:abc"), options));
+        var root = MxcLifecycle.BuildStartEnvelope(new SandboxId("iso:abc"), options);
 
-        Assert.Contains("require schema version '0.9.0-alpha'", ex.Message);
+        Assert.Equal("0.8.0-alpha", root["version"]?.GetValue<string>());
     }
 
     [Fact]

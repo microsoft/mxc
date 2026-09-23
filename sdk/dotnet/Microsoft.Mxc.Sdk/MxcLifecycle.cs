@@ -495,19 +495,7 @@ public static class MxcLifecycle
     private static string ResolveVersion(
         StateAwareContainment containment,
         string? requestedVersion)
-    {
-        var expectedVersion = DefaultVersion(containment);
-        if (requestedVersion is not null
-            && !string.Equals(requestedVersion, expectedVersion, StringComparison.Ordinal))
-        {
-            throw new ArgumentException(
-                $"State-aware {containment} requests require schema version "
-                    + $"'{expectedVersion}', got '{requestedVersion}'.",
-                nameof(requestedVersion));
-        }
-
-        return expectedVersion;
-    }
+        => requestedVersion ?? DefaultVersion(containment);
 
     private static void ValidateProvisionOptions(
         StateAwareContainment containment,

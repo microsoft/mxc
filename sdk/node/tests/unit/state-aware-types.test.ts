@@ -90,22 +90,19 @@ describe('IsolationSessionProvisionConfig', () => {
     assert.ok(missing);
   });
 
-  describe('backend-specific state-aware versions', () => {
-    it('accepts only the registered version for each backend config', () => {
+  describe('state-aware versions', () => {
+    it('allows explicit supported versions for native applicability validation', () => {
       const isolation: IsolationSessionStartConfig = { version: '0.9.0-alpha' };
       const windowsSandbox: WindowsSandboxStartConfig = { version: '0.10.0-alpha' };
       const wslc: WslcStartConfig = { version: '0.9.0-alpha' };
 
       const wrongIsolation: IsolationSessionStartConfig = {
-        // @ts-expect-error — IsolationSession is registered at v0.9.
         version: '0.10.0-alpha',
       };
       const wrongWindowsSandbox: WindowsSandboxStartConfig = {
-        // @ts-expect-error — Windows Sandbox is registered at v0.10.
         version: '0.9.0-alpha',
       };
       const wrongWslc: WslcStartConfig = {
-        // @ts-expect-error — WSLC is registered at v0.9.
         version: '0.10.0-alpha',
       };
 

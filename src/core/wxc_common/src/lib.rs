@@ -28,6 +28,7 @@ pub mod policy_identity;
 pub use network_parser::host_is_canonical_loopback;
 pub mod proxy_env;
 pub mod sandbox_process;
+pub mod schema_versions;
 pub mod script_runner;
 pub(crate) mod splice;
 pub mod state_aware_backend;

@@ -451,8 +451,11 @@ reintroduces a rolling whole-request contract.
 
 ## Version Negotiation
 
-Execution resolves a request in three ordered stages. The schema version gates
-only the first; it does **not** influence stages 2 or 3.
+Execution resolves a request in three ordered stages. The declared schema
+version selects the exact contract in stage 1. For state-aware requests, the
+engine additionally checks after backend resolution that this exact contract
+is the registered contract for that backend. Host-capability negotiation
+remains independent of schema version.
 
 ```
 Stage 1 — Exact contract selection (the trust boundary, `config_parser`)
@@ -464,13 +467,19 @@ Stage 1 — Exact contract selection (the trust boundary, `config_parser`)
                           → normalize and validate into ExecutionRequest
   Patch and prerelease spelling are significant; there is no range fallback.
 
-Stage 2 — Containment resolve (independent of schema version)
+Stage 2 — Containment resolve and state-aware applicability
   Map the `containment` intent to a concrete backend:
     omitted / "process" → OS-native process sandbox
                           (Windows: ProcessContainer, Linux: Bubblewrap,
                            macOS: Seatbelt)
     "vm"                → host VM-class backend
     explicit backend    → used verbatim
+
+  State-aware only:
+    compare the exact contract retained by stage 1 with the canonical
+    backend-specific state-aware contract
+      match    → continue
+      mismatch → malformed_request before backend binding or execution
 
 Stage 3 — Host-capability negotiate (runtime probe, no version input)
   For ProcessContainer on Windows:
@@ -481,6 +490,12 @@ Stage 3 — Host-capability negotiate (runtime probe, no version input)
   The chosen tier and any fallback are logged (warnings + "selected isolation
   tier: …"). This capability fallback is the ONLY fallback.
 ```
+
+Typed SDKs stamp the canonical backend-specific default when their caller
+omits `version`, but they do not decide whether a declared version applies to
+the backend. They forward explicit versions unchanged. The common native
+engine performs the authoritative applicability check for SDK and raw JSON
+callers alike.
 
 For the BaseContainer tier, Stage 3 translates the policy into a PSEC
 FlatBuffer, creates a process security environment, and supplies it to

@@ -762,8 +762,11 @@ requires experimental opt-in; IsolationSession and WSLC do not).
 
 `SchemaVersions` exposes the minimum and maximum accepted schema versions, the
 latest stable schema, and the backend-specific state-aware defaults. These
-constants are checked in CI against `schemas/schema-version.json`, alongside
-the Rust parser and TypeScript SDK constants.
+constants are generated from `schemas/schema-version.json` and checked in CI
+alongside the Rust and TypeScript metadata. State-aware calls stamp the
+backend-specific default only when the caller omits `Version`; explicit values
+are forwarded unchanged, and the common native engine authoritatively rejects
+an inapplicable backend/version pair before binding or execution.
 
 ### State-aware lifecycle
 
