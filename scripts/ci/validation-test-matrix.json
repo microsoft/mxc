@@ -51,7 +51,7 @@
         "arm64": {
           "target": "aarch64-pc-windows-msvc",
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
-          "pool": "1es-mxc-e2e-win-prerelease-isolationsesh-arm64",
+          "pool": "1es-mxc-e2e-win-prerelease-isosesh-arm64",
           "backends": [
             "process-t1",
             "isolation-session"
