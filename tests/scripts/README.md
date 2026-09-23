@@ -48,6 +48,7 @@ Linux / macOS (`.sh`):
 | `T3-Workloads.ps1` | Real workloads (pwsh, git, node, python, cmd) on top of the T3 primitives. A missing interpreter is reported as a skip, not a failure | `wxc-exec.exe`; `pwsh` / `git` / `node` / `python` each optional, gating their own cases |
 | `run_telemetry_consent_smoke_test.ps1` | Consent maintenance, presentation, policy, and exit-code smoke tests | Debug `wxc-exec.exe` built with `test-support` |
 | `run_telemetry_etw_smoke_test.ps1` | Isolated consent flow plus public-provider ETW capture | Debug `wxc-exec.exe` built with `test-support`; ETW tooling; Administrator, otherwise the test skips |
+| `run_telemetry_consent_release_test.ps1` | Consent path in a **release** executor, where the debug store/policy overrides are compiled out. Mutates the real consent store and HKLM policy, so it requires `-AcceptRealMachineMutation` and an ephemeral machine | Release `wxc-exec.exe`; Administrator for the HKLM policy section, otherwise that section skips |
 | `run_on_repeat.ps1` | Stress test (loops core tests) | `wxc-exec.exe` |
 
 Each `run_processcontainer_<area>_test.ps1` also runs standalone against a
