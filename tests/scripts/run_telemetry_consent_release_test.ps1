@@ -66,6 +66,9 @@ $consentFile = Join-Path $mxcDir 'telemetry-consent.json'
 # The executor creates this alongside the store and leaves it behind once the
 # lock is released, so cleanup has to account for it too.
 $lockFile = Join-Path $mxcDir 'telemetry-consent.lock'
+# A pending marker means an interrupted withdrawal, which reads fail-closed.
+# Every consent write clears it, so it has to be backed up and restored.
+$withdrawalFile = Join-Path $mxcDir 'telemetry-consent.withdrawal-pending'
 $policyKey = 'HKLM:\SOFTWARE\Policies\Mxc'
 
 $expectedBody = @'
@@ -372,6 +375,12 @@ if ($RequirePolicyCeiling -and -not $isAdmin) {
 $mxcDirPreexisted = Test-Path $mxcDir
 $consentBackup = if (Test-Path $consentFile) { [IO.File]::ReadAllBytes($consentFile) } else { $null }
 $lockFilePreexisted = Test-Path $lockFile
+$withdrawalBackup = $null
+$withdrawalBackupWritten = $null
+if (Test-Path $withdrawalFile) {
+    $withdrawalBackup = [IO.File]::ReadAllBytes($withdrawalFile)
+    $withdrawalBackupWritten = [IO.File]::GetLastWriteTimeUtc($withdrawalFile)
+}
 $policyKeyPreexisted = Test-Path $policyKey
 $policyValueBackup = $null
 if ($policyKeyPreexisted) {
@@ -415,6 +424,16 @@ finally {
 
     if ($mxcDirPreexisted -and -not $lockFilePreexisted) {
         Remove-Item -Force $lockFile -ErrorAction SilentlyContinue
+    }
+
+    if ($null -ne $withdrawalBackup) {
+        New-Item -ItemType Directory -Path $mxcDir -Force | Out-Null
+        [IO.File]::WriteAllBytes($withdrawalFile, $withdrawalBackup)
+        # The marker goes stale on mtime, so let it keep aging from where it was.
+        [IO.File]::SetLastWriteTimeUtc($withdrawalFile, $withdrawalBackupWritten)
+    }
+    elseif ($mxcDirPreexisted) {
+        Remove-Item -Force $withdrawalFile -ErrorAction SilentlyContinue
     }
 
     if ($isAdmin) {
