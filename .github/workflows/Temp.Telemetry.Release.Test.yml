@@ -60,4 +60,5 @@ jobs:
         run: |
           tests\scripts\run_telemetry_consent_release_test.ps1 `
             -BinDir src\target\${{ matrix.target }}\release `
-            -AcceptRealMachineMutation
+            -AcceptRealMachineMutation `
+            -RequirePolicyCeiling

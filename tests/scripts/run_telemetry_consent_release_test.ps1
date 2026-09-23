@@ -25,12 +25,18 @@
 .PARAMETER AcceptRealMachineMutation
     Required acknowledgement. There is deliberately no CI auto-detection:
     self-hosted runners also set GITHUB_ACTIONS, and those machines persist.
+
+.PARAMETER RequirePolicyCeiling
+    Fails instead of skipping when the session is not elevated. CI passes this
+    so a runner that stops being elevated surfaces as a failure rather than
+    silently dropping the only coverage of the real HKLM policy key.
 #>
 
 [CmdletBinding()]
 param(
     [string]$BinDir,
-    [switch]$AcceptRealMachineMutation
+    [switch]$AcceptRealMachineMutation,
+    [switch]$RequirePolicyCeiling
 )
 
 $ErrorActionPreference = 'Stop'
@@ -356,6 +362,9 @@ function Test-PolicyCeiling {
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
 $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if ($RequirePolicyCeiling -and -not $isAdmin) {
+    throw 'HKLM policy ceiling coverage was required but this session is not elevated.'
+}
 
 $mxcDirPreexisted = Test-Path $mxcDir
 $consentBackup = if (Test-Path $consentFile) { [IO.File]::ReadAllBytes($consentFile) } else { $null }
