@@ -895,14 +895,10 @@ pseudo-console and forwards stdin, so an interactive shell renders and resizes
 normally; the workload owns the console for the call's duration, including
 `Ctrl-C`, and stderr is merged into the pseudo-console's single output stream.
 Windows Sandbox and WSLC relay output but do not provide interactive stdin on
-this path. WSLC supports this attached form, but a daemon-enforced timeout
-surfaces as `ErrorCode.BackendError` because the attached relay cannot return a
-typed timeout result; use a streaming form when `TimedOut` must remain
-distinct. The API refuses with
-`ErrorCode.MalformedRequest` when this process's stdout and stdin are not both
-terminals, and when another attached exec is already running — one runs at a
-time per process. Any console state changed for IsolationSession is restored on
-return.
+this path. The API refuses with `ErrorCode.MalformedRequest` when this process's
+stdout and stdin are not both terminals, and when another attached exec is
+already running — one runs at a time per process. Any console state changed for
+IsolationSession is restored on return.
 
 `ProvisionResult.MetadataJson` carries backend-typed provision metadata, such as
 the per-instance agent user identity. IsolationSession metadata is also
