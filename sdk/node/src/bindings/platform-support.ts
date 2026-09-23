@@ -17,7 +17,8 @@ function isNonNullPointer(value: unknown): boolean {
   return value !== null && value !== undefined && value !== 0 && value !== 0n;
 }
 
-function readOwnedJson(
+/** @internal Exported for native ownership regression tests. */
+export function _readOwnedJson(
   call: OwnedStringFunction,
   stringFree: StringFreeFunction,
   operation: string,
@@ -44,7 +45,7 @@ function readNativeOwnedJson(exportName: string): string {
   try {
     const readJson = native.handle.func(exportName, 'void *', []) as OwnedStringFunction;
     const stringFree = native.handle.func('mxc_string_free', 'void', ['char *']) as StringFreeFunction;
-    return readOwnedJson(readJson, stringFree, exportName);
+    return _readOwnedJson(readJson, stringFree, exportName);
   } finally {
     native.handle.unload();
   }
@@ -56,12 +57,4 @@ export function readPlatformSupportJson(): string {
 
 export function readAvailableBackendsJson(): string {
   return readNativeOwnedJson('mxc_available_backends_json');
-}
-
-/** @internal Reads both discovery surfaces for deterministic tests. */
-export function readPlatformSupportSnapshotJson(): PlatformSupportSnapshotJson {
-  return {
-    platformSupportJson: readPlatformSupportJson(),
-    availableBackendsJson: readAvailableBackendsJson(),
-  };
 }

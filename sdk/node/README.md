@@ -162,7 +162,9 @@ this host and the backends it can launch. `getAvailableBackends()` separately
 reports every host-capability backend detected by the native probe, including
 backends that this SDK surface cannot necessarily launch. It also returns each
 backend's effective isolation tier, optional capabilities, and capability
-warnings.
+warnings. `getAvailableBackends()` is not cached and throws if the native probe
+cannot be loaded or returns malformed data; call it during discovery rather
+than in a hot loop.
 
 When the native platform probe can determine it, `getPlatformSupport()` also
 reports `uiCapabilities`: a platform-neutral view of which UI restrictions the
@@ -184,6 +186,11 @@ if (network.proxyEnforcement !== 'supported') {
 ```
 
 It is reported **fail closed**: if the probe cannot run, the result is `'unsupported'` with the reason in `warnings`, never absent. The check is advisory — the runner still verifies the dependencies at launch, since the probe runs in a different process at an earlier time. See [the Bubblewrap backend guide](../../docs/bwrap-support/bubblewrap-backend.md#checking-host-support-before-you-run).
+
+`getPlatformSupport()` is cached for the module lifetime, so its
+`bubblewrapNetwork` field can become stale if host networking dependencies
+change. Sandbox launch always rechecks those dependencies before enforcing the
+policy.
 
 ---
 
@@ -556,7 +563,7 @@ granting file content reads. It requires a BaseContainer host with PSEC 1.1
 
 | Error | Cause | Fix |
 | --- | --- | --- |
-| `MXC is not supported on this platform` | `getPlatformSupport()` returned `isSupported: false`. On Linux, neither LXC nor a usable Bubblewrap 0.5.0+ installation is available. On macOS, the Seatbelt platform probe could not find `/usr/bin/sandbox-exec`. | Inspect `support.reason`. On Linux, also inspect `support.unavailableReasons` and install LXC or Bubblewrap 0.5.0+. On macOS, verify that `/usr/bin/sandbox-exec` exists; its absence indicates an incomplete or unsupported macOS installation. |
+| `MXC is not supported on this platform` | `getPlatformSupport()` returned `isSupported: false`. On Linux, the in-process SDK could not use Bubblewrap; host-only backends such as LXC are reported separately by `getAvailableBackends()`. On macOS, the native Seatbelt probe did not report SDK support. | Inspect `support.reason`. On Linux, inspect `support.unavailableReasons` for Bubblewrap details and call `getAvailableBackends()` to discover host-only alternatives. |
 | `wxc-exec.exe not found` / `lxc-exec not found` | The SDK couldn't locate the native binary. | Set `MXC_BIN_DIR=<dir>` so `<dir>/<arch>/wxc-exec.exe` (or `lxc-exec`) exists, or pass `options.executablePath` explicitly. |
 | `Invalid containment value '<x>'` | `containment` field doesn't match the parser's accepted values. | Use one of the abstract intents (`process`, `vm`, `microvm`) or a concrete backend listed in [Choosing a Backend](#choosing-a-backend). |
 | `'<x>' containment requires experimental mode` | A `windows_sandbox` / `microvm` / `hyperlight` backend was selected without the flag. | Pass `{ experimental: true }` in `SandboxSpawnOptions`. |

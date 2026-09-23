@@ -253,6 +253,7 @@ describe('lxc-exec --available-backends contract', {
       return;
     }
     const capabilities = (bubblewrap.capabilities ?? []) as string[];
+    const warnings = (bubblewrap.warnings ?? []) as string[];
     const cliSupportsProxyEnforcement = capabilities.includes('proxyEnforcement');
 
     // Drive the real parser with the bytes this CLI just produced. Injecting
@@ -276,6 +277,14 @@ describe('lxc-exec --available-backends contract', {
         platformSupportJson: JSON.stringify({
           isSupported: true,
           availableMethods: ['bubblewrap'],
+          bubblewrapNetwork: {
+            proxyEnforcement: cliSupportsProxyEnforcement ? 'supported' : 'unsupported',
+            warnings: cliSupportsProxyEnforcement
+              ? []
+              : warnings.length > 0
+                ? warnings
+                : ['proxy-only egress is not supported on this host'],
+          },
         }),
         availableBackendsJson: stdout,
       }));
