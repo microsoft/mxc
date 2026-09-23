@@ -24,7 +24,8 @@
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
           "pool": "1es-mxc-windows-prerelease-t1-arm64",
           "backends": [
-            "process-t1"
+            "process-t1",
+            "isolation-session"
           ]
         }
       }
@@ -50,12 +51,10 @@
         "arm64": {
           "target": "aarch64-pc-windows-msvc",
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
-          "pool": "",
+          "pool": "1es-mxc-e2e-win-prerelease-isolationsesh-arm64",
           "backends": [
             "process-t1",
-            "isolation-session",
-            "wslc",
-            "windows-sandbox"
+            "isolation-session"
           ]
         }
       }
@@ -81,7 +80,8 @@
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
           "pool": "1es-mxc-e2e-windows-25h2-pro-arm64",
           "backends": [
-            "process-t1"
+            "process-t1",
+            "isolation-session"
           ]
         }
       }
@@ -107,7 +107,8 @@
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
           "pool": "1es-mxc-e2e-windows-24h2-pro-arm64",
           "backends": [
-            "process-t1"
+            "process-t1",
+            "isolation-session"
           ]
         }
       }

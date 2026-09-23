@@ -87,7 +87,7 @@ uploaded either way — see [Log collection](#log-collection).
 ### `platforms`
 
 Declares an OS image and, per architecture, the build it consumes, the host pool
-it runs on, and **which backends that platform is capable of running**. This is
+it runs on, and **which backends that platform is capable of running in CI**. This is
 a capability declaration, not a schedule.
 
 | Field | Meaning |
@@ -104,21 +104,21 @@ a capability declaration, not a schedule.
 
 Current platforms:
 
-| Platform id | Family | x64 pool | arm64 pool | Declared backends (x64) |
-|-------------|--------|----------|------------|--------------------------|
-| `windows-prerelease-process-container` | windows | `1es-mxc-windows-prerelease-t1-x64` | `1es-mxc-windows-prerelease-t1-arm64` | process-t1, isolation-session, wslc, windows-sandbox, microvm |
-| `windows-prerelease-isolation-session` | windows | `1es-mxc-e2e-win-prerelease-isolationsesh-x64` | *(dormant)* | same as above |
-| `windows-25h2` | windows | `1es-mxc-e2e-windows-25h2-pro-x64` | `1es-mxc-e2e-windows-25h2-pro-arm64` | same as above |
-| `windows-24h2` | windows | `1es-mxc-e2e-windows-24h2-pro-x64` | `1es-mxc-e2e-windows-25h2-pro-arm64` | same as above |
-| `windows-23h2` | windows | `1es-mxc-e2e-windows-23h2-enterprise-x64` | *(dormant)* | process-t3, wslc, windows-sandbox, microvm |
-| `ubuntu-26.04` | linux | `1es-mxc-e2e-ubuntu-26.04-x64` | *(dormant)* | bubblewrap, lxc |
-| `ubuntu-24.04` | linux | `1es-mxc-e2e-ubuntu-24.04-x64` | *(dormant)* | bubblewrap, microvm, lxc |
-| `rhel-10` | linux | `1es-mxc-e2e-rhel-10-x64` | *(dormant)* | bubblewrap, lxc |
-| `debian-13` | linux | `1es-mxc-e2e-debian-13-x64` | *(dormant)* | bubblewrap, lxc |
-| `macos-26` | macos | — | runner `macos-26` | seatbelt |
-| `macos-15` | macos | — | runner `macos-15` | seatbelt |
+| Platform id | Family | x64 pool | arm64 pool | Declared backends (x64) | Declared backends (arm64) |
+|-------------|--------|----------|------------|--------------------------|------------|
+| `windows-prerelease-process-container` | windows | `1es-mxc-windows-prerelease-t1-x64` | `1es-mxc-windows-prerelease-t1-arm64` | process-t1, isolation-session, wslc, windows-sandbox, microvm | process-t1, isolation-session |
+| `windows-prerelease-isolation-session` | windows | `1es-mxc-e2e-win-prerelease-isolationsesh-x64` | `1es-mxc-e2e-win-prerelease-isolationsesh-arm64` | same as above | same as above |
+| `windows-25h2` | windows | `1es-mxc-e2e-windows-25h2-pro-x64` | `1es-mxc-e2e-windows-25h2-pro-arm64` | same as above | same as above |
+| `windows-24h2` | windows | `1es-mxc-e2e-windows-24h2-pro-x64` | `1es-mxc-e2e-windows-25h2-pro-arm64` | same as above | same as above |
+| `windows-23h2` | windows | `1es-mxc-e2e-windows-23h2-enterprise-x64` | *(dormant)* | process-t3, wslc, windows-sandbox, microvm | — |
+| `ubuntu-26.04` | linux | `1es-mxc-e2e-ubuntu-26.04-x64` | *(dormant)* | bubblewrap, lxc | — |
+| `ubuntu-24.04` | linux | `1es-mxc-e2e-ubuntu-24.04-x64` | *(dormant)* | bubblewrap, microvm, lxc | — |
+| `rhel-10` | linux | `1es-mxc-e2e-rhel-10-x64` | *(dormant)* | bubblewrap, lxc | — |
+| `debian-13` | linux | `1es-mxc-e2e-debian-13-x64` | *(dormant)* | bubblewrap, lxc | — |
+| `macos-26` | macos | — | runner `macos-26` | — | seatbelt |
+| `macos-15` | macos | — | runner `macos-15` | — | seatbelt |
 
-ARM64 is declared throughout but mostly dormant: no Azure VM SKU offers nested
+ARM64 is declared throughout but dormant wherever CI cannot run it: no Azure VM SKU offers nested
 virtualization on ARM CPUs yet, so only backends that don't require virtualization are supported. macOS is ARM64-only.
 
 ### Backend ids
@@ -185,11 +185,6 @@ backend **and** has a non-empty pool.
 | `weekly` | scheduled Sunday | empty |
 | `pr` | *(nothing — `Build.yml` does not call the matrix job)* | empty; reserved for a potential future PR-time subset |
 | `enabled` | *(nothing — resolvable locally only)* | reserved for testing this infrastructure and rapid iteration |
-
-Resolved `nightly` today = **19 jobs**: 9 Windows (prerelease/25H2/24H2 × process-t1 + wslc;
-prerelease × isolation-session; 23H2 × process-t3 + wslc),
-8 Linux (each of the four distros × bubblewrap + lxc) and 2 macOS
-(macOS 26 and macOS 15 × seatbelt).
 
 ### `backendDelayedStart`
 
