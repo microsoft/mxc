@@ -594,7 +594,7 @@ getUserProfilePolicy()                  → FilesystemPolicyResult
 getTemporaryFilesPolicy(env?)           → FilesystemPolicyResult
 
 // Telemetry consent (Windows-only; see Telemetry Consent section below)
-queryTelemetryConsentAsync()      → Promise<{ storedState, effectiveState, needsPrompt, policy, error? }>
+queryTelemetryConsentAsync()      → Promise<{ state, storedState, effectiveState, needsPrompt, policy, error? }>
 requestTelemetryConsent(presenter, locale?) → Promise<TelemetryConsentOutcome>
 withdrawTelemetryConsentAsync()   → Promise<TelemetryConsentOutcome>
 
@@ -671,9 +671,9 @@ telemetry remains off. On non-Windows hosts requests and withdrawals return
 
 `queryTelemetryConsentAsync()` fails closed to `'undetermined'` rather than
 `'granted'`. Its `error` field is present when the native query fails or
-returns an invalid response. A valid native fail-closed response can return
-`'undetermined'` or a blocked policy without `error`; native diagnostics are
-written to the process's standard error stream:
+returns an invalid response, and the SDK writes a one-time diagnostic to the
+process's standard error stream. A valid native fail-closed response can return
+`'undetermined'` or a blocked policy without `error` or diagnostic output:
 
 ```typescript
 const { effectiveState, storedState, needsPrompt, policy, error } =

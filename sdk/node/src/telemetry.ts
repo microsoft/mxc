@@ -9,6 +9,7 @@ import {
   withdrawTelemetryConsentJsonAsync,
 } from './bindings/telemetry.js';
 import { runTelemetryConsentRequestAsync } from './bindings/telemetry-request-worker.js';
+import { MxcError } from './errors.js';
 
 const TELEMETRY_CONSENT_STATES = ['granted', 'denied', 'undetermined', 'not-applicable'] as const;
 const TELEMETRY_POLICY_STATES = ['unrestricted', 'allowed', 'blocked', 'not-applicable'] as const;
@@ -373,6 +374,9 @@ export async function withdrawTelemetryConsentAsync(): Promise<TelemetryConsentO
     const json = await withdrawTelemetryConsentJsonAsync();
     return parseConsentOutcome(json, 'withdraw');
   } catch (error) {
+    if (error instanceof MxcError) {
+      throw error;
+    }
     throw new Error(
       `failed to withdraw telemetry consent: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error instanceof Error ? error : undefined },

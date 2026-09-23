@@ -21,6 +21,7 @@ export interface BindingTelemetryWorkerLike {
   on(event: 'message', listener: (message: TelemetryRequestWorkerMessage) => void): this;
   on(event: 'error', listener: (error: Error) => void): this;
   on(event: 'exit', listener: (code: number) => void): this;
+  unref(): void;
   terminate(): void;
 }
 
@@ -107,9 +108,18 @@ export function runTelemetryConsentRequestAsync(
       if (settled || deadline !== undefined) {
         return;
       }
+      if (deadlineRemainingMs <= 0) {
+        finish(() => {
+          worker.unref();
+          worker.terminate();
+          reject(new Error('telemetry consent request timed out'));
+        });
+        return;
+      }
       deadlineStartedAt = Date.now();
       deadline = setTimeout(() => {
         finish(() => {
+          worker.unref();
           worker.terminate();
           reject(new Error('telemetry consent request timed out'));
         });
@@ -125,18 +135,18 @@ export function runTelemetryConsentRequestAsync(
         pauseDeadline();
         presenterAbort = new AbortController();
         void (async () => {
+          let code = TELEMETRY_CONSENT_PRESENTER_ERROR;
           try {
-            const code = await presenter(message.promptJson, presenterAbort.signal);
+            code = await presenter(message.promptJson, presenterAbort.signal);
             if (!Number.isSafeInteger(code)) {
               throw new Error(`consent presenter returned invalid decision '${String(code)}'`);
             }
-            writeDecision(code);
           } catch (error) {
             presenterError = serializeUnknownError(error);
-            writeDecision(TELEMETRY_CONSENT_PRESENTER_ERROR);
-          } finally {
-            armDeadline();
+            code = TELEMETRY_CONSENT_PRESENTER_ERROR;
           }
+          armDeadline();
+          writeDecision(code);
         })();
         return;
       }

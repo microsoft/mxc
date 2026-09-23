@@ -19,6 +19,7 @@ import {
 
 class FakeWorker extends EventEmitter implements BindingTelemetryWorkerLike {
   terminated = false;
+  unreferenced = false;
 
   reply(message: TelemetryRequestWorkerMessage): void {
     queueMicrotask(() => this.emit('message', message));
@@ -30,6 +31,10 @@ class FakeWorker extends EventEmitter implements BindingTelemetryWorkerLike {
 
   exit(code: number): void {
     queueMicrotask(() => this.emit('exit', code));
+  }
+
+  unref(): void {
+    this.unreferenced = true;
   }
 
   terminate(): void {
@@ -193,6 +198,7 @@ describe('telemetry consent request worker', () => {
 
     await assert.rejects(promise, /timed out/);
     assert.strictEqual(worker.terminated, true);
+    assert.strictEqual(worker.unreferenced, true);
   });
 
   it('pauses the native deadline while the presenter is deciding', async () => {
@@ -220,5 +226,29 @@ describe('telemetry consent request worker', () => {
     worker.reply({ kind: 'payload', payload: '{"result":"granted"}' });
 
     assert.strictEqual(await promise, '{"result":"granted"}');
+  });
+
+  it('fails closed before committing a decision after the deadline is exhausted', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'] });
+    const promise = runTelemetryConsentRequestAsync(
+      undefined,
+      () => TELEMETRY_CONSENT_DECISION_YES,
+      100,
+    );
+    const rejection = assert.rejects(promise, /timed out/);
+    await waitFor(() => workerData !== undefined);
+
+    t.mock.timers.tick(100);
+    worker.reply({
+      kind: 'present',
+      promptJson: '{"resourceVersion":1,"locale":"en-US","title":{"id":"title","text":"Help improve MXC"},"body":{"id":"body","text":"body"},"affirmativeLabel":{"id":"yes","text":"Yes"},"negativeLabel":{"id":"no","text":"No"},"learnMoreLabel":{"id":"learn","text":"Learn more"},"learnMoreUrl":"https://example.microsoft.com/privacy"}',
+    });
+
+    const decision = new Int32Array(workerData!.decisionShared);
+    await waitFor(() => Atomics.load(decision, 0) === 1);
+    assert.strictEqual(Atomics.load(decision, 1), TELEMETRY_CONSENT_PRESENTER_ERROR);
+    await rejection;
+    assert.strictEqual(worker.terminated, true);
+    assert.strictEqual(worker.unreferenced, true);
   });
 });

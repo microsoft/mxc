@@ -25,11 +25,14 @@ import {
   type TelemetryRequestWorkerData,
   type TelemetryRequestWorkerMessage,
 } from '../../src/bindings/telemetry-request-worker.js';
+import { MxcError } from '../../src/errors.js';
 
 class FakeWorker extends EventEmitter implements BindingTelemetryWorkerLike {
   reply(message: TelemetryRequestWorkerMessage): void {
     queueMicrotask(() => this.emit('message', message));
   }
+
+  unref(): void {}
 
   terminate(): void {}
 }
@@ -226,6 +229,24 @@ describe('telemetry consent', () => {
         '{"result":"status","storedState":"denied","effectiveState":"denied","reason":null,"policy":"blocked"}',
     });
     await assert.rejects(withdrawTelemetryConsentAsync(), /unrecognised telemetry consent output/);
+  });
+
+  it('preserves typed native withdrawal failures', async () => {
+    const nativeError = new MxcError({
+      code: 'backend_error',
+      message: 'consent store write failed',
+      details: { ffiStatus: 103 },
+    });
+    setAsyncImplementation({
+      withdrawConsentJson: async () => {
+        throw nativeError;
+      },
+    });
+
+    await assert.rejects(
+      withdrawTelemetryConsentAsync(),
+      (error) => error === nativeError,
+    );
   });
 });
 
