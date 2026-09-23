@@ -1149,6 +1149,48 @@ mod tests {
                 );
             }
         }
+
+        #[test]
+        fn a_repeated_caller_key_collapses_to_the_last_value() {
+            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+            r.env = Some(vec!["FOO=first".into(), "FOO=second".into()]);
+            r.inherit_default_env = true;
+            let entries = resolved_env(&r);
+
+            assert_eq!(value(&entries, "FOO"), Some("second"));
+            assert_eq!(
+                entries.iter().filter(|kv| kv.starts_with("FOO=")).count(),
+                1
+            );
+        }
+
+        #[test]
+        fn an_empty_caller_value_still_replaces_the_default() {
+            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+            r.env = Some(vec!["PATH=".into()]);
+            r.inherit_default_env = true;
+            let entries = resolved_env(&r);
+
+            assert_eq!(value(&entries, "PATH"), Some(""));
+            assert_eq!(
+                entries.iter().filter(|kv| kv.starts_with("PATH=")).count(),
+                1
+            );
+        }
+
+        #[test]
+        fn a_caller_entry_without_a_value_is_dropped_by_the_merge() {
+            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+            r.env = Some(vec!["FEATURE_FLAG".into(), "FOO=bar".into()]);
+
+            // Verbatim: carried through, dropped when `lxc-attach` args build.
+            assert!(resolved_env(&r).contains(&"FEATURE_FLAG".to_string()));
+
+            r.inherit_default_env = true;
+            let inherited = resolved_env(&r);
+            assert!(!inherited.iter().any(|kv| kv.starts_with("FEATURE_FLAG")));
+            assert_eq!(value(&inherited, "FOO"), Some("bar"));
+        }
     }
 
     #[test]

@@ -42,7 +42,7 @@ use wxc_common::validator::{
     validate_common, validate_network_policy_support, NetworkPolicySupport,
 };
 
-use crate::default_env::{resolved_env, DEFAULT_SANDBOX_PATH};
+use crate::default_env::{env_pairs, resolved_env, DEFAULT_SANDBOX_PATH};
 use crate::profile_builder::build_profile_with_proxy;
 
 /// Env var keys the cooperative proxy manages. When a proxy is active these
@@ -369,9 +369,7 @@ fn spawn_open(
         let _ = fs::remove_file(&profile_path);
         return Err(error_response(reason));
     }
-    // `HOME` follows the directory the helper actually `cd`s into — the same
-    // absolute form — and only when the request resolved one, so an
-    // unresolved cwd keeps the environment's own writable fallback.
+    // An unresolved cwd starts the child at `/`, which is no one's home.
     let home_dir = resolved_cwd.as_ref().map(|_| cwd.clone());
 
     // 3. Build environment exports for the helper script. When a proxy is
@@ -907,15 +905,13 @@ fn resolve_environment(
     proxy_address: Option<&ProxyAddress>,
     working_directory: Option<&str>,
 ) -> Vec<(String, String)> {
-    let mut pairs = Vec::new();
-    for kv in resolved_env(request, working_directory) {
-        if let Some((key, value)) = kv.split_once('=') {
-            if proxy_address.is_some() && PROXY_ENV_KEYS.contains(&key) {
-                continue;
-            }
-            pairs.push((key.to_string(), value.to_string()));
-        }
-    }
+    let resolved = resolved_env(request, working_directory);
+    let strip_caller_proxy = proxy_address.is_some();
+    let mut pairs: Vec<(String, String)> = env_pairs(&resolved)
+        .into_iter()
+        .filter(|(key, _)| !strip_caller_proxy || !PROXY_ENV_KEYS.contains(key))
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
     if let Some(addr) = proxy_address {
         let url = addr.to_url();
         for key in PROXY_INJECT_KEYS {

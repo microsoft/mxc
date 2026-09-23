@@ -749,6 +749,7 @@ pub(crate) fn build_args_classified_with_mode(
     // request so the sandbox has a minimal, predictable environment.
     args.push("--clearenv".into());
     for env_str in resolved_env(request) {
+        // An entry with no `=` names no variable, so it is dropped here too.
         if let Some((key, value)) = env_str.split_once('=') {
             // When the proxy is active, drop any caller-supplied proxy env
             // entries so they cannot override the values we set below.
@@ -893,6 +894,58 @@ mod tests {
             r.env = None;
             r.working_directory = "/workspace".into();
             assert_eq!(value(&resolved_env(&r), "HOME"), Some("/workspace"));
+        }
+
+        #[test]
+
+        fn a_repeated_caller_key_collapses_to_the_last_value() {
+            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+            r.env = Some(vec!["FOO=first".into(), "FOO=second".into()]);
+            r.inherit_default_env = true;
+            let entries = resolved_env(&r);
+
+            assert_eq!(value(&entries, "FOO"), Some("second"));
+            assert_eq!(
+                entries.iter().filter(|kv| kv.starts_with("FOO=")).count(),
+                1
+            );
+        }
+
+        #[test]
+
+        fn an_empty_caller_value_still_replaces_the_default() {
+            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+            r.env = Some(vec!["PATH=".into()]);
+            r.inherit_default_env = true;
+            let entries = resolved_env(&r);
+
+            assert_eq!(value(&entries, "PATH"), Some(""));
+            assert_eq!(
+                entries.iter().filter(|kv| kv.starts_with("PATH=")).count(),
+                1
+            );
+        }
+
+        #[test]
+
+        fn a_caller_entry_without_a_value_reaches_no_setenv() {
+            for inherit in [false, true] {
+                let mut r = base_request();
+                r.default_env_compatibility = DefaultEnvCompatibility::DefaultBlock;
+                r.env = Some(vec!["FEATURE_FLAG".into(), "FOO=bar".into()]);
+                r.inherit_default_env = inherit;
+                let args = build_args(&r, None);
+
+                assert!(
+                    !args.iter().any(|a| a == "FEATURE_FLAG"),
+                    "a valueless entry must not be set (inherit {inherit}): {args:?}"
+                );
+                assert!(
+                    args.windows(3)
+                        .any(|w| w[0] == "--setenv" && w[1] == "FOO" && w[2] == "bar"),
+                    "the well-formed entry must survive (inherit {inherit}): {args:?}"
+                );
+            }
         }
 
         /// A policy grant is not a working directory: bwrap emits `--chdir`

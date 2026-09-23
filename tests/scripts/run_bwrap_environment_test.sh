@@ -56,6 +56,15 @@ expect_absent() {
     pass "$label"
 }
 
+# Nonzero exit, the reason named, and no workload output.
+expect_rejected() {
+    local label="$1" reason="$2" sentinel="$3"
+    [ "$RC" != 0 ] || fail "$label (exit 0, expected nonzero)" "$OUT"
+    grep -qF "$reason" <<<"$OUT" || fail "$label (missing '$reason')" "$OUT"
+    ! grep -qF "$sentinel" <<<"$OUT" || fail "$label (workload ran)" "$OUT"
+    pass "$label"
+}
+
 DEFAULT_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # Exported here rather than set by a config: the guarantee is unconditional, so
@@ -104,5 +113,10 @@ expect_ok "inheritDefaultEnv keeps the default PATH" "PATH=[$DEFAULT_PATH]"
 expect_ok "inheritDefaultEnv keeps the default HOME" "HOME=[/tmp]"
 expect_ok "inheritDefaultEnv adds the caller's variable" "FOO=[bar]"
 expect_ok "a caller entry overrides the same-named default" "TERM=[vt100]"
+
+# inheritDefaultEnv is a 0.9 field, so the 0.8 contract rejects the document.
+run_config bwrap_env_08_inherit_rejected.json
+expect_rejected "sub-0.9 inheritDefaultEnv is rejected" \
+    "unknown field \`inheritDefaultEnv\`" "INHERIT_08_SHOULD_NOT_RUN"
 
 echo "All $PASS_COUNT Bubblewrap environment assertions passed."

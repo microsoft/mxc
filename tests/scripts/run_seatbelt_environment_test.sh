@@ -50,10 +50,16 @@ expect_ok "process.env can supply HOME" "HOME=[/private/tmp]"
 
 run_config "$(render seatbelt_env_09_default_block.json)"
 expect_ok "0.9: an omitted env gets the default PATH" "PATH=[/usr/bin:/bin:/usr/sbin:/sbin]"
-expect_ok "0.9: an omitted env gets HOME" "HOME=[/tmp]"
+expect_ok "0.9: an omitted env gets HOME" "HOME=[/private/tmp]"
 expect_ok "0.9: an omitted env gets TERM" "TERM=[xterm-256color]"
 expect_marker "0.9: a host environment variable does not leak in" "LEAK=[]"
 expect_absent "0.9: the host value itself does not appear" "SEATBELT_HOST_ENV_LEAKED"
+
+# No `process.cwd` and no policy path resolves no directory, so no HOME.
+run_config "$(render seatbelt_env_09_no_cwd.json)"
+expect_ok "0.9: an unresolved working directory leaves HOME unset" "HOME=[]"
+expect_ok "0.9: the rest of the default block still applies" "PATH=[/usr/bin:/bin:/usr/sbin:/sbin]"
+expect_marker "0.9: an unset HOME is not the host's" "LEAK=[]"
 
 run_config "$(render seatbelt_env_09_empty.json)"
 expect_ok "0.9: an empty env runs" "ENV_PROBE_DONE"
@@ -73,7 +79,7 @@ expect_absent "0.9: a supplied PATH is not merged with the default" "PATH=[/usr/
 
 run_config "$(render seatbelt_env_09_inherit.json)"
 expect_ok "0.9: inheritDefaultEnv keeps the default PATH" "PATH=[/usr/bin:/bin:/usr/sbin:/sbin]"
-expect_ok "0.9: inheritDefaultEnv keeps the default HOME" "HOME=[/tmp]"
+expect_ok "0.9: inheritDefaultEnv keeps the default HOME" "HOME=[/private/tmp]"
 expect_ok "0.9: inheritDefaultEnv adds the caller's variable" "FOO=[bar]"
 expect_ok "0.9: a caller entry overrides the same-named default" "TERM=[vt100]"
 
