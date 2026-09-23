@@ -23,6 +23,8 @@
 //! the development contract's narrow phase probe for trailing CLI commands.
 
 mod registry;
+#[cfg(all(test, feature = "schema-gen"))]
+mod schema_test_support;
 mod version;
 
 pub mod dev;

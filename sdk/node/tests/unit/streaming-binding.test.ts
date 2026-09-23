@@ -5,6 +5,7 @@ import assert from 'node:assert';
 import { PassThrough, type Readable, type Writable } from 'node:stream';
 import { describe, it } from 'node:test';
 import {
+  createStateAwareStreamingDriver,
   createStreamingDriver,
   type StreamingNativeFacade,
 } from '../../src/bindings/streaming.js';
@@ -40,10 +41,23 @@ class FakeNative implements StreamingNativeFacade {
   stdinHandle: number | bigint = 11;
   stdoutHandle: number | bigint = 12;
   stderrHandle: number | bigint = 13;
+  stateAwareRequest: string | undefined;
+  stateAwareExperimental: number | undefined;
 
   spawn(_request: string, outHandle: unknown[], _error: unknown): number {
     outHandle[0] = this.handle;
     return this.spawnStatus;
+  }
+
+  stateAwareExec(
+    request: string,
+    experimental: number,
+    outHandle: unknown[],
+    error: unknown,
+  ): number {
+    this.stateAwareRequest = request;
+    this.stateAwareExperimental = experimental;
+    return this.spawn('', outHandle, error);
   }
 
   id(): number {
@@ -172,6 +186,58 @@ class FakeStreams implements NativeStreamFactory {
 }
 
 describe('native streaming binding ownership', () => {
+  it('dispatches state-aware exec through the native entry point', async () => {
+    const native = new FakeNative();
+    const streams = new FakeStreams();
+    const requestJson = '{"phase":"exec","sandboxId":"iso:abc"}';
+
+    const driver = createStateAwareStreamingDriver(
+      requestJson,
+      true,
+      native,
+      streams,
+    );
+
+    assert.strictEqual(native.stateAwareRequest, requestJson);
+    assert.strictEqual(native.stateAwareExperimental, 1);
+    assert.strictEqual(driver.id, 23);
+    assert.deepStrictEqual(streams.writableHandles, [11]);
+    assert.deepStrictEqual(streams.readableHandles, [12, 13]);
+    await driver.free();
+    assert.strictEqual(native.freeCount, 1);
+  });
+
+  it('passes disabled experimental authorization as zero', async () => {
+    const native = new FakeNative();
+    const driver = createStateAwareStreamingDriver(
+      '{"phase":"exec"}',
+      false,
+      native,
+      new FakeStreams(),
+    );
+
+    assert.strictEqual(native.stateAwareExperimental, 0);
+    await driver.free();
+  });
+
+  it('frees native error detail when state-aware exec dispatch fails', () => {
+    const native = new FakeNative();
+    native.spawnStatus = 12;
+
+    assert.throws(
+      () => createStateAwareStreamingDriver(
+        '{"phase":"exec"}',
+        true,
+        native,
+        new FakeStreams(),
+      ),
+      /native runtime failed/,
+    );
+    assert.strictEqual(native.stateAwareExperimental, 1);
+    assert.strictEqual(native.freeErrorCount, 1);
+    assert.strictEqual(native.freeCount, 0);
+  });
+
   it('passes raw Windows handles directly to the stream factory', async () => {
     const native = new FakeNative();
     native.stdinHandle = 0x100000001n;

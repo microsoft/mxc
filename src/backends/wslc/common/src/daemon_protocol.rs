@@ -173,17 +173,33 @@ pub enum DaemonResponse {
 pub enum ErrKind {
     /// The referenced sandbox id is unknown to the daemon.
     NotProvisioned,
+
     /// The sandbox exists but is not in a state that permits the request
     /// (e.g. exec before start).
     NotStarted,
+
     /// Another exec already holds the container's single-flight slot.
     Busy,
+
     /// The container/session is still coming up.
     NotReady,
+
     /// The client speaks a different protocol version than this daemon.
     Protocol,
+
+    /// The host cannot run WSLc at all — the SDK or a WSL component it depends
+    /// on is missing.
+    Unavailable,
+
+    /// The request cannot be honored as written.
+    Rejected,
+
     /// A backend/SDK-level failure while servicing the request.
     Backend,
+
+    /// A kind this build does not recognize, from a daemon newer than it.
+    #[serde(other)]
+    Unknown,
 }
 
 // ---------------------------------------------------------------------------
@@ -367,13 +383,29 @@ mod tests {
             ErrKind::Busy,
             ErrKind::NotReady,
             ErrKind::Protocol,
+            ErrKind::Unavailable,
+            ErrKind::Rejected,
             ErrKind::Backend,
+            ErrKind::Unknown,
         ] {
             roundtrip(DaemonResponse::Err {
                 kind,
                 message: "detail".to_string(),
             });
         }
+    }
+
+    #[test]
+    fn unrecognized_err_kind_decodes_as_unknown() {
+        let wire = r#"{"status":"err","kind":"some_future_kind","message":"detail"}"#;
+        let decoded: DaemonResponse = serde_json::from_str(wire).expect("decode unknown kind");
+        assert_eq!(
+            decoded,
+            DaemonResponse::Err {
+                kind: ErrKind::Unknown,
+                message: "detail".to_string(),
+            }
+        );
     }
 
     #[test]

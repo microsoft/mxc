@@ -129,17 +129,24 @@ A backend id is passed straight through: the matrix job hands it to the host-pre
 script and then to the dispatcher, which has one `switch`/`case` per id. Ids that
 share a suite each keep their own case so they can diverge later without a
 mapping table — `process-t1` and `process-t3` both run
-`WinProcessContainer-Tests.ps1`, and `process-t3` additionally runs
-`T3-Workloads.ps1`. Teaching the Process Container test suite to
-accept an explicit tier (so a T1 host can also be exercised
-at the T3 fallback) is a worthwhile future improvement.
+`run_processcontainer_all_tests.ps1`, and `process-t3` additionally runs
+`T3-Workloads.ps1`.
 
-Before running the suite, `process-t1` asserts the host selects the tier the
-entry was scheduled for: the dispatcher reads `wxc-exec --probe` and fails the
-job unless it reports `base-container`. Tier selection follows from the host's
-Windows build, so without the check a pool that quietly fell back to
-AppContainer would run the suite and report green while proving nothing about
-T1.
+The two ids no longer run an identical command. The suite derives every
+expectation from the tier the host actually selects, which makes it
+self-consistent anywhere — and therefore silently useless on a host that was
+supposed to be T1 and fell back to T3, since it would run the T3 expectations
+and report green. The dispatcher now passes `-RequireTier base-container` for
+`process-t1` and `-RequireTier appcontainer-dacl` for `process-t3`; the suite
+resolves the tier once at startup and aborts on a mismatch instead of scoring
+the run. Tier selection follows from the host's Windows build, so without the
+check a pool that quietly fell back to AppContainer would run the suite and
+report green while proving nothing about T1.
+
+Both ids also get the same host preparation. A T1 host selects BaseContainer for
+most policies but still exercises the AppContainer fallback tiers, and an
+unprepared host fails the launch outright rather than producing a policy result,
+so `process-t1` runs `prepare-system-drive` / `prepare-null-device` too.
 
 `process-t3` runs its two suites back to back and reports them together: a
 failure in the primitives suite does not skip the workloads suite, so one job
@@ -215,8 +222,8 @@ get fixed or wired.
 
 | Backend | Status | Notes |
 |---------|--------|-------|
-| Process T1 | ✅ Good | Windows 24H2+ only. Runs the primitives suite. Remaining failures are genuine MXC bugs or harness limitations. |
-| Process T3 | ✅ Good | Windows 23H2 only. Runs the primitives suite plus `T3-Workloads.ps1` (real programs — pwsh, git, node, python, cmd — on top of the T3 primitives). |
+| Process T1 | ✅ Good | Windows 24H2+ only. Runs the primitives suite, tier-gated to `base-container`. Includes the schema 0.8 directional networking phases (capability matrix, model-3 equivalence, explicit egress rules, host loopback, runtime proxy, reject surface) and the legacy 0.7 network lane. Remaining failures are genuine MXC bugs or harness limitations. |
+| Process T3 | ✅ Good | Windows 23H2 only. Runs the primitives suite tier-gated to `appcontainer-dacl`, plus `T3-Workloads.ps1` (real programs — pwsh, git, node, python, cmd — on top of the T3 primitives). The 0.8 networking phases assert the documented *rejection* behavior here, since AppContainer cannot carry egress rules, proxy peer identity, or host-loopback configuration. |
 | Bubblewrap | ✅ Good | |
 | LXC | ✅ Good | Some networking tests fail on distros other than Ubuntu 24.04; seems to be an issue with MXC. |
 | WSLC | ✅ Good | Might have to retry hung jobs - this is an issue with overzealous agent reclaiming. |

@@ -255,6 +255,7 @@ describe('native sandbox process', () => {
 
     assert.strictEqual(driver.killCount, 1);
     proc.dispose();
+    assert.strictEqual(driver.killCount, 1);
   });
 
   it('rejects wait when lifecycle polling fails', async () => {

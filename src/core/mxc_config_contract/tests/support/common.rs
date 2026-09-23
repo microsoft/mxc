@@ -1,10 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-pub(crate) use mxc_config_contract::published::v0_9_0_alpha::OneShotRequest;
+pub(crate) use crate::OneShotRequest;
 
 pub(crate) fn assert_valid(json: &str) {
-    crate::exact_test_support::assert_valid::<OneShotRequest>(json);
+    crate::exact_test_support::assert_versioned_valid::<OneShotRequest>(
+        json,
+        crate::CONTRACT_VERSION,
+    );
 }
 
 pub(crate) fn assert_invalid(json: &str) {
@@ -28,5 +31,6 @@ pub(crate) fn assert_invalid_cases<'a>(
 }
 
 fn assert_invalid_with_context(json: &str, context: &str) {
-    crate::exact_test_support::assert_invalid::<OneShotRequest>(json, context);
+    let json = crate::exact_test_support::with_contract_version(json, crate::CONTRACT_VERSION);
+    crate::exact_test_support::assert_invalid::<OneShotRequest>(&json, context);
 }

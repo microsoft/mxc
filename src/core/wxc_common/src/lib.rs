@@ -20,6 +20,7 @@ pub mod log_symbols;
 pub mod logger;
 pub mod models;
 pub mod mxc_error;
+pub mod network_blocks;
 mod network_parser;
 pub mod policy_identity;
 pub use network_parser::host_is_canonical_loopback;

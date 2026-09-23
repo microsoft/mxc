@@ -226,7 +226,7 @@ Egress peer and port fields (used in `egress.allow[]` / `egress.deny[]`; not sho
 | Field | Type | Notes |
 |---|---|---|
 | `to[].cidr` | IPv4 / IPv6 CIDR, or 0.0.0.0/0 / ::/0 for any | Single CIDR string (CNI/Kubernetes style), replacing separate address + prefix length. |
-| `to[].except` | list of CIDRs, optional | Exclusions within the peer's CIDR (Kubernetes `ipBlock.except` style). Expressible on Windows process containers (WFP) and the Linux backends (iptables) as additional deny rules; not supported on Seatbelt (no destination filtering). |
+| `to[].except` | list of CIDRs, optional | Exclusions within the peer's CIDR (Kubernetes `ipBlock.except` style). An exclusion narrows the rule that carries it and nothing else: it never states a verdict of its own, so an address it removes is decided by the remaining rules and the direction default. Windows process containers pass the exclusion to the platform (WFP); the Linux backends subtract it from the peer and program the covering blocks that remain, because an `iptables` rule cannot carry an exclusion and a separate rule would leak into later ones. The Linux backends bound the resulting expansion; the GA Scope by Backend section states the limits. Not supported on Seatbelt (no destination filtering). |
 | `ports[].protocol` | tcp / udp / icmp / any | `any` matches at minimum TCP, UDP, and ICMPv4/6; a backend may match more. Enforced on Windows process containers (WFP) and the Linux backends (iptables); not supported on Seatbelt. |
 | `ports[].port` | uint16, optional | Destination port. Omit `ports` to match all ports/protocols. |
 | `ports[].endPort` | uint16, optional | End of a port range (Kubernetes `endPort` style); requires numeric port. Supported on Windows process containers (WFP) and the Linux backends (iptables); not supported on Seatbelt. |
@@ -473,6 +473,12 @@ egress allow-list.
 LXC and Bubblewrap use iptables/nftables on the container network path. Their INPUT policy applies `ingress.default`
 and the host-to-container half of `ingress.hostLoopback`; routing and output policy enforce its container-to-host half.
 Model 2 permits only the proxy endpoint.
+
+Both backends subtract `to[].except` from the peer that carries it and program the covering blocks that remain, so one
+peer can expand into many rules. Two ceilings bound that expansion: a single peer may expand into at most **256 address
+blocks** once its exclusions are removed, and one `egress` policy may lower into at most **65,536 rules** in total,
+counting every destination block in every port each rule names. A policy exceeding either ceiling is rejected with the
+limit it hit; neither is silently truncated, and no partial policy is installed.
 
 > **Implementation status (Bubblewrap).** Egress is enforced from schema 0.8+,
 > but not on the path described above. Unprivileged Bubblewrap has no host-side

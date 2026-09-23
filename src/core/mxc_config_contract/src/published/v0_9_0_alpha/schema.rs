@@ -219,7 +219,7 @@ pub fn published_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{BTreeSet, VecDeque};
+    use crate::schema_test_support::{assert_schema_invariants, SchemaExpectations};
 
     const ROOT_NAMES: &[&str] = &[
         "OneShotRequest",
@@ -231,241 +231,28 @@ mod tests {
         "DeprovisionRequest",
     ];
 
-    fn definitions(schema: &Value) -> &serde_json::Map<String, Value> {
-        schema["definitions"]
-            .as_object()
-            .expect("schema definitions")
-    }
-
-    fn collect_refs(value: &Value, refs: &mut BTreeSet<String>) {
-        match value {
-            Value::Object(object) => {
-                if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
-                    refs.insert(reference.to_string());
-                }
-                for child in object.values() {
-                    collect_refs(child, refs);
-                }
-            }
-            Value::Array(array) => {
-                for child in array {
-                    collect_refs(child, refs);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn resolve_definition<'a>(
-        reference: &str,
-        definitions: &'a serde_json::Map<String, Value>,
-    ) -> &'a Value {
-        let name = reference
-            .strip_prefix("#/definitions/")
-            .expect("local definition reference");
-        definitions.get(name).expect("referenced definition exists")
-    }
-
-    fn assert_marker(
-        root: &Value,
-        field: &str,
-        expected: &str,
-        definitions: &serde_json::Map<String, Value>,
-    ) {
-        let reference = root["properties"][field]["$ref"]
-            .as_str()
-            .expect("marker reference");
-        let marker = resolve_definition(reference, definitions);
-        assert_eq!(marker["enum"], json!([expected]));
-    }
-
     #[test]
-    fn contains_all_seven_concrete_roots() {
-        let schema = published_schema();
-        let definitions = definitions(&schema);
-
-        for name in ROOT_NAMES {
-            assert!(definitions.contains_key(*name), "missing root {name}");
-        }
-    }
-
-    #[test]
-    fn dispatch_uses_phase_and_containment_property_names() {
-        let schema = published_schema();
-        let dispatch = &schema["allOf"][0];
-        let serialized = serde_json::to_string(dispatch).unwrap();
-
-        assert!(serialized.contains("\"phase\""), "{serialized}");
-        assert!(serialized.contains("\"containment\""), "{serialized}");
-        assert!(!serialized.contains("\"property\""), "{serialized}");
-    }
-
-    #[test]
-    fn one_shot_schema_advertises_compatibility_aliases() {
-        let schema = published_schema();
-        let properties = &schema["definitions"]["OneShotRequest"]["properties"];
-
-        assert_eq!(properties["appContainer"], properties["processContainer"]);
-        assert_eq!(properties["macos_sandbox"], properties["seatbelt"]);
-        assert_eq!(
-            schema["definitions"]["OneShotRequest"]["allOf"]
-                .as_array()
-                .expect("alias constraints")
-                .len(),
-            2
-        );
-    }
-
-    #[test]
-    fn generation_is_deterministic() {
-        assert_eq!(published_schema(), published_schema());
-    }
-
-    #[test]
-    fn roots_pin_version_phase_and_containment() {
-        let schema = published_schema();
-        let definitions = definitions(&schema);
-
-        for name in ROOT_NAMES {
-            let root = &definitions[*name];
-            let version_ref = root["properties"]["version"]["$ref"]
-                .as_str()
-                .expect("version reference");
-            let version = resolve_definition(version_ref, definitions);
-            assert_eq!(version["oneOf"][0]["enum"], json!(["0.9.0-alpha"]));
-        }
-
-        let one_shot = &definitions["OneShotRequest"];
-        assert!(one_shot["properties"].get("phase").is_none());
-        assert!(one_shot["required"]
-            .as_array()
-            .expect("one-shot required fields")
-            .contains(&json!("process")));
-
-        let exec = &definitions["ExecRequest"];
-        assert!(exec["required"]
-            .as_array()
-            .expect("exec required fields")
-            .contains(&json!("process")));
-
-        for (root, phase) in [
-            ("IsolationSessionProvisionRequest", "provision"),
-            ("WslcProvisionRequest", "provision"),
-            ("StartRequest", "start"),
-            ("ExecRequest", "exec"),
-            ("StopRequest", "stop"),
-            ("DeprovisionRequest", "deprovision"),
-        ] {
-            assert_marker(&definitions[root], "phase", phase, definitions);
-        }
-        assert_marker(
-            &definitions["IsolationSessionProvisionRequest"],
-            "containment",
-            "isolation_session",
-            definitions,
-        );
-        assert_marker(
-            &definitions["WslcProvisionRequest"],
-            "containment",
-            "wslc",
-            definitions,
-        );
-    }
-
-    #[test]
-    fn every_reachable_object_is_closed() {
-        let schema = published_schema();
-        let definitions = definitions(&schema);
-        let mut pending: VecDeque<&Value> =
-            ROOT_NAMES.iter().map(|name| &definitions[*name]).collect();
-        let mut visited = BTreeSet::new();
-
-        while let Some(value) = pending.pop_front() {
-            if let Value::Object(object) = value {
-                if object.get("type") == Some(&Value::String("object".to_string())) {
-                    assert_eq!(
-                        object.get("additionalProperties"),
-                        Some(&Value::Bool(false)),
-                        "open object schema: {value}"
-                    );
-                }
-
-                if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
-                    if visited.insert(reference.to_string()) {
-                        pending.push_back(resolve_definition(reference, definitions));
-                    }
-                }
-                pending.extend(object.values());
-            } else if let Value::Array(array) = value {
-                pending.extend(array);
-            }
-        }
-    }
-
-    #[test]
-    fn no_legacy_network_property_is_reachable_from_exact_published_request_roots() {
-        let schema = published_schema();
-        let definitions = definitions(&schema);
-        for root in ROOT_NAMES {
-            let mut pending = VecDeque::from([(&definitions[*root], false)]);
-            let mut visited = BTreeSet::new();
-            while let Some((node, network_object)) = pending.pop_front() {
-                let Value::Object(object) = node else {
-                    continue;
-                };
-                if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
-                    if visited.insert((reference, network_object)) {
-                        pending.push_back((
-                            resolve_definition(reference, definitions),
-                            network_object,
-                        ));
-                    }
-                }
-                if let Some(properties) = object.get("properties").and_then(Value::as_object) {
-                    for (name, child) in properties {
-                        assert!(
-                            !network_object
-                                || !matches!(
-                                    name.as_str(),
-                                    "defaultPolicy"
-                                        | "enforcementMode"
-                                        | "allowedHosts"
-                                        | "blockedHosts"
-                                        | "allowLocalNetwork"
-                                        | "proxy"
-                                ),
-                            "{root}: removed network property {name}"
-                        );
-                        pending.push_back((child, name == "network"));
-                    }
-                }
-                for keyword in ["allOf", "anyOf", "oneOf"] {
-                    if let Some(children) = object.get(keyword).and_then(Value::as_array) {
-                        pending.extend(children.iter().map(|child| (child, network_object)));
-                    }
-                }
-                for keyword in ["if", "then", "else", "not", "items", "additionalProperties"] {
-                    if let Some(child) = object.get(keyword) {
-                        pending.push_back((child, network_object));
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn definition_names_and_references_are_consistent() {
-        let schema = published_schema();
-        let definitions = definitions(&schema);
-        let mut references = BTreeSet::new();
-        collect_refs(&schema, &mut references);
-
-        for reference in references {
-            resolve_definition(&reference, definitions);
-        }
-        assert_eq!(
-            definitions.len(),
-            definitions.keys().collect::<BTreeSet<_>>().len()
-        );
+    fn published_schema_satisfies_shared_invariants() {
+        assert_schema_invariants(SchemaExpectations {
+            version: "0.9.0-alpha",
+            schema: published_schema(),
+            regenerated_schema: published_schema(),
+            request_roots: ROOT_NAMES,
+            phase_markers: &[
+                ("IsolationSessionProvisionRequest", "provision"),
+                ("WslcProvisionRequest", "provision"),
+                ("StartRequest", "start"),
+                ("ExecRequest", "exec"),
+                ("StopRequest", "stop"),
+                ("DeprovisionRequest", "deprovision"),
+            ],
+            containment_markers: &[
+                ("IsolationSessionProvisionRequest", "isolation_session"),
+                ("WslcProvisionRequest", "wslc"),
+            ],
+            compatibility_aliases: true,
+            one_shot_required: &["process"],
+            exec_required: &["process"],
+        });
     }
 }

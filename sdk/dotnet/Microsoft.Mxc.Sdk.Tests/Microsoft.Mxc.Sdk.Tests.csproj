@@ -17,7 +17,7 @@
     <!-- Test isolation overrides are compiled only with Rust debug assertions,
          including when the managed tests themselves run in Release. -->
     <MxcTestCargoProfileDir>debug</MxcTestCargoProfileDir>
-    <MxcTestCargoFeatures>test-support</MxcTestCargoFeatures>
+    <MxcTestCargoFeatures>dotnetsdk test-support</MxcTestCargoFeatures>
     <MxcTestCargoFeatures Condition="'$(MxcWithIsolationSession)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">$(MxcTestCargoFeatures) isolation_session</MxcTestCargoFeatures>
     <MxcTestCargoFeatures Condition="'$(MxcWithWslc)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">$(MxcTestCargoFeatures) wslc</MxcTestCargoFeatures>
     <MxcTestNativeFileName Condition="$([MSBuild]::IsOSPlatform('Windows'))">mxc_ffi.dll</MxcTestNativeFileName>

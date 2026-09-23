@@ -50,6 +50,12 @@ export interface StreamingNativeFacade {
     outHandle: Pointer[],
     error: AbiErrorDetail,
   ): number;
+  stateAwareExec(
+    request: string,
+    experimental: number,
+    outHandle: Pointer[],
+    error: AbiErrorDetail,
+  ): number;
   id(handle: Pointer): number;
   takeNativeStdio(handle: Pointer, stdio: NativeStdioHandles): number;
   closeNativePipe(handle: NativeHandle): void;
@@ -112,6 +118,17 @@ function bindStreamingNativeFacade(
       result: 'int32_t',
       parameters: [
         'const char *',
+        koffi.out(koffi.pointer(AbiSandbox, 2)),
+        koffi.out(koffi.pointer(AbiErrorDetailType)),
+      ],
+    }),
+
+    stateAwareExec: bindNativeFunction(handle, {
+      symbol: 'mxc_state_aware_exec',
+      result: 'int32_t',
+      parameters: [
+        'const char *',
+        'int32_t',
         koffi.out(koffi.pointer(AbiSandbox, 2)),
         koffi.out(koffi.pointer(AbiErrorDetailType)),
       ],
@@ -197,6 +214,13 @@ function bindStreamingNativeFacade(
 }
 
 let sharedNative: StreamingNativeFacade | undefined;
+let stateAwareSandboxProcessFactory:
+  | ((
+      requestJson: string,
+      experimental: boolean,
+      timeoutMs?: number,
+    ) => MxcSandboxProcess)
+  | undefined;
 
 function getNative(): StreamingNativeFacade {
   return sharedNative ??= bindStreamingNativeFacade(loadMxcFfi().handle);
@@ -341,14 +365,14 @@ function beginFailedSpawnCleanup(
 }
 
 /** Internal constructor with injectable native and stream dependencies. */
-export function createStreamingDriver(
-  request: RequestSpec,
+function createStreamingDriverFromSpawn(
   native: StreamingNativeFacade,
   factory: NativeStreamFactory,
+  spawn: (outHandle: Pointer[], error: AbiErrorDetail) => number,
 ): NativeLifecycleDriver {
   const outHandle: Pointer[] = [null];
   const error = {} as AbiErrorDetail;
-  const status = native.spawn(JSON.stringify(request), outHandle, error);
+  const status = spawn(outHandle, error);
   if (status !== 0) {
     try {
       throw nativeStatusError(status, error);
@@ -394,6 +418,23 @@ export function createStreamingDriver(
   }
 }
 
+/** Internal constructor with injectable native and stream dependencies. */
+export function createStreamingDriver(
+  request: RequestSpec,
+  native: StreamingNativeFacade,
+  factory: NativeStreamFactory,
+): NativeLifecycleDriver {
+  return createStreamingDriverFromSpawn(
+    native,
+    factory,
+    (outHandle, error) => native.spawn(
+      JSON.stringify(request),
+      outHandle,
+      error,
+    ),
+  );
+}
+
 function ensureSupportedNodeVersion(): void {
   const platform = nodeStreamFactory.platform;
   const requirement = nativeStdioNodeRequirement(platform);
@@ -421,11 +462,71 @@ export function spawnBindingSandboxProcess(
   request: RequestSpec,
 ): MxcSandboxProcess {
   const driver = spawnDriver(request);
+  return createSandboxProcess(driver, request.policy.timeoutMs);
+}
+
+/** Internal state-aware constructor with injectable native dependencies. */
+export function createStateAwareStreamingDriver(
+  requestJson: string,
+  experimental: boolean,
+  native: StreamingNativeFacade,
+  factory: NativeStreamFactory,
+): NativeLifecycleDriver {
+  return createStreamingDriverFromSpawn(
+    native,
+    factory,
+    (outHandle, error) => native.stateAwareExec(
+      requestJson,
+      experimental ? 1 : 0,
+      outHandle,
+      error,
+    ),
+  );
+}
+
+function createSandboxProcess(
+  driver: NativeLifecycleDriver,
+  timeoutMs?: number,
+): MxcSandboxProcess {
   try {
-    return new MxcSandboxProcess(driver, request.policy.timeoutMs);
+    return new MxcSandboxProcess(driver, timeoutMs);
   } catch (error) {
     destroyNativeStreams(driver);
     void driver.free().catch(() => {});
     throw error;
   }
+}
+
+export function _setStateAwareBindingSandboxProcessFactory(
+  factory?: (
+    requestJson: string,
+    experimental: boolean,
+    timeoutMs?: number,
+  ) => MxcSandboxProcess,
+): void {
+  stateAwareSandboxProcessFactory = factory;
+}
+
+export function spawnStateAwareBindingSandboxProcess(
+  requestJson: string,
+  experimental: boolean,
+  timeoutMs?: number,
+): MxcSandboxProcess {
+  if (stateAwareSandboxProcessFactory !== undefined) {
+    return stateAwareSandboxProcessFactory(
+      requestJson,
+      experimental,
+      timeoutMs,
+    );
+  }
+
+  ensureSupportedNodeVersion();
+  const native = getNative();
+  const driver = createStateAwareStreamingDriver(
+    requestJson,
+    experimental,
+    native,
+    nodeStreamFactory,
+  );
+  return createSandboxProcess(driver, timeoutMs);
 }

@@ -41,7 +41,7 @@ use wslc_common::wslc_bindings::{
     WslcContainer, WslcContainerGuard, WslcContainerNetworkingMode, WslcSdk, WslcSessionGuard,
 };
 use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::ScriptResponse;
+use wxc_common::models::{FailurePhase, ScriptResponse};
 
 /// Fixed name of the single WSL2 utility-VM session the daemon owns.
 const SESSION_NAME: &str = "mxc-wslc-daemon";
@@ -55,9 +55,15 @@ fn default_storage_path() -> String {
         .to_string()
 }
 
-/// Map a step helper's `ScriptResponse` error into the daemon's `anyhow` error.
-fn sr_err(resp: ScriptResponse) -> anyhow::Error {
-    anyhow::anyhow!(resp.error_message)
+/// Convert a step helper's `failure_phase` into a typed failure, since the wire
+/// carries only a message and an [`ErrKind`].
+fn sr_err(resp: ScriptResponse) -> WorkerError {
+    let err = anyhow::anyhow!(resp.error_message);
+    match resp.failure_phase {
+        FailurePhase::BackendUnavailable => WorkerError::Unavailable(err),
+        FailurePhase::Rejected => WorkerError::Rejected(err),
+        _ => WorkerError::Backend(err),
+    }
 }
 
 /// A typed worker failure. The control server maps [`WorkerError::kind`] onto
@@ -67,8 +73,16 @@ fn sr_err(resp: ScriptResponse) -> anyhow::Error {
 pub enum WorkerError {
     /// The referenced sandbox id is unknown to the daemon.
     NotProvisioned(String),
+
     /// The sandbox exists but has not been started.
     NotStarted(String),
+
+    /// The host cannot run WSLc at all.
+    Unavailable(anyhow::Error),
+
+    /// The request cannot be honored as written.
+    Rejected(anyhow::Error),
+
     /// A backend/SDK-level failure, or an internal worker/channel fault.
     Backend(anyhow::Error),
 }
@@ -79,6 +93,8 @@ impl WorkerError {
         match self {
             WorkerError::NotProvisioned(_) => ErrKind::NotProvisioned,
             WorkerError::NotStarted(_) => ErrKind::NotStarted,
+            WorkerError::Unavailable(_) => ErrKind::Unavailable,
+            WorkerError::Rejected(_) => ErrKind::Rejected,
             WorkerError::Backend(_) => ErrKind::Backend,
         }
     }
@@ -89,7 +105,9 @@ impl std::fmt::Display for WorkerError {
         match self {
             WorkerError::NotProvisioned(id) => write!(f, "unknown sandbox {id}"),
             WorkerError::NotStarted(id) => write!(f, "sandbox {id} is not started"),
-            WorkerError::Backend(e) => write!(f, "{e:#}"),
+            WorkerError::Unavailable(e) | WorkerError::Rejected(e) | WorkerError::Backend(e) => {
+                write!(f, "{e:#}")
+            }
         }
     }
 }
@@ -350,7 +368,7 @@ impl Worker {
     }
 
     /// Lazily load the SDK and boot the shared session on first use. Idempotent.
-    fn ensure_session(&mut self) -> Result<()> {
+    fn ensure_session(&mut self) -> Result<(), WorkerError> {
         if self.sdk.is_none() {
             // SAFETY: the worker thread is already in the MTA (see `ComApartment`).
             let sdk =
@@ -737,6 +755,36 @@ mod tests {
     }
 
     // ---- No-WSL unit tests (run everywhere, never touch the SDK) ----
+
+    #[test]
+    fn sr_err_carries_the_step_failure_phase() {
+        for (phase, expected) in [
+            (FailurePhase::BackendUnavailable, ErrKind::Unavailable),
+            (FailurePhase::Rejected, ErrKind::Rejected),
+            (FailurePhase::LaunchFailed, ErrKind::Backend),
+            (FailurePhase::PostLaunchFailed, ErrKind::Backend),
+            (FailurePhase::None, ErrKind::Backend),
+        ] {
+            let resp = ScriptResponse {
+                exit_code: -1,
+                error_message: "boom".to_string(),
+                failure_phase: phase.clone(),
+                ..Default::default()
+            };
+            assert_eq!(sr_err(resp).kind(), expected, "phase {phase:?}");
+        }
+    }
+
+    #[test]
+    fn sr_err_preserves_the_step_message() {
+        let resp = ScriptResponse {
+            exit_code: -1,
+            error_message: "WSLc components are missing".to_string(),
+            failure_phase: FailurePhase::BackendUnavailable,
+            ..Default::default()
+        };
+        assert_eq!(sr_err(resp).to_string(), "WSLc components are missing");
+    }
 
     #[tokio::test]
     async fn start_unknown_sandbox_errors() {

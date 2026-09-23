@@ -148,9 +148,21 @@ are not part of daemon error mapping. Once dispatch reaches the backend,
 |--------|-----------------|
 | daemon `ErrKind::NotProvisioned` (incl. stale / deprovisioned id) | `not_provisioned` |
 | daemon `ErrKind::NotStarted` | `not_started` |
-| daemon `ErrKind::Busy` / `NotReady` / `Protocol` / `Backend`, or `DaemonError::Transport` | `backend_error` |
+| daemon `ErrKind::Unavailable` (host cannot run WSLc) | `backend_unavailable` |
+| daemon `ErrKind::Rejected` (request the backend refuses as written) | `policy_validation` |
+| daemon `ErrKind::Busy` / `NotReady` / `Protocol` / `Backend` / `Unknown`, or `DaemonError::Transport` | `backend_error` |
 | `DaemonClient::connect` failure (no reachable daemon) | `backend_unavailable` |
 | WSLc feature absent / host cannot run WSLc | `backend_unavailable` |
+
+The daemon classifies each failure from the `failure_phase` its step helper
+reported, so a phase failure reaches the SDK with the same code the one-shot
+surface returns for the same host condition. A caller branches on the code
+without matching the message.
+
+`ErrKind` is additive: a kind a client does not recognize decodes to
+`ErrKind::Unknown` and maps to `backend_error`, so a daemon from a newer
+install degrades to the previous behavior instead of failing the decode. Adding
+a kind therefore needs no `PROTOCOL_VERSION` bump.
 
 ## Daemon idle-timeout env overrides
 

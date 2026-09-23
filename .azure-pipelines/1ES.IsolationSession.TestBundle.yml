@@ -19,6 +19,9 @@ trigger: none
 
 name: $(SourceBranchName)_$(Date:yyyyMMdd)$(Rev:.r)
 parameters:
+  - name: MainSourceRef
+    type: string
+    default: refs/heads/main
   - name: TestBundlesBranches
     type: object
     default:
@@ -41,7 +44,7 @@ resources:
     type: github
     name: microsoft/mxc
     endpoint: MXC-GitHub-Connection
-    ref: refs/heads/main
+    ref: ${{ parameters.MainSourceRef }}
   - repository: mxc_iso_session_feature
     type: github
     name: microsoft/mxc
@@ -56,6 +59,8 @@ variables:
 extends:
   template: v1/1ES.Official.PipelineTemplate.yml@1ESPipelineTemplates
   parameters:
+    settings:
+      networkIsolationPolicy: Preferred,GitHub,ESRP,NodeTool
     pool:
       name: Azure-Pipelines-1ESPT-ExDShared
       image: windows-2022
