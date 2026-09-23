@@ -394,7 +394,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
               throw "Packaged SDK test discovery failed with exit code $LASTEXITCODE"
           }
-          if (($testOutput -join "`n") -notmatch '(?m)^# tests [1-9][0-9]*\r?$') {
+          if (($testOutput -join "`n") -notmatch '(?m)^[^A-Za-z0-9]*tests\s+[1-9][0-9]*\r?$') {
               throw "Packaged SDK test discovery did not find any tests"
           }
       }
