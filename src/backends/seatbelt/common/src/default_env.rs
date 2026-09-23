@@ -39,46 +39,13 @@ fn default_env(working_directory: Option<&str>) -> Vec<(String, String)> {
 /// The entries the child should get, as `KEY=VALUE` strings.
 ///
 /// `working_directory` is the directory the runner will start the child in, as
-/// described on [`default_env`].
-///
-/// From schema 0.9 the four states of `process.env` stay distinct: omitted
-/// takes the default, `[]` is empty, a supplied environment is used verbatim,
-/// and `inheritDefaultEnv` layers a supplied environment over the default.
-/// Below 0.9 the caller's entries are passed through untouched and the runner
-/// supplies the baseline `PATH` as it always did.
+/// described on [`default_env`]. The state dispatch and overlay merge are
+/// shared; see [`wxc_common::default_env::resolve_env`].
 pub fn resolved_env(request: &ExecutionRequest, working_directory: Option<&str>) -> Vec<String> {
-    if !request.supplies_default_env() {
-        return request.env_entries().to_vec();
-    }
-
-    let entries = match (&request.env, request.inherit_default_env) {
-        (None, _) => default_env(working_directory),
-        (Some(supplied), false) => return supplied.clone(),
-        (Some(supplied), true) => {
-            let mut entries = default_env(working_directory);
-            // A caller entry replaces the same-named default rather than being
-            // appended, so the later `Command::env` call cannot shadow it.
-            for (key, value) in supplied.iter().filter_map(|kv| kv.split_once('=')) {
-                match entries.iter_mut().find(|(name, _)| name == key) {
-                    Some(slot) => *slot = (key.to_string(), value.to_string()),
-                    None => entries.push((key.to_string(), value.to_string())),
-                }
-            }
-            entries
-        }
-    };
-
-    entries
-        .into_iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect()
+    wxc_common::default_env::resolve_env(request, || default_env(working_directory))
 }
 
-/// Split resolved entries into the `(key, value)` pairs the runner applies.
-/// An entry with no `=` names no variable, so it is dropped.
-pub fn env_pairs(entries: &[String]) -> Vec<(&str, &str)> {
-    entries.iter().filter_map(|kv| kv.split_once('=')).collect()
-}
+pub use wxc_common::default_env::env_pairs;
 
 #[cfg(test)]
 mod tests {
@@ -188,34 +155,6 @@ mod tests {
         assert!(!entries.iter().any(|kv| kv.starts_with("HOME=")));
         assert_eq!(value(&entries, "PATH"), Some(DEFAULT_SANDBOX_PATH));
         assert_eq!(value(&entries, "TERM"), Some(DEFAULT_TERM));
-    }
-
-    #[test]
-    fn a_repeated_caller_key_collapses_to_the_last_value() {
-        let mut r = request(DefaultEnvCompatibility::DefaultBlock);
-        r.env = Some(vec!["FOO=first".into(), "FOO=second".into()]);
-        r.inherit_default_env = true;
-        let entries = resolved_env(&r, None);
-
-        assert_eq!(value(&entries, "FOO"), Some("second"));
-        assert_eq!(
-            entries.iter().filter(|kv| kv.starts_with("FOO=")).count(),
-            1
-        );
-    }
-
-    #[test]
-    fn an_empty_caller_value_still_replaces_the_default() {
-        let mut r = request(DefaultEnvCompatibility::DefaultBlock);
-        r.env = Some(vec!["PATH=".into()]);
-        r.inherit_default_env = true;
-        let entries = resolved_env(&r, None);
-
-        assert_eq!(value(&entries, "PATH"), Some(""));
-        assert_eq!(
-            entries.iter().filter(|kv| kv.starts_with("PATH=")).count(),
-            1
-        );
     }
 
     #[test]

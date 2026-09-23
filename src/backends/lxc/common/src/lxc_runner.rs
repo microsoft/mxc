@@ -74,38 +74,11 @@ fn default_env(request: &ExecutionRequest) -> Vec<(String, String)> {
 
 /// The entries the child should get, as `KEY=VALUE` strings.
 ///
-/// From schema 0.9 the four states of `process.env` stay distinct: omitted
-/// takes the default, `[]` is empty, a supplied environment is used verbatim,
-/// and `inheritDefaultEnv` layers a supplied environment over the default.
-/// Below 0.9 the caller's entries are passed through untouched and the
-/// `lxc-attach` baseline is the only default.
+/// The state dispatch and overlay merge are shared; see
+/// [`wxc_common::default_env::resolve_env`]. Below 0.9 the caller's entries are
+/// passed through untouched and the `lxc-attach` baseline is the only default.
 fn resolved_env(request: &ExecutionRequest) -> Vec<String> {
-    if !request.supplies_default_env() {
-        return request.env_entries().to_vec();
-    }
-
-    let entries = match (&request.env, request.inherit_default_env) {
-        (None, _) => default_env(request),
-        (Some(supplied), false) => return supplied.clone(),
-        (Some(supplied), true) => {
-            let mut entries = default_env(request);
-            // A caller entry replaces the same-named default rather than being
-            // appended: `lxc-attach` takes the last `-v` for a name, so a
-            // duplicate would silently depend on ordering.
-            for (key, value) in supplied.iter().filter_map(|kv| kv.split_once('=')) {
-                match entries.iter_mut().find(|(name, _)| name == key) {
-                    Some(slot) => *slot = (key.to_string(), value.to_string()),
-                    None => entries.push((key.to_string(), value.to_string())),
-                }
-            }
-            entries
-        }
-    };
-
-    entries
-        .into_iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect()
+    wxc_common::default_env::resolve_env(request, || default_env(request))
 }
 
 /// The `/etc/hosts` rewrites are short shell commands and must not inherit the script timeout.
@@ -1169,34 +1142,6 @@ mod tests {
                     "HOME must name the directory the child starts in (cwd {cwd:?})"
                 );
             }
-        }
-
-        #[test]
-        fn a_repeated_caller_key_collapses_to_the_last_value() {
-            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
-            r.env = Some(vec!["FOO=first".into(), "FOO=second".into()]);
-            r.inherit_default_env = true;
-            let entries = resolved_env(&r);
-
-            assert_eq!(value(&entries, "FOO"), Some("second"));
-            assert_eq!(
-                entries.iter().filter(|kv| kv.starts_with("FOO=")).count(),
-                1
-            );
-        }
-
-        #[test]
-        fn an_empty_caller_value_still_replaces_the_default() {
-            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
-            r.env = Some(vec!["PATH=".into()]);
-            r.inherit_default_env = true;
-            let entries = resolved_env(&r);
-
-            assert_eq!(value(&entries, "PATH"), Some(""));
-            assert_eq!(
-                entries.iter().filter(|kv| kv.starts_with("PATH=")).count(),
-                1
-            );
         }
 
         #[test]
