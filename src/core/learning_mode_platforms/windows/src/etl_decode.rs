@@ -1779,7 +1779,7 @@ mod tests {
         assert!(analysis.verbose_logging.signatures.iter().any(|aggregate| {
             aggregate.signature.provider == VerboseLoggingProvider::LearningModeNetworkDecision
                 && aggregate.signature.reason
-                    == VerboseLoggingExclusionReason::IntentionalNetworkPolicyDeny
+                    == VerboseLoggingOutcomeReason::IntentionalNetworkPolicyDeny
         }));
     }
 

@@ -5,7 +5,8 @@
 
 use learning_mode_core::{
     AccessType, DenialDetails, NetworkDenialDetails, NetworkDenialReason, NetworkDenialSource,
-    NetworkDirection, ResourceType, VerboseLoggingExclusionReason, VerboseLoggingProvider,
+    NetworkDirection, ResourceType, VerboseLoggingOutcomeReason as VerboseLoggingExclusionReason,
+    VerboseLoggingProvider,
 };
 use std::net::IpAddr;
 use windows::core::GUID;
