@@ -144,17 +144,26 @@ try {
         'metadata/windows.ai.isolationsession.preview.winmd',
         'metadata/GENERATION_INFO.toml',
         'runtime/IsoSessionApp.dll',
-        'runtime/IsoSessionApp.runtimeversion'
+        'runtime/IsoSession.manifest'
     )
     foreach ($entryName in $requiredEntries) {
         [void] (Get-ZipEntryBytes -Archive $archive -EntryName $entryName)
     }
 
-    $runtimeVersion = Convert-BytesToText (
-        Get-ZipEntryBytes -Archive $archive -EntryName 'runtime/IsoSessionApp.runtimeversion')
-    $runtimeVersion = $runtimeVersion.Trim()
-    if ($runtimeVersion -ne $runtimeVersionExpected) {
-        throw "Runtime sidecar '$runtimeVersion' does not match package version '$packageVersion' (expected '$runtimeVersionExpected')."
+    $runtimeVersion = $runtimeVersionExpected
+    $runtimeInstance = $runtimeVersion.Replace('_', '.')
+    $runtimeManifest = Convert-BytesToText (
+        Get-ZipEntryBytes -Archive $archive -EntryName 'runtime/IsoSession.manifest')
+    if ($runtimeManifest -match '\$\(MonthId\)' -or
+        $runtimeManifest -notmatch [regex]::Escape("name=`"$runtimeInstance`"")) {
+        throw "Runtime manifest does not match package version '$packageVersion' (expected instance '$runtimeInstance')."
+    }
+    foreach ($requiredFragment in @(
+            '<assemblyIdentity name="IsoSession.Runtime"',
+            '<file name="IsoSessionApp.dll"')) {
+        if ($runtimeManifest -notmatch [regex]::Escape($requiredFragment)) {
+            throw "Runtime manifest is missing '$requiredFragment'."
+        }
     }
 
     $packageGenerationInfo = Convert-BytesToText (
