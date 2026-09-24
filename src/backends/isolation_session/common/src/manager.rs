@@ -52,13 +52,6 @@ pub(super) struct MtaReference {
 
 impl MtaReference {
     pub(super) fn acquire() -> Result<Self, IsolationSessionError> {
-        let apartment = current_apartment()?;
-        if apartment.is_single_threaded() {
-            // The lifecycle deadlocks in a single-threaded apartment: its
-            // asynchronous calls block without pumping.
-            return Err(sta_refusal());
-        }
-
         // SAFETY: the out-parameter is a valid, writable local.
         let cookie = unsafe { CoIncrementMTAUsage() }.map_err(|e| {
             transport_err(
@@ -85,6 +78,16 @@ impl Drop for MtaReference {
 // `CoDecrementMTAUsage` accepts it from any thread.
 unsafe impl Send for MtaReference {}
 unsafe impl Sync for MtaReference {}
+
+/// Refuses a caller in a single-threaded apartment.
+fn refuse_single_threaded_apartment() -> Result<(), IsolationSessionError> {
+    if current_apartment()?.is_single_threaded() {
+        // The lifecycle deadlocks in a single-threaded apartment: its
+        // asynchronous calls block without pumping.
+        return Err(sta_refusal());
+    }
+    Ok(())
+}
 
 enum Apartment {
     SingleThreaded,
@@ -203,6 +206,7 @@ impl IsolationSessionManager {
     /// returned by `add_user`). Activates the service factory once and
     /// reuses it for the manager's lifetime.
     pub(super) fn new(agent_user_name: &str) -> Result<Self, IsolationSessionError> {
+        refuse_single_threaded_apartment()?;
         let mta = MtaReference::acquire()?;
         let ops = check_service_available_and_activate()?;
         Ok(Self {
@@ -243,6 +247,7 @@ impl IsolationSessionManager {
     pub(super) fn add_user(
         app_id: Option<&str>,
     ) -> Result<(ProvisionedUser, Self), IsolationSessionError> {
+        refuse_single_threaded_apartment()?;
         let mta = MtaReference::acquire()?;
         let ops = check_service_available_and_activate()?;
         // Prefer the app-scoped `AddUserAsync2` overload, but only when the host
@@ -636,6 +641,7 @@ impl IsolationSessionManager {
         timeout_ms: u32,
         logger: Option<&Logger>,
     ) -> Result<ExecHandle, IsolationSessionError> {
+        refuse_single_threaded_apartment()?;
         // Acquired before the workload starts, so a failure here cannot leave
         // one running with no handle to reach it.
         let mta = MtaReference::acquire()?;
