@@ -200,38 +200,6 @@ struct OwnedSession {
     warnings: Vec<String>,
 }
 
-/// Runs the two teardown calls on a thread of our own.
-///
-/// They inherit the apartment of whatever thread finishes the handle, and the
-/// handle is `Send`. In a single-threaded apartment they return without doing
-/// the work, stranding a real OS account; a thread of our own is never in one.
-///
-/// `stop` is `false` once the session is already stopped: stopping it again
-/// fails, and that failure is indistinguishable from one that never stopped.
-fn teardown(
-    manager: &mut IsolationSessionManager,
-    stop: bool,
-) -> (
-    Result<(), IsolationSessionError>,
-    Result<(), IsolationSessionError>,
-) {
-    let relayed = std::thread::scope(|scope| {
-        std::thread::Builder::new()
-            .spawn_scoped(scope, || {
-                let stopped = if stop { manager.stop_session() } else { Ok(()) };
-                (stopped, manager.deprovision_agent_user())
-            })
-            .ok()
-            .and_then(|worker| worker.join().ok())
-    });
-    // A worker that could not be created leaves the account behind, which is
-    // worse than teardown on the caller's own thread.
-    relayed.unwrap_or_else(|| {
-        let stopped = if stop { manager.stop_session() } else { Ok(()) };
-        (stopped, manager.deprovision_agent_user())
-    })
-}
-
 impl OwnedSession {
     fn new(manager: IsolationSessionManager, agent_user_name: String) -> Self {
         Self {
@@ -254,7 +222,12 @@ impl OwnedSession {
         if let Some(outcome) = self.outcome {
             return outcome;
         }
-        let (stopped, deprovisioned) = teardown(&mut self.manager, !self.stopped);
+        let stopped = if self.stopped {
+            Ok(())
+        } else {
+            self.manager.stop_session()
+        };
+        let deprovisioned = self.manager.deprovision_agent_user();
         if let Err(e) = &stopped {
             self.warnings
                 .push(format!("the isolation session could not be stopped: {e}"));

@@ -36,13 +36,14 @@ use super::error::{
     activation_error, check_result, format_iso_error, lifecycle_err, op, sta_refusal,
     transport_err, IsolationSessionError, StalePromotion,
 };
+use super::owned_thread::{self, Impersonation};
 use super::pipe_relay::{
     create_relay_thread, create_relay_thread_with_stop, duplicate_handle, PipeRelayWithStopParams,
 };
 use super::process_options::{build_iso_process_options, ProcessOptions};
 
 /// Keeps the process's MTA alive for as long as the lifecycle's WinRT objects,
-/// which outlive their creating call and are used from threads MXC does not own.
+/// which outlive the call that created them.
 /// `CoIncrementMTAUsage` holds a reference releasable from any thread;
 /// `CoUninitialize` is thread-affine and would tear the apartment down under a
 /// live object.
@@ -80,6 +81,9 @@ unsafe impl Send for MtaReference {}
 unsafe impl Sync for MtaReference {}
 
 /// Refuses a caller in a single-threaded apartment.
+///
+/// Reads the calling thread's apartment, so it runs before [`owned_thread`]
+/// moves a call off that thread.
 fn refuse_single_threaded_apartment() -> Result<(), IsolationSessionError> {
     if current_apartment()?.is_single_threaded() {
         // The lifecycle deadlocks in a single-threaded apartment: its
@@ -196,6 +200,10 @@ pub struct IsolationSessionManager {
     /// The activated service instance. Held for the manager's lifetime so
     /// the WinRT factory is reused across calls.
     ops: IsoSessionOps,
+    /// The impersonation of the thread that created this manager: every call
+    /// the manager makes, and every call for a process it starts, is made
+    /// under it.
+    impersonation: Impersonation,
     /// Declared after `ops` so it drops last: the apartment outlives every
     /// object activated in it.
     _mta: MtaReference,
@@ -207,12 +215,16 @@ impl IsolationSessionManager {
     /// reuses it for the manager's lifetime.
     pub(super) fn new(agent_user_name: &str) -> Result<Self, IsolationSessionError> {
         refuse_single_threaded_apartment()?;
-        let mta = MtaReference::acquire()?;
-        let ops = check_service_available_and_activate()?;
-        Ok(Self {
-            agent_user_name: HSTRING::from(agent_user_name),
-            ops,
-            _mta: mta,
+        let impersonation = Impersonation::of_this_thread()?;
+        owned_thread::call(&impersonation, || {
+            let mta = MtaReference::acquire()?;
+            let ops = check_service_available_and_activate()?;
+            Ok(Self {
+                agent_user_name: HSTRING::from(agent_user_name),
+                ops,
+                impersonation: impersonation.clone(),
+                _mta: mta,
+            })
         })
     }
 
@@ -248,76 +260,79 @@ impl IsolationSessionManager {
         app_id: Option<&str>,
     ) -> Result<(ProvisionedUser, Self), IsolationSessionError> {
         refuse_single_threaded_apartment()?;
-        let mta = MtaReference::acquire()?;
-        let ops = check_service_available_and_activate()?;
-        // Prefer the app-scoped `AddUserAsync2` overload, but only when the host
-        // advertises support for it. Else fall back to `AddUserAsync`.
-        let app_scoped = app_scoped_supported_from(
-            ops.GetFeatureLevel(IsoSessionFeature::AppScopedRegistration),
-        );
-        // The operation label reported in telemetry must name the overload
-        // actually invoked, not always `AddUserAsync2`.
-        let op_add_user = add_user_op(app_scoped);
-        let async_op = if app_scoped {
-            ops.AddUserAsync2(
-                &HSTRING::from(app_id.unwrap_or_default()),
-                &HSTRING::new(),
-                &HSTRING::new(),
-            )
-        } else {
-            ops.AddUserAsync(&HSTRING::new(), &HSTRING::new())
-        }
-        .map_err(|e| transport_err(op_add_user, "call failed", &e))?;
-        let user_result: IsoSessionUserResult = async_op
-            .join()
-            .map_err(|e| transport_err(op_add_user, "wait failed", &e))?;
-
-        let err = user_result
-            .Error()
-            .map_err(|e| transport_err(op_add_user, "get Error failed", &e))?;
-        let is_error = err
-            .IsError()
-            .map_err(|e| transport_err(op_add_user, "get IsError failed", &e))?;
-        if is_error {
-            // Provision mints the agent user, so `ERROR_NOT_FOUND` here can
-            // never mean "the sandbox is gone" — there is no sandbox id yet.
-            return Err(format_iso_error(
+        let impersonation = Impersonation::of_this_thread()?;
+        owned_thread::call(&impersonation, || {
+            let mta = MtaReference::acquire()?;
+            let ops = check_service_available_and_activate()?;
+            // Prefer the app-scoped `AddUserAsync2` overload, but only when the host
+            // advertises support for it. Else fall back to `AddUserAsync`.
+            let app_scoped = app_scoped_supported_from(
+                ops.GetFeatureLevel(IsoSessionFeature::AppScopedRegistration),
+            );
+            // The operation label reported in telemetry must name the overload
+            // actually invoked, not always `AddUserAsync2`.
+            let op_add_user = add_user_op(app_scoped);
+            let user_result: IsoSessionUserResult = owned_thread::wait_for(
                 op_add_user,
-                &err,
-                StalePromotion::NotEligible,
-            ));
-        }
+                if app_scoped {
+                    ops.AddUserAsync2(
+                        &HSTRING::from(app_id.unwrap_or_default()),
+                        &HSTRING::new(),
+                        &HSTRING::new(),
+                    )
+                } else {
+                    ops.AddUserAsync(&HSTRING::new(), &HSTRING::new())
+                },
+            )?;
 
-        let agent_user_name = user_result
-            .AgentUserName()
-            .map_err(|e| transport_err(op_add_user, "get AgentUserName failed", &e))?;
+            let err = user_result
+                .Error()
+                .map_err(|e| transport_err(op_add_user, "get Error failed", &e))?;
+            let is_error = err
+                .IsError()
+                .map_err(|e| transport_err(op_add_user, "get IsError failed", &e))?;
+            if is_error {
+                // Provision mints the agent user, so `ERROR_NOT_FOUND` here can
+                // never mean "the sandbox is gone" — there is no sandbox id yet.
+                return Err(format_iso_error(
+                    op_add_user,
+                    &err,
+                    StalePromotion::NotEligible,
+                ));
+            }
 
-        // Past this point the OS account exists and `agent_user_name` is the
-        // key that removes it, so build the manager now rather than after the
-        // remaining getters. That makes every subsequent failure recoverable:
-        // the removal key and a live service instance are both already in hand.
-        //
-        // A failure of `AgentUserName()` above is the one case with no
-        // in-process remedy — without the name there is nothing to address a
-        // removal to — so it is left to propagate.
-        let manager = Self {
-            agent_user_name: agent_user_name.clone(),
-            ops,
-            _mta: mta,
-        };
+            let agent_user_name = user_result
+                .AgentUserName()
+                .map_err(|e| transport_err(op_add_user, "get AgentUserName failed", &e))?;
 
-        let provisioned =
-            match Self::read_remaining_facts(&user_result, &agent_user_name, op_add_user) {
-                Ok(provisioned) => provisioned,
-                Err(e) => {
-                    // Best-effort: returning here without this would abandon an
-                    // account we are still able to remove.
-                    let _ = manager.deprovision_agent_user();
-                    return Err(e);
-                }
+            // Past this point the OS account exists and `agent_user_name` is the
+            // key that removes it, so build the manager now rather than after the
+            // remaining getters. That makes every subsequent failure recoverable:
+            // the removal key and a live service instance are both already in hand.
+            //
+            // A failure of `AgentUserName()` above is the one case with no
+            // in-process remedy — without the name there is nothing to address a
+            // removal to — so it is left to propagate.
+            let manager = Self {
+                agent_user_name: agent_user_name.clone(),
+                ops,
+                impersonation: impersonation.clone(),
+                _mta: mta,
             };
 
-        Ok((provisioned, manager))
+            let provisioned =
+                match Self::read_remaining_facts(&user_result, &agent_user_name, op_add_user) {
+                    Ok(provisioned) => provisioned,
+                    Err(e) => {
+                        // Best-effort: returning here without this would abandon an
+                        // account we are still able to remove.
+                        let _ = manager.deprovision_agent_user();
+                        return Err(e);
+                    }
+                };
+
+            Ok((provisioned, manager))
+        })
     }
 
     /// Reads the provision-time facts that remain after the agent user name.
@@ -351,14 +366,14 @@ impl IsolationSessionManager {
     /// The OS interface takes an optional token; MXC always passes an empty
     /// string, which selects a local agent session.
     pub(super) fn start_session(&self) -> Result<(), IsolationSessionError> {
-        let async_op = self
-            .ops
-            .StartSessionAsync(&self.agent_user_name, &HSTRING::new())
-            .map_err(|e| transport_err(op::START_SESSION, "call failed", &e))?;
-        let result = async_op
-            .join()
-            .map_err(|e| transport_err(op::START_SESSION, "wait failed", &e))?;
-        check_result(&result, op::START_SESSION, StalePromotion::Eligible)
+        owned_thread::call(&self.impersonation, || {
+            let result = owned_thread::wait_for(
+                op::START_SESSION,
+                self.ops
+                    .StartSessionAsync(&self.agent_user_name, &HSTRING::new()),
+            )?;
+            check_result(&result, op::START_SESSION, StalePromotion::Eligible)
+        })
     }
 
     /// Step 3a: Start a process inside the started isolation session, and
@@ -368,25 +383,22 @@ impl IsolationSessionManager {
     /// streams are consumed: the relayed path bridges them with its own relay
     /// threads and blocks (see `create_process`), while an in-process SDK
     /// caller takes the raw handles and drives them itself.
-    pub(super) fn start_process(
+    fn start_process(
         &self,
         options: &ProcessOptions,
         logger: Option<&Logger>,
     ) -> Result<StartedProcess, IsolationSessionError> {
         let proc_options = build_iso_process_options(options)?;
 
-        let async_op = self
-            .ops
-            .RunProcessWithOptionsAsync(
+        let result: IsoSessionProcessResult = owned_thread::wait_for(
+            op::RUN_PROCESS,
+            self.ops.RunProcessWithOptionsAsync(
                 &self.agent_user_name,
                 &HSTRING::from(&options.process_path),
                 &HSTRING::from(&options.arguments),
                 &proc_options,
-            )
-            .map_err(|e| transport_err(op::RUN_PROCESS, "call failed", &e))?;
-        let result: IsoSessionProcessResult = async_op
-            .join()
-            .map_err(|e| transport_err(op::RUN_PROCESS, "wait failed", &e))?;
+            ),
+        )?;
 
         let err = result
             .Error()
@@ -442,185 +454,191 @@ impl IsolationSessionManager {
     ///
     /// This is the **relay** path, reached by `wxc-exec` and by an in-process
     /// caller that asked to attach. A caller that wants the streams handed back
-    /// uses [`Self::start_process`] instead.
+    /// uses [`Self::piped_exec_handle`] instead.
     pub(super) fn create_process(
         &self,
         options: &ProcessOptions,
         logger: Option<&mut Logger>,
     ) -> Result<i32, IsolationSessionError> {
-        // Everything fallible that does not need the workload runs first, so no
-        // failure can strand a running one.
-        let wxc_stdout = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }
-            .map_err(|e| lifecycle_err(format!("GetStdHandle(stdout) failed: {}", e)))?;
-        let wxc_stderr = unsafe { GetStdHandle(STD_ERROR_HANDLE) }
-            .map_err(|e| lifecycle_err(format!("GetStdHandle(stderr) failed: {}", e)))?;
-        let wxc_stdin = unsafe { GetStdHandle(STD_INPUT_HANDLE) }
-            .map_err(|e| lifecycle_err(format!("GetStdHandle(stdin) failed: {}", e)))?;
+        owned_thread::call(&self.impersonation, || {
+            // Everything fallible that does not need the workload runs first, so no
+            // failure can strand a running one.
+            let wxc_stdout = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }
+                .map_err(|e| lifecycle_err(format!("GetStdHandle(stdout) failed: {}", e)))?;
+            let wxc_stderr = unsafe { GetStdHandle(STD_ERROR_HANDLE) }
+                .map_err(|e| lifecycle_err(format!("GetStdHandle(stderr) failed: {}", e)))?;
+            let wxc_stdin = unsafe { GetStdHandle(STD_INPUT_HANDLE) }
+                .map_err(|e| lifecycle_err(format!("GetStdHandle(stdin) failed: {}", e)))?;
 
-        // Manual-reset stop event for the stdin relay. Effective for a waitable
-        // `h_read` (console = TTY mode); for pipe handles it has no effect on a
-        // blocked `ReadFile`, so that relay misses its join and ends only when
-        // the calling process exits. Only `wxc-exec` reaches the non-TTY case.
-        let stdin_stop_event = unsafe {
-            CreateEventW(None, true, false, PCWSTR::null())
-                .map_err(|e| lifecycle_err(format!("CreateEventW(stdin stop): {}", e)))?
-        };
-        // Declared before `scope`, which holds a raw copy: it must drop last.
-        let stdin_stop_owned = OwnedHandle::new(stdin_stop_event);
+            // Manual-reset stop event for the stdin relay. Effective for a waitable
+            // `h_read` (console = TTY mode); for pipe handles it has no effect on a
+            // blocked `ReadFile`, so that relay misses its join and ends only when
+            // the calling process exits. Only `wxc-exec` reaches the non-TTY case.
+            let stdin_stop_event = unsafe {
+                CreateEventW(None, true, false, PCWSTR::null())
+                    .map_err(|e| lifecycle_err(format!("CreateEventW(stdin stop): {}", e)))?
+            };
+            // Declared before `scope`, which holds a raw copy: it must drop last.
+            let stdin_stop_owned = OwnedHandle::new(stdin_stop_event);
 
-        // Relay threads bridge the calling process's stdio to
-        // `IsoSessionProcess`'s pipes: console-handle inheritance cannot cross
-        // the desktop-session boundary.
-        //
-        // Handle ownership across four sources:
-        //   - Pipe handles owned by `IsoSessionProcess` (`OutputHandle()` /
-        //     `ErrorHandle()` / `InputHandle()`, returned as u64): released
-        //     by `process.Close()`. We do NOT close them. The output relays
-        //     read their own duplicates, so `Close()` does not disturb them.
-        //   - The calling process's std handles (`GetStdHandle`): OS-owned.
-        //     We do NOT close them.
-        //   - Stop event for stdin relay (`CreateEventW`): RAII-closed via
-        //     `OwnedHandle`.
-        //   - Relay thread handles: RAII-closed via `OwnedHandle` after we
-        //     `WaitForSingleObject` on each.
-        //
-        // Lifetime: each relay's param struct is moved to the heap and owned
-        // by its thread, which frees it on exit, so joining is not required
-        // for memory safety.
-        let started = self.start_process(options, logger.as_deref())?;
-        let process = &started.process;
-        let stdout_handle_val = started.stdout;
-        let stderr_handle_val = started.stderr;
-        let stdin_handle_val = started.stdin;
+            // Relay threads bridge the calling process's stdio to
+            // `IsoSessionProcess`'s pipes: console-handle inheritance cannot cross
+            // the desktop-session boundary.
+            //
+            // Handle ownership across four sources:
+            //   - Pipe handles owned by `IsoSessionProcess` (`OutputHandle()` /
+            //     `ErrorHandle()` / `InputHandle()`, returned as u64): released
+            //     by `process.Close()`. We do NOT close them. The output relays
+            //     read their own duplicates, so `Close()` does not disturb them.
+            //   - The calling process's std handles (`GetStdHandle`): OS-owned.
+            //     We do NOT close them.
+            //   - Stop event for stdin relay (`CreateEventW`): RAII-closed via
+            //     `OwnedHandle`.
+            //   - Relay thread handles: RAII-closed via `OwnedHandle` after we
+            //     `WaitForSingleObject` on each.
+            //
+            // Lifetime: each relay's param struct is moved to the heap and owned
+            // by its thread, which frees it on exit, so joining is not required
+            // for memory safety.
+            let started = self.start_process(options, logger.as_deref())?;
+            let process = &started.process;
+            let stdout_handle_val = started.stdout;
+            let stderr_handle_val = started.stderr;
+            let stdin_handle_val = started.stdin;
 
-        let mut scope = RelayScope::new(process, stdin_stop_owned.get());
+            let mut scope = RelayScope::new(process, stdin_stop_owned.get());
 
-        // In interactive mode, switch the calling process's console to raw VT
-        // so only the agent's ConPTY echoes and renders; otherwise both do.
-        // RAII-restored on scope exit. No-op when stdio is not a console.
-        let _console_guard = if options.interactive {
-            Some(ConsoleModeRestorer::install_raw_vt())
-        } else {
-            None
-        };
-
-        // Install a console Ctrl handler that signals `stdin_stop_owned`
-        // on Ctrl-C or terminal-close events, so the relay loops drain
-        // cleanly instead of being terminated by the OS default
-        // `ExitProcess`. Interactive mode only — non-interactive mode
-        // wants the default behavior so the parent can terminate
-        // wxc-exec via Ctrl-C. Installed after the workload starts: the
-        // event is manual-reset and never cleared, so an earlier Ctrl-C
-        // would stop the stdin relay for the session's lifetime.
-        let _ctrl_guard = if options.interactive {
-            Some(CtrlHandlerGuard::install(stdin_stop_owned.get()))
-        } else {
-            None
-        };
-
-        // Push the local console's viewport size into the agent's inner ConPTY.
-        // Without it the inner HPCON keeps its default dimensions and VT-aware
-        // agents (e.g. PSReadLine) anchor their prompt to that smaller last row,
-        // overlaying text once they reach it. Mid-session resize is not handled
-        // here.
-        if options.interactive {
-            if let Some((cols, rows)) = get_local_console_size() {
-                let _ = process.ResizeConsole(cols, rows);
-            }
-        }
-
-        scope.stdout = if stdout_handle_val != 0 {
-            let (thread, canceller) = unsafe {
-                create_relay_thread(
-                    HANDLE(stdout_handle_val as *mut core::ffi::c_void),
-                    wxc_stdout,
-                )
-            }
-            .map_err(|e| lifecycle_err(format!("create stdout relay: {}", e)))?;
-            scope.output_cancellers.push(canceller);
-            Some(thread)
-        } else {
-            None
-        };
-        scope.stderr = if stderr_handle_val != 0 {
-            let (thread, canceller) = unsafe {
-                create_relay_thread(
-                    HANDLE(stderr_handle_val as *mut core::ffi::c_void),
-                    wxc_stderr,
-                )
-            }
-            .map_err(|e| lifecycle_err(format!("create stderr relay: {}", e)))?;
-            scope.output_cancellers.push(canceller);
-            Some(thread)
-        } else {
-            None
-        };
-        // Stdin: in interactive mode use the console-aware relay so
-        // `WINDOW_BUFFER_SIZE_EVENT` records propagate as
-        // `ResizeConsole(cols, rows)` calls on the agent's inner ConPTY.
-        // In non-interactive mode the agent's stdin is plain byte-oriented
-        // and the simpler stop-aware pipe relay is appropriate.
-        enum StdinRelayKind {
-            None,
-            Pipe(PipeRelayWithStopParams),
-            Console(ConsoleRelayParams),
-        }
-
-        let stdin_relay_state = if stdin_handle_val == 0 {
-            StdinRelayKind::None
-        } else {
-            // Owned, like the output relays': `process.Close()` releases the
-            // original while this relay may still be writing.
-            let stdin_h_write =
-                duplicate_handle(HANDLE(stdin_handle_val as *mut core::ffi::c_void))
-                    .map_err(|e| lifecycle_err(format!("duplicate stdin handle: {}", e)))?;
-            // Shares the event object, so `signal_stop` still reaches the relay.
-            let stdin_h_stop = duplicate_handle(stdin_stop_owned.get())
-                .map_err(|e| lifecycle_err(format!("duplicate stdin stop event: {}", e)))?;
-            if options.interactive {
-                // Clone the WinRT process handle so the relay thread holds
-                // its own ref-counted reference (WinRT clone = AddRef),
-                // released when the thread frees the params it owns.
-                let process_for_resize = process.clone();
-                StdinRelayKind::Console(ConsoleRelayParams {
-                    h_read: wxc_stdin,
-                    h_write: stdin_h_write,
-                    h_stop_event: stdin_h_stop,
-                    resize_callback: Box::new(move |cols, rows| {
-                        let _ = process_for_resize.ResizeConsole(cols, rows);
-                    }),
-                })
+            // In interactive mode, switch the calling process's console to raw VT
+            // so only the agent's ConPTY echoes and renders; otherwise both do.
+            // RAII-restored on scope exit. No-op when stdio is not a console.
+            let _console_guard = if options.interactive {
+                Some(ConsoleModeRestorer::install_raw_vt())
             } else {
-                StdinRelayKind::Pipe(PipeRelayWithStopParams {
-                    h_read: wxc_stdin,
-                    h_write: stdin_h_write,
-                    h_stop_event: stdin_h_stop,
-                })
+                None
+            };
+
+            // Install a console Ctrl handler that signals `stdin_stop_owned`
+            // on Ctrl-C or terminal-close events, so the relay loops drain
+            // cleanly instead of being terminated by the OS default
+            // `ExitProcess`. Interactive mode only — non-interactive mode
+            // wants the default behavior so the parent can terminate
+            // wxc-exec via Ctrl-C. Installed after the workload starts: the
+            // event is manual-reset and never cleared, so an earlier Ctrl-C
+            // would stop the stdin relay for the session's lifetime.
+            let _ctrl_guard = if options.interactive {
+                Some(CtrlHandlerGuard::install(stdin_stop_owned.get()))
+            } else {
+                None
+            };
+
+            // Push the local console's viewport size into the agent's inner ConPTY.
+            // Without it the inner HPCON keeps its default dimensions and VT-aware
+            // agents (e.g. PSReadLine) anchor their prompt to that smaller last row,
+            // overlaying text once they reach it. Mid-session resize is not handled
+            // here.
+            if options.interactive {
+                if let Some((cols, rows)) = get_local_console_size() {
+                    let _ = process.ResizeConsole(cols, rows);
+                }
             }
-        };
 
-        // Matched by value: the params move into the spawn call, which puts
-        // them on the heap under the relay thread's ownership.
-        scope.stdin = match stdin_relay_state {
-            StdinRelayKind::None => None,
-            StdinRelayKind::Pipe(params) => Some(
-                unsafe { create_relay_thread_with_stop(params) }
-                    .map_err(|e| lifecycle_err(format!("create stdin relay: {}", e)))?,
-            ),
-            StdinRelayKind::Console(params) => {
-                Some(unsafe { create_console_relay_thread(params) }.map_err(|e| {
-                    lifecycle_err(format!("create console-aware stdin relay: {}", e))
-                })?)
+            scope.stdout = if stdout_handle_val != 0 {
+                let (thread, canceller) = unsafe {
+                    create_relay_thread(
+                        HANDLE(stdout_handle_val as *mut core::ffi::c_void),
+                        wxc_stdout,
+                    )
+                }
+                .map_err(|e| lifecycle_err(format!("create stdout relay: {}", e)))?;
+                scope.output_cancellers.push(canceller);
+                Some(thread)
+            } else {
+                None
+            };
+            scope.stderr = if stderr_handle_val != 0 {
+                let (thread, canceller) = unsafe {
+                    create_relay_thread(
+                        HANDLE(stderr_handle_val as *mut core::ffi::c_void),
+                        wxc_stderr,
+                    )
+                }
+                .map_err(|e| lifecycle_err(format!("create stderr relay: {}", e)))?;
+                scope.output_cancellers.push(canceller);
+                Some(thread)
+            } else {
+                None
+            };
+            // Stdin: in interactive mode use the console-aware relay so
+            // `WINDOW_BUFFER_SIZE_EVENT` records propagate as
+            // `ResizeConsole(cols, rows)` calls on the agent's inner ConPTY.
+            // In non-interactive mode the agent's stdin is plain byte-oriented
+            // and the simpler stop-aware pipe relay is appropriate.
+            enum StdinRelayKind {
+                None,
+                Pipe(PipeRelayWithStopParams),
+                Console(ConsoleRelayParams),
             }
-        };
 
-        let outcome = started.wait(options.timeout_ms)?;
-        scope.stop_stdin();
-        scope.finish();
+            let stdin_relay_state = if stdin_handle_val == 0 {
+                StdinRelayKind::None
+            } else {
+                // Owned, like the output relays': `process.Close()` releases the
+                // original while this relay may still be writing.
+                let stdin_h_write =
+                    duplicate_handle(HANDLE(stdin_handle_val as *mut core::ffi::c_void))
+                        .map_err(|e| lifecycle_err(format!("duplicate stdin handle: {}", e)))?;
+                // Shares the event object, so `signal_stop` still reaches the relay.
+                let stdin_h_stop = duplicate_handle(stdin_stop_owned.get())
+                    .map_err(|e| lifecycle_err(format!("duplicate stdin stop event: {}", e)))?;
+                if options.interactive {
+                    // Clone the WinRT process handle so the relay thread holds
+                    // its own ref-counted reference (WinRT clone = AddRef),
+                    // released when the thread frees the params it owns.
+                    let process_for_resize = process.clone();
+                    let impersonation = self.impersonation.clone();
+                    StdinRelayKind::Console(ConsoleRelayParams {
+                        h_read: wxc_stdin,
+                        h_write: stdin_h_write,
+                        h_stop_event: stdin_h_stop,
+                        resize_callback: Box::new(move |cols, rows| {
+                            let _ = owned_thread::call(&impersonation, || {
+                                let _ = process_for_resize.ResizeConsole(cols, rows);
+                                Ok(())
+                            });
+                        }),
+                    })
+                } else {
+                    StdinRelayKind::Pipe(PipeRelayWithStopParams {
+                        h_read: wxc_stdin,
+                        h_write: stdin_h_write,
+                        h_stop_event: stdin_h_stop,
+                    })
+                }
+            };
 
-        Ok(match outcome {
-            ExecOutcome::Exited(exit_code) => exit_code,
-            ExecOutcome::TimedOut => WAIT_FOR_EXIT_TIMEOUT,
+            // Matched by value: the params move into the spawn call, which puts
+            // them on the heap under the relay thread's ownership.
+            scope.stdin = match stdin_relay_state {
+                StdinRelayKind::None => None,
+                StdinRelayKind::Pipe(params) => Some(
+                    unsafe { create_relay_thread_with_stop(params) }
+                        .map_err(|e| lifecycle_err(format!("create stdin relay: {}", e)))?,
+                ),
+                StdinRelayKind::Console(params) => {
+                    Some(unsafe { create_console_relay_thread(params) }.map_err(|e| {
+                        lifecycle_err(format!("create console-aware stdin relay: {}", e))
+                    })?)
+                }
+            };
+
+            let outcome = started.wait(options.timeout_ms)?;
+            scope.stop_stdin();
+            scope.finish();
+
+            Ok(match outcome {
+                ExecOutcome::Exited(exit_code) => exit_code,
+                ExecOutcome::TimedOut => WAIT_FOR_EXIT_TIMEOUT,
+            })
         })
     }
 
@@ -642,13 +660,16 @@ impl IsolationSessionManager {
         logger: Option<&Logger>,
     ) -> Result<ExecHandle, IsolationSessionError> {
         refuse_single_threaded_apartment()?;
-        // Acquired before the workload starts, so a failure here cannot leave
-        // one running with no handle to reach it.
-        let mta = MtaReference::acquire()?;
-        let started = Arc::new(ClosingProcess::new(
-            self.start_process(options, logger)?,
-            mta,
-        ));
+        let started = owned_thread::call(&self.impersonation, || {
+            // Acquired before the workload starts, so a failure here cannot
+            // leave one running with no handle to reach it.
+            let mta = MtaReference::acquire()?;
+            Ok(Arc::new(ClosingProcess::new(
+                self.start_process(options, logger)?,
+                self.impersonation.clone(),
+                mta,
+            )))
+        })?;
 
         // Read the handles before the closures take ownership. A zero means the
         // stream is genuinely absent, which is exactly the sentinel the
@@ -657,9 +678,9 @@ impl IsolationSessionManager {
         let stderr = HANDLE(started.stderr as *mut std::ffi::c_void);
         let stdin = HANDLE(started.stdin as *mut std::ffi::c_void);
 
-        // `IsoSessionProcess` is an agile WinRT object (the bindings declare it
-        // `Send + Sync`), so the closures can hold it without the
-        // apartment-affine worker thread the WSLC backend needs.
+        // `IsoSessionProcess` answers `IAgileObject`, so the closures may hold it
+        // on whatever thread runs them; the calls they make go through
+        // `owned_thread`.
         let waiter_process = Arc::clone(&started);
         let stdin_process = Arc::clone(&started);
         Ok(ExecHandle {
@@ -667,22 +688,25 @@ impl IsolationSessionManager {
             stderr,
             stdin,
             stdin_closer: Some(Box::new(move || {
-                let _ = stdin_process.process.CloseStandardInput();
+                let _ = owned_thread::call(&stdin_process.impersonation, || {
+                    let _ = stdin_process.process.CloseStandardInput();
+                    Ok(())
+                });
             })),
             // Reports `TimedOut` when the deadline elapsed with the process
             // still running — see `StartedProcess::wait`, which samples that
             // before the shutdown ladder destroys the evidence.
             waiter: Box::new(move || {
-                waiter_process
-                    .wait(timeout_ms)
-                    .map_err(super::error::map_lifecycle_error)
+                owned_thread::call(&waiter_process.impersonation, || {
+                    waiter_process.wait(timeout_ms)
+                })
+                .map_err(super::error::map_lifecycle_error)
             }),
             // Reports whether the platform *accepted* the kill: `terminate`'s
             // bounded post-kill wait is not consulted, so a `Terminate` that
             // was accepted and then did not take effect still reports success.
             terminator: Box::new(move || {
-                started
-                    .terminate()
+                owned_thread::call(&started.impersonation, || started.terminate())
                     .map_err(super::error::map_lifecycle_error)
             }),
         })
@@ -690,26 +714,24 @@ impl IsolationSessionManager {
 
     /// Step 4: Stop the isolation session.
     pub(super) fn stop_session(&self) -> Result<(), IsolationSessionError> {
-        let async_op = self
-            .ops
-            .StopSessionAsync(&self.agent_user_name)
-            .map_err(|e| transport_err(op::STOP_SESSION, "call failed", &e))?;
-        let result = async_op
-            .join()
-            .map_err(|e| transport_err(op::STOP_SESSION, "wait failed", &e))?;
-        check_result(&result, op::STOP_SESSION, StalePromotion::Eligible)
+        owned_thread::call(&self.impersonation, || {
+            let result = owned_thread::wait_for(
+                op::STOP_SESSION,
+                self.ops.StopSessionAsync(&self.agent_user_name),
+            )?;
+            check_result(&result, op::STOP_SESSION, StalePromotion::Eligible)
+        })
     }
 
     /// Step 5: Deprovision the agent user.
     pub(super) fn deprovision_agent_user(&self) -> Result<(), IsolationSessionError> {
-        let async_op = self
-            .ops
-            .RemoveUserAsync(&self.agent_user_name)
-            .map_err(|e| transport_err(op::REMOVE_USER, "call failed", &e))?;
-        let result = async_op
-            .join()
-            .map_err(|e| transport_err(op::REMOVE_USER, "wait failed", &e))?;
-        check_result(&result, op::REMOVE_USER, StalePromotion::Eligible)
+        owned_thread::call(&self.impersonation, || {
+            let result = owned_thread::wait_for(
+                op::REMOVE_USER,
+                self.ops.RemoveUserAsync(&self.agent_user_name),
+            )?;
+            check_result(&result, op::REMOVE_USER, StalePromotion::Eligible)
+        })
     }
 }
 
@@ -1151,13 +1173,23 @@ impl Drop for RelayScope<'_> {
 ///   out: `RelayScope` owns that teardown and runs it once the relays are done.
 pub(super) struct ClosingProcess {
     started: StartedProcess,
+    /// The impersonation of the manager that started the process.
+    impersonation: Impersonation,
     /// Keeps the apartment alive: the threads that use the object may have none.
     _mta: MtaReference,
 }
 
 impl ClosingProcess {
-    pub(super) fn new(started: StartedProcess, mta: MtaReference) -> Self {
-        Self { started, _mta: mta }
+    pub(super) fn new(
+        started: StartedProcess,
+        impersonation: Impersonation,
+        mta: MtaReference,
+    ) -> Self {
+        Self {
+            started,
+            impersonation,
+            _mta: mta,
+        }
     }
 }
 
@@ -1171,7 +1203,11 @@ impl std::ops::Deref for ClosingProcess {
 
 impl Drop for ClosingProcess {
     fn drop(&mut self) {
-        let _ = self.started.process.Close();
+        let process = &self.started.process;
+        let _ = owned_thread::call(&self.impersonation, || {
+            let _ = process.Close();
+            Ok(())
+        });
     }
 }
 
