@@ -17,6 +17,9 @@ The work covers three public surfaces:
 The probe remains Windows- and ProcessContainer-specific. SDK calls on other
 platforms fail explicitly as unsupported. State-aware request envelopes remain
 unsupported because the existing CLI accepts only one-shot requests.
+One-shot requests whose resolved containment is not ProcessContainer also fail
+with `UnsupportedContainment`; they must not be projected onto ProcessContainer
+policy and reported with an irrelevant tier.
 
 ## Architecture
 
@@ -24,6 +27,11 @@ unsupported because the existing CLI accepts only one-shot requests.
 ProcessContainer fallback detector with engine-owned capability checks for
 guarded capture, IsolationSession, and Hyperlight. The CLI delegates to this
 engine API instead of applying those overrides itself.
+
+The engine validates the resolved containment before invoking the backend
+detector. This check belongs at the shared orchestration boundary rather than
+in the CLI or individual SDK adapters, so every public surface has identical
+behaviour and malformed-input parsing still takes precedence.
 
 The Rust SDK re-exports the typed probe output and exposes:
 
@@ -66,6 +74,9 @@ and optional-field shapes at the process boundary.
   matching the CLI.
 - Invalid request JSON, invalid binding requests, and unsupported platforms are
   API errors rather than success-shaped probe output.
+- A valid one-shot request resolved to any backend other than
+  ProcessContainer returns `UnsupportedContainment` before host capability
+  probing.
 - FFI entry points remain panic-contained and return owned strings that callers
   free through `mxc_string_free`.
 - Node.js surfaces executable lookup, timeout, non-zero exit, and malformed
@@ -82,14 +93,18 @@ and optional-field shapes at the process boundary.
 ## Testing
 
 - Engine tests pin default-request and request-aware orchestration, including
+  ProcessContainer acceptance, non-ProcessContainer rejection, and
   IsolationSession and Hyperlight override seams where feature-gated.
 - CLI tests or existing probe tests verify unchanged serialization.
-- Rust SDK tests exercise the new typed function.
+- Rust SDK tests exercise both a supplied ProcessContainer request and exact
+  `UnsupportedContainment` rejection for another backend.
 - FFI tests verify null/default input, a serialized request, owned JSON, error
-  status, and panic containment conventions.
-- .NET tests verify typed projection and optional-request behaviour.
+  status, non-ProcessContainer rejection, and panic containment conventions.
+- .NET tests verify typed projection, supplied-request behaviour, and exact
+  rejection of an incompatible containment backend.
 - Node.js unit tests inject the probe runner, verify argument construction for
   default and base64-config calls, validate the complete output shape, and
-  reject malformed output.
+  reject malformed output. A production-boundary test verifies the CLI rejects
+  a non-ProcessContainer config.
 - Documentation for all three SDKs includes the new API and its Windows-only,
   advisory nature.
