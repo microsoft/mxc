@@ -9,6 +9,9 @@ namespace Microsoft.Mxc.Sdk.Tests;
 
 public class SandboxAdapterTests
 {
+    private static readonly HashSet<string> NonInjectableRunnerMethods =
+        [nameof(MxcSandbox.Probe)];
+
     [Fact]
     public void DefaultAdaptersImplementInjectableContracts()
     {
@@ -28,6 +31,14 @@ public class SandboxAdapterTests
             () => runner.Run((SandboxRequest)null!));
         Assert.Throws<ArgumentNullException>(
             () => runner.Spawn((SandboxPolicy)null!, "echo hi"));
+    }
+
+    [Fact]
+    public void ExistingRunnerImplementationsRemainSourceCompatible()
+    {
+        ISandboxRunner runner = new ExistingRunnerFake();
+
+        Assert.Equal("fake", runner.NativeVersion);
     }
 
     [Fact]
@@ -51,6 +62,8 @@ public class SandboxAdapterTests
         var contractMethods = contract.GetMethods();
         foreach (var facadeMethod in staticFacade
             .GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly)
+            .Where(method => staticFacade != typeof(MxcSandbox)
+                || !NonInjectableRunnerMethods.Contains(method.Name))
             .Where(method => !method.IsSpecialName))
         {
             var parameterTypes = facadeMethod.GetParameters()
@@ -107,6 +120,38 @@ public class SandboxAdapterTests
             BindingFlags.Public | BindingFlags.Instance);
 
         Assert.Null(method);
+    }
+
+    private sealed class ExistingRunnerFake : ISandboxRunner
+    {
+        public string NativeVersion => "fake";
+
+        public IReadOnlyList<AvailableBackend> GetAvailableBackends() => [];
+
+        public PlatformSupport GetPlatformSupport() => new();
+
+        public RunResult Run(SandboxPolicy policy, string command) =>
+            throw new NotSupportedException();
+
+        public RunResult Run(SandboxRequest request) =>
+            throw new NotSupportedException();
+
+        public Task<RunResult> RunAsync(
+            SandboxPolicy policy,
+            string command,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task<RunResult> RunAsync(
+            SandboxRequest request,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public ISandboxProcess Spawn(SandboxPolicy policy, string command) =>
+            throw new NotSupportedException();
+
+        public ISandboxProcess Spawn(SandboxRequest request) =>
+            throw new NotSupportedException();
     }
 
     private sealed class FakeSandboxProcess(string output) : ISandboxProcess
