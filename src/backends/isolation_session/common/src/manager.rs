@@ -86,8 +86,6 @@ unsafe impl Sync for MtaReference {}
 /// moves a call off that thread.
 fn refuse_single_threaded_apartment() -> Result<(), IsolationSessionError> {
     if current_apartment()?.is_single_threaded() {
-        // The lifecycle deadlocks in a single-threaded apartment: its
-        // asynchronous calls block without pumping.
         return Err(sta_refusal());
     }
     Ok(())
@@ -1401,8 +1399,7 @@ mod tests {
         assert!(event.to_json_line().contains(r#""status":"failure""#));
     }
 
-    /// The process's *first* STA reports `MAINSTA`, not `APTTYPE_STA`; admitting
-    /// it deadlocks.
+    /// The process's *first* STA reports `MAINSTA`, not `APTTYPE_STA`.
     #[test]
     fn only_single_threaded_apartments_are_classified_as_such() {
         for (apartment, qualifier) in [

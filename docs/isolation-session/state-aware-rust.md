@@ -47,9 +47,8 @@ Requirements on an in-process caller:
   *"requires an interactive session"* (`0x80040233`), so a caller running as a
   service, or over a remote SYSTEM-context shell, cannot complete the lifecycle.
   `provision` succeeds first and mints an OS account that must be deprovisioned.
-- **A caller in a single-threaded apartment is refused.** Any other caller enters
-  a multi-threaded apartment held for the manager's lifetime and balanced on
-  drop. A UI application must marshal onto a background thread.
+- **A caller in a single-threaded apartment is refused.** A UI application must
+  marshal onto a background thread.
   `mxc-sdk/examples/sta_probe.rs` measures this against a live host.
 
 The **one-shot** surface is served in-process with piped stdio:

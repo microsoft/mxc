@@ -328,7 +328,7 @@ pub(super) fn activation_error(code: u32, detail: &str) -> IsolationSessionError
 /// names no operation and carries no status.
 pub(super) fn sta_refusal() -> IsolationSessionError {
     IsolationSessionError::Lifecycle(LifecycleFailure::Refused {
-        message: "this thread is in a single-threaded apartment, where the lifecycle deadlocks"
+        message: "this thread is in a single-threaded apartment, which this backend refuses"
             .to_string(),
         remediation: "Call from a multi-threaded apartment; a UI application must marshal this \
                       onto a background thread."
