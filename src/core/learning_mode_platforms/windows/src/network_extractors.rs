@@ -5,8 +5,8 @@
 
 use learning_mode_core::{
     AccessType, DenialDetails, NetworkDenialDetails, NetworkDenialReason, NetworkDenialSource,
-    NetworkDirection, ResourceType, VerboseLoggingOutcomeReason as VerboseLoggingExclusionReason,
-    VerboseLoggingProvider,
+    NetworkDirection, NetworkPolicyModel, NetworkPolicyRuleKind, ResourceType,
+    VerboseLoggingOutcomeReason as VerboseLoggingExclusionReason, VerboseLoggingProvider,
 };
 use std::net::IpAddr;
 use windows::core::GUID;
@@ -41,15 +41,6 @@ const FIELD_REMOTE_ADDRESS: u32 = 1 << 4;
 const FIELD_REMOTE_PORT: u32 = 1 << 5;
 const FIELD_CAPABILITY_ID: u32 = 1 << 6;
 const FIELD_TESSERA_TAG: u32 = 1 << 7;
-const KNOWN_FIELD_FLAGS: u32 = FIELD_APPLICATION_ID
-    | FIELD_PROTOCOL
-    | FIELD_LOCAL_ADDRESS
-    | FIELD_LOCAL_PORT
-    | FIELD_REMOTE_ADDRESS
-    | FIELD_REMOTE_PORT
-    | FIELD_CAPABILITY_ID
-    | FIELD_TESSERA_TAG;
-
 const TESSERA_TAG_VERSION_V1: u8 = 1;
 const TESSERA_MODEL_DIRECT: u8 = 1;
 const TESSERA_MODEL_PROXY: u8 = 2;
@@ -57,7 +48,8 @@ const TESSERA_RULE_BASELINE: u8 = 1;
 const TESSERA_RULE_EXPLICIT_DENY: u8 = 2;
 const TESSERA_RULE_ALLOW_EXCLUSION: u8 = 3;
 const TESSERA_RULE_PROXY_BASELINE: u8 = 4;
-const MAX_TESSERA_RULE_ORDINAL: u32 = 0x00ff_ffff;
+const MAX_TESSERA_RULE_ORDINAL: u32 = 0x00ff_fffe;
+const TESSERA_RULE_ORDINAL_UNAVAILABLE: u32 = 0x00ff_ffff;
 
 const TESSERA_PROVIDER: &str = "{2F8C6D14-3B7E-4A59-9C08-1D4E7A6B2F30}";
 const TESSERA_SUBLAYER: &str = "{7B1E9A2C-9D4F-4C8A-B321-5E6D2F8A1C44}";
@@ -84,7 +76,6 @@ pub(crate) fn extract_network_denial(
         || mode != MODE_LEARNING
         || normal_decision != DECISION_DENY
         || effective_decision != DECISION_DENY
-        || field_flags & !KNOWN_FIELD_FLAGS != 0
         || filetime == 0
         || filter_id == 0
     {
@@ -122,9 +113,6 @@ fn extract_app_isolation(
     _filter_id: u64,
 ) -> Result<RawDenial, VerboseLoggingExclusionReason> {
     if !property_eq(parts, "SublayerGuid", APP_ISOLATION_SUBLAYER) {
-        return Err(VerboseLoggingExclusionReason::UnsupportedEventSchema);
-    }
-    if field_flags & FIELD_TESSERA_TAG != 0 {
         return Err(VerboseLoggingExclusionReason::UnsupportedEventSchema);
     }
     if reason != REASON_APP_ISOLATION_MISSING_CAPABILITY {
@@ -168,13 +156,30 @@ fn extract_tessera(
     }
 
     let expected_tag = match reason {
-        REASON_TESSERA_DIRECT_DEFAULT_DENY => (TESSERA_MODEL_DIRECT, TESSERA_RULE_BASELINE),
-        REASON_TESSERA_EXPLICIT_DENY => (TESSERA_MODEL_DIRECT, TESSERA_RULE_EXPLICIT_DENY),
-        REASON_TESSERA_ALLOW_EXCLUSION => (TESSERA_MODEL_DIRECT, TESSERA_RULE_ALLOW_EXCLUSION),
-        REASON_TESSERA_PROXY_CONTAINMENT => (TESSERA_MODEL_PROXY, TESSERA_RULE_PROXY_BASELINE),
+        REASON_TESSERA_DIRECT_DEFAULT_DENY => (
+            NetworkPolicyModel::Direct,
+            NetworkPolicyRuleKind::DefaultBaseline,
+        ),
+        REASON_TESSERA_EXPLICIT_DENY => (
+            NetworkPolicyModel::Direct,
+            NetworkPolicyRuleKind::ExplicitDeny,
+        ),
+        REASON_TESSERA_ALLOW_EXCLUSION => (
+            NetworkPolicyModel::Direct,
+            NetworkPolicyRuleKind::AllowExclusion,
+        ),
+        REASON_TESSERA_PROXY_CONTAINMENT => (
+            NetworkPolicyModel::Proxy,
+            NetworkPolicyRuleKind::ProxyContainmentBaseline,
+        ),
         _ => return Err(VerboseLoggingExclusionReason::UnknownNetworkReason),
     };
-    validate_tessera_tag(parts, field_flags, expected_tag)?;
+    let Some(policy_tag) = tessera_policy_tag(parts, field_flags) else {
+        return Err(VerboseLoggingExclusionReason::UnsupportedNetworkPolicyAttribution);
+    };
+    if (policy_tag.model, policy_tag.rule_kind) != expected_tag {
+        return Err(VerboseLoggingExclusionReason::UnsupportedNetworkPolicyAttribution);
+    }
 
     match reason {
         REASON_TESSERA_EXPLICIT_DENY | REASON_TESSERA_ALLOW_EXCLUSION => {
@@ -191,21 +196,6 @@ fn extract_tessera(
         return Err(VerboseLoggingExclusionReason::IncompleteNetworkEndpoint);
     }
 
-    fn validate_tessera_tag(
-        parts: &DecodedEventParts,
-        field_flags: u32,
-        expected: (u8, u8),
-    ) -> Result<(), VerboseLoggingExclusionReason> {
-        if field_flags & FIELD_TESSERA_TAG == 0
-            || required_u8(parts, "TagVersion")? != TESSERA_TAG_VERSION_V1
-            || required_u8(parts, "PolicyModel")? != expected.0
-            || required_u8(parts, "RuleKind")? != expected.1
-            || required_u32(parts, "RuleOrdinal")? > MAX_TESSERA_RULE_ORDINAL
-        {
-            return Err(VerboseLoggingExclusionReason::UnsupportedEventSchema);
-        }
-        Ok(())
-    }
     let remote_address = required_ip_string(parts, "RemoteAddress")?;
 
     let protocol = optional_u8(parts, field_flags, FIELD_PROTOCOL, "Protocol")?;
@@ -235,10 +225,53 @@ fn extract_tessera(
             remote_port,
             application_id,
             filter_id,
+            policy_tag_version: Some(policy_tag.version),
+            policy_model: Some(policy_tag.model),
+            policy_rule_kind: Some(policy_tag.rule_kind),
+            policy_rule_ordinal: policy_tag.rule_ordinal,
         })),
         event_id: parts.event_id,
         provider: VerboseLoggingProvider::LearningModeNetworkDecision,
         verbose_logging_properties: sanitize_properties(&parts.props),
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TesseraPolicyTag {
+    version: u8,
+    model: NetworkPolicyModel,
+    rule_kind: NetworkPolicyRuleKind,
+    rule_ordinal: Option<u32>,
+}
+
+fn tessera_policy_tag(parts: &DecodedEventParts, field_flags: u32) -> Option<TesseraPolicyTag> {
+    if field_flags & FIELD_TESSERA_TAG == 0 {
+        return None;
+    }
+
+    let version = property(parts, "TagVersion").and_then(parse_u8)?;
+    let model = match property(parts, "PolicyModel").and_then(parse_u8)? {
+        TESSERA_MODEL_DIRECT => NetworkPolicyModel::Direct,
+        TESSERA_MODEL_PROXY => NetworkPolicyModel::Proxy,
+        _ => return None,
+    };
+    let rule_kind = match property(parts, "RuleKind").and_then(parse_u8)? {
+        TESSERA_RULE_BASELINE => NetworkPolicyRuleKind::DefaultBaseline,
+        TESSERA_RULE_EXPLICIT_DENY => NetworkPolicyRuleKind::ExplicitDeny,
+        TESSERA_RULE_ALLOW_EXCLUSION => NetworkPolicyRuleKind::AllowExclusion,
+        TESSERA_RULE_PROXY_BASELINE => NetworkPolicyRuleKind::ProxyContainmentBaseline,
+        _ => return None,
+    };
+    let ordinal = property(parts, "RuleOrdinal").and_then(parse_u32)?;
+    if version != TESSERA_TAG_VERSION_V1 || ordinal > TESSERA_RULE_ORDINAL_UNAVAILABLE {
+        return None;
+    }
+
+    Some(TesseraPolicyTag {
+        version,
+        model,
+        rule_kind,
+        rule_ordinal: (ordinal <= MAX_TESSERA_RULE_ORDINAL).then_some(ordinal),
     })
 }
 
@@ -425,9 +458,9 @@ mod tests {
             ("OriginalTimestamp".to_string(), "123".to_string()),
             ("FilterId".to_string(), "456".to_string()),
             ("Direction".to_string(), "0x3901".to_string()),
-            ("TagVersion".to_string(), "1".to_string()),
-            ("PolicyModel".to_string(), "1".to_string()),
-            ("RuleKind".to_string(), "1".to_string()),
+            ("TagVersion".to_string(), "0".to_string()),
+            ("PolicyModel".to_string(), "0".to_string()),
+            ("RuleKind".to_string(), "0".to_string()),
             ("RuleOrdinal".to_string(), "0".to_string()),
             ("ProviderGuid".to_string(), TESSERA_PROVIDER.to_string()),
             ("SublayerGuid".to_string(), TESSERA_SUBLAYER.to_string()),
@@ -451,6 +484,22 @@ mod tests {
             .find(|(candidate, _)| candidate == name)
             .unwrap();
         *current = value.into();
+    }
+
+    fn remove(parts: &mut DecodedEventParts, name: &str) {
+        parts.props.retain(|(candidate, _)| candidate != name);
+    }
+
+    fn set_tessera_tag(parts: &mut DecodedEventParts, model: u8, rule_kind: u8, rule_ordinal: u32) {
+        let flags = property(parts, "FieldFlags")
+            .and_then(parse_u32)
+            .unwrap_or_default()
+            | FIELD_TESSERA_TAG;
+        replace(parts, "FieldFlags", flags.to_string());
+        replace(parts, "TagVersion", TESSERA_TAG_VERSION_V1.to_string());
+        replace(parts, "PolicyModel", model.to_string());
+        replace(parts, "RuleKind", rule_kind.to_string());
+        replace(parts, "RuleOrdinal", rule_ordinal.to_string());
     }
 
     #[test]
@@ -492,6 +541,7 @@ mod tests {
             ],
         );
         replace(&mut parts, "FieldFlags", flags.to_string());
+        set_tessera_tag(&mut parts, TESSERA_MODEL_DIRECT, TESSERA_RULE_BASELINE, 0);
 
         let denial = extract_network_denial(&parts).unwrap();
         assert_eq!(denial.object_name, "tcp://203.0.113.10:443");
@@ -503,6 +553,10 @@ mod tests {
                 protocol: Some(6),
                 remote_port: Some(443),
                 filter_id: 456,
+                policy_tag_version: Some(TESSERA_TAG_VERSION_V1),
+                policy_model: Some(NetworkPolicyModel::Direct),
+                policy_rule_kind: Some(NetworkPolicyRuleKind::DefaultBaseline),
+                policy_rule_ordinal: Some(0),
                 ..
             }))
         ));
@@ -521,6 +575,7 @@ mod tests {
             ],
         );
         replace(&mut parts, "FieldFlags", flags.to_string());
+        set_tessera_tag(&mut parts, TESSERA_MODEL_DIRECT, TESSERA_RULE_BASELINE, 0);
 
         assert_eq!(
             extract_network_denial(&parts).unwrap().object_name,
@@ -551,9 +606,7 @@ mod tests {
             ),
         ] {
             let mut parts = event(SOURCE_TESSERA, reason, &[]);
-            replace(&mut parts, "FieldFlags", FIELD_TESSERA_TAG.to_string());
-            replace(&mut parts, "PolicyModel", model.to_string());
-            replace(&mut parts, "RuleKind", kind.to_string());
+            set_tessera_tag(&mut parts, model, kind, 4);
             assert_eq!(extract_network_denial(&parts).unwrap_err(), expected);
         }
     }
@@ -561,7 +614,7 @@ mod tests {
     #[test]
     fn tessera_default_deny_requires_remote_address() {
         let mut parts = event(SOURCE_TESSERA, REASON_TESSERA_DIRECT_DEFAULT_DENY, &[]);
-        replace(&mut parts, "FieldFlags", FIELD_TESSERA_TAG.to_string());
+        set_tessera_tag(&mut parts, TESSERA_MODEL_DIRECT, TESSERA_RULE_BASELINE, 0);
         assert_eq!(
             extract_network_denial(&parts).unwrap_err(),
             VerboseLoggingExclusionReason::IncompleteNetworkEndpoint
@@ -580,6 +633,7 @@ mod tests {
             "FieldFlags",
             (FIELD_REMOTE_ADDRESS | FIELD_TESSERA_TAG).to_string(),
         );
+        set_tessera_tag(&mut parts, TESSERA_MODEL_DIRECT, TESSERA_RULE_BASELINE, 0);
 
         assert_eq!(
             extract_network_denial(&parts).unwrap_err(),
@@ -588,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_field_flags_fail_closed() {
+    fn future_fields_and_flags_do_not_hide_a_valid_v1_event() {
         let mut parts = event(
             SOURCE_TESSERA,
             REASON_TESSERA_DIRECT_DEFAULT_DENY,
@@ -599,10 +653,14 @@ mod tests {
             "FieldFlags",
             (FIELD_REMOTE_ADDRESS | FIELD_TESSERA_TAG | (1 << 31)).to_string(),
         );
+        set_tessera_tag(&mut parts, TESSERA_MODEL_DIRECT, TESSERA_RULE_BASELINE, 7);
+        parts
+            .props
+            .push(("FutureTrailingProperty".to_string(), "future".to_string()));
 
         assert_eq!(
-            extract_network_denial(&parts).unwrap_err(),
-            VerboseLoggingExclusionReason::UnsupportedEventSchema
+            extract_network_denial(&parts).unwrap().object_name,
+            "ip://203.0.113.10"
         );
     }
 
@@ -621,12 +679,116 @@ mod tests {
     }
 
     #[test]
-    fn legacy_tessera_tag_is_verbose_unknown_reason() {
+    fn legacy_24_field_event_remains_a_verbose_unknown_reason() {
         let mut parts = event(SOURCE_TESSERA, u16::MAX, &[]);
-        replace(&mut parts, "FieldFlags", FIELD_TESSERA_TAG.to_string());
-        replace(&mut parts, "TagVersion", "0");
-        replace(&mut parts, "PolicyModel", "0");
-        replace(&mut parts, "RuleKind", "0");
+        for name in ["TagVersion", "PolicyModel", "RuleKind", "RuleOrdinal"] {
+            remove(&mut parts, name);
+        }
+
+        assert_eq!(
+            extract_network_denial(&parts).unwrap_err(),
+            VerboseLoggingExclusionReason::UnknownNetworkReason
+        );
+    }
+
+    #[test]
+    fn updated_tag_fields_are_ignored_when_the_validity_bit_is_clear() {
+        let mut parts = event(
+            SOURCE_TESSERA,
+            REASON_TESSERA_DIRECT_DEFAULT_DENY,
+            &[("RemoteAddress", "203.0.113.10")],
+        );
+        replace(&mut parts, "FieldFlags", FIELD_REMOTE_ADDRESS.to_string());
+
+        assert_eq!(
+            extract_network_denial(&parts).unwrap_err(),
+            VerboseLoggingExclusionReason::UnsupportedNetworkPolicyAttribution
+        );
+    }
+
+    #[test]
+    fn tessera_policy_rule_ordinal_preserves_max_and_omits_unavailable() {
+        for (ordinal, expected) in [
+            (MAX_TESSERA_RULE_ORDINAL, Some(MAX_TESSERA_RULE_ORDINAL)),
+            (TESSERA_RULE_ORDINAL_UNAVAILABLE, None),
+        ] {
+            let mut parts = event(
+                SOURCE_TESSERA,
+                REASON_TESSERA_DIRECT_DEFAULT_DENY,
+                &[("RemoteAddress", "203.0.113.10")],
+            );
+            replace(&mut parts, "FieldFlags", FIELD_REMOTE_ADDRESS.to_string());
+            set_tessera_tag(
+                &mut parts,
+                TESSERA_MODEL_DIRECT,
+                TESSERA_RULE_BASELINE,
+                ordinal,
+            );
+
+            let denial = extract_network_denial(&parts).unwrap();
+            let Some(DenialDetails::Network(details)) = denial.details else {
+                panic!("expected normalized network details");
+            };
+            assert_eq!(details.policy_rule_ordinal, expected);
+        }
+    }
+
+    #[test]
+    fn unsupported_tag_values_preserve_only_the_base_event() {
+        for (field, value) in [
+            ("TagVersion", "2"),
+            ("PolicyModel", "3"),
+            ("RuleKind", "5"),
+            ("RuleOrdinal", "16777216"),
+        ] {
+            let mut parts = event(
+                SOURCE_TESSERA,
+                REASON_TESSERA_DIRECT_DEFAULT_DENY,
+                &[("RemoteAddress", "203.0.113.10")],
+            );
+            replace(&mut parts, "FieldFlags", FIELD_REMOTE_ADDRESS.to_string());
+            set_tessera_tag(&mut parts, TESSERA_MODEL_DIRECT, TESSERA_RULE_BASELINE, 0);
+            replace(&mut parts, field, value);
+
+            assert_eq!(
+                extract_network_denial(&parts).unwrap_err(),
+                VerboseLoggingExclusionReason::UnsupportedNetworkPolicyAttribution,
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn reason_and_tag_mapping_mismatch_preserves_only_the_base_event() {
+        let mut parts = event(SOURCE_TESSERA, REASON_TESSERA_EXPLICIT_DENY, &[]);
+        set_tessera_tag(&mut parts, TESSERA_MODEL_DIRECT, TESSERA_RULE_BASELINE, 0);
+
+        assert_eq!(
+            extract_network_denial(&parts).unwrap_err(),
+            VerboseLoggingExclusionReason::UnsupportedNetworkPolicyAttribution
+        );
+    }
+
+    #[test]
+    fn partial_appended_tag_preserves_only_the_base_event() {
+        let mut parts = event(
+            SOURCE_TESSERA,
+            REASON_TESSERA_DIRECT_DEFAULT_DENY,
+            &[("RemoteAddress", "203.0.113.10")],
+        );
+        replace(&mut parts, "FieldFlags", FIELD_REMOTE_ADDRESS.to_string());
+        set_tessera_tag(&mut parts, TESSERA_MODEL_DIRECT, TESSERA_RULE_BASELINE, 0);
+        remove(&mut parts, "RuleKind");
+
+        assert_eq!(
+            extract_network_denial(&parts).unwrap_err(),
+            VerboseLoggingExclusionReason::UnsupportedNetworkPolicyAttribution
+        );
+    }
+
+    #[test]
+    fn unknown_stable_reason_remains_verbose_only() {
+        let parts = event(SOURCE_TESSERA, u16::MAX, &[]);
 
         assert_eq!(
             extract_network_denial(&parts).unwrap_err(),

@@ -90,6 +90,30 @@ pub enum NetworkDenialReason {
     DirectDefaultDeny,
 }
 
+/// Tessera policy model attributed to a network decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NetworkPolicyModel {
+    /// Direct endpoint filtering.
+    Direct,
+    /// Proxy-containment filtering.
+    Proxy,
+}
+
+/// Tessera source policy rule kind attributed to a network decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NetworkPolicyRuleKind {
+    /// Synthetic default-deny baseline.
+    DefaultBaseline,
+    /// Explicit deny authored by the policy.
+    ExplicitDeny,
+    /// Exclusion from an allow rule.
+    AllowExclusion,
+    /// Synthetic proxy-containment baseline.
+    ProxyContainmentBaseline,
+}
+
 /// Direction of a denied network operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -134,6 +158,19 @@ pub struct NetworkDenialDetails {
     /// Runtime WFP filter identifier used to correlate the event to its live filter.
     #[serde(with = "decimal_u64")]
     pub filter_id: u64,
+    /// Version of the normalized Tessera policy tag, when attribution was valid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_tag_version: Option<u8>,
+    /// Tessera policy model, when attribution was valid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_model: Option<NetworkPolicyModel>,
+    /// Tessera source rule kind, when attribution was valid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_rule_kind: Option<NetworkPolicyRuleKind>,
+    /// Zero-based source policy-rule ordinal. Synthetic baselines and events
+    /// reporting the `0x00ff_ffff` unavailable sentinel omit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_rule_ordinal: Option<u32>,
 }
 
 /// Resource-family-specific metadata attached to a denial.
@@ -334,6 +371,10 @@ mod tests {
                 remote_port: Some(443),
                 application_id: Some(r"\device\harddiskvolume3\app.exe".to_string()),
                 filter_id: u64::MAX,
+                policy_tag_version: Some(1),
+                policy_model: Some(NetworkPolicyModel::Direct),
+                policy_rule_kind: Some(NetworkPolicyRuleKind::DefaultBaseline),
+                policy_rule_ordinal: Some(42),
             })),
         };
 
@@ -341,6 +382,9 @@ mod tests {
         assert_eq!(json["details"]["kind"], "network");
         assert_eq!(json["details"]["filterId"], u64::MAX.to_string());
         assert_eq!(json["details"]["reason"], "directDefaultDeny");
+        assert_eq!(json["details"]["policyModel"], "direct");
+        assert_eq!(json["details"]["policyRuleKind"], "defaultBaseline");
+        assert_eq!(json["details"]["policyRuleOrdinal"], 42);
         assert!(json["details"].get("localAddress").is_none());
         assert_eq!(serde_json::from_value::<DeniedResource>(json).unwrap(), r);
     }

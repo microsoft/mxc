@@ -1072,7 +1072,7 @@ mod tests {
     use super::*;
     use learning_mode_core::{
         AccessType, DenialDetails, NetworkDenialDetails, NetworkDenialReason, NetworkDenialSource,
-        NetworkDirection, ResourceType,
+        NetworkDirection, NetworkPolicyModel, NetworkPolicyRuleKind, ResourceType,
     };
 
     const SCOPED_PID: u32 = 42;
@@ -1774,6 +1774,10 @@ mod tests {
                 remote_port: Some(443),
                 application_id: Some(r"\Device\HarddiskVolume3\app.exe".to_string()),
                 filter_id: 9001,
+                policy_tag_version: Some(1),
+                policy_model: Some(NetworkPolicyModel::Direct),
+                policy_rule_kind: Some(NetworkPolicyRuleKind::DefaultBaseline),
+                policy_rule_ordinal: Some(0),
             }))
         );
         assert!(analysis.verbose_logging.signatures.iter().any(|aggregate| {
@@ -1781,6 +1785,60 @@ mod tests {
                 && aggregate.signature.reason
                     == VerboseLoggingOutcomeReason::IntentionalNetworkPolicyDeny
         }));
+    }
+
+    #[test]
+    fn managed_network_events_preserve_legacy_and_partial_attribution() {
+        let common = [
+            ("SchemaVersion", "1"),
+            ("SourceDomain", "2"),
+            ("Mode", "1"),
+            ("NormalDecision", "1"),
+            ("EffectiveDecision", "1"),
+            ("OriginalTimestamp", "500"),
+            ("FilterId", "9001"),
+            ("Direction", "0x3901"),
+            ("ProviderGuid", "{2F8C6D14-3B7E-4A59-9C08-1D4E7A6B2F30}"),
+            ("SublayerGuid", "{7B1E9A2C-9D4F-4C8A-B321-5E6D2F8A1C44}"),
+            ("RemoteAddress", "203.0.113.10"),
+        ];
+        let legacy = common
+            .into_iter()
+            .chain([("Reason", "65535"), ("FieldFlags", "16")])
+            .collect::<Vec<_>>();
+        let partial_attribution = common
+            .into_iter()
+            .chain([
+                ("Reason", "100"),
+                ("FieldFlags", "144"),
+                ("TagVersion", "1"),
+                ("PolicyModel", "1"),
+                ("RuleOrdinal", "0"),
+            ])
+            .collect::<Vec<_>>();
+
+        let analysis = resources_from_events(&[
+            network_event(777, 600, &legacy),
+            network_event(777, 601, &partial_attribution),
+        ]);
+
+        assert!(analysis.denials.is_empty());
+        for expected in [
+            VerboseLoggingOutcomeReason::UnknownNetworkReason,
+            VerboseLoggingOutcomeReason::UnsupportedNetworkPolicyAttribution,
+        ] {
+            let aggregate = analysis
+                .verbose_logging
+                .signatures
+                .iter()
+                .find(|aggregate| aggregate.signature.reason == expected)
+                .expect("base network event should remain in verbose diagnostics");
+            assert!(aggregate
+                .signature
+                .properties
+                .iter()
+                .any(|(name, value)| name == "RemoteAddress" && value == "203.0.113.10"));
+        }
     }
 
     #[test]

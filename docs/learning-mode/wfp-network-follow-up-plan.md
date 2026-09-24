@@ -21,9 +21,9 @@ VM validation used an outbound TCP connection to `1.1.1.1:445`. The managed
 ETL contained one `NetworkDecisionV1` event with the expected package, endpoint,
 protocol, direction, Tessera provider, and Tessera sublayer.
 
-## Remaining OS.2020 work: Tessera filter tags
+## Completed OS.2020 contract: Tessera filter tags
 
-The ProcessModel/Tessera network-filtering code must set
+The ProcessModel/Tessera network-filtering code sets
 `FWPM_FILTER0.rawContext` when each filter is installed:
 
 ```text
@@ -50,15 +50,20 @@ Rule kinds:
 4 = proxy-containment baseline
 ```
 
-Without this tag, AppInfo emits reason `65535` with zero-valued tag fields.
-MXC retains that event as `unknownNetworkReason` in verbose diagnostics because
-the endpoint and runtime filter ID do not prove whether the denial represents
-missing policy, an explicit deny, an exclusion, or proxy containment.
+AppInfo appends `TagVersion`, `PolicyModel`, `RuleKind`, and `RuleOrdinal` to
+`NetworkDecisionV1`. The event ID and version remain `1`: legacy events contain
+24 properties, while updated events contain 28. `FieldFlags & 0x80` declares
+all four appended properties semantically valid. MXC detects property
+availability instead of requiring an exact count and ignores emitted zeroes
+when the bit is clear.
 
-The ProcessModel owner must add and test these tags in the OS.2020
-`processmodel\lib\networkFiltering\` filter-construction path. A direct
-default-deny filter must produce reason `100`, tag version `1`, policy model
-`1`, and rule kind `1`.
+Reasons `100`-`103` map to the four version-1 model/rule-kind combinations
+above. `RuleOrdinal` uses the low 24 bits: `0x000000`-`0x00fffffe` identify the
+zero-based source rule, and `0x00ffffff` means unavailable. Missing, partial,
+future, or mismatched attribution never discards the base network event. MXC
+retains it in verbose diagnostics as
+`unsupportedNetworkPolicyAttribution`. Legacy reason `65535` remains
+`unknownNetworkReason`.
 
 ## Remaining MXC work: schema 0.8 policy regeneration
 
@@ -94,7 +99,7 @@ legacy file/capability event format:
 For a direct default-deny TCP connection to `1.1.1.1:445`:
 
 1. The managed ETL contains `Reason=100`, `TagVersion=1`, `PolicyModel=1`, and
-   `RuleKind=1`.
+   `RuleKind=1`, with `FieldFlags & 0x80` set.
 2. MXC emits a canonical network denial for `tcp://1.1.1.1:445`.
 3. Policy regeneration adds an egress allow selector equivalent to:
 

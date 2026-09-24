@@ -249,14 +249,42 @@ MXC currently recognizes two normalized source domains:
   resource such as `tcp://203.0.113.10:443` or
   `udp://[2001:db8::1]:53`.
 
+`NetworkDecisionV1` keeps event ID and event version `1` across two compatible
+payload shapes. Legacy events expose 24 properties. Updated events append
+`TagVersion`, `PolicyModel`, `RuleKind`, and `RuleOrdinal` after
+`CapabilityId`, for 28 properties. MXC detects those properties by name and
+does not require an exact property count, so future trailing properties do not
+hide an otherwise valid base event.
+
+`FieldFlags & 0x80` declares all four appended attribution properties valid.
+When that bit is clear, MXC ignores their physically emitted zero values. When
+it is set, all four properties must be present and form one of these version-1
+combinations:
+
+| Reason | Policy model | Rule kind | Meaning |
+|---|---:|---:|---|
+| `100` | `1` (direct) | `1` (default baseline) | Direct default deny |
+| `101` | `1` (direct) | `2` (explicit deny) | Authored explicit deny |
+| `102` | `1` (direct) | `3` (allow exclusion) | Exclusion from an allow rule |
+| `103` | `2` (proxy) | `4` (proxy-containment baseline) | Proxy containment |
+
+`RuleOrdinal` is zero-based in the range `0x000000`-`0x00fffffe`;
+`0x00ffffff` means unavailable. Valid actionable records expose the additive
+Rust fields `policy_tag_version`, `policy_model`, `policy_rule_kind`, and
+`policy_rule_ordinal` (camel-cased in JSON). The unavailable ordinal is
+omitted rather than represented as the sentinel.
+
 Tessera explicit denies, allow exclusions, and proxy-containment decisions are
 intentional authored policy rather than missing grants. They are retained in
 the verbose logging artifact but are not emitted as policy recommendations;
 recommending a direct allow for proxy containment could bypass the proxy.
 Malformed events, unknown reasons, identity mismatches, and incomplete
 endpoints are also verbose-only.
-Legacy, malformed, and future Tessera filter tags are normalized as the
-unknown reason and remain verbose-only until their policy meaning is proven.
+Legacy reason `65535` remains `unknownNetworkReason`. A stable reason
+`100`-`103` with missing, partial, unsupported, or mismatched attribution is
+retained as `unsupportedNetworkPolicyAttribution`; only the optional
+attribution is rejected. The base network event and sanitized properties
+remain in verbose diagnostics.
 
 Actionable network records include an additive `details` object with
 `kind: "network"` and the normalized source, reason, direction, protocol,

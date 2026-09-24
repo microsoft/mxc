@@ -61,6 +61,8 @@ pub enum VerboseLoggingOutcomeReason {
     ProxyContainment,
     /// The network event carried an unknown or unsupported stable reason.
     UnknownNetworkReason,
+    /// A stable Tessera reason lacked a complete, supported policy attribution.
+    UnsupportedNetworkPolicyAttribution,
     /// The network event omitted endpoint data required for policy guidance.
     IncompleteNetworkEndpoint,
 }
