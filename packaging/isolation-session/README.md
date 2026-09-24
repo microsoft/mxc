@@ -32,10 +32,9 @@ The NuGet uses the x64 WinMD pair and signed x64 activation shim consumed by
 MXC. ARM64 WinMD hashes remain in release provenance but are not required to
 match the independently generated x64 metadata byte-for-byte. The package also
 carries the completed `IsoSession.manifest` generated during installer
-packaging, the repository-owned reg-free COM activation manifest, and a
-pipeline-stamped `IsoSessionApp.runtimeversion` sidecar. Aggregation verifies
-that the x64 and ARM64 runtime manifests are byte-identical before packaging
-one copy, so MXC consumers do not stamp `IsoSession.manifest.template`.
+packaging. Aggregation verifies that the x64 and ARM64 runtime manifests are
+byte-identical before packaging one copy, so MXC consumers do not stamp
+`IsoSession.manifest.template`.
 
 ## Upstream source
 

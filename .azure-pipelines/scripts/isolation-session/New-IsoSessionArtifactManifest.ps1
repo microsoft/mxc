@@ -254,22 +254,6 @@ try {
         throw 'NuGet package version does not match the canonical NuGet version.'
     }
 
-    $runtimeVersion = Get-ZipEntryText -Archive $packageZip `
-        -EntryName 'runtime/IsoSessionApp.runtimeversion'
-    if ($runtimeVersion -ne $releaseInfo.monthUnderscore) {
-        throw 'NuGet runtime-version sidecar does not match the MSI registry token.'
-    }
-
-    $comClassManifest = Get-ZipEntryText -Archive $packageZip `
-        -EntryName 'runtime/IsoSessionApp.comClass.manifest'
-    foreach ($clsid in @(
-            '{6EF3155B-D1A2-4A34-BCAA-089F8A6D9916}',
-            '{36B03FF1-21AA-4F3C-819D-2430EC830DD0}')) {
-        if ($comClassManifest -notmatch [regex]::Escape($clsid)) {
-            throw "NuGet COM activation manifest is missing CLSID '$clsid'."
-        }
-    }
-
     $packagedAppBytes = Get-ZipEntryBytes -Archive $packageZip `
         -EntryName 'runtime/IsoSessionApp.dll'
     if (-not $packagedAppBytes) {

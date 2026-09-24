@@ -276,21 +276,18 @@ try {
                 'metadata/GENERATION_INFO.toml',
                 'metadata/RELEASE_INFO.json',
                 'runtime/IsoSessionApp.dll',
-                'runtime/IsoSession.manifest',
+                'runtime/IsoSession.manifest')) {
+            Assert-True ($entries -contains $entry) "entry '$entry' is present"
+        }
+        foreach ($entry in @(
                 'runtime/IsoSessionApp.comClass.manifest',
                 'runtime/IsoSessionApp.runtimeversion')) {
-            Assert-True ($entries -contains $entry) "entry '$entry' is present"
+            Assert-True ($entries -notcontains $entry) "obsolete entry '$entry' is absent"
         }
 
         $nuspecText = Get-ZipEntryTextFromPath -NupkgPath $expectedNupkg -EntryName 'Microsoft.Windows.AI.IsolationSession.SDK.nuspec'
         Assert-True ($nuspecText -match '<id>Microsoft\.Windows\.AI\.IsolationSession\.SDK</id>') 'package id is canonical'
         Assert-True ($nuspecText -match [regex]::Escape("<version>$($releaseInfo.nugetVersion)</version>")) 'package version includes the patch'
-
-        $runtimeVersion = Get-ZipEntryTextFromPath `
-            -NupkgPath $expectedNupkg `
-            -EntryName 'runtime/IsoSessionApp.runtimeversion'
-        Assert-True ($runtimeVersion -eq $releaseInfo.monthUnderscore) `
-            'runtime sidecar uses the MSI registry token'
 
         $packagedRuntimeManifestBytes = Get-ZipEntryBytesFromPath `
             -NupkgPath $expectedNupkg `
@@ -305,13 +302,6 @@ try {
             'completed runtime manifest carries the dotted MonthId'
         Assert-True ($packagedRuntimeManifest -notmatch '\$\(MonthId\)') `
             'completed runtime manifest contains no unresolved placeholder'
-
-        $comClassManifest = Get-ZipEntryTextFromPath `
-            -NupkgPath $expectedNupkg `
-            -EntryName 'runtime/IsoSessionApp.comClass.manifest'
-        Assert-True ($comClassManifest -match [regex]::Escape(
-                '{6EF3155B-D1A2-4A34-BCAA-089F8A6D9916}')) `
-            'COM activation manifest carries the IsoSessionOps activator CLSID'
 
         $packagedAppBytes = Get-ZipEntryBytesFromPath `
             -NupkgPath $expectedNupkg `
