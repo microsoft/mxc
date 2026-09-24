@@ -295,11 +295,13 @@ its existing routing and execution gates before binding to
 consume this bound type. Optional provision configuration and optional fields
 remain intact through validation, with defaults still owned by the backend.
 
-High-level Rust callers construct `ProvisionRequest`,
-`SandboxLifecycleRequest`, or `StateAwareExecRequest`. Those values adapt
+High-level Rust callers use operation-specific functions under
+`mxc_sdk::sandbox`. They pass an opaque `SandboxId` separately from
+`ProvisionRequest`, `LifecycleRequest`, or `ExecRequest`, while authorization
+and telemetry preferences remain in `OperationOptions`. Those values adapt
 directly into `CommonRequestIR + StateAwareOperation` and share normalization
-with the exact-contract lane; they are not serialized to JSON. Typed lifecycle
-dispatch returns `StateAwareResult` and typed backend metadata without
+with the exact-contract lane; they are not serialized to JSON. Provision,
+lifecycle, and validation calls return distinct typed results without
 constructing a JSON response envelope. `run_state_aware_json`,
 `exec_sandbox_json`, and `exec_attached_json` remain for intentional raw
 exact-contract use.
