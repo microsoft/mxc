@@ -128,3 +128,323 @@ fn duplicate_thread_token() -> windows_core::Result<Option<SendOwnedHandle>> {
     let mut duplicate = OwnedHandle::new(duplicate);
     Ok(Some(SendOwnedHandle::take(&mut duplicate)))
 }
+
+#[cfg(test)]
+mod tests {
+    use wxc_common::logger::Mode;
+
+    use windows::Win32::Security::{
+        CreateRestrictedToken, CreateWellKnownSid, GetTokenInformation, ImpersonateSelf,
+        IsTokenRestricted, RevertToSelf, SecurityIdentification, TokenImpersonationLevel,
+        WinWorldSid, CREATE_RESTRICTED_TOKEN_FLAGS, PSID, SECURITY_IMPERSONATION_LEVEL,
+        SECURITY_MAX_SID_SIZE, SID_AND_ATTRIBUTES, TOKEN_QUERY,
+    };
+    use windows::Win32::System::Com::{
+        CoGetApartmentType, CoInitializeEx, CoUninitialize, APTTYPE, APTTYPEQUALIFIER,
+        APTTYPEQUALIFIER_IMPLICIT_MTA, APTTYPE_MAINSTA, APTTYPE_MTA, APTTYPE_STA,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    use super::*;
+    use crate::error::LifecycleFailure;
+
+    /// A single-threaded apartment on the test thread while it lives.
+    struct Sta;
+
+    impl Sta {
+        fn enter() -> Self {
+            // SAFETY: balanced by `CoUninitialize` in `drop`.
+            let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+            assert!(hr.is_ok(), "CoInitializeEx failed: {hr:?}");
+            Self
+        }
+    }
+
+    impl Drop for Sta {
+        fn drop(&mut self) {
+            // SAFETY: balances `enter`.
+            unsafe { CoUninitialize() };
+        }
+    }
+
+    /// The test thread impersonating while it lives.
+    struct Impersonating;
+
+    impl Impersonating {
+        fn process_token(level: SECURITY_IMPERSONATION_LEVEL) -> Self {
+            // SAFETY: impersonation of the process token on this thread, ended
+            // in `drop`.
+            unsafe { ImpersonateSelf(level) }.expect("ImpersonateSelf failed");
+            Self
+        }
+
+        fn token(token: &OwnedHandle) -> Self {
+            // SAFETY: `token` is a live impersonation token; `None` targets the
+            // current thread. Ended in `drop`.
+            unsafe { SetThreadToken(None, Some(token.get())) }.expect("SetThreadToken failed");
+            Self
+        }
+    }
+
+    impl Drop for Impersonating {
+        fn drop(&mut self) {
+            // SAFETY: ends the impersonation the constructor began.
+            let _ = unsafe { RevertToSelf() };
+        }
+    }
+
+    /// An impersonation copy of the process token, restricted so that a thread
+    /// holding it can be told apart from one running as the process.
+    fn restricted_token() -> OwnedHandle {
+        let mut process_token = HANDLE::default();
+        // SAFETY: the out-parameter is a valid, writable local.
+        unsafe {
+            OpenProcessToken(
+                GetCurrentProcess(),
+                TOKEN_DUPLICATE | TOKEN_QUERY,
+                &mut process_token,
+            )
+        }
+        .expect("OpenProcessToken failed");
+        let process_token = OwnedHandle::new(process_token);
+
+        let mut everyone = [0u8; SECURITY_MAX_SID_SIZE as usize];
+        let mut size = everyone.len() as u32;
+        // SAFETY: `everyone` is writable for `size` bytes.
+        unsafe {
+            CreateWellKnownSid(
+                WinWorldSid,
+                None,
+                Some(PSID(everyone.as_mut_ptr().cast())),
+                &mut size,
+            )
+        }
+        .expect("CreateWellKnownSid failed");
+        let restricting = [SID_AND_ATTRIBUTES {
+            Sid: PSID(everyone.as_mut_ptr().cast()),
+            Attributes: 0,
+        }];
+
+        let mut restricted = HANDLE::default();
+        // SAFETY: `process_token` is live, `restricting` points at a valid SID
+        // for the call, and the out-parameter is a valid, writable local.
+        unsafe {
+            CreateRestrictedToken(
+                process_token.get(),
+                CREATE_RESTRICTED_TOKEN_FLAGS(0),
+                None,
+                None,
+                Some(&restricting),
+                &mut restricted,
+            )
+        }
+        .expect("CreateRestrictedToken failed");
+        let restricted = OwnedHandle::new(restricted);
+
+        let mut impersonation = HANDLE::default();
+        // SAFETY: `restricted` is live; the out-parameter is a valid, writable
+        // local.
+        unsafe {
+            DuplicateTokenEx(
+                restricted.get(),
+                TOKEN_QUERY | TOKEN_IMPERSONATE,
+                None,
+                SecurityImpersonation,
+                TokenImpersonation,
+                &mut impersonation,
+            )
+        }
+        .expect("DuplicateTokenEx failed");
+        OwnedHandle::new(impersonation)
+    }
+
+    fn apartment() -> (APTTYPE, APTTYPEQUALIFIER) {
+        let mut apartment = APTTYPE::default();
+        let mut qualifier = APTTYPEQUALIFIER::default();
+        // SAFETY: both out-parameters are valid, writable locals.
+        unsafe { CoGetApartmentType(&mut apartment, &mut qualifier) }
+            .expect("CoGetApartmentType failed");
+        (apartment, qualifier)
+    }
+
+    /// Whether this thread's impersonation token is restricted, and its level;
+    /// `None` when the thread is not impersonating.
+    fn thread_token() -> Option<(bool, SECURITY_IMPERSONATION_LEVEL)> {
+        let mut token = HANDLE::default();
+        // SAFETY: the out-parameter is a valid, writable local.
+        unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut token) }.ok()?;
+        let token = OwnedHandle::new(token);
+
+        // SAFETY: `token` is live.
+        let restricted = unsafe { IsTokenRestricted(token.get()) }.is_ok();
+        let mut level = SECURITY_IMPERSONATION_LEVEL::default();
+        let mut size = 0;
+        // SAFETY: `level` is writable for the length passed, and `size` is a
+        // valid, writable local.
+        unsafe {
+            GetTokenInformation(
+                token.get(),
+                TokenImpersonationLevel,
+                Some(std::ptr::from_mut(&mut level).cast()),
+                std::mem::size_of::<SECURITY_IMPERSONATION_LEVEL>() as u32,
+                &mut size,
+            )
+        }
+        .expect("GetTokenInformation failed");
+        Some((restricted, level))
+    }
+
+    fn sees_a_sink() -> bool {
+        Logger::inherit_thread_diagnostic_sink().has_diagnostic_sink()
+    }
+
+    #[test]
+    fn calls_from_a_single_threaded_apartment_run_in_the_multi_threaded_one() {
+        let _sta = Sta::enter();
+        let caller = apartment();
+        assert!(
+            caller.0 == APTTYPE_STA || caller.0 == APTTYPE_MAINSTA,
+            "{caller:?}"
+        );
+
+        let implicit_mta = (APTTYPE_MTA, APTTYPEQUALIFIER_IMPLICIT_MTA);
+        let impersonation = Impersonation::of_this_thread().unwrap();
+        assert_eq!(
+            call(&impersonation, || Ok(apartment())).unwrap(),
+            implicit_mta
+        );
+        assert_eq!(
+            apartment(),
+            caller,
+            "the caller's apartment must be untouched"
+        );
+    }
+
+    #[test]
+    fn a_call_runs_under_the_captured_token_at_impersonation_level() {
+        let token = restricted_token();
+        let _impersonating = Impersonating::token(&token);
+        let caller = thread_token();
+        assert_eq!(caller, Some((true, SecurityImpersonation)));
+
+        let impersonation = Impersonation::of_this_thread().unwrap();
+        assert_eq!(call(&impersonation, || Ok(thread_token())).unwrap(), caller);
+        assert_eq!(
+            thread_token(),
+            caller,
+            "the caller's token must be untouched"
+        );
+    }
+
+    #[test]
+    fn a_call_runs_under_the_captured_token_not_the_calling_threads() {
+        let impersonation = std::thread::spawn(|| {
+            let token = restricted_token();
+            let _impersonating = Impersonating::token(&token);
+            Impersonation::of_this_thread().unwrap()
+        })
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+
+        std::thread::spawn(move || {
+            let _sta = Sta::enter();
+            let _impersonating = Impersonating::process_token(SecurityIdentification);
+            assert!(
+                Impersonation::of_this_thread().is_err(),
+                "this thread's own token must be one that cannot be captured"
+            );
+            let caller = (apartment(), thread_token());
+
+            assert_eq!(
+                call(&impersonation, || Ok((apartment(), thread_token()))).unwrap(),
+                (
+                    (APTTYPE_MTA, APTTYPEQUALIFIER_IMPLICIT_MTA),
+                    Some((true, SecurityImpersonation))
+                )
+            );
+            assert_eq!(
+                (apartment(), thread_token()),
+                caller,
+                "the calling thread must be untouched"
+            );
+        })
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    }
+
+    #[test]
+    fn a_caller_that_is_not_impersonating_passes_no_token() {
+        assert_eq!(thread_token(), None);
+
+        let impersonation = Impersonation::of_this_thread().unwrap();
+        assert_eq!(call(&impersonation, || Ok(thread_token())).unwrap(), None);
+    }
+
+    /// An identification-level token is one that cannot be carried onto the
+    /// call's thread.
+    #[test]
+    fn an_uncarriable_token_is_refused() {
+        let _impersonating = Impersonating::process_token(SecurityIdentification);
+
+        let refused = Impersonation::of_this_thread().map(|_| ());
+        assert!(
+            matches!(
+                refused,
+                Err(IsolationSessionError::Lifecycle(
+                    LifecycleFailure::Refused { .. }
+                ))
+            ),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_sink_installed_on_the_caller_is_the_one_the_call_writes_to() {
+        let path = std::env::temp_dir().join(format!(
+            "isolation-session-owned-thread-{}.log",
+            std::process::id()
+        ));
+        let mut logger = Logger::new(Mode::Buffer);
+        logger
+            .enable_file_sink(&path)
+            .expect("enable_file_sink failed");
+        let installed = logger.install_thread_diagnostic_sink();
+
+        let write = |marker: &str| {
+            Logger::inherit_thread_diagnostic_sink().log_diagnostic_line(marker);
+        };
+        let impersonation = Impersonation::of_this_thread().unwrap();
+        call(&impersonation, || {
+            write("call-marker");
+            Ok(())
+        })
+        .unwrap();
+
+        drop(installed);
+        drop(logger);
+        let written = std::fs::read_to_string(&path).expect("reading the sink's file failed");
+        let _ = std::fs::remove_file(&path);
+        assert!(written.contains("call-marker"), "{written}");
+    }
+
+    #[test]
+    fn a_caller_with_no_sink_passes_none() {
+        assert!(!sees_a_sink());
+
+        let impersonation = Impersonation::of_this_thread().unwrap();
+        assert!(!call(&impersonation, || Ok(sees_a_sink())).unwrap());
+    }
+
+    #[test]
+    fn a_panic_during_the_call_resumes_on_the_caller() {
+        let caught = std::panic::catch_unwind(|| {
+            let impersonation = Impersonation::of_this_thread().unwrap();
+            call(&impersonation, || -> Result<(), IsolationSessionError> {
+                panic!("inside the call")
+            })
+        });
+        let payload = caught.expect_err("the panic must reach the caller");
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"inside the call"));
+    }
+}
