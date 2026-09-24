@@ -912,6 +912,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_identity_refusal_carries_a_hint_and_no_operation_or_native_code() {
+        use windows::Win32::Foundation::E_ACCESSDENIED;
+
+        let mapped = map_lifecycle_error(identity_refusal(E_ACCESSDENIED.into()));
+        assert_eq!(mapped.code, MxcErrorCode::BackendError);
+        assert_eq!(mapped.operation(), None);
+        assert_eq!(mapped.native_code(), None);
+        assert!(
+            mapped
+                .remediation
+                .as_deref()
+                .is_some_and(|hint| hint.contains("SecurityImpersonation")),
+            "{:?}",
+            mapped.remediation
+        );
+    }
+
+    #[test]
+    fn the_identity_refusal_folds_its_hint_into_the_one_shot_rendering() {
+        use windows::Win32::Foundation::E_ACCESSDENIED;
+
+        let rendered = identity_refusal(E_ACCESSDENIED.into()).to_string();
+        assert!(rendered.contains("impersonation token"), "{rendered}");
+        assert!(
+            rendered.contains("remediation: Call without impersonating"),
+            "{rendered}"
+        );
+    }
+
     // ── One-shot rendering (Display) ─────────────────────────────────────
 
     /// The one-shot path has no structured envelope, so `Display` must keep
