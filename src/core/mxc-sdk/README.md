@@ -418,18 +418,21 @@ compile-time features — **WSLC** and **IsolationSession**.
 ## State-aware lifecycle
 
 Beyond the one-shot `run` / `spawn_sandbox` paths, the SDK exposes the
-state-aware sandbox lifecycle through typed Rust requests:
+state-aware sandbox lifecycle under `mxc_sdk::sandbox`:
 
-- `provision_sandbox`, `start_sandbox`, `stop_sandbox`, and
-  `deprovision_sandbox` return a typed `StateAwareResult`;
-- `exec_sandbox_request` returns a live streaming `Sandbox`;
-- `exec_attached_request` attaches the workload to this process's stdio and
+- `sandbox::provision` returns a `ProvisionResult` with an opaque `SandboxId`;
+- `sandbox::start`, `sandbox::stop`, and `sandbox::deprovision` return a
+  `LifecycleResult`;
+- `sandbox::exec` returns a live streaming `Sandbox`;
+- `sandbox::exec_attached` attaches the workload to this process's stdio and
   returns a `WaitOutcome`;
-- `dry_run_exec_sandbox` validates a typed exec request without running it.
+- `sandbox::validate_*` validates the matching operation without executing it.
 
 These high-level calls adapt Rust values directly into MXC's common request
 model. They do not serialize or parse JSON, and typed backend results are
-returned without constructing a JSON response envelope.
+returned without constructing a JSON response envelope. Sandbox identity is a
+separate typed argument rather than policy, while authorization, telemetry
+preference, and other invocation controls live in `OperationOptions`.
 
 Raw exact-contract entry points remain available for callers that intentionally
 provide wire JSON:
@@ -445,8 +448,8 @@ Windows Sandbox requires `experimental`. The parameter is the in-process
 equivalent of the executor's `--experimental` flag and is not a field in the
 request JSON.
 
-`StateAwareExecRequest` contains only backend-neutral process settings.
-Backend-specific exec capabilities use
+`ExecRequest` contains only backend-neutral process settings. Backend-specific
+exec capabilities use
 `set_backend_options(StateAwareExecBackendOptions)`. A backend rejects options
 that it cannot enforce; currently only WSLc defines an option, for its
 cooperative network proxy.
@@ -457,33 +460,29 @@ OS-side service.
 ```rust,no_run
 use std::error::Error;
 use mxc_sdk::{
-    exec_attached_request, provision_sandbox, start_sandbox, ProvisionRequest,
-    SandboxLifecycleRequest, StateAwareExecOptions, StateAwareExecRequest,
-    StateAwareOptions,
+    sandbox, ExecRequest, LifecycleRequest, OperationOptions, ProvisionRequest,
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
-let provisioned = provision_sandbox(
+let provisioned = sandbox::provision(
     ProvisionRequest::isolation_session("0.9.0-alpha", None),
-    StateAwareOptions::default(),
+    OperationOptions::default(),
 )?;
 // The returned `sandboxId` is opaque — carry it forward, never parse it.
-let sandbox_id = provisioned.sandbox_id.expect("provision returned an id");
+let sandbox_id = provisioned.sandbox_id;
 
 // Start. The exec phase runs against a started session.
-start_sandbox(
-    SandboxLifecycleRequest::new("0.9.0-alpha", &sandbox_id),
-    StateAwareOptions::default(),
+sandbox::start(
+    &sandbox_id,
+    LifecycleRequest::new("0.9.0-alpha"),
+    OperationOptions::default(),
 )?;
 
 // Exec phase, attached: an interactive shell on this console.
-let outcome = exec_attached_request(
-    StateAwareExecRequest::new(
-        "0.9.0-alpha",
-        sandbox_id,
-        "powershell.exe",
-    ),
-    StateAwareExecOptions::default(),
+let outcome = sandbox::exec_attached(
+    &sandbox_id,
+    ExecRequest::new("0.9.0-alpha", "powershell.exe"),
+    OperationOptions::default(),
 )?;
 let _ = outcome;
 Ok(())
@@ -492,11 +491,11 @@ Ok(())
 
 Three backends implement the state-aware lifecycle — IsolationSession, WSLc and
 Windows Sandbox. IsolationSession and WSLc serve streaming typed exec through
-`exec_sandbox_request`; WSLc exposes stdout/stderr only because its SDK has no
+`sandbox::exec`; WSLc exposes stdout/stderr only because its SDK has no
 process-input API. Windows Sandbox supports attached exec but cannot return
 native exec pipes.
 
-All three state-aware backends serve `exec_attached_request`. IsolationSession
+All three state-aware backends serve `sandbox::exec_attached`. IsolationSession
 also forwards stdin through a pseudo-console; Windows Sandbox drops terminal
 input pending PTY support, and WSLc has no process-input API.
 
@@ -699,9 +698,9 @@ stream, so the sandbox's stderr arrives merged into stdout.
 
 Windows Sandbox and WSLc relay attached output without interactive stdin.
 
-`exec_attached` and `exec_attached_request` refuse with `MalformedRequest`
-unless this process's stdout and stdin are both terminals; use `exec_sandbox`
-or `exec_sandbox_request` for a workload with no terminal.
+`sandbox::exec_attached` refuses with `MalformedRequest` unless this process's
+stdout and stdin are both terminals; use `sandbox::exec` for a typed workload
+with no terminal.
 
 ## Relationship to `mxc_engine` and the executor binaries
 

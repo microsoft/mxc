@@ -20,16 +20,41 @@
 //! before backend dispatch.
 
 use mxc_sdk::{
-    dry_run_exec_sandbox, exec_sandbox, exec_sandbox_json, provision_sandbox, run_state_aware_json,
-    start_sandbox, ErrorCode, ProvisionRequest, SandboxLifecycleRequest, StateAwareExecRequest,
-    StateAwareOptions,
+    exec_sandbox, exec_sandbox_json, run_state_aware_json, sandbox, Error, ErrorCode, ExecRequest,
+    LifecycleRequest, LifecycleResult, OperationOptions, ProvisionRequest, ProvisionResult,
+    Sandbox, SandboxId, ValidationResult, WaitOutcome,
 };
 
 #[test]
+fn typed_lifecycle_api_is_operation_specific() {
+    let _: fn(ProvisionRequest, OperationOptions) -> Result<ProvisionResult, Error> =
+        sandbox::provision;
+    let _: fn(ProvisionRequest, OperationOptions) -> Result<ValidationResult, Error> =
+        sandbox::validate_provision;
+    let _: fn(&SandboxId, LifecycleRequest, OperationOptions) -> Result<LifecycleResult, Error> =
+        sandbox::start;
+    let _: fn(&SandboxId, LifecycleRequest, OperationOptions) -> Result<ValidationResult, Error> =
+        sandbox::validate_start;
+    let _: fn(&SandboxId, LifecycleRequest, OperationOptions) -> Result<LifecycleResult, Error> =
+        sandbox::stop;
+    let _: fn(&SandboxId, LifecycleRequest, OperationOptions) -> Result<ValidationResult, Error> =
+        sandbox::validate_stop;
+    let _: fn(&SandboxId, LifecycleRequest, OperationOptions) -> Result<LifecycleResult, Error> =
+        sandbox::deprovision;
+    let _: fn(&SandboxId, LifecycleRequest, OperationOptions) -> Result<ValidationResult, Error> =
+        sandbox::validate_deprovision;
+    let _: fn(&SandboxId, ExecRequest, OperationOptions) -> Result<Sandbox, Error> = sandbox::exec;
+    let _: fn(&SandboxId, ExecRequest, OperationOptions) -> Result<WaitOutcome, Error> =
+        sandbox::exec_attached;
+    let _: fn(&SandboxId, ExecRequest, OperationOptions) -> Result<ValidationResult, Error> =
+        sandbox::validate_exec;
+}
+
+#[test]
 fn typed_windows_sandbox_requires_the_development_version() {
-    let error = provision_sandbox(
+    let error = sandbox::validate_provision(
         ProvisionRequest::windows_sandbox("0.9.0-alpha"),
-        StateAwareOptions::new(true, true),
+        OperationOptions::new(true),
     )
     .unwrap_err();
     assert_eq!(error.code, ErrorCode::MalformedRequest);
@@ -38,9 +63,9 @@ fn typed_windows_sandbox_requires_the_development_version() {
 
 #[test]
 fn typed_windows_sandbox_requires_experimental_authorization() {
-    let error = provision_sandbox(
+    let error = sandbox::validate_provision(
         ProvisionRequest::windows_sandbox("0.10.0-alpha"),
-        StateAwareOptions::new(true, false),
+        OperationOptions::new(false),
     )
     .unwrap_err();
     assert_eq!(error.code, ErrorCode::BackendUnavailable);
@@ -49,9 +74,11 @@ fn typed_windows_sandbox_requires_experimental_authorization() {
 
 #[test]
 fn typed_lifecycle_routes_by_sandbox_id() {
-    let error = start_sandbox(
-        SandboxLifecycleRequest::new("0.9.0-alpha", "nosuchbackend:abc123"),
-        StateAwareOptions::default(),
+    let sandbox_id = SandboxId::parse("nosuchbackend:abc123").unwrap();
+    let error = sandbox::validate_start(
+        &sandbox_id,
+        LifecycleRequest::new("0.9.0-alpha"),
+        OperationOptions::default(),
     )
     .unwrap_err();
     assert_eq!(error.code, ErrorCode::UnsupportedContainment);
@@ -59,17 +86,27 @@ fn typed_lifecycle_routes_by_sandbox_id() {
 
 #[test]
 fn typed_exec_dry_run_honors_experimental_authorization() {
-    let request = StateAwareExecRequest::new("0.10.0-alpha", "wsb:0a1b2c3d", "echo hello");
-    let error = dry_run_exec_sandbox(request.clone(), false).unwrap_err();
+    let sandbox_id = SandboxId::parse("wsb:0a1b2c3d").unwrap();
+    let request = ExecRequest::new("0.10.0-alpha", "echo hello");
+    let error = sandbox::validate_exec(&sandbox_id, request.clone(), OperationOptions::new(false))
+        .unwrap_err();
     assert_eq!(error.code, ErrorCode::BackendUnavailable);
 
-    if let Err(error) = dry_run_exec_sandbox(request, true) {
+    if let Err(error) = sandbox::validate_exec(&sandbox_id, request, OperationOptions::new(true)) {
         assert_ne!(
             error.code,
             ErrorCode::BackendUnavailable,
             "the experimental opt-in must reach typed exec dispatch: {}",
             error.message
         );
+    }
+}
+
+#[test]
+fn sandbox_id_rejects_values_that_cannot_cross_the_ffi_boundary() {
+    for value in ["", "iso:valid\0suffix"] {
+        let error = SandboxId::parse(value).unwrap_err();
+        assert_eq!(error.code, ErrorCode::MalformedId);
     }
 }
 

@@ -191,6 +191,7 @@ unrecognised prefix, and this is by design:
 | Source                  | Behaviour for an unrecognised `sandboxId` prefix |
 | ----------------------- | ------------------------------------------------ |
 | SDK (TypeScript)        | Throws `MxcError { code: 'malformed_id' }` before invoking `mxc_state_aware` or `mxc_state_aware_exec`. The SDK matches the prefix against the closed `StateAwareContainmentBackend` union it was compiled with; an unknown prefix is treated as a malformed id. See `sdk/node/src/state-aware-helper.ts`. |
+| SDK (Rust)              | `SandboxId::parse` accepts a syntactically valid opaque id without interpreting its prefix. Dispatch returns `MxcError { code: 'unsupported_containment' }` when that prefix is not registered. Empty ids, ids without prefix structure, and ids containing NUL are `malformed_id`. |
 | Native FFI entry points | Return `MxcError { code: 'unsupported_containment' }`. The Rust dispatcher parses the prefix successfully but the prefix-to-backend lookup table has no entry for it. See `src/core/wxc_common/src/state_aware_dispatch.rs`. |
 
 A recognised prefix with a malformed body is `malformed_id` from both sources
@@ -1041,10 +1042,10 @@ other state-aware backend, so caller error-handling code is portable across back
 | Code | Meaning |
 |---|---|
 | `malformed_request` | Structural request error: malformed JSON, missing required field, unknown or phase-inappropriate field, recursively unknown backend-specific field, or invalid phase-specific shape |
-| `unsupported_containment` | The backend named by `containment` (provision) or implied by the `sandboxId` prefix (non-provision) is not a recognised backend in this build. **SDK callers**: the SDK type-checks unknown `sandboxId` prefixes against the closed `StateAwareContainmentBackend` union *before* dispatching and instead throws `malformed_id` for an unknown prefix; `unsupported_containment` is reachable from the SDK only on the provision path. See §6.4 |
+| `unsupported_containment` | The backend named by `containment` (provision) or implied by a syntactically valid `sandboxId` prefix (non-provision) is not recognised in this build. The TypeScript SDK checks its closed prefix union before dispatch and instead throws `malformed_id`; the typed Rust SDK keeps ids opaque and therefore returns `unsupported_containment` from dispatch, matching raw FFI requests. See §6.4. |
 | `unsupported_phase` | The backend does not support the requested call mode (state-aware call against an ephemeral-only backend, or one-shot call against a state-aware-only backend) |
 | `backend_unavailable` | The backend's runtime dependency is missing or unreachable (service not running, daemon stopped) |
-| `malformed_id` | The `sandboxId` does not have a recognised backend prefix, or has a recognised prefix but does not deserialise into the backend's native form. **SDK callers** also see this error code for any non-provision call whose `sandboxId` prefix is not in `StateAwareContainmentBackend` |
+| `malformed_id` | The `sandboxId` is structurally invalid or has a recognised prefix but does not deserialize into the backend's native form. The TypeScript SDK also uses this code for a prefix outside its closed `StateAwareContainmentBackend` union; typed Rust and raw FFI calls classify a syntactically valid unknown prefix as `unsupported_containment`. |
 | `stale_id` | The `sandboxId` deserialised but refers to a resource the backend no longer recognises |
 | `not_provisioned` | Phase requires a provisioned sandbox; none provided, or the id is in a pre-provision state |
 | `not_started` | Phase requires a started sandbox; the id is provisioned but not started |
@@ -1125,8 +1126,11 @@ internal common parser and executable equivalence harness have been removed.
 
 The Rust SDK also has a direct typed ingress lane. High-level lifecycle calls
 construct `SdkStateAwareInput` from `ProvisionRequest`,
-`SandboxLifecycleRequest`, or `StateAwareExecRequest`, then normalize it through
-the same private `CommonRequestIR` and `StateAwareInput` seam:
+`LifecycleRequest`, or `ExecRequest`. An opaque `SandboxId` is passed separately
+for operations on an existing sandbox, and authorization, telemetry preference,
+and other invocation controls are carried by `OperationOptions`. The combined
+input then normalizes through the same private `CommonRequestIR` and
+`StateAwareInput` seam:
 
 ```text
 typed Rust request
@@ -1618,10 +1622,11 @@ fn dispatch_state_aware<B: StatefulSandboxBackend>(
 
 `dispatch_state_aware_typed` returns `TypedDispatchOutcome` without serializing
 backend metadata. The high-level Rust SDK maps that result into
-`StateAwareResult` and typed backend metadata. The raw JSON lane wraps the same
-typed dispatch result in `DispatchOutcome::Envelope` and serializes it for the
-wire response. JSON response construction is therefore confined to raw/executor
-entry points rather than being an implementation step of typed Rust calls.
+`ProvisionResult`, `LifecycleResult`, or `ValidationResult` and typed backend
+metadata. The raw JSON lane wraps the same typed dispatch result in
+`DispatchOutcome::Envelope` and serializes it for the wire response. JSON
+response construction is therefore confined to raw/executor entry points
+rather than being an implementation step of typed Rust calls.
 
 `resolve_backend(&parsed)` reads `parsed.containment()` when `phase() == Provision`; for the
 other phases it reads the prefix from `parsed.sandbox_id()` and looks it up in the
