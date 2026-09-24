@@ -5,9 +5,12 @@
 //! the SandboxPolicy -> SandboxRequest builder.
 
 use mxc_sdk::{
-    available_tools_policy, build_request, platform_support, temporary_files_policy,
+    available_tools_policy, build_request, platform_support, probe, temporary_files_policy,
     user_profile_policy, SandboxPolicy,
 };
+
+#[cfg(target_os = "windows")]
+use mxc_sdk::{build_request_with_containment, Containment, WslcSection};
 
 #[cfg(target_os = "macos")]
 use mxc_sdk::{spawn_sandbox, WaitOutcome};
@@ -25,6 +28,62 @@ fn platform_support_reports_host() {
     // Every platform this test runs on (macOS/Linux/Windows in CI) is supported.
     assert!(support.is_supported, "reason: {:?}", support.reason);
     assert!(!support.available_methods.is_empty());
+}
+
+#[test]
+fn request_probe_reports_the_current_host() {
+    #[cfg(target_os = "windows")]
+    {
+        let output = probe(None).expect("Windows exposes the ProcessContainer request probe");
+        assert!(matches!(
+            output.tier.as_deref(),
+            Some("base-container" | "appcontainer-bfs" | "appcontainer-dacl") | None
+        ));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let error = probe(None).expect_err("the request-aware probe is Windows-only");
+        assert_eq!(error.code, mxc_sdk::ErrorCode::UnsupportedContainment);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn probe_test_policy() -> SandboxPolicy {
+    SandboxPolicy {
+        version: "0.9.0-alpha".to_string(),
+        filesystem: None,
+        network: None,
+        ui: None,
+        timeout_ms: None,
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn request_probe_accepts_a_supplied_process_container_request() {
+    let request =
+        build_request(&probe_test_policy(), "echo hi", None).expect("request builds");
+
+    let output = probe(Some(&request)).expect("ProcessContainer request probes");
+    let value = serde_json::to_value(output).expect("probe output serializes");
+    assert!(value.get("probes").is_some());
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn request_probe_rejects_a_supplied_wslc_request() {
+    let request = build_request_with_containment(
+        &probe_test_policy(),
+        &Containment::Wslc(WslcSection::default()),
+        "echo hi",
+        None,
+    )
+    .expect("WSLC request builds");
+
+    let error = probe(Some(&request)).expect_err("WSLC is outside this probe");
+    assert_eq!(error.code, mxc_sdk::ErrorCode::UnsupportedContainment);
+    assert!(error.message.contains("got wslc"));
 }
 
 #[cfg(target_os = "macos")]

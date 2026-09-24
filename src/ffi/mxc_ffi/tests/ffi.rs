@@ -9,10 +9,11 @@ use std::ffi::{CStr, CString};
 use std::ptr;
 
 use mxc_ffi::{
-    mxc_available_backends_json, mxc_error_detail_free, mxc_platform_support_json, mxc_run_request,
-    mxc_run_result_free, mxc_sandbox_stderr_closer, mxc_sandbox_stdout_closer,
-    mxc_sandbox_warnings_json, mxc_spawn_request, mxc_stream_closer_close, mxc_stream_closer_free,
-    mxc_string_free, mxc_version, MxcErrorDetail, MxcRunResult, MxcSandbox,
+    mxc_available_backends_json, mxc_error_detail_free, mxc_platform_support_json,
+    mxc_probe_request_json, mxc_run_request, mxc_run_result_free, mxc_sandbox_stderr_closer,
+    mxc_sandbox_stdout_closer, mxc_sandbox_warnings_json, mxc_spawn_request,
+    mxc_stream_closer_close, mxc_stream_closer_free, mxc_string_free, mxc_version, MxcErrorDetail,
+    MxcRunResult, MxcSandbox,
 };
 
 /// An empty, all-null result to hand to `mxc_run_request`.
@@ -93,6 +94,116 @@ fn extern_discovery_returns_owned_json() {
         mxc_string_free(backends);
         mxc_string_free(support);
     }
+}
+
+#[test]
+fn extern_probe_returns_owned_json_for_default_request() {
+    let mut json = ptr::null_mut();
+    // SAFETY: MxcErrorDetail contains only nullable pointers.
+    let mut error: MxcErrorDetail = unsafe { std::mem::zeroed() };
+    // SAFETY: null request selects the default; both outputs are writable.
+    let status = unsafe { mxc_probe_request_json(ptr::null(), &mut json, &mut error) };
+
+    if cfg!(target_os = "windows") {
+        assert_eq!(status, mxc_ffi::MXC_STATUS_SUCCESS);
+        assert!(!json.is_null());
+        // SAFETY: success returned an owned C string.
+        let value: serde_json::Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(json) }.to_str().unwrap()).unwrap();
+        assert!(value.get("probes").is_some());
+        // SAFETY: json is owned by the caller; error is all-null on success.
+        unsafe {
+            mxc_string_free(json);
+            mxc_error_detail_free(&mut error);
+        }
+    } else {
+        assert_eq!(status, mxc_ffi::MXC_STATUS_UNSUPPORTED_CONTAINMENT);
+        assert!(json.is_null());
+        // SAFETY: the failing call filled the standalone error detail.
+        unsafe { mxc_error_detail_free(&mut error) };
+    }
+}
+
+#[test]
+fn extern_probe_accepts_serialized_process_container_request() {
+    let request = CString::new(
+        r#"{
+            "policy": { "version": "0.7.0-alpha" },
+            "command": "echo hi",
+            "containment": { "type": "processContainer" }
+        }"#,
+    )
+    .unwrap();
+    let mut json = ptr::null_mut();
+    // SAFETY: MxcErrorDetail contains only nullable pointers.
+    let mut error: MxcErrorDetail = unsafe { std::mem::zeroed() };
+    // SAFETY: valid C string and writable output storage.
+    let status = unsafe { mxc_probe_request_json(request.as_ptr(), &mut json, &mut error) };
+
+    if cfg!(target_os = "windows") {
+        assert_eq!(status, mxc_ffi::MXC_STATUS_SUCCESS);
+        assert!(!json.is_null());
+        // SAFETY: success returned an owned C string.
+        let value: serde_json::Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(json) }.to_str().unwrap()).unwrap();
+        assert!(value.get("probes").is_some());
+    } else {
+        assert_eq!(status, mxc_ffi::MXC_STATUS_UNSUPPORTED_CONTAINMENT);
+        assert!(json.is_null());
+    }
+
+    // SAFETY: json is null or an owned result; error is initialized by the call.
+    unsafe {
+        mxc_string_free(json);
+        mxc_error_detail_free(&mut error);
+    }
+}
+
+#[test]
+fn extern_probe_rejects_serialized_wslc_request() {
+    let request = CString::new(
+        r#"{
+            "policy": { "version": "0.9.0-alpha" },
+            "command": "echo hi",
+            "containment": { "type": "wslc" }
+        }"#,
+    )
+    .unwrap();
+    let mut json = ptr::null_mut();
+    // SAFETY: MxcErrorDetail contains only nullable pointers.
+    let mut error: MxcErrorDetail = unsafe { std::mem::zeroed() };
+    // SAFETY: valid C string and writable output storage.
+    let status = unsafe { mxc_probe_request_json(request.as_ptr(), &mut json, &mut error) };
+
+    assert_eq!(status, mxc_ffi::MXC_STATUS_UNSUPPORTED_CONTAINMENT);
+    assert!(json.is_null());
+    assert!(!error.message_utf8.is_null());
+    if cfg!(target_os = "windows") {
+        // SAFETY: failure returned a valid owned error string.
+        let message = unsafe { CStr::from_ptr(error.message_utf8) }
+            .to_str()
+            .unwrap();
+        assert!(message.contains("got wslc"), "unexpected message: {message}");
+    }
+
+    // SAFETY: the failing call filled the standalone error detail.
+    unsafe { mxc_error_detail_free(&mut error) };
+}
+
+#[test]
+fn extern_probe_rejects_malformed_request() {
+    let request = CString::new("not json").unwrap();
+    let mut json = ptr::null_mut();
+    // SAFETY: MxcErrorDetail contains only nullable pointers.
+    let mut error: MxcErrorDetail = unsafe { std::mem::zeroed() };
+    // SAFETY: valid C string and writable output storage.
+    let status = unsafe { mxc_probe_request_json(request.as_ptr(), &mut json, &mut error) };
+
+    assert_eq!(status, mxc_ffi::MXC_STATUS_MALFORMED_REQUEST);
+    assert!(json.is_null());
+    assert!(!error.message_utf8.is_null());
+    // SAFETY: the failing call filled the standalone error detail.
+    unsafe { mxc_error_detail_free(&mut error) };
 }
 
 #[test]
