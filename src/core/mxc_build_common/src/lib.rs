@@ -21,7 +21,7 @@ pub mod isolation_session_sdk {
     pub const PACKAGE_ID: &str = "Microsoft.Windows.AI.IsolationSession.SDK";
     pub const PACKAGE_VERSION: &str = "0.202609.0";
     pub const PACKAGE_SHA256: &str =
-        "5211a15b68f900fa92a47c96c4c59fe4112caaef6c6b1414623e8d4449528bff";
+        "2ce0c920f55b879eec3f3841e286d4be8f53b1a5ee42d5f16f997c6e24a09397";
     pub const PACKAGE_PATH_ENV: &str = "ISOLATION_SESSION_SDK_PACKAGE";
 
     const APP_DLL: &str = "IsoSessionApp.dll";
