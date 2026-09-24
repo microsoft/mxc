@@ -336,6 +336,20 @@ pub(super) fn sta_refusal() -> IsolationSessionError {
     })
 }
 
+/// The refusal for a caller whose impersonation token cannot be carried onto
+/// the thread that makes the call.
+pub(super) fn identity_refusal(err: windows_core::Error) -> IsolationSessionError {
+    IsolationSessionError::Lifecycle(LifecycleFailure::Refused {
+        message: format!(
+            "the calling thread's impersonation token could not be carried onto the thread that \
+             makes the call: {err}"
+        ),
+        remediation: "Call without impersonating, or with an impersonation token this process can \
+                      duplicate at SecurityImpersonation level."
+            .to_string(),
+    })
+}
+
 /// Whether an `ERROR_NOT_FOUND` from this operation means "the sandbox is
 /// gone".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
