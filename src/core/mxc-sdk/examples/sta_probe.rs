@@ -5,7 +5,7 @@
 //! apartment, against a live host.
 //!
 //! ```text
-//! sta_probe.exe sta    # expect a refusal
+//! sta_probe.exe sta    # expect the full lifecycle
 //! sta_probe.exe mta    # expect the full lifecycle
 //! sta_probe.exe none   # expect the full lifecycle — MXC enters the apartment
 //! sta_probe.exe handle-outlives-thread

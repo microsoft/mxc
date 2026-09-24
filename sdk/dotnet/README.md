@@ -426,8 +426,7 @@ refuses filesystem paths and any `Ui`: supplying either is an error rather than
 a no-op, so the policy shown under Usage does not carry over to this backend.
 
 The native unit must be built with isolation-session support or execution returns
-`UnsupportedContainment`. It is refused from a single-threaded apartment, so a
-GUI caller must reach it from an MTA thread.
+`UnsupportedContainment`.
 
 ### Network proxy
 
@@ -942,11 +941,6 @@ On a host or build without the selected backend, lifecycle calls throw
 its OS-side service. WSLC needs the WSL and Virtual Machine Platform optional
 features plus its runtime components; MXC reports missing components rather
 than installing them.
-
-**IsolationSession is refused from a single-threaded apartment**, which
-`[STAThread]` makes the default for WinForms and WPF entry points. Call it from
-an MTA thread — `Task.Run` reaches one from a GUI application — or from a
-console application, which is MTA unless it opts out.
 
 **`StartSandbox` is refused in Session 0.** Provision succeeds first and mints an
 account, so a caller in that position still has to deprovision.

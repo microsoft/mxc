@@ -488,9 +488,6 @@ state-aware arm on the path you called answers `ErrorCode::UnsupportedPhase`.
 Windows Sandbox is compiled in unconditionally on Windows; IsolationSession and
 WSLc each need their engine feature, both of which this crate forwards.
 
-**IsolationSession is refused from a single-threaded apartment.** Call it from an
-MTA thread or one with no apartment of its own.
-
 ## Supported backends
 
 The backend is chosen by the `containment` field in the request (or the host

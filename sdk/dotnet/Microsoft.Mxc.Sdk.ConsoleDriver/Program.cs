@@ -18,8 +18,7 @@
 // Running this alongside the Rust drivers isolates whether a failure is in the
 // C# binding or beneath it.
 //
-// Must run at a real interactive console. A single-threaded apartment is refused,
-// so this is deliberately a plain console app with no [STAThread].
+// Must run at a real interactive console.
 
 using Microsoft.Mxc.Sdk;
 

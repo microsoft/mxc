@@ -123,8 +123,6 @@
 //! response-envelope JSON. The crate README covers which backends implement the
 //! lifecycle and how each is compiled in.
 //!
-//! **IsolationSession is refused from a single-threaded apartment.**
-//!
 //! ## Pty allocation
 //!
 //! Every entry point except [`exec_attached`] wires the child's stdio to
