@@ -229,11 +229,9 @@ mod schema;
 mod stable;
 /// The development `0.10.0-alpha` state-aware configuration contract.
 mod state_aware;
+mod wslc;
 
-pub use experimental::{
-    HyperlightRuntime, OneShotHyperlight, OneShotWindowsSandbox, OneShotWslc, PortMapping,
-    TestFeature, TransportProtocol,
-};
+pub use experimental::{HyperlightRuntime, OneShotHyperlight, OneShotWindowsSandbox, TestFeature};
 pub use network::{
     Network, NetworkAction, NetworkEgress, NetworkIngress, NetworkPeer, NetworkPort,
     NetworkProtocol, NetworkRule,
@@ -263,3 +261,4 @@ pub use state_aware::{StartPhase, StartRequest};
 pub use state_aware::{StateAwareWslc, WslcContainment, WslcProvision, WslcProvisionRequest};
 pub use state_aware::{StopPhase, StopRequest};
 pub use state_aware::{WindowsSandboxContainment, WindowsSandboxProvisionRequest};
+pub use wslc::{OneShotWslc, PortMapping, TransportProtocol};

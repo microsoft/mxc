@@ -1,13 +1,14 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use super::experimental::{OneShotHyperlight, OneShotWindowsSandbox, OneShotWslc, TestFeature};
+use super::experimental::{OneShotHyperlight, OneShotWindowsSandbox, TestFeature};
 use super::network::Network;
 use super::primitives::OptionalField;
 use super::stable::{
     Fallback, Filesystem, Lifecycle, Lxc, Process, ProcessContainer, RuntimeConfig, Seatbelt,
     Telemetry, Ui,
 };
+use super::wslc::OneShotWslc;
 use crate::dev::Version;
 
 string_enum! {
@@ -35,6 +36,8 @@ string_enum! {
         Microvm => ["microvm"],
         /// Select the Hyperlight micro-VM backend.
         Hyperlight => ["hyperlight"],
+
+        // Stable values introduced in `0.9.0-alpha`.
         /// Select the WSL container backend.
         Wslc => ["wslc"],
         /// Select the Windows IsolationSession backend.

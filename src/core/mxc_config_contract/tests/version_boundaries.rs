@@ -19,3 +19,5 @@ mod process_container;
 mod seatbelt;
 #[path = "version_boundaries/state_aware.rs"]
 mod state_aware;
+#[path = "version_boundaries/wslc.rs"]
+mod wslc;

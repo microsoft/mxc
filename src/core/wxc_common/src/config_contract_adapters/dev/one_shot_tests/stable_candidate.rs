@@ -254,6 +254,14 @@ const STABLE_CONTAINMENT_CASES: &[ContainmentCase] = &[
         input: "macos_sandbox",
         expected: "seatbelt",
     },
+    ContainmentCase {
+        input: "wslc",
+        expected: "wslc",
+    },
+    ContainmentCase {
+        input: "isolation_session",
+        expected: "isolation_session",
+    },
 ];
 
 const DEFAULT_NETWORK_POLICY_CASES: &[&str] = &["allow", "deny"];

@@ -26,20 +26,3 @@ fn windows_sandbox_config_is_introduced_in_v010() {
 fn hyperlight_config_is_introduced_in_v010() {
     assert_v10_introduces(r#""hyperlight": {"runtime": "node"}"#);
 }
-
-#[test]
-fn wslc_config_is_introduced_in_v09() {
-    assert_v09_introduces(
-        r#""wslc": {
-            "targetOs": "linux",
-            "image": "ubuntu",
-            "cpuCount": 2,
-            "memoryMb": 4096,
-            "gpu": false,
-            "storagePath": "C:\\mxc",
-            "portMappings": [
-                {"windowsPort": 8080, "containerPort": 80, "protocol": "tcp"}
-            ]
-        }"#,
-    );
-}

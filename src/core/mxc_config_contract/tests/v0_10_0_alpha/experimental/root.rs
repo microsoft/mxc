@@ -10,7 +10,6 @@ fn accepts_permanent_development_fields() {
         "process": {"commandLine": "echo"},
         "test": {"message": "this is a message"},
         "windowsSandbox": {},
-        "wslc": {},
         "hyperlight": {}
     }"#;
 
@@ -70,21 +69,4 @@ fn rejects_moved_experimental_seatbelt_sections() {
 
         assert_invalid(&json);
     }
-}
-
-#[test]
-fn rejects_state_aware_experimental_sections() {
-    let isolation_session = r#"{
-        "version": "0.10.0-alpha",
-        "process": {"commandLine": "echo"},
-        "isolationSession": {"provision": {}}
-    }"#;
-    let wslc = r#"{
-        "version": "0.10.0-alpha",
-        "process": {"commandLine": "echo"},
-        "wslc": {"provision": {}}
-    }"#;
-
-    assert_invalid(isolation_session);
-    assert_invalid(wslc);
 }
