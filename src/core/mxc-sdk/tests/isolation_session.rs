@@ -77,6 +77,23 @@ fn enter_sta() {
     assert!(hr >= 0, "CoInitializeEx failed: 0x{hr:08x}");
 }
 
+fn impersonate_at_identification_level() {
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn ImpersonateSelf(impersonation_level: i32) -> i32;
+    }
+    const SECURITY_IDENTIFICATION: i32 = 1;
+
+    // SAFETY: impersonates on this thread only. Deliberately not reverted — the
+    // thread ends with the test.
+    let impersonating = unsafe { ImpersonateSelf(SECURITY_IDENTIFICATION) };
+    assert!(
+        impersonating != 0,
+        "ImpersonateSelf failed: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
 macro_rules! skip_unless_supported {
     () => {
         if !host_supports_isolation_session() {
@@ -502,6 +519,33 @@ fn one_shot_finished_on_an_sta_thread_still_tears_down() {
     rx.recv_timeout(std::time::Duration::from_secs(120))
         .expect("kill on an STA thread must return rather than block")
         .expect("kill on an STA thread must still stop the session");
+}
+
+/// Fails if teardown is made under the finishing thread's impersonation, whose
+/// token cannot be duplicated at `SecurityImpersonation` level.
+#[test]
+fn one_shot_killed_on_an_sta_thread_impersonating_at_identification_level_stops_its_session() {
+    skip_unless_supported!();
+    let request = build_request_with_containment(
+        &iso_policy(),
+        &Containment::IsolationSession,
+        "ping -n 300 127.0.0.1",
+        None,
+    )
+    .expect("building the request must succeed");
+
+    let mut sandbox = mxc_sdk::spawn_sandbox(request).expect("spawn must reach the backend");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        enter_sta();
+        impersonate_at_identification_level();
+        let _ = tx.send(sandbox.kill().map_err(|e| e.to_string()));
+    });
+
+    rx.recv_timeout(std::time::Duration::from_secs(120))
+        .expect("kill must return rather than block")
+        .expect("kill must stop the session");
 }
 
 /// An abandoned handle's teardown completes without blocking.
