@@ -19,14 +19,13 @@ pub mod isolation_session_sdk {
     use std::process::Command;
 
     pub const PACKAGE_ID: &str = "Microsoft.Windows.AI.IsolationSession.SDK";
-    pub const PACKAGE_VERSION: &str = "0.2608.0";
+    pub const PACKAGE_VERSION: &str = "0.202609.0";
     pub const PACKAGE_SHA256: &str =
-        "af609652e691e9f2ae47885bcfcfd29e8d8c05744482f50c104efd2f3ca1d8e5";
+        "5211a15b68f900fa92a47c96c4c59fe4112caaef6c6b1414623e8d4449528bff";
     pub const PACKAGE_PATH_ENV: &str = "ISOLATION_SESSION_SDK_PACKAGE";
 
     const APP_DLL: &str = "IsoSessionApp.dll";
     const RUNTIME_MANIFEST: &str = "IsoSession.manifest";
-    const VERSION_SIDECAR: &str = "IsoSessionApp.runtimeversion";
 
     pub fn resolve_package() -> Result<PathBuf, String> {
         println!("cargo:rerun-if-env-changed={PACKAGE_PATH_ENV}");
@@ -125,21 +124,10 @@ pub mod isolation_session_sdk {
     pub fn stage_runtime() -> Result<(), String> {
         let package = resolve_package()?;
         let app_dll = read_entry(&package, APP_DLL)?;
-        let version_bytes = read_entry(&package, VERSION_SIDECAR)?;
-        let instance = String::from_utf8(version_bytes)
-            .map_err(|e| format!("{VERSION_SIDECAR} is not valid UTF-8: {e}"))?
-            .trim()
-            .replace('_', ".");
-        validate_instance(&instance)?;
+        let manifest = read_entry(&package, RUNTIME_MANIFEST)?;
+        let instance = package_runtime_instance()?;
+        validate_runtime_manifest(&manifest, &instance)?;
 
-        let manifest = format!(
-            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
-<assembly xmlns=\"urn:schemas-microsoft-com:asm.v1\" manifestVersion=\"1.0\">\n\
-  <assemblyIdentity name=\"IsoSession.Runtime\" version=\"1.0.0.0\" type=\"win32\" />\n\
-  <file name=\"IsoSessionApp.dll\" />\n\
-  <iso:instance xmlns:iso=\"urn:schemas-microsoft-com:agentic-runtime.v1\" name=\"{instance}\" />\n\
-</assembly>\n"
-        );
         let target_dir = target_profile_dir()?;
         std::fs::write(target_dir.join(APP_DLL), app_dll)
             .map_err(|e| format!("stage {APP_DLL} to {}: {e}", target_dir.display()))?;
@@ -193,19 +181,46 @@ pub mod isolation_session_sdk {
             })
     }
 
-    fn validate_instance(instance: &str) -> Result<(), String> {
-        let bytes = instance.as_bytes();
-        if bytes.len() == 7
-            && bytes[4] == b'.'
-            && bytes[..4].iter().all(u8::is_ascii_digit)
-            && bytes[5..].iter().all(u8::is_ascii_digit)
+    fn package_runtime_instance() -> Result<String, String> {
+        let mut parts = PACKAGE_VERSION.split('.');
+        let prefix = parts.next();
+        let release = parts.next();
+        let patch = parts.next();
+        if prefix != Some("0")
+            || parts.next().is_some()
+            || !patch.is_some_and(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
+            || !release.is_some_and(|value| {
+                value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_digit())
+            })
         {
-            Ok(())
-        } else {
-            Err(format!(
-                "{VERSION_SIDECAR} must identify a YYYY_MM instance, got {instance:?}"
-            ))
+            return Err(format!(
+                "IsolationSession SDK package version must use 0.YYYYMM.patch, got {PACKAGE_VERSION:?}"
+            ));
         }
+
+        let release = release.unwrap();
+        Ok(format!("{}.{}", &release[..4], &release[4..]))
+    }
+
+    fn validate_runtime_manifest(manifest: &[u8], instance: &str) -> Result<(), String> {
+        let content = std::str::from_utf8(manifest)
+            .map_err(|e| format!("{RUNTIME_MANIFEST} is not valid UTF-8: {e}"))?;
+        for required in [
+            "<assemblyIdentity name=\"IsoSession.Runtime\"",
+            "<file name=\"IsoSessionApp.dll\"",
+        ] {
+            if !content.contains(required) {
+                return Err(format!("{RUNTIME_MANIFEST} is missing {required:?}"));
+            }
+        }
+
+        let expected_instance = format!("name=\"{instance}\"");
+        if !content.contains(&expected_instance) {
+            return Err(format!(
+                "{RUNTIME_MANIFEST} does not identify runtime instance {instance:?}"
+            ));
+        }
+        Ok(())
     }
 
     fn nuget_cache_root() -> Result<PathBuf, String> {
@@ -239,6 +254,34 @@ pub mod isolation_session_sdk {
                 PACKAGE_SHA256,
                 actual
             ))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{package_runtime_instance, validate_runtime_manifest};
+
+        const MANIFEST: &str = "\
+<assembly>
+  <assemblyIdentity name=\"IsoSession.Runtime\" />
+  <file name=\"IsoSessionApp.dll\" />
+  <iso:instance name=\"2026.09\" />
+</assembly>";
+
+        #[test]
+        fn package_version_maps_to_runtime_instance() {
+            assert_eq!(package_runtime_instance().unwrap(), "2026.09");
+        }
+
+        #[test]
+        fn completed_runtime_manifest_is_accepted() {
+            validate_runtime_manifest(MANIFEST.as_bytes(), "2026.09").unwrap();
+        }
+
+        #[test]
+        fn mismatched_runtime_manifest_is_rejected() {
+            let error = validate_runtime_manifest(MANIFEST.as_bytes(), "2026.10").unwrap_err();
+            assert!(error.contains("does not identify runtime instance"));
         }
     }
 }
