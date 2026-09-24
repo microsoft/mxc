@@ -1186,6 +1186,10 @@ Normalization populates the cross-cutting input fields (`filesystem`, `network`,
 one-shot path does, and `process` populates `ExecutionRequest`'s flat
 `script_code` / `working_directory` / `script_timeout` / `env` fields. Typed
 telemetry is populated from the common top-level `telemetry` field.
+For exec, `process.cwd` is validated for the selected backend before execution.
+IsolationSession and Windows Sandbox require a rooted Windows path; relative,
+drive-relative, and current-drive-rooted paths are rejected. WSLc requires an
+absolute in-container POSIX path.
 `ParsedStateAwareRequest` has private `request: ExecutionRequest` and
 `operation: StateAwareOperation` fields with read-only accessors. The operation
 is the sole phase authority. Provision carries

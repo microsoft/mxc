@@ -237,6 +237,8 @@ pub(super) fn build_request(
             MxcError::malformed_request(format!("failed to build request: {error}"))
         })?;
     inner.source_contract = None;
+    inner.working_directory_compatibility =
+        wxc_common::models::WorkingDirectoryCompatibility::AbsoluteRequired;
     Ok(SandboxRequest {
         inner,
         requested_sandbox_kind: containment.telemetry_kind(),

@@ -34,7 +34,11 @@ pub struct Telemetry {
 pub struct Process {
     /// The non-empty command line to execute.
     pub command_line: NonEmptyString,
-    /// Optional working directory.
+    /// Optional target-absolute working directory.
+    ///
+    /// Windows backends require a rooted Windows path; POSIX backends and state-aware
+    /// WSLc exec require an absolute POSIX path; one-shot WSLc requires a rooted
+    /// local Windows drive path that maps under `/mnt`.
     #[serde(default)]
     pub cwd: OptionalField<String>,
     /// Optional environment entries encoded as `KEY=VALUE` strings.

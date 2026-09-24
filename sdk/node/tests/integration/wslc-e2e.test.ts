@@ -64,7 +64,11 @@ describe('WSLC SDK E2E — createConfigFromPolicy → customize → spawn', {
         filesystem: { readwritePaths: [mountDir] },
       };
       const config = sdk.createConfigFromPolicy(policy, 'wslc');
+      const expectedWorkingDirectory =
+        `/mnt/${mountDir[0].toLowerCase()}${mountDir.slice(2).replaceAll('\\', '/')}`;
+      config.process!.cwd = mountDir;
       config.process!.commandLine = [
+        'pwd',
         "python3 -c \"import sys; print(f'Python {sys.version_info.major}.{sys.version_info.minor}')\"",
         "nproc",
         "cat /proc/meminfo | grep MemTotal",
@@ -94,6 +98,10 @@ describe('WSLC SDK E2E — createConfigFromPolicy → customize → spawn', {
       });
 
       assert.strictEqual(exitCode, 0, `exit=${exitCode}\nstdout=${stdout}\nstderr=${stderr}`);
+      assert.match(stdout, new RegExp(
+        `^${expectedWorkingDirectory.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`,
+        'm',
+      ));
       assert.ok(stdout.includes('Python 3.12'), `Python 3.12 not found in stdout=${stdout}`);
       assert.ok(stdout.includes('All fields work'), `'All fields work' not found in stdout=${stdout}`);
     } finally {

@@ -127,6 +127,13 @@ rejected.
 Shells like bash also have a fallback `PATH`, so a truly empty environment is
 not reachable through `process.env`.
 
+### Working directory
+
+For current contracts, `process.cwd` must be an absolute POSIX path inside the
+container. If it is omitted, the workload starts at the container root (`/`).
+Exact v0.6-v0.8 requests retain relative-path acceptance for compatibility.
+An invalid value is rejected before the container is started or restarted.
+
 ## Network Policy
 
 A legacy deny-default policy that names `allowedHosts` opens port 53

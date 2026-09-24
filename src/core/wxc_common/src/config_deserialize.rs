@@ -316,7 +316,7 @@ fn escape_control_characters(value: &str) -> String {
 /// text before it reaches a diagnostic sink. Shared with the manual
 /// (non-serde) semantic validators so every user-derived diagnostic honors the
 /// same "no raw control/format bytes in diagnostics" guarantee.
-pub(crate) fn escape_diagnostic_text(value: &str) -> String {
+pub fn escape_diagnostic_text(value: &str) -> String {
     escape_control_characters(value)
 }
 

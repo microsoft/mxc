@@ -1,7 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::models::{ExecutionRequest, NetworkAction, NetworkPolicy, ScriptResponse};
+use crate::models::{
+    ExecutionRequest, FailurePhase, NetworkAction, NetworkPolicy, ScriptResponse,
+    WorkingDirectoryScope,
+};
 use crate::mxc_error::MxcError;
 
 /// Declares which optional network policy features a backend enforces.
@@ -190,6 +193,8 @@ pub fn validate_common(request: &ExecutionRequest) -> Result<(), ScriptResponse>
         return Err(ScriptResponse::error("Script content must not be empty."));
     }
 
+    validate_one_shot_working_directory(request)?;
+
     // Enforce the testing-only-features gate centrally so it applies uniformly
     // to all backends — every backend runs `validate_common` before executing.
     // Currently this gates `network.proxy.builtinTestServer` (a deliberately-
@@ -215,6 +220,27 @@ pub fn validate_common(request: &ExecutionRequest) -> Result<(), ScriptResponse>
     Ok(())
 }
 
+/// Validate only the one-shot working-directory invariant.
+///
+/// Engine entry points call this before backend selection can apply host-side
+/// policy. Backends still call [`validate_common`] as defense in depth.
+pub fn validate_one_shot_working_directory(
+    request: &ExecutionRequest,
+) -> Result<(), ScriptResponse> {
+    if let Err(message) = crate::working_directory::validate_working_directory(
+        &request.working_directory,
+        &request.containment,
+        WorkingDirectoryScope::OneShot,
+        request.working_directory_compatibility,
+    ) {
+        return Err(ScriptResponse {
+            failure_phase: FailurePhase::Rejected,
+            ..ScriptResponse::error(&message)
+        });
+    }
+    Ok(())
+}
+
 /// Cross-backend invariants for state-aware `exec`. The dispatcher calls this
 /// before the backend's own `validate_exec` hook. Only the exec phase has a
 /// common-check today (a non-empty `process.commandLine`).
@@ -224,6 +250,13 @@ pub fn validate_exec_common(request: &ExecutionRequest) -> Result<(), MxcError> 
             "exec phase requires a non-empty process.commandLine",
         ));
     }
+    crate::working_directory::validate_working_directory(
+        &request.working_directory,
+        &request.containment,
+        WorkingDirectoryScope::Exec,
+        request.working_directory_compatibility,
+    )
+    .map_err(MxcError::policy_validation)?;
     Ok(())
 }
 
@@ -232,7 +265,7 @@ mod tests {
     use super::*;
     use crate::models::{
         ExecutionRequest, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkRule,
-        ProxyAddress, ProxyConfig,
+        ProxyAddress, ProxyConfig, WorkingDirectoryCompatibility,
     };
     use crate::mxc_error::MxcErrorCode;
 
@@ -294,6 +327,93 @@ mod tests {
     }
 
     #[test]
+    fn one_shot_rejects_relative_cwd_before_backend_validation() {
+        let req = ExecutionRequest {
+            script_code: "echo hello".to_string(),
+            working_directory: "relative".to_string(),
+            containment: crate::models::ContainmentBackend::ProcessContainer,
+            ..Default::default()
+        };
+        let err = validate_common(&req).unwrap_err();
+        assert_eq!(err.failure_phase, FailurePhase::Rejected);
+        assert!(err.error_message.contains("process.cwd"));
+    }
+
+    #[test]
+    fn one_shot_preserves_legacy_relative_cwd_compatibility() {
+        let req = ExecutionRequest {
+            script_code: "echo hello".to_string(),
+            working_directory: "relative".to_string(),
+            working_directory_compatibility: WorkingDirectoryCompatibility::LegacyRelativeAllowed,
+            ..Default::default()
+        };
+        assert!(validate_common(&req).is_ok());
+    }
+
+    #[test]
+    fn one_shot_legacy_windows_rejects_current_drive_rooted_cwd() {
+        for cwd in [r"\work", "/work"] {
+            let req = ExecutionRequest {
+                script_code: "echo hello".to_string(),
+                working_directory: cwd.to_string(),
+                working_directory_compatibility:
+                    WorkingDirectoryCompatibility::LegacyRelativeAllowed,
+                ..Default::default()
+            };
+            let err = validate_common(&req).unwrap_err();
+            assert_eq!(err.failure_phase, FailurePhase::Rejected);
+            assert!(err.error_message.contains("process.cwd"), "{cwd:?}");
+        }
+    }
+
+    #[test]
+    fn one_shot_legacy_wslc_requires_mappable_windows_cwd_before_backend_selection() {
+        let accepted = ExecutionRequest {
+            script_code: "echo hello".to_string(),
+            working_directory: r"C:\work".to_string(),
+            working_directory_compatibility: WorkingDirectoryCompatibility::LegacyRelativeAllowed,
+            containment: crate::models::ContainmentBackend::Wslc,
+            ..Default::default()
+        };
+        validate_one_shot_working_directory(&accepted)
+            .expect("mappable Windows WSLc cwd should pass");
+
+        for cwd in ["relative", "/work"] {
+            let req = ExecutionRequest {
+                script_code: "echo hello".to_string(),
+                working_directory: cwd.to_string(),
+                working_directory_compatibility:
+                    WorkingDirectoryCompatibility::LegacyRelativeAllowed,
+                containment: crate::models::ContainmentBackend::Wslc,
+                ..Default::default()
+            };
+            let err = validate_one_shot_working_directory(&req).unwrap_err();
+            assert_eq!(err.failure_phase, FailurePhase::Rejected);
+            assert!(err.error_message.contains("process.cwd"), "{cwd:?}");
+        }
+    }
+
+    #[test]
+    fn one_shot_rejects_strict_whitespace_only_cwd() {
+        let req = ExecutionRequest {
+            script_code: "echo hello".to_string(),
+            working_directory: "   ".to_string(),
+            ..Default::default()
+        };
+        let err = validate_common(&req).unwrap_err();
+        assert_eq!(err.failure_phase, FailurePhase::Rejected);
+        assert!(err.error_message.contains("process.cwd"));
+    }
+
+    #[test]
+    fn direct_typed_requests_default_to_absolute_required() {
+        assert_eq!(
+            ExecutionRequest::default().working_directory_compatibility,
+            WorkingDirectoryCompatibility::AbsoluteRequired
+        );
+    }
+
+    #[test]
     fn error_mentions_empty() {
         let req = ExecutionRequest::default();
         let err = validate_common(&req).unwrap_err();
@@ -318,6 +438,25 @@ mod tests {
             ..Default::default()
         };
         assert!(validate_exec_common(&req).is_ok());
+    }
+
+    #[test]
+    fn validate_exec_common_uses_in_container_posix_paths_for_wslc() {
+        let accepted = ExecutionRequest {
+            script_code: "echo hello".to_string(),
+            working_directory: "/work".to_string(),
+            containment: crate::models::ContainmentBackend::Wslc,
+            ..Default::default()
+        };
+        assert!(validate_exec_common(&accepted).is_ok());
+
+        let rejected = ExecutionRequest {
+            working_directory: r"C:\work".to_string(),
+            ..accepted
+        };
+        let err = validate_exec_common(&rejected).unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+        assert!(err.message.contains("process.cwd"));
     }
 
     #[test]

@@ -13,7 +13,11 @@
 export interface ProcessConfig {
   /** Complete command line to execute (e.g., "python -c \"print('hello')\"") */
   commandLine: string;
-  /** Working directory for the process */
+  /**
+   * Target-absolute working directory for the process. Windows backends use a
+   * rooted Windows path; POSIX backends use an absolute POSIX path; one-shot
+   * WSLC uses a rooted local Windows drive path.
+   */
   cwd?: string;
   /**
    * Environment variables as KEY=VALUE strings.

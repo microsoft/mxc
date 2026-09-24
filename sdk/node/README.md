@@ -530,6 +530,14 @@ No `network` field → no network. No `readwritePaths` → process can't write `
 
 Setting `cwd` (or the `workingDirectory` argument) does **not** add that path to the policy. Add it to `readonlyPaths` / `readwritePaths` explicitly.
 
+Current contracts require a target-absolute value: rooted Windows paths for
+ProcessContainer, Windows Sandbox, and IsolationSession; absolute POSIX paths
+for Bubblewrap, LXC, and Seatbelt; and a rooted local Windows drive path for
+one-shot WSLC (mapped to `/mnt/<drive>/...`). State-aware WSLC exec instead
+uses an absolute in-container POSIX path. Omit the value to use the backend's
+sandbox-safe default. Exact v0.6-v0.8 requests retain relative-path acceptance
+for ordinary backends; one-shot WSLC always rejects unmappable explicit values.
+
 For Windows ProcessContainer requests using schema `0.9.0-alpha`,
 `processContainer.filesystem.enumeratePaths` permits directory listing without
 granting file content reads. It requires a BaseContainer host with PSEC 1.1

@@ -101,10 +101,15 @@ There is no idle watchdog. A started state-aware sandbox remains active until
   "containment": "windows_sandbox",
   "process": {
     "commandLine": "powershell -NoProfile -Command \"Write-Output 'hello'\"",
+    "cwd": "C:\\",
     "timeout": 60000
   }
 }
 ```
+
+For one-shot and state-aware exec requests, `process.cwd`, when supplied, must
+be a rooted Windows path. Relative, drive-relative, and current-drive-rooted
+values are rejected before the VM is launched or an exec request is sent.
 
 ### State-aware provision
 

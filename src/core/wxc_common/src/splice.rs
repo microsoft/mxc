@@ -438,6 +438,7 @@ mod tests {
         let over = "cli-app.exe --from-cli";
         let original = r#"{
             "version": "0.9.0-alpha",
+            "containment": "processcontainer",
             "process": { "cwd": "C:\\workspace" },
             "filesystem": { "readwritePaths": ["C:\\workspace"] }
         }"#;

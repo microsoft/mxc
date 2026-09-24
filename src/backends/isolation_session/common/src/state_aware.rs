@@ -90,6 +90,10 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
     type StopMetadata = ();
     type DeprovisionMetadata = ();
 
+    fn validate_sandbox_id(&self, sandbox_id: &str) -> Result<(), MxcError> {
+        extract_agent_user_name(sandbox_id).map(|_| ())
+    }
+
     fn provision(
         &mut self,
         _request: &ExecutionRequest,

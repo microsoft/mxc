@@ -16,10 +16,15 @@ $WxcExec = Resolve-RegressionExecutable $WxcExec "wxc-exec.exe"
 $subdirectory = Join-Path $WorkDirectory "sub"
 New-Item -ItemType Directory -Force -Path $subdirectory | Out-Null
 
-# Config
-$configJson = @"
+function New-EncodedCwdConfig {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Version
+    )
+
+    $configJson = @"
 {
-    "version": "0.8.0-alpha",
+    "version": "$Version",
     "containment": "process",
     "process": {
         "cwd": "sub",
@@ -34,22 +39,39 @@ $configJson = @"
 }
 "@
 
-# Command
-$commandLine = "cmd.exe /D /C cd"
+    $json = Add-RegressionCommandLine $configJson "cmd.exe /D /C cd"
+    return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
+}
 
-$json = Add-RegressionCommandLine $configJson $commandLine
-$base64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
+$strictConfig = New-EncodedCwdConfig "0.9.0-alpha"
+$legacyConfig = New-EncodedCwdConfig "0.8.0-alpha"
 
 Push-Location $WorkDirectory
 try {
-    Write-Host "Issue #902: relative process.cwd is resolved against host state." -ForegroundColor Cyan
-    Write-Host "Expected bug: succeeds and prints '$subdirectory'. Healthy behavior rejects relative cwd." -ForegroundColor Yellow
+    Write-Host "Issue #902: current contracts reject relative process.cwd." -ForegroundColor Cyan
+    $strictOutput = & $WxcExec --config-base64 $strictConfig 2>&1 | Out-String
+    $strictExitCode = $LASTEXITCODE
 
-    # Run
-    & $WxcExec --config-base64 $base64
-    $exitCode = $LASTEXITCODE
+    Write-Host "Issue #902 compatibility: v0.8 continues to accept relative process.cwd." -ForegroundColor Cyan
+    $legacyOutput = & $WxcExec --config-base64 $legacyConfig 2>&1 | Out-String
+    $legacyExitCode = $LASTEXITCODE
 } finally {
     Pop-Location
 }
 
-Complete-RegressionTest -Passed ($exitCode -ne 0) -SuccessMessage "The relative working directory was rejected." -FailureMessage "The relative working directory was accepted."
+$expectedLegacyDirectory = [System.IO.Path]::GetFullPath($subdirectory)
+$strictRejected = $strictExitCode -ne 0 -and $strictOutput -match "process\.cwd"
+$legacyAccepted = $legacyExitCode -eq 0 -and
+    $legacyOutput -match [regex]::Escape($expectedLegacyDirectory)
+
+if (-not $strictRejected) {
+    Write-Host "Current contract did not reject relative process.cwd:`n$strictOutput" -ForegroundColor Red
+}
+if (-not $legacyAccepted) {
+    Write-Host "v0.8 request did not run in '$expectedLegacyDirectory':`n$legacyOutput" -ForegroundColor Red
+}
+
+Complete-RegressionTest `
+    -Passed ($strictRejected -and $legacyAccepted) `
+    -SuccessMessage "Current contracts reject relative process.cwd and v0.8 retains compatibility." `
+    -FailureMessage "Working-directory validation or compatibility did not match the contract."

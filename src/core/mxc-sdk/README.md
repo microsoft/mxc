@@ -44,6 +44,13 @@ contract, and adapts it through the shared normalization path. The command is su
 [`build_request`], so the returned [`SandboxRequest`] is complete; optionally
 adjust its working directory or environment before spawning.
 
+`SandboxRequest::set_working_directory` requires a target-absolute value:
+a rooted Windows path for Windows backends, an absolute POSIX path
+for POSIX backends, and a rooted local Windows drive path for one-shot WSLc
+(mapped under `/mnt/<drive>`). Omit it to use the backend's native/default
+behavior. Typed SDK requests use the strict rule regardless of the policy's
+exact contract version.
+
 Telemetry remains off unless `SandboxRequest::set_telemetry_opt_in(true)` is
 called. Enabling that per-invocation switch still requires persisted user
 consent and a permitting administrative policy.
@@ -479,6 +486,10 @@ Ok(())
 
 Three backends implement the state-aware lifecycle — IsolationSession, WSLc and
 Windows Sandbox. Only IsolationSession serves `exec_sandbox`.
+
+For state-aware `exec` JSON, IsolationSession and Windows Sandbox require a
+rooted Windows cwd. WSLc addresses the already-running container, so its cwd is
+instead an absolute in-container POSIX path such as `/workspace`.
 
 `exec_attached` is verified against **IsolationSession** only.
 

@@ -1078,7 +1078,7 @@
           "description": "The non-empty command line to execute."
         },
         "cwd": {
-          "description": "Optional working directory.",
+          "description": "Optional target-absolute working directory.\n\nWindows backends require a rooted Windows path; POSIX backends and state-aware WSLc exec require an absolute POSIX path; one-shot WSLc requires a rooted local Windows drive path that maps under `/mnt`.",
           "type": "string"
         },
         "env": {

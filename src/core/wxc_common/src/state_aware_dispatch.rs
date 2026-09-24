@@ -87,6 +87,7 @@ pub fn dispatch_state_aware_exec<B: StatefulSandboxBackend>(
             "streaming exec requires the exec phase, got {phase}"
         )));
     };
+    backend.validate_sandbox_id(&sandbox_id)?;
     validate_exec_common(&request)?;
     backend.validate_exec(&sandbox_id, &request, config.as_ref())?;
     // The caller drives the returned streams itself, so the backend must
@@ -112,6 +113,7 @@ pub fn dispatch_state_aware<B: StatefulSandboxBackend>(
             Ok(DispatchOutcome::Envelope(provision_envelope(result)?))
         }
         BoundStateAwareOperation::Start { sandbox_id, config } => {
+            backend.validate_sandbox_id(&sandbox_id)?;
             backend.validate_start(&sandbox_id, &request, config.as_ref())?;
             if dry_run {
                 return Ok(DispatchOutcome::Envelope(empty_result_envelope()));
@@ -120,6 +122,7 @@ pub fn dispatch_state_aware<B: StatefulSandboxBackend>(
             Ok(DispatchOutcome::Envelope(metadata_envelope(result)?))
         }
         BoundStateAwareOperation::Exec { sandbox_id, config } => {
+            backend.validate_sandbox_id(&sandbox_id)?;
             validate_exec_common(&request)?;
             backend.validate_exec(&sandbox_id, &request, config.as_ref())?;
             if dry_run {
@@ -130,6 +133,7 @@ pub fn dispatch_state_aware<B: StatefulSandboxBackend>(
             Ok(DispatchOutcome::ExecCompleted { exit_code })
         }
         BoundStateAwareOperation::Stop { sandbox_id, config } => {
+            backend.validate_sandbox_id(&sandbox_id)?;
             backend.validate_stop(&sandbox_id, &request, config.as_ref())?;
             if dry_run {
                 return Ok(DispatchOutcome::Envelope(empty_result_envelope()));
@@ -138,6 +142,7 @@ pub fn dispatch_state_aware<B: StatefulSandboxBackend>(
             Ok(DispatchOutcome::Envelope(metadata_envelope(result)?))
         }
         BoundStateAwareOperation::Deprovision { sandbox_id, config } => {
+            backend.validate_sandbox_id(&sandbox_id)?;
             backend.validate_deprovision(&sandbox_id, &request, config.as_ref())?;
             if dry_run {
                 return Ok(DispatchOutcome::Envelope(empty_result_envelope()));
@@ -577,6 +582,7 @@ mod tests {
         stop_calls: Cell<u32>,
         deprovision_calls: Cell<u32>,
         validate_provision_calls: Cell<u32>,
+        validate_sandbox_id_calls: Cell<u32>,
         validate_start_calls: Cell<u32>,
         validate_exec_calls: Cell<u32>,
         validate_stop_calls: Cell<u32>,
@@ -587,6 +593,7 @@ mod tests {
         last_exec_stdio: Cell<Option<ExecStdio>>,
         provision_error: Option<MxcError>,
         validate_provision_error: Option<MxcError>,
+        validate_sandbox_id_error: Option<MxcError>,
     }
 
     impl StubBackend {
@@ -598,6 +605,7 @@ mod tests {
                 stop_calls: Cell::new(0),
                 deprovision_calls: Cell::new(0),
                 validate_provision_calls: Cell::new(0),
+                validate_sandbox_id_calls: Cell::new(0),
                 validate_start_calls: Cell::new(0),
                 validate_exec_calls: Cell::new(0),
                 validate_stop_calls: Cell::new(0),
@@ -605,6 +613,7 @@ mod tests {
                 last_exec_stdio: Cell::new(None),
                 provision_error: None,
                 validate_provision_error: None,
+                validate_sandbox_id_error: None,
             }
         }
     }
@@ -684,6 +693,14 @@ mod tests {
                 .set(self.validate_provision_calls.get() + 1);
             if let Some(e) = self.validate_provision_error.clone() {
                 return Err(e);
+            }
+            Ok(())
+        }
+        fn validate_sandbox_id(&self, _sandbox_id: &str) -> Result<(), MxcError> {
+            self.validate_sandbox_id_calls
+                .set(self.validate_sandbox_id_calls.get() + 1);
+            if let Some(error) = self.validate_sandbox_id_error.clone() {
+                return Err(error);
             }
             Ok(())
         }
@@ -814,6 +831,13 @@ mod tests {
         BoundStateAwareRequest::for_test(request, operation)
     }
 
+    fn bound_relative_exec(sandbox_id: &str) -> BoundStateAwareRequest<StubBackend> {
+        let (mut request, operation) = bound_runnable_exec(sandbox_id).into_parts();
+        request.containment = ContainmentBackend::Wslc;
+        request.working_directory = "relative".to_string();
+        BoundStateAwareRequest::for_test(request, operation)
+    }
+
     fn assert_envelope(outcome: DispatchOutcome) -> Value {
         match outcome {
             DispatchOutcome::Envelope(v) => v,
@@ -898,8 +922,49 @@ mod tests {
         let err =
             dispatch_state_aware(&mut b, bound(Phase::Exec, Some("stubd:abc")), false).unwrap_err();
         assert_eq!(err.code, MxcErrorCode::MalformedRequest);
+        assert_eq!(b.validate_sandbox_id_calls.get(), 1);
         assert_eq!(b.validate_exec_calls.get(), 0);
         assert_eq!(b.exec_calls.get(), 0);
+    }
+
+    #[test]
+    fn dispatch_exec_rejects_relative_cwd_after_id_validation() {
+        let mut relayed = StubBackend::new();
+        let err = dispatch_state_aware(&mut relayed, bound_relative_exec("stubd:abc"), false)
+            .unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+        assert_eq!(relayed.validate_sandbox_id_calls.get(), 1);
+        assert_eq!(relayed.validate_exec_calls.get(), 0);
+        assert_eq!(relayed.exec_calls.get(), 0);
+
+        let mut streaming = StubBackend::new();
+        let err = dispatch_state_aware_exec(&mut streaming, bound_relative_exec("stubd:abc"))
+            .unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+        assert_eq!(streaming.validate_sandbox_id_calls.get(), 1);
+        assert_eq!(streaming.validate_exec_calls.get(), 0);
+        assert_eq!(streaming.exec_calls.get(), 0);
+    }
+
+    #[test]
+    fn dispatch_exec_rejects_malformed_id_before_relative_cwd() {
+        for streaming in [false, true] {
+            let mut backend = StubBackend::new();
+            backend.validate_sandbox_id_error =
+                Some(MxcError::malformed_id("invalid stub sandbox id"));
+
+            let error = if streaming {
+                dispatch_state_aware_exec(&mut backend, bound_relative_exec("stubd:")).unwrap_err()
+            } else {
+                dispatch_state_aware(&mut backend, bound_relative_exec("stubd:"), false)
+                    .unwrap_err()
+            };
+
+            assert_eq!(error.code, MxcErrorCode::MalformedId);
+            assert_eq!(backend.validate_sandbox_id_calls.get(), 1);
+            assert_eq!(backend.validate_exec_calls.get(), 0);
+            assert_eq!(backend.exec_calls.get(), 0);
+        }
     }
 
     #[test]

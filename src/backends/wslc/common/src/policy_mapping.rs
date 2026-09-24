@@ -35,27 +35,22 @@ pub struct VolumeMount {
 /// - `D:\data\files` → `/mnt/d/data/files`
 /// - `C:\` → `/mnt/c/`
 ///
-/// Returns `None` if the path doesn't start with a drive letter (e.g., UNC paths).
+/// This legacy filesystem-mount mapper trims surrounding whitespace and accepts
+/// a bare drive (`C:`), preserving the established mount contract.
 pub fn windows_path_to_container_path(windows_path: &str) -> Option<String> {
     let path = windows_path.trim();
-    if path.len() < 2 {
+    if path.len() < 2 || path.contains('\0') {
         return None;
     }
 
     let bytes = path.as_bytes();
     let drive = bytes[0];
-    let separator = bytes[1];
-
-    if !drive.is_ascii_alphabetic() || (separator != b':') {
+    if !drive.is_ascii_alphabetic() || bytes[1] != b':' {
         return None;
     }
 
-    // After the colon, must be \, /, or end-of-string (bare "C:")
-    if path.len() > 2 {
-        let after_colon = bytes[2];
-        if after_colon != b'\\' && after_colon != b'/' {
-            return None;
-        }
+    if path.len() > 2 && bytes[2] != b'\\' && bytes[2] != b'/' {
+        return None;
     }
 
     let drive_lower = (drive as char).to_ascii_lowercase();
@@ -63,6 +58,16 @@ pub fn windows_path_to_container_path(windows_path: &str) -> Option<String> {
     let rest_forward = rest.replace('\\', "/");
 
     Some(format!("/mnt/{}{}", drive_lower, rest_forward))
+}
+
+/// Map an exact rooted local drive path for one-shot `process.cwd`.
+pub fn rooted_windows_path_to_container_path(windows_path: &str) -> Option<String> {
+    if !wxc_common::is_wslc_mappable_windows_path(windows_path) {
+        return None;
+    }
+    let drive = windows_path.as_bytes()[0] as char;
+    let rest = windows_path[2..].replace('\\', "/");
+    Some(format!("/mnt/{}{}", drive.to_ascii_lowercase(), rest))
 }
 
 /// Build volume mounts from a container policy's filesystem paths.
@@ -630,6 +635,42 @@ mod tests {
     }
 
     #[test]
+    fn build_mounts_preserves_bare_drive_and_whitespace_compatibility() {
+        let mounts =
+            build_volume_mounts(&[" C:\\work ".to_string(), "D:".to_string()], &[]).unwrap();
+        assert_eq!(mounts[0].container_path, "/mnt/c/work");
+        assert_eq!(mounts[1].container_path, "/mnt/d");
+    }
+
+    #[test]
+    fn strict_cwd_mapper_uses_shared_local_drive_syntax() {
+        for accepted in [r"C:\work", "d:/work"] {
+            assert!(rooted_windows_path_to_container_path(accepted).is_some());
+        }
+        for rejected in [
+            "relative",
+            "C:",
+            r"C:work",
+            r"\work",
+            r"\\server\share",
+            "//server/share",
+            r"\\?\C:\work",
+            r" C:\work",
+            "C:\\work ",
+            r"C:\..\Windows",
+            r"C:\work\..\other",
+            "C:/work/../other",
+            r"C:\work/../other",
+        ] {
+            assert_eq!(
+                rooted_windows_path_to_container_path(rejected),
+                None,
+                "{rejected:?}"
+            );
+        }
+    }
+
+    #[test]
     fn build_mounts_rejects_unc_readwrite() {
         let rw = vec![r"\\server\share".to_string()];
         let ro = vec![];
@@ -1170,12 +1211,28 @@ mod tests {
     }
 
     #[test]
-    fn path_bare_drive_returns_some() {
-        // C: (just drive letter + colon) is valid
+    fn path_bare_drive_preserves_mount_compatibility() {
         assert_eq!(
             windows_path_to_container_path("C:"),
             Some("/mnt/c".to_string())
         );
+    }
+
+    #[test]
+    fn path_whitespace_preserves_mount_compatibility() {
+        assert_eq!(
+            windows_path_to_container_path(r" C:\work"),
+            Some("/mnt/c/work".to_string())
+        );
+        assert_eq!(
+            windows_path_to_container_path("C:\\work "),
+            Some("/mnt/c/work".to_string())
+        );
+    }
+
+    #[test]
+    fn path_with_interior_nul_returns_none() {
+        assert_eq!(windows_path_to_container_path("C:\\work\0hidden"), None);
     }
 
     #[test]

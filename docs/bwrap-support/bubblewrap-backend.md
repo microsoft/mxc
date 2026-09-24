@@ -637,6 +637,11 @@ Standard `process` fields work as expected:
 }
 ```
 
+For current contracts, `process.cwd` must be an absolute POSIX path. When it is
+omitted, MXC does not pass `--chdir`; Bubblewrap retains its native launch
+directory behavior. Exact v0.6-v0.8 requests retain relative-path acceptance
+for compatibility.
+
 ## Network proxy (private namespace, unprivileged)
 
 Bubblewrap supports an **unprivileged, cooperative network proxy** that

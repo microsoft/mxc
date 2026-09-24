@@ -614,6 +614,10 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
     type StopMetadata = ();
     type DeprovisionMetadata = ();
 
+    fn validate_sandbox_id(&self, sandbox_id: &str) -> Result<(), MxcError> {
+        extract_token(sandbox_id).map(|_| ())
+    }
+
     fn provision(
         &mut self,
         request: &ExecutionRequest,

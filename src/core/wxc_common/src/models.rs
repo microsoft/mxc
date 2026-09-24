@@ -1046,6 +1046,9 @@ pub struct ExecutionRequest {
     pub network_enforcement_compatibility: NetworkEnforcementCompatibility,
     /// Whether backends supply the default `process.env` block.
     pub default_env_compatibility: DefaultEnvCompatibility,
+    /// Whether an explicitly supplied working directory may retain legacy
+    /// relative-path behavior or must be absolute for its target backend.
+    pub working_directory_compatibility: WorkingDirectoryCompatibility,
     /// Externally assigned container identifier.
     pub container_id: String,
     /// Environment variables as "KEY=VALUE" strings (from `process.env`).
@@ -1142,6 +1145,37 @@ pub enum DefaultEnvCompatibility {
     /// states of `process.env` distinct.
     #[default]
     DefaultBlock,
+}
+
+/// Working-directory behavior selected by the exact contract adapter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkingDirectoryCompatibility {
+    /// Preserve the relative-path behavior of exact v0.6-v0.8 JSON requests.
+    LegacyRelativeAllowed,
+    /// Require an explicitly supplied working directory to be target-absolute.
+    #[default]
+    AbsoluteRequired,
+}
+
+/// Lifecycle surface against which a working directory is interpreted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkingDirectoryScope {
+    /// A complete run-to-completion or streaming one-shot request.
+    OneShot,
+    /// A state-aware exec request targeting an already-running sandbox.
+    Exec,
+}
+
+/// Absolute path syntax accepted by a target backend and lifecycle surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkingDirectoryStyle {
+    /// A rooted Windows path.
+    RootedWindows,
+    /// A POSIX path beginning with `/`.
+    AbsolutePosix,
+    /// A rooted local Windows drive path that WSLC can map under `/mnt`.
+    WslcLocalDrive,
 }
 
 fn serialize_source_contract<S>(
@@ -1269,7 +1303,10 @@ impl ExecutionRequest {
         &self,
         is_dir: impl Fn(&str) -> bool,
     ) -> Option<ResolvedWorkingDirectory<'_>> {
-        if !self.working_directory.trim().is_empty() {
+        let legacy_blank = self.working_directory_compatibility
+            == WorkingDirectoryCompatibility::LegacyRelativeAllowed
+            && self.working_directory.trim().is_empty();
+        if !self.working_directory.is_empty() && !legacy_blank {
             return Some(ResolvedWorkingDirectory {
                 path: self.working_directory.as_str(),
                 source: WorkingDirectorySource::Explicit,
@@ -1536,12 +1573,13 @@ mod tests {
         assert_eq!(resolve(&req, &["", "   "]), None);
     }
 
-    /// A whitespace-only `process.cwd` is not a caller choice; fall through to
-    /// the policy rather than treating it as an explicit directory.
+    /// Legacy contracts historically treated whitespace-only cwd as omitted.
+    /// Strict requests reject it before resolution.
     #[test]
-    fn resolved_working_directory_ignores_blank_explicit_value() {
+    fn resolved_working_directory_preserves_legacy_blank_fallback() {
         let mut req = request_with_paths(&["C:\\rw"], &[]);
         req.working_directory = "   ".to_string();
+        req.working_directory_compatibility = WorkingDirectoryCompatibility::LegacyRelativeAllowed;
         let resolved = resolve(&req, &["C:\\rw"]).expect("policy path");
         assert_eq!(resolved.path, "C:\\rw");
         assert_eq!(resolved.source, WorkingDirectorySource::Policy);

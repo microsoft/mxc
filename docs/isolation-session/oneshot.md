@@ -140,7 +140,10 @@ Legacy network fields are rejected.
 
 `appId` and the nested `provision` section are state-aware-only and are
 rejected on one-shot requests. Process options (`cwd`, `env`, `timeout`) remain
-in the top-level `process` section.
+in the top-level `process` section. When supplied, `cwd` must be a rooted
+Windows path; relative, drive-relative, and current-drive-rooted values are
+rejected before the session is created. If it is omitted, MXC leaves the OS-side
+process API's native working-directory default unchanged.
 
 Run with: `wxc-exec.exe config.json`.
 

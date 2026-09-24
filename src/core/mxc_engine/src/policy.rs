@@ -606,8 +606,12 @@ pub struct SandboxRequest {
 }
 
 impl SandboxRequest {
-    /// Override the working directory the sandboxed child starts in. Left unset,
-    /// it defaults to the policy's resolution.
+    /// Override the working directory the sandboxed child starts in.
+    ///
+    /// The path must be target-absolute: a rooted Windows path for Windows
+    /// backends, a rooted local Windows drive path for one-shot WSLc, or an
+    /// absolute POSIX path for POSIX backends. Left unset, it defaults to the
+    /// policy's resolution.
     pub fn set_working_directory(&mut self, working_directory: impl Into<String>) -> &mut Self {
         self.inner.working_directory = working_directory.into();
         self
@@ -880,6 +884,11 @@ mod tests {
                     .unwrap();
             assert_eq!(request.inner.source_contract, None);
             assert_eq!(request.inner.source_contract_version(), "");
+            assert_eq!(
+                request.inner.working_directory_compatibility,
+                wxc_common::models::WorkingDirectoryCompatibility::AbsoluteRequired,
+                "{version}"
+            );
             let expected = if matches!(*version, "0.6.0-alpha" | "0.7.0-alpha") {
                 wxc_common::models::NetworkEnforcementCompatibility::LegacyCompatible
             } else {
@@ -908,6 +917,26 @@ mod tests {
                 expected_env == wxc_common::models::DefaultEnvCompatibility::DefaultBlock,
                 "{version}"
             );
+        }
+    }
+
+    #[test]
+    fn typed_working_directory_is_strict_for_every_contract_version() {
+        for version in host_process_versions() {
+            let policy = SandboxPolicy {
+                version: (*version).to_string(),
+                filesystem: None,
+                network: None,
+                ui: None,
+                timeout_ms: None,
+            };
+            let mut request =
+                build_request_with_containment(&policy, &Containment::Process, TEST_COMMAND, None)
+                    .unwrap();
+            request.set_working_directory("relative");
+            let error = wxc_common::validator::validate_common(&request.inner)
+                .expect_err("typed requests must reject relative cwd");
+            assert!(error.error_message.contains("process.cwd"), "{version}");
         }
     }
 

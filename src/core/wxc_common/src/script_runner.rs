@@ -70,7 +70,7 @@ pub fn handle_dry_run_exit(response: &ScriptResponse, logger: &mut Logger) -> ! 
 }
 
 /// Emit a structured JSON error envelope on stderr when a completed run carries
-/// an infrastructure error message.
+/// an MXC error message.
 ///
 /// Shared by `wxc-exec` and `lxc-exec` so that MXC never exits non-zero on an
 /// infrastructure failure without first printing a machine-readable diagnostic
@@ -88,7 +88,7 @@ pub fn emit_backend_error_envelope(response: &ScriptResponse) {
 
     let mut envelope = serde_json::json!({
         "error": {
-            "code": "backend_error",
+            "code": error_code(response),
             "message": response.error_message,
         }
     });
@@ -101,9 +101,20 @@ pub fn emit_backend_error_envelope(response: &ScriptResponse) {
     }
 }
 
+fn error_code(response: &ScriptResponse) -> &'static str {
+    use crate::models::FailurePhase;
+
+    match response.failure_phase {
+        FailurePhase::Rejected => "policy_validation",
+        FailurePhase::BackendUnavailable => "backend_unavailable",
+        _ => "backend_error",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::get_timeout_milliseconds;
+    use crate::models::{FailurePhase, ScriptResponse};
 
     #[test]
     fn timeout_zero_returns_u32_max() {
@@ -136,7 +147,6 @@ mod tests {
 
     #[test]
     fn error_envelope_emits_on_infra_failure() {
-        use crate::models::ScriptResponse;
         // Exercises the serialization branch (writes to stderr); must not panic.
         super::emit_backend_error_envelope(&ScriptResponse {
             exit_code: 1,
@@ -144,5 +154,24 @@ mod tests {
             extended_error: "WIN32_ERROR(1920)".to_string(),
             ..Default::default()
         });
+    }
+
+    #[test]
+    fn error_code_preserves_failure_classification() {
+        for (failure_phase, expected) in [
+            (FailurePhase::Rejected, "policy_validation"),
+            (FailurePhase::BackendUnavailable, "backend_unavailable"),
+            (FailurePhase::LaunchFailed, "backend_error"),
+            (FailurePhase::PostLaunchFailed, "backend_error"),
+            (FailurePhase::None, "backend_error"),
+        ] {
+            assert_eq!(
+                super::error_code(&ScriptResponse {
+                    failure_phase,
+                    ..Default::default()
+                }),
+                expected
+            );
+        }
     }
 }

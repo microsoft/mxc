@@ -702,6 +702,38 @@ fn as_wslc_rejection(err: MxcError) -> ScriptResponse {
     WslcError::Rejected(err.message).into_response()
 }
 
+/// Map an explicitly supplied one-shot cwd into the WSL container namespace.
+///
+/// `None` means the caller omitted `process.cwd`; every explicit value must map
+/// exactly or the request is rejected. Common validation rejects the same forms
+/// before runner resolution; this remains a fail-closed execution backstop.
+fn container_working_directory(working_directory: &str) -> Result<Option<String>, ScriptResponse> {
+    if working_directory.is_empty() {
+        return Ok(None);
+    }
+
+    let escaped = wxc_common::escape_diagnostic_text(working_directory);
+    if working_directory.contains('\0') {
+        return Err(WslcError::Rejected(format!(
+            "WSLc: process.cwd '{escaped}' contains an interior NUL byte and cannot be \
+             represented as a container working directory."
+        ))
+        .into_response());
+    }
+
+    policy_mapping::rooted_windows_path_to_container_path(working_directory)
+        .map(Some)
+        .ok_or_else(|| {
+            WslcError::Rejected(format!(
+                "WSLc: process.cwd '{escaped}' is not a rooted local Windows drive path. \
+                 One-shot WSLC working directories must use a path such as C:\\work so it \
+                 can be mapped under /mnt/<drive>; relative, POSIX, UNC, drive-relative, \
+                 current-drive-rooted, bare-drive, and whitespace-padded paths are not supported."
+            ))
+            .into_response()
+        })
+}
+
 /// The first line [`WSLContainerRunner::start_container`] writes, before any
 /// SDK call. Tests assert its absence to prove a rejection aborted early.
 pub(crate) const START_CONTAINER_BANNER: &str = "[WSLC] Starting WSL Container runner";
@@ -1365,6 +1397,7 @@ impl WSLContainerRunner {
         logger: &mut Logger,
         output: OutputMode,
     ) -> Result<StartedContainer, ScriptResponse> {
+        let container_cwd = container_working_directory(&request.working_directory)?;
         let _ = writeln!(logger, "{START_CONTAINER_BANNER}");
 
         // WSLc provision-time filesystem-policy gate (D6 normalization → D3
@@ -1510,23 +1543,18 @@ impl WSLContainerRunner {
             }
         }
 
-        let _cwd_cstr;
-        if !request.working_directory.is_empty() {
-            if let Some(container_cwd) =
-                policy_mapping::windows_path_to_container_path(&request.working_directory)
-            {
-                _cwd_cstr = format!("{}\0", container_cwd);
-                let hr = sdk.WslcSetProcessSettingsWorkingDirectory(
-                    &mut process_settings,
-                    _cwd_cstr.as_bytes().as_ptr() as PCSTR,
-                );
-                if hr != S_OK {
-                    return Err(sdk_error(
-                        "WslcSetProcessSettingsWorkingDirectory failed",
-                        hr,
-                        "",
-                    ));
-                }
+        let _cwd_cstr = container_cwd.map(|cwd| format!("{cwd}\0").into_bytes());
+        if let Some(cwd_cstr) = &_cwd_cstr {
+            let hr = sdk.WslcSetProcessSettingsWorkingDirectory(
+                &mut process_settings,
+                cwd_cstr.as_ptr() as PCSTR,
+            );
+            if hr != S_OK {
+                return Err(sdk_error(
+                    "WslcSetProcessSettingsWorkingDirectory failed",
+                    hr,
+                    "",
+                ));
             }
         }
 
@@ -2410,6 +2438,97 @@ mod tests {
         let runner = WSLContainerRunner::new(&WslcConfig::default());
         let err = runner.validate_runner(&request).unwrap_err();
         assert!(err.error_message.contains("per-host egress filtering"));
+    }
+
+    #[test]
+    fn container_working_directory_maps_or_rejects_every_explicit_value() {
+        assert_eq!(container_working_directory("").unwrap(), None);
+        assert_eq!(
+            container_working_directory(r"C:\work").unwrap(),
+            Some("/mnt/c/work".to_string())
+        );
+
+        for rejected in [
+            "relative",
+            "~/work",
+            "/work",
+            r"C:work",
+            r"\work",
+            r"\\server\share\work",
+            "C:",
+            r" C:\work",
+            "C:\\work ",
+        ] {
+            let error = container_working_directory(rejected).unwrap_err();
+            assert_eq!(
+                error.failure_phase,
+                wxc_common::models::FailurePhase::Rejected,
+                "{rejected:?}"
+            );
+            assert!(error.error_message.contains("process.cwd"), "{rejected:?}");
+        }
+    }
+
+    #[test]
+    fn container_working_directory_rejects_nul_without_truncating_diagnostic() {
+        let error = container_working_directory("C:\\work\0hidden").unwrap_err();
+        assert_eq!(
+            error.failure_phase,
+            wxc_common::models::FailurePhase::Rejected
+        );
+        assert!(error.error_message.contains("interior NUL"));
+        assert!(error.error_message.contains(r"\u{0}hidden"));
+        assert!(!error.error_message.contains('\0'));
+    }
+
+    #[test]
+    fn invalid_cwd_rejects_dry_run_before_any_container_work() {
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            script_code: "echo hi".to_string(),
+            working_directory: "relative".to_string(),
+            working_directory_compatibility:
+                wxc_common::models::WorkingDirectoryCompatibility::LegacyRelativeAllowed,
+            dry_run: true,
+            ..Default::default()
+        };
+        let mut runner = WSLContainerRunner::new(&WslcConfig::default());
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let response = ScriptRunner::run(&mut runner, &request, &mut logger);
+
+        assert_eq!(
+            response.failure_phase,
+            wxc_common::models::FailurePhase::Rejected
+        );
+        assert!(response.error_message.contains("process.cwd"));
+        assert!(!logger.get_buffer().contains(START_CONTAINER_BANNER));
+        assert!(!logger.get_buffer().contains("COM initialized"));
+    }
+
+    #[test]
+    fn start_container_reuses_cwd_preflight_before_its_banner() {
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            script_code: "echo hi".to_string(),
+            working_directory: "C:\\work\0hidden".to_string(),
+            ..Default::default()
+        };
+        let runner = WSLContainerRunner::new(&WslcConfig::default());
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let error =
+            match unsafe { runner.start_container(&request, &mut logger, OutputMode::Capture) } {
+                Ok(_) => panic!("invalid cwd must reject before container setup"),
+                Err(error) => error,
+            };
+
+        assert_eq!(
+            error.failure_phase,
+            wxc_common::models::FailurePhase::Rejected
+        );
+        assert!(!logger.get_buffer().contains(START_CONTAINER_BANNER));
+        assert!(!logger.get_buffer().contains("COM initialized"));
     }
 
     #[test]

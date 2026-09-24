@@ -127,10 +127,8 @@ that can be executed independently.
 
     "process": {
         "commandLine": "python app.py",    // Required: command to execute
-        "cwd": "C:\\workspace",            // Working directory (optional; when omitted each
-                                           //  backend substitutes a granted directory rather
-                                           //  than inheriting the launcher's — see
-                                           //  "Working Directory" below)
+        "cwd": "C:\\workspace",            // Working directory (optional; omitted behavior is
+                                           //  backend-specific — see "Working Directory" below)
         "env": ["MY_VAR=value"],           // Omitted: backend default; supplied: used verbatim
         "inheritDefaultEnv": true,         // Layer env on the backend default (0.9.0-alpha+)
         "timeout": 30000                   // Timeout in ms (0 = no timeout)
@@ -269,24 +267,57 @@ that can be executed independently.
 
 ### Working Directory
 
-`process.cwd` is optional. When it is set, it is passed to the backend
-verbatim — an unusable value fails the launch rather than being silently
-replaced. When it is **omitted**, backends do not simply inherit the launcher's
-working directory: under a deny-by-default sandbox that directory is usually
-unreadable, and the result ranges from a confusing silent relocation (Windows
-restarts the child at the drive root) to `getcwd()` errors on the child's
-stderr. Each backend therefore substitutes a directory the sandbox can actually
-use:
+`process.cwd` is optional. An omitted value is represented only by an absent
+field or the empty string; whitespace is an explicit value and is validated.
+When a non-empty value is supplied, current contracts require the path form
+appropriate to the selected backend and lifecycle:
+
+| Backend / lifecycle | Required `process.cwd` form |
+|---|---|
+| ProcessContainer, Windows Sandbox, IsolationSession | Rooted Windows path, such as `C:\work` or `\\server\share` |
+| Bubblewrap, LXC, Seatbelt | Absolute POSIX path, such as `/workspace` |
+| WSLc one-shot | Rooted local Windows drive path, such as `C:\work`; MXC maps it to `/mnt/c/work` |
+| WSLc state-aware exec | Absolute in-container POSIX path, such as `/workspace` |
+
+Under strict semantics, drive-relative (`C:work`), current-drive-rooted
+(`\work`), relative, and interior-NUL values are rejected. POSIX targets accept
+absolute paths with two leading slashes, such as `//server/share`. WSLc
+one-shot additionally rejects POSIX, UNC, device-namespace, and other
+non-local-drive paths because they cannot be mapped into the container. It
+rejects `..` path components rather than normalizing them, because Windows and
+Linux clamp drive-root traversal differently. Rejection happens before backend
+startup; MXC never silently drops or rewrites an unusable working directory.
+`~` is shell-expansion syntax, not an absolute POSIX path. MXC does not perform
+shell expansion for `process.cwd`, so literal `~` and `~/work` values are
+treated as relative paths and rejected.
+
+Exact v0.6, v0.7, and v0.8 requests retain their established relative-path
+acceptance for ordinary backends, including Windows drive-relative syntax such
+as `C:work`. Current-drive-rooted spellings (`\work` and `/work`) remain
+invalid because their target depends on ambient drive state. Whitespace-only
+legacy values retain their historical omitted-value fallback. WSLc is
+intentionally excluded: one-shot WSLc rejects every explicit value it cannot
+map faithfully in every contract version. Exact v0.9 and development v0.10
+requests use the strict rules above. Malformed and backend-specific
+unrepresentable values remain invalid. Direct typed SDK requests use strict
+validation.
+
+When `process.cwd` is **omitted**, behavior is backend-specific. Most backends
+avoid simply inheriting the launcher's working directory: under a
+deny-by-default sandbox that directory is usually unreadable, and the result
+ranges from a confusing silent relocation (Windows restarts the child at the
+drive root) to `getcwd()` errors on the child's stderr.
 
 | Backend | Default when `process.cwd` is omitted |
 |---------|----------------------------------------|
 | Windows ProcessContainer (AppContainer / BaseContainer) | First `readwritePaths` entry that is an existing directory, else the first such `readonlyPaths` entry, else the system drive root (`%SystemDrive%\`). Never `NULL`. |
 | Seatbelt (macOS) | Same precedence, with `~` expanded as the profile expands it; falls back to `/`. |
+| Bubblewrap | MXC omits `--chdir`; Bubblewrap retains its native launch-directory behavior. |
 | LXC / WSL Container | The container root — see [`docs/lxc-support/lxc-backend.md`](lxc-support/lxc-backend.md). |
 | MicroVM (NanVix) / Hyperlight | Not applicable — these backends reject a working directory outright. |
 
-Policy entries that are blank, name a file, or do not exist yet are skipped:
-a process cannot be launched in any of them.
+For backends using policy-path fallback, entries that are blank, name a file,
+or do not exist yet are skipped: a process cannot be launched in any of them.
 
 ### Filesystem Policy
 

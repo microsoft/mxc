@@ -21,6 +21,10 @@ pub(super) fn adapt(
     input.into_parts()
 }
 pub(super) fn assert_clean_common(common: &crate::common_request_ir::CommonRequestIR) {
+    assert_eq!(
+        common.working_directory_compatibility,
+        crate::models::WorkingDirectoryCompatibility::AbsoluteRequired
+    );
     assert!(common.phase.is_none());
     assert!(common.sandbox_id.is_none());
     assert!(common.containment.is_none());

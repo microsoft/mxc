@@ -223,7 +223,11 @@ public class StateAwarePhaseOptions
 /// <summary>Process and schema options for a state-aware exec phase.</summary>
 public class StateAwareExecOptions : StateAwarePhaseOptions
 {
-    /// <summary>Working directory inside the sandbox.</summary>
+    /// <summary>Optional absolute working directory inside the sandbox.</summary>
+    /// <remarks>
+    /// IsolationSession and Windows Sandbox require a rooted Windows path.
+    /// WSLC requires an absolute in-container POSIX path.
+    /// </remarks>
     public string? WorkingDirectory { get; set; }
 
     /// <summary>Environment variables encoded as <c>KEY=VALUE</c> strings.</summary>

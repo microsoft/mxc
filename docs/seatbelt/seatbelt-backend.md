@@ -470,7 +470,8 @@ paths are. `PWD` is exported to the resolved directory.
 Both launch methods apply it: `exec` sets it on the child process, while `open`
 performs the `cd` and the `PWD` export inside the generated helper script,
 since Terminal would otherwise start the workload in its own directory. A
-relative `cwd` is resolved against the MXC process's directory on both paths.
+current-contract `cwd` must be an absolute POSIX path. Exact v0.6-v0.8 requests
+retain relative-path acceptance for compatibility.
 
 **Note:** `getcwd()` only succeeds when the directory *itself* is readable under the profile. An
 out-of-policy `cwd` makes callers that resolve relative paths (`git`, Python's

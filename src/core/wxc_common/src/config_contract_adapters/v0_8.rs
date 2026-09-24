@@ -387,6 +387,8 @@ pub(crate) fn into_common_request_ir(
         source_contract: mxc_config_contract::ContractVersion::V0_8_0Alpha,
         default_env_compatibility: crate::models::DefaultEnvCompatibility::LegacyCompatible,
         network_enforcement_compatibility: crate::models::NetworkEnforcementCompatibility::Strict,
+        working_directory_compatibility:
+            crate::models::WorkingDirectoryCompatibility::LegacyRelativeAllowed,
         phase: None,
         sandbox_id: None,
         container_id: container_id.into_option(),
@@ -420,6 +422,16 @@ mod tests {
             "commandLine": "echo hello"
         }
     }"#;
+
+    #[test]
+    fn selects_legacy_working_directory_compatibility() {
+        let request: super::contract::Request = serde_json::from_str(MINIMAL_REQUEST_JSON).unwrap();
+        let common = super::into_common_request_ir(request);
+        assert_eq!(
+            common.working_directory_compatibility,
+            crate::models::WorkingDirectoryCompatibility::LegacyRelativeAllowed
+        );
+    }
 
     const COMPLETE_PROCESS_CONTAINER_REQUEST_JSON: &str = r#"{
         "version": "0.8.0-alpha",

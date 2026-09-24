@@ -239,6 +239,21 @@ pub trait StatefulSandboxBackend {
     type StopMetadata: Serialize;
     type DeprovisionMetadata: Serialize;
 
+    /// Validate a complete non-provision sandbox ID before any request policy.
+    ///
+    /// Backends with richer IDs override this using the same decoder used by
+    /// their phase validation hooks. The default accepts a non-empty payload
+    /// after this backend's exact prefix.
+    fn validate_sandbox_id(&self, sandbox_id: &str) -> Result<(), MxcError> {
+        let expected_prefix = Self::ID_PREFIX;
+        match sandbox_id.split_once(':') {
+            Some((prefix, payload)) if prefix == expected_prefix && !payload.is_empty() => Ok(()),
+            _ => Err(MxcError::malformed_id(format!(
+                "expected {expected_prefix}:<payload>, got {sandbox_id:?}"
+            ))),
+        }
+    }
+
     /// Optional. Default mints `<ID_PREFIX>:<random-token>` and returns no
     /// metadata. Override when the backend has native provision work.
     fn provision(

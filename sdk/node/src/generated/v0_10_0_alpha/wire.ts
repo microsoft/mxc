@@ -545,7 +545,9 @@ export interface Process {
    */
   commandLine: NonEmptyString;
   /**
-   * Optional working directory.
+   * Optional target-absolute working directory.
+   *
+   * Windows backends require a rooted Windows path; POSIX backends and state-aware WSLc exec require an absolute POSIX path; one-shot WSLc requires a rooted local Windows drive path that maps under `/mnt`.
    */
   cwd?: string;
   /**

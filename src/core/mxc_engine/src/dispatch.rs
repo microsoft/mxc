@@ -25,6 +25,7 @@ use wxc_common::logger::Logger;
 use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use wxc_common::mxc_error::MxcError;
 use wxc_common::sandbox_process::SandboxProcess;
+use wxc_common::validator::validate_one_shot_working_directory;
 
 /// `Err` when the host OS has no MXC sandbox backend. Checked before backend
 /// selection so an unsupported platform reports a clear message rather than a
@@ -65,6 +66,7 @@ pub fn spawn_runner(
             "dry_run is not supported for streaming spawns",
         ));
     }
+    validate_one_shot_working_directory(request).map_err(map_script_response_error)?;
     // Anchor the run to its policy identity before any backend is engaged, so
     // the streaming surface produces the same `mxc.PolicyHash` record as the
     // run-to-completion one.
@@ -87,7 +89,7 @@ pub fn spawn_runner(
 /// lower tier, or tell a rejected request from a broken one) and folding any
 /// `extended_error` detail into the message — rather than flattening
 /// everything to a generic `BackendError`.
-fn map_spawn_error(resp: ScriptResponse) -> MxcError {
+pub(crate) fn map_script_response_error(resp: ScriptResponse) -> MxcError {
     use wxc_common::models::FailurePhase;
 
     let mut message = resp.error_message;
@@ -115,7 +117,7 @@ fn spawn_bubblewrap(
     let mut runner = bwrap_common::bwrap_runner::BubblewrapScriptRunner::new();
     runner
         .spawn(request, logger, StdioMode::Pipes)
-        .map_err(map_spawn_error)
+        .map_err(map_script_response_error)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -137,7 +139,7 @@ fn spawn_seatbelt(
     let mut runner = seatbelt_common::seatbelt_runner::SeatbeltScriptRunner::new();
     runner
         .spawn(request, logger, StdioMode::Pipes)
-        .map_err(map_spawn_error)
+        .map_err(map_script_response_error)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -212,7 +214,7 @@ fn spawn_process_container(
                 let _ = writeln!(logger, "warning: {w}");
             }
             let _ = writeln!(logger, "selected isolation tier: {}", tier.as_str());
-            Err(map_spawn_error(*response))
+            Err(map_script_response_error(*response))
         }
     }
 }
@@ -239,7 +241,7 @@ fn spawn_wslc(
     let mut runner = wslc_common::WSLContainerRunner::new(&config);
     runner
         .spawn(request, logger, StdioMode::Pipes)
-        .map_err(map_spawn_error)
+        .map_err(map_script_response_error)
 }
 
 #[cfg(not(all(target_os = "windows", feature = "wslc")))]
@@ -273,7 +275,7 @@ fn spawn_isolation_session(
     use isolation_session_common::OneShotSpawnFailure;
 
     isolation_session_common::spawn_one_shot(request, logger).map_err(|e| match e {
-        OneShotSpawnFailure::Refused(resp) => map_spawn_error(resp),
+        OneShotSpawnFailure::Refused(resp) => map_script_response_error(resp),
         OneShotSpawnFailure::Launch(err) => err,
     })
 }
@@ -299,7 +301,7 @@ fn spawn_isolation_session(
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_host_supported, map_spawn_error, spawn_runner};
+    use super::{ensure_host_supported, map_script_response_error, spawn_runner};
     use crate::policy::{build_request, SandboxPolicy};
     use wxc_common::logger::{Logger, Mode};
     use wxc_common::models::ContainmentBackend;
@@ -329,7 +331,7 @@ mod tests {
     fn rejected_phase_maps_to_policy_validation() {
         use wxc_common::models::FailurePhase;
 
-        let err = map_spawn_error(spawn_failure(FailurePhase::Rejected));
+        let err = map_script_response_error(spawn_failure(FailurePhase::Rejected));
         assert_eq!(err.code, MxcErrorCode::PolicyValidation);
         assert_eq!(err.message, "wslc rejected the request");
     }
@@ -341,15 +343,15 @@ mod tests {
         // `None` is the default, so an unclassified failure must stay a generic
         // backend error rather than being mistaken for a rejection.
         assert_eq!(
-            map_spawn_error(spawn_failure(FailurePhase::BackendUnavailable)).code,
+            map_script_response_error(spawn_failure(FailurePhase::BackendUnavailable)).code,
             MxcErrorCode::BackendUnavailable
         );
         assert_eq!(
-            map_spawn_error(spawn_failure(FailurePhase::None)).code,
+            map_script_response_error(spawn_failure(FailurePhase::None)).code,
             MxcErrorCode::BackendError
         );
         assert_eq!(
-            map_spawn_error(spawn_failure(FailurePhase::LaunchFailed)).code,
+            map_script_response_error(spawn_failure(FailurePhase::LaunchFailed)).code,
             MxcErrorCode::BackendError
         );
     }
@@ -368,6 +370,21 @@ mod tests {
             Err(e) => e,
         };
         assert_eq!(err.code, MxcErrorCode::MalformedRequest);
+    }
+
+    #[test]
+    fn streaming_rejects_relative_cwd_before_backend_selection() {
+        let mut request =
+            build_request(&minimal_policy(), "echo hello", None).expect("build_request");
+        request.set_working_directory("relative");
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let error = match spawn_runner(&request.inner, &mut logger) {
+            Ok(_) => panic!("relative cwd must fail before backend selection"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, MxcErrorCode::PolicyValidation);
+        assert!(error.message.contains("process.cwd"));
     }
 
     #[test]

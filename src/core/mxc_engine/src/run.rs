@@ -86,6 +86,9 @@ pub fn resolve_runner(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<ResolvedRunner, Error> {
+    wxc_common::validator::validate_one_shot_working_directory(request)
+        .map_err(crate::dispatch::map_script_response_error)
+        .map_err(Error::from)?;
     log_policy_hash(request, logger);
     #[cfg(target_os = "windows")]
     {
@@ -598,5 +601,23 @@ mod tests {
             .expect("WSLC selection must not require runtime experimental authorization");
 
         assert!(!logger.get_buffer().contains("experimental"));
+    }
+
+    #[test]
+    fn resolve_runner_rejects_relative_cwd_before_backend_selection() {
+        let request = ExecutionRequest {
+            script_code: "echo hello".to_string(),
+            working_directory: "relative".to_string(),
+            containment: ContainmentBackend::ProcessContainer,
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let error = match resolve_runner(&request, &mut logger) {
+            Ok(_) => panic!("relative cwd must fail before backend resolution"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, crate::ErrorCode::PolicyValidation);
+        assert!(error.message.contains("process.cwd"));
     }
 }

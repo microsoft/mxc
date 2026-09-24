@@ -68,6 +68,13 @@ Prefer the smallest test command covering the change. Host-dependent backend sui
 - Production parsing dispatches through exact closed contracts and their
   version-specific adapters into private `CommonRequestIR` normalization input.
 - Preserve optional-field presence through parsing and binding. Apply defaults and semantic validation in the backend.
+- Working-directory compatibility is selected by exact adapters, not by parsing
+  version strings at runtime. Validate `process.cwd` after abstract containment
+  resolves, using the target backend and lifecycle surface: rooted Windows
+  paths for Windows targets, absolute POSIX paths for POSIX targets, Windows
+  host paths for WSLc one-shot, and in-container POSIX paths for WSLc exec.
+  New backend/lifecycle participation must update the exhaustive cwd style
+  mapping and its table-driven tests.
 - New features use their intended permanent JSON location in the exact
   development contract. JSON placement, publication eligibility, and runtime
   experimental authorization are separate. Update the matching closed request

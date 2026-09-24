@@ -7,6 +7,7 @@ pub mod audit;
 pub mod cmdline;
 mod common_request_ir;
 mod config_deserialize;
+pub use config_deserialize::escape_diagnostic_text;
 pub mod config_parser;
 pub mod default_env;
 pub mod encoding;
@@ -40,6 +41,10 @@ pub mod state_aware_request;
 pub mod telemetry;
 pub mod ui_policy;
 pub mod validator;
+mod working_directory;
+pub use working_directory::{
+    is_absolute_posix_path, is_rooted_local_windows_drive_path, is_wslc_mappable_windows_path,
+};
 
 // Reusable DTOs shared by exact-contract adapters and typed SDK builders.
 pub(crate) mod wire;

@@ -195,6 +195,9 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         source_contract: _excluded_source_contract,
         network_enforcement_compatibility,
         default_env_compatibility: _excluded_default_env_compatibility,
+        // This selects validation compatibility only. Once accepted, it does
+        // not change how the chosen directory is enforced by the backend.
+        working_directory_compatibility: _excluded_working_directory_compatibility,
         container_id,
         working_directory,
         script_timeout,

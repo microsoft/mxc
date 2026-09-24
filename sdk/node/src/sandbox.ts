@@ -622,7 +622,9 @@ export function createConfigFromPolicy(
  * Builds a sandbox payload JSON object from the sandbox policy.
  * @param script The command line script to execute
  * @param policy The sandbox policy configuration
- * @param workingDirectory Optional working directory path
+ * @param workingDirectory Optional target process cwd. Use a rooted Windows
+ * path for Windows backends, a rooted local Windows drive path for one-shot
+ * WSLc, or an absolute POSIX path for POSIX backends.
  * @param containerName Optional container name; if not provided, a random name will be generated
  * @param containment Optional containment backend type
  * @returns The sandbox payload object
@@ -871,7 +873,9 @@ function spawnWithConfig(
  * @param script The command line script to execute
  * @param policy The sandbox policy
  * @param options - Spawn options
- * @param workingDirectory Optional working directory path
+ * @param workingDirectory Optional target process cwd. It is also used as the
+ * host executor cwd, so it must exist on the host and satisfy the selected
+ * backend's target-path rules.
  * @param containerName Optional container name; if not provided, a random name will be generated
  * @param env Optional environment variables
  * @returns IPty object for interacting with the sandboxed process
@@ -908,7 +912,8 @@ export function spawnSandbox(
  *
  * @param config The container configuration (from createConfigFromPolicy)
  * @param options - Spawn options
- * @param workingDirectory Optional working directory path
+ * @param workingDirectory Optional host cwd for launching the executor. This
+ * does not change the sandboxed process cwd; set `config.process.cwd` for that.
  * @returns IPty when usePty is true or unset; ChildProcess when usePty is false
  *
  * @example
@@ -985,7 +990,9 @@ export function spawnSandboxFromConfig(
  * @param script The command line script to execute
  * @param policy The sandbox policy
  * @param options - Spawn options
- * @param workingDirectory Optional working directory path
+ * @param workingDirectory Optional target process cwd. Use a rooted Windows
+ * path for Windows backends, a rooted local Windows drive path for one-shot
+ * WSLc, or an absolute POSIX path for POSIX backends.
  * @param containerName Optional container name; if not provided, a random name will be generated
  *
  * @returns Promise that resolves with stdout/stderr and exit code

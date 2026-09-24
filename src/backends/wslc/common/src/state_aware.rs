@@ -64,6 +64,10 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
     type StopMetadata = ();
     type DeprovisionMetadata = ();
 
+    fn validate_sandbox_id(&self, sandbox_id: &str) -> Result<(), MxcError> {
+        validate_sandbox_id(sandbox_id)
+    }
+
     fn provision(
         &mut self,
         request: &ExecutionRequest,

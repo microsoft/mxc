@@ -984,8 +984,9 @@ fn cleanup_files(paths: &[&str]) {
 mod tests {
     use super::*;
     use wxc_common::models::{
-        DefaultEnvCompatibility, ExecutionRequest, NetworkAction, NetworkEgressPolicy,
-        NetworkPolicy, ProxyAddress, SeatbeltConfig,
+        ContainmentBackend, DefaultEnvCompatibility, ExecutionRequest, NetworkAction,
+        NetworkEgressPolicy, NetworkPolicy, ProxyAddress, SeatbeltConfig,
+        WorkingDirectoryCompatibility,
     };
 
     #[allow(clippy::field_reassign_with_default)]
@@ -995,6 +996,7 @@ mod tests {
         // explicitly.
         request.default_env_compatibility = DefaultEnvCompatibility::LegacyCompatible;
         request.experimental_enabled = true;
+        request.containment = ContainmentBackend::Seatbelt;
         request.seatbelt = Some(SeatbeltConfig::default());
         request
     }
@@ -1540,21 +1542,27 @@ mod tests {
         assert_eq!(env_value(&pairs, "HOME"), Some("/Users/someone/work"));
     }
 
-    /// A relative `process.cwd` means "relative to the launching process" —
-    /// that is what `chdir` gives the exec path. The helper script runs from
-    /// Terminal's directory instead, so the value must be anchored before it is
-    /// embedded. The two bases here stand in for the launcher and Terminal:
-    /// the same relative request must not be able to name both directories.
+    /// Exact v0.6-v0.8 requests retain relative-cwd compatibility. After shared
+    /// validation admits that legacy request, Seatbelt anchors the value to the
+    /// MXC launch directory so the exec and `open` paths select the same target.
     #[test]
-    fn relative_working_directory_is_anchored_to_the_launching_process() {
+    fn legacy_relative_working_directory_is_anchored_to_the_launching_process() {
+        let mut request = base_request();
+        request.script_code = "pwd".into();
+        request.working_directory = "work".into();
+        request.working_directory_compatibility =
+            WorkingDirectoryCompatibility::LegacyRelativeAllowed;
+        validate_common(&request).expect("legacy relative cwd should pass shared validation");
+
         let launcher = || Ok(PathBuf::from("/tmp/launcher"));
         let terminal = || Ok(PathBuf::from("/Users/someone"));
 
-        let anchored = absolute_working_directory_with("work", launcher).unwrap();
+        let anchored =
+            absolute_working_directory_with(&request.working_directory, launcher).unwrap();
         assert_eq!(anchored, "/tmp/launcher/work");
         assert_ne!(
             anchored,
-            absolute_working_directory_with("work", terminal).unwrap()
+            absolute_working_directory_with(&request.working_directory, terminal).unwrap()
         );
 
         // Anchored means absolute, so the directory the helper runs from can no
@@ -1562,6 +1570,17 @@ mod tests {
         let script = build_helper_script("", &anchored, "/p.sb", "pwd");
         assert!(script.contains("cd '/tmp/launcher/work' ||"), "{script}");
         assert!(script.contains("PWD='/tmp/launcher/work'"), "{script}");
+    }
+
+    #[test]
+    fn strict_relative_working_directory_is_rejected_before_seatbelt_resolution() {
+        let mut request = base_request();
+        request.script_code = "pwd".into();
+        request.working_directory = "work".into();
+
+        let error = validate_common(&request).expect_err("strict relative cwd must be rejected");
+        assert!(error.error_message.contains("process.cwd"));
+        assert!(error.error_message.contains("absolute POSIX path"));
     }
 
     /// An absolute directory is passed through spelled exactly as written —
@@ -1579,10 +1598,10 @@ mod tests {
         );
     }
 
-    /// A relative value cannot be anchored without the launcher's directory, so
-    /// that failure propagates rather than being silently left relative.
+    /// Legacy relative values still require a launch directory for anchoring;
+    /// failure to obtain it propagates rather than leaving the cwd relative.
     #[test]
-    fn relative_working_directory_propagates_a_missing_launch_directory() {
+    fn legacy_relative_working_directory_propagates_a_missing_launch_directory() {
         let gone = || {
             Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,

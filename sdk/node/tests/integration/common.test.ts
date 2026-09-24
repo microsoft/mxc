@@ -21,6 +21,35 @@ describe('Platform support', () => {
 
 const platformSupport = sdk.getPlatformSupport();
 
+describe('Working directory validation', {
+  skip: !platformSupport.isSupported
+    ? `Platform not supported: ${platformSupport.reason}`
+    : undefined,
+}, () => {
+  it('should reject a relative current-contract cwd with policy_validation', async () => {
+    const policy = {
+      version: '0.9.0-alpha',
+      filesystem: {
+        readwritePaths: [os.tmpdir()],
+      },
+    };
+
+    await assert.rejects(
+      sdk.spawnSandboxAsync(
+        'echo unreachable',
+        policy,
+        debugSpawnOptions,
+        'relative/subdirectory',
+        'relative-cwd',
+      ),
+      (error: unknown) =>
+        error instanceof sdk.MxcError &&
+        error.code === 'policy_validation' &&
+        /process\.cwd/.test(error.message),
+    );
+  });
+});
+
 // The exact 0.6 contract predates Seatbelt, which is the native macOS backend.
 const platformVersions = os.platform() === 'darwin'
   ? supportedVersions.filter((version) => version.compare('0.7.0-alpha') >= 0)

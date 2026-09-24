@@ -1114,7 +1114,7 @@ impl ScriptRunner for NanVixScriptRunner {
 mod tests {
     use super::*;
     use wxc_common::logger::{Logger, Mode};
-    use wxc_common::models::{ContainerPolicy, NetworkPolicy};
+    use wxc_common::models::{ContainerPolicy, ContainmentBackend, NetworkPolicy};
 
     #[test]
     fn total_timeout_adds_boot_staging_and_script() {
@@ -1637,6 +1637,7 @@ mod tests {
         let request = ExecutionRequest {
             script_code: "echo test".to_string(),
             working_directory: "/home/user".to_string(),
+            containment: ContainmentBackend::MicroVm,
             ..Default::default()
         };
         let mut logger = Logger::new(Mode::Buffer);

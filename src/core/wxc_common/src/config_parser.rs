@@ -10,7 +10,7 @@ use crate::models::{
     CaptureDenialsConfig, CaptureDenialsMode, ContainerPolicy, ContainmentBackend,
     ExecutionRequest, HyperlightConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode,
     NetworkPolicy, PortMapping, SeatbeltConfig, TelemetryConfig, TestFeatureConfig, UiPolicy,
-    WindowsSandboxConfig, WslcConfig,
+    WindowsSandboxConfig, WorkingDirectoryScope, WslcConfig,
 };
 use crate::mxc_error::MxcError;
 use crate::network_parser::{host_is_any_loopback, parse_network_policy, NetworkSections};
@@ -132,7 +132,7 @@ pub fn load_one_shot_request_from_contract(
         }
     };
 
-    let result = normalize_common_request_ir(config, logger, true, false);
+    let result = normalize_common_request_ir(config, logger, NormalizationOptions::one_shot());
     log_one_shot_error(logger, &result);
     result
 }
@@ -173,7 +173,7 @@ where
 {
     let request = config_deserialize::from_str(json)
         .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
-    normalize_common_request_ir(adapt(request), logger, true, false)
+    normalize_common_request_ir(adapt(request), logger, NormalizationOptions::one_shot())
         .map(MxcRequest::OneShot)
         .map_err(ParseError::OneShot)
 }
@@ -361,16 +361,14 @@ fn parse_exact_v0_9(json: &str, logger: &mut Logger) -> Result<MxcRequest, Parse
 
     match adapted {
         crate::config_contract_adapters::v0_9::AdaptedConfigRequest::OneShot(config) => {
-            normalize_common_request_ir(config, logger, true, false)
+            normalize_common_request_ir(config, logger, NormalizationOptions::one_shot())
                 .map(MxcRequest::OneShot)
                 .map_err(ParseError::OneShot)
         }
         crate::config_contract_adapters::v0_9::AdaptedConfigRequest::StateAware(input) => {
             normalize_state_aware(input, logger)
                 .map(MxcRequest::StateAware)
-                .map_err(|error| {
-                    ParseError::StateAware(MxcError::malformed_request(error.to_string()))
-                })
+                .map_err(state_aware_normalization_error)
         }
     }
 }
@@ -428,18 +426,24 @@ fn parse_exact_development(json: &str, logger: &mut Logger) -> Result<MxcRequest
 
     match adapted {
         crate::config_contract_adapters::dev::AdaptedConfigRequest::OneShot(config) => {
-            normalize_common_request_ir(config, logger, true, false)
+            normalize_common_request_ir(config, logger, NormalizationOptions::one_shot())
                 .map(MxcRequest::OneShot)
                 .map_err(ParseError::OneShot)
         }
         crate::config_contract_adapters::dev::AdaptedConfigRequest::StateAware(input) => {
             normalize_state_aware(input, logger)
                 .map(MxcRequest::StateAware)
-                .map_err(|error| {
-                    ParseError::StateAware(MxcError::malformed_request(error.to_string()))
-                })
+                .map_err(state_aware_normalization_error)
         }
     }
+}
+
+fn state_aware_normalization_error(error: WxcError) -> ParseError {
+    let error = match error {
+        WxcError::Validation(message) => MxcError::policy_validation(message),
+        error => MxcError::malformed_request(error.to_string()),
+    };
+    ParseError::StateAware(error)
 }
 
 fn parse_exact_mxc_request_json(json: &str, logger: &mut Logger) -> Result<MxcRequest, ParseError> {
@@ -1071,11 +1075,43 @@ fn validate_capture_denials_output_path(path: &str, logger: &mut Logger) -> Resu
 // mode was fixed at provision, so a proxy-only exec inherits that mode rather
 // than restating `defaultPolicy`. Backend phase validation still rejects every
 // post-provision network-mode or host-filtering field.
+#[derive(Debug, Clone, Copy)]
+struct NormalizationOptions {
+    require_process: bool,
+    working_directory_scope: Option<WorkingDirectoryScope>,
+    state_aware_wslc_exec: bool,
+}
+
+impl NormalizationOptions {
+    const fn one_shot() -> Self {
+        Self {
+            require_process: true,
+            working_directory_scope: Some(WorkingDirectoryScope::OneShot),
+            state_aware_wslc_exec: false,
+        }
+    }
+
+    const fn state_aware_exec(state_aware_wslc_exec: bool) -> Self {
+        Self {
+            require_process: true,
+            working_directory_scope: None,
+            state_aware_wslc_exec,
+        }
+    }
+
+    const fn state_aware_non_exec() -> Self {
+        Self {
+            require_process: false,
+            working_directory_scope: None,
+            state_aware_wslc_exec: false,
+        }
+    }
+}
+
 fn normalize_common_request_ir(
     cfg: crate::common_request_ir::CommonRequestIR,
     logger: &mut Logger,
-    require_process: bool,
-    state_aware_wslc_exec: bool,
+    options: NormalizationOptions,
 ) -> Result<ExecutionRequest, WxcError> {
     let _ignored_metadata = (&cfg.schema, &cfg.comment);
 
@@ -1100,6 +1136,7 @@ fn normalize_common_request_ir(
     let source_contract = cfg.source_contract;
     let network_enforcement_compatibility = cfg.network_enforcement_compatibility;
     let default_env_compatibility = cfg.default_env_compatibility;
+    let working_directory_compatibility = cfg.working_directory_compatibility;
     let container_id = cfg.container_id.unwrap_or_default();
 
     // Process section: required for one-shot and state-aware exec; optional for
@@ -1109,12 +1146,12 @@ fn normalize_common_request_ir(
             Some(process) => {
                 let script_code = match process.command_line {
                     Some(s) if !s.is_empty() => s,
-                    Some(_) if require_process => {
+                    Some(_) if options.require_process => {
                         return Err(WxcError::ConfigParse(
                             "process.commandLine cannot be empty".to_string(),
                         ));
                     }
-                    None if require_process => {
+                    None if options.require_process => {
                         return Err(WxcError::ConfigParse(
                             "Missing required field: process.commandLine".to_string(),
                         ));
@@ -1137,7 +1174,7 @@ fn normalize_common_request_ir(
                     process.inherit_default_env.unwrap_or(false),
                 )
             }
-            None if require_process => {
+            None if options.require_process => {
                 return Err(WxcError::ConfigParse(
                     "'process' section is required".into(),
                 ));
@@ -1151,6 +1188,15 @@ fn normalize_common_request_ir(
     let containment = map_wire_containment(cfg.containment.as_ref());
 
     validate_single_backend_section(containment.clone(), &present_backend_sections)?;
+    if let Some(scope) = options.working_directory_scope {
+        crate::working_directory::validate_working_directory(
+            &working_directory,
+            &containment,
+            scope,
+            working_directory_compatibility,
+        )
+        .map_err(WxcError::Validation)?;
+    }
 
     // LXC configuration
     let lxc_config = match cfg.lxc {
@@ -1413,7 +1459,7 @@ fn normalize_common_request_ir(
         // Require an 'allow' default with no host lists so the proxy is reachable.
         if containment == ContainmentBackend::Wslc
             && policy.network_proxy.is_enabled()
-            && !state_aware_wslc_exec
+            && !options.state_aware_wslc_exec
             && (policy.default_network_policy == NetworkPolicy::Block
                 || !policy.allowed_hosts.is_empty()
                 || !policy.blocked_hosts.is_empty())
@@ -1693,6 +1739,7 @@ fn normalize_common_request_ir(
         source_contract: Some(source_contract),
         network_enforcement_compatibility,
         default_env_compatibility,
+        working_directory_compatibility,
         container_id,
         env,
         inherit_default_env,
@@ -1767,8 +1814,12 @@ fn normalize_state_aware_common(
             .containment
             .as_ref()
             .is_some_and(|value| map_wire_containment(Some(value)) == ContainmentBackend::Wslc);
-    let mut request =
-        normalize_common_request_ir(common, logger, require_process, state_aware_wslc_exec)?;
+    let options = if require_process {
+        NormalizationOptions::state_aware_exec(state_aware_wslc_exec)
+    } else {
+        NormalizationOptions::state_aware_non_exec()
+    };
+    let mut request = normalize_common_request_ir(common, logger, options)?;
     if context.phase != Phase::Provision && !network_supplied {
         request.policy.network_egress = None;
         request.policy.network_ingress = None;
@@ -3102,6 +3153,218 @@ mod tests {
     }
 
     #[test]
+    fn v0_8_preserves_relative_working_directory_compatibility() {
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "containment": "processcontainer",
+            "process": {
+                "commandLine": "echo hello",
+                "cwd": "relative"
+            }
+        }"#;
+        let MxcRequest::OneShot(request) = load_mxc(json).unwrap() else {
+            panic!("expected one-shot request");
+        };
+        assert_eq!(request.working_directory, "relative");
+        assert_eq!(
+            request.working_directory_compatibility,
+            crate::models::WorkingDirectoryCompatibility::LegacyRelativeAllowed
+        );
+    }
+
+    #[test]
+    fn v0_8_windows_compatibility_accepts_relative_but_rejects_current_drive_rooted() {
+        for accepted in ["relative", r"C:work"] {
+            let json = serde_json::json!({
+                "version": "0.8.0-alpha",
+                "containment": "processcontainer",
+                "process": {
+                    "commandLine": "echo hello",
+                    "cwd": accepted
+                }
+            });
+            assert!(load_mxc(&json.to_string()).is_ok(), "{accepted:?}");
+        }
+
+        for rejected in [r"\work", "/work"] {
+            let json = serde_json::json!({
+                "version": "0.8.0-alpha",
+                "containment": "processcontainer",
+                "process": {
+                    "commandLine": "echo hello",
+                    "cwd": rejected
+                }
+            });
+            let error = load_mxc(&json.to_string()).unwrap_err();
+            assert!(error.message().contains("process.cwd"), "{rejected:?}");
+        }
+    }
+
+    #[test]
+    fn current_contract_rejects_relative_working_directory_after_backend_resolution() {
+        let json = r#"{
+            "version": "0.10.0-alpha",
+            "containment": "process",
+            "process": {
+                "commandLine": "echo hello",
+                "cwd": "relative"
+            }
+        }"#;
+        let error = load_mxc(json).unwrap_err();
+        assert!(error.message().contains("process.cwd"));
+        assert!(error
+            .message()
+            .contains("target's ambient working-directory state"));
+    }
+
+    #[test]
+    fn current_contract_accepts_abstract_process_target_absolute_path() {
+        #[cfg(target_os = "windows")]
+        let cwd = r"C:\work";
+        #[cfg(not(target_os = "windows"))]
+        let cwd = "/work";
+
+        let json = serde_json::json!({
+            "version": "0.10.0-alpha",
+            "containment": "process",
+            "process": {
+                "commandLine": "echo hello",
+                "cwd": cwd
+            }
+        });
+        let MxcRequest::OneShot(request) = load_mxc(&json.to_string()).unwrap() else {
+            panic!("expected one-shot request");
+        };
+        assert_eq!(request.working_directory, cwd);
+    }
+
+    #[test]
+    fn current_contract_normalization_enforces_windows_path_forms() {
+        for accepted in [
+            "",
+            r"C:\work",
+            "d:/work",
+            r"\\server\share\work",
+            "//server/share/work",
+            r"\\server/share\work",
+            r"\\?\C:\work",
+            r"\\.\C:\work",
+        ] {
+            let json = serde_json::json!({
+                "version": "0.10.0-alpha",
+                "containment": "processcontainer",
+                "process": {
+                    "commandLine": "echo hello",
+                    "cwd": accepted
+                }
+            });
+            let MxcRequest::OneShot(request) = load_mxc(&json.to_string()).unwrap() else {
+                panic!("expected one-shot request");
+            };
+            assert_eq!(request.working_directory, accepted);
+        }
+
+        for rejected in [
+            "relative",
+            r"C:work",
+            r"\work",
+            "/work",
+            " C:\\work",
+            "C:\\work ",
+        ] {
+            let json = serde_json::json!({
+                "version": "0.10.0-alpha",
+                "containment": "processcontainer",
+                "process": {
+                    "commandLine": "echo hello",
+                    "cwd": rejected
+                }
+            });
+            let error = load_mxc(&json.to_string()).unwrap_err();
+            assert!(error.message().contains("process.cwd"), "{rejected:?}");
+        }
+    }
+
+    #[test]
+    fn current_contract_normalization_enforces_posix_path_forms() {
+        for accepted in ["", "/", "/work", "//server/share"] {
+            let json = serde_json::json!({
+                "version": "0.10.0-alpha",
+                "containment": "bubblewrap",
+                "process": {
+                    "commandLine": "echo hello",
+                    "cwd": accepted
+                }
+            });
+            let MxcRequest::OneShot(request) = load_mxc(&json.to_string()).unwrap() else {
+                panic!("expected one-shot request");
+            };
+            assert_eq!(request.working_directory, accepted);
+        }
+
+        for rejected in ["relative", "~", "~/work", " /work", r"C:\work"] {
+            let json = serde_json::json!({
+                "version": "0.10.0-alpha",
+                "containment": "bubblewrap",
+                "process": {
+                    "commandLine": "echo hello",
+                    "cwd": rejected
+                }
+            });
+            let error = load_mxc(&json.to_string()).unwrap_err();
+            assert!(error.message().contains("process.cwd"), "{rejected:?}");
+        }
+    }
+
+    #[test]
+    fn wslc_uses_host_drive_paths_for_one_shot_and_posix_paths_for_exec() {
+        let one_shot = r#"{
+            "version": "0.9.0-alpha",
+            "containment": "wslc",
+            "process": {
+                "commandLine": "echo hello",
+                "cwd": "C:\\work"
+            }
+        }"#;
+        let MxcRequest::OneShot(request) = load_mxc(one_shot).unwrap() else {
+            panic!("expected one-shot request");
+        };
+        assert_eq!(request.working_directory, r"C:\work");
+
+        let exec = r#"{
+            "version": "0.9.0-alpha",
+            "phase": "exec",
+            "sandboxId": "wslc:example",
+            "process": {
+                "commandLine": "echo hello",
+                "cwd": "/work"
+            }
+        }"#;
+        assert_eq!(load_state_aware(exec).request().working_directory, "/work");
+
+        let container_path = one_shot.replace("C:\\\\work", "/work");
+        let error = load_mxc(&container_path).unwrap_err();
+        assert!(error.message().contains("rooted local Windows drive path"));
+    }
+
+    #[test]
+    fn state_aware_exec_defers_relative_cwd_validation_until_dispatch() {
+        let json = r#"{
+            "version": "0.9.0-alpha",
+            "phase": "exec",
+            "sandboxId": "wslc:example",
+            "process": {
+                "commandLine": "echo hello",
+                "cwd": "relative"
+            }
+        }"#;
+        let MxcRequest::StateAware(parsed) = load_mxc(json).unwrap() else {
+            panic!("expected state-aware request");
+        };
+        assert_eq!(parsed.request().working_directory, "relative");
+    }
+
+    #[test]
     fn state_aware_public_loaders_deliver_expected_provision_configuration() {
         for (fixture, expected) in [
             (
@@ -3283,7 +3546,11 @@ mod tests {
 
     #[test]
     fn cli_command_supplies_a_missing_one_shot_command_line() {
-        let json = r#"{"version":"0.9.0-alpha","process":{"cwd":"C:\\tmp"}}"#;
+        let json = r#"{
+            "version":"0.9.0-alpha",
+            "containment":"processcontainer",
+            "process":{"cwd":"C:\\tmp"}
+        }"#;
         match load_mxc_with_cli(json, &argv(&["app.exe", "--flag"])).unwrap() {
             MxcRequest::OneShot(req) => {
                 assert_eq!(req.script_code, "app.exe --flag");
@@ -3549,6 +3816,32 @@ mod tests {
                 }
                 other => panic!("{case}: expected state-aware error, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn unresolved_state_aware_target_precedes_cwd_semantic_validation() {
+        for (sandbox_id, expected_code) in [
+            ("zzz:abcd", MxcErrorCode::UnsupportedContainment),
+            ("no-colon", MxcErrorCode::MalformedId),
+        ] {
+            let json = serde_json::json!({
+                "version": "0.9.0-alpha",
+                "phase": "exec",
+                "sandboxId": sandbox_id,
+                "process": {
+                    "commandLine": "echo hello",
+                    "cwd": "relative"
+                }
+            });
+            let MxcRequest::StateAware(parsed) =
+                load_mxc(&json.to_string()).expect("cwd validation must wait for a known target")
+            else {
+                panic!("expected state-aware request");
+            };
+
+            let error = crate::state_aware_dispatch::resolve_backend(&parsed).unwrap_err();
+            assert_eq!(error.code, expected_code, "{sandbox_id}");
         }
     }
 

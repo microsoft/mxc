@@ -260,6 +260,8 @@ pub(super) fn into_common_request_ir(
         source_contract: mxc_config_contract::ContractVersion::V0_9_0Alpha,
         default_env_compatibility: crate::models::DefaultEnvCompatibility::DefaultBlock,
         network_enforcement_compatibility: crate::models::NetworkEnforcementCompatibility::Strict,
+        working_directory_compatibility:
+            crate::models::WorkingDirectoryCompatibility::AbsoluteRequired,
         phase: None,
         sandbox_id: None,
         container_id: container_id.into_option(),

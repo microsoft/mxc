@@ -36,7 +36,14 @@ public sealed class SandboxRequest
     [JsonPropertyName("containerName")]
     public string? ContainerName { get; set; }
 
-    /// <summary>An optional initial working directory.</summary>
+    /// <summary>
+    /// An optional target-absolute initial working directory.
+    /// </summary>
+    /// <remarks>
+    /// Windows backends require a rooted Windows path; POSIX backends require
+    /// an absolute POSIX path; one-shot WSLC requires a rooted local Windows
+    /// drive path, which MXC maps into the container.
+    /// </remarks>
     [JsonPropertyName("workingDirectory")]
     public string? WorkingDirectory { get; set; }
 

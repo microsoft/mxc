@@ -188,7 +188,9 @@ wrong-nesting cases are rejected as `malformed_request`.
 ### Exec
 
 **Config (none).** Exec uses only the cross-cutting `process` block on the
-top-level wire envelope (`commandLine`, `cwd`, `env`, `timeout`).
+top-level wire envelope (`commandLine`, `cwd`, `env`, `timeout`). When supplied,
+`cwd` must be a rooted Windows path; invalid values are rejected as
+`policy_validation` before backend validation or process creation.
 
 **Output.** Stdout is the agent process's live-streamed output (the SDK
 discriminates this from a JSON envelope by exit code + stdout-parseability;
@@ -349,7 +351,8 @@ also structurally refused as `malformed_request`.
 - `process.commandLine` — required for one-shot and for state-aware exec;
   rejected structurally at non-exec state-aware phases.
 - `process.cwd`, `process.env`, `process.timeout` — optional in both modes,
-  honoured per-process (each exec receives its own block).
+  honoured per-process (each exec receives its own block). `cwd`, when present,
+  is a rooted Windows path.
 
 ### Policy fields and mode parity
 

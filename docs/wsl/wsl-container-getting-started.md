@@ -450,6 +450,23 @@ Paths in `filesystem.readwritePaths` and `filesystem.readonlyPaths` are mounted
 into the container. Host path `C:\workspace` becomes `/mnt/c/workspace` inside
 the container.
 
+### Working directory
+
+One-shot `process.cwd` uses a host path because the request is assembled before
+the container exists. Current contracts require a rooted local Windows drive
+path such as `C:\workspace`; MXC maps it to `/mnt/c/workspace`. Relative,
+drive-relative, UNC, device, POSIX, whitespace-padded, and interior-NUL values
+are rejected before WSLC startup rather than being silently ignored. Parent
+components (`..`) are also rejected rather than normalized, because Windows
+and Linux handle traversal above a drive mount differently.
+
+State-aware `exec` addresses an already-running container, so its
+`process.cwd` is instead an absolute in-container POSIX path such as
+`/workspace`. If `process.cwd` is omitted, the workload starts at the container
+root (`/`). Unlike ordinary backends, one-shot WSLc rejects unmappable explicit
+cwd values in every contract version; silently dropping them is not a
+compatibility behavior.
+
 ### `ui` is not supported
 
 A `ui` section is **rejected** — the backend has no mechanism to enforce UI

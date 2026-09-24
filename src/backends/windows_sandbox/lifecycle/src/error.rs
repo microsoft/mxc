@@ -72,10 +72,11 @@ impl OneShotError {
     /// whether a retry could ever succeed.
     fn failure_phase(&self) -> FailurePhase {
         match self {
-            // Non-retryable preflight: the request/config cannot be honored or a
-            // required host prerequisite is missing. Retrying the same input on
-            // the same host will not succeed.
-            OneShotError::SandboxUnavailable(_) | OneShotError::Policy(_) => FailurePhase::Rejected,
+            // The request itself must change before retrying.
+            OneShotError::Policy(_) => FailurePhase::Rejected,
+            // The host cannot serve Windows Sandbox, so callers may select
+            // another backend instead of treating this as invalid policy.
+            OneShotError::SandboxUnavailable(_) => FailurePhase::BackendUnavailable,
             // Launch attempt failed (incl. transient single-instance contention,
             // async-runtime setup, capture-proof, rendezvous wait, and the
             // initial guest connect) — generally worth retrying.
@@ -102,18 +103,15 @@ mod tests {
     }
 
     #[test]
-    fn policy_and_prereq_errors_map_to_rejected() {
-        for err in [
-            OneShotError::Policy("denied path in share".to_string()),
-            OneShotError::SandboxUnavailable("feature off".to_string()),
-        ] {
-            let resp = err.into_response();
-            assert_eq!(
-                resp.failure_phase,
-                FailurePhase::Rejected,
-                "non-retryable preflight should map to Rejected"
-            );
-        }
+    fn policy_error_maps_to_rejected() {
+        let resp = OneShotError::Policy("denied path in share".to_string()).into_response();
+        assert_eq!(resp.failure_phase, FailurePhase::Rejected);
+    }
+
+    #[test]
+    fn unavailable_host_maps_to_backend_unavailable() {
+        let resp = OneShotError::SandboxUnavailable("feature off".to_string()).into_response();
+        assert_eq!(resp.failure_phase, FailurePhase::BackendUnavailable);
     }
 
     #[test]

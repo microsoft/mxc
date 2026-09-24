@@ -220,6 +220,13 @@ var request = new SandboxRequest(
 RunResult result = await MxcSandbox.RunAsync(request);
 ```
 
+`WorkingDirectory`, when set, must be target-absolute: a rooted Windows path
+for Windows backends, an absolute POSIX path for POSIX backends, or a rooted
+local Windows drive path for one-shot WSLC. The WSLC path is mapped to
+`/mnt/<drive>/...`. Omit it to use the backend's sandbox-safe default.
+Legacy relative-path compatibility does not make one-shot WSLC silently ignore
+an unmappable value.
+
 By default, a non-null `Environment` dictionary replaces the child's
 environment, including when the dictionary is explicitly empty. Leave it null
 to use the backend default. Set `InheritDefaultEnvironment` to layer a non-null
@@ -862,9 +869,11 @@ IsolationSession and WSLC state-aware calls use published schema
 `0.10.0-alpha`.
 `Version` may be omitted or explicitly set to that registered value; the SDK
 rejects other values rather than emitting an envelope for an unregistered
-state-aware contract. State-aware exec options expose working directory,
-`KEY=VALUE` environment entries, `InheritDefaultEnvironment`, and timeout.
-WSLC also accepts a proxy-only per-exec override:
+state-aware contract. State-aware exec options expose working directory, `KEY=VALUE` environment
+entries, `InheritDefaultEnvironment`, and timeout. IsolationSession and Windows
+Sandbox require a rooted Windows working directory; WSLC requires an absolute
+in-container POSIX working directory. WSLC also accepts a proxy-only per-exec
+override:
 
 ```csharp
 var options = new WslcExecOptions
