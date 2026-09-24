@@ -158,15 +158,12 @@ pub struct NetworkDenialDetails {
     /// Runtime WFP filter identifier used to correlate the event to its live filter.
     #[serde(with = "decimal_u64")]
     pub filter_id: u64,
-    /// Version of the normalized Tessera policy tag, when attribution was valid.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub policy_tag_version: Option<u8>,
-    /// Tessera policy model, when attribution was valid.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub policy_model: Option<NetworkPolicyModel>,
-    /// Tessera source rule kind, when attribution was valid.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub policy_rule_kind: Option<NetworkPolicyRuleKind>,
+    /// Version of the validated Tessera policy tag.
+    pub policy_tag_version: u8,
+    /// Validated Tessera policy model.
+    pub policy_model: NetworkPolicyModel,
+    /// Validated Tessera source rule kind.
+    pub policy_rule_kind: NetworkPolicyRuleKind,
     /// Zero-based source policy-rule ordinal. Synthetic baselines and events
     /// reporting the `0x00ff_ffff` unavailable sentinel omit this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -371,9 +368,9 @@ mod tests {
                 remote_port: Some(443),
                 application_id: Some(r"\device\harddiskvolume3\app.exe".to_string()),
                 filter_id: u64::MAX,
-                policy_tag_version: Some(1),
-                policy_model: Some(NetworkPolicyModel::Direct),
-                policy_rule_kind: Some(NetworkPolicyRuleKind::DefaultBaseline),
+                policy_tag_version: 1,
+                policy_model: NetworkPolicyModel::Direct,
+                policy_rule_kind: NetworkPolicyRuleKind::DefaultBaseline,
                 policy_rule_ordinal: Some(42),
             })),
         };

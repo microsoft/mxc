@@ -71,6 +71,7 @@ pub(crate) fn extract_network_denial(
     let field_flags = required_u32(parts, "FieldFlags")?;
     let filetime = required_u64(parts, "OriginalTimestamp")?;
     let filter_id = required_u64(parts, "FilterId")?;
+    require_policy_tag_properties(parts)?;
 
     if schema_version != SCHEMA_VERSION_V1
         || mode != MODE_LEARNING
@@ -225,9 +226,9 @@ fn extract_tessera(
             remote_port,
             application_id,
             filter_id,
-            policy_tag_version: Some(policy_tag.version),
-            policy_model: Some(policy_tag.model),
-            policy_rule_kind: Some(policy_tag.rule_kind),
+            policy_tag_version: policy_tag.version,
+            policy_model: policy_tag.model,
+            policy_rule_kind: policy_tag.rule_kind,
             policy_rule_ordinal: policy_tag.rule_ordinal,
         })),
         event_id: parts.event_id,
@@ -242,6 +243,16 @@ struct TesseraPolicyTag {
     model: NetworkPolicyModel,
     rule_kind: NetworkPolicyRuleKind,
     rule_ordinal: Option<u32>,
+}
+
+fn require_policy_tag_properties(
+    parts: &DecodedEventParts,
+) -> Result<(), VerboseLoggingExclusionReason> {
+    required_u8(parts, "TagVersion")?;
+    required_u8(parts, "PolicyModel")?;
+    required_u8(parts, "RuleKind")?;
+    required_u32(parts, "RuleOrdinal")?;
+    Ok(())
 }
 
 fn tessera_policy_tag(parts: &DecodedEventParts, field_flags: u32) -> Option<TesseraPolicyTag> {
@@ -486,10 +497,6 @@ mod tests {
         *current = value.into();
     }
 
-    fn remove(parts: &mut DecodedEventParts, name: &str) {
-        parts.props.retain(|(candidate, _)| candidate != name);
-    }
-
     fn set_tessera_tag(parts: &mut DecodedEventParts, model: u8, rule_kind: u8, rule_ordinal: u32) {
         let flags = property(parts, "FieldFlags")
             .and_then(parse_u32)
@@ -553,9 +560,9 @@ mod tests {
                 protocol: Some(6),
                 remote_port: Some(443),
                 filter_id: 456,
-                policy_tag_version: Some(TESSERA_TAG_VERSION_V1),
-                policy_model: Some(NetworkPolicyModel::Direct),
-                policy_rule_kind: Some(NetworkPolicyRuleKind::DefaultBaseline),
+                policy_tag_version: TESSERA_TAG_VERSION_V1,
+                policy_model: NetworkPolicyModel::Direct,
+                policy_rule_kind: NetworkPolicyRuleKind::DefaultBaseline,
                 policy_rule_ordinal: Some(0),
                 ..
             }))
@@ -679,20 +686,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_24_field_event_remains_a_verbose_unknown_reason() {
-        let mut parts = event(SOURCE_TESSERA, u16::MAX, &[]);
-        for name in ["TagVersion", "PolicyModel", "RuleKind", "RuleOrdinal"] {
-            remove(&mut parts, name);
-        }
-
-        assert_eq!(
-            extract_network_denial(&parts).unwrap_err(),
-            VerboseLoggingExclusionReason::UnknownNetworkReason
-        );
-    }
-
-    #[test]
-    fn updated_tag_fields_are_ignored_when_the_validity_bit_is_clear() {
+    fn tag_fields_are_ignored_when_the_validity_bit_is_clear() {
         let mut parts = event(
             SOURCE_TESSERA,
             REASON_TESSERA_DIRECT_DEFAULT_DENY,
@@ -770,7 +764,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_appended_tag_preserves_only_the_base_event() {
+    fn missing_appended_tag_field_is_a_malformed_payload() {
         let mut parts = event(
             SOURCE_TESSERA,
             REASON_TESSERA_DIRECT_DEFAULT_DENY,
@@ -778,11 +772,11 @@ mod tests {
         );
         replace(&mut parts, "FieldFlags", FIELD_REMOTE_ADDRESS.to_string());
         set_tessera_tag(&mut parts, TESSERA_MODEL_DIRECT, TESSERA_RULE_BASELINE, 0);
-        remove(&mut parts, "RuleKind");
+        parts.props.retain(|(name, _)| name != "RuleKind");
 
         assert_eq!(
             extract_network_denial(&parts).unwrap_err(),
-            VerboseLoggingExclusionReason::UnsupportedNetworkPolicyAttribution
+            VerboseLoggingExclusionReason::EventPayloadMalformed
         );
     }
 

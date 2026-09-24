@@ -51,18 +51,17 @@ Rule kinds:
 ```
 
 AppInfo appends `TagVersion`, `PolicyModel`, `RuleKind`, and `RuleOrdinal` to
-`NetworkDecisionV1`. The event ID and version remain `1`: legacy events contain
-24 properties, while updated events contain 28. `FieldFlags & 0x80` declares
-all four appended properties semantically valid. MXC detects property
-availability instead of requiring an exact count and ignores emitted zeroes
-when the bit is clear.
+`NetworkDecisionV1`, producing a 28-property payload with event ID and version
+`1`. All four properties are required. `FieldFlags & 0x80` declares their
+values semantically valid; MXC ignores emitted zeroes when the bit is clear and
+does not reject future trailing properties.
 
 Reasons `100`-`103` map to the four version-1 model/rule-kind combinations
 above. `RuleOrdinal` uses the low 24 bits: `0x000000`-`0x00fffffe` identify the
-zero-based source rule, and `0x00ffffff` means unavailable. Missing, partial,
-future, or mismatched attribution never discards the base network event. MXC
-retains it in verbose diagnostics as
-`unsupportedNetworkPolicyAttribution`. Legacy reason `65535` remains
+zero-based source rule, and `0x00ffffff` means unavailable. Missing appended
+properties are malformed payloads. Unsupported or mismatched attribution never
+discards the base network event; MXC retains it in verbose diagnostics as
+`unsupportedNetworkPolicyAttribution`. Reason `65535` remains
 `unknownNetworkReason`.
 
 ## Remaining MXC work: schema 0.8 policy regeneration

@@ -1713,6 +1713,10 @@ mod tests {
                 ("FieldFlags", "64"),
                 ("SublayerGuid", "{FFE221C3-92A8-4564-A59F-DAFB70756020}"),
                 ("CapabilityId", "0"),
+                ("TagVersion", "0"),
+                ("PolicyModel", "0"),
+                ("RuleKind", "0"),
+                ("RuleOrdinal", "0"),
             ])
             .collect::<Vec<_>>();
         let tessera = common
@@ -1774,9 +1778,9 @@ mod tests {
                 remote_port: Some(443),
                 application_id: Some(r"\Device\HarddiskVolume3\app.exe".to_string()),
                 filter_id: 9001,
-                policy_tag_version: Some(1),
-                policy_model: Some(NetworkPolicyModel::Direct),
-                policy_rule_kind: Some(NetworkPolicyRuleKind::DefaultBaseline),
+                policy_tag_version: 1,
+                policy_model: NetworkPolicyModel::Direct,
+                policy_rule_kind: NetworkPolicyRuleKind::DefaultBaseline,
                 policy_rule_ordinal: Some(0),
             }))
         );
@@ -1788,7 +1792,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_network_events_preserve_legacy_and_partial_attribution() {
+    fn managed_network_events_preserve_unknown_and_malformed_outcomes() {
         let common = [
             ("SchemaVersion", "1"),
             ("SourceDomain", "2"),
@@ -1802,9 +1806,16 @@ mod tests {
             ("SublayerGuid", "{7B1E9A2C-9D4F-4C8A-B321-5E6D2F8A1C44}"),
             ("RemoteAddress", "203.0.113.10"),
         ];
-        let legacy = common
+        let unknown_reason = common
             .into_iter()
-            .chain([("Reason", "65535"), ("FieldFlags", "16")])
+            .chain([
+                ("Reason", "65535"),
+                ("FieldFlags", "16"),
+                ("TagVersion", "0"),
+                ("PolicyModel", "0"),
+                ("RuleKind", "0"),
+                ("RuleOrdinal", "0"),
+            ])
             .collect::<Vec<_>>();
         let partial_attribution = common
             .into_iter()
@@ -1818,14 +1829,14 @@ mod tests {
             .collect::<Vec<_>>();
 
         let analysis = resources_from_events(&[
-            network_event(777, 600, &legacy),
+            network_event(777, 600, &unknown_reason),
             network_event(777, 601, &partial_attribution),
         ]);
 
         assert!(analysis.denials.is_empty());
         for expected in [
             VerboseLoggingOutcomeReason::UnknownNetworkReason,
-            VerboseLoggingOutcomeReason::UnsupportedNetworkPolicyAttribution,
+            VerboseLoggingOutcomeReason::EventPayloadMalformed,
         ] {
             let aggregate = analysis
                 .verbose_logging
