@@ -48,6 +48,14 @@ accepts an optional serialized binding request, returns the canonical probe JSON
 through an owned C string, and reports malformed or unsupported requests through
 the existing stable status and error-detail contracts.
 
+The public .NET entry point is the static `MxcSandbox.Probe(...)` method. It is
+not added to the existing `ISandboxRunner` dependency-injection contract.
+`ISandboxRunner` is already documented for consumer-supplied fakes and custom
+implementations, so adding a required member would break those implementations.
+A separate probe interface is unnecessary while probing has a single static
+entry point, and a default interface implementation has no useful native-free
+fallback.
+
 The Node.js SDK exposes a typed synchronous probe function. It invokes the
 packaged `wxc-exec --probe` binary, adding `--config-base64` when a config is
 supplied, and validates the returned JSON before returning it. Detection logic
@@ -107,7 +115,9 @@ ProcessContainer tier decision.
 - FFI tests verify null/default input, a serialized request, owned JSON, error
   status, non-ProcessContainer rejection, and panic containment conventions.
 - .NET tests verify typed projection, supplied-request behaviour, and exact
-  rejection of an incompatible containment backend.
+  rejection of an incompatible containment backend. A compatibility test keeps
+  a minimal consumer implementation of the pre-existing `ISandboxRunner`
+  contract compiling without a probe member.
 - Node.js unit tests inject the probe runner, verify argument construction for
   default and base64-config calls, validate the complete output shape, and
   reject malformed output. A production-boundary test verifies the CLI rejects
