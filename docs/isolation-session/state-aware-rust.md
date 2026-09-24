@@ -50,6 +50,8 @@ Requirements on an in-process caller:
 - **A caller in a single-threaded apartment is refused.** A UI application must
   marshal onto a background thread.
   `mxc-sdk/examples/sta_probe.rs` measures this against a live host.
+- **An impersonating caller is refused unless this process can duplicate its
+  token at `SecurityImpersonation` level.**
 
 The **one-shot** surface is served in-process with piped stdio:
 `mxc_sdk::run` and `spawn_sandbox`, without a runtime experimental opt-in.
@@ -439,6 +441,7 @@ is the API's own message, passed through verbatim.
 | Activation failure (`backend_unavailable`) | ✅ | ✅ | — |
 | The API's status code itself could not be read | ✅ | — | best-effort |
 | Single-threaded-apartment refusal | — | — | ✅ |
+| Impersonation-token refusal | — | — | ✅ |
 | MXC-internal failure (relay threads, console handles) | — | — | — |
 | `Policy` and the MXC-side `malformed_*` rejections | — | — | — |
 
