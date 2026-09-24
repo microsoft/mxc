@@ -1,19 +1,23 @@
 # Version-Aware Stack Plan
 
-Status: Phase 12 and Phase 13 are complete. Phase 14, which establishes the
-v1 SDK line and the v1.0 exact contract, is planned but not started.
+Status: Phase 12 and the exact-contract and runtime portions of Phase 13 are
+complete. Phase 13c, which completes the missing direct typed Rust SDK path,
+must land before Phase 14 starts. Phase 14 establishes the v1 SDK line and the
+v1.0 exact contract.
 
 Updated: September 22, 2026.
 
-## 1. Completed stack
+## 1. Stack status
 
-The WSLC-inclusive stack was selected and merged:
+The WSLC-inclusive exact-contract stack was selected and merged. The missing
+Rust SDK transport work is the final pre-Phase 14 step:
 
 | Phase | PR | Merge commit | Result |
 | --- | --- | --- | --- |
 | Phase 12 | #1187 | `c531de65` | Published v0.9 with stable WSLC support |
 | Phase 13 core | #1188 | `be9c377d` | Removed the rolling configuration architecture |
 | Phase 13 follow-ups | #1189 | `8ac67daf` | Hardened exact-contract infrastructure |
+| Phase 13c | Planned | — | Complete direct typed Rust SDK transport before Phase 14 |
 
 The alternative non-WSLC stack in #1184, #1185, and #1186 was completed and
 verified but was not selected for merge.
@@ -31,6 +35,13 @@ The merged architecture now has:
 - v0.6/v0.7 legacy network-enforcement compatibility and strict enforcement
   from v0.8 onward;
 - source-contract attribution separated from effective runtime semantics.
+
+The merged stack does not yet complete the SDK transport goal. State-aware
+runtime dispatch is typed after parsing, but the public Rust state-aware API
+still accepts serialized JSON. Node and .NET high-level state-aware APIs also
+serialize JSON internally. Phase 13c must preserve the raw exact-JSON lane
+while adding a direct typed lane for Rust SDK callers. Later binding work must
+reuse that seam for .NET and evaluate the corresponding Node transport.
 
 ## 2. Versioning model
 
@@ -63,6 +74,30 @@ There is no:
 
 High-level SDK APIs target a major contract line rather than asking consumers
 to select an exact configuration version.
+
+High-level SDK version selection and SDK transport are separate concerns. A
+package-owned exact target does not justify serializing a high-level request
+to JSON and parsing it back. The two supported ingress lanes are:
+
+```text
+explicit raw configuration API
+  -> exact JSON
+  -> exact registered request root
+  -> exact contract adapter
+  -> CommonRequestIR
+```
+
+```text
+trusted high-level SDK API
+  -> typed SDK request
+  -> direct SDK adapter
+  -> CommonRequestIR
+```
+
+Both lanes then use the same semantic normalization into `ExecutionRequest`.
+The raw lane remains available for configuration files, replay, automation,
+and callers that intentionally use exact contracts. It is not the production
+implementation path for a high-level Rust SDK call.
 
 Within one SDK major line:
 
@@ -99,11 +134,141 @@ not parse or compare config-version strings.
 Post-v1 compatibility tooling compares exact contracts at development and
 publication time. It does not participate in runtime dispatch.
 
-## 3. Phase 14 outcome
+## 3. Pre-Phase 14 Rust SDK transport completion
+
+Phase 13c corrects the missing caller-boundary work on the current v0.9/v0.10
+contract line before any v1 contract or public-API transition begins.
+
+### 3.1 Existing foundation
+
+The work is partially complete:
+
+| Area | Status | Existing implementation | Remaining Phase 13c work |
+| --- | --- | --- | --- |
+| One-shot caller transport | Complete for JSON elimination | `SandboxPolicy` plus `build_request` or `build_request_with_containment` constructs a typed `SandboxRequest`; `run` and `spawn_sandbox` consume it without serializing or parsing JSON | Preserve this invariant |
+| One-shot normalization adapter | Partial | The builder constructs the selected exact contract as an in-memory Rust value and calls `load_one_shot_request_from_contract`; there is no JSON round trip | Add or confirm the intended borrowed SDK-to-`CommonRequestIR` adapter so high-level SDK construction does not depend on building an exact wire-contract value |
+| Shared normalization seam | Complete | Exact-contract adapters produce private `CommonRequestIR`, which shared normalization converts into `ExecutionRequest` | Expose only the minimum crate-private construction seam needed by trusted SDK adapters |
+| State-aware parsing and runtime representation | Complete after ingress | Exact JSON parsing produces `ParsedStateAwareRequest` with typed `StateAwareOperation`; successful requests retain neither source JSON nor raw backend payload | Preserve this typed runtime model |
+| State-aware engine dispatch | Complete after parsing | `run_state_aware` and `exec_state_aware` accept `ParsedStateAwareRequest` and dispatch typed operations | Add construction entry points that do not require JSON parsing |
+| Raw state-aware JSON API | Complete | `run_state_aware_json`, `exec_state_aware_json`, and attached-exec JSON entry points parse exact contracts and call the typed runtime dispatch | Retain and clearly identify these as raw exact-configuration APIs |
+| High-level typed state-aware Rust API | Missing | Public Rust lifecycle calls accept `&str`; envelope calls return serialized JSON strings | Add typed request and response APIs for provision, start, exec, stop, and deprovision |
+| Typed state-aware SDK adapter | Missing | State-aware `CommonRequestIR` is currently produced only by exact-contract adapters | Map borrowed typed SDK lifecycle requests directly into `CommonRequestIR` plus `StateAwareOperation` |
+| Caller-boundary equivalence coverage | Missing | Existing tests prove exact JSON parsing and post-parse typed dispatch; one-shot tests cover the typed builder separately | Prove typed SDK and equivalent exact JSON inputs normalize to the same intent without routing production typed calls through JSON |
+
+One-shot therefore already meets the immediate no-JSON transport objective.
+Its remaining question is narrower: whether the current in-memory
+exact-contract bridge is the intended long-term SDK adapter or should be
+replaced by a dedicated borrowed SDK adapter. The target architecture favors
+the dedicated adapter so SDK construction and exact wire-contract evolution
+remain separate.
+
+### 3.2 Required production path
+
+The required production path is:
+
+```text
+typed Rust SDK request
+  -> direct SDK adapter
+  -> CommonRequestIR
+  -> shared normalization
+  -> ExecutionRequest
+```
+
+The raw path remains:
+
+```text
+exact JSON
+  -> exact registered parser
+  -> exact contract adapter
+  -> CommonRequestIR
+  -> shared normalization
+  -> ExecutionRequest
+```
+
+### 3.3 Implementation sequence
+
+#### 13c-a — Lock the SDK boundary
+
+1. define typed public lifecycle request and response shapes for provision,
+   start, exec, stop, and deprovision;
+2. define which execution options remain method parameters rather than policy,
+   including dry-run, experimental authorization, and stdio mode;
+3. keep raw exact-JSON entry points, but give them explicit raw names and
+   document that they are not the high-level implementation path;
+4. add compile fixtures for the proposed typed API before implementing it.
+
+#### 13c-b — Add the direct SDK normalization seam
+
+1. add a crate-private borrowed SDK adapter into `CommonRequestIR`;
+2. construct `StateAwareOperation` directly from typed lifecycle input;
+3. normalize the pair through the existing `StateAwareInput` and shared
+   semantic normalizer;
+4. add typed engine construction entry points returning
+   `ParsedStateAwareRequest`;
+5. migrate the one-shot builder to the same direct SDK adapter, or explicitly
+   prove and document why its current in-memory exact-contract bridge remains
+   the chosen implementation.
+
+#### 13c-c — Add typed lifecycle execution
+
+1. add typed envelope-phase execution for provision, start, stop, deprovision,
+   and dry-run;
+2. add typed streaming and attached exec entry points;
+3. return typed lifecycle envelopes and errors from high-level calls;
+4. keep JSON response serialization solely in the raw JSON wrappers;
+5. make raw wrappers parse exact JSON and delegate to the same typed engine
+   execution functions used by the high-level APIs.
+
+#### 13c-d — Prove equivalence and preserve behavior
+
+1. create typed and exact-JSON pairs for every lifecycle operation;
+2. compare their `CommonRequestIR`, `StateAwareOperation`, and normalized
+   `ExecutionRequest` intent;
+3. cover v0.9 and development v0.10 backends, presence semantics, experimental
+   authorization, telemetry, dry-run, streaming exec, and attached exec;
+4. preserve existing diagnostics for raw malformed or unsupported exact JSON;
+5. prove high-level typed calls never invoke JSON serialization, JSON parsing,
+   or an exact-contract adapter.
+
+#### 13c-e — Migrate consumers and documentation
+
+1. migrate Rust SDK tests and examples to the typed lifecycle surface;
+2. retain focused tests for each raw JSON entry point;
+3. update state-aware Rust and architecture documentation to show both lanes;
+4. add an API-boundary regression that prevents the typed implementation from
+   delegating to a raw JSON function;
+5. record the completed seam for subsequent .NET FFI and Node transport work.
+
+This step must preserve current v0.9/v0.10 contract behavior, runtime
+semantics, diagnostics, feature gates, and raw API compatibility. It does not:
+
+- create `1.0.0` or rename v0.10;
+- remove v0.9 aliases or legacy high-level networking;
+- redesign .NET, Node, or FFI transport;
+- change the exact JSON trust boundary.
+
+Phase 13c is complete when:
+
+- typed Rust one-shot and state-aware calls reach `CommonRequestIR` without
+  serializing or parsing JSON;
+- the raw JSON lane remains explicit and exact-versioned;
+- typed-versus-raw equivalence tests cover every lifecycle operation and
+  representative backend-specific configuration;
+- Rust SDK tests exercise the typed public lifecycle surface rather than using
+  `run_state_aware_json` as the high-level API;
+- no high-level Rust SDK implementation delegates to the raw JSON lane.
+
+The implementation may be one pull request or a short stack covering the
+engine seam, direct adapters, public lifecycle APIs, and equivalence tests.
+All parts must merge before Phase 14 begins.
+
+## 4. Phase 14 outcome
 
 Phase 14 establishes:
 
 - the v1 high-level SDK API line;
+- preservation of the direct typed Rust SDK path established in Phase 13c;
+- the typed SDK transport sequence for .NET and Node after the Rust path;
 - directional-only high-level SDK networking;
 - the exact published `1.0.0` contract;
 - the exact mutable `1.1.0` development contract;
@@ -117,7 +282,7 @@ identifies whether a contract is mutable or published.
 Phase 14 is the intentional public-API break boundary. It must not be combined
 with unrelated backend redesign.
 
-## 4. v1.0.0 contract boundary
+## 5. v1.0.0 contract boundary
 
 The exact `1.0.0` contract starts from published `0.9.0-alpha`:
 
@@ -149,7 +314,7 @@ The v1 high-level SDK policy exposes directional networking only. Legacy
 network authoring remains available solely through the immutable v0.6-v0.8 raw
 JSON contracts.
 
-## 5. v0.10 becomes v1.1.0
+## 6. v0.10 becomes v1.1.0
 
 The v0.10 development contract is not deleted and later reconstructed. Its
 complete development lineage becomes the exact `1.1.0` development contract:
@@ -190,11 +355,11 @@ WSLC, IsolationSession, directional networking, and the common state-aware
 phase roots are already part of v0.9 and therefore form part of the `1.0.0`
 baseline.
 
-## 6. Contract transition sequence
+## 7. Contract transition sequence
 
 The transition preserves exactly one mutable development contract throughout.
 
-### 6.1 Add and release `1.0.0`
+### 7.1 Add and release `1.0.0`
 
 While `0.10.0-alpha` remains the sole mutable development contract:
 
@@ -212,17 +377,20 @@ The implementation pull request is the release candidate. The merged
 `1.0.0` identity is published from its first appearance in the registry; there
 is no second mutable v1.0 contract alongside v0.10.
 
-### 6.2 Release the v1.0 SDKs
+### 7.2 Release the v1.0 SDKs
 
 At the release checkpoint:
 
 1. high-level Rust, Node, and .NET APIs target the v1 major line;
 2. their package-owned exact target is `1.0.0`;
-3. raw configuration APIs remain exact-versioned;
-4. the v1 SDKs and runtime are validated and released together;
-5. no `1.1.0` SDK target is enabled before the v1.0 release is complete.
+3. high-level Rust one-shot and state-aware calls use typed requests and
+   direct adapters rather than serialized JSON;
+4. raw configuration APIs remain exact-versioned and explicitly named as raw
+   JSON entry points;
+5. the v1 SDKs and runtime are validated and released together;
+6. no `1.1.0` SDK target is enabled before the v1.0 release is complete.
 
-### 6.3 Rename v0.10 development to `1.1.0`
+### 7.3 Rename v0.10 development to `1.1.0`
 
 After the v1.0 release:
 
@@ -234,7 +402,7 @@ After the v1.0 release:
 5. prove existing v1.0 SDK consumer source remains valid;
 6. remove all remaining v0.10 identities and generated artifacts.
 
-## 7. Canonical SDK exact targets
+## 8. Canonical SDK exact targets
 
 Add a canonical major-to-exact-contract mapping to
 `schemas/schema-version.json`, conceptually:
@@ -262,21 +430,28 @@ Applications select an SDK package version, not an exact wire version:
 - existing source continues to express the same intent;
 - raw configuration APIs continue to accept explicit exact versions.
 
-## 8. SDK work
+## 9. SDK work
 
-### 8.1 Rust
+### 9.1 Rust
 
-The v1 Rust high-level API:
+Phase 13c establishes the direct typed Rust transport on the current contract
+line. The v1 Rust high-level API preserves that path while it:
 
 - removes caller selection of an exact config version;
 - targets the v1 major line and its canonical latest minor;
 - exposes directional network policy only;
 - preserves exact-version selection in raw configuration APIs;
+- provides typed one-shot and state-aware request types;
+- adapts borrowed typed SDK input directly into `CommonRequestIR`;
+- does not serialize high-level requests to JSON or invoke the exact JSON
+  parser as an implementation step;
+- retains separately named raw JSON state-aware entry points for callers that
+  intentionally supply an exact contract;
 - retains backend validation and current runtime semantics;
 - uses non-exhaustive or otherwise additive public types where minor releases
   may add variants.
 
-### 8.2 Node
+### 9.2 Node
 
 Separate high-level policy from raw configuration:
 
@@ -297,7 +472,15 @@ High-level calls target the canonical v1 exact contract. Raw APIs such as
 
 New v1.x policy fields and backend options must be optional additions.
 
-### 8.3 .NET and FFI
+The current state-aware Node path builds an exact JSON envelope and sends it to
+the executor. After the Rust direct-adapter seam is established, perform a
+bounded Node transport design and implementation step. The default outcome is
+a typed native transport for high-level calls while retaining explicit raw
+JSON APIs. If the executor-backed architecture prevents that outcome, record
+the constraint, approved boundary, owner, and follow-up instead of treating
+JSON serialization as implicitly complete.
+
+### 9.3 .NET and FFI
 
 The v1 .NET high-level API:
 
@@ -310,11 +493,32 @@ The private FFI request is a co-versioned binding contract, not an MXC
 configuration contract. It must not recreate a public multi-version config
 model.
 
-State-aware JSON transport may remain temporarily, but the SDK owns its exact
-target version. Replacing that transport with typed FFI is independent
-optimization work.
+The current .NET state-aware path serializes a `JsonObject` and passes UTF-8
+JSON to `mxc_state_aware`. Replace that high-level path with a typed,
+co-versioned FFI request that adapts into the same `CommonRequestIR` seam.
+Explicit raw exact-configuration APIs may continue to pass JSON. Typed FFI is
+required follow-up architecture work, not an independent performance
+optimization.
 
-## 9. Legacy networking removal
+### 9.4 Typed transport sequence
+
+Implement typed transport in this order:
+
+1. complete the typed engine entry points, direct Rust SDK adapters, typed
+   state-aware APIs, and raw API separation in Phase 13c;
+2. preserve that path through the v1 Rust API transition;
+3. add a co-versioned typed FFI request and migrate .NET high-level lifecycle
+   APIs;
+4. complete the Node transport design and implement typed native transport
+   unless an explicit reviewed architecture decision records why it must
+   remain executor JSON;
+5. keep typed and raw exact-JSON normalization equivalent through shared
+   fixtures and tests.
+
+Completing internal typed dispatch after JSON parsing does not satisfy this
+work. Completion is measured at the caller boundary.
+
+## 10. Legacy networking removal
 
 Remove legacy network authoring from v1 high-level Rust, Node, and .NET policy
 types:
@@ -336,9 +540,9 @@ Retain:
 - runtime proxy configuration at its current location;
 - exact parsing of legacy syntax in immutable v0.6-v0.8 raw contracts.
 
-## 10. v1.x compatibility gates
+## 11. v1.x compatibility gates
 
-### 10.1 Exact-contract structural comparison
+### 11.1 Exact-contract structural comparison
 
 Compare adjacent exact contracts within one major line, beginning with
 `1.0.0` to `1.1.0`. Use generated schemas plus registry request-root metadata,
@@ -361,7 +565,7 @@ not Rust source text.
 The gate rejects same-major structural breaks and requires an explicit
 classification for every difference it cannot prove compatible.
 
-### 10.2 Semantic review manifests
+### 11.2 Semantic review manifests
 
 Add a checked-in manifest for every adjacent v1 minor transition, beginning
 with:
@@ -380,7 +584,7 @@ The manifest records:
 
 CI fails when the contract changes without a corresponding classification.
 
-### 10.3 SDK source-compatibility gates
+### 11.3 SDK source-compatibility gates
 
 Capture public API baselines when v1.0 is published:
 
@@ -392,7 +596,7 @@ Capture public API baselines when v1.0 is published:
   a representative v1.0 consumer project;
 - FFI: retain generated-binding, status-code, and API parity gates.
 
-### 10.4 Behavioral compatibility fixtures
+### 11.4 Behavioral compatibility fixtures
 
 Create a small corpus of high-level v1.0 policies representing established
 consumer intent. Run them through the latest v1 SDK and verify:
@@ -406,12 +610,18 @@ consumer intent. Run them through the latest v1 SDK and verify:
 Compare normalized intent rather than serialized JSON bytes because the exact
 version and additive wire shape are expected to advance.
 
-## 11. File-level implementation inventory
+For every typed SDK request represented in the corpus, construct the
+equivalent exact JSON request and prove that both lanes produce equivalent
+`CommonRequestIR` and normalized `ExecutionRequest` intent. This equivalence
+test is a publication gate; production typed SDK calls must not use the JSON
+lane to achieve equivalence.
+
+## 12. File-level implementation inventory
 
 Every implementation pull request must inspect and update the applicable
 surfaces below.
 
-### 11.1 Contract and registry
+### 12.1 Contract and registry
 
 - `src/core/mxc_config_contract/src/registry.rs`;
 - the published v0.9 module used as the `1.0.0` source;
@@ -420,7 +630,7 @@ surfaces below.
 - exact-contract adapters into `CommonRequestIR`;
 - parser and state-aware request-root dispatch.
 
-### 11.2 Canonical and generated artifacts
+### 12.2 Canonical and generated artifacts
 
 - `schemas/schema-version.json`;
 - stable `1.0.0` schema;
@@ -429,7 +639,7 @@ surfaces below.
 - schema and TypeScript codegen checks;
 - stable-history protection.
 
-### 11.3 Fixtures and tests
+### 12.3 Fixtures and tests
 
 - exact request-root fixture directories;
 - valid and invalid root fixtures;
@@ -438,16 +648,21 @@ surfaces below.
 - `1.0.0` to `1.1.0` compatibility classifications;
 - raw historical contract regression tests.
 
-### 11.4 SDK and binding surfaces
+### 12.4 SDK and binding surfaces
 
 - Rust `mxc-sdk` high-level policy and builders;
+- typed Rust state-aware lifecycle request types and public APIs;
+- direct Rust SDK adapters into `CommonRequestIR`;
+- typed engine entry points that bypass exact JSON parsing;
+- separately named raw JSON configuration and lifecycle entry points;
 - Node public policy, raw `ContainerConfig`, state-aware API, README, and
   conformance tests;
 - .NET policy and lifecycle APIs, README, reference assembly, and tests;
-- FFI request adaptation and generated-binding parity;
+- co-versioned typed FFI request adaptation and generated-binding parity;
+- Node typed-transport design and implementation record;
 - SDK exact-target synchronization.
 
-### 11.5 CI and documentation
+### 12.5 CI and documentation
 
 - exact-contract codegen and fixture gates;
 - schema-version synchronization;
@@ -455,25 +670,37 @@ surfaces below.
 - `docs/versioning.md`;
 - SDK documentation and migration guidance.
 
-## 12. Suggested PR and release boundaries
+## 13. Suggested PR and release boundaries
 
 | Step | Scope |
 | --- | --- |
+| 13c — Rust typed SDK transport | Before Phase 14, add typed engine entry points, direct Rust SDK adapters into `CommonRequestIR`, typed state-aware APIs, raw JSON API separation, and typed-versus-raw equivalence tests on the current v0.9/v0.10 line |
 | 14a — Compatibility foundations | Canonical SDK-major target metadata, adjacent-contract comparator, semantic-review manifest format, and initial SDK API baseline tooling |
 | 14b — Exact `1.0.0` contract | Create `1.0.0` from v0.9, remove aliases, add stable registry/schema/types/fixtures/adapters/parser dispatch, and prove v0.10-only surfaces are rejected |
-| 14c — v1 SDK boundary | Implement the Rust, Node, .NET, and FFI high-level v1 APIs, remove high-level legacy network authoring, and target `1.0.0` |
+| 14c — v1 SDK boundary | Apply the Rust, Node, .NET, and FFI high-level v1 API changes, preserve the direct Rust transport, remove high-level legacy network authoring, and target `1.0.0` |
+| 14d — .NET and Node transport | Add typed co-versioned FFI and migrate .NET high-level lifecycle calls; complete the Node transport design and typed implementation or record an explicit reviewed constraint and follow-up |
 | v1.0 release checkpoint | Complete validation and release the v1.0 SDKs and runtime while the canonical v1 target is `1.0.0` |
-| 14d — Rename v0.10 to `1.1.0` | Rename the existing development contract and artifacts without reconstructing features, advance the canonical v1 SDK target, and remove v0.10 identities |
-| 14e — Enforce v1.1 compatibility | Check `1.0.0` to `1.1.0`, add semantic classifications, compile v1.0 consumers against v1.1 SDKs, and run behavioral compatibility fixtures |
-| 14f — Documentation and cleanup | Complete migration guidance, remove obsolete aliases and identities, and verify canonical documentation |
+| 14e — Rename v0.10 to `1.1.0` | Rename the existing development contract and artifacts without reconstructing features, advance the canonical v1 SDK target, and remove v0.10 identities |
+| 14f — Enforce v1.1 compatibility | Check `1.0.0` to `1.1.0`, add semantic classifications, compile v1.0 consumers against v1.1 SDKs, and run behavioral compatibility fixtures |
+| 14g — Documentation and cleanup | Complete migration guidance, remove obsolete aliases and identities, and verify canonical documentation |
 
-If 14c is too large for one review, implement it as a short stacked series for
-Rust, Node, and .NET/FFI. Review the stack as one API-boundary change and merge
-all parts before the v1.0 release checkpoint.
+Phase 14 may not start until 13c is complete. Implement 14d after the Phase 13c
+seam is stable and the v1 API boundary has consumed it. Merge the required
+.NET and Node work before the v1.0 release checkpoint.
 
-## 13. Validation
+## 14. Validation
 
-### 13.1 Exact `1.0.0`
+### 14.1 Phase 13c Rust transport
+
+- typed one-shot and state-aware calls bypass JSON serialization and exact
+  parsing;
+- typed and exact-JSON inputs produce equivalent `CommonRequestIR` and
+  `ExecutionRequest` intent;
+- raw exact-JSON APIs retain diagnostics and compatibility;
+- typed public API compile tests cover every lifecycle operation;
+- default and applicable feature-gated Rust SDK, engine, and FFI suites pass.
+
+### 14.2 Exact `1.0.0`
 
 - exact stable `1.0.0` schema and TypeScript code generation;
 - `1.0.0` request-root fixture validation;
@@ -483,15 +710,25 @@ all parts before the v1.0 release checkpoint.
 - raw legacy-contract regression tests;
 - stable-schema immutability and published-registry history checks.
 
-### 13.2 v1 SDK release
+### 14.3 v1 SDK release
 
-- Rust, Node, .NET, and FFI high-level equivalence;
+- typed Rust one-shot and state-aware calls reach `CommonRequestIR` without
+  JSON serialization or exact JSON parsing;
+- equivalent typed Rust and exact JSON requests produce equivalent
+  `CommonRequestIR` and `ExecutionRequest` intent;
+- raw Rust state-aware JSON APIs remain available but are explicitly separated
+  from the high-level typed surface;
+- .NET high-level lifecycle calls use the co-versioned typed FFI path;
+- the Node transport decision and implementation status are explicit, tested,
+  and not represented as typed merely because parsing produces typed runtime
+  operations;
+- Rust, Node, .NET, and FFI high-level semantic equivalence;
 - directional-only SDK compile-time and runtime tests;
 - canonical exact-target synchronization at `1.0.0`;
 - API removal and migration diagnostics;
 - package and schema version synchronization.
 
-### 13.3 `1.1.0` development
+### 14.4 `1.1.0` development
 
 - fixture and codegen coverage for every former v0.10 item;
 - no v0.10 identity or artifact remains;
@@ -502,29 +739,39 @@ all parts before the v1.0 release checkpoint.
 - behavioral fixtures proving existing intent is unchanged;
 - explicit tests for every newly available optional field and backend.
 
-## 14. Phase 14 exit criteria
+## 15. Phase 14 exit criteria
 
 Phase 14 is complete when:
 
 1. high-level SDK APIs target the latest minor in the v1 major line without
    caller-selected exact config versions;
-2. raw configuration APIs still require exact registered versions;
-3. v1 high-level policy is directional-network-only;
-4. published `1.0.0` derives from the v0.9 baseline with compatibility aliases
+2. Phase 14 preserves the Phase 13c invariant that high-level Rust one-shot and
+   state-aware APIs adapt typed input directly into `CommonRequestIR` without
+   serializing or parsing JSON;
+3. raw configuration and raw state-aware APIs still require exact registered
+   versions and are clearly separated from high-level typed APIs;
+4. typed Rust and exact JSON requests have publication-gated semantic
+   equivalence without sharing the production ingress path;
+5. .NET high-level state-aware calls use a typed co-versioned FFI request
+   rather than UTF-8 JSON;
+6. the Node typed-transport outcome is implemented or an explicit reviewed
+   architecture decision records the remaining constraint and follow-up;
+7. v1 high-level policy is directional-network-only;
+8. published `1.0.0` derives from the v0.9 baseline with compatibility aliases
    removed;
-5. `1.0.0` contains none of the v0.10-only items;
-6. the former v0.10 development contract is now the sole mutable `1.1.0`
+9. `1.0.0` contains none of the v0.10-only items;
+10. the former v0.10 development contract is now the sole mutable `1.1.0`
    contract;
-7. SDK 1.0 targets `1.0.0` and SDK 1.1 targets `1.1.0`;
-8. existing v1.0 SDK consumer source remains valid against the v1.1 SDK unless
+11. SDK 1.0 targets `1.0.0` and SDK 1.1 targets `1.1.0`;
+12. existing v1.0 SDK consumer source remains valid against the v1.1 SDK unless
    it opts into a new feature;
-9. exact-contract, semantic, behavioral, and SDK compatibility gates protect
+13. exact-contract, semantic, behavioral, and SDK compatibility gates protect
    future v1.x evolution;
-10. no v0.10 identity or artifact remains;
-11. no rolling parser, rolling SDK contract interpreter, runtime
+14. no v0.10 identity or artifact remains;
+15. no rolling parser, rolling SDK contract interpreter, runtime
     `VersionSemantics`, or same-major parser fallback is introduced.
 
-## 15. Non-goals
+## 16. Non-goals
 
 Phase 14 does not:
 
@@ -537,4 +784,5 @@ Phase 14 does not:
 - make runtime dispatch select parsers by compatible ranges;
 - combine every historical config shape into one SDK policy union;
 - redesign backend execution;
+- remove explicit raw exact-JSON APIs;
 - reject positional JSON arrays accepted by Serde struct deserialization.
