@@ -271,6 +271,41 @@ And a backend appearing in `available_backends()` is a host-capability signal,
 **not** a guarantee this SDK can launch it — cross-check [`platform_support`]
 for that.
 
+### Probing a specific ProcessContainer request
+
+On Windows, [`probe`] runs the same request-aware fallback detector as
+`wxc-exec --probe` without creating a sandbox:
+
+```rust,no_run
+use mxc_sdk::{build_request, probe, SandboxPolicy};
+
+let policy = SandboxPolicy {
+    version: "0.9.0-alpha".to_string(),
+    filesystem: None,
+    network: None,
+    ui: None,
+    timeout_ms: None,
+};
+let request = build_request(&policy, "cmd /c exit 0", None)?;
+let result = probe(Some(&request))?;
+
+if let Some(error) = result.error {
+    eprintln!("request cannot be served: {error}");
+} else {
+    println!("selected tier: {:?}", result.tier);
+}
+# Ok::<(), mxc_sdk::Error>(())
+```
+
+Pass `None` to probe the default empty request, matching `wxc-exec --probe`
+without a config. The result is advisory because host capabilities can change
+before launch. Non-Windows hosts return `ErrorCode::UnsupportedContainment`.
+
+The supplied request must resolve to ProcessContainer containment. Requests
+targeting WSLC, IsolationSession, or another backend return
+`ErrorCode::UnsupportedContainment`; they are never projected onto
+ProcessContainer policy. Non-Windows hosts return `ErrorCode::UnsupportedContainment`.
+
 On Linux, [`platform_support`] additionally reports `bubblewrap_network`: whether
 this host can enforce **proxy-only egress** (schema `0.8.0-alpha`+ proxy mode,
 which runs the sandbox in a private network namespace). That mode has no

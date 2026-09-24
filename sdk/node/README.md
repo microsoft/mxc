@@ -173,6 +173,30 @@ if (network.proxyEnforcement !== 'supported') {
 
 It is reported **fail closed**: if the probe cannot run, the result is `'unsupported'` with the reason in `warnings`, never absent. The check is advisory — the runner still verifies the dependencies at launch, since the probe runs in a different process at an earlier time. See [the Bubblewrap backend guide](../../docs/bwrap-support/bubblewrap-backend.md#checking-host-support-before-you-run).
 
+### Probe a specific ProcessContainer config
+
+On Windows, `probeSandboxSupport()` runs the same request-aware detector as
+`wxc-exec --probe` without creating a sandbox:
+
+```typescript
+import { probeSandboxSupport } from '@microsoft/mxc-sdk';
+
+const result = probeSandboxSupport(config);
+if (result.error) {
+  throw new Error(`request cannot be served: ${result.error}`);
+}
+console.log(result.tier, result.warnings, result.probes);
+```
+
+Call it without a config to probe the default empty policy. The call is
+synchronous and advisory: host capabilities can change before launch.
+Non-Windows hosts throw an unsupported-platform error.
+
+The supplied config must resolve to ProcessContainer containment. Configs
+targeting WSLC, IsolationSession, or another backend throw an
+unsupported-containment error; they are never projected onto ProcessContainer
+policy.
+
 ---
 
 ## Three Ways to Spawn
