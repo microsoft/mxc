@@ -18,12 +18,8 @@ use isolation_session_bindings::bindings::{
     IsoSessionFeature, IsoSessionOps, IsoSessionProcess, IsoSessionProcessResult,
     IsoSessionUserResult,
 };
-use windows::Win32::Foundation::{CO_E_NOTINITIALIZED, HANDLE, WAIT_OBJECT_0};
-use windows::Win32::System::Com::{
-    CoDecrementMTAUsage, CoGetApartmentType, CoIncrementMTAUsage, APTTYPE, APTTYPEQUALIFIER,
-    APTTYPEQUALIFIER_NA_ON_MAINSTA, APTTYPEQUALIFIER_NA_ON_STA, APTTYPE_MAINSTA, APTTYPE_NA,
-    APTTYPE_STA, CO_MTA_USAGE_COOKIE,
-};
+use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
+use windows::Win32::System::Com::{CoDecrementMTAUsage, CoIncrementMTAUsage, CO_MTA_USAGE_COOKIE};
 use windows::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
@@ -33,8 +29,8 @@ use windows_core::{HSTRING, PCWSTR};
 use super::console_mode::{get_local_console_size, ConsoleModeRestorer, CtrlHandlerGuard};
 use super::console_relay::{create_console_relay_thread, ConsoleRelayParams};
 use super::error::{
-    activation_error, check_result, format_iso_error, lifecycle_err, op, sta_refusal,
-    transport_err, IsolationSessionError, StalePromotion,
+    activation_error, check_result, format_iso_error, lifecycle_err, op, transport_err,
+    IsolationSessionError, StalePromotion,
 };
 use super::owned_thread::{self, Impersonation};
 use super::pipe_relay::{
@@ -79,69 +75,6 @@ impl Drop for MtaReference {
 // `CoDecrementMTAUsage` accepts it from any thread.
 unsafe impl Send for MtaReference {}
 unsafe impl Sync for MtaReference {}
-
-/// Refuses a caller in a single-threaded apartment.
-///
-/// Reads the calling thread's apartment, so it runs before [`owned_thread`]
-/// moves a call off that thread.
-fn refuse_single_threaded_apartment() -> Result<(), IsolationSessionError> {
-    if current_apartment()?.is_single_threaded() {
-        return Err(sta_refusal());
-    }
-    Ok(())
-}
-
-enum Apartment {
-    SingleThreaded,
-    Other,
-}
-
-impl Apartment {
-    fn is_single_threaded(&self) -> bool {
-        matches!(self, Self::SingleThreaded)
-    }
-}
-
-/// A thread with no apartment reads as `CO_E_NOTINITIALIZED`, which is not a
-/// refusal: `CoIncrementMTAUsage` gives it an implicit multi-threaded one.
-fn current_apartment() -> Result<Apartment, IsolationSessionError> {
-    let mut apartment = APTTYPE::default();
-    let mut qualifier = APTTYPEQUALIFIER::default();
-
-    // SAFETY: both out-parameters are valid, writable locals. Reads the calling
-    // thread's apartment without altering it.
-    match unsafe { CoGetApartmentType(&mut apartment, &mut qualifier) } {
-        Ok(()) => {}
-        Err(e) if e.code() == CO_E_NOTINITIALIZED => return Ok(Apartment::Other),
-        Err(e) => {
-            return Err(transport_err(
-                op::CO_GET_APARTMENT_TYPE,
-                "could not read this thread's COM apartment",
-                &e,
-            ))
-        }
-    }
-
-    Ok(classify_apartment(apartment, qualifier))
-}
-
-/// Split from [`current_apartment`] so the rule is testable: the real read
-/// returns process-global state a test cannot vary.
-///
-/// A neutral apartment inherits the thread's real one, so it is single-threaded
-/// exactly when that is.
-fn classify_apartment(apartment: APTTYPE, qualifier: APTTYPEQUALIFIER) -> Apartment {
-    let single_threaded = apartment == APTTYPE_STA
-        || apartment == APTTYPE_MAINSTA
-        || (apartment == APTTYPE_NA
-            && (qualifier == APTTYPEQUALIFIER_NA_ON_STA
-                || qualifier == APTTYPEQUALIFIER_NA_ON_MAINSTA));
-    if single_threaded {
-        Apartment::SingleThreaded
-    } else {
-        Apartment::Other
-    }
-}
 
 /// Activates the in-proc IsolationSession runtime factory and returns the
 /// instance.
@@ -212,7 +145,6 @@ impl IsolationSessionManager {
     /// returned by `add_user`). Activates the service factory once and
     /// reuses it for the manager's lifetime.
     pub(super) fn new(agent_user_name: &str) -> Result<Self, IsolationSessionError> {
-        refuse_single_threaded_apartment()?;
         let impersonation = Impersonation::of_this_thread()?;
         owned_thread::call(&impersonation, || {
             let mta = MtaReference::acquire()?;
@@ -257,7 +189,6 @@ impl IsolationSessionManager {
     pub(super) fn add_user(
         app_id: Option<&str>,
     ) -> Result<(ProvisionedUser, Self), IsolationSessionError> {
-        refuse_single_threaded_apartment()?;
         let impersonation = Impersonation::of_this_thread()?;
         owned_thread::call(&impersonation, || {
             let mta = MtaReference::acquire()?;
@@ -657,7 +588,6 @@ impl IsolationSessionManager {
         timeout_ms: u32,
         logger: Option<&Logger>,
     ) -> Result<ExecHandle, IsolationSessionError> {
-        refuse_single_threaded_apartment()?;
         let started = owned_thread::call(&self.impersonation, || {
             // Acquired before the workload starts, so a failure here cannot
             // leave one running with no handle to reach it.
@@ -1350,9 +1280,6 @@ fn wait_with_graceful_shutdown(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows::Win32::System::Com::{
-        APTTYPEQUALIFIER_NA_ON_MTA, APTTYPEQUALIFIER_NONE, APTTYPE_MTA,
-    };
 
     #[test]
     fn teardown_status_distinguishes_failure_success_and_skipped() {
@@ -1397,32 +1324,6 @@ mod tests {
             .bool("agent_user_deprovisioned", false);
         assert!(event.missing_required_fields().is_empty());
         assert!(event.to_json_line().contains(r#""status":"failure""#));
-    }
-
-    /// The process's *first* STA reports `MAINSTA`, not `APTTYPE_STA`.
-    #[test]
-    fn only_single_threaded_apartments_are_classified_as_such() {
-        for (apartment, qualifier) in [
-            (APTTYPE_STA, APTTYPEQUALIFIER_NONE),
-            (APTTYPE_MAINSTA, APTTYPEQUALIFIER_NONE),
-            (APTTYPE_NA, APTTYPEQUALIFIER_NA_ON_STA),
-            (APTTYPE_NA, APTTYPEQUALIFIER_NA_ON_MAINSTA),
-        ] {
-            assert!(
-                classify_apartment(apartment, qualifier).is_single_threaded(),
-                "{apartment:?} / {qualifier:?} must be refused"
-            );
-        }
-
-        for (apartment, qualifier) in [
-            (APTTYPE_MTA, APTTYPEQUALIFIER_NONE),
-            (APTTYPE_NA, APTTYPEQUALIFIER_NA_ON_MTA),
-        ] {
-            assert!(
-                !classify_apartment(apartment, qualifier).is_single_threaded(),
-                "{apartment:?} / {qualifier:?} must be admitted"
-            );
-        }
     }
 
     /// The exit code a timed-out process reads, paired with the `WaitForExit`

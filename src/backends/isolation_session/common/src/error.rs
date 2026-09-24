@@ -23,7 +23,6 @@ use isolation_session_bindings::bindings::{IsoSessionError, IsoSessionResult};
 /// telemetry.
 pub(super) mod op {
     pub(crate) const CO_INCREMENT_MTA_USAGE: &str = "Com.CoIncrementMTAUsage";
-    pub(crate) const CO_GET_APARTMENT_TYPE: &str = "Com.CoGetApartmentType";
 
     pub(crate) const ACTIVATE: &str = "IsoSessionOps.ActivateInstance";
     /// The app-scoped provisioning overload, preferred when the host advertises
@@ -320,20 +319,6 @@ pub(super) fn activation_error(code: u32, detail: &str) -> IsolationSessionError
         Some(message),
         None,
     ))
-}
-
-/// The refusal for a caller already in a single-threaded apartment.
-///
-/// The apartment query succeeded and no API call was in flight, so the refusal
-/// names no operation and carries no status.
-pub(super) fn sta_refusal() -> IsolationSessionError {
-    IsolationSessionError::Lifecycle(LifecycleFailure::Refused {
-        message: "this thread is in a single-threaded apartment, which this backend refuses"
-            .to_string(),
-        remediation: "Call from a multi-threaded apartment; a UI application must marshal this \
-                      onto a background thread."
-            .to_string(),
-    })
 }
 
 /// The refusal for a caller whose impersonation token cannot be carried onto
@@ -882,36 +867,6 @@ mod tests {
         assert_eq!(mapped.native_code(), None);
     }
 
-    /// The apartment query succeeds, so the refusal has no call to name and no
-    /// status to report — only a hint the caller can act on.
-    #[test]
-    fn the_sta_refusal_carries_a_hint_and_no_api_detail() {
-        let mapped = map_lifecycle_error(sta_refusal());
-        assert_eq!(mapped.code, MxcErrorCode::BackendError);
-        assert_eq!(mapped.operation(), None);
-        assert_eq!(mapped.native_code(), None);
-        assert!(
-            mapped
-                .remediation
-                .as_deref()
-                .is_some_and(|hint| hint.contains("multi-threaded apartment")),
-            "{:?}",
-            mapped.remediation
-        );
-    }
-
-    /// The one-shot path has no structured envelope, so the hint has to reach
-    /// the caller folded into the message.
-    #[test]
-    fn the_sta_refusal_folds_its_hint_into_the_one_shot_rendering() {
-        let rendered = sta_refusal().to_string();
-        assert!(rendered.contains("single-threaded apartment"), "{rendered}");
-        assert!(
-            rendered.contains("remediation: Call from a multi-threaded apartment"),
-            "{rendered}"
-        );
-    }
-
     #[test]
     fn the_identity_refusal_carries_a_hint_and_no_operation_or_native_code() {
         use windows::Win32::Foundation::E_ACCESSDENIED;
@@ -1008,7 +963,6 @@ mod tests {
     fn operation_constants_are_qualified_and_parameter_free() {
         for value in [
             op::CO_INCREMENT_MTA_USAGE,
-            op::CO_GET_APARTMENT_TYPE,
             op::ACTIVATE,
             op::ADD_USER,
             op::START_SESSION,

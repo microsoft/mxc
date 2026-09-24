@@ -57,7 +57,7 @@ fn skips_are_failures() -> bool {
     )
 }
 
-/// Enters a single-threaded apartment, which the backend refuses.
+/// Enters a single-threaded apartment.
 ///
 /// libtest runs every test on its own thread and apartment membership is
 /// per-thread, so a test that wants an STA enters one itself.
@@ -109,28 +109,36 @@ macro_rules! skip_unless_supported {
 }
 
 #[test]
-fn a_single_threaded_apartment_is_refused_before_the_service_is_reached() {
-    enter_sta();
+fn a_single_threaded_apartment_drives_the_full_lifecycle() {
+    skip_unless_supported!();
 
-    let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
-        "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#;
-    let err = mxc_sdk::run_state_aware_json(provision, false, true)
-        .expect_err("a single-threaded apartment must be refused");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        enter_sta();
+        let started = provision_and_start();
+        let captured =
+            exec_capture_stdout(&started.sandbox_id, "cmd.exe /c echo sta-lifecycle-marker");
 
-    assert_eq!(
-        err.code,
-        ErrorCode::BackendError,
-        "message: {}",
-        err.message
-    );
-    assert_eq!(
-        err.operation, None,
-        "the apartment query succeeds, so the refusal has no call to name"
-    );
-    assert_eq!(err.native_code, None);
+        let stop = format!(
+            r#"{{"version":"0.9.0-alpha","phase":"stop","sandboxId":"{}"}}"#,
+            started.sandbox_id
+        );
+        mxc_sdk::run_state_aware_json(&stop, false, true).expect("stop must succeed");
+        let deprovision = format!(
+            r#"{{"version":"0.9.0-alpha","phase":"deprovision","sandboxId":"{}"}}"#,
+            started.sandbox_id
+        );
+        mxc_sdk::run_state_aware_json(&deprovision, false, true).expect("deprovision must succeed");
+        started.teardown.defuse();
+        let _ = tx.send(captured);
+    });
+
+    let captured = rx
+        .recv_timeout(std::time::Duration::from_secs(180))
+        .expect("the lifecycle must finish on the STA thread");
     assert!(
-        err.remediation.is_some(),
-        "the refusal must tell the caller what to do instead"
+        captured.contains("sta-lifecycle-marker"),
+        "exec stdout did not carry the marker, got: {captured:?}"
     );
 }
 
