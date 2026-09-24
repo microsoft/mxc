@@ -261,6 +261,21 @@
           ]
         }
       }
+    },
+    {
+      "id": "macos-27",
+      "displayName": "macOS 27",
+      "family": "macos",
+      "architectures": {
+        "arm64": {
+          "target": "aarch64-apple-darwin",
+          "artifact": "mxc-binaries-aarch64-apple-darwin",
+          "runner": "xcode-27",
+          "backends": [
+            "seatbelt"
+          ]
+        }
+      }
     }
   ],
   "backendDelayedStart": [],
@@ -337,6 +352,12 @@
       },
       {
         "os": "macos-15",
+        "backends": [
+          "seatbelt"
+        ]
+      },
+      {
+        "os": "macos-27",
         "backends": [
           "seatbelt"
         ]

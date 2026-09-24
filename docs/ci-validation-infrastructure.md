@@ -115,6 +115,7 @@ Current platforms:
 | `ubuntu-24.04` | linux | `1es-mxc-e2e-ubuntu-24.04-x64` | *(dormant)* | bubblewrap, microvm, lxc | — |
 | `rhel-10` | linux | `1es-mxc-e2e-rhel-10-x64` | *(dormant)* | bubblewrap, lxc | — |
 | `debian-13` | linux | `1es-mxc-e2e-debian-13-x64` | *(dormant)* | bubblewrap, lxc | — |
+| `macos-27` | macos | — | runner `xcode-27` (public preview) | — | seatbelt |
 | `macos-26` | macos | — | runner `macos-26` | — | seatbelt |
 | `macos-15` | macos | — | runner `macos-15` | — | seatbelt |
 
@@ -181,7 +182,7 @@ backend **and** has a non-empty pool.
 
 | Plan | Wired to | Contents today |
 |------|----------|----------------|
-| `nightly` | scheduled Mon–Sun | 5 Windows platforms, 4 Linux platforms, 2 MacOS platforms |
+| `nightly` | scheduled Mon–Sun | 5 Windows platforms, 4 Linux platforms, 3 MacOS platforms |
 | `weekly` | scheduled Sunday | empty |
 | `pr` | *(nothing — `Build.yml` does not call the matrix job)* | empty; reserved for a potential future PR-time subset |
 | `enabled` | *(nothing — resolvable locally only)* | reserved for testing this infrastructure and rapid iteration |
