@@ -68,6 +68,12 @@ meanings. The Rust and .NET surfaces use typed models. Node.js defines matching
 TypeScript interfaces and validates the required object, array, string, boolean,
 and optional-field shapes at the process boundary.
 
+Optional-backend facts are build-relative: `isolationSessionAvailable` and
+`hyperlightAvailable` are `false` when the invoked CLI or SDK native library was
+not compiled with that backend. Different packages may therefore report
+different optional-backend facts while retaining the same contract and
+ProcessContainer tier decision.
+
 ## Error Handling
 
 - Detector failures remain successful probe calls with `ProbeOutput.error`,

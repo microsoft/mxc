@@ -157,7 +157,14 @@ public sealed class ProbeFacts
     public bool BaseContainerSupportsDenyPaths { get; init; }
     public bool BaseContainerSupportsEnumeratePaths { get; init; }
     public bool BaseContainerSupportsIngressHostLoopbackAllow { get; init; }
+    /// <summary>
+    /// Whether this native SDK build includes IsolationSession and the host can activate it.
+    /// </summary>
     public bool IsolationSessionAvailable { get; init; }
+
+    /// <summary>
+    /// Whether this native SDK build includes Hyperlight and its host runtime is available.
+    /// </summary>
     public bool HyperlightAvailable { get; init; }
     public required UiCapabilitySupport UiCapabilities { get; init; }
 }

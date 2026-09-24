@@ -648,7 +648,9 @@ export interface ProbeFacts {
   baseContainerSupportsDenyPaths: boolean;
   baseContainerSupportsEnumeratePaths: boolean;
   baseContainerSupportsIngressHostLoopbackAllow: boolean;
+  /** True when this CLI build includes IsolationSession and the host can activate it. */
   isolationSessionAvailable: boolean;
+  /** True when this CLI build includes Hyperlight and its host runtime is available. */
   hyperlightAvailable: boolean;
   uiCapabilities: UiCapabilitySupport;
 }

@@ -32,7 +32,10 @@ pub struct ProbeOutput {
     pub error: Option<String>,
 }
 
-/// Raw host facts gathered before request tier selection.
+/// Facts gathered before request tier selection.
+///
+/// Optional-backend fields describe what the current engine build can probe on
+/// this host. They remain `false` when that backend was not compiled in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProbeFacts {
@@ -44,7 +47,11 @@ pub struct ProbeFacts {
     pub base_container_supports_deny_paths: bool,
     pub base_container_supports_enumerate_paths: bool,
     pub base_container_supports_ingress_host_loopback_allow: bool,
+    /// Whether this build includes IsolationSession and the service is
+    /// activatable on this host.
     pub isolation_session_available: bool,
+    /// Whether this build includes Hyperlight and WHP is available on this
+    /// host.
     pub hyperlight_available: bool,
     pub ui_capabilities: UiCapabilitySupport,
 }
