@@ -20,6 +20,7 @@ pub mod daemon_record;
 pub mod error;
 pub mod policy;
 pub mod policy_mapping;
+pub mod process_env;
 pub mod sandbox;
 pub mod state_aware;
 mod stream_buffer;

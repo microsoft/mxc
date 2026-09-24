@@ -1056,7 +1056,8 @@ pub struct ExecutionRequest {
     ///   default: on Windows, the user's profile block; on LXC, Bubblewrap, and
     ///   Seatbelt, `PATH` + `TERM`, plus `HOME` naming the directory the child
     ///   is started in. Those three omit `HOME` when no working directory
-    ///   resolves, having no private directory to point it at.
+    ///   resolves, having no private directory to point it at. On WSLc it is
+    ///   the container image's own `ENV`.
     /// * `Some(vec![])` — the caller asked for an *empty* environment. This is
     ///   not the same as `None`, and on the Windows process container it is
     ///   rejected before launch, because the OS requires certain names to be
@@ -1067,9 +1068,9 @@ pub struct ExecutionRequest {
     ///   [`ExecutionRequest::inherit_default_env`].
     ///
     /// The Windows process container honors the distinction at every schema
-    /// version; LXC, Bubblewrap, and Seatbelt honor it from 0.9. Below 0.9 on
-    /// those three, and on IsolationSession and WSLc at every version, `None`
-    /// and `Some(vec![])` are treated alike.
+    /// version; LXC, Bubblewrap, Seatbelt, and WSLc honor it from 0.9. Below
+    /// 0.9 on those four, and on IsolationSession at every version, `None` and
+    /// `Some(vec![])` are treated alike.
     pub env: Option<Vec<String>>,
 
     /// Layer [`ExecutionRequest::env`] on top of the backend's default
@@ -1228,10 +1229,12 @@ impl ExecutionRequest {
     /// empty" flattened to the same empty slice.
     ///
     /// Only for backends that have no default environment to distinguish them
-    /// against — IsolationSession and WSLc, plus every backend below schema
-    /// 0.9. A backend with a default block must match on
-    /// [`ExecutionRequest::env`] directly, since `None` means "give the child
-    /// the default" and `Some(vec![])` means "give the child nothing".
+    /// against — IsolationSession, plus every backend below schema 0.9. A
+    /// backend with a default block must match on [`ExecutionRequest::env`]
+    /// directly, since `None` means "give the child the default" and
+    /// `Some(vec![])` means "give the child nothing". WSLc's default is the
+    /// container image's `ENV`, which MXC cannot enumerate, so it takes the
+    /// state from `env` and the entries from here.
     pub fn env_entries(&self) -> &[String] {
         self.env.as_deref().unwrap_or(&[])
     }

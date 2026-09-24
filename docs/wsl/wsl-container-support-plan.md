@@ -593,9 +593,16 @@ if it hasn't exited.
 
 ## Supported Workloads
 
-MXC's Linux container support is **language-agnostic and image-agnostic**. The container image defines the capabilities — not MXC. Any workload that meets the following criteria is supported:
+MXC's Linux container support is **language-agnostic**. The container image defines the capabilities — not MXC. Any workload that meets the following criteria is supported:
 
 > **Runs on Linux, exits on its own, and produces output via stdout/stderr.**
+
+### What the image must provide
+
+MXC runs the workload's command line as `/bin/sh -c`, and a request that
+replaces the environment (a verbatim or explicitly empty `process.env` at
+schema 0.9) runs that shell through `/usr/bin/env`. An image supplying neither
+path — `scratch` and most distroless images — cannot be used.
 
 ### Supported
 

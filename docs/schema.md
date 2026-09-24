@@ -288,6 +288,24 @@ use:
 Policy entries that are blank, name a file, or do not exist yet are skipped:
 a process cannot be launched in any of them.
 
+### Environment
+
+`process.env` has four states, kept distinct from `0.9.0-alpha`:
+
+| `process.env` | `inheritDefaultEnv` | The child gets |
+|---|---|---|
+| omitted | — | the backend default |
+| `[]` | — | nothing |
+| `["FOO=bar"]` | `false` (default) | only `FOO` |
+| `["FOO=bar"]` | `true` | the default, plus `FOO`; a caller entry wins |
+
+What the default block contains is backend-specific; see the backend's guide.
+On the WSL Container backend it is the container image's own `ENV`, which MXC
+neither authors nor enumerates — see
+[`docs/wsl/wsl-container-getting-started.md`](wsl/wsl-container-getting-started.md#environment).
+
+Below `0.9.0-alpha`, `inheritDefaultEnv` is rejected as an unknown field.
+
 ### Filesystem Policy
 
 The `filesystem` section defines path access policy shared across backends:

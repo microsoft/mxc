@@ -139,6 +139,7 @@ acknowledges that WSLC cannot independently restrict those directions.
 | Legacy `network` fields | structurally rejected in v0.9 | structurally rejected | structurally rejected |
 | `runtimeConfig.networkProxy` | structurally rejected | structurally rejected | honored as a routable URL, injected as `HTTP_PROXY` / `HTTPS_PROXY` env vars |
 | `ui` | rejected | rejected | rejected |
+| `process.env` / `process.inheritDefaultEnv` | n/a | n/a | honored → see [Environment](wsl-container-getting-started.md#environment) |
 | `process.timeout` | n/a | n/a | honored → `ExecConfig.timeout_ms` |
 | `lifecycle` | rejected (whole section, at parse) | rejected | rejected |
 

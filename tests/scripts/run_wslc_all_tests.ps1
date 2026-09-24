@@ -219,6 +219,15 @@ $null = $results.Add((Run-WslcTest "wslc_exit_code.json" -ExpectedExit 42 -Outpu
 $null = $results.Add((Run-WslcTest "wslc_stderr.json" -OutputContains "stdout message"))
 $null = $results.Add((Run-WslcTest "wslc_large_output.json"))
 
+Write-Host "`n--- Environment Tests (schema 0.9) ---" -ForegroundColor Cyan
+# PYTHON_VERSION is baked into the image by ENV. Unlike PATH and TERM, no shell
+# fabricates it when it starts without one, so its absence is real evidence that
+# the image environment was replaced rather than a shell default reading back.
+$null = $results.Add((Run-WslcTest "wslc_env_09_default_block.json" -OutputMatches 'PYVER=\[3\.\d'))
+$null = $results.Add((Run-WslcTest "wslc_env_09_empty.json" -OutputMatches 'PYVER=\[\][\s\S]*FOO=\[\]'))
+$null = $results.Add((Run-WslcTest "wslc_env_09_verbatim.json" -OutputMatches 'PYVER=\[\][\s\S]*FOO=\[bar\]'))
+$null = $results.Add((Run-WslcTest "wslc_env_09_inherit.json" -OutputMatches 'PYVER=\[3\.\d[\s\S]*FOO=\[bar\][\s\S]*LANG=\[C\.OVERRIDDEN\][\s\S]*LANGCOUNT=\[1\]'))
+
 Write-Host "`n--- Filesystem Tests ---" -ForegroundColor Cyan
 
 # Fixed paths must match tests\configs\wslc_filesystem.json and

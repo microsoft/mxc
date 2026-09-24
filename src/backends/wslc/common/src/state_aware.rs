@@ -41,6 +41,7 @@ use crate::daemon_protocol::{
 use crate::policy::{
     exec_proxy_url, validate_exec_policy, validate_post_provision_policy, validate_provision_policy,
 };
+use crate::process_env::EnvScope;
 #[cfg(windows)]
 use crate::sandbox::prepare_native_output;
 #[cfg(windows)]
@@ -180,6 +181,7 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
             script_code: request.script_code.clone(),
             working_directory: request.working_directory.clone(),
             env,
+            env_scope: EnvScope::of(request),
             timeout_ms: request.script_timeout,
         };
 
@@ -584,13 +586,11 @@ fn map_network(request: &ExecutionRequest) -> NetworkMode {
 }
 
 /// Split `"KEY=VALUE"` env entries into `(name, value)` pairs (the daemon's
-/// `ExecConfig.env` shape). An entry without `=` becomes `(entry, "")`.
+/// `ExecConfig.env` shape). An entry naming no variable is dropped.
 fn split_env(env: &[String]) -> Vec<(String, String)> {
-    env.iter()
-        .map(|entry| match entry.split_once('=') {
-            Some((k, v)) => (k.to_string(), v.to_string()),
-            None => (entry.clone(), String::new()),
-        })
+    wxc_common::default_env::env_pairs(env)
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
         .collect()
 }
 
@@ -1042,7 +1042,7 @@ mod tests {
     }
 
     #[test]
-    fn split_env_splits_pairs_and_bare_keys() {
+    fn split_env_splits_pairs_and_drops_bare_keys() {
         let env = vec![
             "PATH=/usr/bin".to_string(),
             "EMPTY=".to_string(),
@@ -1052,9 +1052,9 @@ mod tests {
         let pairs = split_env(&env);
         assert_eq!(pairs[0], ("PATH".to_string(), "/usr/bin".to_string()));
         assert_eq!(pairs[1], ("EMPTY".to_string(), String::new()));
-        assert_eq!(pairs[2], ("BARE".to_string(), String::new()));
         // Only the first '=' splits; the value keeps the rest verbatim.
-        assert_eq!(pairs[3], ("URL".to_string(), "http://a=b".to_string()));
+        assert_eq!(pairs[2], ("URL".to_string(), "http://a=b".to_string()));
+        assert_eq!(pairs.len(), 3);
     }
 
     #[test]

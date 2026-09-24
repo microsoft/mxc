@@ -450,6 +450,42 @@ Paths in `filesystem.readwritePaths` and `filesystem.readonlyPaths` are mounted
 into the container. Host path `C:\workspace` becomes `/mnt/c/workspace` inside
 the container.
 
+### Environment
+
+From schema `0.9.0-alpha` the four states of `process.env` stay distinct. The
+backend default is the **container image's own `ENV`** — MXC neither authors
+nor enumerates it, so what you get in the first and last rows depends on the
+image you chose:
+
+| `process.env` | `inheritDefaultEnv` | MXC gives the child |
+|---|---|---|
+| omitted | — | the image's `ENV` |
+| `[]` | — | nothing |
+| `["FOO=bar"]` | `false` (default) | only `FOO` |
+| `["FOO=bar"]` | `true` | the image's `ENV`, plus `FOO`; a caller entry wins |
+
+Below `0.9.0-alpha` an omitted and an empty `process.env` are treated alike, and
+the caller's entries always layer over the image's `ENV`.
+
+The table is what MXC supplies, which is not all the workload observes. The
+command line runs under the image's `/bin/sh`, and a shell started without a
+`PATH` falls back to a compiled-in one — on the Alpine images that is
+`/sbin:/usr/sbin:/bin:/usr/bin`. So in the two replacing rows `ls` still
+resolves, while an interpreter the image installed elsewhere (`python3` under
+`/usr/local/bin`) does not. Such a workload needs `PATH` in `process.env` or
+`inheritDefaultEnv`. The same shell also fabricates `PWD` and `SHLVL`, so no
+row reads back as a truly empty environment from inside the container.
+
+`WslcSetProcessSettingsEnvVariables` layers its entries over the image's `ENV`
+and the SDK offers no call that clears it, so the two replacing rows launch the
+workload through `env -i` instead. An entry naming no variable (`"FOO"` rather
+than `"FOO=bar"`) is dropped, as it is on every other backend.
+
+`runtimeConfig.networkProxy` is an exception to all four rows: its variables are
+injected, and any caller-supplied proxy variable is scrubbed, whatever
+`process.env` asks for. Egress policy is enforced cooperatively through those
+variables, so a verbatim environment cannot be used to opt out of it.
+
 ### `ui` is not supported
 
 A `ui` section is **rejected** — the backend has no mechanism to enforce UI
