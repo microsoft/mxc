@@ -153,9 +153,6 @@ on an internal Windows feature flag.
 
 Activation goes through the WinRT activation factory for the
 `Windows.AI.IsolationSession.Preview` `IsoSessionOps` runtime class.
-Activation requires `RoInitialize(RO_INIT_MULTITHREADED)` (handled in
-`main.rs` at startup, applied unconditionally because it's benign for other
-backends).
 
 The API surface includes the lifecycle methods plus
 `IsoSessionProcess` (the running-process handle). The runner uses the

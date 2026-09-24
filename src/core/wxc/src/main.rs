@@ -973,11 +973,6 @@ fn main() {
     // `getPlatformSupport()` on every first call. It does not spawn a
     // sandbox and never parks a DaclManager.
     //
-    // It does activate WinRT: `isolation_session_available()` resolves the
-    // IsolationSession activation factory. That probe owns and releases its
-    // own COM apartment, so it neither needs nor disturbs the process-wide
-    // init below — this ordering is not a claim that the probe is COM-free.
-    //
     // Run it AFTER recovery (so consumers that rely on `--probe`-as-
     // reaper still get it) but BEFORE COM init / SetConsoleCtrlHandler
     // (which probe doesn't need; deferring them shaves cold-start cost

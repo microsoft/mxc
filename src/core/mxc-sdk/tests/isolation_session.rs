@@ -42,8 +42,6 @@ fn iso_policy_with_deadline(timeout_ms: Option<u32>) -> SandboxPolicy {
     }
 }
 
-/// Safe to call before anything else has initialised COM: the backend's probe
-/// owns its own apartment.
 fn host_supports_isolation_session() -> bool {
     mxc_sdk::available_backends()
         .iter()

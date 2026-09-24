@@ -200,8 +200,7 @@ fn wslc_available() -> bool {
 /// Delegates to the backend's own availability probe — the same one
 /// [`available_backends`](crate::available_backends) consults — so the CLI
 /// `--probe` surface and the Rust SDK surface can never disagree about this
-/// host. That probe owns its COM apartment, so this is callable regardless of
-/// whether the caller has initialized COM.
+/// host.
 #[cfg(all(target_os = "windows", feature = "isolation_session"))]
 pub fn isolation_session_available() -> bool {
     isolation_session_common::availability::is_isolation_session_available()

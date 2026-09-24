@@ -135,7 +135,7 @@ fn main() {
         }
         let _ = std::io::stdout().flush();
 
-        checkpoint("available_backends() — activation from this apartment");
+        checkpoint("available_backends()");
         let backends = mxc_sdk::available_backends();
         let supported = backends.iter().any(|b| b.backend == "isolation_session");
         println!("    isolation_session available: {supported}");
@@ -249,8 +249,7 @@ impl Drop for Teardown {
 /// created it.
 ///
 /// `SandboxProcess` is `Send`, so a host may create a handle on one thread and
-/// use it on another. The main thread deliberately does not enter an apartment,
-/// so the worker is the only MTA member while it lives.
+/// use it on another.
 #[cfg(all(target_os = "windows", feature = "isolation_session"))]
 fn measure_handle_outliving_its_thread() {
     use std::io::Read;
