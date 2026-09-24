@@ -37,6 +37,7 @@ mod guarded_capture;
 mod platform;
 pub mod policy;
 mod probe;
+mod request_probe;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 mod run;
 mod state_aware;
@@ -54,6 +55,9 @@ pub use policy::{
     NetworkRuleSection, RuntimeConfigSection, SandboxPolicy, SandboxRequest, WslcSection,
 };
 pub use probe::{available_backends, to_json_pretty, AvailableBackend, BackendCapability};
+pub use request_probe::{
+    probe, probe_execution_request, ProbeFacts, ProbeOutput, UiCapabilitySupport,
+};
 #[cfg(target_os = "windows")]
 pub fn guarded_capture_available() -> bool {
     guarded_capture::is_available()

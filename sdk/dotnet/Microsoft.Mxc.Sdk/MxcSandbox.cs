@@ -116,6 +116,93 @@ public static class MxcSandbox
     }
 
     /// <summary>
+    /// Probe which Windows ProcessContainer tier can serve an optional request.
+    /// </summary>
+    /// <remarks>
+    /// A null request probes the default empty request. The probe does not
+    /// create a sandbox. Non-Windows hosts report unsupported containment.
+    /// </remarks>
+    public static ProbeOutput Probe(SandboxRequest? request = null)
+    {
+        byte[]? requestBuf = request is null
+            ? null
+            : ToNullTerminatedUtf8(SerializeRequest(request));
+
+        unsafe
+        {
+            fixed (byte* requestPtr = requestBuf)
+            {
+                byte* json = null;
+                MxcErrorDetail error = default;
+                var status = NativeMethods.mxc_probe_request_json(requestPtr, &json, &error);
+                if (status != (int)ErrorCode.Success)
+                {
+                    try
+                    {
+                        throw NativeError.ToException(
+                            status,
+                            error,
+                            "probing request support failed");
+                    }
+                    finally
+                    {
+                        NativeMethods.mxc_error_detail_free(&error);
+                    }
+                }
+
+                return ParseProbeOutput(ReadOwnedJson(json, "probing request support"));
+            }
+        }
+    }
+
+    /// <summary>Map canonical native probe JSON onto the public model.</summary>
+    internal static ProbeOutput ParseProbeOutput(string json)
+    {
+        var output = JsonSerializer.Deserialize<NativeProbeOutput>(json, JsonOptions)
+            ?? throw new JsonException("Native request probe returned null JSON.");
+        var probes = output.Probes
+            ?? throw new JsonException("Native request probe omitted probes.");
+        var ui = probes.UiCapabilities
+            ?? throw new JsonException("Native request probe omitted UI capabilities.");
+
+        return new ProbeOutput
+        {
+            Tier = output.Tier is null ? null : ParseIsolationTier(output.Tier),
+            NeedsDaclAugmentation = output.NeedsDaclAugmentation,
+            Warnings = output.Warnings.ToArray(),
+            Error = output.Error,
+            Probes = new ProbeFacts
+            {
+                BaseContainerApiPresent = probes.BaseContainerApiPresent,
+                NativeCaptureAvailable = probes.NativeCaptureAvailable,
+                GuardedCaptureAvailable = probes.GuardedCaptureAvailable,
+                BfscfgPresent = probes.BfscfgPresent,
+                BfsCompiledIn = probes.BfsCompiledIn,
+                BaseContainerSupportsDenyPaths = probes.BaseContainerSupportsDenyPaths,
+                BaseContainerSupportsEnumeratePaths =
+                    probes.BaseContainerSupportsEnumeratePaths,
+                BaseContainerSupportsIngressHostLoopbackAllow =
+                    probes.BaseContainerSupportsIngressHostLoopbackAllow,
+                IsolationSessionAvailable = probes.IsolationSessionAvailable,
+                HyperlightAvailable = probes.HyperlightAvailable,
+                UiCapabilities = new UiCapabilitySupport
+                {
+                    CanBlockClipboardRead = ui.CanBlockClipboardRead,
+                    CanBlockClipboardWrite = ui.CanBlockClipboardWrite,
+                    CanBlockInputInjection = ui.CanBlockInputInjection,
+                    CanBlockInputMethodChanges = ui.CanBlockInputMethodChanges,
+                    CanBlockExternalUiObjects = ui.CanBlockExternalUiObjects,
+                    CanBlockGlobalUiNamespace = ui.CanBlockGlobalUiNamespace,
+                    CanBlockDesktopSwitching = ui.CanBlockDesktopSwitching,
+                    CanBlockLogoffOrShutdown = ui.CanBlockLogoffOrShutdown,
+                    CanBlockSystemParameterChanges = ui.CanBlockSystemParameterChanges,
+                    CanBlockDisplaySettingsChanges = ui.CanBlockDisplaySettingsChanges,
+                },
+            },
+        };
+    }
+
+    /// <summary>
     /// Run <paramref name="command"/> in a sandbox described by
     /// <paramref name="policy"/>, to completion, capturing its output.
     /// </summary>

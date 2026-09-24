@@ -999,28 +999,14 @@ fn main() {
         } else {
             wxc_common::models::ExecutionRequest::default()
         };
-        let output = process_container_common::probe::run_probe(
-            &request,
-            mxc_engine::guarded_capture_available(),
-        );
-        // process_container_common has no dependency on the isolation-session
-        // backend, so it reports `isolationSessionAvailable` as `false`. When
-        // the backend is compiled in, override it with a read-only activation
-        // probe of the in-proc service.
-        #[cfg(all(target_os = "windows", feature = "isolation_session"))]
-        let output = {
-            let mut output = output;
-            output.probes.isolation_session_available = mxc_engine::isolation_session_available();
-            output
+        let output = match mxc_engine::probe_execution_request(Some(&request)) {
+            Ok(output) => output,
+            Err(error) => {
+                eprintln!("Error: {}", error.message);
+                process::exit(1);
+            }
         };
-        // WHP is delay-loaded; check before pyhl::install warms a VM.
-        #[cfg(all(target_os = "windows", feature = "hyperlight", target_arch = "x86_64"))]
-        let output = {
-            let mut output = output;
-            output.probes.hyperlight_available = hyperlight_common::is_whp_available();
-            output
-        };
-        match process_container_common::probe::to_json_pretty(&output) {
+        match serde_json::to_string_pretty(&output) {
             Ok(s) => println!("{s}"),
             Err(e) => {
                 eprintln!("Error: probe serialization failed: {e}");

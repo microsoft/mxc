@@ -281,8 +281,10 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn request_probe_rejects_non_process_container_containment() {
-        let mut request = ExecutionRequest::default();
-        request.containment = ContainmentBackend::Wslc;
+        let request = ExecutionRequest {
+            containment: ContainmentBackend::Wslc,
+            ..Default::default()
+        };
 
         let error = probe_execution_request(Some(&request))
             .expect_err("WSLC requests must not be projected onto ProcessContainer");

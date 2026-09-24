@@ -243,6 +243,21 @@ wxc-exec.exe --debug config.json
 
 See [docs/diagnostics.md](docs/diagnostics.md) for full diagnostics reference.
 
+### Request-Aware Support Probe
+
+The Windows executor and SDKs expose the same ProcessContainer fallback
+decision and machine facts without creating a sandbox:
+
+- CLI: `wxc-exec --probe [config.json]`
+- Rust: `mxc_sdk::probe(Some(&request))`
+- Node.js: `probeSandboxSupport(config)`
+- .NET: `MxcSandbox.Probe(request)`
+
+Omit the request/config to probe the default empty policy. Supplying a one-shot
+request checks the isolation tier and host capabilities that request needs.
+Detector failures are returned in the probe result's `error` field; malformed
+requests and non-Windows calls fail as API errors.
+
 ### Audit Mode (Permissive Learning Mode)
 
 `--audit` is a compatibility wrapper over `processContainer.captureDenials` in allow mode with ETL retention forced on. It injects `permissiveLearningMode`, so denied operations are recorded but allowed to proceed. On hosts with the complete PSEC/V2 Learning Mode API set, the selected ProcessContainer runner uses native capture without launching PLM or prompting for elevation. Older or policy-incompatible tiers use the guarded-WPR fallback: `wxc-exec.exe` remains unelevated and starts a session-scoped UAC-elevated PLM guardian only for the privileged WPR lifecycle, communicating over an authenticated local named pipe. It is rejected for Windows Sandbox, WSLC, IsolationSession, and every other containment backend.

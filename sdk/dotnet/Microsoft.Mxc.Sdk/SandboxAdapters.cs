@@ -18,6 +18,9 @@ public interface ISandboxRunner
     /// <summary>Probe the containment backends the public SDK can launch.</summary>
     PlatformSupport GetPlatformSupport();
 
+    /// <summary>Probe which ProcessContainer tier can serve an optional request.</summary>
+    ProbeOutput Probe(SandboxRequest? request = null);
+
     /// <summary>Run a policy and command to completion.</summary>
     RunResult Run(SandboxPolicy policy, string command);
 
@@ -60,6 +63,10 @@ public sealed class MxcSandboxRunner : ISandboxRunner
     /// <inheritdoc/>
     public PlatformSupport GetPlatformSupport() =>
         MxcSandbox.GetPlatformSupport();
+
+    /// <inheritdoc/>
+    public ProbeOutput Probe(SandboxRequest? request = null) =>
+        MxcSandbox.Probe(request);
 
     /// <inheritdoc/>
     public RunResult Run(SandboxPolicy policy, string command) =>

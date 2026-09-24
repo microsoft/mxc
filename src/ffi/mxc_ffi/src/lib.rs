@@ -54,7 +54,9 @@ use std::panic::catch_unwind;
 use std::ptr;
 use std::sync::OnceLock;
 
-use mxc_sdk::{available_backends, platform_support, run, ErrorCode, SandboxRequest, WaitOutcome};
+use mxc_sdk::{
+    available_backends, platform_support, probe, run, Error, ErrorCode, SandboxRequest, WaitOutcome,
+};
 
 mod error_detail;
 mod request;
@@ -496,6 +498,81 @@ pub extern "C" fn mxc_platform_support_json() -> *mut c_char {
         report_panic("mxc_platform_support_json", &*panic);
         ptr::null_mut()
     })
+}
+
+/// Probe an optional one-shot request and return the canonical probe JSON.
+///
+/// A null `request_json_utf8` probes the default empty request. A non-null
+/// request uses the co-versioned language-binding request contract.
+///
+/// # Safety
+/// - `request_json_utf8` must be null or valid NUL-terminated UTF-8.
+/// - `out_json_utf8` must point to writable pointer storage.
+/// - `out_error` must point to writable [`MxcErrorDetail`] storage.
+/// - On success the caller must free `*out_json_utf8` with [`mxc_string_free`].
+/// - On failure the caller must free `*out_error` with
+///   [`mxc_error_detail_free`].
+#[no_mangle]
+pub unsafe extern "C" fn mxc_probe_request_json(
+    request_json_utf8: *const c_char,
+    out_json_utf8: *mut *mut c_char,
+    out_error: *mut MxcErrorDetail,
+) -> i32 {
+    if out_json_utf8.is_null() || out_error.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+
+    // SAFETY: both pointers are non-null and caller-guaranteed writable.
+    unsafe {
+        ptr::write(out_json_utf8, ptr::null_mut());
+        ptr::write(out_error, MxcErrorDetail::none());
+    }
+
+    match catch_unwind(|| probe_request_json_inner(request_json_utf8)) {
+        Ok(Ok(json)) => {
+            // SAFETY: out_json_utf8 is non-null and writable.
+            unsafe { ptr::write(out_json_utf8, json) };
+            MXC_STATUS_SUCCESS
+        }
+        Ok(Err(error)) => {
+            let status = status_from_error_code(error.code);
+            // SAFETY: out_error is non-null and writable.
+            unsafe { ptr::write(out_error, MxcErrorDetail::from_error(&error)) };
+            status
+        }
+        Err(panic) => {
+            report_panic("mxc_probe_request_json", &*panic);
+            // SAFETY: out_error is non-null and writable.
+            unsafe {
+                ptr::write(
+                    out_error,
+                    MxcErrorDetail::from_message("the mxc engine panicked"),
+                )
+            };
+            MXC_STATUS_PANIC
+        }
+    }
+}
+
+fn probe_request_json_inner(request_json_utf8: *const c_char) -> Result<*mut c_char, Error> {
+    let request = if request_json_utf8.is_null() {
+        None
+    } else {
+        // SAFETY: the caller contract requires a valid NUL-terminated string.
+        let request_json = unsafe { CStr::from_ptr(request_json_utf8) }
+            .to_str()
+            .map_err(|_| Error::new(ErrorCode::MalformedRequest, "request is not valid UTF-8"))?;
+        Some(request::build_request_from_json(request_json)?)
+    };
+    let output = probe(request.as_ref())?;
+    serde_json::to_vec(&output)
+        .map(|json| alloc_cstring(&json))
+        .map_err(|error| {
+            Error::new(
+                ErrorCode::BackendError,
+                format!("serializing probe output failed: {error}"),
+            )
+        })
 }
 
 fn serialize_owned_json(value: &impl serde::Serialize) -> *mut c_char {

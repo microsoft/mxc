@@ -183,7 +183,10 @@ fn extern_probe_rejects_serialized_wslc_request() {
         let message = unsafe { CStr::from_ptr(error.message_utf8) }
             .to_str()
             .unwrap();
-        assert!(message.contains("got wslc"), "unexpected message: {message}");
+        assert!(
+            message.contains("got wslc"),
+            "unexpected message: {message}"
+        );
     }
 
     // SAFETY: the failing call filled the standalone error detail.

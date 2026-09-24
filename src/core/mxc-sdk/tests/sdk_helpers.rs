@@ -62,8 +62,7 @@ fn probe_test_policy() -> SandboxPolicy {
 #[cfg(target_os = "windows")]
 #[test]
 fn request_probe_accepts_a_supplied_process_container_request() {
-    let request =
-        build_request(&probe_test_policy(), "echo hi", None).expect("request builds");
+    let request = build_request(&probe_test_policy(), "echo hi", None).expect("request builds");
 
     let output = probe(Some(&request)).expect("ProcessContainer request probes");
     let value = serde_json::to_value(output).expect("probe output serializes");

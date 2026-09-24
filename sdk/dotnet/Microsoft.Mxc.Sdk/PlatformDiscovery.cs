@@ -125,6 +125,58 @@ public sealed class PlatformSupport
         Array.Empty<ContainmentBackend>();
 }
 
+/// <summary>
+/// Result of probing which Windows ProcessContainer tier can serve a request.
+/// </summary>
+public sealed class ProbeOutput
+{
+    /// <summary>The selected tier, or null when detection failed.</summary>
+    public IsolationTier? Tier { get; init; }
+
+    /// <summary>Whether the selected tier needs DACL deny augmentation.</summary>
+    public bool? NeedsDaclAugmentation { get; init; }
+
+    /// <summary>Tier degradation warnings.</summary>
+    public IReadOnlyList<string> Warnings { get; init; } = Array.Empty<string>();
+
+    /// <summary>Raw host facts gathered by the detector.</summary>
+    public required ProbeFacts Probes { get; init; }
+
+    /// <summary>The detector failure, or null when detection succeeded.</summary>
+    public string? Error { get; init; }
+}
+
+/// <summary>Raw host facts used by request tier selection.</summary>
+public sealed class ProbeFacts
+{
+    public bool BaseContainerApiPresent { get; init; }
+    public bool NativeCaptureAvailable { get; init; }
+    public bool GuardedCaptureAvailable { get; init; }
+    public bool BfscfgPresent { get; init; }
+    public bool BfsCompiledIn { get; init; }
+    public bool BaseContainerSupportsDenyPaths { get; init; }
+    public bool BaseContainerSupportsEnumeratePaths { get; init; }
+    public bool BaseContainerSupportsIngressHostLoopbackAllow { get; init; }
+    public bool IsolationSessionAvailable { get; init; }
+    public bool HyperlightAvailable { get; init; }
+    public required UiCapabilitySupport UiCapabilities { get; init; }
+}
+
+/// <summary>Host support for enforcing sandbox UI restrictions.</summary>
+public sealed class UiCapabilitySupport
+{
+    public bool CanBlockClipboardRead { get; init; }
+    public bool CanBlockClipboardWrite { get; init; }
+    public bool CanBlockInputInjection { get; init; }
+    public bool CanBlockInputMethodChanges { get; init; }
+    public bool CanBlockExternalUiObjects { get; init; }
+    public bool CanBlockGlobalUiNamespace { get; init; }
+    public bool CanBlockDesktopSwitching { get; init; }
+    public bool CanBlockLogoffOrShutdown { get; init; }
+    public bool CanBlockSystemParameterChanges { get; init; }
+    public bool CanBlockDisplaySettingsChanges { get; init; }
+}
+
 internal sealed class NativeAvailableBackend
 {
     [JsonPropertyName("backend")]
@@ -150,4 +202,91 @@ internal sealed class NativePlatformSupport
 
     [JsonPropertyName("availableMethods")]
     public string[] AvailableMethods { get; init; } = [];
+}
+
+internal sealed class NativeProbeOutput
+{
+    [JsonPropertyName("tier")]
+    public string? Tier { get; init; }
+
+    [JsonPropertyName("needsDaclAugmentation")]
+    public bool? NeedsDaclAugmentation { get; init; }
+
+    [JsonPropertyName("warnings")]
+    public string[] Warnings { get; init; } = [];
+
+    [JsonPropertyName("probes")]
+    public NativeProbeFacts? Probes { get; init; }
+
+    [JsonPropertyName("error")]
+    public string? Error { get; init; }
+}
+
+internal sealed class NativeProbeFacts
+{
+    [JsonPropertyName("baseContainerApiPresent")]
+    public bool BaseContainerApiPresent { get; init; }
+
+    [JsonPropertyName("nativeCaptureAvailable")]
+    public bool NativeCaptureAvailable { get; init; }
+
+    [JsonPropertyName("guardedCaptureAvailable")]
+    public bool GuardedCaptureAvailable { get; init; }
+
+    [JsonPropertyName("bfscfgPresent")]
+    public bool BfscfgPresent { get; init; }
+
+    [JsonPropertyName("bfsCompiledIn")]
+    public bool BfsCompiledIn { get; init; }
+
+    [JsonPropertyName("baseContainerSupportsDenyPaths")]
+    public bool BaseContainerSupportsDenyPaths { get; init; }
+
+    [JsonPropertyName("baseContainerSupportsEnumeratePaths")]
+    public bool BaseContainerSupportsEnumeratePaths { get; init; }
+
+    [JsonPropertyName("baseContainerSupportsIngressHostLoopbackAllow")]
+    public bool BaseContainerSupportsIngressHostLoopbackAllow { get; init; }
+
+    [JsonPropertyName("isolationSessionAvailable")]
+    public bool IsolationSessionAvailable { get; init; }
+
+    [JsonPropertyName("hyperlightAvailable")]
+    public bool HyperlightAvailable { get; init; }
+
+    [JsonPropertyName("uiCapabilities")]
+    public NativeUiCapabilitySupport? UiCapabilities { get; init; }
+}
+
+internal sealed class NativeUiCapabilitySupport
+{
+    [JsonPropertyName("canBlockClipboardRead")]
+    public bool CanBlockClipboardRead { get; init; }
+
+    [JsonPropertyName("canBlockClipboardWrite")]
+    public bool CanBlockClipboardWrite { get; init; }
+
+    [JsonPropertyName("canBlockInputInjection")]
+    public bool CanBlockInputInjection { get; init; }
+
+    [JsonPropertyName("canBlockInputMethodChanges")]
+    public bool CanBlockInputMethodChanges { get; init; }
+
+    [JsonPropertyName("canBlockExternalUiObjects")]
+    public bool CanBlockExternalUiObjects { get; init; }
+
+    [JsonPropertyName("canBlockGlobalUiNamespace")]
+    public bool CanBlockGlobalUiNamespace { get; init; }
+
+    [JsonPropertyName("canBlockDesktopSwitching")]
+    public bool CanBlockDesktopSwitching { get; init; }
+
+    [JsonPropertyName("canBlockLogoffOrShutdown")]
+    public bool CanBlockLogoffOrShutdown { get; init; }
+
+    [JsonPropertyName("canBlockSystemParameterChanges")]
+    public bool CanBlockSystemParameterChanges { get; init; }
+
+    [JsonPropertyName("canBlockDisplaySettingsChanges")]
+    public bool CanBlockDisplaySettingsChanges { get; init; }
 }
