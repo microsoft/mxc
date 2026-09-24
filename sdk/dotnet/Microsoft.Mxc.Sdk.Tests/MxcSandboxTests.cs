@@ -440,6 +440,107 @@ public class MxcSandboxTests
         }
     }
 
+    [Fact]
+    public void Probe_ReturnsTypedNativeResultOrUnsupportedPlatform()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Throws<MxcException>(() => MxcSandbox.Probe());
+            return;
+        }
+
+        var output = MxcSandbox.Probe();
+        Assert.NotNull(output.Probes);
+        Assert.NotNull(output.Probes.UiCapabilities);
+        Assert.NotNull(output.Warnings);
+    }
+
+    [Fact]
+    public void Probe_AcceptsProcessContainerRequest()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var request = new SandboxRequest(
+            new SandboxPolicy { Version = "0.9.0-alpha" },
+            "cmd /c exit 0");
+
+        var output = MxcSandbox.Probe(request);
+        Assert.NotNull(output.Probes);
+    }
+
+    [Fact]
+    public void Probe_RejectsWslcRequest()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var request = new SandboxRequest(
+            new SandboxPolicy { Version = "0.9.0-alpha" },
+            "echo hi")
+        {
+            Containment = new WslcContainment(),
+        };
+
+        var error = Assert.Throws<MxcException>(() => MxcSandbox.Probe(request));
+        Assert.Equal(ErrorCode.UnsupportedContainment, error.Code);
+        Assert.Contains("got wslc", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ParseProbeOutput_MapsEveryField()
+    {
+        const string json = """
+            {
+              "tier": "appcontainer-dacl",
+              "needsDaclAugmentation": true,
+              "warnings": ["fell through"],
+              "probes": {
+                "baseContainerApiPresent": true,
+                "nativeCaptureAvailable": false,
+                "guardedCaptureAvailable": true,
+                "bfscfgPresent": false,
+                "bfsCompiledIn": false,
+                "baseContainerSupportsDenyPaths": true,
+                "baseContainerSupportsEnumeratePaths": false,
+                "baseContainerSupportsIngressHostLoopbackAllow": true,
+                "isolationSessionAvailable": true,
+                "hyperlightAvailable": false,
+                "uiCapabilities": {
+                  "canBlockClipboardRead": true,
+                  "canBlockClipboardWrite": false,
+                  "canBlockInputInjection": true,
+                  "canBlockInputMethodChanges": false,
+                  "canBlockExternalUiObjects": true,
+                  "canBlockGlobalUiNamespace": false,
+                  "canBlockDesktopSwitching": true,
+                  "canBlockLogoffOrShutdown": false,
+                  "canBlockSystemParameterChanges": true,
+                  "canBlockDisplaySettingsChanges": false
+                }
+              },
+              "error": "diagnostic"
+            }
+            """;
+
+        var output = MxcSandbox.ParseProbeOutput(json);
+
+        Assert.Equal(IsolationTier.AppContainerDacl, output.Tier);
+        Assert.True(output.NeedsDaclAugmentation);
+        Assert.Equal(["fell through"], output.Warnings);
+        Assert.True(output.Probes.BaseContainerApiPresent);
+        Assert.True(output.Probes.GuardedCaptureAvailable);
+        Assert.True(output.Probes.BaseContainerSupportsDenyPaths);
+        Assert.True(output.Probes.IsolationSessionAvailable);
+        Assert.True(output.Probes.UiCapabilities.CanBlockClipboardRead);
+        Assert.False(output.Probes.UiCapabilities.CanBlockClipboardWrite);
+        Assert.Equal("diagnostic", output.Error);
+    }
+
     [Theory]
     [InlineData("processcontainer", ContainmentBackend.ProcessContainer)]
     [InlineData("windows_sandbox", ContainmentBackend.WindowsSandbox)]

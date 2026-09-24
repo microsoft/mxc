@@ -152,6 +152,30 @@ Discovery is advisory. Availability can change before launch, and a backend in
 Cross-check `GetPlatformSupport()` and continue handling
 `ErrorCode.BackendUnavailable`.
 
+#### Probe a specific ProcessContainer request
+
+On Windows, `MxcSandbox.Probe()` runs the same request-aware detector as
+`wxc-exec --probe` without creating a sandbox:
+
+```csharp
+ProbeOutput result = MxcSandbox.Probe(request);
+if (result.Error is not null)
+{
+    throw new InvalidOperationException(
+        $"Request cannot be served: {result.Error}");
+}
+Console.WriteLine($"Selected tier: {result.Tier}");
+```
+
+Pass no request to probe the default empty policy. The result is advisory
+because host capabilities can change before launch. Non-Windows hosts throw
+`MxcException` with `ErrorCode.UnsupportedContainment`.
+
+The supplied request must resolve to ProcessContainer containment. Requests
+targeting WSLC, IsolationSession, or another backend throw `MxcException` with
+`ErrorCode.UnsupportedContainment`; they are never projected onto
+ProcessContainer policy.
+
 #### Bubblewrap proxy-only egress (Linux)
 
 Schema `0.8.0-alpha`+ `network.proxy` needs host tooling and kernel permissions
