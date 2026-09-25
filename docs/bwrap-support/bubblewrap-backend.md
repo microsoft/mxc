@@ -668,11 +668,12 @@ request fails if its private namespace cannot be configured.
    proxy-mode execution on the host indefinitely. A successful probe is cached
    for the life of the process; failures are not, so installing the missing
    tool takes effect without a restart.
-1. When `network.proxy` is set, the runner launches an unprivileged HTTP
-   proxy on loopback (`127.0.0.1:N`). For tests, the bundled
-   `unix-test-proxy` binary is used (`builtinTestServer: true`,
-   testing-only and gated behind `--allow-testing-features`); in production callers
-   supply their own proxy via `localhost: <port>` or `url: <url>`.
+1. When a proxy is requested, the runner routes the sandbox to it. On v0.9 the
+   proxy is named by `runtimeConfig.networkProxy` and must already be listening
+   on loopback; the caller starts it. On schema 0.6–0.8 it is named by
+   `network.proxy`, and `builtinTestServer: true` additionally makes the runner
+   launch the bundled `unix-test-proxy` on loopback (testing-only, gated behind
+   `--allow-testing-features`).
 2. The runner creates a same-UID user-namespace supervisor, starts Bubblewrap
    with `--unshare-net`, and keeps the workload behind a startup barrier.
 3. The supervisor attaches `slirp4netns` to Bubblewrap's private network
@@ -712,7 +713,25 @@ request fails if its private namespace cannot be configured.
    the `allowedHosts` / `blockedHosts` lists. Non-cooperating clients are not
    merely unrouted — their traffic is dropped by the egress chain.
 
-### Example: builtin test proxy with allowlist
+### Example: proxy on v0.9
+
+```json
+{
+  "version": "0.9.0-alpha",
+  "containment": "bubblewrap",
+  "process": { "commandLine": "curl -fsSL https://example.com" },
+  "network": {
+    "egress": { "default": "deny" },
+    "ingress": { "default": "deny", "hostLoopback": "deny" }
+  },
+  "runtimeConfig": { "networkProxy": "http://127.0.0.1:8080" }
+}
+```
+
+A proxy request is the proxy-only posture, so `egress.default` must be `deny`
+with no `allow` / `deny` rules; the chain opens the proxy endpoint alone.
+
+### Example (legacy, ≤0.8): builtin test proxy with allowlist
 
 ```json
 {
@@ -730,7 +749,7 @@ request fails if its private namespace cannot be configured.
 }
 ```
 
-### Example: external proxy on loopback
+### Example (legacy, ≤0.8): external proxy on loopback
 
 ```json
 {
@@ -743,10 +762,11 @@ request fails if its private namespace cannot be configured.
 }
 ```
 
-> Both examples declare `0.8.0-alpha` deliberately: the private-namespace and
-> egress-enforcement behavior described above is selected by the schema version,
-> so the same config on `0.6`/`0.7` runs the legacy shared-host-network proxy
-> path instead.
+> Both legacy examples declare `0.8.0-alpha` deliberately: the
+> private-namespace and egress-enforcement behavior described above is selected
+> by the schema version, so the same config on `0.6`/`0.7` runs the legacy
+> shared-host-network proxy path instead. `network.proxy`, `allowedHosts`, and
+> `blockedHosts` are not accepted on v0.9.
 
 ### Checking host support before you run
 
