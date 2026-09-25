@@ -506,7 +506,8 @@ pub extern "C" fn mxc_platform_support_json() -> *mut c_char {
 /// request uses the co-versioned language-binding request contract.
 ///
 /// # Safety
-/// - `request_json_utf8` must be null or valid NUL-terminated UTF-8.
+/// - `request_json_utf8` must be null or point to a valid NUL-terminated byte string;
+///   non-UTF-8 input returns [`MXC_STATUS_INVALID_UTF8`].
 /// - `out_json_utf8` must point to writable pointer storage.
 /// - `out_error` must point to writable [`MxcErrorDetail`] storage.
 /// - On success the caller must free `*out_json_utf8` with [`mxc_string_free`].

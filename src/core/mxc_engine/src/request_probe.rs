@@ -8,7 +8,10 @@
 //! SDK surfaces.
 
 use serde::Serialize;
-use wxc_common::models::{ContainmentBackend, ExecutionRequest};
+use wxc_common::models::ExecutionRequest;
+
+#[cfg(target_os = "windows")]
+use wxc_common::models::ContainmentBackend;
 
 use crate::policy::SandboxRequest;
 use crate::Error;

@@ -53,7 +53,13 @@ export function probeSandboxSupport(config?: ContainerConfig): ProbeOutput {
         '--config-base64',
         Buffer.from(JSON.stringify(config), 'utf-8').toString('base64'),
       ];
-  const value: unknown = JSON.parse(requestProbeRunner(args));
+  let value: unknown;
+  try {
+    value = JSON.parse(requestProbeRunner(args));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`invalid request probe JSON from wxc-exec: ${detail}`);
+  }
   if (!isProbeOutput(value)) {
     throw new Error('invalid request probe output from wxc-exec');
   }
