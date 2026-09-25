@@ -25,6 +25,7 @@
 //! operation), so trailing deny rules take precedence over earlier allow
 //! rules — the behavior callers expect from MXC's `denied_paths`.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -87,6 +88,10 @@ pub fn build_profile_with_proxy(
 
     // Policy-derived deny rules go LAST so they win on conflict.
     write_filesystem_deny(&mut out, &resolved);
+    if let Some(seatbelt) = request.seatbelt.as_ref() {
+        write_denied_path_names(&mut out, &seatbelt.denied_path_names)?;
+        write_denied_unix_socket_paths(&mut out, &seatbelt.denied_unix_socket_paths)?;
+    }
 
     Ok(out)
 }
@@ -376,11 +381,148 @@ fn write_filesystem_deny(out: &mut String, paths: &ResolvedPaths) {
 
 /// Emit a single `(<ops> (subpath …)…)` rule over already-resolved paths.
 fn write_path_rule(out: &mut String, ops: &str, paths: &[String]) {
+    write_rule(
+        out,
+        ops,
+        paths
+            .iter()
+            .map(|p| format!("(subpath {})", quote_scheme(p))),
+    );
+}
+
+/// Emit a single `(<ops> <filter>…)` rule.
+fn write_rule(out: &mut String, ops: &str, filters: impl IntoIterator<Item = String>) {
     let _ = writeln!(out, "({ops}");
-    for p in paths {
-        let _ = writeln!(out, "    (subpath {})", quote_scheme(p));
+    for filter in filters {
+        let _ = writeln!(out, "    {filter}");
     }
     out.push_str(")\n");
+}
+
+/// Characters a `deniedPathNames` entry cannot contain besides the `/`
+/// separator. They are reserved so that a glob-looking entry is rejected
+/// instead of silently matching only a file with that literal name.
+const RESERVED_NAME_CHARS: &str = r"*?[]{}\";
+
+/// Emit `seatbelt.deniedPathNames`: each name, and everything below it, at any
+/// depth.
+///
+/// Seatbelt evaluates regex filters per access, so these rules also cover
+/// entries created after launch, and nothing is enumerated. They match
+/// anywhere rather than below a chosen root, so moving a directory that holds
+/// a match to another writable location keeps it denied. Renaming a leading
+/// component of a multi-component name would still move the rest out from
+/// under its regex (`.config` for `.config/gh`), so `file-write-unlink`
+/// (rename away and delete) is denied on those components too.
+fn write_denied_path_names(out: &mut String, names: &[String]) -> Result<(), String> {
+    if names.is_empty() {
+        return Ok(());
+    }
+    let mut denied = Vec::new();
+    let mut pinned = BTreeSet::new();
+    for name in names {
+        let components = name_regex_components(name)?;
+        denied.push(regex_filter(&format!(
+            "^/(.*/)?{}(/.*)?$",
+            components.join("/")
+        )));
+        for end in 1..components.len() {
+            pinned.insert(regex_filter(&format!(
+                "^/(.*/)?{}$",
+                components[..end].join("/")
+            )));
+        }
+    }
+
+    out.push_str(";; --- seatbelt.deniedPathNames (override broader allow rules) ---\n");
+    write_rule(
+        out,
+        "deny file-read* file-write* network-bind network-outbound",
+        denied,
+    );
+    // A rule without filters would match every path.
+    if !pinned.is_empty() {
+        out.push_str(";; --- seatbelt.deniedPathNames: keep leading components in place ---\n");
+        write_rule(out, "deny file-write-unlink", pinned);
+    }
+    Ok(())
+}
+
+/// Emit `seatbelt.deniedUnixSocketPaths`. Under a path filter, `network-bind`
+/// and `network-outbound` match only AF_UNIX sockets, so file access and IP
+/// networking are unchanged.
+fn write_denied_unix_socket_paths(out: &mut String, paths: &[String]) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let paths = paths
+        .iter()
+        .map(|path| {
+            let resolved = resolve_policy_path(path)?;
+            // The kernel checks absolute paths, so a relative rule never matches.
+            if resolved.starts_with('/') {
+                Ok(resolved)
+            } else {
+                Err(format!(
+                    "Seatbelt: seatbelt.deniedUnixSocketPaths entry '{path}' must be an \
+                     absolute path."
+                ))
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    out.push_str(";; --- seatbelt.deniedUnixSocketPaths (AF_UNIX bind/connect only) ---\n");
+    write_path_rule(out, "deny network-bind network-outbound", &paths);
+    Ok(())
+}
+
+/// Split a `deniedPathNames` entry into its components, each rendered as a
+/// regex that matches it literally.
+fn name_regex_components(name: &str) -> Result<Vec<String>, String> {
+    name.split('/')
+        .map(|component| {
+            let supported = !matches!(component, "" | "." | "..")
+                && component
+                    .chars()
+                    .all(|c| (' '..='~').contains(&c) && !RESERVED_NAME_CHARS.contains(c));
+            if supported {
+                Ok(component_regex(component))
+            } else {
+                Err(format!(
+                    "Seatbelt: seatbelt.deniedPathNames entry {name:?} is not supported. A name \
+                     is one or more literal path components joined by '/'. Each component must \
+                     be printable ASCII, must not be empty, '.' or '..', and must not contain \
+                     the reserved characters * ? [ ] {{ }} \\."
+                ))
+            }
+        })
+        .collect()
+}
+
+/// A regex matching `component` literally, with each ASCII letter in either
+/// case: Seatbelt regexes have no case-insensitive flag, and APFS volumes are
+/// case-insensitive by default.
+fn component_regex(component: &str) -> String {
+    let mut out = String::with_capacity(component.len() * 4);
+    for c in component.chars() {
+        if c.is_ascii_alphabetic() {
+            out.push('[');
+            out.push(c.to_ascii_lowercase());
+            out.push(c.to_ascii_uppercase());
+            out.push(']');
+        } else {
+            if r"\.+*?()|[]{}^$".contains(c) {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// A `(regex …)` filter; the Scheme string escaping keeps the regex's own
+/// backslashes intact.
+fn regex_filter(regex: &str) -> String {
+    format!("(regex {})", quote_scheme(regex))
 }
 
 fn write_network_rules(
@@ -2132,6 +2274,125 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn with_exclusions(names: &[&str], socket_paths: &[&str]) -> ExecutionRequest {
+        let mut r = req();
+        r.seatbelt = Some(SeatbeltConfig {
+            denied_path_names: names.iter().map(|name| name.to_string()).collect(),
+            denied_unix_socket_paths: socket_paths.iter().map(|path| path.to_string()).collect(),
+            ..Default::default()
+        });
+        r
+    }
+
+    #[test]
+    fn denied_path_names_match_at_any_depth_and_pin_leading_components() {
+        let p = build_profile(&with_exclusions(&[".ssh", ".config/gh"], &[])).unwrap();
+        let expected = r#";; --- seatbelt.deniedPathNames (override broader allow rules) ---
+(deny file-read* file-write* network-bind network-outbound
+    (regex "^/(.*/)?\\.[sS][sS][hH](/.*)?$")
+    (regex "^/(.*/)?\\.[cC][oO][nN][fF][iI][gG]/[gG][hH](/.*)?$")
+)
+;; --- seatbelt.deniedPathNames: keep leading components in place ---
+(deny file-write-unlink
+    (regex "^/(.*/)?\\.[cC][oO][nN][fF][iI][gG]$")
+)
+"#;
+        assert!(p.ends_with(expected), "profile:\n{p}");
+    }
+
+    #[test]
+    fn single_component_names_need_no_unlink_rule() {
+        let p = build_profile(&with_exclusions(&["id_rsa", ".ssh"], &[])).unwrap();
+        assert!(p.contains(r#"(regex "^/(.*/)?[iI][dD]_[rR][sS][aA](/.*)?$")"#));
+        assert!(!p.contains("file-write-unlink"), "profile:\n{p}");
+    }
+
+    #[test]
+    fn denied_path_names_are_matched_literally() {
+        let p = build_profile(&with_exclusions(&["a+b(1).$^|~ z"], &[])).unwrap();
+        assert!(
+            p.contains(r#"(regex "^/(.*/)?[aA]\\+[bB]\\(1\\)\\.\\$\\^\\|~ [zZ](/.*)?$")"#),
+            "profile:\n{p}"
+        );
+    }
+
+    #[test]
+    fn path_exclusions_follow_every_broader_allow() {
+        let mut r = with_exclusions(&[".ssh"], &["/tmp/work"]);
+        r.policy.readwrite_paths = vec!["/tmp".into()];
+        r.policy.denied_paths = vec!["/tmp/other".into()];
+        r.policy.network_egress = Some(egress(NetworkAction::Allow));
+        let p = build_profile(&r).unwrap();
+
+        let names = p.find(";; --- seatbelt.deniedPathNames").unwrap();
+        let sockets = p.find(";; --- seatbelt.deniedUnixSocketPaths").unwrap();
+        for allow in [RW_RULE, "(allow network-outbound)", DENY_RULE] {
+            let idx = p.find(allow).unwrap();
+            assert!(
+                idx < names && idx < sockets,
+                "{allow} must come first:\n{p}"
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_path_names_are_rejected() {
+        for name in [
+            "",
+            "/",
+            "/.ssh",
+            ".ssh/",
+            "a//b",
+            ".",
+            "..",
+            "a/../b",
+            "*.pem",
+            "id_rsa?",
+            "[ab]",
+            "{a,b}",
+            r"a\b",
+            "caf\u{e9}",
+            "tab\there",
+        ] {
+            let err = build_profile(&with_exclusions(&[name], &[])).unwrap_err();
+            assert!(err.contains("is not supported"), "{name:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn denied_unix_socket_paths_deny_only_socket_operations() {
+        let p = build_profile(&with_exclusions(&[], &["/tmp/host"])).unwrap();
+        assert!(
+            p.ends_with(
+                ";; --- seatbelt.deniedUnixSocketPaths (AF_UNIX bind/connect only) ---\n\
+                 (deny network-bind network-outbound\n    (subpath \"/private/tmp/host\")\n)\n"
+            ),
+            "profile:\n{p}"
+        );
+    }
+
+    #[test]
+    fn unusable_socket_paths_are_rejected() {
+        for (path, message) in [
+            ("relative/dir", "must be an absolute path"),
+            ("", "must be an absolute path"),
+            ("/tmp/../host", "'..' segment"),
+        ] {
+            let err = build_profile(&with_exclusions(&[], &[path])).unwrap_err();
+            assert!(err.contains(message), "{path:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn empty_exclusions_leave_the_profile_unchanged() {
+        let mut r = req();
+        r.policy.readwrite_paths = vec!["/tmp/work".into()];
+        r.policy.denied_paths = vec!["/tmp/work/secret".into()];
+        let before = build_profile(&r).unwrap();
+        r.seatbelt = Some(SeatbeltConfig::default());
+        assert_eq!(build_profile(&r).unwrap(), before);
     }
 
     #[test]

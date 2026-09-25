@@ -368,4 +368,13 @@ pub struct Seatbelt {
     /// Additional Mach service global names the process may resolve.
     #[serde(default)]
     pub extra_mach_lookups: OptionalField<Vec<String>>,
+    /// Literal names denied, with everything below them, at any depth: one
+    /// path component such as `.ssh`, or several joined by `/` such as
+    /// `.config/gh`. Requires `--experimental`.
+    #[serde(default)]
+    pub denied_path_names: OptionalField<Vec<String>>,
+    /// Paths at or below which AF_UNIX sockets cannot be bound or connected,
+    /// even inside a read-write grant. Requires `--experimental`.
+    #[serde(default)]
+    pub denied_unix_socket_paths: OptionalField<Vec<String>>,
 }

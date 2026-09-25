@@ -965,6 +965,8 @@ fn make_seatbelt_config(sb: wire::Seatbelt) -> SeatbeltConfig {
         nested_pty,
         keychain_access,
         extra_mach_lookups,
+        denied_path_names,
+        denied_unix_socket_paths,
     } = sb;
     SeatbeltConfig {
         profile_override,
@@ -973,6 +975,8 @@ fn make_seatbelt_config(sb: wire::Seatbelt) -> SeatbeltConfig {
         nested_pty: nested_pty.unwrap_or(true),
         keychain_access: keychain_access.unwrap_or(false),
         extra_mach_lookups: extra_mach_lookups.unwrap_or_default(),
+        denied_path_names: denied_path_names.unwrap_or_default(),
+        denied_unix_socket_paths: denied_unix_socket_paths.unwrap_or_default(),
     }
 }
 
@@ -4733,6 +4737,19 @@ mod tests {
                 crate::models::LaunchMethod::Open
             ));
         }
+    }
+
+    #[test]
+    fn exact_v0_10_loader_maps_seatbelt_path_exclusions() {
+        let json = r#"{"version":"0.10.0-alpha","containment":"seatbelt","process":{"commandLine":"echo hi"},"seatbelt":{"deniedPathNames":[".ssh",".config/gh"],"deniedUnixSocketPaths":["/work"]}}"#;
+        let MxcRequest::OneShot(request) =
+            load_mxc_request_from_json(json, &mut test_logger()).unwrap()
+        else {
+            panic!("expected a one-shot request");
+        };
+        let seatbelt = request.seatbelt.expect("seatbelt should be populated");
+        assert_eq!(seatbelt.denied_path_names, [".ssh", ".config/gh"]);
+        assert_eq!(seatbelt.denied_unix_socket_paths, ["/work"]);
     }
 
     #[test]

@@ -177,6 +177,8 @@ fn convert_seatbelt(value: contract::Seatbelt) -> wire::Seatbelt {
         nested_pty,
         keychain_access,
         extra_mach_lookups,
+        denied_path_names,
+        denied_unix_socket_paths,
     } = value;
     wire::Seatbelt {
         profile_override: profile_override.into_option(),
@@ -186,6 +188,8 @@ fn convert_seatbelt(value: contract::Seatbelt) -> wire::Seatbelt {
         nested_pty: nested_pty.into_option(),
         keychain_access: keychain_access.into_option(),
         extra_mach_lookups: extra_mach_lookups.into_option(),
+        denied_path_names: denied_path_names.into_option(),
+        denied_unix_socket_paths: denied_unix_socket_paths.into_option(),
     }
 }
 

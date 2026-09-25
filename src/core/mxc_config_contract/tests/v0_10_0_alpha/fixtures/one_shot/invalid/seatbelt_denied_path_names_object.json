@@ -1,0 +1,15 @@
+{
+  "version": "0.10.0-alpha",
+  "containment": "seatbelt",
+  "process": {
+    "commandLine": "echo path names must be strings"
+  },
+  "seatbelt": {
+    "deniedPathNames": [
+      {
+        "root": "/Users/example/project",
+        "names": [".ssh"]
+      }
+    ]
+  }
+}

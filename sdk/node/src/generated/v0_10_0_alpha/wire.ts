@@ -661,6 +661,14 @@ export interface RuntimeConfig {
  */
 export interface Seatbelt {
   /**
+   * Literal names denied, with everything below them, at any depth: one path component such as `.ssh`, or several joined by `/` such as `.config/gh`. Requires `--experimental`.
+   */
+  deniedPathNames?: string[];
+  /**
+   * Paths at or below which AF_UNIX sockets cannot be bound or connected, even inside a read-write grant. Requires `--experimental`.
+   */
+  deniedUnixSocketPaths?: string[];
+  /**
    * Additional Mach service global names the process may resolve.
    */
   extraMachLookups?: string[];

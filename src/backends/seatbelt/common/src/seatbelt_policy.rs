@@ -44,6 +44,36 @@ pub fn validate_seatbelt_ui_policy(request: &ExecutionRequest) -> Result<(), Str
     Ok(())
 }
 
+/// Reject `seatbelt.deniedPathNames` and `seatbelt.deniedUnixSocketPaths`
+/// wherever their rules would not be emitted. Both only add deny rules, so a
+/// run that dropped them would silently weaken the sandbox: the usual
+/// "ignore until `--experimental`" treatment would fail open.
+pub fn validate_seatbelt_path_exclusions(request: &ExecutionRequest) -> Result<(), String> {
+    let Some(seatbelt) = request.seatbelt.as_ref() else {
+        return Ok(());
+    };
+    if seatbelt.denied_path_names.is_empty() && seatbelt.denied_unix_socket_paths.is_empty() {
+        return Ok(());
+    }
+    if !request.experimental_enabled {
+        return Err("Seatbelt: seatbelt.deniedPathNames and \
+                    seatbelt.deniedUnixSocketPaths are experimental and require \
+                    --experimental (SDK: experimental: true). They are rejected rather \
+                    than ignored, because dropping a deny rule would weaken the sandbox."
+            .to_string());
+    }
+    if seatbelt.profile_override.is_some() {
+        return Err(
+            "Seatbelt: seatbelt.profileOverride cannot be combined with \
+                    seatbelt.deniedPathNames or seatbelt.deniedUnixSocketPaths. The \
+                    override replaces the generated profile, so their deny rules would \
+                    never be emitted."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Effective outbound posture, preferring the directional `network.egress`
 /// over the legacy `defaultPolicy` when both are present.
 pub fn egress_allowed(policy: &ContainerPolicy) -> bool {
@@ -399,6 +429,52 @@ mod tests {
         assert!(validate_seatbelt_ui_policy(&gui_request(false, true)).is_ok());
         // An absent seatbelt section must not trip the rule either.
         assert!(validate_seatbelt_ui_policy(&ExecutionRequest::default()).is_ok());
+    }
+
+    fn path_exclusion_request(experimental: bool) -> ExecutionRequest {
+        ExecutionRequest {
+            experimental_enabled: experimental,
+            seatbelt: Some(SeatbeltConfig {
+                denied_unix_socket_paths: vec!["/tmp/host".to_string()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn path_exclusions_require_experimental_instead_of_being_ignored() {
+        let msg = validate_seatbelt_path_exclusions(&path_exclusion_request(false)).unwrap_err();
+        assert!(msg.contains("--experimental"), "got: {msg}");
+
+        let mut names = path_exclusion_request(false);
+        let seatbelt = names.seatbelt.as_mut().unwrap();
+        seatbelt.denied_unix_socket_paths.clear();
+        seatbelt.denied_path_names = vec![".ssh".to_string()];
+        assert!(validate_seatbelt_path_exclusions(&names).is_err());
+
+        assert!(validate_seatbelt_path_exclusions(&path_exclusion_request(true)).is_ok());
+    }
+
+    #[test]
+    fn path_exclusions_cannot_be_combined_with_a_profile_override() {
+        let mut r = path_exclusion_request(true);
+        r.seatbelt.as_mut().unwrap().profile_override = Some("(version 1)".to_string());
+        let msg = validate_seatbelt_path_exclusions(&r).unwrap_err();
+        assert!(msg.contains("profileOverride"), "got: {msg}");
+    }
+
+    #[test]
+    fn requests_without_path_exclusions_do_not_need_experimental() {
+        assert!(validate_seatbelt_path_exclusions(&ExecutionRequest::default()).is_ok());
+        let override_only = ExecutionRequest {
+            seatbelt: Some(SeatbeltConfig {
+                profile_override: Some("(version 1)".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(validate_seatbelt_path_exclusions(&override_only).is_ok());
     }
 
     #[test]

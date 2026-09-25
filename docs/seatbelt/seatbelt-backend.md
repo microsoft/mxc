@@ -152,6 +152,81 @@ networking.
 > plane. Keep the read-write root narrow, and put sensitive sockets in
 > `deniedPaths`.
 
+### Denied names and socket paths
+
+> Development schema `0.10.0-alpha` only, and only with `--experimental`
+> (`experimental: true` in the SDK). A config that sets either field without it
+> is rejected, not run without the rules.
+
+Two `seatbelt` options add deny rules without enumerating any directory tree:
+
+```json
+"seatbelt": {
+    "deniedPathNames": [".ssh", ".aws", ".config/gh"],
+    "deniedUnixSocketPaths": ["/Users/me/project"]
+}
+```
+
+| Field | Generated rule | Effect |
+|---|---|---|
+| `deniedPathNames` | `(deny file-read* file-write* network-bind network-outbound (regex …))` | Each name, and everything below it, at any depth |
+| `deniedUnixSocketPaths` | `(deny network-bind network-outbound (subpath …))` | AF_UNIX `bind()` and `connect()` at or below each path; file access is unchanged |
+
+Both are emitted after every allow, including `readwritePaths`, `guiAccess`,
+and `egress.default: "allow"`, so they win. Seatbelt evaluates the regexes on
+each access, so a name created after launch is covered too.
+
+**Name syntax.**
+
+- A name is one path component (`.ssh`) or several joined by `/`
+  (`.config/gh`). The components must appear consecutively in the accessed
+  path: `.config/gh` matches `…/.config/gh/hosts.yml` but not
+  `…/.config/other/gh`.
+- A name is matched literally, anywhere. It has no root: the other filesystem
+  rules still decide what is reachable at all.
+- ASCII letters match either case (`.SSH` matches `.ssh`), because APFS is
+  case-insensitive by default. Every other character must match exactly.
+- These are rejected rather than guessed at: `*`, `?`, `[`, `]`, `{`, `}`, and
+  `\`, which are reserved so that a glob-looking name cannot silently match only
+  itself; an empty, `.`, or `..` component, including a leading or trailing `/`;
+  and any character outside printable ASCII.
+
+**Renames.** A process that can write a directory could otherwise rename it
+to move a match out from under its rule. The denied name itself cannot be
+renamed or deleted. For a multi-component name, `file-write-unlink` (rename
+and delete) is also denied on its leading components, so `mv .config c` cannot
+expose `c/gh`. Other directories stay renamable. Moving one that holds a match,
+even to another writable root, keeps the match denied, because names match
+anywhere.
+
+**Symlinks and aliases.** Seatbelt matches the path the kernel resolves, not
+the file:
+
+- A symlink that resolves into a denied name is denied: `link -> …/.ssh`
+  exposes nothing.
+- An access through a denied name is denied even when that name is itself a
+  symlink: `…/.ssh -> /elsewhere` blocks `…/.ssh/…`.
+- The rule does not follow a symlink back to its target: `/elsewhere` stays
+  reachable under its own name wherever another rule grants it.
+- A hard link, or any other alias that reaches a matching file through a
+  non-matching path, is not guaranteed to be denied.
+
+To deny a known target under every name that resolves to it, add its resolved
+path to `filesystem.deniedPaths`.
+
+**Socket paths.** `deniedUnixSocketPaths` entries are resolved like
+`deniedPaths` and must be absolute. They are independent of `deniedPathNames`
+and do not deny file access. Keep sockets the workload needs, such as a private
+scratch directory for IPC, outside them.
+
+The rule matches a socket's path at `bind()` or `connect()`, not the socket
+itself. A process that can rename a socket, or a directory above it, out of
+the listed path can then reach it. `filesystem.deniedPaths` also denies
+renaming the directory or anything in it.
+
+`profileOverride` replaces the generated profile, so combining it with either
+field is rejected.
+
 ### Always-on baseline
 
 Every sandbox gets these regardless of policy, so the dynamic linker, shells,
@@ -373,6 +448,8 @@ Set under a top-level `"seatbelt"` key.
 | `launchMethod` | `"exec"` \| `"open"` | `"exec"` |**Removed in `0.9.0-alpha`** (see below); available on `0.7.0-alpha` and `0.8.0-alpha`. `"exec"` applies `sandbox_init()` then execs directly. `"open"` runs the command as the first shell of a Terminal.app instance — and sandboxes that shell. Terminal itself runs unsandboxed. |
 | `profileOverride` | string | unset | Replaces the generated profile with raw TinyScheme. **All `filesystem`/`network`/`ui` policy is ignored for profile generation.** Last resort. |
 | `extraMachLookups` | string[] | `[]` | Additional Mach services the sandbox may look up, as exact `global-name` values. The escape hatch for an app that needs one XPC service without resorting to `profileOverride`. |
+| `deniedPathNames` | string[] | `[]` | Names such as `.ssh` or `.config/gh`, denied with everything below them at any depth. `0.10.0-alpha` and `--experimental` only — see [Denied names and socket paths](#denied-names-and-socket-paths). |
+| `deniedUnixSocketPaths` | string[] | `[]` | Paths at or below which AF_UNIX `bind()` and `connect()` are denied, even inside `readwritePaths`. `0.10.0-alpha` and `--experimental` only. |
 
 <details>
 <summary><code>guiAccess</code> — exactly what it opens</summary>
@@ -642,8 +719,12 @@ the rule applies to both.
 | Config | Why it's rejected | Do this instead |
 |---|---|---|
 | Any path containing a `..` segment | macOS resolves `..` *after* following symlinks, so a lexically-resolved rule can silently point elsewhere (`/tmp/..` is `/private`, not `/`) | Pass the fully resolved path |
+| `seatbelt.deniedPathNames` or `seatbelt.deniedUnixSocketPaths` without `--experimental` | Ignoring them, as other development features are ignored, would silently drop deny rules | Pass `--experimental` |
+| A `deniedPathNames` entry containing `*`, `?`, `[`, `]`, `{`, `}`, `\`, an empty, `.`, or `..` component, or a character outside printable ASCII | Names are literal; a glob-looking name would otherwise match only itself | Spell out each name |
+| A relative `deniedUnixSocketPaths` entry | The kernel checks absolute paths, so the rule would match nothing | Pass an absolute path |
+| `profileOverride` with either field | The override replaces the generated profile, which would drop their rules | Use one or the other |
 
-This one is **Seatbelt-only** — the shared parser accepts `..`, so a
+The `..` rule is **Seatbelt-only** — the shared parser accepts `..`, so a
 cross-backend policy using it will run on Linux and fail on macOS. That's
 deliberate: the alternative is a rule that matches nothing, which for
 `deniedPaths` would fail *open*.
