@@ -8,12 +8,13 @@ library, which wraps the Rust engine.
 Breaking changes and migration notes are recorded in
 [`CHANGELOG.md`](CHANGELOG.md).
 
-## Building the NuGet package
+## NuGet packaging
 
-On Windows, `build.bat --all` creates a Windows x64/ARM64 local package under
-`output\packages` with a `-local-windows` version suffix. Add `--with-wslc` to
-include the WSLC runtime. The governed build pipeline creates the publishable
-package containing all supported Windows, Linux, and macOS runtime assets.
+The governed build pipeline creates the publishable package containing all
+supported Windows, Linux, and macOS runtime assets. `build.bat` creates a
+separate architecture-specific local package for each selected Windows RID
+under `output\packages`; `--all` creates both `win-x64` and `win-arm64`
+packages. Local package versions use a `-local-<rid>` suffix.
 
 ```
 C# (Microsoft.Mxc.Sdk)
@@ -757,10 +758,9 @@ library when no prebuilt path is supplied.
 
 A build of this project puts the freshly built native unit next to the managed
 assembly. `dotnet pack` includes that exact unit under
-`runtimes/<host-rid>/native/`; `build.bat --all` additionally pre-stages the
-other Windows RID in a Windows-only local package. The official package
-includes `mxc_ffi` for `win-x64`, `win-arm64`, `linux-x64`, `linux-arm64`, and
-`osx-arm64`.
+`runtimes/<rid>/native/`. Local `build.bat` packages contain only their selected
+Windows RID. The official package includes `mxc_ffi` for `win-x64`,
+`win-arm64`, `linux-x64`, `linux-arm64`, and `osx-arm64`.
 
 ## Supported surface
 

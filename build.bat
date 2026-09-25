@@ -9,7 +9,6 @@ set "WITH_NANVIX=0"
 set "WITH_WSLC=0"
 set "WITH_ISOLATION_SESSION=0"
 set "WITH_HYPERLIGHT=0"
-set "WITH_WSLC_PACKAGE_VERIFY="
 
 :: Parse arguments
 :parse_args
@@ -49,7 +48,6 @@ if "%WITH_NANVIX%"=="1" set "CARGO_FLAGS=--features microvm %CARGO_FLAGS%"
 if "%WITH_WSLC%"=="1" set "CARGO_FLAGS=--features wslc %CARGO_FLAGS%"
 if "%WITH_ISOLATION_SESSION%"=="1" set "CARGO_FLAGS=--features isolation_session %CARGO_FLAGS%"
 if "%WITH_HYPERLIGHT%"=="1" set "CARGO_FLAGS=--features hyperlight %CARGO_FLAGS%"
-if "%WITH_WSLC%"=="1" set "WITH_WSLC_PACKAGE_VERIFY=-RequireWslc"
 set "DOTNET_CONFIG=Release"
 if "%BUILD_CONFIG%"=="debug" set "DOTNET_CONFIG=Debug"
 set "DOTNET_BUILD_PROPERTIES="
@@ -202,59 +200,30 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
     )
 )
 
-:: Build the managed .NET SDK. The native runtime assets were staged above so
-:: an --all build can produce one package containing both Windows RIDs.
+:: Build the managed .NET SDK. Native runtime assets are staged above for
+:: local execution and architecture-specific local packages. The governed
+:: pipeline assembles the cross-platform package.
 echo.
 echo Building .NET SDK...
 call dotnet restore sdk\dotnet\Microsoft.Mxc.Sdk\Microsoft.Mxc.Sdk.csproj --nologo || goto :error_root
 call dotnet build sdk\dotnet\Microsoft.Mxc.Sdk\Microsoft.Mxc.Sdk.csproj --configuration !DOTNET_CONFIG! --no-restore --nologo !DOTNET_BUILD_PROPERTIES! || goto :error_root
 
-if "%BUILD_ALL%"=="1" (
-    echo.
-    echo Packaging Microsoft.Mxc.Sdk NuGet package...
-    if not exist "output\packages" mkdir "output\packages"
-    set "DOTNET_PACKAGE_ROOT=output\dotnet-package-input"
-    if exist "!DOTNET_PACKAGE_ROOT!" rmdir /s /q "!DOTNET_PACKAGE_ROOT!"
-    mkdir "!DOTNET_PACKAGE_ROOT!\managed"
-    mkdir "!DOTNET_PACKAGE_ROOT!\runtimes\win-x64\native"
-    mkdir "!DOTNET_PACKAGE_ROOT!\runtimes\win-arm64\native"
-    copy /Y "sdk\dotnet\Microsoft.Mxc.Sdk\bin\!DOTNET_CONFIG!\net8.0\Microsoft.Mxc.Sdk.dll" "!DOTNET_PACKAGE_ROOT!\managed\" >nul || goto :error_root
-    copy /Y "sdk\dotnet\Microsoft.Mxc.Sdk\bin\!DOTNET_CONFIG!\net8.0\Microsoft.Mxc.Sdk.pdb" "!DOTNET_PACKAGE_ROOT!\managed\" >nul || goto :error_root
-    for %%R in (win-x64 win-arm64) do (
-        for %%F in (mxc_ffi.dll plm.exe) do (
-            if not exist "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\%%R\native\%%F" (
-                echo ERROR: .NET package input is missing %%R\native\%%F
-                goto :error_root
-            )
-            copy /Y "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\%%R\native\%%F" "!DOTNET_PACKAGE_ROOT!\runtimes\%%R\native\" >nul || goto :error_root
-        )
-        if "%WITH_WSLC%"=="1" (
-            for %%F in (wxc-wslc-daemon.exe wslcsdk.dll) do (
-                if not exist "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\%%R\native\%%F" (
-                    echo ERROR: WSLC-enabled .NET package input is missing %%R\native\%%F
-                    goto :error_root
-                )
-                copy /Y "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\%%R\native\%%F" "!DOTNET_PACKAGE_ROOT!\runtimes\%%R\native\" >nul || goto :error_root
-            )
-        )
-    )
-    for /f "usebackq delims=" %%V in (`powershell -NoProfile -Command "[xml]$p = Get-Content 'sdk\dotnet\Microsoft.Mxc.Sdk\Microsoft.Mxc.Sdk.csproj'; $p.Project.PropertyGroup.Version"`) do set "DOTNET_PACKAGE_VERSION=%%V"
-    set "DOTNET_LOCAL_PACKAGE_VERSION=!DOTNET_PACKAGE_VERSION!-local-windows"
-    call dotnet restore sdk\dotnet\Microsoft.Mxc.Sdk.Package\Microsoft.Mxc.Sdk.Package.csproj --nologo || goto :error_root
-    call dotnet pack sdk\dotnet\Microsoft.Mxc.Sdk.Package\Microsoft.Mxc.Sdk.Package.csproj --configuration !DOTNET_CONFIG! --no-restore --output output\packages --nologo ^
-        -p:PackageVersion=!DOTNET_LOCAL_PACKAGE_VERSION! ^
-        -p:WindowsOnlyPackage=true ^
-        -p:ManagedOutput="%CD%\!DOTNET_PACKAGE_ROOT!\managed" ^
-        -p:X64Native="%CD%\!DOTNET_PACKAGE_ROOT!\runtimes\win-x64\native" ^
-        -p:Arm64Native="%CD%\!DOTNET_PACKAGE_ROOT!\runtimes\win-arm64\native" ^
-        -p:RepositoryRoot="%CD%" || goto :error_root
-    powershell -NoProfile -ExecutionPolicy Bypass -File .azure-pipelines\scripts\verify-dotnet-nuget-package.ps1 ^
-        -PackagePath "output\packages\Microsoft.Mxc.Sdk.!DOTNET_LOCAL_PACKAGE_VERSION!.nupkg" ^
-        -WindowsOnly ^
-        !WITH_WSLC_PACKAGE_VERIFY! || goto :error_root
-    echo   Created Windows-only local package output\packages\Microsoft.Mxc.Sdk.!DOTNET_LOCAL_PACKAGE_VERSION!.nupkg
-) else (
-    echo   Skipping Microsoft.Mxc.Sdk NuGet package; use --all to build both Windows RIDs.
+echo.
+echo Packaging architecture-specific Microsoft.Mxc.Sdk NuGet package...
+if not exist "output\packages" mkdir "output\packages"
+for /f "usebackq delims=" %%V in (`powershell -NoProfile -Command "[xml]$p = Get-Content 'sdk\dotnet\Microsoft.Mxc.Sdk\Microsoft.Mxc.Sdk.csproj'; $p.Project.PropertyGroup.Version"`) do set "DOTNET_PACKAGE_VERSION=%%V"
+set "DOTNET_PACKAGE_TARGETS=%BUILD_ARCH%"
+if "%BUILD_ALL%"=="1" set "DOTNET_PACKAGE_TARGETS=x86_64-pc-windows-msvc aarch64-pc-windows-msvc"
+for %%T in (!DOTNET_PACKAGE_TARGETS!) do (
+    if "%%T"=="x86_64-pc-windows-msvc" (set "PACKAGE_RID=win-x64") else (set "PACKAGE_RID=win-arm64")
+    set "PACKAGE_NATIVE_DIR=%CD%\sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!PACKAGE_RID!\native"
+    call dotnet pack sdk\dotnet\Microsoft.Mxc.Sdk\Microsoft.Mxc.Sdk.csproj --configuration !DOTNET_CONFIG! --no-restore --no-build --output output\packages --nologo ^
+        -p:PackageVersion=!DOTNET_PACKAGE_VERSION!-local-!PACKAGE_RID! ^
+        -p:MxcPrebuiltNativeDir="!PACKAGE_NATIVE_DIR!" ^
+        -p:MxcPackageRid=!PACKAGE_RID! ^
+        -p:MxcPackSingleRid=true ^
+        !DOTNET_BUILD_PROPERTIES! || goto :error_root
+    echo   Created output\packages\Microsoft.Mxc.Sdk.!DOTNET_PACKAGE_VERSION!-local-!PACKAGE_RID!.nupkg
 )
 
 :: Build npm packages

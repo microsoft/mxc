@@ -67,6 +67,8 @@
 
     <MxcHostRid>$(NETCoreSdkPortableRuntimeIdentifier)</MxcHostRid>
     <MxcHostArch>$(MxcHostRid.Substring($([MSBuild]::Add($(MxcHostRid.LastIndexOf('-')), 1))))</MxcHostArch>
+    <MxcPackageRid Condition="'$(MxcPackageRid)' == ''">$(MxcHostRid)</MxcPackageRid>
+    <MxcPackSingleRid Condition="'$(MxcPackSingleRid)' == ''">false</MxcPackSingleRid>
     <MxcOtherWindowsRid Condition="'$(MxcHostRid)' == 'win-x64'">win-arm64</MxcOtherWindowsRid>
     <MxcOtherWindowsRid Condition="'$(MxcHostRid)' == 'win-arm64'">win-x64</MxcOtherWindowsRid>
   </PropertyGroup>
@@ -268,14 +270,16 @@
   <ItemGroup>
     <None Include="runtimes/**/*"
           Exclude="runtimes/$(MxcHostRid)/native/*;runtimes/*/mxc-build-features.txt"
+          Condition="'$(MxcPackSingleRid)' != 'true'"
           Pack="true"
           PackagePath="runtimes/" />
   </ItemGroup>
 
   <!-- A clean dotnet pack has no pre-staged host RID. Add the exact native
        unit produced by this invocation; remove a same-RID pre-staged copy to
-       avoid duplicate package paths while retaining other RIDs assembled by
-       build.bat's all-architectures mode. -->
+       avoid duplicate package paths. Local build.bat packaging sets
+       MxcPackSingleRid and MxcPackageRid to emit one package per selected
+       Windows architecture without including other staged RIDs. -->
   <PropertyGroup>
     <TargetsForTfmSpecificContentInPackage>$(TargetsForTfmSpecificContentInPackage);MxcAddNativeUnitToPackage</TargetsForTfmSpecificContentInPackage>
   </PropertyGroup>
@@ -283,9 +287,9 @@
           DependsOnTargets="GenerateNativeBindings;MxcLoadPrebuiltNativeUnit">
     <ItemGroup>
     <MxcOtherRidNative Include="runtimes/$(MxcOtherWindowsRid)/native/*"
-                       Condition="'$(MxcOtherWindowsRid)' != ''" />
+                       Condition="'$(MxcPackSingleRid)' != 'true' and '$(MxcOtherWindowsRid)' != ''" />
     <TfmSpecificPackageFile Include="@(MxcNativeUnit)">
-      <PackagePath>runtimes/$(MxcHostRid)/native/%(Filename)%(Extension)</PackagePath>
+      <PackagePath>runtimes/$(MxcPackageRid)/native/%(Filename)%(Extension)</PackagePath>
     </TfmSpecificPackageFile>
   </ItemGroup>
   <ReadLinesFromFile File="runtimes/$(MxcOtherWindowsRid)/mxc-build-features.txt"
