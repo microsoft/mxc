@@ -7,8 +7,9 @@
 //! failures can be debugged from Rust test code.
 
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -654,6 +655,90 @@ pub fn run_platform_config_value(
         .unwrap_or_else(|error| panic!("failed to execute {label}: {error}"));
 
     command_result(label, output, start.elapsed().as_millis())
+}
+
+/// [`run_platform_config_value`] bounded by a host-side deadline, returning
+/// `None` if it expired. Use this wherever termination is the
+/// property under test.
+///
+/// On expiry the executor is killed and reaped. Its sandboxed descendants are
+/// not walked: that is the backend's teardown contract, and a test that has
+/// already timed out is in no position to enforce it.
+pub fn run_platform_config_value_within_duration(
+    label: &str,
+    config: &serde_json::Value,
+    extra_env: &[(&str, &str)],
+    cwd: Option<&Path>,
+    deadline: Duration,
+) -> Option<CommandResult> {
+    /// Short enough that a prompt failure is still reported as prompt, long
+    /// enough that polling is not a busy-wait.
+    const POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+    let exe = find_platform_exec().expect("native executor binary should be available");
+    let encoded = STANDARD.encode(config.to_string().as_bytes());
+
+    let start = Instant::now();
+    let mut cmd = Command::new(&exe);
+    cmd.arg("--config-base64").arg(encoded);
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .unwrap_or_else(|error| panic!("failed to execute {label}: {error}"));
+
+    // Both pipes are drained on their own threads: waiting on the process
+    // while its output sits unread would deadlock as soon as a chatty child
+    // filled a pipe buffer.
+    let mut stdout_pipe = child.stdout.take().expect("stdout was piped");
+    let mut stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stdout_reader = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buffer);
+        buffer
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buffer);
+        buffer
+    });
+
+    let status = loop {
+        match child.try_wait().expect("poll the executor's status") {
+            Some(status) => break Some(status),
+            None if start.elapsed() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            None => std::thread::sleep(POLL_INTERVAL),
+        }
+    };
+    // Returning here leaves the readers detached on purpose. A descendant that
+    // inherited the pipes can hold them open past the kill, and joining would
+    // reintroduce exactly the hang this function exists to bound.
+    let status = status?;
+
+    let stdout = stdout_reader.join().expect("stdout reader thread panicked");
+    let stderr = stderr_reader.join().expect("stderr reader thread panicked");
+
+    Some(command_result(
+        label,
+        Output {
+            status,
+            stdout,
+            stderr,
+        },
+        start.elapsed().as_millis(),
+    ))
 }
 
 /// Run `wxc-test-driver.exe` against a directory or a single config file.

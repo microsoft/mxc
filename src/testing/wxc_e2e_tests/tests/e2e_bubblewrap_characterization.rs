@@ -20,7 +20,9 @@ use serde_json::json;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use wxc_e2e_tests::{has_bwrap, has_platform_exec, run_platform_config_value};
+use wxc_e2e_tests::{
+    has_bwrap, has_platform_exec, run_platform_config_value,
+};
 
 const SCHEMA_VERSION: &str = "0.7.0-alpha";
 
@@ -215,30 +217,34 @@ fn bubblewrap_anchors_a_relative_process_cwd_from_0_9() {
 /// reporting success or hanging.
 ///
 /// The sandbox is torn down on the same path as a normal exit, so a shell that
-/// never execs anything must still release the run. A hang here would show up
-/// as the harness blocking rather than as a wrong exit code, which is why the
-/// elapsed time is bounded too.
+/// never execs anything must still release the run. Termination is therefore
+/// the property under test, and it is enforced by the harness deadline rather
+/// than by an elapsed-time assertion: a run that never returns could not be
+/// measured by one.
 #[test]
 fn bubblewrap_reports_a_missing_command() {
     if !ready() {
         return;
     }
-    const MAX_ELAPSED: Duration = Duration::from_secs(30);
+    const DEADLINE: Duration = Duration::from_secs(30);
 
     let cfg = config("missing-command", "mxc-char-definitely-not-a-real-binary");
-    let started = Instant::now();
-    let result = run_platform_config_value("bwrap missing command", &cfg, &[], None);
-    let elapsed = started.elapsed();
-    let out = result.combined_output();
+    let result = run_platform_config_value_within_duration(
+        "bwrap missing command",
+        &cfg,
+        &[],
+        None,
+        DEADLINE,
+    )
+    .unwrap_or_else(|| {
+        panic!("a missing command should fail promptly; it was still running after {DEADLINE:?}")
+    });
 
     assert_ne!(
         result.code,
         Some(0),
-        "a missing command should fail the run. Output:\n{out}"
-    );
-    assert!(
-        elapsed < MAX_ELAPSED,
-        "a missing command should fail promptly; took {elapsed:?}"
+        "a missing command should fail the run. Output:\n{}",
+        result.combined_output()
     );
 }
 
