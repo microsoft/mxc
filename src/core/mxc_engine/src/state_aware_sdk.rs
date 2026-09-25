@@ -3,6 +3,8 @@
 
 //! Typed Rust SDK models for state-aware lifecycle calls.
 
+use std::fmt;
+
 use mxc_config_contract::ContractVersion;
 use wxc_common::mxc_error::MxcError;
 use wxc_common::sdk_input::{
@@ -18,6 +20,7 @@ use crate::policy::{
     FilesystemSection, NetworkAction, NetworkPeerSection, NetworkPortSection, NetworkProtocol,
     NetworkRuleSection, NetworkSection,
 };
+use crate::Error;
 
 /// Backend selected by a typed state-aware provision request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +66,49 @@ impl StateAwareProvision {
     }
 }
 
+/// Opaque identity returned for a provisioned state-aware sandbox.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SandboxId(String);
+
+impl SandboxId {
+    /// Parse a sandbox identity previously returned by MXC.
+    pub fn parse(value: impl Into<String>) -> Result<Self, Error> {
+        Self::try_new(value.into()).map_err(Error::from)
+    }
+
+    fn try_new(value: String) -> Result<Self, MxcError> {
+        if value.is_empty() {
+            return Err(MxcError::malformed_id("sandbox ID must not be empty"));
+        }
+        if value.contains('\0') {
+            return Err(MxcError::malformed_id(
+                "sandbox ID must not contain a NUL character",
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    pub(crate) fn from_backend(value: String) -> Result<Self, MxcError> {
+        Self::try_new(value)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for SandboxId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for SandboxId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Typed state-aware provision request.
 #[derive(Debug, Clone)]
 pub struct ProvisionRequest {
@@ -70,7 +116,6 @@ pub struct ProvisionRequest {
     provision: StateAwareProvision,
     filesystem: Option<FilesystemSection>,
     network: Option<NetworkSection>,
-    telemetry_opt_in: Option<bool>,
 }
 
 impl ProvisionRequest {
@@ -97,7 +142,6 @@ impl ProvisionRequest {
             provision: StateAwareProvision::IsolationSession { app_id },
             filesystem: None,
             network: Some(network),
-            telemetry_opt_in: None,
         }
     }
 
@@ -108,7 +152,6 @@ impl ProvisionRequest {
             provision: StateAwareProvision::WindowsSandbox,
             filesystem: None,
             network: None,
-            telemetry_opt_in: None,
         }
     }
 
@@ -129,7 +172,6 @@ impl ProvisionRequest {
             },
             filesystem: None,
             network: None,
-            telemetry_opt_in: None,
         }
     }
 
@@ -145,13 +187,10 @@ impl ProvisionRequest {
         self
     }
 
-    /// Set the per-invocation telemetry preference.
-    pub fn set_telemetry_opt_in(&mut self, enabled: bool) -> &mut Self {
-        self.telemetry_opt_in = Some(enabled);
-        self
-    }
-
-    pub(crate) fn into_sdk_input(self) -> Result<SdkStateAwareInput, MxcError> {
+    pub(crate) fn into_sdk_input(
+        self,
+        telemetry_opt_in: Option<bool>,
+    ) -> Result<SdkStateAwareInput, MxcError> {
         let version = parse_state_aware_version(&self.version)?;
         match &self.provision {
             StateAwareProvision::IsolationSession { .. } if self.filesystem.is_some() => {
@@ -172,70 +211,78 @@ impl ProvisionRequest {
         let (network, runtime_config) = map_network(version, self.network.as_ref())?;
         input.network = network;
         input.runtime_config = runtime_config;
-        input.telemetry_opt_in = self.telemetry_opt_in;
+        input.telemetry_opt_in = telemetry_opt_in;
         Ok(input)
     }
 }
 
-/// Typed start, stop, or deprovision request.
+/// Versioned policy input shared by start, stop, and deprovision.
 #[derive(Debug, Clone)]
-pub struct SandboxLifecycleRequest {
+pub struct LifecycleRequest {
     version: String,
-    sandbox_id: String,
-    telemetry_opt_in: Option<bool>,
 }
 
-impl SandboxLifecycleRequest {
-    pub fn new(version: impl Into<String>, sandbox_id: impl Into<String>) -> Self {
+impl LifecycleRequest {
+    pub fn new(version: impl Into<String>) -> Self {
         Self {
             version: version.into(),
-            sandbox_id: sandbox_id.into(),
-            telemetry_opt_in: None,
         }
-    }
-
-    /// Set the per-invocation telemetry preference.
-    pub fn set_telemetry_opt_in(&mut self, enabled: bool) -> &mut Self {
-        self.telemetry_opt_in = Some(enabled);
-        self
     }
 
     fn into_sdk_input(
         self,
+        sandbox_id: &SandboxId,
+        telemetry_opt_in: Option<bool>,
         operation: fn(String) -> RuntimeOperation,
     ) -> Result<SdkStateAwareInput, MxcError> {
         let version = parse_state_aware_version(&self.version)?;
-        let mut input = SdkStateAwareInput::new(version, operation(self.sandbox_id))
+        let mut input = SdkStateAwareInput::new(version, operation(sandbox_id.as_str().to_owned()))
             .map_err(|error| MxcError::malformed_request(error.to_string()))?;
-        input.telemetry_opt_in = self.telemetry_opt_in;
+        input.telemetry_opt_in = telemetry_opt_in;
         Ok(input)
     }
 
-    pub(crate) fn into_start_input(self) -> Result<SdkStateAwareInput, MxcError> {
-        self.into_sdk_input(|sandbox_id| RuntimeOperation::Start { sandbox_id })
+    pub(crate) fn into_start_input(
+        self,
+        sandbox_id: &SandboxId,
+        telemetry_opt_in: Option<bool>,
+    ) -> Result<SdkStateAwareInput, MxcError> {
+        self.into_sdk_input(sandbox_id, telemetry_opt_in, |sandbox_id| {
+            RuntimeOperation::Start { sandbox_id }
+        })
     }
 
-    pub(crate) fn into_stop_input(self) -> Result<SdkStateAwareInput, MxcError> {
-        self.into_sdk_input(|sandbox_id| RuntimeOperation::Stop { sandbox_id })
+    pub(crate) fn into_stop_input(
+        self,
+        sandbox_id: &SandboxId,
+        telemetry_opt_in: Option<bool>,
+    ) -> Result<SdkStateAwareInput, MxcError> {
+        self.into_sdk_input(sandbox_id, telemetry_opt_in, |sandbox_id| {
+            RuntimeOperation::Stop { sandbox_id }
+        })
     }
 
-    pub(crate) fn into_deprovision_input(self) -> Result<SdkStateAwareInput, MxcError> {
-        self.into_sdk_input(|sandbox_id| RuntimeOperation::Deprovision { sandbox_id })
+    pub(crate) fn into_deprovision_input(
+        self,
+        sandbox_id: &SandboxId,
+        telemetry_opt_in: Option<bool>,
+    ) -> Result<SdkStateAwareInput, MxcError> {
+        self.into_sdk_input(sandbox_id, telemetry_opt_in, |sandbox_id| {
+            RuntimeOperation::Deprovision { sandbox_id }
+        })
     }
 }
 
 /// Typed state-aware exec request.
 #[derive(Debug, Clone)]
-pub struct StateAwareExecRequest {
+pub struct ExecRequest {
     version: String,
-    sandbox_id: String,
     command_line: String,
     working_directory: Option<String>,
     environment: Option<Vec<String>>,
     inherit_default_env: Option<bool>,
     timeout_ms: Option<u32>,
     backend_options: Option<StateAwareExecBackendOptions>,
-    telemetry_opt_in: Option<bool>,
 }
 
 /// Backend-specific options for a typed state-aware exec request.
@@ -246,22 +293,16 @@ pub enum StateAwareExecBackendOptions {
     Wslc { network_proxy: String },
 }
 
-impl StateAwareExecRequest {
-    pub fn new(
-        version: impl Into<String>,
-        sandbox_id: impl Into<String>,
-        command_line: impl Into<String>,
-    ) -> Self {
+impl ExecRequest {
+    pub fn new(version: impl Into<String>, command_line: impl Into<String>) -> Self {
         Self {
             version: version.into(),
-            sandbox_id: sandbox_id.into(),
             command_line: command_line.into(),
             working_directory: None,
             environment: None,
             inherit_default_env: None,
             timeout_ms: None,
             backend_options: None,
-            telemetry_opt_in: None,
         }
     }
 
@@ -301,17 +342,16 @@ impl StateAwareExecRequest {
         self
     }
 
-    pub fn set_telemetry_opt_in(&mut self, enabled: bool) -> &mut Self {
-        self.telemetry_opt_in = Some(enabled);
-        self
-    }
-
-    pub(crate) fn into_sdk_input(self) -> Result<SdkStateAwareInput, MxcError> {
+    pub(crate) fn into_sdk_input(
+        self,
+        sandbox_id: &SandboxId,
+        telemetry_opt_in: Option<bool>,
+    ) -> Result<SdkStateAwareInput, MxcError> {
         let version = parse_state_aware_version(&self.version)?;
         let mut input = SdkStateAwareInput::new(
             version,
             RuntimeOperation::Exec {
-                sandbox_id: self.sandbox_id,
+                sandbox_id: sandbox_id.as_str().to_owned(),
             },
         )
         .map_err(|error| MxcError::malformed_request(error.to_string()))?;
@@ -327,39 +367,31 @@ impl StateAwareExecRequest {
                 network_proxy: Some(network_proxy),
             },
         });
-        input.telemetry_opt_in = self.telemetry_opt_in;
+        input.telemetry_opt_in = telemetry_opt_in;
         Ok(input)
     }
 }
 
-/// Execution options that are authorization or invocation behavior rather than
-/// sandbox policy.
+/// Authorization and invocation controls for a lifecycle operation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct StateAwareOptions {
-    pub dry_run: bool,
+pub struct OperationOptions {
     pub experimental: bool,
+    pub telemetry_opt_in: Option<bool>,
 }
 
-impl StateAwareOptions {
-    pub fn new(dry_run: bool, experimental: bool) -> Self {
+impl OperationOptions {
+    pub fn new(experimental: bool) -> Self {
         Self {
-            dry_run,
             experimental,
+            telemetry_opt_in: None,
         }
     }
-}
 
-/// Execution options for live state-aware exec calls.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct StateAwareExecOptions {
-    pub experimental: bool,
-}
-
-impl StateAwareExecOptions {
-    pub fn new(experimental: bool) -> Self {
-        Self { experimental }
+    /// Set the per-invocation telemetry preference.
+    pub fn with_telemetry_opt_in(mut self, enabled: bool) -> Self {
+        self.telemetry_opt_in = Some(enabled);
+        self
     }
 }
 
@@ -375,16 +407,37 @@ pub struct IsolationSessionProvisionMetadata {
 /// Backend-specific metadata returned by a typed lifecycle call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum StateAwareMetadata {
+pub enum ProvisionMetadata {
     IsolationSessionProvision(IsolationSessionProvisionMetadata),
 }
 
-/// Typed result for provision, start, stop, deprovision, or dry-run.
+/// Result of successfully provisioning a sandbox.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct StateAwareResult {
+pub struct ProvisionResult {
+    pub sandbox_id: SandboxId,
+    pub metadata: Option<ProvisionMetadata>,
+    pub warnings: Vec<String>,
+}
+
+/// Result of successfully starting, stopping, or deprovisioning a sandbox.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LifecycleResult {
+    pub warnings: Vec<String>,
+}
+
+/// Result of validating an operation without executing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ValidationResult {
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StateAwareResult {
     pub sandbox_id: Option<String>,
-    pub metadata: Option<StateAwareMetadata>,
+    pub metadata: Option<ProvisionMetadata>,
     pub warnings: Vec<String>,
 }
 
@@ -399,12 +452,45 @@ impl StateAwareResult {
     }
 
     #[cfg(target_os = "windows")]
-    pub(crate) fn provision(sandbox_id: String, metadata: Option<StateAwareMetadata>) -> Self {
+    pub(crate) fn provision(sandbox_id: String, metadata: Option<ProvisionMetadata>) -> Self {
         Self {
             sandbox_id: Some(sandbox_id),
             metadata,
             warnings: Vec::new(),
         }
+    }
+
+    pub(crate) fn into_provision(self) -> Result<ProvisionResult, MxcError> {
+        let sandbox_id = self.sandbox_id.ok_or_else(|| {
+            MxcError::backend_error("typed provision completed without returning a sandbox ID")
+        })?;
+        Ok(ProvisionResult {
+            sandbox_id: SandboxId::from_backend(sandbox_id)?,
+            metadata: self.metadata,
+            warnings: self.warnings,
+        })
+    }
+
+    pub(crate) fn into_lifecycle(self) -> Result<LifecycleResult, MxcError> {
+        if self.sandbox_id.is_some() || self.metadata.is_some() {
+            return Err(MxcError::backend_error(
+                "typed lifecycle operation returned provision-only output",
+            ));
+        }
+        Ok(LifecycleResult {
+            warnings: self.warnings,
+        })
+    }
+
+    pub(crate) fn into_validation(self) -> Result<ValidationResult, MxcError> {
+        if self.sandbox_id.is_some() || self.metadata.is_some() {
+            return Err(MxcError::backend_error(
+                "typed dry run returned execution output",
+            ));
+        }
+        Ok(ValidationResult {
+            warnings: self.warnings,
+        })
     }
 }
 
