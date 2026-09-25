@@ -231,7 +231,9 @@ that can be executed independently.
         "guiAccess": false,                // Allow GUI Mach services / IOKit / pty for window-drawing apps
         "nestedPty": true,                 // Allow inner process to allocate its own pty (posix_openpt)
         "keychainAccess": false,           // Allow Keychain via securityd / trustd / cfprefsd / lsd.*
-        "extraMachLookups": []             // Additional Mach service global-names the inner process may resolve
+        "extraMachLookups": [],            // Additional Mach service global-names the inner process may resolve
+        "deniedPathNames": [".ssh"],       // Names denied at any depth (v0.10+, requires --experimental)
+        "deniedUnixSocketPaths": []        // Paths where AF_UNIX bind/connect is denied (v0.10+, requires --experimental)
     },
 
     "telemetry": {                         // Telemetry (Windows only)

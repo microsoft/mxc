@@ -1,7 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::common::assert_v07_introduces;
+use crate::common::{assert_v07_introduces, assert_v10_introduces};
+
+#[test]
+fn seatbelt_path_exclusions_are_introduced_in_v010() {
+    assert_v10_introduces(r#""seatbelt": {"deniedPathNames": [".ssh"]}"#);
+    assert_v10_introduces(r#""seatbelt": {"deniedUnixSocketPaths": ["/work"]}"#);
+}
 
 #[test]
 fn seatbelt_section_is_introduced_in_v07() {

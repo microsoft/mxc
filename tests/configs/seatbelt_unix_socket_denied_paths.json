@@ -1,0 +1,20 @@
+{
+    "$schema": "../../schemas/dev/mxc-config.schema.0.10.0-alpha.json",
+    "version": "0.10.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "/usr/bin/python3 -c 'import os, socket\ndef connect(label, path):\n    s = socket.socket(socket.AF_UNIX)\n    try:\n        s.connect(path)\n        print(label + \"=CONNECTED\")\n    except OSError as e:\n        print(label + \"=REFUSED(\" + str(e.errno) + \")\")\n    finally:\n        s.close()\ndef ipc(label, path):\n    s = socket.socket(socket.AF_UNIX)\n    try:\n        s.bind(path)\n        s.listen(1)\n        c = socket.socket(socket.AF_UNIX)\n        c.connect(path)\n        c.close()\n        print(label + \"=IPC_OK\")\n    except OSError as e:\n        print(label + \"=REFUSED(\" + str(e.errno) + \")\")\n    finally:\n        s.close()\nroot = \"{{ROOT}}\"\nother = \"{{TESTDIR}}/other\"\nconnect(\"HOST_SOCKET\", root + \"/run/host.sock\")\nipc(\"HOST_FOLDER_IPC\", root + \"/sandbox.sock\")\nipc(\"SCRATCH_IPC\", other + \"/sandbox.sock\")\nwith open(root + \"/written.txt\", \"w\") as f:\n    f.write(\"x\")\nprint(\"HOST_FOLDER_FILE_WRITE=OK\")\nos.rename(root + \"/run/host.sock\", other + \"/moved.sock\")\nconnect(\"MOVED_SOCKET\", other + \"/moved.sock\")\nprint(\"PATH_NAMES_PROBE_DONE\")'",
+        "timeout": 20000
+    },
+    "filesystem": {
+        "readonlyPaths": ["{{DEVDIR}}"],
+        "readwritePaths": ["{{ROOT}}", "{{TESTDIR}}/other"]
+    },
+    "network": {
+        "egress": { "default": "allow" },
+        "ingress": { "default": "allow", "hostLoopback": "allow" }
+    },
+    "seatbelt": {
+        "deniedUnixSocketPaths": ["{{ROOT}}"]
+    }
+}

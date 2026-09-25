@@ -576,6 +576,19 @@ export interface SeatbeltConfig {
    * `(allow mach-lookup ...)` form.
    */
   extraMachLookups?: string[];
+  /**
+   * Literal names such as `.ssh` or `.config/gh`, denied with everything
+   * below them at any depth, without scanning the filesystem. Schema
+   * `0.10.0-alpha` only; requires `experimental: true`. See the Seatbelt
+   * backend guide for the name syntax.
+   */
+  deniedPathNames?: string[];
+  /**
+   * Paths at or below which AF_UNIX `bind()` and `connect()` are denied, even
+   * inside `readwritePaths`. File access is unchanged. Schema `0.10.0-alpha`
+   * only; requires `experimental: true`.
+   */
+  deniedUnixSocketPaths?: string[];
 }
 
 /**
