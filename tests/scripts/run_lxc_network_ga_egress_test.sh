@@ -65,6 +65,8 @@ fail() {
 
 # shellcheck source=lib/chain_name.sh
 . "$SCRIPT_DIR/lib/chain_name.sh"
+# shellcheck source=lib/lxc_peer_listener.sh
+. "$SCRIPT_DIR/lib/lxc_peer_listener.sh"
 
 # The snapshot keeps chains left behind by an earlier failed run from being
 # blamed on this one.
@@ -179,6 +181,8 @@ PEER_UDP_PORT="8053"
 
 PEER_LISTENER_PID=""
 PEER_UDP_LISTENER_PID=""
+PEER_LISTENER_LOG="$(mktemp)"
+PEER_UDP_LISTENER_LOG="$(mktemp)"
 IP_FORWARD_WAS=""
 teardown_peer() {
     if [ -n "$PEER_LISTENER_PID" ]; then
@@ -193,7 +197,11 @@ teardown_peer() {
         sysctl -w net.ipv4.ip_forward="$IP_FORWARD_WAS" >/dev/null 2>&1 || true
     fi
 }
-trap teardown_peer EXIT
+teardown_run() {
+    teardown_peer
+    rm -f "$PEER_LISTENER_LOG" "$PEER_UDP_LISTENER_LOG"
+}
+trap teardown_run EXIT
 
 # Clear anything an aborted earlier run left behind, then build the peer.
 teardown_peer
@@ -222,26 +230,15 @@ sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 \
 # The firewall matches the port and not the payload, so plain HTTP on tcp/443
 # is enough.  A reply proves the SYN reached the peer.
 ip netns exec "$PEER_NETNS" python3 -m http.server "$PEER_PORT" --bind "$PEER_IP" \
-    >/dev/null 2>&1 &
+    >"$PEER_LISTENER_LOG" 2>&1 &
 PEER_LISTENER_PID=$!
-sleep 1
-kill -0 "$PEER_LISTENER_PID" >/dev/null 2>&1 \
-    || fail "the egress peer listener did not start on $PEER_IP:$PEER_PORT."
 
 # Alive is not reachable.  A peer that never bound has to fail here as harness
 # breakage, rather than later as the firewall blocking the allow case.
-python3 - "$PEER_IP" "$PEER_PORT" <<'PY' || fail "the egress peer is unreachable across the veth at $PEER_IP:$PEER_PORT."
-import socket, sys
-s = socket.socket()
-s.settimeout(5)
-try:
-    s.connect((sys.argv[1], int(sys.argv[2])))
-except OSError as exc:
-    print(exc)
-    sys.exit(1)
-finally:
-    s.close()
-PY
+if ! PEER_PROBE_ERROR="$(await_peer_tcp "$PEER_IP" "$PEER_PORT")"; then
+    fail_unreachable_peer "the egress peer" "$PEER_IP:$PEER_PORT" \
+        "$PEER_PROBE_ERROR" "$PEER_LISTENER_LOG"
+fi
 
 # UDP carries no handshake, so the probe reads a returned payload as the
 # verdict.  An echo service supplies one.
@@ -252,27 +249,14 @@ s.bind(('$PEER_IP', $PEER_UDP_PORT))
 while True:
     payload, sender = s.recvfrom(1024)
     s.sendto(payload, sender)
-" >/dev/null 2>&1 &
+" >"$PEER_UDP_LISTENER_LOG" 2>&1 &
 PEER_UDP_LISTENER_PID=$!
-sleep 1
-kill -0 "$PEER_UDP_LISTENER_PID" >/dev/null 2>&1 \
-    || fail "the egress peer UDP listener did not start on $PEER_IP:$PEER_UDP_PORT."
 
 # A silent echo service would make the udp allow case read as a firewall block.
-python3 - "$PEER_IP" "$PEER_UDP_PORT" <<'PY' || fail "the egress peer does not echo UDP at $PEER_IP:$PEER_UDP_PORT."
-import socket, sys
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-s.settimeout(5)
-try:
-    s.sendto(b"probe", (sys.argv[1], int(sys.argv[2])))
-    if s.recvfrom(1024)[0] != b"probe":
-        sys.exit(1)
-except OSError as exc:
-    print(exc)
-    sys.exit(1)
-finally:
-    s.close()
-PY
+if ! PEER_PROBE_ERROR="$(await_peer_udp_echo "$PEER_IP" "$PEER_UDP_PORT")"; then
+    fail_unreachable_peer "the egress peer UDP echo service" \
+        "$PEER_IP:$PEER_UDP_PORT" "$PEER_PROBE_ERROR" "$PEER_UDP_LISTENER_LOG"
+fi
 
 # The ICMP cases below read an unanswered echo as a firewall verdict, so a peer
 # that ignores echo has to fail here as harness breakage instead.

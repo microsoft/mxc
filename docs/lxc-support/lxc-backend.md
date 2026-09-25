@@ -43,6 +43,24 @@ sudo dnf install lxc lxc-devel
 sudo pacman -S lxc
 ```
 
+### Container networking
+
+A policy that permits any network needs `lxcbr0` to hand the container an IPv4
+lease, so the bridge has to be up before a run: `sudo systemctl start lxc-net`.
+
+On a host running firewalld, which is the default on Fedora and RHEL, the bridge
+also has to sit in a zone that permits the traffic. The default zone rejects
+IPv4 DHCP while permitting router advertisement, so the container configures
+itself an IPv6 address, never receives a lease, and the run fails:
+
+```bash
+sudo firewall-cmd --zone=trusted --change-interface=lxcbr0
+```
+
+firewalld's rules are evaluated alongside the ones `lxc-net` installs rather
+than replaced by them, so a reject there applies however `lxc-net` configured
+the bridge.
+
 ## Configuration
 
 Note the required field lxc.

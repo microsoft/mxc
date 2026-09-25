@@ -52,6 +52,8 @@ fail() {
 
 # shellcheck source=lib/chain_name.sh
 . "$SCRIPT_DIR/lib/chain_name.sh"
+# shellcheck source=lib/lxc_peer_listener.sh
+. "$SCRIPT_DIR/lib/lxc_peer_listener.sh"
 
 # Compared against a snapshot taken before the run, so chains left behind by an
 # earlier failed run are not blamed on this one.
@@ -115,6 +117,7 @@ PEER_PREFIX="29"
 PEER_PORT="443"
 
 PEER_LISTENER_PID=""
+PEER_LISTENER_LOG="$(mktemp)"
 IP_FORWARD_WAS=""
 teardown_peer() {
     if [ -n "$PEER_LISTENER_PID" ]; then
@@ -126,7 +129,11 @@ teardown_peer() {
         sysctl -w net.ipv4.ip_forward="$IP_FORWARD_WAS" >/dev/null 2>&1 || true
     fi
 }
-trap teardown_peer EXIT
+teardown_run() {
+    teardown_peer
+    rm -f "$PEER_LISTENER_LOG"
+}
+trap teardown_run EXIT
 
 # Clear anything an aborted earlier run left behind, then build the peer.
 teardown_peer
@@ -155,26 +162,15 @@ sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 \
 # The firewall matches the port and not the payload, so plain HTTP on tcp/443
 # is enough.  A reply proves the SYN reached the peer.
 ip netns exec "$PEER_NETNS" python3 -m http.server "$PEER_PORT" --bind "$PEER_IP" \
-    >/dev/null 2>&1 &
+    >"$PEER_LISTENER_LOG" 2>&1 &
 PEER_LISTENER_PID=$!
-sleep 1
-kill -0 "$PEER_LISTENER_PID" >/dev/null 2>&1 \
-    || fail "the peer listener did not start on $PEER_IP:$PEER_PORT."
 
 # Alive is not reachable.  A peer that never bound has to fail here as harness
 # breakage, rather than later as the control run being blocked.
-python3 - "$PEER_IP" "$PEER_PORT" <<'PY' || fail "the peer is unreachable across the veth at $PEER_IP:$PEER_PORT."
-import socket, sys
-s = socket.socket()
-s.settimeout(5)
-try:
-    s.connect((sys.argv[1], int(sys.argv[2])))
-except OSError as exc:
-    print(exc)
-    sys.exit(1)
-finally:
-    s.close()
-PY
+if ! PEER_PROBE_ERROR="$(await_peer_tcp "$PEER_IP" "$PEER_PORT")"; then
+    fail_unreachable_peer "the peer" "$PEER_IP:$PEER_PORT" \
+        "$PEER_PROBE_ERROR" "$PEER_LISTENER_LOG"
+fi
 
 # Drift guard: both fixtures must aim at this peer, or the run would probe a
 # stale address and prove nothing.

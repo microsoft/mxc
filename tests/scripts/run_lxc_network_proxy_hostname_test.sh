@@ -124,6 +124,9 @@ skip_live() {
     exit "$SKIP_EXIT"
 }
 
+# shellcheck source=lib/lxc_peer_listener.sh
+. "$SCRIPT_DIR/lib/lxc_peer_listener.sh"
+
 LXC_EXEC="$REPO_DIR/src/target/release/lxc-exec"
 [ -f "$LXC_EXEC" ] || LXC_EXEC="$REPO_DIR/src/target/debug/lxc-exec"
 [ -f "$LXC_EXEC" ] || skip_live "lxc-exec not built (run build.sh first)"
@@ -138,6 +141,7 @@ ip netns list >/dev/null 2>&1 || skip_live "network namespaces unavailable in th
 # host must route to it and the container's packets traverse FORWARD.
 # ---------------------------------------------------------------------------
 PROXY_PID=""
+PROXY_LOG="$(mktemp)"
 HOSTS_BACKUP=""
 NETNS_MADE=""
 VETH_MADE=""
@@ -156,6 +160,7 @@ cleanup() {
     if [ -n "$IP_FORWARD_WAS" ]; then
         sysctl -w net.ipv4.ip_forward="$IP_FORWARD_WAS" >/dev/null 2>&1 || true
     fi
+    rm -f "$PROXY_LOG"
 }
 trap cleanup EXIT
 
@@ -196,7 +201,7 @@ printf '%s %s\n' "$PROXY_IP" "$PROXY_HOSTNAME" >> /etc/hosts
 # Start the forward proxy inside the namespace. It answers any request with the
 # sentinel body, so the positive path needs no real internet.
 # ---------------------------------------------------------------------------
-ip netns exec "$NETNS" python3 - "$PROXY_IP" "$PROXY_PORT" >/dev/null 2>&1 <<'PY' &
+ip netns exec "$NETNS" python3 - "$PROXY_IP" "$PROXY_PORT" >"$PROXY_LOG" 2>&1 <<'PY' &
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -216,28 +221,13 @@ HTTPServer((sys.argv[1], int(sys.argv[2])), Proxy).serve_forever()
 PY
 PROXY_PID=$!
 
-# Give the proxy a moment to bind, then confirm it is listening *and* reachable
-# across the veth. A proxy that never came up would fail this test as though the
-# firewall had blocked it, which would be a false accusation.
-sleep 1
-if ! kill -0 "$PROXY_PID" >/dev/null 2>&1; then
-    fail "proxy process died before it could serve on $PROXY_IP:$PROXY_PORT"
-fi
-if ! python3 - "$PROXY_IP" "$PROXY_PORT" <<'PY'
-import socket, sys
-s = socket.socket()
-s.settimeout(5)
-try:
-    s.connect((sys.argv[1], int(sys.argv[2])))
-except OSError as exc:
-    print(exc)
-    sys.exit(1)
-finally:
-    s.close()
-PY
-then
-    skip_live "the proxy namespace is not reachable from the host; \
-the environment does not route to $PROXY_IP"
+# Wait until the proxy is listening *and* reachable across the veth. A proxy
+# that never came up would fail this test as though the firewall had blocked
+# it, which would be a false accusation.
+if ! PROXY_PROBE_ERROR="$(await_peer_tcp "$PROXY_IP" "$PROXY_PORT")"; then
+    skip_live "the proxy namespace is not reachable from the host at \
+$PROXY_IP:$PROXY_PORT ($PROXY_PROBE_ERROR); the environment does not route to it. \
+Proxy output: $(peer_listener_output "$PROXY_LOG")"
 fi
 
 # ---------------------------------------------------------------------------
