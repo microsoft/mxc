@@ -675,8 +675,9 @@ impl SandboxRequest {
     /// a caller. Entries in `extra` override same-named defaults.
     ///
     /// From schema 0.9 LXC, Bubblewrap, and Seatbelt supply `PATH` + `HOME` +
-    /// `TERM`, and WSLc supplies the container image's own `ENV`. Below 0.9 the
-    /// default is empty and this is equivalent to [`Self::set_env`].
+    /// `TERM`. Below 0.9 their default is empty and this is equivalent to
+    /// [`Self::set_env`]. WSLc supplies the container image's own `ENV` at
+    /// every version, so `extra` always layers over it.
     pub fn inherit_default_env<K, V>(
         &mut self,
         extra: impl IntoIterator<Item = (K, V)>,

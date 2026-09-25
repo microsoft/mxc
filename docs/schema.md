@@ -304,8 +304,6 @@ On the WSL Container backend it is the container image's own `ENV`, which MXC
 neither authors nor enumerates — see
 [`docs/wsl/wsl-container-getting-started.md`](wsl/wsl-container-getting-started.md#environment).
 
-Below `0.9.0-alpha`, `inheritDefaultEnv` is rejected as an unknown field.
-
 ### Filesystem Policy
 
 The `filesystem` section defines path access policy shared across backends:

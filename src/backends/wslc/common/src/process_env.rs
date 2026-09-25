@@ -5,12 +5,17 @@
 //!
 //! `WslcSetProcessSettingsEnvVariables` layers its entries over the image's
 //! baked-in `ENV` and the SDK exposes no call that clears it, so it alone
-//! cannot produce the empty and verbatim environments schema 0.9 requires.
-//! Those two states launch the workload through `env -i` instead, which wipes
-//! what the SDK handed the process before the shell starts.
+//! cannot give the child an environment the image's is absent from. A request
+//! that asks for one launches the workload through `env -i` instead, which
+//! wipes what the SDK handed the process before the shell starts.
+//!
+//! The image's `ENV` is this backend's default block, and MXC can neither
+//! author nor enumerate it, so there is nothing here to overlay a caller's
+//! entries onto.
 
 use serde::{Deserialize, Serialize};
 
+use wxc_common::default_env::EnvResolution;
 use wxc_common::models::ExecutionRequest;
 
 const SHELL: &str = "/bin/sh";
@@ -30,15 +35,27 @@ pub enum EnvScope {
 }
 
 impl EnvScope {
-    /// The scope the request selects, which below schema 0.9 is always
-    /// [`EnvScope::Merge`] because the four states of `process.env` are not
-    /// distinct there.
+    /// The scope the request selects.
     pub fn of(request: &ExecutionRequest) -> Self {
-        match (&request.env, request.inherit_default_env) {
-            (Some(_), false) if request.supplies_default_env() => Self::Replace,
-            _ => Self::Merge,
+        match EnvResolution::of(request) {
+            EnvResolution::Replace => Self::Replace,
+            // Every other state keeps the image's environment, which is what
+            // the SDK's setter does on its own.
+            EnvResolution::Default | EnvResolution::Overlay | EnvResolution::Legacy => Self::Merge,
         }
     }
+}
+
+/// The entries that name a variable, in the order supplied.
+///
+/// An entry carrying a NUL would reach the SDK truncated at it, which in argv
+/// is a bare word that `env` runs as the command. Dropping it here alongside
+/// the entries with no `=` keeps every state handing the container the same
+/// set, whether it travels in argv or through the SDK.
+fn assignments(entries: &[String]) -> impl Iterator<Item = &String> {
+    entries
+        .iter()
+        .filter(|e| e.contains('=') && !e.contains('\0'))
 }
 
 /// The container process's argv, running `script_code` under the shell.
@@ -53,8 +70,7 @@ pub fn argv_words(scope: EnvScope, entries: &[String], script_code: &str) -> Vec
         // own options.
         argv.push("--".to_string());
 
-        // An entry naming no variable would be taken as the command to run.
-        argv.extend(entries.iter().filter(|e| e.contains('=')).cloned());
+        argv.extend(assignments(entries).cloned());
     }
 
     argv.push(SHELL.to_string());
@@ -65,10 +81,10 @@ pub fn argv_words(scope: EnvScope, entries: &[String], script_code: &str) -> Vec
 
 /// The entries to hand the SDK's environment setter, empty under
 /// [`EnvScope::Replace`] because `env -i` would clear whatever it applied.
-pub fn sdk_entries(scope: EnvScope, entries: &[String]) -> &[String] {
+pub fn sdk_entries(scope: EnvScope, entries: &[String]) -> Vec<String> {
     match scope {
-        EnvScope::Merge => entries,
-        EnvScope::Replace => &[],
+        EnvScope::Merge => assignments(entries).cloned().collect(),
+        EnvScope::Replace => Vec::new(),
     }
 }
 
@@ -230,13 +246,11 @@ mod tests {
     }
 
     #[test]
-    fn a_replaced_entry_naming_no_variable_is_dropped() {
+    fn an_entry_naming_no_variable_is_dropped_by_both_scopes() {
+        let supplied = entries(&["FEATURE_FLAG", "FOO=bar"]);
+
         assert_eq!(
-            argv_words(
-                EnvScope::Replace,
-                &entries(&["FEATURE_FLAG", "FOO=bar"]),
-                "echo hi"
-            ),
+            argv_words(EnvScope::Replace, &supplied, "echo hi"),
             [
                 "/usr/bin/env",
                 "-i",
@@ -247,6 +261,26 @@ mod tests {
                 "echo hi"
             ]
         );
+        assert_eq!(sdk_entries(EnvScope::Merge, &supplied), ["FOO=bar"]);
+    }
+
+    #[test]
+    fn an_entry_carrying_a_nul_is_dropped_by_both_scopes() {
+        let supplied = entries(&["FOO\0=bar", "KEEP=yes"]);
+
+        assert_eq!(
+            argv_words(EnvScope::Replace, &supplied, "echo hi"),
+            [
+                "/usr/bin/env",
+                "-i",
+                "--",
+                "KEEP=yes",
+                "/bin/sh",
+                "-c",
+                "echo hi"
+            ]
+        );
+        assert_eq!(sdk_entries(EnvScope::Merge, &supplied), ["KEEP=yes"]);
     }
 
     #[test]
@@ -276,7 +310,7 @@ mod tests {
     fn only_a_merged_environment_reaches_the_sdk() {
         let supplied = entries(&["FOO=bar"]);
 
-        assert_eq!(sdk_entries(EnvScope::Merge, &supplied), supplied.as_slice());
+        assert_eq!(sdk_entries(EnvScope::Merge, &supplied), supplied);
         assert!(sdk_entries(EnvScope::Replace, &supplied).is_empty());
     }
 }

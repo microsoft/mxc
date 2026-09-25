@@ -70,7 +70,7 @@ pub(crate) fn sdk_error(context: &str, hr: HRESULT, sdk_msg: &str) -> ScriptResp
 /// image, or container path can contain `\u{0}`. Rust keeps such a string whole,
 /// but the SDK stops at the first NUL — so validation/logging and execution
 /// would disagree about what actually ran. Reject at the marshalling boundary.
-fn cstr_bytes(field: &str, value: &str) -> Result<Vec<u8>, ScriptResponse> {
+pub(crate) fn cstr_bytes(field: &str, value: &str) -> Result<Vec<u8>, ScriptResponse> {
     std::ffi::CString::new(value)
         .map(|c| c.into_bytes_with_nul())
         .map_err(|_| {
@@ -387,13 +387,6 @@ impl ProcessSettings {
             sdk_io_ref = SdkIoRef(Some(io_ctx_raw as *const IoContext));
         }
 
-        // Checked before argv is assembled so a NUL is reported against the
-        // variable carrying it rather than as a bad argv word.
-        let env_cstrings: Vec<Vec<u8>> = env
-            .iter()
-            .map(|e| cstr_bytes("environment variable", e))
-            .collect::<Result<Vec<_>, _>>()?;
-
         // argv points into argv_cstrings; both are owned below.
         let argv_cstrings = process_env::argv_words(scope, env, script_code)
             .iter()
@@ -406,8 +399,12 @@ impl ProcessSettings {
         }
 
         // env_ptrs point into env_cstrings; both are owned below.
+        let env_cstrings: Vec<Vec<u8>> = process_env::sdk_entries(scope, env)
+            .iter()
+            .map(|e| cstr_bytes("environment variable", e))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut env_ptrs: Vec<PCSTR> = Vec::new();
-        if !process_env::sdk_entries(scope, env).is_empty() {
+        if !env_cstrings.is_empty() {
             env_ptrs = env_cstrings.iter().map(|e| e.as_ptr() as PCSTR).collect();
             let hr =
                 sdk.WslcSetProcessSettingsEnvVariables(&mut raw, env_ptrs.as_ptr(), env_ptrs.len());
@@ -794,7 +791,7 @@ pub unsafe fn resolve_image(
          wxc-exec.exe --setup-wslc --image {}{} \
          (or scripts\\setup-wslc.ps1 -Image {}{}). \
          MXC does not pull images at run time; \
-         see docs/wsl/wsl-container-support-plan.md.",
+         see docs/wsl/wsl-container-getting-started.md.",
         image, image, storage_arg_wxc, image, storage_arg_ps,
     ))
     .into_response())

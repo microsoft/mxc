@@ -7,7 +7,7 @@ cost.
 
 It complements:
 
-- [`wsl-container-support-plan.md`](wsl-container-support-plan.md) — the original one-shot backend design.
+- [`wslc-sdk-bindings.md`](wslc-sdk-bindings.md) — regenerating the SDK bindings.
 - [`../state-aware-lifecycle/mxc-state-aware-sandbox-api.md`](../state-aware-lifecycle/mxc-state-aware-sandbox-api.md) — the cross-backend state-aware wire format, the Rust `StatefulSandboxBackend` trait, and the dispatcher contract.
 
 The WSLc state-aware surface is part of published schema `0.9.0-alpha` and does

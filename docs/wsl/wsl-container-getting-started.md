@@ -515,6 +515,34 @@ Note the state-aware surface differs: it rejects the whole `lifecycle` section
 at parse time, because a multi-invocation sandbox's lifetime is driven by the
 explicit `provision` / `deprovision` phases rather than by per-run flags.
 
+## Supported workloads
+
+MXC's Linux container support is **language-agnostic**. The image defines the
+capabilities, not MXC: any workload that runs on Linux, exits on its own, and
+produces output via stdout/stderr is supported. That covers interpreted scripts
+(`python:3.12`, `node:20`), compiled binaries (`golang:1.22`, `gcc:latest`),
+shell automation (`alpine`, `ubuntu:22.04`), .NET on Linux, and private
+registry images carrying your own toolchain.
+
+Four workload shapes are not:
+
+| Workload type | Why |
+|---|---|
+| Interactive processes (REPLs, shells) | MXC does not pass stdin — execution is fire-and-forget |
+| GUI applications (X11, Wayland) | No display server — MXC captures stdout/stderr only |
+| Long-running daemons (web servers, databases) | MXC expects the process to exit within the configured timeout |
+| Hardware access (USB, serial, Bluetooth) | The micro-VM does not expose host hardware beyond filesystem and network |
+
+GPU compute is supported with `"gpu": true`, which passes through the host GPU
+via the SDK's `ENABLE_GPU` container flag and requires a GPU-capable host.
+
+### What the image must provide
+
+MXC runs the workload's command line as `/bin/sh -c`, and a request that
+supplies `process.env` without `inheritDefaultEnv` runs that shell through
+`/usr/bin/env`. An image supplying neither path — `scratch` and most distroless
+images — cannot be used.
+
 ## Troubleshooting
 
 | Error | Cause | Fix |

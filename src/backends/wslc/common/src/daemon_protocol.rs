@@ -637,7 +637,7 @@ mod tests {
 
     #[test]
     fn an_exec_config_without_an_env_scope_defaults_to_merge() {
-        let without = r#"{"sandbox_id":"s","script_code":"run"}"#;
+        let without = r#"{"exec_id":"e","run_token":"r","sandbox_id":"s","script_code":"run"}"#;
         let parsed: ExecConfig = serde_json::from_str(without).expect("env_scope is optional");
 
         assert_eq!(parsed.env_scope, EnvScope::Merge);

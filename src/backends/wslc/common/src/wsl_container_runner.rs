@@ -33,7 +33,7 @@ use wxc_common::script_runner::ScriptRunner;
 use wxc_common::string_util::{to_wide, CoTaskMemPWSTR};
 use wxc_common::validator::validate_network_policy_support;
 
-use crate::container_steps::sdk_error;
+use crate::container_steps::{cstr_bytes, sdk_error};
 use crate::error::WslcError;
 use crate::policy;
 use crate::policy_mapping;
@@ -951,7 +951,7 @@ impl WSLContainerRunner {
                  wxc-exec.exe --setup-wslc --image {}{} \
                  (or scripts\\setup-wslc.ps1 -Image {}{}). \
                  MXC does not pull images at run time; \
-                 see docs/wsl/wsl-container-support-plan.md.",
+                 see docs/wsl/wsl-container-getting-started.md.",
                 image_name, image_name, storage_arg_wxc, image_name, storage_arg_ps,
             ))
             .into_response());
@@ -1478,8 +1478,8 @@ impl WSLContainerRunner {
         let _argv_cstrings: Vec<Vec<u8>> =
             process_env::argv_words(scope, &effective_env, &request.script_code)
                 .iter()
-                .map(|word| format!("{word}\0").into_bytes())
-                .collect();
+                .map(|word| cstr_bytes("command", word))
+                .collect::<Result<Vec<_>, _>>()?;
         let argv: Vec<PCSTR> = _argv_cstrings
             .iter()
             .map(|word| word.as_ptr() as PCSTR)
@@ -1492,8 +1492,8 @@ impl WSLContainerRunner {
 
         let _env_cstrings: Vec<Vec<u8>> = process_env::sdk_entries(scope, &effective_env)
             .iter()
-            .map(|e| format!("{e}\0").into_bytes())
-            .collect();
+            .map(|e| cstr_bytes("environment variable", e))
+            .collect::<Result<Vec<_>, _>>()?;
         let _env_ptrs: Vec<PCSTR> = _env_cstrings.iter().map(|e| e.as_ptr() as PCSTR).collect();
         if !_env_ptrs.is_empty() {
             let hr = sdk.WslcSetProcessSettingsEnvVariables(

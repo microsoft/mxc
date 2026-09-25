@@ -530,6 +530,9 @@ impl Worker {
             )
             .map_err(sr_err)?;
 
+            // Merge keeps the keepalive out of `env -i`, so a container whose
+            // execs never replace an environment does not need `/usr/bin/env`
+            // in its image.
             let mut keepalive = ProcessSettings::build_detached(
                 sdk,
                 container_steps::KEEPALIVE_SCRIPT,
