@@ -43,35 +43,33 @@ afterEach(() => _setRequestProbeRunner());
 
 describe('probeSandboxSupport', () => {
   it('runs the empty request probe', () => {
-    let received: readonly string[] = [];
-    _setRequestProbeRunner((args) => {
-      received = args;
+    let received: string | undefined = 'unset';
+    _setRequestProbeRunner((requestJson) => {
+      received = requestJson;
       return JSON.stringify(completeProbe);
     });
 
     assert.strictEqual(probeSandboxSupport().tier, 'appcontainer-dacl');
-    assert.deepStrictEqual(received, ['--probe']);
+    assert.strictEqual(received, undefined);
   });
 
-  it('passes a config through config-base64', () => {
-    let received: readonly string[] = [];
+  it('passes a config through the co-versioned request JSON', () => {
+    let received: string | undefined;
     const config = {
       version: '0.9.0-alpha' as const,
       containment: 'processcontainer' as const,
       process: { commandLine: 'cmd /c exit 0' },
     } satisfies ContainerConfig;
-    _setRequestProbeRunner((args) => {
-      received = args;
+    _setRequestProbeRunner((requestJson) => {
+      received = requestJson;
       return JSON.stringify(completeProbe);
     });
 
     probeSandboxSupport(config);
 
-    assert.deepStrictEqual(received.slice(0, 2), ['--probe', '--config-base64']);
-    assert.deepStrictEqual(
-      JSON.parse(Buffer.from(received[2], 'base64').toString('utf-8')),
-      config,
-    );
+    assert.ok(received !== undefined);
+    const parsed = JSON.parse(received) as { command: string };
+    assert.strictEqual(parsed.command, 'cmd /c exit 0');
   });
 
   it('rejects malformed probe output', () => {

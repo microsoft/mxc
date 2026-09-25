@@ -1,8 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { execFileSync } from 'node:child_process';
-import { findWxcExecutable } from './platform.js';
+import { probeBindingRequestJson } from './bindings/probe.js';
+import { prepareRequestSpec } from './bindings/request.js';
 import type {
   ContainerConfig,
   IsolationTier,
@@ -11,57 +11,36 @@ import type {
   UiCapabilitySupport,
 } from './types.js';
 
-type RequestProbeRunner = (args: readonly string[]) => string;
+type RequestProbeRunner = (requestJson?: string) => string;
 
-function defaultRequestProbeRunner(args: readonly string[]): string {
-  if (process.platform !== 'win32') {
-    throw new Error(
-      'the request-aware probe is available only for Windows ProcessContainer',
-    );
-  }
-  const executable = findWxcExecutable();
-  if (!executable) {
-    throw new Error('wxc-exec not found');
-  }
-  return execFileSync(executable, [...args], {
-    timeout: 5000,
-    encoding: 'utf-8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-}
+let requestProbeRunner: RequestProbeRunner = probeBindingRequestJson;
 
-let requestProbeRunner: RequestProbeRunner = defaultRequestProbeRunner;
-
-/** @internal Replaces the native process invocation for unit tests. */
+/** @internal Replaces the native binding invocation for unit tests. */
 export function _setRequestProbeRunner(
   runner?: RequestProbeRunner,
 ): void {
-  requestProbeRunner = runner ?? defaultRequestProbeRunner;
+  requestProbeRunner = runner ?? probeBindingRequestJson;
 }
 
 /**
  * Probe which Windows ProcessContainer tier can serve an optional config.
  *
  * The probe is synchronous and does not create a sandbox. Omitting `config`
- * matches `wxc-exec --probe` without a config.
+ * probes the default empty request in-process through `mxc_ffi`.
  */
 export function probeSandboxSupport(config?: ContainerConfig): ProbeOutput {
-  const args = config === undefined
-    ? ['--probe']
-    : [
-        '--probe',
-        '--config-base64',
-        Buffer.from(JSON.stringify(config), 'utf-8').toString('base64'),
-      ];
+  const requestJson = config === undefined
+    ? undefined
+    : JSON.stringify(prepareRequestSpec(config));
   let value: unknown;
   try {
-    value = JSON.parse(requestProbeRunner(args));
+    value = JSON.parse(requestProbeRunner(requestJson));
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`invalid request probe JSON from wxc-exec: ${detail}`);
+    throw new Error(`invalid request probe JSON from mxc_ffi: ${detail}`);
   }
   if (!isProbeOutput(value)) {
-    throw new Error('invalid request probe output from wxc-exec');
+    throw new Error('invalid request probe output from mxc_ffi');
   }
   return value;
 }

@@ -376,8 +376,8 @@ describe('getPlatformSupport probe integration', () => {
   });
 });
 
-// findWxcExecutable failure-mode: the SDK's default probe runner calls
-// findWxcExecutable() and throws if it returns null. Tests below
+// findWxcExecutable failure-mode: telemetry and helper consumers call
+// findWxcExecutable() and throw if it returns null. Tests below
 // confirm the function never throws — only ever returns a string path
 // or `null` — even under hostile inputs to its env-var search seam.
 describe('findWxcExecutable failure modes', () => {
