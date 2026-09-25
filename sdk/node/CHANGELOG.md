@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Stable IsolationSession and WSLC one-shot and state-aware backends under the
+  exact `0.9.0-alpha` contract. Neither backend requires
+  `{ experimental: true }`.
 - State-aware provision, start, stop, and deprovision calls run in-process
   through `mxc_ffi` rather than spawning `wxc-exec`.
 - Native live, buffered, and dry-run exec support for IsolationSession and
