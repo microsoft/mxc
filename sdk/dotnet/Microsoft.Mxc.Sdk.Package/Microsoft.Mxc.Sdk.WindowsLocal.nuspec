@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<package>
+  <metadata>
+    <id>Microsoft.Mxc.Sdk</id>
+    <version>$version$</version>
+    <title>Microsoft.Mxc.Sdk (Windows local build)</title>
+    <authors>Microsoft</authors>
+    <owners>Microsoft</owners>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <license type="file">LICENSE.md</license>
+    <readme>README.md</readme>
+    <projectUrl>https://github.com/microsoft/mxc</projectUrl>
+    <repository type="git" url="https://github.com/microsoft/mxc" />
+    <description>Windows-only local development package for the MXC .NET SDK.</description>
+    <tags>mxc sandbox isolation security</tags>
+    <dependencies>
+      <group targetFramework="net8.0" />
+    </dependencies>
+  </metadata>
+  <files>
+    <file src="$managedOutput$\Microsoft.Mxc.Sdk.dll" target="lib\net8.0" />
+    <file src="$managedOutput$\Microsoft.Mxc.Sdk.pdb" target="lib\net8.0" />
+    <file src="$x64Native$\*" target="runtimes\win-x64\native" />
+    <file src="$arm64Native$\*" target="runtimes\win-arm64\native" />
+    <file src="$repositoryRoot$\sdk\dotnet\README.md" target="" />
+    <file src="$repositoryRoot$\LICENSE.md" target="" />
+  </files>
+</package>

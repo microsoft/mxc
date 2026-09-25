@@ -10,8 +10,10 @@ Breaking changes and migration notes are recorded in
 
 ## Building the NuGet package
 
-On Windows, `build.bat --all` creates the multi-RID package under
-`output\packages`. Add `--with-wslc` to include the WSLC runtime.
+On Windows, `build.bat --all` creates a Windows x64/ARM64 local package under
+`output\packages` with a `-local-windows` version suffix. Add `--with-wslc` to
+include the WSLC runtime. The governed build pipeline creates the publishable
+package containing all supported Windows, Linux, and macOS runtime assets.
 
 ```
 C# (Microsoft.Mxc.Sdk)
@@ -755,9 +757,9 @@ library when no prebuilt path is supplied.
 
 A build of this project puts the freshly built native unit next to the managed
 assembly. `dotnet pack` includes that exact unit under
-`runtimes/<host-rid>/native/`; `build.bat --all` can additionally pre-stage the
-other Windows RID for a multi-RID package. The official package includes
-`mxc_ffi` for `win-x64`, `win-arm64`, `linux-x64`, `linux-arm64`, and
+`runtimes/<host-rid>/native/`; `build.bat --all` additionally pre-stages the
+other Windows RID in a Windows-only local package. The official package
+includes `mxc_ffi` for `win-x64`, `win-arm64`, `linux-x64`, `linux-arm64`, and
 `osx-arm64`.
 
 ## Supported surface

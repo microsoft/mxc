@@ -239,17 +239,20 @@ if "%BUILD_ALL%"=="1" (
         )
     )
     for /f "usebackq delims=" %%V in (`powershell -NoProfile -Command "[xml]$p = Get-Content 'sdk\dotnet\Microsoft.Mxc.Sdk\Microsoft.Mxc.Sdk.csproj'; $p.Project.PropertyGroup.Version"`) do set "DOTNET_PACKAGE_VERSION=%%V"
+    set "DOTNET_LOCAL_PACKAGE_VERSION=!DOTNET_PACKAGE_VERSION!-local-windows"
     call dotnet restore sdk\dotnet\Microsoft.Mxc.Sdk.Package\Microsoft.Mxc.Sdk.Package.csproj --nologo || goto :error_root
     call dotnet pack sdk\dotnet\Microsoft.Mxc.Sdk.Package\Microsoft.Mxc.Sdk.Package.csproj --configuration !DOTNET_CONFIG! --no-restore --output output\packages --nologo ^
-        -p:PackageVersion=!DOTNET_PACKAGE_VERSION! ^
+        -p:PackageVersion=!DOTNET_LOCAL_PACKAGE_VERSION! ^
+        -p:WindowsOnlyPackage=true ^
         -p:ManagedOutput="%CD%\!DOTNET_PACKAGE_ROOT!\managed" ^
         -p:X64Native="%CD%\!DOTNET_PACKAGE_ROOT!\runtimes\win-x64\native" ^
         -p:Arm64Native="%CD%\!DOTNET_PACKAGE_ROOT!\runtimes\win-arm64\native" ^
         -p:RepositoryRoot="%CD%" || goto :error_root
     powershell -NoProfile -ExecutionPolicy Bypass -File .azure-pipelines\scripts\verify-dotnet-nuget-package.ps1 ^
-        -PackagePath "output\packages\Microsoft.Mxc.Sdk.!DOTNET_PACKAGE_VERSION!.nupkg" ^
+        -PackagePath "output\packages\Microsoft.Mxc.Sdk.!DOTNET_LOCAL_PACKAGE_VERSION!.nupkg" ^
+        -WindowsOnly ^
         !WITH_WSLC_PACKAGE_VERIFY! || goto :error_root
-    echo   Created output\packages\Microsoft.Mxc.Sdk.!DOTNET_PACKAGE_VERSION!.nupkg
+    echo   Created Windows-only local package output\packages\Microsoft.Mxc.Sdk.!DOTNET_LOCAL_PACKAGE_VERSION!.nupkg
 ) else (
     echo   Skipping Microsoft.Mxc.Sdk NuGet package; use --all to build both Windows RIDs.
 )

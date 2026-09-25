@@ -2,7 +2,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$PackagePath,
 
-    [switch]$RequireWslc
+    [switch]$RequireWslc,
+
+    [switch]$WindowsOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,12 +24,17 @@ try {
         'runtimes/win-x64/native/plm.exe',
         'runtimes/win-arm64/native/mxc_ffi.dll',
         'runtimes/win-arm64/native/plm.exe',
-        'runtimes/linux-x64/native/libmxc_ffi.so',
-        'runtimes/linux-arm64/native/libmxc_ffi.so',
-        'runtimes/osx-arm64/native/libmxc_ffi.dylib',
         'README.md',
         'LICENSE.md'
     )
+
+    if (-not $WindowsOnly) {
+        $required += @(
+            'runtimes/linux-x64/native/libmxc_ffi.so',
+            'runtimes/linux-arm64/native/libmxc_ffi.so',
+            'runtimes/osx-arm64/native/libmxc_ffi.dylib'
+        )
+    }
 
     if ($RequireWslc) {
         $required += @(

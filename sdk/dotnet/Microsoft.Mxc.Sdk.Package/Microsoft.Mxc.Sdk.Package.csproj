@@ -5,7 +5,8 @@
     <IsPackable>true</IsPackable>
     <IncludeBuildOutput>false</IncludeBuildOutput>
     <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
-    <NuspecFile>Microsoft.Mxc.Sdk.nuspec</NuspecFile>
+    <NuspecFile Condition="'$(WindowsOnlyPackage)' == 'true'">Microsoft.Mxc.Sdk.WindowsLocal.nuspec</NuspecFile>
+    <NuspecFile Condition="'$(NuspecFile)' == ''">Microsoft.Mxc.Sdk.nuspec</NuspecFile>
     <NuspecBasePath>$(RepositoryRoot)</NuspecBasePath>
     <NuspecProperties>version=$(PackageVersion);managedOutput=$(ManagedOutput);x64Native=$(X64Native);arm64Native=$(Arm64Native);linuxX64Native=$(LinuxX64Native);linuxArm64Native=$(LinuxArm64Native);macArm64Native=$(MacArm64Native);repositoryRoot=$(RepositoryRoot)</NuspecProperties>
   </PropertyGroup>
@@ -15,9 +16,9 @@
     <Error Condition="'$(ManagedOutput)' == ''" Text="ManagedOutput is required." />
     <Error Condition="'$(X64Native)' == ''" Text="X64Native is required." />
     <Error Condition="'$(Arm64Native)' == ''" Text="Arm64Native is required." />
-    <Error Condition="'$(LinuxX64Native)' == ''" Text="LinuxX64Native is required." />
-    <Error Condition="'$(LinuxArm64Native)' == ''" Text="LinuxArm64Native is required." />
-    <Error Condition="'$(MacArm64Native)' == ''" Text="MacArm64Native is required." />
+    <Error Condition="'$(WindowsOnlyPackage)' != 'true' and '$(LinuxX64Native)' == ''" Text="LinuxX64Native is required." />
+    <Error Condition="'$(WindowsOnlyPackage)' != 'true' and '$(LinuxArm64Native)' == ''" Text="LinuxArm64Native is required." />
+    <Error Condition="'$(WindowsOnlyPackage)' != 'true' and '$(MacArm64Native)' == ''" Text="MacArm64Native is required." />
     <Error Condition="'$(RepositoryRoot)' == ''" Text="RepositoryRoot is required." />
   </Target>
 
