@@ -105,17 +105,10 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   // Copy of config; fields are removed as they are lifted into the envelope.
   // Anything left becomes <backendSection>.<phase>.
   const backendSpecific: Record<string, unknown> = { ...(config ?? {}) };
-  const defaultVersion = DEFAULT_STATE_AWARE_VERSION[backendKey] ?? STATE_AWARE_VERSION;
+  const defaultVersion = DEFAULT_STATE_AWARE_VERSION[backendKey];
   const telemetry = backendSpecific.telemetry as TelemetryConfig | undefined;
   const requestedVersion = backendSpecific.version;
-  if (requestedVersion !== undefined && requestedVersion !== defaultVersion) {
-    throw mxcErrorFromCode(
-      'malformed_request',
-      `State-aware ${backendKey} requests require schema version '${defaultVersion}', ` +
-      `got '${String(requestedVersion)}'.`,
-    );
-  }
-  const version = defaultVersion;
+  const version = requestedVersion === undefined ? defaultVersion : requestedVersion;
   delete backendSpecific.version;
 
   const fail = (message: string): never => {

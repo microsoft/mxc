@@ -23,13 +23,15 @@ import {
   runBindingRequestAsync,
   type BindingRunResult,
 } from './bindings/run.js';
+import {
+  MAX_SUPPORTED_VERSION as SUPPORTED_VERSION,
+  MIN_VERSION,
+} from './generated/schema-versions.js';
 
 // High-level calls currently emit canonical exact-contract JSON, so this
 // producer validates the selected contract before launching the executor. The
 // v1 SDK split will make SandboxPolicy version-free while retaining versions
 // for raw ContainerConfig input.
-const MIN_VERSION = '0.6.0-alpha';
-const SUPPORTED_VERSION = '0.10.0-alpha';
 const REGISTERED_VERSION_VALUES = [
     '0.6.0-alpha',
     '0.7.0-alpha',

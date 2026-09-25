@@ -186,21 +186,14 @@ describe('buildStateAwareEnvelope', () => {
     assert.equal(env.experimental, undefined);
   });
 
-  it('rejects an explicitly older schema version when telemetry is present', () => {
-    assert.throws(
-      () => buildStateAwareEnvelope({
-        phase: 'start',
-        backendKey: 'windows_sandbox',
-        sandboxId: 'wsb:01234567',
-        config: { version: '0.8.0-alpha', telemetry: { enabled: true } },
-      }),
-      (error: unknown) =>
-        error instanceof MxcError &&
-        error.code === 'malformed_request' &&
-        error.message.includes(
-          "State-aware windows_sandbox requests require schema version '0.10.0-alpha'",
-        ),
-    );
+  it('forwards an explicitly older schema version when telemetry is present', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'start',
+      backendKey: 'windows_sandbox',
+      sandboxId: 'wsb:01234567',
+      config: { version: '0.8.0-alpha', telemetry: { enabled: true } },
+    });
+    assert.equal(env.version, '0.8.0-alpha');
   });
 
   it('selects schema 0.9 when WSLC exec inherits the backend environment', () => {
@@ -222,27 +215,20 @@ describe('buildStateAwareEnvelope', () => {
     });
   });
 
-  it('rejects an explicitly older schema version when the environment is inherited', () => {
-    assert.throws(
-      () => buildStateAwareEnvelope({
-        phase: 'exec',
-        backendKey: 'wslc',
-        sandboxId: 'wslc:abc',
-        config: {
-          version: '0.8.0-alpha',
-          process: {
-            commandLine: 'echo hi',
-            inheritDefaultEnv: true,
-          },
+  it('forwards an explicitly older schema version when the environment is inherited', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'exec',
+      backendKey: 'wslc',
+      sandboxId: 'wslc:abc',
+      config: {
+        version: '0.8.0-alpha',
+        process: {
+          commandLine: 'echo hi',
+          inheritDefaultEnv: true,
         },
-      }),
-      (error: unknown) =>
-        error instanceof MxcError &&
-        error.code === 'malformed_request' &&
-        error.message.includes(
-          "State-aware wslc requests require schema version '0.9.0-alpha'",
-        ),
-    );
+      },
+    });
+    assert.equal(env.version, '0.8.0-alpha');
   });
 
   it('produces a provision envelope with cross-cutting fields lifted to top-level', () => {
@@ -305,18 +291,25 @@ describe('buildStateAwareEnvelope', () => {
     }
   });
 
-  it('rejects an untyped caller-supplied version with malformed_request', () => {
-    assert.throws(
-      () => buildStateAwareEnvelope({
-        phase: 'provision',
-        backendKey: 'isolation_session',
-        containment: 'isolation_session',
-        config: { version: '0.6.5-alpha' },
-      }),
-      (err: unknown) => err instanceof MxcError &&
-        err.code === 'malformed_request' &&
-        /require schema version '0\.9\.0-alpha'/.test(err.message),
-    );
+  it('forwards an untyped caller-supplied version to native validation', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'provision',
+      backendKey: 'isolation_session',
+      containment: 'isolation_session',
+      config: { version: '0.6.5-alpha' },
+    });
+    assert.equal(env.version, '0.6.5-alpha');
+  });
+
+  it('preserves an explicit null version for native validation', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'provision',
+      backendKey: 'isolation_session',
+      containment: 'isolation_session',
+      config: { version: null },
+    });
+    const wire = JSON.parse(JSON.stringify(env));
+    assert.strictEqual(wire.version, null);
   });
 
   it('nests provision appId under isolationSession.provision', () => {
@@ -525,6 +518,30 @@ describe('provisionSandbox', () => {
       () => provisionSandbox('isolation_session', ACK),
       (err: unknown) => err instanceof MxcError && err.code === 'backend_unavailable',
     );
+  });
+
+  it('forwards an explicit version through the FFI transport and surfaces native rejection', async () => {
+    let request: BindingStateAwareRequest | undefined;
+    _setBindingStateAwareAsyncImplementation(async (value) => {
+      request = value;
+      throw new MxcError(
+        'malformed_request',
+        "State-aware isolation_session requests require schema version '0.9.0-alpha', got '0.10.0-alpha'.",
+      );
+    });
+
+    await assert.rejects(
+      () => provisionSandbox(
+        'isolation_session',
+        { ...ACK, version: '0.10.0-alpha' },
+      ),
+      (err: unknown) =>
+        err instanceof MxcError &&
+        err.code === 'malformed_request' &&
+        err.message.includes("got '0.10.0-alpha'"),
+    );
+
+    assert.strictEqual(requestEnvelope(request!).version, '0.10.0-alpha');
   });
 
   it('rejects unsupported options', async () => {
@@ -1025,18 +1042,14 @@ describe('wslc state-aware lifecycle', () => {
     assert.strictEqual(env.version, '0.9.0-alpha');
   });
 
-  it('rejects a caller-supplied version without a registered wslc state-aware contract', () => {
-    assert.throws(
-      () => buildStateAwareEnvelope({
-        phase: 'provision',
-        backendKey: 'wslc',
-        containment: 'wslc',
-        config: { version: '0.8.1-alpha', image: 'alpine:latest' },
-      }),
-      (err: unknown) => err instanceof MxcError &&
-        err.code === 'malformed_request' &&
-        /require schema version '0\.9\.0-alpha'/.test(err.message),
-    );
+  it('forwards a caller-supplied version for native contract validation', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'provision',
+      backendKey: 'wslc',
+      containment: 'wslc',
+      config: { version: '0.8.1-alpha', image: 'alpine:latest' },
+    });
+    assert.equal(env.version, '0.8.1-alpha');
   });
 
   it('lifts filesystem + network and nests image under wslc.provision', () => {

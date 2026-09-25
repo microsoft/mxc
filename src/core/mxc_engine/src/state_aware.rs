@@ -67,6 +67,33 @@ fn require_experimental_optin(
     Ok(())
 }
 
+fn validate_state_aware_contract(
+    backend: &wxc_common::models::ContainmentBackend,
+    parsed: &ParsedStateAwareRequest,
+) -> Result<(), MxcError> {
+    let expected = wxc_common::schema_versions::state_aware_contract(backend).ok_or_else(|| {
+        MxcError::malformed_request(format!(
+            "state-aware backend {} has no registered schema contract",
+            backend.wire_name()
+        ))
+    })?;
+    let declared = parsed.request().source_contract.ok_or_else(|| {
+        MxcError::malformed_request(format!(
+            "state-aware {} request has no exact schema contract attribution",
+            backend.wire_name()
+        ))
+    })?;
+    if declared != expected {
+        return Err(MxcError::malformed_request(format!(
+            "State-aware {} requests require schema version '{}', got '{}'.",
+            backend.wire_name(),
+            expected.as_str(),
+            declared.as_str()
+        )));
+    }
+    Ok(())
+}
+
 /// This phase's telemetry correlation vector, purely internal to MXC: no
 /// caller ever supplies or relays one. `provision` (whose `sandboxId` doesn't
 /// exist yet) mints a fresh vector; every later phase recalls the same
@@ -125,6 +152,7 @@ pub fn run_state_aware(
     dry_run: bool,
 ) -> Result<DispatchOutcome, MxcError> {
     let backend = resolve_backend(&parsed)?;
+    validate_state_aware_contract(&backend, &parsed)?;
     require_experimental_optin(&backend, &parsed)?;
     match backend {
         #[cfg(target_os = "windows")]
@@ -166,6 +194,7 @@ pub fn exec_state_aware(
     parsed: ParsedStateAwareRequest,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     let backend = resolve_backend(&parsed)?;
+    validate_state_aware_contract(&backend, &parsed)?;
     require_experimental_optin(&backend, &parsed)?;
     match backend {
         #[cfg(target_os = "windows")]
@@ -595,6 +624,108 @@ mod tests {
             assert_eq!(error.code, crate::ErrorCode::MalformedRequest);
             assert!(error.message.contains("version"), "{}", error.message);
         }
+    }
+
+    #[test]
+    fn state_aware_contract_validation_accepts_each_backend_default() {
+        for json in [
+            r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"iso:abc"}"#,
+            r#"{"version":"0.10.0-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
+            r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"wslc:0123456789abcdef0123456789abcdef"}"#,
+        ] {
+            let parsed = parse_state_aware(json, false, &mut Logger::new(Mode::Buffer)).unwrap();
+            let backend = resolve_backend(&parsed).unwrap();
+            validate_state_aware_contract(&backend, &parsed).unwrap();
+        }
+    }
+
+    #[test]
+    fn state_aware_contract_validation_rejects_each_backend_mismatch() {
+        for (json, backend_name, expected, declared) in [
+            (
+                r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"wsb:abcd1234"}"#,
+                "windows_sandbox",
+                "0.10.0-alpha",
+                "0.9.0-alpha",
+            ),
+            (
+                r#"{"version":"0.10.0-alpha","phase":"start","sandboxId":"iso:abc"}"#,
+                "isolation_session",
+                "0.9.0-alpha",
+                "0.10.0-alpha",
+            ),
+            (
+                r#"{"version":"0.10.0-alpha","phase":"start","sandboxId":"wslc:0123456789abcdef0123456789abcdef"}"#,
+                "wslc",
+                "0.9.0-alpha",
+                "0.10.0-alpha",
+            ),
+        ] {
+            let parsed = parse_state_aware(json, false, &mut Logger::new(Mode::Buffer)).unwrap();
+            let backend = resolve_backend(&parsed).unwrap();
+            let error = validate_state_aware_contract(&backend, &parsed).unwrap_err();
+
+            assert_eq!(error.code, MxcErrorCode::MalformedRequest);
+            assert!(error.message.contains(backend_name), "{}", error.message);
+            assert!(error.message.contains(expected), "{}", error.message);
+            assert!(error.message.contains(declared), "{}", error.message);
+        }
+    }
+
+    #[test]
+    fn state_aware_contract_validation_rejects_an_unmapped_backend() {
+        let parsed = parse_state_aware(
+            r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"iso:abc"}"#,
+            false,
+            &mut Logger::new(Mode::Buffer),
+        )
+        .unwrap();
+
+        let error = validate_state_aware_contract(
+            &wxc_common::models::ContainmentBackend::ProcessContainer,
+            &parsed,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, MxcErrorCode::MalformedRequest);
+        assert!(
+            error.message.contains("no registered schema contract"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn contract_mismatch_precedes_backend_availability() {
+        let parsed = parse_state_aware(
+            r#"{"version":"0.10.0-alpha","phase":"start","sandboxId":"wslc:0123456789abcdef0123456789abcdef"}"#,
+            false,
+            &mut Logger::new(Mode::Buffer),
+        )
+        .unwrap();
+
+        let error = run_state_aware(parsed, false).unwrap_err();
+
+        assert_eq!(error.code, MxcErrorCode::MalformedRequest);
+        assert!(error.message.contains("0.9.0-alpha"), "{}", error.message);
+    }
+
+    #[test]
+    fn streaming_contract_mismatch_precedes_backend_availability() {
+        let parsed = parse_state_aware(
+            r#"{"version":"0.10.0-alpha","phase":"exec","sandboxId":"wslc:0123456789abcdef0123456789abcdef","process":{"commandLine":"echo hi"}}"#,
+            false,
+            &mut Logger::new(Mode::Buffer),
+        )
+        .unwrap();
+
+        let error = match exec_state_aware(parsed) {
+            Ok(_) => panic!("a mismatched state-aware contract must fail before backend startup"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code, MxcErrorCode::MalformedRequest);
+        assert!(error.message.contains("0.9.0-alpha"), "{}", error.message);
     }
 
     #[test]

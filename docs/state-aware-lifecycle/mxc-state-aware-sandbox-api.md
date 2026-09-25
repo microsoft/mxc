@@ -671,7 +671,7 @@ Top-level fields shared by both branches:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `version` | string | Yes | Exact backend-specific schema version. IsolationSession and WSLC use `0.9.0-alpha`; Windows Sandbox uses `0.10.0-alpha`. The SDK fills this field when the consumer Config omits it. |
+| `version` | string | Yes | Exact backend-specific schema version. IsolationSession and WSLC use `0.9.0-alpha`; Windows Sandbox uses `0.10.0-alpha`. The SDK stamps that backend default when the consumer Config omits it and forwards an explicit value unchanged. After resolving the backend, the common native engine rejects a version that does not apply before binding or execution. |
 
 Backend-routing fields:
 
