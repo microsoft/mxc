@@ -534,11 +534,21 @@ pub unsafe extern "C" fn mxc_probe_request_json(
             unsafe { ptr::write(out_json_utf8, json) };
             MXC_STATUS_SUCCESS
         }
-        Ok(Err(error)) => {
+        Ok(Err(ProbeRequestError::Sdk(error))) => {
             let status = status_from_error_code(error.code);
             // SAFETY: out_error is non-null and writable.
             unsafe { ptr::write(out_error, MxcErrorDetail::from_error(&error)) };
             status
+        }
+        Ok(Err(ProbeRequestError::InvalidUtf8)) => {
+            // SAFETY: out_error is non-null and writable.
+            unsafe {
+                ptr::write(
+                    out_error,
+                    MxcErrorDetail::from_message("request JSON is not UTF-8"),
+                )
+            };
+            MXC_STATUS_INVALID_UTF8
         }
         Err(panic) => {
             report_panic("mxc_probe_request_json", &*panic);
@@ -554,24 +564,30 @@ pub unsafe extern "C" fn mxc_probe_request_json(
     }
 }
 
-fn probe_request_json_inner(request_json_utf8: *const c_char) -> Result<*mut c_char, Error> {
+enum ProbeRequestError {
+    Sdk(Error),
+    InvalidUtf8,
+}
+
+fn probe_request_json_inner(
+    request_json_utf8: *const c_char,
+) -> Result<*mut c_char, ProbeRequestError> {
     let request = if request_json_utf8.is_null() {
         None
     } else {
         // SAFETY: the caller contract requires a valid NUL-terminated string.
-        let request_json = unsafe { CStr::from_ptr(request_json_utf8) }
-            .to_str()
-            .map_err(|_| Error::new(ErrorCode::MalformedRequest, "request is not valid UTF-8"))?;
-        Some(request::build_request_from_json(request_json)?)
+        let request_json =
+            unsafe { cstr_to_str(request_json_utf8) }.ok_or(ProbeRequestError::InvalidUtf8)?;
+        Some(request::build_request_from_json(request_json).map_err(ProbeRequestError::Sdk)?)
     };
-    let output = probe(request.as_ref())?;
+    let output = probe(request.as_ref()).map_err(ProbeRequestError::Sdk)?;
     serde_json::to_vec(&output)
         .map(|json| alloc_cstring(&json))
         .map_err(|error| {
-            Error::new(
+            ProbeRequestError::Sdk(Error::new(
                 ErrorCode::BackendError,
                 format!("serializing probe output failed: {error}"),
-            )
+            ))
         })
 }
 

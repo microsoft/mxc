@@ -210,6 +210,23 @@ fn extern_probe_rejects_malformed_request() {
 }
 
 #[test]
+fn extern_probe_rejects_invalid_utf8_with_ffi_status() {
+    let request = CString::new(vec![0xff]).unwrap();
+    let mut json = ptr::null_mut();
+    // SAFETY: MxcErrorDetail contains only nullable pointers.
+    let mut error: MxcErrorDetail = unsafe { std::mem::zeroed() };
+    // SAFETY: valid NUL-terminated bytes and writable output storage.
+    let status = unsafe { mxc_probe_request_json(request.as_ptr(), &mut json, &mut error) };
+
+    assert_eq!(status, mxc_ffi::MXC_STATUS_INVALID_UTF8);
+    assert!(json.is_null());
+    assert!(!error.message_utf8.is_null());
+
+    // SAFETY: the failing call filled the standalone error detail.
+    unsafe { mxc_error_detail_free(&mut error) };
+}
+
+#[test]
 fn extern_streaming_warning_and_closer_preconditions_are_safe() {
     let mut warnings = ptr::dangling_mut();
     // SAFETY: null sandbox/closer handles are deliberate precondition tests;
