@@ -1805,6 +1805,105 @@ mod tests {
     }
 
     #[test]
+    fn com_access_checks_are_actionable_in_block_and_allow_modes() {
+        let activation_clsid = "{A47979D2-C419-11D9-A5B4-001185AD2B89}";
+        let call_iid = "{00000132-0000-0000-C000-000000000046}";
+        let events = vec![
+            kernel_event(
+                14,
+                100,
+                1,
+                &[
+                    ("Mode", "\"Normal\""),
+                    ("ObjectType", "\"ComActivationForClass\""),
+                    ("ObjectName", activation_clsid),
+                    ("AccessMask", "0x1"),
+                ],
+            ),
+            kernel_event(
+                14,
+                101,
+                2,
+                &[
+                    ("Mode", "\"Permissive\""),
+                    ("ObjectType", "\"ComActivationForClass\""),
+                    ("ObjectName", "\"{a47979d2-c419-11d9-a5b4-001185ad2b89}\""),
+                    ("AccessMask", "0xffffffff"),
+                ],
+            ),
+            kernel_event(
+                14,
+                102,
+                3,
+                &[
+                    ("Mode", "\"Permissive\""),
+                    ("ObjectType", "\"ComCallOnInterface\""),
+                    ("ObjectName", call_iid),
+                    ("AccessMask", "0x2"),
+                ],
+            ),
+        ];
+
+        let analysis = resources_from_events(&events);
+
+        assert_eq!(analysis.denials.len(), 2);
+        assert_eq!(analysis.denials[0].resource, activation_clsid);
+        assert_eq!(analysis.denials[0].resource_type, ResourceType::Other);
+        assert_eq!(analysis.denials[0].access_type, AccessType::Unknown);
+        assert_eq!(analysis.denials[1].resource, call_iid);
+        assert_eq!(analysis.denials[1].resource_type, ResourceType::Other);
+        assert_eq!(analysis.denials[1].access_type, AccessType::Unknown);
+
+        let com_signatures = analysis
+            .verbose_logging
+            .signatures
+            .iter()
+            .filter(|group| {
+                matches!(
+                    property(&group.signature, "ObjectType"),
+                    "ComActivationForClass" | "ComCallOnInterface"
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(com_signatures.len(), 3);
+        assert!(com_signatures.iter().all(|group| {
+            group.signature.reason == VerboseLoggingOutcomeReason::Actionable
+                && group.signature.resource_type == Some(ResourceType::Other)
+                && group.signature.access_type == Some(AccessType::Unknown)
+                && group.count == 1
+        }));
+    }
+
+    #[test]
+    fn malformed_com_identifier_remains_classified_verbose_diagnostic() {
+        let events = vec![kernel_event(
+            14,
+            42,
+            1,
+            &[
+                ("Mode", "\"Normal\""),
+                ("ObjectType", "\"ComActivationForClass\""),
+                ("ObjectName", "\"not-a-clsid\""),
+                ("AccessMask", "0x1"),
+            ],
+        )];
+
+        let analysis = resources_from_events(&events);
+
+        assert!(analysis.denials.is_empty());
+        assert_eq!(analysis.verbose_logging.signatures.len(), 1);
+        let signature = &analysis.verbose_logging.signatures[0].signature;
+        assert_eq!(
+            signature.reason,
+            VerboseLoggingOutcomeReason::EventPayloadMalformed
+        );
+        assert_eq!(signature.resource_type, Some(ResourceType::Other));
+        assert_eq!(signature.access_type, Some(AccessType::Unknown));
+        assert_eq!(property(signature, "ObjectType"), "ComActivationForClass");
+        assert_eq!(property(signature, "ObjectName"), "not-a-clsid");
+    }
+
+    #[test]
     fn unidentified_capability_events_are_omitted() {
         let events = vec![
             kernel_event(

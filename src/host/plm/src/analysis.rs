@@ -211,6 +211,11 @@ mod tests {
             ),
             denial("Clipboard", ResourceType::Ui, AccessType::Unknown),
             denial(
+                "{00000132-0000-0000-C000-000000000046}",
+                ResourceType::Other,
+                AccessType::Unknown,
+            ),
+            denial(
                 "S-1-15-3-1024-1-2-3-4-5-6-7-8",
                 ResourceType::Capability,
                 AccessType::Unknown,

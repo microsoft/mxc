@@ -211,12 +211,13 @@ sandbox policy:
 - `resource` is the user-visible identifier for the denied resource,
   interpreted by `resourceType`: an absolute `C:\…` path for `file`, the
   AppContainer **capability name** (e.g. `internetClient`) for `capability`,
-  and the raw resource identifier otherwise. Well-known capability SIDs are
-  resolved to their policy name; custom (hashed) capability SIDs that can't be
-  reversed fall back to the `S-1-15-3-…` SID string. Named Section,
-  SymbolicLink, and Timer checks are verbose-only because the config has no
-  corresponding policy grants. Event 28 is
-  schema-discriminated: UI-shaped `Category`/`Detail` payloads emit `ui`
+  and the raw resource identifier otherwise. For COM access checks, `other`
+  carries the CLSID of an activation check or the IID of an interface-call
+  check. Well-known capability SIDs are resolved to their policy name; custom
+  (hashed) capability SIDs that can't be reversed fall back to the
+  `S-1-15-3-…` SID string. Named Section, SymbolicLink, and Timer checks are
+  verbose-only because the config has no corresponding policy grants. Event 28
+  is schema-discriminated: UI-shaped `Category`/`Detail` payloads emit `ui`
   resources instead of treating the package SID as a capability.
 - `resourceType` is one of `file`, `ui`, `network`, `capability`, `other`;
   `accessType` is one of `read`, `write`, `execute`, `unknown`. Capability
@@ -225,6 +226,36 @@ sandbox policy:
   not carry a stable capability identifier.
 - `filetime` is a decimal string containing the Windows `FILETIME` value, so
   JavaScript consumers retain all 64 bits without numeric precision loss.
+
+### COM access checks
+
+On Windows builds with COM Learning Mode metadata, Kernel-General access-check
+event 14 reports two additional object types:
+
+| `ObjectType` | `resource` | `resourceType` | `accessType` |
+| ------------ | ---------- | -------------- | ------------ |
+| `ComActivationForClass` | Activation CLSID | `other` | `unknown` |
+| `ComCallOnInterface` | Called interface IID | `other` | `unknown` |
+
+Both `captureDenials.mode: "block"` and `captureDenials.mode: "allow"` decode
+these records identically. The mode still controls whether the denied operation
+remains blocked or is permitted; it does not change the output classification.
+MXC validates that the resource is GUID-shaped and preserves the original
+CLSID/IID spelling.
+
+COM records are included in the caller-facing denial file for auditing and
+application-specific policy workflows, and are also retained as `actionable`
+signatures in the verbose sibling. MXC does not currently expose an authorable
+COM grant, so the legacy adjusted-config generator intentionally ignores
+`resourceType: "other"` records.
+
+This coverage applies to classic COM activation checks instrumented in RPCSS and
+COM interface-call checks instrumented in COMBASE. The separate WinRT
+`CheckActivationPermissions` path does not currently attach this COM Learning
+Mode metadata, so an MXC decoder-only change cannot identify those WinRT
+activation denials as `ComActivationForClass`. `RPC Interface` events are
+lower-layer LRPC diagnostics and remain `unsupportedObjectType`; they are not a
+substitute for the COM permission event.
 
 ### Verbose logging event signatures
 
@@ -274,12 +305,13 @@ non-file resource values are retained. Complete file paths are replaced with
 Exact header timestamps and timestamp-like properties are omitted so otherwise
 identical events deduplicate, and free-form decoder errors are never serialized.
 
-Every valid actionable denial is classified as `actionable` in the verbose
-file, including its first occurrence, later duplicates, and candidates observed
-after the actionable file's unique-denial bound. Those occurrences deduplicate
-under the same signature and increment its count. `accessType` and
-`resourceType` are included when denial extraction determined them; diagnostic
-outcomes without those classifications omit the fields.
+Every valid actionable denial, including a COM CLSID/IID record, is classified
+as `actionable` in the verbose file. Its first occurrence, later duplicates, and
+candidates observed after the actionable file's unique-denial bound are all
+retained. Those occurrences deduplicate under the same signature and increment
+its count. `accessType` and `resourceType` are included when denial extraction
+determined them; diagnostic outcomes without those classifications omit the
+fields.
 
 Candidates excluded from the actionable output retain a closed diagnostic
 reason and their sanitized event properties:
@@ -297,7 +329,8 @@ reason and their sanitized event properties:
 - `unsupportedObjectType` means the event names a resource outside the
   supported diagnostic model. Examples include `\BaseNamedObjects` as a
   Directory, ALPC Ports such as
-  `ubpmtaskhostchannel`, and RPC Interface GUIDs.
+  `ubpmtaskhostchannel`, and lower-layer RPC Interface GUIDs. The explicit COM
+  object types documented above are supported and do not use this outcome.
 
 Property values longer than 256 characters retain bounded prefix and suffix
 context plus a SHA-256 digest of the complete sanitized value. This keeps long
