@@ -38,12 +38,6 @@ export function validateCatalog(catalog) {
     if (platforms.has(platform.id)) {
       throw new Error(`duplicate platform id: ${platform.id}`);
     }
-    if (platform.prerelease === true) {
-      // Prerelease platforms use neutral IDs in public matrix fields.
-      if (!/^windows-prerelease-[a-z-]+$/.test(platform.id)) {
-        throw new Error(`${platform.id} must use a neutral prerelease-platform alias`);
-      }
-    }
 
     const architectures = Object.entries(platform.architectures ?? {});
     if (architectures.length === 0) {

@@ -95,7 +95,6 @@ a capability declaration, not a schedule.
 | `id` | Stable key referenced by `triggers`. Also the value shown in job names. |
 | `displayName` | Human label (emitted as `os_name`). |
 | `family` | `windows` \| `linux` \| `macos` — selects the matrix job and the dispatcher. |
-| `prerelease` | `true` marks an unreleased Windows image. Its `id` must be a neutral alias matching `windows-prerelease-<name>`, because the id is public in job names. |
 | `architectures.<x64\|arm64>.target` | Rust target triple. |
 | `architectures.<…>.artifact` | Build artifact name to download. |
 | `architectures.<…>.pool` | 1ES pool name (Windows/Linux). **An empty string means "declared but never scheduled"** — the entry stays documented but dormant. |
@@ -183,7 +182,7 @@ backend **and** has a non-empty pool.
 
 | Plan | Wired to | Contents today |
 |------|----------|----------------|
-| `nightly` | scheduled Mon–Sun | 5 Windows platforms, 4 Linux platforms, 3 MacOS platforms |
+| `nightly` | scheduled Mon–Sun | All tests. |
 | `weekly` | scheduled Sunday | empty |
 | `pr` | *(nothing — `Build.yml` does not call the matrix job)* | empty; reserved for a potential future PR-time subset |
 | `enabled` | *(nothing — resolvable locally only)* | reserved for testing this infrastructure and rapid iteration |
@@ -443,14 +442,12 @@ passing a distinguishing argument later without touching the matrix.
    already baked into the image — the jobs verify but never enable them.
 2. Add a `platforms` entry: `id`, `displayName`, `family`, and per-architecture
    `target`, `artifact`, `pool`/`runner`, and `backends`.
-3. For a Windows prerelease image set `"prerelease": true` and use a neutral
-   `windows-prerelease-<name>` id — the id appears in public job names.
-4. For a new Linux distro, check that `prepare-linux-host.sh` handles its
+3. For a new Linux distro, check that `prepare-linux-host.sh` handles its
    package manager and service layout. A new package-manager family needs one
    arm in `install_packages` and one entry in `resolve_package_manager`; a
    family whose package *names* differ also needs its column in the tables in
    `install_lxc` and `install_bubblewrap`.
-5. Add it to a plan's `triggers`, then resolve locally.
+4. Add it to a plan's `triggers`, then resolve locally.
 
 ### Wire an unwired backend to a suite
 

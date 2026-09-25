@@ -5,7 +5,6 @@
       "id": "windows-prerelease-process-container",
       "displayName": "Windows Prerelease Process Container",
       "family": "windows",
-      "prerelease": true,
       "architectures": {
         "x64": {
           "target": "x86_64-pc-windows-msvc",
@@ -34,7 +33,6 @@
       "id": "windows-prerelease-isolation-session",
       "displayName": "Windows Prerelease Isolation Session",
       "family": "windows",
-      "prerelease": true,
       "architectures": {
         "x64": {
           "target": "x86_64-pc-windows-msvc",
