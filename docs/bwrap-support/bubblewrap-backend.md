@@ -668,12 +668,14 @@ request fails if its private namespace cannot be configured.
    proxy-mode execution on the host indefinitely. A successful probe is cached
    for the life of the process; failures are not, so installing the missing
    tool takes effect without a restart.
-1. When a proxy is requested, the runner routes the sandbox to it. On v0.9 the
-   proxy is named by `runtimeConfig.networkProxy` and must already be listening
-   on loopback; the caller starts it. On schema 0.6–0.8 it is named by
-   `network.proxy`, and `builtinTestServer: true` additionally makes the runner
-   launch the bundled `unix-test-proxy` on loopback (testing-only, gated behind
-   `--allow-testing-features`).
+1. When a proxy is requested, the runner routes the sandbox to it. It must
+   already be listening on loopback; the caller starts it.
+   `runtimeConfig.networkProxy` names it from schema 0.8 onward and is the only
+   spelling on 0.9. The legacy `network.proxy` field names it on 0.6–0.8, where
+   `builtinTestServer: true` additionally makes the runner launch the bundled
+   `unix-test-proxy` on loopback (testing-only, gated behind
+   `--allow-testing-features`). Both spellings normalize to the same
+   `policy.network_proxy`, so 0.8 accepts either and enforces them identically.
 2. The runner creates a same-UID user-namespace supervisor, starts Bubblewrap
    with `--unshare-net`, and keeps the workload behind a startup barrier.
 3. The supervisor attaches `slirp4netns` to Bubblewrap's private network

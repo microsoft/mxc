@@ -22,6 +22,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use wxc_e2e_tests::{
     has_bwrap, has_platform_exec, run_platform_config_value,
+    run_platform_config_value_within_duration,
 };
 
 const SCHEMA_VERSION: &str = "0.7.0-alpha";
