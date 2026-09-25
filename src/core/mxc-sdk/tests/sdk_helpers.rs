@@ -164,7 +164,7 @@ fn build_request_host_rules_require_outbound() {
 }
 
 #[test]
-fn build_request_blocklist_only_requires_outbound() {
+fn build_request_blocklist_only_defers_shared_semantic_validation() {
     let mut network = mxc_sdk::policy::NetworkSection::default();
     network.blocked_hosts = vec!["198.51.100.10".to_string()];
 
@@ -176,12 +176,21 @@ fn build_request_blocklist_only_requires_outbound() {
         timeout_ms: None,
     };
 
-    let error = build_request(&policy, "echo hello", None)
-        .expect_err("blocklist-only requires an allow default");
-    assert_eq!(
-        error.message,
-        "blockedHosts requires allowedHosts when network.defaultPolicy='block'"
-    );
+    let result = build_request(&policy, "echo hello", None);
+    if cfg!(any(target_os = "linux", target_os = "macos")) {
+        assert!(
+            result.is_ok(),
+            "Unix SDK construction must defer host-list semantics to backend validation"
+        );
+    } else {
+        assert!(
+            result
+                .expect_err("Windows ProcessContainer requires allowOutbound for host rules")
+                .message
+                .contains("allowedHosts/blockedHosts require allowOutbound"),
+            "Windows must retain its platform-specific authoring requirement"
+        );
+    }
 }
 
 #[test]

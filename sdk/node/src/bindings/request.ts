@@ -22,7 +22,6 @@ export interface RequestSpecOptions {
   env?: { [key: string]: string | undefined };
   inheritDefaultEnv?: boolean;
   experimental?: boolean;
-  authoredAllowOutbound?: boolean;
 }
 
 /**
@@ -201,16 +200,13 @@ export function bindingRequestUnsupportedReason(config: ContainerConfig): string
   return null;
 }
 
-function projectNetwork(
-  config: ContainerConfig,
-  authoredAllowOutbound?: boolean,
-): RequestSpecPolicy['network'] {
+function projectNetwork(config: ContainerConfig): RequestSpecPolicy['network'] {
   if (config.network === undefined && config.runtimeConfig === undefined) {
     return undefined;
   }
 
-  let allowOutbound = authoredAllowOutbound;
-  if (allowOutbound === undefined && config.network?.defaultPolicy !== undefined) {
+  let allowOutbound: boolean | undefined;
+  if (config.network?.defaultPolicy !== undefined) {
     allowOutbound = config.network.defaultPolicy === 'allow';
   }
 
@@ -383,7 +379,7 @@ export function prepareRequestSpec(
   const policy: RequestSpecPolicy = {
     version: config.version,
     filesystem: projectFilesystem(config),
-    network: projectNetwork(config, options.authoredAllowOutbound),
+    network: projectNetwork(config),
     ui: projectUi(config),
     timeoutMs: config.process.timeout,
     telemetry: config.telemetry,

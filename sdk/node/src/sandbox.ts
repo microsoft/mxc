@@ -539,15 +539,6 @@ export function createConfigFromPolicy(
                 );
             }
         }
-        if (
-            policy.network.blockedHosts?.length &&
-            !policy.network.allowedHosts?.length &&
-            !policy.network.allowOutbound
-        ) {
-            throw new Error(
-                "blockedHosts requires allowedHosts when network.defaultPolicy='block'",
-            );
-        }
         // Unix backends accept allowlists without allowOutbound. Bubblewrap and
         // LXC enforce them under a block default; WSLC and Seatbelt leave their
         // backend-specific limitations to native validation.
@@ -1037,8 +1028,16 @@ export async function spawnSandboxAsync(
   const request = prepareRequestSpec(config, {
     inheritDefaultEnv: options.inheritDefaultEnv,
     experimental: options.experimental,
-    authoredAllowOutbound: policy.network?.allowOutbound,
   });
+  // The generated wire config uses a block default when an allowlist narrows
+  // outbound access. Preserve the caller's authored legacy capability intent
+  // for native platform-specific validation.
+  if (
+    request.policy.network !== undefined &&
+    policy.network?.allowOutbound !== undefined
+  ) {
+    request.policy.network.allowOutbound = policy.network.allowOutbound;
+  }
   const result = await runBindingRequestAsync(request);
   if (result.timedOut) {
     throw new MxcError('backend_error', 'sandbox execution timed out', {

@@ -77,15 +77,6 @@ fn validate_common(
             ));
         }
 
-        if !network.blocked_hosts.is_empty()
-            && network.allowed_hosts.is_empty()
-            && !network.allow_outbound
-        {
-            return Err(error(
-                "blockedHosts requires allowedHosts when network.defaultPolicy='block'",
-            ));
-        }
-
         let accepts_host_rules_without_outbound = match containment {
             Containment::Process => cfg!(any(target_os = "linux", target_os = "macos")),
             Containment::ProcessContainer(_) => false,

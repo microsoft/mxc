@@ -1842,8 +1842,7 @@ describe('createConfigFromPolicy', () => {
             network: { blockedHosts: ['evil.com'] },
           }),
           {
-            message:
-              "blockedHosts requires allowedHosts when network.defaultPolicy='block'",
+            message: /allowedHosts\/blockedHosts require allowOutbound/,
           },
         );
       } finally {
@@ -2040,17 +2039,16 @@ describe('createConfigFromPolicy', () => {
       assert.strictEqual(config.network!.enforcementMode, 'firewall');
     });
 
-    it('should reject blockedHosts without an allowlist or outbound default', () => {
-      assert.throws(
-        () => createConfigFromPolicy({
+    it('should defer block-default blocklist validation to the backend', () => {
+      const config = createConfigFromPolicy(
+        {
           version: '0.6.0-alpha',
           network: { blockedHosts: ['evil.com'] },
-        }, 'lxc'),
-        {
-          message:
-            "blockedHosts requires allowedHosts when network.defaultPolicy='block'",
         },
+        'lxc',
       );
+      assert.strictEqual(config.network!.defaultPolicy, 'block');
+      assert.deepStrictEqual(config.network!.blockedHosts, ['evil.com']);
     });
   });
 });
