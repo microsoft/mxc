@@ -155,7 +155,6 @@ public static class MxcSandbox
         }
     }
 
-    /// <summary>Map canonical native probe JSON onto the public model.</summary>
     internal static ProbeOutput ParseProbeOutput(string json)
     {
         var output = JsonSerializer.Deserialize<NativeProbeOutput>(json, JsonOptions)
