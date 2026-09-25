@@ -18,9 +18,8 @@
 //! binaries' guarded-PLM lifecycle) implements them by adapting
 //! `plm::elevated::{start_guarded_session_with_executable, GuardedSession}`,
 //! and hands the concrete factory to the dispatcher only when it explicitly
-//! opts a request into the fallback (see
-//! `dispatcher::dispatch_with_fallback_and_capture` /
-//! `dispatcher::spawn_with_fallback_and_capture`) — a runner never picks up
+//! opts a request into the fallback (see `dispatcher::dispatch_with_fallback`
+//! and `dispatcher::spawn_with_fallback`) — a runner never picks up
 //! guarded capture silently.
 
 use std::path::Path;

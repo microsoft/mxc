@@ -90,14 +90,17 @@ pub fn available_backends() -> Vec<AvailableBackend> {
     }
     #[cfg(target_os = "windows")]
     {
-        use process_container_common::fallback_detector::is_base_container_usable;
+        use process_container_common::base_container_runner::BaseContainerRunner;
 
-        let tier = select_tier(is_base_container_usable(), cfg!(feature = "tier2_bfs"));
+        let tier = select_tier(
+            BaseContainerRunner::is_base_container_api_present(),
+            cfg!(feature = "tier2_bfs"),
+        );
         windows_backends(
             tier,
             ProcessContainerCapabilities {
                 capture_denials: capture_denials_available(
-                    process_container_common::base_container_runner::BaseContainerRunner::is_capture_denials_usable(),
+                    process_container_common::base_container_runner::BaseContainerRunner::is_native_capture_available(),
                     guarded_capture::is_available(),
                 ),
                 filesystem_denied_paths: process_container_common::base_container_runner::BaseContainerRunner::supports_native_denied_paths(),

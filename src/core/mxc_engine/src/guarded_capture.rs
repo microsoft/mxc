@@ -240,10 +240,7 @@ fn start_with_plm_path(
 }
 
 /// Build the guarded-capture factory to hand to the dispatcher for `request`,
-/// or `None` when `captureDenials` isn't requested. Centralizing this (rather
-/// than constructing a `PlmGuardedCaptureFactory` unconditionally at every call
-/// site) keeps `run.rs` / `dispatch.rs` from wiring a factory the request never
-/// needed.
+/// or `None` when `captureDenials` isn't requested.
 pub(crate) fn factory_for_request(
     request: &wxc_common::models::ExecutionRequest,
 ) -> Option<std::sync::Arc<dyn GuardedCaptureFactory>> {
@@ -317,7 +314,7 @@ mod tests {
         request.policy.capture_denials = Some(Default::default());
 
         assert!(factory_for_request(&request)
-            .unwrap()
+            .expect("capture request should get a factory")
             .allows_trace_transfer());
     }
 

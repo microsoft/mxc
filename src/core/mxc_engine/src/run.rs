@@ -216,7 +216,7 @@ fn resolve_runner_inner_windows(
     match request.containment {
         ContainmentBackend::ProcessContainer => {
             // ProcessContainer resolves to a concrete Windows backend purely by
-            // host capability: `dispatch_with_fallback_and_capture` prefers
+            // host capability: `dispatch_with_fallback` prefers
             // the native BaseContainer (OS sandbox API) when usable and
             // otherwise falls back to AppContainer tiers (BFS / DACL). The
             // schema version does not influence this choice. When the request
@@ -224,7 +224,8 @@ fn resolve_runner_inner_windows(
             // WPR fallback factory to the dispatcher so an AppContainer
             // fallback tier can still honor it instead of failing closed.
             let capture_factory = crate::guarded_capture::factory_for_request(request);
-            match process_container_common::dispatcher::dispatch_with_fallback_and_capture(
+
+            match process_container_common::dispatcher::dispatch_with_fallback(
                 request,
                 capture_factory,
             ) {

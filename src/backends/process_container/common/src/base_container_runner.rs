@@ -14,7 +14,7 @@ use std::ptr;
 use std::sync::Arc;
 
 use learning_mode_core::DenialAnalyzer;
-use learning_mode_windows::{EtlDenialAnalyzer, LearningModeApi};
+use learning_mode_windows::{EtlDenialAnalyzer, LEARNING_MODE_API_SET};
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, SetHandleInformation, ERROR_CALL_NOT_IMPLEMENTED, E_NOTIMPL, HANDLE,
     HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT,
@@ -30,8 +30,8 @@ use windows::Win32::System::Threading::{
 use windows_core::{PCWSTR, PWSTR};
 
 use crate::base_container_helpers::{
-    build_psec_spec, has_conflicting_proxy_identity, unrestricted_host_loopback_allowed,
-    PsecContract, ResolvedPsecContract,
+    build_psec_v1_security_environment_spec, has_conflicting_proxy_identity,
+    unrestricted_host_loopback_allowed,
 };
 use crate::capture_output::{
     combine_capture_and_cleanup_results, combine_process_and_teardown_results,
@@ -46,9 +46,11 @@ use crate::launch_diagnostics::{
 use crate::native_capture::CaptureSession;
 use crate::proxy_coordinator::ProxyCoordinator;
 use crate::secenv::{
-    ProcessSecurityEnvironment, SecurityEnvironmentApi, SecurityEnvironmentStartupInfo,
-    PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+    self, ProcessSecurityEnvironment, SecurityEnvironmentStartupInfo, SecurityEnvironmentSupport,
+    SecurityEnvironmentVersion, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+    SECURITY_ENVIRONMENT_API_SET,
 };
+use wxc_common::api_set::is_api_set_implemented;
 use wxc_common::audit::{
     sanitize_identity, AuditEvent, AuditEventName, KillMethod, TeardownSkipReason, TeardownStatus,
 };
@@ -118,11 +120,6 @@ fn build_child_env_block(request: &ExecutionRequest) -> Result<Option<Vec<u16>>,
 
 const CAPTURE_API_AVAILABLE_LOG: &str =
     "captureDenials: learning-mode trace API available (processmodel.dll)";
-const PSEC_DENIED_PATHS_UNSUPPORTED_MSG: &str =
-    "filesystem.deniedPaths on the process-security-environment path requires \
-     QueryProcessSecurityEnvironmentSupport to advertise PSE_SUPPORT_FS_DENY; this OS \
-     build does not support that policy, and the process-security-environment path \
-     cannot fall back to AppContainer or host-DACL enforcement";
 const PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG: &str =
     "processContainer.filesystem.enumeratePaths requires Process Security Environment contract version 1.1 \
      and QueryProcessSecurityEnvironmentSupport to advertise PSE_SUPPORT_FS_ENUMERATE; this OS \
@@ -133,29 +130,6 @@ const PSEC_INGRESS_UNSUPPORTED_MSG: &str =
      1.1 with ingress support";
 const CREATE_PROCESS_IN_SECURITY_ENVIRONMENT_API: &str =
     "CreateProcessW(PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT)";
-
-trait PsecCapabilityProbe {
-    fn supports_version_1_1(&self) -> Result<bool, String>;
-    fn supports_enumerate_paths(&self) -> Result<bool, String>;
-    fn supports_network_ingress(&self) -> Result<bool, String>;
-}
-
-impl PsecCapabilityProbe for SecurityEnvironmentApi {
-    fn supports_version_1_1(&self) -> Result<bool, String> {
-        self.supports_version(1, 1)
-            .map_err(|error| error.to_string())
-    }
-
-    fn supports_enumerate_paths(&self) -> Result<bool, String> {
-        self.supports_enumerate_paths()
-            .map_err(|error| error.to_string())
-    }
-
-    fn supports_network_ingress(&self) -> Result<bool, String> {
-        self.supports_network_ingress()
-            .map_err(|error| error.to_string())
-    }
-}
 
 #[derive(Debug)]
 struct CaptureCleanupError {
@@ -175,19 +149,6 @@ impl std::error::Error for CaptureCleanupError {}
 /// enabled on this build (symbol present, capability gated off).
 fn is_api_not_implemented(err: u32) -> bool {
     err == ERROR_CALL_NOT_IMPLEMENTED.0 || err == E_NOTIMPL.0 as u32
-}
-
-fn learning_mode_api_not_implemented(error: &learning_mode_windows::LearningModeError) -> bool {
-    match error {
-        learning_mode_windows::LearningModeError::ApiSetUnavailable { .. }
-        | learning_mode_windows::LearningModeError::DllLoad(_)
-        | learning_mode_windows::LearningModeError::ExportMissing { .. } => true,
-        learning_mode_windows::LearningModeError::HResultCall { code, .. } => *code == E_NOTIMPL.0,
-        learning_mode_windows::LearningModeError::ApiCall { code, .. } => {
-            is_api_not_implemented(*code)
-        }
-        _ => false,
-    }
 }
 
 trait CaptureSessionOps {
@@ -219,14 +180,6 @@ trait CaptureSessionFactory: Send + Sync {
     ) -> Result<Box<dyn CaptureSessionOps>, learning_mode_windows::LearningModeError>;
 }
 
-trait CapturePlatformSupport: Send + Sync {
-    fn check_apis(&self, require_learning_mode: bool) -> Result<(), String>;
-    fn supports_deny_paths(&self) -> Result<bool, String>;
-    fn supports_enumerate_paths(&self) -> Result<bool, String> {
-        Ok(false)
-    }
-}
-
 struct RealCaptureSessionFactory;
 
 impl CaptureSessionFactory for RealCaptureSessionFactory {
@@ -235,50 +188,28 @@ impl CaptureSessionFactory for RealCaptureSessionFactory {
         sandbox_specification: &[u8],
         flags: u32,
     ) -> Result<Box<dyn CaptureSessionOps>, learning_mode_windows::LearningModeError> {
-        let security_environment_api = SecurityEnvironmentApi::load()?;
-        let learning_mode_api = LearningModeApi::load()?;
-        CaptureSession::begin(
-            security_environment_api,
-            learning_mode_api,
-            sandbox_specification,
-            flags,
-        )
-        .map(|session| Box::new(session) as Box<dyn CaptureSessionOps>)
+        CaptureSession::begin(sandbox_specification, flags)
+            .map(|session| Box::new(session) as Box<dyn CaptureSessionOps>)
     }
 }
 
-struct RealCapturePlatformSupport;
+/// Request-level BaseContainer eligibility. This is the authoritative decision
+/// consumed by tier selection; callers must not reconstruct eligibility from
+/// individual host capability probes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BaseContainerRequestDecision {
+    Serviceable,
+    Unavailable,
+    PolicyIncompatible,
+    DeniedPathsUnsupported,
+    EnumeratePathsUnsupported,
+    IngressUnsupported,
+    NativeCaptureUnavailable,
+}
 
-impl CapturePlatformSupport for RealCapturePlatformSupport {
-    fn check_apis(&self, require_learning_mode: bool) -> Result<(), String> {
-        SecurityEnvironmentApi::load()
-            .map_err(|error| format!("security-environment API: {error}"))?;
-        if require_learning_mode {
-            LearningModeApi::load().map_err(|error| format!("learning-mode trace API: {error}"))?;
-        }
-        Ok(())
-    }
-
-    fn supports_deny_paths(&self) -> Result<bool, String> {
-        SecurityEnvironmentApi::load()
-            .map_err(|error| format!("process security-environment API unavailable: {error}"))?
-            .supports_deny_paths()
-            .map_err(|error| {
-                format!("could not query process security-environment support: {error}")
-            })
-    }
-
-    fn supports_enumerate_paths(&self) -> Result<bool, String> {
-        let api = SecurityEnvironmentApi::load()
-            .map_err(|error| format!("process security-environment API unavailable: {error}"))?;
-        if !api.supports_version(1, 1).map_err(|error| {
-            format!("could not query process security-environment version: {error}")
-        })? {
-            return Ok(false);
-        }
-        api.supports_enumerate_paths().map_err(|error| {
-            format!("could not query process security-environment support: {error}")
-        })
+impl BaseContainerRequestDecision {
+    pub(crate) fn can_service_request(self) -> bool {
+        self == Self::Serviceable
     }
 }
 
@@ -286,9 +217,7 @@ impl CapturePlatformSupport for RealCapturePlatformSupport {
 pub struct BaseContainerRunner {
     proxy_coordinator: ProxyCoordinator,
     capture_factory: Arc<dyn CaptureSessionFactory>,
-    capture_support: Arc<dyn CapturePlatformSupport>,
-    #[cfg(test)]
-    psec_usable_override: Option<bool>,
+    request_serviceability_confirmed: bool,
 }
 
 impl Default for BaseContainerRunner {
@@ -296,9 +225,7 @@ impl Default for BaseContainerRunner {
         Self {
             proxy_coordinator: ProxyCoordinator::default(),
             capture_factory: Arc::new(RealCaptureSessionFactory),
-            capture_support: Arc::new(RealCapturePlatformSupport),
-            #[cfg(test)]
-            psec_usable_override: None,
+            request_serviceability_confirmed: false,
         }
     }
 }
@@ -308,11 +235,24 @@ impl BaseContainerRunner {
         Self::default()
     }
 
+    /// Construct the runner after [`Self::can_backend_service_request`] returned
+    /// [`BaseContainerRequestDecision::Serviceable`] for the request that will
+    /// be executed. The dispatcher owns that invariant and uses this constructor
+    /// so validation does not repeat the OS capability decision.
+    pub(crate) fn new_for_selected_request() -> Self {
+        Self {
+            request_serviceability_confirmed: true,
+            ..Self::default()
+        }
+    }
+
     #[cfg(test)]
     fn build_process_security_environment_spec(request: &ExecutionRequest) -> Vec<u8> {
-        build_psec_spec(
+        let version = Self::choose_min_required_psec_version_for_request(request);
+        build_psec_v1_security_environment_spec(
             request,
-            ResolvedPsecContract::with_all_contract_capabilities(request),
+            version,
+            version >= SecurityEnvironmentVersion::V1_1,
         )
     }
 
@@ -321,21 +261,7 @@ impl BaseContainerRunner {
         Self {
             proxy_coordinator: ProxyCoordinator::default(),
             capture_factory,
-            capture_support: Arc::new(RealCapturePlatformSupport),
-            psec_usable_override: Some(true),
-        }
-    }
-
-    #[cfg(test)]
-    fn with_capture_components(
-        capture_factory: Arc<dyn CaptureSessionFactory>,
-        capture_support: Arc<dyn CapturePlatformSupport>,
-    ) -> Self {
-        Self {
-            proxy_coordinator: ProxyCoordinator::default(),
-            capture_factory,
-            capture_support,
-            psec_usable_override: Some(true),
+            request_serviceability_confirmed: true,
         }
     }
 
@@ -345,357 +271,112 @@ impl BaseContainerRunner {
         self.proxy_coordinator.stop(logger);
     }
 
-    /// Whether the BaseContainer (Tier 1) PSEC backend is usable.
-    pub fn is_base_container_usable() -> bool {
+    /// Whether the process security-environment API set is present.
+    pub fn is_base_container_api_present() -> bool {
         #[cfg(test)]
         if let Ok(forced) = std::env::var("MXC_FORCE_BC_USABLE") {
             return forced == "1";
         }
-        Self::is_process_security_environment_usable()
-    }
 
-    /// Whether the process security environment API set is present.
-    pub fn is_base_container_api_present() -> Result<(), String> {
-        SecurityEnvironmentApi::load()
-            .map(drop)
-            .map_err(|error| error.to_string())
-    }
-
-    /// Whether PSEC can create and close a minimal security environment on
-    /// this host. Export presence and the support query alone are insufficient
-    /// on transitional builds where the API surface exists before the feature
-    /// is enabled.
-    pub fn is_process_security_environment_usable() -> bool {
-        static USABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *USABLE.get_or_init(|| {
-            let request = ExecutionRequest {
-                ..Default::default()
-            };
-            let specification = build_psec_spec(&request, ResolvedPsecContract::baseline());
-            SecurityEnvironmentApi::load()
-                .and_then(|api| api.create(&specification, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE))
-                .and_then(|environment| {
-                    let startup_info = SecurityEnvironmentStartupInfo::new(
-                        STARTUPINFOW::default(),
-                        environment.raw(),
-                        &[],
-                    );
-                    environment.close();
-                    startup_info.map(drop)
-                })
-                .is_ok()
-        })
+        static PRESENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *PRESENT.get_or_init(|| is_api_set_implemented(SECURITY_ENVIRONMENT_API_SET))
     }
 
     /// Whether the native PSEC plus Learning Mode API set is available.
-    ///
-    /// This does not start a Learning Mode trace. It also does not evaluate
-    /// whether a particular request is compatible with PSEC.
     pub fn is_native_capture_available() -> bool {
         #[cfg(test)]
         if let Ok(forced) = std::env::var("MXC_FORCE_NATIVE_CAPTURE_USABLE") {
             return forced == "1";
         }
 
-        Self::is_process_security_environment_usable()
-            && RealCapturePlatformSupport.check_apis(true).is_ok()
-    }
-
-    /// Whether this host can create a PSEC environment and start a Learning Mode trace.
-    ///
-    /// The successful probe session is dropped immediately, which closes and discards the trace.
-    pub fn is_capture_denials_usable() -> bool {
-        // Do not cache: StartLearningModeTrace can fail transiently, so later probes must retry.
-        if !Self::is_process_security_environment_usable() {
-            return false;
-        }
-
-        let request = ExecutionRequest {
-            ..Default::default()
-        };
-        let specification = build_psec_spec(&request, ResolvedPsecContract::baseline());
-        SecurityEnvironmentApi::load()
-            .and_then(|security_environment_api| {
-                CaptureSession::begin(
-                    security_environment_api,
-                    LearningModeApi::load()?,
-                    &specification,
-                    PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
-                )
-            })
-            .is_ok()
+        Self::is_base_container_api_present() && is_api_set_implemented(LEARNING_MODE_API_SET)
     }
 
     /// Whether PSEC can enforce `filesystem.deniedPaths`.
     pub fn supports_native_denied_paths() -> bool {
-        Self::is_process_security_environment_usable()
-            && SecurityEnvironmentApi::load()
-                .and_then(|api| api.supports_deny_paths())
-                .unwrap_or(false)
+        #[cfg(test)]
+        if let Ok(forced) = std::env::var("MXC_FORCE_DENY_PATHS") {
+            return forced == "1";
+        }
+
+        Self::is_base_container_api_present()
+            && secenv::query_support(SecurityEnvironmentSupport::FileSystemDeny)
     }
 
-    /// Whether PSEC can enforce `processContainer.filesystem.enumeratePaths` on this host.
+    /// Whether PSEC can enforce `processContainer.filesystem.enumeratePaths`.
     pub fn supports_enumerate_paths() -> bool {
-        Self::is_process_security_environment_usable()
-            && Self::query_psec_enumerate_support().unwrap_or(false)
+        Self::is_base_container_api_present()
+            && secenv::query_support(SecurityEnvironmentSupport::FileSystemEnumerate)
     }
 
     /// Whether BaseContainer can enforce
     /// `network.ingress.hostLoopback = "allow"`.
     pub fn supports_ingress_host_loopback_allow() -> bool {
-        Self::is_process_security_environment_usable()
-            && Self::query_psec_ingress_support().unwrap_or(false)
+        Self::is_base_container_api_present()
+            && secenv::query_support(SecurityEnvironmentSupport::NetworkIngress)
     }
 
-    fn resolve_psec_contract(
+    /// The single PSEC version-selection point: start at 1.0 and raise it to
+    /// the highest version required by any requested native feature.
+    fn choose_min_required_psec_version_for_request(
         request: &ExecutionRequest,
-    ) -> Result<ResolvedPsecContract, ScriptResponse> {
-        let contract = PsecContract::for_request(request);
-        if contract == PsecContract::V1_0 {
-            return Ok(ResolvedPsecContract::baseline());
+    ) -> SecurityEnvironmentVersion {
+        let mut version = SecurityEnvironmentVersion::V1_0;
+        if !request.policy.denied_paths.is_empty() {
+            version = version.max(SecurityEnvironmentSupport::FileSystemDeny.required_version());
         }
-
-        let api = SecurityEnvironmentApi::load().map_err(|error| ScriptResponse {
-            failure_phase: FailurePhase::BackendUnavailable,
-            ..ScriptResponse::error(&format!(
-                "failed to load Process Security Environment support APIs: {error}"
-            ))
-        })?;
-        Self::resolve_psec_contract_with_probe(request, &api)
+        if !request.policy.enumerate_paths.is_empty() {
+            version =
+                version.max(SecurityEnvironmentSupport::FileSystemEnumerate.required_version());
+        }
+        if unrestricted_host_loopback_allowed(&request.policy) {
+            version = version.max(SecurityEnvironmentSupport::NetworkIngress.required_version());
+        }
+        version
     }
 
-    fn resolve_psec_contract_with_probe(
+    /// The single BaseContainer serviceability decision point: return the first
+    /// reason the request cannot be enforced, or
+    /// [`BaseContainerRequestDecision::Serviceable`] when every check passes.
+    pub(crate) fn can_backend_service_request(
         request: &ExecutionRequest,
-        probe: &dyn PsecCapabilityProbe,
-    ) -> Result<ResolvedPsecContract, ScriptResponse> {
-        let contract = PsecContract::for_request(request);
-        if contract == PsecContract::V1_0 {
-            return Ok(ResolvedPsecContract::baseline());
+    ) -> BaseContainerRequestDecision {
+        if !Self::is_base_container_api_present() {
+            return BaseContainerRequestDecision::Unavailable;
         }
-
-        let requires_enumerate_paths = !request.policy.enumerate_paths.is_empty();
-        let requires_unrestricted_host_loopback =
-            unrestricted_host_loopback_allowed(&request.policy);
-        let version_supported = probe
-            .supports_version_1_1()
-            .map_err(|error| ScriptResponse {
-                failure_phase: FailurePhase::BackendUnavailable,
-                ..ScriptResponse::error(&format!(
-                    "failed to query Process Security Environment contract support: {error}"
-                ))
-            })?;
-        if !version_supported {
-            return Err(ScriptResponse {
-                failure_phase: FailurePhase::Rejected,
-                ..ScriptResponse::error(if requires_enumerate_paths {
-                    PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG
-                } else {
-                    PSEC_INGRESS_UNSUPPORTED_MSG
-                })
-            });
+        if request.policy.least_privilege_mode
+            || (request.policy.network_proxy.is_enabled()
+                && !request.policy.runtime_network_proxy_specified)
+        {
+            return BaseContainerRequestDecision::PolicyIncompatible;
         }
-
-        let enumerate_paths_supported = if requires_enumerate_paths {
-            probe
-                .supports_enumerate_paths()
-                .map_err(|error| ScriptResponse {
-                    failure_phase: FailurePhase::BackendUnavailable,
-                    ..ScriptResponse::error(&format!(
-                        "failed to query Process Security Environment filesystem enumeration support: {error}"
-                    ))
-                })?
+        let capture_denials = request.policy.capture_denials.is_some();
+        #[cfg(test)]
+        let native_capture_available = if capture_denials {
+            std::env::var("MXC_FORCE_NATIVE_CAPTURE_USABLE").map_or_else(
+                |_| Self::is_native_capture_available(),
+                |forced| forced == "1",
+            )
         } else {
             true
         };
-        if requires_enumerate_paths && !enumerate_paths_supported {
-            return Err(ScriptResponse {
-                failure_phase: FailurePhase::Rejected,
-                ..ScriptResponse::error(PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG)
-            });
-        }
-
-        let network_ingress_supported =
-            probe
-                .supports_network_ingress()
-                .map_err(|error| ScriptResponse {
-                    failure_phase: FailurePhase::BackendUnavailable,
-                    ..ScriptResponse::error(&format!(
-                        "failed to query Process Security Environment ingress support: {error}"
-                    ))
-                })?;
-        if requires_unrestricted_host_loopback && !network_ingress_supported {
-            return Err(ScriptResponse {
-                failure_phase: FailurePhase::Rejected,
-                ..ScriptResponse::error(PSEC_INGRESS_UNSUPPORTED_MSG)
-            });
-        }
-        Ok(ResolvedPsecContract {
-            contract,
-            supports_network_ingress: network_ingress_supported,
-        })
-    }
-
-    fn query_psec_ingress_support() -> Result<bool, learning_mode_windows::LearningModeError> {
-        let api = SecurityEnvironmentApi::load()?;
-        if !api.supports_version(1, 1)? {
-            return Ok(false);
-        }
-        api.supports_network_ingress()
-    }
-
-    fn query_psec_enumerate_support() -> Result<bool, learning_mode_windows::LearningModeError> {
-        let api = SecurityEnvironmentApi::load()?;
-        if !api.supports_version(1, 1)? {
-            return Ok(false);
-        }
-        api.supports_enumerate_paths()
-    }
-    fn should_use_process_security_environment(
-        request: &ExecutionRequest,
-        psec_usable: bool,
-        psec_supports_deny_paths: bool,
-        psec_supports_enumerate_paths: bool,
-    ) -> bool {
-        if !psec_usable {
-            return false;
-        }
-        Self::psec_policy_compatible(
-            request,
-            psec_supports_deny_paths,
-            psec_supports_enumerate_paths,
-        )
-    }
-
-    fn psec_policy_compatible(
-        request: &ExecutionRequest,
-        psec_supports_deny_paths: bool,
-        psec_supports_enumerate_paths: bool,
-    ) -> bool {
-        !request.policy.least_privilege_mode
-            && (!request.policy.network_proxy.is_enabled()
-                || request.policy.runtime_network_proxy_specified)
-            && (request.policy.denied_paths.is_empty() || psec_supports_deny_paths)
-            && (request.policy.enumerate_paths.is_empty() || psec_supports_enumerate_paths)
-    }
-
-    fn process_security_environment_usable(&self) -> bool {
-        #[cfg(test)]
-        if let Some(usable) = self.psec_usable_override {
-            return usable;
-        }
-        Self::is_process_security_environment_usable()
-    }
-
-    /// Whether a `captureDenials` request is eligible for the native
-    /// (PSEC + Learning Mode) capture path, given the effective PSEC usability
-    /// and a [`CapturePlatformSupport`] probe. Shared by the instance
-    /// ([`Self::uses_process_security_environment`], probing `self.capture_support`)
-    /// and static ([`Self::uses_native_capture_for_request`], probing
-    /// [`RealCapturePlatformSupport`]) eligibility checks so the two cannot drift.
-    fn native_capture_eligible(
-        request: &ExecutionRequest,
-        psec_usable: bool,
-        support: &dyn CapturePlatformSupport,
-    ) -> bool {
-        #[cfg(test)]
-        let native_capture_usable = std::env::var("MXC_FORCE_NATIVE_CAPTURE_USABLE").map_or_else(
-            |_| psec_usable && support.check_apis(true).is_ok(),
-            |forced| forced == "1",
-        );
         #[cfg(not(test))]
-        let native_capture_usable = psec_usable && support.check_apis(true).is_ok();
-
-        request.policy.capture_denials.is_some()
-            && native_capture_usable
-            && Self::psec_policy_compatible(
-                request,
-                request.policy.denied_paths.is_empty()
-                    || support.supports_deny_paths().unwrap_or(false),
-                request.policy.enumerate_paths.is_empty()
-                    || support.supports_enumerate_paths().unwrap_or(false),
-            )
-    }
-
-    fn uses_process_security_environment(&self, request: &ExecutionRequest) -> bool {
-        if request.policy.capture_denials.is_some() {
-            return Self::native_capture_eligible(
-                request,
-                self.process_security_environment_usable(),
-                self.capture_support.as_ref(),
-            );
+        let native_capture_available = !capture_denials || Self::is_native_capture_available();
+        if !native_capture_available {
+            return BaseContainerRequestDecision::NativeCaptureUnavailable;
         }
-        let supports_deny_paths = request.policy.denied_paths.is_empty()
-            || self.capture_support.supports_deny_paths().unwrap_or(false);
-        let supports_enumerate_paths = request.policy.enumerate_paths.is_empty()
-            || self
-                .capture_support
-                .supports_enumerate_paths()
-                .unwrap_or(false);
-        Self::should_use_process_security_environment(
-            request,
-            self.process_security_environment_usable(),
-            supports_deny_paths,
-            supports_enumerate_paths,
-        )
-    }
-
-    pub(crate) fn is_usable_for_request(request: &ExecutionRequest) -> bool {
-        #[cfg(test)]
-        if let Ok(forced) = std::env::var("MXC_FORCE_BC_USABLE") {
-            return forced == "1";
+        if !request.policy.enumerate_paths.is_empty() && !Self::supports_enumerate_paths() {
+            return BaseContainerRequestDecision::EnumeratePathsUnsupported;
         }
-        let psec_usable = Self::is_process_security_environment_usable();
-        if request.policy.capture_denials.is_some() {
-            return Self::uses_native_capture_for_request(request);
+        if !request.policy.denied_paths.is_empty() && !Self::supports_native_denied_paths() {
+            return BaseContainerRequestDecision::DeniedPathsUnsupported;
         }
-        let psec_supports_deny_paths = request.policy.denied_paths.is_empty()
-            || SecurityEnvironmentApi::load()
-                .and_then(|api| api.supports_deny_paths())
-                .unwrap_or(false);
-        let psec_supports_enumerate_paths = request.policy.enumerate_paths.is_empty()
-            || Self::query_psec_enumerate_support().unwrap_or(false);
-        Self::should_use_process_security_environment(
-            request,
-            psec_usable,
-            psec_supports_deny_paths,
-            psec_supports_enumerate_paths,
-        )
-    }
-
-    pub(crate) fn supports_deny_paths_for_request(request: &ExecutionRequest) -> bool {
-        let psec_supports_deny_paths = SecurityEnvironmentApi::load()
-            .and_then(|api| api.supports_deny_paths())
-            .unwrap_or(false);
-        let uses_native_capture = Self::uses_native_capture_for_request(request);
-        if uses_native_capture {
-            return true;
+        if unrestricted_host_loopback_allowed(&request.policy)
+            && !Self::supports_ingress_host_loopback_allow()
+        {
+            return BaseContainerRequestDecision::IngressUnsupported;
         }
-        Self::should_use_process_security_environment(
-            request,
-            Self::is_process_security_environment_usable(),
-            psec_supports_deny_paths,
-            request.policy.enumerate_paths.is_empty()
-                || Self::query_psec_enumerate_support().unwrap_or(false),
-        )
-    }
-
-    pub(crate) fn capabilities_for_request(
-        request: &ExecutionRequest,
-    ) -> crate::fallback_detector::BaseContainerRequestCapabilities {
-        crate::fallback_detector::BaseContainerRequestCapabilities {
-            usable: Self::is_usable_for_request(request),
-            supports_deny_paths: Self::supports_deny_paths_for_request(request),
-            supports_enumerate_paths: Self::is_process_security_environment_usable()
-                && Self::query_psec_enumerate_support().unwrap_or(false),
-        }
-    }
-
-    pub(crate) fn uses_native_capture_for_request(request: &ExecutionRequest) -> bool {
-        Self::native_capture_eligible(
-            request,
-            Self::is_process_security_environment_usable(),
-            &RealCapturePlatformSupport,
-        )
+        BaseContainerRequestDecision::Serviceable
     }
 }
 
@@ -724,7 +405,26 @@ impl BaseContainerRunner {
             logger,
         );
 
-        let psec_contract = Self::resolve_psec_contract(request)?;
+        let psec_version = Self::choose_min_required_psec_version_for_request(request);
+        let version_supported =
+            secenv::supports_version(psec_version).map_err(|error| ScriptResponse {
+                failure_phase: FailurePhase::BackendUnavailable,
+                ..ScriptResponse::error(&format!(
+                    "failed to query Process Security Environment contract support: {error}"
+                ))
+            })?;
+        if !version_supported {
+            return Err(ScriptResponse {
+                failure_phase: FailurePhase::Rejected,
+                ..ScriptResponse::error(if !request.policy.enumerate_paths.is_empty() {
+                    PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG
+                } else if unrestricted_host_loopback_allowed(&request.policy) {
+                    PSEC_INGRESS_UNSUPPORTED_MSG
+                } else {
+                    "the required Process Security Environment schema version is not supported"
+                })
+            });
+        }
 
         // Launch builtin test proxy if requested (before building spec so we have the port).
         let mut request = request.clone();
@@ -768,13 +468,18 @@ impl BaseContainerRunner {
             let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: captureDenials");
         }
 
-        let process_security_environment_spec = build_psec_spec(&request, psec_contract);
-        let contract_version = psec_contract.contract.version();
+        let supports_network_ingress = psec_version >= SecurityEnvironmentVersion::V1_1
+            && secenv::query_support(SecurityEnvironmentSupport::NetworkIngress);
+        let process_security_environment_spec = build_psec_v1_security_environment_spec(
+            &request,
+            psec_version,
+            supports_network_ingress,
+        );
         let _ = writeln!(
             logger,
             "process security environment spec built (PSEC {}.{}, {} bytes)",
-            contract_version.major,
-            contract_version.minor,
+            psec_version.major,
+            psec_version.minor,
             process_security_environment_spec.len()
         );
 
@@ -1017,7 +722,7 @@ impl BaseContainerRunner {
                         let msg =
                             format!("captureDenials: failed to start learning-mode capture: {e}");
                         let _ = writeln!(logger, "Error: {msg}");
-                        let failure_phase = if learning_mode_api_not_implemented(&e) {
+                        let failure_phase = if e.is_api_unavailable() {
                             FailurePhase::BackendUnavailable
                         } else {
                             FailurePhase::LaunchFailed
@@ -1033,8 +738,7 @@ impl BaseContainerRunner {
                     }
                 }
             } else {
-                let result = SecurityEnvironmentApi::load()
-                    .and_then(|api| api.create(psec_spec, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE));
+                let result = secenv::create(psec_spec, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE);
                 match result {
                     Ok(environment) => {
                         let _ = writeln!(
@@ -1047,7 +751,7 @@ impl BaseContainerRunner {
                         let msg =
                             format!("failed to create the process security environment: {error}");
                         let _ = writeln!(logger, "Error: {msg}");
-                        let failure_phase = if learning_mode_api_not_implemented(&error) {
+                        let failure_phase = if error.is_api_unavailable() {
                             FailurePhase::BackendUnavailable
                         } else {
                             FailurePhase::LaunchFailed
@@ -1097,11 +801,10 @@ impl BaseContainerRunner {
                     );
                     }
                     let _ = writeln!(logger, "Error: {msg}");
-                    let failure_phase = if learning_mode_api_not_implemented(&primary)
-                        || cleanup_error
-                            .as_ref()
-                            .is_some_and(learning_mode_api_not_implemented)
-                    {
+                    let failure_phase = if primary.is_api_unavailable()
+                        || cleanup_error.as_ref().is_some_and(
+                            learning_mode_windows::LearningModeError::is_api_unavailable,
+                        ) {
                         FailurePhase::BackendUnavailable
                     } else {
                         FailurePhase::LaunchFailed
@@ -1445,7 +1148,6 @@ impl SandboxBackend for BaseContainerRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         validate_required_child_env(request)?;
         validate_network_policy_support(request, self.network_policy_support())?;
-        let capture_denials = request.policy.capture_denials.is_some();
         if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
             return Err(ScriptResponse::error(
                 wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
@@ -1464,7 +1166,9 @@ impl SandboxBackend for BaseContainerRunner {
         if request.dry_run {
             return Ok(());
         }
-        if !self.uses_process_security_environment(request) {
+        if !self.request_serviceability_confirmed
+            && !Self::can_backend_service_request(request).can_service_request()
+        {
             return Err(ScriptResponse {
                 failure_phase: FailurePhase::BackendUnavailable,
                 ..ScriptResponse::error(
@@ -1478,32 +1182,6 @@ impl SandboxBackend for BaseContainerRunner {
                 "the process-security-environment path cannot be combined with \
                  processContainer.leastPrivilege because it does not support LPAC tokens",
             ));
-        }
-        if !capture_denials {
-            self.capture_support
-                .check_apis(false)
-                .map_err(|detail| ScriptResponse {
-                    failure_phase: FailurePhase::BackendUnavailable,
-                    ..ScriptResponse::error(&format!(
-                        "the selected process-security-environment path requires the official \
-                         process security-environment APIs ({detail})"
-                    ))
-                })?;
-        }
-        if !request.policy.denied_paths.is_empty() {
-            let deny_supported = self
-                .capture_support
-                .supports_deny_paths()
-                .map_err(|message| ScriptResponse {
-                    failure_phase: FailurePhase::BackendUnavailable,
-                    ..ScriptResponse::error(&message)
-                })?;
-            if !deny_supported {
-                return Err(ScriptResponse {
-                    failure_phase: FailurePhase::BackendUnavailable,
-                    ..ScriptResponse::error(PSEC_DENIED_PATHS_UNSUPPORTED_MSG)
-                });
-            }
         }
         Ok(())
     }
@@ -2364,31 +2042,10 @@ mod tests {
     use process_security_environment_spec::process_security_environment_layout as psec_layout;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use wxc_common::models::{
-        ContainerPolicy, DefaultEnvCompatibility, NetworkAction, NetworkCidr,
-        NetworkEnforcementCompatibility, NetworkPeer, NetworkPolicy, NetworkPort, NetworkProtocol,
-        NetworkRule, ProxyConfig,
+        ContainerPolicy, DefaultEnvCompatibility, NetworkAction, NetworkCidr, NetworkPeer,
+        NetworkPolicy, NetworkPort, NetworkProtocol, NetworkRule, ProxyConfig,
     };
     use wxc_common::ui_policy::EffectiveUiRestrictions;
-
-    struct FakePsecCapabilityProbe {
-        version_1_1: Result<bool, &'static str>,
-        enumerate_paths: Result<bool, &'static str>,
-        network_ingress: Result<bool, &'static str>,
-    }
-
-    impl PsecCapabilityProbe for FakePsecCapabilityProbe {
-        fn supports_version_1_1(&self) -> Result<bool, String> {
-            self.version_1_1.map_err(str::to_string)
-        }
-
-        fn supports_enumerate_paths(&self) -> Result<bool, String> {
-            self.enumerate_paths.map_err(str::to_string)
-        }
-
-        fn supports_network_ingress(&self) -> Result<bool, String> {
-            self.network_ingress.map_err(str::to_string)
-        }
-    }
 
     fn enumerate_request() -> ExecutionRequest {
         let mut request = ExecutionRequest::default();
@@ -2407,10 +2064,6 @@ mod tests {
             host_loopback: NetworkAction::Allow,
         });
         request
-    }
-
-    fn response_error(response: ScriptResponse) -> String {
-        response.error_message
     }
 
     struct FakeCaptureSession {
@@ -2464,32 +2117,6 @@ mod tests {
         }
     }
 
-    struct FakeCaptureSupport {
-        api_error: Option<&'static str>,
-        deny_error: Option<&'static str>,
-        deny_supported: bool,
-        api_calls: AtomicUsize,
-        learning_mode_api_calls: AtomicUsize,
-        deny_calls: AtomicUsize,
-    }
-
-    impl CapturePlatformSupport for FakeCaptureSupport {
-        fn check_apis(&self, require_learning_mode: bool) -> Result<(), String> {
-            self.api_calls.fetch_add(1, Ordering::SeqCst);
-            if require_learning_mode {
-                self.learning_mode_api_calls.fetch_add(1, Ordering::SeqCst);
-            }
-            self.api_error
-                .map_or(Ok(()), |error| Err(error.to_string()))
-        }
-
-        fn supports_deny_paths(&self) -> Result<bool, String> {
-            self.deny_calls.fetch_add(1, Ordering::SeqCst);
-            self.deny_error
-                .map_or(Ok(self.deny_supported), |error| Err(error.to_string()))
-        }
-    }
-
     fn fake_capture_factory() -> Arc<FakeCaptureFactory> {
         Arc::new(FakeCaptureFactory {
             begin_error: None,
@@ -2497,16 +2124,6 @@ mod tests {
             begin_calls: AtomicUsize::new(0),
             finish_calls: Arc::new(AtomicUsize::new(0)),
         })
-    }
-
-    fn capture_request_with_denied_path() -> ExecutionRequest {
-        let mut request = ExecutionRequest {
-            network_enforcement_compatibility: NetworkEnforcementCompatibility::Strict,
-            ..Default::default()
-        };
-        request.policy.capture_denials = Some(Default::default());
-        request.policy.denied_paths = vec![r"C:\secret".to_string()];
-        request
     }
 
     struct FakeAnalyzer {
@@ -2875,34 +2492,6 @@ mod tests {
     }
 
     #[test]
-    fn learning_mode_api_not_implemented_checks_primary_failure() {
-        use learning_mode_windows::LearningModeError;
-
-        let disabled = LearningModeError::HResultCall {
-            function: "StartLearningModeTrace",
-            code: E_NOTIMPL.0,
-        };
-        assert!(learning_mode_api_not_implemented(&disabled));
-
-        let ordinary = LearningModeError::HResultCall {
-            function: "StartLearningModeTrace",
-            code: windows::Win32::Foundation::E_INVALIDARG.0,
-        };
-        assert!(!learning_mode_api_not_implemented(&ordinary));
-
-        assert!(learning_mode_api_not_implemented(
-            &LearningModeError::ExportMissing {
-                api: "Learning Mode trace",
-                export: "StartLearningModeTrace",
-                detail: "not found".to_string(),
-            }
-        ));
-        assert!(learning_mode_api_not_implemented(
-            &LearningModeError::DllLoad("missing processmodel.dll".to_string())
-        ));
-    }
-
-    #[test]
     fn capture_factory_injects_begin_failure() {
         let factory = Arc::new(FakeCaptureFactory {
             begin_error: Some((
@@ -3239,135 +2828,57 @@ mod tests {
     }
 
     #[test]
-    fn psec_resolver_rejects_unsupported_version_with_enumeration_diagnostic() {
-        let error = BaseContainerRunner::resolve_psec_contract_with_probe(
-            &enumerate_request(),
-            &FakePsecCapabilityProbe {
-                version_1_1: Ok(false),
-                enumerate_paths: Ok(true),
-                network_ingress: Ok(true),
-            },
-        )
-        .unwrap_err();
-
-        assert_eq!(response_error(error), PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG);
+    fn required_psec_contract_uses_v1_1_for_enumeration() {
+        assert_eq!(
+            BaseContainerRunner::choose_min_required_psec_version_for_request(&enumerate_request()),
+            SecurityEnvironmentVersion::V1_1
+        );
     }
 
     #[test]
-    fn psec_resolver_rejects_unsupported_enumeration_capability() {
-        let error = BaseContainerRunner::resolve_psec_contract_with_probe(
-            &enumerate_request(),
-            &FakePsecCapabilityProbe {
-                version_1_1: Ok(true),
-                enumerate_paths: Ok(false),
-                network_ingress: Ok(true),
-            },
-        )
-        .unwrap_err();
+    fn required_psec_contract_uses_v1_1_for_host_loopback() {
+        assert_eq!(
+            BaseContainerRunner::choose_min_required_psec_version_for_request(
+                &host_loopback_request()
+            ),
+            SecurityEnvironmentVersion::V1_1
+        );
+    }
 
-        assert_eq!(response_error(error), PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG);
+    #[test]
+    fn required_psec_contract_defaults_to_v1_0() {
+        assert_eq!(
+            BaseContainerRunner::choose_min_required_psec_version_for_request(
+                &ExecutionRequest::default()
+            ),
+            SecurityEnvironmentVersion::V1_0
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "build_psec_v1_security_environment_spec only supports PSEC major version 1"
+    )]
+    fn psec_v1_builder_rejects_other_major_versions() {
+        build_psec_v1_security_environment_spec(
+            &ExecutionRequest::default(),
+            SecurityEnvironmentVersion { major: 2, minor: 0 },
+            false,
+        );
     }
 
     #[test]
     fn psec_enumeration_without_ingress_support_omits_ingress_table() {
         let request = enumerate_request();
-        let resolution = BaseContainerRunner::resolve_psec_contract_with_probe(
+        let bytes = build_psec_v1_security_environment_spec(
             &request,
-            &FakePsecCapabilityProbe {
-                version_1_1: Ok(true),
-                enumerate_paths: Ok(true),
-                network_ingress: Ok(false),
-            },
-        )
-        .unwrap();
-
-        let bytes = build_psec_spec(&request, resolution);
+            SecurityEnvironmentVersion::V1_1,
+            false,
+        );
         let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
 
         assert_eq!(spec.version().minor(), 1);
         assert!(spec.network_policy().unwrap().ingress().is_none());
-    }
-
-    #[test]
-    fn psec_resolver_preserves_host_loopback_diagnostic_when_version_is_unsupported() {
-        let error = BaseContainerRunner::resolve_psec_contract_with_probe(
-            &host_loopback_request(),
-            &FakePsecCapabilityProbe {
-                version_1_1: Ok(false),
-                enumerate_paths: Ok(true),
-                network_ingress: Ok(true),
-            },
-        )
-        .unwrap_err();
-
-        assert_eq!(response_error(error), PSEC_INGRESS_UNSUPPORTED_MSG);
-    }
-
-    #[test]
-    fn psec_resolver_rejects_host_loopback_without_ingress_capability() {
-        let error = BaseContainerRunner::resolve_psec_contract_with_probe(
-            &host_loopback_request(),
-            &FakePsecCapabilityProbe {
-                version_1_1: Ok(true),
-                enumerate_paths: Ok(true),
-                network_ingress: Ok(false),
-            },
-        )
-        .unwrap_err();
-
-        assert_eq!(response_error(error), PSEC_INGRESS_UNSUPPORTED_MSG);
-    }
-
-    #[test]
-    fn psec_resolver_surfaces_capability_query_errors() {
-        let version_error = BaseContainerRunner::resolve_psec_contract_with_probe(
-            &enumerate_request(),
-            &FakePsecCapabilityProbe {
-                version_1_1: Err("version query failed"),
-                enumerate_paths: Ok(true),
-                network_ingress: Ok(true),
-            },
-        )
-        .unwrap_err();
-        assert!(response_error(version_error).contains("version query failed"));
-
-        let enumeration_error = BaseContainerRunner::resolve_psec_contract_with_probe(
-            &enumerate_request(),
-            &FakePsecCapabilityProbe {
-                version_1_1: Ok(true),
-                enumerate_paths: Err("enumeration query failed"),
-                network_ingress: Ok(true),
-            },
-        )
-        .unwrap_err();
-        assert!(response_error(enumeration_error).contains("enumeration query failed"));
-
-        let ingress_error = BaseContainerRunner::resolve_psec_contract_with_probe(
-            &enumerate_request(),
-            &FakePsecCapabilityProbe {
-                version_1_1: Ok(true),
-                enumerate_paths: Ok(true),
-                network_ingress: Err("ingress query failed"),
-            },
-        )
-        .unwrap_err();
-        assert!(response_error(ingress_error).contains("ingress query failed"));
-    }
-
-    #[test]
-    fn psec_resolver_returns_full_capability_success() {
-        let resolution = BaseContainerRunner::resolve_psec_contract_with_probe(
-            &host_loopback_request(),
-            &FakePsecCapabilityProbe {
-                version_1_1: Ok(true),
-                enumerate_paths: Ok(true),
-                network_ingress: Ok(true),
-            },
-        )
-        .unwrap();
-
-        assert_eq!(resolution.contract, PsecContract::V1_1);
-        assert!(resolution.supports_network_ingress);
     }
 
     #[test]
@@ -3379,7 +2890,11 @@ mod tests {
         });
         request.policy.allowed_proxy_peer = Some("S-1-15-2-1".into());
 
-        let bytes = build_psec_spec(&request, ResolvedPsecContract::baseline());
+        let bytes = build_psec_v1_security_environment_spec(
+            &request,
+            SecurityEnvironmentVersion::V1_0,
+            false,
+        );
         let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
         let network = spec.network_policy().expect("network policy");
 
@@ -3651,70 +3166,6 @@ mod tests {
     }
 
     #[test]
-    fn process_security_environment_preference_is_network_compatibility_independent() {
-        for compatibility in [
-            NetworkEnforcementCompatibility::LegacyCompatible,
-            NetworkEnforcementCompatibility::Strict,
-        ] {
-            let request = ExecutionRequest {
-                network_enforcement_compatibility: compatibility,
-                ..Default::default()
-            };
-            assert!(
-                BaseContainerRunner::should_use_process_security_environment(
-                    &request, true, true, true,
-                ),
-                "PSEC should be preferred for {compatibility:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn psec_is_used_only_when_runtime_probe_succeeds() {
-        let request = ExecutionRequest {
-            network_enforcement_compatibility: NetworkEnforcementCompatibility::LegacyCompatible,
-            ..Default::default()
-        };
-
-        assert!(
-            BaseContainerRunner::should_use_process_security_environment(
-                &request, true, true, true
-            )
-        );
-        assert!(
-            !BaseContainerRunner::should_use_process_security_environment(
-                &request, false, true, true
-            )
-        );
-    }
-
-    #[test]
-    fn runtime_proxy_requires_psec() {
-        let mut request = ExecutionRequest::default();
-        request.policy.runtime_network_proxy_specified = true;
-        request.policy.network_proxy = ProxyConfig {
-            address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
-            builtin_test_server: false,
-        };
-        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy::default());
-        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
-            default: NetworkAction::Allow,
-            host_loopback: NetworkAction::Allow,
-        });
-
-        assert!(
-            BaseContainerRunner::should_use_process_security_environment(
-                &request, true, true, true
-            )
-        );
-        assert!(
-            !BaseContainerRunner::should_use_process_security_environment(
-                &request, false, true, true
-            )
-        );
-    }
-
-    #[test]
     fn conflicting_proxy_identity_table() {
         for allowed_proxy_peer in [false, true] {
             for host_loopback in [NetworkAction::Deny, NetworkAction::Allow] {
@@ -3769,14 +3220,8 @@ mod tests {
             builtin_test_server: false,
         };
 
-        let runner = BaseContainerRunner::with_capture_factory(fake_capture_factory());
         assert!(
-            !BaseContainerRunner::should_use_process_security_environment(
-                &request, true, true, true
-            )
-        );
-        assert!(
-            !runner.uses_process_security_environment(&request),
+            !BaseContainerRunner::can_backend_service_request(&request).can_service_request(),
             "legacy proxy requests must fall through to an AppContainer tier"
         );
     }
@@ -3791,109 +3236,12 @@ mod tests {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
             builtin_test_server: false,
         };
-        let support = Arc::new(FakeCaptureSupport {
-            api_error: None,
-            deny_error: None,
-            deny_supported: true,
-            api_calls: AtomicUsize::new(0),
-            learning_mode_api_calls: AtomicUsize::new(0),
-            deny_calls: AtomicUsize::new(0),
-        });
-        let runner = BaseContainerRunner::with_capture_components(fake_capture_factory(), support);
-
-        assert!(runner.uses_process_security_environment(&request));
-        assert!(BaseContainerRunner::uses_native_capture_for_request(
-            &request
-        ));
+        assert!(BaseContainerRunner::can_backend_service_request(&request).can_service_request());
     }
 
-    #[test]
-    fn least_privilege_is_not_psec_compatible() {
-        let mut request = ExecutionRequest::default();
-        request.policy.least_privilege_mode = true;
-
-        assert!(
-            !BaseContainerRunner::should_use_process_security_environment(
-                &request, true, true, true
-            )
-        );
-    }
-
-    #[test]
-    fn denied_paths_are_not_psec_compatible_when_support_is_absent() {
-        let mut request = ExecutionRequest::default();
-        request.policy.denied_paths = vec![r"C:\secret".to_string()];
-
-        assert!(
-            !BaseContainerRunner::should_use_process_security_environment(
-                &request, true, false, true
-            )
-        );
-    }
-
-    #[test]
-    fn enumerate_paths_require_supported_psec() {
-        let mut request = ExecutionRequest::default();
-        request.policy.enumerate_paths = vec![r"C:\tools".to_string()];
-
-        assert!(
-            BaseContainerRunner::should_use_process_security_environment(
-                &request, true, true, true
-            )
-        );
-        assert!(
-            !BaseContainerRunner::should_use_process_security_environment(
-                &request, true, true, false
-            )
-        );
-    }
     // ---- validate_runner: unsupported policy fields surface as errors. ----
 
     use wxc_common::sandbox_process::SandboxBackend;
-
-    #[test]
-    fn validate_runner_accepts_denied_paths_when_supported() {
-        let _guard = crate::test_env::DenyPathsGuard::supported(true);
-        let runner = BaseContainerRunner::new();
-        let mut request = ExecutionRequest::default();
-        request.policy.denied_paths = vec!["C:\\secret".into()];
-
-        // May still fail if the BaseContainer API is unavailable, but not for deny.
-        if let Err(err) = runner.validate(&request) {
-            assert!(
-                !err.error_message.contains("deniedPaths")
-                    && !err.error_message.contains("PSE_SUPPORT_FS_DENY"),
-                "deniedPaths should not be rejected when supported, got: {}",
-                err.error_message
-            );
-        }
-    }
-
-    #[test]
-    fn validate_runner_rejects_denied_paths_when_unsupported() {
-        let _guard = crate::test_env::DenyPathsGuard::supported(false);
-        let support = Arc::new(FakeCaptureSupport {
-            api_error: None,
-            deny_error: None,
-            deny_supported: false,
-            api_calls: AtomicUsize::new(0),
-            learning_mode_api_calls: AtomicUsize::new(0),
-            deny_calls: AtomicUsize::new(0),
-        });
-        let runner = BaseContainerRunner::with_capture_components(fake_capture_factory(), support);
-        let mut request = ExecutionRequest::default();
-        request.policy.denied_paths = vec!["C:\\secret".into()];
-
-        let err = runner
-            .validate(&request)
-            .expect_err("deniedPaths must be rejected when the capability is unavailable");
-        assert!(
-            err.error_message
-                .contains("cannot be represented by the process security environment"),
-            "expected the PSEC compatibility message, got: {}",
-            err.error_message
-        );
-    }
 
     #[test]
     fn validate_runner_rejects_allowed_hosts() {
@@ -3933,184 +3281,9 @@ mod tests {
         // dev machines where BaseContainer isn't present; we only assert that
         // the policy-field checks above don't fire. Skip when the host doesn't
         // expose the API.
-        if BaseContainerRunner::is_base_container_api_present().is_ok() {
+        if BaseContainerRunner::is_base_container_api_present() {
             assert!(runner.validate(&request).is_ok());
         }
-    }
-
-    #[test]
-    fn capture_denied_paths_error_names_v2_capability() {
-        assert!(
-            PSEC_DENIED_PATHS_UNSUPPORTED_MSG.contains("QueryProcessSecurityEnvironmentSupport")
-        );
-        assert!(PSEC_DENIED_PATHS_UNSUPPORTED_MSG.contains("PSE_SUPPORT_FS_DENY"));
-        assert!(PSEC_DENIED_PATHS_UNSUPPORTED_MSG.contains("cannot fall back to AppContainer"));
-    }
-
-    #[test]
-    fn capture_validation_rejects_when_v2_api_is_unavailable() {
-        let _guard = crate::test_env::lock();
-        let factory = fake_capture_factory();
-        let support = Arc::new(FakeCaptureSupport {
-            api_error: Some("missing CloseLearningModeTrace"),
-            deny_error: None,
-            deny_supported: true,
-            api_calls: AtomicUsize::new(0),
-            learning_mode_api_calls: AtomicUsize::new(0),
-            deny_calls: AtomicUsize::new(0),
-        });
-        let runner = BaseContainerRunner::with_capture_components(factory.clone(), support.clone());
-
-        let error = runner
-            .validate(&capture_request_with_denied_path())
-            .expect_err("missing V2 API must fail closed");
-
-        assert_eq!(error.failure_phase, FailurePhase::BackendUnavailable);
-        assert!(error
-            .error_message
-            .contains("cannot be represented by the process security environment"));
-        assert_eq!(support.api_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(support.learning_mode_api_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(support.deny_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(factory.begin_calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn capture_validation_rejects_when_native_deny_query_fails() {
-        let _guard = crate::test_env::lock();
-        let factory = fake_capture_factory();
-        let support = Arc::new(FakeCaptureSupport {
-            api_error: None,
-            deny_error: Some("query failed"),
-            deny_supported: false,
-            api_calls: AtomicUsize::new(0),
-            learning_mode_api_calls: AtomicUsize::new(0),
-            deny_calls: AtomicUsize::new(0),
-        });
-        let runner = BaseContainerRunner::with_capture_components(factory.clone(), support.clone());
-
-        let error = runner
-            .validate(&capture_request_with_denied_path())
-            .expect_err("deny query failure must fail closed");
-
-        assert_eq!(error.failure_phase, FailurePhase::BackendUnavailable);
-        assert!(error
-            .error_message
-            .contains("cannot be represented by the process security environment"));
-        assert_eq!(support.api_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(support.deny_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(factory.begin_calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn capture_validation_rejects_when_native_deny_bit_is_clear() {
-        let _guard = crate::test_env::lock();
-        let factory = fake_capture_factory();
-        let support = Arc::new(FakeCaptureSupport {
-            api_error: None,
-            deny_error: None,
-            deny_supported: false,
-            api_calls: AtomicUsize::new(0),
-            learning_mode_api_calls: AtomicUsize::new(0),
-            deny_calls: AtomicUsize::new(0),
-        });
-        let runner = BaseContainerRunner::with_capture_components(factory.clone(), support.clone());
-
-        let error = runner
-            .validate(&capture_request_with_denied_path())
-            .expect_err("missing deny support bit must fail closed");
-
-        assert_eq!(error.failure_phase, FailurePhase::BackendUnavailable);
-        assert!(error
-            .error_message
-            .contains("cannot be represented by the process security environment"));
-        assert_eq!(support.api_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(support.deny_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(factory.begin_calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn psec_without_capture_requires_only_security_environment_api() {
-        let factory = fake_capture_factory();
-        let support = Arc::new(FakeCaptureSupport {
-            api_error: None,
-            deny_error: None,
-            deny_supported: true,
-            api_calls: AtomicUsize::new(0),
-            learning_mode_api_calls: AtomicUsize::new(0),
-            deny_calls: AtomicUsize::new(0),
-        });
-        let runner = BaseContainerRunner::with_capture_components(factory.clone(), support.clone());
-        let request = ExecutionRequest {
-            network_enforcement_compatibility: NetworkEnforcementCompatibility::LegacyCompatible,
-            ..Default::default()
-        };
-
-        runner
-            .validate(&request)
-            .expect("PSEC requires the security-environment API but not Learning Mode");
-
-        assert_eq!(support.api_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(support.learning_mode_api_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(support.deny_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(factory.begin_calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn psec_dry_run_skips_host_api_probes() {
-        let factory = fake_capture_factory();
-        let support = Arc::new(FakeCaptureSupport {
-            api_error: Some("V2 exports unavailable"),
-            deny_error: Some("deny support query unavailable"),
-            deny_supported: false,
-            api_calls: AtomicUsize::new(0),
-            learning_mode_api_calls: AtomicUsize::new(0),
-            deny_calls: AtomicUsize::new(0),
-        });
-        let runner = BaseContainerRunner::with_capture_components(factory.clone(), support.clone());
-        let mut request = ExecutionRequest {
-            network_enforcement_compatibility: NetworkEnforcementCompatibility::LegacyCompatible,
-            dry_run: true,
-            ..Default::default()
-        };
-        request.policy.capture_denials = Some(Default::default());
-        request.policy.denied_paths = vec![r"C:\secret".to_string()];
-
-        runner
-            .validate(&request)
-            .expect("dry-run should validate policy without probing host APIs");
-
-        assert_eq!(support.api_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(support.learning_mode_api_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(support.deny_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(factory.begin_calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn validate_runner_allows_capture_denials_on_older_schema() {
-        let factory = fake_capture_factory();
-        let support = Arc::new(FakeCaptureSupport {
-            api_error: None,
-            deny_error: None,
-            deny_supported: true,
-            api_calls: AtomicUsize::new(0),
-            learning_mode_api_calls: AtomicUsize::new(0),
-            deny_calls: AtomicUsize::new(0),
-        });
-        let runner = BaseContainerRunner::with_capture_components(factory.clone(), support.clone());
-        let mut request = ExecutionRequest {
-            network_enforcement_compatibility: NetworkEnforcementCompatibility::LegacyCompatible,
-            dry_run: true,
-            ..Default::default()
-        };
-        request.policy.capture_denials = Some(Default::default());
-
-        runner
-            .validate(&request)
-            .expect("captureDenials should use PSEC regardless of schema version");
-        assert_eq!(support.api_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(support.learning_mode_api_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(factory.begin_calls.load(Ordering::SeqCst), 0);
     }
 
     // ETL-retention capability validation (the retainEtl gate, including the
