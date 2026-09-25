@@ -1,18 +1,18 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! State-aware dispatcher: consumes a checked backend-bound operation, runs
-//! the backend's `StatefulSandboxBackend` per-phase typed flow, and
-//! produces either a JSON response envelope (non-exec phases or dispatch
-//! failure) or an exit code (exec phase, which streams its output live).
+//! State-aware dispatcher: consumes a checked backend-bound operation and runs
+//! the backend's `StatefulSandboxBackend` per-phase typed flow. Typed SDK calls
+//! retain backend-native results; raw/executor calls encode those results as a
+//! JSON response envelope. Exec streams output live and returns an exit code.
 //!
 //! `mxc_engine` resolves the backend and applies execution gates before checked
 //! binding. The local `run_state_aware` is its fallback for backends without a
 //! state-aware implementation and surfaces `unsupported_phase`.
 //!
-//! `dispatch_state_aware<B>` is the per-backend phase router, generic over the
-//! `StatefulSandboxBackend` impl. It borrows configuration for validation, moves
-//! it into the phase method, and wraps the result in a wire response envelope.
+//! `dispatch_state_aware_typed<B>` is the per-backend phase router, generic over
+//! the `StatefulSandboxBackend` impl. `dispatch_state_aware<B>` wraps its result
+//! in a wire response envelope for raw callers.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -44,6 +44,24 @@ pub enum DispatchOutcome {
     /// Stdout already carried the script's output; no JSON envelope is emitted.
     ExecCompleted { exit_code: i32 },
 }
+
+/// Typed outcome of backend dispatch before raw response-envelope encoding.
+#[derive(Debug)]
+pub enum TypedDispatchOutcome<ProvisionMetadata, StartMetadata, StopMetadata, DeprovisionMetadata> {
+    DryRun,
+    Provision(ProvisionResult<ProvisionMetadata>),
+    Start(StartResult<StartMetadata>),
+    ExecCompleted { exit_code: i32 },
+    Stop(StopResult<StopMetadata>),
+    Deprovision(DeprovisionResult<DeprovisionMetadata>),
+}
+
+pub type TypedBackendDispatchOutcome<B> = TypedDispatchOutcome<
+    <B as StatefulSandboxBackend>::ProvisionMetadata,
+    <B as StatefulSandboxBackend>::StartMetadata,
+    <B as StatefulSandboxBackend>::StopMetadata,
+    <B as StatefulSandboxBackend>::DeprovisionMetadata,
+>;
 
 /// Fallback dispatch for backends whose state-aware impl isn't reachable
 /// from `wxc_common` (e.g. it lives in a backend crate that depends on
@@ -101,49 +119,75 @@ pub fn dispatch_state_aware<B: StatefulSandboxBackend>(
     bound: BoundStateAwareRequest<B>,
     dry_run: bool,
 ) -> Result<DispatchOutcome, MxcError> {
+    match dispatch_state_aware_typed(backend, bound, dry_run)? {
+        TypedDispatchOutcome::DryRun => Ok(DispatchOutcome::Envelope(empty_result_envelope())),
+        TypedDispatchOutcome::Provision(result) => {
+            Ok(DispatchOutcome::Envelope(provision_envelope(result)?))
+        }
+        TypedDispatchOutcome::Start(result) => {
+            Ok(DispatchOutcome::Envelope(metadata_envelope(result)?))
+        }
+        TypedDispatchOutcome::ExecCompleted { exit_code } => {
+            Ok(DispatchOutcome::ExecCompleted { exit_code })
+        }
+        TypedDispatchOutcome::Stop(result) => {
+            Ok(DispatchOutcome::Envelope(metadata_envelope(result)?))
+        }
+        TypedDispatchOutcome::Deprovision(result) => {
+            Ok(DispatchOutcome::Envelope(metadata_envelope(result)?))
+        }
+    }
+}
+
+/// Per-backend phase router that retains typed backend results.
+pub fn dispatch_state_aware_typed<B: StatefulSandboxBackend>(
+    backend: &mut B,
+    bound: BoundStateAwareRequest<B>,
+    dry_run: bool,
+) -> Result<TypedBackendDispatchOutcome<B>, MxcError> {
     let (request, operation) = bound.into_parts();
     match operation {
         BoundStateAwareOperation::Provision(config) => {
             backend.validate_provision(&request, config.as_ref())?;
             if dry_run {
-                return Ok(DispatchOutcome::Envelope(empty_result_envelope()));
+                return Ok(TypedDispatchOutcome::DryRun);
             }
             let result = backend.provision(&request, config)?;
-            Ok(DispatchOutcome::Envelope(provision_envelope(result)?))
+            Ok(TypedDispatchOutcome::Provision(result))
         }
         BoundStateAwareOperation::Start { sandbox_id, config } => {
             backend.validate_start(&sandbox_id, &request, config.as_ref())?;
             if dry_run {
-                return Ok(DispatchOutcome::Envelope(empty_result_envelope()));
+                return Ok(TypedDispatchOutcome::DryRun);
             }
             let result = backend.start(&sandbox_id, &request, config)?;
-            Ok(DispatchOutcome::Envelope(metadata_envelope(result)?))
+            Ok(TypedDispatchOutcome::Start(result))
         }
         BoundStateAwareOperation::Exec { sandbox_id, config } => {
             validate_exec_common(&request)?;
             backend.validate_exec(&sandbox_id, &request, config.as_ref())?;
             if dry_run {
-                return Ok(DispatchOutcome::Envelope(empty_result_envelope()));
+                return Ok(TypedDispatchOutcome::DryRun);
             }
             let handle = backend.exec(&sandbox_id, &request, config, ExecStdio::Relayed)?;
             let exit_code = relay_exec_to_stdio(handle)?;
-            Ok(DispatchOutcome::ExecCompleted { exit_code })
+            Ok(TypedDispatchOutcome::ExecCompleted { exit_code })
         }
         BoundStateAwareOperation::Stop { sandbox_id, config } => {
             backend.validate_stop(&sandbox_id, &request, config.as_ref())?;
             if dry_run {
-                return Ok(DispatchOutcome::Envelope(empty_result_envelope()));
+                return Ok(TypedDispatchOutcome::DryRun);
             }
             let result = backend.stop(&sandbox_id, &request, config)?;
-            Ok(DispatchOutcome::Envelope(metadata_envelope(result)?))
+            Ok(TypedDispatchOutcome::Stop(result))
         }
         BoundStateAwareOperation::Deprovision { sandbox_id, config } => {
             backend.validate_deprovision(&sandbox_id, &request, config.as_ref())?;
             if dry_run {
-                return Ok(DispatchOutcome::Envelope(empty_result_envelope()));
+                return Ok(TypedDispatchOutcome::DryRun);
             }
             let result = backend.deprovision(&sandbox_id, &request, config)?;
-            Ok(DispatchOutcome::Envelope(metadata_envelope(result)?))
+            Ok(TypedDispatchOutcome::Deprovision(result))
         }
     }
 }

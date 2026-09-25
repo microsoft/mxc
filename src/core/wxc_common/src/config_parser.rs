@@ -366,7 +366,7 @@ fn parse_exact_v0_9(json: &str, logger: &mut Logger) -> Result<MxcRequest, Parse
                 .map_err(ParseError::OneShot)
         }
         crate::config_contract_adapters::v0_9::AdaptedConfigRequest::StateAware(input) => {
-            normalize_state_aware(input, logger)
+            normalize_state_aware(input, logger, true)
                 .map(MxcRequest::StateAware)
                 .map_err(|error| {
                     ParseError::StateAware(MxcError::malformed_request(error.to_string()))
@@ -433,7 +433,7 @@ fn parse_exact_development(json: &str, logger: &mut Logger) -> Result<MxcRequest
                 .map_err(ParseError::OneShot)
         }
         crate::config_contract_adapters::dev::AdaptedConfigRequest::StateAware(input) => {
-            normalize_state_aware(input, logger)
+            normalize_state_aware(input, logger, true)
                 .map(MxcRequest::StateAware)
                 .map_err(|error| {
                     ParseError::StateAware(MxcError::malformed_request(error.to_string()))
@@ -1719,9 +1719,10 @@ fn normalize_common_request_ir(
 fn normalize_state_aware(
     input: StateAwareInput,
     logger: &mut Logger,
+    preserve_source_contract: bool,
 ) -> Result<ParsedStateAwareRequest, WxcError> {
     let (common, operation) = input.into_parts();
-    let request = normalize_state_aware_common(
+    let mut request = normalize_state_aware_common(
         common,
         NormalizationContext {
             phase: operation.phase(),
@@ -1740,7 +1741,20 @@ fn normalize_state_aware(
         },
         logger,
     )?;
+    if !preserve_source_contract {
+        request.source_contract = None;
+    }
     Ok(ParsedStateAwareRequest::new(request, operation))
+}
+
+/// Normalize trusted typed Rust SDK lifecycle input without JSON parsing or
+/// external exact-contract attribution.
+#[doc(hidden)]
+pub fn normalize_sdk_state_aware_request(
+    input: crate::sdk_input::SdkStateAwareInput,
+    logger: &mut Logger,
+) -> Result<ParsedStateAwareRequest, WxcError> {
+    normalize_state_aware(input.into_normalization_input()?, logger, false)
 }
 
 /// Temporary routing view; production derives it exclusively from the operation.

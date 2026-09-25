@@ -19,7 +19,74 @@
 //! experimental opt-in — which stays host-independent because the gate runs
 //! before backend dispatch.
 
-use mxc_sdk::{exec_sandbox, run_state_aware_json, ErrorCode};
+use mxc_sdk::{
+    dry_run_exec_sandbox, exec_sandbox, exec_sandbox_json, provision_sandbox, run_state_aware_json,
+    start_sandbox, ErrorCode, ProvisionRequest, SandboxLifecycleRequest, StateAwareExecRequest,
+    StateAwareOptions,
+};
+
+#[test]
+fn typed_windows_sandbox_requires_the_development_version() {
+    let error = provision_sandbox(
+        ProvisionRequest::windows_sandbox("0.9.0-alpha"),
+        StateAwareOptions::new(true, true),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::MalformedRequest);
+    assert!(error.message.contains("0.10.0-alpha"));
+}
+
+#[test]
+fn typed_windows_sandbox_requires_experimental_authorization() {
+    let error = provision_sandbox(
+        ProvisionRequest::windows_sandbox("0.10.0-alpha"),
+        StateAwareOptions::new(true, false),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::BackendUnavailable);
+    assert!(error.message.contains("experimental"));
+}
+
+#[test]
+fn typed_lifecycle_routes_by_sandbox_id() {
+    let error = start_sandbox(
+        SandboxLifecycleRequest::new("0.9.0-alpha", "nosuchbackend:abc123"),
+        StateAwareOptions::default(),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::UnsupportedContainment);
+}
+
+#[test]
+fn typed_exec_dry_run_honors_experimental_authorization() {
+    let request = StateAwareExecRequest::new("0.10.0-alpha", "wsb:0a1b2c3d", "echo hello");
+    let error = dry_run_exec_sandbox(request.clone(), false).unwrap_err();
+    assert_eq!(error.code, ErrorCode::BackendUnavailable);
+
+    if let Err(error) = dry_run_exec_sandbox(request, true) {
+        assert_ne!(
+            error.code,
+            ErrorCode::BackendUnavailable,
+            "the experimental opt-in must reach typed exec dispatch: {}",
+            error.message
+        );
+    }
+}
+
+#[test]
+fn explicit_raw_exec_alias_preserves_existing_behavior() {
+    let json = r#"{"version":"0.8.0-alpha","process":{"commandLine":"echo hi"}}"#;
+    let legacy = match exec_sandbox(json, false) {
+        Ok(_) => panic!("one-shot must be rejected"),
+        Err(error) => error,
+    };
+    let explicit = match exec_sandbox_json(json, false) {
+        Ok(_) => panic!("one-shot must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(legacy.code, explicit.code);
+    assert_eq!(legacy.message, explicit.message);
+}
 
 #[test]
 fn run_state_aware_json_rejects_one_shot_config() {
