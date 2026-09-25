@@ -154,7 +154,7 @@ jobs:
       targetType: inline
       script: |
         [xml]$project = Get-Content "$(sdkProject)"
-        $version = [string]$project.Project.PropertyGroup.Version
+        $version = ([string]$project.Project.PropertyGroup.Version).Trim()
         if ([string]::IsNullOrWhiteSpace($version)) {
           throw "Microsoft.Mxc.Sdk.csproj does not define Version"
         }
