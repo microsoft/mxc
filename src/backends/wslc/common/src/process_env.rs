@@ -48,14 +48,11 @@ impl EnvScope {
 
 /// The entries that name a variable, in the order supplied.
 ///
-/// An entry carrying a NUL would reach the SDK truncated at it, which in argv
-/// is a bare word that `env` runs as the command. Dropping it here alongside
-/// the entries with no `=` keeps every state handing the container the same
-/// set, whether it travels in argv or through the SDK.
+/// An entry with no `=` names nothing, and in argv would be the command `env`
+/// runs. One carrying a NUL is kept so the marshalling step rejects it rather
+/// than launching without a variable the caller asked for.
 fn assignments(entries: &[String]) -> impl Iterator<Item = &String> {
-    entries
-        .iter()
-        .filter(|e| e.contains('=') && !e.contains('\0'))
+    entries.iter().filter(|e| e.contains('='))
 }
 
 /// The container process's argv, running `script_code` under the shell.
@@ -265,7 +262,9 @@ mod tests {
     }
 
     #[test]
-    fn an_entry_carrying_a_nul_is_dropped_by_both_scopes() {
+    fn an_entry_carrying_a_nul_reaches_the_marshalling_step_that_rejects_it() {
+        // Dropping it here would launch without a variable the caller asked
+        // for; `cstr_bytes` names the offending field instead.
         let supplied = entries(&["FOO\0=bar", "KEEP=yes"]);
 
         assert_eq!(
@@ -274,13 +273,14 @@ mod tests {
                 "/usr/bin/env",
                 "-i",
                 "--",
+                "FOO\0=bar",
                 "KEEP=yes",
                 "/bin/sh",
                 "-c",
                 "echo hi"
             ]
         );
-        assert_eq!(sdk_entries(EnvScope::Merge, &supplied), ["KEEP=yes"]);
+        assert_eq!(sdk_entries(EnvScope::Merge, &supplied), supplied);
     }
 
     #[test]
