@@ -192,25 +192,23 @@ describe(`Linux Bubblewrap network proxy, legacy shape (schema ${PROXY_SCHEMA})`
 // That posture is enforced from inside a private network namespace routed by
 // rootless slirp4netns, which the legacy path does not need -- hence the extra
 // prerequisite here.
+//
+// The SDK's own capability answers it: the native probe runs `slirp4netns
+// --version`, checks that private namespaces can actually be unshared, and
+// inspects the iptables backend, so it fails closed on any part of the
+// dependency set. Testing for the binary alone would let a host with an
+// unusable slirp, `unshare`, `nsenter`, `iptables`, or `ip6tables` past the
+// gate and report an environmental failure as a test failure.
 const PROXY_SCHEMA_09 = '0.9.0-alpha';
-const hasSlirp4netns = (() => {
-  if (os.platform() !== 'linux') return false;
-  const pathDirs = (process.env.PATH ?? '').split(path.delimiter);
-  return pathDirs.some((dir) => {
-    if (!dir) return false;
-    try {
-      return fs.existsSync(path.join(dir, 'slirp4netns'));
-    } catch {
-      return false;
-    }
-  });
-})();
+const hasProxyEnforcement =
+  isLinuxBubblewrap &&
+  sdk.getPlatformSupport().bubblewrapNetwork?.proxyEnforcement === 'supported';
 
 describe(`Linux Bubblewrap network proxy (schema ${PROXY_SCHEMA_09})`, {
   skip: !isLinuxBubblewrap
     ? 'Linux Bubblewrap proxy tests require Linux with bwrap installed'
-    : !hasSlirp4netns
-      ? 'the 0.9 proxy posture needs slirp4netns to route its private namespace'
+    : !hasProxyEnforcement
+      ? 'this host cannot enforce proxy-only egress (see PlatformSupport.bubblewrapNetwork.warnings)'
       : undefined,
 }, () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-sdk-bwrap-proxy-09-'));

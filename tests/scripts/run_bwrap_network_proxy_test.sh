@@ -65,6 +65,10 @@ cleanup_control() {
             wait "$pid" 2>/dev/null || true
         fi
     done
+    # This runs once explicitly and again from the EXIT trap. A reaped PID can
+    # be reused by an unrelated process before then, so forget it once reaped.
+    CONTROL_PID=""
+    PROXY_ENDPOINT_PID=""
     exec 7>&- 2>/dev/null || true
     exec 8>&- 2>/dev/null || true
     rm -rf "$CONTROL_DIR"
