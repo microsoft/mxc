@@ -502,23 +502,80 @@ pub fn run_wxc_example(config_file: &str, extra_args: &[&str]) -> CommandResult 
     run_executable(config_file, &exe, args)
 }
 
-/// Run `wxc-exec.exe` with a state-aware request envelope. The JSON value is
-/// serialised, base64-encoded, and passed via `--config-base64`. Used by the
-/// state-aware smoke tests.
+/// Run `wxc-exec.exe` with a state-aware request. Routing fields are moved from
+/// the exact request into the executor's CLI arguments before the remaining
+/// JSON is serialised and passed via `--config-base64`.
+fn build_wxc_state_aware_args(
+    operation: String,
+    sandbox_id: Option<String>,
+    encoded: String,
+    extra_args: &[&str],
+) -> Vec<String> {
+    let mut args = vec!["--operation".to_string(), operation.clone()];
+    if operation != "provision" {
+        args.push("--sandbox-id".to_string());
+        args.push(sandbox_id.expect("non-provision test request must contain sandboxId"));
+    }
+    args.push("--config-base64".to_string());
+    args.push(encoded);
+    args.extend(extra_args.iter().map(|arg| (*arg).to_string()));
+    args
+}
+
 pub fn run_wxc_state_aware(
     label: &str,
     request: &serde_json::Value,
     extra_args: &[&str],
 ) -> CommandResult {
     let exe = find_binary("wxc-exec.exe").expect("wxc-exec.exe should be available");
+    let mut request = request.clone();
+    let object = request
+        .as_object_mut()
+        .expect("state-aware test request must be an object");
+    let operation = object
+        .remove("phase")
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .expect("state-aware test request must contain a string phase");
+    let sandbox_id = object
+        .remove("sandboxId")
+        .and_then(|value| value.as_str().map(str::to_owned));
     let json = request.to_string();
     let encoded = STANDARD.encode(json.as_bytes());
 
-    let mut args: Vec<String> = extra_args.iter().map(|s| (*s).to_string()).collect();
-    args.push("--config-base64".to_string());
-    args.push(encoded);
+    let args = build_wxc_state_aware_args(operation, sandbox_id, encoded, extra_args);
 
     run_executable(label, &exe, args)
+}
+
+#[cfg(test)]
+mod state_aware_args_tests {
+    use super::build_wxc_state_aware_args;
+
+    #[test]
+    fn mandatory_arguments_precede_the_trailing_command_separator() {
+        let args = build_wxc_state_aware_args(
+            "exec".to_string(),
+            Some("iso:abc".to_string()),
+            "encoded".to_string(),
+            &["--experimental", "--", "echo", "hello"],
+        );
+
+        assert_eq!(
+            args,
+            [
+                "--operation",
+                "exec",
+                "--sandbox-id",
+                "iso:abc",
+                "--config-base64",
+                "encoded",
+                "--experimental",
+                "--",
+                "echo",
+                "hello",
+            ]
+        );
+    }
 }
 
 /// Run `wxc-exec.exe` with a one-shot config supplied as an in-memory JSON
