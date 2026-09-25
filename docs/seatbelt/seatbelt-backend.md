@@ -200,14 +200,12 @@ even to another writable root, keeps the match denied, because names match
 anywhere.
 
 **Symlinks and aliases.** Seatbelt matches the path the kernel resolves, not
-the file:
+the file and not the names of the symlinks it followed:
 
 - A symlink that resolves into a denied name is denied: `link -> …/.ssh`
   exposes nothing.
-- An access through a denied name is denied even when that name is itself a
-  symlink: `…/.ssh -> /elsewhere` blocks `…/.ssh/…`.
-- The rule does not follow a symlink back to its target: `/elsewhere` stays
-  reachable under its own name wherever another rule grants it.
+- A symlink's own name does not count: `…/.ssh -> /elsewhere` resolves to
+  `/elsewhere/…`, which is reachable wherever another rule grants it.
 - A hard link, or any other alias that reaches a matching file through a
   non-matching path, is not guaranteed to be denied.
 

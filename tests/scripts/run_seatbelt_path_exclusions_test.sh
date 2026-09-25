@@ -35,28 +35,34 @@ ln -s ../plain "$ROOT/b/.ssh"
 
 render_names() { render "$1" TESTDIR "$TESTDIR" ROOT "$ROOT"; }
 
+# A policy denial reports EPERM or EACCES. ENOENT or ECONNREFUSED would mean
+# the probe missed its target, not that the sandbox refused it.
+expect_permission_denied() {
+    expect_marker_any "$1" "$2(1)" "$2(13)"
+}
+
 run_config "$(render_names seatbelt_path_names_reads.json)" --experimental
 expect_ok "the name probe ran" "PATH_NAMES_PROBE_DONE"
-expect_marker "a denied name is unreadable" "TOP=DENIED"
-expect_marker "a denied name matches at depth and in any ASCII case" "DEEP_CASE=DENIED"
-expect_marker "a multi-component name is denied" "MULTI=DENIED"
-expect_marker "regex metacharacters in a name are literal" "SPECIAL_NAME=DENIED"
-expect_marker "a symlink that resolves into a denied name is denied" "LINK_INTO=DENIED"
-expect_marker "a symlink carrying a denied name blocks access through it" "LINK_NAMED=DENIED"
+expect_permission_denied "a denied name is unreadable" "TOP=DENIED"
+expect_permission_denied "a denied name matches at depth and in any ASCII case" "DEEP_CASE=DENIED"
+expect_permission_denied "a multi-component name is denied" "MULTI=DENIED"
+expect_permission_denied "regex metacharacters in a name are literal" "SPECIAL_NAME=DENIED"
+expect_permission_denied "a symlink that resolves into a denied name is denied" "LINK_INTO=DENIED"
+expect_marker "a symlink's own name does not count: rules match the resolved path" "LINK_NAMED=READ"
 expect_marker "a sibling of a multi-component match stays readable" "SIBLING=READ"
 expect_marker "a name only matches whole components" "BOUNDARY=READ"
 expect_marker "a '.' in a name does not match any character" "DOT_DECOY=READ"
 expect_marker "metacharacters in a name do not act as regex syntax" "SPECIAL_DECOY=READ"
-expect_marker "the target of a denied-name symlink stays readable under its own name" "TARGET=READ"
+expect_marker "an ordinary directory stays readable" "TARGET=READ"
 
 run_config "$(render_names seatbelt_path_names_renames.json)" --experimental
 expect_ok "the rename probe ran" "PATH_NAMES_PROBE_DONE"
 expect_marker "unrelated renames still work" "UNRELATED=MOVED"
-expect_marker "a leading component of a multi-component name cannot be renamed" "PREFIX=REFUSED"
+expect_permission_denied "a leading component of a multi-component name cannot be renamed" "PREFIX=REFUSED"
 expect_absent "renaming the leading component exposes nothing" "PREFIX_TARGET=READ"
-expect_marker "a denied name cannot be renamed" "MATCH=REFUSED"
+expect_permission_denied "a denied name cannot be renamed" "MATCH=REFUSED"
 expect_marker "a directory holding a match can move to another writable root" "CROSS_ROOT=MOVED"
-expect_marker "the moved match is still denied in the other root" "CROSS_ROOT_MATCH=DENIED"
+expect_permission_denied "the moved match is still denied in the other root" "CROSS_ROOT_MATCH=DENIED"
 [ -f "$ROOT/a/.config/gh/hosts.yml" ] || fail "the pinned .config directory was moved"
 [ -f "$OTHER/moved/.ssh/sentinel" ] || fail "the cross-root move did not happen on the host"
 pass "the host tree matches what the sandbox reported"
@@ -78,7 +84,7 @@ RC=0
 wait "$late_pid" || RC=$?
 OUT="$(cat "$LATE_OUT")"
 expect_ok "the late-creation probe saw the host create the name" "LATE_READY"
-expect_marker "a name created after launch is denied" "LATE=DENIED"
+expect_permission_denied "a name created after launch is denied" "LATE=DENIED"
 
 /usr/bin/python3 -c $'import socket, sys\ns = socket.socket(socket.AF_UNIX)\ns.bind(sys.argv[1])\ns.listen(8)\nwhile True:\n    s.accept()[0].close()' \
     "$ROOT/run/host.sock" &
@@ -91,8 +97,8 @@ done
 
 run_config "$(render_names seatbelt_unix_socket_denied_paths.json)" --experimental
 expect_ok "the socket probe ran" "PATH_NAMES_PROBE_DONE"
-expect_marker "a host socket under a denied socket path is unreachable" "HOST_SOCKET=REFUSED"
-expect_marker "the workload cannot bind under a denied socket path" "HOST_FOLDER_IPC=REFUSED"
+expect_permission_denied "a host socket under a denied socket path is unreachable" "HOST_SOCKET=REFUSED"
+expect_permission_denied "the workload cannot bind under a denied socket path" "HOST_FOLDER_IPC=REFUSED"
 expect_marker "private scratch IPC keeps working" "SCRATCH_IPC=IPC_OK"
 expect_marker "file writes under a denied socket path still work" "HOST_FOLDER_FILE_WRITE=OK"
 # Documented limitation: the rule matches the socket's path, not its inode, so
