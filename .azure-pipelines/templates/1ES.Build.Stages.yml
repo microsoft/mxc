@@ -66,6 +66,12 @@ stages:
         isOfficialBuild: ${{ parameters.isOfficialBuild }}
         ESRPInfo: ${{ parameters.ESRPInfo }}
 
+- stage: Validate_DotNet_Pipeline
+  displayName: 'Validate .NET Pipeline'
+  dependsOn: []
+  jobs:
+  - template: DotNet.Validate.Job.yml
+
 - stage: Package_MXC
   displayName: 'Package MXC'
   dependsOn:
@@ -96,6 +102,7 @@ stages:
   dependsOn:
   - Build_Binaries
   - Validate_Package_Locks
+  - Validate_DotNet_Pipeline
   jobs:
   - template: DotNet.Build.Job.yml
     parameters:
@@ -133,5 +140,6 @@ stages:
   dependsOn:
   - Build_Binaries
   - Validate_Package_Locks
+  - Validate_DotNet_Pipeline
   jobs:
   - template: DotNet.Test.Job.yml

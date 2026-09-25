@@ -22,6 +22,10 @@ from crates.io and npmjs, helping ensure secure and vetted consumption of thirdâ
   internal-test payload includes the unique Azure Pipelines build ID in its
   prerelease version so repeated publications do not collide. Both payloads use
   neutral suffixes because release inputs reject unsigned `.nupkg` files.
+- A fast .NET pipeline validation stage runs in parallel with the Rust builds.
+  It verifies the .NET SDK/runtime setup and packs both NuGet variants with
+  synthetic native inputs so pipeline and package-contract failures surface
+  without waiting for the cross-platform Rust artifacts.
 - `OneBranch.DotNet.Release.yml` selects the payload for the requested target,
   restores its `.nupkg` suffix, signs and verifies it, and publishes it to the
   internal `Mxc-Azure-Feed` by default. Queue-time selection can instead publish
