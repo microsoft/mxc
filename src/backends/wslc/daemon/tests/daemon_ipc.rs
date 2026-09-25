@@ -124,6 +124,7 @@ fn full_lifecycle_over_pipe() {
     let result = client
         .exec(ExecConfig {
             exec_id: "ipc-first".to_string(),
+            run_token: "ipc-first-run".to_string(),
             sandbox_id: sandbox_id.clone(),
             script_code: "echo hi".to_string(),
             working_directory: String::new(),
@@ -138,6 +139,7 @@ fn full_lifecycle_over_pipe() {
     let result = client
         .exec(ExecConfig {
             exec_id: "ipc-second".to_string(),
+            run_token: "ipc-second-run".to_string(),
             sandbox_id: sandbox_id.clone(),
             script_code: "exit 7".to_string(),
             working_directory: String::new(),

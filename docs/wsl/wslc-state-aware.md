@@ -86,6 +86,32 @@ attached dispatch failures via the exit code + whether stdout parses as an envel
 on the attached relay surfaces as a backend error because that path cannot return a typed timeout;
 the piped path reports it through its wait result.
 
+### exec admission, cancellation, and failure containment
+
+The daemon runs one exec at a time because all WSLc SDK operations are confined
+to one apartment-affine worker. A concurrent exec is rejected with
+`backend_error` rather than queued behind an unknown-duration workload. Up to
+eight additional control connections can be serviced while an exec owns the
+stream slot; connections beyond the daemon's bounded client capacity are
+refused.
+
+Each exec carries an internal ID and per-run token. A duplicate live ID is
+rejected, and cancellation must match both values so a delayed cancellation
+cannot terminate a later run that reused the same ID. Cancellation observed
+before the worker starts a queued command returns a typed cancelled result
+without creating the process.
+
+Live output uses bounded queues in both the daemon and the in-process native
+pipe bridge. If a caller does not drain stdout/stderr quickly enough, excess
+output is dropped and completion becomes an explicit backend error reporting
+truncation; incomplete output is never reported as successful.
+
+If process termination cannot be positively confirmed after creation, the
+container is quarantined and cannot be started or used for another exec. The
+daemon attempts immediate deletion. If deletion fails, the quarantined entry is
+retained so `deprovision` can retry cleanup; it is not removed from tracking
+while a potentially running workload remains.
+
 ## Policy honor matrix
 
 WSLc networking is **all-or-nothing** (`WslcContainerNetworkingMode` `None` vs

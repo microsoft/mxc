@@ -44,6 +44,8 @@ use wxc_common::logger::Logger;
 use wxc_common::models::{PortMapping, ScriptResponse};
 use wxc_common::string_util::{to_wide, CoTaskMemPWSTR};
 
+use crate::daemon_protocol::ExecTerminal;
+
 use crate::error::WslcError;
 use crate::policy_mapping::VolumeMount;
 use crate::wsl_container_runner::{wslc_prerequisite_error, WSLContainerRunner};
@@ -1004,9 +1006,7 @@ fn wait_for_exit_callback(io_ctx: &IoContext) -> bool {
 /// Terminal state of a daemon container process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessCompletion {
-    Exited(i32),
-    TimedOut,
-    Cancelled,
+    Confirmed(ExecTerminal),
     /// The process could not be positively confirmed dead. The owning
     /// container must be quarantined and never reused.
     TerminationUnconfirmed,
@@ -1019,15 +1019,15 @@ fn natural_exit_confirmed(exit_wait: ExitWait, callback_confirmed: bool) -> bool
 
 fn classify_completion(exit_wait: ExitWait, confirmed: bool, exit_code: i32) -> ProcessCompletion {
     if natural_exit_confirmed(exit_wait, confirmed) {
-        return ProcessCompletion::Exited(exit_code);
+        return ProcessCompletion::Confirmed(ExecTerminal::Exited(exit_code));
     }
 
     match exit_wait {
         ExitWait::Interrupted(ExecInterruption::TimedOut) if confirmed => {
-            ProcessCompletion::TimedOut
+            ProcessCompletion::Confirmed(ExecTerminal::TimedOut)
         }
         ExitWait::Interrupted(ExecInterruption::Cancelled) if confirmed => {
-            ProcessCompletion::Cancelled
+            ProcessCompletion::Confirmed(ExecTerminal::Cancelled)
         }
         ExitWait::Interrupted(_) | ExitWait::Failed { .. } => {
             ProcessCompletion::TerminationUnconfirmed
@@ -1042,6 +1042,9 @@ pub struct ExecOutcome {
     pub completion: ProcessCompletion,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+    /// Specific post-process-creation failure that made termination
+    /// unobservable. The daemon uses this context when quarantining.
+    pub post_launch_error: Option<ScriptResponse>,
 }
 
 /// Run `script_code` (under `/bin/sh -c`) as a fresh process inside a started
@@ -1093,7 +1096,12 @@ pub unsafe fn exec_in_container(
     let mut exit_event: HANDLE = ptr::null_mut();
     let hr = sdk.WslcGetProcessExitEvent(process_guard.as_raw(), &mut exit_event);
     if hr != S_OK {
-        return Err(sdk_error("WslcGetProcessExitEvent failed", hr, ""));
+        return Ok(ExecOutcome {
+            completion: ProcessCompletion::TerminationUnconfirmed,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            post_launch_error: Some(sdk_error("WslcGetProcessExitEvent failed", hr, "")),
+        });
     }
 
     let timeout = (timeout_ms > 0).then(|| Duration::from_millis(u64::from(timeout_ms)));
@@ -1183,21 +1191,21 @@ pub unsafe fn exec_in_container(
     // Resolve the reported outcome from positive evidence only.
     let completion = classify_completion(exit_wait, confirmed, exit_code);
     match completion {
-        ProcessCompletion::TimedOut => {
+        ProcessCompletion::Confirmed(ExecTerminal::TimedOut) => {
             let _ = writeln!(
                 logger,
                 "[WSLC][daemon] Process killed after {}",
                 ExecInterruption::TimedOut.get_interruption_word()
             );
         }
-        ProcessCompletion::Cancelled => {
+        ProcessCompletion::Confirmed(ExecTerminal::Cancelled) => {
             let _ = writeln!(
                 logger,
                 "[WSLC][daemon] Process killed after {}",
                 ExecInterruption::Cancelled.get_interruption_word()
             );
         }
-        ProcessCompletion::Exited(exit_code) => {
+        ProcessCompletion::Confirmed(ExecTerminal::Exited(exit_code)) => {
             let _ = writeln!(
                 logger,
                 "[WSLC][daemon] Process exited with code {}",
@@ -1218,6 +1226,7 @@ pub unsafe fn exec_in_container(
         completion,
         stdout,
         stderr,
+        post_launch_error: None,
     })
 }
 
@@ -1359,19 +1368,19 @@ mod tests {
     fn completion_classification_requires_positive_exit_evidence() {
         assert_eq!(
             classify_completion(ExitWait::Signalled, false, 7),
-            ProcessCompletion::Exited(7)
+            ProcessCompletion::Confirmed(ExecTerminal::Exited(7))
         );
         assert_eq!(
             classify_completion(ExitWait::NoEvent, true, 8),
-            ProcessCompletion::Exited(8)
+            ProcessCompletion::Confirmed(ExecTerminal::Exited(8))
         );
         assert_eq!(
             classify_completion(ExitWait::Interrupted(ExecInterruption::TimedOut), true, -1,),
-            ProcessCompletion::TimedOut
+            ProcessCompletion::Confirmed(ExecTerminal::TimedOut)
         );
         assert_eq!(
             classify_completion(ExitWait::Interrupted(ExecInterruption::Cancelled), true, -1,),
-            ProcessCompletion::Cancelled
+            ProcessCompletion::Confirmed(ExecTerminal::Cancelled)
         );
         assert_eq!(
             classify_completion(

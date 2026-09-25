@@ -42,13 +42,14 @@ use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use wslc_common::container_steps::OutStream;
 use wslc_common::daemon_protocol::{
-    encode_frame, DaemonRequest, DaemonResponse, StreamFrame, MAX_FRAME_SIZE,
+    encode_frame, DaemonRequest, DaemonResponse, ExecTerminal, StreamFrame, MAX_FRAME_SIZE,
 };
 
-use crate::session_manager::{ExecCompletion, ExecStream, SessionHandle, WorkerError};
+use crate::session_manager::{ExecStream, SessionHandle, WorkerError};
 
-/// Upper bound on long-running exec streams.
-const MAX_CONCURRENT_EXECS: usize = 128;
+/// The WSLc SDK worker is apartment-affine and executes one command at a time.
+/// Refuse additional execs instead of admitting a queue that cannot run.
+const MAX_CONCURRENT_EXECS: usize = 1;
 
 /// Capacity reserved for cancellation and lifecycle requests while all exec
 /// stream slots are occupied.
@@ -429,7 +430,7 @@ where
             handle_exec(pipe, session, config, exec_permit).await?;
         }
         DaemonRequest::CancelExec(config) => {
-            session.cancel_exec(&config.exec_id);
+            session.cancel_exec(&config.exec_id, &config.run_token);
             write_frame(&mut pipe, &DaemonResponse::Ok).await?;
         }
     }
@@ -548,7 +549,7 @@ fn output_frame((kind, data): (OutStream, Vec<u8>)) -> StreamFrame {
 /// (already an `Error`) is strictly more informative and passes through
 /// unchanged.
 fn terminal_frame(
-    result: Result<Result<ExecCompletion, WorkerError>, oneshot::error::RecvError>,
+    result: Result<Result<ExecTerminal, WorkerError>, oneshot::error::RecvError>,
     overflowed: &AtomicBool,
 ) -> StreamFrame {
     match exit_terminal(result) {
@@ -564,12 +565,12 @@ fn terminal_frame(
 /// Map a completed exec's result (or a dropped completion channel) to its
 /// terminal [`StreamFrame`].
 fn exit_terminal(
-    result: Result<Result<ExecCompletion, WorkerError>, oneshot::error::RecvError>,
+    result: Result<Result<ExecTerminal, WorkerError>, oneshot::error::RecvError>,
 ) -> StreamFrame {
     match result {
-        Ok(Ok(ExecCompletion::Exited(code))) => StreamFrame::Exit { code },
-        Ok(Ok(ExecCompletion::TimedOut)) => StreamFrame::TimedOut,
-        Ok(Ok(ExecCompletion::Cancelled)) => StreamFrame::Cancelled,
+        Ok(Ok(ExecTerminal::Exited(code))) => StreamFrame::Exit { code },
+        Ok(Ok(ExecTerminal::TimedOut)) => StreamFrame::TimedOut,
+        Ok(Ok(ExecTerminal::Cancelled)) => StreamFrame::Cancelled,
         Ok(Err(e)) => StreamFrame::Error {
             message: e.to_string(),
         },
@@ -627,7 +628,7 @@ mod tests {
     fn test_registration() -> Arc<crate::session_manager::ExecRegistration> {
         let active_execs = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let cancellation = Arc::new(AtomicBool::new(false));
-        Arc::new(register_exec(&active_execs, "test-exec", &cancellation).unwrap())
+        Arc::new(register_exec(&active_execs, "test-exec", "test-run", &cancellation).unwrap())
     }
 
     #[tokio::test]
@@ -640,6 +641,7 @@ mod tests {
             &mut client,
             &DaemonRequest::Exec(ExecConfig {
                 exec_id: "exec-busy".to_string(),
+                run_token: "run-busy".to_string(),
                 sandbox_id: "wslc:test".to_string(),
                 script_code: "echo hi".to_string(),
                 working_directory: String::new(),
@@ -674,6 +676,7 @@ mod tests {
             &mut client,
             &DaemonRequest::CancelExec(CancelExecConfig {
                 exec_id: "unknown-exec".to_string(),
+                run_token: "unknown-run".to_string(),
             }),
         )
         .await
@@ -691,7 +694,7 @@ mod tests {
     /// Admit an exec whose output channel is already closed (no live output),
     /// so `write_exec_result` goes straight from `Ok` to the terminal frame.
     fn admitted_no_output(
-        done: oneshot::Receiver<Result<ExecCompletion, WorkerError>>,
+        done: oneshot::Receiver<Result<ExecTerminal, WorkerError>>,
     ) -> Result<ExecStream, WorkerError> {
         let (tx, output) = mpsc::channel(16);
         drop(tx);
@@ -752,7 +755,7 @@ mod tests {
     #[tokio::test]
     async fn dropped_completion_channel_yields_single_error_terminal() {
         let (mut server, mut client) = duplex(64 * 1024);
-        let (done_tx, done_rx) = oneshot::channel::<Result<ExecCompletion, WorkerError>>();
+        let (done_tx, done_rx) = oneshot::channel::<Result<ExecTerminal, WorkerError>>();
         drop(done_tx);
 
         write_exec_result(&mut server, admitted_no_output(done_rx))
@@ -781,8 +784,8 @@ mod tests {
     #[tokio::test]
     async fn successful_exec_writes_ok_then_exit() {
         let (mut server, mut client) = duplex(64 * 1024);
-        let (done_tx, done_rx) = oneshot::channel::<Result<ExecCompletion, WorkerError>>();
-        done_tx.send(Ok(ExecCompletion::Exited(7))).unwrap();
+        let (done_tx, done_rx) = oneshot::channel::<Result<ExecTerminal, WorkerError>>();
+        done_tx.send(Ok(ExecTerminal::Exited(7))).unwrap();
 
         write_exec_result(&mut server, admitted_no_output(done_rx))
             .await
@@ -799,11 +802,12 @@ mod tests {
     async fn exec_id_stays_registered_until_terminal_delivery() {
         let active_execs = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let cancellation = Arc::new(AtomicBool::new(false));
-        let registration = Arc::new(register_exec(&active_execs, "exec-1", &cancellation).unwrap());
+        let registration =
+            Arc::new(register_exec(&active_execs, "exec-1", "run-1", &cancellation).unwrap());
         let worker_registration = Arc::clone(&registration);
         let (mut server, mut client) = duplex(1);
-        let (done_tx, done_rx) = oneshot::channel::<Result<ExecCompletion, WorkerError>>();
-        done_tx.send(Ok(ExecCompletion::Exited(0))).unwrap();
+        let (done_tx, done_rx) = oneshot::channel::<Result<ExecTerminal, WorkerError>>();
+        done_tx.send(Ok(ExecTerminal::Exited(0))).unwrap();
         let (output_tx, output) = mpsc::channel(1);
         drop(output_tx);
 
@@ -828,7 +832,7 @@ mod tests {
         tokio::task::yield_now().await;
 
         let replacement = Arc::new(AtomicBool::new(false));
-        let error = register_exec(&active_execs, "exec-1", &replacement).unwrap_err();
+        let error = register_exec(&active_execs, "exec-1", "run-2", &replacement).unwrap_err();
         assert_eq!(error.kind(), ErrKind::Rejected);
 
         assert_eq!(
@@ -838,15 +842,15 @@ mod tests {
         writer.await.unwrap().unwrap();
 
         let replacement_registration =
-            register_exec(&active_execs, "exec-1", &replacement).unwrap();
+            register_exec(&active_execs, "exec-1", "run-2", &replacement).unwrap();
         drop(replacement_registration);
     }
 
     #[tokio::test]
     async fn timeout_writes_a_typed_terminal_frame() {
         let (mut server, mut client) = duplex(64 * 1024);
-        let (done_tx, done_rx) = oneshot::channel::<Result<ExecCompletion, WorkerError>>();
-        done_tx.send(Ok(ExecCompletion::TimedOut)).unwrap();
+        let (done_tx, done_rx) = oneshot::channel::<Result<ExecTerminal, WorkerError>>();
+        done_tx.send(Ok(ExecTerminal::TimedOut)).unwrap();
 
         write_exec_result(&mut server, admitted_no_output(done_rx))
             .await
@@ -865,8 +869,8 @@ mod tests {
     #[tokio::test]
     async fn cancellation_writes_a_typed_terminal_frame() {
         let (mut server, mut client) = duplex(64 * 1024);
-        let (done_tx, done_rx) = oneshot::channel::<Result<ExecCompletion, WorkerError>>();
-        done_tx.send(Ok(ExecCompletion::Cancelled)).unwrap();
+        let (done_tx, done_rx) = oneshot::channel::<Result<ExecTerminal, WorkerError>>();
+        done_tx.send(Ok(ExecTerminal::Cancelled)).unwrap();
 
         write_exec_result(&mut server, admitted_no_output(done_rx))
             .await
@@ -888,7 +892,7 @@ mod tests {
     #[tokio::test]
     async fn live_output_streams_before_exit() {
         let (mut server, mut client) = duplex(64 * 1024);
-        let (done_tx, done_rx) = oneshot::channel::<Result<ExecCompletion, WorkerError>>();
+        let (done_tx, done_rx) = oneshot::channel::<Result<ExecTerminal, WorkerError>>();
         let (out_tx, output) = mpsc::channel(16);
 
         // Enqueue interleaved output, then the exit code, then close the channel
@@ -902,7 +906,7 @@ mod tests {
         out_tx
             .try_send((OutStream::Stdout, b"world".to_vec()))
             .unwrap();
-        done_tx.send(Ok(ExecCompletion::Exited(0))).unwrap();
+        done_tx.send(Ok(ExecTerminal::Exited(0))).unwrap();
         drop(out_tx);
 
         write_exec_result(
@@ -952,7 +956,7 @@ mod tests {
     #[tokio::test]
     async fn leak_path_drains_queued_then_terminates() {
         let (mut server, mut client) = duplex(64 * 1024);
-        let (done_tx, done_rx) = oneshot::channel::<Result<ExecCompletion, WorkerError>>();
+        let (done_tx, done_rx) = oneshot::channel::<Result<ExecTerminal, WorkerError>>();
         let (out_tx, output) = mpsc::channel(16);
 
         // Two chunks already queued, the run reports its exit, and the sender is
@@ -963,7 +967,7 @@ mod tests {
         out_tx
             .try_send((OutStream::Stderr, b"tail".to_vec()))
             .unwrap();
-        done_tx.send(Ok(ExecCompletion::Exited(3))).unwrap();
+        done_tx.send(Ok(ExecTerminal::Exited(3))).unwrap();
 
         write_exec_result(
             &mut server,
@@ -1014,12 +1018,12 @@ mod tests {
     #[tokio::test]
     async fn continuous_producer_does_not_starve_terminal() {
         let (mut server, mut client) = duplex(64 * 1024);
-        let (done_tx, done_rx) = oneshot::channel::<Result<ExecCompletion, WorkerError>>();
+        let (done_tx, done_rx) = oneshot::channel::<Result<ExecTerminal, WorkerError>>();
         // Small queue so a fast producer keeps it perpetually non-empty.
         let (out_tx, output) = mpsc::channel(4);
 
         // Completion is already ready before the handler runs.
-        done_tx.send(Ok(ExecCompletion::Exited(5))).unwrap();
+        done_tx.send(Ok(ExecTerminal::Exited(5))).unwrap();
         // A producer that keeps enqueuing (the leaked `IoContext` on the kill
         // path). It races the handler; `send` errors once the receiver closes,
         // ending the task — so this never leaks past the test.
@@ -1081,7 +1085,7 @@ mod tests {
     #[tokio::test]
     async fn overflow_yields_truncation_error_terminal() {
         let (mut server, mut client) = duplex(64 * 1024);
-        let (done_tx, done_rx) = oneshot::channel::<Result<ExecCompletion, WorkerError>>();
+        let (done_tx, done_rx) = oneshot::channel::<Result<ExecTerminal, WorkerError>>();
         let (out_tx, output) = mpsc::channel(16);
 
         // Some output made it through before the drop, then a clean exit, but the
@@ -1089,7 +1093,7 @@ mod tests {
         out_tx
             .try_send((OutStream::Stdout, b"partial".to_vec()))
             .unwrap();
-        done_tx.send(Ok(ExecCompletion::Exited(0))).unwrap();
+        done_tx.send(Ok(ExecTerminal::Exited(0))).unwrap();
         drop(out_tx);
         let overflowed = Arc::new(AtomicBool::new(true));
 

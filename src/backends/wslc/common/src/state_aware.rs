@@ -172,8 +172,10 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
 
         let client = connect_daemon()?;
         let exec_id = uuid::Uuid::new_v4().simple().to_string();
+        let run_token = uuid::Uuid::new_v4().simple().to_string();
         let config = ExecConfig {
             exec_id: exec_id.clone(),
+            run_token: run_token.clone(),
             sandbox_id: sandbox_id.to_string(),
             script_code: request.script_code.clone(),
             working_directory: request.working_directory.clone(),
@@ -183,7 +185,7 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
 
         match stdio {
             ExecStdio::Relayed => exec_relayed(client, config),
-            ExecStdio::Piped => exec_piped(client, config, exec_id),
+            ExecStdio::Piped => exec_piped(client, config, exec_id, run_token),
         }
     }
 
@@ -328,6 +330,7 @@ fn exec_piped(
     client: DaemonClient,
     config: ExecConfig,
     exec_id: String,
+    run_token: String,
 ) -> Result<ExecHandle, MxcError> {
     let stdout_pipe = prepare_native_output()
         .map_err(|error| MxcError::backend_error(format!("create WSLC stdout pipe: {error}")))?;
@@ -347,6 +350,7 @@ fn exec_piped(
     let stderr = windows::Win32::Foundation::HANDLE(stderr_reader.as_raw_handle());
     let terminator_client = client.clone();
     let relay_exec_id = exec_id.clone();
+    let relay_run_token = run_token.clone();
     let cancellation = Arc::new(AtomicBool::new(false));
     let relay_cancellation = Arc::clone(&cancellation);
     let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
@@ -358,7 +362,7 @@ fn exec_piped(
                 .admit_exec(config)
                 .and_then(|exec| {
                     if relay_cancellation.load(Ordering::Acquire) {
-                        let _ = client.cancel_exec(relay_exec_id);
+                        client.cancel_exec(relay_exec_id, relay_run_token)?;
                     }
                     exec.read_to_completion(|stream, bytes| match stream {
                         OutStream::Stdout => stdout_writer.write(bytes),
@@ -417,7 +421,7 @@ fn exec_piped(
         terminator: Box::new(move || {
             cancellation.store(true, Ordering::Release);
             terminator_client
-                .cancel_exec(exec_id)
+                .cancel_exec(exec_id, run_token)
                 .map_err(map_daemon_error)
         }),
     })
@@ -428,6 +432,7 @@ fn exec_piped(
     _client: DaemonClient,
     _config: ExecConfig,
     _exec_id: String,
+    _run_token: String,
 ) -> Result<ExecHandle, MxcError> {
     Err(MxcError::backend_unavailable(
         "WSLc piped execution is available only on Windows",

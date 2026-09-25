@@ -41,8 +41,8 @@ use serde::Serialize;
 use crate::container_steps::OutStream;
 use crate::daemon_protocol::{
     encode_frame, CancelExecConfig, DaemonRequest, DaemonResponse, DeprovisionConfig, ErrKind,
-    ExecConfig, ProvisionConfig, StartConfig, StopConfig, StreamFrame, MAX_FRAME_SIZE,
-    PROTOCOL_VERSION,
+    ExecConfig, ExecTerminal, ProvisionConfig, StartConfig, StopConfig, StreamFrame,
+    MAX_FRAME_SIZE, PROTOCOL_VERSION,
 };
 use crate::daemon_record::{live_daemon, DaemonRecord, TransitionLock};
 
@@ -136,12 +136,7 @@ pub struct ExecResult {
 }
 
 /// Terminal outcome of a streaming daemon exec.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DaemonExecOutcome {
-    Exited(i32),
-    TimedOut,
-    Cancelled,
-}
+pub type DaemonExecOutcome = ExecTerminal;
 
 /// An exec request that the daemon has admitted and whose pipe is now carrying
 /// only the [`StreamFrame`] data phase.
@@ -386,7 +381,16 @@ impl DaemonClient {
         let mut pipe = self.open_pipe()?;
         write_frame(&mut pipe, &DaemonRequest::Exec(config))?;
 
-        match read_frame::<DaemonResponse>(&mut pipe)? {
+        let timeout = call_timeout();
+        let (pipe, response) = read_frame_with_deadline(
+            move || {
+                let response = read_frame::<DaemonResponse>(&mut pipe)?;
+                Ok((pipe, response))
+            },
+            timeout,
+        )?;
+
+        match response {
             DaemonResponse::Ok => {}
             DaemonResponse::Err { kind, message } => {
                 return Err(DaemonError::Daemon { kind, message })
@@ -403,8 +407,11 @@ impl DaemonClient {
 
     /// Request termination of an admitted exec. The request is idempotent: a
     /// late cancellation after natural completion is still success.
-    pub fn cancel_exec(&self, exec_id: String) -> DaemonResult<()> {
-        expect_ok(self.call(&DaemonRequest::CancelExec(CancelExecConfig { exec_id }))?)
+    pub fn cancel_exec(&self, exec_id: String, run_token: String) -> DaemonResult<()> {
+        expect_ok(self.call(&DaemonRequest::CancelExec(CancelExecConfig {
+            exec_id,
+            run_token,
+        }))?)
     }
 
     /// Issue a single non-streaming request on a fresh connection and return the
