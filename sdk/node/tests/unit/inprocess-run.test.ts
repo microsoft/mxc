@@ -74,7 +74,7 @@ describe('in-process async run routing', () => {
     );
   });
 
-  it('lets the native builder derive legacy network enforcement', async () => {
+  it('preserves authored outbound intent for native legacy validation', async () => {
     let bindingRequest: RequestSpec | undefined;
     _setBindingRunAsyncImplementation(async (request) => {
       bindingRequest = request;

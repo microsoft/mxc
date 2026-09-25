@@ -1037,6 +1037,7 @@ export async function spawnSandboxAsync(
   const request = prepareRequestSpec(config, {
     inheritDefaultEnv: options.inheritDefaultEnv,
     experimental: options.experimental,
+    authoredAllowOutbound: policy.network?.allowOutbound,
   });
   const result = await runBindingRequestAsync(request);
   if (result.timedOut) {

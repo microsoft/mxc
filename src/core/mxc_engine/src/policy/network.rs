@@ -400,8 +400,8 @@ pub(super) fn proxy_to_wire(proxy: &ProxySpec) -> serde_json::Value {
 mod tests {
     use super::{
         legacy_default_allows, proxy_to_wire, select_network_format, ContractVersion,
-        NetworkAction, NetworkEgressSection, NetworkFormat, NetworkPeerSection,
-        NetworkPortSection, NetworkRuleSection, NetworkSection, ProxySpec, RuntimeConfigSection,
+        NetworkAction, NetworkEgressSection, NetworkFormat, NetworkPeerSection, NetworkPortSection,
+        NetworkRuleSection, NetworkSection, ProxySpec, RuntimeConfigSection,
     };
 
     #[test]
