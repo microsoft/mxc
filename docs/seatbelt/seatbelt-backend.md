@@ -9,7 +9,7 @@ framework behind the App Sandbox that every Mac App Store app uses.
 |---|---|
 | **Binary** | `mxc-exec-mac` |
 | **Config value** | `"containment": "seatbelt"` |
-| **Schema** | `0.8.0-alpha` recommended. `0.7.0-alpha` is the minimum and still supported. |
+| **Schema** | `0.9.0-alpha` recommended. `0.7.0-alpha` and `0.8.0-alpha` are legacy but still supported. |
 | **Requires** | macOS 15 (Sequoia) or later. No root, no daemon, no install. |
 | **Isolation** | Process tree (no named container, no lifecycle, nothing to clean up) |
 | **Enforced by** | The macOS kernel, via a generated profile |
@@ -20,15 +20,12 @@ string — no temp files. The child keeps the parent's Mach bootstrap namespace,
 which is what lets GUI apps run under the sandbox when `guiAccess` is enabled.
 The sandbox lives exactly as long as the process tree it wraps.
 
-Continuous integration exercises the backend on **macOS 15** and **macOS 26**
-(Apple silicon).
-
 ## Quick start
 
 ```json
 {
-    "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
-    "version": "0.8.0-alpha",
+    "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
+    "version": "0.9.0-alpha",
     "containment": "seatbelt",
     "process": { "commandLine": "echo hi", "timeout": 30000 },
     "filesystem": {
@@ -54,16 +51,15 @@ That denies all network access. To open it up, see
 ```
 
 **Tip:** always run `--dry-run` first.
-> **Which schema version?** This doc uses the **0.8** network shape
-> (`egress` / `ingress` / `runtimeConfig.networkProxy`) throughout, since that's
-> the current cross-backend design. The older 0.7 fields still work — see
-> [Legacy 0.7 network fields](#legacy-07-network-fields) for the mapping. A
-> single config must use one shape or the other, never both.
+> **Which schema version?** This doc uses the directional network shape
+> (`egress` / `ingress` / `runtimeConfig.networkProxy`) throughout — the only
+> form `0.9.0-alpha` accepts, and the same shape 0.8 introduced. The older 0.7
+> fields still work on `0.7.0-alpha` and `0.8.0-alpha` — see
+> [Legacy 0.7 network fields](#legacy-07-network-fields) for the mapping — and
+> are structurally rejected at `0.9.0-alpha`. A single config must use one shape
+> or the other, never both.
 
-For exact `0.9.0-alpha`, only the directional form is accepted: use
-`egress` / `ingress` and `runtimeConfig.networkProxy`. The legacy fields
-documented for published versions below are structurally rejected in v0.9.
-Seatbelt's capability limits are unchanged: in particular,
+Seatbelt's capability limits are the same on 0.9 as on 0.8: in particular,
 `ingress.hostLoopback: "allow"` under `ingress.default: "deny"` is still
 rejected, and an omitted host-loopback field remains deny rather than
 inheriting ingress allow.
@@ -186,10 +182,11 @@ Seatbelt declares support for
 **not** `EGRESS_RULES` (per-CIDR/port rules) and not `PROXY_PEER_IDENTITY`.
 Anything it hasn't declared is rejected up front.
 
-### Fields (schema 0.8+)
+### Fields (schema 0.8 and later)
 
-This is the cross-backend
-[0.8 networking shape](../sandbox-policy/0.8.0/networking/networking.md).
+This is the cross-backend directional shape, introduced in
+[0.8 networking](../sandbox-policy/0.8.0/networking/networking.md) and the only
+network shape `0.9.0-alpha` accepts.
 
 > **Omitting `network` entirely denies all IP networking.** Every field below
 > defaults to `deny`, so a config with no `network` block behaves exactly like
@@ -333,11 +330,10 @@ it was independently configured with.
 
 ### Legacy 0.7 network fields
 
-Still supported for configs on `"version": "0.7.0-alpha"`. Prefer the 0.8 shape
-above for new work. **A config must use one shape or the other — mixing them is
-rejected.**
+Accepted only on `"version": "0.7.0-alpha"` and `"0.8.0-alpha"`. Prefer the directional shape above for new work. **A config must
+use one shape or the other — mixing them is rejected.**
 
-| Legacy (0.7) | 0.8 equivalent | Notes |
+| Legacy (0.7) | Directional equivalent | Notes |
 |---|---|---|
 | `defaultPolicy: "block"` | `egress.default: "deny"` | Identical profile output |
 | `defaultPolicy: "allow"` | `egress.default: "allow"` | Identical profile output |
@@ -370,7 +366,6 @@ Set under a top-level `"seatbelt"` key.
 | `nestedPty` | bool | `true` | Lets the inner process allocate its own ptys. Needed by anything that spawns a shell — test runners, `git`, `gh`, REPLs, agent tools. Set `false` for a tighter sandbox. |
 | `guiAccess` | bool | `false` | Adds Mach/IOKit rules so GUI apps can create windows, and widens the filesystem — see below. **Requires UI to be enabled**, which is spelled `ui.disable: false` (there is no `ui.enable`). |
 | `keychainAccess` | bool | `false` | Opens the sandbox enough for `keytar` / Security.framework to reach the Keychain. Opt in only if genuinely needed. |
-| `launchMethod` | `"exec"` \| `"open"` | `"exec"` |**Removed in `0.9.0-alpha`** (see below); available on `0.7.0-alpha` and `0.8.0-alpha`. `"exec"` applies `sandbox_init()` then execs directly. `"open"` runs the command as the first shell of a Terminal.app instance — and sandboxes that shell. Terminal itself runs unsandboxed. |
 | `profileOverride` | string | unset | Replaces the generated profile with raw TinyScheme. **All `filesystem`/`network`/`ui` policy is ignored for profile generation.** Last resort. |
 | `extraMachLookups` | string[] | `[]` | Additional Mach services the sandbox may look up, as exact `global-name` values. The escape hatch for an app that needs one XPC service without resorting to `profileOverride`. |
 
@@ -400,6 +395,14 @@ in `global-name`). Read access to `/private/var/db/mds` and
 `/private/var/folders`. System keychain stores are already covered by the
 baseline `/Library` and `/System` allows.
 </details>
+
+
+> **`launchMethod` is legacy — `0.7.0-alpha` and `0.8.0-alpha` only.** A
+> `0.9.0-alpha` config that sets it is rejected; drop the field and the process
+> is launched with `exec`, like every other backend. On the older schemas,
+> `"exec"` (the default) applies `sandbox_init()` then execs directly, while
+> `"open"` runs the command as the first shell of a Terminal.app instance — and
+> sandboxes that shell. Terminal itself runs unsandboxed.
 
 ## Process environment
 
@@ -495,7 +498,7 @@ fail with `Operation not permitted`. Grant the working directory in
 import { spawnSandbox, SandboxPolicy } from '@microsoft/mxc-sdk';
 
 const policy: SandboxPolicy = {
-    version: '0.8.0-alpha',
+    version: '0.9.0-alpha',
     filesystem: {
         readwritePaths: ['/tmp/output'],
         readonlyPaths:  ['/opt/tools'],
@@ -513,7 +516,7 @@ pty.onExit((e) => console.log('Exit:', e.exitCode));
 ```
 
 `version` is required and must fall in the supported range. The SDK rejects a
-policy that mixes the 0.8 `egress`/`ingress` fields with the legacy
+policy that mixes the directional `egress`/`ingress` fields with the legacy
 `allowOutbound`/`allowedHosts`/`blockedHosts` fields.
 
 ## Building from source
@@ -620,20 +623,21 @@ inbound grant by peer. See [the trap](#the-hostloopback-trap).
 
 #### Network
 
-Field names below are the 0.8 shape; the legacy 0.7 equivalent is noted where
-the rule applies to both.
+Field names below are the directional shape; the legacy 0.7 equivalent is noted
+where the rule applies to both.
 
 | Config | Why it's rejected | Do this instead |
 |---|---|---|
 | `egress.allow` / `egress.deny` (non-empty) | No CIDR/port/protocol filtering primitive | Use `egress.default` alone |
 | `ingress.hostLoopback: "allow"` + `ingress.default: "deny"` | The inbound half is not expressible, so the promised host-to-container grant could not be made; see [the trap](#the-hostloopback-trap) | Set both to `"allow"` |
 | `runtimeConfig.networkProxy` + `egress.default: "allow"`<br>*(legacy: `network.proxy` + `defaultPolicy: "allow"`)* | Outbound is already open, so the proxy enforces nothing and traffic could silently bypass it | `egress.default: "deny"` + the proxy |
-| `runtimeConfig.networkProxy` with a non-loopback host<br>*(0.8 only — rejected by the shared parser, whatever `egress.default` says)* | The runtime proxy endpoint must be loopback | Use `localhost`, `127.0.0.1`, or `[::1]` |
-| Remote (non-loopback) `network.proxy` + `defaultPolicy: "block"`<br>*(legacy only — the 0.8 field never gets this far, see the row above)* | Seatbelt can't express reachability to a remote host, so the proxy would be unreachable and *nothing* could connect | Loopback proxy, or `builtinTestServer` |
+| `runtimeConfig.networkProxy` with a non-loopback host<br>*(directional only — rejected by the shared parser, whatever `egress.default` says)* | The runtime proxy endpoint must be loopback | Use `localhost`, `127.0.0.1`, or `[::1]` |
+| Remote (non-loopback) `network.proxy` + `defaultPolicy: "block"`<br>*(legacy only — the directional field never gets this far, see the row above)* | Seatbelt can't express reachability to a remote host, so the proxy would be unreachable and *nothing* could connect | Loopback proxy, or `builtinTestServer` |
 | Proxy + `enforcementMode: "firewall"` or `"both"` | macOS has no packet-filter layer to enforce with | Drop `enforcementMode` — profile enforcement is implied |
 | `processContainer.network.allowedProxyPeer` | Peer identity pinning isn't supported | Remove it |
-| `egress`/`ingress` on schema `< 0.8.0-alpha` | Fields don't exist yet | Set `"version": "0.8.0-alpha"` |
-| 0.8 fields **and** legacy fields in one config | Ambiguous | Pick one shape |
+| `egress`/`ingress` on schema `< 0.8.0-alpha` | Fields don't exist yet | Set `"version": "0.9.0-alpha"` |
+| Legacy fields on schema `0.9.0-alpha` | The 0.9 contract has no legacy network fields | Use `egress`/`ingress` + `runtimeConfig.networkProxy` |
+| Directional fields **and** legacy fields in one config | Ambiguous | Pick one shape |
 | `blockedHosts` *(legacy only)* | No per-host filtering primitive | `egress.default: "deny"` to deny everything |
 | `allowedHosts` + `defaultPolicy: "block"` *(legacy only)* | Could only degrade to allow-all (the inverse of your request) or deny-all | Loopback proxy under deny, or `builtinTestServer` for tests |
 
@@ -654,7 +658,8 @@ deliberate: the alternative is a rule that matches nothing, which for
 |---|---|
 | `guiAccess: true` with `ui.disable: true`, or with no `ui` section | The GUI rules are only emitted when UI is enabled, so the request would otherwise be dropped without a word |
 | `guiAccess: true` with piped stdio (SDK streaming) | GUI mode needs inherited stdio and a real terminal |
-| `launchMethod: "open"` with piped stdio | Launches Terminal.app; there are no pipes to stream |
+| `launchMethod: "open"` with piped stdio *(0.7/0.8 only)* | Launches Terminal.app; there are no pipes to stream |
+| `launchMethod` on schema `0.9.0-alpha` | The field is not in the 0.9 contract |
 
 ## Limitations
 
@@ -698,17 +703,3 @@ Sandbox.
 `run_seatbelt_<area>_test.sh` scripts can be run on their own. There is no skip
 path — a missing prerequisite fails, so a green run always means the assertions
 executed.
-
-## Upcoming alpha 0.9 changes
-
-**`launchMethod` is removed in schema `0.9.0-alpha`.** A `0.9` config that still
-sets it is rejected; drop the field and the process is launched with `exec`,
-which is how every other backend behaves. Nothing else about the option changes
-on `0.7.0-alpha` and `0.8.0-alpha` — those are published schemas, so `"open"`
-keeps working there.
-
-In its current form `"open"` puts the sandboxed process in a separate,
-*unsandboxed* instance of Terminal.app. Only the shell inside it is confined;
-Terminal itself never is. If that use case matters to your workload, sandbox a
-terminal emulator such as iTerm2 that can be configured not to start its shell
-as a login shell, and enable `guiAccess` in the config.

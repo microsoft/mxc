@@ -9,11 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Stable IsolationSession and WSLC one-shot and state-aware backends under the
+  exact `0.9.0-alpha` contract. Neither backend requires
+  `{ experimental: true }`.
 - State-aware provision, start, stop, and deprovision calls run in-process
   through `mxc_ffi` rather than spawning `wxc-exec`.
 - Native live, buffered, and dry-run exec support for IsolationSession and
   WSLC. WSLC exposes stdout/stderr, waiting, timeout, and cancellation, but no
   stdin because the WSLC SDK has no process-input API.
+- Telemetry consent APIs: `queryTelemetryConsentAsync`,
+  `requestTelemetryConsent`, and `withdrawTelemetryConsentAsync`. Applications
+  supply the consent presenter; MXC persists its own user decision and applies
+  administrative policy as an additional restriction.
 
 ### Changed (breaking)
 
@@ -21,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   backends expose native piped exec streams. Windows Sandbox remains available
   for provision, start, stop, and deprovision, but Node no longer exposes exec
   dry-run for a backend it cannot execute through those APIs.
+- The minimum supported Node.js version is 24. On Windows, native stdio
+  requires Node.js 24.21.0 or later within the Node.js 24 release line, or
+  Node.js 26.8.0 or later. Node.js 26.8.0 or later is recommended.
 
 ## [0.7.0]
 
