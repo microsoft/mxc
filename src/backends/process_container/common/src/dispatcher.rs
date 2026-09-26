@@ -227,6 +227,9 @@ pub enum DispatchError {
     /// captureDenials requires the native BaseContainer tier and cannot
     /// proceed through an AppContainer fallback.
     CaptureDenialsUnsupported { tier: IsolationTier },
+    /// The selected AppContainer fallback requires guarded capture, but its
+    /// prerequisites are not available.
+    CaptureDenialsUnavailable { tier: IsolationTier, reason: String },
 }
 
 impl std::fmt::Display for DispatchError {
@@ -261,6 +264,12 @@ impl std::fmt::Display for DispatchError {
                 f,
                 "captureDenials requires the native BaseContainer backend; \
                  the selected fallback tier '{}' does not support denial capture.",
+                tier.as_str()
+            ),
+            DispatchError::CaptureDenialsUnavailable { tier, reason } => write!(
+                f,
+                "the guarded WPR captureDenials fallback required by isolation tier '{}' \
+                 is unavailable: {reason}",
                 tier.as_str()
             ),
         }
@@ -424,10 +433,12 @@ struct BackendPlan {
 /// `capture_factory` is the optional guarded-WPR-capture DI boundary (see
 /// [`crate::guarded_capture`]). When `request.policy.capture_denials` is set
 /// and the selected tier is not the native BaseContainer backend:
-/// - `capture_factory` present → the factory is threaded onto the chosen
+/// - available `capture_factory` → the factory is threaded onto the chosen
 ///   AppContainer runner via `with_guarded_capture_factory`, so the runner
 ///   itself performs the guarded WPR fallback capture (see
-///   `appcontainer_runner`'s `validate`/`spawn`).
+///   `appcontainer_runner`'s `validate`/`spawn`);
+/// - unavailable `capture_factory` → dispatch fails before backend construction
+///   or DACL mutation with [`DispatchError::CaptureDenialsUnavailable`];
 /// - `capture_factory` absent → dispatch fails closed with
 ///   [`DispatchError::CaptureDenialsUnsupported`], preserving the legacy
 ///   behavior for callers that haven't opted into the fallback (e.g. callers
@@ -453,7 +464,14 @@ fn select_backend_with_fallback(
         });
     }
     let capture_factory_for_appcontainer = if guarded_capture_required {
-        capture_factory
+        let factory = capture_factory.expect("guarded capture factory checked above");
+        factory
+            .verify_available()
+            .map_err(|reason| DispatchError::CaptureDenialsUnavailable {
+                tier: decision.tier,
+                reason,
+            })?;
+        Some(factory)
     } else {
         None
     };
@@ -878,6 +896,21 @@ mod tests {
         }
     }
 
+    struct UnavailableGuardedCaptureFactory;
+
+    impl GuardedCaptureFactory for UnavailableGuardedCaptureFactory {
+        fn verify_available(&self) -> Result<(), String> {
+            Err("plm.exe is not trusted".to_string())
+        }
+
+        fn start(
+            &self,
+            _owner_pid: u32,
+        ) -> Result<Box<dyn crate::guarded_capture::GuardedCaptureSession>, String> {
+            panic!("unavailable factory must be rejected before start")
+        }
+    }
+
     #[test]
     fn dispatch_t1_no_denied_paths_no_dacl() {
         let _g = ForceTierGuard::set_tier(IsolationTier::BaseContainer);
@@ -979,6 +1012,25 @@ mod tests {
     }
 
     #[test]
+    fn capture_denials_rejects_unavailable_guarded_factory_before_backend_setup() {
+        let _g = ForceTierGuard::set("appcontainer-dacl");
+        let (mut policy, _temporary_path) = policy_with_rw_temp();
+        policy.capture_denials = Some(Default::default());
+        let req = test_request(policy);
+
+        let factory: Arc<dyn GuardedCaptureFactory> = Arc::new(UnavailableGuardedCaptureFactory);
+        let result = dispatch_with_fallback(&req, Some(factory));
+
+        assert!(matches!(
+            result,
+            Err(DispatchError::CaptureDenialsUnavailable {
+                tier: IsolationTier::AppContainerDacl,
+                ref reason
+            }) if reason == "plm.exe is not trusted"
+        ));
+    }
+
+    #[test]
     fn capture_denials_prefers_native_psec_v2_when_complete() {
         let _guard = CaptureCapabilityGuard::set(true, true);
         let mut policy = empty_policy();
@@ -987,6 +1039,20 @@ mod tests {
 
         let dispatched = dispatch_with_fallback(&request, None)
             .expect("complete native capture should not require guarded WPR");
+
+        assert!(matches!(dispatched.tier, IsolationTier::BaseContainer));
+    }
+
+    #[test]
+    fn capture_denials_native_capture_does_not_check_guarded_factory_availability() {
+        let _guard = CaptureCapabilityGuard::set(true, true);
+        let mut policy = empty_policy();
+        policy.capture_denials = Some(Default::default());
+        let request = test_request(policy);
+
+        let factory: Arc<dyn GuardedCaptureFactory> = Arc::new(UnavailableGuardedCaptureFactory);
+        let dispatched = dispatch_with_fallback(&request, Some(factory))
+            .expect("native capture must not depend on guarded WPR prerequisites");
 
         assert!(matches!(dispatched.tier, IsolationTier::BaseContainer));
     }
@@ -1007,6 +1073,28 @@ mod tests {
                     tier: IsolationTier::AppContainerDacl
                 }
             ))
+        ));
+    }
+
+    #[test]
+    fn capture_denials_spawn_rejects_unavailable_guarded_factory_before_spawn() {
+        let _g = ForceTierGuard::set("appcontainer-dacl");
+        let (mut policy, _temporary_path) = policy_with_rw_temp();
+        policy.capture_denials = Some(Default::default());
+        let req = test_request(policy);
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let factory: Arc<dyn GuardedCaptureFactory> = Arc::new(UnavailableGuardedCaptureFactory);
+
+        let result = spawn_with_fallback(&req, &mut logger, StdioMode::Inherit, Some(factory));
+
+        assert!(matches!(
+            result,
+            Err(SpawnDispatchError::Dispatch(
+                DispatchError::CaptureDenialsUnavailable {
+                    tier: IsolationTier::AppContainerDacl,
+                    ref reason
+                }
+            )) if reason == "plm.exe is not trusted"
         ));
     }
 

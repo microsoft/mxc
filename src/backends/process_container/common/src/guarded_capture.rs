@@ -113,6 +113,16 @@ pub trait GuardedCaptureSession: Send {
 /// Implementations are constructed by a higher layer (`mxc_engine`) that can
 /// depend on `plm`; `process_container_common` only ever sees the trait object.
 pub trait GuardedCaptureFactory: Send + Sync {
+    /// Verifies that this factory can start a guarded capture without creating
+    /// a sandbox or starting a capture session.
+    ///
+    /// The dispatcher calls this only when tier selection requires guarded
+    /// capture. Implementations should keep this check read-only and repeat
+    /// any security-sensitive validation in [`Self::start`].
+    fn verify_available(&self) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Whether this factory can transfer the sealed ETL when `retainEtl` is
     /// requested. Implementations that only support analysis keep the default.
     fn allows_trace_transfer(&self) -> bool {
