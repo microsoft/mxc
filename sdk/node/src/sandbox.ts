@@ -5,49 +5,22 @@ import pty from 'node-pty';
 import * as os from 'os';
 import { spawn, ChildProcess } from 'child_process';
 import { randomBytes } from "crypto";
-import { parse as semverParse } from 'semver';
 import {
     SandboxPolicy,
     ContainerConfig,
-    ContainmentType,
-    ContainmentBackend,
+    SandboxContainment,
 } from './types.js';
 import { prepareSpawn, diagLogVersion, applyLinuxNetworkPolicy } from './helper.js';
 import { diagLog } from './diagnostic.js';
 import { MxcError } from './errors.js';
-import {
-  prepareRequestSpec,
-  validateBindingPolicy,
-} from './bindings/request.js';
+import { prepareRequestSpec } from './bindings/request.js';
 import {
   runBindingRequestAsync,
   type BindingRunResult,
 } from './bindings/run.js';
 
-// High-level calls currently emit canonical exact-contract JSON, so this
-// producer validates the selected contract before launching the executor. The
-// v1 SDK split will make SandboxPolicy version-free while retaining versions
-// for raw ContainerConfig input.
-const MIN_VERSION = '0.6.0-alpha';
-const SUPPORTED_VERSION = '1.1.0-alpha';
-const REGISTERED_VERSION_VALUES = [
-    '0.6.0-alpha',
-    '0.7.0-alpha',
-    '0.8.0-alpha',
-    '0.9.0-alpha',
-    '1.0.0',
-    '1.1.0-alpha',
-];
-const REGISTERED_VERSIONS = new Set(REGISTERED_VERSION_VALUES);
-const DIRECTIONAL_ONLY_VERSIONS = new Set([
-    '0.9.0-alpha',
-    '1.0.0',
-    '1.1.0-alpha',
-]);
-const REGISTERED_VERSION_ORDER = new Map(
-    REGISTERED_VERSION_VALUES.map((version, index) => [version, index]),
-);
-const LEGACY_NETWORK_FIELDS = [
+const SDK_CONTRACT_VERSION = '1.0.0';
+const LEGACY_POLICY_NETWORK_FIELDS = [
     'allowOutbound',
     'defaultPolicy',
     'enforcementMode',
@@ -56,6 +29,15 @@ const LEGACY_NETWORK_FIELDS = [
     'blockedHosts',
     'proxy',
 ] as const;
+const V1_CONTAINMENTS = new Set<SandboxContainment>([
+    'process',
+    'processcontainer',
+    'wslc',
+    'lxc',
+    'seatbelt',
+    'isolation_session',
+    'bubblewrap',
+]);
 
 /**
  * Generates a random 8-character alphanumeric string for the app container name.
@@ -64,162 +46,36 @@ function generateRandomContainerName(): string {
     return randomBytes(4).toString("hex");
 }
 
-function validatePolicyVersion(version: string): void {
-    if (!version) {
-        throw new Error('Policy version is required');
-    }
-
-    const parsed = semverParse(version);
-    if (!parsed) {
+function validateV1Policy(policy: SandboxPolicy, containment: SandboxContainment): void {
+    if ('version' in policy) {
         throw new Error(
-            `Invalid policy version '${version}': must be valid semver` +
-            ` (e.g., '0.6.0' or '0.6.0-alpha')`
+            'SandboxPolicy no longer accepts a caller-selected version; '
+            + 'the v1 SDK targets exact contract 1.0.0. '
+            + 'Use ContainerConfig for raw exact-version configuration.',
         );
     }
-
-    const supported = semverParse(SUPPORTED_VERSION);
-    const minimum = semverParse(MIN_VERSION);
-    if (
-        parsed.major < minimum!.major ||
-        (parsed.major === minimum!.major &&
-            parsed.minor < minimum!.minor)
-    ) {
+    if (!V1_CONTAINMENTS.has(containment)) {
         throw new Error(
-            `Policy version '${version}' is older than supported` +
-            ` (min: ${minimum!.major}.${minimum!.minor}.x).` +
-            ` Update your config.`
+            `Containment '${String(containment)}' is not available in the v1.0 high-level SDK. `
+            + 'Use an exact-version ContainerConfig for development-only containment.',
         );
     }
-    if (
-        parsed.major > supported!.major ||
-        (parsed.major === supported!.major &&
-            parsed.minor > supported!.minor)
-    ) {
-        throw new Error(
-            `Policy version '${version}' is newer than supported` +
-            ` (max: ${supported!.major}.${supported!.minor}.x).` +
-            ` Upgrade the SDK.`
-        );
+    if (policy.network !== undefined) {
+        for (const field of LEGACY_POLICY_NETWORK_FIELDS) {
+            if (field in policy.network) {
+                throw new Error(
+                    `SandboxPolicy.network.${field} is not part of the v1 API; `
+                    + 'use directional network.egress/network.ingress and '
+                    + 'runtimeConfig.networkProxy.',
+                );
+            }
+        }
     }
-    if (!REGISTERED_VERSIONS.has(version)) {
-        throw new Error(
-            `Policy version '${version}' is not a registered schema contract. ` +
-            `Use one of: ${REGISTERED_VERSION_VALUES.join(', ')}.`
-        );
-    }
-}
-
-function validateContainmentVersion(
-    version: string,
-    containment: ContainmentType | ContainmentBackend,
-    platform: NodeJS.Platform,
-): void {
-    const effectiveContainment =
-        containment === 'process' && platform === 'darwin' ? 'seatbelt' : containment;
-    const minimumVersion =
-        effectiveContainment === 'seatbelt'
-            ? '0.7.0-alpha'
-            : effectiveContainment === 'isolation_session'
-              || effectiveContainment === 'wslc'
-              ? '0.9.0-alpha'
-              : effectiveContainment === 'vm' ||
-                effectiveContainment === 'microvm' ||
-                effectiveContainment === 'windows_sandbox' ||
-                effectiveContainment === 'hyperlight'
-                ? '1.1.0-alpha'
-                : '0.6.0-alpha';
-
-    const versionOrder = REGISTERED_VERSION_ORDER.get(version);
-    const minimumOrder = REGISTERED_VERSION_ORDER.get(minimumVersion);
-    if (versionOrder === undefined || minimumOrder === undefined || versionOrder < minimumOrder) {
-        throw new Error(
-            `Schema ${version} does not support containment '${containment}'; ` +
-            `use schema ${minimumVersion} or later.`
-        );
-    }
-}
-
-function validateTelemetryVersion(policy: SandboxPolicy): void {
-    if (policy.telemetry === undefined) {
-        return;
-    }
-
-    const minimumVersion = '0.9.0-alpha';
-    const versionOrder = REGISTERED_VERSION_ORDER.get(policy.version);
-    const minimumOrder = REGISTERED_VERSION_ORDER.get(minimumVersion);
-    if (versionOrder === undefined || minimumOrder === undefined || versionOrder < minimumOrder) {
-        throw new Error(
-            `Schema ${policy.version} does not support telemetry; ` +
-            `use schema ${minimumVersion} or later.`
-        );
-    }
-}
-
-function hasLegacyNetworkFields(network: NonNullable<SandboxPolicy['network']>): boolean {
-    return LEGACY_NETWORK_FIELDS.some(
-        field => (network as Record<string, unknown>)[field] !== undefined,
-    );
-}
-
-function hasDirectionalNetworkFields(network: NonNullable<SandboxPolicy['network']>): boolean {
-    return network.egress !== undefined || network.ingress !== undefined;
-}
-
-function usesDirectionalNetwork(policy: SandboxPolicy): boolean {
-    const network = policy.network;
-    return (network !== undefined && hasDirectionalNetworkFields(network)) ||
-        policy.runtimeConfig?.networkProxy !== undefined ||
-        policy.processContainer?.network?.allowedProxyPeer !== undefined;
 }
 
 function hasProcessContainerPolicy(policy: SandboxPolicy): boolean {
     return Boolean(policy.processContainer?.filesystem?.enumeratePaths?.length) ||
         policy.processContainer?.network?.allowedProxyPeer !== undefined;
-}
-
-function requiresDirectionalNetwork(version: string): boolean {
-    return DIRECTIONAL_ONLY_VERSIONS.has(version);
-}
-
-function selectDirectionalNetwork(policy: SandboxPolicy): boolean {
-    const network = policy.network;
-    if (
-        requiresDirectionalNetwork(policy.version) &&
-        network !== undefined
-    ) {
-        for (const field of LEGACY_NETWORK_FIELDS) {
-            if (network !== null && (network as Record<string, unknown>)[field] !== undefined) {
-                throw new Error(
-                    `Schema ${policy.version} no longer supports network.${field}. ` +
-                    'Author network.egress/network.ingress and runtimeConfig.networkProxy explicitly, ' +
-                    'or retain schema 0.8.0-alpha for legacy networking. Hostnames are not converted to CIDRs.',
-                );
-            }
-        }
-        if (network === null || typeof network !== 'object' || Array.isArray(network)) {
-            throw new Error('network must be an object when supplied.');
-        }
-    }
-    const hasLegacy = network !== undefined && hasLegacyNetworkFields(network);
-    const hasDirectional = usesDirectionalNetwork(policy);
-
-    if (hasLegacy && hasDirectional) {
-        throw new Error(
-            'Network configuration cannot mix allowOutbound, allowLocalNetwork, allowedHosts, ' +
-            'blockedHosts, or proxy with egress, ingress, runtimeConfig, or processContainer.network.',
-        );
-    }
-
-    const parsed = semverParse(policy.version)!;
-    const supportsDirectional = parsed.major > 0 || parsed.minor >= 8;
-    if (hasDirectional && !supportsDirectional) {
-        throw new Error(
-            `Schema ${policy.version} does not support network.egress, network.ingress, ` +
-            'runtimeConfig, or processContainer.network; use schema 0.8.0-alpha or later.',
-        );
-    }
-
-    return hasDirectional || (supportsDirectional && !hasLegacy);
 }
 
 
@@ -300,13 +156,12 @@ function buildProcessBaseContainerConfig(
 ): ContainerConfig {
     const capabilities: string[] = [];
     const allowsInternet =
-        policy.network?.allowOutbound ||
         policy.network?.egress?.default === 'allow' ||
         Boolean(policy.network?.egress?.allow?.length);
     if (allowsInternet) {
         capabilities.push("internetClient");
     }
-    if (policy.network?.allowLocalNetwork || policy.network?.ingress?.default === 'allow') {
+    if (policy.network?.ingress?.default === 'allow') {
         capabilities.push("privateNetworkClientServer");
     }
 
@@ -327,79 +182,6 @@ function buildProcessBaseContainerConfig(
             : undefined,
     };
 
-    // Network enforcement: use firewall only when host filtering is needed (requires admin)
-    if (
-        config.network &&
-        !requiresDirectionalNetwork(policy.version) &&
-        !usesDirectionalNetwork(policy)
-    ) {
-        if (config.network.allowedHosts?.length || config.network.blockedHosts?.length) {
-            config.network.enforcementMode = 'both';
-        } else {
-            config.network.enforcementMode = 'capabilities';
-        }
-    }
-
-    return config;
-}
-
-/**
- * Builds the MicroVM (NanVix) portion of a ContainerConfig.
- * MicroVM is Windows-only and supports isolated or unrestricted networking.
- */
-function buildMicroVmConfig(
-    config: ContainerConfig,
-    policy: SandboxPolicy,
-): ContainerConfig {
-    if (os.platform() !== 'win32') {
-        throw new Error('The microvm backend is only supported on Windows (requires WHP/Hyper-V).');
-    }
-    if (policy.network && hasLegacyNetworkFields(policy.network)) {
-        throw new Error(
-            'The microvm backend supports only directional network.egress/network.ingress configuration.'
-        );
-    }
-    if (policy.runtimeConfig?.networkProxy !== undefined ||
-        policy.processContainer?.network?.allowedProxyPeer !== undefined) {
-        throw new Error('The microvm backend does not support network proxy configuration.');
-    }
-    if (policy.network?.egress?.allow?.length || policy.network?.egress?.deny?.length) {
-        throw new Error(
-            'The microvm backend does not support directional network rules. ' +
-            'Use fully isolated or explicitly unrestricted networking without rules.'
-        );
-    }
-    if (policy.network !== undefined) {
-        const egressDefault = policy.network.egress?.default ?? 'deny';
-        const ingressDefault = policy.network.ingress?.default ?? 'deny';
-        const hostLoopback = policy.network.ingress?.hostLoopback ?? 'deny';
-        if (egressDefault !== ingressDefault || ingressDefault !== hostLoopback) {
-            throw new Error(
-                'The microvm backend requires network.egress.default, network.ingress.default, ' +
-                'and network.ingress.hostLoopback to be all deny or all allow.'
-            );
-        }
-        config.network = {
-            egress: policy.network.egress,
-            ingress: policy.network.ingress,
-        };
-    }
-    if (policy.filesystem?.readwritePaths?.length ||
-        policy.filesystem?.readonlyPaths?.length ||
-        policy.filesystem?.deniedPaths?.length) {
-        config.filesystem = {
-            readwritePaths: policy.filesystem?.readwritePaths,
-            readonlyPaths: policy.filesystem?.readonlyPaths,
-            deniedPaths: policy.filesystem?.deniedPaths,
-        };
-    }
-    if (policy.processContainer?.filesystem?.enumeratePaths?.length) {
-        throw new Error(
-            'The microvm backend does not support processContainer.filesystem.enumeratePaths. ' +
-            'Remove it or use the Windows ProcessContainer backend.'
-        );
-    }
-    config.containment = 'microvm';
     return config;
 }
 
@@ -433,22 +215,19 @@ function buildMicroVmConfig(
  */
 export function createConfigFromPolicy(
     policy: SandboxPolicy,
-    containment: ContainmentType | ContainmentBackend = "process",
+    containment: SandboxContainment = "process",
     containerName?: string,
 ): ContainerConfig {
     diagLogVersion();
-    validatePolicyVersion(policy.version);
+    validateV1Policy(policy, containment);
     const platform = os.platform();
-    validateContainmentVersion(policy.version, containment, platform);
-    validateTelemetryVersion(policy);
-    const directionalNetwork = selectDirectionalNetwork(policy);
     const enumeratePaths = policy.processContainer?.filesystem?.enumeratePaths;
 
     const containerId = containerName ?? generateRandomContainerName();
 
     const clearPolicy = policy.filesystem?.clearPolicyOnExit ?? true;
     const config: ContainerConfig = {
-        version: policy.version,
+        version: SDK_CONTRACT_VERSION,
         containerId,
         lifecycle: {
             destroyOnExit: true,
@@ -461,18 +240,7 @@ export function createConfigFromPolicy(
         telemetry: policy.telemetry === undefined ? undefined : { ...policy.telemetry },
     };
 
-    // Microvm: delegate to dedicated builder
-    if (containment === 'microvm') {
-        diagLog(`createConfigFromPolicy: containment=microvm, id=${containerId}`);
-        return buildMicroVmConfig(config, policy);
-    }
-
     if (enumeratePaths?.length) {
-        if (!DIRECTIONAL_ONLY_VERSIONS.has(policy.version)) {
-            throw new Error(
-                'processContainer.filesystem.enumeratePaths requires schema version 0.9.0-alpha or later.'
-            );
-        }
         const targetsWindowsProcessContainer =
             platform === 'win32' && (containment === 'process' || containment === 'processcontainer');
         if (!targetsWindowsProcessContainer) {
@@ -503,78 +271,35 @@ export function createConfigFromPolicy(
         injection: policy.ui?.allowInputInjection ?? false,
     };
 
-    if (directionalNetwork) {
-        if ((requiresDirectionalNetwork(policy.version) &&
-            policy.network !== undefined) ||
-            policy.network?.egress !== undefined || policy.network?.ingress !== undefined) {
-            config.network = {
-                egress: policy.network?.egress,
-                ingress: policy.network?.ingress,
-            };
-        }
-        if (policy.runtimeConfig?.networkProxy !== undefined) {
-            config.runtimeConfig = {
-                networkProxy: policy.runtimeConfig.networkProxy,
-            };
-        }
-        if (policy.processContainer?.network?.allowedProxyPeer !== undefined) {
-            config.processContainer = {
-                ...config.processContainer,
-                network: {
-                    allowedProxyPeer: policy.processContainer.network.allowedProxyPeer,
-                },
-            };
-        }
-        // Legacy network mapping (cross-platform) — default-deny unless explicitly allowed.
-    } else if (policy.network) {
-        // Linux: only Bubblewrap supports network.proxy (cooperative env-var
-        // proxy, no privilege required). LXC and explicit non-bubblewrap
-        // containments do not. Abstract `'process'` on Linux resolves to
-        // Bubblewrap server-side so the proxy field is permitted there too.
-        if (policy.network.proxy && platform === 'linux') {
-            const linuxProxySupported =
-                containment === 'bubblewrap' || containment === 'process';
-            if (!linuxProxySupported) {
-                throw new Error(
-                    `Proxy configuration is not supported on Linux containment='${containment}'. ` +
-                    `Use containment 'bubblewrap' (or the abstract 'process') for proxy-based host filtering.`,
-                );
-            }
-        }
-        // Unix backends accept host lists without allowOutbound. Bubblewrap and
-        // LXC enforce them; WSLC does not (per-host filtering is non-functional —
-        // no in-kernel iptables + no CAP_NET_ADMIN — and is rejected at parse
-        // time); Seatbelt accepts them for SDK compatibility and leaves its
-        // limitations to native validation.
-        const acceptsHostRulesWithoutOutbound =
-            containment === 'wslc' ||
-            containment === 'seatbelt' ||
-            containment === 'bubblewrap' ||
-            containment === 'lxc' ||
-            (containment === 'process' && platform === 'linux') ||
-            (containment === 'process' && platform === 'darwin');
-        if (!acceptsHostRulesWithoutOutbound) {
-            if ((policy.network.allowedHosts?.length || policy.network.blockedHosts?.length) && !policy.network.allowOutbound) {
-                throw new Error('allowedHosts/blockedHosts require allowOutbound to be true');
-            }
-        }
-
+    if (policy.network !== undefined) {
         config.network = {
-            defaultPolicy: policy.network.allowOutbound ? 'allow' : 'block',
-            allowLocalNetwork: policy.network.allowLocalNetwork,
-            allowedHosts: policy.network.allowedHosts,
-            blockedHosts: policy.network.blockedHosts,
-            proxy: policy.network.proxy,
+            egress: policy.network.egress,
+            ingress: policy.network.ingress,
         };
-    } else {
-        config.network = {
-            defaultPolicy: 'block',
+    }
+    if (policy.runtimeConfig?.networkProxy !== undefined) {
+        config.runtimeConfig = {
+            networkProxy: policy.runtimeConfig.networkProxy,
+        };
+    }
+    if (policy.processContainer?.network?.allowedProxyPeer !== undefined) {
+        config.processContainer = {
+            ...config.processContainer,
+            network: {
+                allowedProxyPeer: policy.processContainer.network.allowedProxyPeer,
+            },
         };
     }
 
     // Backend-specific config based on containment type
     if (containment === 'wslc') {
         return buildWslcContainerConfig(config, policy, containerId);
+    }
+
+    if (containment === 'isolation_session') {
+        config.containment = 'isolation_session';
+        diagLog(`createConfigFromPolicy: containment=isolation_session, id=${containerId}`);
+        return config;
     }
 
     if (containment === 'bubblewrap') {
@@ -586,6 +311,18 @@ export function createConfigFromPolicy(
         diagLog(`createConfigFromPolicy: containment=lxc, id=${containerId}`);
         config.containment = 'lxc';
         return buildLinuxProcessConfig(config);
+    }
+
+    if (containment === 'seatbelt') {
+        config.containment = 'seatbelt';
+        diagLog(`createConfigFromPolicy: containment=seatbelt, id=${containerId}`);
+        return buildDarwinProcessConfig(config);
+    }
+
+    if (containment === 'processcontainer') {
+        config.containment = 'processcontainer';
+        diagLog(`createConfigFromPolicy: containment=processcontainer, id=${containerId}`);
+        return buildProcessBaseContainerConfig(config, policy);
     }
 
     if (containment === 'process') {
@@ -634,7 +371,7 @@ export function buildSandboxPayload(
     policy: SandboxPolicy,
     workingDirectory?: string,
     containerName?: string,
-    containment: ContainmentType | ContainmentBackend = "process",
+    containment: SandboxContainment = "process",
 ): ContainerConfig {
     const config = createConfigFromPolicy(policy, containment, containerName);
 
@@ -882,7 +619,7 @@ function spawnWithConfig(
  * @example
  * ```typescript
  * const script = 'python -c "import sys; print(sys.version)"';
- * const policy: SandboxPolicy = { version: '0.6.0-alpha' };
+ * const policy: SandboxPolicy = {};
  *
  * const ptyProcess = spawnSandbox(script, policy);
  * ptyProcess.onData((data) => console.log(data));
@@ -995,7 +732,6 @@ export function spawnSandboxFromConfig(
  * @example
  * ```typescript
  * const policy: SandboxPolicy = {
- *   version: '0.6.0-alpha',
  *   filesystem: { readwritePaths: ['/workspace'] },
  * };
  *
@@ -1018,14 +754,7 @@ export async function spawnSandboxAsync(
       `spawnSandboxAsync does not support executor-only option '${unsupportedOption}'`,
     );
   }
-  validateBindingPolicy(policy);
-
   const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
-  // Legacy policy construction derives an executor-specific enforcement mode.
-  // The native policy builder derives its own mode from the portable fields.
-  if (config.network !== undefined) {
-    delete config.network.enforcementMode;
-  }
   const request = prepareRequestSpec(config, {
     inheritDefaultEnv: options.inheritDefaultEnv,
     experimental: options.experimental,

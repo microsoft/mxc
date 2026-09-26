@@ -23,7 +23,6 @@ using Microsoft.Mxc.Sdk;
 
 var policy = new SandboxPolicy
 {
-    Version = "0.7.0-alpha",
     Filesystem = new FilesystemPolicy { ReadwritePaths = { @"C:\Windows\Temp" } },
     TimeoutMs = 30_000,
 };
@@ -200,7 +199,6 @@ opt-in:
 var request = new SandboxRequest(
     new SandboxPolicy
     {
-        Version = "0.8.0-alpha",
         Filesystem = new FilesystemPolicy
         {
             ReadonlyPaths = { @"C:\tools" },
@@ -300,6 +298,10 @@ request.Containment = new ProcessContainerContainment
 };
 ```
 
+`SandboxPolicy` is version-free. The package owns the v1 contract target and
+currently emits exact `1.0.0`; raw exact-version configuration remains a
+separate executor-facing API.
+
 With schema `0.9.0-alpha`,
 `ProcessContainerContainment.Filesystem.EnumeratePaths` requests directory-query
 and listing access without granting file-content reads. This is supported only
@@ -358,7 +360,6 @@ resource, storage, GPU, and host-to-container TCP port settings:
 var request = new SandboxRequest(
     new SandboxPolicy
     {
-        Version = "0.9.0-alpha",
         Network = new NetworkPolicy
         {
             Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
@@ -402,7 +403,6 @@ configuration of its own:
 var request = new SandboxRequest(
     new SandboxPolicy
     {
-        Version = "0.9.0-alpha",
         Network = new NetworkPolicy
         {
             Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
@@ -430,25 +430,10 @@ The native unit must be built with isolation-session support or execution return
 
 ### Network proxy
 
-Set `NetworkPolicy.Proxy` to route HTTP/HTTPS traffic through a loopback proxy
-or an explicit proxy URL:
-
-```csharp
-var policy = new SandboxPolicy
-{
-    Version = "0.8.0-alpha",
-    Network = new NetworkPolicy
-    {
-        Proxy = new LocalhostNetworkProxyPolicy(8080),
-        // Or: Proxy = new UrlNetworkProxyPolicy("http://proxy.example:3128"),
-    },
-};
-```
-
-Backend validation determines which form and combinations are enforceable.
-On backends that implement proxies cooperatively, well-behaved HTTP clients
-honor the injected proxy environment variables, but raw-socket clients can
-bypass them. The native `builtinTestServer` proxy is intentionally not exposed
+The version-free v1 `SandboxPolicy` does not expose legacy one-shot proxy
+settings. Consumers that need an older exact proxy contract must use the raw
+executor configuration path. WSLC state-aware exec exposes its supported
+proxy-only runtime override through `WslcExecOptions.RuntimeConfig`.
 by this SDK: it is testing-only and the .NET FFI contract has no
 testing-feature opt-in.
 
@@ -460,7 +445,6 @@ protocol, and port rules, plus a runtime proxy value:
 ```csharp
 var policy = new SandboxPolicy
 {
-    Version = "0.8.0-alpha",
     Network = new NetworkPolicy
     {
         Egress = new NetworkEgressPolicy
@@ -512,7 +496,6 @@ var temporaryFiles = SandboxPolicyDiscovery.GetTemporaryFilesPolicy();
 
 var policy = new SandboxPolicy
 {
-    Version = "0.8.0-alpha",
     Filesystem = new FilesystemPolicy
     {
         ReadonlyPaths =
@@ -545,7 +528,6 @@ does not grant:
 var request = new SandboxRequest(
     new SandboxPolicy
     {
-        Version = "0.8.0-alpha",
     },
     "cmd /c type C:\\blocked.txt")
 {
@@ -656,7 +638,6 @@ and its
 Per-invocation opt-in:
 - One-shot (`Run`/`Spawn`): set
   `SandboxPolicy.Telemetry = new TelemetrySettings { Enabled = true }`.
-  An explicit policy version must be `0.9.0-alpha` or later.
 - State-aware phases: set each phase's
   `Telemetry = new TelemetrySettings { Enabled = true }` independently.
   `ProvisionResult` contains the sandbox identity used by later phases; no
@@ -755,9 +736,8 @@ Exposes **run-to-completion** (`Run` / `RunAsync`), **streaming**
 (`Spawn` → `MxcSandboxProcess`), and the **state-aware lifecycle**
 (`MxcLifecycle`) over the backends the public Rust SDK supports (Windows
 ProcessContainer, Linux Bubblewrap, macOS Seatbelt, and Windows
-IsolationSession and WSLC for run/stream; the state-aware lifecycle supports
-IsolationSession, Windows Sandbox, and WSLC on Windows. Windows Sandbox
-requires experimental opt-in; IsolationSession and WSLC do not).
+IsolationSession and WSLC for run/stream). The typed state-aware lifecycle
+supports IsolationSession and WSLC on Windows.
 
 `SchemaVersions` exposes the minimum and maximum accepted schema versions, the
 latest stable schema, and the backend-specific state-aware defaults. These
@@ -831,15 +811,6 @@ finally
 Provision options are backend-specific:
 
 ```csharp
-var windowsSandbox = new WindowsSandboxProvisionOptions
-{
-    Filesystem = new StateAwareFilesystemPolicy
-    {
-        ReadonlyPaths = { @"C:\input" },
-        ReadwritePaths = { @"C:\output" },
-    },
-};
-
 var wslc = new WslcProvisionOptions
 {
     Image = "alpine:latest",
@@ -856,14 +827,14 @@ var wslc = new WslcProvisionOptions
 };
 ```
 
-IsolationSession and WSLC state-aware calls use published schema
-`0.9.0-alpha`. Windows Sandbox state-aware calls use development schema
-`1.1.0-alpha`.
-`Version` may be omitted or explicitly set to that registered value; the SDK
-rejects other values rather than emitting an envelope for an unregistered
-state-aware contract. State-aware exec options expose working directory,
-`KEY=VALUE` environment entries, `InheritDefaultEnvironment`, and timeout.
-WSLC also accepts a proxy-only per-exec override:
+The v1 SDK owns exact contract `1.0.0` for typed IsolationSession and WSLC
+state-aware calls; callers do not select a schema version. Windows Sandbox
+lifecycle remains available only through the raw exact `1.1.0-alpha` contract,
+not through the typed v1 SDK surface.
+
+State-aware exec options expose working directory, `KEY=VALUE` environment
+entries, `InheritDefaultEnvironment`, and timeout. WSLC also accepts a
+proxy-only per-exec runtime override:
 
 ```csharp
 var options = new WslcExecOptions
@@ -871,9 +842,9 @@ var options = new WslcExecOptions
     WorkingDirectory = "/work",
     Environment = new List<string> { "MODE=test" },
     TimeoutMs = 30_000,
-    Network = new WslcExecNetworkPolicy
+    RuntimeConfig = new NetworkRuntimeConfig
     {
-        Proxy = new UrlNetworkProxyPolicy("http://proxy.example:8080"),
+        NetworkProxy = "http://proxy.example:8080",
     },
 };
 SandboxWaitResult outcome =
@@ -885,16 +856,15 @@ leave this process's console untouched. On backends that support streaming
 state-aware exec (currently IsolationSession and WSLC), their wait results report
 `StateAwareExecOptions.TimeoutMs` expirations through `TimedOut`, matching
 one-shot execution. WSLC exposes stdout and stderr but no stdin because the
-WSLC SDK provides no process-input API. Windows Sandbox does not support these
-streaming forms.
+WSLC SDK provides no process-input API.
 
 `ExecInSandboxAttached` relays the workload onto this process's stdio instead,
 returning no handle or captured output. For IsolationSession it allocates a
 pseudo-console and forwards stdin, so an interactive shell renders and resizes
 normally; the workload owns the console for the call's duration, including
 `Ctrl-C`, and stderr is merged into the pseudo-console's single output stream.
-Windows Sandbox and WSLC relay output but do not provide interactive stdin on
-this path. The API refuses with `ErrorCode.MalformedRequest` when this process's
+WSLC relays output but does not provide interactive stdin on this path. The API
+refuses with `ErrorCode.MalformedRequest` when this process's
 stdout and stdin are not both terminals, and when another attached exec is
 already running — one runs at a time per process. Any console state changed for
 IsolationSession is restored on return.
@@ -905,9 +875,8 @@ available as `ProvisionResult.IsolationSessionMetadata`.
 
 Every phase has a `DryRun...` counterpart that parses and validates the request
 without creating, starting, executing in, stopping, or destroying a sandbox.
-Windows Sandbox supports attached exec and exec dry-run, but not the streaming
-`ExecInSandbox` / `ExecInSandboxAsync` forms. WSLC supports both attached and
-streaming exec.
+WSLC supports both attached and streaming exec. Windows Sandbox lifecycle
+requests must use the raw exact `1.1.0-alpha` executor contract.
 
 Cross-cutting policy (`Network`, `Filesystem`) is sent as supplied. A backend
 that cannot honour a value rejects it with `ErrorCode.PolicyValidation` rather

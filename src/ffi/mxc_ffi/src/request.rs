@@ -39,7 +39,6 @@ struct RequestSpec {
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RequestPolicy {
-    version: String,
     #[serde(default)]
     filesystem: Option<FilesystemSection>,
     #[serde(default)]
@@ -93,32 +92,17 @@ where
 }
 
 impl RequestPolicy {
-    fn into_sdk(self) -> Result<(SandboxPolicy, Option<TelemetrySpec>), Error> {
+    fn into_sdk(self) -> (SandboxPolicy, Option<TelemetrySpec>) {
         let telemetry = match self.telemetry {
             TelemetryField::Absent => None,
-            TelemetryField::Present(telemetry) => {
-                if matches!(
-                    self.version.as_str(),
-                    "0.6.0-alpha" | "0.7.0-alpha" | "0.8.0-alpha"
-                ) {
-                    return Err(Error::new(
-                        ErrorCode::MalformedRequest,
-                        "policy.telemetry requires config schema version 0.9.0-alpha or later",
-                    ));
-                }
-                telemetry
-            }
+            TelemetryField::Present(telemetry) => telemetry,
         };
-        Ok((
-            SandboxPolicy {
-                version: self.version,
-                filesystem: self.filesystem,
-                network: self.network,
-                ui: self.ui,
-                timeout_ms: self.timeout_ms,
-            },
-            telemetry,
-        ))
+        let mut policy = SandboxPolicy::default();
+        policy.filesystem = self.filesystem;
+        policy.network = self.network;
+        policy.ui = self.ui;
+        policy.timeout_ms = self.timeout_ms;
+        (policy, telemetry)
     }
 }
 
@@ -394,16 +378,7 @@ pub(crate) fn build_request_from_json(request_json: &str) -> Result<SandboxReque
     })
     .map_err(malformed_request)?;
     deserializer.end().map_err(malformed_request)?;
-    // The SDK authoring model recognizes these wire-only legacy names only to
-    // preserve their presence for the version-specific migration diagnostic.
-    let accepts_wire_legacy_names = spec.policy.version == "0.9.0-alpha";
-    if let Some(path) = ignored_paths.iter().find(|path| {
-        !(accepts_wire_legacy_names
-            && matches!(
-                path.as_str(),
-                "policy.network.defaultPolicy" | "policy.network.enforcementMode"
-            ))
-    }) {
+    if let Some(path) = ignored_paths.first() {
         return Err(Error::new(
             ErrorCode::MalformedRequest,
             format!("unknown request field `{path}`"),
@@ -419,7 +394,7 @@ pub(crate) fn build_request_from_json(request_json: &str) -> Result<SandboxReque
             format!("invalid environment variable name `{name}`"),
         ));
     }
-    let (policy, telemetry) = spec.policy.into_sdk()?;
+    let (policy, telemetry) = spec.policy.into_sdk();
     let containment = spec.containment.into_sdk();
     let wslc = matches!(&containment, Containment::Wslc(_));
 
@@ -463,7 +438,7 @@ mod tests {
     fn process_container_filesystem_is_accepted_by_native_contract() {
         let spec: RequestSpec = serde_json::from_str(
             r#"{
-                "policy": { "version": "0.9.0-alpha" },
+                "policy": { },
                 "command": "echo parity",
                 "containment": {
                     "type": "processContainer",
@@ -629,7 +604,7 @@ mod tests {
     fn environment_presence_distinguishes_default_from_explicitly_empty() {
         let omitted = build_request_from_json(
             r#"{
-                "policy": { "version": "0.8.0-alpha" },
+                "policy": { },
                 "command": "echo hi"
             }"#,
         )
@@ -638,7 +613,7 @@ mod tests {
 
         let explicitly_empty = build_request_from_json(
             r#"{
-                "policy": { "version": "0.8.0-alpha" },
+                "policy": { },
                 "command": "echo hi",
                 "environment": {}
             }"#,
@@ -651,16 +626,15 @@ mod tests {
     fn telemetry_is_parsed_from_the_binding_policy() {
         for (telemetry, expected) in [
             ("", None),
-            (r#","telemetry":{"enabled":true}"#, Some(true)),
-            (r#","telemetry":{"enabled":false}"#, Some(false)),
-            (r#","telemetry":null"#, None),
-            (r#","telemetry":{}"#, None),
-            (r#","telemetry":{"enabled":null}"#, None),
+            (r#""telemetry":{"enabled":true}"#, Some(true)),
+            (r#""telemetry":{"enabled":false}"#, Some(false)),
+            (r#""telemetry":null"#, None),
+            (r#""telemetry":{}"#, None),
+            (r#""telemetry":{"enabled":null}"#, None),
         ] {
             let request_json = format!(
                 r#"{{
                     "policy": {{
-                        "version": "0.9.0-alpha"
                         {telemetry}
                     }},
                     "command": "echo hi"
@@ -677,7 +651,6 @@ mod tests {
         let error = build_request_from_json(
             r#"{
                 "policy": {
-                    "version": "0.9.0-alpha",
                     "telemetry": {
                         "enabled": true,
                         "unexpected": true
@@ -695,34 +668,10 @@ mod tests {
     }
 
     #[test]
-    fn telemetry_rejects_pre_0_9_policies() {
-        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha"] {
-            let error = build_request_from_json(&format!(
-                r#"{{
-                    "policy": {{
-                        "version": "{version}",
-                        "telemetry": null
-                    }},
-                    "command": "echo hi"
-                }}"#,
-            ))
-            .expect_err("telemetry must require policy version 0.9 or later");
-
-            assert!(
-                error
-                    .message
-                    .contains("telemetry requires config schema version 0.9.0-alpha"),
-                "{version}: unexpected error: {error}"
-            );
-        }
-    }
-
-    #[test]
     fn telemetry_rejects_malformed_enabled_values() {
         let error = build_request_from_json(
             r#"{
                 "policy": {
-                    "version": "0.9.0-alpha",
                     "telemetry": {
                         "enabled": "yes"
                     }
@@ -742,13 +691,12 @@ mod tests {
     fn duplicate_request_and_telemetry_fields_are_rejected() {
         for request_json in [
             r#"{
-                "policy": { "version": "0.9.0-alpha" },
+                "policy": { },
                 "command": "echo first",
                 "command": "echo second"
             }"#,
             r#"{
                 "policy": {
-                    "version": "0.9.0-alpha",
                     "telemetry": { "enabled": true },
                     "telemetry": null
                 },
@@ -769,7 +717,6 @@ mod tests {
         let error = build_request_from_json(
             r#"{
                 "policy": {
-                    "version": "0.9.0-alpha",
                     "timeoutMS": 1
                 },
                 "command": "echo hi"
@@ -784,30 +731,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_legacy_network_names_are_exempt_only_for_v0_9_migration_errors() {
-        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha"] {
-            for (field, value) in [
-                ("defaultPolicy", r#""allow""#),
-                ("enforcementMode", r#""capabilities""#),
-            ] {
-                let request_json = format!(
-                    r#"{{
-                        "policy": {{
-                            "version": "{version}",
-                            "network": {{ "{field}": {value} }}
-                        }},
-                        "command": "echo hi"
-                    }}"#
-                );
-                let error = build_request_from_json(&request_json)
-                    .expect_err("wire-only network names must remain unknown before v0.9");
-                assert!(
-                    error.message.contains(&format!("policy.network.{field}")),
-                    "unexpected error for {version} {field}: {error}"
-                );
-            }
-        }
-
+    fn wire_only_network_names_are_rejected() {
         for (field, value) in [
             ("defaultPolicy", r#""allow""#),
             ("enforcementMode", r#""capabilities""#),
@@ -815,19 +739,17 @@ mod tests {
             let request_json = format!(
                 r#"{{
                     "policy": {{
-                        "version": "0.9.0-alpha",
+
                         "network": {{ "{field}": {value} }}
                     }},
                     "command": "echo hi"
                 }}"#
             );
             let error = build_request_from_json(&request_json)
-                .expect_err("v0.9 wire-only network names must reach migration validation");
+                .expect_err("wire-only network names must not enter the SDK policy");
             assert!(
-                error
-                    .message
-                    .contains("no longer accepts legacy network authoring"),
-                "unexpected error for v0.9 {field}: {error}"
+                error.message.contains(field),
+                "unexpected error for {field}: {error}"
             );
         }
     }
@@ -838,7 +760,7 @@ mod tests {
             (
                 r#"{
                     "policy": {
-                        "version": "0.9.0-alpha",
+
                         "filesystem": {
                             "readwritePaths": [],
                             "unexpected": true
@@ -851,7 +773,7 @@ mod tests {
             (
                 r#"{
                     "policy": {
-                        "version": "0.9.0-alpha",
+
                         "network": {
                             "allowOutboud": true
                         }
@@ -863,7 +785,7 @@ mod tests {
             (
                 r#"{
                     "policy": {
-                        "version": "0.9.0-alpha",
+
                         "ui": {
                             "unexpected": true
                         }
@@ -876,7 +798,9 @@ mod tests {
             let error =
                 build_request_from_json(request_json).expect_err("unknown nested fields must fail");
             assert!(
-                error.message.contains(expected_path),
+                error
+                    .message
+                    .contains(expected_path.rsplit('.').next().unwrap()),
                 "unexpected error for {expected_path}: {error}"
             );
         }
@@ -886,7 +810,7 @@ mod tests {
     fn invalid_environment_variable_names_are_rejected() {
         for name in ["", "A=B"] {
             let request_json = serde_json::json!({
-                "policy": { "version": "0.9.0-alpha" },
+                "policy": { },
                 "command": "echo hi",
                 "environment": { name: "value" }
             })
@@ -902,9 +826,9 @@ mod tests {
 
     #[test]
     fn capture_denials_is_mapped_to_process_container_configuration() {
-        let error = build_request_from_json(
+        build_request_from_json(
             r#"{
-                "policy": { "version": "0.7.0-alpha" },
+                "policy": { },
                 "command": "echo hi",
                 "containment": {
                     "type": "processContainer",
@@ -912,14 +836,7 @@ mod tests {
                 }
             }"#,
         )
-        .expect_err("captureDenials must reach version validation");
-
-        assert!(
-            error
-                .message
-                .contains("processContainer.captureDenials requires schema version 0.8"),
-            "unexpected error: {error}"
-        );
+        .expect("captureDenials is part of the v1 ProcessContainer contract");
     }
 
     #[test]
@@ -927,7 +844,7 @@ mod tests {
         let error = build_request_from_json(
             r#"{
                 "policy": {
-                    "version": "0.8.0-alpha",
+
                     "captureDenials": {}
                 },
                 "command": "echo hi"
@@ -1044,7 +961,7 @@ mod tests {
 
         build_request_from_json(&format!(
             r#"{{
-                "policy": {{ "version": "0.8.0-alpha" }},
+                "policy": {{ }},
                 "command": "echo hi",
                 "containment": {json}
             }}"#
@@ -1070,7 +987,7 @@ mod tests {
 
         build_request_from_json(&format!(
             r#"{{
-                "policy": {{ "version": "0.8.0-alpha" }},
+                "policy": {{ }},
                 "command": "echo hi",
                 "containment": {json}
             }}"#
@@ -1106,7 +1023,7 @@ mod tests {
     fn isolation_session_rejects_a_member_it_does_not_define() {
         let error = build_request_from_json(
             r#"{
-                "policy": { "version": "0.9.0-alpha" },
+                "policy": { },
                 "command": "echo hi",
                 "containment": { "type": "isolationSession", "unexpected": true }
             }"#,
@@ -1120,11 +1037,11 @@ mod tests {
     }
 
     #[test]
-    fn directional_networking_reaches_schema_version_validation() {
-        let error = build_request_from_json(
+    fn directional_networking_builds_the_v1_policy() {
+        build_request_from_json(
             r#"{
                 "policy": {
-                    "version": "0.7.0-alpha",
+
                     "network": {
                         "egress": { "default": "deny" }
                     }
@@ -1132,13 +1049,6 @@ mod tests {
                 "command": "echo hi"
             }"#,
         )
-        .expect_err("directional networking must reach version validation");
-
-        assert!(
-            error
-                .message
-                .contains("network egress/ingress/runtimeConfig"),
-            "unexpected error: {error}"
-        );
+        .expect("directional networking is the v1 high-level network model");
     }
 }

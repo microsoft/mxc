@@ -49,6 +49,7 @@ export {
   ContainmentType,
   ContainmentTypes,
   ContainmentBackend,
+  SandboxContainment,
   ExperimentalBackends,
   ContainerConfig,
   ProcessContainerConfig,

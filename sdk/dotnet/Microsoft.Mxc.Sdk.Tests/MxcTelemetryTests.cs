@@ -93,7 +93,6 @@ public sealed class MxcTelemetryTests : IDisposable
     {
         var policy = new SandboxPolicy
         {
-            Version = SchemaVersions.MaximumSupported,
             Telemetry = new TelemetrySettings { Enabled = true },
         };
 

@@ -668,7 +668,7 @@ Top-level fields shared by both branches:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `version` | string | Yes | Exact backend-specific schema version. IsolationSession and WSLC use `0.9.0-alpha`; Windows Sandbox uses `1.1.0-alpha`. The SDK fills this field when the consumer Config omits it. |
+| `version` | string | Yes | Exact backend-specific schema version. IsolationSession and WSLC use `1.0.0`; Windows Sandbox uses `1.1.0-alpha`. The SDK fills this field when the consumer Config omits it. |
 
 Backend-routing fields:
 
@@ -1169,12 +1169,13 @@ payloads directly to runtime configurations, while common fields reuse
 internal common parser and executable equivalence harness have been removed.
 
 The Rust SDK also has a direct typed ingress lane. High-level lifecycle calls
-construct `SdkStateAwareInput` from `ProvisionRequest`,
-`LifecycleRequest`, or `ExecRequest`. An opaque `SandboxId` is passed separately
-for operations on an existing sandbox, and authorization, telemetry preference,
-and other invocation controls are carried by `OperationOptions`. The combined
-input then normalizes through the same private `CommonRequestIR` and
-`StateAwareInput` seam:
+construct `SdkStateAwareInput` from `ProvisionRequest` or `ExecRequest`. An
+opaque `SandboxId` is passed separately for operations on an existing sandbox;
+start, stop, and deprovision require no additional policy request.
+Authorization, telemetry preference, and other invocation controls are carried
+by `OperationOptions`. The high-level v1 SDK supplies its package-owned exact
+`1.0.0` target, and the combined input then normalizes through the same private
+`CommonRequestIR` and `StateAwareInput` seam:
 
 ```text
 typed Rust request
@@ -1186,7 +1187,7 @@ typed Rust request
 ```
 
 This lane does not serialize or parse JSON and does not invoke an exact-contract
-adapter. Its selected version still controls compatibility semantics, but the
+adapter. The SDK-owned `1.0.0` target controls compatibility semantics, but the
 normalized request has no `source_contract` because no external exact contract
 produced it. Raw callers follow the separate exact path:
 

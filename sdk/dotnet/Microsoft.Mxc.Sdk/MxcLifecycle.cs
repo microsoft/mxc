@@ -21,22 +21,11 @@ public static class MxcLifecycle
         NativeLibraryResolver.Initialize();
     }
 
-    /// <summary>
-    /// Default state-aware schema for IsolationSession.
-    /// </summary>
-    public const string StateAwareVersion = SchemaVersions.StateAware;
-
-    /// <summary>Default state-aware schema for Windows Sandbox.</summary>
-    public const string WindowsSandboxStateAwareVersion = SchemaVersions.WindowsSandboxStateAware;
-
-    /// <summary>Default state-aware schema for WSLC.</summary>
-    public const string WslcStateAwareVersion = SchemaVersions.WslcStateAware;
+    /// <summary>Exact contract owned by this v1 SDK.</summary>
+    public const string StateAwareVersion = SchemaVersions.SdkContract;
 
     /// <summary>IsolationSession containment wire key.</summary>
     public const string IsolationSessionContainment = "isolation_session";
-
-    /// <summary>Windows Sandbox containment wire key.</summary>
-    public const string WindowsSandboxContainment = "windows_sandbox";
 
     /// <summary>WSLC containment wire key.</summary>
     public const string WslcContainment = "wslc";
@@ -51,7 +40,6 @@ public static class MxcLifecycle
         Converters =
         {
             new JsonStringEnumConverter(JsonNamingPolicy.CamelCase),
-            new NetworkProxyPolicyJsonConverter(),
         },
     };
 
@@ -101,9 +89,7 @@ public static class MxcLifecycle
     {
         ValidateProvisionOptions(containment, options);
         var backend = ContainmentKey(containment);
-        var envelope = NewEnvelope(
-            "provision",
-            ResolveVersion(containment, options?.Version));
+        var envelope = NewEnvelope("provision");
         envelope["containment"] = backend;
 
         switch (options)
@@ -116,9 +102,6 @@ public static class MxcLifecycle
                     "provision",
                     "appId",
                     isolation.AppId);
-                break;
-            case WindowsSandboxProvisionOptions windowsSandbox:
-                SetCrossCuttingPolicies(envelope, windowsSandbox.Filesystem, network: null);
                 break;
             case WslcProvisionOptions wslc:
                 SetCrossCuttingPolicies(envelope, wslc.Filesystem, wslc.Network);
@@ -159,7 +142,7 @@ public static class MxcLifecycle
         StateAwarePhaseOptions? options = null)
     {
         ValidateNonExecOptions("start", options);
-        var envelope = BuildIdEnvelope("start", id, options?.Version);
+        var envelope = BuildIdEnvelope("start", id);
         ApplyTelemetry(envelope, options?.Telemetry);
         return envelope;
     }
@@ -263,7 +246,7 @@ public static class MxcLifecycle
     {
         ArgumentNullException.ThrowIfNull(command);
         ValidateExecOptions(id, options);
-        var envelope = BuildIdEnvelope("exec", id, options?.Version);
+        var envelope = BuildIdEnvelope("exec", id);
         var process = new JsonObject { ["commandLine"] = command };
         if (options?.WorkingDirectory is { } cwd)
         {
@@ -388,7 +371,7 @@ public static class MxcLifecycle
         StateAwarePhaseOptions? options = null)
     {
         ValidateNonExecOptions("stop", options);
-        var envelope = BuildIdEnvelope("stop", id, options?.Version);
+        var envelope = BuildIdEnvelope("stop", id);
         ApplyTelemetry(envelope, options?.Telemetry);
         return envelope;
     }
@@ -414,7 +397,7 @@ public static class MxcLifecycle
         StateAwarePhaseOptions? options = null)
     {
         ValidateNonExecOptions("deprovision", options);
-        var envelope = BuildIdEnvelope("deprovision", id, options?.Version);
+        var envelope = BuildIdEnvelope("deprovision", id);
         ApplyTelemetry(envelope, options?.Telemetry);
         return envelope;
     }
@@ -424,7 +407,7 @@ public static class MxcLifecycle
         StateAwarePhaseOptions? options)
     {
         if (options is WslcExecOptions wslc
-            && (wslc.RuntimeConfig is not null || wslc.Network is not null))
+            && wslc.RuntimeConfig is not null)
         {
             throw new ArgumentException(
                 "Runtime proxy configuration is accepted only on WSLC exec, not start, stop or deprovision.",
@@ -439,22 +422,17 @@ public static class MxcLifecycle
         }
     }
 
-    private static JsonObject BuildIdEnvelope(
-        string phase,
-        SandboxId id,
-        string? version)
+    private static JsonObject BuildIdEnvelope(string phase, SandboxId id)
     {
-        var containment = ContainmentForId(id);
-        var envelope = NewEnvelope(
-            phase,
-            ResolveVersion(containment, version));
+        ContainmentForId(id);
+        var envelope = NewEnvelope(phase);
         envelope["sandboxId"] = id.Value;
         return envelope;
     }
 
-    private static JsonObject NewEnvelope(string phase, string version) => new()
+    private static JsonObject NewEnvelope(string phase) => new()
     {
-        ["version"] = version,
+        ["version"] = SchemaVersions.SdkContract,
         ["phase"] = phase,
     };
 
@@ -474,40 +452,11 @@ public static class MxcLifecycle
     private static string ContainmentKey(StateAwareContainment containment) => containment switch
     {
         StateAwareContainment.IsolationSession => IsolationSessionContainment,
-        StateAwareContainment.WindowsSandbox => WindowsSandboxContainment,
         StateAwareContainment.Wslc => WslcContainment,
         _ => throw new MxcException(
             ErrorCode.UnsupportedContainment,
             $"unknown state-aware containment '{containment}'"),
     };
-
-    private static string DefaultVersion(StateAwareContainment containment) =>
-        containment switch
-        {
-            StateAwareContainment.IsolationSession => StateAwareVersion,
-            StateAwareContainment.WindowsSandbox => WindowsSandboxStateAwareVersion,
-            StateAwareContainment.Wslc => WslcStateAwareVersion,
-            _ => throw new MxcException(
-                ErrorCode.UnsupportedContainment,
-                $"unknown state-aware containment '{containment}'"),
-        };
-
-    private static string ResolveVersion(
-        StateAwareContainment containment,
-        string? requestedVersion)
-    {
-        var expectedVersion = DefaultVersion(containment);
-        if (requestedVersion is not null
-            && !string.Equals(requestedVersion, expectedVersion, StringComparison.Ordinal))
-        {
-            throw new ArgumentException(
-                $"State-aware {containment} requests require schema version "
-                    + $"'{expectedVersion}', got '{requestedVersion}'.",
-                nameof(requestedVersion));
-        }
-
-        return expectedVersion;
-    }
 
     private static void ValidateProvisionOptions(
         StateAwareContainment containment,
@@ -519,7 +468,6 @@ public static class MxcLifecycle
             (_, null) => true,
             (StateAwareContainment.IsolationSession, IsolationSessionProvisionOptions) => true,
             (StateAwareContainment.IsolationSession, ProvisionSandboxOptions) => true,
-            (StateAwareContainment.WindowsSandbox, WindowsSandboxProvisionOptions) => true,
             (StateAwareContainment.Wslc, WslcProvisionOptions) => true,
             _ => false,
         };
@@ -572,13 +520,6 @@ public static class MxcLifecycle
         }
         if (options is WslcExecOptions wslc)
         {
-            if (wslc.Network is not null)
-            {
-                throw new ArgumentException(
-                    "Schema 0.9 no longer supports exec network.proxy; use "
-                        + "WslcExecOptions.RuntimeConfig.NetworkProxy with an HTTP/S URL.",
-                    nameof(options));
-            }
             if (wslc.RuntimeConfig?.NetworkProxy is { } proxy
                 && (string.IsNullOrWhiteSpace(proxy)
                     || proxy.Trim() != proxy
@@ -595,16 +536,6 @@ public static class MxcLifecycle
     private static void ValidateDirectionalNetwork(StateAwareNetworkPolicy network)
     {
         ArgumentNullException.ThrowIfNull(network);
-        if (network.LegacyFieldSpecified is { } field)
-        {
-            throw new ArgumentException(
-                $"Schema 0.9 no longer supports authored network.{field}, including null. "
-                    + "Use directional network.Egress/Ingress on WSLC provision. "
-                    + "Remove DefaultPolicy, EnforcementMode, AllowLocalNetwork, "
-                    + "AllowedHosts, BlockedHosts and Proxy; "
-                    + "configure a proxy with RuntimeConfig.NetworkProxy on exec. Hostnames are not converted to CIDRs.",
-                nameof(network));
-        }
     }
 
     private static StateAwareContainment ContainmentForId(SandboxId id)
@@ -626,7 +557,6 @@ public static class MxcLifecycle
         return value![..separator] switch
         {
             "iso" => StateAwareContainment.IsolationSession,
-            "wsb" => StateAwareContainment.WindowsSandbox,
             "wslc" => StateAwareContainment.Wslc,
             _ => throw new MxcException(
                 ErrorCode.UnsupportedContainment,
@@ -672,7 +602,6 @@ public static class MxcLifecycle
         var section = backend switch
         {
             IsolationSessionContainment => "isolationSession",
-            WindowsSandboxContainment => "windowsSandbox",
             WslcContainment => "wslc",
             _ => throw new ArgumentException($"Unsupported state-aware backend '{backend}'.", nameof(backend)),
         };
@@ -722,18 +651,17 @@ public static class MxcLifecycle
         }
     }
 
-    private static int ExperimentalOptInFor(SandboxId id) =>
-        ContainmentForId(id) == StateAwareContainment.WindowsSandbox
-            ? ExperimentalOptIn
-            : NoExperimentalOptIn;
+    private static int ExperimentalOptInFor(SandboxId id)
+    {
+        ContainmentForId(id);
+        return NoExperimentalOptIn;
+    }
 
     private static int ExperimentalOptInFor(JsonObject envelope)
     {
-        if (envelope["containment"]?.GetValue<string>() is { } containment)
+        if (envelope["containment"]?.GetValue<string>() is not null)
         {
-            return containment == WindowsSandboxContainment
-                ? ExperimentalOptIn
-                : NoExperimentalOptIn;
+            return NoExperimentalOptIn;
         }
         if (envelope["sandboxId"]?.GetValue<string>() is { } sandboxId)
         {
