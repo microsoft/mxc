@@ -211,14 +211,13 @@ sandbox policy:
 - `resource` is the user-visible identifier for the denied resource,
   interpreted by `resourceType`: an absolute `C:\…` path for `file`, the
   AppContainer **capability name** (e.g. `internetClient`) for `capability`,
-  and the raw resource identifier otherwise. For COM access checks, `other`
-  carries the CLSID of an activation check or the IID of an interface-call
-  check. Well-known capability SIDs are resolved to their policy name; custom
-  (hashed) capability SIDs that can't be reversed fall back to the
-  `S-1-15-3-…` SID string. Named Section, SymbolicLink, and Timer checks are
-  verbose-only because the config has no corresponding policy grants. Event 28
-  is schema-discriminated: UI-shaped `Category`/`Detail` payloads emit `ui`
-  resources instead of treating the package SID as a capability.
+  and the raw resource identifier otherwise. Well-known capability SIDs are
+  resolved to their policy name; custom (hashed) capability SIDs that can't be
+  reversed fall back to the `S-1-15-3-…` SID string. Named Section,
+  SymbolicLink, Timer, and COM checks are verbose-only because the config has
+  no corresponding policy grants. Event 28 is schema-discriminated: UI-shaped
+  `Category`/`Detail` payloads emit `ui` resources instead of treating the
+  package SID as a capability.
 - `resourceType` is one of `file`, `ui`, `network`, `capability`, `other`;
   `accessType` is one of `read`, `write`, `execute`, `unknown`. Capability
   denials are recorded under `block`; current `allow` traces expose capability
@@ -232,22 +231,25 @@ sandbox policy:
 On Windows builds with COM Learning Mode metadata, Kernel-General access-check
 event 14 reports two additional object types:
 
-| `ObjectType` | `resource` | `resourceType` | `accessType` |
-| ------------ | ---------- | -------------- | ------------ |
-| `ComActivationForClass` | Activation CLSID | `other` | `unknown` |
-| `ComCallOnInterface` | Called interface IID | `other` | `unknown` |
+| `ObjectType` | Verbose reason | Identifier |
+| ------------ | -------------- | ---------- |
+| `ComActivationForClass` | `comActivation` | Activation CLSID |
+| `ComCallOnInterface` | `comInterfaceCall` | Called interface IID |
 
 Both `captureDenials.mode: "block"` and `captureDenials.mode: "allow"` decode
 these records identically. The mode still controls whether the denied operation
 remains blocked or is permitted; it does not change the output classification.
-MXC validates that the resource is GUID-shaped and preserves the original
-CLSID/IID spelling.
+MXC validates that the identifier is GUID-shaped.
 
-COM records are included in the caller-facing denial file for auditing and
-application-specific policy workflows, and are also retained as `actionable`
-signatures in the verbose sibling. MXC does not currently expose an authorable
-COM grant, so the legacy adjusted-config generator intentionally ignores
-`resourceType: "other"` records.
+COM records do not enter the caller-facing `denials` array because MXC does not
+expose an authorable COM grant. They are retained in the local verbose sibling
+with `resourceType: "other"`, no `accessType`, and the original CLSID/IID in the
+sanitized `ObjectName` property. The distinct reasons make COM activation and
+interface calls recognizable without treating them as unknown object types or
+policy-actionable denials.
+
+The `MXC.VerboseDenials` telemetry projection retains the COM reason and count
+but removes all verbose properties, including the CLSID/IID.
 
 This coverage applies to classic COM activation checks instrumented in RPCSS and
 COM interface-call checks instrumented in COMBASE. The separate WinRT
@@ -266,7 +268,7 @@ policy denial occurrences plus diagnostic outcomes omitted from the policy file:
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "signatures": [
     {
       "signature": {
@@ -305,17 +307,19 @@ non-file resource values are retained. Complete file paths are replaced with
 Exact header timestamps and timestamp-like properties are omitted so otherwise
 identical events deduplicate, and free-form decoder errors are never serialized.
 
-Every valid actionable denial, including a COM CLSID/IID record, is classified
-as `actionable` in the verbose file. Its first occurrence, later duplicates, and
-candidates observed after the actionable file's unique-denial bound are all
-retained. Those occurrences deduplicate under the same signature and increment
-its count. `accessType` and `resourceType` are included when denial extraction
-determined them; diagnostic outcomes without those classifications omit the
-fields.
+Every valid policy denial is classified as `actionable` in the verbose file.
+Its first occurrence, later duplicates, and candidates observed after the
+actionable file's unique-denial bound are all retained. Those occurrences
+deduplicate under the same signature and increment its count. `accessType` and
+`resourceType` are included when denial extraction determined them; diagnostic
+outcomes without those classifications omit the fields.
 
 Candidates excluded from the actionable output retain a closed diagnostic
 reason and their sanitized event properties:
 
+- `comActivation` and `comInterfaceCall` identify recognized classic COM
+  permission decisions. They include `resourceType: "other"` and omit
+  `accessType`; their CLSID/IID remains only in the local verbose properties.
 - `notActionable` includes registry writes, registry checks whose access mask
   cannot be classified as a read, and recognized Section, SymbolicLink, and
   Timer checks. MXC has no corresponding policy grants, so reporting them in

@@ -1805,7 +1805,7 @@ mod tests {
     }
 
     #[test]
-    fn com_access_checks_are_actionable_in_block_and_allow_modes() {
+    fn com_access_checks_are_distinct_verbose_only_outcomes_in_both_modes() {
         let activation_clsid = "{A47979D2-C419-11D9-A5B4-001185AD2B89}";
         let call_iid = "{00000132-0000-0000-C000-000000000046}";
         let events = vec![
@@ -1846,32 +1846,37 @@ mod tests {
 
         let analysis = resources_from_events(&events);
 
-        assert_eq!(analysis.denials.len(), 2);
-        assert_eq!(analysis.denials[0].resource, activation_clsid);
-        assert_eq!(analysis.denials[0].resource_type, ResourceType::Other);
-        assert_eq!(analysis.denials[0].access_type, AccessType::Unknown);
-        assert_eq!(analysis.denials[1].resource, call_iid);
-        assert_eq!(analysis.denials[1].resource_type, ResourceType::Other);
-        assert_eq!(analysis.denials[1].access_type, AccessType::Unknown);
-
-        let com_signatures = analysis
+        assert!(analysis.denials.is_empty());
+        let activation_signatures = analysis
             .verbose_logging
             .signatures
             .iter()
-            .filter(|group| {
-                matches!(
-                    property(&group.signature, "ObjectType"),
-                    "ComActivationForClass" | "ComCallOnInterface"
-                )
-            })
+            .filter(|group| property(&group.signature, "ObjectType") == "ComActivationForClass")
             .collect::<Vec<_>>();
-        assert_eq!(com_signatures.len(), 3);
-        assert!(com_signatures.iter().all(|group| {
-            group.signature.reason == VerboseLoggingOutcomeReason::Actionable
+        assert_eq!(activation_signatures.len(), 2);
+        assert!(activation_signatures.iter().all(|group| {
+            group.signature.reason == VerboseLoggingOutcomeReason::ComActivation
                 && group.signature.resource_type == Some(ResourceType::Other)
-                && group.signature.access_type == Some(AccessType::Unknown)
+                && group.signature.access_type.is_none()
                 && group.count == 1
         }));
+        assert!(activation_signatures
+            .iter()
+            .any(|group| property(&group.signature, "ObjectName") == activation_clsid));
+
+        let call = analysis
+            .verbose_logging
+            .signatures
+            .iter()
+            .find(|group| property(&group.signature, "ObjectType") == "ComCallOnInterface")
+            .expect("COM interface call should remain in verbose logging");
+        assert_eq!(
+            call.signature.reason,
+            VerboseLoggingOutcomeReason::ComInterfaceCall
+        );
+        assert_eq!(call.signature.resource_type, Some(ResourceType::Other));
+        assert!(call.signature.access_type.is_none());
+        assert_eq!(property(&call.signature, "ObjectName"), call_iid);
     }
 
     #[test]
@@ -1898,7 +1903,7 @@ mod tests {
             VerboseLoggingOutcomeReason::EventPayloadMalformed
         );
         assert_eq!(signature.resource_type, Some(ResourceType::Other));
-        assert_eq!(signature.access_type, Some(AccessType::Unknown));
+        assert!(signature.access_type.is_none());
         assert_eq!(property(signature, "ObjectType"), "ComActivationForClass");
         assert_eq!(property(signature, "ObjectName"), "not-a-clsid");
     }

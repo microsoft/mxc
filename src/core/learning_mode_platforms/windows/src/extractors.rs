@@ -34,9 +34,9 @@
 //!   access are retained only as verbose diagnostics. Named Section,
 //!   SymbolicLink, and Timer objects are likewise verbose-only because MXC has
 //!   no corresponding policy grants. COM activation and interface-call checks
-//!   map to [`ResourceType::Other`] with their CLSID/IID as the resource and
-//!   [`AccessType::Unknown`]. Other object types are dropped until their
-//!   access-mask vocabulary is understood. The [`AccessType`] is derived from the
+//!   are recognized as distinct verbose-only outcomes with their CLSID/IID
+//!   retained in sanitized properties. Other object types are dropped until
+//!   their access-mask vocabulary is understood. The [`AccessType`] is derived from the
 //!   `AccessMask` field (see [`access_type_from_mask`]). Emitted under both
 //!   learning modes (`block` → `Mode="Normal"`, `allow` →
 //!   `Mode="Permissive"`).
@@ -201,7 +201,7 @@ pub(crate) fn verbose_logging_classification(
                     Some(ResourceType::Other),
                 ),
                 COM_ACTIVATION_OBJECT_TYPE | COM_CALL_OBJECT_TYPE => {
-                    (Some(AccessType::Unknown), Some(ResourceType::Other))
+                    (None, Some(ResourceType::Other))
                 }
                 "" => (Some(AccessType::Unknown), Some(ResourceType::Capability)),
                 _ => (None, None),
@@ -617,12 +617,12 @@ pub(crate) fn sanitize_properties(props: &[(String, String)]) -> Vec<(String, St
 /// (registry) map to concrete resources, an **empty** `ObjectType` is a
 /// brokered-capability check, the observed named-object types `Section`,
 /// `SymbolicLink`, and `Timer` map to [`ResourceType::Other`], and COM
-/// activation/interface checks map to [`ResourceType::Other`] with a CLSID/IID
-/// resource. Only registry reads and valid COM identifiers are actionable;
-/// other registry access and those named-object types are excluded because MXC
-/// has no corresponding policy grants. Other object types are dropped until
-/// their access-mask vocabulary is understood. An absent `ObjectType` field
-/// drops the event.
+/// activation/interface checks are recognized as distinct verbose-only
+/// outcomes with a CLSID/IID resource. Only registry reads are actionable;
+/// other registry access, named-object types, and COM checks are excluded
+/// because MXC has no corresponding policy grants. Other object types are
+/// dropped until their access-mask vocabulary is understood. An absent
+/// `ObjectType` field drops the event.
 ///
 /// For file/registry resources the [`AccessType`] is derived from the
 /// event's `AccessMask` field (the desired access the caller was denied;
@@ -642,9 +642,10 @@ pub(crate) fn sanitize_properties(props: &[(String, String)]) -> Vec<(String, St
 /// unidentified brokered check,
 /// [`VerboseLoggingOutcomeReason::UnresolvedCapability`] — [`crate::capability_dacl`]
 /// may still recover it from the event's DACL payload), a malformed COM
-/// identifier ([`VerboseLoggingOutcomeReason::EventPayloadMalformed`]), or a
-/// self-access, non-read registry, or recognized named-object check that isn't
-/// actionable ([`VerboseLoggingOutcomeReason::NotActionable`]).
+/// identifier ([`VerboseLoggingOutcomeReason::EventPayloadMalformed`]), a valid
+/// COM check retained under its dedicated verbose reason, or a self-access,
+/// non-read registry, or recognized named-object check that isn't actionable
+/// ([`VerboseLoggingOutcomeReason::NotActionable`]).
 pub fn build_denial_from_access_check(
     parts: &DecodedEventParts,
     pid: u32,
@@ -659,9 +660,9 @@ pub fn build_denial_from_access_check(
         "File" => ResourceType::File,
         "Key" => ResourceType::Other,
         "Section" | "SymbolicLink" | "Timer" => ResourceType::Other,
-        COM_ACTIVATION_OBJECT_TYPE | COM_CALL_OBJECT_TYPE => ResourceType::Other,
         // A present-but-empty object type is a brokered-capability check.
         "" => ResourceType::Capability,
+        COM_ACTIVATION_OBJECT_TYPE | COM_CALL_OBJECT_TYPE => ResourceType::Other,
         _ => return Err(VerboseLoggingOutcomeReason::UnsupportedObjectType),
     };
 
@@ -681,6 +682,15 @@ pub fn build_denial_from_access_check(
     if is_com_object_type(object_type_str) && !is_guid_identifier(&object_name) {
         return Err(VerboseLoggingOutcomeReason::EventPayloadMalformed);
     }
+    match object_type_str {
+        COM_ACTIVATION_OBJECT_TYPE => {
+            return Err(VerboseLoggingOutcomeReason::ComActivation);
+        }
+        COM_CALL_OBJECT_TYPE => {
+            return Err(VerboseLoggingOutcomeReason::ComInterfaceCall);
+        }
+        _ => {}
+    }
 
     if resource_type == ResourceType::File {
         let app_path = find_prop(&parts.props, "AppPath")
@@ -691,21 +701,20 @@ pub fn build_denial_from_access_check(
         }
     }
 
-    let access_type =
-        if resource_type == ResourceType::Capability || is_com_object_type(object_type_str) {
-            // Capability and COM checks report masks whose vocabulary is not a
-            // file/registry read/write/execute verb.
-            AccessType::Unknown
-        } else {
-            find_prop(&parts.props, "AccessMask")
-                .and_then(|v| parse_u32(v))
-                .map(|mask| match object_type_str {
-                    "Key" => access_type_from_mask(mask, true),
-                    "File" => access_type_from_mask(mask, false),
-                    _ => named_object_access_type(object_type_str, mask),
-                })
-                .unwrap_or(AccessType::Unknown)
-        };
+    let access_type = if resource_type == ResourceType::Capability {
+        // Capability checks report a mask whose vocabulary is not a
+        // file/registry read/write/execute verb.
+        AccessType::Unknown
+    } else {
+        find_prop(&parts.props, "AccessMask")
+            .and_then(|v| parse_u32(v))
+            .map(|mask| match object_type_str {
+                "Key" => access_type_from_mask(mask, true),
+                "File" => access_type_from_mask(mask, false),
+                _ => named_object_access_type(object_type_str, mask),
+            })
+            .unwrap_or(AccessType::Unknown)
+    };
 
     if (object_type_str == "Key" && access_type != AccessType::Read)
         || matches!(object_type_str, "Section" | "SymbolicLink" | "Timer")
@@ -1389,17 +1398,19 @@ mod tests {
     }
 
     #[test]
-    fn access_check_com_denials_preserve_guid_and_use_unknown_access() {
-        for (object_type, object_name, mode) in [
+    fn access_check_com_denials_use_distinct_verbose_reasons() {
+        for (object_type, object_name, mode, expected_reason) in [
             (
                 COM_ACTIVATION_OBJECT_TYPE,
                 "{A47979D2-C419-11D9-A5B4-001185AD2B89}",
                 "\"Normal\"",
+                VerboseLoggingOutcomeReason::ComActivation,
             ),
             (
                 COM_CALL_OBJECT_TYPE,
                 "{00000132-0000-0000-C000-000000000046}",
                 "\"Permissive\"",
+                VerboseLoggingOutcomeReason::ComInterfaceCall,
             ),
         ] {
             let p = parts(
@@ -1412,13 +1423,10 @@ mod tests {
                 ],
             );
 
-            let denial = extract_denial(&p, 42, FIXED_FILETIME).expect("COM denial should extract");
-            assert_eq!(denial.resource_type, ResourceType::Other);
-            assert_eq!(denial.object_name, object_name);
-            assert_eq!(denial.access_type, AccessType::Unknown);
+            assert_eq!(extract_denial(&p, 42, FIXED_FILETIME), Err(expected_reason));
             assert_eq!(
                 verbose_logging_classification(&p),
-                (Some(AccessType::Unknown), Some(ResourceType::Other))
+                (None, Some(ResourceType::Other))
             );
         }
     }
@@ -1446,7 +1454,7 @@ mod tests {
             assert_eq!(extract_denial(&p, 42, FIXED_FILETIME), Err(expected));
             assert_eq!(
                 verbose_logging_classification(&p),
-                (Some(AccessType::Unknown), Some(ResourceType::Other))
+                (None, Some(ResourceType::Other))
             );
         }
     }

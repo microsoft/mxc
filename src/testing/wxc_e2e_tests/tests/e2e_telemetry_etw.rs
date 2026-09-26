@@ -474,7 +474,7 @@ fn test_verbose_denials_etw_payload_honors_consent() {
         &std::fs::read(&verbose_path).expect("failed to read verbose artifact"),
     )
     .expect("verbose artifact was not valid JSON");
-    assert_eq!(verbose["version"], 2);
+    assert_eq!(verbose["version"], 3);
 
     let granted_dump = decode_trace(&granted_etl, &workdir)
         .expect("tracerpt produced no output for the verbose telemetry run");

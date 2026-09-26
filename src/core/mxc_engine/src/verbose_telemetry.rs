@@ -215,13 +215,17 @@ mod tests {
     };
     use wxc_common::models::{CaptureDenialsOutput, SandboxOutputMetadata};
 
-    fn aggregate(event_id: u16, value: &str) -> VerboseLoggingAggregate {
+    fn aggregate_with_reason(
+        event_id: u16,
+        value: &str,
+        reason: VerboseLoggingOutcomeReason,
+    ) -> VerboseLoggingAggregate {
         VerboseLoggingAggregate {
             signature: VerboseLoggingSignature {
                 provider: VerboseLoggingProvider::KernelGeneral,
                 provider_guid: "{a68ca8b7-004f-d7b6-a698-07e2de0f1f5d}".to_string(),
                 event_id,
-                reason: VerboseLoggingOutcomeReason::UnsupportedEventSchema,
+                reason,
                 pid: 42,
                 access_type: None,
                 resource_type: None,
@@ -229,6 +233,14 @@ mod tests {
             },
             count: 1,
         }
+    }
+
+    fn aggregate(event_id: u16, value: &str) -> VerboseLoggingAggregate {
+        aggregate_with_reason(
+            event_id,
+            value,
+            VerboseLoggingOutcomeReason::UnsupportedEventSchema,
+        )
     }
 
     fn document(signatures: Vec<VerboseLoggingAggregate>) -> VerboseLoggingDocument {
@@ -341,6 +353,28 @@ mod tests {
             aggregate.signature.provider_guid
                 == canonical_provider_guid(aggregate.signature.provider)
         }));
+    }
+
+    #[test]
+    fn telemetry_preserves_com_reason_but_strips_clsid() {
+        let mut document = document(vec![aggregate_with_reason(
+            14,
+            "{A47979D2-C419-11D9-A5B4-001185AD2B89}",
+            VerboseLoggingOutcomeReason::ComActivation,
+        )]);
+        document.signatures[0].signature.resource_type =
+            Some(learning_mode_core::ResourceType::Other);
+
+        document = project_for_telemetry(document);
+
+        let signature = &document.signatures[0].signature;
+        assert_eq!(signature.reason, VerboseLoggingOutcomeReason::ComActivation);
+        assert_eq!(
+            signature.resource_type,
+            Some(learning_mode_core::ResourceType::Other)
+        );
+        assert!(signature.access_type.is_none());
+        assert!(signature.properties.is_empty());
     }
 
     #[test]
