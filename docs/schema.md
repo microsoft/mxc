@@ -240,6 +240,8 @@ that can be executed independently.
                                            // Native PSEC/V2 capture cannot combine with leastPrivilege
                                            // or network.proxy. Hosts without that complete native set
                                            // retain an eligible legacy containment tier and use guarded WPR.
+                                           // If guarded-WPR prerequisites are unavailable, the request
+                                           // fails before MXC creates the sandbox.
     },
 
     "lxc": {                               // LXC-specific
