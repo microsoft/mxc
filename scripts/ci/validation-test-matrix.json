@@ -5,7 +5,6 @@
       "id": "windows-prerelease-process-container",
       "displayName": "Windows Prerelease Process Container",
       "family": "windows",
-      "prerelease": true,
       "architectures": {
         "x64": {
           "target": "x86_64-pc-windows-msvc",
@@ -34,7 +33,6 @@
       "id": "windows-prerelease-isolation-session",
       "displayName": "Windows Prerelease Isolation Session",
       "family": "windows",
-      "prerelease": true,
       "architectures": {
         "x64": {
           "target": "x86_64-pc-windows-msvc",
@@ -55,6 +53,32 @@
           "backends": [
             "process-t1",
             "isolation-session"
+          ]
+        }
+      }
+    },
+    {
+      "id": "windows-prerelease-26h1",
+      "displayName": "Windows Prerelease 26H1",
+      "family": "windows",
+      "architectures": {
+        "x64": {
+          "target": "x86_64-pc-windows-msvc",
+          "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
+          "pool": "1es-mxc-windows-prerelease-26h1-x64",
+          "backends": [
+            "process-t1",
+            "wslc",
+            "windows-sandbox",
+            "microvm"
+          ]
+        },
+        "arm64": {
+          "target": "aarch64-pc-windows-msvc",
+          "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
+          "pool": "1es-mxc-windows-prerelease-26h1-arm64",
+          "backends": [
+            "process-t1"
           ]
         }
       }
@@ -293,6 +317,13 @@
         "os": "windows-prerelease-isolation-session",
         "backends": [
           "isolation-session"
+        ]
+      },
+      {
+        "os": "windows-prerelease-26h1",
+        "backends": [
+          "process-t1",
+          "wslc"
         ]
       },
       {
