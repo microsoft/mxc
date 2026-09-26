@@ -442,24 +442,29 @@ impl IngressManager {
 
         self.reset_family(family, runner, logger)?;
 
-        self.run(runner, binary, &["-N", &chain], logger)
+        self.run_logged(runner, binary, &["-N", &chain], logger)
             .map_err(RunError::into_message)?;
         self.set_created(family);
 
         for rule in &rules.body {
             let argv: Vec<&str> = rule.iter().map(String::as_str).collect();
-            self.run(runner, binary, &argv, logger)
+            self.run_logged(runner, binary, &argv, logger)
                 .map_err(RunError::into_message)?;
         }
 
         let hook: Vec<&str> = rules.hook.iter().map(String::as_str).collect();
-        self.run(runner, binary, &hook, logger)
+        self.run_logged(runner, binary, &hook, logger)
             .map_err(RunError::into_message)?;
         self.set_hooked(family);
 
         Ok(())
     }
 
+    /// Clear any chain an earlier run left behind before installing this one.
+    ///
+    /// Nothing is normally present, so the steps are expected to report the
+    /// chain as absent. Anything actually removed here escaped a previous
+    /// teardown and is worth a line of its own.
     fn reset_family(
         &mut self,
         family: IpFamily,
@@ -467,7 +472,15 @@ impl IngressManager {
         logger: &mut Logger,
     ) -> Result<(), String> {
         let steps = Self::reset_steps(family, &self.chain_name);
-        self.execute_teardown(&steps, runner, logger)
+        let removed = self.execute_teardown(&steps, runner, logger)?;
+        if removed {
+            logger.log_line(&format!(
+                "Removed a stale inbound {} chain '{}' left by an earlier run.",
+                family.binary(),
+                self.chain_name
+            ));
+        }
+        Ok(())
     }
 
     fn reset_steps(family: IpFamily, chain: &str) -> Vec<TeardownStep> {
@@ -478,21 +491,35 @@ impl IngressManager {
         ]
     }
 
+    /// Run one command in the container netns without logging the outcome.
+    ///
+    /// Several callers issue commands whose failure is the expected result --
+    /// tearing down a chain that was never installed, or deleting hook
+    /// references until one reports none left. Only the caller can tell those
+    /// apart from a genuine error, so it decides what reaches the log.
     fn run(
+        &self,
+        runner: &mut dyn CommandRunner,
+        binary: &str,
+        args: &[&str],
+    ) -> Result<(), RunError> {
+        let argv = self.nsenter_argv(binary, args);
+        runner.run(&argv)
+    }
+
+    /// Run a command whose failure is always genuine, recording it.
+    fn run_logged(
         &self,
         runner: &mut dyn CommandRunner,
         binary: &str,
         args: &[&str],
         logger: &mut Logger,
     ) -> Result<(), RunError> {
-        let argv = self.nsenter_argv(binary, args);
-        match runner.run(&argv) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                logger.log_line(e.message());
-                Err(e)
-            }
+        let result = self.run(runner, binary, args);
+        if let Err(ref e) = result {
+            logger.log_line(e.message());
         }
+        result
     }
 
     fn build_ingress_rules(
@@ -581,17 +608,20 @@ impl IngressManager {
         ));
 
         let steps = self.owned_teardown_steps();
-        self.execute_teardown(&steps, runner, logger)
+        self.execute_teardown(&steps, runner, logger)?;
+        Ok(())
     }
 
+    /// Run the teardown steps, returning whether any of them removed something.
     fn execute_teardown(
         &mut self,
         steps: &[TeardownStep],
         runner: &mut dyn CommandRunner,
         logger: &mut Logger,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let mut failures: Vec<String> = Vec::new();
         let mut blocked = [false, false];
+        let mut removed = false;
 
         for step in steps {
             let fi = step.family.index();
@@ -605,8 +635,11 @@ impl IngressManager {
                 StepKind::Unhook => {
                     let mut cleared = false;
                     for _ in 0..MAX_UNHOOK_ATTEMPTS {
-                        match self.run(runner, binary, &arg_refs, logger) {
-                            Ok(()) => continue,
+                        match self.run(runner, binary, &arg_refs) {
+                            Ok(()) => {
+                                removed = true;
+                                continue;
+                            }
                             Err(RunError::Exit { ref stderr, .. })
                                 if step.kind.stderr_means_absent(stderr) =>
                             {
@@ -614,7 +647,9 @@ impl IngressManager {
                                 break;
                             }
                             Err(e) => {
-                                failures.push(e.into_message());
+                                let msg = e.into_message();
+                                logger.log_line(&msg);
+                                failures.push(msg);
                                 blocked[fi] = true;
                                 break;
                             }
@@ -635,25 +670,28 @@ impl IngressManager {
                     }
                     self.clear_hooked(step.family);
                 }
-                StepKind::Flush | StepKind::Delete => {
-                    match self.run(runner, binary, &arg_refs, logger) {
-                        Ok(()) => self.clear_step_flag(step),
-                        Err(RunError::Exit { ref stderr, .. })
-                            if step.kind.stderr_means_absent(stderr) =>
-                        {
-                            self.clear_step_flag(step);
-                        }
-                        Err(e) => {
-                            failures.push(e.into_message());
-                            blocked[fi] = true;
-                        }
+                StepKind::Flush | StepKind::Delete => match self.run(runner, binary, &arg_refs) {
+                    Ok(()) => {
+                        removed = true;
+                        self.clear_step_flag(step);
                     }
-                }
+                    Err(RunError::Exit { ref stderr, .. })
+                        if step.kind.stderr_means_absent(stderr) =>
+                    {
+                        self.clear_step_flag(step);
+                    }
+                    Err(e) => {
+                        let msg = e.into_message();
+                        logger.log_line(&msg);
+                        failures.push(msg);
+                        blocked[fi] = true;
+                    }
+                },
             }
         }
 
         if failures.is_empty() {
-            Ok(())
+            Ok(removed)
         } else {
             Err(format!(
                 "inbound teardown for chain '{}' failed: {}",
@@ -747,7 +785,7 @@ impl IngressManager {
         runner: &mut dyn CommandRunner,
         logger: &mut Logger,
     ) -> bool {
-        match self.run(runner, "ip6tables", &["-S"], logger) {
+        match self.run(runner, "ip6tables", &["-S"]) {
             Ok(()) => true,
             Err(e) => {
                 logger.log_line(&format!(
@@ -1900,6 +1938,95 @@ mod tests {
         assert!(
             first_flush < first_delete,
             "flush precedes delete: {verbs:?}"
+        );
+    }
+
+    /// A chain that was never installed is the normal case on a fresh
+    /// container, and draining hook references ends by design with iptables
+    /// reporting none left. Logging those makes every healthy run look like a
+    /// string of failures and buries a real one.
+    #[test]
+    fn expected_absent_teardown_outcomes_are_not_logged_as_failures() {
+        let pid = 91u32;
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let mut mgr = IngressManager::new("quiet-reset-container", pid);
+
+        let mut runner = FakeRunner {
+            calls: Vec::new(),
+            respond: |argv: &[String]| match verb(argv) {
+                "-D" => Err(absent_rule()),
+                _ => Err(absent_chain()),
+            },
+        };
+
+        mgr.reset_family(IpFamily::V4, &mut runner, &mut logger)
+            .expect("a chain that was never installed is not a teardown failure");
+
+        let logged = logger.get_buffer();
+        assert!(
+            !logged.contains("failed"),
+            "tearing down an absent chain must log nothing: {logged:?}"
+        );
+        assert!(
+            !logged.contains("stale"),
+            "nothing was removed, so no stale-chain report is warranted: {logged:?}"
+        );
+    }
+
+    /// The counterpart: a chain that really was there escaped an earlier
+    /// teardown, and silence would hide the leak the quiet path exists to
+    /// tolerate.
+    #[test]
+    fn reset_reports_a_chain_an_earlier_run_left_behind() {
+        let pid = 92u32;
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let mut mgr = IngressManager::new("stale-reset-container", pid);
+
+        let mut runner = FakeRunner {
+            calls: Vec::new(),
+            respond: |argv: &[String]| match verb(argv) {
+                "-D" => Err(absent_rule()),
+                _ => Ok(()),
+            },
+        };
+
+        mgr.reset_family(IpFamily::V4, &mut runner, &mut logger)
+            .expect("removing a leftover chain succeeds");
+
+        assert!(
+            logger.get_buffer().contains("stale"),
+            "a chain removed here leaked from an earlier run and must be reported: {:?}",
+            logger.get_buffer()
+        );
+    }
+
+    /// Quieting the expected outcomes must not quiet the unexpected ones.
+    #[test]
+    fn a_genuine_teardown_failure_is_still_logged() {
+        let pid = 93u32;
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let mut mgr = IngressManager::new("broken-teardown-container", pid);
+
+        let mut runner = FakeRunner {
+            calls: Vec::new(),
+            respond: |argv: &[String]| match verb(argv) {
+                "-D" => Err(absent_rule()),
+                _ => Err(RunError::Exit {
+                    stderr: "iptables: Resource temporarily unavailable.".to_string(),
+                    msg: "iptables -F chain failed: Resource temporarily unavailable.".to_string(),
+                }),
+            },
+        };
+
+        mgr.reset_family(IpFamily::V4, &mut runner, &mut logger)
+            .expect_err("a failure that is not 'already absent' must surface");
+
+        assert!(
+            logger
+                .get_buffer()
+                .contains("Resource temporarily unavailable"),
+            "a genuine failure must reach the log: {:?}",
+            logger.get_buffer()
         );
     }
 
