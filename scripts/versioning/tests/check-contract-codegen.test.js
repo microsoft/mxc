@@ -48,7 +48,7 @@ function schema(requestRoots = roots) {
 function contract(version, requestRoots, overrides = {}) {
   return {
     version,
-    status: version === "0.10.0-alpha" ? "development" : "published",
+    status: version === "1.1.0-alpha" ? "development" : "published",
     schemaPath: `${version}.schema.json`,
     typescriptPath: `${version}.wire.ts`,
     generatesArtifacts: true,
@@ -65,13 +65,13 @@ function contract(version, requestRoots, overrides = {}) {
 
 test("exact versions dispatch precisely their expected request roots", () => {
   const v0_9 = contract("0.9.0-alpha", v0_9Roots);
-  const v0_10 = contract("0.10.0-alpha", roots);
+  const v1_1 = contract("1.1.0-alpha", roots);
   assert.deepEqual(
     [...validateDispatchRoots(schema(v0_9Roots), v0_9).values()],
     v0_9Roots
   );
   assert.deepEqual(
-    [...validateDispatchRoots(schema(), v0_10).values()],
+    [...validateDispatchRoots(schema(), v1_1).values()],
     roots
   );
 
@@ -98,17 +98,18 @@ test("registry selects exact contracts with generated artifacts", () => {
       generatesArtifacts: false,
     }),
     contract("0.9.0-alpha", v0_9Roots),
-    contract("0.10.0-alpha", roots),
+    contract("1.0.0", v0_9Roots),
+    contract("1.1.0-alpha", roots),
   ]);
   assert.deepEqual(
     selected.map(contract => contract.version),
-    ["0.9.0-alpha", "0.10.0-alpha"]
+    ["0.9.0-alpha", "1.0.0", "1.1.0-alpha"]
   );
 
   assert.throws(
     () => contractsWithGeneratedArtifacts([
       contract("0.9.0-alpha", v0_9Roots, { typescriptPath: null }),
-      contract("0.10.0-alpha", roots),
+      contract("1.1.0-alpha", roots),
     ]),
     /0\.9\.0-alpha has no TypeScript oracle path/
   );
@@ -243,9 +244,9 @@ test("published registry covers every supported stable schema", () => {
       schemaId,
     },
     {
-      version: "0.10.0-alpha",
+      version: "1.1.0-alpha",
       status: "development",
-      schemaPath: "schemas/dev/mxc-config.schema.0.10.0-alpha.json",
+      schemaPath: "schemas/dev/mxc-config.schema.1.1.0-alpha.json",
       schemaId: "development",
     },
   ];
@@ -275,9 +276,9 @@ test("retired stable schemas do not require exact registry entries", () => {
     ],
   ]);
   const development = [{
-    version: "0.10.0-alpha",
+    version: "1.1.0-alpha",
     status: "development",
-    schemaPath: "schemas/dev/mxc-config.schema.0.10.0-alpha.json",
+    schemaPath: "schemas/dev/mxc-config.schema.1.1.0-alpha.json",
     schemaId: "development",
   }];
   assert.deepEqual(

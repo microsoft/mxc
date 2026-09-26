@@ -317,7 +317,7 @@ fn input<C: Case>(phase: Phase) -> Value {
         "version": if C::BACKEND == "isolation_session" {
             "0.9.0-alpha"
         } else {
-            "0.10.0-alpha"
+            "1.1.0-alpha"
         },
         "phase": phase.as_str(),
         "telemetry": {"enabled": false},

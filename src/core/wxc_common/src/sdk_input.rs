@@ -109,11 +109,11 @@ impl SdkStateAwareInput {
     pub fn new(version: ContractVersion, operation: StateAwareOperation) -> Result<Self, WxcError> {
         if !matches!(
             version,
-            ContractVersion::V0_9_0Alpha | ContractVersion::V0_10_0Alpha
+            ContractVersion::V0_9_0Alpha | ContractVersion::V1_0_0 | ContractVersion::V1_1_0Alpha
         ) {
             return Err(WxcError::ConfigParse(format!(
                 "typed state-aware Rust SDK requests require schema version \
-                 0.9.0-alpha or 0.10.0-alpha, got {}",
+                 0.9.0-alpha, 1.0.0, or 1.1.0-alpha, got {}",
                 version.as_str()
             )));
         }
@@ -122,10 +122,10 @@ impl SdkStateAwareInput {
             StateAwareOperation::Provision(
                 crate::state_aware_operation::StateAwareProvision::WindowsSandbox
             )
-        ) && version != ContractVersion::V0_10_0Alpha
+        ) && version != ContractVersion::V1_1_0Alpha
         {
             return Err(WxcError::ConfigParse(
-                "Windows Sandbox state-aware provision requires schema version 0.10.0-alpha"
+                "Windows Sandbox state-aware provision requires schema version 1.1.0-alpha"
                     .to_string(),
             ));
         }

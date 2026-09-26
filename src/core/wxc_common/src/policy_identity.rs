@@ -863,7 +863,7 @@ mod tests {
             if backend == "isolation_session" {
                 "0.9.0-alpha"
             } else {
-                "0.10.0-alpha"
+                "1.1.0-alpha"
             }
         )
     }
@@ -1055,7 +1055,7 @@ mod tests {
             };
             let source = |extra_fields: &str| {
                 format!(
-                    r#"{{"version":"0.10.0-alpha","phase":"{phase}","sandboxId":"wsb:deadbeef"{process}{extra_fields}}}"#
+                    r#"{{"version":"1.1.0-alpha","phase":"{phase}","sandboxId":"wsb:deadbeef"{process}{extra_fields}}}"#
                 )
             };
             assert_eq!(

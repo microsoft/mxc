@@ -29,18 +29,20 @@ import {
 // v1 SDK split will make SandboxPolicy version-free while retaining versions
 // for raw ContainerConfig input.
 const MIN_VERSION = '0.6.0-alpha';
-const SUPPORTED_VERSION = '0.10.0-alpha';
+const SUPPORTED_VERSION = '1.1.0-alpha';
 const REGISTERED_VERSION_VALUES = [
     '0.6.0-alpha',
     '0.7.0-alpha',
     '0.8.0-alpha',
     '0.9.0-alpha',
-    '0.10.0-alpha',
+    '1.0.0',
+    '1.1.0-alpha',
 ];
 const REGISTERED_VERSIONS = new Set(REGISTERED_VERSION_VALUES);
 const DIRECTIONAL_ONLY_VERSIONS = new Set([
     '0.9.0-alpha',
-    '0.10.0-alpha',
+    '1.0.0',
+    '1.1.0-alpha',
 ]);
 const REGISTERED_VERSION_ORDER = new Map(
     REGISTERED_VERSION_VALUES.map((version, index) => [version, index]),
@@ -124,7 +126,7 @@ function validateContainmentVersion(
                 effectiveContainment === 'microvm' ||
                 effectiveContainment === 'windows_sandbox' ||
                 effectiveContainment === 'hyperlight'
-                ? '0.10.0-alpha'
+                ? '1.1.0-alpha'
                 : '0.6.0-alpha';
 
     const versionOrder = REGISTERED_VERSION_ORDER.get(version);
@@ -466,7 +468,7 @@ export function createConfigFromPolicy(
     }
 
     if (enumeratePaths?.length) {
-        if (policy.version !== '0.9.0-alpha' && policy.version !== '0.10.0-alpha') {
+        if (!DIRECTIONAL_ONLY_VERSIONS.has(policy.version)) {
             throw new Error(
                 'processContainer.filesystem.enumeratePaths requires schema version 0.9.0-alpha or later.'
             );

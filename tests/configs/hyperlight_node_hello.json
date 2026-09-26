@@ -1,5 +1,5 @@
 {
-    "version": "0.10.0-alpha",
+    "version": "1.1.0-alpha",
     "process": {
         "commandLine": "const os = require('os');\nconsole.log(`hello from node ${process.version} on ${os.platform()}`);",
         "timeout": 30000

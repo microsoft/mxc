@@ -251,16 +251,19 @@ function Phase-IntentTelemetryVersion {
         -Pass ((Test-WasRejected -Run $r -Log $logText) -and $gated) `
         -Detail "exit=$($r.ExitCode); errorNamesTelemetry=$gated"
 
-    # The supported range is 0.6.0-alpha through 0.9.0-alpha inclusive
-    # (schemas/schema-version.json). Both ends must be accepted and both
-    # neighbours rejected, or the range is not actually a range.
+    # Every exact registered version in schemas/schema-version.json must be
+    # accepted. Versions outside that closed set must be rejected, including
+    # neighbors below the minimum and above the development contract.
     $versions = @(
         @{ V = '0.6.0-alpha'; Accept = $true;  Why = 'min supported' }
-        @{ V = '0.7.0-alpha'; Accept = $true;  Why = 'in range' }
-        @{ V = '0.8.0-alpha'; Accept = $true;  Why = 'in range, latest stable' }
-        @{ V = '0.9.0-alpha'; Accept = $true;  Why = 'maxSupported' }
+        @{ V = '0.7.0-alpha'; Accept = $true;  Why = 'registered stable' }
+        @{ V = '0.8.0-alpha'; Accept = $true;  Why = 'registered stable' }
+        @{ V = '0.9.0-alpha'; Accept = $true;  Why = 'registered stable' }
+        @{ V = '0.10.0-alpha'; Accept = $false; Why = 'retired development contract' }
+        @{ V = '1.0.0';       Accept = $true;  Why = 'latest stable' }
+        @{ V = '1.1.0-alpha'; Accept = $true;  Why = 'development contract' }
         @{ V = '0.5.0-alpha'; Accept = $false; Why = 'below min supported' }
-        @{ V = '1.0.0';       Accept = $false; Why = 'above maxSupported' }
+        @{ V = '1.2.0-alpha'; Accept = $false; Why = 'above development contract' }
         @{ V = 'not-a-version'; Accept = $false; Why = 'unparseable' }
     )
     foreach ($case in $versions) {

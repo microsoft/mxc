@@ -132,7 +132,7 @@ const V0_9_ROOTS: &[ContractRequestRoot] = &[
     },
 ];
 
-const V0_10_ROOTS: &[ContractRequestRoot] = &[
+const V1_1_ROOTS: &[ContractRequestRoot] = &[
     ContractRequestRoot {
         fixture_directory: "one_shot",
         schema_definition: "OneShotRequest",
@@ -211,14 +211,23 @@ pub const CONTRACTS: &[ContractDescriptor] = &[
         request_roots: V0_9_ROOTS,
     },
     ContractDescriptor {
-        version: ContractVersion::V0_10_0Alpha,
+        version: ContractVersion::V1_0_0,
+        status: ContractStatus::Published,
+        schema_id: "https://github.com/microsoft/mxc/schemas/stable/mxc-config.schema.1.0.0.json",
+        schema_path: "schemas/stable/mxc-config.schema.1.0.0.json",
+        typescript_path: Some("sdk/node/src/generated/v1_0_0/wire.ts"),
+        generates_artifacts: true,
+        request_roots: V0_9_ROOTS,
+    },
+    ContractDescriptor {
+        version: ContractVersion::V1_1_0Alpha,
         status: ContractStatus::Development,
         schema_id:
-            "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.10.0-alpha.json",
-        schema_path: "schemas/dev/mxc-config.schema.0.10.0-alpha.json",
-        typescript_path: Some("sdk/node/src/generated/v0_10_0_alpha/wire.ts"),
+            "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.1.1.0-alpha.json",
+        schema_path: "schemas/dev/mxc-config.schema.1.1.0-alpha.json",
+        typescript_path: Some("sdk/node/src/generated/v1_1_0_alpha/wire.ts"),
         generates_artifacts: true,
-        request_roots: V0_10_ROOTS,
+        request_roots: V1_1_ROOTS,
     },
 ];
 
@@ -229,7 +238,8 @@ pub const fn descriptor(version: ContractVersion) -> ContractDescriptor {
         ContractVersion::V0_7_0Alpha => CONTRACTS[1],
         ContractVersion::V0_8_0Alpha => CONTRACTS[2],
         ContractVersion::V0_9_0Alpha => CONTRACTS[3],
-        ContractVersion::V0_10_0Alpha => CONTRACTS[4],
+        ContractVersion::V1_0_0 => CONTRACTS[4],
+        ContractVersion::V1_1_0Alpha => CONTRACTS[5],
     }
 }
 
@@ -255,12 +265,13 @@ mod tests {
     #[test]
     fn test_supported_versions() {
         let versions = supported_versions();
-        assert_eq!(versions.len(), 5);
+        assert_eq!(versions.len(), 6);
         assert!(versions.contains(&ContractVersion::V0_6_0Alpha));
         assert!(versions.contains(&ContractVersion::V0_7_0Alpha));
         assert!(versions.contains(&ContractVersion::V0_8_0Alpha));
         assert!(versions.contains(&ContractVersion::V0_9_0Alpha));
-        assert!(versions.contains(&ContractVersion::V0_10_0Alpha));
+        assert!(versions.contains(&ContractVersion::V1_0_0));
+        assert!(versions.contains(&ContractVersion::V1_1_0Alpha));
     }
 
     #[test]
@@ -287,14 +298,14 @@ mod tests {
 
     #[test]
     fn development_artifacts_use_exact_version_paths() {
-        let descriptor = descriptor(ContractVersion::V0_10_0Alpha);
+        let descriptor = descriptor(ContractVersion::V1_1_0Alpha);
 
         assert_eq!(descriptor.status().as_str(), "development");
-        assert!(descriptor.schema_id().contains("0.10.0-alpha"));
-        assert!(descriptor.schema_path().contains("0.10.0-alpha"));
+        assert!(descriptor.schema_id().contains("1.1.0-alpha"));
+        assert!(descriptor.schema_path().contains("1.1.0-alpha"));
         assert!(descriptor
             .typescript_path()
-            .is_some_and(|path| path.contains("v0_10_0_alpha")));
+            .is_some_and(|path| path.contains("v1_1_0_alpha")));
         assert!(descriptor.generates_artifacts());
         assert!(descriptor
             .request_roots()

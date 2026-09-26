@@ -622,7 +622,7 @@ public class MxcLifecycleTests
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        Assert.Equal("0.10.0-alpha", root.GetProperty("version").GetString());
+        Assert.Equal("1.1.0-alpha", root.GetProperty("version").GetString());
         Assert.Equal("windows_sandbox", root.GetProperty("containment").GetString());
         Assert.Equal(
             @"C:\input",
@@ -737,7 +737,7 @@ public class MxcLifecycleTests
 
     [Theory]
     [InlineData("iso:abc", "0.9.0-alpha")]
-    [InlineData("wsb:0a1b2c3d", "0.10.0-alpha")]
+    [InlineData("wsb:0a1b2c3d", "1.1.0-alpha")]
     [InlineData("wslc:0123456789abcdef0123456789abcdef", "0.9.0-alpha")]
     public void BuildExecEnvelope_InheritDefaultEnvironmentUsesBackendVersion(
         string sandboxId,
@@ -866,7 +866,7 @@ public class MxcLifecycleTests
             new StateAwarePhaseOptions { Version = "0.9.0-alpha" });
 
         Assert.Equal("0.9.0-alpha", wslcStart["version"]!.GetValue<string>());
-        Assert.Equal("0.10.0-alpha", wsbStop["version"]!.GetValue<string>());
+        Assert.Equal("1.1.0-alpha", wsbStop["version"]!.GetValue<string>());
         Assert.Equal("0.9.0-alpha", overridden["version"]!.GetValue<string>());
     }
 

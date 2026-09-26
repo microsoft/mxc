@@ -22,11 +22,12 @@ macro_rules! optional {
     };
 }
 
-mod v0_10;
 mod v0_6;
 mod v0_7;
 mod v0_8;
 mod v0_9;
+mod v1_0;
+mod v1_1;
 
 #[derive(Clone, Copy)]
 enum LegacyEnforcement {
@@ -227,8 +228,9 @@ pub(super) fn build_request(
         ContractVersion::V0_9_0Alpha => {
             ExactOneShotContract::V0_9(Box::new(v0_9::build(&prepared)?))
         }
-        ContractVersion::V0_10_0Alpha => {
-            ExactOneShotContract::Dev(Box::new(v0_10::build(&prepared)?))
+        ContractVersion::V1_0_0 => ExactOneShotContract::V1_0(Box::new(v1_0::build(&prepared)?)),
+        ContractVersion::V1_1_0Alpha => {
+            ExactOneShotContract::Dev(Box::new(v1_1::build(&prepared)?))
         }
     };
     let mut logger = Logger::new(Mode::Buffer);

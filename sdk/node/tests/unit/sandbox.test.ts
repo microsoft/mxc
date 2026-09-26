@@ -204,7 +204,7 @@ describe('buildSandboxPayload', () => {
 
     it('should reject ProcessContainer enumeration policy for non-ProcessContainer targets', () => {
       const policy: SandboxPolicy = {
-        version: '0.10.0-alpha',
+        version: '1.1.0-alpha',
         processContainer: { filesystem: { enumeratePaths: ['C:\\tools'] } },
       };
       for (const [platform, containment] of [
@@ -250,7 +250,7 @@ describe('buildSandboxPayload', () => {
           const minimumVersion =
             containment === 'isolation_session' || containment === 'wslc'
               ? '0.9.0-alpha'
-              : '0.10.0-alpha';
+              : '1.1.0-alpha';
           assert.throws(
             () => createConfigFromPolicy({ version: '0.8.0-alpha' }, containment),
             {
@@ -279,7 +279,7 @@ describe('buildSandboxPayload', () => {
           const version =
             containment === 'isolation_session' || containment === 'wslc'
               ? '0.9.0-alpha'
-              : '0.10.0-alpha';
+              : '1.1.0-alpha';
           try {
             createConfigFromPolicy({ version }, containment);
           } catch (error) {
@@ -329,8 +329,19 @@ describe('buildSandboxPayload', () => {
       mockWindows();
       try {
         assert.throws(
-          () => buildSandboxPayload('echo hi', { version: '0.99.0' }),
+          () => buildSandboxPayload('echo hi', { version: '1.2.0' }),
           { message: /newer than supported/ },
+        );
+      } finally {
+        restore();
+      }
+    });
+
+    it('should accept the published v1 contract', () => {
+      mockWindows();
+      try {
+        assert.doesNotThrow(
+          () => buildSandboxPayload('echo hi', { version: '1.0.0' }),
         );
       } finally {
         restore();
@@ -341,7 +352,7 @@ describe('buildSandboxPayload', () => {
       mockWindows();
       try {
         assert.throws(
-          () => buildSandboxPayload('echo hi', { version: '1.0.0' }),
+          () => buildSandboxPayload('echo hi', { version: '2.0.0' }),
           { message: /newer than supported/ },
         );
       } finally {
@@ -504,7 +515,7 @@ describe('buildSandboxPayload', () => {
 
   describe('Containment override', () => {
     let originalPlatform: PropertyDescriptor | undefined;
-    const developmentPolicy: SandboxPolicy = { version: '0.10.0-alpha' };
+    const developmentPolicy: SandboxPolicy = { version: '1.1.0-alpha' };
 
     const mockWindows = () => {
       originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
@@ -533,7 +544,7 @@ describe('buildSandboxPayload', () => {
       mockWindows();
       try {
         const policy: SandboxPolicy = {
-          version: '0.10.0-alpha',
+          version: '1.1.0-alpha',
           filesystem: { readwritePaths: ['/tmp'] },
         };
         const payload = buildSandboxPayload('print(42)', policy, undefined, undefined, 'microvm');
@@ -551,7 +562,7 @@ describe('buildSandboxPayload', () => {
       mockWindows();
       try {
         const policy: SandboxPolicy = {
-          version: '0.10.0-alpha',
+          version: '1.1.0-alpha',
           filesystem: { readwritePaths: ['/tmp'], clearPolicyOnExit: false },
         };
         const payload = buildSandboxPayload('print(42)', policy, undefined, undefined, 'microvm');
@@ -565,7 +576,7 @@ describe('buildSandboxPayload', () => {
       mockWindows();
       try {
         const policy: SandboxPolicy = {
-          version: '0.10.0-alpha',
+          version: '1.1.0-alpha',
           network: { egress: { default: 'allow' } },
         };
         const payload = buildSandboxPayload('echo hi', policy);
@@ -581,7 +592,7 @@ describe('buildSandboxPayload', () => {
       try {
         for (const action of ['allow', 'deny'] as const) {
           const policy: SandboxPolicy = {
-            version: '0.10.0-alpha',
+            version: '1.1.0-alpha',
             network: {
               egress: { default: action },
               ingress: { default: action, hostLoopback: action },
@@ -608,7 +619,7 @@ describe('buildSandboxPayload', () => {
           () => buildSandboxPayload(
             'print(42)',
             {
-              version: '0.10.0-alpha',
+              version: '1.1.0-alpha',
               runtimeConfig: { networkProxy: 'http://127.0.0.1:8080' },
             },
             undefined,
@@ -621,7 +632,7 @@ describe('buildSandboxPayload', () => {
           () => buildSandboxPayload(
             'print(42)',
             {
-              version: '0.10.0-alpha',
+              version: '1.1.0-alpha',
               processContainer: {
                 network: { allowedProxyPeer: 'Contoso.Proxy_123' },
               },
@@ -636,7 +647,7 @@ describe('buildSandboxPayload', () => {
           () => buildSandboxPayload(
             'print(42)',
             {
-              version: '0.10.0-alpha',
+              version: '1.1.0-alpha',
               network: {
                 egress: {
                   default: 'allow',
@@ -655,7 +666,7 @@ describe('buildSandboxPayload', () => {
           () => buildSandboxPayload(
             'print(42)',
             {
-              version: '0.10.0-alpha',
+              version: '1.1.0-alpha',
               network: {
                 egress: { default: 'allow' },
                 ingress: { default: 'deny', hostLoopback: 'deny' },
@@ -679,7 +690,7 @@ describe('buildSandboxPayload', () => {
           () => buildSandboxPayload(
             'print(42)',
             {
-              version: '0.10.0-alpha',
+              version: '1.1.0-alpha',
               processContainer: {
                 filesystem: { enumeratePaths: ['C:\\tools'] },
               },
@@ -712,7 +723,7 @@ describe('buildSandboxPayload', () => {
       mockWindows();
       try {
         const policy: SandboxPolicy = {
-          version: '0.10.0-alpha',
+          version: '1.1.0-alpha',
           filesystem: { clearPolicyOnExit: false },
         };
         const payload = buildSandboxPayload('print(42)', policy, undefined, undefined, 'microvm');
@@ -2126,7 +2137,7 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
       containment === 'isolation_session' || containment === 'wslc'
         ? '0.9.0-alpha'
         : ['microvm', 'vm', 'hyperlight', 'windows_sandbox'].includes(containment)
-        ? '0.10.0-alpha'
+        ? '1.1.0-alpha'
         : ['seatbelt', 'macos_sandbox'].includes(containment)
           ? '0.7.0-alpha'
           : '0.6.0-alpha';
@@ -2236,10 +2247,10 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
     );
   });
 
-  // Legacy wire-value aliases (PR #268 deprecation window). The native binary
-  // accepts these via serde aliases regardless of schema version; the SDK
-  // validator must mirror that so configs carried forward from older spellings
-  // are not rejected before they reach wxc-exec. See also Rust parser tests
+  // Legacy wire-value aliases (PR #268 deprecation window). Historical v0
+  // contracts accept these via serde aliases; the SDK validator must mirror
+  // each exact contract so legacy configs reach wxc-exec while v1 rejects the
+  // retired spellings. See also Rust parser tests
   // `legacy_appcontainer_wire_value_aliases_processcontainer` and
   // `legacy_macos_sandbox_wire_value_aliases_seatbelt`.
   describe('legacy containment aliases', () => {
@@ -2292,6 +2303,67 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
       const envelope = JSON.parse(decoded);
       assert.strictEqual(envelope.containment, 'appcontainer');
     });
+
+    for (const version of ['1.0.0', '1.1.0-alpha']) {
+      it(`should reject legacy containment values for ${version}`, () => {
+        for (const [alias, canonical] of [
+          ['appcontainer', 'processcontainer'],
+          ['macos_sandbox', 'seatbelt'],
+        ] as const) {
+          assert.throws(
+            () => resolveExecutableAndArgs({
+              version,
+              containment: alias as ContainerConfig['containment'],
+              process: { commandLine: 'echo hi' },
+            }, {
+              executablePath: fakeExe,
+              skipPlatformCheck: true,
+            }),
+            {
+              message: new RegExp(
+                `Schema ${version.replaceAll('.', '\\.')} does not support legacy containment alias '${alias}'; use '${canonical}' instead`,
+              ),
+            },
+          );
+        }
+      });
+
+      it(`should reject legacy backend sections for ${version}`, () => {
+        assert.throws(
+          () => resolveExecutableAndArgs({
+            version,
+            containment: 'processcontainer',
+            process: { commandLine: 'echo hi' },
+            appContainer: {},
+          }, {
+            executablePath: fakeExe,
+            skipPlatformCheck: true,
+          }),
+          {
+            message: new RegExp(
+              `Schema ${version.replaceAll('.', '\\.')} does not support legacy field 'appContainer'; use 'processContainer' instead`,
+            ),
+          },
+        );
+
+        assert.throws(
+          () => resolveExecutableAndArgs({
+            version,
+            containment: 'seatbelt',
+            process: { commandLine: 'echo hi' },
+            macos_sandbox: {},
+          } as ContainerConfig, {
+            executablePath: fakeExe,
+            skipPlatformCheck: true,
+          }),
+          {
+            message: new RegExp(
+              `Schema ${version.replaceAll('.', '\\.')} does not support legacy field 'macos_sandbox'; use 'seatbelt' instead`,
+            ),
+          },
+        );
+      });
+    }
   });
 
   describe('builtinTestServer testing-features gate', () => {

@@ -1,5 +1,5 @@
 {
-    "version": "0.10.0-alpha",
+    "version": "1.1.0-alpha",
     "process": {
         "commandLine": "import sys\nprint(f'hello from plain python {sys.version.split()[0]}')",
         "timeout": 30000

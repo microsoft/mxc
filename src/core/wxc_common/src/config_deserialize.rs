@@ -528,6 +528,14 @@ mod tests {
         assert_exact_root::<mxc_config_contract::published::v0_9_0_alpha::ExecRequest>();
         assert_exact_root::<mxc_config_contract::published::v0_9_0_alpha::StopRequest>();
         assert_exact_root::<mxc_config_contract::published::v0_9_0_alpha::DeprovisionRequest>();
+        assert_exact_root::<mxc_config_contract::published::v1_0_0::OneShotRequest>();
+        assert_exact_root::<mxc_config_contract::published::v1_0_0::IsolationSessionProvisionRequest>(
+        );
+        assert_exact_root::<mxc_config_contract::published::v1_0_0::WslcProvisionRequest>();
+        assert_exact_root::<mxc_config_contract::published::v1_0_0::StartRequest>();
+        assert_exact_root::<mxc_config_contract::published::v1_0_0::ExecRequest>();
+        assert_exact_root::<mxc_config_contract::published::v1_0_0::StopRequest>();
+        assert_exact_root::<mxc_config_contract::published::v1_0_0::DeprovisionRequest>();
         assert_exact_root::<mxc_config_contract::dev::OneShotRequest>();
         assert_exact_root::<mxc_config_contract::dev::WindowsSandboxProvisionRequest>();
         assert_exact_root::<mxc_config_contract::dev::IsolationSessionProvisionRequest>();

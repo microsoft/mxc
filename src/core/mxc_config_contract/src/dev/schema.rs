@@ -127,39 +127,7 @@ fn phase_dispatch(
     )
 }
 
-fn add_property_alias(definitions: &mut Value, definition: &str, canonical: &str, alias: &str) {
-    let properties = definitions[definition]["properties"]
-        .as_object_mut()
-        .expect("object definition properties");
-    let schema = properties
-        .get(canonical)
-        .unwrap_or_else(|| panic!("missing canonical property {definition}.{canonical}"))
-        .clone();
-    properties.insert(alias.to_string(), schema);
-}
-
-fn exclude_duplicate_alias(
-    definitions: &mut Value,
-    definition: &str,
-    canonical: &str,
-    alias: &str,
-) {
-    let definition = definitions[definition]
-        .as_object_mut()
-        .expect("object definition");
-    let constraints = definition
-        .entry("allOf")
-        .or_insert_with(|| Value::Array(Vec::new()))
-        .as_array_mut()
-        .expect("allOf constraints");
-    constraints.push(json!({
-        "not": {
-            "required": [canonical, alias]
-        }
-    }));
-}
-
-/// Generates the unrendered JSON Schema for the mutable `0.10.0-alpha`
+/// Generates the unrendered JSON Schema for the mutable `1.1.0-alpha`
 /// development contract.
 ///
 /// The document selects one of eight closed request roots through nested
@@ -184,38 +152,14 @@ pub fn development_schema() -> Value {
         state_aware,
         one_shot_dispatch(one_shot),
     );
-    let mut definitions =
+    let definitions =
         serde_json::to_value(generator.take_definitions()).expect("definitions serialize to JSON");
-    add_property_alias(
-        &mut definitions,
-        "OneShotRequest",
-        "processContainer",
-        "appContainer",
-    );
-    exclude_duplicate_alias(
-        &mut definitions,
-        "OneShotRequest",
-        "processContainer",
-        "appContainer",
-    );
-    add_property_alias(
-        &mut definitions,
-        "OneShotRequest",
-        "seatbelt",
-        "macos_sandbox",
-    );
-    exclude_duplicate_alias(
-        &mut definitions,
-        "OneShotRequest",
-        "seatbelt",
-        "macos_sandbox",
-    );
 
     json!({
         "$schema": "http://json-schema.org/draft-07/schema#",
-        "title": "MXC Configuration 0.10.0-alpha",
+        "title": "MXC Configuration 1.1.0-alpha",
         "description": "Exact mutable MXC development configuration contract.",
-        "$comment": "GENERATED FILE - DO NOT EDIT. Regenerate with: cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0.10.0-alpha --out schemas/dev/mxc-config.schema.0.10.0-alpha.json. This exact contract is authoritative for declared 0.10.0-alpha requests. Request roots are selected by phase and provision containment.",
+        "$comment": "GENERATED FILE - DO NOT EDIT. Regenerate with: cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 1.1.0-alpha --out schemas/dev/mxc-config.schema.1.1.0-alpha.json. This exact contract is authoritative for declared 1.1.0-alpha requests. Request roots are selected by phase and provision containment.",
         "allOf": [dispatch],
         "definitions": definitions
     })
@@ -240,7 +184,7 @@ mod tests {
     #[test]
     fn development_schema_satisfies_shared_invariants() {
         assert_schema_invariants(SchemaExpectations {
-            version: "0.10.0-alpha",
+            version: "1.1.0-alpha",
             schema: development_schema(),
             regenerated_schema: development_schema(),
             request_roots: ROOT_NAMES,
@@ -258,7 +202,7 @@ mod tests {
                 ("IsolationSessionProvisionRequest", "isolation_session"),
                 ("WslcProvisionRequest", "wslc"),
             ],
-            compatibility_aliases: true,
+            compatibility_aliases: false,
             one_shot_required: &["process"],
             exec_required: &["process"],
         });

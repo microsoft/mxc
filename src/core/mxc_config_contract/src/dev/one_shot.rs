@@ -12,20 +12,20 @@ use super::wslc::OneShotWslc;
 use crate::dev::Version;
 
 string_enum! {
-    /// Containment selections available in `0.10.0-alpha`.
+    /// Containment selections available in `1.1.0-alpha`.
     #[derive(Debug)]
     pub enum Containment, schema_name = "OneShotContainment" {
         // Stable-candidate values.
         /// Select the host's native process-containment backend.
         Process => ["process"],
         /// Select the Windows ProcessContainer backend.
-        ProcessContainer => ["processcontainer", "appcontainer"],
+        ProcessContainer => ["processcontainer"],
         /// Select the Linux LXC backend.
         Lxc => ["lxc"],
         /// Select the Linux Bubblewrap backend.
         Bubblewrap => ["bubblewrap"],
         /// Select the macOS Seatbelt backend.
-        Seatbelt => ["seatbelt", "macos_sandbox"],
+        Seatbelt => ["seatbelt"],
 
         // Development-only values.
         /// Select the host's VM-class containment backend.
@@ -45,7 +45,7 @@ string_enum! {
     }
 }
 
-/// A complete one-shot `0.10.0-alpha` configuration request.
+/// A complete one-shot `1.1.0-alpha` configuration request.
 #[derive(Debug, serde::Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schema-gen", schemars(rename = "OneShotRequest"))]
@@ -83,14 +83,13 @@ pub struct Request {
     #[serde(default)]
     pub ui: OptionalField<Ui>,
     /// Optional ProcessContainer settings.
-    /// The legacy `appContainer` spelling is accepted as an alias.
-    #[serde(alias = "appContainer", default)]
+    #[serde(default)]
     pub process_container: OptionalField<ProcessContainer>,
     /// Optional LXC distribution settings.
     #[serde(default)]
     pub lxc: OptionalField<Lxc>,
     /// Optional macOS Seatbelt configuration.
-    #[serde(alias = "macos_sandbox", default)]
+    #[serde(default)]
     pub seatbelt: OptionalField<Seatbelt>,
     /// Optional runtime configuration settings.
     #[serde(default)]

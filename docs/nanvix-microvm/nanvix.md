@@ -63,7 +63,7 @@ is to run a normal `--with-microvm` build once and copy the staged
 
 ```json
 {
-  "version": "0.10.0-alpha",
+  "version": "1.1.0-alpha",
   "process": {
     "commandLine": "print('Hello from MicroVM!')",
     "timeout": 30000
@@ -100,7 +100,7 @@ mounts are used.
 
 ```json
 {
-  "version": "0.10.0-alpha",
+  "version": "1.1.0-alpha",
   "process": {
     "commandLine": "import os\npath = 'C:\\\\Users\\\\me\\\\work'\nwith open(os.path.join(path, 'result.txt'), 'w') as f:\n    f.write('done')",
     "timeout": 30000
@@ -154,11 +154,11 @@ Not supported for MicroVM. If `deniedPaths` is specified, the config is rejected
 | Symlinks/reparse points in source paths | Not supported (rejected at preflight)       |
 | Junctions for staging                   | Not used                                    |
 | `workingDirectory`                      | Not supported (guest CWD is `/`)            |
-| Network policy                          | v0.10 isolated or explicitly unrestricted host networking |
+| Network policy                          | v1.1 isolated or explicitly unrestricted host networking |
 
 ## Networking
 
-Host networking is **opt-in**. Exact v0.10 supports two coherent directional
+Host networking is **opt-in**. Exact v1.1 supports two coherent directional
 postures: all three of egress default, ingress default and host-loopback deny
 leaves networking disabled; all three explicitly allow enables unrestricted
 host networking through `-allow-host-networking`. Mixed postures are rejected,
@@ -166,7 +166,7 @@ including egress allow with omitted ingress defaults.
 
 ```json
 {
-  "version": "0.10.0-alpha",
+  "version": "1.1.0-alpha",
   "containment": "microvm",
   "process": { "commandLine": "print('network enabled')" },
   "network": {
@@ -185,7 +185,7 @@ Runtime proxy configuration is also unsupported.
 
 ### Legacy per-host filter implementation (compatibility/reference only)
 
-The following describes the retained legacy runtime filter, not accepted v0.10
+The following describes the retained legacy runtime filter, not accepted v1.1
 JSON vocabulary. The exact cutover does not silently translate directional
 rules into this weaker contract.
 
@@ -226,7 +226,7 @@ preflight.
 {
   "containment": "microvm",
   "process": { "commandLine": "import urllib.request; ..." },
-  // Historical legacy shape, not accepted by the exact v0.10 contract:
+  // Historical legacy shape, not accepted by the exact v1.1 contract:
   "network": { "defaultPolicy": "allow" }
 }
 ```
@@ -235,7 +235,7 @@ preflight.
 {
   "containment": "microvm",
   "process": { "commandLine": "import urllib.request; ..." },
-  // Historical legacy shape, not accepted by the exact v0.10 contract:
+  // Historical legacy shape, not accepted by the exact v1.1 contract:
   "network": { "allowedHosts": ["example.com", "10.0.0.0/8"] }
 }
 ```
