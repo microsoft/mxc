@@ -5,7 +5,7 @@ complete. Phase 13c, which completes the missing direct typed Rust SDK path,
 must land before Phase 14 starts. Phase 14 establishes the v1 SDK line and the
 v1.0 exact contract.
 
-Updated: September 22, 2026.
+Updated: September 26, 2026.
 
 ## 1. Stack status
 
@@ -507,16 +507,50 @@ Implement typed transport in this order:
 1. complete the typed engine entry points, direct Rust SDK adapters, typed
    state-aware APIs, and raw API separation in Phase 13c;
 2. preserve that path through the v1 Rust API transition;
-3. add a co-versioned typed FFI request and migrate .NET high-level lifecycle
-   APIs;
-4. complete the Node transport design and implement typed native transport
+3. complete the FFI ingress matrix in a dedicated follow-up PR: typed and raw
+   exact-JSON entry points for both one-shot and state-aware operations;
+4. migrate .NET high-level lifecycle calls to the typed state-aware FFI lane;
+5. complete the Node transport design and implement typed native transport
    unless an explicit reviewed architecture decision records why it must
    remain executor JSON;
-5. keep typed and raw exact-JSON normalization equivalent through shared
+6. keep typed and raw exact-JSON normalization equivalent through shared
    fixtures and tests.
 
 Completing internal typed dispatch after JSON parsing does not satisfy this
 work. Completion is measured at the caller boundary.
+
+### 9.5 Symmetric Rust FFI ingress
+
+Add one follow-up PR after the current six-PR stack to make `mxc_ffi` expose
+both supported ingress forms for both execution models:
+
+| Execution model | Typed FFI entry point | Raw exact-JSON FFI entry point |
+| --- | --- | --- |
+| One-shot | Co-versioned typed request that adapts directly into `CommonRequestIR` | Explicit exact-version JSON request |
+| State-aware | Typed operation request plus typed sandbox identity and result | Explicit exact-version lifecycle envelope JSON |
+
+The typed entry points are the high-level binding path. They must not serialize
+to JSON or call an exact JSON parser internally. The JSON entry points remain
+available for raw configuration, replay, compatibility, and callers that
+intentionally own an exact contract.
+
+The PR must:
+
+- keep one-shot run-to-completion and streaming ownership semantics distinct;
+- keep state-aware envelope, streaming exec, and attached exec semantics
+  distinct;
+- use co-versioned FFI structs rather than exposing Rust layout or exact
+  contract structs through the ABI;
+- adapt typed requests into the same private `CommonRequestIR` and checked
+  state-aware binding paths used by the Rust SDK;
+- preserve existing raw JSON entry points and their path-aware diagnostics;
+- preserve panic containment, status-code mapping, allocation ownership, and
+  result-free functions across the C ABI;
+- regenerate C/C# bindings and update API-parity checks;
+- add typed-versus-JSON equivalence tests for one-shot and every state-aware
+  operation, including presence-sensitive fields, errors, and metadata;
+- leave Node transport selection as a separate consumer decision rather than
+  making the FFI PR implicitly migrate Node.
 
 ## 10. Legacy networking removal
 
@@ -678,7 +712,8 @@ surfaces below.
 | 14a — Compatibility foundations | Canonical SDK-major target metadata, adjacent-contract comparator, semantic-review manifest format, and initial SDK API baseline tooling |
 | 14b — Exact `1.0.0` contract | Create `1.0.0` from v0.9, remove aliases, add stable registry/schema/types/fixtures/adapters/parser dispatch, and prove v0.10-only surfaces are rejected |
 | 14c — v1 SDK boundary | Apply the Rust, Node, .NET, and FFI high-level v1 API changes, preserve the direct Rust transport, remove high-level legacy network authoring, and target `1.0.0` |
-| 14d — .NET and Node transport | Add typed co-versioned FFI and migrate .NET high-level lifecycle calls; complete the Node transport design and typed implementation or record an explicit reviewed constraint and follow-up |
+| FFI follow-up — symmetric typed/raw ingress | Add typed and raw exact-JSON `mxc_ffi` entry points for both one-shot and state-aware operations, with shared semantic-equivalence, ownership, panic-containment, and generated-binding coverage |
+| 14d — .NET and Node transport | Migrate .NET high-level lifecycle calls onto the completed typed state-aware FFI lane; complete the Node transport design and typed implementation or record an explicit reviewed constraint and follow-up |
 | v1.0 release checkpoint | Complete validation and release the v1.0 SDKs and runtime while the canonical v1 target is `1.0.0` |
 | 14e — Rename v0.10 to `1.1.0` | Rename the existing development contract and artifacts without reconstructing features, advance the canonical v1 SDK target, and remove v0.10 identities |
 | 14f — Enforce v1.1 compatibility | Check `1.0.0` to `1.1.0`, add semantic classifications, compile v1.0 consumers against v1.1 SDKs, and run behavioral compatibility fixtures |
@@ -739,6 +774,18 @@ seam is stable and the v1 API boundary has consumed it. Merge the required
 - behavioral fixtures proving existing intent is unchanged;
 - explicit tests for every newly available optional field and backend.
 
+### 14.5 Symmetric FFI ingress
+
+- typed one-shot FFI input reaches `CommonRequestIR` without JSON;
+- raw one-shot FFI input continues through exact registered JSON parsing;
+- typed state-aware FFI input carries operation and sandbox identity without a
+  JSON envelope;
+- raw state-aware FFI input retains exact lifecycle envelope parsing;
+- typed and JSON requests produce equivalent normalized intent and results;
+- streaming handles, attached execution, result allocation/freeing, error
+  codes, and panic containment are covered for both execution models;
+- generated native headers and managed bindings match the exported ABI.
+
 ## 15. Phase 14 exit criteria
 
 Phase 14 is complete when:
@@ -769,7 +816,9 @@ Phase 14 is complete when:
    future v1.x evolution;
 14. no v0.10 identity or artifact remains;
 15. no rolling parser, rolling SDK contract interpreter, runtime
-    `VersionSemantics`, or same-major parser fallback is introduced.
+    `VersionSemantics`, or same-major parser fallback is introduced;
+16. `mxc_ffi` exposes typed and raw exact-JSON entry points for both one-shot
+    and state-aware operations without routing typed calls through JSON.
 
 ## 16. Non-goals
 
