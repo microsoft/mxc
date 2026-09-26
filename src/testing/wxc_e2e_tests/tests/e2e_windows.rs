@@ -16,7 +16,7 @@ use wxc_e2e_tests::{
     assert_success_or_skip_missing_prerequisite, examples_dir, has_hyperlight_runtime,
     has_hyperlight_snapshot, has_nanvix_binaries, has_test_driver, has_windows_sandbox_feature,
     has_wxc_exe, repo_root, run_test_driver, run_wxc_config, run_wxc_config_value, run_wxc_example,
-    run_wxc_state_aware, test_configs_dir, TempDirs,
+    test_configs_dir, TempDirs,
 };
 
 static HAS_WXC_EXE: OnceLock<bool> = OnceLock::new();
@@ -1103,7 +1103,7 @@ fn hyperlight_suite() {
             "filesystem": { "readwritePaths": [mount_dir.to_string_lossy()] }
         });
 
-        let result = run_wxc_state_aware("hyperlight-fs", &config, &["--debug", "--experimental"]);
+        let result = run_wxc_config_value("hyperlight-fs", &config, &["--debug", "--experimental"]);
 
         if result.code != Some(0) {
             failures.push(format!(
@@ -1171,7 +1171,7 @@ fn hyperlight_suite() {
             }
         });
 
-        let result = run_wxc_state_aware(
+        let result = run_wxc_config_value(
             "hyperlight-fs-readonly",
             &config,
             &["--debug", "--experimental"],

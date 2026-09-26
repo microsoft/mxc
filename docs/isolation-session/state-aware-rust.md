@@ -14,22 +14,24 @@ concurrency story, and error mapping.
 - The Rust layer of state-aware IsolationSession in `wxc-exec.exe`, behind
   the `--features isolation_session` Cargo feature. The published v0.9
   surface requires no runtime experimental opt-in.
-- The wire format consumed by `wxc-exec.exe` for state-aware requests
-  (top-level `phase` discriminator, `sandboxId`,
-  `isolationSession.provision` typed configuration).
+- The exact state-aware phase contracts. Raw SDK and FFI JSON carries the
+  top-level `phase` discriminator and `sandboxId`; direct `wxc-exec.exe`
+  calls supply those routing values through `--operation` and
+  `--sandbox-id`.
 - Mapping from the OS-side service's HRESULTs to the wire-format `MxcError`
   codes.
 
 ### In-process callers reach the same lifecycle
 
 The Rust SDK (`mxc-sdk`) and the C ABI over it (`mxc_ffi`), each with an
-`isolation_session` feature, take the same phases and the same request JSON as
-`wxc-exec`; only the entry point differs.
+`isolation_session` feature, use the raw exact envelope containing `phase` and,
+for non-provision operations, `sandboxId`. The executor uses the same exact
+phase contracts after taking those routing values from CLI arguments.
 
 | Phase | `wxc-exec` | In-process |
 |---|---|---|
-| provision / start / stop / deprovision | `wxc-exec --config …` | `mxc_sdk::run_state_aware_json`, `mxc_state_aware` |
-| exec, attached to the caller's stdio | `wxc-exec --config …` | `mxc_sdk::exec_attached`, `mxc_state_aware_exec_attached` |
+| provision / start / stop / deprovision | `wxc-exec --operation <phase> [--sandbox-id <id>] --config …` | `mxc_sdk::run_state_aware_json`, `mxc_state_aware` |
+| exec, attached to the caller's stdio | `wxc-exec --operation exec --sandbox-id <id> --config …` | `mxc_sdk::exec_attached`, `mxc_state_aware_exec_attached` |
 | exec, caller drives the pipes | *(no CLI equivalent)* | `mxc_sdk::exec_sandbox`, `mxc_state_aware_exec` |
 
 Requirements on an in-process caller:
@@ -367,6 +369,10 @@ match what the backend actually does), while the state-aware parser refuses the
 whole section for every backend. See the matrix notes above.
 
 ### Fields valid in state-aware only
+
+These are fields in the raw exact SDK/FFI envelope. Direct `wxc-exec` calls
+remove `phase` and `sandboxId` from the JSON payload and pass them as
+`--operation` and `--sandbox-id`.
 
 - `phase` — the discriminator. Required for state-aware; absent for one-shot.
 - `sandboxId` — required for non-provision phases.

@@ -61,9 +61,11 @@ deserialization DTO.
 
 ## Sandbox IDs
 
-`provision` mints an id of the form `wslc:<32 lowercase hex>` (`wslc:` + a UUID simple form). All
-post-provision phases (`start` / `exec` / `stop` / `deprovision`) carry this id in `sandboxId`; the
-dispatcher derives the backend from the `wslc:` prefix (they do **not** repeat `containment`).
+`provision` mints an id of the form `wslc:<32 lowercase hex>` (`wslc:` + a UUID simple form).
+Raw SDK/FFI requests carry this id in `sandboxId` for every post-provision phase
+(`start` / `exec` / `stop` / `deprovision`). Direct `wxc-exec` calls omit it from JSON and pass it
+as `--sandbox-id`; the dispatcher derives the backend from the `wslc:` prefix (later operations do
+**not** repeat `containment`).
 
 ## Phase → WSLc SDK mapping
 
@@ -230,13 +232,14 @@ run individually or in an arbitrary order:
   `deprovision` → `not_provisioned`).
 - **The id must be threaded through.** `provision` returns the real `wslc:<32-hex>` id on stdout
   (`result.sandboxId`). The post-provision fixtures (`_start`, `_stop`, `_deprovision`, and every
-  `_exec_*`) ship with a literal **`{{SANDBOX_ID}}` placeholder** that must be replaced with that
-  minted id before the config is passed to `wxc-exec`. Running a post-provision fixture as-is sends
-  the literal placeholder and fails validation.
+  `_exec_*`) ship with a literal **`{{SANDBOX_ID}}` placeholder**. These fixtures use the raw exact
+  SDK/FFI envelope shape; the harness replaces the placeholder before converting the request to
+  direct executor CLI form.
 
 `run_wslc_state_aware_tests.ps1` handles both concerns automatically (it drives the phases in order
-and does the `{{SANDBOX_ID}}` substitution from each provision's output), which is why the fixtures
-should be exercised **through the harness**, not by pointing `wxc-exec --config` at them directly.
+and does the `{{SANDBOX_ID}}` substitution from each provision's output). It then removes `phase`
+and `sandboxId` from the JSON and passes them as `--operation` and `--sandbox-id`. Exercise these
+fixtures **through the harness**, not by pointing `wxc-exec --config` at them directly.
 
 ## Known limitations
 
