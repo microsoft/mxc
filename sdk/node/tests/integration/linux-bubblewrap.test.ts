@@ -86,10 +86,14 @@ describe(`Linux Bubblewrap (schema ${schemaVersion})`, {
 // Network proxy tests use the cooperative env-var proxy, which is
 // unprivileged by design -- the entire reason the proxy path exists is to
 // avoid the root requirement of iptables-based enforcement. Gate on
-// "Linux + bwrap available" rather than "Linux + root". Pinned to schema
-// 0.6.0-alpha because Bubblewrap proxy support is only available in 0.6+.
-const PROXY_SCHEMA = '0.6.0-alpha';
-describe('Linux Bubblewrap network proxy (schema 0.6.0-alpha)', {
+// "Linux + bwrap available" rather than "Linux + root".
+//
+// Pinned to 0.7 to hold the *legacy* proxy shape: `network.proxy`,
+// `defaultPolicy` and `allowedHosts` were removed in 0.9, and below 0.8 they
+// run on the shared host network, so this block needs no slirp4netns. The 0.9
+// spelling is covered separately below.
+const PROXY_SCHEMA = '0.7.0-alpha';
+describe(`Linux Bubblewrap network proxy, legacy shape (schema ${PROXY_SCHEMA})`, {
   skip: !isLinuxBubblewrap
     ? 'Linux Bubblewrap proxy tests require Linux with bwrap installed'
     : undefined,
@@ -175,6 +179,127 @@ describe('Linux Bubblewrap network proxy (schema 0.6.0-alpha)', {
     assert.ok(result.stdout.includes('SENTINEL_OK'), `missing SENTINEL_OK in: ${result.stdout}`);
     assert.ok(result.stdout.includes('BLOCKED_OK'), `disallowed host was not blocked: ${result.stdout}`);
     assert.ok(!result.stdout.includes('SENTINEL_BAD_LEAK'), `allowlist leaked: ${result.stdout}`);
+  });
+});
+
+// Schema 0.9 removed `network.proxy` along with `defaultPolicy` and the host
+// lists, so the legacy block above has no 0.9 translation. A 0.9 proxy is a
+// real endpoint named by `runtimeConfig.networkProxy`, which the parser accepts
+// only on loopback, and the request resolves to the proxy-only posture: egress
+// must be deny-by-default with no rules, and the backend opens the proxy
+// endpoint alone.
+//
+// That posture is enforced from inside a private network namespace routed by
+// rootless slirp4netns, which the legacy path does not need -- hence the extra
+// prerequisite here.
+//
+// The SDK's own capability answers it: the native probe runs `slirp4netns
+// --version`, checks that private namespaces can actually be unshared, and
+// inspects the iptables backend, so it fails closed on any part of the
+// dependency set. Testing for the binary alone would let a host with an
+// unusable slirp, `unshare`, `nsenter`, `iptables`, or `ip6tables` past the
+// gate and report an environmental failure as a test failure.
+const PROXY_SCHEMA_09 = '0.9.0-alpha';
+const hasProxyEnforcement =
+  isLinuxBubblewrap &&
+  sdk.getPlatformSupport().bubblewrapNetwork?.proxyEnforcement === 'supported';
+
+describe(`Linux Bubblewrap network proxy (schema ${PROXY_SCHEMA_09})`, {
+  skip: !isLinuxBubblewrap
+    ? 'Linux Bubblewrap proxy tests require Linux with bwrap installed'
+    : !hasProxyEnforcement
+      ? 'this host cannot enforce proxy-only egress (see PlatformSupport.bubblewrapNetwork.warnings)'
+      : undefined,
+}, () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-sdk-bwrap-proxy-09-'));
+  const proxies: ChildProcess[] = [];
+
+  // The helper announces its port through a fixed-name ready file, so two
+  // proxies sharing a directory would have the second read the first one's
+  // port. Each gets its own directory instead.
+  const startProxy = (): number => {
+    const { port, proxyProcess } = startUnixTestProxy(
+      fs.mkdtempSync(path.join(tmpDir, 'proxy-')),
+    );
+    proxies.push(proxyProcess);
+    return port;
+  };
+
+  after(() => {
+    for (const p of proxies) {
+      try { p.kill('SIGTERM'); } catch { /* ignore */ }
+    }
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  it('should route traffic through the endpoint named by runtimeConfig.networkProxy', async () => {
+    const port = startProxy();
+
+    const config = sdk.createConfigFromPolicy(
+      { version: PROXY_SCHEMA_09 },
+      'bubblewrap',
+      'bwrap-runtime-proxy-09',
+    );
+    config.process!.commandLine =
+      `curl -fsSL '${NETWORK_TEST_URL}' > /dev/null && echo PROXY_09_OK`;
+    config.network = {
+      egress: { default: 'deny' },
+      ingress: { default: 'deny', hostLoopback: 'deny' },
+    };
+    config.runtimeConfig = {
+      ...(config.runtimeConfig ?? {}),
+      networkProxy: `http://127.0.0.1:${port}`,
+    };
+
+    // No allowTestingFeatures: that flag gates `builtinTestServer`, which has
+    // no 0.9 spelling. Needing it here would mean the gate had gone slack.
+    const result = await spawnFromConfigAsync(config, { ...debugSpawnOptions, experimental: true });
+    assert.strictEqual(result.exitCode, 0, `0.9 proxy run failed: ${result.stdout}`);
+    assert.ok(result.stdout.includes('PROXY_09_OK'), `missing PROXY_09_OK in: ${result.stdout}`);
+  });
+
+  it('should confine egress to the proxy endpoint', async () => {
+    const port = startProxy();
+
+    const config = sdk.createConfigFromPolicy(
+      { version: PROXY_SCHEMA_09 },
+      'bubblewrap',
+      'bwrap-runtime-proxy-09-egress',
+    );
+    // `--noproxy '*'` is the load-bearing part: it opts the request out of the
+    // proxy env vars, so a success would mean the sandbox reached the internet
+    // directly and the proxy-only posture was never enforced.
+    config.process!.commandLine =
+      'set -e; ' +
+      `if curl -fsS --noproxy '*' --max-time 10 '${NETWORK_TEST_URL}' > /dev/null 2>&1; then ` +
+      '  echo DIRECT_09_LEAKED; exit 1; ' +
+      'else ' +
+      '  echo DIRECT_09_BLOCKED_OK; ' +
+      'fi; ' +
+      `curl -fsSL '${NETWORK_TEST_URL}' > /dev/null && echo PROXY_09_STILL_OK`;
+    config.network = {
+      egress: { default: 'deny' },
+      ingress: { default: 'deny', hostLoopback: 'deny' },
+    };
+    config.runtimeConfig = {
+      ...(config.runtimeConfig ?? {}),
+      networkProxy: `http://127.0.0.1:${port}`,
+    };
+
+    const result = await spawnFromConfigAsync(config, { ...debugSpawnOptions, experimental: true });
+    assert.strictEqual(result.exitCode, 0, `0.9 egress run failed: ${result.stdout}`);
+    assert.ok(
+      result.stdout.includes('DIRECT_09_BLOCKED_OK'),
+      `direct egress was not blocked: ${result.stdout}`,
+    );
+    assert.ok(
+      result.stdout.includes('PROXY_09_STILL_OK'),
+      `the proxied request did not complete: ${result.stdout}`,
+    );
+    assert.ok(
+      !result.stdout.includes('DIRECT_09_LEAKED'),
+      `proxy-only egress leaked: ${result.stdout}`,
+    );
   });
 });
 

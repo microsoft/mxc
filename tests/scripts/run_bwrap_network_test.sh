@@ -27,10 +27,10 @@ else
 fi
 echo "Bubblewrap network block test complete."
 
-# Schema 0.6 firewall mode keeps its legacy host-chain behavior. Asserts only
+# Schema 0.7 firewall mode keeps its legacy host-chain behavior. Asserts only
 # that it still parses — whether iptables itself succeeds depends on privilege.
 # Schema 0.8 enforcement is covered by run_bwrap_firewall_test.sh.
-echo "Running Bubblewrap firewall-mode legacy test (schema 0.6)..."
+echo "Running Bubblewrap firewall-mode legacy test (schema 0.7)..."
 set +e
 LEGACY_OUTPUT=$("$LXC_EXEC" --experimental \
     "$REPO_DIR/tests/configs/bubblewrap_network_firewall.json" 2>&1)
@@ -42,8 +42,8 @@ set -e
 # gate leaked into the legacy schema.
 if echo "$LEGACY_OUTPUT" | grep -qF "Configuration parse error"; then
     echo "$LEGACY_OUTPUT"
-    echo "FAIL: schema 0.6 firewall mode failed config validation (status $LEGACY_STATUS)."
+    echo "FAIL: schema 0.7 firewall mode failed config validation (status $LEGACY_STATUS)."
     exit 1
 fi
-echo "PASS: schema 0.6 firewall mode still accepted."
+echo "PASS: schema 0.7 firewall mode still accepted."
 echo "Bubblewrap firewall-mode tests complete."
