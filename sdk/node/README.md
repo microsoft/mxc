@@ -24,12 +24,11 @@ const tools = getAvailableToolsPolicy(process.env);
 const temp  = getTemporaryFilesPolicy();
 
 const config = createConfigFromPolicy({
-  version: '0.6.0-alpha',
   filesystem: {
     readonlyPaths:  tools.readonlyPaths,    // PATH, PYTHONPATH, JAVA_HOME, …
     readwritePaths: temp.readwritePaths,    // %TEMP% / $TMPDIR
   },
-  network: { allowOutbound: false },
+  network: { egress: { default: 'deny' } },
   timeoutMs: 30_000,
 });
 config.process!.commandLine = 'python -c "print(\'hello from sandbox\')"';
@@ -56,7 +55,11 @@ child.on('close', (code) => console.log('exit:', code));
 for the `windowsHandle` option used by `fs.ReadStream` and `fs.WriteStream`.
 Node.js 26.8.0 or later is recommended.
 
-**Policy / config schema versions:**
+**High-level policy target:** `SandboxPolicy` is version-free. This package owns
+the v1 target and currently emits exact contract `1.0.0`. Use `ContainerConfig`
+only when a caller must author a raw exact-version configuration.
+
+**Raw config schema versions:**
 
 | Version | Status | Schema file |
 | --- | --- | --- |
@@ -82,14 +85,11 @@ or later.
 
 <a id="schema-080-networking"></a>
 
-**Schema 0.8 directional networking:** `createConfigFromPolicy` accepts
+**Directional networking:** `createConfigFromPolicy` accepts
 `network.egress` / `network.ingress`, `runtimeConfig.networkProxy`, and
-`processContainer.network.allowedProxyPeer`. Do not mix those fields with the
-legacy `network.allowOutbound`, `network.allowLocalNetwork`,
-`network.allowedHosts`, `network.blockedHosts`, or `network.proxy` fields.
-`createConfigFromPolicy` authors either shape according to the supplied policy
-version and fields. Schema 0.6 and 0.7 policies continue to produce the legacy
-wire shape. With schema 0.8, omitting all network fields leaves the
+`processContainer.network.allowedProxyPeer`. Legacy network authoring is not
+part of the v1 high-level API; use a raw `ContainerConfig` only when replaying
+an immutable historical contract. Omitting all network fields leaves the
 `network` block out of the generated config; the native parser interprets that
 as directional default-deny for egress, ingress, and host loopback. See the
 [Sandbox Policy 0.8.0 specification](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.8.0/policy.md)
@@ -109,7 +109,6 @@ import {
 } from '@microsoft/mxc-sdk';
 
 const directConfig = createConfigFromPolicy({
-  version: '0.8.0-alpha',
   network: {
     egress: {
       default: 'deny',
@@ -129,7 +128,6 @@ spawnSandboxFromConfig(directConfig);
 
 ```typescript
 const proxyConfig = createConfigFromPolicy({
-  version: '0.8.0-alpha',
   network: {
     egress: { default: 'deny' },
     ingress: { default: 'deny', hostLoopback: 'deny' },
@@ -193,12 +191,11 @@ const temp  = getTemporaryFilesPolicy();
 
 const config = createConfigFromPolicy(
   {
-    version: '0.6.0-alpha',
     filesystem: {
       readonlyPaths:  tools.readonlyPaths,
       readwritePaths: temp.readwritePaths,
     },
-    network: { allowOutbound: true },
+    network: { egress: { default: 'allow' } },
     timeoutMs: 30_000,
   },
   'process', // intent: "process" | "vm" | "microvm"
@@ -233,7 +230,6 @@ const tools = getAvailableToolsPolicy(process.env);
 const temp  = getTemporaryFilesPolicy();
 
 const pty = spawnSandbox('python script.py', {
-  version: '0.9.0-alpha',
   filesystem: {
     readonlyPaths:  tools.readonlyPaths,
     readwritePaths: temp.readwritePaths,
@@ -274,7 +270,6 @@ const temp  = getTemporaryFilesPolicy();
 const result = await spawnSandboxAsync(
   'python -c "import sys; print(sys.version)"',
   {
-    version: '0.6.0-alpha',
     filesystem: {
       readonlyPaths:  tools.readonlyPaths,
       readwritePaths: temp.readwritePaths,
@@ -481,12 +476,11 @@ const profile = getUserProfilePolicy();               // %LOCALAPPDATA%\Programs
 const tmp     = getTemporaryFilesPolicy();            // %TEMP% / $TMPDIR
 
 const policy = {
-  version: '0.6.0-alpha',
   filesystem: {
     readonlyPaths: [...tools.readonlyPaths, ...profile.readonlyPaths],
     readwritePaths: tmp.readwritePaths,
   },
-  network: { allowOutbound: false },
+  network: { egress: { default: 'deny' } },
 };
 ```
 
@@ -506,7 +500,6 @@ The `policy.ui` block is enforced on all supported schema versions, and `policy.
 import { spawnSandboxFromConfig, createConfigFromPolicy } from '@microsoft/mxc-sdk';
 
 const config = createConfigFromPolicy({
-  version: '0.6.0-alpha',
   ui: { allowWindows: true },     // ← required for powershell.exe to start
 });
 config.process!.commandLine = 'powershell.exe -NoProfile -Command "Get-Date"';

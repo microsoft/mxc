@@ -10,7 +10,6 @@ import type {
   NetworkConfig,
   PortMapping,
   ProcessContainerConfig,
-  SandboxPolicy,
   SeatbeltConfig,
   WslcConfig,
 } from '../types.js';
@@ -33,14 +32,8 @@ export interface RequestSpecOptions {
  * not a second public sandbox-policy API.
  */
 export interface RequestSpecPolicy {
-  version: string;
   filesystem?: ContainerConfig['filesystem'];
   network?: {
-    allowOutbound?: boolean;
-    allowLocalNetwork?: boolean;
-    allowedHosts?: string[];
-    blockedHosts?: string[];
-    proxy?: NetworkConfig['proxy'];
     egress?: NetworkConfig['egress'];
     ingress?: NetworkConfig['ingress'];
     runtimeConfig?: ContainerConfig['runtimeConfig'];
@@ -143,19 +136,10 @@ const SUPPORTED_REQUEST_CONTAINMENTS = new Set<string>([
   'isolation_session',
 ]);
 
-export function validateBindingPolicy(policy: SandboxPolicy): void {
-  const enforcementMode = (
-    policy.network as Record<string, unknown> | undefined
-  )?.enforcementMode;
-  if (enforcementMode !== undefined) {
-    throw new MxcError(
-      'malformed_request',
-      'spawnSandboxAsync does not support network.enforcementMode',
-    );
-  }
-}
-
 export function bindingRequestUnsupportedReason(config: ContainerConfig): string | null {
+  if (config.version !== '1.0.0') {
+    return "the in-process Node binding accepts only the SDK-owned 1.0.0 contract; use spawnSandboxFromConfig for raw exact-version configs";
+  }
   const unsupportedAlias = legacyConfigAliasUnsupportedReason(config);
   if (unsupportedAlias !== undefined) {
     return unsupportedAlias;
@@ -212,17 +196,7 @@ function projectNetwork(config: ContainerConfig): RequestSpecPolicy['network'] {
     return undefined;
   }
 
-  let allowOutbound: boolean | undefined;
-  if (config.network?.defaultPolicy !== undefined) {
-    allowOutbound = config.network.defaultPolicy === 'allow';
-  }
-
   return {
-    allowOutbound,
-    allowLocalNetwork: config.network?.allowLocalNetwork,
-    allowedHosts: config.network?.allowedHosts,
-    blockedHosts: config.network?.blockedHosts,
-    proxy: config.network?.proxy,
     egress: config.network?.egress,
     ingress: config.network?.ingress,
     runtimeConfig: config.runtimeConfig,
@@ -384,7 +358,6 @@ export function prepareRequestSpec(
   }
 
   const policy: RequestSpecPolicy = {
-    version: config.version,
     filesystem: projectFilesystem(config),
     network: projectNetwork(config),
     ui: projectUi(config),

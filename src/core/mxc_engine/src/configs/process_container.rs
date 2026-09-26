@@ -376,37 +376,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_v0_8_process_container_fields_for_legacy_schemas() {
-        for (process_container, field) in [
-            (
-                ProcessContainer {
-                    learning_mode: true,
-                    ..Default::default()
-                },
-                "learningMode",
-            ),
-            (
-                ProcessContainer {
-                    capture_denials: Some(CaptureDenials::default()),
-                    ..Default::default()
-                },
-                "captureDenials",
-            ),
-        ] {
-            let error = build_request_with_containment(
-                &policy_for_version("0.7.0-alpha", None),
-                &Containment::ProcessContainer(process_container),
-                TEST_COMMAND,
-                None,
-            )
-            .expect_err("schema 0.7 must reject schema 0.8 ProcessContainer fields");
-
-            assert!(error.message.contains(field), "{error:?}");
-            assert!(error.message.contains("schema version 0.8"), "{error:?}");
-        }
-    }
-
-    #[test]
     fn legacy_process_container_omits_v0_8_defaults() {
         let request = build_request_with_containment(
             &policy_for_version("0.7.0-alpha", None),
@@ -423,29 +392,5 @@ mod tests {
             .capabilities
             .iter()
             .any(|capability| capability == "learningModeLogging"));
-    }
-
-    #[test]
-    fn rejects_process_container_network_with_legacy_network_config() {
-        let network = NetworkSection {
-            allow_outbound: true,
-            ..Default::default()
-        };
-        let process_container = ProcessContainer {
-            network: Some(ProcessContainerNetwork {
-                allowed_proxy_peer: Some("Contoso.Proxy_123".to_string()),
-            }),
-            ..Default::default()
-        };
-
-        let error = build_request_with_containment(
-            &policy_for_version("0.8.0-alpha", Some(network)),
-            &Containment::ProcessContainer(process_container),
-            TEST_COMMAND,
-            None,
-        )
-        .expect_err("legacy and ProcessContainer directional networking must not mix");
-
-        assert!(error.message.contains("cannot be combined"));
     }
 }

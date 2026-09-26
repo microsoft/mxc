@@ -109,11 +109,11 @@ impl SdkStateAwareInput {
     pub fn new(version: ContractVersion, operation: StateAwareOperation) -> Result<Self, WxcError> {
         if !matches!(
             version,
-            ContractVersion::V0_9_0Alpha | ContractVersion::V1_0_0 | ContractVersion::V1_1_0Alpha
+            ContractVersion::V1_0_0 | ContractVersion::V1_1_0Alpha
         ) {
             return Err(WxcError::ConfigParse(format!(
                 "typed state-aware Rust SDK requests require schema version \
-                 0.9.0-alpha, 1.0.0, or 1.1.0-alpha, got {}",
+                 1.0.0 or 1.1.0-alpha, got {}",
                 version.as_str()
             )));
         }

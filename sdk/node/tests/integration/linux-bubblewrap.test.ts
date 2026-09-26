@@ -21,6 +21,7 @@ import {
   NETWORK_TEST_URL,
 } from './test-helpers.js';
 import type { ChildProcess } from 'node:child_process';
+import type { ContainerConfig } from '@microsoft/mxc-sdk';
 
 // Bwrap fingerprint: when invoked with `--unshare-pid`, bubblewrap creates a
 // new PID namespace and stays as PID 1 in that namespace, acting as init
@@ -46,7 +47,7 @@ describe(`Linux Bubblewrap (schema ${schemaVersion})`, {
     // which on Linux resolves to Bubblewrap in the binary.
     const result = await sdk.spawnSandboxAsync(
       BWRAP_PROBE,
-      { version: schemaVersion.raw },
+      {},
       {},
       undefined,
       `bwrap-default-${schemaVersion}`,
@@ -57,7 +58,7 @@ describe(`Linux Bubblewrap (schema ${schemaVersion})`, {
 
   it('should select Bubblewrap for abstract containment="process"', async () => {
     const config = sdk.createConfigFromPolicy(
-      { version: schemaVersion.raw },
+      {},
       'process',
       `bwrap-process-${schemaVersion}`,
     );
@@ -70,7 +71,7 @@ describe(`Linux Bubblewrap (schema ${schemaVersion})`, {
 
   it('should select Bubblewrap for explicit containment="bubblewrap"', async () => {
     const config = sdk.createConfigFromPolicy(
-      { version: schemaVersion.raw },
+      {},
       'bubblewrap',
       `bwrap-explicit-${schemaVersion}`,
     );
@@ -108,11 +109,12 @@ describe('Linux Bubblewrap network proxy (schema 0.6.0-alpha)', {
     const { port, proxyProcess } = startUnixTestProxy(tmpDir);
     proxies.push(proxyProcess);
 
-    const config = sdk.createConfigFromPolicy(
-      { version: PROXY_SCHEMA },
-      'bubblewrap',
-      'bwrap-external-proxy',
-    );
+    const config: ContainerConfig = {
+      version: PROXY_SCHEMA,
+      containment: 'bubblewrap',
+      containerId: 'bwrap-external-proxy',
+      process: { commandLine: '' },
+    };
     // Azure Artifacts feed (NETWORK_TEST_URL)
     config.process!.commandLine =
       `curl -fsSL '${NETWORK_TEST_URL}' > /dev/null && echo PROXY_OK`;
@@ -128,11 +130,12 @@ describe('Linux Bubblewrap network proxy (schema 0.6.0-alpha)', {
   });
 
   it('should launch a builtinTestServer proxy and route traffic through it', async () => {
-    const config = sdk.createConfigFromPolicy(
-      { version: PROXY_SCHEMA },
-      'bubblewrap',
-      'bwrap-builtin-proxy',
-    );
+    const config: ContainerConfig = {
+      version: PROXY_SCHEMA,
+      containment: 'bubblewrap',
+      containerId: 'bwrap-builtin-proxy',
+      process: { commandLine: '' },
+    };
     config.process!.commandLine =
       `curl -fsSL '${NETWORK_TEST_URL}' > /dev/null && echo BUILTIN_OK`;
     config.network = {
@@ -147,11 +150,12 @@ describe('Linux Bubblewrap network proxy (schema 0.6.0-alpha)', {
   });
 
   it('should enforce allowedHosts at the proxy layer', async () => {
-    const config = sdk.createConfigFromPolicy(
-      { version: PROXY_SCHEMA },
-      'bubblewrap',
-      'bwrap-allowlist-proxy',
-    );
+    const config: ContainerConfig = {
+      version: PROXY_SCHEMA,
+      containment: 'bubblewrap',
+      containerId: 'bwrap-allowlist-proxy',
+      process: { commandLine: '' },
+    };
     // Sentinel pattern: allowed host succeeds, disallowed host fails with 403
     // from the proxy and curl exits non-zero. The script swallows that and
     // prints BLOCKED_OK so we can assert both signals are present.

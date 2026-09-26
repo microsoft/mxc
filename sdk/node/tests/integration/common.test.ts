@@ -33,13 +33,12 @@ for (const schemaVersion of platformVersions) {
 
   describe(`Dry-run smoke tests (schema ${schemaVersion})`, { skip: skipReason }, () => {
     const policy = {
-      version: schemaVersion.raw,
       filesystem: {
         readwritePaths: [os.tmpdir()],
         readonlyPaths: [process.cwd()],
       },
       network: {
-        allowOutbound: false,
+        egress: { default: 'deny' as const },
       },
       ui: {
         allowWindows: false,

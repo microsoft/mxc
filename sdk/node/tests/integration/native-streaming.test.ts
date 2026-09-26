@@ -73,7 +73,6 @@ describe(`Internal native streaming (schema ${schemaVersion})`, { skip: skipReas
       : 'sh -c "printf \'STREAM_FIRST\\n\'; IFS= read -r _; ' +
         'printf \'STREAM_SECOND\\n\'; printf \'STREAM_ERROR\\n\' >&2"';
     const policy = {
-      version: schemaVersion.raw,
       ...(os.platform() === 'win32' ? { ui: { allowWindows: true } } : {}),
     };
     const config = sdk.createConfigFromPolicy(policy);
@@ -139,7 +138,6 @@ describe(`Internal native streaming (schema ${schemaVersion})`, { skip: skipReas
         '[Console]::Error.Write($chunk) }"'
       : 'sh -c "head -c 2097152 /dev/zero; head -c 2097152 /dev/zero >&2"';
     const policy = {
-      version: schemaVersion.raw,
       ...(os.platform() === 'win32' ? { ui: { allowWindows: true } } : {}),
     };
     const config = sdk.createConfigFromPolicy(policy);
