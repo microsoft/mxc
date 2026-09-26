@@ -14,7 +14,9 @@ jobs:
             runner: windows-2025
             target: x86_64-pc-windows-msvc
             # tier2_bfs must NOT ship on Win 11 25H2 (bfscfg.exe hangs the host).
-            features: hyperlight isolation_session microvm wslc
+            # dotnetsdk emits the generated C# P/Invoke source consumed by the
+            # package job; it does not change the native runtime surface.
+            features: hyperlight isolation_session microvm wslc dotnetsdk
           - arch: arm64
             runner: windows-11-arm
             target: aarch64-pc-windows-msvc
@@ -100,6 +102,17 @@ jobs:
             -AcceptRealMachineMutation `
             -RequirePolicyCeiling
 
+      - name: Stage generated .NET bindings
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          $destination = 'src/target/${{ matrix.target }}/release/dotnet'
+          New-Item -ItemType Directory -Path $destination -Force | Out-Null
+          Copy-Item `
+            -LiteralPath 'sdk/dotnet/Microsoft.Mxc.Sdk/Native/NativeMethods.g.cs' `
+            -Destination $destination
+
       - name: Upload binaries
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -118,5 +131,6 @@ jobs:
             src/target/${{ matrix.target }}/release/wslcsdk.dll
             src/target/${{ matrix.target }}/release/wxc-ui-probe.exe
             src/target/${{ matrix.target }}/release/wxc-test-driver.exe
+            src/target/${{ matrix.target }}/release/dotnet/NativeMethods.g.cs
           if-no-files-found: error
           retention-days: 1

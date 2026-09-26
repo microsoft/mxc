@@ -143,3 +143,11 @@ stages:
   - Validate_DotNet_Pipeline
   jobs:
   - template: DotNet.Test.Job.yml
+
+- stage: DotNet_SDK_Integration_Tests
+  displayName: '.NET SDK Package Integration Tests'
+  dependsOn:
+  - Build_DotNet_SDK
+  - Validate_Package_Locks
+  jobs:
+  - template: DotNet.Integration.Test.Job.yml

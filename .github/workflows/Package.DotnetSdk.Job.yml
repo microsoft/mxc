@@ -1,0 +1,127 @@
+name: Package .NET SDK
+
+on:
+  workflow_call:
+
+jobs:
+  package-dotnet-sdk:
+    name: Package .NET SDK
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Download Windows x64 runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: wxc-binaries-x86_64-pc-windows-msvc
+          path: artifacts/win-x64
+
+      - name: Download Windows ARM64 runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: wxc-binaries-aarch64-pc-windows-msvc
+          path: artifacts/win-arm64
+
+      - name: Download Linux x64 runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: lxc-binaries-x86_64-unknown-linux-gnu
+          path: artifacts/linux-x64
+
+      - name: Download Linux ARM64 runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: lxc-binaries-aarch64-unknown-linux-gnu
+          path: artifacts/linux-arm64
+
+      - name: Download macOS ARM64 runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: mxc-binaries-aarch64-apple-darwin
+          path: artifacts/osx-arm64
+
+      - name: Build publishable NuGet package
+        shell: pwsh
+        run: |
+          $sdkProject = Join-Path $env:GITHUB_WORKSPACE 'sdk/dotnet/Microsoft.Mxc.Sdk/Microsoft.Mxc.Sdk.csproj'
+          $packageProject = Join-Path $env:GITHUB_WORKSPACE 'sdk/dotnet/Microsoft.Mxc.Sdk.Package/Microsoft.Mxc.Sdk.Package.csproj'
+          $sdkOutput = Join-Path $env:GITHUB_WORKSPACE 'sdk/dotnet/Microsoft.Mxc.Sdk/bin/Release/net8.0'
+          $packageRoot = Join-Path $env:GITHUB_WORKSPACE 'out/dotnet-package'
+          $packageOutput = Join-Path $env:GITHUB_WORKSPACE 'out/dotnet-nuget'
+          $winX64 = Join-Path $env:GITHUB_WORKSPACE 'artifacts/win-x64'
+          $winArm64 = Join-Path $env:GITHUB_WORKSPACE 'artifacts/win-arm64'
+          $linuxX64 = Join-Path $env:GITHUB_WORKSPACE 'artifacts/linux-x64'
+          $linuxArm64 = Join-Path $env:GITHUB_WORKSPACE 'artifacts/linux-arm64'
+          $macArm64 = Join-Path $env:GITHUB_WORKSPACE 'artifacts/osx-arm64'
+
+          Copy-Item `
+            -LiteralPath (Join-Path $winX64 'dotnet/NativeMethods.g.cs') `
+            -Destination (Join-Path $env:GITHUB_WORKSPACE 'sdk/dotnet/Microsoft.Mxc.Sdk/Native/NativeMethods.g.cs') `
+            -Force
+
+          dotnet restore $sdkProject --nologo
+          if ($LASTEXITCODE -ne 0) { throw "dotnet restore failed with exit code $LASTEXITCODE" }
+
+          dotnet build $sdkProject `
+            --configuration Release `
+            --no-restore `
+            --nologo `
+            -p:MxcWithIsolationSession=true `
+            -p:MxcWithWslc=true `
+            "-p:MxcPrebuiltNativeDir=$winX64"
+          if ($LASTEXITCODE -ne 0) { throw "dotnet build failed with exit code $LASTEXITCODE" }
+
+          $managed = Join-Path $packageRoot 'managed'
+          New-Item -ItemType Directory -Path $managed -Force | Out-Null
+          Copy-Item -LiteralPath (Join-Path $sdkOutput 'Microsoft.Mxc.Sdk.dll') -Destination $managed
+          Copy-Item -LiteralPath (Join-Path $sdkOutput 'Microsoft.Mxc.Sdk.pdb') -Destination $managed
+
+          $runtimeInputs = @(
+            @{ Source = $winX64; Destination = 'runtimes/win-x64/native'; Files = @('mxc_ffi.dll', 'plm.exe', 'wxc-wslc-daemon.exe', 'wslcsdk.dll') },
+            @{ Source = $winArm64; Destination = 'runtimes/win-arm64/native'; Files = @('mxc_ffi.dll', 'plm.exe', 'wxc-wslc-daemon.exe', 'wslcsdk.dll') },
+            @{ Source = $linuxX64; Destination = 'runtimes/linux-x64/native'; Files = @('libmxc_ffi.so') },
+            @{ Source = $linuxArm64; Destination = 'runtimes/linux-arm64/native'; Files = @('libmxc_ffi.so') },
+            @{ Source = $macArm64; Destination = 'runtimes/osx-arm64/native'; Files = @('libmxc_ffi.dylib') }
+          )
+          foreach ($input in $runtimeInputs) {
+            $destination = Join-Path $packageRoot $input.Destination
+            New-Item -ItemType Directory -Path $destination -Force | Out-Null
+            foreach ($file in $input.Files) {
+              Copy-Item -LiteralPath (Join-Path $input.Source $file) -Destination $destination
+            }
+          }
+
+          [xml]$projectXml = Get-Content -LiteralPath $sdkProject -Raw
+          $versionNode = $projectXml.SelectSingleNode('/Project/PropertyGroup/Version')
+          $version = $versionNode.InnerText.Trim()
+          if ([string]::IsNullOrWhiteSpace($version)) { throw 'Microsoft.Mxc.Sdk version is empty.' }
+
+          dotnet pack $packageProject `
+            --configuration Release `
+            --output $packageOutput `
+            --nologo `
+            "-p:PackageVersion=$version" `
+            "-p:ManagedOutput=$managed" `
+            "-p:X64Native=$(Join-Path $packageRoot 'runtimes/win-x64/native')" `
+            "-p:Arm64Native=$(Join-Path $packageRoot 'runtimes/win-arm64/native')" `
+            "-p:LinuxX64Native=$(Join-Path $packageRoot 'runtimes/linux-x64/native')" `
+            "-p:LinuxArm64Native=$(Join-Path $packageRoot 'runtimes/linux-arm64/native')" `
+            "-p:MacArm64Native=$(Join-Path $packageRoot 'runtimes/osx-arm64/native')" `
+            "-p:RepositoryRoot=$env:GITHUB_WORKSPACE"
+          if ($LASTEXITCODE -ne 0) { throw "dotnet pack failed with exit code $LASTEXITCODE" }
+
+          & "$env:GITHUB_WORKSPACE/.azure-pipelines/scripts/verify-dotnet-nuget-package.ps1" `
+            -PackagePath (Join-Path $packageOutput "Microsoft.Mxc.Sdk.$version.nupkg") `
+            -RequireWslc
+
+      - name: Upload .NET SDK package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dotnet-nuget-package
+          path: out/dotnet-nuget/*.nupkg
+          if-no-files-found: error
+          retention-days: 1

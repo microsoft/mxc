@@ -1,0 +1,62 @@
+name: SDK .NET Package Integration Tests
+
+on:
+  workflow_call:
+
+jobs:
+  sdk-dotnet-integration-tests:
+    name: SDK .NET Package Integration Tests (${{ matrix.os_label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os_label: windows
+            runner: windows-latest
+          - os_label: linux
+            runner: ubuntu-latest
+          - os_label: macos
+            runner: macos-26
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Download .NET SDK package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dotnet-nuget-package
+          path: sdk-pkg
+
+      - name: Install Bubblewrap
+        if: matrix.os_label == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      - name: Test installed .NET SDK package
+        shell: pwsh
+        run: |
+          $package = @(Get-Item "$env:GITHUB_WORKSPACE/sdk-pkg/Microsoft.Mxc.Sdk.*.nupkg")
+          if ($package.Count -ne 1) {
+            throw "Expected exactly one Microsoft.Mxc.Sdk package, found $($package.Count)."
+          }
+
+          $arguments = @{
+            PackagePath = $package[0].FullName
+          }
+          if ('${{ matrix.os_label }}' -eq 'windows') {
+            $arguments.SkipBackendTests = $true
+          }
+          if ('${{ matrix.os_label }}' -eq 'linux') {
+            $arguments.RunWithSudo = $true
+          }
+
+          & "$env:GITHUB_WORKSPACE/sdk/dotnet/tests/integration/run.ps1" @arguments

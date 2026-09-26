@@ -26,6 +26,11 @@ from crates.io and npmjs, helping ensure secure and vetted consumption of thirdâ
   It verifies the .NET SDK/runtime setup and packs both NuGet variants with
   synthetic native inputs so pipeline and package-contract failures surface
   without waiting for the cross-platform Rust artifacts.
+- After the real NuGet package is assembled, .NET package integration jobs
+  restore that package without a project reference on Windows, Linux, and
+  macOS. All hosts verify managed/native package loading and RID assets; Linux
+  and macOS also run backend hello-world and exit-code tests. Windows execution
+  remains gated to hosts prepared for ProcessContainer.
 - `OneBranch.DotNet.Release.yml` selects the payload for the requested target,
   restores its `.nupkg` suffix, signs and verifies it, and publishes it to the
   internal `Mxc-Azure-Feed` by default. Queue-time selection can instead publish

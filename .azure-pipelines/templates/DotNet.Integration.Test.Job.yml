@@ -1,0 +1,87 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+
+parameters:
+- name: sdkArtifact
+  type: string
+  default: mxc-dotnet-sdk-nuget-unsigned
+- name: targets
+  type: object
+  default:
+  - name: windows
+    os: windows
+  - name: linux
+    os: linux
+  - name: macos
+    os: macos
+
+jobs:
+- ${{ each target in parameters.targets }}:
+  - job: 'test_dotnet_sdk_package_${{ target.name }}'
+    displayName: 'Test .NET SDK package (${{ target.name }})'
+    pool:
+      ${{ if eq(target.os, 'windows') }}:
+        name: Azure-Pipelines-1ESPT-ExDShared
+        image: windows-latest
+        os: windows
+      ${{ if eq(target.os, 'linux') }}:
+        name: Azure-Pipelines-1ESPT-ExDShared
+        image: ubuntu-latest
+        os: linux
+      ${{ if eq(target.os, 'macos') }}:
+        name: Azure Pipelines
+        vmImage: macOS-15-arm64
+        os: macOS
+
+    variables:
+      sdkPkgDirectory: $(Pipeline.Workspace)/dotnet-sdk-package
+
+    steps:
+    - checkout: self
+
+    - task: UseDotNet@2
+      displayName: Use .NET runtime 8
+      inputs:
+        packageType: runtime
+        version: 8.0.x
+
+    - task: UseDotNet@2
+      displayName: Use .NET SDK 10
+      inputs:
+        packageType: sdk
+        version: 10.x
+
+    - task: DownloadPipelineArtifact@2
+      displayName: Download .NET SDK package
+      inputs:
+        artifact: ${{ parameters.sdkArtifact }}
+        path: $(sdkPkgDirectory)
+
+    - ${{ if eq(target.os, 'linux') }}:
+      - script: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+        displayName: Install Bubblewrap
+
+    - pwsh: |
+        $package = @(
+          Get-ChildItem -LiteralPath "$(sdkPkgDirectory)" -Recurse -File |
+            Where-Object { $_.Name -like 'Microsoft.Mxc.Sdk.*.public-unsigned-package' }
+        )
+        if ($package.Count -ne 1) {
+          throw "Expected exactly one public Microsoft.Mxc.Sdk package, found $($package.Count)."
+        }
+
+        $arguments = @{
+          PackagePath = $package[0].FullName
+        }
+        if ('${{ target.os }}' -eq 'windows') {
+          $arguments.SkipBackendTests = $true
+        }
+        if ('${{ target.os }}' -eq 'linux') {
+          $arguments.RunWithSudo = $true
+        }
+
+        & "$(Build.SourcesDirectory)/sdk/dotnet/tests/integration/run.ps1" @arguments
+      displayName: Test installed .NET SDK package

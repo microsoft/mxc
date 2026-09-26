@@ -57,6 +57,14 @@ jobs:
   sdk-dotnet-tests:
     uses: ./.github/workflows/SDK.Dotnet.Test.Job.yml
 
+  package-dotnet-sdk:
+    needs: [package-lock-check, windows, linux, macos]
+    uses: ./.github/workflows/Package.DotnetSdk.Job.yml
+
+  sdk-dotnet-integration-tests:
+    needs: [package-lock-check, package-dotnet-sdk]
+    uses: ./.github/workflows/SDK.Dotnet.Integration.Test.Job.yml
+
   package-npm-sdk:
     needs: [package-lock-check, windows, linux, macos]
     uses: ./.github/workflows/Package.NpmSdk.Job.yml
