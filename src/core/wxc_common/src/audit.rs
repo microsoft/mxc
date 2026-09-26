@@ -262,6 +262,8 @@ impl EffectiveEnforcementLevel {
 pub enum RejectionReason {
     /// The input was not valid JSON (or not valid base64-wrapped JSON).
     MalformedJson,
+    /// The configuration source was missing or could not be read.
+    InputSourceUnavailable,
     /// The input parsed as JSON but violated the config schema.
     SchemaViolation,
     /// Neither the policy nor the CLI supplied a command line.
@@ -284,6 +286,7 @@ impl RejectionReason {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::MalformedJson => "malformed_json",
+            Self::InputSourceUnavailable => "input_source_unavailable",
             Self::SchemaViolation => "schema_violation",
             Self::MissingCommand => "missing_command",
             Self::UnsupportedFieldForBackend => "unsupported_field_for_backend",
@@ -638,6 +641,7 @@ mod tests {
             TeardownSkipReason::PreservePolicy.as_str(),
             TeardownSkipReason::CleanupNotImplemented.as_str(),
             RejectionReason::MalformedJson.as_str(),
+            RejectionReason::InputSourceUnavailable.as_str(),
             RejectionReason::SchemaViolation.as_str(),
             RejectionReason::MissingCommand.as_str(),
             RejectionReason::UnsupportedFieldForBackend.as_str(),
