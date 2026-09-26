@@ -1123,6 +1123,43 @@ payloads directly to runtime configurations, while common fields reuse
 `common_request_ir::CommonRequestIR` conversion in `config_parser.rs`. The
 internal common parser and executable equivalence harness have been removed.
 
+The Rust SDK also has a direct typed ingress lane. High-level lifecycle calls
+construct `SdkStateAwareInput` from `ProvisionRequest`,
+`SandboxLifecycleRequest`, or `StateAwareExecRequest`, then normalize it through
+the same private `CommonRequestIR` and `StateAwareInput` seam:
+
+```text
+typed Rust request
+  -> SDK adapter
+  -> CommonRequestIR + StateAwareOperation
+  -> shared normalization
+  -> ParsedStateAwareRequest
+  -> checked backend binding
+```
+
+This lane does not serialize or parse JSON and does not invoke an exact-contract
+adapter. Its selected version still controls compatibility semantics, but the
+normalized request has no `source_contract` because no external exact contract
+produced it. Raw callers follow the separate exact path:
+
+```text
+raw JSON
+  -> exact registered request root
+  -> exact adapter
+  -> CommonRequestIR + StateAwareOperation
+  -> shared normalization
+  -> ParsedStateAwareRequest
+```
+
+Both lanes converge before backend resolution and binding. Equivalence tests
+compare their operation and normalized execution intent for every lifecycle
+phase and supported provision backend.
+
+The existing high-level one-shot Rust path is also JSON-free: it constructs an
+in-memory exact contract value and invokes that contract's adapter directly.
+It does not serialize or parse JSON. The state-aware work described here closes
+the missing lifecycle path while preserving that established one-shot bridge.
+
 When the native CLI supplies trailing command arguments, the loader first
 splices the rendered command into `process.commandLine` and then parses that
 effective document. Structural diagnostics are therefore relative to that
@@ -1499,6 +1536,16 @@ surface introduces none, so the trait stays minimal and reuses `ExecutionRequest
 ### 9.3 Dispatch
 
 ```rust
+/// Typed backend result before raw response-envelope encoding.
+enum TypedDispatchOutcome<P, S, T, D> {
+    DryRun,
+    Provision(ProvisionResult<P>),
+    Start(StartResult<S>),
+    ExecCompleted { exit_code: i32 },
+    Stop(StopResult<T>),
+    Deprovision(DeprovisionResult<D>),
+}
+
 /// Dispatch outcome. Distinguishes structured-envelope responses (non-exec phases or
 /// dispatch failure) from exec success (where stdio has already streamed live through
 /// the relay).
@@ -1568,6 +1615,13 @@ fn dispatch_state_aware<B: StatefulSandboxBackend>(
     }
 }
 ```
+
+`dispatch_state_aware_typed` returns `TypedDispatchOutcome` without serializing
+backend metadata. The high-level Rust SDK maps that result into
+`StateAwareResult` and typed backend metadata. The raw JSON lane wraps the same
+typed dispatch result in `DispatchOutcome::Envelope` and serializes it for the
+wire response. JSON response construction is therefore confined to raw/executor
+entry points rather than being an implementation step of typed Rust calls.
 
 `resolve_backend(&parsed)` reads `parsed.containment()` when `phase() == Provision`; for the
 other phases it reads the prefix from `parsed.sandbox_id()` and looks it up in the
