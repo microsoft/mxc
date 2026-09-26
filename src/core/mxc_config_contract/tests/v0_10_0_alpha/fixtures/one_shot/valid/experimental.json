@@ -1,7 +1,0 @@
-{
-  "version": "0.10.0-alpha",
-  "process": {
-    "commandLine": "echo experimental"
-  },
-  "test": {}
-}

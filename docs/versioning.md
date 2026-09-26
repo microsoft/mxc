@@ -6,10 +6,10 @@
 
 The policy (filesystem, network) expresses **what** the user wants — "block network, allow these paths." It does not specify how the OS enforces it, nor which container type to use.
 
-### Current v0.x Policy Version = Config Schema Version
+### Policy Version = Config Schema Version
 
-The current v0.x SDKs expose an exact `version` field in `SandboxPolicy`. It
-must match the MXC config JSON version: they are the same version, tied 1:1.
+The `version` field in SandboxPolicy must match the MXC config
+JSON version: they are the same version, tied 1:1.
 
 When a consumer specifies a SandboxPolicy version (e.g.,
 `0.6.0-alpha`), MXC creates the corresponding configuration using the
@@ -51,18 +51,18 @@ reasons:
 
 | Axis | What it describes | Where it lives | Who decides it |
 |---|---|---|---|
-| **Schema (config) version** | The *shape* of the config JSON — which fields exist and what values they accept. | The `version` field in raw config and, in current v0.x SDKs, `SandboxPolicy`. | The config author or current v0.x SDK caller; a v1 high-level SDK owns its exact minor target. |
+| **Schema (config) version** | The *shape* of the config JSON — which fields exist and what values they accept. | The `version` field in the config / `SandboxPolicy`. | The config author. |
 | **Product version** | The MXC *binaries and npm package* that do the work. | Rust workspace version (`src/Cargo.toml`) + `sdk/package.json`. | The release. |
 | **Host capability** | What the *running OS* can actually enforce (e.g. whether the BaseContainer sandbox API is usable, velocity keys, Hyper-V). | Negotiated at runtime — **never a string in the config**. | The host, probed at execution time. |
 
 - **Schema version** selects an exact registered contract at the trust boundary:
   `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, `0.9.0-alpha`, or
-  `0.10.0-alpha`.
+  `1.0.0`, or `1.1.0-alpha`.
   Patch and prerelease spelling are significant; `0.6.1-alpha` and `0.8.0-dev`
   are not registered and are rejected. A missing declaration is rejected too.
   The SDK enforces the same exact set. IsolationSession and WSLC state-aware
   requests use `0.9.0-alpha`; Windows Sandbox state-aware requests use
-  `0.10.0-alpha`. The compatibility constants in
+  `1.1.0-alpha`. The compatibility constants in
   `schemas/schema-version.json` do not authorize other versions within their
   minimum/maximum range.
 - **Product version** tracks the shipped artifacts and moves independently of the
@@ -77,57 +77,6 @@ reasons:
   policy that is expressible in multiple registered contracts retains the same
   host-capability-driven backend selection.
 
-### How the v1 High-Level SDK Selects a Schema Contract
-
-The SDK package and schema contract are separate version axes. The
-`@microsoft/mxc-sdk` package version governs compatibility of its public
-TypeScript API. The schema version governs the exact JSON contract accepted at
-the native trust boundary. A high-level SDK API connects the two by selecting
-the exact schema contract that it constructs.
-
-In the current v0.x API, callers put an exact schema version in
-`SandboxPolicy`. In the v1 high-level API, the policy arguments to
-`spawnSandbox`, `spawnSandboxAsync`, and `createConfigFromPolicy` will not
-contain a `version` field. The installed SDK package will select the exact
-contract and put its version in the generated `ContainerConfig`.
-
-Raw configuration remains explicitly versioned. This includes a
-`ContainerConfig` passed to `spawnSandboxFromConfig`, a JSON configuration
-file, `--config-base64` input, and replay tooling.
-
-For example:
-
-```typescript
-// High-level API: the caller supplies policy intent; the SDK selects the
-// exact contract.
-spawnSandbox("python script.py", {
-  filesystem: { readonlyPaths: ["C:\\tools"] },
-});
-
-// Raw configuration API: the caller selects an exact registered contract.
-spawnSandboxFromConfig({
-  version: "1.0.0",
-  process: { commandLine: "python script.py" },
-});
-```
-
-Within an SDK package major, compatible minor releases may add optional
-high-level fields or methods without requiring existing callers to adopt them.
-Breaking changes to the public TypeScript API require a new package major. This
-does not promise identical observed behavior across releases: bug fixes,
-security corrections, and host-capability differences may change runtime
-behavior while preserving the API contract.
-
-`0.10.0-alpha` is the current unpublished development schema. At the v1
-cutover, the published v1.0 contract will be based on v0.9 and will not contain
-the v0.10-only development surfaces. Those development surfaces then move to
-the v1.1 development contract; this plan does not publish a stable v0.10
-contract.
-
-The v1 high-level policy model is directional-network-only. Legacy networking
-remains available through the immutable v0.6-v0.8 raw JSON contracts, not
-through v1 high-level SDK policy.
-
 ## Schema Shipping Model
 
 ```
@@ -138,9 +87,10 @@ mxc/schemas/
 │   ├── mxc-config.schema.0.6.0-alpha.json  (minimum supported)
 │   ├── mxc-config.schema.0.7.0-alpha.json  (shipped)
 │   ├── mxc-config.schema.0.8.0-alpha.json  (shipped)
-│   └── mxc-config.schema.0.9.0-alpha.json  (shipped — current stable)
+│   ├── mxc-config.schema.0.9.0-alpha.json  (shipped)
+│   └── mxc-config.schema.1.0.0.json        (shipped — current stable)
 └── dev/
-    └── mxc-config.schema.0.10.0-alpha.json  (exact closed development contract)
+    └── mxc-config.schema.1.1.0-alpha.json  (exact closed development contract)
 ```
 
 Retired stable schema files are **kept as immutable historical artifacts** — the
@@ -148,20 +98,20 @@ parser simply stops accepting those versions (the supported floor is
 `0.6.0-alpha`). Released schemas are never edited or deleted.
 
 The development artifact is generated from the exact
-`mxc_config_contract::dev` model. It describes all eight closed one-shot and
-state-aware roots, including recursively closed development-only structures,
-and is the authoritative contract for declared `0.10.0-alpha` requests.
+  `mxc_config_contract::dev` model. It describes all eight closed one-shot and
+  state-aware roots, including recursively closed experimental structures, and
+  is the authoritative contract for declared `1.1.0-alpha` requests.
 
 The runtime parser and Rust SDK policy builders dispatch through the exact
 contract registered for the declared version. Corpus validation selects the
 exact registered schema from each document's `version`.
 
-Only the v0.10 file under `schemas/dev/` is a generated development artifact.
-Published v0.9 is represented by its exact Rust contract and immutable stable
-schema. Exact fixtures and adapter/runtime tests remain ordinary mutable tests
-so they can gain regression coverage as implementations evolve. See
-[Schema Code Generation](schema-codegen.md) for the regeneration commands and
-independent drift/history gates.
+Only the v1.1 prerelease file under `schemas/dev/` is a generated development
+artifact. Published v0.9 and v1.0 are represented by exact Rust contracts and
+immutable stable schemas. Exact fixtures and adapter/runtime tests remain
+ordinary mutable tests so they can gain regression coverage as implementations
+evolve. See [Schema Code Generation](schema-codegen.md) for the regeneration
+commands and independent drift/history gates.
 
 ### Typed state-aware dispatch
 
@@ -213,8 +163,8 @@ exact version adapter.
 
 ### IsolationSession directional networking
 
-The published `0.9.0-alpha` contract accepts the standard directional
-all-allow posture for IsolationSession:
+The published `0.9.0-alpha` and `1.0.0` contracts accept the standard
+directional all-allow posture for IsolationSession:
 
 ```json
 {
@@ -232,10 +182,17 @@ The policy continues through the ordinary cross-cutting network model and
 policy identity. No backend-specific acknowledgment field, transport, or hash
 projection is introduced.
 
-The stable v0.9 schema and TypeScript oracle are regenerated from the
-published Rust model and compared in CI. Exact fixture and adapter/runtime
-tests remain editable so regression coverage can grow without changing the
-published JSON contract.
+The stable v0.9 and v1.0 schemas and TypeScript oracles are regenerated from
+their published Rust models and compared in CI. Exact fixture and
+adapter/runtime tests remain editable so regression coverage can grow without
+changing a published JSON contract.
+
+The v1.0 contract preserves the v0.9 request roots and canonical field/value
+spellings, but removes the legacy `appcontainer`, `appContainer`, and
+`macos_sandbox` aliases. They remain rejected throughout the v1 contract line.
+Features that exist only in mutable v1.1 development, including Windows Sandbox
+provision and the `vm`, `microvm`, and `hyperlight` one-shot surfaces, are not
+accepted by v1.0.
 
 ### Trust boundary vs schema defaults
 
@@ -293,9 +250,8 @@ generated request roots.
 
 `schemas/schema-version.json` owns `sdkMajorTargets`, the canonical mapping
 from each high-level SDK major line to the latest published stable exact
-contract that line targets. The map remains empty until a stable contract is
-published for that major. SDK v1.0 adds `"1": "1.0.0"`; opening mutable
-`1.1.0-alpha` development does not advance that value. Publishing stable
+line targets. The v1 line targets `"1": "1.0.0"`. Opening mutable
+`1.1.0-alpha` development does not advance that target; publishing stable
 `1.1.0` does.
 
 The exact Rust contract registry is authoritative. The schema-version gate
@@ -310,11 +266,12 @@ Generated schemas remain derived artifacts and drift oracles. They do not
 define the SDK target or the accepted contract shape.
 
 Compatibility comparison and SDK API baselines are intentionally deferred
-until the relevant artifacts exist. When published stable `1.0.0` and `1.1.0`
-coexist, structural tooling may compare temporary projections generated
-directly from their exact Rust types, while explicit Rust and fixture tests
-cover semantic meaning. Rust, Node, and .NET API baselines are captured when
-the v1.0 SDK surface is established rather than through empty placeholder
+until the relevant stable and public API artifacts exist. When stable `1.0.0`
+and `1.1.0` are both published, structural tooling may compare temporary
+projections generated directly from their exact Rust types, while explicit
+Rust and fixture tests cover semantic meaning. Rust, Node, and .NET API
+baselines are captured when the v1.0 SDK surface is established rather than
+through empty placeholder
 descriptors.
 
 ### Experimental Flag
@@ -382,7 +339,7 @@ Edit the authoritative closed mutable contract under
 `CommonRequestIR`. Regenerate the exact schema:
 
 ```text
-cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0.10.0-alpha --out schemas/dev/mxc-config.schema.0.10.0-alpha.json
+cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 1.1.0-alpha --out schemas/dev/mxc-config.schema.1.1.0-alpha.json
 ```
 
 Also regenerate the exact TypeScript oracle with the corresponding
@@ -664,30 +621,16 @@ When a wire value is renamed (e.g. `appcontainer` → `processcontainer` in
 [#268](https://github.com/microsoft/mxc/pull/268)), the legacy spelling enters a
 deprecation window where both forms are accepted on the wire.
 
-**Policy:** alias acceptance belongs to each exact parser contract. For
-contracts whose schemas and raw types are generated from that exact contract,
-the parser, schema, generated raw type, and raw SDK validator must agree on the
-accepted spellings. An alias accepted by several current contracts is
-deliberately present in each contract; it is not a version-independent parser
-exception.
+**Policy:** alias acceptance belongs to each exact parser contract. The parser,
+schema, generated raw type, and raw SDK validator must agree on the spellings
+accepted by the declared `config.version`; aliases are not version-independent
+parser exceptions.
 
-**Legacy schema exception.** The v0.6-v0.8 stable schemas predate exact-contract
-artifact generation and describe a curated stable surface rather than every
-spelling accepted by their parsers. The v0.6-v0.8 parsers accept the
-`appcontainer` containment value and the top-level `appContainer` field. The
-v0.7-v0.8 parsers also accept the `macos_sandbox` containment value and
-top-level field. Their immutable stable schemas do not consistently advertise
-those aliases: only the v0.7 schema includes `appContainer`, and none includes
-the deprecated containment values or `macos_sandbox` field. This historical
-schema/parser mismatch does not make aliases version-independent; each exact
-parser still owns the aliases it accepts. Generated exact-contract artifacts,
-starting with v0.9, advertise the accepted aliases.
-
-Within a stable major line, adding an alias is compatible but removing an
-accepted alias is breaking. A v1.x alias therefore remains accepted for the
-rest of the v1 line and may be removed only in the next major contract. New
-high-level SDK APIs should emit the canonical spelling and may warn when a raw
-configuration uses a deprecated alias.
+The historical v0 contracts retain their original compatibility aliases.
+`appcontainer` and `appContainer` are accepted by v0.6-v0.9, while
+`macos_sandbox` is accepted by v0.7-v0.9. The v1 line removes all three
+spellings at its major-version boundary, so raw v1.0 and v1.1 requests must use
+`processcontainer`, `processContainer`, and `seatbelt`.
 
 **Observability.** Each exact contract accepts its version-specific legacy
 value aliases and normalizes them during exact deserialization, before its
@@ -698,10 +641,10 @@ through `wire::Containment::parse_wire_name`. Alias acceptance is silent in the
 native parser; the TypeScript SDK validator may still surface a deprecation hint
 via `diagLog` while inspecting raw config.
 
-**Removal.** Remove an alias only in a new major exact contract. The prior
-major's immutable contracts continue to accept it. Document the removal in the
-new major's migration guidance and return the standard exact-contract
-diagnostic when the new contract receives the retired spelling.
+**Removal.** Removing an accepted alias is a breaking wire change and therefore
+belongs at a major-version boundary. Older immutable contracts continue to
+accept their historical spellings; the new major rejects them with the
+standard exact-contract diagnostic.
 
 ## Open Questions
 

@@ -11,7 +11,7 @@ crate. One code path serves Linux (KVM) and Windows (WHP).
 |---|---|
 | **Binary** | `lxc-exec` (Linux), `wxc-exec.exe` (Windows) |
 | **Config value** | `"containment": "hyperlight"` |
-| **Schema** | `0.10.0-alpha`, with `--experimental` |
+| **Schema** | `1.1.0-alpha`, with `--experimental` |
 | **Requires** | x86_64; `/dev/kvm` readable and writable, or WHP enabled; a build with `--with-hyperlight` |
 | **Isolation** | Hardware virtualization; the guest is a unikernel with its own filesystem |
 | **Guest** | One of the runtimes below, restored from a warm snapshot on every run |
@@ -26,7 +26,7 @@ lxc-exec --setup-hyperlight=python,node   # installs others; any of the names be
 
 ```json
 {
-    "version": "0.10.0-alpha",
+    "version": "1.1.0-alpha",
     "process": {
         "commandLine": "import pandas as pd\nprint(pd.DataFrame({'x': [1, 2]}).sum().to_dict())",
         "timeout": 30000
@@ -45,7 +45,7 @@ guest's output goes straight to the process's stdout. The runtime is
 
 ```json
 {
-    "version": "0.10.0-alpha",
+    "version": "1.1.0-alpha",
     "process": { "commandLine": "console.log(`hello from node ${process.version}`)" },
     "containment": "hyperlight",
     "hyperlight": { "runtime": "node" }
@@ -127,7 +127,7 @@ to the snapshot between calls.
 | `filesystem.readwritePaths` | Each directory appears in the guest at `/host/<basename>` |
 | `filesystem.readonlyPaths` | The same, mounted read-only; the guest kernel and the host both enforce it |
 | `filesystem.deniedPaths` | Checked at preflight against the two lists above |
-| `network` | Rejected at preflight in this release: the guest runs without networking. The backend's host-proxied sockets take a host allow or block list; wiring the `0.10.0-alpha` egress model onto them is the next step |
+| `network` | Rejected at preflight in this release: the guest runs without networking. The backend's host-proxied sockets take a host allow or block list; wiring the `1.1.0-alpha` egress model onto them is the next step |
 | `workingDirectory` | Rejected at preflight; the guest has its own filesystem |
 
 Mount directories are created when their parent exists. A basename may not

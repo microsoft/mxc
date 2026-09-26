@@ -858,7 +858,7 @@ var wslc = new WslcProvisionOptions
 
 IsolationSession and WSLC state-aware calls use published schema
 `0.9.0-alpha`. Windows Sandbox state-aware calls use development schema
-`0.10.0-alpha`.
+`1.1.0-alpha`.
 `Version` may be omitted or explicitly set to that registered value; the SDK
 rejects other values rather than emitting an envelope for an unregistered
 state-aware contract. State-aware exec options expose working directory,

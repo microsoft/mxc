@@ -64,7 +64,8 @@ fn renderable_exact_schema(version: ContractVersion) -> Result<Value, String> {
         ContractVersion::V0_9_0Alpha => {
             Ok(mxc_config_contract::published::v0_9_0_alpha::published_schema())
         }
-        ContractVersion::V0_10_0Alpha => Ok(mxc_config_contract::dev::development_schema()),
+        ContractVersion::V1_0_0 => Ok(mxc_config_contract::published::v1_0_0::published_schema()),
+        ContractVersion::V1_1_0Alpha => Ok(mxc_config_contract::dev::development_schema()),
         ContractVersion::V0_6_0Alpha
         | ContractVersion::V0_7_0Alpha
         | ContractVersion::V0_8_0Alpha => Err(format!(
@@ -194,17 +195,17 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|record| record["version"] == "0.10.0-alpha")
+            .find(|record| record["version"] == "1.1.0-alpha")
             .unwrap();
 
         assert_eq!(development["status"], "development");
         assert_eq!(
             development["schemaPath"],
-            "schemas/dev/mxc-config.schema.0.10.0-alpha.json"
+            "schemas/dev/mxc-config.schema.1.1.0-alpha.json"
         );
         assert_eq!(
             development["typescriptPath"],
-            "sdk/node/src/generated/v0_10_0_alpha/wire.ts"
+            "sdk/node/src/generated/v1_1_0_alpha/wire.ts"
         );
         assert_eq!(development["generatesArtifacts"], true);
         assert!(development["requestRoots"]
@@ -228,6 +229,21 @@ mod tests {
         let types = types_content(ContractVersion::V0_9_0Alpha).unwrap();
         assert!(types.contains("Emitted from the exact MXC 0.9.0-alpha contract"));
         assert!(types.contains("export type OneShotRequest"));
+    }
+
+    #[test]
+    fn published_v1_generation_is_supported() {
+        let (schema, descriptor) = exact_schema(ContractVersion::V1_0_0).unwrap();
+
+        assert_eq!(descriptor.status().as_str(), "published");
+        assert_eq!(
+            schema["$id"],
+            "https://github.com/microsoft/mxc/schemas/stable/mxc-config.schema.1.0.0.json"
+        );
+        assert!(schema["definitions"]["OneShotRequest"].is_object());
+        let types = types_content(ContractVersion::V1_0_0).unwrap();
+        assert!(types.contains("Emitted from the exact MXC 1.0.0 contract"));
+        assert!(types.contains("export interface OneShotRequest"));
     }
 
     #[test]

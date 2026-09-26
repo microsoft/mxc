@@ -1,5 +1,5 @@
 {
-    "version": "0.10.0-alpha",
+    "version": "1.1.0-alpha",
     "process": {
         "commandLine": "raise ValueError('intentional test error')",
         "timeout": 30000

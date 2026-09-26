@@ -288,7 +288,7 @@ public static class MxcSandbox
                 nameof(policy));
         }
 
-        if (policy.Version is "0.9.0-alpha" or "0.10.0-alpha")
+        if (!SchemaVersions.UsesLegacyNetworkDefaults(policy.Version))
         {
             throw new ArgumentException(
                 $"Schema {policy.Version} no longer supports authored network.{field}, including null. Legacy network authoring "

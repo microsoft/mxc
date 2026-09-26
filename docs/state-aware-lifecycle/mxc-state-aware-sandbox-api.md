@@ -448,12 +448,14 @@ Phases with no backend-specific or cross-cutting fields declare a Config carryin
 change: extend `StateAwareContainmentBackend`, define five new `*Config` interfaces, and
 add an arm to `ConfigsForBackend`.
 
-Each Config carries an optional `version?: StateAwareSchemaVersion`, using the
-existing SDK type for the exact state-aware contract, currently `0.9.0-alpha`.
-When omitted, the SDK supplies `STATE_AWARE_VERSION` (`0.9.0-alpha`); an explicit
-value must name that same registered state-aware contract. Other spellings are
-rejected, not range-validated or negotiated. The emitted JSON envelope always
-contains the required `version` declaration.
+Each Config carries an optional version constrained to its backend's exact
+contract. IsolationSession uses `STATE_AWARE_VERSION` (`0.9.0-alpha`), WSLC
+uses `WSLC_STATE_AWARE_VERSION` (`0.9.0-alpha`), and Windows Sandbox uses
+`WINDOWS_SANDBOX_STATE_AWARE_VERSION` (`1.1.0-alpha`). When omitted, the SDK
+supplies the corresponding backend default; an explicit value must match that
+same registered contract. Other spellings are rejected, not range-validated
+or negotiated. The emitted JSON envelope always contains the required
+`version` declaration.
 
 ### 6.2 Method signatures
 
@@ -666,7 +668,7 @@ Top-level fields shared by both branches:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `version` | string | Yes | Exact backend-specific schema version. IsolationSession and WSLC use `0.9.0-alpha`; Windows Sandbox uses `0.10.0-alpha`. The SDK fills this field when the consumer Config omits it. |
+| `version` | string | Yes | Exact backend-specific schema version. IsolationSession and WSLC use `0.9.0-alpha`; Windows Sandbox uses `1.1.0-alpha`. The SDK fills this field when the consumer Config omits it. |
 
 Backend-routing fields:
 
@@ -1152,9 +1154,10 @@ implements one trait, the other, or both, depending on its declared participatio
 
 `src/core/wxc_common/src/config_deserialize.rs` performs path-aware JSON
 deserialization into the exact contract selected by version, phase, and
-provision containment. Published v0.9 and development v0.10 select one-shot,
-`provision`, `start`, `exec`, `stop`, or `deprovision`; provision then selects
-the backend-specific closed root registered by that exact contract.
+provision containment. Published v0.9 and v1.0 plus development v1.1 select
+one-shot, `provision`, `start`, `exec`, `stop`, or `deprovision`; provision
+then selects the backend-specific closed root registered by that exact
+contract.
 
 The exact contract is the JSON trust boundary. Its recursively closed request
 types enforce required declarations, phase-inappropriate fields,

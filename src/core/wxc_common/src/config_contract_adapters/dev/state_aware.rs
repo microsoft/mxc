@@ -82,7 +82,7 @@ fn state_aware_common(
     crate::common_request_ir::CommonRequestIR {
         schema: schema.into_option(),
         comment: comment.into_option(),
-        source_contract: mxc_config_contract::ContractVersion::V0_10_0Alpha,
+        source_contract: mxc_config_contract::ContractVersion::V1_1_0Alpha,
         default_env_compatibility: crate::models::DefaultEnvCompatibility::DefaultBlock,
         network_enforcement_compatibility: crate::models::NetworkEnforcementCompatibility::Strict,
         phase: None,

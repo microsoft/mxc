@@ -1172,11 +1172,11 @@ mod tests {
 
         assert_typed_matches_exact(
             r#"{
-                "version":"0.10.0-alpha",
+                "version":"1.1.0-alpha",
                 "phase":"provision",
                 "containment":"windows_sandbox"
             }"#,
-            ProvisionRequest::windows_sandbox("0.10.0-alpha")
+            ProvisionRequest::windows_sandbox("1.1.0-alpha")
                 .into_sdk_input(None)
                 .unwrap(),
         );
@@ -1380,7 +1380,7 @@ mod tests {
     #[test]
     fn experimental_backend_requires_optin() {
         let parsed = parse_state_aware(
-            r#"{"version":"0.10.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
+            r#"{"version":"1.1.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
             false,
             &mut Logger::new(Mode::Buffer),
         )
@@ -1511,7 +1511,7 @@ mod tests {
         // The gate and phase checks pass, so the refusal can only come from the
         // single-flight claim. The exec goes no further: `wsb:` resolves to a
         // backend needing a live host, and the claim is taken before that.
-        let json = r#"{"version":"0.10.0-alpha","phase":"exec","sandboxId":"wsb:0123abcd",
+        let json = r#"{"version":"1.1.0-alpha","phase":"exec","sandboxId":"wsb:0123abcd",
             "process":{"commandLine":"cmd.exe /c echo hi"}}"#;
 
         let held = claim_attached_exec().expect("the claim must be available");
@@ -1529,7 +1529,7 @@ mod tests {
 
     #[test]
     fn attached_exec_requires_a_terminal() {
-        let json = r#"{"version":"0.10.0-alpha","phase":"exec","sandboxId":"wsb:0123abcd",
+        let json = r#"{"version":"1.1.0-alpha","phase":"exec","sandboxId":"wsb:0123abcd",
             "process":{"commandLine":"cmd.exe /c echo hi"}}"#;
 
         let err = exec_state_aware_attached_with(json, true, || false)
@@ -1581,7 +1581,7 @@ mod tests {
     #[test]
     fn exec_state_aware_routes_windows_sandbox_exec_to_backend() {
         let parsed = parse_state_aware(
-            r#"{"version":"0.10.0-alpha","phase":"exec","sandboxId":"wsb:abcd1234",
+            r#"{"version":"1.1.0-alpha","phase":"exec","sandboxId":"wsb:abcd1234",
                 "process":{"commandLine":"echo typed"}}"#,
             true,
             &mut Logger::new(Mode::Buffer),
@@ -1622,7 +1622,7 @@ mod tests {
     fn lifecycle_fixture(backend: &str, id: &str, phase: Phase) -> String {
         let mut value = serde_json::json!({
             "version": if backend == "windows_sandbox" {
-                "0.10.0-alpha"
+                "1.1.0-alpha"
             } else {
                 "0.9.0-alpha"
             },
@@ -1867,7 +1867,7 @@ mod tests {
         // Provision without containment — the dispatcher rejects it as
         // `MalformedRequest` before ever reaching a backend.
         let error = super::run_state_aware_json(
-            r#"{"version":"0.10.0-alpha","phase":"provision"}"#,
+            r#"{"version":"1.1.0-alpha","phase":"provision"}"#,
             false,
             false,
         )
@@ -1882,7 +1882,7 @@ mod tests {
         // `BackendUnavailable` → `InitError`; the shared classifier keeps
         // streaming and state-aware attribution in lockstep.
         let error = super::run_state_aware_json(
-            r#"{"version":"0.10.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
+            r#"{"version":"1.1.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
             false,
             false,
         )
@@ -1911,7 +1911,7 @@ mod tests {
         use crate::error::ErrorCode;
         for _ in 0..3 {
             let error = super::run_state_aware_json(
-                r#"{"version":"0.10.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
+                r#"{"version":"1.1.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
                 false,
                 false,
             )

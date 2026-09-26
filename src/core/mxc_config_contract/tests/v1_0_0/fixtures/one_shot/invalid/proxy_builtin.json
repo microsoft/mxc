@@ -1,0 +1,11 @@
+{
+  "version": "1.0.0",
+  "process": {
+    "commandLine": "echo proxy"
+  },
+  "network": {
+    "proxy": {
+      "builtinTestServer": true
+    }
+  }
+}

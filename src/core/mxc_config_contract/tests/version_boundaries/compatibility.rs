@@ -1,11 +1,15 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use mxc_config_contract::published::{
-    v0_6_0_alpha::{Containment as V06Containment, Request as V06Request},
-    v0_7_0_alpha::{Containment as V07Containment, Request as V07Request},
-    v0_8_0_alpha::{Containment as V08Containment, Request as V08Request},
-    v0_9_0_alpha::{OneShotContainment as V09Containment, OneShotRequest as V09Request},
+use mxc_config_contract::{
+    dev::OneShotRequest as V11Request,
+    published::{
+        v0_6_0_alpha::{Containment as V06Containment, Request as V06Request},
+        v0_7_0_alpha::{Containment as V07Containment, Request as V07Request},
+        v0_8_0_alpha::{Containment as V08Containment, Request as V08Request},
+        v0_9_0_alpha::{OneShotContainment as V09Containment, OneShotRequest as V09Request},
+        v1_0_0::OneShotRequest as V10Request,
+    },
 };
 
 #[test]
@@ -257,4 +261,34 @@ fn macos_sandbox_section_alias_remains_accepted_from_v07() {
     assert!(v07_request.seatbelt.as_ref().is_some());
     assert!(v08_request.seatbelt.as_ref().is_some());
     assert!(v09_request.seatbelt.as_ref().is_some());
+}
+
+#[test]
+fn compatibility_aliases_are_rejected_throughout_v1() {
+    for json in [
+        r#"{
+            "version": "1.0.0",
+            "containment": "appcontainer",
+            "process": {"commandLine": "echo"}
+        }"#,
+        r#"{
+            "version": "1.0.0",
+            "appContainer": {},
+            "process": {"commandLine": "echo"}
+        }"#,
+        r#"{
+            "version": "1.0.0",
+            "containment": "macos_sandbox",
+            "process": {"commandLine": "echo"}
+        }"#,
+        r#"{
+            "version": "1.0.0",
+            "macos_sandbox": {},
+            "process": {"commandLine": "echo"}
+        }"#,
+    ] {
+        assert!(serde_json::from_str::<V10Request>(json).is_err());
+        let v11_json = json.replace("\"1.0.0\"", "\"1.1.0-alpha\"");
+        assert!(serde_json::from_str::<V11Request>(&v11_json).is_err());
+    }
 }

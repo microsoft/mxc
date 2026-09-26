@@ -110,8 +110,8 @@ test("compareVersions orders by major, then minor, then patch", () => {
 test("compareVersions orders multi-digit minor versions numerically", () => {
   assert.ok(
     compareVersions(
-      parseVersion("0.9.0-alpha"),
-      parseVersion("0.10.0-alpha")
+      parseVersion("1.9.0-alpha"),
+      parseVersion("1.10.0-alpha")
     ) < 0
   );
 });

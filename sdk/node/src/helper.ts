@@ -6,7 +6,14 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { randomBytes } from 'crypto';
 import { FileLogger } from './logger.js';
-import { ContainerConfig, ContainmentBackend, ContainmentTypes, ExperimentalBackends, LegacyContainmentAliases } from './types.js';
+import {
+  ContainerConfig,
+  ContainmentBackend,
+  ContainmentTypes,
+  ExperimentalBackends,
+  LegacyContainmentAliases,
+  legacyConfigAliasUnsupportedReason,
+} from './types.js';
 import { findWxcExecutable, findLxcExecutable, findSeatbeltExecutable, getPlatformSupport } from './platform.js';
 import { SandboxSpawnOptions } from './sandbox.js';
 import { diagLog } from './diagnostic.js';
@@ -218,6 +225,11 @@ export function resolveExecutableAndArgs(
   config: ContainerConfig,
   options: SandboxSpawnOptions = {},
 ): { executablePath: string; args: string[] } {
+  const unsupportedAlias = legacyConfigAliasUnsupportedReason(config);
+  if (unsupportedAlias !== undefined) {
+    throw new Error(unsupportedAlias);
+  }
+
   const legacyExperimental = (config as ContainerConfig & {
     experimental?: unknown;
   }).experimental;
@@ -234,14 +246,9 @@ export function resolveExecutableAndArgs(
     throw new Error('script is required. Set process.commandLine on the config or pass a script to spawnSandbox().');
   }
 
-  // Resolve deprecated wire values (e.g. "appcontainer" → "processcontainer",
-  // "macos_sandbox" → "seatbelt") once, and drive every containment check
-  // from the resolved value. The native binary accepts both spellings via
-  // serde aliases, so the wire payload is forwarded unchanged below — this
-  // resolution is purely for SDK-side validation. Without it, legacy values
-  // bypass the experimental-mode gate (because they are not in
-  // ExperimentalBackends under their alias) and produce a confusing
-  // "not available on this platform" error instead.
+  // Resolve aliases accepted by the selected historical contract once, and
+  // drive every containment check from the canonical value. The wire payload
+  // remains unchanged so the matching exact Rust parser performs normalization.
   const rawContainment = config.containment;
   const effectiveContainment = rawContainment
     ? (LegacyContainmentAliases[rawContainment] ?? rawContainment)
