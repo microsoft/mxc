@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<package>
+  <metadata>
+    <id>Microsoft.Mxc.Sdk</id>
+    <version>$version$</version>
+    <authors>Microsoft</authors>
+    <owners>Microsoft</owners>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <license type="file">LICENSE.md</license>
+    <readme>README.md</readme>
+    <projectUrl>https://github.com/microsoft/mxc</projectUrl>
+    <repository type="git" url="https://github.com/microsoft/mxc" />
+    <description>.NET SDK for MXC (Microsoft eXecution Container), including Windows, Linux, and macOS native runtime assets.</description>
+    <tags>mxc sandbox isolation security</tags>
+    <dependencies>
+      <group targetFramework="net8.0" />
+    </dependencies>
+  </metadata>
+  <files>
+    <file src="$managedOutput$\Microsoft.Mxc.Sdk.dll" target="lib\net8.0" />
+    <file src="$managedOutput$\Microsoft.Mxc.Sdk.pdb" target="lib\net8.0" />
+    <file src="$x64Native$\*" target="runtimes\win-x64\native" />
+    <file src="$arm64Native$\*" target="runtimes\win-arm64\native" />
+    <file src="$linuxX64Native$\*" target="runtimes\linux-x64\native" />
+    <file src="$linuxArm64Native$\*" target="runtimes\linux-arm64\native" />
+    <file src="$macArm64Native$\*" target="runtimes\osx-arm64\native" />
+    <file src="$repositoryRoot$\sdk\dotnet\README.md" target="" />
+    <file src="$repositoryRoot$\LICENSE.md" target="" />
+  </files>
+</package>

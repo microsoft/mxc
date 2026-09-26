@@ -20,11 +20,11 @@
 //! broker state and staged ETL. There is **no real-time event access**; denials are
 //! read from the ETL after the sandboxed process exits.
 //!
-//! Because the exports only exist on feature-enabled OS builds, this crate resolves
-//! them at runtime via `LoadLibrary`/`GetProcAddress` behind the [`is_learning_mode_api_available`]
-//! capability probe. The crate compiles on every platform: the capability probe returns
-//! `false` on non-Windows targets, while the loader and trace-handle types are exported
-//! only on Windows.
+//! Availability is checked with `IsApiSetImplemented` for
+//! `api-win-appmodel-processmodel~learningmodetrace`. Execution resolves the
+//! exports at runtime via `LoadLibrary`/`GetProcAddress`. The crate compiles on
+//! every platform, while the API-set contract name, loader, and trace-handle
+//! types are exported only on Windows.
 
 use thiserror::Error;
 
@@ -58,7 +58,10 @@ pub use etl_filter::filter_trace_for_job_membership;
 #[cfg(target_os = "windows")]
 pub use extractors::DecodedEventParts;
 #[cfg(target_os = "windows")]
-pub use ffi::{is_learning_mode_api_available, LearningModeApi, LearningModeTraceHandle};
+pub use ffi::{
+    is_learning_mode_api_available, start_trace, LearningModeApi, LearningModeTraceHandle,
+    LEARNING_MODE_API_SET,
+};
 #[cfg(target_os = "windows")]
 pub use process_lifetime::{
     JobMembershipSnapshot, JobProcessMembership, MAX_JOB_PROCESS_LIFETIMES,
@@ -127,8 +130,26 @@ pub enum LearningModeError {
     },
 }
 
-/// Capability probe: `true` only when `processmodel.dll` exposes the Learning Mode
-/// trace exports on this machine. Always `false` on non-Windows targets.
+#[cfg(target_os = "windows")]
+impl LearningModeError {
+    /// Whether the failure means the underlying Windows API is unavailable.
+    #[must_use]
+    pub fn is_api_unavailable(&self) -> bool {
+        use windows::Win32::Foundation::{ERROR_CALL_NOT_IMPLEMENTED, E_NOTIMPL};
+
+        match self {
+            Self::ApiSetUnavailable { .. } | Self::DllLoad(_) | Self::ExportMissing { .. } => true,
+            Self::HResultCall { code, .. } => *code == E_NOTIMPL.0,
+            Self::ApiCall { code, .. } => {
+                *code == ERROR_CALL_NOT_IMPLEMENTED.0 || *code == E_NOTIMPL.0 as u32
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Capability probe for the Learning Mode trace API. Always `false` on
+/// non-Windows targets.
 #[cfg(not(target_os = "windows"))]
 #[must_use]
 pub fn is_learning_mode_api_available() -> bool {
@@ -172,5 +193,31 @@ mod error_tests {
         let message = error.to_string();
         assert!(message.contains("process security-environment API"));
         assert!(!message.contains("lacks the Learning Mode trace API"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn api_unavailable_classifies_platform_failures() {
+        use windows::Win32::Foundation::{E_INVALIDARG, E_NOTIMPL};
+
+        assert!(LearningModeError::HResultCall {
+            function: "StartLearningModeTrace",
+            code: E_NOTIMPL.0,
+        }
+        .is_api_unavailable());
+        assert!(!LearningModeError::HResultCall {
+            function: "StartLearningModeTrace",
+            code: E_INVALIDARG.0,
+        }
+        .is_api_unavailable());
+        assert!(LearningModeError::ExportMissing {
+            api: "Learning Mode trace",
+            export: "StartLearningModeTrace",
+            detail: "not found".to_string(),
+        }
+        .is_api_unavailable());
+        assert!(
+            LearningModeError::DllLoad("missing processmodel.dll".to_string()).is_api_unavailable()
+        );
     }
 }

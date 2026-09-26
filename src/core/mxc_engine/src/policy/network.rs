@@ -62,9 +62,12 @@ impl<'de> serde::Deserialize<'de> for ProxySpec {
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct NetworkSection {
+    /// Allow outbound by default when no allowlist narrows the policy.
     pub allow_outbound: bool,
     pub allow_local_network: bool,
+    /// Destinations allowed under a default-block legacy policy.
     pub allowed_hosts: Vec<String>,
+    /// Destinations denied after legacy allow rules are applied.
     pub blocked_hosts: Vec<String>,
     pub proxy: Option<ProxySpec>,
     /// Schema 0.8 outbound network policy.
@@ -74,6 +77,10 @@ pub struct NetworkSection {
     /// Schema 0.8 runtime values supplied separately from sandbox policy.
     pub runtime_config: Option<RuntimeConfigSection>,
     pub(crate) legacy_fields_specified: bool,
+}
+
+pub(super) fn legacy_default_allows(network: &NetworkSection) -> bool {
+    network.allow_outbound && network.allowed_hosts.is_empty()
 }
 
 impl<'de> serde::Deserialize<'de> for NetworkSection {
@@ -392,14 +399,38 @@ pub(super) fn proxy_to_wire(proxy: &ProxySpec) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        proxy_to_wire, select_network_format, ContractVersion, NetworkAction, NetworkEgressSection,
-        NetworkFormat, NetworkPeerSection, NetworkPortSection, NetworkRuleSection, NetworkSection,
-        ProxySpec, RuntimeConfigSection,
+        legacy_default_allows, proxy_to_wire, select_network_format, ContractVersion,
+        NetworkAction, NetworkEgressSection, NetworkFormat, NetworkPeerSection, NetworkPortSection,
+        NetworkRuleSection, NetworkSection, ProxySpec, RuntimeConfigSection,
     };
 
     #[test]
     fn network_action_defaults_to_deny() {
         assert_eq!(NetworkAction::default(), NetworkAction::Deny);
+    }
+
+    #[test]
+    fn legacy_allowlist_selects_a_block_default() {
+        for allow_outbound in [false, true] {
+            let network = NetworkSection {
+                allow_outbound,
+                allowed_hosts: vec!["192.0.2.10".to_string()],
+                ..Default::default()
+            };
+
+            assert!(!legacy_default_allows(&network));
+        }
+    }
+
+    #[test]
+    fn legacy_blocklist_only_preserves_the_outbound_default() {
+        let network = NetworkSection {
+            allow_outbound: true,
+            blocked_hosts: vec!["198.51.100.10".to_string()],
+            ..Default::default()
+        };
+
+        assert!(legacy_default_allows(&network));
     }
 
     #[test]

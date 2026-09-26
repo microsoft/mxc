@@ -48,6 +48,11 @@ if "%WITH_NANVIX%"=="1" set "CARGO_FLAGS=--features microvm %CARGO_FLAGS%"
 if "%WITH_WSLC%"=="1" set "CARGO_FLAGS=--features wslc %CARGO_FLAGS%"
 if "%WITH_ISOLATION_SESSION%"=="1" set "CARGO_FLAGS=--features isolation_session %CARGO_FLAGS%"
 if "%WITH_HYPERLIGHT%"=="1" set "CARGO_FLAGS=--features hyperlight %CARGO_FLAGS%"
+set "DOTNET_CONFIG=Release"
+if "%BUILD_CONFIG%"=="debug" set "DOTNET_CONFIG=Debug"
+set "DOTNET_BUILD_PROPERTIES="
+if "%WITH_ISOLATION_SESSION%"=="1" set "DOTNET_BUILD_PROPERTIES=!DOTNET_BUILD_PROPERTIES! -p:MxcWithIsolationSession=true"
+if "%WITH_WSLC%"=="1" set "DOTNET_BUILD_PROPERTIES=!DOTNET_BUILD_PROPERTIES! -p:MxcWithWslc=true"
 
 :: Build Rust
 echo.
@@ -195,6 +200,32 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
     )
 )
 
+:: Build the managed .NET SDK. Native runtime assets are staged above for
+:: local execution and architecture-specific local packages. The governed
+:: pipeline assembles the cross-platform package.
+echo.
+echo Building .NET SDK...
+call dotnet restore sdk\dotnet\Microsoft.Mxc.Sdk\Microsoft.Mxc.Sdk.csproj --nologo || goto :error_root
+call dotnet build sdk\dotnet\Microsoft.Mxc.Sdk\Microsoft.Mxc.Sdk.csproj --configuration !DOTNET_CONFIG! --no-restore --nologo !DOTNET_BUILD_PROPERTIES! || goto :error_root
+
+echo.
+echo Packaging architecture-specific Microsoft.Mxc.Sdk NuGet package...
+if not exist "output\packages" mkdir "output\packages"
+for /f "usebackq delims=" %%V in (`powershell -NoProfile -Command "[xml]$p = Get-Content 'sdk\dotnet\Microsoft.Mxc.Sdk\Microsoft.Mxc.Sdk.csproj'; $p.Project.PropertyGroup.Version"`) do set "DOTNET_PACKAGE_VERSION=%%V"
+set "DOTNET_PACKAGE_TARGETS=%BUILD_ARCH%"
+if "%BUILD_ALL%"=="1" set "DOTNET_PACKAGE_TARGETS=x86_64-pc-windows-msvc aarch64-pc-windows-msvc"
+for %%T in (!DOTNET_PACKAGE_TARGETS!) do (
+    if "%%T"=="x86_64-pc-windows-msvc" (set "PACKAGE_RID=win-x64") else (set "PACKAGE_RID=win-arm64")
+    set "PACKAGE_NATIVE_DIR=%CD%\sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!PACKAGE_RID!\native"
+    call dotnet pack sdk\dotnet\Microsoft.Mxc.Sdk\Microsoft.Mxc.Sdk.csproj --configuration !DOTNET_CONFIG! --no-restore --no-build --output output\packages --nologo ^
+        -p:PackageVersion=!DOTNET_PACKAGE_VERSION!-local-!PACKAGE_RID! ^
+        -p:MxcPrebuiltNativeDir="!PACKAGE_NATIVE_DIR!" ^
+        -p:MxcPackageRid=!PACKAGE_RID! ^
+        -p:MxcPackSingleRid=true ^
+        !DOTNET_BUILD_PROPERTIES! || goto :error_root
+    echo   Created output\packages\Microsoft.Mxc.Sdk.!DOTNET_PACKAGE_VERSION!-local-!PACKAGE_RID!.nupkg
+)
+
 :: Build npm packages
 echo.
 echo Building npm SDK package...
@@ -263,6 +294,7 @@ exit /b 0
 
 :error
 popd
+:error_root
 echo.
 echo Build failed.
 exit /b 1
@@ -276,7 +308,7 @@ echo   --debug     Build debug configuration (default: release)
 echo   --release   Build release configuration
 echo   --x64       Build for x64 only
 echo   --arm64     Build for ARM64 only
-echo   --all             Build for both x64 and ARM64
+echo   --all             Build both Windows architectures and create the .NET NuGet package
 echo   --with-microvm    Download and include NanVix micro-VM binaries
 echo   --with-wslc       Build with WSL Container (WSLC SDK) support
 echo   --with-isolation-session   Build with IsolationSession backend (IsoEnvBroker)

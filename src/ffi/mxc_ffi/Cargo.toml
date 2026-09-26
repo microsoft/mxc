@@ -29,10 +29,9 @@ wslc = ["mxc-sdk/wslc"]
 # `attached_console_ffi` example.
 isolation_session = ["mxc-sdk/isolation_session"]
 # Opt-in C# SDK P/Invoke code generation (csbindgen) in build.rs. Off by
-# default so normal builds — including the whole-workspace backend build
-# matrix — don't compile csbindgen or write into the source tree. The drift
-# gate (scripts/check-dotnet-bindings-codegen.js) builds with this feature to
-# regenerate the committed bindings.
+# default so normal builds don't compile csbindgen or write into the source
+# tree. Local C# builds, the Windows x64 pipeline build, and the drift gate
+# enable it when they need generated bindings.
 dotnetsdk = ["dep:csbindgen"]
 # Exposes the debug-only telemetry test seams to language-binding tests.
 test-support = ["mxc-sdk/test-support"]

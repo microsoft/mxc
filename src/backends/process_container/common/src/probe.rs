@@ -137,10 +137,8 @@ impl From<EffectiveUiRestrictions> for UiCapabilitySupport {
 pub fn run_probe(request: &ExecutionRequest, guarded_capture_available: bool) -> ProbeOutput {
     use crate::base_container_runner::BaseContainerRunner;
 
-    let capabilities = BaseContainerRunner::capabilities_for_request(request);
-    let uses_native_capture = BaseContainerRunner::uses_native_capture_for_request(request);
     let probes = ProbeFacts {
-        base_container_api_present: BaseContainerRunner::is_base_container_api_present().is_ok(),
+        base_container_api_present: BaseContainerRunner::is_base_container_api_present(),
         native_capture_available: BaseContainerRunner::is_native_capture_available(),
         guarded_capture_available,
         bfscfg_present: fallback_detector::find_bfscfg_exe()
@@ -148,8 +146,8 @@ pub fn run_probe(request: &ExecutionRequest, guarded_capture_available: bool) ->
             .flatten()
             .is_some(),
         bfs_compiled_in: cfg!(feature = "tier2_bfs"),
-        base_container_supports_deny_paths: capabilities.supports_deny_paths,
-        base_container_supports_enumerate_paths: capabilities.supports_enumerate_paths,
+        base_container_supports_deny_paths: BaseContainerRunner::supports_native_denied_paths(),
+        base_container_supports_enumerate_paths: BaseContainerRunner::supports_enumerate_paths(),
         base_container_supports_ingress_host_loopback_allow:
             BaseContainerRunner::supports_ingress_host_loopback_allow(),
         isolation_session_available: false,
@@ -157,20 +155,22 @@ pub fn run_probe(request: &ExecutionRequest, guarded_capture_available: bool) ->
         ui_capabilities: crate::job_object::supported_ui_restrictions().into(),
     };
 
-    run_probe_with_capabilities(request, probes, capabilities, uses_native_capture)
+    run_probe_with_tier_decision(
+        request,
+        probes,
+        fallback_detector::choose_backend_tier(request),
+    )
 }
 
-fn run_probe_with_capabilities(
+fn run_probe_with_tier_decision(
     request: &ExecutionRequest,
     probes: ProbeFacts,
-    capabilities: fallback_detector::BaseContainerRequestCapabilities,
-    uses_native_capture: bool,
+    tier_decision: Result<fallback_detector::TierDecision, FallbackError>,
 ) -> ProbeOutput {
-    match detect_request_tier(request, capabilities) {
+    match tier_decision {
         Ok(decision)
             if request.policy.capture_denials.is_some()
-                && (decision.tier != fallback_detector::IsolationTier::BaseContainer
-                    || !uses_native_capture)
+                && decision.tier != fallback_detector::IsolationTier::BaseContainer
                 && !probes.guarded_capture_available =>
         {
             ProbeOutput {
@@ -198,17 +198,6 @@ fn run_probe_with_capabilities(
     }
 }
 
-fn detect_request_tier(
-    request: &ExecutionRequest,
-    capabilities: fallback_detector::BaseContainerRequestCapabilities,
-) -> Result<fallback_detector::TierDecision, FallbackError> {
-    fallback_detector::detect_with_base_container_capabilities(
-        &request.policy,
-        capabilities.usable,
-        capabilities,
-    )
-}
-
 fn format_fallback_error(e: &FallbackError) -> String {
     match e {
         FallbackError::DaclFallbackDisabled => {
@@ -220,7 +209,9 @@ fn format_fallback_error(e: &FallbackError) -> String {
         FallbackError::SystemRootUnresolved { reason } => {
             format!("Could not resolve Windows system directory: {reason}")
         }
-        FallbackError::EnumeratePathsUnsupported => e.to_string(),
+        FallbackError::EnumeratePathsUnsupported | FallbackError::IngressUnsupported => {
+            e.to_string()
+        }
     }
 }
 
@@ -238,7 +229,9 @@ mod tests {
     use super::*;
     use crate::fallback_detector::IsolationTier;
     use crate::test_env::{CaptureCapabilityGuard, ForceTierGuard};
-    use wxc_common::models::{ContainerPolicy, ExecutionRequest};
+    use wxc_common::models::{
+        ContainerPolicy, ExecutionRequest, NetworkAction, NetworkIngressPolicy,
+    };
 
     fn all_ui_capabilities() -> UiCapabilitySupport {
         UiCapabilitySupport {
@@ -278,18 +271,6 @@ mod tests {
             isolation_session_available: false,
             hyperlight_available: false,
             ui_capabilities: all_ui_capabilities(),
-        }
-    }
-
-    fn request_capabilities(
-        usable: bool,
-        supports_deny_paths: bool,
-        supports_enumerate_paths: bool,
-    ) -> fallback_detector::BaseContainerRequestCapabilities {
-        fallback_detector::BaseContainerRequestCapabilities {
-            usable,
-            supports_deny_paths,
-            supports_enumerate_paths,
         }
     }
 
@@ -385,15 +366,16 @@ mod tests {
     #[test]
     fn request_capabilities_control_base_container_selection() {
         let _lock = crate::test_env::lock();
+        // SAFETY: env-var mutation is serialized by the shared test lock.
+        unsafe {
+            std::env::set_var("MXC_FORCE_BC_USABLE", "1");
+        }
         let request = ExecutionRequest::default();
-        let probes = test_probe_facts(false, false);
-
-        let selected = run_probe_with_capabilities(
-            &request,
-            probes,
-            request_capabilities(true, true, true),
-            false,
-        );
+        let selected = run_probe(&request, false);
+        // SAFETY: env-var mutation is serialized by the shared test lock.
+        unsafe {
+            std::env::remove_var("MXC_FORCE_BC_USABLE");
+        }
 
         assert_eq!(selected.tier, Some("base-container"));
         assert!(selected.error.is_none());
@@ -408,11 +390,10 @@ mod tests {
         };
         let request = request_with_policy(policy);
 
-        let output = run_probe_with_capabilities(
+        let output = run_probe_with_tier_decision(
             &request,
             test_probe_facts(false, true),
-            request_capabilities(false, false, true),
-            false,
+            fallback_detector::choose_backend_tier(&request),
         );
 
         assert_eq!(output.tier, Some("appcontainer-dacl"));
@@ -427,38 +408,16 @@ mod tests {
             capture_denials: Some(Default::default()),
             ..Default::default()
         };
-        let output = run_probe_with_capabilities(
-            &request_with_policy(policy),
+        let request = request_with_policy(policy);
+        let output = run_probe_with_tier_decision(
+            &request,
             test_probe_facts(false, false),
-            request_capabilities(false, false, true),
-            false,
+            fallback_detector::choose_backend_tier(&request),
         );
 
         assert!(output.tier.is_none());
         assert!(output.needs_dacl_augmentation.is_none());
         assert!(!output.probes.guarded_capture_available);
-        assert_eq!(
-            output.error.as_deref(),
-            Some("guarded WPR captureDenials fallback is unavailable")
-        );
-    }
-
-    #[test]
-    fn capture_denials_requires_guarded_capture_on_legacy_base_container() {
-        let _guard = ForceTierGuard::set_tier(IsolationTier::BaseContainer);
-        let policy = ContainerPolicy {
-            capture_denials: Some(Default::default()),
-            ..Default::default()
-        };
-        let output = run_probe_with_capabilities(
-            &request_with_policy(policy),
-            test_probe_facts(false, false),
-            request_capabilities(true, true, true),
-            false,
-        );
-
-        assert!(output.tier.is_none());
-        assert!(output.needs_dacl_augmentation.is_none());
         assert_eq!(
             output.error.as_deref(),
             Some("guarded WPR captureDenials fallback is unavailable")
@@ -472,11 +431,11 @@ mod tests {
             capture_denials: Some(Default::default()),
             ..Default::default()
         };
-        let output = run_probe_with_capabilities(
-            &request_with_policy(policy),
+        let request = request_with_policy(policy);
+        let output = run_probe_with_tier_decision(
+            &request,
             test_probe_facts(true, false),
-            request_capabilities(true, true, true),
-            true,
+            fallback_detector::choose_backend_tier(&request),
         );
 
         assert_eq!(output.tier, Some("base-container"));
@@ -606,34 +565,49 @@ mod tests {
     #[test]
     fn request_detector_keeps_supported_denied_paths_on_base_container() {
         let _guard = crate::test_env::lock();
+        // SAFETY: env-var mutation is serialized by the shared test lock.
+        unsafe {
+            std::env::set_var("MXC_FORCE_BC_USABLE", "1");
+            std::env::set_var("MXC_FORCE_DENY_PATHS", "1");
+        }
         let mut request = ExecutionRequest::default();
         request.policy.denied_paths = vec!["C:\\secret".to_string()];
 
-        let decision = detect_request_tier(&request, request_capabilities(true, true, true))
+        let decision = fallback_detector::choose_backend_tier(&request)
             .expect("BaseContainer should be selected");
+        // SAFETY: env-var mutation is serialized by the shared test lock.
+        unsafe {
+            std::env::remove_var("MXC_FORCE_BC_USABLE");
+            std::env::remove_var("MXC_FORCE_DENY_PATHS");
+        }
 
         assert_eq!(decision.tier, IsolationTier::BaseContainer);
     }
 
     #[test]
     fn request_detector_rejects_enumerate_paths_without_compatible_base_container() {
+        let _guard = crate::test_env::BcUsableGuard::set(false);
         let mut request = ExecutionRequest::default();
         request.policy.enumerate_paths = vec!["C:\\tools".to_string()];
 
-        let error = detect_request_tier(&request, request_capabilities(false, false, false))
+        let error = fallback_detector::choose_backend_tier(&request)
             .expect_err("enumeratePaths must not fall through to AppContainer");
 
         assert!(matches!(error, FallbackError::EnumeratePathsUnsupported));
     }
 
     #[test]
-    fn request_detector_rejects_enumerate_paths_without_native_support() {
+    fn request_detector_rejects_host_loopback_without_compatible_base_container() {
+        let _guard = crate::test_env::BcUsableGuard::set(false);
         let mut request = ExecutionRequest::default();
-        request.policy.enumerate_paths = vec!["C:\\tools".to_string()];
+        request.policy.network_ingress = Some(NetworkIngressPolicy {
+            default: NetworkAction::Deny,
+            host_loopback: NetworkAction::Allow,
+        });
 
-        let error = detect_request_tier(&request, request_capabilities(true, true, false))
-            .expect_err("enumeratePaths requires its specific native capability");
+        let error = fallback_detector::choose_backend_tier(&request)
+            .expect_err("host-loopback ingress must not fall through to AppContainer");
 
-        assert!(matches!(error, FallbackError::EnumeratePathsUnsupported));
+        assert!(matches!(error, FallbackError::IngressUnsupported));
     }
 }

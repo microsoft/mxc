@@ -15,6 +15,22 @@ from crates.io and npmjs, helping ensure secure and vetted consumption of thirdâ
 ### Production Build and Release pipelines
 - The ADO pipeline is the official build pipeline that signs the binaries and
   drives public releases. It runs on merge to `main` and on a nightly schedule.
+- The shared build stages assemble the managed and native .NET SDK binaries
+  into two unsigned `Microsoft.Mxc.Sdk` NuGet packages in both official and
+  unofficial builds. Official builds sign the managed and native binaries
+  before packaging. The NuGet.org payload keeps the project version; the
+  internal-test payload includes the unique Azure Pipelines build ID in its
+  prerelease version so repeated publications do not collide. Both payloads use
+  neutral suffixes because release inputs reject unsigned `.nupkg` files.
+- A fast .NET pipeline validation stage runs in parallel with the Rust builds.
+  It verifies the .NET SDK/runtime setup and packs both NuGet variants with
+  synthetic native inputs so pipeline and package-contract failures surface
+  without waiting for the cross-platform Rust artifacts.
+- `OneBranch.DotNet.Release.yml` selects the payload for the requested target,
+  restores its `.nupkg` suffix, signs and verifies it, and publishes it to the
+  internal `Mxc-Azure-Feed` by default. Queue-time selection can instead publish
+  the fixed-version package publicly to NuGet.org through the `MXC Nuget`
+  service connection.
 
 ### PR Pipelines
 - GitHub Actions runs the PR validation build automatically on every pull

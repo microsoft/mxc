@@ -66,6 +66,12 @@ stages:
         isOfficialBuild: ${{ parameters.isOfficialBuild }}
         ESRPInfo: ${{ parameters.ESRPInfo }}
 
+- stage: Validate_DotNet_Pipeline
+  displayName: 'Validate .NET Pipeline'
+  dependsOn: []
+  jobs:
+  - template: DotNet.Validate.Job.yml
+
 - stage: Package_MXC
   displayName: 'Package MXC'
   dependsOn:
@@ -91,6 +97,18 @@ stages:
 
   - template: Mxc.Binary.Packaging.Job.yml
 
+- stage: Build_DotNet_SDK
+  displayName: 'Build .NET SDK'
+  dependsOn:
+  - Build_Binaries
+  - Validate_Package_Locks
+  - Validate_DotNet_Pipeline
+  jobs:
+  - template: DotNet.Build.Job.yml
+    parameters:
+      isOfficialBuild: ${{ parameters.isOfficialBuild }}
+      ESRPInfo: ${{ parameters.ESRPInfo }}
+
 - stage: Lint
   displayName: 'Lint'
   dependsOn: []
@@ -99,16 +117,16 @@ stages:
     parameters:
       isOfficialBuild: ${{ parameters.isOfficialBuild }}
 
-- stage: SDK_Unit_Tests
-  displayName: 'SDK Unit Tests'
+- stage: Node_SDK_Unit_Tests
+  displayName: 'Node SDK Unit Tests'
   dependsOn: Validate_Package_Locks
   jobs:
   - template: SDK.Unit.Test.Job.yml
     parameters:
       debug: ${{ parameters.debug }}
 
-- stage: SDK_Integration_Tests
-  displayName: 'SDK Integration Tests'
+- stage: Node_SDK_Integration_Tests
+  displayName: 'Node SDK Integration Tests'
   dependsOn:
   - Package_MXC
   - Validate_Package_Locks
@@ -116,3 +134,12 @@ stages:
   - template: SDK.Integration.Test.Job.yml
     parameters:
       debug: ${{ parameters.debug }}
+
+- stage: DotNet_SDK_Tests
+  displayName: '.NET SDK Tests'
+  dependsOn:
+  - Build_Binaries
+  - Validate_Package_Locks
+  - Validate_DotNet_Pipeline
+  jobs:
+  - template: DotNet.Test.Job.yml

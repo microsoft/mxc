@@ -478,13 +478,13 @@ export type SandboxPolicy = {
   };
   /** Network access restrictions. All flags default to false (no network access). */
   network?: {
-      /** Whether to allow outbound connections to the Internet. (default: false) Legacy network field. */
+      /** Allow outbound by default when no allowlist narrows the policy. (default: false) Legacy network field. */
       allowOutbound?: boolean;
       /** Whether to allow connections to local networks. (default: false) Legacy network field. */
       allowLocalNetwork?: boolean;
-      /** When set, ONLY these outbound hosts are reachable. Requires allowOutbound. Legacy network field. */
+      /** Destinations allowed under a default-block policy. Windows ProcessContainer also requires allowOutbound. Legacy network field. */
       allowedHosts?: string[];
-      /** Hosts to block even when outbound is allowed. Requires allowOutbound. Legacy network field. */
+      /** Destinations denied after allow rules. Without allowedHosts, set allowOutbound so the default is allow. Legacy network field. */
       blockedHosts?: string[];
       /**
        * Proxy configuration. Routes cooperating HTTP traffic through this proxy.

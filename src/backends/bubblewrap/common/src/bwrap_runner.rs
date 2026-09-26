@@ -2074,23 +2074,45 @@ mod tests {
 
     #[test]
     fn validate_accepts_host_rules_when_a_proxy_enforces_them_at_0_8() {
-        // The proxy is the mechanism, so the same lists are fine with one.
+        // The proxy is the mechanism, so a valid allow-default blocklist
+        // reaches the environmental probe instead of failing policy validation.
         let mut req = base_request();
         req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
+        req.policy.default_network_policy = wxc_common::models::NetworkPolicy::Allow;
         req.policy.blocked_hosts = vec!["evil.example.com".into()];
         req.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".into(), 3128)),
             builtin_test_server: false,
         };
 
-        if let Err(err) = BubblewrapScriptRunner::new().validate(&req) {
-            assert!(
-                !err.error_message
-                    .contains("require an enforcement mechanism"),
-                "a proxy enforces the lists: {}",
-                err.error_message
-            );
-        }
+        let unavailable = bwrap_version::BwrapUnavailable::NotFound;
+        let expected = unavailable.to_string();
+        let error = BubblewrapScriptRunner::new()
+            .validate_prepared_with_probe(&req, || Err(unavailable))
+            .unwrap_err();
+        assert_eq!(error.error_message, expected);
+    }
+
+    #[test]
+    fn validate_rejects_block_default_blocklist_without_allowlist() {
+        let mut req = base_request();
+        req.schema_version = "0.8.0-alpha".into();
+        req.policy.default_network_policy = wxc_common::models::NetworkPolicy::Block;
+        req.policy.blocked_hosts = vec!["evil.example.com".into()];
+        req.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".into(), 3128)),
+            builtin_test_server: false,
+        };
+
+        let error = BubblewrapScriptRunner::new()
+            .validate_prepared_with_probe(&req, || {
+                panic!("environment probe must not run for an invalid legacy host list")
+            })
+            .unwrap_err();
+        assert_eq!(
+            error.error_message,
+            "blockedHosts requires allowedHosts when network.defaultPolicy='block'"
+        );
     }
 
     #[test]
@@ -2101,14 +2123,12 @@ mod tests {
         req.policy.default_network_policy = wxc_common::models::NetworkPolicy::Block;
         req.policy.allowed_hosts = vec!["api.github.com".into()];
 
-        if let Err(err) = BubblewrapScriptRunner::new().validate(&req) {
-            assert!(
-                !err.error_message
-                    .contains("require an enforcement mechanism"),
-                "0.7 must not be rejected: {}",
-                err.error_message
-            );
-        }
+        let unavailable = bwrap_version::BwrapUnavailable::NotFound;
+        let expected = unavailable.to_string();
+        let error = BubblewrapScriptRunner::new()
+            .validate_prepared_with_probe(&req, || Err(unavailable))
+            .unwrap_err();
+        assert_eq!(error.error_message, expected);
     }
 
     #[test]

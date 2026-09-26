@@ -1,0 +1,262 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+
+parameters:
+- name: isOfficialBuild
+  type: boolean
+  default: false
+- name: ESRPInfo
+  type: object
+  default: {}
+- name: nugetPackageVariants
+  type: object
+  default:
+  - displayName: NuGet.org
+    version: $(PackageVersion)
+    transportKind: public
+  - displayName: internal testing
+    version: $(InternalPackageVersion)
+    transportKind: internal
+
+jobs:
+- job: build_dotnet_sdk
+  displayName: Build .NET SDK
+  pool:
+    name: Azure-Pipelines-1ESPT-ExDShared
+    image: windows-2022
+    os: windows
+  variables:
+    sdkProject: $(Build.SourcesDirectory)\sdk\dotnet\Microsoft.Mxc.Sdk\Microsoft.Mxc.Sdk.csproj
+    sdkOutput: $(Build.SourcesDirectory)\sdk\dotnet\Microsoft.Mxc.Sdk\bin\Release\net8.0
+    packageRoot: $(Build.SourcesDirectory)\out\dotnet-package
+    packageOutput: $(Build.SourcesDirectory)\out\dotnet-nuget
+    x64NativeDir: $(Pipeline.Workspace)\dotnet-rust-x64
+    arm64NativeDir: $(Pipeline.Workspace)\dotnet-rust-arm64
+    linuxX64NativeDir: $(Pipeline.Workspace)\dotnet-rust-linux-x64
+    linuxArm64NativeDir: $(Pipeline.Workspace)\dotnet-rust-linux-arm64
+    macArm64NativeDir: $(Pipeline.Workspace)\dotnet-rust-macos-arm64
+
+  steps:
+  - checkout: self
+
+  - task: UseDotNet@2
+    displayName: Use .NET SDK 10
+    inputs:
+      packageType: sdk
+      version: 10.x
+
+  - task: DownloadPipelineArtifact@2
+    displayName: Download x64 Rust runtime
+    inputs:
+      artifact: wxc-binaries-x86_64-pc-windows-msvc
+      path: $(x64NativeDir)
+
+  - task: DownloadPipelineArtifact@2
+    displayName: Download ARM64 Rust runtime
+    inputs:
+      artifact: wxc-binaries-aarch64-pc-windows-msvc
+      path: $(arm64NativeDir)
+
+  - task: DownloadPipelineArtifact@2
+    displayName: Download Linux x64 Rust runtime
+    inputs:
+      artifact: lxc-binaries-x86_64-unknown-linux-gnu
+      path: $(linuxX64NativeDir)
+
+  - task: DownloadPipelineArtifact@2
+    displayName: Download Linux ARM64 Rust runtime
+    inputs:
+      artifact: lxc-binaries-aarch64-unknown-linux-gnu
+      path: $(linuxArm64NativeDir)
+
+  - task: DownloadPipelineArtifact@2
+    displayName: Download macOS ARM64 Rust runtime
+    inputs:
+      artifact: mxc-binaries-aarch64-apple-darwin
+      path: $(macArm64NativeDir)
+
+  - task: CopyFiles@2
+    displayName: Stage generated .NET bindings
+    inputs:
+      sourceFolder: $(x64NativeDir)\dotnet
+      contents: NativeMethods.g.cs
+      targetFolder: $(Build.SourcesDirectory)\sdk\dotnet\Microsoft.Mxc.Sdk\Native
+      overWrite: true
+
+  - task: NuGetAuthenticate@1
+    displayName: Authenticate to Mxc-Azure-Feed
+
+  - task: DotNetCoreCLI@2
+    displayName: Restore Microsoft.Mxc.Sdk
+    inputs:
+      command: restore
+      projects: $(sdkProject)
+      feedsToUse: config
+      nugetConfigPath: $(Build.SourcesDirectory)\.azure-pipelines\.nuget\nuget.private.config
+
+  - task: DotNetCoreCLI@2
+    displayName: Build Microsoft.Mxc.Sdk
+    inputs:
+      command: build
+      projects: $(sdkProject)
+      arguments: >-
+        --configuration Release
+        --no-restore
+        --nologo
+        -p:MxcWithIsolationSession=true
+        -p:MxcWithWslc=true
+        -p:MxcPrebuiltNativeDir="$(x64NativeDir)"
+
+  - ${{ if eq(parameters.isOfficialBuild, true) }}:
+    - task: EsrpCodeSigning@5
+      displayName: Sign Microsoft.Mxc.Sdk.dll
+      inputs:
+        ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
+        AppRegistrationClientId: ${{ parameters.ESRPInfo.clientId }}
+        AppRegistrationTenantId: ${{ parameters.ESRPInfo.tenantId }}
+        AuthAKVName: ${{ parameters.ESRPInfo.azureKeyVaultName }}
+        AuthCertName: ${{ parameters.ESRPInfo.authCertName }}
+        AuthSignCertName: ${{ parameters.ESRPInfo.signCertName }}
+        FolderPath: $(sdkOutput)
+        Pattern: Microsoft.Mxc.Sdk.dll
+        UseMinimatch: true
+        signConfigType: inlineSignParams
+        inlineOperation: >-
+          [
+            {
+              "KeyCode": "CP-230012",
+              "OperationCode": "SigntoolSign",
+              "ToolName": "sign",
+              "ToolVersion": "1.0",
+              "Parameters": {
+                "OpusName": "Microsoft",
+                "OpusInfo": "https://www.microsoft.com",
+                "FileDigest": "/fd SHA256",
+                "PageHash": "/NPH",
+                "TimeStamp": "/tr \"http://rfc3161.gtm.corp.microsoft.com/TSS/HttpTspServer\" /td sha256"
+              }
+            },
+            {
+              "KeyCode": "CP-230012",
+              "OperationCode": "SigntoolVerify",
+              "ToolName": "sign",
+              "ToolVersion": "1.0",
+              "Parameters": {}
+            }
+          ]
+
+  - task: NuGetToolInstaller@1
+    displayName: Install NuGet
+
+  - task: PowerShell@2
+    displayName: Set package versions
+    inputs:
+      filePath: $(Build.SourcesDirectory)\.azure-pipelines\scripts\set-dotnet-package-versions.ps1
+      arguments: >-
+        -ProjectPath "$(sdkProject)"
+        -BuildId "$(Build.BuildId)"
+
+  - task: CopyFiles@2
+    displayName: Stage managed SDK for NuGet
+    inputs:
+      sourceFolder: $(sdkOutput)
+      contents: |
+        Microsoft.Mxc.Sdk.dll
+        Microsoft.Mxc.Sdk.pdb
+      targetFolder: $(packageRoot)\managed
+
+  - task: CopyFiles@2
+    displayName: Stage x64 native runtime for NuGet
+    inputs:
+      sourceFolder: $(x64NativeDir)
+      contents: |
+        mxc_ffi.dll
+        plm.exe
+        wxc-wslc-daemon.exe
+        wslcsdk.dll
+      targetFolder: $(packageRoot)\runtimes\win-x64\native
+
+  - task: CopyFiles@2
+    displayName: Stage ARM64 native runtime for NuGet
+    inputs:
+      sourceFolder: $(arm64NativeDir)
+      contents: |
+        mxc_ffi.dll
+        plm.exe
+        wxc-wslc-daemon.exe
+        wslcsdk.dll
+      targetFolder: $(packageRoot)\runtimes\win-arm64\native
+
+  - task: CopyFiles@2
+    displayName: Stage Linux x64 native runtime for NuGet
+    inputs:
+      sourceFolder: $(linuxX64NativeDir)
+      contents: libmxc_ffi.so
+      targetFolder: $(packageRoot)\runtimes\linux-x64\native
+
+  - task: CopyFiles@2
+    displayName: Stage Linux ARM64 native runtime for NuGet
+    inputs:
+      sourceFolder: $(linuxArm64NativeDir)
+      contents: libmxc_ffi.so
+      targetFolder: $(packageRoot)\runtimes\linux-arm64\native
+
+  - task: CopyFiles@2
+    displayName: Stage macOS ARM64 native runtime for NuGet
+    inputs:
+      sourceFolder: $(macArm64NativeDir)
+      contents: libmxc_ffi.dylib
+      targetFolder: $(packageRoot)\runtimes\osx-arm64\native
+
+  # MXC's build-time ESRP service is not configured to sign NuGet packages.
+  # Use a neutral transport suffix so the OneBranch release pipeline can
+  # download the unsigned payload, restore .nupkg, and sign it later.
+  - ${{ each package in parameters.nugetPackageVariants }}:
+    - task: NuGetCommand@2
+      displayName: Pack Microsoft.Mxc.Sdk for ${{ package.displayName }}
+      inputs:
+        command: pack
+        packagesToPack: $(Build.SourcesDirectory)\sdk\dotnet\Microsoft.Mxc.Sdk.Package\Microsoft.Mxc.Sdk.nuspec
+        packDestination: $(packageOutput)
+        versioningScheme: off
+        buildProperties: version=${{ package.version }};managedOutput=$(packageRoot)\managed;x64Native=$(packageRoot)\runtimes\win-x64\native;arm64Native=$(packageRoot)\runtimes\win-arm64\native;linuxX64Native=$(packageRoot)\runtimes\linux-x64\native;linuxArm64Native=$(packageRoot)\runtimes\linux-arm64\native;macArm64Native=$(packageRoot)\runtimes\osx-arm64\native;repositoryRoot=$(Build.SourcesDirectory)
+
+    - task: PowerShell@2
+      displayName: Verify ${{ package.displayName }} package contents
+      inputs:
+        filePath: $(Build.SourcesDirectory)\.azure-pipelines\scripts\verify-dotnet-nuget-package.ps1
+        arguments: >-
+          -PackagePath "$(packageOutput)\Microsoft.Mxc.Sdk.${{ package.version }}.nupkg"
+          -RequireWslc
+
+    - task: PowerShell@2
+      displayName: Prepare ${{ package.displayName }} package for release transport
+      inputs:
+        targetType: inline
+        script: |
+          $packagePath = "$(packageOutput)\Microsoft.Mxc.Sdk.${{ package.version }}.nupkg"
+          $transportPath = "$(packageOutput)\Microsoft.Mxc.Sdk.${{ package.version }}.${{ package.transportKind }}-unsigned-package"
+
+          if (-not (Test-Path -LiteralPath $packagePath -PathType Leaf)) {
+            throw "Unsigned NuGet package was not found: $packagePath"
+          }
+          if (Test-Path -LiteralPath $transportPath) {
+            throw "Release transport path already exists: $transportPath"
+          }
+          Move-Item -LiteralPath $packagePath -Destination $transportPath
+
+  - task: PowerShell@2
+    displayName: Verify release transport directory
+    inputs:
+      targetType: inline
+      script: |
+        $remainingPackages = @(Get-ChildItem -LiteralPath "$(packageOutput)" -Filter *.nupkg -File)
+        if ($remainingPackages.Count -ne 0) {
+          throw "Unsigned .nupkg files remain in the release artifact directory"
+        }
+
+  - task: 1ES.PublishPipelineArtifact@1
+    displayName: Publish unsigned NuGet release payload
+    inputs:
+      path: $(packageOutput)
+      artifactName: mxc-dotnet-sdk-nuget-unsigned

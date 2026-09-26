@@ -52,6 +52,8 @@ pub(crate) mod config_contract_adapters;
 // shared across host tools (e.g. wxc_host_prep, mxc_diagnostic_console)
 // and ≥1 backend stay here.
 #[cfg(target_os = "windows")]
+pub mod api_set;
+#[cfg(target_os = "windows")]
 pub mod diagnostic;
 #[cfg(target_os = "windows")]
 pub mod filesystem_dacl;

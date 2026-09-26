@@ -34,6 +34,8 @@ microvm-perf-results*.json
 packages/
 nuget.exe
 vcpkg_installed/
+*.nupkg
+*.snupkg
 
 # build artifacts
 output

@@ -94,6 +94,13 @@ as directional default-deny for egress, ingress, and host loopback. See the
 [Sandbox Policy 0.8.0 specification](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.8.0/policy.md)
 for the complete cross-platform authoring shape.
 
+For legacy `SandboxPolicy` authoring, a non-empty `allowedHosts` list selects a
+block default even when `allowOutbound` is true, so the list narrows outbound
+access rather than forming the invalid `allow` + allowlist wire combination.
+With no allowlist, `allowOutbound: true` selects an allow default and
+`blockedHosts` expresses allow-all-except-these. A blocklist without either an
+allowlist or `allowOutbound` is rejected.
+
 Model 1 permits direct connections selected by IP/CIDR, protocol, and port
 rules; it does not configure an application-layer proxy. Model 2 denies direct
 internet access and supplies a loopback HTTP/S proxy endpoint. Backend-specific

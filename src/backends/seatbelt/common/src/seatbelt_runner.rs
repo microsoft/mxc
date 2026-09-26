@@ -1096,14 +1096,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_blocked_hosts() {
+    fn rejects_shared_valid_blocked_hosts() {
         let mut request = base_request();
+        request.policy.default_network_policy = NetworkPolicy::Allow;
         request.policy.blocked_hosts = vec!["evil.example.com".into()];
         let runner = SeatbeltScriptRunner::new();
         let response = runner.validate(&request).unwrap_err();
         assert_eq!(response.exit_code, -1);
-        assert!(response.error_message.contains("blockedHosts"));
-        assert!(response.error_message.contains("cannot be enforced"));
+        assert_eq!(
+            response.error_message,
+            "macOS Seatbelt does not support per-host network filtering. \
+             'blockedHosts' cannot be enforced; remove it. To deny all \
+             network, use defaultPolicy: \"block\" without host lists."
+        );
     }
 
     /// The parser is not a door at all for these rules: `validate` is the only

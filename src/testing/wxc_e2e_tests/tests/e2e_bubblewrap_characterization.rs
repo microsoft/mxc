@@ -17,10 +17,19 @@
 #![cfg(target_os = "linux")]
 
 use serde_json::json;
+use std::fs;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use wxc_e2e_tests::{has_bwrap, has_platform_exec, run_platform_config_value};
+use wxc_e2e_tests::{
+    has_bwrap, has_platform_exec, run_platform_config_value,
+    run_platform_config_value_within_duration,
+};
 
 const SCHEMA_VERSION: &str = "0.7.0-alpha";
+
+/// The schema that introduced the default environment block and start-directory
+/// normalization, so cases asserting either must name it explicitly.
+const SCHEMA_VERSION_0_9: &str = "0.9.0-alpha";
 
 /// Whether the Bubblewrap characterization prerequisites are present.
 fn ready() -> bool {
@@ -30,11 +39,28 @@ fn ready() -> bool {
 /// Build a one-shot config that omits `containment` so the binary selects its
 /// OS-native backend (Bubblewrap on Linux).
 fn config(label: &str, command_line: &str) -> serde_json::Value {
+    config_at(SCHEMA_VERSION, label, command_line)
+}
+
+/// [`config`] against an explicit schema version.
+fn config_at(version: &str, label: &str, command_line: &str) -> serde_json::Value {
     json!({
-        "version": SCHEMA_VERSION,
+        "version": version,
         "containerId": format!("char-bwrap-{label}"),
         "process": { "commandLine": command_line }
     })
+}
+
+/// A private directory on the host, used as a policy grant or as the launching
+/// process's own working directory.
+fn unique_tempdir(tag: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock is after the unix epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("mxc-char-bwrap-{tag}-{nanos}"));
+    fs::create_dir_all(&dir).expect("create temp dir");
+    dir
 }
 
 #[test]
@@ -114,6 +140,111 @@ fn bubblewrap_applies_requested_env() {
     assert!(
         result.combined_output().contains("SET=[from_config_c93b]"),
         "expected requested env var to reach the child. Output:\n{}",
+        result.combined_output()
+    );
+}
+
+/// Locks in that a filesystem grant is **not** a working directory.
+///
+/// Seatbelt and ProcessContainer both resolve an empty `process.cwd` to the
+/// first read-write policy path. Bubblewrap deliberately does not: it emits
+/// `--chdir` only for `process.cwd`, because a granted directory is somewhere
+/// the child was permitted to go, not somewhere it was asked to start. The
+/// divergence is easy to "fix" into conformity by mistake, so it is pinned
+/// end-to-end here and not only in `bwrap_command.rs`.
+#[test]
+fn bubblewrap_does_not_adopt_a_policy_grant_as_the_working_directory() {
+    if !ready() {
+        return;
+    }
+    let grant = fs::canonicalize(unique_tempdir("cwd-grant")).expect("canonicalize grant");
+    let mut cfg = config("cwd-grant", "pwd -P");
+    cfg["filesystem"] = json!({ "readwritePaths": [grant.to_string_lossy()] });
+    let result = run_platform_config_value("bwrap cwd grant", &cfg, &[], None);
+    let landed = result.stdout.trim().to_string();
+    let _ = fs::remove_dir_all(&grant);
+
+    assert_eq!(
+        result.code,
+        Some(0),
+        "run failed:\n{}",
+        result.combined_output()
+    );
+    assert_ne!(
+        landed,
+        grant.to_string_lossy(),
+        "a read-write grant must not become the child's working directory"
+    );
+}
+
+/// Locks in that from schema 0.9 a relative `process.cwd` is anchored to the
+/// sandbox root rather than resolving against whatever directory `bwrap`
+/// carried into the namespace.
+///
+/// `tmp` is the probe because the backend always mounts a `--tmpfs /tmp`, so
+/// `/tmp` is guaranteed to exist inside the sandbox while the launching
+/// process's own directory is not. Anchoring is what keeps `HOME` and
+/// `--chdir` naming the same directory, so both are asserted together.
+#[test]
+fn bubblewrap_anchors_a_relative_process_cwd_from_0_9() {
+    if !ready() {
+        return;
+    }
+    // Launched from a directory that is *not* the filesystem root, so an
+    // unanchored `tmp` could not coincidentally resolve to `/tmp`.
+    let launch = fs::canonicalize(unique_tempdir("cwd-relative")).expect("canonicalize launch");
+    let mut cfg = config_at(
+        SCHEMA_VERSION_0_9,
+        "cwd-relative",
+        "printf 'PWD=[%s] HOME=[%s]\\n' \"$(pwd -P)\" \"$HOME\"",
+    );
+    cfg["process"]["cwd"] = json!("tmp");
+    let result = run_platform_config_value("bwrap cwd relative", &cfg, &[], Some(launch.as_path()));
+    let _ = fs::remove_dir_all(&launch);
+
+    let out = result.combined_output();
+    assert_eq!(result.code, Some(0), "run failed:\n{out}");
+    assert!(
+        out.contains("PWD=[/tmp]"),
+        "a relative process.cwd should anchor to the sandbox root. Output:\n{out}"
+    );
+    assert!(
+        out.contains("HOME=[/tmp]"),
+        "HOME must name the directory the child actually started in. Output:\n{out}"
+    );
+}
+
+/// Locks in that a command which does not exist fails the run instead of
+/// reporting success or hanging.
+///
+/// The sandbox is torn down on the same path as a normal exit, so a shell that
+/// never execs anything must still release the run. Termination is therefore
+/// the property under test, and it is enforced by the harness deadline rather
+/// than by an elapsed-time assertion: a run that never returns could not be
+/// measured by one.
+#[test]
+fn bubblewrap_reports_a_missing_command() {
+    if !ready() {
+        return;
+    }
+    const DEADLINE: Duration = Duration::from_secs(30);
+
+    let cfg = config("missing-command", "mxc-char-definitely-not-a-real-binary");
+    let result = run_platform_config_value_within_duration(
+        "bwrap missing command",
+        &cfg,
+        &[],
+        None,
+        DEADLINE,
+    )
+    .unwrap_or_else(|| {
+        panic!("a missing command should fail promptly; it was still running after {DEADLINE:?}")
+    });
+
+    assert_ne!(
+        result.code,
+        Some(0),
+        "a missing command should fail the run. Output:\n{}",
         result.combined_output()
     );
 }

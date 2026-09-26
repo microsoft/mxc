@@ -46,7 +46,13 @@ jobs:
         workingDirectory: $(Build.SourcesDirectory)/src
         # Explicit feature set (no --all-features): tier2_bfs must NOT ship
         # on Win 11 25H2 (bfscfg.exe risks an OS hang).
-        cargoFeatures: hyperlight isolation_session microvm wslc
+        ${{ if eq(item.arch, 'x64') }}:
+          # Generate the C# P/Invoke source once. The dotnetsdk feature only
+          # enables csbindgen; it does not alter the native runtime surface.
+          cargoFeatures: hyperlight isolation_session microvm wslc dotnetsdk
+          dotnetTestSupportTargetDir: c:/t/dotnet-test-support
+        ${{ else }}:
+          cargoFeatures: hyperlight isolation_session microvm wslc
         signPattern: |
             wxc-exec.exe
             plm.exe
@@ -135,6 +141,15 @@ jobs:
           cargo build --release --target $(triplet) -p unix_test_proxy -p mxc_ffi --manifest-path $(Build.SourcesDirectory)/src/Cargo.toml
         displayName: Build Node runtime dependencies
         condition: eq('${{ item.os }}', 'linux')
+
+      # The managed telemetry tests need debug-only test seams that must never
+      # be present in the production DLL. Build that isolated DLL here
+      # so the .NET test job only consumes Rust artifacts.
+      - script: |
+          cargo build --locked -p mxc_ffi --features "test-support isolation_session wslc" --target $(triplet) --target-dir $(dotnetTestSupportTargetDir)
+        displayName: Build .NET test-support native library
+        workingDirectory: $(Build.SourcesDirectory)/src
+        condition: and(eq('${{ item.os }}', 'windows'), eq('${{ item.arch }}', 'x64'))
 
       # plm (Permissive Learning Mode) is functionally Windows-only, but it
       # builds cross-platform via a no-op stub `fn main()` so it sits in the
@@ -225,6 +240,29 @@ jobs:
             *.pdb
             *.dwp
           targetFolder: $(outputDirectory)/$(targetTriple)/symbols
+
+      - task: CopyFiles@2
+        displayName: Copy generated .NET bindings
+        condition: and(eq('${{ item.os }}', 'windows'), eq('${{ item.arch }}', 'x64'))
+        inputs:
+          sourceFolder: $(Build.SourcesDirectory)/sdk/dotnet/Microsoft.Mxc.Sdk/Native
+          contents: NativeMethods.g.cs
+          targetFolder: $(outputDirectory)/$(targetTriple)/dotnet
+
+      - task: CopyFiles@2
+        displayName: Copy .NET test-support native library
+        condition: and(eq('${{ item.os }}', 'windows'), eq('${{ item.arch }}', 'x64'))
+        inputs:
+          sourceFolder: $(dotnetTestSupportTargetDir)/$(triplet)/debug
+          contents: mxc_ffi.dll
+          targetFolder: $(outputDirectory)/dotnet-test-support-$(targetTriple)
+
+      - task: 1ES.PublishPipelineArtifact@1
+        displayName: Publish .NET test-support native library
+        condition: and(eq('${{ item.os }}', 'windows'), eq('${{ item.arch }}', 'x64'))
+        inputs:
+          path: '$(outputDirectory)/dotnet-test-support-$(targetTriple)'
+          artifactName: mxc-dotnet-test-support-$(targetTriple)
 
       - task: 1ES.PublishPipelineArtifact@1
         displayName: Publish

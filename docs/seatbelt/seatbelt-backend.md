@@ -339,7 +339,7 @@ use one shape or the other — mixing them is rejected.**
 | `defaultPolicy: "allow"` | `egress.default: "allow"` | Identical profile output |
 | `allowLocalNetwork: true` | `ingress.default: "allow"` | Identical profile output |
 | `network.proxy.localhost` / loopback `network.proxy.url` | `runtimeConfig.networkProxy` | |
-| `allowedHosts` | *(no equivalent)* | Under `"allow"`: accepted but **ignored** — outbound is already unrestricted, so the list narrows nothing. **Rejected** under `"block"` unless `builtinTestServer` |
+| `allowedHosts` | *(no equivalent)* | With `"allow"`: rejected by shared legacy-network validation because an allowlist cannot narrow an allow default. With `"block"`: shared-valid, but Seatbelt rejects it unless `builtinTestServer` supplies the enforcement path |
 | `blockedHosts` | *(no equivalent)* | **Rejected** always |
 | *(no equivalent)* | `ingress.hostLoopback` | New in 0.8 — legacy configs never emit a host-loopback rule |
 

@@ -2,15 +2,14 @@
 # LXC CIDR boundary network filtering test
 #
 # Proves roadmap item 19 / AB#62830559 accepts boundary-valid CIDR
-# destinations while using the default-allow firewall path. The boundary values
+# destinations while using the default-block firewall path. The boundary values
 # pinned here are IPv4/IPv6 /0, IPv4 /32, IPv6 /128, non-zero host-bit CIDRs,
 # and a bare literal plus matching single-address CIDR spelling in one policy.
 #
 # NOTE: this fixture asserts that boundary prefixes are accepted and programmed,
-# not effective reachability. Allow-list rules are emitted before block-list rules
-# and iptables is first-match-wins (interim behaviour, AB#62830341), so the
-# `0.0.0.0/0` and `::/0` allow entries shadow every blockedHosts entry here.
-# Do not add reachability assertions to this file expecting the block list to win.
+# not effective reachability. Block-list rules are emitted before allow-list
+# rules and iptables is first-match-wins, so explicit blockedHosts entries take
+# precedence over the broader `0.0.0.0/0` and `::/0` allow entries.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -196,11 +195,11 @@ assert_programmed_rule iptables "198.51.100.42/32" DROP
 assert_programmed_rule ip6tables "2001:db8::5" DROP
 assert_programmed_rule ip6tables "2001:db8::5/128" DROP
 
-if ! echo "$OUTPUT" | grep -q "Default network policy: ACCEPT"; then
-    fail "default-allow policy was not applied."
+if ! echo "$OUTPUT" | grep -q "Default network policy: DROP"; then
+    fail "default-deny policy was not applied."
 fi
-if echo "$OUTPUT" | grep -q "Default network policy: DROP"; then
-    fail "default-deny policy was applied unexpectedly."
+if echo "$OUTPUT" | grep -q "Default network policy: ACCEPT"; then
+    fail "default-allow policy was applied unexpectedly."
 fi
 
 # The v6 half is required by roadmap item 19 / AB#62830559; skipping it would be a dual-stack bypass.

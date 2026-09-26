@@ -480,7 +480,10 @@ impl HyperlightScriptRunner {
         if !request.working_directory.is_empty() {
             return Err(RunnerError::Preflight(ERR_WORKDIR.to_string()));
         }
-        if !request.policy.allowed_hosts.is_empty() && !request.policy.blocked_hosts.is_empty() {
+        if request.policy.default_network_policy == NetworkPolicy::Block
+            && !request.policy.allowed_hosts.is_empty()
+            && !request.policy.blocked_hosts.is_empty()
+        {
             return Err(RunnerError::Preflight(
                 "allowedHosts and blockedHosts are mutually exclusive".to_string(),
             ));
@@ -1698,6 +1701,7 @@ mod tests {
     fn network_policy_blocklist_from_blocked_hosts() {
         let request = ExecutionRequest {
             policy: ContainerPolicy {
+                default_network_policy: NetworkPolicy::Allow,
                 blocked_hosts: vec!["127.0.0.1".to_string()],
                 ..Default::default()
             },
@@ -1710,6 +1714,41 @@ mod tests {
             policy,
             Some(hyperlight_unikraft::NetworkPolicy::BlockList(_))
         ));
+    }
+
+    #[test]
+    fn policy_rejects_blocklist_without_allowlist_under_block_default() {
+        let request = ExecutionRequest {
+            policy: ContainerPolicy {
+                blocked_hosts: vec!["127.0.0.1".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let error = runner().validate_runner(&request).unwrap_err();
+        assert_eq!(
+            error.error_message,
+            "blockedHosts requires allowedHosts when network.defaultPolicy='block'"
+        );
+    }
+
+    #[test]
+    fn policy_rejects_allowlist_under_allow_default() {
+        let request = ExecutionRequest {
+            policy: ContainerPolicy {
+                default_network_policy: NetworkPolicy::Allow,
+                allowed_hosts: vec!["127.0.0.1".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let error = runner().validate_runner(&request).unwrap_err();
+        assert_eq!(
+            error.error_message,
+            "allowedHosts requires network.defaultPolicy='block'"
+        );
     }
 
     #[test]

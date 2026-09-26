@@ -17,65 +17,23 @@ use wxc_common::models::{
 };
 
 use crate::network_policy_helpers::{add_default_network_capabilities, ensure_capability};
+use crate::secenv::SecurityEnvironmentVersion;
 
 pub(super) const LOOPBACK_NETWORK_PEER: &str = "MXC-Loopback";
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum PsecContract {
-    V1_0,
-    V1_1,
-}
-
-impl PsecContract {
-    pub(super) fn for_request(request: &ExecutionRequest) -> Self {
-        if unrestricted_host_loopback_allowed(&request.policy)
-            || !request.policy.enumerate_paths.is_empty()
-        {
-            Self::V1_1
-        } else {
-            Self::V1_0
-        }
-    }
-
-    pub(super) fn version(self) -> SchemaVersionT {
-        match self {
-            Self::V1_0 => SchemaVersionT { major: 1, minor: 0 },
-            Self::V1_1 => SchemaVersionT { major: 1, minor: 1 },
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct ResolvedPsecContract {
-    pub(super) contract: PsecContract,
-    pub(super) supports_network_ingress: bool,
-}
-
-impl ResolvedPsecContract {
-    pub(super) fn baseline() -> Self {
-        Self {
-            contract: PsecContract::V1_0,
-            supports_network_ingress: false,
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn with_all_contract_capabilities(request: &ExecutionRequest) -> Self {
-        Self {
-            contract: PsecContract::for_request(request),
-            supports_network_ingress: PsecContract::for_request(request) == PsecContract::V1_1,
-        }
-    }
-}
 
 pub(super) fn has_conflicting_proxy_identity(policy: &ContainerPolicy) -> bool {
     policy.allowed_proxy_peer.is_some() && unrestricted_host_loopback_allowed(policy)
 }
 
-pub(super) fn build_psec_spec(
+pub(super) fn build_psec_v1_security_environment_spec(
     request: &ExecutionRequest,
-    resolution: ResolvedPsecContract,
+    version: SecurityEnvironmentVersion,
+    supports_network_ingress: bool,
 ) -> Vec<u8> {
+    assert_eq!(
+        version.major, 1,
+        "build_psec_v1_security_environment_spec only supports PSEC major version 1"
+    );
     let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
     let mut capabilities = effective_capabilities(&request.policy);
     if request.policy.network_proxy.is_enabled()
@@ -92,7 +50,10 @@ pub(super) fn build_psec_spec(
     ) as u64;
 
     let mut spec = PsecProcessSecurityEnvironment::default();
-    spec.version = resolution.contract.version();
+    spec.version = SchemaVersionT {
+        major: version.major,
+        minor: version.minor,
+    };
     spec.capabilities = (!capabilities.is_empty()).then(|| capabilities.join(","));
     spec.disallow_win32k_system_calls = request.policy.ui.disable;
     spec.ui_restrictions = ui_restrictions;
@@ -100,9 +61,9 @@ pub(super) fn build_psec_spec(
     spec.fs_read_only = non_empty_paths(&request.policy.readonly_paths);
     spec.fs_deny = non_empty_paths(&request.policy.denied_paths);
     spec.fs_enumerate = non_empty_paths(&request.policy.enumerate_paths);
-    spec.network_policy = Some(Box::new(build_psec_network_policy(
+    spec.network_policy = Some(Box::new(build_psec_v1_network_policy(
         &request.policy,
-        resolution.supports_network_ingress,
+        supports_network_ingress,
     )));
     let spec = spec.pack(&mut builder);
     finish_process_security_environment_buffer(&mut builder, spec);
@@ -124,7 +85,7 @@ fn non_empty_paths(paths: &[String]) -> Option<Vec<String>> {
     (!paths.is_empty()).then(|| paths.to_vec())
 }
 
-fn build_psec_network_policy(
+fn build_psec_v1_network_policy(
     policy: &ContainerPolicy,
     supports_network_ingress: bool,
 ) -> PsecNetworkPolicy {

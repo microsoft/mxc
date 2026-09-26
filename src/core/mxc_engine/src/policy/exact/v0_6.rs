@@ -186,7 +186,7 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::Request, MxcE
                 if policy
                     .network
                     .as_ref()
-                    .is_some_and(|network| network.allow_outbound)
+                    .is_some_and(super::legacy_default_allows)
                 {
                     contract::DefaultNetworkPolicy::Allow
                 } else {

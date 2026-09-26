@@ -41,10 +41,8 @@ fn main() {
 mod windows_impl {
     use std::path::PathBuf;
 
-    use learning_mode_windows::LearningModeApi;
     use process_container_common::{
-        CaptureSession, ProcessSecurityEnvironmentApi, SecurityEnvironmentStartupInfo,
-        PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+        CaptureSession, SecurityEnvironmentStartupInfo, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
     };
     use process_security_environment_spec::process_security_environment_layout::{
         finish_process_security_environment_buffer, ProcessSecurityEnvironment,
@@ -87,30 +85,10 @@ mod windows_impl {
     }
 
     pub fn run() -> i32 {
-        let secenv_api = match ProcessSecurityEnvironmentApi::load() {
-            Ok(api) => api,
-            Err(e) => {
-                eprintln!("ProcessSecurityEnvironmentApi::load failed (off-feature build?): {e}");
-                return 2;
-            }
-        };
-        let learning_mode_api = match LearningModeApi::load() {
-            Ok(api) => api,
-            Err(e) => {
-                eprintln!("LearningModeApi::load failed (off-feature build?): {e}");
-                return 2;
-            }
-        };
-
         let spec = build_psec_spec();
         println!("built sandbox spec: {} bytes", spec.len());
 
-        let session = match CaptureSession::begin(
-            secenv_api,
-            learning_mode_api,
-            &spec,
-            PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
-        ) {
+        let session = match CaptureSession::begin(&spec, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE) {
             Ok(session) => session,
             Err(e) => {
                 eprintln!("CaptureSession::begin failed: {e}");
