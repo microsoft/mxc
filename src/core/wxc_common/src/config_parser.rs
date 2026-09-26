@@ -49,6 +49,24 @@ enum ErrorOutput {
     DiagnosticOnly,
 }
 
+/// Failure while reading or decoding the configuration source.
+#[doc(hidden)]
+#[derive(Debug)]
+pub enum RequestInputError {
+    /// The supplied base64 or decoded UTF-8 payload was malformed.
+    Decode(WxcError),
+    /// The path was missing or the source could not be read.
+    Source(WxcError),
+}
+
+impl RequestInputError {
+    pub fn into_error(self) -> WxcError {
+        match self {
+            Self::Decode(error) | Self::Source(error) => error,
+        }
+    }
+}
+
 impl ParseError {
     fn output(&self) -> ErrorOutput {
         match self {
@@ -522,7 +540,7 @@ pub fn load_mxc_request_with_options(
 ) -> Result<MxcRequest, ParseError> {
     let result: Result<MxcRequest, ParseError> = (|| {
         let json_str = decode_request_input(input, opts.is_base64).map_err(ParseError::Decode)?;
-        parse_mxc_request_json_with_cli(&json_str, logger, opts.cli_command)
+        parse_mxc_request_json_with_cli(&json_str, logger, opts.cli_command, ErrorOutput::Primary)
     })();
 
     if let Err(error) = &result {
@@ -572,9 +590,90 @@ pub fn load_mxc_request_from_json_with_options(
     // `is_base64` is meaningless on an already-decoded JSON string; the field
     // is kept in `LoadOptions` for signature parity with the from-input path.
     let _ = opts.is_base64;
-    let result = parse_mxc_request_json_with_cli(json_str, logger, opts.cli_command);
+    let result =
+        parse_mxc_request_json_with_cli(json_str, logger, opts.cli_command, ErrorOutput::Primary);
     if let Err(error) = &result {
         log_error(logger, &error.message(), error.output());
+    }
+    result
+}
+
+/// Parses a state-aware request whose operation and sandbox identity were
+/// supplied by the executor command line.
+///
+/// Raw exact JSON entry points continue to accept the registered phase-bearing
+/// contracts. This CLI-specific transport overlays the out-of-band routing
+/// values before sending the effective document through the same exact parser.
+pub fn load_state_aware_request_from_json_with_options(
+    json_str: &str,
+    logger: &mut Logger,
+    phase: Phase,
+    sandbox_id: Option<&str>,
+    cli_command: &[String],
+) -> Result<ParsedStateAwareRequest, ParseError> {
+    let result = (|| {
+        let version = probe_version(json_str).map_err(exact_version_error)?;
+        if !matches!(
+            version,
+            ContractVersion::V0_9_0Alpha | ContractVersion::V0_10_0Alpha
+        ) {
+            return Err(ParseError::StateAware(MxcError::malformed_request(
+                "sandbox lifecycle operations require schema version \
+                 '0.9.0-alpha' or '0.10.0-alpha'",
+            )));
+        }
+
+        match (phase, sandbox_id) {
+            (Phase::Provision, Some(_)) => {
+                return Err(ParseError::StateAware(MxcError::malformed_request(
+                    "the provision operation does not accept --sandbox-id",
+                )));
+            }
+            (Phase::Provision, None) => {}
+            (_, None) => {
+                return Err(ParseError::StateAware(MxcError::malformed_request(
+                    format!("the {phase} operation requires --sandbox-id"),
+                )));
+            }
+            (_, Some("")) => {
+                return Err(ParseError::StateAware(MxcError::malformed_request(
+                    "--sandbox-id must not be empty",
+                )));
+            }
+            (_, Some(_)) => {}
+        }
+
+        let source = crate::splice::CommandSource::parse(json_str).ok_or_else(|| {
+            ParseError::StateAware(MxcError::malformed_request(
+                "lifecycle request must be a JSON object",
+            ))
+        })?;
+        let routed_json = source
+            .splice_lifecycle_routing(phase.as_str(), sandbox_id)
+            .ok_or_else(|| {
+                ParseError::StateAware(MxcError::malformed_request(
+                    "failed to apply lifecycle routing arguments",
+                ))
+            })?;
+
+        match parse_mxc_request_json_with_cli(
+            &routed_json,
+            logger,
+            cli_command,
+            ErrorOutput::DiagnosticOnly,
+        )? {
+            MxcRequest::StateAware(parsed) => Ok(parsed),
+            MxcRequest::OneShot(_) => Err(ParseError::StateAware(MxcError::malformed_request(
+                "expected a state-aware lifecycle request",
+            ))),
+        }
+    })();
+
+    if let Err(error) = &result {
+        // `--operation` selected the lifecycle contract before this loader was
+        // called, so every failure must leave primary output available for the
+        // JSON error envelope regardless of its internal ParseError variant.
+        log_error(logger, &error.message(), ErrorOutput::DiagnosticOnly);
     }
     result
 }
@@ -583,6 +682,7 @@ fn parse_mxc_request_json_with_cli(
     json_str: &str,
     logger: &mut Logger,
     cli_command: &[String],
+    override_output: ErrorOutput,
 ) -> Result<MxcRequest, ParseError> {
     if cli_command.is_empty() {
         return parse_exact_mxc_request_json(json_str, logger);
@@ -591,7 +691,7 @@ fn parse_mxc_request_json_with_cli(
     let (json_str, override_log) = apply_cli_command(json_str, cli_command)?;
     let request = parse_exact_mxc_request_json(&json_str, logger)?;
     if let Some(message) = override_log {
-        logger.log_line(&message);
+        log_error(logger, &message, override_output);
     }
     Ok(request)
 }
@@ -717,12 +817,26 @@ fn log_error(logger: &mut Logger, message: &str, output: ErrorOutput) {
 /// This performs no logging so callers can apply the correct output contract
 /// after discriminating execution requests from maintenance commands.
 pub fn decode_request_input(input: &str, is_base64: bool) -> Result<String, WxcError> {
+    decode_request_input_classified(input, is_base64).map_err(RequestInputError::into_error)
+}
+
+/// Decode an input while preserving whether failure came from the source or
+/// from the encoded payload.
+#[doc(hidden)]
+pub fn decode_request_input_classified(
+    input: &str,
+    is_base64: bool,
+) -> Result<String, RequestInputError> {
     if is_base64 {
         let bytes = base64_decode(input).map_err(|_| {
-            WxcError::ConfigParse("Failed to decode base64 configuration".to_string())
+            RequestInputError::Decode(WxcError::ConfigParse(
+                "Failed to decode base64 configuration".to_string(),
+            ))
         })?;
         String::from_utf8(bytes).map_err(|_| {
-            WxcError::ConfigParse("Base64 decoded content is not valid UTF-8".to_string())
+            RequestInputError::Decode(WxcError::ConfigParse(
+                "Base64 decoded content is not valid UTF-8".to_string(),
+            ))
         })
     } else {
         // The file path is untrusted input; on Linux/macOS it may contain
@@ -731,15 +845,21 @@ pub fn decode_request_input(input: &str, is_base64: bool) -> Result<String, WxcE
         // multi-line log output.
         let safe_input = config_deserialize::escape_diagnostic_text(input);
         if !std::path::Path::new(input).exists() {
-            return Err(WxcError::ConfigParse(format!(
+            return Err(RequestInputError::Source(WxcError::ConfigParse(format!(
                 "Configuration file not found: {safe_input}"
-            )));
+            ))));
         }
-        fs::read_to_string(input).map_err(|e| {
-            WxcError::ConfigParse(format!(
-                "Failed to read configuration file '{safe_input}': {e}"
-            ))
-        })
+        match fs::read_to_string(input) {
+            Ok(contents) => Ok(contents),
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                Err(RequestInputError::Decode(WxcError::ConfigParse(format!(
+                    "Configuration file content is not valid UTF-8: {safe_input}",
+                ))))
+            }
+            Err(error) => Err(RequestInputError::Source(WxcError::ConfigParse(format!(
+                "Failed to read configuration file '{safe_input}': {error}",
+            )))),
+        }
     }
 }
 
@@ -4864,5 +4984,182 @@ mod tests {
                 "{version}: got {error:?}"
             );
         }
+    }
+
+    #[test]
+    fn operation_cli_transport_uses_exact_phase_specific_contracts() {
+        let cases = [
+            (
+                Phase::Provision,
+                None,
+                r#"{"version":"0.9.0-alpha","containment":"wslc"}"#,
+            ),
+            (
+                Phase::Start,
+                Some("iso:abc"),
+                r#"{"version":"0.9.0-alpha"}"#,
+            ),
+            (
+                Phase::Exec,
+                Some("iso:abc"),
+                r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"}}"#,
+            ),
+            (Phase::Stop, Some("iso:abc"), r#"{"version":"0.9.0-alpha"}"#),
+            (
+                Phase::Deprovision,
+                Some("iso:abc"),
+                r#"{"version":"0.9.0-alpha"}"#,
+            ),
+        ];
+
+        for (phase, sandbox_id, json) in cases {
+            let parsed = load_state_aware_request_from_json_with_options(
+                json,
+                &mut test_logger(),
+                phase,
+                sandbox_id,
+                &[],
+            )
+            .unwrap_or_else(|error| panic!("{phase}: {error:?}"));
+            assert_eq!(parsed.phase(), phase);
+            assert_eq!(parsed.sandbox_id(), sandbox_id);
+        }
+    }
+
+    #[test]
+    fn operation_cli_transport_rejects_json_routing_authorities() {
+        for json in [
+            r#"{"version":"0.9.0-alpha","phase":"start"}"#,
+            r#"{"version":"0.9.0-alpha","sandboxId":"iso:json"}"#,
+        ] {
+            let error = load_state_aware_request_from_json_with_options(
+                json,
+                &mut test_logger(),
+                Phase::Start,
+                Some("iso:cli"),
+                &[],
+            )
+            .unwrap_err();
+            assert!(matches!(error, ParseError::StateAware(_)), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn operation_cli_transport_validates_sandbox_id_arguments() {
+        let provision_error = load_state_aware_request_from_json_with_options(
+            r#"{"version":"0.9.0-alpha","containment":"wslc"}"#,
+            &mut test_logger(),
+            Phase::Provision,
+            Some("wslc:abc"),
+            &[],
+        )
+        .unwrap_err();
+        assert!(provision_error
+            .message()
+            .contains("does not accept --sandbox-id"));
+
+        let start_error = load_state_aware_request_from_json_with_options(
+            r#"{"version":"0.9.0-alpha"}"#,
+            &mut test_logger(),
+            Phase::Start,
+            None,
+            &[],
+        )
+        .unwrap_err();
+        assert!(start_error.message().contains("requires --sandbox-id"));
+    }
+
+    #[test]
+    fn operation_cli_transport_routes_all_errors_to_diagnostic_only() {
+        for json in [
+            "{ not json",
+            r#"{"version":"99.99.99-secret"}"#,
+            r#"{"version":"0.9.0-alpha","containment":"wslc","unknown":true}"#,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let log_path = directory.path().join("mxc.log");
+            let mut logger = test_logger();
+            logger.enable_file_sink(&log_path).unwrap();
+
+            let error = load_state_aware_request_from_json_with_options(
+                json,
+                &mut logger,
+                Phase::Provision,
+                None,
+                &[],
+            )
+            .unwrap_err();
+            assert!(
+                logger.get_buffer().is_empty(),
+                "lifecycle errors must not reach primary output: {error:?}"
+            );
+            let message = error.message();
+            drop(logger);
+
+            let log = std::fs::read_to_string(log_path).unwrap();
+            assert_eq!(
+                log.matches(&message).count(),
+                1,
+                "expected one auxiliary diagnostic for {error:?}: {log:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn operation_cli_exec_command_is_applied_after_routing() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_path = directory.path().join("mxc.log");
+        let mut logger = test_logger();
+        logger.enable_file_sink(&log_path).unwrap();
+        let parsed = load_state_aware_request_from_json_with_options(
+            r#"{
+                "version":"0.9.0-alpha",
+                "process":{"commandLine":"policy.exe"}
+            }"#,
+            &mut logger,
+            Phase::Exec,
+            Some("iso:abc"),
+            &["echo".to_string(), "hello".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(parsed.request().script_code, "echo hello");
+        assert!(
+            logger.get_buffer().is_empty(),
+            "lifecycle override diagnostics must not reach primary output"
+        );
+        drop(logger);
+        let log = std::fs::read_to_string(log_path).unwrap();
+        assert_eq!(
+            log.matches("Overriding policy process.commandLine").count(),
+            1,
+            "expected one auxiliary override diagnostic: {log}"
+        );
+    }
+
+    #[test]
+    fn one_shot_cli_command_override_keeps_primary_log_behavior() {
+        let command = ["echo".to_string(), "hello".to_string()];
+        let mut logger = test_logger();
+        let request = load_mxc_request_from_json_with_options(
+            r#"{
+                "version":"0.9.0-alpha",
+                "process":{"commandLine":"policy.exe"}
+            }"#,
+            &mut logger,
+            LoadOptions {
+                is_base64: false,
+                cli_command: &command,
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(request, MxcRequest::OneShot(_)));
+        assert!(
+            logger
+                .get_buffer()
+                .contains("Overriding policy process.commandLine"),
+            "one-shot overrides retain their primary diagnostic"
+        );
     }
 }

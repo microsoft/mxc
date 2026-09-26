@@ -5,14 +5,15 @@
 .SYNOPSIS
     Runs IsolationSession state-aware lifecycle E2E tests. Companion to
     run_isolation_session_tests.ps1 --that script asserts the one-shot path;
-    this script asserts the state-aware path (`phase` / `sandboxId` envelope
-    style, multi-invocation lifecycle).
+    this script asserts the state-aware path (CLI-routed, multi-invocation
+    lifecycle).
 
 .DESCRIPTION
-    Each test invokes wxc-exec.exe with a base64-encoded state-aware request
-    envelope, parses the JSON response on stdout, and asserts on the
-    envelope's `result` or `error` fields. The corpus covers lifecycle,
-    process execution, sandbox-internal persistence, and validation errors.
+    Each test invokes wxc-exec.exe with lifecycle routing in --operation /
+    --sandbox-id and a base64-encoded phase-specific request payload, parses
+    the JSON response on stdout, and asserts on the envelope's `result` or
+    `error` fields. The corpus covers lifecycle, process execution,
+    sandbox-internal persistence, and validation errors.
 
     This script must run INTERACTIVELY on the test host. The OS-side service
     calling-process identity check rejects network-logon tokens, so
@@ -165,24 +166,11 @@ if (-not $ConfigDir) {
     $ConfigDir = Join-Path $RepoRoot "tests\configs"
 }
 
-# Encode a state-aware request envelope and run wxc-exec against it. The
-# request comes either from an in-line hashtable or from a static JSON
-# fixture file under tests/configs/ (for the project-wide "test scenarios are
-# version-controlled JSON" pattern). When the fixture contains the
-# placeholder `{{SANDBOX_ID}}`, the caller must supply -SandboxId so it can
-# be substituted before the request is base64-encoded. Returns a hashtable
-# with stdout / stderr / exitCode for the caller to assert on.
-function Invoke-StateAware {
+function ConvertTo-StateAwareInvocation {
     param(
         [hashtable]$Request,
         [string]$ConfigFile,
-        [string]$SandboxId,
-        # Adds --dry-run: wxc-exec parses, routes, and runs the backend's
-        # validate_<phase> hook, then returns an empty result envelope WITHOUT
-        # performing the phase. Lets a test pin that validation-time rejections
-        # (e.g. a malformed sandboxId) fire identically whether or not the phase
-        # would really run -- the dry-run/execution agreement.
-        [switch]$DryRun
+        [string]$SandboxId
     )
 
     if ($ConfigFile) {
@@ -197,21 +185,96 @@ function Invoke-StateAware {
             }
             $json = $json -replace '\{\{SANDBOX_ID\}\}', $SandboxId
         }
-    } elseif ($Request) {
-        if (-not $Request.ContainsKey('version')) {
-            $Request = $Request.Clone()
-            $Request['version'] = '0.9.0-alpha'
+        try {
+            $requestObject = $json | ConvertFrom-Json
+        } catch {
+            throw "Config fixture is not valid JSON: $path ($($_.Exception.Message))"
         }
-        $json = $Request | ConvertTo-Json -Compress -Depth 12
+    } elseif ($Request) {
+        $requestObject = $Request.Clone()
+        if (-not $Request.ContainsKey('version')) {
+            $requestObject['version'] = '0.9.0-alpha'
+        }
     } else {
-        throw "Invoke-StateAware requires either -Request or -ConfigFile"
+        throw "State-aware invocation requires either -Request or -ConfigFile"
     }
 
-    $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
+    if ($requestObject -is [System.Collections.IDictionary]) {
+        $phaseKey = $requestObject.Keys | Where-Object { $_ -ceq 'phase' } | Select-Object -First 1
+        if ($null -eq $phaseKey) { throw "State-aware request must contain a string 'phase'" }
+        $phase = $requestObject[$phaseKey]
+        $null = $requestObject.Remove($phaseKey)
+    } else {
+        $phaseProperty = $requestObject.PSObject.Properties |
+            Where-Object { $_.Name -ceq 'phase' } |
+            Select-Object -First 1
+        if ($null -eq $phaseProperty) { throw "State-aware request must contain a string 'phase'" }
+        $phase = $phaseProperty.Value
+        $requestObject.PSObject.Properties.Remove($phaseProperty.Name)
+    }
+    if ($phase -isnot [string]) { throw "State-aware request must contain a string 'phase'" }
 
-    $argList = @()
+    $routingSandboxId = $null
+    if ($phase -ne 'provision') {
+        if ($requestObject -is [System.Collections.IDictionary]) {
+            $sandboxIdKey = $requestObject.Keys |
+                Where-Object { $_ -ceq 'sandboxId' } |
+                Select-Object -First 1
+            if ($null -eq $sandboxIdKey) {
+                throw "State-aware '$phase' request must contain a string 'sandboxId'"
+            }
+            $routingSandboxId = $requestObject[$sandboxIdKey]
+            $null = $requestObject.Remove($sandboxIdKey)
+        } else {
+            $sandboxIdProperty = $requestObject.PSObject.Properties |
+                Where-Object { $_.Name -ceq 'sandboxId' } |
+                Select-Object -First 1
+            if ($null -eq $sandboxIdProperty) {
+                throw "State-aware '$phase' request must contain a string 'sandboxId'"
+            }
+            $routingSandboxId = $sandboxIdProperty.Value
+            $requestObject.PSObject.Properties.Remove($sandboxIdProperty.Name)
+        }
+        if ($routingSandboxId -isnot [string]) {
+            throw "State-aware '$phase' request must contain a string 'sandboxId'"
+        }
+    }
+
+    $json = $requestObject | ConvertTo-Json -Compress -Depth 12
+    $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
+    @{
+        Operation    = [string]$phase
+        SandboxId    = $routingSandboxId
+        ConfigBase64 = $b64
+    }
+}
+
+# Parse or clone a state-aware request, move lifecycle routing to executor
+# arguments, encode the remaining phase-specific payload, and run wxc-exec.
+# Fixture placeholders are substituted before parsing. Returns a hashtable
+# with stdout / stderr / exitCode for the caller to assert on.
+function Invoke-StateAware {
+    param(
+        [hashtable]$Request,
+        [string]$ConfigFile,
+        [string]$SandboxId,
+        # Adds --dry-run: wxc-exec parses, routes, and runs the backend's
+        # validate_<phase> hook, then returns an empty result envelope WITHOUT
+        # performing the phase. Lets a test pin that validation-time rejections
+        # (e.g. a malformed sandboxId) fire identically whether or not the phase
+        # would really run -- the dry-run/execution agreement.
+        [switch]$DryRun
+    )
+
+    $invocation = ConvertTo-StateAwareInvocation `
+        -Request $Request -ConfigFile $ConfigFile -SandboxId $SandboxId
+
+    $argList = @('--operation', $invocation.Operation)
+    if ($invocation.Operation -ne 'provision') {
+        $argList += @('--sandbox-id', $invocation.SandboxId)
+    }
     if ($DryRun.IsPresent) { $argList += '--dry-run' }
-    $argList += @('--config-base64', $b64)
+    $argList += @('--config-base64', $invocation.ConfigBase64)
 
     $stdoutFile = [System.IO.Path]::GetTempFileName()
     $stderrFile = [System.IO.Path]::GetTempFileName()

@@ -147,13 +147,15 @@ the helpers.
 
 ## Wire contract
 
-The wire envelope is a TypeScript discriminated union over `phase`, JSON-serialised.
-The Rust executor parses the same shape through its exact version/phase contract
-and adapts it into a typed operation plus common runtime fields (reference §9.1).
-The only `Record<string, unknown>` in the contract is
-`ErrorEnvelope.details` — the escape hatch for backend-specific structured failure
-information. Backend-neutral failure detail travels in the error envelope's named
-fields (`operation`, `nativeCode`, `remediation`) instead.
+The raw SDK/FFI wire envelope is a TypeScript discriminated union over `phase`,
+JSON-serialised. Direct executor calls instead supply `phase` and `sandboxId`
+as `--operation` and `--sandbox-id`; their JSON contains only the selected
+phase's exact payload. Rust normalizes both transports into a typed operation
+plus common runtime fields (reference §9.1). The only
+`Record<string, unknown>` in the contract is `ErrorEnvelope.details` — the
+escape hatch for backend-specific structured failure information.
+Backend-neutral failure detail travels in the error envelope's named fields
+(`operation`, `nativeCode`, `remediation`) instead.
 
 ```typescript
 interface OneShotRequest {

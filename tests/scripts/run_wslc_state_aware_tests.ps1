@@ -5,17 +5,18 @@
 .SYNOPSIS
     Runs WSLc state-aware lifecycle E2E tests. Companion to
     run_wslc_all_tests.ps1 -- that script asserts the one-shot path; this
-    script asserts the state-aware path (`phase` / `sandboxId` envelope style,
-    multi-invocation provision -> start -> exec* -> stop -> deprovision driven
-    through the long-lived `wxc-wslc-daemon`).
+    script asserts the CLI-routed state-aware path (multi-invocation provision
+    -> start -> exec* -> stop -> deprovision driven through the long-lived
+    `wxc-wslc-daemon`).
 
 .DESCRIPTION
-    Each test invokes wxc-exec.exe with a base64-encoded state-aware request
-    envelope. Provision / start / stop / deprovision return a JSON envelope on
-    stdout (asserted on `result` / `error`); a successful exec streams the
-    script's own stdout (relayed from the daemon) and exits with the script's
-    exit code. Because the daemon owns the live WslcSession / WslcContainer
-    handles, exec against a provisioned+started sandbox hits a WARM container:
+    Each test invokes wxc-exec.exe with lifecycle routing in --operation /
+    --sandbox-id and a base64-encoded phase-specific request payload.
+    Provision / start / stop / deprovision return a JSON envelope on stdout
+    (asserted on `result` / `error`); a successful exec streams the script's
+    own stdout (relayed from the daemon) and exits with the script's exit code.
+    Because the daemon owns the live WslcSession / WslcContainer handles, exec
+    against a provisioned+started sandbox hits a WARM container:
     the tests prove this two ways -- (1) in-container state (a /tmp marker)
     written by one exec is visible to a later, separate wxc-exec invocation,
     and (2) after the last sandbox is deprovisioned the daemon idles out and
@@ -137,17 +138,11 @@ if (-not $SkipSetup) {
 
 # ---------------- Helpers ----------------
 
-# Encode a state-aware request envelope and run wxc-exec against it. The request
-# comes from a static JSON fixture under tests/configs (with `{{SANDBOX_ID}}`
-# substitution) or an inline hashtable. A `wslc:{{SANDBOX_ID}}` placeholder
-# retains backend identity during static corpus parsing and is replaced as one
-# unit by the full real ID. Returns @{ ExitCode; Stdout; Stderr }.
-function Invoke-StateAware {
+function ConvertTo-StateAwareInvocation {
     param(
         [hashtable]$Request,
         [string]$ConfigFile,
-        [string]$SandboxId,
-        [switch]$DryRun
+        [string]$SandboxId
     )
 
     if ($ConfigFile) {
@@ -164,22 +159,93 @@ function Invoke-StateAware {
             $json = $json -replace 'wslc:\{\{SANDBOX_ID\}\}', $SandboxId
             $json = $json -replace '\{\{SANDBOX_ID\}\}', $SandboxId
         }
-    } elseif ($Request) {
-        if (-not $Request.ContainsKey('version')) {
-            $Request = $Request.Clone()
-            $Request['version'] = '0.9.0-alpha'
+        try {
+            $requestObject = $json | ConvertFrom-Json
+        } catch {
+            throw "Config fixture is not valid JSON: $path ($($_.Exception.Message))"
         }
-        $json = $Request | ConvertTo-Json -Compress -Depth 12
+    } elseif ($Request) {
+        $requestObject = $Request.Clone()
+        if (-not $Request.ContainsKey('version')) {
+            $requestObject['version'] = '0.9.0-alpha'
+        }
     } else {
-        throw "Invoke-StateAware requires either -Request or -ConfigFile"
+        throw "State-aware invocation requires either -Request or -ConfigFile"
     }
 
-    $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
+    if ($requestObject -is [System.Collections.IDictionary]) {
+        $phaseKey = $requestObject.Keys | Where-Object { $_ -ceq 'phase' } | Select-Object -First 1
+        if ($null -eq $phaseKey) { throw "State-aware request must contain a string 'phase'" }
+        $phase = $requestObject[$phaseKey]
+        $null = $requestObject.Remove($phaseKey)
+    } else {
+        $phaseProperty = $requestObject.PSObject.Properties |
+            Where-Object { $_.Name -ceq 'phase' } |
+            Select-Object -First 1
+        if ($null -eq $phaseProperty) { throw "State-aware request must contain a string 'phase'" }
+        $phase = $phaseProperty.Value
+        $requestObject.PSObject.Properties.Remove($phaseProperty.Name)
+    }
+    if ($phase -isnot [string]) { throw "State-aware request must contain a string 'phase'" }
 
-    $argList = @()
+    $routingSandboxId = $null
+    if ($phase -ne 'provision') {
+        if ($requestObject -is [System.Collections.IDictionary]) {
+            $sandboxIdKey = $requestObject.Keys |
+                Where-Object { $_ -ceq 'sandboxId' } |
+                Select-Object -First 1
+            if ($null -eq $sandboxIdKey) {
+                throw "State-aware '$phase' request must contain a string 'sandboxId'"
+            }
+            $routingSandboxId = $requestObject[$sandboxIdKey]
+            $null = $requestObject.Remove($sandboxIdKey)
+        } else {
+            $sandboxIdProperty = $requestObject.PSObject.Properties |
+                Where-Object { $_.Name -ceq 'sandboxId' } |
+                Select-Object -First 1
+            if ($null -eq $sandboxIdProperty) {
+                throw "State-aware '$phase' request must contain a string 'sandboxId'"
+            }
+            $routingSandboxId = $sandboxIdProperty.Value
+            $requestObject.PSObject.Properties.Remove($sandboxIdProperty.Name)
+        }
+        if ($routingSandboxId -isnot [string]) {
+            throw "State-aware '$phase' request must contain a string 'sandboxId'"
+        }
+    }
+
+    $json = $requestObject | ConvertTo-Json -Compress -Depth 12
+    $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
+    @{
+        Operation    = [string]$phase
+        SandboxId    = $routingSandboxId
+        ConfigBase64 = $b64
+    }
+}
+
+# Parse or clone a state-aware request, move lifecycle routing to executor
+# arguments, encode the remaining phase-specific payload, and run wxc-exec.
+# A `wslc:{{SANDBOX_ID}}` fixture placeholder retains backend identity during
+# static corpus parsing and is replaced as one unit by the full real ID.
+# Returns @{ ExitCode; Stdout; Stderr }.
+function Invoke-StateAware {
+    param(
+        [hashtable]$Request,
+        [string]$ConfigFile,
+        [string]$SandboxId,
+        [switch]$DryRun
+    )
+
+    $invocation = ConvertTo-StateAwareInvocation `
+        -Request $Request -ConfigFile $ConfigFile -SandboxId $SandboxId
+
+    $argList = @('--operation', $invocation.Operation)
+    if ($invocation.Operation -ne 'provision') {
+        $argList += @('--sandbox-id', $invocation.SandboxId)
+    }
     if ($DryRun) { $argList += '--dry-run' }
     if ($Debug) { $argList += '--debug' }
-    $argList += @('--config-base64', $b64)
+    $argList += @('--config-base64', $invocation.ConfigBase64)
 
     # Drive wxc-exec via System.Diagnostics.Process rather than Start-Process
     # -Wait: the state-aware phase process exits as soon as it has driven the
@@ -216,11 +282,8 @@ function Invoke-StateAware {
 }
 
 # Like Invoke-StateAware but records the wall-clock arrival time of each stdout
-# line, so a test can prove output is streamed incrementally (an early line lands
-# well before a later one) rather than buffered and dumped together at process
-# exit. `ReadLineAsync` returns the moment the child flushes a newline-terminated
-# line, so a streamed line is observed immediately; a buffer-then-dump impl would
-# surface every line at once only when the process exits. Returns
+# line. It uses the same parsed/cloned request preparation and CLI routing, then
+# observes each newline-terminated line as soon as the child flushes it. Returns
 # @{ ExitCode; Stdout; Stderr; Lines = @(@{ Text; At }) } (At = UTC DateTime).
 function Invoke-StateAwareStreaming {
     param(
@@ -229,34 +292,15 @@ function Invoke-StateAwareStreaming {
         [string]$SandboxId
     )
 
-    if ($ConfigFile) {
-        $path = Join-Path $ConfigDir $ConfigFile
-        if (-not (Test-Path $path)) { throw "Config fixture not found: $path" }
-        $json = Get-Content $path -Raw
-        if ($json -match '\{\{SANDBOX_ID\}\}') {
-            if (-not $SandboxId) {
-                throw "Fixture $ConfigFile contains {{SANDBOX_ID}} but -SandboxId was not supplied"
-            }
-            if ($json -match 'wslc:\{\{SANDBOX_ID\}\}' -and -not $SandboxId.StartsWith('wslc:')) {
-                throw "Fixture $ConfigFile requires a wslc: sandbox ID"
-            }
-            $json = $json -replace 'wslc:\{\{SANDBOX_ID\}\}', $SandboxId
-            $json = $json -replace '\{\{SANDBOX_ID\}\}', $SandboxId
-        }
-    } elseif ($Request) {
-        if (-not $Request.ContainsKey('version')) {
-            $Request = $Request.Clone()
-            $Request['version'] = '0.9.0-alpha'
-        }
-        $json = $Request | ConvertTo-Json -Compress -Depth 12
-    } else {
-        throw "Invoke-StateAwareStreaming requires either -Request or -ConfigFile"
-    }
+    $invocation = ConvertTo-StateAwareInvocation `
+        -Request $Request -ConfigFile $ConfigFile -SandboxId $SandboxId
 
-    $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
-    $argList = @()
+    $argList = @('--operation', $invocation.Operation)
+    if ($invocation.Operation -ne 'provision') {
+        $argList += @('--sandbox-id', $invocation.SandboxId)
+    }
     if ($Debug) { $argList += '--debug' }
-    $argList += @('--config-base64', $b64)
+    $argList += @('--config-base64', $invocation.ConfigBase64)
 
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $WxcExec
