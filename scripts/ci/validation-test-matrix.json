@@ -307,90 +307,15 @@
     "pr": [],
     "nightly": [
       {
-        "os": "windows-prerelease-process-container",
-        "backends": [
-          "process-t1",
-          "wslc"
-        ]
-      },
-      {
         "os": "windows-prerelease-isolation-session",
         "backends": [
           "isolation-session"
         ]
       },
       {
-        "os": "windows-prerelease-26h1",
-        "backends": [
-          "process-t1",
-          "wslc"
-        ]
-      },
-      {
         "os": "windows-25h2",
         "backends": [
-          "process-t1",
           "wslc"
-        ]
-      },
-      {
-        "os": "windows-24h2",
-        "backends": [
-          "process-t1",
-          "wslc"
-        ]
-      },
-      {
-        "os": "windows-23h2",
-        "backends": [
-          "process-t3",
-          "wslc"
-        ]
-      },
-      {
-        "os": "ubuntu-26.04",
-        "backends": [
-          "bubblewrap",
-          "lxc"
-        ]
-      },
-      {
-        "os": "ubuntu-24.04",
-        "backends": [
-          "bubblewrap",
-          "lxc"
-        ]
-      },
-      {
-        "os": "rhel-10",
-        "backends": [
-          "bubblewrap",
-          "lxc"
-        ]
-      },
-      {
-        "os": "debian-13",
-        "backends": [
-          "bubblewrap",
-          "lxc"
-        ]
-      },
-      {
-        "os": "macos-26",
-        "backends": [
-          "seatbelt"
-        ]
-      },
-      {
-        "os": "macos-15",
-        "backends": [
-          "seatbelt"
-        ]
-      },
-      {
-        "os": "macos-27",
-        "backends": [
-          "seatbelt"
         ]
       }
     ],
