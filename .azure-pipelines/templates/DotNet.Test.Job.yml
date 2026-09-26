@@ -65,10 +65,11 @@ jobs:
     inputs:
       command: test
       projects: $(testProject)
+      # MTP rejects the VSTest TRX arguments injected by this task's default.
+      publishTestResults: false
       arguments: >-
         --configuration Release
         --no-restore
-        --nologo
         -p:MxcWithIsolationSession=true
         -p:MxcWithWslc=true
         -p:MxcPrebuiltNativeDir="$(prebuiltNativeDir)"
