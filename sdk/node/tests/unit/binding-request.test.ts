@@ -13,7 +13,7 @@ import type { ContainerConfig } from '../../src/types.js';
 describe('native binding request', () => {
   it('projects an existing ContainerConfig at the binding boundary', () => {
     const request = prepareRequestSpec({
-      version: '0.9.0-alpha',
+      version: '1.0.0',
       containerId: 'sample',
       process: {
         commandLine: 'echo hello',
@@ -34,14 +34,8 @@ describe('native binding request', () => {
 
     assert.deepStrictEqual(request, {
       policy: {
-        version: '0.9.0-alpha',
         filesystem: { readonlyPaths: ['C:\\input'], clearPolicyOnExit: false },
         network: {
-          allowOutbound: undefined,
-          allowLocalNetwork: undefined,
-          allowedHosts: undefined,
-          blockedHosts: undefined,
-          proxy: undefined,
           egress: { default: 'deny' },
           ingress: undefined,
           runtimeConfig: { networkProxy: 'http://127.0.0.1:8080' },
@@ -66,7 +60,7 @@ describe('native binding request', () => {
 
   it('preserves environment inheritance and explicit overrides', () => {
     const baseConfig: ContainerConfig = {
-      version: '0.9.0-alpha',
+      version: '1.0.0',
       process: { commandLine: 'echo hello' },
     };
 
@@ -98,25 +92,13 @@ describe('native binding request', () => {
     assert.strictEqual(inheritanceEnabled.inheritDefaultEnv, true);
   });
 
-  it('preserves explicit block policy and empty collections', () => {
-    const request = prepareRequestSpec({
-      version: '0.9.0-alpha',
-      process: { commandLine: 'echo hello' },
-      network: { defaultPolicy: 'block', allowedHosts: [] },
-    });
-
-    assert.strictEqual(request.policy.network!.allowOutbound, false);
-    assert.deepStrictEqual(request.policy.network!.allowedHosts, []);
-    assert.strictEqual(request.experimental, false);
-  });
-
   it('rejects network enforcement mode instead of silently dropping it', () => {
     assert.throws(
       () => prepareRequestSpec({
-        version: '0.8.0-alpha',
+        version: '1.0.0',
         process: { commandLine: 'echo hello' },
         network: { enforcementMode: 'firewall' },
-      }),
+      } as unknown as ContainerConfig),
       (error: unknown) =>
         error instanceof MxcError
         && error.code === 'malformed_request'
@@ -126,7 +108,7 @@ describe('native binding request', () => {
 
   it('preserves lifecycle policy through the request policy projection', () => {
     const request = prepareRequestSpec({
-      version: '0.9.0-alpha',
+      version: '1.0.0',
       process: { commandLine: 'echo hello' },
       lifecycle: { preservePolicy: true },
     });
@@ -137,7 +119,7 @@ describe('native binding request', () => {
   it('does not silently drop ProcessContainer settings from process intent', () => {
     assert.throws(
       () => prepareRequestSpec({
-        version: '0.9.0-alpha',
+        version: '1.0.0',
         containment: 'process',
         process: { commandLine: 'echo hello' },
         processContainer: { learningMode: true },
@@ -147,17 +129,7 @@ describe('native binding request', () => {
 
     assert.throws(
       () => prepareRequestSpec({
-        version: '0.9.0-alpha',
-        containment: 'process',
-        process: { commandLine: 'echo hello' },
-        appContainer: { learningMode: true },
-      }),
-      /require containment 'processcontainer'/,
-    );
-
-    assert.throws(
-      () => prepareRequestSpec({
-        version: '0.9.0-alpha',
+        version: '1.0.0',
         containment: 'process',
         process: { commandLine: 'echo hello' },
         processContainer: {
@@ -169,7 +141,7 @@ describe('native binding request', () => {
 
     assert.throws(
       () => prepareRequestSpec({
-        version: '0.9.0-alpha',
+        version: '1.0.0',
         containment: 'seatbelt',
         process: { commandLine: 'echo hello' },
         processContainer: {
@@ -180,60 +152,44 @@ describe('native binding request', () => {
     );
   });
 
-  it('normalizes legacy containment aliases privately', () => {
-    const request = prepareRequestSpec({
-      version: '0.9.0-alpha',
-      containment: 'appcontainer' as 'processcontainer',
-      process: { commandLine: 'echo hello' },
-      appContainer: { learningMode: true },
-    });
-
-    assert.deepStrictEqual(request.containment, {
-      type: 'processContainer',
-      learningMode: true,
-    });
-  });
-
-  it('rejects retired aliases for v1 exact contracts', () => {
-    for (const version of ['1.0.0', '1.1.0-alpha']) {
-      for (const config of [
-        {
-          version,
-          containment: 'appcontainer',
-          process: { commandLine: 'echo hello' },
-        },
-        {
-          version,
-          containment: 'macos_sandbox',
-          process: { commandLine: 'echo hello' },
-        },
-        {
-          version,
-          containment: 'processcontainer',
-          process: { commandLine: 'echo hello' },
-          appContainer: {},
-        },
-        {
-          version,
-          containment: 'seatbelt',
-          process: { commandLine: 'echo hello' },
-          macos_sandbox: {},
-        },
-      ]) {
-        assert.throws(
-          () => prepareRequestSpec(config as ContainerConfig),
-          (error: unknown) =>
-            error instanceof MxcError
-            && error.code === 'malformed_request'
-            && /does not support legacy/.test(error.message),
-        );
-      }
+  it('rejects retired aliases for the SDK-owned v1 contract', () => {
+    for (const config of [
+      {
+        version: '1.0.0',
+        containment: 'appcontainer',
+        process: { commandLine: 'echo hello' },
+      },
+      {
+        version: '1.0.0',
+        containment: 'macos_sandbox',
+        process: { commandLine: 'echo hello' },
+      },
+      {
+        version: '1.0.0',
+        containment: 'processcontainer',
+        process: { commandLine: 'echo hello' },
+        appContainer: {},
+      },
+      {
+        version: '1.0.0',
+        containment: 'seatbelt',
+        process: { commandLine: 'echo hello' },
+        macos_sandbox: {},
+      },
+    ]) {
+      assert.throws(
+        () => prepareRequestSpec(config as ContainerConfig),
+        (error: unknown) =>
+          error instanceof MxcError
+          && error.code === 'malformed_request'
+          && /does not support legacy/.test(error.message),
+      );
     }
   });
 
   it('defaults a partial UI config to no window access', () => {
     const request = prepareRequestSpec({
-      version: '0.9.0-alpha',
+      version: '1.0.0',
       process: { commandLine: 'echo hello' },
       ui: { clipboard: 'read' } as NonNullable<ContainerConfig['ui']>,
     });
@@ -245,7 +201,7 @@ describe('native binding request', () => {
 
   it('projects an omitted Seatbelt section as empty backend settings', () => {
     const request = prepareRequestSpec({
-      version: '0.9.0-alpha',
+      version: '1.0.0',
       containment: 'seatbelt',
       process: { commandLine: 'echo hello' },
     });
@@ -255,7 +211,7 @@ describe('native binding request', () => {
 
   it('moves ProcessContainer configuration onto tagged containment', () => {
     const request = prepareRequestSpec({
-      version: '0.9.0-alpha',
+      version: '1.0.0',
       containment: 'processcontainer',
       process: { commandLine: 'echo hello' },
       processContainer: {
@@ -293,7 +249,7 @@ describe('native binding request', () => {
 
   it('moves WSLC configuration onto tagged containment', () => {
     const request = prepareRequestSpec({
-      version: '0.9.0-alpha',
+      version: '1.0.0',
       containment: 'wslc',
       process: { commandLine: 'echo hello' },
       wslc: {
@@ -316,7 +272,7 @@ describe('native binding request', () => {
   it('rejects unsupported WSLC protocol and foreign backend settings', () => {
     assert.throws(
       () => prepareRequestSpec({
-        version: '0.9.0-alpha',
+        version: '1.0.0',
         containment: 'wslc',
         process: { commandLine: 'echo hello' },
         wslc: {
@@ -332,7 +288,7 @@ describe('native binding request', () => {
 
     assert.throws(
       () => prepareRequestSpec({
-        version: '0.9.0-alpha',
+        version: '1.0.0',
         containment: 'process',
         process: { commandLine: 'echo hello' },
         wslc: { image: 'alpine:latest' },
@@ -343,7 +299,7 @@ describe('native binding request', () => {
 
   it('moves Unix backend configuration onto tagged containment', () => {
     const seatbelt = prepareRequestSpec({
-      version: '0.9.0-alpha',
+      version: '1.0.0',
       containment: 'seatbelt',
       process: { commandLine: 'echo hello' },
       seatbelt: {
@@ -364,7 +320,7 @@ describe('native binding request', () => {
     });
 
     const lxc = prepareRequestSpec({
-      version: '0.9.0-alpha',
+      version: '1.0.0',
       containment: 'lxc',
       process: { commandLine: 'echo hello' },
       lxc: {
@@ -382,14 +338,14 @@ describe('native binding request', () => {
     assert.strictEqual(lxc.containerName, 'node-sdk-test');
 
     const bubblewrap = prepareRequestSpec({
-      version: '0.9.0-alpha',
+      version: '1.0.0',
       containment: 'bubblewrap',
       process: { commandLine: 'echo hello' },
     });
     assert.deepStrictEqual(bubblewrap.containment, { type: 'bubblewrap' });
 
     const isolationSession = prepareRequestSpec({
-      version: '0.9.0-alpha',
+      version: '1.0.0',
       containment: 'isolation_session',
       process: { commandLine: 'echo hello' },
     }, { experimental: true });
@@ -401,7 +357,7 @@ describe('native binding request', () => {
   it('rejects Unix backend settings under another containment', () => {
     assert.throws(
       () => prepareRequestSpec({
-        version: '0.9.0-alpha',
+        version: '1.0.0',
         containment: 'process',
         process: { commandLine: 'echo hello' },
         seatbelt: { nestedPty: false },
@@ -411,7 +367,7 @@ describe('native binding request', () => {
 
     assert.throws(
       () => prepareRequestSpec({
-        version: '0.9.0-alpha',
+        version: '1.0.0',
         containment: 'process',
         process: { commandLine: 'echo hello' },
         lxc: { distribution: 'ubuntu' },
@@ -421,7 +377,7 @@ describe('native binding request', () => {
 
     assert.throws(
       () => prepareRequestSpec({
-        version: '0.9.0-alpha',
+        version: '1.0.0',
         containment: 'lxc',
         process: { commandLine: 'echo hello' },
         lxc: { destroyOnExit: false },
@@ -432,7 +388,7 @@ describe('native binding request', () => {
 
   it('rejects configurations the native one-shot contract cannot represent', () => {
     const config = {
-      version: '0.9.0-alpha',
+      version: '1.0.0',
       process: { commandLine: 'echo hello' },
       network: { proxy: { builtinTestServer: true } },
     } as unknown as ContainerConfig;
@@ -448,7 +404,7 @@ describe('native binding request', () => {
 
   it('uses a typed malformed-request error when the command is absent', () => {
     assert.throws(
-      () => prepareRequestSpec({ version: '0.9.0-alpha' }),
+      () => prepareRequestSpec({ version: '1.0.0' }),
       (error) => error instanceof MxcError && error.code === 'malformed_request',
     );
   });

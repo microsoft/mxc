@@ -177,33 +177,33 @@ describe('buildStateAwareEnvelope', () => {
   it('lifts telemetry to the top-level envelope', () => {
     const env = buildStateAwareEnvelope({
       phase: 'start',
-      backendKey: 'windows_sandbox',
-      sandboxId: 'wsb:01234567',
+      backendKey: 'isolation_session',
+      sandboxId: 'iso:01234567',
       config: { telemetry: { enabled: true } },
     });
     assert.deepEqual(env.telemetry, { enabled: true });
-    assert.equal(env.version, '1.1.0-alpha');
+    assert.equal(env.version, '1.0.0');
     assert.equal(env.experimental, undefined);
   });
 
-  it('rejects an explicitly older schema version when telemetry is present', () => {
+  it('rejects any caller-selected schema version', () => {
     assert.throws(
       () => buildStateAwareEnvelope({
         phase: 'start',
-        backendKey: 'windows_sandbox',
-        sandboxId: 'wsb:01234567',
-        config: { version: '0.8.0-alpha', telemetry: { enabled: true } },
+        backendKey: 'isolation_session',
+        sandboxId: 'iso:01234567',
+        config: { version: '1.0.0', telemetry: { enabled: true } },
       }),
       (error: unknown) =>
         error instanceof MxcError &&
         error.code === 'malformed_request' &&
         error.message.includes(
-          "State-aware windows_sandbox requests require schema version '1.1.0-alpha'",
+          'State-aware high-level requests do not accept a caller-selected version',
         ),
     );
   });
 
-  it('selects schema 0.9 when WSLC exec inherits the backend environment', () => {
+  it('selects stable schema 1.0 when WSLC exec inherits the backend environment', () => {
     const env = buildStateAwareEnvelope({
       phase: 'exec',
       backendKey: 'wslc',
@@ -215,21 +215,21 @@ describe('buildStateAwareEnvelope', () => {
         },
       },
     });
-    assert.equal(env.version, '0.9.0-alpha');
+    assert.equal(env.version, '1.0.0');
     assert.deepEqual(env.process, {
       commandLine: 'echo hi',
       inheritDefaultEnv: true,
     });
   });
 
-  it('rejects an explicitly older schema version when the environment is inherited', () => {
+  it('rejects a caller-selected version when the environment is inherited', () => {
     assert.throws(
       () => buildStateAwareEnvelope({
         phase: 'exec',
         backendKey: 'wslc',
         sandboxId: 'wslc:abc',
         config: {
-          version: '0.8.0-alpha',
+          version: '1.0.0',
           process: {
             commandLine: 'echo hi',
             inheritDefaultEnv: true,
@@ -240,7 +240,7 @@ describe('buildStateAwareEnvelope', () => {
         error instanceof MxcError &&
         error.code === 'malformed_request' &&
         error.message.includes(
-          "State-aware wslc requests require schema version '0.9.0-alpha'",
+          'State-aware high-level requests do not accept a caller-selected version',
         ),
     );
   });
@@ -251,7 +251,6 @@ describe('buildStateAwareEnvelope', () => {
       backendKey: 'isolation_session',
       containment: 'isolation_session',
       config: {
-        version: '0.9.0-alpha',
         network: {
           egress: { default: 'allow' },
           ingress: { default: 'allow', hostLoopback: 'allow' },
@@ -315,7 +314,7 @@ describe('buildStateAwareEnvelope', () => {
       }),
       (err: unknown) => err instanceof MxcError &&
         err.code === 'malformed_request' &&
-        /require schema version '0\.9\.0-alpha'/.test(err.message),
+        /do not accept a caller-selected version/.test(err.message),
     );
   });
 
@@ -382,7 +381,7 @@ describe('buildStateAwareEnvelope', () => {
       config: { telemetry: { enabled: true } },
     });
     assert.deepStrictEqual(env.telemetry, { enabled: true });
-    assert.strictEqual(env.version, '0.9.0-alpha');
+    assert.strictEqual(env.version, '1.0.0');
     assert.strictEqual(env.experimental, undefined);
   });
 
@@ -592,7 +591,7 @@ describe('startSandbox', () => {
     await startSandbox(id, { telemetry: { enabled: false } });
     const envelope = requestEnvelope(request());
     assert.deepStrictEqual(envelope.telemetry, { enabled: false });
-    assert.strictEqual(envelope.version, '0.9.0-alpha');
+    assert.strictEqual(envelope.version, '1.0.0');
     assert.strictEqual(envelope.experimental, undefined);
   });
 
@@ -924,129 +923,28 @@ describe('execInSandbox', () => {
   });
 });
 
-describe('windows_sandbox state-aware lifecycle', () => {
-  it('buildStateAwareEnvelope lifts filesystem (incl. deniedPaths) and emits no experimental block', () => {
-    const env = buildStateAwareEnvelope({
-      phase: 'provision',
-      backendKey: 'windows_sandbox',
-      containment: 'windows_sandbox',
-      config: {
-        version: '1.1.0-alpha',
-        filesystem: {
-          readwritePaths: ['C:\\workspace'],
-          readonlyPaths: ['C:\\inputs'],
-          deniedPaths: ['C:\\secrets'],
-        },
-      },
-    });
-    assert.strictEqual(env.phase, 'provision');
-    assert.strictEqual(env.containment, 'windows_sandbox');
-    assert.deepStrictEqual(env.filesystem, {
-      readwritePaths: ['C:\\workspace'],
-      readonlyPaths: ['C:\\inputs'],
-      deniedPaths: ['C:\\secrets'],
-    });
-    assert.strictEqual(env.experimental, undefined);
-  });
-
-  describe('round-trip via the typed API', () => {
-    it('provisionSandbox builds a windows_sandbox envelope and routes back via the wsb: prefix', async () => {
-      const request = installStateAwareReply('{"result":{"sandboxId":"wsb:prov-1"}}');
-      const result = await provisionSandbox(
-        'windows_sandbox',
-        { filesystem: { readonlyPaths: ['C:\\inputs'] } },
-        { experimental: true },
-      );
-      assert.strictEqual(result.sandboxId, 'wsb:prov-1');
-      const envelope = requestEnvelope(request());
-      assert.strictEqual(envelope.phase, 'provision');
-      assert.strictEqual(envelope.containment, 'windows_sandbox');
-      assert.deepStrictEqual(envelope.filesystem, { readonlyPaths: ['C:\\inputs'] });
-      assert.strictEqual(envelope.experimental, undefined);
-    });
-
-    it('startSandbox infers windows_sandbox from the wsb: prefix', async () => {
-      const request = installStateAwareReply('{"result":{}}');
-      const id = 'wsb:prov-1' as SandboxId<'windows_sandbox'>;
-      await startSandbox(id, undefined, { experimental: true });
-      const envelope = requestEnvelope(request());
-      assert.strictEqual(envelope.phase, 'start');
-      assert.strictEqual(envelope.sandboxId, 'wsb:prov-1');
-      assert.strictEqual(envelope.experimental, undefined);
-    });
-
-    it('execInSandboxAsync rejects live execution for a wsb: id', async () => {
-      const id = 'wsb:prov-1' as SandboxId<'windows_sandbox'>;
-      await assert.rejects(
-        () => execInSandboxAsync(
-          id as unknown as SandboxId<'isolation_session'>,
-          { process: { commandLine: 'echo hello-from-wsb' } },
-          { experimental: true },
-        ),
-        (error: unknown) =>
-          error instanceof MxcError &&
-          error.code === 'unsupported_containment',
-      );
-    });
-
-    it('execInSandboxAsync rejects dry-run execution for a wsb: id', async () => {
-      const id = 'wsb:prov-1' as SandboxId<'windows_sandbox'>;
-      if (false) {
-        void execInSandboxAsync(
-          // @ts-expect-error Windows Sandbox cannot execute through this API, including dry-run.
-          id,
-          { process: { commandLine: 'echo hello-from-wsb' } },
-          { dryRun: true, experimental: true },
-        );
-      }
-      await assert.rejects(
-        () => execInSandboxAsync(
-          id as unknown as SandboxId<'isolation_session'>,
-          { process: { commandLine: 'echo hello-from-wsb' } },
-          { dryRun: true, experimental: true },
-        ),
-        (error: unknown) =>
-          error instanceof MxcError &&
-          error.code === 'unsupported_containment',
-      );
-    });
-
-    it('stopSandbox and deprovisionSandbox build minimal envelopes for a wsb: id', async () => {
-      for (const phase of ['stop', 'deprovision'] as const) {
-        const request = installStateAwareReply('{"result":{}}');
-        const id = 'wsb:prov-1' as SandboxId<'windows_sandbox'>;
-        const call = phase === 'stop' ? stopSandbox : deprovisionSandbox;
-        await call(id, undefined, { experimental: true });
-        const envelope = requestEnvelope(request());
-        assert.strictEqual(envelope.phase, phase);
-        assert.strictEqual(envelope.sandboxId, 'wsb:prov-1');
-      }
-    });
-  });
-});
-
 describe('wslc state-aware lifecycle', () => {
-  it('defaults the version to the published 0.9.0-alpha contract', () => {
+  it('targets the SDK-owned stable 1.0.0 contract', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',
       backendKey: 'wslc',
       containment: 'wslc',
       config: { image: 'alpine:latest' },
     });
-    assert.strictEqual(env.version, '0.9.0-alpha');
+    assert.strictEqual(env.version, '1.0.0');
   });
 
-  it('rejects a caller-supplied version without a registered wslc state-aware contract', () => {
+  it('rejects a caller-supplied version', () => {
     assert.throws(
       () => buildStateAwareEnvelope({
         phase: 'provision',
         backendKey: 'wslc',
         containment: 'wslc',
-        config: { version: '0.8.1-alpha', image: 'alpine:latest' },
+        config: { version: '1.0.0', image: 'alpine:latest' },
       }),
       (err: unknown) => err instanceof MxcError &&
         err.code === 'malformed_request' &&
-        /require schema version '0\.9\.0-alpha'/.test(err.message),
+        /do not accept a caller-selected version/.test(err.message),
     );
   });
 
@@ -1130,7 +1028,7 @@ describe('wslc state-aware lifecycle', () => {
       const envelope = requestEnvelope(request());
       assert.strictEqual(envelope.phase, 'provision');
       assert.strictEqual(envelope.containment, 'wslc');
-      assert.strictEqual(envelope.version, '0.9.0-alpha');
+      assert.strictEqual(envelope.version, '1.0.0');
     });
 
     it('startSandbox infers wslc from the wslc: prefix', async () => {

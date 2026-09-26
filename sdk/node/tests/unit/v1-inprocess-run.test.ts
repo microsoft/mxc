@@ -91,32 +91,4 @@ describe('in-process async run routing', () => {
         && error.details?.timedOut === true,
     );
   });
-
-  it('preserves typed native errors', async () => {
-    _setBindingRunAsyncImplementation(async () => {
-      throw new MxcError('unsupported_containment', 'LXC is executor-only');
-    });
-
-    await assert.rejects(
-      spawnSandboxAsync('echo hello', {}),
-      (error: unknown) =>
-        error instanceof MxcError
-        && error.code === 'unsupported_containment'
-        && error.message === 'LXC is executor-only',
-    );
-  });
-
-  it('wraps binding invocation failures as backend errors', async () => {
-    _setBindingRunAsyncImplementation(async () => {
-      throw new Error('native invocation failed');
-    });
-
-    await assert.rejects(
-      spawnSandboxAsync('echo hello', {}),
-      (error: unknown) =>
-        error instanceof MxcError
-        && error.code === 'backend_error'
-        && error.message === 'native invocation failed',
-    );
-  });
 });

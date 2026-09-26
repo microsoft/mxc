@@ -126,6 +126,21 @@ export type ContainmentBackend =
   | 'bubblewrap';
 
 /**
+ * Containment choices available to the v1 high-level policy API.
+ *
+ * Raw {@link ContainerConfig} values retain the full exact-contract
+ * containment union.
+ */
+export type SandboxContainment =
+  | 'process'
+  | 'processcontainer'
+  | 'wslc'
+  | 'lxc'
+  | 'seatbelt'
+  | 'isolation_session'
+  | 'bubblewrap';
+
+/**
  * Containment values (abstract intent or concrete backend) that require
  * the `--experimental` flag.
  */
@@ -493,8 +508,6 @@ export function legacyConfigAliasUnsupportedReason(config: ContainerConfig): str
  * No OS-specific content. Omitted fields = most restrictive (default-deny).
  */
 export type SandboxPolicy = {
-  /** Policy version (semver). Must match a supported schema version. */
-  version: string;
   /** Filesystem access restrictions */
   filesystem?: {
       /** Paths that are granted read and write access */
@@ -506,35 +519,9 @@ export type SandboxPolicy = {
       /** Whether to clear the filesystem policy when the shell exits. (default: true) */
       clearPolicyOnExit?: boolean;
   };
-  /** Network access restrictions. All flags default to false (no network access). */
-  network?: {
-      /** Whether to allow outbound connections to the Internet. (default: false) Legacy network field. */
-      allowOutbound?: boolean;
-      /** Whether to allow connections to local networks. (default: false) Legacy network field. */
-      allowLocalNetwork?: boolean;
-      /** When set, ONLY these outbound hosts are reachable. Requires allowOutbound. Legacy network field. */
-      allowedHosts?: string[];
-      /** Hosts to block even when outbound is allowed. Requires allowOutbound. Legacy network field. */
-      blockedHosts?: string[];
-      /**
-       * Proxy configuration. Routes cooperating HTTP traffic through this proxy.
-       * Supported on Windows ProcessContainer, Linux Bubblewrap, and macOS
-       * Seatbelt. On Bubblewrap/Seatbelt it is a cooperative env-var proxy
-       * (HTTP_PROXY/HTTPS_PROXY) — raw-socket clients can bypass it. Native
-       * validation enforces backend-specific combination rules.
-       * `builtinTestServer` selects a bundled, testing-only proxy; the SDK
-       * rejects it unless `allowTestingFeatures: true` is set in
-       * SandboxSpawnOptions (which maps to the native
-       * `--allow-testing-features` flag).
-       * Legacy network field.
-       */
-      proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
-      /** Schema 0.8 outbound network policy. Cannot be combined with legacy network fields. */
-      egress?: NetworkEgressConfig;
-      /** Schema 0.8 inbound and host-loopback policy. Cannot be combined with legacy network fields. */
-      ingress?: NetworkIngressConfig;
-  };
-  /** Schema 0.8 runtime values supplied separately from sandbox policy. */
+  /** Directional network access restrictions. */
+  network?: DirectionalNetworkConfig;
+  /** Runtime values supplied separately from sandbox policy. */
   runtimeConfig?: RuntimeConfig;
   /** Per-invocation telemetry opt-in, subject to consent and policy. */
   telemetry?: TelemetryConfig;

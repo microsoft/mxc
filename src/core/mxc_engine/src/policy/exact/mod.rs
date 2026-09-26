@@ -3,15 +3,13 @@
 
 use std::num::NonZeroU16;
 
-use mxc_config_contract::ContractVersion;
 use wxc_common::config_parser::{load_one_shot_request_from_contract, ExactOneShotContract};
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::mxc_error::MxcError;
 
 use crate::configs::{Lxc, ProcessContainer, Seatbelt};
 
-use super::network::{select_network_format, NetworkFormat};
-use super::{Containment, NetworkAction, ProxySpec, SandboxPolicy, SandboxRequest};
+use super::{Containment, NetworkAction, SandboxPolicy, SandboxRequest};
 
 macro_rules! optional {
     ($module:ident, $value:expr) => {
@@ -22,26 +20,13 @@ macro_rules! optional {
     };
 }
 
-mod v0_6;
-mod v0_7;
-mod v0_8;
-mod v0_9;
 mod v1_0;
-mod v1_1;
-
-#[derive(Clone, Copy)]
-enum LegacyEnforcement {
-    Capabilities,
-    Firewall,
-    Both,
-}
 
 struct PreparedInput<'a> {
     policy: &'a SandboxPolicy,
     containment: &'a Containment,
     script: &'a str,
     container_id: String,
-    network_format: NetworkFormat,
 }
 
 fn error(message: impl Into<String>) -> MxcError {
@@ -52,51 +37,20 @@ fn non_empty_port(value: u16, field: &str) -> Result<NonZeroU16, MxcError> {
     NonZeroU16::new(value).ok_or_else(|| error(format!("{field} must be non-zero")))
 }
 
-fn validate_common(
-    policy: &SandboxPolicy,
-    containment: &Containment,
-    version: ContractVersion,
-) -> Result<NetworkFormat, MxcError> {
-    let has_process_container_network = match containment {
-        Containment::ProcessContainer(process_container) => process_container
+fn validate_common(containment: &Containment) -> Result<(), MxcError> {
+    if let Containment::ProcessContainer(process_container) = containment {
+        if process_container
             .network
             .as_ref()
             .and_then(|network| network.allowed_proxy_peer.as_deref())
-            .is_some_and(|peer| !peer.trim().is_empty()),
-        _ => false,
-    };
-    let network_format = select_network_format(
-        version,
-        policy.network.as_ref(),
-        has_process_container_network,
-    )?;
-
-    if let Some(network) = policy.network.as_ref() {
-        if matches!(network.proxy, Some(ProxySpec::BuiltinTestServer)) {
-            return Err(error(
-                "network.proxy.builtinTestServer is not supported by the in-process Rust SDK; use localhost or url",
-            ));
-        }
-
-        let accepts_host_rules_without_outbound = match containment {
-            Containment::Process => cfg!(any(target_os = "linux", target_os = "macos")),
-            Containment::ProcessContainer(_) => false,
-            Containment::Seatbelt(_) => true,
-            Containment::Lxc(_) | Containment::Bubblewrap => true,
-            Containment::Wslc(_) => true,
-            Containment::IsolationSession => false,
-        };
-        if !accepts_host_rules_without_outbound
-            && (!network.allowed_hosts.is_empty() || !network.blocked_hosts.is_empty())
-            && !network.allow_outbound
+            .is_some_and(|peer| peer.trim().is_empty())
         {
             return Err(error(
-                "allowedHosts/blockedHosts require allowOutbound to be true",
+                "processContainer.network.allowedProxyPeer must not be empty",
             ));
         }
     }
-
-    Ok(network_format)
+    Ok(())
 }
 
 fn selected_process_container(containment: &Containment) -> Option<ProcessContainer> {
@@ -125,24 +79,17 @@ fn selected_lxc(containment: &Containment) -> Option<Lxc> {
 fn normalized_capabilities(
     policy: &SandboxPolicy,
     process_container: &ProcessContainer,
-    network_format: NetworkFormat,
 ) -> Vec<String> {
     let mut capabilities = process_container.capabilities.clone();
     if let Some(network) = policy.network.as_ref() {
-        let (allows_internet, allows_local_network) = match network_format {
-            NetworkFormat::Legacy => (network.allow_outbound, network.allow_local_network),
-            NetworkFormat::Directional => {
-                let allows_internet = network.egress.as_ref().is_some_and(|egress| {
-                    egress.default == Some(NetworkAction::Allow)
-                        || egress.allow.as_ref().is_some_and(|rules| !rules.is_empty())
-                });
-                let allows_local_network = network
-                    .ingress
-                    .as_ref()
-                    .is_some_and(|ingress| ingress.default == Some(NetworkAction::Allow));
-                (allows_internet, allows_local_network)
-            }
-        };
+        let allows_internet = network.egress.as_ref().is_some_and(|egress| {
+            egress.default == Some(NetworkAction::Allow)
+                || egress.allow.as_ref().is_some_and(|rules| !rules.is_empty())
+        });
+        let allows_local_network = network
+            .ingress
+            .as_ref()
+            .is_some_and(|ingress| ingress.default == Some(NetworkAction::Allow));
         if allows_internet
             && !capabilities
                 .iter()
@@ -161,33 +108,6 @@ fn normalized_capabilities(
     capabilities
 }
 
-fn legacy_enforcement(
-    policy: &SandboxPolicy,
-    containment: &Containment,
-    has_process_container: bool,
-) -> Option<LegacyEnforcement> {
-    let network = policy.network.as_ref()?;
-    let has_host_rules = !network.allowed_hosts.is_empty() || !network.blocked_hosts.is_empty();
-    if has_process_container {
-        return Some(if has_host_rules {
-            LegacyEnforcement::Both
-        } else {
-            LegacyEnforcement::Capabilities
-        });
-    }
-    if cfg!(target_os = "linux")
-        && matches!(
-            containment,
-            Containment::Process | Containment::Lxc(_) | Containment::Bubblewrap
-        )
-        && has_host_rules
-        && network.proxy.is_none()
-    {
-        return Some(LegacyEnforcement::Firewall);
-    }
-    None
-}
-
 fn container_id(container_name: Option<&str>) -> String {
     container_name
         .map(str::to_string)
@@ -200,39 +120,17 @@ pub(super) fn build_request(
     script: &str,
     container_name: Option<&str>,
 ) -> Result<SandboxRequest, crate::Error> {
-    if policy.version.is_empty() {
-        return Err(error("Policy version is required").into());
-    }
-    let version = ContractVersion::parse_exact(&policy.version)
-        .ok_or_else(|| error(format!("Invalid schema version: {}", policy.version)))?;
     if script.is_empty() {
         return Err(error("script parameter is required").into());
     }
+    validate_common(containment)?;
     let prepared = PreparedInput {
         policy,
         containment,
         script,
         container_id: container_id(container_name),
-        network_format: validate_common(policy, containment, version)?,
     };
-    let contract = match version {
-        ContractVersion::V0_6_0Alpha => {
-            ExactOneShotContract::V0_6(Box::new(v0_6::build(&prepared)?))
-        }
-        ContractVersion::V0_7_0Alpha => {
-            ExactOneShotContract::V0_7(Box::new(v0_7::build(&prepared)?))
-        }
-        ContractVersion::V0_8_0Alpha => {
-            ExactOneShotContract::V0_8(Box::new(v0_8::build(&prepared)?))
-        }
-        ContractVersion::V0_9_0Alpha => {
-            ExactOneShotContract::V0_9(Box::new(v0_9::build(&prepared)?))
-        }
-        ContractVersion::V1_0_0 => ExactOneShotContract::V1_0(Box::new(v1_0::build(&prepared)?)),
-        ContractVersion::V1_1_0Alpha => {
-            ExactOneShotContract::Dev(Box::new(v1_1::build(&prepared)?))
-        }
-    };
+    let contract = ExactOneShotContract::V1_0(Box::new(v1_0::build(&prepared)?));
     let mut logger = Logger::new(Mode::Buffer);
     let mut inner =
         load_one_shot_request_from_contract(contract, &mut logger).map_err(|error| {
@@ -243,4 +141,89 @@ pub(super) fn build_request(
         inner,
         requested_sandbox_kind: containment.telemetry_kind(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::configs::ProcessContainerNetwork;
+    use crate::policy::{
+        NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkSection,
+        RuntimeConfigSection,
+    };
+
+    use super::*;
+
+    fn process_container_with_proxy_peer(peer: &str) -> Containment {
+        Containment::ProcessContainer(ProcessContainer {
+            network: Some(ProcessContainerNetwork {
+                allowed_proxy_peer: Some(peer.to_string()),
+            }),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn rejects_empty_allowed_proxy_peer() {
+        let error = build_request(
+            &SandboxPolicy::default(),
+            &process_container_with_proxy_peer(""),
+            "echo hello",
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "processContainer.network.allowedProxyPeer must not be empty"
+        );
+    }
+
+    #[test]
+    fn rejects_whitespace_only_allowed_proxy_peer() {
+        let error = build_request(
+            &SandboxPolicy::default(),
+            &process_container_with_proxy_peer(" \t\r\n"),
+            "echo hello",
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "processContainer.network.allowedProxyPeer must not be empty"
+        );
+    }
+
+    #[test]
+    fn preserves_nonempty_allowed_proxy_peer() {
+        let policy = SandboxPolicy {
+            network: Some(NetworkSection {
+                egress: Some(NetworkEgressSection {
+                    default: Some(NetworkAction::Deny),
+                    ..Default::default()
+                }),
+                ingress: Some(NetworkIngressSection {
+                    default: Some(NetworkAction::Allow),
+                    host_loopback: Some(NetworkAction::Deny),
+                }),
+                runtime_config: Some(RuntimeConfigSection {
+                    network_proxy: Some("http://127.0.0.1:8080".to_string()),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let request = build_request(
+            &policy,
+            &process_container_with_proxy_peer(" Contoso.Proxy_123 "),
+            "echo hello",
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            request.inner.policy.allowed_proxy_peer.as_deref(),
+            Some(" Contoso.Proxy_123 ")
+        );
+    }
 }

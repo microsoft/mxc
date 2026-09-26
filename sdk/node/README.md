@@ -24,12 +24,11 @@ const tools = getAvailableToolsPolicy(process.env);
 const temp  = getTemporaryFilesPolicy();
 
 const config = createConfigFromPolicy({
-  version: '0.6.0-alpha',
   filesystem: {
     readonlyPaths:  tools.readonlyPaths,    // PATH, PYTHONPATH, JAVA_HOME, …
     readwritePaths: temp.readwritePaths,    // %TEMP% / $TMPDIR
   },
-  network: { allowOutbound: false },
+  network: { egress: { default: 'deny' } },
   timeoutMs: 30_000,
 });
 config.process!.commandLine = 'python -c "print(\'hello from sandbox\')"';
@@ -56,7 +55,11 @@ child.on('close', (code) => console.log('exit:', code));
 for the `windowsHandle` option used by `fs.ReadStream` and `fs.WriteStream`.
 Node.js 26.8.0 or later is recommended.
 
-**Policy / config schema versions:**
+**High-level policy target:** `SandboxPolicy` is version-free. This package owns
+the v1 target and currently emits exact contract `1.0.0`. Use `ContainerConfig`
+only when a caller must author a raw exact-version configuration.
+
+**Raw config schema versions:**
 
 | Version | Status | Schema file |
 | --- | --- | --- |
@@ -82,14 +85,11 @@ or later.
 
 <a id="schema-080-networking"></a>
 
-**Schema 0.8 directional networking:** `createConfigFromPolicy` accepts
+**Directional networking:** `createConfigFromPolicy` accepts
 `network.egress` / `network.ingress`, `runtimeConfig.networkProxy`, and
-`processContainer.network.allowedProxyPeer`. Do not mix those fields with the
-legacy `network.allowOutbound`, `network.allowLocalNetwork`,
-`network.allowedHosts`, `network.blockedHosts`, or `network.proxy` fields.
-`createConfigFromPolicy` authors either shape according to the supplied policy
-version and fields. Schema 0.6 and 0.7 policies continue to produce the legacy
-wire shape. With schema 0.8, omitting all network fields leaves the
+`processContainer.network.allowedProxyPeer`. Legacy network authoring is not
+part of the v1 high-level API; use a raw `ContainerConfig` only when replaying
+an immutable historical contract. Omitting all network fields leaves the
 `network` block out of the generated config; the native parser interprets that
 as directional default-deny for egress, ingress, and host loopback. See the
 [Sandbox Policy 0.8.0 specification](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.8.0/policy.md)
@@ -109,7 +109,6 @@ import {
 } from '@microsoft/mxc-sdk';
 
 const directConfig = createConfigFromPolicy({
-  version: '0.8.0-alpha',
   network: {
     egress: {
       default: 'deny',
@@ -129,7 +128,6 @@ spawnSandboxFromConfig(directConfig);
 
 ```typescript
 const proxyConfig = createConfigFromPolicy({
-  version: '0.8.0-alpha',
   network: {
     egress: { default: 'deny' },
     ingress: { default: 'deny', hostLoopback: 'deny' },
@@ -193,12 +191,11 @@ const temp  = getTemporaryFilesPolicy();
 
 const config = createConfigFromPolicy(
   {
-    version: '0.6.0-alpha',
     filesystem: {
       readonlyPaths:  tools.readonlyPaths,
       readwritePaths: temp.readwritePaths,
     },
-    network: { allowOutbound: true },
+    network: { egress: { default: 'allow' } },
     timeoutMs: 30_000,
   },
   'process', // intent: "process" | "vm" | "microvm"
@@ -233,7 +230,6 @@ const tools = getAvailableToolsPolicy(process.env);
 const temp  = getTemporaryFilesPolicy();
 
 const pty = spawnSandbox('python script.py', {
-  version: '0.9.0-alpha',
   filesystem: {
     readonlyPaths:  tools.readonlyPaths,
     readwritePaths: temp.readwritePaths,
@@ -274,7 +270,6 @@ const temp  = getTemporaryFilesPolicy();
 const result = await spawnSandboxAsync(
   'python -c "import sys; print(sys.version)"',
   {
-    version: '0.6.0-alpha',
     filesystem: {
       readonlyPaths:  tools.readonlyPaths,
       readwritePaths: temp.readwritePaths,
@@ -364,7 +359,14 @@ capability names are reserved and must not be added directly to
 
 For long-lived sandboxes where you provision once, exec many times, and tear down at the end (e.g. agentic loops), use the state-aware lifecycle.
 
-> **Backend support:** the state-aware lifecycle is currently implemented for `isolation_session`, `windows_sandbox`, and `wslc` (all Windows-only). Node exposes live, buffered, and dry-run exec only for backends that support native piped execution: IsolationSession and WSLC. Windows Sandbox supports provision, start, stop, and deprovision through Node, but its exec APIs are unavailable because the backend cannot return native pipes. IsolationSession and WSLC do not require an experimental opt-in; Windows Sandbox does. The one-shot spawn APIs (`spawnSandbox` / `spawnSandboxFromConfig`) are the supported execution path for every other backend.
+> **Backend support:** the typed Node state-aware lifecycle exposes
+> `isolation_session` and `wslc` (both Windows-only). These APIs are
+> version-free and emit the SDK-owned stable exact `1.0.0` contract. Windows
+> Sandbox lifecycle remains available only through raw exact
+> `1.1.0-alpha` configuration/FFI paths; it is not part of the Node high-level
+> lifecycle surface. The one-shot spawn APIs (`spawnSandbox` /
+> `spawnSandboxFromConfig`) remain the supported execution path for other
+> backends.
 
 ```typescript
 import {
@@ -404,14 +406,6 @@ all-allow shape shown above; legacy fields are rejected. Rules,
 proxies, mixed postures, and omission are rejected. The other lifecycle phases
 remain available for every state-aware backend.
 
-`windows_sandbox` follows the same provision/start/stop/deprovision shape
-(substitute the containment string and provide `filesystem.readwritePaths` /
-`readonlyPaths` at provision if needed). Node does not expose its exec phase,
-including dry-run, because the backend cannot execute through the native piped
-contract used by `execInSandbox` and `execInSandboxAsync`. See
-[`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md)
-for the per-phase config matrix.
-
 `wslc` needs no provision config (it defaults to an `alpine:latest`
 container with no network). A bridged container uses the directional all-allow
 posture:
@@ -430,9 +424,9 @@ Provision may also supply `filesystem.readwritePaths` / `readonlyPaths`
 `imageTarPath`. Node live and buffered WSLC exec support stdout/stderr streaming,
 timeouts, and cancellation. WSLC does not currently expose process stdin.
 
-IsolationSession state-aware requests default to published `0.9.0-alpha`.
-Windows Sandbox requests default to development `1.1.0-alpha`; WSLC requests
-default to stable `0.9.0-alpha`. See
+The typed IsolationSession and WSLC lifecycle APIs do not accept a version;
+the v1 Node SDK emits stable exact `1.0.0`. Raw exact lifecycle requests remain
+explicitly versioned. See
 [`docs/wsl/wslc-state-aware.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wslc-state-aware.md)
 for the per-phase config matrix.
 
@@ -481,12 +475,11 @@ const profile = getUserProfilePolicy();               // %LOCALAPPDATA%\Programs
 const tmp     = getTemporaryFilesPolicy();            // %TEMP% / $TMPDIR
 
 const policy = {
-  version: '0.6.0-alpha',
   filesystem: {
     readonlyPaths: [...tools.readonlyPaths, ...profile.readonlyPaths],
     readwritePaths: tmp.readwritePaths,
   },
-  network: { allowOutbound: false },
+  network: { egress: { default: 'deny' } },
 };
 ```
 
@@ -506,7 +499,6 @@ The `policy.ui` block is enforced on all supported schema versions, and `policy.
 import { spawnSandboxFromConfig, createConfigFromPolicy } from '@microsoft/mxc-sdk';
 
 const config = createConfigFromPolicy({
-  version: '0.6.0-alpha',
   ui: { allowWindows: true },     // ← required for powershell.exe to start
 });
 config.process!.commandLine = 'powershell.exe -NoProfile -Command "Get-Date"';
@@ -552,7 +544,7 @@ granting file content reads. It requires a BaseContainer host with PSEC 1.1
 | `CreateProcessW(PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT) failed: ...` | The process security environment launch returned an OS-level error. Backend-unavailable failures automatically fall through to an AppContainer tier during selection. | Check the Windows build requirements for the backend you selected. |
 | Process exits `-1` / `4294967295` with no stdout | Native binary terminated abnormally. | Re-run with `options.debug: true` (or `options.logDir: '<dir>'`) to capture diagnostic logs. |
 | `Policy version '<x>' is older than supported` / `newer than supported` | Version is outside the supported version lines. | Use an exact registered version: `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, `0.9.0-alpha`, `1.0.0`, or `1.1.0-alpha`. See [Compatibility](#compatibility). |
-| `Policy version '<x>' is not a registered schema contract` / `Unsupported contract version` | The declaration is not registered, even if it falls between supported versions (for example, `0.6.1-alpha`). | Use an exact version from [Compatibility](#compatibility); IsolationSession and WSLC state-aware requests use `0.9.0-alpha`, while Windows Sandbox uses `1.1.0-alpha`. |
+| `Policy version '<x>' is not a registered schema contract` / `Unsupported contract version` | A raw exact declaration is not registered, even if it falls between supported versions (for example, `0.6.1-alpha`). | Use an exact version from [Compatibility](#compatibility). High-level one-shot and typed lifecycle APIs do not accept a version and emit stable `1.0.0`; raw Windows Sandbox lifecycle requests use `1.1.0-alpha`. |
 | `Schema <x> does not support containment '<backend>'` | The selected backend was introduced after the declared schema version. | Use the backend's minimum version from [Choosing a Backend](#choosing-a-backend). Seatbelt requires `0.7.0-alpha`; IsolationSession and WSLC require `0.9.0-alpha`; Windows Sandbox, MicroVM, and Hyperlight require `1.1.0-alpha`. |
 
 For backend-specific errors, see the per-backend guide linked from the [Choosing a Backend](#choosing-a-backend) table.
@@ -575,10 +567,10 @@ spawnSandboxFromConfig(config, options?, workingDirectory?, env?) → IPty | Chi
 spawnSandbox(script, policy, options?, workingDirectory?, containerName?, env?) → IPty
 spawnSandboxAsync(script, policy, ...) → Promise<{ stdout, stderr, exitCode }>
 
-// State-aware lifecycle (currently `isolation_session`, `windows_sandbox`, and `wslc` — all Windows-only)
+// Typed state-aware lifecycle (`isolation_session` and `wslc` — both Windows-only)
 // `config` on provisionSandbox is required for backends whose provision config
 // has a required member (isolation_session: unrestricted network) and
-// optional otherwise (windows_sandbox, wslc).
+// optional otherwise (wslc). The API is version-free and targets exact 1.0.0.
 provisionSandbox(containment, config, options?)  → Promise<ProvisionResult>
 startSandbox(sandboxId, config?, options?)       → Promise<StartResult>
 execInSandbox(sandboxId, config, options?)        → MxcSandboxProcess // streaming

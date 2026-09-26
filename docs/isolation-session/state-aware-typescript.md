@@ -31,6 +31,10 @@ The SDK exposes only the fields the IsolationSession runtime currently honors at
 phase. See the [Rust spec](state-aware-rust.md) for the full Rust-side
 contract (including fields not yet exposed via the SDK).
 
+Like the other high-level v1 APIs, these typed lifecycle APIs are
+version-free. The Node SDK owns and emits exact stable contract `1.0.0`;
+caller-selected versions are reserved for raw exact APIs.
+
 | Phase | Config | Metadata |
 |---|---|---|
 | provision | `IsolationSessionProvisionConfig` | `IsolationSessionProvisionMetadata` |
@@ -45,7 +49,6 @@ contract (including fields not yet exposed via the SDK).
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `version` | `0.9.0-alpha` | `0.9.0-alpha` | Optional explicit declaration of the registered state-aware contract; other values are rejected by the SDK. |
 | `network` | `IsolationSessionNetworkConfig` | — (**required**) | The backend's actual unrestricted posture: `{ egress: { default: 'allow' }, ingress: { default: 'allow', hostLoopback: 'allow' } }`. Legacy fields are rejected. Rules, proxies, mixed postures, and omission are rejected, and `network` is not accepted on post-provision phases. |
 | `appId` | string | absent | Optional identifier for the calling application, associating the provisioned agent user with its owning app. **A packaged application must supply its Package Family Name in the form `PFN:<packageFamilyName>`** (for example `PFN:Contoso.App_8wekyb3d8bbwe`). An unpackaged application may pass any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it. Validated structurally only (no control characters, at most 256 characters); rejections surface as `MxcError` with `code: 'policy_validation'`. Whitespace and case are preserved exactly, and an explicitly supplied empty string is a **distinct** value from omitting the field. Provision-phase only — it is fixed for the sandbox's lifetime, and the `IsolationSessionStartConfig` type rejects it at compile time. |
 
@@ -64,11 +67,7 @@ in the SDK parses past the `iso:` prefix.
 
 ### Start
 
-**Config (`IsolationSessionStartConfig`):**
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `version` | `0.9.0-alpha` | `0.9.0-alpha` | Optional explicit declaration of the registered state-aware contract; other values are rejected by the SDK. |
+**Config (`IsolationSessionStartConfig`):** optional telemetry only.
 
 **Metadata:** none.
 
@@ -78,14 +77,13 @@ in the SDK parses past the `iso:` prefix.
 
 | Field | Type | Description |
 |---|---|---|
-| `version` | `0.9.0-alpha` | Optional explicit declaration of the registered state-aware contract; other values are rejected by the SDK. |
 | `process` | `ProcessConfig` (required) | Cross-cutting process info — `commandLine`, `cwd`, `env`, `timeout`. |
 
 **Metadata:** n/a — exec returns an exit code and streamed stdio, not a structured result.
 
 ### Stop, Deprovision
 
-Each Config carries only `version?`. Neither phase returns metadata.
+Each Config carries only optional telemetry. Neither phase returns metadata.
 
 ## End-to-end example
 

@@ -12,12 +12,10 @@
  * On Linux, `getPlatformSupport()` reports failures for individual backends
  * through `PlatformSupport.unavailableReasons`, including when none is usable.
  *
- * Schema `0.8.0-alpha` policies may use directional
- * `network.egress` / `network.ingress`, `runtimeConfig.networkProxy`, and
- * `processContainer.network.allowedProxyPeer` through `createConfigFromPolicy`.
- * These fields cannot be mixed with legacy network fields.
- * Schema `0.9.0-alpha` requires directional networking; explicit legacy
- * inputs (including false and empty lists) produce migration errors.
+ * The version-free v1 policy API uses directional `network.egress` /
+ * `network.ingress`; explicit legacy network inputs produce migration errors.
+ * Raw exact-version configuration remains available through
+ * `spawnSandboxFromConfig`.
  * WSLC state-aware exec uses top-level `runtimeConfig.networkProxy` without
  * restating network posture. IsolationSession provision requires
  * directional egress, ingress, and host-loopback defaults set to `allow`.
@@ -49,6 +47,7 @@ export {
   ContainmentType,
   ContainmentTypes,
   ContainmentBackend,
+  SandboxContainment,
   ExperimentalBackends,
   ContainerConfig,
   ProcessContainerConfig,
@@ -109,10 +108,7 @@ export {
 export {
   Phase,
   STATE_AWARE_VERSION,
-  WINDOWS_SANDBOX_STATE_AWARE_VERSION,
-  WSLC_STATE_AWARE_VERSION,
   StateAwareContainmentBackend,
-  StateAwareSchemaVersion,
   SandboxId,
   IsolationSessionNetworkConfig,
   IsolationSessionProvisionConfig,
@@ -121,11 +117,6 @@ export {
   IsolationSessionStopConfig,
   IsolationSessionDeprovisionConfig,
   IsolationSessionProvisionMetadata,
-  WindowsSandboxProvisionConfig,
-  WindowsSandboxStartConfig,
-  WindowsSandboxExecConfig,
-  WindowsSandboxStopConfig,
-  WindowsSandboxDeprovisionConfig,
   WslcProvisionConfig,
   WslcStartConfig,
   WslcExecConfig,

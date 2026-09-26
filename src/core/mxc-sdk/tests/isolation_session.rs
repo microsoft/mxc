@@ -33,13 +33,10 @@ fn iso_policy_with_deadline(timeout_ms: Option<u32>) -> SandboxPolicy {
     network.egress = Some(egress);
     network.ingress = Some(ingress);
 
-    SandboxPolicy {
-        version: "0.9.0-alpha".to_string(),
-        filesystem: None,
-        network: Some(network),
-        ui: None,
-        timeout_ms,
-    }
+    let mut policy = SandboxPolicy::default();
+    policy.network = Some(network);
+    policy.timeout_ms = timeout_ms;
+    policy
 }
 
 fn host_supports_isolation_session() -> bool {

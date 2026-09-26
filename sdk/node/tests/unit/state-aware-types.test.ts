@@ -15,17 +15,12 @@ import {
   StartMetadataFor,
   STATE_AWARE_VERSION,
   StateAwareContainmentBackend,
-  StateAwareSchemaVersion,
   StopConfigFor,
-  WindowsSandboxProvisionConfig,
-  WindowsSandboxStartConfig,
-  WINDOWS_SANDBOX_STATE_AWARE_VERSION,
   WslcProvisionConfig,
   WslcStartConfig,
   WslcExecConfig,
   WslcStopConfig,
   WslcDeprovisionConfig,
-  WSLC_STATE_AWARE_VERSION,
 } from '../../src/state-aware-types.js';
 import { backendForSandboxId } from '../../src/state-aware-helper.js';
 
@@ -51,18 +46,23 @@ describe('SandboxId<C> brand', () => {
   });
 });
 
-describe('StateAwareSchemaVersion', () => {
-  it('contains every backend-specific runtime constant', () => {
-    const versions: StateAwareSchemaVersion[] = [
-      STATE_AWARE_VERSION,
-      WINDOWS_SANDBOX_STATE_AWARE_VERSION,
-      WSLC_STATE_AWARE_VERSION,
-    ];
-    assert.deepStrictEqual(versions, [
-      '0.9.0-alpha',
-      '1.1.0-alpha',
-      '0.9.0-alpha',
-    ]);
+describe('STATE_AWARE_VERSION', () => {
+  it('targets the SDK-owned stable v1 contract', () => {
+    assert.strictEqual(STATE_AWARE_VERSION, '1.0.0');
+  });
+});
+
+describe('StateAwareContainmentBackend', () => {
+  it('excludes Windows Sandbox from the typed high-level lifecycle', async () => {
+    // @ts-expect-error — Windows Sandbox lifecycle is raw exact 1.1 only.
+    const unsupported: StateAwareContainmentBackend = 'windows_sandbox';
+    const { provisionSandbox } = await import('../../src/state-aware.js');
+    // @ts-expect-error — Windows Sandbox is not a high-level lifecycle backend.
+    const provision = () => provisionSandbox('windows_sandbox');
+
+    assert.ok(unsupported);
+    assert.ok(provision);
+    assert.throws(() => backendForSandboxId('wsb:prov-1'), /does not match a known/);
   });
 });
 
@@ -79,42 +79,30 @@ describe('IsolationSessionProvisionConfig', () => {
     assert.strictEqual(directional.network.egress.default, 'allow');
 
     const oldVersion: IsolationSessionProvisionConfig = {
-      // @ts-expect-error — no state-aware contract is registered for 0.8.
+      // @ts-expect-error — high-level lifecycle configs are version-free.
       version: '0.8.0-alpha',
       network: directionalNetwork,
     };
     assert.ok(oldVersion);
 
     // @ts-expect-error — network is required; provision must acknowledge the unrestricted network.
-    const missing: IsolationSessionProvisionConfig = { version: '0.9.0-alpha' };
+    const missing: IsolationSessionProvisionConfig = {};
     assert.ok(missing);
   });
 
-  describe('backend-specific state-aware versions', () => {
-    it('accepts only the registered version for each backend config', () => {
-      const isolation: IsolationSessionStartConfig = { version: '0.9.0-alpha' };
-      const windowsSandbox: WindowsSandboxStartConfig = { version: '1.1.0-alpha' };
-      const wslc: WslcStartConfig = { version: '0.9.0-alpha' };
-
-      const wrongIsolation: IsolationSessionStartConfig = {
-        // @ts-expect-error — IsolationSession is registered at v0.9.
-        version: '1.1.0-alpha',
+  describe('version-free lifecycle configs', () => {
+    it('rejects caller-selected versions for each typed backend', () => {
+      const isolation: IsolationSessionStartConfig = {
+        // @ts-expect-error — the v1 SDK owns the exact contract target.
+        version: '1.0.0',
       };
-      const wrongWindowsSandbox: WindowsSandboxStartConfig = {
-        // @ts-expect-error — Windows Sandbox is registered at v1.1.
-        version: '0.9.0-alpha',
-      };
-      const wrongWslc: WslcStartConfig = {
-        // @ts-expect-error — WSLC is registered at v0.9.
-        version: '1.1.0-alpha',
+      const wslc: WslcStartConfig = {
+        // @ts-expect-error — the v1 SDK owns the exact contract target.
+        version: '1.0.0',
       };
 
       assert.ok(isolation);
-      assert.ok(windowsSandbox);
       assert.ok(wslc);
-      assert.ok(wrongIsolation);
-      assert.ok(wrongWindowsSandbox);
-      assert.ok(wrongWslc);
     });
   });
 
@@ -131,7 +119,7 @@ describe('IsolationSessionProvisionConfig', () => {
     assert.ok(skipped);
 
     // Backends whose provision config is entirely optional stay skippable.
-    const optional = () => provisionSandbox('windows_sandbox');
+    const optional = () => provisionSandbox('wslc');
     assert.ok(optional);
   });
 
@@ -139,7 +127,7 @@ describe('IsolationSessionProvisionConfig', () => {
     // A caller holding a variable typed as the whole backend union — rather
     // than a literal — instantiates the conditional tuple with that union. If
     // optionality were decided over the *union of configs*, the all-optional
-    // WindowsSandbox member would satisfy it and make the config optional for
+    // WSLC member would satisfy it and make the config optional for
     // every backend, silently re-opening the hole the test above closes.
     // A union backend must behave like its strictest member.
     const { provisionSandbox } = await import('../../src/state-aware.js');
@@ -257,7 +245,7 @@ describe('IsolationSessionStartConfig', () => {
     assert.ok(cfg);
   });
 
-  it('rejects a backend-specific field (start takes only version)', () => {
+  it('rejects a backend-specific field (start takes only telemetry)', () => {
     const cfg: IsolationSessionStartConfig = {
       // @ts-expect-error — start accepts no backend-specific config.
       unsupportedSetting: { nested: true },
@@ -280,8 +268,8 @@ describe('IsolationSessionExecConfig', () => {
 });
 
 describe('IsolationSessionStopConfig and IsolationSessionDeprovisionConfig', () => {
-  it('only carry version', () => {
-    const stopCfg: StopConfigFor<'isolation_session'> = { version: '0.9.0-alpha' };
+  it('only carry telemetry', () => {
+    const stopCfg: StopConfigFor<'isolation_session'> = {};
     const deprovCfg: DeprovisionConfigFor<'isolation_session'> = {};
 
     const wrongStop: StopConfigFor<'isolation_session'> = {
@@ -298,7 +286,6 @@ describe('ConfigsForBackend', () => {
   it('selects the IsolationSession bundle for the isolation_session backend', () => {
     const bundle: ConfigsForBackend<'isolation_session'> = {
       provision: {
-        version: '0.9.0-alpha',
         network: {
           egress: { default: 'allow' },
           ingress: { default: 'allow', hostLoopback: 'allow' },
@@ -312,116 +299,15 @@ describe('ConfigsForBackend', () => {
     assert.strictEqual(bundle.exec.process.commandLine, 'echo');
   });
 
-  it('selects the WindowsSandbox bundle for the windows_sandbox backend', () => {
-    const bundle: ConfigsForBackend<'windows_sandbox'> = {
-      provision: { version: '1.1.0-alpha', filesystem: { readwritePaths: ['C:\\workspace'] } },
-      start: {},
-      exec: { process: { commandLine: 'echo' } },
-      stop: {},
-      deprovision: {},
-    };
-    assert.strictEqual(bundle.provision.filesystem?.readwritePaths?.[0], 'C:\\workspace');
-  });
-});
-
-describe('WindowsSandboxProvisionConfig', () => {
-  it('accepts version and filesystem (incl. deniedPaths)', () => {
-    const cfg: WindowsSandboxProvisionConfig = {
-      version: '1.1.0-alpha',
-      filesystem: {
-        readwritePaths: ['C:\\workspace'],
-        readonlyPaths: ['C:\\inputs'],
-        deniedPaths: ['C:\\secrets'],
-      },
-    };
-    assert.deepStrictEqual(cfg.filesystem?.deniedPaths, ['C:\\secrets']);
-  });
-
-  it('rejects an undeclared backend-specific field', () => {
-    const cfg: WindowsSandboxProvisionConfig = {
-      // @ts-expect-error — windows_sandbox provision declares no such field.
-      unsupportedSetting: { nested: true },
-    };
-    assert.ok(cfg);
-  });
-
-  it('rejects network and ui at provision', () => {
-    const withNetwork: WindowsSandboxProvisionConfig = {
-      // @ts-expect-error — network is not exposed on the windows_sandbox provision config.
-      network: { defaultPolicy: 'block' },
-    };
-    const withUi: WindowsSandboxProvisionConfig = {
-      // @ts-expect-error — ui is not exposed on the windows_sandbox provision config.
-      ui: { disable: true, clipboard: 'none', injection: false },
-    };
-    assert.ok(withNetwork);
-    assert.ok(withUi);
-  });
-});
-
-describe('WindowsSandboxStartConfig', () => {
-  it('carries only version (no configurationId, no backend-specific fields)', () => {
-    const ok: WindowsSandboxStartConfig = { version: '1.1.0-alpha' };
-    assert.strictEqual(ok.version, '1.1.0-alpha');
-
-    const withConfigurationId: WindowsSandboxStartConfig = {
-      // @ts-expect-error — windows_sandbox start has no configurationId.
-      configurationId: 'small',
-    };
-    assert.ok(withConfigurationId);
-
-    const withExtra: WindowsSandboxStartConfig = {
-      // @ts-expect-error — windows_sandbox start declares no backend-specific field.
-      unsupportedSetting: { nested: true },
-    };
-    assert.ok(withExtra);
-  });
-});
-
-describe('WindowsSandbox SandboxId<C> brand', () => {
-  it('runtime value is a string and brands distinctly from isolation_session', () => {
-    const id = 'wsb:prov-1' as SandboxId<'windows_sandbox'>;
-    assert.strictEqual(typeof id, 'string');
-
-    function takesWsbId(_id: SandboxId<'windows_sandbox'>): void {
-      // body unused
-    }
-    // @ts-expect-error — an isolation_session id is not a windows_sandbox id.
-    takesWsbId('iso:abcd' as SandboxId<'isolation_session'>);
-    assert.ok(true);
-  });
-});
-
-describe('WindowsSandbox metadata resolves to undefined for every phase', () => {
-  it('typed metadata accessors are undefined and ProvisionResult carries no metadata', () => {
-    // These assignments only compile if the *MetadataFor<'windows_sandbox'>
-    // aliases resolve to `undefined` (not `never` / not an object).
-    const provMeta: ProvisionMetadataFor<'windows_sandbox'> = undefined;
-    const startMeta: StartMetadataFor<'windows_sandbox'> = undefined;
-    assert.strictEqual(provMeta, undefined);
-    assert.strictEqual(startMeta, undefined);
-
-    const result: ProvisionResult<'windows_sandbox'> = {
-      sandboxId: 'wsb:prov-1' as SandboxId<'windows_sandbox'>,
-    };
-    assert.strictEqual(result.metadata, undefined);
-
-    const withBogusMetadata: ProvisionResult<'windows_sandbox'> = {
-      sandboxId: 'wsb:prov-1' as SandboxId<'windows_sandbox'>,
-      // @ts-expect-error — WindowsSandbox provision returns no metadata object.
-      metadata: { agentUserName: 'nope' },
-    };
-    assert.ok(withBogusMetadata);
-  });
 });
 
 describe('SandboxId<C> brand is compile-time only; prefix is the runtime routing authority', () => {
-  it('routes a force-cast wsb id to windows_sandbox despite the iso brand', () => {
+  it('routes a force-cast wslc id to wslc despite the iso brand', () => {
     // A caller can defeat the compile-time brand with a forced cast. Routing
-    // must still follow the *runtime* prefix (`wsb:`), not the (wrong) brand —
+    // must still follow the *runtime* prefix (`wslc:`), not the (wrong) brand —
     // pinning that the brand is advisory and the prefix is authoritative.
-    const misbranded = 'wsb:prov-1' as unknown as SandboxId<'isolation_session'>;
-    assert.strictEqual(backendForSandboxId(misbranded), 'windows_sandbox');
+    const misbranded = 'wslc:prov-1' as unknown as SandboxId<'isolation_session'>;
+    assert.strictEqual(backendForSandboxId(misbranded), 'wslc');
 
     const isoId = 'iso:abcd' as SandboxId<'isolation_session'>;
     assert.strictEqual(backendForSandboxId(isoId), 'isolation_session');
@@ -445,9 +331,8 @@ describe('ProvisionResult<C>', () => {
 });
 
 describe('WslcProvisionConfig', () => {
-  it('accepts version, filesystem, network, and the backend-specific image knobs', () => {
+  it('accepts filesystem, network, and the backend-specific image knobs', () => {
     const cfg: WslcProvisionConfig = {
-      version: '0.9.0-alpha',
       filesystem: { readwritePaths: ['C:\\ws\\rw'], readonlyPaths: ['C:\\ws\\ro'] },
       network: {
         egress: { default: 'allow' },
@@ -484,11 +369,11 @@ describe('WslcProvisionConfig', () => {
 });
 
 describe('WslcStartConfig / WslcStopConfig / WslcDeprovisionConfig', () => {
-  it('carry only version', () => {
-    const start: WslcStartConfig = { version: '0.9.0-alpha' };
+  it('carry only telemetry', () => {
+    const start: WslcStartConfig = {};
     const stop: WslcStopConfig = {};
     const deprov: WslcDeprovisionConfig = {};
-    assert.strictEqual(start.version, '0.9.0-alpha');
+    assert.ok(start);
     assert.ok(stop);
     assert.ok(deprov);
 

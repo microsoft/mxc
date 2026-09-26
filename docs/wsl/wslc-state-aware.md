@@ -10,9 +10,11 @@ It complements:
 - [`wsl-container-support-plan.md`](wsl-container-support-plan.md) — the original one-shot backend design.
 - [`../state-aware-lifecycle/mxc-state-aware-sandbox-api.md`](../state-aware-lifecycle/mxc-state-aware-sandbox-api.md) — the cross-backend state-aware wire format, the Rust `StatefulSandboxBackend` trait, and the dispatcher contract.
 
-The WSLc state-aware surface is part of published schema `0.9.0-alpha` and does
-not require a runtime experimental opt-in. Native builds still require the
-`wslc` feature (`build.bat --with-wslc`).
+The raw WSLc state-aware surface is available in published exact schemas
+beginning with `0.9.0-alpha`. The Rust, .NET, and Node high-level v1 lifecycle
+APIs are version-free and emit stable exact `1.0.0`. Neither path requires a
+runtime experimental opt-in. Native builds still require the `wslc` feature
+(`build.bat --with-wslc`).
 
 ## Why a daemon
 
@@ -142,7 +144,8 @@ acknowledges that WSLC cannot independently restrict those directions.
 | `process.timeout` | n/a | n/a | honored → `ExecConfig.timeout_ms` |
 | `lifecycle` | rejected (whole section, at parse) | rejected | rejected |
 
-The exact `0.9.0-alpha` request root is selected before backend dispatch.
+For a raw `0.9.0-alpha` request, that exact request root is selected before
+backend dispatch. High-level v1 SDK calls select exact `1.0.0` internally.
 Fields absent from that phase's closed root fail structurally with
 `malformed_request`: provision excludes `ui`, start / stop / deprovision admit
 no filesystem, network, UI, or process policy, and exec excludes filesystem and

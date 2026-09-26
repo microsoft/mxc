@@ -16,22 +16,14 @@ use mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy, SandboxRequest, WaitO
 /// timeout (ms; `0` == run until exit, required for interactive/long cases).
 #[cfg(target_os = "macos")]
 fn seatbelt_request(command: &str, timeout_ms: u32) -> SandboxRequest {
-    let policy = SandboxPolicy {
-        version: "0.7.0-alpha".to_string(),
-        filesystem: Some(mxc_sdk::policy::FilesystemSection {
-            readwrite_paths: vec!["/tmp".to_string()],
-            readonly_paths: vec![],
-            denied_paths: vec![],
-            clear_policy_on_exit: None,
-        }),
-        network: None,
-        ui: None,
-        timeout_ms: if timeout_ms == 0 {
-            None
-        } else {
-            Some(timeout_ms)
-        },
-    };
+    let mut policy = SandboxPolicy::default();
+    policy.filesystem = Some(mxc_sdk::policy::FilesystemSection {
+        readwrite_paths: vec!["/tmp".to_string()],
+        readonly_paths: vec![],
+        denied_paths: vec![],
+        clear_policy_on_exit: None,
+    });
+    policy.timeout_ms = (timeout_ms != 0).then_some(timeout_ms);
     let request = build_request(&policy, command, None).expect("build_request should succeed");
     request
 }

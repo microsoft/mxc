@@ -29,9 +29,7 @@ export const sdk = sdkNamespace;
 // Schema versions
 
 export const supportedVersions = [
-  new semver.SemVer('0.6.0-alpha'),
-  new semver.SemVer('0.7.0-alpha'),
-  new semver.SemVer('0.8.0-alpha'),
+  new semver.SemVer('1.0.0'),
 ];
 
 // SDK package location
@@ -277,12 +275,6 @@ export async function probeStateAwareRuntime<C extends StateAwareContainmentBack
             { network: isolationSessionNetwork },
             { experimental: true },
           );
-          return result.sandboxId;
-        }
-        case 'windows_sandbox': {
-          const result = await provisionSandbox('windows_sandbox', undefined, {
-            experimental: true,
-          });
           return result.sandboxId;
         }
         case 'wslc': {

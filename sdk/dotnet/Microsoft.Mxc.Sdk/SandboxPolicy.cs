@@ -12,9 +12,8 @@ namespace Microsoft.Mxc.Sdk;
 /// </summary>
 public sealed class SandboxPolicy
 {
-    /// <summary>Policy/schema version (e.g. <c>"0.7.0-alpha"</c>). Required.</summary>
-    [JsonPropertyName("version")]
-    public string Version { get; set; } = string.Empty;
+    [JsonIgnore]
+    internal string Version { get; set; } = string.Empty;
 
     /// <summary>Filesystem access policy.</summary>
     [JsonPropertyName("filesystem")]
@@ -154,114 +153,20 @@ public sealed class FilesystemPolicy
 }
 
 /// <summary>
-/// Network authoring section. Schema 0.9 requires Egress/Ingress and
-/// RuntimeConfig; legacy properties remain available for published 0.6–0.8.
-/// Omission retains native default-deny without synthesizing legacy fields.
+/// Directional network authoring section for the v1 high-level SDK.
+/// Omission retains native default-deny.
 /// </summary>
-[JsonConverter(typeof(NetworkPolicyJsonConverter))]
 public sealed class NetworkPolicy
 {
-    private bool? _allowOutbound;
-    private bool? _allowLocalNetwork;
-    private List<string> _allowedHosts = new();
-    private List<string> _blockedHosts = new();
-    private NetworkProxyPolicy? _proxy;
-    private string? _legacyFieldSpecified;
-    private readonly HashSet<string> _legacyFields = new(StringComparer.Ordinal);
-
-    internal string? LegacyFieldSpecified =>
-        _legacyFieldSpecified
-        ?? (_allowedHosts is { Count: > 0 } ? "allowedHosts" : null)
-        ?? (_blockedHosts is { Count: > 0 } ? "blockedHosts" : null);
-
-    internal bool? AuthoredAllowOutbound
-    {
-        get => _allowOutbound;
-        set { _allowOutbound = value; MarkLegacyField("allowOutbound"); }
-    }
-
-    internal bool? AuthoredAllowLocalNetwork
-    {
-        get => _allowLocalNetwork;
-        set { _allowLocalNetwork = value; MarkLegacyField("allowLocalNetwork"); }
-    }
-
-    internal bool HasLegacyField(string field) =>
-        _legacyFields.Contains(field)
-        || (field == "allowedHosts" && _allowedHosts is { Count: > 0 })
-        || (field == "blockedHosts" && _blockedHosts is { Count: > 0 });
-
-    internal void RecordLegacyWireField(string field) => MarkLegacyField(field);
-
-    private void MarkLegacyField(string field)
-    {
-        _legacyFieldSpecified ??= field;
-        _legacyFields.Add(field);
-    }
-
-    /// <summary>Allow outbound network access.</summary>
-    [JsonPropertyName("allowOutbound")]
-    public bool AllowOutbound
-    {
-        get => _allowOutbound ?? false;
-        set => AuthoredAllowOutbound = value;
-    }
-
-    /// <summary>Allow access to the local network.</summary>
-    [JsonPropertyName("allowLocalNetwork")]
-    public bool AllowLocalNetwork
-    {
-        get => _allowLocalNetwork ?? false;
-        set => AuthoredAllowLocalNetwork = value;
-    }
-
-    /// <summary>Hosts explicitly allowed.</summary>
-    [JsonPropertyName("allowedHosts")]
-    public List<string> AllowedHosts
-    {
-        get => _allowedHosts;
-        set
-        {
-            ArgumentNullException.ThrowIfNull(value);
-            _allowedHosts = value;
-            MarkLegacyField("allowedHosts");
-        }
-    }
-
-    /// <summary>Hosts explicitly blocked.</summary>
-    [JsonPropertyName("blockedHosts")]
-    public List<string> BlockedHosts
-    {
-        get => _blockedHosts;
-        set
-        {
-            ArgumentNullException.ThrowIfNull(value);
-            _blockedHosts = value;
-            MarkLegacyField("blockedHosts");
-        }
-    }
-
-    /// <summary>
-    /// HTTP/HTTPS proxy used by the sandbox. Raw-socket clients may bypass
-    /// cooperative proxy implementations on backends that cannot enforce
-    /// proxy-only egress.
-    /// </summary>
-    [JsonPropertyName("proxy")]
-    public NetworkProxyPolicy? Proxy
-    {
-        get => _proxy;
-        set { _proxy = value; MarkLegacyField("proxy"); }
-    }
-
-    /// <summary>Schema-0.8 outbound network policy.</summary>
+    /// <summary>Outbound network policy.</summary>
     [JsonPropertyName("egress")]
     public NetworkEgressPolicy? Egress { get; set; }
 
-    /// <summary>Schema-0.8 inbound and host-loopback policy.</summary>
+    /// <summary>Inbound and host-loopback policy.</summary>
     [JsonPropertyName("ingress")]
     public NetworkIngressPolicy? Ingress { get; set; }
 
-    /// <summary>Schema-0.8 runtime network values.</summary>
+    /// <summary>Runtime network values.</summary>
     [JsonPropertyName("runtimeConfig")]
     public NetworkRuntimeConfig? RuntimeConfig { get; set; }
 }
@@ -376,54 +281,6 @@ public sealed class NetworkRuntimeConfig
     /// </summary>
     [JsonPropertyName("networkProxy")]
     public string? NetworkProxy { get; set; }
-}
-
-/// <summary>
-/// Production network-proxy configuration. Use
-/// <see cref="LocalhostNetworkProxyPolicy"/> for a proxy listening on the host
-/// loopback interface or <see cref="UrlNetworkProxyPolicy"/> for an explicit
-/// proxy URL.
-/// </summary>
-[JsonConverter(typeof(NetworkProxyPolicyJsonConverter))]
-public abstract class NetworkProxyPolicy;
-
-/// <summary>An HTTP/HTTPS proxy listening on a host loopback port.</summary>
-public sealed class LocalhostNetworkProxyPolicy : NetworkProxyPolicy
-{
-    /// <summary>Create a loopback proxy configuration.</summary>
-    /// <exception cref="ArgumentOutOfRangeException">
-    /// <paramref name="port"/> is outside the TCP port range.
-    /// </exception>
-    public LocalhostNetworkProxyPolicy(int port)
-    {
-        if (port is < 1 or > ushort.MaxValue)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(port),
-                port,
-                $"Proxy port must be between 1 and {ushort.MaxValue}.");
-        }
-
-        Port = (ushort)port;
-    }
-
-    /// <summary>The host loopback TCP port.</summary>
-    public ushort Port { get; }
-}
-
-/// <summary>An HTTP/HTTPS proxy identified by an explicit URL.</summary>
-public sealed class UrlNetworkProxyPolicy : NetworkProxyPolicy
-{
-    /// <summary>Create an explicit proxy URL configuration.</summary>
-    /// <exception cref="ArgumentException"><paramref name="url"/> is empty.</exception>
-    public UrlNetworkProxyPolicy(string url)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(url);
-        Url = url;
-    }
-
-    /// <summary>The proxy URL. Native policy validation determines whether it is supported.</summary>
-    public string Url { get; }
 }
 
 /// <summary>Clipboard access level. Serialized as camelCase ("none"/"read"/"write"/"all").</summary>

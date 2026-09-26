@@ -23,14 +23,10 @@ public static class SchemaVersions
     /// <summary>Newest immutable released schema.</summary>
     public const string LatestStable = "1.0.0";
 
-    /// <summary>Default state-aware version for IsolationSession.</summary>
-    public const string StateAware = "0.9.0-alpha";
+    /// <summary>Exact contract owned by the v1 high-level SDK.</summary>
+    internal const string SdkContract = LatestStable;
 
-    /// <summary>Default state-aware version for Windows Sandbox.</summary>
-    public const string WindowsSandboxStateAware = "1.1.0-alpha";
-
-    /// <summary>Default state-aware version for WSLC.</summary>
-    public const string WslcStateAware = "0.9.0-alpha";
+    internal const string StateAware = SdkContract;
 
     internal static bool IsPublished(string version) =>
         version is Minimum or V0_7_0Alpha or "0.8.0-alpha" or V0_9_0Alpha or LatestStable;

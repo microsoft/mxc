@@ -19,7 +19,7 @@
 //
 //   public field                          wire location
 //   ------------------------------------  --------------------------------------
-//   *Config.version                       top-level `version` (SDK fills default)
+//   SDK-owned exact target                top-level `version`
 //   ExecConfig.process                    top-level `Process`
 //   ProvisionConfig.appId                 IsolationSessionProvisionPhase.appId
 //
@@ -57,8 +57,7 @@ import type {
   DeprovisionRequest,
   WslcProvision as WireWslcProvisionPhase,
   WslcProvisionRequest,
-} from '../../src/generated/v0_9_0_alpha/wire.js';
-import type { ExecRequest as V11ExecRequest } from '../../src/generated/v1_1_0_alpha/wire.js';
+} from '../../src/generated/v1_0_0/wire.js';
 
 import type {
   AssertTrue,
@@ -81,7 +80,7 @@ type _ExactWslcNetwork = AssertTrue<
 type _ExactExecRuntime = AssertTrue<
   Equivalent<
     NonNullable<WslcExecConfig['runtimeConfig']>,
-    NonNullable<V11ExecRequest['runtimeConfig']>
+    NonNullable<ExecRequest['runtimeConfig']>
   >
 >;
 type _ExactIsoNetwork = AssertTrue<
@@ -96,8 +95,8 @@ type _ExactIsoNetwork = AssertTrue<
 // The per-phase wire surface is DERIVED from the real public phase configs, not
 // hand-restated, so a newly exposed public phase field cannot bypass the oracle
 // (review finding F2). Each phase config splits into "lifted" fields that map to
-// top-level wire locations (`version` is SDK metadata; `process` → top-level
-// `Process`, both covered elsewhere) and backend-specific fields that map onto
+// top-level wire locations (`process` → top-level `Process`, covered
+// elsewhere) and backend-specific fields that map onto
 // that phase's wire object.
 //
 // The wire model declares a SEPARATE type per phase, so the comparison is
@@ -109,7 +108,7 @@ type _ExactIsoNetwork = AssertTrue<
 // phase configs surface them publicly but they map to the envelope top level,
 // not under `<backendSection>.<phase>`. Listing them here keeps the
 // backend-key set limited to genuinely per-phase wire fields.
-type LiftedPhaseKey = 'version' | 'process' | 'network' | 'runtimeConfig' | 'filesystem' | 'telemetry';
+type LiftedPhaseKey = 'process' | 'network' | 'runtimeConfig' | 'filesystem' | 'telemetry';
 
 type BackendKeys<C> = Exclude<keyof C, LiftedPhaseKey>;
 type WireKeys<W> = keyof StripIndex<W>;

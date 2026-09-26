@@ -40,6 +40,7 @@ const {
   stableLatest,
   sdkMajorTargets,
 } = schemaVer;
+const sdkV1Target = sdkMajorTargets["1"];
 
 // Assert a regex captures exactly `expected` in `text`.
 function expectConst(file, text, label, regex, expected) {
@@ -114,16 +115,9 @@ const sandboxTs = read("sdk", "node", "src", "sandbox.ts");
 expectConst(
   "sandbox.ts",
   sandboxTs,
-  "SUPPORTED_VERSION",
-  /const SUPPORTED_VERSION\s*=\s*'([^']+)'/,
-  maxSupported
-);
-expectConst(
-  "sandbox.ts",
-  sandboxTs,
-  "MIN_VERSION",
-  /const MIN_VERSION\s*=\s*'([^']+)'/,
-  min
+  "SDK_CONTRACT_VERSION",
+  /const SDK_CONTRACT_VERSION\s*=\s*'([^']+)'/,
+  sdkV1Target
 );
 const stateAwareTs = read("sdk", "node", "src", "state-aware-types.ts");
 expectConst(
@@ -131,21 +125,7 @@ expectConst(
   stateAwareTs,
   "STATE_AWARE_VERSION",
   /const STATE_AWARE_VERSION\s*=\s*'([^']+)'/,
-  stateAware
-);
-expectConst(
-  "state-aware-types.ts",
-  stateAwareTs,
-  "WINDOWS_SANDBOX_STATE_AWARE_VERSION",
-  /const WINDOWS_SANDBOX_STATE_AWARE_VERSION\s*=\s*'([^']+)'/,
-  stateAwareWindowsSandbox
-);
-expectConst(
-  "state-aware-types.ts",
-  stateAwareTs,
-  "WSLC_STATE_AWARE_VERSION",
-  /const WSLC_STATE_AWARE_VERSION\s*=\s*'([^']+)'/,
-  stateAwareWslc
+  sdkV1Target
 );
 // -- C# SDK (sdk/dotnet/Microsoft.Mxc.Sdk/SchemaVersions.cs) --
 const schemaVersionsCs = read(
@@ -158,9 +138,6 @@ for (const [label, expected] of [
   ["Minimum", min],
   ["MaximumSupported", maxSupported],
   ["LatestStable", stableLatest],
-  ["StateAware", stateAware],
-  ["WindowsSandboxStateAware", stateAwareWindowsSandbox],
-  ["WslcStateAware", stateAwareWslc],
 ]) {
   expectConst(
     "SchemaVersions.cs",
@@ -168,6 +145,30 @@ for (const [label, expected] of [
     label,
     new RegExp(`const string ${label}\\s*=\\s*"([^"]+)"`),
     expected
+  );
+}
+const sdkContractMatch =
+  /const string SdkContract\s*=\s*(LatestStable|"([^"]+)")/.exec(
+    schemaVersionsCs
+  );
+if (!sdkContractMatch) {
+  errors.push("SchemaVersions.cs: could not find SdkContract");
+} else {
+  const sdkContract =
+    sdkContractMatch[1] === "LatestStable"
+      ? stableLatest
+      : sdkContractMatch[2];
+  if (sdkContract !== sdkV1Target) {
+    errors.push(
+      `SchemaVersions.cs: SdkContract resolves to "${sdkContract}" but canonical sdkMajorTargets[1] expects "${sdkV1Target}"`
+    );
+  }
+}
+if (
+  !/const string StateAware\s*=\s*SdkContract\s*;/.test(schemaVersionsCs)
+) {
+  errors.push(
+    "SchemaVersions.cs: StateAware must alias the high-level SdkContract"
   );
 }
 
