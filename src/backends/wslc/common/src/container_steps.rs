@@ -70,7 +70,7 @@ pub(crate) fn sdk_error(context: &str, hr: HRESULT, sdk_msg: &str) -> ScriptResp
 /// image, or container path can contain `\u{0}`. Rust keeps such a string whole,
 /// but the SDK stops at the first NUL — so validation/logging and execution
 /// would disagree about what actually ran. Reject at the marshalling boundary.
-pub(crate) fn cstr_bytes(field: &str, value: &str) -> Result<Vec<u8>, ScriptResponse> {
+fn cstr_bytes(field: &str, value: &str) -> Result<Vec<u8>, ScriptResponse> {
     std::ffi::CString::new(value)
         .map(|c| c.into_bytes_with_nul())
         .map_err(|_| {
@@ -245,6 +245,66 @@ unsafe extern "C" fn exit_callback(_exit_code: i32, context: *mut c_void) {
     ctx.exited.1.notify_all();
 }
 
+/// The command-line and environment buffers the SDK stored pointers into.
+///
+/// The SDK does not copy them, so this must outlive the create call that reads
+/// them.
+pub(crate) struct CommandLineBuffers {
+    _argv_cstrings: Vec<Vec<u8>>,
+    _argv: Vec<PCSTR>,
+    _env_cstrings: Vec<Vec<u8>>,
+    _env_ptrs: Vec<PCSTR>,
+}
+
+/// Set `settings`' command line and environment from `script_code` and `env`
+/// applied at `scope`, returning the buffers the SDK now points into.
+///
+/// # Safety
+/// `sdk` must hold valid, currently-loaded function pointers, and `settings`
+/// must remain at a fixed address while the returned buffers are alive.
+pub(crate) unsafe fn set_command_line_and_env(
+    sdk: &WslcSdk,
+    settings: *mut WslcProcessSettings,
+    scope: EnvScope,
+    env: &[String],
+    script_code: &str,
+) -> Result<CommandLineBuffers, ScriptResponse> {
+    let argv_cstrings = process_env::argv_words(scope, env, script_code)
+        .iter()
+        .map(|word| cstr_bytes("command", word))
+        .collect::<Result<Vec<_>, _>>()?;
+    let argv: Vec<PCSTR> = argv_cstrings.iter().map(|w| w.as_ptr() as PCSTR).collect();
+    let hr = sdk.WslcSetProcessSettingsCmdLine(settings, argv.as_ptr(), argv.len());
+    if hr != S_OK {
+        return Err(sdk_error("WslcSetProcessSettingsCmdLine failed", hr, ""));
+    }
+
+    let env_cstrings: Vec<Vec<u8>> = process_env::sdk_entries(scope, env)
+        .iter()
+        .map(|e| cstr_bytes("environment variable", e))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut env_ptrs: Vec<PCSTR> = Vec::new();
+    if !env_cstrings.is_empty() {
+        env_ptrs = env_cstrings.iter().map(|e| e.as_ptr() as PCSTR).collect();
+        let hr =
+            sdk.WslcSetProcessSettingsEnvVariables(settings, env_ptrs.as_ptr(), env_ptrs.len());
+        if hr != S_OK {
+            return Err(sdk_error(
+                "WslcSetProcessSettingsEnvVariables failed",
+                hr,
+                "",
+            ));
+        }
+    }
+
+    Ok(CommandLineBuffers {
+        _argv_cstrings: argv_cstrings,
+        _argv: argv,
+        _env_cstrings: env_cstrings,
+        _env_ptrs: env_ptrs,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // ProcessSettings builder
 // ---------------------------------------------------------------------------
@@ -265,10 +325,7 @@ pub struct ProcessSettings {
     // and dereferences at `WslcCreateContainerProcess` time. They must outlive
     // the create call, so the struct owns them; the `_` prefix marks them as
     // held purely to anchor those lifetimes, never read directly.
-    _argv_cstrings: Vec<Vec<u8>>,
-    _argv: Vec<PCSTR>,
-    _env_cstrings: Vec<Vec<u8>>,
-    _env_ptrs: Vec<PCSTR>,
+    _command: CommandLineBuffers,
     _cwd_cstr: Option<Vec<u8>>,
 }
 
@@ -387,35 +444,7 @@ impl ProcessSettings {
             sdk_io_ref = SdkIoRef(Some(io_ctx_raw as *const IoContext));
         }
 
-        // argv points into argv_cstrings; both are owned below.
-        let argv_cstrings = process_env::argv_words(scope, env, script_code)
-            .iter()
-            .map(|word| cstr_bytes("command", word))
-            .collect::<Result<Vec<_>, _>>()?;
-        let argv: Vec<PCSTR> = argv_cstrings.iter().map(|w| w.as_ptr() as PCSTR).collect();
-        let hr = sdk.WslcSetProcessSettingsCmdLine(&mut raw, argv.as_ptr(), argv.len());
-        if hr != S_OK {
-            return Err(sdk_error("WslcSetProcessSettingsCmdLine failed", hr, ""));
-        }
-
-        // env_ptrs point into env_cstrings; both are owned below.
-        let env_cstrings: Vec<Vec<u8>> = process_env::sdk_entries(scope, env)
-            .iter()
-            .map(|e| cstr_bytes("environment variable", e))
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut env_ptrs: Vec<PCSTR> = Vec::new();
-        if !env_cstrings.is_empty() {
-            env_ptrs = env_cstrings.iter().map(|e| e.as_ptr() as PCSTR).collect();
-            let hr =
-                sdk.WslcSetProcessSettingsEnvVariables(&mut raw, env_ptrs.as_ptr(), env_ptrs.len());
-            if hr != S_OK {
-                return Err(sdk_error(
-                    "WslcSetProcessSettingsEnvVariables failed",
-                    hr,
-                    "",
-                ));
-            }
-        }
+        let command = set_command_line_and_env(sdk, &mut raw, scope, env, script_code)?;
 
         // Working directory (an absolute in-container path, e.g. `/work`; empty =
         // container default). It is passed straight to the SDK; a non-absolute
@@ -444,10 +473,7 @@ impl ProcessSettings {
             raw,
             io_ctx,
             sdk_io_ref,
-            _argv_cstrings: argv_cstrings,
-            _argv: argv,
-            _env_cstrings: env_cstrings,
-            _env_ptrs: env_ptrs,
+            _command: command,
             _cwd_cstr: cwd_cstr,
         })
     }

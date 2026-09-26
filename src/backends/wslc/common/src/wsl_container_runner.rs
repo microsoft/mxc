@@ -33,7 +33,7 @@ use wxc_common::script_runner::ScriptRunner;
 use wxc_common::string_util::{to_wide, CoTaskMemPWSTR};
 use wxc_common::validator::validate_network_policy_support;
 
-use crate::container_steps::{cstr_bytes, sdk_error};
+use crate::container_steps::{self, sdk_error};
 use crate::error::WslcError;
 use crate::policy;
 use crate::policy_mapping;
@@ -689,6 +689,7 @@ impl ScriptRunner for WSLContainerRunner {
         validate_network_policy_support(request, policy::network_policy_support())
             .map_err(|resp| WslcError::Rejected(resp.error_message).into_response())?;
         policy::validate_directional_network(request).map_err(as_wslc_rejection)?;
+        policy::reject_proxy_credentials_in_argv(request).map_err(as_wslc_rejection)?;
         Ok(())
     }
 
@@ -1469,46 +1470,17 @@ impl WSLContainerRunner {
             request.env_entries().to_vec()
         };
 
-        let scope = process_env::EnvScope::of(request);
-
         // These buffers must outlive WslcCreateContainer: the SDK stores the
         // pointers into process_settings (it does not copy), and reads them at
-        // container-create time. Scoping them inside the branches below frees
-        // them early and causes a use-after-free (0xC0000005).
-        let _argv_cstrings: Vec<Vec<u8>> =
-            process_env::argv_words(scope, &effective_env, &request.script_code)
-                .iter()
-                .map(|word| cstr_bytes("command", word))
-                .collect::<Result<Vec<_>, _>>()?;
-        let argv: Vec<PCSTR> = _argv_cstrings
-            .iter()
-            .map(|word| word.as_ptr() as PCSTR)
-            .collect();
-        let hr =
-            sdk.WslcSetProcessSettingsCmdLine(&mut process_settings, argv.as_ptr(), argv.len());
-        if hr != S_OK {
-            return Err(sdk_error("WslcSetProcessSettingsCmdLine failed", hr, ""));
-        }
-
-        let _env_cstrings: Vec<Vec<u8>> = process_env::sdk_entries(scope, &effective_env)
-            .iter()
-            .map(|e| cstr_bytes("environment variable", e))
-            .collect::<Result<Vec<_>, _>>()?;
-        let _env_ptrs: Vec<PCSTR> = _env_cstrings.iter().map(|e| e.as_ptr() as PCSTR).collect();
-        if !_env_ptrs.is_empty() {
-            let hr = sdk.WslcSetProcessSettingsEnvVariables(
-                &mut process_settings,
-                _env_ptrs.as_ptr(),
-                _env_ptrs.len(),
-            );
-            if hr != S_OK {
-                return Err(sdk_error(
-                    "WslcSetProcessSettingsEnvVariables failed",
-                    hr,
-                    "",
-                ));
-            }
-        }
+        // container-create time. Dropping them earlier causes a use-after-free
+        // (0xC0000005).
+        let _command = container_steps::set_command_line_and_env(
+            sdk,
+            &mut process_settings,
+            process_env::EnvScope::of(request),
+            &effective_env,
+            &request.script_code,
+        )?;
 
         let _cwd_cstr;
         if !request.working_directory.is_empty() {

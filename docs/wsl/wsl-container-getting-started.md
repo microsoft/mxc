@@ -452,17 +452,21 @@ the container.
 
 ### Environment
 
-From schema `0.9.0-alpha` the four states of `process.env` stay distinct. The
-backend default is the **container image's own `ENV`** — MXC neither authors
-nor enumerates it, so what you get in the first and last rows depends on the
+From schema `0.9.0-alpha` `process.env` and `process.inheritDefaultEnv` combine
+as below. The backend default is the **container image's own `ENV`** — MXC
+neither authors nor enumerates it, so what those rows give you depends on the
 image you chose:
 
 | `process.env` | `inheritDefaultEnv` | MXC gives the child |
 |---|---|---|
-| omitted | — | the image's `ENV` |
-| `[]` | — | nothing |
+| omitted | ignored | the image's `ENV` |
+| `[]` | `false` (default) | nothing |
+| `[]` | `true` | the image's `ENV` |
 | `["FOO=bar"]` | `false` (default) | only `FOO` |
 | `["FOO=bar"]` | `true` | the image's `ENV`, plus `FOO`; a caller entry wins |
+
+`inheritDefaultEnv` layers the supplied entries over the image's `ENV`, so
+supplying none of them asks for that environment itself.
 
 Below `0.9.0-alpha` an omitted and an empty `process.env` are treated alike, and
 the caller's entries always layer over the image's `ENV`.
@@ -481,10 +485,22 @@ and the SDK offers no call that clears it, so the two replacing rows launch the
 workload through `env -i` instead. An entry naming no variable (`"FOO"` rather
 than `"FOO=bar"`) is dropped, as it is on every other backend.
 
-`runtimeConfig.networkProxy` is an exception to all four rows: its variables are
+> **A replacing row puts every entry on the container's command line.** `env -i`
+> takes them as arguments, so each `NAME=VALUE` is readable from inside the
+> container through `/proc/<pid>/cmdline` for as long as the command runs, and
+> appears wherever that container's process list is captured. The entries are
+> not exposed to the Windows host — the container runs in its own WSL VM — and
+> MXC does not log them. Pass a secret through `inheritDefaultEnv` instead,
+> which hands it to the SDK's environment setter and keeps it off the command
+> line, or supply it to the workload through a mounted file.
+
+`runtimeConfig.networkProxy` is an exception to every row: its variables are
 injected, and any caller-supplied proxy variable is scrubbed, whatever
 `process.env` asks for. Egress policy is enforced cooperatively through those
-variables, so a verbatim environment cannot be used to opt out of it.
+variables, so a verbatim environment cannot be used to opt out of it. Because
+MXC injects the proxy URL itself, a replacing row cannot choose to keep it off
+the command line — so a URL holding `user:pass@` credentials is rejected there
+rather than exposed.
 
 ### `ui` is not supported
 

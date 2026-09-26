@@ -449,6 +449,38 @@ mod tests {
     }
 
     #[test]
+    fn an_exec_config_keeps_repeated_environment_names_in_order() {
+        // `env -i` and the SDK's setter both apply entries left to right, so a
+        // reordered or deduplicated wire form would hand the child a different
+        // value than the caller asked for.
+        let config = ExecConfig {
+            exec_id: "exec-1".to_string(),
+            run_token: "run-1".to_string(),
+            sandbox_id: "wslc:abc123".to_string(),
+            script_code: "echo hi".to_string(),
+            working_directory: String::new(),
+            env: vec![
+                ("FOO".to_string(), "1".to_string()),
+                ("BAR".to_string(), "keep".to_string()),
+                ("FOO".to_string(), "2".to_string()),
+            ],
+            env_scope: EnvScope::Replace,
+            timeout_ms: 0,
+        };
+
+        let frame = encode_frame(&DaemonRequest::Exec(config.clone())).unwrap();
+        let DecodeResult::Message { message, .. } = decode_frame::<DaemonRequest>(&frame).unwrap()
+        else {
+            panic!("expected a complete message");
+        };
+        let DaemonRequest::Exec(decoded) = message else {
+            panic!("expected an exec request");
+        };
+
+        assert_eq!(decoded.env, config.env);
+    }
+
+    #[test]
     fn roundtrip_each_response_variant() {
         roundtrip(DaemonResponse::Provisioned {
             sandbox_id: "wslc:abc123".to_string(),

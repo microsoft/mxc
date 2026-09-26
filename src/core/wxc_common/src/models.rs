@@ -1058,10 +1058,12 @@ pub struct ExecutionRequest {
     ///   is started in. Those three omit `HOME` when no working directory
     ///   resolves, having no private directory to point it at. On WSLc it is
     ///   the container image's own `ENV`.
-    /// * `Some(vec![])` — the caller asked for an *empty* environment. This is
-    ///   not the same as `None`, and on the Windows process container it is
-    ///   rejected before launch, because the OS requires certain names to be
-    ///   present (see `REQUIRED_CHILD_ENV_VARS`).
+    /// * `Some(vec![])` — the caller asked for an *empty* environment, unless
+    ///   [`ExecutionRequest::inherit_default_env`] layers it over the default
+    ///   and so asks for the default itself. This is not the same as `None`,
+    ///   and on the Windows process container an empty block is rejected before
+    ///   launch, because the OS requires certain names to be present (see
+    ///   `REQUIRED_CHILD_ENV_VARS`).
     /// * `Some(entries)` — the caller's environment, used verbatim. MXC does
     ///   not add to it; callers that want the default block or the calling
     ///   process's variables must merge them in themselves, or set
