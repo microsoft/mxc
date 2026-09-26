@@ -39,16 +39,28 @@ jobs:
     needs: dependency-feed-check
     uses: ./.github/workflows/Build.MacOS.Job.yml
 
+  isolation-session-bundle:
+    needs: dependency-feed-check
+    uses: ./.github/workflows/Package.IsolationSession.TestBundle.Job.yml
+
+  # Runs even when the bundle failed; the isolation-session jobs then fail at
+  # their bundle download.
   test-nightly:
-    needs: [windows, linux, macos]
-    if: github.event_name == 'schedule' || inputs.plan == 'nightly'
+    needs: [windows, linux, macos, isolation-session-bundle]
+    if: >-
+      ${{ !cancelled() && needs.windows.result == 'success' && needs.linux.result == 'success'
+      && needs.macos.result == 'success'
+      && (github.event_name == 'schedule' || inputs.plan == 'nightly') }}
     uses: ./.github/workflows/Validation.Tests.Matrix.Job.yml
     with:
       plan: nightly
 
   test-weekly:
-    needs: [windows, linux, macos]
-    if: (github.event_name == 'schedule' && github.event.schedule == '0 8 * * 0') || inputs.plan == 'weekly'
+    needs: [windows, linux, macos, isolation-session-bundle]
+    if: >-
+      ${{ !cancelled() && needs.windows.result == 'success' && needs.linux.result == 'success'
+      && needs.macos.result == 'success'
+      && ((github.event_name == 'schedule' && github.event.schedule == '0 8 * * 0') || inputs.plan == 'weekly') }}
     uses: ./.github/workflows/Validation.Tests.Matrix.Job.yml
     with:
       plan: weekly
