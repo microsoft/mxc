@@ -255,80 +255,6 @@ ensure_bridge_nat() {
 
 
 
-# --- TEMP DIAGNOSTICS (remove before merge) ---------------------------------
-# Records the host state this suite depends on, so the run can confirm why the
-# bridge behaves as it does rather than leaving it to inference.
-dump_bridge_state() {
-    local bridge="${LXC_BRIDGE:-lxcbr0}"
-
-    echo "::group::TEMP diagnostics: $1"
-    echo "--- firewalld ---"
-    if command -v firewall-cmd >/dev/null 2>&1; then
-        sudo firewall-cmd --state || true
-        echo "default zone: $(sudo firewall-cmd --get-default-zone 2>&1 || true)"
-        sudo firewall-cmd --get-active-zones 2>&1 || true
-        sudo firewall-cmd --info-zone=public 2>&1 || true
-    else
-        echo "firewall-cmd is not installed"
-    fi
-    echo "--- dnsmasq ---"
-    ps -eo args= | grep '[d]nsmasq' || echo "no dnsmasq is running"
-    echo "--- iptables ---"
-    sudo iptables -S INPUT 2>&1 || true
-    sudo iptables -S FORWARD 2>&1 || true
-    sudo iptables -t nat -S POSTROUTING 2>&1 || true
-    echo "--- nft ---"
-    if command -v nft >/dev/null 2>&1; then
-        sudo nft list ruleset 2>&1 | head -n 200 || true
-    else
-        echo "nft is not installed"
-    fi
-    echo "--- addresses ---"
-    ip -4 addr show "$bridge" 2>&1 || true
-    ip -4 route 2>&1 || true
-    echo "--- selinux ---"
-    command -v getenforce >/dev/null 2>&1 && { getenforce || true; }
-    echo "::endgroup::"
-}
-
-# The peer-backed network tests give a listener one second to bind before they
-# probe it. Measuring the real bind latency on this host says whether that
-# budget is the reason two of them reported the peer as unreachable.
-dump_listener_latency() {
-    echo "::group::TEMP diagnostics: python3 http.server bind latency"
-    python3 - <<'PY' || true
-import socket
-import subprocess
-import sys
-import time
-
-start = time.monotonic()
-server = subprocess.Popen(
-    [sys.executable, "-m", "http.server", "18080", "--bind", "127.0.0.1"],
-    stdout=subprocess.DEVNULL,
-    stderr=subprocess.DEVNULL,
-)
-try:
-    while time.monotonic() - start < 20:
-        probe = socket.socket()
-        probe.settimeout(1)
-        try:
-            probe.connect(("127.0.0.1", 18080))
-            print(f"bound after {time.monotonic() - start:.2f}s")
-            break
-        except OSError:
-            time.sleep(0.05)
-        finally:
-            probe.close()
-    else:
-        print("never bound within 20s")
-finally:
-    server.terminate()
-PY
-    echo "::endgroup::"
-}
-# --- end TEMP DIAGNOSTICS ---------------------------------------------------
-
 # Verifies the interpreters test suites drive inside the sandbox and reports
 # what the image actually provides, so a tool the image was built without stays
 # visible instead of silently absent. These are baked into the image rather
@@ -420,11 +346,8 @@ case "$backend" in
             sudo apparmor_parser -rT /etc/apparmor.d/lxc* 2>/dev/null || true
         fi
         start_lxc_bridge
-        dump_bridge_state "before the zone assignment"
         ensure_bridge_firewall_zone
         ensure_bridge_nat
-        dump_bridge_state "after host preparation"
-        dump_listener_latency
         ;;
     microvm)
         for file in nanvixd.elf nanvix_rootfs.img python3.initrd bin/kernel.elf; do
