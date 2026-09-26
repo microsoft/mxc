@@ -367,6 +367,10 @@ mod tests {
     use std::os::windows::process::ExitStatusExt;
     use std::path::PathBuf;
 
+    const INHERITED_OUTPUT_PARENT_PID_PATH: &str = "MXC_PLM_TEST_DESCENDANT_PID_PATH";
+    const INHERITED_OUTPUT_DESCENDANT: &str = "MXC_PLM_TEST_INHERITED_OUTPUT_DESCENDANT";
+    const INHERITED_OUTPUT_NONCE: &str = "MXC_PLM_TEST_INHERITED_OUTPUT_NONCE";
+
     struct FakeLauncher {
         starts: Vec<ExitStatus>,
         idx: usize,
@@ -604,32 +608,80 @@ mod tests {
         let cleanup = DescendantCleanup {
             pid_path: directory.path().join("descendant.pid"),
         };
-        let pid_path = cleanup.pid_path.to_string_lossy().replace('\'', "''");
-        let mut command = Command::new("powershell.exe");
-        command.args([
-            "-NoProfile",
-            "-Command",
-            &format!(
-                "$p = Start-Process powershell.exe -NoNewWindow -PassThru -ArgumentList \
-                 '-NoProfile','-Command','Start-Sleep -Seconds 120'; \
-                 [IO.File]::WriteAllText('{pid_path}', [string]$p.Id); \
-                 Write-Output \"PID=$($p.Id)\""
-            ),
-        ]);
+        let nonce = directory.path().to_string_lossy().into_owned();
+        let test_executable = std::env::current_exe().expect("resolve current test executable");
+        let mut command = Command::new(&test_executable);
+        command
+            .arg("start::tests::inherited_output_handle_parent_probe")
+            .arg("--nocapture")
+            .arg("--ignored")
+            .env(INHERITED_OUTPUT_PARENT_PID_PATH, &cleanup.pid_path)
+            .env(INHERITED_OUTPUT_NONCE, &nonce);
         let started = Instant::now();
 
-        let error = run_wpr_command(command, "test", "powershell.exe", Duration::from_secs(30))
-            .unwrap_err();
+        let error = run_wpr_command(
+            command,
+            "test",
+            &test_executable.to_string_lossy(),
+            Duration::from_secs(30),
+        )
+        .unwrap_err();
         let control_elapsed = started.elapsed();
         let message = format!("{error:#}");
+        assert!(message.contains("output drain failed"), "{message}");
+        assert!(message.contains("DESCENDANT_READY"), "{message}");
         let pid = cleanup
             .pid()
             .expect("descendant PID should be recorded for cleanup");
 
-        assert!(message.contains("output drain failed"));
         assert!(message.contains(&format!("PID={pid}")));
         assert!(may_have_changed_wpr_state(&error));
         assert!(control_elapsed < Duration::from_secs(40));
+    }
+
+    #[test]
+    #[ignore = "launched by inherited_output_handle_cannot_block_control_completion"]
+    #[allow(clippy::zombie_processes)]
+    fn inherited_output_handle_parent_probe() {
+        let (Some(pid_path), Some(nonce)) = (
+            std::env::var_os(INHERITED_OUTPUT_PARENT_PID_PATH),
+            std::env::var_os(INHERITED_OUTPUT_NONCE),
+        ) else {
+            return;
+        };
+        // The descendant must outlive this helper so its inherited stdout and
+        // stderr handles exercise the bounded output-drain path.
+        let test_executable = std::env::current_exe().expect("resolve current test executable");
+        let descendant = Command::new(test_executable)
+            .arg("start::tests::inherited_output_handle_descendant_probe")
+            .arg("--nocapture")
+            .arg("--ignored")
+            .env(INHERITED_OUTPUT_DESCENDANT, &nonce)
+            .env(INHERITED_OUTPUT_NONCE, &nonce)
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn inherited-output descendant");
+
+        std::fs::write(pid_path, descendant.id().to_string())
+            .expect("record inherited-output descendant PID");
+        println!("DESCENDANT_READY PID={}", descendant.id());
+    }
+
+    #[test]
+    #[ignore = "launched by inherited_output_handle_parent_probe"]
+    fn inherited_output_handle_descendant_probe() {
+        let (Some(descendant_nonce), Some(expected_nonce)) = (
+            std::env::var_os(INHERITED_OUTPUT_DESCENDANT),
+            std::env::var_os(INHERITED_OUTPUT_NONCE),
+        ) else {
+            return;
+        };
+        if descendant_nonce != expected_nonce {
+            return;
+        }
+        std::thread::sleep(Duration::from_secs(120));
     }
 
     /// Whether `element` carries an attribute `name` whose (unescaped)
