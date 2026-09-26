@@ -30,6 +30,8 @@ pub use network_parser::host_is_canonical_loopback;
 pub mod proxy_env;
 pub mod sandbox_process;
 pub mod script_runner;
+#[doc(hidden)]
+pub mod sdk_input;
 pub(crate) mod splice;
 pub mod state_aware_backend;
 pub mod state_aware_binding;
@@ -42,6 +44,7 @@ pub mod ui_policy;
 pub mod validator;
 
 // Reusable DTOs shared by exact-contract adapters and typed SDK builders.
+// Public only for the cross-crate Rust SDK adapter; not an external wire API.
 pub(crate) mod wire;
 
 // Adapters that map specific JSON contracts into the internal config input.
