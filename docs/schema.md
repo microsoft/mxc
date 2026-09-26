@@ -309,6 +309,35 @@ use:
 Policy entries that are blank, name a file, or do not exist yet are skipped:
 a process cannot be launched in any of them.
 
+### Environment
+
+`process.env` and `process.inheritDefaultEnv` combine as follows from
+`0.9.0-alpha`:
+
+| `process.env` | `inheritDefaultEnv` | The child gets |
+|---|---|---|
+| omitted | ignored | the backend default |
+| `[]` | `false` (default) | nothing |
+| `[]` | `true` | the backend default |
+| `["FOO=bar"]` | `false` (default) | only `FOO` |
+| `["FOO=bar"]` | `true` | the default, plus `FOO`; a caller entry wins |
+
+`inheritDefaultEnv` layers the supplied entries over the default, so supplying
+none of them asks for the default itself — the same environment an omitted
+`process.env` gets.
+
+Two backends depart from the table. The Windows process container requires
+`SYSTEMROOT` and `LOCALAPPDATA` to be present, so a caller-owned block that
+omits them — including `[]` — is rejected before launch rather than used; the
+rejection names the missing variables. IsolationSession does not yet
+distinguish an omitted `process.env` from `[]`, and treats both as the session's
+default environment.
+
+What the default block contains is backend-specific; see the backend's guide.
+On the WSL Container backend it is the container image's own `ENV`, which MXC
+neither authors nor enumerates — see
+[`docs/wsl/wsl-container-getting-started.md`](wsl/wsl-container-getting-started.md#environment).
+
 ### Filesystem Policy
 
 The `filesystem` section defines path access policy shared across backends:

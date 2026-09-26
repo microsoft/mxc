@@ -450,6 +450,58 @@ Paths in `filesystem.readwritePaths` and `filesystem.readonlyPaths` are mounted
 into the container. Host path `C:\workspace` becomes `/mnt/c/workspace` inside
 the container.
 
+### Environment
+
+From schema `0.9.0-alpha` `process.env` and `process.inheritDefaultEnv` combine
+as below. The backend default is the **container image's own `ENV`** — MXC
+neither authors nor enumerates it, so what those rows give you depends on the
+image you chose:
+
+| `process.env` | `inheritDefaultEnv` | MXC gives the child |
+|---|---|---|
+| omitted | ignored | the image's `ENV` |
+| `[]` | `false` (default) | nothing |
+| `[]` | `true` | the image's `ENV` |
+| `["FOO=bar"]` | `false` (default) | only `FOO` |
+| `["FOO=bar"]` | `true` | the image's `ENV`, plus `FOO`; a caller entry wins |
+
+`inheritDefaultEnv` layers the supplied entries over the image's `ENV`, so
+supplying none of them asks for that environment itself.
+
+Below `0.9.0-alpha` an omitted and an empty `process.env` are treated alike, and
+the caller's entries always layer over the image's `ENV`.
+
+The table is what MXC supplies, which is not all the workload observes. The
+command line runs under the image's `/bin/sh`, and a shell started without a
+`PATH` falls back to a compiled-in one — on the Alpine images that is
+`/sbin:/usr/sbin:/bin:/usr/bin`. So in the two replacing rows `ls` still
+resolves, while an interpreter the image installed elsewhere (`python3` under
+`/usr/local/bin`) does not. Such a workload needs `PATH` in `process.env` or
+`inheritDefaultEnv`. The same shell also fabricates `PWD` and `SHLVL`, so no
+row reads back as a truly empty environment from inside the container.
+
+`WslcSetProcessSettingsEnvVariables` layers its entries over the image's `ENV`
+and the SDK offers no call that clears it, so the two replacing rows launch the
+workload through `env -i` instead. An entry naming no variable (`"FOO"` rather
+than `"FOO=bar"`) is dropped, as it is on every other backend.
+
+> **A replacing row puts every entry on the container's command line.** `env -i`
+> takes them as arguments, so each `NAME=VALUE` is readable from inside the
+> container through `/proc/<pid>/cmdline` for as long as the command runs, and
+> appears wherever that container's process list is captured. The entries are
+> not exposed to the Windows host — the container runs in its own WSL VM — and
+> MXC does not log them. Pass a secret through `inheritDefaultEnv` instead,
+> which hands it to the SDK's environment setter and keeps it off the command
+> line, or supply it to the workload through a mounted file.
+
+`runtimeConfig.networkProxy` is an exception to every row: its variables are
+injected, and any caller-supplied proxy variable is scrubbed, whatever
+`process.env` asks for. Egress policy is enforced cooperatively through those
+variables, so a verbatim environment cannot be used to opt out of it. Because
+MXC injects the proxy URL itself, a replacing row cannot choose to keep it off
+the command line — so a URL holding `user:pass@` credentials is rejected there
+rather than exposed.
+
 ### `ui` is not supported
 
 A `ui` section is **rejected** — the backend has no mechanism to enforce UI
@@ -478,6 +530,34 @@ policy-persistence primitive, so there is nothing for the flag to select.
 Note the state-aware surface differs: it rejects the whole `lifecycle` section
 at parse time, because a multi-invocation sandbox's lifetime is driven by the
 explicit `provision` / `deprovision` phases rather than by per-run flags.
+
+## Supported workloads
+
+MXC's Linux container support is **language-agnostic**. The image defines the
+capabilities, not MXC: any workload that runs on Linux, exits on its own, and
+produces output via stdout/stderr is supported. That covers interpreted scripts
+(`python:3.12`, `node:20`), compiled binaries (`golang:1.22`, `gcc:latest`),
+shell automation (`alpine`, `ubuntu:22.04`), .NET on Linux, and private
+registry images carrying your own toolchain.
+
+Four workload shapes are not:
+
+| Workload type | Why |
+|---|---|
+| Interactive processes (REPLs, shells) | MXC does not pass stdin — execution is fire-and-forget |
+| GUI applications (X11, Wayland) | No display server — MXC captures stdout/stderr only |
+| Long-running daemons (web servers, databases) | MXC expects the process to exit within the configured timeout |
+| Hardware access (USB, serial, Bluetooth) | The micro-VM does not expose host hardware beyond filesystem and network |
+
+GPU compute is supported with `"gpu": true`, which passes through the host GPU
+via the SDK's `ENABLE_GPU` container flag and requires a GPU-capable host.
+
+### What the image must provide
+
+MXC runs the workload's command line as `/bin/sh -c`, and a request that
+supplies `process.env` without `inheritDefaultEnv` runs that shell through
+`/usr/bin/env`. An image supplying neither path — `scratch` and most distroless
+images — cannot be used.
 
 ## Troubleshooting
 

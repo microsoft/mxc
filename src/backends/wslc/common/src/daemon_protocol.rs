@@ -29,6 +29,8 @@ use serde::de::DeserializeOwned;
 use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::process_env::EnvScope;
+
 /// Upper bound on a single decoded frame (16 MiB). Guards the decoder against a
 /// hostile or corrupt length prefix demanding an unbounded allocation.
 pub const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
@@ -44,7 +46,11 @@ pub const MAX_EXEC_ID_BYTES: usize = 128;
 /// from the same build, so in normal operation both sides always match; the
 /// version guards against a stale daemon left running by a different mxc
 /// install. Bump only for incompatible changes to framing or message shape.
-pub const PROTOCOL_VERSION: u32 = 4;
+///
+/// A new optional field counts: these structs do not deny unknown fields, so a
+/// daemon predating one drops it and acts on a request it only partly
+/// understood.
+pub const PROTOCOL_VERSION: u32 = 5;
 
 fn deserialize_exec_id<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
@@ -139,6 +145,10 @@ pub struct ExecConfig {
     /// Environment variables applied to the process, as `(name, value)` pairs.
     #[serde(default)]
     pub env: Vec<(String, String)>,
+
+    /// How `env` combines with the container image's own environment.
+    #[serde(default)]
+    pub env_scope: EnvScope,
     /// Timeout in milliseconds (0 = no timeout).
     #[serde(default)]
     pub timeout_ms: u32,
@@ -422,6 +432,7 @@ mod tests {
             script_code: "echo hi".to_string(),
             working_directory: "/work".to_string(),
             env: vec![("PATH".to_string(), "/usr/bin".to_string())],
+            env_scope: EnvScope::Replace,
             timeout_ms: 30_000,
         }));
         roundtrip(DaemonRequest::CancelExec(CancelExecConfig {
@@ -435,6 +446,38 @@ mod tests {
             sandbox_id: "wslc:abc123".to_string(),
         }));
         roundtrip(DaemonRequest::Ping);
+    }
+
+    #[test]
+    fn an_exec_config_keeps_repeated_environment_names_in_order() {
+        // `env -i` and the SDK's setter both apply entries left to right, so a
+        // reordered or deduplicated wire form would hand the child a different
+        // value than the caller asked for.
+        let config = ExecConfig {
+            exec_id: "exec-1".to_string(),
+            run_token: "run-1".to_string(),
+            sandbox_id: "wslc:abc123".to_string(),
+            script_code: "echo hi".to_string(),
+            working_directory: String::new(),
+            env: vec![
+                ("FOO".to_string(), "1".to_string()),
+                ("BAR".to_string(), "keep".to_string()),
+                ("FOO".to_string(), "2".to_string()),
+            ],
+            env_scope: EnvScope::Replace,
+            timeout_ms: 0,
+        };
+
+        let frame = encode_frame(&DaemonRequest::Exec(config.clone())).unwrap();
+        let DecodeResult::Message { message, .. } = decode_frame::<DaemonRequest>(&frame).unwrap()
+        else {
+            panic!("expected a complete message");
+        };
+        let DaemonRequest::Exec(decoded) = message else {
+            panic!("expected an exec request");
+        };
+
+        assert_eq!(decoded.env, config.env);
     }
 
     #[test]
@@ -622,5 +665,13 @@ mod tests {
         buf.extend_from_slice(body);
         let r: Result<DecodeResult<DaemonRequest>, _> = decode_frame(&buf);
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn an_exec_config_without_an_env_scope_defaults_to_merge() {
+        let without = r#"{"exec_id":"e","run_token":"r","sandbox_id":"s","script_code":"run"}"#;
+        let parsed: ExecConfig = serde_json::from_str(without).expect("env_scope is optional");
+
+        assert_eq!(parsed.env_scope, EnvScope::Merge);
     }
 }

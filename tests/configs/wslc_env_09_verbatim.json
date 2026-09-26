@@ -1,0 +1,16 @@
+{
+  "version": "0.9.0-alpha",
+  "containerId": "wslc-env-09-verbatim",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "echo \"PYVER=[$PYTHON_VERSION]\"; echo \"FOO=[$FOO]\"; echo ENV_PROBE_DONE",
+    "timeout": 30000,
+    "env": ["FOO=bar"]
+  },
+  "network": {
+    "egress": { "default": "deny" }
+  },
+  "wslc": {
+    "image": "python:3.12-alpine"
+  }
+}

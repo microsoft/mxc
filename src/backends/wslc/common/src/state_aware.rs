@@ -41,6 +41,7 @@ use crate::daemon_protocol::{
 use crate::policy::{
     exec_proxy_url, validate_exec_policy, validate_post_provision_policy, validate_provision_policy,
 };
+use crate::process_env::EnvScope;
 #[cfg(windows)]
 use crate::sandbox::prepare_native_output;
 #[cfg(windows)]
@@ -157,31 +158,10 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         _config: Option<()>,
         stdio: ExecStdio,
     ) -> Result<ExecHandle, MxcError> {
-        // Cooperative proxy: inject HTTP(S)_PROXY (and scrub caller-supplied
-        // proxy vars). `exec_proxy_url` yields the routable URL only when the
-        // proxy is enabled *and* in the required `url` form — `validate_exec`
-        // has already rejected the non-`url` form before we get here, so a
-        // `None` here means the proxy is disabled, not malformed.
-        let env = match exec_proxy_url(request) {
-            Some(proxy_url) => split_env(&wxc_common::proxy_env::apply_cooperative_proxy_env(
-                request.env_entries(),
-                proxy_url,
-            )),
-            None => split_env(request.env_entries()),
-        };
-
         let client = connect_daemon()?;
         let exec_id = uuid::Uuid::new_v4().simple().to_string();
         let run_token = uuid::Uuid::new_v4().simple().to_string();
-        let config = ExecConfig {
-            exec_id: exec_id.clone(),
-            run_token: run_token.clone(),
-            sandbox_id: sandbox_id.to_string(),
-            script_code: request.script_code.clone(),
-            working_directory: request.working_directory.clone(),
-            env,
-            timeout_ms: request.script_timeout,
-        };
+        let config = exec_config(sandbox_id, request, exec_id.clone(), run_token.clone());
 
         match stdio {
             ExecStdio::Relayed => exec_relayed(client, config),
@@ -439,6 +419,37 @@ fn exec_piped(
     ))
 }
 
+/// The daemon's inputs for one exec, with the cooperative proxy applied.
+fn exec_config(
+    sandbox_id: &str,
+    request: &ExecutionRequest,
+    exec_id: String,
+    run_token: String,
+) -> ExecConfig {
+    // `exec_proxy_url` yields the routable URL only when the proxy is enabled
+    // *and* in the required `url` form — `validate_exec` has already rejected
+    // the non-`url` form before we get here, so a `None` here means the proxy
+    // is disabled, not malformed.
+    let env = match exec_proxy_url(request) {
+        Some(proxy_url) => split_env(&wxc_common::proxy_env::apply_cooperative_proxy_env(
+            request.env_entries(),
+            proxy_url,
+        )),
+        None => split_env(request.env_entries()),
+    };
+
+    ExecConfig {
+        exec_id,
+        run_token,
+        sandbox_id: sandbox_id.to_string(),
+        script_code: request.script_code.clone(),
+        working_directory: request.working_directory.clone(),
+        env,
+        env_scope: EnvScope::of(request),
+        timeout_ms: request.script_timeout,
+    }
+}
+
 /// Discover (or spawn) the daemon. A discovery/spawn failure is a
 /// `backend_unavailable` — the backend cannot service any phase without it.
 fn connect_daemon() -> Result<DaemonClient, MxcError> {
@@ -584,13 +595,11 @@ fn map_network(request: &ExecutionRequest) -> NetworkMode {
 }
 
 /// Split `"KEY=VALUE"` env entries into `(name, value)` pairs (the daemon's
-/// `ExecConfig.env` shape). An entry without `=` becomes `(entry, "")`.
+/// `ExecConfig.env` shape). An entry naming no variable is dropped.
 fn split_env(env: &[String]) -> Vec<(String, String)> {
-    env.iter()
-        .map(|entry| match entry.split_once('=') {
-            Some((k, v)) => (k.to_string(), v.to_string()),
-            None => (entry.clone(), String::new()),
-        })
+    wxc_common::default_env::env_pairs(env)
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
         .collect()
 }
 
@@ -598,7 +607,8 @@ fn split_env(env: &[String]) -> Vec<(String, String)> {
 mod tests {
     use super::*;
     use wxc_common::models::{
-        ContainerPolicy, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy,
+        ContainerPolicy, DefaultEnvCompatibility, NetworkAction, NetworkEgressPolicy,
+        NetworkIngressPolicy, ProxyAddress, ProxyConfig,
     };
 
     #[test]
@@ -1042,7 +1052,7 @@ mod tests {
     }
 
     #[test]
-    fn split_env_splits_pairs_and_bare_keys() {
+    fn split_env_splits_pairs_and_drops_bare_keys() {
         let env = vec![
             "PATH=/usr/bin".to_string(),
             "EMPTY=".to_string(),
@@ -1052,9 +1062,147 @@ mod tests {
         let pairs = split_env(&env);
         assert_eq!(pairs[0], ("PATH".to_string(), "/usr/bin".to_string()));
         assert_eq!(pairs[1], ("EMPTY".to_string(), String::new()));
-        assert_eq!(pairs[2], ("BARE".to_string(), String::new()));
         // Only the first '=' splits; the value keeps the rest verbatim.
-        assert_eq!(pairs[3], ("URL".to_string(), "http://a=b".to_string()));
+        assert_eq!(pairs[2], ("URL".to_string(), "http://a=b".to_string()));
+        assert_eq!(pairs.len(), 3);
+    }
+
+    #[test]
+    fn the_exec_config_carries_the_scope_each_state_of_process_env_selects() {
+        struct Case {
+            label: &'static str,
+            compatibility: DefaultEnvCompatibility,
+            env: Option<Vec<&'static str>>,
+            inherit_default_env: bool,
+            scope: EnvScope,
+            entries: &'static [(&'static str, &'static str)],
+        }
+
+        let cases = [
+            Case {
+                label: "omitted takes the image environment",
+                compatibility: DefaultEnvCompatibility::DefaultBlock,
+                env: None,
+                inherit_default_env: false,
+                scope: EnvScope::Merge,
+                entries: &[],
+            },
+            Case {
+                label: "explicitly empty leaves the child nothing",
+                compatibility: DefaultEnvCompatibility::DefaultBlock,
+                env: Some(vec![]),
+                inherit_default_env: false,
+                scope: EnvScope::Replace,
+                entries: &[],
+            },
+            Case {
+                label: "explicitly empty plus inheritDefaultEnv takes the image environment",
+                compatibility: DefaultEnvCompatibility::DefaultBlock,
+                env: Some(vec![]),
+                inherit_default_env: true,
+                scope: EnvScope::Merge,
+                entries: &[],
+            },
+            Case {
+                label: "supplied is used verbatim",
+                compatibility: DefaultEnvCompatibility::DefaultBlock,
+                env: Some(vec!["FOO=bar"]),
+                inherit_default_env: false,
+                scope: EnvScope::Replace,
+                entries: &[("FOO", "bar")],
+            },
+            Case {
+                label: "supplied plus inheritDefaultEnv layers over the image environment",
+                compatibility: DefaultEnvCompatibility::DefaultBlock,
+                env: Some(vec!["FOO=bar"]),
+                inherit_default_env: true,
+                scope: EnvScope::Merge,
+                entries: &[("FOO", "bar")],
+            },
+            Case {
+                label: "a legacy contract keeps the image environment",
+                compatibility: DefaultEnvCompatibility::LegacyCompatible,
+                env: Some(vec!["FOO=bar"]),
+                inherit_default_env: false,
+                scope: EnvScope::Merge,
+                entries: &[("FOO", "bar")],
+            },
+        ];
+
+        for case in cases {
+            let request = ExecutionRequest {
+                default_env_compatibility: case.compatibility,
+                env: case.env.map(|e| e.into_iter().map(String::from).collect()),
+                inherit_default_env: case.inherit_default_env,
+                script_code: "echo hi".to_string(),
+                ..Default::default()
+            };
+
+            let config = exec_config(
+                "wslc:abc",
+                &request,
+                "exec-1".to_string(),
+                "run-1".to_string(),
+            );
+
+            assert_eq!(config.env_scope, case.scope, "scope for {}", case.label);
+            let expected: Vec<(String, String)> = case
+                .entries
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            assert_eq!(config.env, expected, "entries for {}", case.label);
+            assert_eq!(config.sandbox_id, "wslc:abc");
+            assert_eq!(config.script_code, "echo hi");
+        }
+    }
+
+    #[test]
+    fn the_exec_config_keeps_the_cooperative_proxy_out_of_the_callers_reach() {
+        let request = ExecutionRequest {
+            default_env_compatibility: DefaultEnvCompatibility::DefaultBlock,
+            env: Some(vec![
+                "FOO=bar".to_string(),
+                "HTTP_PROXY=http://attacker.invalid:1".to_string(),
+            ]),
+            policy: ContainerPolicy {
+                network_proxy: ProxyConfig {
+                    address: Some(ProxyAddress::from_url(
+                        "http://127.0.0.1:8888",
+                        "127.0.0.1".to_string(),
+                        8888,
+                    )),
+                    builtin_test_server: false,
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let config = exec_config(
+            "wslc:abc",
+            &request,
+            "exec-1".to_string(),
+            "run-1".to_string(),
+        );
+
+        // Replacement still applies, so the proxy variables must survive into
+        // the entries argv carries rather than being left to the SDK's setter.
+        assert_eq!(config.env_scope, EnvScope::Replace);
+        let value = |name: &str| {
+            config
+                .env
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(value("FOO").as_deref(), Some("bar"));
+        assert_eq!(
+            value("HTTP_PROXY").as_deref(),
+            Some("http://127.0.0.1:8888")
+        );
+        assert_eq!(value("NO_PROXY").as_deref(), Some(""));
+        assert!(!config.env.iter().any(|(_, v)| v.contains("attacker")));
     }
 
     #[test]

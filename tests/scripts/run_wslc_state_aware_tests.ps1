@@ -520,6 +520,56 @@ try {
         } | Out-Null
     }
 
+    # A6b: the environment scope reaches process launch through the daemon, not
+    # just the one-shot runner. The probe counts HOSTNAME in the real
+    # environment rather than expanding $HOSTNAME, which the image's shell
+    # fabricates whether or not the variable was inherited.
+    if ($execedOk) {
+        Run-StateAwareTest "A: exec (verbatim env replaces the image environment)" {
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_exec_env_replace.json' -SandboxId $script:sandboxId
+            Assert-True ($r.ExitCode -eq 0) "exit code = 0"
+            Assert-True ($r.Stdout -match 'MY_SA_VAR=\[replaced\]') `
+                "the caller's entry reaches the container"
+            Assert-True ($r.Stdout -match 'HOSTCOUNT=\[0\]') `
+                "the image environment is absent ($($r.Stdout.Trim()))"
+        } | Out-Null
+    }
+
+    if ($execedOk) {
+        Run-StateAwareTest "A: exec (inheritDefaultEnv layers over the image environment)" {
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_exec_env_inherit.json' -SandboxId $script:sandboxId
+            Assert-True ($r.ExitCode -eq 0) "exit code = 0"
+            Assert-True ($r.Stdout -match 'MY_SA_VAR=\[layered\]') `
+                "the caller's entry reaches the container"
+            Assert-True ($r.Stdout -match 'HOSTCOUNT=\[1\]') `
+                "the image environment survives ($($r.Stdout.Trim()))"
+        } | Out-Null
+    }
+
+    # The two states that carry no entries. They differ only in the scope the
+    # daemon is told to apply, so nothing else distinguishes them on the wire.
+    if ($execedOk) {
+        Run-StateAwareTest "A: exec (omitted env takes the image environment)" {
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_exec_env_default.json' -SandboxId $script:sandboxId
+            Assert-True ($r.ExitCode -eq 0) "exit code = 0"
+            Assert-True ($r.Stdout -match 'HOSTCOUNT=\[1\]') `
+                "the image environment survives ($($r.Stdout.Trim()))"
+        } | Out-Null
+    }
+
+    if ($execedOk) {
+        Run-StateAwareTest "A: exec (explicitly empty env leaves the child nothing)" {
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_exec_env_empty.json' -SandboxId $script:sandboxId
+            Assert-True ($r.ExitCode -eq 0) "exit code = 0"
+            Assert-True ($r.Stdout -match 'HOSTCOUNT=\[0\]') `
+                "the image environment is absent ($($r.Stdout.Trim()))"
+            # PWD and SHLVL are fabricated by the shell itself, so an emptied
+            # environment reads back as those two and nothing else.
+            Assert-True ($r.Stdout -match 'VARCOUNT=\[2\]') `
+                "only the shell's own variables remain ($($r.Stdout.Trim()))"
+        } | Out-Null
+    }
+
     # A7: the exact exec root rejects immutable filesystem policy
     # structurally. Direct WSLc policy tests retain the backend validation.
     if ($execedOk) {

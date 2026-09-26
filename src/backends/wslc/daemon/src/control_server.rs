@@ -646,6 +646,7 @@ mod tests {
                 script_code: "echo hi".to_string(),
                 working_directory: String::new(),
                 env: Vec::new(),
+                env_scope: wslc_common::process_env::EnvScope::Merge,
                 timeout_ms: 0,
             }),
         )
