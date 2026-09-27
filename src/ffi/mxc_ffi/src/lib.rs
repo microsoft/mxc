@@ -62,6 +62,8 @@
 //!
 //! This C ABI is versioned with the native library and generated bindings. It
 //! is not a stable external ABI; regenerate bindings when this surface changes.
+//! See `docs/mxc-ffi-ingress.md` for the complete typed, raw exact-JSON, and
+//! compatibility entry-point matrix and ownership rules.
 
 use std::any::Any;
 use std::ffi::{c_char, c_void, CStr, CString};
