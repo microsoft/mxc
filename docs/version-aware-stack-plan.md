@@ -529,28 +529,140 @@ both supported ingress forms for both execution models:
 | One-shot | Co-versioned typed request that adapts directly into `CommonRequestIR` | Explicit exact-version JSON request |
 | State-aware | Typed operation request plus typed sandbox identity and result | Explicit exact-version lifecycle envelope JSON |
 
-The typed entry points are the high-level binding path. They must not serialize
-to JSON or call an exact JSON parser internally. The JSON entry points remain
-available for raw configuration, replay, compatibility, and callers that
-intentionally own an exact contract.
+The current one-shot FFI entry points (`mxc_run_request` and
+`mxc_spawn_request`) consume a private co-versioned JSON binding document.
+They are not raw exact-configuration APIs. The current state-aware entry points
+(`mxc_state_aware`, `mxc_state_aware_exec`, and
+`mxc_state_aware_exec_attached`) consume raw exact lifecycle JSON. The
+follow-up must make this distinction explicit rather than relabelling either
+existing behavior.
 
-The PR must:
+#### 9.5.1 ABI design
 
-- keep one-shot run-to-completion and streaming ownership semantics distinct;
-- keep state-aware envelope, streaming exec, and attached exec semantics
-  distinct;
-- use co-versioned FFI structs rather than exposing Rust layout or exact
-  contract structs through the ABI;
-- adapt typed requests into the same private `CommonRequestIR` and checked
-  state-aware binding paths used by the Rust SDK;
-- preserve existing raw JSON entry points and their path-aware diagnostics;
-- preserve panic containment, status-code mapping, allocation ownership, and
-  result-free functions across the C ABI;
-- regenerate C/C# bindings and update API-parity checks;
-- add typed-versus-JSON equivalence tests for one-shot and every state-aware
-  operation, including presence-sensitive fields, errors, and metadata;
-- leave Node transport selection as a separate consumer decision rather than
-  making the FFI PR implicitly migrate Node.
+Define co-versioned, C-compatible typed request structures with:
+
+- `#[repr(C)]`, fixed-width scalar fields, and explicit enum discriminants;
+- an ABI revision and structure size on each top-level request so later
+  versions can append fields without reinterpreting older callers;
+- borrowed UTF-8 string and array views whose lifetime ends when the call
+  returns;
+- explicit presence for optional scalar values, preserving omitted versus
+  present-empty policy;
+- pointers to optional nested policy/config structures rather than exposed
+  Rust `Option`, `String`, `Vec`, enum, or exact-contract layouts.
+
+Input structures never transfer ownership. Existing result structures,
+allocated strings, opaque sandbox handles, stream handles, and their matching
+free functions remain the ownership model unless a result cannot be
+represented without an additive structure extension.
+
+#### 9.5.2 Entry-point matrix
+
+Add clearly named typed entry points for:
+
+- one-shot run-to-completion;
+- one-shot streaming spawn;
+- state-aware provision, start, stop, deprovision, and dry-run validation;
+- state-aware streaming exec;
+- state-aware attached exec.
+
+Add clearly named raw exact-JSON entry points for one-shot run and spawn.
+Retain the existing state-aware JSON entry points and add explicit `_json`
+aliases if needed for naming symmetry.
+
+Keep `mxc_run_request` and `mxc_spawn_request` as compatibility entry points
+for the current private binding JSON until their .NET and Node consumers are
+migrated. Do not change their accepted document or silently treat it as an
+exact MXC configuration.
+
+#### 9.5.3 Typed adaptation
+
+Implement one shared conversion layer from the C ABI structures to the typed
+Rust SDK input:
+
+1. validate the ABI revision, structure size, discriminants, pointers, lengths,
+   UTF-8, and required fields before starting work;
+2. map one-shot policy, containment, process, filesystem, directional network,
+   runtime, UI, and telemetry values into the existing typed request builders;
+3. map state-aware provision and exec options plus sandbox identity into the
+   existing typed lifecycle request types;
+4. call the typed `mxc_engine` entry points so no typed FFI request is
+   serialized to JSON or passed through an exact JSON parser;
+5. share semantic validation and backend dispatch with the Rust SDK rather
+   than implementing FFI-specific policy behavior.
+
+The typed state-aware ABI supports the v1 high-level backend set. Windows
+Sandbox lifecycle remains available only through raw exact `1.1.0-alpha` JSON
+until a future stable high-level contract includes it.
+
+#### 9.5.4 Raw exact JSON
+
+The raw one-shot path must dispatch through the exact registered request
+contract selected by its `version`, preserving source locations and migration
+diagnostics. The raw state-aware path continues to parse the exact lifecycle
+envelope, including `phase` and `sandboxId`.
+
+Typed and raw APIs may converge only after ingress, at `CommonRequestIR` or
+checked state-aware binding. They must not share a convenience implementation
+that converts typed structures to JSON.
+
+#### 9.5.5 Safety and ownership
+
+Every exported function must:
+
+- initialize output storage before any operation with side effects;
+- reject null pointers, invalid lengths, invalid UTF-8, unknown discriminants,
+  and unsupported ABI revisions with stable `MXC_STATUS_*` values;
+- retain `catch_unwind` containment so no panic crosses the C ABI;
+- preserve one-shot run-to-completion and streaming ownership separately;
+- preserve state-aware envelope, streaming exec, and attached exec semantics
+  separately;
+- return no success-shaped handle or partially owned result on failure;
+- use the existing result-free, error-detail-free, sandbox-free, and
+  stream-free functions consistently and idempotently.
+
+#### 9.5.6 Implementation sequence
+
+1. Add the ABI header, borrowed string/list views, typed policy structures, and
+   conversion unit tests.
+2. Add typed one-shot run and spawn entry points over the existing typed Rust
+   SDK/engine path.
+3. Add raw exact-JSON one-shot run and spawn entry points without changing the
+   private binding-JSON compatibility functions.
+4. Add typed state-aware envelope, streaming exec, and attached exec entry
+   points over the existing typed lifecycle APIs.
+5. Add explicit state-aware `_json` aliases if required for a consistent
+   public naming scheme while retaining the existing exported symbols.
+6. Consolidate common out-parameter initialization, error mapping, panic
+   containment, and result construction helpers.
+7. Regenerate C# bindings and update exported-entry-point and API-parity gates.
+8. Document the complete matrix and the migration path for binding authors.
+
+#### 9.5.7 Verification
+
+Add typed-versus-raw equivalence tests for one-shot and every state-aware
+operation. Cover:
+
+- omitted, present-empty, and populated policy sections;
+- filesystem, directional networking, runtime configuration, UI, process
+  environment, working directory, timeout, and telemetry;
+- backend-specific provision and exec options;
+- sandbox identity, phase routing, dry-run, errors, warnings, and metadata;
+- run-to-completion, streaming, attached execution, timeout, and cancellation;
+- null pointers, invalid UTF-8, invalid discriminants, unsupported structure
+  versions, panic containment, and repeated/free-after-failure cleanup;
+- generated native headers, C# bindings, status-code parity, and exported API
+  inventory.
+
+Run the default and applicable feature-gated Rust SDK, engine, and FFI suites,
+plus generated-binding and repository parity checks.
+
+#### 9.5.8 Non-goals
+
+This PR does not migrate .NET high-level lifecycle calls, choose or implement
+Node's typed native transport, remove compatibility entry points, change exact
+JSON contracts, or alter backend execution behavior. Those consumer migrations
+remain Phase 14d work after the symmetric FFI surface is stable.
 
 ## 10. Legacy networking removal
 
