@@ -167,16 +167,22 @@ public unsafe class TypedRequestMarshallerTests
     public void OneShotMarshaller_DistinguishesAbsentAndPresentEmptyEnvironment()
     {
         using var absent = TypedRequestMarshaller.ForOneShot(
-            new SandboxRequest(new SandboxPolicy(), "echo absent"));
+            new SandboxRequest(new SandboxPolicy(), "echo absent")
+            {
+                InheritDefaultEnvironment = true,
+            });
         Assert.Equal(0, absent.OneShotRequest->environment.is_set);
+        Assert.Equal(0, absent.OneShotRequest->inherit_default_env);
 
         using var empty = TypedRequestMarshaller.ForOneShot(
             new SandboxRequest(new SandboxPolicy(), "echo empty")
             {
                 Environment = [],
+                InheritDefaultEnvironment = true,
             });
         Assert.Equal(1, empty.OneShotRequest->environment.is_set);
         Assert.Equal((nuint)0, empty.OneShotRequest->environment.len);
+        Assert.Equal(1, empty.OneShotRequest->inherit_default_env);
     }
 
     [Fact]
@@ -274,6 +280,17 @@ public unsafe class TypedRequestMarshallerTests
         Assert.Equal(0, absentEnv.StateAwareRequest->exec->environment.is_set);
         Assert.Equal(0, absentEnv.StateAwareRequest->exec->inherit_default_env.is_set);
 
+        using var inheritWithoutEnv = TypedRequestMarshaller.ForExec(
+            new SandboxId("wslc:0123456789abcdef0123456789abcdef"),
+            "echo inherit",
+            new StateAwareExecOptions
+            {
+                InheritDefaultEnvironment = true,
+            });
+        Assert.Equal(0, inheritWithoutEnv.StateAwareRequest->exec->environment.is_set);
+        Assert.Equal(1, inheritWithoutEnv.StateAwareRequest->exec->inherit_default_env.is_set);
+        Assert.Equal(1, inheritWithoutEnv.StateAwareRequest->exec->inherit_default_env.value);
+
         using var emptyEnv = TypedRequestMarshaller.ForExec(
             new SandboxId("wslc:0123456789abcdef0123456789abcdef"),
             "echo empty",
@@ -304,6 +321,28 @@ public unsafe class TypedRequestMarshallerTests
 
         Assert.Equal(ErrorCode.MalformedRequest, ex.Code);
         Assert.Contains("environment", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Run_InheritDefaultEnvironmentWithoutEnvironment_DoesNotMalformed()
+    {
+        try
+        {
+            _ = MxcSandbox.Run(
+                new SandboxRequest(new SandboxPolicy(), "echo inherit")
+                {
+                    InheritDefaultEnvironment = true,
+                });
+        }
+        catch (MxcException ex) when (
+            ex.Code == ErrorCode.MalformedRequest
+            && ex.Message.Contains("inherit_default_env", StringComparison.OrdinalIgnoreCase))
+        {
+            throw;
+        }
+        catch (MxcException)
+        {
+        }
     }
 
     [Fact]

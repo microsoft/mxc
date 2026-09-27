@@ -163,7 +163,8 @@ internal unsafe sealed class TypedRequestMarshaller : IDisposable
             container_name = OptionalString(request.ContainerName),
             working_directory = OptionalString(request.WorkingDirectory),
             environment = BuildEnvironment(request.Environment),
-            inherit_default_env = Flag(request.InheritDefaultEnvironment),
+            inherit_default_env = Flag(
+                request.InheritDefaultEnvironment && request.Environment is not null),
             experimental = Flag(request.Experimental),
         });
     }
