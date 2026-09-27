@@ -10,6 +10,11 @@ import {
   type StreamingNativeFacade,
 } from '../../src/bindings/streaming.js';
 import {
+  MXC_STATE_AWARE_EXEC,
+  type MxcTypedOneShotRequest,
+  type MxcTypedStateAwareRequest,
+} from '../../src/bindings/typed-abi.js';
+import {
   createNodeStreamFactory,
   supportsNativeStdio,
   type NodeStreamDependencies,
@@ -41,23 +46,37 @@ class FakeNative implements StreamingNativeFacade {
   stdinHandle: number | bigint = 11;
   stdoutHandle: number | bigint = 12;
   stderrHandle: number | bigint = 13;
-  stateAwareRequest: string | undefined;
+  spawnRequest: MxcTypedOneShotRequest | undefined;
+  stateAwareTypedRequest: MxcTypedStateAwareRequest | undefined;
+  stateAwareJsonRequest: string | undefined;
   stateAwareExperimental: number | undefined;
 
-  spawn(_request: string, outHandle: unknown[], _error: unknown): number {
+  spawn(request: MxcTypedOneShotRequest, outHandle: unknown[], _error: unknown): number {
+    this.spawnRequest = request;
     outHandle[0] = this.handle;
     return this.spawnStatus;
   }
 
-  stateAwareExec(
+  stateAwareExecTyped(
+    request: MxcTypedStateAwareRequest,
+    outHandle: unknown[],
+    _error: unknown,
+  ): number {
+    this.stateAwareTypedRequest = request;
+    outHandle[0] = this.handle;
+    return this.spawnStatus;
+  }
+
+  stateAwareExecJson(
     request: string,
     experimental: number,
     outHandle: unknown[],
-    error: unknown,
+    _error: unknown,
   ): number {
-    this.stateAwareRequest = request;
+    this.stateAwareJsonRequest = request;
     this.stateAwareExperimental = experimental;
-    return this.spawn('', outHandle, error);
+    outHandle[0] = this.handle;
+    return this.spawnStatus;
   }
 
   id(): number {
@@ -185,11 +204,19 @@ class FakeStreams implements NativeStreamFactory {
   }
 }
 
+const MINIMAL_REQUEST = {
+  policy: {},
+  command: 'echo hi',
+  containment: { type: 'process' },
+  inheritDefaultEnv: false,
+  experimental: false,
+} as const;
+
 describe('native streaming binding ownership', () => {
   it('dispatches state-aware exec through the native entry point', async () => {
     const native = new FakeNative();
     const streams = new FakeStreams();
-    const requestJson = '{"phase":"exec","sandboxId":"iso:abc"}';
+    const requestJson = '{"version":"1.0.0","phase":"exec","sandboxId":"iso:abc","process":{"commandLine":"echo hi"}}';
 
     const driver = createStateAwareStreamingDriver(
       requestJson,
@@ -198,8 +225,9 @@ describe('native streaming binding ownership', () => {
       streams,
     );
 
-    assert.strictEqual(native.stateAwareRequest, requestJson);
-    assert.strictEqual(native.stateAwareExperimental, 1);
+    assert.strictEqual(native.stateAwareJsonRequest, undefined);
+    assert.strictEqual(native.stateAwareTypedRequest?.operation, MXC_STATE_AWARE_EXEC);
+    assert.strictEqual(native.stateAwareTypedRequest?.experimental, 1);
     assert.strictEqual(driver.id, 23);
     assert.deepStrictEqual(streams.writableHandles, [11]);
     assert.deepStrictEqual(streams.readableHandles, [12, 13]);
@@ -210,13 +238,13 @@ describe('native streaming binding ownership', () => {
   it('passes disabled experimental authorization as zero', async () => {
     const native = new FakeNative();
     const driver = createStateAwareStreamingDriver(
-      '{"phase":"exec"}',
+      '{"version":"1.0.0","phase":"exec","sandboxId":"wslc:abc","process":{"commandLine":"echo hi"}}',
       false,
       native,
       new FakeStreams(),
     );
 
-    assert.strictEqual(native.stateAwareExperimental, 0);
+    assert.strictEqual(native.stateAwareTypedRequest?.experimental, 0);
     await driver.free();
   });
 
@@ -246,7 +274,7 @@ describe('native streaming binding ownership', () => {
     const streams = new FakeStreams('win32');
 
     const driver = createStreamingDriver(
-      {} as never,
+      MINIMAL_REQUEST,
       native,
       streams,
     );
@@ -265,7 +293,7 @@ describe('native streaming binding ownership', () => {
     const streams = new FakeStreams();
 
     const driver = createStreamingDriver(
-      {} as never,
+      MINIMAL_REQUEST,
       native,
       streams,
     );
@@ -282,7 +310,7 @@ describe('native streaming binding ownership', () => {
     const native = new FakeNative();
     native.deferWait = true;
     const driver = createStreamingDriver(
-      {} as never,
+      MINIMAL_REQUEST,
       native,
       new FakeStreams(),
     );
@@ -305,7 +333,7 @@ describe('native streaming binding ownership', () => {
     unixNative.stderrHandle = -1n;
     const unixStreams = new FakeStreams();
     const unixDriver = createStreamingDriver(
-      {} as never,
+      MINIMAL_REQUEST,
       unixNative,
       unixStreams,
     );
@@ -320,7 +348,7 @@ describe('native streaming binding ownership', () => {
     windowsNative.stderrHandle = 0;
     const windowsStreams = new FakeStreams('win32');
     const windowsDriver = createStreamingDriver(
-      {} as never,
+      MINIMAL_REQUEST,
       windowsNative,
       windowsStreams,
     );
@@ -337,7 +365,7 @@ describe('native streaming binding ownership', () => {
     streams.failHandle = 12;
 
     assert.throws(
-      () => createStreamingDriver({} as never, native, streams),
+      () => createStreamingDriver(MINIMAL_REQUEST, native, streams),
       /readable construction failed/,
     );
 
@@ -354,7 +382,7 @@ describe('native streaming binding ownership', () => {
     streams.failHandle = 12;
 
     assert.throws(
-      () => createStreamingDriver({} as never, native, streams),
+      () => createStreamingDriver(MINIMAL_REQUEST, native, streams),
       /rollback was incomplete/,
     );
 
@@ -370,7 +398,7 @@ describe('native streaming binding ownership', () => {
 
     assert.throws(
       () => createStreamingDriver(
-        {} as never,
+        MINIMAL_REQUEST,
         native,
         new FakeStreams(),
       ),
@@ -387,7 +415,7 @@ describe('native streaming binding ownership', () => {
 
     assert.throws(
       () => createStreamingDriver(
-        {} as never,
+        MINIMAL_REQUEST,
         native,
         new FakeStreams(),
       ),
@@ -403,7 +431,7 @@ describe('native streaming binding ownership', () => {
     native.warningsStatus = 12;
     native.outputMetadataStatus = 12;
     const driver = createStreamingDriver(
-      {} as never,
+      MINIMAL_REQUEST,
       native,
       new FakeStreams(),
     );

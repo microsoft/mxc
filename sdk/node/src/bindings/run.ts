@@ -11,6 +11,11 @@ import { loadMxcFfi } from '../native-library.js';
 import type { RequestSpec } from './request.js';
 import { bindNativeFunction } from './native-function.js';
 import {
+  buildTypedOneShotRequest,
+  MxcTypedOneShotRequestType,
+  type MxcTypedOneShotRequest,
+} from './typed-abi.js';
+import {
   AbiErrorDetailType,
   decodeString,
   nativeStatusError,
@@ -31,8 +36,11 @@ interface AbiRunResult {
   warnings: unknown | null;
 }
 
-type RunFunction = (request: string, result: AbiRunResult) => number;
 type FreeFunction = (result: AbiRunResult) => void;
+type TypedRunFunction = (
+  request: MxcTypedOneShotRequest,
+  result: AbiRunResult,
+) => number;
 
 export interface BindingRunResult {
   stdout: string;
@@ -57,15 +65,15 @@ const AbiRunResultType = koffi.struct('MxcNodeJsonRunResult', {
 function bindRunFunctions(
   native: ReturnType<typeof loadMxcFfi>,
 ): {
-  run: ReturnType<typeof bindNativeFunction<RunFunction>>;
+  run: ReturnType<typeof bindNativeFunction<TypedRunFunction>>;
   free: ReturnType<typeof bindNativeFunction<FreeFunction>>;
 } {
   return {
-    run: bindNativeFunction<RunFunction>(native.handle, {
-      symbol: 'mxc_run_request',
+    run: bindNativeFunction<TypedRunFunction>(native.handle, {
+      symbol: 'mxc_run_typed',
       result: 'int32_t',
       parameters: [
-        'const char *',
+        koffi.pointer(MxcTypedOneShotRequestType),
         koffi.out(koffi.pointer(AbiRunResultType)),
       ],
     }),
@@ -96,10 +104,11 @@ export function runBindingRequest(request: RequestSpec): BindingRunResult {
   const native = loadMxcFfi();
   try {
     const { run, free } = bindRunFunctions(native);
+    const typed = buildTypedOneShotRequest(request);
     const result = {} as AbiRunResult;
     let filled = false;
     try {
-      const status = run(JSON.stringify(request), result);
+      const status = run(typed.value, result);
       filled = true;
       return decodeRunResult(status, result);
     } finally {
@@ -116,12 +125,12 @@ async function runBindingRequestAsyncNative(
   const native = loadMxcFfi();
   try {
     const { run, free } = bindRunFunctions(native);
+    const typed = buildTypedOneShotRequest(request);
     const result = {} as AbiRunResult;
     let filled = false;
     try {
-      const requestJson = JSON.stringify(request);
       const status = await new Promise<number>((resolve, reject) => {
-        run.async(requestJson, result, (error, nativeStatus) => {
+        run.async(typed.value, result, (error, nativeStatus) => {
           if (error !== null) {
             reject(error);
             return;

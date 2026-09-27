@@ -13,6 +13,16 @@ import { loadMxcFfi, type MxcNativeLibrary } from '../native-library.js';
 import type { RequestSpec } from './request.js';
 import { bindNativeFunction } from './native-function.js';
 import {
+  buildTypedOneShotRequest,
+  buildTypedStateAwareRequest,
+  MxcTypedOneShotRequestType,
+  MxcTypedStateAwareRequestType,
+  parseStateAwareEnvelopeJson,
+  supportsTypedStateAwareEnvelope,
+  type MxcTypedOneShotRequest,
+  type MxcTypedStateAwareRequest,
+} from './typed-abi.js';
+import {
   createNativeStdioStreams,
   destroyNativeStreams,
   nativeStdioNodeRequirement,
@@ -46,11 +56,16 @@ const AbiNativeStdioType = koffi.struct('MxcNodeNativeStdio', {
 
 export interface StreamingNativeFacade {
   spawn(
-    request: string,
+    request: MxcTypedOneShotRequest,
     outHandle: Pointer[],
     error: AbiErrorDetail,
   ): number;
-  stateAwareExec(
+  stateAwareExecTyped(
+    request: MxcTypedStateAwareRequest,
+    outHandle: Pointer[],
+    error: AbiErrorDetail,
+  ): number;
+  stateAwareExecJson(
     request: string,
     experimental: number,
     outHandle: Pointer[],
@@ -114,17 +129,27 @@ function bindStreamingNativeFacade(
 
   const native: StreamingNativeFacade = {
     spawn: bindNativeFunction(handle, {
-      symbol: 'mxc_spawn_request',
+      symbol: 'mxc_spawn_typed',
       result: 'int32_t',
       parameters: [
-        'const char *',
+        koffi.pointer(MxcTypedOneShotRequestType),
         koffi.out(koffi.pointer(AbiSandbox, 2)),
         koffi.out(koffi.pointer(AbiErrorDetailType)),
       ],
     }),
 
-    stateAwareExec: bindNativeFunction(handle, {
-      symbol: 'mxc_state_aware_exec',
+    stateAwareExecTyped: bindNativeFunction(handle, {
+      symbol: 'mxc_state_aware_exec_typed',
+      result: 'int32_t',
+      parameters: [
+        koffi.pointer(MxcTypedStateAwareRequestType),
+        koffi.out(koffi.pointer(AbiSandbox, 2)),
+        koffi.out(koffi.pointer(AbiErrorDetailType)),
+      ],
+    }),
+
+    stateAwareExecJson: bindNativeFunction(handle, {
+      symbol: 'mxc_state_aware_exec_json',
       result: 'int32_t',
       parameters: [
         'const char *',
@@ -424,14 +449,11 @@ export function createStreamingDriver(
   native: StreamingNativeFacade,
   factory: NativeStreamFactory,
 ): NativeLifecycleDriver {
+  const typed = buildTypedOneShotRequest(request);
   return createStreamingDriverFromSpawn(
     native,
     factory,
-    (outHandle, error) => native.spawn(
-      JSON.stringify(request),
-      outHandle,
-      error,
-    ),
+    (outHandle, error) => native.spawn(typed.value, outHandle, error),
   );
 }
 
@@ -472,15 +494,26 @@ export function createStateAwareStreamingDriver(
   native: StreamingNativeFacade,
   factory: NativeStreamFactory,
 ): NativeLifecycleDriver {
+  let typed: ReturnType<typeof buildTypedStateAwareRequest> | undefined;
+  try {
+    const envelope = parseStateAwareEnvelopeJson(requestJson);
+    typed = supportsTypedStateAwareEnvelope(envelope)
+      ? buildTypedStateAwareRequest(envelope, experimental)
+      : undefined;
+  } catch {
+    typed = undefined;
+  }
   return createStreamingDriverFromSpawn(
     native,
     factory,
-    (outHandle, error) => native.stateAwareExec(
-      requestJson,
-      experimental ? 1 : 0,
-      outHandle,
-      error,
-    ),
+    (outHandle, error) => typed === undefined
+      ? native.stateAwareExecJson(
+        requestJson,
+        experimental ? 1 : 0,
+        outHandle,
+        error,
+      )
+      : native.stateAwareExecTyped(typed.value, outHandle, error),
   );
 }
 

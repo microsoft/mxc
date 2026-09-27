@@ -182,6 +182,21 @@ It is reported **fail closed**: if the probe cannot run, the result is `'unsuppo
 
 The SDK provides three entry points. **Prefer the config-based path** (`createConfigFromPolicy` + `spawnSandboxFromConfig`) — it gives you backend selection, backend-specific tuning, and (with `usePty: false`) separated stdout/stderr.
 
+### Native transport boundary
+
+Version-free high-level calls use typed `mxc_ffi` ingress. `spawnSandboxAsync`
+marshals the SDK-owned `SandboxPolicy` projection to `mxc_run_typed`; the
+internal native streaming binding uses `mxc_spawn_typed`. The state-aware
+IsolationSession and WSLC lifecycle APIs use `mxc_state_aware_typed`, and their
+live exec path uses `mxc_state_aware_exec_typed`.
+
+The config-based `spawnSandboxFromConfig` path intentionally remains
+executor-backed because it replays caller-authored exact-version
+`ContainerConfig` JSON and provides PTY/`child_process` behavior. The
+convenience `spawnSandbox` API also remains executor-backed for live PTY
+sessions. Windows Sandbox lifecycle is outside the typed lifecycle v1 ABI and
+stays on the explicit raw JSON FFI lane.
+
 ### 1. Config-based — recommended
 
 ```typescript
@@ -260,7 +275,7 @@ The `await`-friendly API runs the abstract `process` containment intent and
 resolves with `{ stdout, stderr, exitCode }`. That intent maps to the native
 process backend for each host and selects Windows ProcessContainer when the
 policy contains ProcessContainer-specific settings. Requests execute through
-`mxc_ffi` and return separate stdout and stderr.
+typed `mxc_ffi` ingress and return separate stdout and stderr.
 
 ```typescript
 import {

@@ -1,8 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Adapts the public ContainerConfig model to the private request accepted by
-// the native Node binding.
+// Adapts the public ContainerConfig model to the private request marshalled by
+// the native Node typed ABI binding.
 
 import type {
   ContainerConfig,
@@ -339,7 +339,7 @@ function resolveContainerName(
 /**
  * Converts the public ContainerConfig into the private, co-versioned request
  * consumed by the native binding.
- * JSON serialization belongs in the Koffi binding, mirroring the .NET SDK.
+ * Koffi marshalling belongs in the typed ABI binding, mirroring the .NET SDK.
  */
 export function prepareRequestSpec(
   config: ContainerConfig,

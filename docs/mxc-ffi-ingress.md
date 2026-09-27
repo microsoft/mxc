@@ -104,11 +104,34 @@ The generated `NativeMethods.g.cs` file is not committed.
 
 ## Consumer migration
 
-This ingress work does not itself switch .NET or Node high-level APIs:
+The high-level managed consumers now use the typed FFI lanes where their public
+API is version-free:
 
-1. migrate .NET one-shot and lifecycle high-level calls from private JSON to
-   the typed entry points;
-2. retain explicit raw exact-config APIs on the JSON entry points;
-3. complete the Node native-transport design separately;
-4. remove compatibility binding-JSON entry points only after all consumers
+1. .NET one-shot and lifecycle high-level calls marshal to typed entry points;
+2. Node `spawnSandboxAsync` and the internal native streaming one-shot binding
+   marshal `SandboxPolicy`/containment/process options to `mxc_run_typed` and
+   `mxc_spawn_typed`;
+3. Node state-aware `isolation_session` and `wslc` lifecycle calls marshal to
+   `mxc_state_aware_typed`, and live/buffered exec marshal to
+   `mxc_state_aware_exec_typed`;
+4. explicit raw exact-config APIs stay on their existing raw path. In Node,
+   `spawnSandbox` and `spawnSandboxFromConfig` remain executor-backed because
+   their contract is to launch the packaged executor with PTY/child-process
+   behavior and to replay caller-authored exact `ContainerConfig` JSON. Windows
+   Sandbox lifecycle stays on the explicit raw JSON FFI lane
+   (`mxc_state_aware_json` / `mxc_state_aware_exec_json`) because typed lifecycle
+   v1 intentionally supports only IsolationSession and WSLC;
+5. remove compatibility binding-JSON entry points only after all consumers
    have migrated and the removal has its own reviewed compatibility boundary.
+
+Node transport inventory after migration:
+
+| Node API | Before | After |
+| --- | --- | --- |
+| `spawnSandboxAsync` | `mxc_run_request` with private binding JSON | `mxc_run_typed` |
+| Internal `spawnBindingSandboxProcess` | `mxc_spawn_request` with private binding JSON | `mxc_spawn_typed` |
+| `spawnSandbox` | Executor process via `node-pty` | Executor process via `node-pty` |
+| `spawnSandboxFromConfig` | Executor process (`node-pty` or `child_process`) with exact `ContainerConfig` JSON | Unchanged raw executor path |
+| `provisionSandbox`, `startSandbox`, `stopSandbox`, `deprovisionSandbox` for IsolationSession/WSLC | `mxc_state_aware` JSON envelope | `mxc_state_aware_typed` |
+| `execInSandbox` and non-dry-run `execInSandboxAsync` for IsolationSession/WSLC | `mxc_state_aware_exec` JSON envelope | `mxc_state_aware_exec_typed` |
+| State-aware Windows Sandbox exact lifecycle | `mxc_state_aware` / `mxc_state_aware_exec` JSON envelope | `mxc_state_aware_json` / `mxc_state_aware_exec_json` |
