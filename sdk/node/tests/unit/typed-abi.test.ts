@@ -24,10 +24,21 @@ import {
   type MxcUtf8Slice,
 } from '../../src/bindings/typed-abi.js';
 import type { RequestSpec } from '../../src/bindings/request.js';
+import { MxcError } from '../../src/errors.js';
 
 function text(value: MxcUtf8Slice | null): string | undefined {
   if (value === null || value.data === null) return undefined;
   return value.data.toString('utf8', 0, value.len);
+}
+
+function assertMalformed(action: () => unknown, path: string, max: number): void {
+  assert.throws(
+    action,
+    (error: unknown) =>
+      error instanceof MxcError &&
+      error.code === 'malformed_request' &&
+      error.message === `${path} must be an integer between 0 and ${max}`,
+  );
 }
 
 describe('typed one-shot ABI marshalling', () => {
@@ -222,6 +233,146 @@ describe('typed one-shot ABI marshalling', () => {
     const typed = buildTypedOneShotRequest(request);
     assert.strictEqual(typed.value.seatbelt!.nested_pty, 1);
   });
+
+  it('rejects network ports that would truncate in native integer fields', () => {
+    for (const portValue of [65_536, 70_000]) {
+      assertMalformed(
+        () => buildTypedOneShotRequest({
+          policy: {
+            network: {
+              egress: {
+                allow: [{ ports: [{ port: portValue }] }],
+              },
+            },
+          },
+          command: 'echo hi',
+          containment: { type: 'process' },
+          inheritDefaultEnv: false,
+          experimental: false,
+        }),
+        'policy.network.egress.rule.ports.port',
+        65_535,
+      );
+    }
+  });
+
+  it('rejects negative, fractional, and out-of-range one-shot timeouts', () => {
+    for (const timeoutMs of [-1, 1.9, 2 ** 32]) {
+      assertMalformed(
+        () => buildTypedOneShotRequest({
+          policy: { timeoutMs },
+          command: 'echo hi',
+          containment: { type: 'process' },
+          inheritDefaultEnv: false,
+          experimental: false,
+        }),
+        'policy.timeoutMs',
+        4_294_967_295,
+      );
+    }
+  });
+
+  it('rejects WSLC integer options outside their typed ABI ranges', () => {
+    assertMalformed(
+      () => buildTypedOneShotRequest({
+        policy: {},
+        command: 'echo hi',
+        containment: {
+          type: 'wslc',
+          portMappings: [{ windowsPort: 65_536, containerPort: 80 }],
+        },
+        inheritDefaultEnv: false,
+        experimental: false,
+      }),
+      'wslc.portMappings[0].windowsPort',
+      65_535,
+    );
+
+    assertMalformed(
+      () => buildTypedOneShotRequest({
+        policy: {},
+        command: 'echo hi',
+        containment: {
+          type: 'wslc',
+          portMappings: [{ windowsPort: 80, containerPort: 70_000 }],
+        },
+        inheritDefaultEnv: false,
+        experimental: false,
+      }),
+      'wslc.portMappings[0].containerPort',
+      65_535,
+    );
+
+    assertMalformed(
+      () => buildTypedOneShotRequest({
+        policy: {},
+        command: 'echo hi',
+        containment: { type: 'wslc', cpuCount: 1.5 },
+        inheritDefaultEnv: false,
+        experimental: false,
+      }),
+      'wslc.cpuCount',
+      4_294_967_295,
+    );
+
+    for (const memoryMb of [1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      assertMalformed(
+        () => buildTypedOneShotRequest({
+          policy: {},
+          command: 'echo hi',
+          containment: { type: 'wslc', memoryMb },
+          inheritDefaultEnv: false,
+          experimental: false,
+        }),
+        'wslc.memoryMb',
+        Number.MAX_SAFE_INTEGER,
+      );
+    }
+  });
+
+  it('accepts unsigned integer boundary values in typed one-shot requests', () => {
+    const typed = buildTypedOneShotRequest({
+      policy: {
+        timeoutMs: 4_294_967_295,
+        network: {
+          egress: {
+            allow: [{ ports: [{ port: 0, endPort: 65_535 }] }],
+          },
+        },
+      },
+      command: 'echo hi',
+      containment: {
+        type: 'wslc',
+        cpuCount: 0,
+        memoryMb: Number.MAX_SAFE_INTEGER,
+        portMappings: [{ windowsPort: 0, containerPort: 65_535 }],
+      },
+      inheritDefaultEnv: false,
+      experimental: false,
+    });
+
+    assert.deepStrictEqual(typed.value.policy!.timeout_ms, {
+      is_set: 1,
+      value: 4_294_967_295,
+    });
+    assert.deepStrictEqual(typed.value.policy!.network!.egress!.allow![0]!.ports![0]!.port, {
+      is_set: 1,
+      value: 0,
+    });
+    assert.deepStrictEqual(typed.value.policy!.network!.egress!.allow![0]!.ports![0]!.end_port, {
+      is_set: 1,
+      value: 65_535,
+    });
+    assert.deepStrictEqual(typed.value.wslc!.cpu_count, { is_set: 1, value: 0 });
+    assert.deepStrictEqual(typed.value.wslc!.memory_mb, {
+      is_set: 1,
+      value: BigInt(Number.MAX_SAFE_INTEGER),
+    });
+    assert.deepStrictEqual(typed.value.wslc!.port_mappings![0], {
+      windows_port: 0,
+      container_port: 65_535,
+    });
+  });
 });
 
 describe('typed state-aware ABI marshalling', () => {
@@ -275,5 +426,33 @@ describe('typed state-aware ABI marshalling', () => {
     assert.strictEqual(text(typed.value.exec!.environment.entries![1]!.key), 'EMPTY');
     assert.strictEqual(text(typed.value.exec!.environment.entries![1]!.value), '');
     assert.strictEqual(text(typed.value.exec!.network_proxy), 'http://127.0.0.1:8888');
+  });
+
+  it('rejects fractional state-aware exec timeout as malformed_request', () => {
+    assertMalformed(
+      () => buildTypedStateAwareRequest({
+        version: '1.0.0',
+        phase: 'exec',
+        sandboxId: 'wslc:abc',
+        process: { commandLine: 'echo hi', timeout: 1.5 },
+      }, false),
+      'process.timeout',
+      4_294_967_295,
+    );
+  });
+
+  it('accepts state-aware exec timeout boundaries', () => {
+    for (const timeout of [0, 4_294_967_295]) {
+      const typed = buildTypedStateAwareRequest({
+        version: '1.0.0',
+        phase: 'exec',
+        sandboxId: 'wslc:abc',
+        process: { commandLine: 'echo hi', timeout },
+      }, false);
+      assert.deepStrictEqual(typed.value.exec!.timeout_ms, {
+        is_set: 1,
+        value: timeout,
+      });
+    }
   });
 });

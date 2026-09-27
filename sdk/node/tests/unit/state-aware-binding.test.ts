@@ -145,4 +145,24 @@ describe('state-aware native binding ownership', () => {
     );
     assert.strictEqual(native.freeTypedCount, 0);
   });
+
+  it('rejects typed marshalling failures as malformed_request before native dispatch', async () => {
+    const native = new FakeStateAwareNative();
+
+    await assert.rejects(
+      () => runBindingStateAwareRequestWithNative({
+        requestJson: '{"version":"1.0.0","phase":"exec","sandboxId":"wslc:abc","process":{"commandLine":"echo hi","timeout":1.5}}',
+        dryRun: true,
+        experimental: false,
+      }, native),
+      (error: unknown) =>
+        error instanceof MxcError &&
+        error.code === 'malformed_request' &&
+        error.message === 'process.timeout must be an integer between 0 and 4294967295',
+    );
+    assert.strictEqual(native.jsonCalls.length, 0);
+    assert.strictEqual(native.typedCalls.length, 0);
+    assert.strictEqual(native.freeJsonCount, 0);
+    assert.strictEqual(native.freeTypedCount, 0);
+  });
 });

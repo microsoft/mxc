@@ -525,18 +525,44 @@ function optionalBool(value: boolean | undefined): MxcOptionalBool {
   return value === undefined ? { is_set: 0, value: 0 } : { is_set: 1, value: flag(value) };
 }
 
-function optionalU16(value: number | undefined): MxcOptionalU16 {
-  return value === undefined ? { is_set: 0, value: 0 } : { is_set: 1, value };
+const U16_MAX = 65_535;
+const U32_MAX = 4_294_967_295;
+const U64_SAFE_MAX = Number.MAX_SAFE_INTEGER;
+
+function unsignedInteger(
+  value: number,
+  max: number,
+  field: string,
+  requireSafe = false,
+): number {
+  const validInteger = requireSafe
+    ? Number.isSafeInteger(value)
+    : Number.isInteger(value);
+  if (!validInteger || value < 0 || value > max) {
+    throw new MxcError(
+      'malformed_request',
+      `${field} must be an integer between 0 and ${max}`,
+    );
+  }
+  return value;
 }
 
-function optionalU32(value: number | undefined): MxcOptionalU32 {
-  return value === undefined ? { is_set: 0, value: 0 } : { is_set: 1, value };
+function optionalU16(value: number | undefined, field: string): MxcOptionalU16 {
+  return value === undefined
+    ? { is_set: 0, value: 0 }
+    : { is_set: 1, value: unsignedInteger(value, U16_MAX, field) };
 }
 
-function optionalU64(value: number | undefined): MxcOptionalU64 {
+function optionalU32(value: number | undefined, field: string): MxcOptionalU32 {
+  return value === undefined
+    ? { is_set: 0, value: 0 }
+    : { is_set: 1, value: unsignedInteger(value, U32_MAX, field) };
+}
+
+function optionalU64(value: number | undefined, field: string): MxcOptionalU64 {
   return value === undefined
     ? { is_set: 0, value: 0n }
-    : { is_set: 1, value: BigInt(value) };
+    : { is_set: 1, value: BigInt(unsignedInteger(value, U64_SAFE_MAX, field, true)) };
 }
 
 function optionalI32(value: number | undefined): MxcOptionalI32 {
@@ -632,8 +658,8 @@ function peer(arena: Arena, value: NetworkPeerConfig): MxcTypedNetworkPeer {
 function port(value: NetworkPortConfig): MxcTypedNetworkPort {
   return {
     protocol: optionalI32(networkProtocol(value.protocol)),
-    port: optionalU16(value.port),
-    end_port: optionalU16(value.endPort),
+    port: optionalU16(value.port, 'policy.network.egress.rule.ports.port'),
+    end_port: optionalU16(value.endPort, 'policy.network.egress.rule.ports.endPort'),
   };
 }
 
@@ -704,7 +730,7 @@ function sandboxPolicy(
       clipboard: clipboard(value.ui.clipboard),
       allow_input_injection: flag(value.ui.allowInputInjection),
     }),
-    timeout_ms: optionalU32(value.timeoutMs),
+    timeout_ms: optionalU32(value.timeoutMs, 'policy.timeoutMs'),
     telemetry_enabled: telemetryEnabled(value.telemetry),
   });
   return policy.filesystem === null
@@ -769,15 +795,23 @@ function wslc(
   arena: Arena,
   value: Extract<RequestSpec['containment'], { type: 'wslc' }>,
 ): MxcTypedWslc {
-  const portMappings = value.portMappings?.map((mapping) => ({
-    windows_port: mapping.windowsPort,
-    container_port: mapping.containerPort,
+  const portMappings = value.portMappings?.map((mapping, index) => ({
+    windows_port: unsignedInteger(
+      mapping.windowsPort,
+      U16_MAX,
+      `wslc.portMappings[${index}].windowsPort`,
+    ),
+    container_port: unsignedInteger(
+      mapping.containerPort,
+      U16_MAX,
+      `wslc.portMappings[${index}].containerPort`,
+    ),
   })) ?? [];
   return arena.keep({
     image: arena.utf8(value.image ?? 'alpine:latest'),
     image_tar_path: arena.optionalUtf8(value.imageTarPath),
-    cpu_count: optionalU32(value.cpuCount),
-    memory_mb: optionalU64(value.memoryMb),
+    cpu_count: optionalU32(value.cpuCount, 'wslc.cpuCount'),
+    memory_mb: optionalU64(value.memoryMb, 'wslc.memoryMb'),
     gpu: flag(value.gpu),
     storage_path: arena.optionalUtf8(value.storagePath),
     port_mappings: portMappings.length === 0 ? null : arena.keep(portMappings),
@@ -956,7 +990,7 @@ function exec(
     working_directory: arena.optionalUtf8(process?.cwd),
     environment: arena.environmentFromProcess(process),
     inherit_default_env: optionalBool(process?.inheritDefaultEnv),
-    timeout_ms: optionalU32(process?.timeout),
+    timeout_ms: optionalU32(process?.timeout, 'process.timeout'),
     network_proxy: arena.optionalUtf8(runtimeConfig?.networkProxy),
   });
 }

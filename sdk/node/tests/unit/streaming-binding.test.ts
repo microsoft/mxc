@@ -20,6 +20,7 @@ import {
   type NodeStreamDependencies,
   type NativeStreamFactory,
 } from '../../src/bindings/native-stdio.js';
+import { MxcError } from '../../src/errors.js';
 
 class FakeNative implements StreamingNativeFacade {
   readonly handle = {};
@@ -213,6 +214,55 @@ const MINIMAL_REQUEST = {
 } as const;
 
 describe('native streaming binding ownership', () => {
+  it('rejects one-shot typed integer marshalling failures before native spawn', () => {
+    const native = new FakeNative();
+
+    assert.throws(
+      () => createStreamingDriver(
+        {
+          ...MINIMAL_REQUEST,
+          policy: {
+            network: {
+              egress: {
+                allow: [{ ports: [{ port: 70_000 }] }],
+              },
+            },
+          },
+        },
+        native,
+        new FakeStreams(),
+      ),
+      (error: unknown) =>
+        error instanceof MxcError &&
+        error.code === 'malformed_request' &&
+        error.message === 'policy.network.egress.rule.ports.port must be an integer between 0 and 65535',
+    );
+    assert.strictEqual(native.spawnRequest, undefined);
+    assert.strictEqual(native.freeErrorCount, 0);
+    assert.strictEqual(native.freeCount, 0);
+  });
+
+  it('rejects state-aware typed integer marshalling failures before native exec', () => {
+    const native = new FakeNative();
+
+    assert.throws(
+      () => createStateAwareStreamingDriver(
+        '{"version":"1.0.0","phase":"exec","sandboxId":"wslc:abc","process":{"commandLine":"echo hi","timeout":1.5}}',
+        false,
+        native,
+        new FakeStreams(),
+      ),
+      (error: unknown) =>
+        error instanceof MxcError &&
+        error.code === 'malformed_request' &&
+        error.message === 'process.timeout must be an integer between 0 and 4294967295',
+    );
+    assert.strictEqual(native.stateAwareTypedRequest, undefined);
+    assert.strictEqual(native.stateAwareJsonRequest, undefined);
+    assert.strictEqual(native.freeErrorCount, 0);
+    assert.strictEqual(native.freeCount, 0);
+  });
+
   it('dispatches state-aware exec through the native entry point', async () => {
     const native = new FakeNative();
     const streams = new FakeStreams();

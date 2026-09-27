@@ -495,14 +495,15 @@ export function createStateAwareStreamingDriver(
   factory: NativeStreamFactory,
 ): NativeLifecycleDriver {
   let typed: ReturnType<typeof buildTypedStateAwareRequest> | undefined;
+  let envelope: Record<string, unknown> | undefined;
   try {
-    const envelope = parseStateAwareEnvelopeJson(requestJson);
-    typed = supportsTypedStateAwareEnvelope(envelope)
-      ? buildTypedStateAwareRequest(envelope, experimental)
-      : undefined;
+    envelope = parseStateAwareEnvelopeJson(requestJson);
   } catch {
-    typed = undefined;
+    envelope = undefined;
   }
+  typed = envelope !== undefined && supportsTypedStateAwareEnvelope(envelope)
+    ? buildTypedStateAwareRequest(envelope, experimental)
+    : undefined;
   return createStreamingDriverFromSpawn(
     native,
     factory,
