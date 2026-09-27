@@ -75,7 +75,7 @@ function directZombieChildren(): Set<number> {
         zombies.add(Number(entry));
       }
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      if (!isProcessGoneError(err)) throw err;
     }
   }
   return zombies;
@@ -643,12 +643,14 @@ describe('bwrap subprocess helpers', () => {
     );
     const shared = new SharedArrayBuffer(12 + 1024);
     const header = new Int32Array(shared, 0, 3);
+    const workerReadyBarrier = new Int32Array(new SharedArrayBuffer(4));
     const anchorExitBarrier = new Int32Array(new SharedArrayBuffer(4));
     const worker = new Worker(
       new URL('../../src/bwrap-probe-worker.js', import.meta.url),
       {
         workerData: {
           shared,
+          workerReadyBarrier: workerReadyBarrier.buffer,
           anchorExitBarrier: anchorExitBarrier.buffer,
           anchorPath,
           helperPath: anchorPath,
@@ -660,6 +662,12 @@ describe('bwrap subprocess helpers', () => {
     );
     worker.on('error', () => {});
     try {
+      const readyWaitResult = Atomics.wait(workerReadyBarrier, 0, 0, 30000);
+      assert.notStrictEqual(
+        readyWaitResult,
+        'timed-out',
+        'worker did not finish startup',
+      );
       const exitWaitResult = Atomics.wait(anchorExitBarrier, 0, 0, 5000);
       assert.notStrictEqual(exitWaitResult, 'timed-out');
       assert.strictEqual(
