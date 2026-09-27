@@ -137,6 +137,21 @@ pub unsafe extern "C" fn mxc_state_aware(
     status
 }
 
+/// Explicitly named alias for [`mxc_state_aware`]'s raw exact-JSON contract.
+///
+/// # Safety
+/// Identical to [`mxc_state_aware`].
+#[no_mangle]
+pub unsafe extern "C" fn mxc_state_aware_json(
+    request_json_utf8: *const c_char,
+    dry_run: i32,
+    experimental: i32,
+    out: *mut MxcStateAwareResult,
+) -> i32 {
+    // SAFETY: this alias has the identical caller contract.
+    unsafe { mxc_state_aware(request_json_utf8, dry_run, experimental, out) }
+}
+
 fn state_aware_inner(
     request_json_utf8: *const c_char,
     dry_run: bool,
@@ -269,6 +284,22 @@ pub unsafe extern "C" fn mxc_state_aware_exec(
     unsafe { crate::streaming::finish_spawn(outcome, out_handle, out_error) }
 }
 
+/// Explicitly named alias for [`mxc_state_aware_exec`]'s raw exact-JSON
+/// contract.
+///
+/// # Safety
+/// Identical to [`mxc_state_aware_exec`].
+#[no_mangle]
+pub unsafe extern "C" fn mxc_state_aware_exec_json(
+    request_json_utf8: *const c_char,
+    experimental: i32,
+    out_handle: *mut *mut MxcSandbox,
+    out_error: *mut MxcErrorDetail,
+) -> i32 {
+    // SAFETY: this alias has the identical caller contract.
+    unsafe { mxc_state_aware_exec(request_json_utf8, experimental, out_handle, out_error) }
+}
+
 /// How an attached exec finished, filled by [`mxc_state_aware_exec_attached`].
 ///
 /// `timed_out` is a separate field so a timeout stays additive to this struct's
@@ -392,6 +423,24 @@ pub unsafe extern "C" fn mxc_state_aware_exec_attached(
             }
             status
         }
+    }
+}
+
+/// Explicitly named alias for [`mxc_state_aware_exec_attached`]'s raw
+/// exact-JSON contract.
+///
+/// # Safety
+/// Identical to [`mxc_state_aware_exec_attached`].
+#[no_mangle]
+pub unsafe extern "C" fn mxc_state_aware_exec_attached_json(
+    request_json_utf8: *const c_char,
+    experimental: i32,
+    out_outcome: *mut MxcExecOutcome,
+    out_error: *mut MxcErrorDetail,
+) -> i32 {
+    // SAFETY: this alias has the identical caller contract.
+    unsafe {
+        mxc_state_aware_exec_attached(request_json_utf8, experimental, out_outcome, out_error)
     }
 }
 
