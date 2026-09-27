@@ -75,7 +75,7 @@ function directZombieChildren(): Set<number> {
         zombies.add(Number(entry));
       }
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      if (!isProcessGoneError(err)) throw err;
     }
   }
   return zombies;
