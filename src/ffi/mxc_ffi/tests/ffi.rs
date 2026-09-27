@@ -12,9 +12,10 @@ use mxc_ffi::{
     mxc_available_backends_json, mxc_platform_support_json, mxc_run_json, mxc_run_request,
     mxc_run_result_free, mxc_run_typed, mxc_sandbox_stderr_closer, mxc_sandbox_stdout_closer,
     mxc_sandbox_warnings_json, mxc_spawn_json, mxc_spawn_typed, mxc_state_aware_exec_typed,
-    mxc_state_aware_typed, mxc_state_aware_typed_result_free, mxc_stream_closer_close,
-    mxc_stream_closer_free, mxc_string_free, mxc_version, MxcEnvironment, MxcErrorDetail,
-    MxcOptionalBool, MxcRunResult, MxcTypedOneShotRequest, MxcTypedStateAwareRequest,
+    mxc_state_aware_json, mxc_state_aware_result_free, mxc_state_aware_typed,
+    mxc_state_aware_typed_result_free, mxc_stream_closer_close, mxc_stream_closer_free,
+    mxc_string_free, mxc_version, MxcEnvironment, MxcErrorDetail, MxcOptionalBool, MxcRunResult,
+    MxcStateAwareResult, MxcTypedOneShotRequest, MxcTypedStateAwareRequest,
     MxcTypedStateAwareResult, MxcUtf8Slice, MXC_CONTAINMENT_PROCESS, MXC_STATE_AWARE_START,
     MXC_TYPED_ABI_VERSION_1,
 };
@@ -293,6 +294,20 @@ fn extern_typed_exec_initializes_outputs_before_validating_operation() {
     assert!(!error.message_utf8.is_null());
     // SAFETY: detail was populated by the typed exec entry point.
     unsafe { mxc_ffi::mxc_error_detail_free(&mut error) };
+}
+
+#[test]
+fn explicit_state_aware_json_alias_preserves_existing_behavior() {
+    let request = CString::new(r#"{"version":"1.0.0"}"#).unwrap();
+    // SAFETY: all-zero is a valid empty state-aware result.
+    let mut out: MxcStateAwareResult = unsafe { std::mem::zeroed() };
+    // SAFETY: request and output storage remain valid for the call.
+    let status = unsafe { mxc_state_aware_json(request.as_ptr(), 0, 0, &mut out) };
+
+    assert_eq!(status, mxc_ffi::MXC_STATUS_MALFORMED_REQUEST);
+    assert!(!out.error.message_utf8.is_null());
+    // SAFETY: result was populated by the JSON alias.
+    unsafe { mxc_state_aware_result_free(&mut out) };
 }
 
 /// A real run requires a host backend; on Windows that means an elevated,
