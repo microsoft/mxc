@@ -1,6 +1,5 @@
 {
   "policy": {
-    "version": "0.8.0-alpha",
     "filesystem": {
       "readwritePaths": ["C:\\work"],
       "readonlyPaths": ["C:\\input"],
@@ -8,10 +7,6 @@
       "clearPolicyOnExit": true
     },
     "network": {
-      "allowOutbound": false,
-      "allowLocalNetwork": false,
-      "allowedHosts": [],
-      "blockedHosts": [],
       "egress": {
         "default": "deny"
       },

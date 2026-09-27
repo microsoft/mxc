@@ -18,13 +18,7 @@
 //! use mxc_sdk::{build_request, run, SandboxPolicy, WaitOutcome};
 //!
 //! // Turn a policy into a request, fill in the command, and run it.
-//! let policy = SandboxPolicy {
-//!     version: "0.7.0-alpha".to_string(),
-//!     filesystem: None,
-//!     network: None,
-//!     ui: None,
-//!     timeout_ms: None,
-//! };
+//! let policy = SandboxPolicy::default();
 //! let request = build_request(&policy, "echo hi", None)?;
 //! let output = run(request)?;
 //! match output.outcome {
@@ -98,10 +92,7 @@
 //!     build_request_with_containment, run, Containment, SandboxPolicy, WslcSection,
 //! };
 //!
-//! # let policy = SandboxPolicy {
-//! #     version: "0.9.0-alpha".to_string(),
-//! #     filesystem: None, network: None, ui: None, timeout_ms: None,
-//! # };
+//! # let policy = SandboxPolicy::default();
 //! // Run a command inside a WSL container (Windows, --features wslc).
 //! let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
 //! let request = build_request_with_containment(&policy, &Containment::Wslc(wslc), "python3 -c 'print(42)'", None)?;
@@ -165,11 +156,11 @@ pub use mxc_engine::{
     available_backends, available_tools_policy, build_request, build_request_with_containment,
     platform_support, temporary_files_policy, user_profile_policy, AvailableBackend,
     BackendCapability, BubblewrapNetworkSupport, Containment, Error, ErrorCode, ExecRequest,
-    FilesystemPolicyResult, IsolationSessionProvisionMetadata, LifecycleRequest, LifecycleResult,
-    NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkPeerSection,
-    NetworkPortSection, NetworkProtocol, NetworkRuleSection, OperationOptions, PlatformSupport,
-    ProvisionMetadata, ProvisionRequest, ProvisionResult, ProxyEnforcement, RuntimeConfigSection,
-    SandboxId, SandboxPolicy, SandboxRequest, StateAwareExecBackendOptions, StateAwareProvision,
+    FilesystemPolicyResult, IsolationSessionProvisionMetadata, LifecycleResult, NetworkAction,
+    NetworkEgressSection, NetworkIngressSection, NetworkPeerSection, NetworkPortSection,
+    NetworkProtocol, NetworkRuleSection, OperationOptions, PlatformSupport, ProvisionMetadata,
+    ProvisionRequest, ProvisionResult, ProxyEnforcement, RuntimeConfigSection, SandboxId,
+    SandboxPolicy, SandboxRequest, StateAwareExecBackendOptions, StateAwareProvision,
     ValidationResult, WslcSection,
 };
 

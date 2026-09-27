@@ -70,9 +70,9 @@ pub use state_aware::{
     validate_stop,
 };
 pub use state_aware_sdk::{
-    ExecRequest, IsolationSessionProvisionMetadata, LifecycleRequest, LifecycleResult,
-    OperationOptions, ProvisionMetadata, ProvisionRequest, ProvisionResult, SandboxId,
-    StateAwareExecBackendOptions, StateAwareProvision, ValidationResult,
+    ExecRequest, IsolationSessionProvisionMetadata, LifecycleResult, OperationOptions,
+    ProvisionMetadata, ProvisionRequest, ProvisionResult, SandboxId, StateAwareExecBackendOptions,
+    StateAwareProvision, ValidationResult,
 };
 #[cfg(target_os = "windows")]
 pub use verbose_telemetry::emit_verbose_telemetry;

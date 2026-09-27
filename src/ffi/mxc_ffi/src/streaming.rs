@@ -1011,7 +1011,7 @@ mod tests {
     fn request(command: &str) -> CString {
         CString::new(
             serde_json::json!({
-                "policy": { "version": "0.8.0-alpha" },
+                "policy": {},
                 "command": command
             })
             .to_string(),
@@ -1092,7 +1092,7 @@ mod tests {
 
     #[test]
     fn spawn_empty_command_reports_malformed_request() {
-        let request = CString::new(r#"{"policy":{"version":"0.7.0-alpha"},"command":""}"#).unwrap();
+        let request = CString::new(r#"{"policy":{},"command":""}"#).unwrap();
         let mut handle: *mut MxcSandbox = ptr::null_mut();
         let mut err = MxcErrorDetail::none();
 

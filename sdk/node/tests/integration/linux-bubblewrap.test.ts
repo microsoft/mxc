@@ -21,6 +21,7 @@ import {
   NETWORK_TEST_URL,
 } from './test-helpers.js';
 import type { ChildProcess } from 'node:child_process';
+import type { ContainerConfig } from '@microsoft/mxc-sdk';
 
 // Bwrap fingerprint: when invoked with `--unshare-pid`, bubblewrap creates a
 // new PID namespace and stays as PID 1 in that namespace, acting as init
@@ -46,7 +47,7 @@ describe(`Linux Bubblewrap (schema ${schemaVersion})`, {
     // which on Linux resolves to Bubblewrap in the binary.
     const result = await sdk.spawnSandboxAsync(
       BWRAP_PROBE,
-      { version: schemaVersion.raw },
+      {},
       {},
       undefined,
       `bwrap-default-${schemaVersion}`,
@@ -57,7 +58,7 @@ describe(`Linux Bubblewrap (schema ${schemaVersion})`, {
 
   it('should select Bubblewrap for abstract containment="process"', async () => {
     const config = sdk.createConfigFromPolicy(
-      { version: schemaVersion.raw },
+      {},
       'process',
       `bwrap-process-${schemaVersion}`,
     );
@@ -70,7 +71,7 @@ describe(`Linux Bubblewrap (schema ${schemaVersion})`, {
 
   it('should select Bubblewrap for explicit containment="bubblewrap"', async () => {
     const config = sdk.createConfigFromPolicy(
-      { version: schemaVersion.raw },
+      {},
       'bubblewrap',
       `bwrap-explicit-${schemaVersion}`,
     );
@@ -112,11 +113,12 @@ describe(`Linux Bubblewrap network proxy, legacy shape (schema ${PROXY_SCHEMA})`
     const { port, proxyProcess } = startUnixTestProxy(tmpDir);
     proxies.push(proxyProcess);
 
-    const config = sdk.createConfigFromPolicy(
-      { version: PROXY_SCHEMA },
-      'bubblewrap',
-      'bwrap-external-proxy',
-    );
+    const config: ContainerConfig = {
+      version: PROXY_SCHEMA,
+      containment: 'bubblewrap',
+      containerId: 'bwrap-external-proxy',
+      process: { commandLine: '' },
+    };
     // Azure Artifacts feed (NETWORK_TEST_URL)
     config.process!.commandLine =
       `curl -fsSL '${NETWORK_TEST_URL}' > /dev/null && echo PROXY_OK`;
@@ -132,11 +134,12 @@ describe(`Linux Bubblewrap network proxy, legacy shape (schema ${PROXY_SCHEMA})`
   });
 
   it('should launch a builtinTestServer proxy and route traffic through it', async () => {
-    const config = sdk.createConfigFromPolicy(
-      { version: PROXY_SCHEMA },
-      'bubblewrap',
-      'bwrap-builtin-proxy',
-    );
+    const config: ContainerConfig = {
+      version: PROXY_SCHEMA,
+      containment: 'bubblewrap',
+      containerId: 'bwrap-builtin-proxy',
+      process: { commandLine: '' },
+    };
     config.process!.commandLine =
       `curl -fsSL '${NETWORK_TEST_URL}' > /dev/null && echo BUILTIN_OK`;
     config.network = {
@@ -151,11 +154,12 @@ describe(`Linux Bubblewrap network proxy, legacy shape (schema ${PROXY_SCHEMA})`
   });
 
   it('should enforce allowedHosts at the proxy layer', async () => {
-    const config = sdk.createConfigFromPolicy(
-      { version: PROXY_SCHEMA },
-      'bubblewrap',
-      'bwrap-allowlist-proxy',
-    );
+    const config: ContainerConfig = {
+      version: PROXY_SCHEMA,
+      containment: 'bubblewrap',
+      containerId: 'bwrap-allowlist-proxy',
+      process: { commandLine: '' },
+    };
     // Sentinel pattern: allowed host succeeds, disallowed host fails with 403
     // from the proxy and curl exits non-zero. The script swallows that and
     // prints BLOCKED_OK so we can assert both signals are present.
@@ -182,12 +186,11 @@ describe(`Linux Bubblewrap network proxy, legacy shape (schema ${PROXY_SCHEMA})`
   });
 });
 
-// Schema 0.9 removed `network.proxy` along with `defaultPolicy` and the host
-// lists, so the legacy block above has no 0.9 translation. A 0.9 proxy is a
-// real endpoint named by `runtimeConfig.networkProxy`, which the parser accepts
-// only on loopback, and the request resolves to the proxy-only posture: egress
-// must be deny-by-default with no rules, and the backend opens the proxy
-// endpoint alone.
+// The v1 policy replaces legacy `network.proxy`, `defaultPolicy`, and host
+// lists with a real endpoint named by `runtimeConfig.networkProxy`. The parser
+// accepts only loopback endpoints, and the request resolves to the proxy-only
+// posture: egress must be deny-by-default with no rules, and the backend opens
+// the proxy endpoint alone.
 //
 // That posture is enforced from inside a private network namespace routed by
 // rootless slirp4netns, which the legacy path does not need -- hence the extra
@@ -199,19 +202,18 @@ describe(`Linux Bubblewrap network proxy, legacy shape (schema ${PROXY_SCHEMA})`
 // dependency set. Testing for the binary alone would let a host with an
 // unusable slirp, `unshare`, `nsenter`, `iptables`, or `ip6tables` past the
 // gate and report an environmental failure as a test failure.
-const PROXY_SCHEMA_09 = '0.9.0-alpha';
 const hasProxyEnforcement =
   isLinuxBubblewrap &&
   sdk.getPlatformSupport().bubblewrapNetwork?.proxyEnforcement === 'supported';
 
-describe(`Linux Bubblewrap network proxy (schema ${PROXY_SCHEMA_09})`, {
+describe('Linux Bubblewrap network proxy (v1 SDK policy)', {
   skip: !isLinuxBubblewrap
     ? 'Linux Bubblewrap proxy tests require Linux with bwrap installed'
     : !hasProxyEnforcement
       ? 'this host cannot enforce proxy-only egress (see PlatformSupport.bubblewrapNetwork.warnings)'
       : undefined,
 }, () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-sdk-bwrap-proxy-09-'));
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-sdk-bwrap-proxy-v1-'));
   const proxies: ChildProcess[] = [];
 
   // The helper announces its port through a fixed-name ready file, so two
@@ -236,12 +238,12 @@ describe(`Linux Bubblewrap network proxy (schema ${PROXY_SCHEMA_09})`, {
     const port = startProxy();
 
     const config = sdk.createConfigFromPolicy(
-      { version: PROXY_SCHEMA_09 },
+      {},
       'bubblewrap',
-      'bwrap-runtime-proxy-09',
+      'bwrap-runtime-proxy-v1',
     );
     config.process!.commandLine =
-      `curl -fsSL '${NETWORK_TEST_URL}' > /dev/null && echo PROXY_09_OK`;
+      `curl -fsSL '${NETWORK_TEST_URL}' > /dev/null && echo PROXY_V1_OK`;
     config.network = {
       egress: { default: 'deny' },
       ingress: { default: 'deny', hostLoopback: 'deny' },
@@ -251,20 +253,20 @@ describe(`Linux Bubblewrap network proxy (schema ${PROXY_SCHEMA_09})`, {
       networkProxy: `http://127.0.0.1:${port}`,
     };
 
-    // No allowTestingFeatures: that flag gates `builtinTestServer`, which has
-    // no 0.9 spelling. Needing it here would mean the gate had gone slack.
+    // No allowTestingFeatures: the v1 policy names a caller-supplied endpoint,
+    // not the testing-only built-in proxy.
     const result = await spawnFromConfigAsync(config, { ...debugSpawnOptions, experimental: true });
-    assert.strictEqual(result.exitCode, 0, `0.9 proxy run failed: ${result.stdout}`);
-    assert.ok(result.stdout.includes('PROXY_09_OK'), `missing PROXY_09_OK in: ${result.stdout}`);
+    assert.strictEqual(result.exitCode, 0, `v1 proxy run failed: ${result.stdout}`);
+    assert.ok(result.stdout.includes('PROXY_V1_OK'), `missing PROXY_V1_OK in: ${result.stdout}`);
   });
 
   it('should confine egress to the proxy endpoint', async () => {
     const port = startProxy();
 
     const config = sdk.createConfigFromPolicy(
-      { version: PROXY_SCHEMA_09 },
+      {},
       'bubblewrap',
-      'bwrap-runtime-proxy-09-egress',
+      'bwrap-runtime-proxy-v1-egress',
     );
     // `--noproxy '*'` is the load-bearing part: it opts the request out of the
     // proxy env vars, so a success would mean the sandbox reached the internet
@@ -272,11 +274,11 @@ describe(`Linux Bubblewrap network proxy (schema ${PROXY_SCHEMA_09})`, {
     config.process!.commandLine =
       'set -e; ' +
       `if curl -fsS --noproxy '*' --max-time 10 '${NETWORK_TEST_URL}' > /dev/null 2>&1; then ` +
-      '  echo DIRECT_09_LEAKED; exit 1; ' +
+      '  echo DIRECT_V1_LEAKED; exit 1; ' +
       'else ' +
-      '  echo DIRECT_09_BLOCKED_OK; ' +
+      '  echo DIRECT_V1_BLOCKED_OK; ' +
       'fi; ' +
-      `curl -fsSL '${NETWORK_TEST_URL}' > /dev/null && echo PROXY_09_STILL_OK`;
+      `curl -fsSL '${NETWORK_TEST_URL}' > /dev/null && echo PROXY_V1_STILL_OK`;
     config.network = {
       egress: { default: 'deny' },
       ingress: { default: 'deny', hostLoopback: 'deny' },
@@ -287,17 +289,17 @@ describe(`Linux Bubblewrap network proxy (schema ${PROXY_SCHEMA_09})`, {
     };
 
     const result = await spawnFromConfigAsync(config, { ...debugSpawnOptions, experimental: true });
-    assert.strictEqual(result.exitCode, 0, `0.9 egress run failed: ${result.stdout}`);
+    assert.strictEqual(result.exitCode, 0, `v1 egress run failed: ${result.stdout}`);
     assert.ok(
-      result.stdout.includes('DIRECT_09_BLOCKED_OK'),
+      result.stdout.includes('DIRECT_V1_BLOCKED_OK'),
       `direct egress was not blocked: ${result.stdout}`,
     );
     assert.ok(
-      result.stdout.includes('PROXY_09_STILL_OK'),
+      result.stdout.includes('PROXY_V1_STILL_OK'),
       `the proxied request did not complete: ${result.stdout}`,
     );
     assert.ok(
-      !result.stdout.includes('DIRECT_09_LEAKED'),
+      !result.stdout.includes('DIRECT_V1_LEAKED'),
       `proxy-only egress leaked: ${result.stdout}`,
     );
   });

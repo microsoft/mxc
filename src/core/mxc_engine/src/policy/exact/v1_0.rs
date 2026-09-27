@@ -187,7 +187,6 @@ fn map_wslc(wslc: &WslcSection) -> Result<contract::OneShotWslc, MxcError> {
 pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::OneShotRequest, MxcError> {
     let policy = input.policy;
     let containment = input.containment;
-    let network_format = input.network_format;
     let process_container = selected_process_container(containment);
     let network = match policy.network.as_ref() {
         // A runtime-only section does not author a sandbox posture. In
@@ -224,7 +223,7 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::OneShotReques
     let process_container = process_container
         .as_ref()
         .map(|process_container| {
-            let capabilities = normalized_capabilities(policy, process_container, network_format)
+            let capabilities = normalized_capabilities(policy, process_container)
                 .into_iter()
                 .map(contract::ProcessContainerCapability::new)
                 .collect::<Result<Vec<_>, _>>()

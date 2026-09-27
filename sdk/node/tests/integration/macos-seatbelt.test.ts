@@ -61,7 +61,7 @@ describe('macOS Seatbelt Container', {
   it('should execute hello world in seatbelt sandbox', async () => {
     const result = await sdk.spawnSandboxAsync(
       "echo 'Hello from seatbelt'",
-      { version: schemaVersion },
+      {},
       { experimental: true },
       undefined,
       'seatbelt-hello',
@@ -73,7 +73,7 @@ describe('macOS Seatbelt Container', {
   it('should propagate exit code', async () => {
     const result = await sdk.spawnSandboxAsync(
       'exit 42',
-      { version: schemaVersion },
+      {},
       inProcessSeatbeltOptions,
       undefined,
       'seatbelt-exit-code',
@@ -96,7 +96,7 @@ describe('macOS Seatbelt Container', {
     ].join('\n');
     const result = await sdk.spawnSandboxAsync(
       script,
-      { version: schemaVersion },
+      {},
       inProcessSeatbeltOptions,
       undefined,
       'seatbelt-child-signal',
@@ -109,7 +109,7 @@ describe('macOS Seatbelt Container', {
     // The default seatbelt profile denies access to /Users.
     const result = await sdk.spawnSandboxAsync(
       'ls /Users 2>&1 || true',
-      { version: schemaVersion },
+      {},
       inProcessSeatbeltOptions,
       undefined,
       'seatbelt-filesystem-deny',
@@ -124,8 +124,7 @@ describe('macOS Seatbelt Container', {
 
   it('should deny network access when allowOutbound is false', async () => {
     const policy = {
-      version: schemaVersion,
-      network: { allowOutbound: false },
+      network: { egress: { default: 'deny' as const } },
     };
     const result = await sdk.spawnSandboxAsync(
       "curl --max-time 5 --fail --silent --show-error https://example.com 2>&1; echo CURL_EXIT=$?",
@@ -143,8 +142,7 @@ describe('macOS Seatbelt Container', {
 
   it('should allow network access when allowOutbound is true', { skip: networkSkipReason }, async () => {
     const policy = {
-      version: schemaVersion,
-      network: { allowOutbound: true },
+      network: { egress: { default: 'allow' as const } },
     };
     const result = await sdk.spawnSandboxAsync(
       `RESULT=$(curl --max-time 10 --fail --silent '${NETWORK_TEST_URL}') && echo 'NETWORK_OK'`,
@@ -159,7 +157,6 @@ describe('macOS Seatbelt Container', {
 
   it('should deny clipboard access when clipboard is none', { skip: clipboardSkipReason }, async () => {
     const policy = {
-      version: schemaVersion,
       ui: { clipboard: 'none' as const },
     };
     const result = await sdk.spawnSandboxAsync(
@@ -176,7 +173,6 @@ describe('macOS Seatbelt Container', {
   it('should allow clipboard access when clipboard is all', { skip: clipboardSkipReason }, async () => {
     const uniqueToken = `seatbelt_clip_${Date.now()}`;
     const policy = {
-      version: schemaVersion,
       ui: { clipboard: 'all' as const },
     };
     const result = await sdk.spawnSandboxAsync(
@@ -190,43 +186,10 @@ describe('macOS Seatbelt Container', {
     assert.ok(result.stdout.includes(uniqueToken));
   });
 
-  it('should reject blockedHosts with a clear error', async () => {
-    const policy = {
-      version: schemaVersion,
-      network: {
-        allowOutbound: true,
-        blockedHosts: ['evil.example.com'],
-      },
-    };
-    // blockedHosts is unsupported on seatbelt; the runner rejects it and emits
-    // a structured `backend_error` envelope, so spawnSandboxAsync rejects with
-    // an MxcError (parity with wxc-exec / lxc-exec — issue #564).
-    await assert.rejects(
-      () =>
-        sdk.spawnSandboxAsync(
-          'echo should-not-run',
-          policy,
-          inProcessSeatbeltOptions,
-          undefined,
-          'seatbelt-blocked-hosts',
-        ),
-      (err: unknown) => {
-        assert.ok(err instanceof MxcError, `Expected MxcError, got: ${err}`);
-        assert.strictEqual(err.code, 'backend_error');
-        assert.ok(
-          err.message.includes('blockedHosts') ||
-            err.message.includes('cannot be enforced'),
-          `Expected blockedHosts rejection message, got: ${err.message}`,
-        );
-        return true;
-      },
-    );
-  });
-
   it('should run multi-command pipeline', async () => {
     const result = await sdk.spawnSandboxAsync(
       "echo 'step 1' && uname -s && echo 'step 2' && whoami && echo 'Pipeline complete'",
-      { version: schemaVersion },
+      {},
       inProcessSeatbeltOptions,
       undefined,
       'seatbelt-pipeline',
@@ -238,7 +201,6 @@ describe('macOS Seatbelt Container', {
 
   it('should enforce timeout on long-running scripts', async () => {
     const policy = {
-      version: schemaVersion,
       timeoutMs: 2000,
     };
     // On timeout the runner kills the process and emits a structured
@@ -267,7 +229,7 @@ describe('macOS Seatbelt Container', {
 
   it('should apply profile override from seatbelt config', { timeout: 30_000 }, async () => {
     // Build a config with a custom seatbelt profile that allows everything
-    const config = sdk.createConfigFromPolicy({ version: schemaVersion });
+    const config = sdk.createConfigFromPolicy({});
     config.process = { commandLine: "echo 'profile override works'" };
     config.seatbelt = { profileOverride: '(version 1)\n(allow default)' };
     config.containerId = 'seatbelt-profile-override';
