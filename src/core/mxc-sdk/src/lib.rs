@@ -163,6 +163,8 @@ pub use mxc_engine::{
     SandboxPolicy, SandboxRequest, StateAwareExecBackendOptions, StateAwareProvision,
     ValidationResult, WslcSection,
 };
+#[cfg(feature = "test-support")]
+pub use mxc_engine::{json_one_shot_intent, typed_one_shot_intent};
 
 pub use sandbox::{
     CaptureDenialsErrorOutput, CaptureDenialsOutput, Output, Sandbox, SandboxOutputMetadata,

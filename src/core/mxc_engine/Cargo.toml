@@ -63,6 +63,8 @@ isolation_session = [
 force-tier-testing = ["process_container_common/force-tier-testing"]
 # Forwards process_container_common/tier2_bfs. OFF by default; see process_container_common/Cargo.toml.
 tier2_bfs = ["process_container_common/tier2_bfs"]
+# Exposes semantic projections used by downstream FFI equivalence tests.
+test-support = ["wxc_common/test-support"]
 
 [dev-dependencies]
 mxc_config_contract.workspace = true

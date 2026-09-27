@@ -131,6 +131,48 @@ pub fn spawn_one_shot_json(request_json: &str) -> Result<Box<dyn SandboxProcess>
     spawn_execution_request(&request, logger)
 }
 
+#[cfg(feature = "test-support")]
+fn one_shot_intent(request: &ExecutionRequest) -> Result<serde_json::Value, Error> {
+    let mut value = serde_json::to_value(request).map_err(|error| {
+        Error::new(
+            ErrorCode::BackendError,
+            format!("failed to project one-shot request intent: {error}"),
+        )
+    })?;
+    if let Some(object) = value.as_object_mut() {
+        object.remove("source_contract");
+    }
+    Ok(value)
+}
+
+/// Project a typed one-shot request into normalized semantic intent for
+/// binding-equivalence tests.
+#[cfg(feature = "test-support")]
+pub fn typed_one_shot_intent(request: &SandboxRequest) -> Result<serde_json::Value, Error> {
+    one_shot_intent(&request.inner)
+}
+
+/// Parse raw exact one-shot JSON and project its normalized semantic intent for
+/// binding-equivalence tests.
+#[cfg(feature = "test-support")]
+pub fn json_one_shot_intent(request_json: &str) -> Result<serde_json::Value, Error> {
+    let mut logger = Logger::new(Mode::Buffer);
+    let request =
+        match wxc_common::config_parser::load_mxc_request_from_json(request_json, &mut logger)
+            .map_err(state_aware::parse_error_to_mxc)
+            .map_err(Error::from)?
+        {
+            MxcRequest::OneShot(request) => request,
+            MxcRequest::StateAware(_) => {
+                return Err(Error::new(
+                    ErrorCode::MalformedRequest,
+                    "expected one-shot JSON for intent projection",
+                ))
+            }
+        };
+    one_shot_intent(&request)
+}
+
 fn spawn_execution_request(
     request: &ExecutionRequest,
     mut logger: Logger,

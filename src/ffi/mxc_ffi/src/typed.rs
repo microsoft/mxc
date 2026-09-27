@@ -1068,4 +1068,101 @@ mod tests {
         let built = unsafe { build_one_shot_request(&request) }.expect("request builds");
         assert_eq!(built.env(), Some(&[][..]));
     }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn typed_and_exact_json_produce_equivalent_one_shot_intent() {
+        let readonly = [text("/input")];
+        let filesystem = MxcTypedFilesystemPolicy {
+            readwrite_paths: MxcUtf8SliceList {
+                items: ptr::null(),
+                len: 0,
+            },
+            readonly_paths: MxcUtf8SliceList {
+                items: readonly.as_ptr(),
+                len: readonly.len(),
+            },
+            denied_paths: MxcUtf8SliceList {
+                items: ptr::null(),
+                len: 0,
+            },
+            clear_policy_on_exit: MxcOptionalBool {
+                is_set: 0,
+                value: 0,
+            },
+        };
+        let egress = MxcTypedNetworkEgress {
+            default_action: MxcOptionalI32 {
+                is_set: 1,
+                value: MXC_NETWORK_ACTION_DENY,
+            },
+            allow_is_set: 0,
+            allow: ptr::null(),
+            allow_len: 0,
+            deny_is_set: 0,
+            deny: ptr::null(),
+            deny_len: 0,
+        };
+        let ingress = MxcTypedNetworkIngress {
+            default_action: MxcOptionalI32 {
+                is_set: 1,
+                value: MXC_NETWORK_ACTION_DENY,
+            },
+            host_loopback: MxcOptionalI32 {
+                is_set: 1,
+                value: MXC_NETWORK_ACTION_DENY,
+            },
+        };
+        let network = MxcTypedNetworkPolicy {
+            egress: &egress,
+            ingress: &ingress,
+            network_proxy: ptr::null(),
+        };
+        let policy = MxcTypedSandboxPolicy {
+            filesystem: &filesystem,
+            network: &network,
+            ui: ptr::null(),
+            timeout_ms: MxcOptionalU32 {
+                is_set: 1,
+                value: 5000,
+            },
+            telemetry_enabled: MxcOptionalBool {
+                is_set: 0,
+                value: 0,
+            },
+        };
+        let container_name = text("ffi-equivalence");
+        let working_directory = text("/work");
+        let mut request = minimal("echo hello");
+        request.policy = &policy;
+        request.containment = MXC_CONTAINMENT_BUBBLEWRAP;
+        request.container_name = &container_name;
+        request.working_directory = &working_directory;
+        request.environment.is_set = 1;
+
+        // SAFETY: every pointer remains valid for projection.
+        let typed = unsafe { build_one_shot_request(&request) }.expect("typed request builds");
+        let typed_intent = mxc_sdk::typed_one_shot_intent(&typed).expect("typed intent projects");
+        let exact_intent = mxc_sdk::json_one_shot_intent(
+            r#"{
+                "version":"1.0.0",
+                "containerId":"ffi-equivalence",
+                "containment":"bubblewrap",
+                "process":{
+                    "commandLine":"echo hello",
+                    "cwd":"/work",
+                    "env":[],
+                    "timeout":5000
+                },
+                "filesystem":{"readonlyPaths":["/input"]},
+                "network":{
+                    "egress":{"default":"deny"},
+                    "ingress":{"default":"deny","hostLoopback":"deny"}
+                }
+            }"#,
+        )
+        .expect("exact intent projects");
+
+        assert_eq!(typed_intent, exact_intent);
+    }
 }
