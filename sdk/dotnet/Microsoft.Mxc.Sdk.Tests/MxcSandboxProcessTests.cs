@@ -36,16 +36,30 @@ public class MxcSandboxProcessTests
     [Fact]
     public void Spawn_NullCommand_Throws()
     {
-        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        var policy = new SandboxPolicy();
         Assert.Throws<ArgumentNullException>(() => MxcSandbox.Spawn(policy, null!));
     }
 
     [Fact]
     public void Spawn_MalformedPolicy_ThrowsMalformedRequest()
     {
-        // A version-less policy is rejected by the native parser before any
-        // sandbox is spawned, so this runs on any host.
-        var policy = new SandboxPolicy { Version = string.Empty };
+        var policy = new SandboxPolicy
+        {
+            Network = new NetworkPolicy
+            {
+                Egress = new NetworkEgressPolicy
+                {
+                    Default = NetworkAction.Deny,
+                    Allow =
+                    [
+                        new NetworkRulePolicy
+                        {
+                            To = [new NetworkPeerPolicy("not-a-cidr")],
+                        },
+                    ],
+                },
+            },
+        };
 
         var ex = Assert.Throws<MxcException>(() => MxcSandbox.Spawn(policy, "echo hi"));
         Assert.Equal(ErrorCode.MalformedRequest, ex.Code);
@@ -57,7 +71,7 @@ public class MxcSandboxProcessTests
     {
         Assert.SkipUnless(HostCanSpawn, "no host backend available");
 
-        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        var policy = new SandboxPolicy();
         using var proc = MxcSandbox.Spawn(policy, BlockerCommand);
 
         Assert.Throws<InvalidOperationException>(() => proc.StandardOutputCloser);
@@ -68,7 +82,7 @@ public class MxcSandboxProcessTests
     {
         Assert.SkipUnless(HostCanSpawn, "no host backend available");
 
-        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        var policy = new SandboxPolicy();
         using var proc = MxcSandbox.Spawn(policy, BlockerCommand);
         var stdout = proc.StandardOutput;
         var closer = proc.StandardOutputCloser;
@@ -96,7 +110,7 @@ public class MxcSandboxProcessTests
     {
         Assert.SkipUnless(HostCanSpawn, "no host backend available");
 
-        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        var policy = new SandboxPolicy();
         using var proc = MxcSandbox.Spawn(policy, BlockerCommand);
 
         Assert.Empty(proc.Warnings);
@@ -109,7 +123,7 @@ public class MxcSandboxProcessTests
     {
         Assert.SkipUnless(HostCanSpawn, "no host backend available");
 
-        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        var policy = new SandboxPolicy();
         var command = OperatingSystem.IsWindows()
             ? @"C:\Windows\System32\cmd.exe /c echo mxc_stream_ok"
             : "echo mxc_stream_ok";
@@ -132,7 +146,7 @@ public class MxcSandboxProcessTests
     {
         Assert.SkipUnless(HostCanSpawn, "no host backend available");
 
-        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        var policy = new SandboxPolicy();
         var command = OperatingSystem.IsWindows()
             ? @"C:\Windows\System32\cmd.exe /c echo mxc_async_ok"
             : "echo mxc_async_ok";
@@ -151,7 +165,7 @@ public class MxcSandboxProcessTests
     {
         Assert.SkipUnless(HostCanSpawn, "no host backend available");
 
-        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        var policy = new SandboxPolicy();
         using var proc = MxcSandbox.Spawn(policy, BlockerCommand);
         using var stdin = proc.StandardInput;
         Assert.NotNull(stdin);
@@ -178,7 +192,7 @@ public class MxcSandboxProcessTests
         // A cmd builtin (set /p) reads one stdin line and echoes it with delayed
         // expansion — no external process spawn, so it is robust to the sandbox
         // cwd. Exercises the stdin write path with the stdout read path.
-        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        var policy = new SandboxPolicy();
         var command = OperatingSystem.IsWindows()
             ? @"C:\Windows\System32\cmd.exe /v:on /c set /p L= & echo GOT:!L!"
             : "cat";
@@ -212,7 +226,7 @@ public class MxcSandboxProcessTests
 
         // The caller never touches StandardOutput/Error; Wait() must drain the
         // untaken streams so a chatty child cannot wedge on a full pipe.
-        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        var policy = new SandboxPolicy();
         var command = OperatingSystem.IsWindows()
             ? @"C:\Windows\System32\cmd.exe /c echo a& echo b& echo c"
             : "printf 'a\\nb\\nc\\n'";
@@ -229,7 +243,7 @@ public class MxcSandboxProcessTests
     {
         Assert.SkipUnless(HostCanSpawn, "no host backend available");
 
-        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        var policy = new SandboxPolicy();
         var command = OperatingSystem.IsWindows()
             ? @"C:\Windows\System32\cmd.exe /c echo bye"
             : "echo bye";
@@ -250,7 +264,7 @@ public class MxcSandboxProcessTests
         // this thread. The SafeHandle refcount must keep the native stream alive
         // across the in-flight read; the read completes (EOF once the child is
         // killed) or throws ObjectDisposedException — never a crash / UAF.
-        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        var policy = new SandboxPolicy();
         var command = OperatingSystem.IsWindows()
             ? @"C:\Windows\System32\cmd.exe /c echo hi & ping -n 3 127.0.0.1 >nul"
             : "sh -c 'echo hi; sleep 2'";
@@ -300,7 +314,7 @@ public class MxcSandboxProcessTests
     {
         Assert.SkipUnless(HostCanSpawn, "no host backend available");
 
-        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        var policy = new SandboxPolicy();
         using var proc = MxcSandbox.Spawn(policy, BlockerCommand);
         var stdin = proc.StandardInput; // hold stdin open so the child blocks
         Assert.NotNull(stdin);
@@ -318,7 +332,7 @@ public class MxcSandboxProcessTests
 
         // The poll-based Wait design exists so Kill stays responsive during a
         // WaitAsync from another thread; prove the await completes after Kill.
-        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        var policy = new SandboxPolicy();
         using var proc = MxcSandbox.Spawn(policy, BlockerCommand);
         var stdin = proc.StandardInput; // hold stdin open so the child blocks
         Assert.NotNull(stdin);
@@ -343,7 +357,7 @@ public class MxcSandboxProcessTests
 
         // Cancelling WaitAsync abandons the wait (throwing) without killing the
         // child — the exact path that previously triggered the stream UAF.
-        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        var policy = new SandboxPolicy();
         using var proc = MxcSandbox.Spawn(policy, BlockerCommand);
         var stdin = proc.StandardInput; // hold stdin open so the child blocks
         Assert.NotNull(stdin);
@@ -361,7 +375,7 @@ public class MxcSandboxProcessTests
     {
         Assert.SkipUnless(HostCanSpawn, "no host backend available");
 
-        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        var policy = new SandboxPolicy();
         // Write one line to stdout and one to stderr (both cmd builtins).
         var command = @"C:\Windows\System32\cmd.exe /c echo to-out& echo to-err 1>&2";
         using var proc = MxcSandbox.Spawn(policy, command);
@@ -382,7 +396,7 @@ public class MxcSandboxProcessTests
         // Emit well over a pipe buffer (~64KB) on BOTH stdout and stderr. If the
         // streams were not drained concurrently the child would wedge on a full
         // pipe; WaitForExitWithOutputAsync must return both in full.
-        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        var policy = new SandboxPolicy();
         var command =
             @"C:\Windows\System32\cmd.exe /c for /L %i in (1,1,12000) do @(echo out-%i& echo err-%i 1>&2)";
         using var proc = MxcSandbox.Spawn(policy, command);
@@ -405,7 +419,7 @@ public class MxcSandboxProcessTests
         // A short policy timeout must be honoured by the polling Wait() path:
         // try_wait never kills and spawn starts no native watchdog, so without
         // managed enforcement the blocked child would hang Wait() indefinitely.
-        var policy = new SandboxPolicy { Version = "0.8.0-alpha", TimeoutMs = 1000 };
+        var policy = new SandboxPolicy { TimeoutMs = 1000 };
         using var proc = MxcSandbox.Spawn(policy, BlockerCommand);
         var stdin = proc.StandardInput; // hold stdin open so the child blocks
         Assert.NotNull(stdin);
@@ -432,7 +446,7 @@ public class MxcSandboxProcessTests
         // Wait() drains any untaken standard stream on an internal task. Handing
         // that same stream back to the caller afterwards would race the drainer on
         // one native handle, so StandardOutput/Error must refuse it.
-        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        var policy = new SandboxPolicy();
         var command = @"C:\Windows\System32\cmd.exe /c echo drained";
         using var proc = MxcSandbox.Spawn(policy, command);
 
@@ -451,7 +465,7 @@ public class MxcSandboxProcessTests
         // native reads return, then surfaces cancellation without killing the
         // child. Previously it awaited the reads before unblocking them and hung
         // forever, leaking the native child.
-        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        var policy = new SandboxPolicy();
         using var proc = MxcSandbox.Spawn(policy, BlockerCommand);
         var stdin = proc.StandardInput; // hold stdin open so the child blocks
         Assert.NotNull(stdin);

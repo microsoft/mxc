@@ -30,19 +30,8 @@ public static class MxcSandbox
         Converters =
         {
             new JsonStringEnumConverter(JsonNamingPolicy.CamelCase),
-            new NetworkProxyPolicyJsonConverter(),
         },
     };
-
-    private static readonly JsonSerializerOptions PublishedPolicyJsonOptions = new(JsonOptions)
-    {
-        Converters = { new NetworkPolicyJsonConverter(includeLegacyDefaults: true) },
-    };
-
-    private static JsonSerializerOptions PolicyJsonOptions(string version) =>
-        SchemaVersions.UsesLegacyNetworkDefaults(version)
-            ? PublishedPolicyJsonOptions
-            : JsonOptions;
 
     /// <summary>
     /// The version of the native <c>mxc_ffi</c> library.
@@ -119,7 +108,7 @@ public static class MxcSandbox
     /// Run <paramref name="command"/> in a sandbox described by
     /// <paramref name="policy"/>, to completion, capturing its output.
     /// </summary>
-    /// <param name="policy">What to restrict. Its <see cref="SandboxPolicy.Version"/> must be set.</param>
+    /// <param name="policy">What to restrict.</param>
     /// <param name="command">The command line to run (the <c>process.commandLine</c> equivalent).</param>
     /// <returns>The captured stdout/stderr and exit outcome.</returns>
     /// <exception cref="ArgumentNullException">A required argument was null.</exception>
@@ -196,7 +185,7 @@ public static class MxcSandbox
     /// <paramref name="policy"/> and return a live <see cref="MxcSandboxProcess"/>
     /// you can stream stdio through, wait on, and kill while it runs.
     /// </summary>
-    /// <param name="policy">What to restrict. Its <see cref="SandboxPolicy.Version"/> must be set.</param>
+    /// <param name="policy">What to restrict.</param>
     /// <param name="command">The command line to run (the <c>process.commandLine</c> equivalent).</param>
     /// <returns>A live process handle. Dispose it to release native resources (killing the child if still running).</returns>
     /// <exception cref="ArgumentNullException">A required argument was null.</exception>
@@ -261,42 +250,13 @@ public static class MxcSandbox
     internal static string SerializePolicy(SandboxPolicy policy)
     {
         ArgumentNullException.ThrowIfNull(policy);
-        ValidateNetworkVersion(policy);
-        return JsonSerializer.Serialize(policy, PolicyJsonOptions(policy.Version));
+        return JsonSerializer.Serialize(policy, JsonOptions);
     }
 
     internal static string SerializeRequest(SandboxRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-        ValidateNetworkVersion(request.Policy);
-        return JsonSerializer.Serialize(PrepareRequest(request), PolicyJsonOptions(request.Policy.Version));
-    }
-
-    private static void ValidateNetworkVersion(SandboxPolicy policy)
-    {
-        if (policy.Network?.LegacyFieldSpecified is not { } field)
-        {
-            return;
-        }
-
-        if (!SchemaVersions.IsSupported(policy.Version))
-        {
-            throw new ArgumentException(
-                $"Schema version '{policy.Version}' is not supported. "
-                    + $"Use a version from {SchemaVersions.Minimum} through "
-                    + $"{SchemaVersions.MaximumSupported}.",
-                nameof(policy));
-        }
-
-        if (!SchemaVersions.UsesLegacyNetworkDefaults(policy.Version))
-        {
-            throw new ArgumentException(
-                $"Schema {policy.Version} no longer supports authored network.{field}, including null. Legacy network authoring "
-                    + "(AllowOutbound, AllowLocalNetwork, AllowedHosts, BlockedHosts, Proxy). "
-                    + "Use Network.Egress/Ingress and Network.RuntimeConfig.NetworkProxy explicitly, "
-                    + "or retain schema 0.8.0-alpha. Hostnames are not converted to CIDRs.",
-                nameof(policy));
-        }
+        return JsonSerializer.Serialize(PrepareRequest(request), JsonOptions);
     }
 
     private static SandboxRequest PrepareRequest(SandboxRequest request)

@@ -29,7 +29,6 @@ public class MxcSandboxIsolationSessionE2ETests
                 // The backend cannot restrict the container's network, so it
                 // requires the explicit directional all-allow posture and refuses
                 // an absent policy, whose default is a deny it could not enforce.
-                Version = "0.9.0-alpha",
                 Network = new NetworkPolicy
                 {
                     Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },

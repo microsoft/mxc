@@ -28,8 +28,6 @@ use crate::Error;
 pub enum StateAwareProvision {
     /// Windows IsolationSession with an optional application identifier.
     IsolationSession { app_id: Option<String> },
-    /// Windows Sandbox, available only in the development contract.
-    WindowsSandbox,
     /// WSL Container with optional image selection.
     Wslc {
         image: Option<String>,
@@ -47,7 +45,6 @@ impl StateAwareProvision {
                     }
                 }))
             }
-            Self::WindowsSandbox => RuntimeProvision::WindowsSandbox,
             Self::Wslc {
                 image,
                 image_tar_path,
@@ -112,7 +109,6 @@ impl fmt::Display for SandboxId {
 /// Typed state-aware provision request.
 #[derive(Debug, Clone)]
 pub struct ProvisionRequest {
-    version: String,
     provision: StateAwareProvision,
     filesystem: Option<FilesystemSection>,
     network: Option<NetworkSection>,
@@ -123,7 +119,7 @@ impl ProvisionRequest {
     /// unrestricted directional network posture.
     ///
     /// `None` omits backend-specific provision configuration.
-    pub fn isolation_session(version: impl Into<String>, app_id: Option<String>) -> Self {
+    pub fn isolation_session(app_id: Option<String>) -> Self {
         let egress = crate::policy::NetworkEgressSection {
             default: Some(NetworkAction::Allow),
             ..Default::default()
@@ -138,20 +134,9 @@ impl ProvisionRequest {
             ..Default::default()
         };
         Self {
-            version: version.into(),
             provision: StateAwareProvision::IsolationSession { app_id },
             filesystem: None,
             network: Some(network),
-        }
-    }
-
-    /// Create a Windows Sandbox provision request.
-    pub fn windows_sandbox(version: impl Into<String>) -> Self {
-        Self {
-            version: version.into(),
-            provision: StateAwareProvision::WindowsSandbox,
-            filesystem: None,
-            network: None,
         }
     }
 
@@ -159,13 +144,8 @@ impl ProvisionRequest {
     ///
     /// When both image arguments are `None`, backend-specific provision
     /// configuration is omitted and the backend owns its defaults.
-    pub fn wslc(
-        version: impl Into<String>,
-        image: Option<String>,
-        image_tar_path: Option<String>,
-    ) -> Self {
+    pub fn wslc(image: Option<String>, image_tar_path: Option<String>) -> Self {
         Self {
-            version: version.into(),
             provision: StateAwareProvision::Wslc {
                 image,
                 image_tar_path,
@@ -191,16 +171,11 @@ impl ProvisionRequest {
         self,
         telemetry_opt_in: Option<bool>,
     ) -> Result<SdkStateAwareInput, MxcError> {
-        let version = parse_state_aware_version(&self.version)?;
+        let version = ContractVersion::V1_0_0;
         match &self.provision {
             StateAwareProvision::IsolationSession { .. } if self.filesystem.is_some() => {
                 return Err(MxcError::malformed_request(
                     "IsolationSession state-aware provision does not accept filesystem policy",
-                ));
-            }
-            StateAwareProvision::WindowsSandbox if self.network.is_some() => {
-                return Err(MxcError::malformed_request(
-                    "Windows Sandbox state-aware provision does not accept network policy",
                 ));
             }
             _ => {}
@@ -208,7 +183,7 @@ impl ProvisionRequest {
         let mut input = SdkStateAwareInput::new(version, self.provision.runtime_operation())
             .map_err(|error| MxcError::malformed_request(error.to_string()))?;
         input.filesystem = self.filesystem.as_ref().map(map_filesystem).transpose()?;
-        let (network, runtime_config) = map_network(version, self.network.as_ref())?;
+        let (network, runtime_config) = map_network(self.network.as_ref())?;
         input.network = network;
         input.runtime_config = runtime_config;
         input.telemetry_opt_in = telemetry_opt_in;
@@ -216,67 +191,23 @@ impl ProvisionRequest {
     }
 }
 
-/// Versioned policy input shared by start, stop, and deprovision.
-#[derive(Debug, Clone)]
-pub struct LifecycleRequest {
-    version: String,
-}
-
-impl LifecycleRequest {
-    pub fn new(version: impl Into<String>) -> Self {
-        Self {
-            version: version.into(),
-        }
-    }
-
-    fn into_sdk_input(
-        self,
-        sandbox_id: &SandboxId,
-        telemetry_opt_in: Option<bool>,
-        operation: fn(String) -> RuntimeOperation,
-    ) -> Result<SdkStateAwareInput, MxcError> {
-        let version = parse_state_aware_version(&self.version)?;
-        let mut input = SdkStateAwareInput::new(version, operation(sandbox_id.as_str().to_owned()))
-            .map_err(|error| MxcError::malformed_request(error.to_string()))?;
-        input.telemetry_opt_in = telemetry_opt_in;
-        Ok(input)
-    }
-
-    pub(crate) fn into_start_input(
-        self,
-        sandbox_id: &SandboxId,
-        telemetry_opt_in: Option<bool>,
-    ) -> Result<SdkStateAwareInput, MxcError> {
-        self.into_sdk_input(sandbox_id, telemetry_opt_in, |sandbox_id| {
-            RuntimeOperation::Start { sandbox_id }
-        })
-    }
-
-    pub(crate) fn into_stop_input(
-        self,
-        sandbox_id: &SandboxId,
-        telemetry_opt_in: Option<bool>,
-    ) -> Result<SdkStateAwareInput, MxcError> {
-        self.into_sdk_input(sandbox_id, telemetry_opt_in, |sandbox_id| {
-            RuntimeOperation::Stop { sandbox_id }
-        })
-    }
-
-    pub(crate) fn into_deprovision_input(
-        self,
-        sandbox_id: &SandboxId,
-        telemetry_opt_in: Option<bool>,
-    ) -> Result<SdkStateAwareInput, MxcError> {
-        self.into_sdk_input(sandbox_id, telemetry_opt_in, |sandbox_id| {
-            RuntimeOperation::Deprovision { sandbox_id }
-        })
-    }
+pub(crate) fn lifecycle_sdk_input(
+    sandbox_id: &SandboxId,
+    telemetry_opt_in: Option<bool>,
+    operation: fn(String) -> RuntimeOperation,
+) -> Result<SdkStateAwareInput, MxcError> {
+    let mut input = SdkStateAwareInput::new(
+        ContractVersion::V1_0_0,
+        operation(sandbox_id.as_str().to_owned()),
+    )
+    .map_err(|error| MxcError::malformed_request(error.to_string()))?;
+    input.telemetry_opt_in = telemetry_opt_in;
+    Ok(input)
 }
 
 /// Typed state-aware exec request.
 #[derive(Debug, Clone)]
 pub struct ExecRequest {
-    version: String,
     command_line: String,
     working_directory: Option<String>,
     environment: Option<Vec<String>>,
@@ -294,9 +225,8 @@ pub enum StateAwareExecBackendOptions {
 }
 
 impl ExecRequest {
-    pub fn new(version: impl Into<String>, command_line: impl Into<String>) -> Self {
+    pub fn new(command_line: impl Into<String>) -> Self {
         Self {
-            version: version.into(),
             command_line: command_line.into(),
             working_directory: None,
             environment: None,
@@ -347,9 +277,8 @@ impl ExecRequest {
         sandbox_id: &SandboxId,
         telemetry_opt_in: Option<bool>,
     ) -> Result<SdkStateAwareInput, MxcError> {
-        let version = parse_state_aware_version(&self.version)?;
         let mut input = SdkStateAwareInput::new(
-            version,
+            ContractVersion::V1_0_0,
             RuntimeOperation::Exec {
                 sandbox_id: sandbox_id.as_str().to_owned(),
             },
@@ -494,22 +423,6 @@ impl StateAwareResult {
     }
 }
 
-fn parse_state_aware_version(version: &str) -> Result<ContractVersion, MxcError> {
-    let version = ContractVersion::parse_exact(version)
-        .ok_or_else(|| MxcError::malformed_request(format!("Invalid schema version: {version}")))?;
-    if !matches!(
-        version,
-        ContractVersion::V0_9_0Alpha | ContractVersion::V1_0_0 | ContractVersion::V1_1_0Alpha
-    ) {
-        return Err(MxcError::malformed_request(format!(
-            "typed state-aware Rust SDK requests require schema version \
-             0.9.0-alpha, 1.0.0, or 1.1.0-alpha, got {}",
-            version.as_str()
-        )));
-    }
-    Ok(version)
-}
-
 fn map_filesystem(value: &FilesystemSection) -> Result<SdkFilesystemInput, MxcError> {
     if value.clear_policy_on_exit.is_some() {
         return Err(MxcError::malformed_request(
@@ -524,24 +437,11 @@ fn map_filesystem(value: &FilesystemSection) -> Result<SdkFilesystemInput, MxcEr
 }
 
 fn map_network(
-    version: ContractVersion,
     value: Option<&NetworkSection>,
 ) -> Result<(Option<SdkNetworkInput>, Option<SdkRuntimeConfigInput>), MxcError> {
     let Some(value) = value else {
         return Ok((None, None));
     };
-    if value.allow_outbound
-        || value.allow_local_network
-        || !value.allowed_hosts.is_empty()
-        || !value.blocked_hosts.is_empty()
-        || value.proxy.is_some()
-        || value.legacy_fields_specified
-    {
-        return Err(MxcError::malformed_request(format!(
-            "schema {} state-aware typed requests accept directional networking only",
-            version.as_str()
-        )));
-    }
     let network =
         if value.runtime_config.is_none() || value.egress.is_some() || value.ingress.is_some() {
             Some(SdkNetworkInput {

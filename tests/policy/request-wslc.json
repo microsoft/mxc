@@ -1,7 +1,5 @@
 {
-  "policy": {
-    "version": "0.9.0-alpha"
-  },
+  "policy": {},
   "command": "printf parity",
   "containment": {
     "type": "wslc",

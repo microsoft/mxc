@@ -8,8 +8,8 @@
 use std::io::{Read, Write};
 
 use crate::{
-    Error, ExecRequest, LifecycleRequest, LifecycleResult, OperationOptions, ProvisionRequest,
-    ProvisionResult, SandboxId, ValidationResult,
+    Error, ExecRequest, LifecycleResult, OperationOptions, ProvisionRequest, ProvisionResult,
+    SandboxId, ValidationResult,
 };
 pub use wxc_common::models::{
     CaptureDenialsErrorOutput, CaptureDenialsOutput, SandboxOutputMetadata,
@@ -34,57 +34,45 @@ pub fn validate_provision(
 }
 
 /// Start an existing sandbox.
-pub fn start(
-    sandbox_id: &SandboxId,
-    request: LifecycleRequest,
-    options: OperationOptions,
-) -> Result<LifecycleResult, Error> {
-    mxc_engine::start_sandbox(sandbox_id, request, options)
+pub fn start(sandbox_id: &SandboxId, options: OperationOptions) -> Result<LifecycleResult, Error> {
+    mxc_engine::start_sandbox(sandbox_id, options)
 }
 
 /// Validate a start request without starting the sandbox.
 pub fn validate_start(
     sandbox_id: &SandboxId,
-    request: LifecycleRequest,
     options: OperationOptions,
 ) -> Result<ValidationResult, Error> {
-    mxc_engine::validate_start(sandbox_id, request, options)
+    mxc_engine::validate_start(sandbox_id, options)
 }
 
 /// Stop an existing sandbox.
-pub fn stop(
-    sandbox_id: &SandboxId,
-    request: LifecycleRequest,
-    options: OperationOptions,
-) -> Result<LifecycleResult, Error> {
-    mxc_engine::stop_sandbox(sandbox_id, request, options)
+pub fn stop(sandbox_id: &SandboxId, options: OperationOptions) -> Result<LifecycleResult, Error> {
+    mxc_engine::stop_sandbox(sandbox_id, options)
 }
 
 /// Validate a stop request without stopping the sandbox.
 pub fn validate_stop(
     sandbox_id: &SandboxId,
-    request: LifecycleRequest,
     options: OperationOptions,
 ) -> Result<ValidationResult, Error> {
-    mxc_engine::validate_stop(sandbox_id, request, options)
+    mxc_engine::validate_stop(sandbox_id, options)
 }
 
 /// Deprovision an existing sandbox.
 pub fn deprovision(
     sandbox_id: &SandboxId,
-    request: LifecycleRequest,
     options: OperationOptions,
 ) -> Result<LifecycleResult, Error> {
-    mxc_engine::deprovision_sandbox(sandbox_id, request, options)
+    mxc_engine::deprovision_sandbox(sandbox_id, options)
 }
 
 /// Validate a deprovision request without changing the sandbox.
 pub fn validate_deprovision(
     sandbox_id: &SandboxId,
-    request: LifecycleRequest,
     options: OperationOptions,
 ) -> Result<ValidationResult, Error> {
-    mxc_engine::validate_deprovision(sandbox_id, request, options)
+    mxc_engine::validate_deprovision(sandbox_id, options)
 }
 
 /// Execute in an existing sandbox and return a live streaming handle.

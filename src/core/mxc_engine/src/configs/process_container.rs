@@ -153,13 +153,10 @@ mod tests {
 
     const TEST_COMMAND: &str = "echo hello";
 
-    fn policy_for_version(version: &str, network: Option<NetworkSection>) -> SandboxPolicy {
+    fn policy_with_network(network: Option<NetworkSection>) -> SandboxPolicy {
         SandboxPolicy {
-            version: version.to_string(),
-            filesystem: None,
             network,
-            ui: None,
-            timeout_ms: None,
+            ..SandboxPolicy::default()
         }
     }
 
@@ -191,7 +188,7 @@ mod tests {
         };
 
         let request = build_request_with_containment(
-            &policy_for_version("0.9.0-alpha", None),
+            &policy_with_network(None),
             &Containment::ProcessContainer(process_container),
             TEST_COMMAND,
             Some("sdk-test"),
@@ -274,7 +271,7 @@ mod tests {
         };
 
         let request = build_request_with_containment(
-            &policy_for_version("0.8.0-alpha", Some(network)),
+            &policy_with_network(Some(network)),
             &Containment::ProcessContainer(process_container),
             TEST_COMMAND,
             None,
@@ -333,7 +330,7 @@ mod tests {
         };
 
         let request = build_request_with_containment(
-            &policy_for_version("0.8.0-alpha", Some(network)),
+            &policy_with_network(Some(network)),
             &Containment::ProcessContainer(ProcessContainer::default()),
             TEST_COMMAND,
             None,
@@ -362,12 +359,12 @@ mod tests {
         };
 
         let request = build_request_with_containment(
-            &policy_for_version("0.8.0-alpha", None),
+            &policy_with_network(None),
             &Containment::ProcessContainer(process_container),
             TEST_COMMAND,
             None,
         )
-        .expect("schema 0.8 request should build");
+        .expect("v1 request should build");
 
         let capture = request.inner.policy.capture_denials.as_ref().unwrap();
         assert_eq!(capture.mode, RuntimeCaptureDenialsMode::Block);
@@ -376,76 +373,26 @@ mod tests {
     }
 
     #[test]
-    fn rejects_v0_8_process_container_fields_for_legacy_schemas() {
-        for (process_container, field) in [
-            (
-                ProcessContainer {
-                    learning_mode: true,
-                    ..Default::default()
-                },
-                "learningMode",
-            ),
-            (
-                ProcessContainer {
-                    capture_denials: Some(CaptureDenials::default()),
-                    ..Default::default()
-                },
-                "captureDenials",
-            ),
-        ] {
-            let error = build_request_with_containment(
-                &policy_for_version("0.7.0-alpha", None),
-                &Containment::ProcessContainer(process_container),
-                TEST_COMMAND,
-                None,
-            )
-            .expect_err("schema 0.7 must reject schema 0.8 ProcessContainer fields");
-
-            assert!(error.message.contains(field), "{error:?}");
-            assert!(error.message.contains("schema version 0.8"), "{error:?}");
-        }
-    }
-
-    #[test]
     fn legacy_process_container_omits_v0_8_defaults() {
-        let request = build_request_with_containment(
-            &policy_for_version("0.7.0-alpha", None),
-            &Containment::ProcessContainer(ProcessContainer::default()),
-            TEST_COMMAND,
-            None,
+        let contract: mxc_config_contract::published::v0_7_0_alpha::Request =
+            serde_json::from_value(serde_json::json!({
+                "version": "0.7.0-alpha",
+                "containment": "processcontainer",
+                "process": { "commandLine": TEST_COMMAND },
+            }))
+            .expect("schema 0.7 request should parse");
+        let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
+        let request = wxc_common::config_parser::load_one_shot_request_from_contract(
+            wxc_common::config_parser::ExactOneShotContract::V0_7(Box::new(contract)),
+            &mut logger,
         )
         .expect("default ProcessContainer should remain valid for schema 0.7");
 
-        assert!(request.inner.policy.capture_denials.is_none());
+        assert!(request.policy.capture_denials.is_none());
         assert!(!request
-            .inner
             .policy
             .capabilities
             .iter()
             .any(|capability| capability == "learningModeLogging"));
-    }
-
-    #[test]
-    fn rejects_process_container_network_with_legacy_network_config() {
-        let network = NetworkSection {
-            allow_outbound: true,
-            ..Default::default()
-        };
-        let process_container = ProcessContainer {
-            network: Some(ProcessContainerNetwork {
-                allowed_proxy_peer: Some("Contoso.Proxy_123".to_string()),
-            }),
-            ..Default::default()
-        };
-
-        let error = build_request_with_containment(
-            &policy_for_version("0.8.0-alpha", Some(network)),
-            &Containment::ProcessContainer(process_container),
-            TEST_COMMAND,
-            None,
-        )
-        .expect_err("legacy and ProcessContainer directional networking must not mix");
-
-        assert!(error.message.contains("cannot be combined"));
     }
 }

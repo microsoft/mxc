@@ -6,15 +6,11 @@ import {
   Phase,
   STATE_AWARE_VERSION,
   StateAwareContainmentBackend,
-  WINDOWS_SANDBOX_STATE_AWARE_VERSION,
-  WSLC_STATE_AWARE_VERSION,
 } from './state-aware-types.js';
 import { TelemetryConfig } from './types.js';
 
 export {
   STATE_AWARE_VERSION,
-  WINDOWS_SANDBOX_STATE_AWARE_VERSION,
-  WSLC_STATE_AWARE_VERSION,
 };
 
 // Wire-format cross-cutting fields that live at the envelope's top level.
@@ -27,18 +23,7 @@ export const CROSS_CUTTING_FIELDS = ['filesystem', 'network', 'runtimeConfig', '
 // `sandboxId` produced by that backend. Each future state-aware backend
 // declares its own `<BACKEND>_ID_PREFIX` const here.
 export const ISOLATION_SESSION_ID_PREFIX = 'iso';
-export const WINDOWS_SANDBOX_ID_PREFIX = 'wsb';
 export const WSLC_ID_PREFIX = 'wslc';
-
-// Per-backend default schema version stamped onto an envelope when the caller
-// supplies none. Each backend's state-aware surface was promoted at its own
-// schema version, so the default is backend-specific rather than a single
-// global constant.
-const DEFAULT_STATE_AWARE_VERSION: Record<StateAwareContainmentBackend, string> = {
-  isolation_session: STATE_AWARE_VERSION,
-  windows_sandbox: WINDOWS_SANDBOX_STATE_AWARE_VERSION,
-  wslc: WSLC_STATE_AWARE_VERSION,
-};
 
 // Exhaustive backend→prefix map. Typed `Record<StateAwareContainmentBackend,
 // string>` so adding a backend to the union without registering a prefix here
@@ -48,7 +33,6 @@ const DEFAULT_STATE_AWARE_VERSION: Record<StateAwareContainmentBackend, string> 
 // `malformed_id`.
 export const BACKEND_TO_PREFIX: Record<StateAwareContainmentBackend, string> = {
   isolation_session: ISOLATION_SESSION_ID_PREFIX,
-  windows_sandbox: WINDOWS_SANDBOX_ID_PREFIX,
   wslc: WSLC_ID_PREFIX,
 };
 
@@ -105,18 +89,15 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   // Copy of config; fields are removed as they are lifted into the envelope.
   // Anything left becomes <backendSection>.<phase>.
   const backendSpecific: Record<string, unknown> = { ...(config ?? {}) };
-  const defaultVersion = DEFAULT_STATE_AWARE_VERSION[backendKey] ?? STATE_AWARE_VERSION;
   const telemetry = backendSpecific.telemetry as TelemetryConfig | undefined;
-  const requestedVersion = backendSpecific.version;
-  if (requestedVersion !== undefined && requestedVersion !== defaultVersion) {
+  if ('version' in backendSpecific) {
     throw mxcErrorFromCode(
       'malformed_request',
-      `State-aware ${backendKey} requests require schema version '${defaultVersion}', ` +
-      `got '${String(requestedVersion)}'.`,
+      `State-aware high-level requests do not accept a caller-selected version; ` +
+      `the v1 SDK targets exact contract ${STATE_AWARE_VERSION}.`,
     );
   }
-  const version = defaultVersion;
-  delete backendSpecific.version;
+  const version = STATE_AWARE_VERSION;
 
   const fail = (message: string): never => {
     throw mxcErrorFromCode('malformed_request', message);
@@ -199,7 +180,6 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   if (Object.keys(backendSpecific).length > 0) {
     const backendSection = {
       isolation_session: 'isolationSession',
-      windows_sandbox: 'windowsSandbox',
       wslc: 'wslc',
     }[backendKey];
     envelope[backendSection] = { [phase]: backendSpecific };

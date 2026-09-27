@@ -158,23 +158,12 @@ mod attribution_tests {
             NetworkEnforcementCompatibility::LegacyCompatible
         );
 
-        let direct = build_request(
-            &SandboxPolicy {
-                version: "0.7.0-alpha".to_string(),
-                filesystem: None,
-                network: None,
-                ui: None,
-                timeout_ms: None,
-            },
-            "echo direct",
-            None,
-        )
-        .unwrap();
+        let direct = build_request(&SandboxPolicy::default(), "echo direct", None).unwrap();
         assert_eq!(config_schema_version(&direct.inner), "");
         assert_eq!(direct.inner.source_contract, None);
         assert_eq!(
             direct.inner.network_enforcement_compatibility,
-            NetworkEnforcementCompatibility::LegacyCompatible
+            NetworkEnforcementCompatibility::Strict
         );
     }
 }
