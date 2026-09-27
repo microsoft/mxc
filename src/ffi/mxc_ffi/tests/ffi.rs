@@ -10,8 +10,10 @@ use std::ptr;
 
 use mxc_ffi::{
     mxc_available_backends_json, mxc_platform_support_json, mxc_run_request, mxc_run_result_free,
-    mxc_sandbox_stderr_closer, mxc_sandbox_stdout_closer, mxc_sandbox_warnings_json,
-    mxc_stream_closer_close, mxc_stream_closer_free, mxc_string_free, mxc_version, MxcRunResult,
+    mxc_run_typed, mxc_sandbox_stderr_closer, mxc_sandbox_stdout_closer, mxc_sandbox_warnings_json,
+    mxc_spawn_typed, mxc_stream_closer_close, mxc_stream_closer_free, mxc_string_free, mxc_version,
+    MxcEnvironment, MxcErrorDetail, MxcRunResult, MxcTypedOneShotRequest, MxcUtf8Slice,
+    MXC_CONTAINMENT_PROCESS, MXC_TYPED_ABI_VERSION_1,
 };
 
 /// An empty, all-null result to hand to `mxc_run_request`.
@@ -19,6 +21,32 @@ fn zeroed_result() -> MxcRunResult {
     // SAFETY: `MxcRunResult` is `repr(C)` of `i32`s and nullable pointers, so an
     // all-zero value is valid (null pointers, zero status).
     unsafe { std::mem::zeroed() }
+}
+
+fn typed_request(command: &str) -> MxcTypedOneShotRequest {
+    MxcTypedOneShotRequest {
+        abi_version: MXC_TYPED_ABI_VERSION_1,
+        struct_size: std::mem::size_of::<MxcTypedOneShotRequest>(),
+        policy: ptr::null(),
+        command: MxcUtf8Slice {
+            data: command.as_ptr(),
+            len: command.len(),
+        },
+        containment: MXC_CONTAINMENT_PROCESS,
+        process_container: ptr::null(),
+        seatbelt: ptr::null(),
+        lxc: ptr::null(),
+        wslc: ptr::null(),
+        container_name: ptr::null(),
+        working_directory: ptr::null(),
+        environment: MxcEnvironment {
+            is_set: 0,
+            entries: ptr::null(),
+            len: 0,
+        },
+        inherit_default_env: 0,
+        experimental: 0,
+    }
 }
 
 #[test]
@@ -124,6 +152,49 @@ fn extern_run_request_rejects_null_result_before_parsing() {
     let status = unsafe { mxc_run_request(invalid_utf8.as_ptr().cast(), ptr::null_mut()) };
 
     assert_eq!(status, mxc_ffi::MXC_STATUS_NULL_ARGUMENT);
+}
+
+#[test]
+fn extern_typed_run_rejects_null_result_before_reading_request() {
+    // SAFETY: both null pointers are deliberate precondition inputs.
+    let status = unsafe { mxc_run_typed(ptr::null(), ptr::null_mut()) };
+    assert_eq!(status, mxc_ffi::MXC_STATUS_NULL_ARGUMENT);
+}
+
+#[test]
+fn extern_typed_run_rejects_unknown_abi_revision() {
+    let mut request = typed_request("echo hello");
+    request.abi_version = 99;
+    let mut out = zeroed_result();
+    // SAFETY: request and output pointers are valid for the duration of the call.
+    let status = unsafe { mxc_run_typed(&request, &mut out) };
+
+    assert_eq!(status, mxc_ffi::MXC_STATUS_MALFORMED_REQUEST);
+    assert_eq!(out.status, status);
+    // SAFETY: failure populated a valid owned C string.
+    let message = unsafe { CStr::from_ptr(out.error.message_utf8) }
+        .to_str()
+        .unwrap();
+    assert!(message.contains("ABI version"), "{message}");
+    // SAFETY: `out` was filled by `mxc_run_typed`.
+    unsafe { mxc_run_result_free(&mut out) };
+}
+
+#[test]
+fn extern_typed_spawn_initializes_outputs_before_validation() {
+    let mut request = typed_request("echo hello");
+    request.struct_size = 0;
+    let mut handle = ptr::dangling_mut();
+    // SAFETY: all-zero is a valid empty detail.
+    let mut error: MxcErrorDetail = unsafe { std::mem::zeroed() };
+    // SAFETY: request and out-parameters are valid for the duration of the call.
+    let status = unsafe { mxc_spawn_typed(&request, &mut handle, &mut error) };
+
+    assert_eq!(status, mxc_ffi::MXC_STATUS_MALFORMED_REQUEST);
+    assert!(handle.is_null());
+    assert!(!error.message_utf8.is_null());
+    // SAFETY: the standalone detail was filled by `mxc_spawn_typed`.
+    unsafe { mxc_ffi::mxc_error_detail_free(&mut error) };
 }
 
 /// A real run requires a host backend; on Windows that means an elevated,

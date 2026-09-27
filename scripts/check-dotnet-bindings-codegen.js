@@ -42,7 +42,7 @@ function listFiles(directory) {
 // entry point. The generated file is excluded because it is the output under
 // test.
 const managedSource = join(repoRoot, "sdk", "dotnet", "Microsoft.Mxc.Sdk");
-const REQUIRED_ENTRY_POINTS = [
+const managedEntryPoints = [
   ...new Set(
     listFiles(managedSource)
       .filter((path) => path.endsWith(".cs") && path !== generated)
@@ -52,10 +52,14 @@ const REQUIRED_ENTRY_POINTS = [
       .map((match) => match[1])
   ),
 ].sort();
-if (REQUIRED_ENTRY_POINTS.length === 0) {
+if (managedEntryPoints.length === 0) {
   console.error("ERROR: found no NativeMethods.mxc_* call sites in the C# SDK");
   process.exit(1);
 }
+const ABI_ONLY_ENTRY_POINTS = ["mxc_run_typed", "mxc_spawn_typed"];
+const REQUIRED_ENTRY_POINTS = [
+  ...new Set([...managedEntryPoints, ...ABI_ONLY_ENTRY_POINTS]),
+].sort();
 
 // Remove any stale copy so we prove codegen actually (re)produces it.
 if (existsSync(generated)) {
@@ -96,6 +100,8 @@ if (missing.length > 0) {
 const requiredSignatures = [
   "mxc_run_request(byte* request_json_utf8, MxcRunResult* @out)",
   "mxc_spawn_request(byte* request_json_utf8, MxcSandbox** out_handle, MxcErrorDetail* out_error)",
+  "mxc_run_typed(MxcTypedOneShotRequest* request, MxcRunResult* @out)",
+  "mxc_spawn_typed(MxcTypedOneShotRequest* request, MxcSandbox** out_handle, MxcErrorDetail* out_error)",
 ];
 const missingSignatures = requiredSignatures.filter(
   (signature) => !content.includes(signature)
@@ -164,6 +170,6 @@ if (notDeclared.length > 0) {
 }
 
 console.log(
-  `C# bindings codegen OK: generated every one of ${REQUIRED_ENTRY_POINTS.length} managed entry points; ` +
+  `C# bindings codegen OK: generated all ${REQUIRED_ENTRY_POINTS.length} required entry points; ` +
     `${csbindgenInputs.length} csbindgen source(s) all declared as rerun-if-changed`
 );
