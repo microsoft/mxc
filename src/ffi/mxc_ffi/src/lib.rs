@@ -5,12 +5,18 @@
 //!
 //! This is the flat, panic-safe C surface loaded by language bindings.
 //!
-//! - **Run to completion** — [`mxc_run_request`] accepts a binding request.
+//! - **Typed run to completion** — [`mxc_run_typed`] accepts a versioned
+//!   borrowed C structure and adapts directly through the Rust SDK.
+//! - **Compatibility run to completion** — [`mxc_run_request`] accepts the
+//!   existing private co-versioned binding JSON request.
 //! - **Host discovery** — [`mxc_available_backends_json`] reports every
 //!   host-available backend, while [`mxc_platform_support_json`] reports the
 //!   subset this SDK can launch.
-//! - **Streaming** (`streaming` module) — [`mxc_spawn_request`] accepts the
-//!   same binding request and returns an opaque live handle.
+//! - **Typed streaming** — [`mxc_spawn_typed`] accepts the typed one-shot
+//!   request and returns an opaque live handle.
+//! - **Compatibility streaming** (`streaming` module) —
+//!   [`mxc_spawn_request`] accepts the private binding JSON request and returns
+//!   the same opaque handle type.
 //! - **State-aware lifecycle** (`state_aware` module) — [`mxc_state_aware`]
 //!   drives the envelope phases (provision / start / stop / deprovision), and
 //!   [`mxc_state_aware_exec`] runs the exec phase as a live streaming handle
@@ -32,10 +38,12 @@
 //! - **Never unwinds**: every entry point wraps its body in
 //!   [`std::panic::catch_unwind`]; a panic becomes a status code
 //!   ([`MXC_STATUS_PANIC`]), never an unwind across the boundary.
-//! - **Data contract**: JSON in, captured bytes + status out. The status codes
-//!   mirror `mxc_sdk::ErrorCode` one-for-one (plus a few FFI-local codes).
-//! - **Per-invocation telemetry opt-in**: request JSON uses
-//!   `policy.telemetry.enabled`.
+//! - **Data contracts**: typed calls borrow versioned C structures;
+//!   compatibility calls borrow JSON. Both return captured bytes + status.
+//!   The status codes mirror `mxc_sdk::ErrorCode` one-for-one (plus a few
+//!   FFI-local codes).
+//! - **Per-invocation telemetry opt-in**: typed requests use the explicit
+//!   optional field; compatibility JSON uses `policy.telemetry.enabled`.
 //! - **WSLC native co-location** (`wslc` feature, Windows): `wslcsdk.dll`, plus
 //!   `wxc-wslc-daemon.exe` for the state-aware lifecycle, must sit beside this
 //!   library rather than beside the application host, because both resolve
@@ -64,9 +72,11 @@ mod error_detail;
 mod request;
 mod state_aware;
 mod streaming;
+mod typed;
 pub use error_detail::*;
 pub use state_aware::*;
 pub use streaming::*;
+pub use typed::*;
 
 /// Return code from an FFI telemetry-consent presenter callback.
 pub const MXC_TELEMETRY_CONSENT_DECISION_NO: i32 = 0;
@@ -381,7 +391,7 @@ fn run_request_inner(request_json_utf8: *const c_char) -> MxcRunResult {
     execute_request(request)
 }
 
-fn execute_request(request: SandboxRequest) -> MxcRunResult {
+pub(crate) fn execute_request(request: SandboxRequest) -> MxcRunResult {
     match run(request) {
         Ok(output) => {
             let (exit_code, timed_out) = match output.outcome {
