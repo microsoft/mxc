@@ -285,7 +285,7 @@ pub struct MxcExecOutcome {
 /// Split out of the `extern "C"` entry point so it is testable without a live
 /// backend: both fields are `i32`, so a transposition compiles and inverts every
 /// caller-visible signal.
-fn exec_outcome_to_abi(outcome: WaitOutcome) -> MxcExecOutcome {
+pub(crate) fn exec_outcome_to_abi(outcome: WaitOutcome) -> MxcExecOutcome {
     match outcome {
         WaitOutcome::Exited(code) => MxcExecOutcome {
             timed_out: 0,

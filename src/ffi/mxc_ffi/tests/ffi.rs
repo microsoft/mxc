@@ -11,9 +11,11 @@ use std::ptr;
 use mxc_ffi::{
     mxc_available_backends_json, mxc_platform_support_json, mxc_run_json, mxc_run_request,
     mxc_run_result_free, mxc_run_typed, mxc_sandbox_stderr_closer, mxc_sandbox_stdout_closer,
-    mxc_sandbox_warnings_json, mxc_spawn_json, mxc_spawn_typed, mxc_stream_closer_close,
+    mxc_sandbox_warnings_json, mxc_spawn_json, mxc_spawn_typed, mxc_state_aware_exec_typed,
+    mxc_state_aware_typed, mxc_state_aware_typed_result_free, mxc_stream_closer_close,
     mxc_stream_closer_free, mxc_string_free, mxc_version, MxcEnvironment, MxcErrorDetail,
-    MxcRunResult, MxcTypedOneShotRequest, MxcUtf8Slice, MXC_CONTAINMENT_PROCESS,
+    MxcOptionalBool, MxcRunResult, MxcTypedOneShotRequest, MxcTypedStateAwareRequest,
+    MxcTypedStateAwareResult, MxcUtf8Slice, MXC_CONTAINMENT_PROCESS, MXC_STATE_AWARE_START,
     MXC_TYPED_ABI_VERSION_1,
 };
 
@@ -46,6 +48,22 @@ fn typed_request(command: &str) -> MxcTypedOneShotRequest {
             len: 0,
         },
         inherit_default_env: 0,
+        experimental: 0,
+    }
+}
+
+fn typed_start_request(id: &MxcUtf8Slice) -> MxcTypedStateAwareRequest {
+    MxcTypedStateAwareRequest {
+        abi_version: MXC_TYPED_ABI_VERSION_1,
+        struct_size: std::mem::size_of::<MxcTypedStateAwareRequest>(),
+        operation: MXC_STATE_AWARE_START,
+        sandbox_id: id,
+        provision: ptr::null(),
+        exec: ptr::null(),
+        telemetry_enabled: MxcOptionalBool {
+            is_set: 0,
+            value: 0,
+        },
         experimental: 0,
     }
 }
@@ -228,6 +246,53 @@ fn extern_raw_json_spawn_checks_output_before_parsing() {
         )
     };
     assert_eq!(status, mxc_ffi::MXC_STATUS_NULL_ARGUMENT);
+}
+
+#[test]
+fn extern_typed_lifecycle_rejects_windows_sandbox_before_dispatch() {
+    let id_text = "wsb:example";
+    let id = MxcUtf8Slice {
+        data: id_text.as_ptr(),
+        len: id_text.len(),
+    };
+    let request = typed_start_request(&id);
+    // SAFETY: all-zero is a valid empty typed result.
+    let mut out: MxcTypedStateAwareResult = unsafe { std::mem::zeroed() };
+    // SAFETY: request and output storage remain valid for the call.
+    let status = unsafe { mxc_state_aware_typed(&request, 1, &mut out) };
+
+    assert_eq!(status, mxc_ffi::MXC_STATUS_MALFORMED_REQUEST);
+    assert!(!out.error.message_utf8.is_null());
+    // SAFETY: result was populated by the typed lifecycle entry point.
+    unsafe { mxc_state_aware_typed_result_free(&mut out) };
+}
+
+#[test]
+fn extern_typed_lifecycle_checks_result_before_request() {
+    // SAFETY: deliberate null precondition inputs.
+    let status = unsafe { mxc_state_aware_typed(ptr::null(), 0, ptr::null_mut()) };
+    assert_eq!(status, mxc_ffi::MXC_STATUS_NULL_ARGUMENT);
+}
+
+#[test]
+fn extern_typed_exec_initializes_outputs_before_validating_operation() {
+    let id_text = "iso:example";
+    let id = MxcUtf8Slice {
+        data: id_text.as_ptr(),
+        len: id_text.len(),
+    };
+    let request = typed_start_request(&id);
+    let mut handle = ptr::dangling_mut();
+    // SAFETY: all-zero is a valid empty detail.
+    let mut error: MxcErrorDetail = unsafe { std::mem::zeroed() };
+    // SAFETY: request and output storage remain valid for the call.
+    let status = unsafe { mxc_state_aware_exec_typed(&request, &mut handle, &mut error) };
+
+    assert_eq!(status, mxc_ffi::MXC_STATUS_MALFORMED_REQUEST);
+    assert!(handle.is_null());
+    assert!(!error.message_utf8.is_null());
+    // SAFETY: detail was populated by the typed exec entry point.
+    unsafe { mxc_ffi::mxc_error_detail_free(&mut error) };
 }
 
 /// A real run requires a host backend; on Windows that means an elevated,
