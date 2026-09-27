@@ -656,4 +656,66 @@ mod tests {
             "typed v1 must keep Windows Sandbox on raw JSON"
         );
     }
+
+    #[test]
+    fn typed_provision_preserves_presence_sensitive_filesystem_input() {
+        let filesystem = MxcTypedFilesystemPolicy {
+            readwrite_paths: crate::MxcUtf8SliceList {
+                items: ptr::null(),
+                len: 0,
+            },
+            readonly_paths: crate::MxcUtf8SliceList {
+                items: ptr::null(),
+                len: 0,
+            },
+            denied_paths: crate::MxcUtf8SliceList {
+                items: ptr::null(),
+                len: 0,
+            },
+            clear_policy_on_exit: MxcOptionalBool {
+                is_set: 1,
+                value: 1,
+            },
+        };
+        let provision = MxcTypedProvisionRequest {
+            backend: MXC_STATE_AWARE_WSLC,
+            app_id: ptr::null(),
+            image: ptr::null(),
+            image_tar_path: ptr::null(),
+            filesystem: &filesystem,
+            network: ptr::null(),
+        };
+        let request = MxcTypedStateAwareRequest {
+            abi_version: MXC_TYPED_ABI_VERSION_1,
+            struct_size: std::mem::size_of::<MxcTypedStateAwareRequest>(),
+            operation: MXC_STATE_AWARE_PROVISION,
+            sandbox_id: ptr::null(),
+            provision: &provision,
+            exec: ptr::null(),
+            telemetry_enabled: MxcOptionalBool {
+                is_set: 0,
+                value: 0,
+            },
+            experimental: 0,
+        };
+
+        // SAFETY: every pointer remains valid for the call.
+        let result = unsafe { run(&request, true) };
+        assert_eq!(result.status, crate::MXC_STATUS_MALFORMED_REQUEST);
+        // SAFETY: result owns its strings.
+        let mut result = result;
+        unsafe { mxc_state_aware_typed_result_free(&mut result) };
+    }
+
+    #[test]
+    fn typed_result_free_is_idempotent() {
+        let mut result = MxcTypedStateAwareResult::empty();
+        result.sandbox_id_utf8 = alloc_cstring(b"iso:example");
+        // SAFETY: result owns its allocated string.
+        unsafe {
+            mxc_state_aware_typed_result_free(&mut result);
+            mxc_state_aware_typed_result_free(&mut result);
+        }
+        assert!(result.sandbox_id_utf8.is_null());
+    }
 }
