@@ -9,11 +9,12 @@ use std::ffi::{CStr, CString};
 use std::ptr;
 
 use mxc_ffi::{
-    mxc_available_backends_json, mxc_platform_support_json, mxc_run_request, mxc_run_result_free,
-    mxc_run_typed, mxc_sandbox_stderr_closer, mxc_sandbox_stdout_closer, mxc_sandbox_warnings_json,
-    mxc_spawn_typed, mxc_stream_closer_close, mxc_stream_closer_free, mxc_string_free, mxc_version,
-    MxcEnvironment, MxcErrorDetail, MxcRunResult, MxcTypedOneShotRequest, MxcUtf8Slice,
-    MXC_CONTAINMENT_PROCESS, MXC_TYPED_ABI_VERSION_1,
+    mxc_available_backends_json, mxc_platform_support_json, mxc_run_json, mxc_run_request,
+    mxc_run_result_free, mxc_run_typed, mxc_sandbox_stderr_closer, mxc_sandbox_stdout_closer,
+    mxc_sandbox_warnings_json, mxc_spawn_json, mxc_spawn_typed, mxc_stream_closer_close,
+    mxc_stream_closer_free, mxc_string_free, mxc_version, MxcEnvironment, MxcErrorDetail,
+    MxcRunResult, MxcTypedOneShotRequest, MxcUtf8Slice, MXC_CONTAINMENT_PROCESS,
+    MXC_TYPED_ABI_VERSION_1,
 };
 
 /// An empty, all-null result to hand to `mxc_run_request`.
@@ -195,6 +196,38 @@ fn extern_typed_spawn_initializes_outputs_before_validation() {
     assert!(!error.message_utf8.is_null());
     // SAFETY: the standalone detail was filled by `mxc_spawn_typed`.
     unsafe { mxc_ffi::mxc_error_detail_free(&mut error) };
+}
+
+#[test]
+fn extern_raw_json_rejects_state_aware_envelopes() {
+    let request =
+        CString::new(r#"{"version":"1.0.0","phase":"start","sandboxId":"iso:example"}"#).unwrap();
+    let mut out = zeroed_result();
+    // SAFETY: valid C string and output storage.
+    let status = unsafe { mxc_run_json(request.as_ptr(), &mut out) };
+
+    assert_eq!(status, mxc_ffi::MXC_STATUS_MALFORMED_REQUEST);
+    // SAFETY: failure populated a valid owned C string.
+    let message = unsafe { CStr::from_ptr(out.error.message_utf8) }
+        .to_str()
+        .unwrap();
+    assert!(message.contains("one-shot"), "{message}");
+    // SAFETY: `out` was filled by `mxc_run_json`.
+    unsafe { mxc_run_result_free(&mut out) };
+}
+
+#[test]
+fn extern_raw_json_spawn_checks_output_before_parsing() {
+    let invalid_utf8 = [0xff_u8, 0];
+    // SAFETY: NUL-terminated bytes and deliberate null out-parameters.
+    let status = unsafe {
+        mxc_spawn_json(
+            invalid_utf8.as_ptr().cast(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+        )
+    };
+    assert_eq!(status, mxc_ffi::MXC_STATUS_NULL_ARGUMENT);
 }
 
 /// A real run requires a host backend; on Windows that means an elevated,

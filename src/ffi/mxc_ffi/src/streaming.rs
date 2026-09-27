@@ -64,7 +64,7 @@ use std::io::{Read, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
-use mxc_sdk::{spawn_sandbox, Sandbox, StreamCloser, WaitOutcome};
+use mxc_sdk::{spawn_sandbox, spawn_sandbox_json, Sandbox, StreamCloser, WaitOutcome};
 
 use crate::{
     alloc_cstring, cstr_to_str, request, status_from_error_code, MxcErrorDetail,
@@ -179,6 +179,63 @@ pub unsafe extern "C" fn mxc_spawn_request(
 
     // SAFETY: `out_handle` is non-null and `out_error` is null or writable.
     unsafe { finish_spawn(outcome, out_handle, out_error) }
+}
+
+/// Spawn a raw exact-version one-shot JSON request as a live sandbox.
+///
+/// # Safety
+/// - `request_json_utf8` must be null or valid NUL-terminated UTF-8.
+/// - `out_handle` must point to writable pointer storage holding no live
+///   handle.
+/// - `out_error` must be null or point to fresh writable detail storage.
+#[no_mangle]
+pub unsafe extern "C" fn mxc_spawn_json(
+    request_json_utf8: *const c_char,
+    out_handle: *mut *mut MxcSandbox,
+    out_error: *mut MxcErrorDetail,
+) -> i32 {
+    if !out_handle.is_null() {
+        // SAFETY: caller-guaranteed writable pointer-sized storage.
+        unsafe { *out_handle = ptr::null_mut() };
+    }
+    if !out_error.is_null() {
+        // SAFETY: caller-guaranteed writable storage for one fresh detail.
+        unsafe { ptr::write(out_error, MxcErrorDetail::none()) };
+    }
+    if out_handle.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+
+    let outcome = catch_unwind(AssertUnwindSafe(|| spawn_json_inner(request_json_utf8)))
+        .unwrap_or_else(|panic| {
+            crate::report_panic("mxc_spawn_json", &*panic);
+            Err((
+                MXC_STATUS_PANIC,
+                MxcErrorDetail::from_message("the mxc engine panicked"),
+            ))
+        });
+    // SAFETY: `out_handle` is non-null and `out_error` is null or writable.
+    unsafe { finish_spawn(outcome, out_handle, out_error) }
+}
+
+fn spawn_json_inner(request_json_utf8: *const c_char) -> Result<Sandbox, (i32, MxcErrorDetail)> {
+    // SAFETY: caller contract on `mxc_spawn_json`; borrowed only within scope.
+    let request_json = match unsafe { cstr_to_str(request_json_utf8) } {
+        Some(value) => value,
+        None if request_json_utf8.is_null() => {
+            return Err((
+                MXC_STATUS_NULL_ARGUMENT,
+                MxcErrorDetail::from_message("request JSON pointer is null"),
+            ))
+        }
+        None => {
+            return Err((
+                MXC_STATUS_INVALID_UTF8,
+                MxcErrorDetail::from_message("request JSON is not UTF-8"),
+            ))
+        }
+    };
+    spawn_sandbox_json(request_json).map_err(sdk_error_detail)
 }
 
 fn spawn_request_inner(request_json_utf8: *const c_char) -> Result<Sandbox, (i32, MxcErrorDetail)> {

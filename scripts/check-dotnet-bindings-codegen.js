@@ -56,7 +56,12 @@ if (managedEntryPoints.length === 0) {
   console.error("ERROR: found no NativeMethods.mxc_* call sites in the C# SDK");
   process.exit(1);
 }
-const ABI_ONLY_ENTRY_POINTS = ["mxc_run_typed", "mxc_spawn_typed"];
+const ABI_ONLY_ENTRY_POINTS = [
+  "mxc_run_json",
+  "mxc_run_typed",
+  "mxc_spawn_json",
+  "mxc_spawn_typed",
+];
 const REQUIRED_ENTRY_POINTS = [
   ...new Set([...managedEntryPoints, ...ABI_ONLY_ENTRY_POINTS]),
 ].sort();
@@ -99,7 +104,9 @@ if (missing.length > 0) {
 
 const requiredSignatures = [
   "mxc_run_request(byte* request_json_utf8, MxcRunResult* @out)",
+  "mxc_run_json(byte* request_json_utf8, MxcRunResult* @out)",
   "mxc_spawn_request(byte* request_json_utf8, MxcSandbox** out_handle, MxcErrorDetail* out_error)",
+  "mxc_spawn_json(byte* request_json_utf8, MxcSandbox** out_handle, MxcErrorDetail* out_error)",
   "mxc_run_typed(MxcTypedOneShotRequest* request, MxcRunResult* @out)",
   "mxc_spawn_typed(MxcTypedOneShotRequest* request, MxcSandbox** out_handle, MxcErrorDetail* out_error)",
 ];

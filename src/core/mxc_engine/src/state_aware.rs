@@ -385,7 +385,7 @@ fn normalize_sdk_state_aware(
 /// Map a [`config_parser::ParseError`](wxc_common::config_parser::ParseError) to
 /// an [`MxcError`]. The state-aware arm already carries one; the decode,
 /// version, and one-shot arms carry a `WxcError` that maps to `malformed_request`.
-fn parse_error_to_mxc(e: wxc_common::config_parser::ParseError) -> MxcError {
+pub(crate) fn parse_error_to_mxc(e: wxc_common::config_parser::ParseError) -> MxcError {
     use wxc_common::config_parser::ParseError;
     match e {
         ParseError::StateAware(err) => err,
