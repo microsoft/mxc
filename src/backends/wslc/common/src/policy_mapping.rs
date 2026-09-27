@@ -72,10 +72,17 @@ pub fn windows_path_to_container_path(windows_path: &str) -> Option<String> {
 /// the cwd was omitted and yields `Ok(None)`, so the container default applies.
 /// Any other value that cannot be mapped is an error rather than being dropped,
 /// because running the workload in a directory the caller did not ask for is a
-/// silent policy deviation.
+/// silent policy deviation. For the same reason a value with an interior NUL is
+/// rejected: the SDK takes a C string and would see only the prefix.
 pub fn container_working_directory(cwd: &str) -> Result<Option<String>, String> {
     if cwd.trim().is_empty() {
         return Ok(None);
+    }
+    if cwd.contains('\0') {
+        return Err(format!(
+            "WSLC: process.cwd {cwd:?} contains an interior NUL byte, which is not a \
+             valid C string"
+        ));
     }
     windows_path_to_container_path(cwd)
         .map(Some)
@@ -677,6 +684,16 @@ mod tests {
                 "error must name the field: {err}"
             );
         }
+    }
+
+    #[test]
+    fn cwd_interior_nul_is_rejected_not_truncated() {
+        let err = container_working_directory("C:\\work\0ignored")
+            .expect_err("an interior NUL must be rejected, not truncated at the C boundary");
+        assert!(
+            err.contains("interior NUL"),
+            "error explains the cause: {err}"
+        );
     }
 
     // -- Volume mount tests --
