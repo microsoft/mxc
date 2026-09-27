@@ -36,14 +36,11 @@ public enum StateAwareNetworkDefault
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed class StateAwareNetworkPolicy
 {
-    internal string? LegacyFieldSpecified { get; private set; }
-
     /// <summary>Directional outbound posture for WSLC provision.</summary>
     public NetworkEgressPolicy? Egress { get; set; }
 
     /// <summary>Directional inbound and host-loopback posture for WSLC provision.</summary>
     public NetworkIngressPolicy? Ingress { get; set; }
-
 }
 
 /// <summary>Filesystem posture sent on a state-aware lifecycle request.</summary>
