@@ -65,6 +65,31 @@ pub fn windows_path_to_container_path(windows_path: &str) -> Option<String> {
     Some(format!("/mnt/{}{}", drive_lower, rest_forward))
 }
 
+/// Map a one-shot `process.cwd` to the container working directory.
+///
+/// The one-shot surface takes a local Windows drive path and maps it under
+/// `/mnt/<drive>` with [`windows_path_to_container_path`]. A blank value means
+/// the cwd was omitted and yields `Ok(None)`, so the container default applies.
+/// Any other value that cannot be mapped is an error rather than being dropped,
+/// because running the workload in a directory the caller did not ask for is a
+/// silent policy deviation.
+pub fn container_working_directory(cwd: &str) -> Result<Option<String>, String> {
+    if cwd.trim().is_empty() {
+        return Ok(None);
+    }
+    windows_path_to_container_path(cwd)
+        .map(Some)
+        .ok_or_else(|| {
+            format!(
+                "WSLC: process.cwd {cwd:?} is not a local Windows drive path. The one-shot \
+             WSLc surface maps process.cwd from a host path under /mnt/<drive> \
+             (e.g. C:\\work -> /mnt/c/work); relative, drive-relative, UNC, and \
+             in-container paths are not supported. To start in an absolute \
+             in-container path such as /work, use the state-aware lifecycle."
+            )
+        })
+}
+
 /// Build volume mounts from a container policy's filesystem paths.
 ///
 /// - `readwrite_paths` → mounts with `read_only: false`
@@ -612,6 +637,46 @@ mod tests {
     #[test]
     fn path_relative_returns_none() {
         assert_eq!(windows_path_to_container_path("relative/path"), None);
+    }
+
+    // -- Working-directory mapping tests --
+
+    #[test]
+    fn cwd_blank_is_omitted() {
+        for cwd in ["", "   ", "\t"] {
+            assert_eq!(container_working_directory(cwd), Ok(None), "cwd {cwd:?}");
+        }
+    }
+
+    #[test]
+    fn cwd_drive_paths_are_mapped() {
+        for (cwd, expected) in [
+            (r"C:\work", "/mnt/c/work"),
+            ("C:/work", "/mnt/c/work"),
+            (r"D:\data\sub", "/mnt/d/data/sub"),
+            ("C:", "/mnt/c"),
+        ] {
+            assert_eq!(
+                container_working_directory(cwd),
+                Ok(Some(expected.to_string())),
+                "cwd {cwd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cwd_unmappable_values_are_rejected() {
+        for cwd in ["/workspace", "work", "sub/dir", "C:work", r"\\server\share"] {
+            let err = container_working_directory(cwd).unwrap_err();
+            assert!(
+                err.contains(&format!("{cwd:?}")),
+                "error must name the value {cwd:?}: {err}"
+            );
+            assert!(
+                err.contains("process.cwd"),
+                "error must name the field: {err}"
+            );
+        }
     }
 
     // -- Volume mount tests --

@@ -598,6 +598,39 @@ mod tests {
         );
     }
 
+    /// Regression for #902 on the streaming path: an unmappable cwd is refused
+    /// before `start_container`, rather than dropped once the container exists.
+    #[test]
+    fn spawn_rejects_unmappable_working_directory_before_touching_the_wslc_sdk() {
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            script_code: "pwd".to_string(),
+            working_directory: "/workspace".to_string(),
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+        let mut runner = WSLContainerRunner::new(&wxc_common::models::WslcConfig::default());
+
+        let err = runner
+            .spawn(&request, &mut logger, StdioMode::Pipes)
+            .err()
+            .expect("an unmappable cwd must not produce a live container");
+        assert!(
+            err.error_message.contains("\"/workspace\""),
+            "the refusal must name the cwd: {}",
+            err.error_message
+        );
+        assert_eq!(
+            err.failure_phase,
+            wxc_common::models::FailurePhase::Rejected
+        );
+        assert!(
+            !logger.get_buffer().contains(START_CONTAINER_BANNER),
+            "guard must run before `start_container`; logger: {}",
+            logger.get_buffer()
+        );
+    }
+
     /// The exact contradiction the streaming contract forbids: a timed-out run
     /// is killed, so the container *has* an exit code to report — and reporting
     /// it would turn `wait`'s `Err(TimedOut)` into a later `Ok(Some(137))`.
