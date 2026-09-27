@@ -124,38 +124,34 @@ public static class MxcSandbox
     public static RunResult Run(SandboxRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-
-        var requestBuf = ToNullTerminatedUtf8(SerializeRequest(request));
+        using var marshaller = TypedRequestMarshaller.ForOneShot(PrepareRequest(request));
 
         unsafe
         {
-            fixed (byte* requestPtr = requestBuf)
+            MxcRunResult result = default;
+            var status = NativeMethods.mxc_run_typed(marshaller.OneShotRequest, &result);
+            try
             {
-                MxcRunResult result = default;
-                var status = NativeMethods.mxc_run_request(requestPtr, &result);
-                try
+                if (status != (int)ErrorCode.Success)
                 {
-                    if (status != (int)ErrorCode.Success)
-                    {
-                        throw NativeError.ToException(status, result.error, "unknown error");
-                    }
+                    throw NativeError.ToException(status, result.error, "unknown error");
+                }
 
-                    return new RunResult
-                    {
-                        ExitCode = result.exit_code,
-                        TimedOut = result.timed_out != 0,
-                        Stdout = PtrToString(result.stdout_utf8) ?? string.Empty,
-                        Stderr = PtrToString(result.stderr_utf8) ?? string.Empty,
-                        OutputMetadata = DeserializeOutputMetadata(
-                            PtrToString(result.output_metadata_json_utf8)),
-                        Warnings = DeserializeWarnings(
-                            PtrToString(result.warnings_json_utf8)),
-                    };
-                }
-                finally
+                return new RunResult
                 {
-                    NativeMethods.mxc_run_result_free(&result);
-                }
+                    ExitCode = result.exit_code,
+                    TimedOut = result.timed_out != 0,
+                    Stdout = PtrToString(result.stdout_utf8) ?? string.Empty,
+                    Stderr = PtrToString(result.stderr_utf8) ?? string.Empty,
+                    OutputMetadata = DeserializeOutputMetadata(
+                        PtrToString(result.output_metadata_json_utf8)),
+                    Warnings = DeserializeWarnings(
+                        PtrToString(result.warnings_json_utf8)),
+                };
+            }
+            finally
+            {
+                NativeMethods.mxc_run_result_free(&result);
             }
         }
     }
@@ -201,35 +197,33 @@ public static class MxcSandbox
     public static MxcSandboxProcess Spawn(SandboxRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-
-        var requestBuf = ToNullTerminatedUtf8(SerializeRequest(request));
+        var prepared = PrepareRequest(request);
+        using var marshaller = TypedRequestMarshaller.ForOneShot(prepared);
 
         unsafe
         {
-            fixed (byte* requestPtr = requestBuf)
+            NativeSandbox* handle = null;
+            MxcErrorDetail error = default;
+            var status = NativeMethods.mxc_spawn_typed(
+                marshaller.OneShotRequest, &handle, &error);
+            if (status != (int)ErrorCode.Success)
             {
-                NativeSandbox* handle = null;
-                MxcErrorDetail error = default;
-                var status = NativeMethods.mxc_spawn_request(requestPtr, &handle, &error);
-                if (status != (int)ErrorCode.Success)
+                // `finally`, not a straight-line free: marshalling the strings or
+                // allocating the exception can throw, and on that path the detail
+                // would never be released. Ownership has to be discharged however
+                // we leave this block.
+                try
                 {
-                    // `finally`, not a straight-line free: marshalling the strings or
-                    // allocating the exception can throw, and on that path the detail
-                    // would never be released. Ownership has to be discharged however
-                    // we leave this block.
-                    try
-                    {
-                        throw NativeError.ToException(status, error, "unknown error");
-                    }
-                    finally
-                    {
-                        NativeMethods.mxc_error_detail_free(&error);
-                    }
+                    throw NativeError.ToException(status, error, "unknown error");
                 }
-                return new MxcSandboxProcess(
-                    MxcSandboxHandle.FromRaw(handle),
-                    request.Policy.TimeoutMs);
+                finally
+                {
+                    NativeMethods.mxc_error_detail_free(&error);
+                }
             }
+            return new MxcSandboxProcess(
+                MxcSandboxHandle.FromRaw(handle),
+                prepared.Policy.TimeoutMs);
         }
     }
 
@@ -259,7 +253,7 @@ public static class MxcSandbox
         return JsonSerializer.Serialize(PrepareRequest(request), JsonOptions);
     }
 
-    private static SandboxRequest PrepareRequest(SandboxRequest request)
+    internal static SandboxRequest PrepareRequest(SandboxRequest request)
     {
 #pragma warning disable MXC0001 // Compatibility migration for the obsolete policy field.
         var legacyCaptureDenials = request.Policy.CaptureDenials;

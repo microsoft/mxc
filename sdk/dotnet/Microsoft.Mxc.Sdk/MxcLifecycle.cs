@@ -33,6 +33,13 @@ public static class MxcLifecycle
     private const int ExperimentalOptIn = 1;
     private const int NoExperimentalOptIn = 0;
 
+    private enum LifecycleBackend
+    {
+        IsolationSession,
+        Wslc,
+        WindowsSandbox,
+    }
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -49,27 +56,18 @@ public static class MxcLifecycle
         StateAwareContainment containment,
         StateAwareProvisionOptions? options = null)
     {
-        var result = RunEnvelopePhase(BuildProvisionEnvelope(containment, options), dryRun: false)
-            ?? throw new MxcException(
-                ErrorCode.BackendError,
-                "provision response carried no result object");
-        var sandboxId = result["sandboxId"]?.GetValue<string>()
+        ValidateProvisionOptions(containment, options);
+        using var marshaller = TypedRequestMarshaller.ForProvision(containment, options);
+        var result = RunTypedPhase(marshaller, dryRun: false);
+        var sandboxId = result.SandboxId
             ?? throw new MxcException(
                 ErrorCode.BackendError,
                 "provision response carried no sandboxId");
-        var metadata = result["metadata"];
-        var metadataJson = metadata?.ToJsonString();
         return new ProvisionResult
         {
             SandboxId = new SandboxId(sandboxId),
-            MetadataJson = metadataJson,
-            IsolationSessionMetadata =
-                containment == StateAwareContainment.IsolationSession
-                && metadataJson is not null
-                    ? JsonSerializer.Deserialize<IsolationSessionProvisionMetadata>(
-                        metadataJson,
-                        JsonOptions)
-                    : null,
+            MetadataJson = result.MetadataJson,
+            IsolationSessionMetadata = result.IsolationSessionMetadata,
         };
     }
 
@@ -80,7 +78,9 @@ public static class MxcLifecycle
         StateAwareContainment containment,
         StateAwareProvisionOptions? options = null)
     {
-        RunEnvelopePhase(BuildProvisionEnvelope(containment, options), dryRun: true);
+        ValidateProvisionOptions(containment, options);
+        using var marshaller = TypedRequestMarshaller.ForProvision(containment, options);
+        RunTypedPhase(marshaller, dryRun: true);
     }
 
     internal static JsonObject BuildProvisionEnvelope(
@@ -128,13 +128,13 @@ public static class MxcLifecycle
     /// <summary>Start a provisioned sandbox.</summary>
     public static void StartSandbox(SandboxId id, StateAwarePhaseOptions? options = null)
     {
-        RunEnvelopePhase(BuildStartEnvelope(id, options), dryRun: false);
+        RunNonExecPhase(TypedRequestMarshaller.StateAwareStart, id, options, dryRun: false);
     }
 
     /// <summary>Validate a start request without starting the sandbox.</summary>
     public static void DryRunStartSandbox(SandboxId id, StateAwarePhaseOptions? options = null)
     {
-        RunEnvelopePhase(BuildStartEnvelope(id, options), dryRun: true);
+        RunNonExecPhase(TypedRequestMarshaller.StateAwareStart, id, options, dryRun: true);
     }
 
     internal static JsonObject BuildStartEnvelope(
@@ -158,32 +158,35 @@ public static class MxcLifecycle
         StateAwareExecOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(command);
-        var requestJson = BuildExecEnvelope(id, command, options).ToJsonString();
-        var requestBuf = ToNullTerminatedUtf8(requestJson);
+        ValidateExecOptions(id, options);
+
+        if (BackendForId(id) == LifecycleBackend.WindowsSandbox)
+        {
+            return ExecInSandboxJson(id, command, options);
+        }
+
+        using var marshaller = TypedRequestMarshaller.ForExec(id, command, options);
 
         unsafe
         {
-            fixed (byte* requestPtr = requestBuf)
+            NativeSandbox* handle = null;
+            MxcErrorDetail error = default;
+            var status = NativeMethods.mxc_state_aware_exec_typed(
+                marshaller.StateAwareRequest, &handle, &error);
+            if (status != (int)ErrorCode.Success)
             {
-                NativeSandbox* handle = null;
-                MxcErrorDetail error = default;
-                var status = NativeMethods.mxc_state_aware_exec(
-                    requestPtr, ExperimentalOptInFor(id), &handle, &error);
-                if (status != (int)ErrorCode.Success)
+                try
                 {
-                    try
-                    {
-                        throw NativeError.ToException(status, error, "unknown error");
-                    }
-                    finally
-                    {
-                        NativeMethods.mxc_error_detail_free(&error);
-                    }
+                    throw NativeError.ToException(status, error, "unknown error");
                 }
-                return new MxcSandboxProcess(
-                    MxcSandboxHandle.FromRaw(handle),
-                    MxcSandboxProcess.NormalizeTimeout(options?.TimeoutMs));
+                finally
+                {
+                    NativeMethods.mxc_error_detail_free(&error);
+                }
             }
+            return new MxcSandboxProcess(
+                MxcSandboxHandle.FromRaw(handle),
+                MxcSandboxProcess.NormalizeTimeout(options?.TimeoutMs));
         }
     }
 
@@ -196,34 +199,37 @@ public static class MxcLifecycle
         StateAwareExecOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(command);
-        var requestJson = BuildExecEnvelope(id, command, options).ToJsonString();
-        var requestBuf = ToNullTerminatedUtf8(requestJson);
+        ValidateExecOptions(id, options);
+
+        if (BackendForId(id) == LifecycleBackend.WindowsSandbox)
+        {
+            return ExecInSandboxAttachedJson(id, command, options);
+        }
+
+        using var marshaller = TypedRequestMarshaller.ForExec(id, command, options);
 
         unsafe
         {
-            fixed (byte* requestPtr = requestBuf)
+            MxcExecOutcome outcome = default;
+            MxcErrorDetail error = default;
+            var status = NativeMethods.mxc_state_aware_exec_attached_typed(
+                marshaller.StateAwareRequest, &outcome, &error);
+            if (status != (int)ErrorCode.Success)
             {
-                MxcExecOutcome outcome = default;
-                MxcErrorDetail error = default;
-                var status = NativeMethods.mxc_state_aware_exec_attached(
-                    requestPtr, ExperimentalOptInFor(id), &outcome, &error);
-                if (status != (int)ErrorCode.Success)
+                try
                 {
-                    try
-                    {
-                        throw NativeError.ToException(status, error, "unknown error");
-                    }
-                    finally
-                    {
-                        NativeMethods.mxc_error_detail_free(&error);
-                    }
+                    throw NativeError.ToException(status, error, "unknown error");
                 }
-                return new SandboxWaitResult
+                finally
                 {
-                    ExitCode = outcome.exit_code,
-                    TimedOut = outcome.timed_out != 0,
-                };
+                    NativeMethods.mxc_error_detail_free(&error);
+                }
             }
+            return new SandboxWaitResult
+            {
+                ExitCode = outcome.exit_code,
+                TimedOut = outcome.timed_out != 0,
+            };
         }
     }
 
@@ -236,7 +242,15 @@ public static class MxcLifecycle
         StateAwareExecOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(command);
-        RunEnvelopePhase(BuildExecEnvelope(id, command, options), dryRun: true);
+        ValidateExecOptions(id, options);
+        if (BackendForId(id) == LifecycleBackend.WindowsSandbox)
+        {
+            RunEnvelopePhase(BuildExecEnvelope(id, command, options), dryRun: true);
+            return;
+        }
+
+        using var marshaller = TypedRequestMarshaller.ForExec(id, command, options);
+        RunTypedPhase(marshaller, dryRun: true);
     }
 
     internal static JsonObject BuildExecEnvelope(
@@ -357,13 +371,13 @@ public static class MxcLifecycle
     /// <summary>Stop a running sandbox.</summary>
     public static void StopSandbox(SandboxId id, StateAwarePhaseOptions? options = null)
     {
-        RunEnvelopePhase(BuildStopEnvelope(id, options), dryRun: false);
+        RunNonExecPhase(TypedRequestMarshaller.StateAwareStop, id, options, dryRun: false);
     }
 
     /// <summary>Validate a stop request without stopping the sandbox.</summary>
     public static void DryRunStopSandbox(SandboxId id, StateAwarePhaseOptions? options = null)
     {
-        RunEnvelopePhase(BuildStopEnvelope(id, options), dryRun: true);
+        RunNonExecPhase(TypedRequestMarshaller.StateAwareStop, id, options, dryRun: true);
     }
 
     internal static JsonObject BuildStopEnvelope(
@@ -381,7 +395,11 @@ public static class MxcLifecycle
         SandboxId id,
         StateAwarePhaseOptions? options = null)
     {
-        RunEnvelopePhase(BuildDeprovisionEnvelope(id, options), dryRun: false);
+        RunNonExecPhase(
+            TypedRequestMarshaller.StateAwareDeprovision,
+            id,
+            options,
+            dryRun: false);
     }
 
     /// <summary>Validate a deprovision request without destroying the sandbox.</summary>
@@ -389,7 +407,11 @@ public static class MxcLifecycle
         SandboxId id,
         StateAwarePhaseOptions? options = null)
     {
-        RunEnvelopePhase(BuildDeprovisionEnvelope(id, options), dryRun: true);
+        RunNonExecPhase(
+            TypedRequestMarshaller.StateAwareDeprovision,
+            id,
+            options,
+            dryRun: true);
     }
 
     internal static JsonObject BuildDeprovisionEnvelope(
@@ -424,15 +446,21 @@ public static class MxcLifecycle
 
     private static JsonObject BuildIdEnvelope(string phase, SandboxId id)
     {
-        ContainmentForId(id);
-        var envelope = NewEnvelope(phase);
+        var backend = BackendForId(id);
+        var envelope = NewEnvelope(
+            phase,
+            backend == LifecycleBackend.WindowsSandbox
+                ? SchemaVersions.MaximumSupported
+                : StateAwareVersion);
         envelope["sandboxId"] = id.Value;
         return envelope;
     }
 
-    private static JsonObject NewEnvelope(string phase) => new()
+    private static JsonObject NewEnvelope(
+        string phase,
+        string version = StateAwareVersion) => new()
     {
-        ["version"] = SchemaVersions.SdkContract,
+        ["version"] = version,
         ["phase"] = phase,
     };
 
@@ -510,9 +538,9 @@ public static class MxcLifecycle
 
     private static void ValidateExecOptions(SandboxId id, StateAwareExecOptions? options)
     {
-        var containment = ContainmentForId(id);
+        var containment = BackendForId(id);
         if (options is WslcExecOptions
-            && containment != StateAwareContainment.Wslc)
+            && containment != LifecycleBackend.Wslc)
         {
             throw new ArgumentException(
                 $"{nameof(WslcExecOptions)} requires a wslc: sandbox id",
@@ -538,7 +566,7 @@ public static class MxcLifecycle
         ArgumentNullException.ThrowIfNull(network);
     }
 
-    private static StateAwareContainment ContainmentForId(SandboxId id)
+    private static LifecycleBackend BackendForId(SandboxId id)
     {
         // Mirrors the native `parse_sandbox_id_prefix`, which folds a missing
         // `:` and an empty prefix into one MalformedId: both are structural,
@@ -556,11 +584,33 @@ public static class MxcLifecycle
 
         return value![..separator] switch
         {
+            "iso" => LifecycleBackend.IsolationSession,
+            "wslc" => LifecycleBackend.Wslc,
+            "wsb" => LifecycleBackend.WindowsSandbox,
+            _ => throw new MxcException(
+                ErrorCode.UnsupportedContainment,
+                $"no state-aware backend is registered for sandbox id '{id.Value}'"),
+        };
+    }
+
+    private static StateAwareContainment ContainmentForId(SandboxId id)
+    {
+        var value = id.Value;
+        var separator = value is null ? -1 : value.IndexOf(':', StringComparison.Ordinal);
+        if (separator <= 0)
+        {
+            throw new MxcException(
+                ErrorCode.MalformedId,
+                $"sandbox id '{id}' is missing the '<prefix>:...' form");
+        }
+
+        return value![..separator] switch
+        {
             "iso" => StateAwareContainment.IsolationSession,
             "wslc" => StateAwareContainment.Wslc,
             _ => throw new MxcException(
                 ErrorCode.UnsupportedContainment,
-                $"no state-aware backend is registered for sandbox id '{id.Value}'"),
+                $"no typed state-aware backend is registered for sandbox id '{id.Value}'"),
         };
     }
 
@@ -618,6 +668,171 @@ public static class MxcLifecycle
         phaseConfig[key] = value;
     }
 
+    private sealed record TypedLifecycleResult(
+        string? SandboxId,
+        string? MetadataJson,
+        IsolationSessionProvisionMetadata? IsolationSessionMetadata,
+        IReadOnlyList<string> Warnings);
+
+    private static void RunNonExecPhase(
+        int operation,
+        SandboxId id,
+        StateAwarePhaseOptions? options,
+        bool dryRun)
+    {
+        ValidateNonExecOptions(OperationName(operation), options);
+        if (BackendForId(id) == LifecycleBackend.WindowsSandbox)
+        {
+            RunEnvelopePhase(BuildEnvelopeForOperation(operation, id, options), dryRun);
+            return;
+        }
+
+        using var marshaller = TypedRequestMarshaller.ForLifecycleId(operation, id, options);
+        RunTypedPhase(marshaller, dryRun);
+    }
+
+    private static JsonObject BuildEnvelopeForOperation(
+        int operation,
+        SandboxId id,
+        StateAwarePhaseOptions? options) => operation switch
+        {
+            TypedRequestMarshaller.StateAwareStart => BuildStartEnvelope(id, options),
+            TypedRequestMarshaller.StateAwareStop => BuildStopEnvelope(id, options),
+            TypedRequestMarshaller.StateAwareDeprovision => BuildDeprovisionEnvelope(id, options),
+            _ => throw new ArgumentOutOfRangeException(nameof(operation), operation, "unknown lifecycle operation"),
+        };
+
+    private static string OperationName(int operation) => operation switch
+    {
+        TypedRequestMarshaller.StateAwareStart => "start",
+        TypedRequestMarshaller.StateAwareStop => "stop",
+        TypedRequestMarshaller.StateAwareDeprovision => "deprovision",
+        _ => throw new ArgumentOutOfRangeException(nameof(operation), operation, "unknown lifecycle operation"),
+    };
+
+    private static unsafe TypedLifecycleResult RunTypedPhase(
+        TypedRequestMarshaller marshaller,
+        bool dryRun)
+    {
+        MxcTypedStateAwareResult result = default;
+        var status = NativeMethods.mxc_state_aware_typed(
+            marshaller.StateAwareRequest,
+            dryRun ? 1 : 0,
+            &result);
+        try
+        {
+            if (status != (int)ErrorCode.Success)
+            {
+                throw NativeError.ToException(status, result.error, "unknown error");
+            }
+
+            var warnings = DeserializeWarnings(PtrToString(result.warnings_json_utf8));
+            var metadata = ParseTypedMetadata(result);
+            return new TypedLifecycleResult(
+                PtrToString(result.sandbox_id_utf8),
+                metadata.Json,
+                metadata.IsolationSession,
+                warnings);
+        }
+        finally
+        {
+            NativeMethods.mxc_state_aware_typed_result_free(&result);
+        }
+    }
+
+    internal static unsafe (string? Json, IsolationSessionProvisionMetadata? IsolationSession)
+        ParseTypedMetadata(MxcTypedStateAwareResult result)
+    {
+        if (result.metadata_kind == TypedRequestMarshaller.ProvisionMetadataNone)
+        {
+            return (null, null);
+        }
+        if (result.metadata_kind != TypedRequestMarshaller.ProvisionMetadataIsolationSession)
+        {
+            throw new MxcException(
+                ErrorCode.BackendError,
+                $"typed lifecycle returned unsupported metadata kind {result.metadata_kind}");
+        }
+
+        var metadata = new IsolationSessionProvisionMetadata
+        {
+            AgentUserName = PtrToString(result.agent_user_name_utf8),
+            AgentUserSid = PtrToString(result.agent_user_sid_utf8),
+            EphemeralWorkspacePath = PtrToString(result.ephemeral_workspace_path_utf8),
+        };
+        return (JsonSerializer.Serialize(metadata, JsonOptions), metadata);
+    }
+
+    private static MxcSandboxProcess ExecInSandboxJson(
+        SandboxId id,
+        string command,
+        StateAwareExecOptions? options)
+    {
+        var requestJson = BuildExecEnvelope(id, command, options).ToJsonString();
+        var requestBuf = ToNullTerminatedUtf8(requestJson);
+
+        unsafe
+        {
+            fixed (byte* requestPtr = requestBuf)
+            {
+                NativeSandbox* handle = null;
+                MxcErrorDetail error = default;
+                var status = NativeMethods.mxc_state_aware_exec_json(
+                    requestPtr, ExperimentalOptInFor(id), &handle, &error);
+                if (status != (int)ErrorCode.Success)
+                {
+                    try
+                    {
+                        throw NativeError.ToException(status, error, "unknown error");
+                    }
+                    finally
+                    {
+                        NativeMethods.mxc_error_detail_free(&error);
+                    }
+                }
+                return new MxcSandboxProcess(
+                    MxcSandboxHandle.FromRaw(handle),
+                    MxcSandboxProcess.NormalizeTimeout(options?.TimeoutMs));
+            }
+        }
+    }
+
+    private static SandboxWaitResult ExecInSandboxAttachedJson(
+        SandboxId id,
+        string command,
+        StateAwareExecOptions? options)
+    {
+        var requestJson = BuildExecEnvelope(id, command, options).ToJsonString();
+        var requestBuf = ToNullTerminatedUtf8(requestJson);
+
+        unsafe
+        {
+            fixed (byte* requestPtr = requestBuf)
+            {
+                MxcExecOutcome outcome = default;
+                MxcErrorDetail error = default;
+                var status = NativeMethods.mxc_state_aware_exec_attached_json(
+                    requestPtr, ExperimentalOptInFor(id), &outcome, &error);
+                if (status != (int)ErrorCode.Success)
+                {
+                    try
+                    {
+                        throw NativeError.ToException(status, error, "unknown error");
+                    }
+                    finally
+                    {
+                        NativeMethods.mxc_error_detail_free(&error);
+                    }
+                }
+                return new SandboxWaitResult
+                {
+                    ExitCode = outcome.exit_code,
+                    TimedOut = outcome.timed_out != 0,
+                };
+            }
+        }
+    }
+
     private static JsonObject? RunEnvelopePhase(JsonObject envelope, bool dryRun)
     {
         var requestBuf = ToNullTerminatedUtf8(envelope.ToJsonString());
@@ -627,7 +842,7 @@ public static class MxcLifecycle
             fixed (byte* requestPtr = requestBuf)
             {
                 MxcStateAwareResult result = default;
-                var status = NativeMethods.mxc_state_aware(
+                var status = NativeMethods.mxc_state_aware_json(
                     requestPtr,
                     dryRun ? 1 : 0,
                     ExperimentalOptInFor(envelope),
@@ -653,8 +868,9 @@ public static class MxcLifecycle
 
     private static int ExperimentalOptInFor(SandboxId id)
     {
-        ContainmentForId(id);
-        return NoExperimentalOptIn;
+        return BackendForId(id) == LifecycleBackend.WindowsSandbox
+            ? ExperimentalOptIn
+            : NoExperimentalOptIn;
     }
 
     private static int ExperimentalOptInFor(JsonObject envelope)
@@ -684,4 +900,9 @@ public static class MxcLifecycle
 
     private static unsafe string? PtrToString(byte* p) =>
         p is null ? null : System.Runtime.InteropServices.Marshal.PtrToStringUTF8((IntPtr)p);
+
+    private static IReadOnlyList<string> DeserializeWarnings(string? json) =>
+        string.IsNullOrEmpty(json)
+            ? Array.Empty<string>()
+            : JsonSerializer.Deserialize<string[]>(json) ?? Array.Empty<string>();
 }

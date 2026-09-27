@@ -104,11 +104,14 @@ The generated `NativeMethods.g.cs` file is not committed.
 
 ## Consumer migration
 
-This ingress work does not itself switch .NET or Node high-level APIs:
+.NET high-level one-shot and typed state-aware lifecycle calls use the typed
+entry points. Its Windows Sandbox lifecycle path remains on raw exact
+`1.1.0-alpha` JSON because typed lifecycle v1 covers only IsolationSession and
+WSLC.
 
-1. migrate .NET one-shot and lifecycle high-level calls from private JSON to
-   the typed entry points;
-2. retain explicit raw exact-config APIs on the JSON entry points;
-3. complete the Node native-transport design separately;
-4. remove compatibility binding-JSON entry points only after all consumers
+Remaining migration work:
+
+1. retain explicit raw exact-config APIs on the JSON entry points;
+2. complete the Node native-transport design separately;
+3. remove compatibility binding-JSON entry points only after all consumers
    have migrated and the removal has its own reviewed compatibility boundary.

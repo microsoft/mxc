@@ -236,10 +236,10 @@ to use the backend default. Set `InheritDefaultEnvironment` to layer a non-null
 dictionary on the backend default instead; on Windows process containers, that
 default is the user profile environment block.
 
-`MxcSandbox.Run(request)` and `MxcSandbox.Spawn(request)` pass this complete
-request through the co-versioned native FFI contract. The existing
-`Run(policy, command)` and `Spawn(policy, command)` overloads remain
-compatibility shims.
+`MxcSandbox.Run(request)` and `MxcSandbox.Spawn(request)` marshal this complete
+request onto the typed native FFI ABI. The existing `Run(policy, command)` and
+`Spawn(policy, command)` overloads remain compatibility shims that build the
+same typed request shape.
 
 `SandboxPolicy.CaptureDenials` is obsolete. Migrate existing code to
 `ProcessContainerContainment.CaptureDenials`, as shown below. For compatibility,
@@ -753,7 +753,9 @@ Exposes **run-to-completion** (`Run` / `RunAsync`), **streaming**
 (`MxcLifecycle`) over the backends the public Rust SDK supports (Windows
 ProcessContainer, Linux Bubblewrap, macOS Seatbelt, and Windows
 IsolationSession and WSLC for run/stream). The typed state-aware lifecycle
-supports IsolationSession and WSLC on Windows.
+supports IsolationSession and WSLC on Windows. High-level one-shot and
+state-aware calls use typed FFI; Windows Sandbox lifecycle remains on the raw
+exact JSON lane described below.
 
 `SchemaVersions` exposes `Minimum`, `MaximumSupported`, and `LatestStable`.
 These public constants are checked in CI against
