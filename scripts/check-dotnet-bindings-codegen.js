@@ -61,6 +61,10 @@ const ABI_ONLY_ENTRY_POINTS = [
   "mxc_run_typed",
   "mxc_spawn_json",
   "mxc_spawn_typed",
+  "mxc_state_aware_exec_attached_typed",
+  "mxc_state_aware_exec_typed",
+  "mxc_state_aware_typed",
+  "mxc_state_aware_typed_result_free",
 ];
 const REQUIRED_ENTRY_POINTS = [
   ...new Set([...managedEntryPoints, ...ABI_ONLY_ENTRY_POINTS]),
@@ -109,6 +113,10 @@ const requiredSignatures = [
   "mxc_spawn_json(byte* request_json_utf8, MxcSandbox** out_handle, MxcErrorDetail* out_error)",
   "mxc_run_typed(MxcTypedOneShotRequest* request, MxcRunResult* @out)",
   "mxc_spawn_typed(MxcTypedOneShotRequest* request, MxcSandbox** out_handle, MxcErrorDetail* out_error)",
+  "mxc_state_aware_typed(MxcTypedStateAwareRequest* request, int dry_run, MxcTypedStateAwareResult* @out)",
+  "mxc_state_aware_typed_result_free(MxcTypedStateAwareResult* result)",
+  "mxc_state_aware_exec_typed(MxcTypedStateAwareRequest* request, MxcSandbox** out_handle, MxcErrorDetail* out_error)",
+  "mxc_state_aware_exec_attached_typed(MxcTypedStateAwareRequest* request, MxcExecOutcome* out_outcome, MxcErrorDetail* out_error)",
 ];
 const missingSignatures = requiredSignatures.filter(
   (signature) => !content.includes(signature)

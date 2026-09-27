@@ -19,6 +19,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src/streaming.rs");
     println!("cargo:rerun-if-changed=src/state_aware.rs");
     println!("cargo:rerun-if-changed=src/typed.rs");
+    println!("cargo:rerun-if-changed=src/typed_state_aware.rs");
     println!("cargo:rerun-if-changed=build.rs");
 
     #[cfg(feature = "dotnetsdk")]
@@ -51,6 +52,7 @@ fn generate_csharp_bindings() {
         .input_extern_file("src/streaming.rs")
         .input_extern_file("src/state_aware.rs")
         .input_extern_file("src/typed.rs")
+        .input_extern_file("src/typed_state_aware.rs")
         .csharp_dll_name("mxc_ffi")
         .csharp_namespace("Microsoft.Mxc.Sdk.Native")
         .csharp_class_name("NativeMethods")

@@ -338,7 +338,7 @@ fn malformed(message: impl Into<String>) -> Error {
     Error::new(ErrorCode::MalformedRequest, message)
 }
 
-fn flag(value: i32, field: &str) -> Result<bool, Error> {
+pub(crate) fn flag(value: i32, field: &str) -> Result<bool, Error> {
     match value {
         0 => Ok(false),
         1 => Ok(true),
@@ -346,11 +346,15 @@ fn flag(value: i32, field: &str) -> Result<bool, Error> {
     }
 }
 
-fn presence(value: i32, field: &str) -> Result<bool, Error> {
+pub(crate) fn presence(value: i32, field: &str) -> Result<bool, Error> {
     flag(value, field)
 }
 
-unsafe fn borrowed_slice<'a, T>(data: *const T, len: usize, field: &str) -> Result<&'a [T], Error> {
+pub(crate) unsafe fn borrowed_slice<'a, T>(
+    data: *const T,
+    len: usize,
+    field: &str,
+) -> Result<&'a [T], Error> {
     if len == 0 {
         return Ok(&[]);
     }
@@ -364,7 +368,7 @@ unsafe fn borrowed_slice<'a, T>(data: *const T, len: usize, field: &str) -> Resu
     Ok(unsafe { slice::from_raw_parts(data, len) })
 }
 
-unsafe fn utf8(value: MxcUtf8Slice, field: &str) -> Result<String, Error> {
+pub(crate) unsafe fn utf8(value: MxcUtf8Slice, field: &str) -> Result<String, Error> {
     // SAFETY: delegated to `borrowed_slice` under this entry point's caller contract.
     let bytes = unsafe { borrowed_slice(value.data, value.len, field)? };
     str::from_utf8(bytes)
@@ -372,7 +376,10 @@ unsafe fn utf8(value: MxcUtf8Slice, field: &str) -> Result<String, Error> {
         .map_err(|_| malformed(format!("{field} is not valid UTF-8")))
 }
 
-unsafe fn optional_utf8(value: *const MxcUtf8Slice, field: &str) -> Result<Option<String>, Error> {
+pub(crate) unsafe fn optional_utf8(
+    value: *const MxcUtf8Slice,
+    field: &str,
+) -> Result<Option<String>, Error> {
     if value.is_null() {
         return Ok(None);
     }
@@ -393,7 +400,7 @@ unsafe fn utf8_list(value: MxcUtf8SliceList, field: &str) -> Result<Vec<String>,
         .collect()
 }
 
-fn optional_bool(value: MxcOptionalBool, field: &str) -> Result<Option<bool>, Error> {
+pub(crate) fn optional_bool(value: MxcOptionalBool, field: &str) -> Result<Option<bool>, Error> {
     if !presence(value.is_set, &format!("{field}.is_set"))? {
         return Ok(None);
     }
@@ -404,7 +411,7 @@ fn optional_u16(value: MxcOptionalU16, field: &str) -> Result<Option<u16>, Error
     presence(value.is_set, &format!("{field}.is_set")).map(|set| set.then_some(value.value))
 }
 
-fn optional_u32(value: MxcOptionalU32, field: &str) -> Result<Option<u32>, Error> {
+pub(crate) fn optional_u32(value: MxcOptionalU32, field: &str) -> Result<Option<u32>, Error> {
     presence(value.is_set, &format!("{field}.is_set")).map(|set| set.then_some(value.value))
 }
 
@@ -516,7 +523,7 @@ unsafe fn network_rules(
         .collect()
 }
 
-unsafe fn policy(
+pub(crate) unsafe fn policy(
     value: *const MxcTypedSandboxPolicy,
 ) -> Result<(SandboxPolicy, Option<bool>), Error> {
     if value.is_null() {

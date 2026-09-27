@@ -80,10 +80,12 @@ mod request;
 mod state_aware;
 mod streaming;
 mod typed;
+mod typed_state_aware;
 pub use error_detail::*;
 pub use state_aware::*;
 pub use streaming::*;
 pub use typed::*;
+pub use typed_state_aware::*;
 
 /// Return code from an FFI telemetry-consent presenter callback.
 pub const MXC_TELEMETRY_CONSENT_DECISION_NO: i32 = 0;
