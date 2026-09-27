@@ -179,6 +179,15 @@ pub fn spawn_sandbox(request: SandboxRequest) -> Result<Sandbox, Error> {
     mxc_engine::spawn(&request).map(Sandbox::new)
 }
 
+/// Spawn a raw exact-version one-shot JSON request.
+///
+/// The JSON must contain an exact registered `version` and a one-shot request
+/// root. State-aware envelopes are rejected; use the state-aware JSON APIs for
+/// those operations.
+pub fn spawn_sandbox_json(request_json: &str) -> Result<Sandbox, Error> {
+    mxc_engine::spawn_one_shot_json(request_json).map(Sandbox::new)
+}
+
 /// Run a sandbox from a [`SandboxRequest`] **to completion**, capturing its
 /// output.
 ///
@@ -195,6 +204,16 @@ pub fn spawn_sandbox(request: SandboxRequest) -> Result<Sandbox, Error> {
 /// [`Error`]), or when waiting on the child fails at the OS level.
 pub fn run(request: SandboxRequest) -> Result<Output, Error> {
     let sandbox = spawn_sandbox(request)?;
+    wait_with_output(sandbox)
+}
+
+/// Run a raw exact-version one-shot JSON request to completion.
+pub fn run_json(request_json: &str) -> Result<Output, Error> {
+    let sandbox = spawn_sandbox_json(request_json)?;
+    wait_with_output(sandbox)
+}
+
+fn wait_with_output(sandbox: Sandbox) -> Result<Output, Error> {
     sandbox.wait_with_output().map_err(|e| {
         Error::new(
             ErrorCode::BackendError,

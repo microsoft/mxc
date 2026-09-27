@@ -9,6 +9,8 @@
 //!   borrowed C structure and adapts directly through the Rust SDK.
 //! - **Compatibility run to completion** — [`mxc_run_request`] accepts the
 //!   existing private co-versioned binding JSON request.
+//! - **Raw exact run to completion** — [`mxc_run_json`] accepts a public exact
+//!   MXC one-shot request.
 //! - **Host discovery** — [`mxc_available_backends_json`] reports every
 //!   host-available backend, while [`mxc_platform_support_json`] reports the
 //!   subset this SDK can launch.
@@ -17,6 +19,8 @@
 //! - **Compatibility streaming** (`streaming` module) —
 //!   [`mxc_spawn_request`] accepts the private binding JSON request and returns
 //!   the same opaque handle type.
+//! - **Raw exact streaming** — [`mxc_spawn_json`] accepts a public exact MXC
+//!   one-shot request.
 //! - **State-aware lifecycle** (`state_aware` module) — [`mxc_state_aware`]
 //!   drives the envelope phases (provision / start / stop / deprovision), and
 //!   [`mxc_state_aware_exec`] runs the exec phase as a live streaming handle
@@ -66,7 +70,10 @@ use std::panic::catch_unwind;
 use std::ptr;
 use std::sync::OnceLock;
 
-use mxc_sdk::{available_backends, platform_support, run, ErrorCode, SandboxRequest, WaitOutcome};
+use mxc_sdk::{
+    available_backends, platform_support, run, run_json, ErrorCode, Output, SandboxRequest,
+    WaitOutcome,
+};
 
 mod error_detail;
 mod request;
@@ -375,6 +382,46 @@ pub unsafe extern "C" fn mxc_run_request(
     status
 }
 
+/// Run a raw exact-version one-shot JSON request to completion.
+///
+/// Unlike [`mxc_run_request`], this entry point accepts the public MXC request
+/// contract with an exact registered `version`.
+///
+/// # Safety
+/// - `request_json_utf8` must be null or valid NUL-terminated UTF-8.
+/// - `out` must be null or point to writable [`MxcRunResult`]-sized storage.
+/// - On success the caller must release `*out` with [`mxc_run_result_free`].
+#[no_mangle]
+pub unsafe extern "C" fn mxc_run_json(
+    request_json_utf8: *const c_char,
+    out: *mut MxcRunResult,
+) -> i32 {
+    if out.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+
+    let result = catch_unwind(|| run_json_inner(request_json_utf8)).unwrap_or_else(|panic| {
+        report_panic("mxc_run_json", &*panic);
+        MxcRunResult::error(MXC_STATUS_PANIC, "the mxc engine panicked")
+    });
+    let status = result.status;
+    // SAFETY: `out` is non-null and caller-guaranteed writable.
+    unsafe { ptr::write(out, result) };
+    status
+}
+
+fn run_json_inner(request_json_utf8: *const c_char) -> MxcRunResult {
+    // SAFETY: caller contract on `mxc_run_json`; borrowed only within scope.
+    let request_json = match unsafe { cstr_to_str(request_json_utf8) } {
+        Some(value) => value,
+        None if request_json_utf8.is_null() => {
+            return MxcRunResult::error(MXC_STATUS_NULL_ARGUMENT, "request JSON pointer is null")
+        }
+        None => return MxcRunResult::error(MXC_STATUS_INVALID_UTF8, "request JSON is not UTF-8"),
+    };
+    execute_output(run_json(request_json))
+}
+
 fn run_request_inner(request_json_utf8: *const c_char) -> MxcRunResult {
     // SAFETY: caller contract on `mxc_run_request`; borrowed only within scope.
     let request_json = match unsafe { cstr_to_str(request_json_utf8) } {
@@ -392,7 +439,11 @@ fn run_request_inner(request_json_utf8: *const c_char) -> MxcRunResult {
 }
 
 pub(crate) fn execute_request(request: SandboxRequest) -> MxcRunResult {
-    match run(request) {
+    execute_output(run(request))
+}
+
+pub(crate) fn execute_output(output: Result<Output, mxc_sdk::Error>) -> MxcRunResult {
+    match output {
         Ok(output) => {
             let (exit_code, timed_out) = match output.outcome {
                 WaitOutcome::Exited(code) => (code, 0),
