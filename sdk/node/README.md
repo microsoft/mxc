@@ -327,21 +327,22 @@ const config: ContainerConfig = {
 const pty = spawnSandboxFromConfig(config, { experimental: true });
 ```
 
-IsolationSession one-shot execution uses the explicit configuration path and
-requires the standard directional all-allow network posture:
+IsolationSession one-shot execution uses the version-free high-level policy
+path and requires the standard directional all-allow network posture:
 
 ```typescript
-import { ContainerConfig, spawnSandboxFromConfig } from '@microsoft/mxc-sdk';
+import {
+  createConfigFromPolicy,
+  spawnSandboxFromConfig,
+} from '@microsoft/mxc-sdk';
 
-const config: ContainerConfig = {
-  version: '0.9.0-alpha',
-  containment: 'isolation_session',
-  process: { commandLine: 'cmd /c whoami' },
+const config = createConfigFromPolicy({
   network: {
     egress: { default: 'allow' },
     ingress: { default: 'allow', hostLoopback: 'allow' },
   },
-};
+}, 'isolation_session');
+config.process!.commandLine = 'cmd /c whoami';
 
 const pty = spawnSandboxFromConfig(config);
 ```

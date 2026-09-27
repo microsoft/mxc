@@ -446,8 +446,6 @@ The version-free v1 `SandboxPolicy` does not expose legacy one-shot proxy
 settings. Consumers that need an older exact proxy contract must use the raw
 executor configuration path. WSLC state-aware exec exposes its supported
 proxy-only runtime override through `WslcExecOptions.RuntimeConfig`.
-by this SDK: it is testing-only and the .NET FFI contract has no
-testing-feature opt-in.
 
 ### Directional networking (schema 0.8)
 
