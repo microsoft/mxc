@@ -990,8 +990,7 @@ mod tests {
         );
         assert!(
             !logger.get_buffer().contains("Creating LXC container"),
-            "the refusal must land before any container work; log: {:?}",
-            logger.get_buffer()
+            "the refusal must land before any container work"
         );
     }
 
