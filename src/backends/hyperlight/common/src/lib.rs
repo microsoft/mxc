@@ -497,14 +497,15 @@ impl HyperlightScriptRunner {
                 .iter()
                 .chain(request.policy.readonly_paths.iter())
             {
-                match same_path(allowed, denied) {
-                    PathComparison::Same => {
+                match path_relationship(allowed, denied) {
+                    PathRelationship::Covered => {
                         return Err(RunnerError::Preflight(format!(
-                            "path {denied:?} appears in both deniedPaths and an allow list"
+                            "path {denied:?} appears in deniedPaths but is exposed by allow list \
+                             path {allowed:?}"
                         )));
                     }
-                    PathComparison::Different => {}
-                    PathComparison::Indeterminate => {
+                    PathRelationship::Separate => {}
+                    PathRelationship::Indeterminate => {
                         return Err(RunnerError::Preflight(format!(
                             "Hyperlight: cannot verify deniedPaths against allow lists because \
                              {allowed:?} or {denied:?} could not be resolved to a canonical \
@@ -1337,62 +1338,71 @@ fn stamp_matches(home: &Path, runtime: HyperlightRuntime) -> bool {
     }
 }
 
-/// Paths equal after canonicalization, with a platform-aware lexical fallback
-/// for paths that do not exist yet.
-fn same_path(a: &str, b: &str) -> PathComparison {
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(ap), Ok(bp)) => PathComparison::from_bool(ap == bp),
-        _ => same_path_fallback(a, b),
+/// Whether an allowed host path exposes a denied path after canonicalization,
+/// with a platform-aware lexical fallback for paths that do not exist yet.
+fn path_relationship(allowed: &str, denied: &str) -> PathRelationship {
+    match (
+        std::fs::canonicalize(allowed),
+        std::fs::canonicalize(denied),
+    ) {
+        (Ok(allowed), Ok(denied)) => PathRelationship::from_covered(denied.starts_with(allowed)),
+        _ => path_relationship_fallback(allowed, denied),
     }
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum PathComparison {
-    Same,
-    Different,
+enum PathRelationship {
+    Covered,
+    Separate,
     Indeterminate,
 }
 
-impl PathComparison {
-    fn from_bool(equal: bool) -> Self {
-        if equal {
-            Self::Same
+impl PathRelationship {
+    fn from_covered(covered: bool) -> Self {
+        if covered {
+            Self::Covered
         } else {
-            Self::Different
+            Self::Separate
         }
     }
 }
 
 #[cfg(target_os = "windows")]
-fn same_path_fallback(a: &str, b: &str) -> PathComparison {
+fn path_relationship_fallback(allowed: &str, denied: &str) -> PathRelationship {
     use wxc_common::filesystem_canonical::canonicalize_allowing_absent_tail;
 
-    same_path_fallback_with(a, b, canonicalize_allowing_absent_tail)
+    path_relationship_fallback_with(allowed, denied, canonicalize_allowing_absent_tail)
 }
 
 #[cfg(target_os = "windows")]
-fn same_path_fallback_with(
-    a: &str,
-    b: &str,
+fn path_relationship_fallback_with(
+    allowed: &str,
+    denied: &str,
     resolve: impl Fn(&str) -> wxc_common::filesystem_canonical::PathCanonical,
-) -> PathComparison {
+) -> PathRelationship {
     use wxc_common::filesystem_canonical::PathCanonical;
 
-    if !has_verbatim_trim_sensitive_component(a) && !has_verbatim_trim_sensitive_component(b) {
-        match (resolve(a), resolve(b)) {
-            (PathCanonical::Canonical(ap), PathCanonical::Canonical(bp)) => {
-                return PathComparison::from_bool(
-                    WindowsFallbackPath::parse(&ap) == WindowsFallbackPath::parse(&bp),
-                );
-            }
-            (PathCanonical::Unknown, _) | (_, PathCanonical::Unknown) => {
-                return PathComparison::Indeterminate;
-            }
-            _ => {}
+    match (resolve(allowed), resolve(denied)) {
+        (PathCanonical::Canonical(allowed_resolved), PathCanonical::Canonical(denied_resolved)) => {
+            let allowed_norm = WindowsFallbackPath::parse_with_trailing_policy(
+                &allowed_resolved,
+                has_verbatim_trim_sensitive_component(allowed),
+            );
+            let denied_norm = WindowsFallbackPath::parse_with_trailing_policy(
+                &denied_resolved,
+                has_verbatim_trim_sensitive_component(denied),
+            );
+            return PathRelationship::from_covered(allowed_norm.covers(&denied_norm));
         }
+        (PathCanonical::Unknown, _) | (_, PathCanonical::Unknown) => {
+            return PathRelationship::Indeterminate;
+        }
+        _ => {}
     }
 
-    PathComparison::from_bool(WindowsFallbackPath::parse(a) == WindowsFallbackPath::parse(b))
+    PathRelationship::from_covered(
+        WindowsFallbackPath::parse(allowed).covers(&WindowsFallbackPath::parse(denied)),
+    )
 }
 
 #[cfg(target_os = "windows")]
@@ -1406,6 +1416,10 @@ struct WindowsFallbackPath {
 #[cfg(target_os = "windows")]
 impl WindowsFallbackPath {
     fn parse(path: &str) -> Self {
+        Self::parse_with_trailing_policy(path, has_verbatim_trim_sensitive_component(path))
+    }
+
+    fn parse_with_trailing_policy(path: &str, preserve_trailing_dots_and_spaces: bool) -> Self {
         let (folded, verbatim) = normalize_windows_verbatim_prefix(&path.to_lowercase());
         let bytes = folded.as_bytes();
         let (drive, rest) =
@@ -1428,7 +1442,7 @@ impl WindowsFallbackPath {
                     }
                 }
                 _ => {
-                    let component = if verbatim {
+                    let component = if verbatim || preserve_trailing_dots_and_spaces {
                         segment
                     } else {
                         segment.trim_end_matches(['.', ' '])
@@ -1445,6 +1459,12 @@ impl WindowsFallbackPath {
             rooted,
             components,
         }
+    }
+
+    fn covers(&self, denied: &Self) -> bool {
+        self.drive == denied.drive
+            && self.rooted == denied.rooted
+            && denied.components.starts_with(&self.components)
     }
 }
 
@@ -1470,8 +1490,8 @@ fn has_verbatim_trim_sensitive_component(path: &str) -> bool {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn same_path_fallback(a: &str, b: &str) -> PathComparison {
-    PathComparison::from_bool(PathBuf::from(a) == PathBuf::from(b))
+fn path_relationship_fallback(allowed: &str, denied: &str) -> PathRelationship {
+    PathRelationship::from_covered(Path::new(denied).starts_with(Path::new(allowed)))
 }
 
 fn mounts_equal(a: &[Mount], b: &[Mount]) -> bool {
@@ -1759,6 +1779,21 @@ mod tests {
         assert!(resp.error_message.contains("deniedPaths"));
     }
 
+    #[test]
+    fn policy_rejects_denied_descendant_of_allowed_mount() {
+        let request = ExecutionRequest {
+            script_code: "print('x')".to_string(),
+            policy: ContainerPolicy {
+                readwrite_paths: vec!["/tmp/hyperlight-allowed".to_string()],
+                denied_paths: vec!["/tmp/hyperlight-allowed/secret".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = HyperlightScriptRunner::validate_policies(&request).unwrap_err();
+        assert!(err.to_string().contains("deniedPaths"), "got: {err}");
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn policy_rejects_denied_missing_windows_case_variant_allow_overlap() {
@@ -1850,12 +1885,35 @@ mod tests {
         use wxc_common::filesystem_canonical::PathCanonical;
 
         assert_eq!(
-            same_path_fallback_with(
+            path_relationship_fallback_with(
                 "C:\\MXC\\HyperlightUnknown\\allow",
                 "C:\\MXC\\HyperlightUnknown\\deny",
                 |_| PathCanonical::Unknown,
             ),
-            PathComparison::Indeterminate
+            PathRelationship::Indeterminate
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn fallback_canonicalizes_verbatim_trailing_dot_alias_ancestors() {
+        use wxc_common::filesystem_canonical::PathCanonical;
+
+        assert_eq!(
+            path_relationship_fallback_with(
+                "\\\\?\\C:\\link\\cache.",
+                "\\\\?\\C:\\real\\cache.",
+                |path| match path {
+                    "\\\\?\\C:\\link\\cache." => {
+                        PathCanonical::Canonical("C:\\real\\cache.".to_string())
+                    }
+                    "\\\\?\\C:\\real\\cache." => {
+                        PathCanonical::Canonical("C:\\real\\cache.".to_string())
+                    }
+                    _ => PathCanonical::Absent,
+                },
+            ),
+            PathRelationship::Covered
         );
     }
 
@@ -1863,12 +1921,12 @@ mod tests {
     #[test]
     fn fallback_path_comparison_stays_case_sensitive_off_windows() {
         assert_eq!(
-            same_path("/tmp/mxc-missing-case", "/tmp/mxc-missing-case"),
-            PathComparison::Same
+            path_relationship("/tmp/mxc-missing-case", "/tmp/mxc-missing-case"),
+            PathRelationship::Covered
         );
         assert_eq!(
-            same_path("/tmp/MXC-MISSING-CASE", "/tmp/mxc-missing-case"),
-            PathComparison::Different
+            path_relationship("/tmp/MXC-MISSING-CASE", "/tmp/mxc-missing-case"),
+            PathRelationship::Separate
         );
     }
 
