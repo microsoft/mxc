@@ -1339,22 +1339,51 @@ fn same_path(a: &str, b: &str) -> bool {
 
 #[cfg(target_os = "windows")]
 fn same_path_fallback(a: &str, b: &str) -> bool {
-windows_fallback_path_key(a).to_lowercase() == windows_fallback_path_key(b).to_lowercase()
+    WindowsFallbackPath::parse(a) == WindowsFallbackPath::parse(b)
 }
 
 #[cfg(target_os = "windows")]
-fn windows_fallback_path_key(path: &str) -> String {
-    let mut normalized = path.replace('/', "\\");
-    while normalized.len() > 1 && normalized.ends_with('\\') {
-        if normalized.len() == 3 && normalized.as_bytes()[1] == b':' {
-            break;
+#[derive(Debug, PartialEq, Eq)]
+struct WindowsFallbackPath {
+    drive: Option<String>,
+    rooted: bool,
+    components: Vec<String>,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsFallbackPath {
+    fn parse(path: &str) -> Self {
+        let folded = path.to_lowercase();
+        let bytes = folded.as_bytes();
+        let (drive, rest) =
+            if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+                (Some(folded[..2].to_string()), &folded[2..])
+            } else {
+                (None, folded.as_str())
+            };
+
+        let rooted = rest.starts_with(['\\', '/']);
+        let mut components = Vec::new();
+        for segment in rest.split(['\\', '/']).filter(|s| !s.is_empty()) {
+            match segment {
+                "." => {}
+                ".." => {
+                    if components.last().is_some_and(|last| last != "..") {
+                        components.pop();
+                    } else if !rooted {
+                        components.push("..".to_string());
+                    }
+                }
+                other => components.push(other.to_string()),
+            }
         }
-        if normalized.chars().all(|c| c == '\\') {
-            break;
+
+        Self {
+            drive,
+            rooted,
+            components,
         }
-        normalized.pop();
     }
-    normalized
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -1654,8 +1683,10 @@ mod tests {
         let request = ExecutionRequest {
             script_code: "print('x')".to_string(),
             policy: ContainerPolicy {
-                readwrite_paths: vec!["C:\\MXC\\HyperlightMissingCase\\PRIVATECACHE".to_string()],
-                denied_paths: vec!["c:/mxc/hyperlightmissingcase/privatecache/".to_string()],
+                readwrite_paths: vec![
+                    "C:\\MXC\\HyperlightMissingCase\\temp\\..\\PRIVATECACHE\\\\".to_string()
+                ],
+                denied_paths: vec!["c:/mxc//hyperlightmissingcase/./privatecache".to_string()],
                 ..Default::default()
             },
             ..Default::default()
