@@ -11,8 +11,19 @@ use wxc_common::models::{
     ContainerPolicy, ExecutionRequest, LifecycleConfig, LxcConfig, NetworkEnforcementMode,
     ScriptResponse,
 };
+use wxc_common::sandbox_process::{SandboxBackend, SandboxProcess, StdioMode};
 use wxc_common::script_runner::ScriptRunner;
-use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
+use wxc_common::validator::{
+    validate_common, validate_network_policy_support, NetworkPolicySupport,
+};
+
+#[cfg(target_os = "linux")]
+use wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
+#[cfg(target_os = "linux")]
+use wxc_common::sandbox_process::{
+    boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, spawn_discard,
+    take_boxed_read, take_boxed_write, wait_with_timeout, NativeStdio, StreamCloser, WaitError,
+};
 
 use crate::filesystem_mounts;
 use crate::lxc_bindings::{ContainerFirewall, LxcContainer, StartNetwork};
@@ -114,6 +125,15 @@ enum ContainerRelease {
     Stop,
 }
 
+impl ContainerRelease {
+    fn verb(self) -> &'static str {
+        match self {
+            ContainerRelease::Destroy => "destroy",
+            ContainerRelease::Stop => "stop",
+        }
+    }
+}
+
 pub struct LxcScriptRunner {
     config: LxcConfig,
     container_id: String,
@@ -192,11 +212,12 @@ impl LxcScriptRunner {
         let Err(e) = result else {
             return;
         };
-        let verb = match release {
-            ContainerRelease::Destroy => "destroy",
-            ContainerRelease::Stop => "stop",
-        };
-        let _ = writeln!(logger, "Warning: failed to {} container: {}", verb, e);
+        let _ = writeln!(
+            logger,
+            "Warning: failed to {} container: {}",
+            release.verb(),
+            e
+        );
     }
 
     fn release_after_failure(
@@ -211,6 +232,37 @@ impl LxcScriptRunner {
             ContainerRelease::Stop => container.stop(),
         };
         Self::report_release_failure(release, result, logger);
+    }
+
+    /// Release a sandbox whose workload never got a handle to own its cleanup,
+    /// reporting whatever it could not release.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn abandon_prepared(&self, prepared: &mut PreparedSandbox, logger: &mut Logger) -> Vec<String> {
+        // The pin and the chains are both reached through the container, so
+        // they come out before it does.
+        let mut failures = prepared.remove_in_container_state(self.cleanup_policy, logger);
+
+        let release = self.release_kind(prepared.container_created);
+        let result = match release {
+            ContainerRelease::Destroy => prepared.container.destroy(),
+
+            // Already down, and `lxc-stop` against a container that is not
+            // running reports a failure with nothing behind it.
+            ContainerRelease::Stop if prepared.force_stopped => Ok(()),
+
+            ContainerRelease::Stop => prepared.container.stop(),
+        };
+        match &result {
+            Ok(()) => {
+                prepared.released = matches!(release, ContainerRelease::Destroy);
+                prepared.note_namespace_gone();
+            }
+            Err(e) => {
+                failures.push(format!("failed to {} container: {}", release.verb(), e));
+            }
+        }
+        Self::report_release_failure(release, result, logger);
+        failures
     }
 
     fn set_up_network_rules_for_v07(
@@ -639,9 +691,12 @@ impl LxcScriptRunner {
             fw_manager,
             ingress_manager,
             container,
+            container_created,
             firewall,
             pinned,
             released: false,
+            force_stopped: false,
+            stop_failed: false,
             script_code: request.script_code.clone(),
             start_directory: start_directory(request).unwrap_or_default(),
             exec_env,
@@ -744,9 +799,20 @@ struct PreparedSandbox {
     fw_manager: NetworkIptablesManager,
     ingress_manager: Option<IngressManager>,
     container: LxcContainer,
+
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    container_created: bool,
+
     firewall: ContainerFirewall,
     pinned: bool,
     released: bool,
+
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    force_stopped: bool,
+
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    stop_failed: bool,
+
     script_code: String,
     start_directory: String,
     exec_env: Vec<String>,
@@ -754,9 +820,30 @@ struct PreparedSandbox {
 }
 
 impl PreparedSandbox {
-    /// Run the completion-path release — pin, then rules, then container —
-    /// repeating only the steps an earlier call failed to complete.
-    fn tear_down(&mut self, cleanup_policy: bool, destroy_on_exit: bool, logger: &mut Logger) {
+    /// Remove the state that can only come out while the container is up: the
+    /// pin is rewritten by a command inside it, and the chains are addressed
+    /// through its init PID.
+    fn remove_in_container_state(
+        &mut self,
+        cleanup_policy: bool,
+        logger: &mut Logger,
+    ) -> Vec<String> {
+        let mut failures = Vec::new();
+
+        // The workload is still behind these chains, so taking them out would
+        // leave it running with no enforcement at all. Chains that were never
+        // hooked filter nothing, so they are removed as usual.
+        if self.stop_failed && self.fw_manager.is_hooked() {
+            self.retain_rules_past_drop();
+            let failure = "the container could not be stopped, so its firewall rules were left \
+                           in place rather than removed around a workload that may still be \
+                           running"
+                .to_string();
+            let _ = writeln!(logger, "Warning: {}", failure);
+            failures.push(failure);
+            return failures;
+        }
+
         if self.pinned && cleanup_policy {
             let clear_run_pin_command = LxcScriptRunner::build_hosts_unpin_command();
             let unpin_error = match self.container.attach_capture(
@@ -776,11 +863,9 @@ impl PreparedSandbox {
 
             match unpin_error {
                 Some(reason) => {
-                    let _ = writeln!(
-                        logger,
-                        "Warning: failed to clear the proxy host pin: {}",
-                        reason
-                    );
+                    let failure = format!("failed to clear the proxy host pin: {}", reason);
+                    let _ = writeln!(logger, "Warning: {}", failure);
+                    failures.push(failure);
                 }
                 None => self.pinned = false,
             }
@@ -790,21 +875,112 @@ impl PreparedSandbox {
         // to come out before the container does.
         if self.fw_manager.rules_applied() && cleanup_policy {
             let _ = self.fw_manager.remove_firewall_rules(logger);
+            if self.fw_manager.rules_applied() {
+                let failure = format!(
+                    "failed to remove the egress firewall chain {}",
+                    self.fw_manager.chain_name()
+                );
+                let _ = writeln!(logger, "Warning: {}", failure);
+                failures.push(failure);
+            }
         }
         if let Some(mgr) = &mut self.ingress_manager {
             if mgr.rules_applied() && cleanup_policy {
                 let _ = mgr.remove_firewall_rules(logger);
+                if mgr.rules_applied() {
+                    let failure = format!(
+                        "failed to remove the ingress firewall chain {}",
+                        mgr.chain_name()
+                    );
+                    let _ = writeln!(logger, "Warning: {}", failure);
+                    failures.push(failure);
+                }
             }
         }
 
-        if destroy_on_exit && !self.released {
+        failures
+    }
+
+    /// Run the completion-path release — pin, then rules, then container —
+    /// repeating only the steps an earlier call failed to complete.
+    fn tear_down(
+        &mut self,
+        cleanup_policy: bool,
+        destroy_on_exit: bool,
+        logger: &mut Logger,
+    ) -> Vec<String> {
+        let mut failures = Vec::new();
+
+        // Destroying takes the network namespace and the rootfs down with it,
+        // so the chains in one and the pin in the other are already going.
+        // Chains that were never hooked live on the host and still have to
+        // come out below.
+        let destroying = destroy_on_exit && !self.released;
+        if !(destroying && self.fw_manager.is_hooked()) {
+            failures.extend(self.remove_in_container_state(cleanup_policy, logger));
+        }
+
+        if destroying {
             let _ = writeln!(logger, "Destroying container...");
             match self.container.destroy() {
-                Ok(()) => self.released = true,
+                Ok(()) => {
+                    self.released = true;
+                    self.note_namespace_gone();
+                }
                 Err(e) => {
-                    let _ = writeln!(logger, "Warning: failed to destroy container: {}", e);
+                    let failure = format!("failed to destroy container: {}", e);
+                    let _ = writeln!(logger, "Warning: {}", failure);
+                    failures.push(failure);
                 }
             }
+        }
+
+        failures
+    }
+
+    /// Keep the installed rules in place when the managers go away, for a
+    /// container that may still be running behind them.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn retain_rules_past_drop(&mut self) {
+        self.fw_manager.set_preserve_policy(true);
+        if let Some(mgr) = &mut self.ingress_manager {
+            mgr.set_preserve_policy(true);
+        }
+    }
+
+    /// Kill every process in the container, which is the only way to reach a
+    /// workload that lives in its PID namespace.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn force_stop(&mut self) -> Result<(), String> {
+        if self.force_stopped {
+            return Ok(());
+        }
+        if let Err(e) = self.container.stop() {
+            self.stop_failed = true;
+            return Err(e);
+        }
+        self.stop_failed = false;
+        self.force_stopped = true;
+        self.note_namespace_gone();
+
+        Ok(())
+    }
+
+    /// Give up the state that needed the container, now that it is gone.
+    fn note_namespace_gone(&mut self) {
+        // Rewriting the pin takes a command inside a running container, and
+        // there is no longer one; a container kept for reuse has the stale pin
+        // cleared by the next run.
+        self.pinned = false;
+
+        // These chains went down with the network namespace, and the init PID
+        // that addressed them can be recycled into another namespace, where the
+        // same chain name may belong to a later run.
+        if self.fw_manager.is_hooked() {
+            self.fw_manager.forget();
+        }
+        if let Some(mgr) = &mut self.ingress_manager {
+            mgr.forget();
         }
     }
 }
@@ -820,6 +996,15 @@ pub const LXC_RUNTIME_PROXY_UNSUPPORTED: &str =
     "LXC: runtimeConfig.networkProxy is not supported. It must name a loopback endpoint, which \
      inside the container's own network namespace is the container rather than the host. On \
      schema 0.6-0.8, use network.proxy.url with an address routable from inside the container.";
+
+pub const LXC_INHERIT_STDIO_UNSUPPORTED: &str =
+    "LXC: inherited stdio is not available from the in-process sandbox API. LXC gives a workload \
+     the host's own stdin/stdout/stderr by allocating a pty and bridging it, which runs the \
+     script to completion and cannot hand back a live handle; it also reads the host's stdin and \
+     installs a process-wide window-size handler, neither of which a library may do to its \
+     caller. Stream the sandbox over pipes, or run the lxc-exec binary.";
+
+pub const LXC_STREAMING_LINUX_ONLY: &str = "LXC: sandboxes can only be launched on Linux.";
 
 fn asks_for_capabilities_enforcement(request: &ExecutionRequest) -> bool {
     !uses_directional_keys(&request.policy)
@@ -859,6 +1044,339 @@ impl ScriptRunner for LxcScriptRunner {
     }
 }
 
+/// LXC's streaming half, which serves [`StdioMode::Pipes`] only.
+///
+/// [`StdioMode::Inherit`] is refused, so wrapping this in
+/// [`wxc_common::sandbox_process::Runner`] compiles but fails at run time;
+/// `lxc-exec` stays on [`ScriptRunner`] for its pty.
+impl SandboxBackend for LxcScriptRunner {
+    fn network_policy_support(&self) -> NetworkPolicySupport {
+        lxc_network_policy_support()
+    }
+
+    fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        ScriptRunner::validate_runner(self, request)
+    }
+
+    fn spawn(
+        &mut self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+        stdio: StdioMode,
+    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.spawn_internal(request, logger, stdio)
+        })) {
+            Ok(r) => r,
+            Err(_) => Err(ScriptResponse::error(
+                "Unknown error during LXC sandbox launch.",
+            )),
+        }
+    }
+}
+
+impl LxcScriptRunner {
+    fn spawn_internal(
+        &self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+        stdio: StdioMode,
+    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+        if stdio == StdioMode::Inherit {
+            return Err(ScriptResponse::error(LXC_INHERIT_STDIO_UNSUPPORTED));
+        }
+        validate_common(request)?;
+        SandboxBackend::validate(self, request)?;
+
+        self.launch_piped(request, logger)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn launch_piped(
+        &self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+        let mut prepared = self.prepare(request, logger)?;
+
+        let _ = writeln!(logger, "Launching script inside container...");
+
+        // The `true` forces `--clear-env`, without which an empty env list lets
+        // `lxc-attach` inherit the host environment and its proxy credentials.
+        let launched = prepared.container.attach_spawn(
+            &prepared.script_code,
+            &prepared.start_directory,
+            &prepared.exec_env,
+            true,
+            prepared.firewall,
+        );
+
+        let mut child = match launched {
+            Ok(child) => child,
+            Err(e) => {
+                let cleanup = self.abandon_prepared(&mut prepared, logger);
+                return Err(ScriptResponse::error(&launch_failure_message(
+                    &format!("Execution failed: {}", e),
+                    &cleanup,
+                )));
+            }
+        };
+
+        let stdin = child.stdin.take();
+
+        // Wrap the pipe reads so the caller can abandon a stream a backgrounded
+        // descendant is holding open without killing the workload.
+        let wrapped = (
+            wrap_pipe(child.stdout.take()),
+            wrap_pipe(child.stderr.take()),
+        );
+        let (stdout, stdout_canceller, stderr, stderr_canceller) = match wrapped {
+            (Ok((out, out_canceller)), Ok((err, err_canceller))) => {
+                (out, out_canceller, err, err_canceller)
+            }
+            (out_result, err_result) => {
+                // The workload is already running and no handle exists to own
+                // its cleanup, so it comes down here.
+                if prepared.force_stop().is_err() {
+                    let _ = child.kill();
+                }
+                let _ = child.wait();
+                let cleanup = self.abandon_prepared(&mut prepared, logger);
+
+                let error = out_result.err().or(err_result.err());
+                return Err(ScriptResponse::error(&launch_failure_message(
+                    &format!(
+                        "Failed to wrap the lxc-attach stdio pipes: {}",
+                        error.map_or_else(|| "unknown error".to_string(), |e| e.to_string())
+                    ),
+                    &cleanup,
+                )));
+            }
+        };
+
+        Ok(Box::new(LxcSandboxProcess::new(LxcChild {
+            child,
+            stdin,
+            stdout,
+            stderr,
+            stdout_canceller,
+            stderr_canceller,
+            timeout: prepared.timeout,
+            prepared,
+            cleanup_policy: self.cleanup_policy,
+            destroy_on_exit: self.destroy_on_exit,
+        })))
+    }
+
+    /// Stub for the workspace-wide clippy lane that runs on Windows.
+    #[cfg(not(target_os = "linux"))]
+    fn launch_piped(
+        &self,
+        _request: &ExecutionRequest,
+        _logger: &mut Logger,
+    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+        Err(ScriptResponse::error(LXC_STREAMING_LINUX_ONLY))
+    }
+}
+
+/// A launched workload: the host-side `lxc-attach` process, its parent-side
+/// pipe ends, and the prepared sandbox torn down once it is done.
+#[cfg(target_os = "linux")]
+struct LxcChild {
+    child: std::process::Child,
+    stdin: Option<std::process::ChildStdin>,
+    stdout: Option<InterruptibleReader>,
+    stderr: Option<InterruptibleReader>,
+
+    /// Cancellers for the stdout/stderr reads, kept so the closers can still be
+    /// minted after the stream is taken.
+    stdout_canceller: Option<ReadCanceller>,
+    stderr_canceller: Option<ReadCanceller>,
+
+    timeout: Option<Duration>,
+    prepared: PreparedSandbox,
+    cleanup_policy: bool,
+    destroy_on_exit: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl LxcChild {
+    fn terminate(&mut self) -> std::io::Result<()> {
+        // Killed first so the reap, and the stream drains waiting on it, are
+        // never parked behind a stop that is slow or wedged. The workload is
+        // orphaned for as long as the stop takes, with its chains still up.
+        let _ = self.child.kill();
+
+        // `lxc-attach` is a host process while the workload runs in the
+        // container's PID namespace under container init, so nothing aimed at
+        // the host process or its group reaches the workload; only stopping the
+        // container does.
+        self.prepared.force_stop().map_err(std::io::Error::other)
+    }
+}
+
+/// A running LXC sandbox exposed as a [`SandboxProcess`].
+#[cfg(target_os = "linux")]
+struct LxcSandboxProcess {
+    inner: LxcChild,
+    teardown_done: bool,
+    teardown_failures: Vec<String>,
+}
+
+#[cfg(target_os = "linux")]
+impl LxcSandboxProcess {
+    fn new(inner: LxcChild) -> Self {
+        Self {
+            inner,
+            teardown_done: false,
+            teardown_failures: Vec::new(),
+        }
+    }
+
+    fn run_teardown(&mut self) {
+        if self.teardown_done {
+            return;
+        }
+
+        // A failed destroy leaks a root-owned container, and neither `wait` nor
+        // `Drop` has the caller's logger to report it through.
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        self.teardown_failures = self.inner.prepared.tear_down(
+            self.inner.cleanup_policy,
+            self.inner.destroy_on_exit,
+            &mut logger,
+        );
+
+        // `tear_down` repeats only the steps an earlier call could not finish,
+        // so latching unconditionally would strand the container on one
+        // failure.
+        self.teardown_done = self.teardown_failures.is_empty();
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl SandboxProcess for LxcSandboxProcess {
+    fn warnings(&self) -> Vec<String> {
+        self.teardown_failures.clone()
+    }
+
+    fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+        use std::os::fd::AsFd;
+
+        let stdio = duplicate_and_take_native_stdio(
+            &mut self.inner.stdin,
+            &mut self.inner.stdout,
+            &mut self.inner.stderr,
+            |stream| stream.as_fd().try_clone_to_owned(),
+            InterruptibleReader::try_clone_owned_fd,
+            InterruptibleReader::try_clone_owned_fd,
+        )?;
+        if stdio.is_some() {
+            self.inner.stdout_canceller.take();
+            self.inner.stderr_canceller.take();
+        }
+        Ok(stdio)
+    }
+
+    fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
+        take_boxed_write(&mut self.inner.stdin)
+    }
+
+    fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        take_boxed_read(&mut self.inner.stdout)
+    }
+
+    fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        take_boxed_read(&mut self.inner.stderr)
+    }
+
+    fn stdout_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        boxed_closer(&self.inner.stdout_canceller)
+    }
+
+    fn stderr_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        boxed_closer(&self.inner.stderr_canceller)
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+        Ok(self
+            .inner
+            .child
+            .try_wait()?
+            .map(|status| status.code().unwrap_or(-1)))
+    }
+
+    fn id(&self) -> u32 {
+        self.inner.child.id()
+    }
+
+    fn kill(&mut self) -> std::io::Result<()> {
+        // Only a clean teardown releases the container, so a failed one leaves
+        // this latch open and still reaches the stop below.
+        if self.teardown_done {
+            return Ok(());
+        }
+        self.inner.terminate()
+    }
+
+    fn wait(&mut self) -> std::io::Result<i32> {
+        // Close our copy of any not-taken stdin so the child sees EOF.
+        self.inner.stdin.take();
+
+        // Drain (and discard) any not-taken stdout/stderr concurrently so the
+        // child can't block on a full pipe (taken streams are the caller's
+        // responsibility).
+        let stdout_thread = spawn_discard(self.inner.stdout.take());
+        let stderr_thread = spawn_discard(self.inner.stderr.take());
+
+        let result = match wait_with_timeout(&mut self.inner.child, self.inner.timeout) {
+            Ok(status) => Ok(status.code().unwrap_or(-1)),
+            Err(WaitError::Timeout) => {
+                // Stopping the container releases the pipe write ends a
+                // backgrounded descendant would otherwise hold past the
+                // deadline, so the drains below can finish.
+                let terminated = self.kill_for_timeout();
+                let _ = self.inner.child.wait();
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    match terminated {
+                        Ok(()) => "LXC: script timed out".to_string(),
+                        Err(e) => format!(
+                            "LXC: script timed out, and the container could not be stopped, \
+                             so the workload may still be running: {e}"
+                        ),
+                    },
+                ))
+            }
+            Err(WaitError::Io(error)) => {
+                // The workload may still be running, and teardown is about to
+                // release the container it is running in.
+                let _ = self.kill();
+                let _ = self.inner.child.wait();
+                Err(std::io::Error::other(format!("LXC: wait failed: {error}")))
+            }
+        };
+
+        cancel_and_join_discard(stdout_thread, &self.inner.stdout_canceller);
+        cancel_and_join_discard(stderr_thread, &self.inner.stderr_canceller);
+        self.run_teardown();
+        result
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for LxcSandboxProcess {
+    fn drop(&mut self) {
+        // Kill and reap before teardown: a sandbox abandoned without a wait
+        // would otherwise have its container destroyed while its workload was
+        // still running in it, and the host-side `lxc-attach` would be left
+        // unreaped.
+        let _ = self.kill();
+        let _ = self.inner.child.wait();
+        self.run_teardown();
+    }
+}
+
 fn uuid_simple() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let t = SystemTime::now()
@@ -874,6 +1392,22 @@ fn egress_hook_point(netns_pid: Option<u32>, installs_firewall: bool) -> Option<
         None if installs_firewall => None,
         None => Some(EgressHookPoint::Unhooked),
     }
+}
+
+/// The launch error, plus anything the cleanup behind it could not release.
+///
+/// No handle exists on these paths, so `warnings` is never called and a leaked
+/// root-owned container has nowhere else to surface.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn launch_failure_message(reason: &str, cleanup_failures: &[String]) -> String {
+    if cleanup_failures.is_empty() {
+        return reason.to_string();
+    }
+    format!(
+        "{} Cleanup after the failure did not finish: {}.",
+        reason,
+        cleanup_failures.join("; ")
+    )
 }
 
 /// Whether the workload must be kept away from chains in its own namespace.
@@ -1100,6 +1634,200 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_container_that_would_not_stop_keeps_its_firewall_rules() {
+        let fake = crate::network_iptables::test_firewall::install();
+        let mut prepared = prepared_with_applied_rules("stop-refused");
+        apply_hooked_egress_rules(&mut prepared, 4242);
+        prepared.pinned = true;
+
+        // The fixture names a container that was never created, so `lxc-stop`
+        // has nothing to stop and reports the failure this test needs.
+        prepared
+            .force_stop()
+            .expect_err("a container that does not exist cannot be stopped");
+
+        let issued_before = fake.issued().len();
+        let mut logger = Logger::new(Mode::Buffer);
+        let failures = prepared.remove_in_container_state(true, &mut logger);
+
+        assert_eq!(
+            fake.issued().len(),
+            issued_before,
+            "the workload may still be running behind these rules, so removing them would \
+             leave it egressing unfiltered; issued {:?}",
+            fake.issued()
+        );
+        assert!(
+            prepared.fw_manager.rules_applied(),
+            "the rules must stay owned so a later teardown can still remove them"
+        );
+        assert!(
+            failures.iter().any(|f| f.contains("could not be stopped")),
+            "a caller sampling warnings must learn the rules were left behind; got {failures:?}"
+        );
+    }
+
+    /// Install a hooked egress chain on a prepared sandbox, so the
+    /// netns-scoped state has something to forget. Ingress is left alone: its
+    /// manager drives `nsenter` through a runner the iptables fake does not
+    /// intercept, so its own module owns that coverage.
+    fn apply_hooked_egress_rules(prepared: &mut PreparedSandbox, netns_pid: u32) {
+        let policy = ContainerPolicy {
+            network_enforcement_mode: NetworkEnforcementMode::Firewall,
+            allowed_hosts: vec!["192.0.2.10".to_string()],
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+
+        prepared.fw_manager = NetworkIptablesManager::new(
+            prepared.container.name(),
+            EgressHookPoint::ContainerNetns(netns_pid),
+        );
+        prepared
+            .fw_manager
+            .apply_legacy_rules(&policy, &mut logger)
+            .expect("the fake firewall accepts every command");
+    }
+
+    #[test]
+    fn a_destroyed_container_takes_its_chains_out_of_later_removals() {
+        let _fake = crate::network_iptables::test_firewall::install();
+        let mut prepared = prepared_with_applied_rules("namespace-gone");
+        apply_hooked_egress_rules(&mut prepared, 4242);
+        prepared.pinned = true;
+
+        assert!(
+            prepared.fw_manager.rules_applied(),
+            "precondition: the chain is installed in the container netns"
+        );
+
+        prepared.note_namespace_gone();
+
+        assert!(
+            !prepared.fw_manager.rules_applied(),
+            "the netns took the chain with it, so its dead init PID must never be nsentered"
+        );
+        assert!(
+            !prepared.pinned,
+            "the pin cannot be rewritten without a running container"
+        );
+    }
+
+    #[test]
+    fn abandoning_a_stopped_sandbox_forgets_the_chains_its_namespace_took() {
+        let _fake = crate::network_iptables::test_firewall::install();
+
+        // `preserve_policy` keeps the explicit removal from running, so the
+        // only thing that can clear the chain here is the release itself.
+        let runner = LxcScriptRunner::new(
+            &LxcConfig::default(),
+            "abandon-stopped",
+            &LifecycleConfig {
+                destroy_on_exit: false,
+                preserve_policy: true,
+            },
+        );
+        let mut prepared = prepared_with_applied_rules("abandon-stopped");
+        apply_hooked_egress_rules(&mut prepared, 4242);
+
+        // The state the wrap-pipe failure path reaches: the container was
+        // stopped before the sandbox was abandoned, so `lxc-stop` must not be
+        // issued against it a second time.
+        prepared.force_stopped = true;
+
+        let mut logger = Logger::new(Mode::Buffer);
+        let failures = runner.abandon_prepared(&mut prepared, &mut logger);
+
+        assert!(
+            !prepared.fw_manager.rules_applied(),
+            "releasing a stopped container must give up its netns chains, or a later drop \
+             nsenters an init PID that is dead"
+        );
+        assert!(
+            failures.is_empty(),
+            "a container that was already stopped is released cleanly; got {failures:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_release_reaches_the_caller_rather_than_only_the_log() {
+        let _fake = crate::network_iptables::test_firewall::install();
+        let runner = LxcScriptRunner::new(
+            &LxcConfig::default(),
+            "abandon-failed",
+            &LifecycleConfig::default(),
+        );
+        let mut prepared = prepared_with_applied_rules("abandon-failed");
+
+        let mut logger = Logger::new(Mode::Buffer);
+        let failures = runner.abandon_prepared(&mut prepared, &mut logger);
+
+        assert!(
+            failures.iter().any(|f| f.contains("destroy container")),
+            "no handle exists on a failed launch, so a container that could not be destroyed \
+             has to travel back with the error; got {failures:?}"
+        );
+        assert!(
+            launch_failure_message("Execution failed: no", &failures).contains("destroy container"),
+            "the launch error must carry the cleanup failure"
+        );
+    }
+
+    #[test]
+    fn host_chains_survive_a_container_that_is_gone() {
+        let fake = crate::network_iptables::test_firewall::install();
+        let mut prepared = prepared_with_applied_rules("unhooked-survives");
+
+        assert!(
+            !prepared.fw_manager.is_hooked() && prepared.fw_manager.rules_applied(),
+            "precondition: the fixture's chain is on the host, not in a netns"
+        );
+
+        prepared.note_namespace_gone();
+
+        assert!(
+            prepared.fw_manager.rules_applied(),
+            "an unhooked chain lives on the host and outlives the container, so forgetting it \
+             would leak host firewall state"
+        );
+
+        let issued_before = fake.issued().len();
+        let mut logger = Logger::new(Mode::Buffer);
+        prepared.remove_in_container_state(true, &mut logger);
+
+        assert!(
+            fake.issued().len() > issued_before,
+            "a host chain must still be removed after the container is gone; issued {:?}",
+            fake.issued()
+        );
+    }
+
+    #[test]
+    fn a_container_that_would_not_stop_keeps_its_rules_through_the_drop() {
+        let fake = crate::network_iptables::test_firewall::install();
+        let mut prepared = prepared_with_applied_rules("stop-refused-drop");
+        apply_hooked_egress_rules(&mut prepared, 4242);
+
+        prepared
+            .force_stop()
+            .expect_err("a container that does not exist cannot be stopped");
+
+        let mut logger = Logger::new(Mode::Buffer);
+        prepared.remove_in_container_state(true, &mut logger);
+
+        let issued_before = fake.issued().len();
+        drop(prepared);
+
+        assert_eq!(
+            fake.issued().len(),
+            issued_before,
+            "the workload may still be running behind these chains, so dropping the sandbox \
+             must not remove them either; issued {:?}",
+            fake.issued()
+        );
+    }
+
     /// A sandbox whose egress chain is installed, for the teardown tests. The
     /// container name is unique per process so the release cannot reach a real
     /// container on a host that has LXC installed.
@@ -1132,9 +1860,12 @@ mod tests {
             fw_manager,
             ingress_manager,
             container: LxcContainer::new(&name, Some("/var/lib/lxc")),
+            container_created: false,
             firewall: ContainerFirewall::Absent,
             pinned: false,
             released: false,
+            force_stopped: false,
+            stop_failed: false,
             script_code: "true".to_string(),
             start_directory: String::new(),
             exec_env: Vec::new(),
@@ -2075,6 +2806,86 @@ mod tests {
             !logger.get_buffer().contains("Creating LXC container"),
             "the refusal must land before the container is created; log={}",
             logger.get_buffer()
+        );
+    }
+
+    /// A request with a script, so nothing but the checks under test refuses it.
+    fn streamable_request() -> ExecutionRequest {
+        ExecutionRequest {
+            script_code: "echo hello".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn inherited_stdio_is_refused_rather_than_given_a_pty() {
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let refusal = validating_runner()
+            .spawn(&streamable_request(), &mut logger, StdioMode::Inherit)
+            .err()
+            .expect("the library path has no pty to hand a workload");
+
+        assert_eq!(refusal.error_message, LXC_INHERIT_STDIO_UNSUPPORTED);
+        assert!(
+            !logger.get_buffer().contains("Container name:"),
+            "the refusal must land before a container is named; log={}",
+            logger.get_buffer()
+        );
+    }
+
+    #[test]
+    fn a_request_the_backend_cannot_honor_is_refused_before_anything_launches() {
+        let policy = ContainerPolicy {
+            runtime_network_proxy_specified: true,
+            ..Default::default()
+        };
+        let request = ExecutionRequest {
+            script_code: "echo hello".to_string(),
+            policy,
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let refusal = validating_runner()
+            .spawn(&request, &mut logger, StdioMode::Pipes)
+            .err()
+            .expect("a runtime proxy has no loopback the container shares with the host");
+
+        assert_eq!(refusal.error_message, LXC_RUNTIME_PROXY_UNSUPPORTED);
+        assert!(
+            !logger.get_buffer().contains("Container name:"),
+            "validation must run before the container is named; log={}",
+            logger.get_buffer()
+        );
+    }
+
+    #[test]
+    fn an_empty_script_is_refused_by_the_shared_checks() {
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let refusal = validating_runner()
+            .spawn(&ExecutionRequest::default(), &mut logger, StdioMode::Pipes)
+            .err()
+            .expect("there is nothing to run");
+
+        assert!(
+            refusal
+                .error_message
+                .contains("Script content must not be empty"),
+            "expected the shared refusal, got: {refusal:?}"
+        );
+    }
+
+    #[test]
+    fn both_runner_personalities_declare_the_same_network_support() {
+        let runner = validating_runner();
+
+        assert_eq!(
+            SandboxBackend::network_policy_support(&runner),
+            lxc_network_policy_support(),
+            "a policy accepted on one path and refused on the other would enforce differently \
+             depending on which API the caller reached for"
         );
     }
 }

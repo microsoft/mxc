@@ -317,5 +317,11 @@ The zone query should answer the zone you assigned.
   Stock `lxcbr0` gives the container no IPv6 address, so this surfaces only on a
   host that provides one.
 - **No proxied egress.** See [Proxy](#proxy).
-- **No state-aware lifecycle.** LXC implements `ScriptRunner` only (one-shot),
-  not `StatefulSandboxBackend`. A state-aware request is rejected.
+- **No state-aware lifecycle.** LXC implements `ScriptRunner` (one-shot) and
+  `SandboxBackend` (streaming over pipes), not `StatefulSandboxBackend`. A
+  state-aware request is rejected.
+- **Streaming gives pipes, not a terminal.** The `SandboxBackend` path wires
+  stdin, stdout, and stderr to pipes and refuses `StdioMode::Inherit`, so the
+  workload sees `isatty() == false`; the `lxc-exec` binary keeps its pty. The
+  engine does not route to this path yet, so the in-process SDK APIs still
+  report `UnsupportedContainment` for LXC.

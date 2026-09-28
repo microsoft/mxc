@@ -239,6 +239,15 @@ impl IngressManager {
         self.preserve_policy = preserve;
     }
 
+    /// Discard the record of what was installed, so no later removal is
+    /// attempted.
+    pub fn forget(&mut self) {
+        self.v4_chain_created = false;
+        self.v6_chain_created = false;
+        self.v4_hooked = false;
+        self.v6_hooked = false;
+    }
+
     fn should_cleanup_on_drop(&self) -> bool {
         self.rules_applied() && !self.preserve_policy
     }
@@ -1716,6 +1725,29 @@ mod tests {
 
         mgr.v4_chain_created = false;
         mgr.v4_hooked = false;
+    }
+
+    #[test]
+    fn forgetting_the_installed_state_stops_the_drop_time_removal() {
+        let mut mgr = IngressManager::new("forget-container", 4242);
+
+        mgr.v4_chain_created = true;
+        mgr.v4_hooked = true;
+        assert!(
+            mgr.should_cleanup_on_drop(),
+            "precondition: an installed chain is removed on drop"
+        );
+
+        mgr.forget();
+
+        assert!(
+            !mgr.rules_applied(),
+            "a forgotten manager must own no installed state"
+        );
+        assert!(
+            !mgr.should_cleanup_on_drop(),
+            "the netns holding the chain is gone, so Drop must not nsenter its dead pid"
+        );
     }
 
     #[test]
