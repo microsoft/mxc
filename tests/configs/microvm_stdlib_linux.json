@@ -1,4 +1,5 @@
 {
+    "$schema": "../../schemas/dev/mxc-config.schema.0.10.0-alpha.json",
     "version": "0.10.0-alpha",
     "process": {
         "commandLine": "import json, math, hashlib\ndata = {'pi': math.pi, 'e': math.e, 'hash': hashlib.sha256(b'nanvix').hexdigest()[:16]}\nprint(json.dumps(data))",

@@ -1,4 +1,5 @@
 {
+    "$schema": "../../schemas/dev/mxc-config.schema.0.10.0-alpha.json",
     "version": "0.10.0-alpha",
     "process": {
         "commandLine": "import time; time.sleep(120); print('should not reach here')",

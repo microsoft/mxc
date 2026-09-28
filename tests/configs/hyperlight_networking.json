@@ -1,4 +1,5 @@
 {
+    "$schema": "../../schemas/dev/mxc-config.schema.0.10.0-alpha.json",
     "version": "0.10.0-alpha",
     "_comment": "Intentional v0.10 migration rejection: the former example.com hostname allowlist has no lossless directional CIDR equivalent. The parser must reject network.allowedHosts before the workload runs; run_hyperlight_network_migration_test.ps1 asserts that boundary without DNS resolution or broader network access.",
     "process": {
