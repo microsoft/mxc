@@ -274,8 +274,8 @@ backend rejects configurations it cannot enforce.
 **Decision:** GA defines outbound configuration and inbound control.
 `ingress.default: deny` blocks LAN/private-network inbound traffic, and
 `ingress.hostLoopback: deny` separately blocks host-loopback connectivity in both directions, except for the exact
-outbound proxy endpoint when `runtimeConfig.networkProxy` selects model 2. The host-loopback value overrides `default`
-for all other host-loopback traffic.
+outbound proxy endpoint when `runtimeConfig.networkProxy` selects model 2. If omitted, `ingress.hostLoopback`
+defaults to `deny` independently of `ingress.default`; an explicit value controls all other host-loopback traffic.
 Intra-container loopback is allowed on backends with private loopback.
 Seatbelt has the caveat described below.
 
