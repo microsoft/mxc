@@ -1144,6 +1144,7 @@ fn resolve_through_symlinks(path: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mxc_config_contract::ContractVersion;
     use wxc_common::models::{
         NetworkEnforcementCompatibility, NetworkEnforcementMode, ProxyAddress, ProxyConfig,
     };
@@ -2096,7 +2097,7 @@ mod tests {
     #[test]
     fn validate_rejects_block_default_blocklist_without_allowlist() {
         let mut req = base_request();
-        req.schema_version = "0.8.0-alpha".into();
+        req.source_contract = Some(ContractVersion::V0_8_0Alpha);
         req.policy.default_network_policy = wxc_common::models::NetworkPolicy::Block;
         req.policy.blocked_hosts = vec!["evil.example.com".into()];
         req.policy.network_proxy = ProxyConfig {

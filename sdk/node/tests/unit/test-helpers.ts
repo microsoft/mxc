@@ -1,10 +1,20 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { getPlatformSupport } from '../../src/platform.js';
+import {
+  _resetPlatformSupportCache,
+  _setAvailableBackendsProbe,
+  getPlatformSupport,
+} from '../../src/platform.js';
 
-// Skip marker for describes that hit the binary resolver: undefined when MXC
-// is supported on this host, an error string when it isn't.
+// Unit tests exercise binary argument construction, not native discovery.
+// Supply a deterministic Linux snapshot so importing this helper never loads
+// an unavailable libmxc_ffi.so.
+_setAvailableBackendsProbe(() => [
+  { backend: 'bubblewrap', capabilities: [], warnings: [] },
+]);
 export const platformSkip: string | false = !getPlatformSupport().isSupported
   ? 'MXC not supported on this machine'
   : false;
+_setAvailableBackendsProbe();
+_resetPlatformSupportCache();

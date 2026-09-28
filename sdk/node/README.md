@@ -212,8 +212,8 @@ It is reported **fail closed**: if the probe cannot run, the result is `'unsuppo
 
 For request-specific Windows ProcessContainer diagnostics, call
 `probeSandboxSupport(config)`. It accepts the same `ContainerConfig` used by
-`spawnSandboxFromConfig`, writes it to a short-lived temporary file, and invokes
-the packaged `wxc-exec --probe <config>`:
+`spawnSandboxFromConfig` and calls the packaged `mxc_ffi` native library in
+process:
 
 ```typescript
 import { probeSandboxSupport } from '@microsoft/mxc-sdk';
@@ -222,10 +222,10 @@ const result = probeSandboxSupport(config);
 console.log(result.tier, result.warnings, result.probes.uiCapabilities);
 ```
 
-This API is synchronous, Windows-only, and does not create a sandbox. Missing
-executors, non-ProcessContainer requests, nonzero executor exits, and malformed
-JSON throw errors; they are not reported as successful unsupported results.
-The CLI remains the authoritative ProcessContainer diagnostic.
+This API is synchronous, Windows-only, and does not create a sandbox. Native
+probe failures, non-ProcessContainer requests, and malformed JSON throw errors;
+they are not reported as successful unsupported results. The CLI remains the
+authoritative ProcessContainer diagnostic.
 
 ---
 

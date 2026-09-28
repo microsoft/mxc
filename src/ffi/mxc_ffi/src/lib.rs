@@ -9,6 +9,8 @@
 //! - **Host discovery** — [`mxc_available_backends_json`] reports every
 //!   host-available backend, while [`mxc_platform_support_json`] reports the
 //!   subset this SDK can launch.
+//! - **Windows request probe** — `mxc_probe_request_json` evaluates a
+//!   ProcessContainer config without creating a sandbox.
 //! - **Streaming** (`streaming` module) — [`mxc_spawn_request`] accepts the
 //!   same binding request and returns an opaque live handle.
 //! - **State-aware lifecycle** (`state_aware` module) — [`mxc_state_aware`]
@@ -500,6 +502,48 @@ pub extern "C" fn mxc_platform_support_json() -> *mut c_char {
         report_panic("mxc_platform_support_json", &*panic);
         ptr::null_mut()
     })
+}
+
+/// Probe a Windows ProcessContainer request without creating a sandbox.
+///
+/// `request_json_utf8` may be null to probe the default ProcessContainer
+/// request. Otherwise it must point to a NUL-terminated UTF-8 MXC config
+/// document. The returned JSON string is owned by the caller and must be freed
+/// with [`mxc_string_free`]. Returns null for invalid input, state-aware or
+/// non-ProcessContainer requests, probe failures, serialization failures, or
+/// panics.
+///
+/// This ABI is present only in Windows builds.
+///
+/// # Safety
+/// `request_json_utf8` must be null or a valid NUL-terminated C string that
+/// remains alive for the duration of the call.
+#[cfg(target_os = "windows")]
+#[no_mangle]
+pub unsafe extern "C" fn mxc_probe_request_json(request_json_utf8: *const c_char) -> *mut c_char {
+    catch_unwind(|| probe_request_json_inner(request_json_utf8)).unwrap_or_else(|panic| {
+        report_panic("mxc_probe_request_json", &*panic);
+        ptr::null_mut()
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn probe_request_json_inner(request_json_utf8: *const c_char) -> *mut c_char {
+    let request_json = if request_json_utf8.is_null() {
+        None
+    } else {
+        // SAFETY: caller contract on `mxc_probe_request_json`; borrowed only
+        // for this synchronous call.
+        let Some(request_json) = (unsafe { cstr_to_str(request_json_utf8) }) else {
+            return ptr::null_mut();
+        };
+        Some(request_json)
+    };
+
+    match mxc_sdk::probe_request_json_for_ffi(request_json) {
+        Ok(output) => alloc_cstring(output.as_bytes()),
+        Err(_) => ptr::null_mut(),
+    }
 }
 
 fn serialize_owned_json(value: &impl serde::Serialize) -> *mut c_char {

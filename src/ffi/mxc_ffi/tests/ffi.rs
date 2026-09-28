@@ -8,6 +8,8 @@
 use std::ffi::{CStr, CString};
 use std::ptr;
 
+#[cfg(target_os = "windows")]
+use mxc_ffi::mxc_probe_request_json;
 use mxc_ffi::{
     mxc_available_backends_json, mxc_error_detail_free, mxc_platform_support_json, mxc_run_request,
     mxc_run_result_free, mxc_sandbox_stderr_closer, mxc_sandbox_stdout_closer,
@@ -92,6 +94,65 @@ fn extern_discovery_returns_owned_json() {
     unsafe {
         mxc_string_free(backends);
         mxc_string_free(support);
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn extern_request_probe_parses_and_returns_owned_json() {
+    let request = CString::new(
+        r#"{
+            "version": "0.9.0-alpha",
+            "containment": "processcontainer",
+            "process": { "commandLine": "cmd /c exit 0" }
+        }"#,
+    )
+    .unwrap();
+
+    // SAFETY: the request is a valid NUL-terminated UTF-8 string.
+    let output = unsafe { mxc_probe_request_json(request.as_ptr()) };
+    assert!(!output.is_null());
+    // SAFETY: a non-null probe result is an owned NUL-terminated UTF-8 string.
+    let json = unsafe { CStr::from_ptr(output) }.to_str().unwrap();
+    let value: serde_json::Value = serde_json::from_str(json).unwrap();
+    assert!(value.get("warnings").is_some());
+    assert!(value.get("probes").is_some());
+
+    // SAFETY: `output` is an owned result from the FFI.
+    unsafe { mxc_string_free(output) };
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn extern_request_probe_accepts_null_as_default_request() {
+    // SAFETY: null is the documented default-request input.
+    let output = unsafe { mxc_probe_request_json(ptr::null()) };
+    assert!(!output.is_null());
+    // SAFETY: `output` is an owned result from the FFI.
+    unsafe { mxc_string_free(output) };
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn extern_request_probe_rejects_malformed_and_unsupported_requests() {
+    for request in [
+        "not json",
+        r#"{
+            "version": "0.9.0-alpha",
+            "containment": "wslc",
+            "process": { "commandLine": "echo hi" }
+        }"#,
+        r#"{
+            "version": "0.9.0-alpha",
+            "phase": "exec",
+            "sandboxId": "wslc:test",
+            "process": { "commandLine": "echo hi" }
+        }"#,
+    ] {
+        let request = CString::new(request).unwrap();
+        // SAFETY: the request is a valid NUL-terminated UTF-8 string.
+        let output = unsafe { mxc_probe_request_json(request.as_ptr()) };
+        assert!(output.is_null());
     }
 }
 

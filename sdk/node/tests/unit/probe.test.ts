@@ -2,8 +2,8 @@
 // Licensed under the MIT License.
 
 import assert from 'node:assert/strict';
-import * as fs from 'node:fs';
 import { afterEach, describe, it } from 'node:test';
+import { readProbeJsonWithNative } from '../../src/bindings/probe.js';
 import {
   _setRequestProbeDependencies,
   probeSandboxSupport,
@@ -46,7 +46,6 @@ function cloneCompleteProbe(): Record<string, unknown> {
 function runProbeOutput(payload: unknown) {
   _setRequestProbeDependencies(
     () => JSON.stringify(payload),
-    () => 'wxc-exec.exe',
     'win32',
   );
   return probeSandboxSupport();
@@ -62,17 +61,16 @@ function assertProbeOutputRejected(payload: unknown): void {
 afterEach(() => _setRequestProbeDependencies());
 
 describe('probeSandboxSupport', () => {
-  it('serializes the config, invokes --probe, and removes the temp file', () => {
-    let configPath = '';
-    _setRequestProbeDependencies((_executable, args) => {
-      assert.equal(args[0], '--probe');
-      configPath = args[1];
-      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as {
+  it('serializes the config and forwards it to the native binding', () => {
+    let forwarded: string | undefined;
+    _setRequestProbeDependencies((requestJson) => {
+      forwarded = requestJson;
+      const config = JSON.parse(requestJson ?? '') as {
         containment: string;
       };
       assert.equal(config.containment, 'processcontainer');
       return JSON.stringify(completeProbe);
-    }, () => 'wxc-exec.exe', 'win32');
+    }, 'win32');
 
     const output = probeSandboxSupport({
       version: '0.9.0-alpha',
@@ -81,34 +79,78 @@ describe('probeSandboxSupport', () => {
     });
 
     assert.equal(output.tier, 'appcontainer-dacl');
-    assert.equal(fs.existsSync(configPath), false);
+    assert.equal(typeof forwarded, 'string');
   });
 
-  it('rejects non-ProcessContainer executor failures and cleans up', () => {
-    let configPath = '';
-    _setRequestProbeDependencies((_executable, args) => {
-      configPath = args[1];
-      const error = new Error('Command failed') as Error & { stderr: string };
-      error.stderr =
-        'Error: request-aware probe supports only ProcessContainer containment; got wslc';
-      throw error;
-    }, () => 'wxc-exec.exe', 'win32');
+  it('uses the default native request when config is omitted', () => {
+    let forwarded = 'not-called';
+    _setRequestProbeDependencies((requestJson) => {
+      forwarded = requestJson ?? 'default';
+      return JSON.stringify(completeProbe);
+    }, 'win32');
+
+    const output = probeSandboxSupport();
+
+    assert.equal(output.tier, 'appcontainer-dacl');
+    assert.equal(forwarded, 'default');
+  });
+
+  it('rejects a supplied config that does not serialize to a string', () => {
+    let nativeCalls = 0;
+    _setRequestProbeDependencies(() => {
+      nativeCalls += 1;
+      return JSON.stringify(completeProbe);
+    }, 'win32');
+    const config = {
+      toJSON: () => undefined,
+    };
 
     assert.throws(
-      () => probeSandboxSupport({
+      () => probeSandboxSupport(config as never),
+      /config must serialize to a JSON string/,
+    );
+    assert.equal(nativeCalls, 0);
+  });
+
+  it('rejects other supplied values that stringify to undefined', () => {
+    let nativeCalls = 0;
+    _setRequestProbeDependencies(() => {
+      nativeCalls += 1;
+      return JSON.stringify(completeProbe);
+    }, 'win32');
+
+    for (const config of [undefined, () => undefined, Symbol('config')]) {
+      assert.throws(
+        () => probeSandboxSupport(config as never),
+        /config must serialize to a JSON string/,
+      );
+    }
+    assert.equal(nativeCalls, 0);
+  });
+
+  it('surfaces native probe failures with the original cause', () => {
+    const nativeError = new Error('unsupported containment');
+    _setRequestProbeDependencies(() => {
+      throw nativeError;
+    }, 'win32');
+
+    let caught: unknown;
+    try {
+      probeSandboxSupport({
         version: '0.9.0-alpha',
         containment: 'wslc',
         process: { commandLine: 'echo hi' },
-      }),
-      /supports only ProcessContainer containment; got wslc/,
-    );
-    assert.equal(fs.existsSync(configPath), false);
+      });
+    } catch (error) {
+      caught = error;
+    }
+    assert.match(String(caught), /native request probe failed/);
+    assert.equal((caught as Error).cause, nativeError);
   });
 
-  it('surfaces malformed executor output', () => {
+  it('surfaces malformed native output', () => {
     _setRequestProbeDependencies(
       () => 'not json',
-      () => 'wxc-exec.exe',
       'win32',
     );
     assert.throws(() => probeSandboxSupport(), /invalid request probe JSON/);
@@ -217,9 +259,6 @@ describe('probeSandboxSupport', () => {
   it('rejects off-Windows calls before executor discovery', () => {
     _setRequestProbeDependencies(
       () => JSON.stringify(completeProbe),
-      () => {
-        throw new Error('must not resolve');
-      },
       'linux',
     );
     assert.throws(
@@ -227,9 +266,92 @@ describe('probeSandboxSupport', () => {
       /available only for Windows ProcessContainer/,
     );
   });
+});
 
-  it('surfaces a missing executor', () => {
-    _setRequestProbeDependencies(undefined, () => null, 'win32');
-    assert.throws(() => probeSandboxSupport(), /wxc-exec\.exe not found/);
+describe('request probe native ownership', () => {
+  for (const pointer of [null, undefined, 0, 0n]) {
+    it(`rejects ${String(pointer)} without freeing`, () => {
+      let frees = 0;
+      assert.throws(
+        () => readProbeJsonWithNative({
+          probeRequest: () => pointer,
+          freeString: () => { frees += 1; },
+        }),
+        /native request probe failed/,
+      );
+      assert.equal(frees, 0);
+    });
+  }
+
+  it('forwards the request, decodes, and frees exactly once', () => {
+    const pointer = { address: 1 };
+    const freed: unknown[] = [];
+    let forwarded: string | null | undefined;
+    const json = readProbeJsonWithNative(
+      {
+        probeRequest: (requestJson) => {
+          forwarded = requestJson;
+          return pointer;
+        },
+        freeString: (candidate) => freed.push(candidate),
+      },
+      '{"version":"0.9.0-alpha"}',
+      (candidate) => candidate === pointer ? '{}' : undefined,
+    );
+
+    assert.equal(forwarded, '{"version":"0.9.0-alpha"}');
+    assert.equal(json, '{}');
+    assert.deepEqual(freed, [pointer]);
+  });
+
+  it('passes null for the default request', () => {
+    const pointer = { address: 1 };
+    let forwarded: string | null | undefined;
+    readProbeJsonWithNative(
+      {
+        probeRequest: (requestJson) => {
+          forwarded = requestJson;
+          return pointer;
+        },
+        freeString: () => {},
+      },
+      undefined,
+      () => '{}',
+    );
+    assert.equal(forwarded, null);
+  });
+
+  it('frees after decode failure', () => {
+    const pointer = { address: 1 };
+    let frees = 0;
+    assert.throws(
+      () => readProbeJsonWithNative(
+        {
+          probeRequest: () => pointer,
+          freeString: () => { frees += 1; },
+        },
+        undefined,
+        () => { throw new Error('decode failed'); },
+      ),
+      /decode failed/,
+    );
+    assert.equal(frees, 1);
+  });
+
+  it('frees an undecodable non-null pointer', () => {
+    const pointer = { address: 1 };
+    let frees = 0;
+    assert.throws(
+      () => readProbeJsonWithNative(
+        {
+          probeRequest: () => pointer,
+          freeString: () => { frees += 1; },
+        },
+        undefined,
+        () => undefined,
+      ),
+      /undecodable string/,
+    );
+    assert.equal(frees, 1);
   });
 });

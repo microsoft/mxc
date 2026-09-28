@@ -383,6 +383,49 @@ fn platform_support_windows_includes_processcontainer() {
     }
 }
 
+#[cfg(target_os = "windows")]
+#[test]
+fn ffi_request_probe_bridge_parses_exact_json_and_defaults() {
+    let request = r#"{
+        "version": "0.9.0-alpha",
+        "containment": "processcontainer",
+        "process": { "commandLine": "cmd /c exit 0" }
+    }"#;
+
+    for config_json in [None, Some(request)] {
+        let json = mxc_sdk::probe_request_json_for_ffi(config_json)
+            .expect("default and exact ProcessContainer requests should probe");
+        let output: serde_json::Value =
+            serde_json::from_str(&json).expect("probe output should be JSON");
+        assert!(output.get("warnings").is_some());
+        assert!(output.get("probes").is_some());
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn ffi_request_probe_bridge_rejects_invalid_request_kinds() {
+    for request in [
+        "not json",
+        r#"{
+            "version": "0.9.0-alpha",
+            "phase": "exec",
+            "sandboxId": "wslc:test",
+            "process": { "commandLine": "echo hi" }
+        }"#,
+        r#"{
+            "version": "0.9.0-alpha",
+            "containment": "wslc",
+            "process": { "commandLine": "echo hi" }
+        }"#,
+    ] {
+        assert!(
+            mxc_sdk::probe_request_json_for_ffi(Some(request)).is_err(),
+            "request should be rejected: {request}"
+        );
+    }
+}
+
 /// Without the `wslc` feature the backend cannot run at all, so it must never be
 /// advertised — regardless of whether the host happens to have the runtime.
 #[cfg(all(target_os = "windows", not(feature = "wslc")))]

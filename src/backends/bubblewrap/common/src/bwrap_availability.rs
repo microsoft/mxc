@@ -218,8 +218,10 @@ fn availability_timeout(timeout: Duration) -> BwrapAvailabilityError {
 }
 
 fn viability_request() -> ExecutionRequest {
-    let mut request = ExecutionRequest::default();
-    request.containment = ContainmentBackend::Bubblewrap;
+    let mut request = ExecutionRequest {
+        containment: ContainmentBackend::Bubblewrap,
+        ..Default::default()
+    };
     request.script_code = "exit 0".to_string();
     request.working_directory = "/".to_string();
     request.env = Some(vec!["PATH=/usr/bin:/bin".to_string()]);

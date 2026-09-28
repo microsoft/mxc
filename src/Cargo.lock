@@ -228,6 +228,7 @@ name = "bwrap_common"
 version = "0.9.0"
 dependencies = [
  "lxc_common",
+ "mxc_config_contract",
  "nix",
  "serde",
  "serde_json",

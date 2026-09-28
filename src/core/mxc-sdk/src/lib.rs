@@ -212,6 +212,63 @@ pub fn run(request: SandboxRequest) -> Result<Output, Error> {
     })
 }
 
+/// Internal request-aware probe bridge for language bindings.
+///
+/// This is public only so the workspace's FFI crate can preserve the
+/// `mxc_ffi -> mxc-sdk -> mxc_engine` dependency boundary. It is not part of
+/// the supported Rust SDK surface.
+#[cfg(target_os = "windows")]
+#[doc(hidden)]
+pub fn probe_request_json_for_ffi(config_json: Option<&str>) -> Result<String, Error> {
+    use wxc_common::logger::{Logger, Mode};
+    use wxc_common::state_aware_request::MxcRequest;
+
+    let request = match config_json {
+        None => None,
+        Some(config_json) => {
+            let mut logger = Logger::new(Mode::Buffer);
+            let request = match wxc_common::config_parser::load_mxc_request_from_json(
+                config_json,
+                &mut logger,
+            ) {
+                Ok(MxcRequest::OneShot(request)) => request,
+                Ok(MxcRequest::StateAware(_)) => {
+                    return Err(Error::new(
+                        ErrorCode::MalformedRequest,
+                        "request-aware probe requires a one-shot config, not a state-aware request",
+                    ));
+                }
+                Err(error) => return Err(probe_parse_error(error)),
+            };
+            Some(request)
+        }
+    };
+
+    let output = mxc_engine::probe_execution_request(request.as_ref())?;
+    serde_json::to_string(&output).map_err(|error| {
+        Error::new(
+            ErrorCode::BackendError,
+            format!("request probe serialization failed: {error}"),
+        )
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn probe_parse_error(error: wxc_common::config_parser::ParseError) -> Error {
+    use wxc_common::config_parser::ParseError;
+    use wxc_common::mxc_error::MxcError;
+
+    match error {
+        ParseError::StateAware(error) => Error::from(error),
+        ParseError::Decode(error)
+        | ParseError::Version(error)
+        | ParseError::OneShot(error)
+        | ParseError::OneShotMalformed(error) => {
+            Error::from(MxcError::malformed_request(error.to_string()))
+        }
+    }
+}
+
 /// Run a **state-aware lifecycle** request (as a JSON string) and return the
 /// response-envelope JSON string.
 ///

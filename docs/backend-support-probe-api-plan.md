@@ -194,11 +194,11 @@ packaged native library, and both `getAvailableBackends()` and Linux
 `getPlatformSupport()` project the same Rust result. The executor
 `--available-backends` mode remains available for CLI consumers but is not the
 Node transport. The Windows request diagnostic `wxc-exec --probe` remains authoritative.
-Node.js `probeSandboxSupport(config)` and .NET `MxcSandbox.Probe(request)`
-provide public request-aware projections by invoking that packaged executor
-with a temporary config and parsing its typed JSON output. This transport is
-Windows ProcessContainer-only and preserves subprocess and parse failures.
-The Rust SDK and C FFI do not expose a native request-probe ABI.
+Node.js `probeSandboxSupport(config)` provides its public request-aware
+projection in process through the Windows-only `mxc_probe_request_json` C ABI.
+.NET `MxcSandbox.Probe(request)` continues to invoke the packaged executor.
+Both surfaces are Windows ProcessContainer-only and preserve native/executor
+and parse failures. The Rust SDK does not expose a public request-probe API.
 
 ---
 
