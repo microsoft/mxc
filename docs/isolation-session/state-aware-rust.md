@@ -45,10 +45,10 @@ Requirements on an in-process caller:
 - **An attached exec takes over this process's console for its duration**:
   raw VT, so no echo, no line input, and keystrokes — `Ctrl-C` included — go to
   the sandboxed workload rather than to this process. Restored on return.
-- **`start` cannot run from Session 0.** `StartSessionAsync` fails with
-  *"requires an interactive session"* (`0x80040233`), so a caller running as a
-  service, or over a remote SYSTEM-context shell, cannot complete the lifecycle.
-  `provision` succeeds first and mints an OS account that must be deprovisioned.
+- **`start` cannot run from Session 0.** It fails with `0x80040233`, so a caller
+  running as a service, or over a remote SYSTEM-context shell, cannot complete
+  the lifecycle. `provision` succeeds first and mints an OS account that must be
+  deprovisioned.
 - **An impersonating caller is refused unless this process can duplicate its
   token at `SecurityImpersonation` level.**
 
@@ -111,8 +111,8 @@ legacy fields, mixing postures, or adding rules or proxy settings is a structura
 
 | Field | Type | Description |
 |---|---|---|
-| `agentUserName` | string | The OS-assigned agent account name returned by the selected `AddUser` overload (`AddUserAsync2`, or `AddUserAsync` on hosts without app-scoped support), also carried inside the `sandboxId` payload where it serves as the addressing key for every post-provision phase. Format is OS-internal and not stable across builds. |
-| `agentUserSid` | string | The security identifier (SID) of the agent user, returned by the selected `AddUser` overload (`AddUserAsync2`, or `AddUserAsync` on hosts without app-scoped support). Diagnostic only. |
+| `agentUserName` | string | The OS-assigned agent account name returned by provisioning, also carried inside the `sandboxId` payload where it serves as the addressing key for every post-provision phase. Format is OS-internal and not stable across builds. |
+| `agentUserSid` | string | The security identifier (SID) of the agent user, returned by provisioning. Diagnostic only. |
 | `ephemeralWorkspacePath` | string | A directory shared between the calling user and this isolated agent user, through which the caller can stage files into the session. Each isolated user can access only its own workspace; the caller can access every concurrent sandbox's workspace. Created at provision and deleted when the sandbox is deprovisioned. It does **not** change the workload's working directory. |
 
 `appId` is deliberately **not** echoed in the metadata — the caller supplied
@@ -387,7 +387,7 @@ remove `phase` and `sandboxId` from the JSON payload and pass them as
 | Phase | Repeated call | Notes |
 |---|---|---|
 | provision | non-idempotent | Each provision mints a fresh agent user. Two provision calls produce two distinct sandboxes. Acceptable: callers manage `sandboxId` state themselves. |
-| start | OS-side dependent | Starting an already-started session surfaces an HRESULT from `StartSessionAsync`; mapped to `backend_error` (no specific MXC code). Callers should not call start twice; if they do, the second call's failure does not corrupt the first session. |
+| start | OS-side dependent | Starting an already-started session surfaces an HRESULT from the OS session-start call; mapped to `backend_error` (no specific MXC code). Callers should not call start twice; if they do, the second call's failure does not corrupt the first session. |
 | exec | per-call | Each exec creates a fresh agent process via `RunProcessWithOptionsAsync`. No deduplication — repeated `commandLine` runs the command repeatedly. |
 | stop | OS-side dependent | Stopping an already-stopped session surfaces an HRESULT from `StopSessionAsync`; mapped to `backend_error`. The agent user remains — only the running session is gone. |
 | deprovision | becomes `stale_id` | After a successful deprovision, the agent user is gone. A second deprovision on the same `sandboxId` fails the OS-side agent-user lookup (`HRESULT_FROM_WIN32(ERROR_NOT_FOUND)`), which the runner maps to `MxcError::StaleId`. |
@@ -396,9 +396,8 @@ remove `phase` and `sandboxId` from the JSON payload and pass them as
 
 ### Multiple sandboxes
 
-Distinct `sandboxId`s map to distinct OS agent users (each provisioning call —
-`AddUserAsync2`, or `AddUserAsync` on hosts without app-scoped support — mints a
-fresh account). There is no shared registration between them, so
+Distinct `sandboxId`s map to distinct OS agent users (each provisioning call
+mints a fresh account). There is no shared registration between them, so
 concurrent provisions are independent and all succeed.
 
 ### Multiple exec calls against the same sandbox

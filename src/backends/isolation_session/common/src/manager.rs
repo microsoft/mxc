@@ -165,11 +165,6 @@ impl IsolationSessionManager {
     /// exception is a failure to read the account name itself, which leaves
     /// nothing to address a removal to.
     ///
-    /// The OS interface takes an app id plus an optional enterprise account
-    /// name and token. MXC passes the caller-supplied `app_id` verbatim to the
-    /// app-scoped [`AddUserAsync2`] overload, with empty strings for the
-    /// enterprise account name and token — which selects a local agent user.
-    ///
     /// Note: the in-proc API exposes no session-lifetime knob, so `lifecycle`
     /// cannot be honored here. Unsupported values are refused by the calling
     /// surface rather than ignored — one-shot rejects `destroyOnExit: false`
@@ -182,13 +177,10 @@ impl IsolationSessionManager {
         owned_thread::call(&impersonation, || {
             let mta = MtaReference::acquire()?;
             let ops = check_service_available_and_activate()?;
-            // Prefer the app-scoped `AddUserAsync2` overload, but only when the host
-            // advertises support for it. Else fall back to `AddUserAsync`.
+            // Prefer the newest overload the host advertises.
             let app_scoped = app_scoped_supported_from(
                 ops.GetFeatureLevel(IsoSessionFeature::AppScopedRegistration),
             );
-            // The operation label reported in telemetry must name the overload
-            // actually invoked, not always `AddUserAsync2`.
             let (op_add_user, started) = if app_scoped {
                 (
                     op::ADD_USER,
@@ -283,9 +275,6 @@ impl IsolationSessionManager {
     }
 
     /// Step 2: Start the isolation session for the pegged agent user.
-    ///
-    /// The OS interface takes an optional token; MXC always passes an empty
-    /// string, which selects a local agent session.
     pub(super) fn start_session(&self) -> Result<(), IsolationSessionError> {
         owned_thread::call(&self.impersonation, || {
             let result = owned_thread::wait_for(

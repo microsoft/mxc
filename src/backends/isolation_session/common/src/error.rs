@@ -25,12 +25,7 @@ pub(super) mod op {
     pub(crate) const CO_INCREMENT_MTA_USAGE: &str = "Com.CoIncrementMTAUsage";
 
     pub(crate) const ACTIVATE: &str = "IsoSessionOps.ActivateInstance";
-    /// The app-scoped provisioning overload, preferred when the host advertises
-    /// `IsoSessionFeature::AppScopedRegistration`.
     pub(crate) const ADD_USER: &str = "IsoSessionOps.AddUserAsync2";
-    /// The legacy provisioning overload, used on hosts that do not support the
-    /// app-scoped one. Reported instead of [`ADD_USER`] so telemetry attributes
-    /// a failure to the overload actually invoked.
     pub(crate) const ADD_USER_LEGACY: &str = "IsoSessionOps.AddUserAsync";
     pub(crate) const START_SESSION: &str = "IsoSessionOps.StartSessionAsync";
     pub(crate) const RUN_PROCESS: &str = "IsoSessionOps.RunProcessWithOptionsAsync";
