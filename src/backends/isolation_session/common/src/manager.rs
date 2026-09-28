@@ -95,17 +95,6 @@ fn app_scoped_supported_from(level: windows_core::Result<i32>) -> bool {
     matches!(level, Ok(level) if level > 0)
 }
 
-/// Maps the app-scoped support decision to the telemetry operation label of the
-/// provisioning overload that will be invoked, so a failure is attributed to
-/// the `AddUser` overload actually called.
-fn add_user_op(app_scoped: bool) -> &'static str {
-    if app_scoped {
-        op::ADD_USER
-    } else {
-        op::ADD_USER_LEGACY
-    }
-}
-
 /// The provision-time facts the OS assigns to a freshly-created agent user,
 /// read from `IsoSessionUserResult` at `add_user`. The addressing key for
 /// every later lifecycle op remains `agent_user_name`; the other two fields
@@ -200,19 +189,22 @@ impl IsolationSessionManager {
             );
             // The operation label reported in telemetry must name the overload
             // actually invoked, not always `AddUserAsync2`.
-            let op_add_user = add_user_op(app_scoped);
-            let user_result: IsoSessionUserResult = owned_thread::wait_for(
-                op_add_user,
-                if app_scoped {
+            let (op_add_user, started) = if app_scoped {
+                (
+                    op::ADD_USER,
                     ops.AddUserAsync2(
                         &HSTRING::from(app_id.unwrap_or_default()),
                         &HSTRING::new(),
                         &HSTRING::new(),
-                    )
-                } else {
-                    ops.AddUserAsync(&HSTRING::new(), &HSTRING::new())
-                },
-            )?;
+                    ),
+                )
+            } else {
+                (
+                    op::ADD_USER_LEGACY,
+                    ops.AddUserAsync(&HSTRING::new(), &HSTRING::new()),
+                )
+            };
+            let user_result: IsoSessionUserResult = owned_thread::wait_for(op_add_user, started)?;
 
             let err = user_result
                 .Error()
@@ -1478,13 +1470,5 @@ mod tests {
                 windows_core::HRESULT(0x8007_0057u32 as i32), // E_INVALIDARG
             )
         )));
-    }
-
-    #[test]
-    fn add_user_op_names_the_invoked_overload() {
-        // App-scoped hosts use `AddUserAsync2`; older hosts fall back to the
-        // legacy `AddUserAsync`. Telemetry must name whichever was invoked.
-        assert_eq!(add_user_op(true), op::ADD_USER);
-        assert_eq!(add_user_op(false), op::ADD_USER_LEGACY);
     }
 }
