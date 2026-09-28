@@ -129,4 +129,13 @@
         HarnessArguments = "Default"
         Destructive = $false
     }
+    "1245" = @{
+        FriendlyName = "Permissive UI Policy"
+        Script = "test_cases\Invoke-Issue1245-PermissiveUiPolicy.ps1"
+        ExpectedTierSupport = @("base-container-psec")
+        Prerequisites = @("wxc-exec", "PSEC BaseContainer-capable host", "interactive desktop")
+        CapabilityPreflight = $true
+        HarnessArguments = "Default"
+        Destructive = $false
+    }
 }

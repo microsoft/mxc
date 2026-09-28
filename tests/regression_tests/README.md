@@ -21,7 +21,7 @@ Full
 ## Harness info
 - Harness warns about all missing manifest-listed dependencies and prints their installation commands.
 - Missing dependencies stop the run by default; pass `-InstallMissingDependencies` to install supported dependencies with `winget`, or `-RunWithMissingDependencies` to attempt the tests anyway.
-- `wxc-exec.exe` is searched for in current directory or `PATH`
+- `wxc-exec.exe` is searched for in the current directory, standard repository Cargo/SDK build outputs, or `PATH`
 - Destructive cases include `DESTRUCTIVE` in the filename, are skipped by default, and refuse direct execution without `-AllowDestructive`.
 
 ### Objective output
