@@ -8,11 +8,25 @@ license.workspace = true
 wxc_common = { workspace = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
-hyperlight-unikraft = { version = "0.12.1", optional = true }
+hyperlight-unikraft = { version = "0.14.1", default-features = false, optional = true }
+# Setup pulls the guest rootfs straight from the OCI registry, so no
+# container runtime is needed on the host.
+ureq = { version = "3", optional = true }
+flate2 = { version = "1", optional = true }
+tar = { version = "0.4", optional = true }
+serde_json = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true }
 
 [features]
 default = []
-hyperlight = ["dep:hyperlight-unikraft"]
+hyperlight = [
+    "dep:hyperlight-unikraft",
+    "dep:ureq",
+    "dep:flate2",
+    "dep:tar",
+    "dep:serde_json",
+    "dep:sha2",
+]

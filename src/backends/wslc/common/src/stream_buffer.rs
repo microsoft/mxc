@@ -24,6 +24,10 @@ use wxc_common::sandbox_process::StreamCloser;
 #[derive(Default)]
 struct State {
     buffer: VecDeque<u8>,
+    /// Optional ceiling for bytes waiting to be read.
+    max_buffered_bytes: Option<usize>,
+    /// The bounded queue dropped output after reaching its ceiling.
+    overflowed: bool,
     /// No more bytes will arrive (the process exited, or teardown ran).
     closed: bool,
     /// A [`StreamCanceller`] fired: reads report EOF without draining.
@@ -46,11 +50,36 @@ impl Shared {
 
 /// Create a connected writer / reader pair.
 pub(crate) fn stream_pair() -> (StreamWriter, StreamReader) {
+    let (writer, reader, _) = stream_pair_with_limit(None);
+    (writer, reader)
+}
+
+/// Create a connected writer / reader pair with a nonblocking byte ceiling.
+///
+/// Once the pending-byte ceiling is reached, the writer latches overflow and
+/// drops later bytes instead of blocking the producer. The returned observer
+/// lets the owner turn that truncation into an explicit terminal error.
+pub(crate) fn bounded_stream_pair(
+    max_buffered_bytes: usize,
+) -> (StreamWriter, StreamReader, StreamOverflow) {
+    stream_pair_with_limit(Some(max_buffered_bytes))
+}
+
+fn stream_pair_with_limit(
+    max_buffered_bytes: Option<usize>,
+) -> (StreamWriter, StreamReader, StreamOverflow) {
     let shared = Arc::new(Shared {
-        state: Mutex::new(State::default()),
+        state: Mutex::new(State {
+            max_buffered_bytes,
+            ..State::default()
+        }),
         ready: Condvar::new(),
     });
-    (StreamWriter(Arc::clone(&shared)), StreamReader(shared))
+    (
+        StreamWriter(Arc::clone(&shared)),
+        StreamReader(Arc::clone(&shared)),
+        StreamOverflow(shared),
+    )
 }
 
 /// The producing end, written from the SDK's callback threads. Never blocks.
@@ -64,8 +93,17 @@ impl StreamWriter {
     /// nothing to drain it.
     pub(crate) fn write(&self, bytes: &[u8]) {
         let mut state = self.0.lock();
-        if state.closed || state.cancelled {
+        if state.closed || state.cancelled || state.overflowed || bytes.is_empty() {
             return;
+        }
+        if let Some(max_buffered_bytes) = state.max_buffered_bytes {
+            let available = max_buffered_bytes.saturating_sub(state.buffer.len());
+            if bytes.len() > available {
+                state.buffer.extend(&bytes[..available]);
+                state.overflowed = true;
+                self.0.ready.notify_all();
+                return;
+            }
         }
         state.buffer.extend(bytes);
         self.0.ready.notify_all();
@@ -77,6 +115,12 @@ impl StreamWriter {
         let mut state = self.0.lock();
         state.closed = true;
         self.0.ready.notify_all();
+    }
+}
+
+impl Drop for StreamWriter {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
@@ -148,6 +192,16 @@ impl Drop for StreamReader {
     }
 }
 
+/// Observes whether a bounded stream dropped output without keeping its reader
+/// alive.
+pub(crate) struct StreamOverflow(Arc<Shared>);
+
+impl StreamOverflow {
+    pub(crate) fn has_overflowed(&self) -> bool {
+        self.0.lock().overflowed
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,6 +217,15 @@ mod tests {
         let n = reader.read(&mut buf).expect("read data");
         assert_eq!(&buf[..n], b"hello");
         assert_eq!(reader.read(&mut buf).expect("read eof"), 0);
+    }
+
+    #[test]
+    fn dropping_writer_reports_eof() {
+        let (writer, mut reader) = stream_pair();
+        drop(writer);
+
+        let mut buf = [0u8; 1];
+        assert_eq!(reader.read(&mut buf).unwrap(), 0);
     }
 
     #[test]
@@ -221,6 +284,38 @@ mod tests {
             "writes must not block on an unread stream, took {:?}",
             start.elapsed()
         );
+    }
+
+    #[test]
+    fn bounded_stream_drops_tail_and_latches_overflow() {
+        let (writer, mut reader, overflow) = bounded_stream_pair(4);
+        writer.write(b"abcdef");
+        writer.close();
+
+        let mut output = Vec::new();
+        reader.read_to_end(&mut output).expect("read bounded data");
+        assert_eq!(output, b"abcd");
+        assert!(overflow.has_overflowed());
+
+        writer.write(b"later");
+        assert!(overflow.has_overflowed());
+    }
+
+    #[test]
+    fn bounded_stream_reuses_capacity_after_reads() {
+        let (writer, mut reader, overflow) = bounded_stream_pair(4);
+        writer.write(b"abcd");
+
+        let mut first = [0u8; 4];
+        reader.read_exact(&mut first).expect("drain first chunk");
+        writer.write(b"efgh");
+        writer.close();
+
+        let mut second = Vec::new();
+        reader.read_to_end(&mut second).expect("read second chunk");
+        assert_eq!(&first, b"abcd");
+        assert_eq!(second, b"efgh");
+        assert!(!overflow.has_overflowed());
     }
 
     #[test]

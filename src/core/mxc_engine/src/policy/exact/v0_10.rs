@@ -363,5 +363,6 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::OneShotReques
         test: Default::default(),
         windows_sandbox: Default::default(),
         wslc,
+        hyperlight: Default::default(),
     })
 }

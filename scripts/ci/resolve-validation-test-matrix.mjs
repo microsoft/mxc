@@ -10,7 +10,7 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 const FAMILIES = ['windows', 'linux', 'macos'];
-const ARM64_UNSUPPORTED_BACKENDS = new Set(['hyperlight', 'microvm']);
+const ARM64_UNSUPPORTED_BACKENDS = new Set(['microvm']);
 
 function assertNonEmptyString(value, label) {
   if (typeof value !== 'string' || value.trim() === '') {
@@ -37,12 +37,6 @@ export function validateCatalog(catalog) {
     }
     if (platforms.has(platform.id)) {
       throw new Error(`duplicate platform id: ${platform.id}`);
-    }
-    if (platform.prerelease === true) {
-      // Prerelease platforms use neutral IDs in public matrix fields.
-      if (!/^windows-prerelease-[a-z-]+$/.test(platform.id)) {
-        throw new Error(`${platform.id} must use a neutral prerelease-platform alias`);
-      }
     }
 
     const architectures = Object.entries(platform.architectures ?? {});
@@ -216,7 +210,6 @@ export function resolvePlan(catalog, plan) {
     matrices[family].push(matrixEntry);
   }
 
-  suppressNonMacArm64(matrices);
   sortMatrices(matrices);
   applyDelayedStart(matrices, catalog.backendDelayedStart);
   return matrices;
@@ -260,16 +253,6 @@ function setDefaultDelays(matrices) {
     for (const entry of matrices[family]) {
       entry.startup_delay_seconds = 0;
     }
-  }
-}
-
-// Windows and Linux ARM64 hosted VMs currently lack nested virtualization.
-// Keep their catalog entries intact for future enablement, but never emit them
-// until suitable test hosts are available. macOS remains ARM64-only.
-function suppressNonMacArm64(matrices) {
-  for (const family of ['windows', 'linux']) {
-    matrices[family] = matrices[family]
-      .filter(entry => entry.architecture !== 'arm64');
   }
 }
 

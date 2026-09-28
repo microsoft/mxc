@@ -73,7 +73,7 @@ impl Drop for ForceTierGuard {
 }
 
 /// RAII guard for `MXC_FORCE_BC_USABLE`, mirroring [`ForceTierGuard`]. Forces
-/// `fallback_detector::is_base_container_usable()` to a fixed value so
+/// `BaseContainerRunner::is_base_container_api_present()` to a fixed value so
 /// tier-selection tests can simulate "symbol present but feature disabled"
 /// (and the reverse) without real OS support. Also clears `MXC_FORCE_TIER` so
 /// the force-tier seam does not pre-empt the capability path under test.
@@ -132,32 +132,6 @@ impl Drop for CaptureCapabilityGuard {
         unsafe {
             std::env::remove_var("MXC_FORCE_BC_USABLE");
             std::env::remove_var("MXC_FORCE_NATIVE_CAPTURE_USABLE");
-        }
-    }
-}
-
-/// RAII guard for `MXC_FORCE_DENY_PATHS`, mirroring [`BcUsableGuard`]. Forces
-/// `base_container_supports_deny_paths()` to a fixed value in tests.
-pub(crate) struct DenyPathsGuard {
-    _lock: MutexGuard<'static, ()>,
-}
-
-impl DenyPathsGuard {
-    pub(crate) fn supported(supported: bool) -> Self {
-        let guard = lock();
-        // SAFETY: env-var mutation is gated by ENV_LOCK.
-        unsafe {
-            std::env::set_var("MXC_FORCE_DENY_PATHS", if supported { "1" } else { "0" });
-        }
-        DenyPathsGuard { _lock: guard }
-    }
-}
-
-impl Drop for DenyPathsGuard {
-    fn drop(&mut self) {
-        // SAFETY: serialized by ENV_LOCK still held in `_lock`.
-        unsafe {
-            std::env::remove_var("MXC_FORCE_DENY_PATHS");
         }
     }
 }

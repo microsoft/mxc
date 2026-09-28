@@ -57,6 +57,8 @@ mod fixtures;
 mod network;
 #[path = "support/one_shot.rs"]
 mod one_shot;
+#[path = "v0_10_0_alpha/one_shot_backend_sections.rs"]
+mod one_shot_backend_sections;
 #[path = "support/optional_fields.rs"]
 mod optional_fields;
 #[path = "v0_10_0_alpha/request.rs"]
@@ -67,3 +69,5 @@ mod seatbelt;
 mod state_aware;
 #[path = "v0_10_0_alpha/state_aware/provision/mod.rs"]
 mod state_aware_provision;
+#[path = "v0_10_0_alpha/wslc.rs"]
+mod wslc;

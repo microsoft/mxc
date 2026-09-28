@@ -7,8 +7,10 @@
 //! failures can be debugged from Rust test code.
 
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -255,17 +257,39 @@ pub fn run_lxc_config(config_file: &str, extra_args: &[&str]) -> CommandResult {
     run_executable(config_file, &exe, args)
 }
 
-/// Return whether the Hyperlight snapshot is installed at the default
-/// location (`%LOCALAPPDATA%\pyhl\snapshot\index.json`).
-pub fn has_hyperlight_snapshot() -> bool {
-    let home = std::env::var_os("LOCALAPPDATA")
+/// The Hyperlight image home the runner resolves first: `MXC_HYPERLIGHT_HOME`
+/// when set, else `%LOCALAPPDATA%\mxc-hyperlight`.
+fn hyperlight_home() -> PathBuf {
+    if let Some(home) = std::env::var_os("MXC_HYPERLIGHT_HOME") {
+        return PathBuf::from(home);
+    }
+    std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             std::env::var_os("USERPROFILE")
                 .map(|v| PathBuf::from(v).join("AppData").join("Local"))
                 .unwrap_or_default()
-        });
-    let snapshot = home.join("pyhl").join("snapshot").join("index.json");
+        })
+        .join("mxc-hyperlight")
+}
+
+/// Return whether `runtime`'s snapshot is installed in the default home
+/// (`%LOCALAPPDATA%\mxc-hyperlight\<runtime>\snapshot\index.json`).
+pub fn has_hyperlight_runtime(runtime: &str) -> bool {
+    hyperlight_home()
+        .join(runtime)
+        .join("snapshot")
+        .join("index.json")
+        .is_file()
+}
+
+/// Return whether the default Hyperlight runtime's snapshot is installed
+/// (`%LOCALAPPDATA%\mxc-hyperlight\agent\snapshot\index.json`).
+pub fn has_hyperlight_snapshot() -> bool {
+    let snapshot = hyperlight_home()
+        .join("agent")
+        .join("snapshot")
+        .join("index.json");
     if snapshot.is_file() {
         println!("Using Hyperlight snapshot at {}", snapshot.display());
         true
@@ -480,23 +504,108 @@ pub fn run_wxc_example(config_file: &str, extra_args: &[&str]) -> CommandResult 
     run_executable(config_file, &exe, args)
 }
 
-/// Run `wxc-exec.exe` with a state-aware request envelope. The JSON value is
-/// serialised, base64-encoded, and passed via `--config-base64`. Used by the
-/// state-aware smoke tests.
+/// Build executor arguments for a state-aware request after removing routing
+/// fields from the JSON payload.
+fn build_wxc_state_aware_args(
+    operation: String,
+    sandbox_id: Option<String>,
+    encoded: String,
+    extra_args: &[&str],
+) -> Vec<String> {
+    let mut args = vec!["--operation".to_string(), operation.clone()];
+    if operation != "provision" {
+        args.push("--sandbox-id".to_string());
+        args.push(sandbox_id.expect("non-provision test request must contain sandboxId"));
+    }
+    args.push("--config-base64".to_string());
+    args.push(encoded);
+    args.extend(extra_args.iter().map(|arg| (*arg).to_string()));
+    args
+}
+
+fn extract_wxc_state_aware_routing(request: &mut serde_json::Value) -> (String, Option<String>) {
+    let object = request
+        .as_object_mut()
+        .expect("state-aware test request must be an object");
+    let operation = object
+        .remove("phase")
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .expect("state-aware test request must contain a string phase");
+    let sandbox_id = if operation == "provision" {
+        None
+    } else {
+        object
+            .remove("sandboxId")
+            .and_then(|value| value.as_str().map(str::to_owned))
+    };
+
+    (operation, sandbox_id)
+}
+
+/// Run `wxc-exec.exe` with a state-aware request. Routing fields are passed as
+/// executor arguments; the remaining exact request is passed via
+/// `--config-base64`.
 pub fn run_wxc_state_aware(
     label: &str,
     request: &serde_json::Value,
     extra_args: &[&str],
 ) -> CommandResult {
     let exe = find_binary("wxc-exec.exe").expect("wxc-exec.exe should be available");
+    let mut request = request.clone();
+    let (operation, sandbox_id) = extract_wxc_state_aware_routing(&mut request);
     let json = request.to_string();
     let encoded = STANDARD.encode(json.as_bytes());
-
-    let mut args: Vec<String> = extra_args.iter().map(|s| (*s).to_string()).collect();
-    args.push("--config-base64".to_string());
-    args.push(encoded);
+    let args = build_wxc_state_aware_args(operation, sandbox_id, encoded, extra_args);
 
     run_executable(label, &exe, args)
+}
+
+#[cfg(test)]
+mod state_aware_args_tests {
+    use super::{build_wxc_state_aware_args, extract_wxc_state_aware_routing};
+    use serde_json::json;
+
+    #[test]
+    fn mandatory_arguments_precede_the_trailing_command_separator() {
+        let args = build_wxc_state_aware_args(
+            "exec".to_string(),
+            Some("iso:abc".to_string()),
+            "encoded".to_string(),
+            &["--experimental", "--", "echo", "hello"],
+        );
+
+        assert_eq!(
+            args,
+            [
+                "--operation",
+                "exec",
+                "--sandbox-id",
+                "iso:abc",
+                "--config-base64",
+                "encoded",
+                "--experimental",
+                "--",
+                "echo",
+                "hello",
+            ]
+        );
+    }
+
+    #[test]
+    fn provision_preserves_sandbox_id_for_executor_rejection() {
+        let mut request = json!({
+            "phase": "provision",
+            "sandboxId": "iso:unexpected",
+            "containment": "isolation_session",
+        });
+
+        let (operation, sandbox_id) = extract_wxc_state_aware_routing(&mut request);
+
+        assert_eq!(operation, "provision");
+        assert_eq!(sandbox_id, None);
+        assert_eq!(request["sandboxId"], "iso:unexpected");
+        assert!(request.get("phase").is_none());
+    }
 }
 
 /// Run `wxc-exec.exe` with a one-shot config supplied as an in-memory JSON
@@ -632,6 +741,117 @@ pub fn run_platform_config_value(
         .unwrap_or_else(|error| panic!("failed to execute {label}: {error}"));
 
     command_result(label, output, start.elapsed().as_millis())
+}
+
+/// [`run_platform_config_value`] bounded by a host-side deadline, returning
+/// `None` if it expired. Use this wherever termination is the
+/// property under test.
+///
+/// The deadline covers both the executor's exit and the close of its output
+/// pipes, so a descendant that outlives the executor still holding them open
+/// is reported as an expiry rather than blocking the caller.
+///
+/// On expiry the executor is killed and reaped. Its sandboxed descendants are
+/// not walked: that is the backend's teardown contract, and a test that has
+/// already timed out is in no position to enforce it.
+pub fn run_platform_config_value_within_duration(
+    label: &str,
+    config: &serde_json::Value,
+    extra_env: &[(&str, &str)],
+    cwd: Option<&Path>,
+    deadline: Duration,
+) -> Option<CommandResult> {
+    /// Short enough that a prompt failure is still reported as prompt, long
+    /// enough that polling is not a busy-wait.
+    const POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+    let exe = find_platform_exec().expect("native executor binary should be available");
+    let encoded = STANDARD.encode(config.to_string().as_bytes());
+
+    let start = Instant::now();
+    let mut cmd = Command::new(&exe);
+    cmd.arg("--config-base64").arg(encoded);
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .unwrap_or_else(|error| panic!("failed to execute {label}: {error}"));
+
+    // Both pipes are drained on their own threads: waiting on the process
+    // while its output sits unread would deadlock as soon as a chatty child
+    // filled a pipe buffer. Results come back over channels so that collecting
+    // them can honor the deadline too.
+    let mut stdout_pipe = child.stdout.take().expect("stdout was piped");
+    let mut stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let (stdout_tx, stdout_rx) = mpsc::channel();
+    let (stderr_tx, stderr_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buffer);
+        let _ = stdout_tx.send(buffer);
+    });
+    std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buffer);
+        let _ = stderr_tx.send(buffer);
+    });
+
+    let expires_at = start + deadline;
+    let status = loop {
+        match child.try_wait().expect("poll the executor's status") {
+            Some(status) => break Some(status),
+            None if Instant::now() >= expires_at => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            None => std::thread::sleep(POLL_INTERVAL),
+        }
+    };
+    // Each `?` below leaves the readers detached on purpose. A descendant that
+    // inherited the pipes can hold them open past the executor's own exit, and
+    // blocking on them would reintroduce exactly the hang this function exists
+    // to bound.
+    let status = status?;
+    let stdout = collect_within_duration(&stdout_rx, expires_at)?;
+    let stderr = collect_within_duration(&stderr_rx, expires_at)?;
+
+    Some(command_result(
+        label,
+        Output {
+            status,
+            stdout,
+            stderr,
+        },
+        start.elapsed().as_millis(),
+    ))
+}
+
+/// Take a reader thread's output, giving up at `expires_at`.
+///
+/// The buffer is only sent once its pipe reaches EOF, so a pending receive
+/// means the pipe is still open somewhere.
+fn collect_within_duration(
+    reader: &mpsc::Receiver<Vec<u8>>,
+    expires_at: Instant,
+) -> Option<Vec<u8>> {
+    match reader.try_recv() {
+        Ok(buffer) => Some(buffer),
+        // A zero or negative remainder must not discard output that is already
+        // waiting, hence the `try_recv` first.
+        Err(mpsc::TryRecvError::Empty) => reader
+            .recv_timeout(expires_at.saturating_duration_since(Instant::now()))
+            .ok(),
+        Err(mpsc::TryRecvError::Disconnected) => None,
+    }
 }
 
 /// Run `wxc-test-driver.exe` against a directory or a single config file.

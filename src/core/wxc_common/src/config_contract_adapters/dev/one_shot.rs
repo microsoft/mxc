@@ -280,11 +280,13 @@ pub(super) fn into_common_request_ir(
         test,
         windows_sandbox,
         wslc,
+        hyperlight,
     } = request;
     crate::common_request_ir::CommonRequestIR {
         schema: schema.into_option(),
         comment: comment.into_option(),
         source_contract: mxc_config_contract::ContractVersion::V0_10_0Alpha,
+        default_env_compatibility: crate::models::DefaultEnvCompatibility::DefaultBlock,
         network_enforcement_compatibility: crate::models::NetworkEnforcementCompatibility::Strict,
         phase: None,
         sandbox_id: None,
@@ -306,6 +308,23 @@ pub(super) fn into_common_request_ir(
         seatbelt: seatbelt.into_option().map(convert_seatbelt),
         test_feature: test.into_option().map(convert_test),
         windows_sandbox: windows_sandbox.into_option().map(convert_windows_sandbox),
+        hyperlight: hyperlight.into_option().map(convert_hyperlight),
+    }
+}
+
+fn convert_hyperlight(value: contract::OneShotHyperlight) -> wire::Hyperlight {
+    let contract::OneShotHyperlight { runtime } = value;
+    wire::Hyperlight {
+        runtime: runtime.into_option().map(|runtime| match runtime {
+            contract::HyperlightRuntime::Agent => crate::models::HyperlightRuntime::Agent,
+            contract::HyperlightRuntime::Python => crate::models::HyperlightRuntime::Python,
+            contract::HyperlightRuntime::PythonShell => {
+                crate::models::HyperlightRuntime::PythonShell
+            }
+            contract::HyperlightRuntime::Node => crate::models::HyperlightRuntime::Node,
+            contract::HyperlightRuntime::Bash => crate::models::HyperlightRuntime::Bash,
+            contract::HyperlightRuntime::DotnetJit => crate::models::HyperlightRuntime::DotnetJit,
+        }),
     }
 }
 

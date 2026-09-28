@@ -30,34 +30,6 @@ const WINDOWS_SANDBOX_REQUEST_JSON: &str = r#"{
     }
 }"#;
 
-const WSLC_REQUEST_JSON: &str = r#"{
-    "version": "0.10.0-alpha",
-    "containment": "wslc",
-    "process": {
-        "commandLine": "echo hello"
-    },
-    "wslc": {
-        "targetOs": "linux",
-        "image": "alpine:latest",
-        "imageTarPath": "C:\\images\\alpine.tar",
-        "cpuCount": 4,
-        "memoryMb": 4294967296,
-        "gpu": true,
-        "storagePath": "C:\\wslc",
-        "portMappings": [
-            {
-                "windowsPort": 8080,
-                "containerPort": 80
-            },
-            {
-                "windowsPort": 8443,
-                "containerPort": 443,
-                "protocol": "tcp"
-            }
-        ]
-    }
-}"#;
-
 #[test]
 fn windows_sandbox_maps_expected_wire_fields() {
     let wire = adapt(WINDOWS_SANDBOX_REQUEST_JSON);
@@ -79,7 +51,6 @@ fn windows_sandbox_maps_expected_wire_fields() {
     );
 
     assert!(wire.test_feature.is_none());
-    assert!(wire.wslc.is_none());
     assert!(wire.telemetry.is_none());
 }
 
@@ -94,51 +65,6 @@ fn test_feature_and_telemetry_map_expected_wire_fields() {
     assert_eq!(telemetry.enabled, Some(false));
 
     assert!(wire.windows_sandbox.is_none());
-    assert!(wire.wslc.is_none());
-}
-
-#[test]
-fn wslc_maps_expected_wire_fields() {
-    let wire = adapt(WSLC_REQUEST_JSON);
-
-    assert!(matches!(
-        wire.containment,
-        Some(super::wire::Containment::Wslc)
-    ));
-
-    assert!(wire.test_feature.is_none());
-    assert!(wire.windows_sandbox.is_none());
-    let wslc = wire.wslc.expect("wslc should be populated");
-
-    assert_eq!(wslc.target_os.as_deref(), Some("linux"));
-    assert_eq!(wslc.image.as_deref(), Some("alpine:latest"));
-    assert_eq!(
-        wslc.image_tar_path.as_deref(),
-        Some(r"C:\images\alpine.tar")
-    );
-    assert_eq!(wslc.cpu_count, Some(4));
-    assert_eq!(wslc.memory_mb, Some(4294967296));
-    assert_eq!(wslc.gpu, Some(true));
-    assert_eq!(wslc.storage_path.as_deref(), Some(r"C:\wslc"));
-    assert!(wslc.provision.is_none());
-
-    let mappings = wslc
-        .port_mappings
-        .expect("portMappings should be populated");
-    assert_eq!(mappings.len(), 2);
-
-    assert_eq!(mappings[0].windows_port, 8080);
-    assert_eq!(mappings[0].container_port, 80);
-    assert!(mappings[0].protocol.is_none());
-
-    assert_eq!(mappings[1].windows_port, 8443);
-    assert_eq!(mappings[1].container_port, 443);
-    assert!(matches!(
-        &mappings[1].protocol,
-        Some(super::wire::TransportProtocol::Tcp)
-    ));
-
-    assert!(wire.telemetry.is_none());
 }
 
 struct DevelopmentContainmentCase {
@@ -162,14 +88,6 @@ const DEVELOPMENT_CONTAINMENT_CASES: &[DevelopmentContainmentCase] = &[
     DevelopmentContainmentCase {
         input: "hyperlight",
         expected: "hyperlight",
-    },
-    DevelopmentContainmentCase {
-        input: "wslc",
-        expected: "wslc",
-    },
-    DevelopmentContainmentCase {
-        input: "isolation_session",
-        expected: "isolation_session",
     },
 ];
 

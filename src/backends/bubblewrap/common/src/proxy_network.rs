@@ -116,6 +116,12 @@ const INGRESS_CHAIN: &str = "MXC_INGRESS";
 /// a redirection, which is the whole reason the parent pins them.
 const SUPERVISOR_PID_FD: RawFd = 3;
 const SUPERVISOR_EXIT_FD: RawFd = 4;
+/// Held open by the supervisor and inherited by slirp, never written to.
+///
+/// The parent keeps only the read end, so it reaches EOF exactly when both
+/// have exited -- an orphaned slirp still carries the sandbox's route, and
+/// holding the descriptor is what keeps that case from reading as a loss.
+const SUPERVISOR_LIVENESS_FD: RawFd = 5;
 /// Descriptors are staged above every target before being landed, so a source
 /// already sitting on a target cannot be clobbered mid-remap.
 const FD_STAGING_BASE: RawFd = 10;
@@ -633,6 +639,9 @@ pub(crate) struct ProxyNetworkNamespace {
     userns: Option<File>,
     /// Hosts file mounted over `/etc/hosts`, when the endpoint is a hostname.
     hosts: Option<PathBuf>,
+    /// Read end of the descriptor the supervisor and slirp hold open, taken by
+    /// the monitor that watches for the network provider dying mid-run.
+    liveness_reader: Option<OwnedFd>,
     /// Restore transactions the supervisor will apply, which sizes the
     /// readiness budget in [`Self::attach`].
     transactions: usize,
@@ -691,6 +700,9 @@ impl ProxyNetworkNamespace {
             pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("Bubblewrap: pipe failed: {error}"))?;
         let (pid_reader, pid_writer) =
             pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("Bubblewrap: pipe failed: {error}"))?;
+        let (liveness_reader, liveness_writer) =
+            pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("Bubblewrap: pipe failed: {error}"))?;
+        set_nonblocking(liveness_reader.as_raw_fd())?;
 
         let mut command = Command::new("unshare");
         command
@@ -717,6 +729,7 @@ impl ProxyNetworkNamespace {
             [
                 (pid_reader.as_raw_fd(), SUPERVISOR_PID_FD),
                 (exit_reader.as_raw_fd(), SUPERVISOR_EXIT_FD),
+                (liveness_writer.as_raw_fd(), SUPERVISOR_LIVENESS_FD),
             ],
         );
 
@@ -725,6 +738,10 @@ impl ProxyNetworkNamespace {
         })?;
         drop(exit_reader);
         drop(pid_reader);
+
+        // The supervisor tree is now the only holder of the write end, which is
+        // what makes the read end reach EOF when it dies.
+        drop(liveness_writer);
 
         if let Err(error) = wait_for_file(
             state_dir.path().join("userns.ready"),
@@ -773,6 +790,7 @@ impl ProxyNetworkNamespace {
             pid_writer: Some(pid_writer),
             userns: Some(userns),
             hosts,
+            liveness_reader: Some(liveness_reader),
             transactions,
             script_timeout_ms,
         })
@@ -865,6 +883,50 @@ impl ProxyNetworkNamespace {
              rules are in force",
         );
         Ok(())
+    }
+
+    /// Confirm the network provider is still alive, immediately before the
+    /// workload's startup gate opens.
+    ///
+    /// `slirp.ready` is a latch that stays on disk after slirp dies, so the
+    /// readiness [`Self::attach`] waited for can already be stale here.
+    pub(crate) fn check_alive(&mut self) -> Result<(), String> {
+        match self.supervisor.try_wait() {
+            Ok(None) => Ok(()),
+
+            // The supervisor's last act is to wait on slirp, so it outlives
+            // slirp and any exit at all leaves the sandbox with no route.
+            Ok(Some(status)) => Err(format!(
+                "Bubblewrap: the proxy network supervisor exited ({status}) after signalling \
+                 readiness but before the workload started, leaving the sandbox with no \
+                 network provider ({})",
+                stderr_detail(&self.state_dir.path().join("supervisor.stderr"))
+            )),
+            Err(error) => Err(format!(
+                "Bubblewrap: failed to inspect the proxy network supervisor before starting \
+                 the workload: {error}"
+            )),
+        }
+    }
+
+    /// Take the descriptor a [`ProviderMonitor`] watches for provider loss.
+    pub(crate) fn take_liveness_watch(&mut self) -> Option<OwnedFd> {
+        self.liveness_reader.take()
+    }
+
+    /// Describe the provider loss a monitor observed, for the error the run
+    /// fails with.
+    pub(crate) fn lost_provider_detail(&mut self) -> String {
+        let status = match self.supervisor.try_wait() {
+            Ok(Some(status)) => format!("exited with {status}"),
+            Ok(None) => "is still running, so slirp4netns died on its own".to_string(),
+            Err(error) => format!("could not be inspected: {error}"),
+        };
+        format!(
+            "Bubblewrap: the sandbox lost its network provider while the workload was \
+             running; the proxy network supervisor {status} ({})",
+            stderr_detail(&self.state_dir.path().join("supervisor.stderr"))
+        )
     }
 
     /// Stop slirp and reap the namespace supervisor.
@@ -4641,5 +4703,84 @@ exec sleep 30
             supervisor.stderr()
         );
         assert_eq!(supervisor.rule_invocations(), 0);
+    }
+
+    /// A namespace whose supervisor is `script`, every other field inert, for
+    /// exercising the pre-gate liveness check on its own.
+    fn namespace_running(script: &str) -> ProxyNetworkNamespace {
+        let state_dir = tempfile::tempdir().expect("tempdir");
+        let stderr = File::create(state_dir.path().join("supervisor.stderr")).expect("stderr");
+        let supervisor = Command::new("sh")
+            .args(["-c", script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(stderr))
+            .spawn()
+            .expect("spawn supervisor");
+
+        ProxyNetworkNamespace {
+            state_dir,
+            supervisor,
+            exit_writer: None,
+            pid_writer: None,
+            userns: None,
+            hosts: None,
+            liveness_reader: None,
+            transactions: 0,
+            script_timeout_ms: 0,
+        }
+    }
+
+    fn await_exit(namespace: &mut ProxyNetworkNamespace) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if namespace.supervisor.try_wait().expect("try_wait").is_some() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("supervisor did not exit");
+    }
+
+    #[test]
+    fn the_gate_check_passes_while_the_supervisor_is_running() {
+        let mut network = namespace_running("sleep 30");
+
+        assert!(
+            network.check_alive().is_ok(),
+            "a running supervisor must not block the workload"
+        );
+    }
+
+    #[test]
+    fn the_gate_check_refuses_a_supervisor_that_died_after_signalling_readiness() {
+        let mut network = namespace_running("echo 'slirp4netns: crashed' >&2; exit 1");
+        await_exit(&mut network);
+
+        let error = network
+            .check_alive()
+            .expect_err("a dead supervisor must not reach the workload");
+        assert!(
+            error.contains("no network provider"),
+            "the failure must name the lost provider rather than read as a workload \
+             error: {error}"
+        );
+        assert!(
+            error.contains("slirp4netns: crashed"),
+            "the failure must carry what the supervisor wrote: {error}"
+        );
+    }
+
+    /// Slirp carries the sandbox's only route, so its exit code says nothing
+    /// about whether the sandbox still has a network.
+    #[test]
+    fn the_gate_check_refuses_even_a_supervisor_that_exited_cleanly() {
+        let mut network = namespace_running("exit 0");
+        await_exit(&mut network);
+
+        assert!(
+            network.check_alive().is_err(),
+            "a successful exit still leaves the sandbox with no route"
+        );
     }
 }

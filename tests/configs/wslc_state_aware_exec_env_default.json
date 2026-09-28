@@ -1,0 +1,9 @@
+{
+    "version": "0.9.0-alpha",
+    "phase": "exec",
+    "sandboxId": "{{SANDBOX_ID}}",
+    "process": {
+        "commandLine": "echo \"HOSTCOUNT=[$(env | grep -c '^HOSTNAME=')]\"",
+        "timeout": 30000
+    }
+}

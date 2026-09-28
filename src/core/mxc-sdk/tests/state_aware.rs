@@ -19,7 +19,111 @@
 //! experimental opt-in — which stays host-independent because the gate runs
 //! before backend dispatch.
 
-use mxc_sdk::{exec_sandbox, run_state_aware_json, ErrorCode};
+use mxc_sdk::{
+    exec_sandbox, exec_sandbox_json, run_state_aware_json, sandbox, Error, ErrorCode, ExecRequest,
+    LifecycleRequest, LifecycleResult, OperationOptions, ProvisionRequest, ProvisionResult,
+    Sandbox, SandboxId, ValidationResult, WaitOutcome,
+};
+
+#[test]
+fn typed_lifecycle_api_is_operation_specific() {
+    let _: fn(ProvisionRequest, OperationOptions) -> Result<ProvisionResult, Error> =
+        sandbox::provision;
+    let _: fn(ProvisionRequest, OperationOptions) -> Result<ValidationResult, Error> =
+        sandbox::validate_provision;
+    let _: fn(&SandboxId, LifecycleRequest, OperationOptions) -> Result<LifecycleResult, Error> =
+        sandbox::start;
+    let _: fn(&SandboxId, LifecycleRequest, OperationOptions) -> Result<ValidationResult, Error> =
+        sandbox::validate_start;
+    let _: fn(&SandboxId, LifecycleRequest, OperationOptions) -> Result<LifecycleResult, Error> =
+        sandbox::stop;
+    let _: fn(&SandboxId, LifecycleRequest, OperationOptions) -> Result<ValidationResult, Error> =
+        sandbox::validate_stop;
+    let _: fn(&SandboxId, LifecycleRequest, OperationOptions) -> Result<LifecycleResult, Error> =
+        sandbox::deprovision;
+    let _: fn(&SandboxId, LifecycleRequest, OperationOptions) -> Result<ValidationResult, Error> =
+        sandbox::validate_deprovision;
+    let _: fn(&SandboxId, ExecRequest, OperationOptions) -> Result<Sandbox, Error> = sandbox::exec;
+    let _: fn(&SandboxId, ExecRequest, OperationOptions) -> Result<WaitOutcome, Error> =
+        sandbox::exec_attached;
+    let _: fn(&SandboxId, ExecRequest, OperationOptions) -> Result<ValidationResult, Error> =
+        sandbox::validate_exec;
+}
+
+#[test]
+fn typed_windows_sandbox_requires_the_development_version() {
+    let error = sandbox::validate_provision(
+        ProvisionRequest::windows_sandbox("0.9.0-alpha"),
+        OperationOptions::new(true),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::MalformedRequest);
+    assert!(error.message.contains("0.10.0-alpha"));
+}
+
+#[test]
+fn typed_windows_sandbox_requires_experimental_authorization() {
+    let error = sandbox::validate_provision(
+        ProvisionRequest::windows_sandbox("0.10.0-alpha"),
+        OperationOptions::new(false),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::BackendUnavailable);
+    assert!(error.message.contains("experimental"));
+}
+
+#[test]
+fn typed_lifecycle_routes_by_sandbox_id() {
+    let sandbox_id = SandboxId::parse("nosuchbackend:abc123").unwrap();
+    let error = sandbox::validate_start(
+        &sandbox_id,
+        LifecycleRequest::new("0.9.0-alpha"),
+        OperationOptions::default(),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::UnsupportedContainment);
+}
+
+#[test]
+fn typed_exec_dry_run_honors_experimental_authorization() {
+    let sandbox_id = SandboxId::parse("wsb:0a1b2c3d").unwrap();
+    let request = ExecRequest::new("0.10.0-alpha", "echo hello");
+    let error = sandbox::validate_exec(&sandbox_id, request.clone(), OperationOptions::new(false))
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::BackendUnavailable);
+
+    if let Err(error) = sandbox::validate_exec(&sandbox_id, request, OperationOptions::new(true)) {
+        assert_ne!(
+            error.code,
+            ErrorCode::BackendUnavailable,
+            "the experimental opt-in must reach typed exec dispatch: {}",
+            error.message
+        );
+    }
+}
+
+#[test]
+fn sandbox_id_rejects_values_that_cannot_cross_the_ffi_boundary() {
+    for value in ["", "iso:valid\0suffix"] {
+        let error = SandboxId::parse(value).unwrap_err();
+        assert_eq!(error.code, ErrorCode::MalformedId);
+    }
+}
+
+#[test]
+fn explicit_raw_exec_alias_preserves_existing_behavior() {
+    let json = r#"{"version":"0.8.0-alpha","process":{"commandLine":"echo hi"}}"#;
+    let legacy = match exec_sandbox(json, false) {
+        Ok(_) => panic!("one-shot must be rejected"),
+        Err(error) => error,
+    };
+    let explicit = match exec_sandbox_json(json, false) {
+        Ok(_) => panic!("one-shot must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(legacy.code, explicit.code);
+    assert_eq!(legacy.message, explicit.message);
+}
 
 #[test]
 fn run_state_aware_json_rejects_one_shot_config() {

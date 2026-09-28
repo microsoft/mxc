@@ -371,6 +371,14 @@ export interface WslcConfig {
 }
 
 /**
+ * Hyperlight backend configuration
+ */
+export interface HyperlightConfig {
+  /** Guest runtime that `process.commandLine` is source for (default: "agent") */
+  runtime?: 'agent' | 'python' | 'python-shell' | 'node' | 'bash' | 'dotnet-jit';
+}
+
+/**
  * Port mapping for host↔container port forwarding.
  */
 export interface PortMapping {
@@ -439,6 +447,8 @@ export interface ContainerConfig {
   telemetry?: TelemetryConfig;
   /** WSLC SDK configuration for Linux containers from Windows */
   wslc?: WslcConfig;
+  /** Hyperlight backend configuration */
+  hyperlight?: HyperlightConfig;
   /** macOS Seatbelt sandbox configuration (macOS only) */
   seatbelt?: SeatbeltConfig;
   /** Cross-platform UI configuration */
@@ -468,13 +478,13 @@ export type SandboxPolicy = {
   };
   /** Network access restrictions. All flags default to false (no network access). */
   network?: {
-      /** Whether to allow outbound connections to the Internet. (default: false) Legacy network field. */
+      /** Allow outbound by default when no allowlist narrows the policy. (default: false) Legacy network field. */
       allowOutbound?: boolean;
       /** Whether to allow connections to local networks. (default: false) Legacy network field. */
       allowLocalNetwork?: boolean;
-      /** When set, ONLY these outbound hosts are reachable. Requires allowOutbound. Legacy network field. */
+      /** Destinations allowed under a default-block policy. Windows ProcessContainer also requires allowOutbound. Legacy network field. */
       allowedHosts?: string[];
-      /** Hosts to block even when outbound is allowed. Requires allowOutbound. Legacy network field. */
+      /** Destinations denied after allow rules. Without allowedHosts, set allowOutbound so the default is allow. Legacy network field. */
       blockedHosts?: string[];
       /**
        * Proxy configuration. Routes cooperating HTTP traffic through this proxy.

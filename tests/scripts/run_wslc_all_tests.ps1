@@ -219,6 +219,15 @@ $null = $results.Add((Run-WslcTest "wslc_exit_code.json" -ExpectedExit 42 -Outpu
 $null = $results.Add((Run-WslcTest "wslc_stderr.json" -OutputContains "stdout message"))
 $null = $results.Add((Run-WslcTest "wslc_large_output.json"))
 
+Write-Host "`n--- Environment Tests (schema 0.9) ---" -ForegroundColor Cyan
+# PYTHON_VERSION is baked into the image by ENV. Unlike PATH and TERM, no shell
+# fabricates it when it starts without one, so its absence is real evidence that
+# the image environment was replaced rather than a shell default reading back.
+$null = $results.Add((Run-WslcTest "wslc_env_09_default_block.json" -OutputMatches 'PYVER=\[3\.\d'))
+$null = $results.Add((Run-WslcTest "wslc_env_09_empty.json" -OutputMatches 'PYVER=\[\][\s\S]*FOO=\[\]'))
+$null = $results.Add((Run-WslcTest "wslc_env_09_verbatim.json" -OutputMatches 'PYVER=\[\][\s\S]*FOO=\[bar\]'))
+$null = $results.Add((Run-WslcTest "wslc_env_09_inherit.json" -OutputMatches 'PYVER=\[3\.\d[\s\S]*FOO=\[bar\][\s\S]*LANG=\[C\.OVERRIDDEN\][\s\S]*LANGCOUNT=\[1\]'))
+
 Write-Host "`n--- Filesystem Tests ---" -ForegroundColor Cyan
 
 # Fixed paths must match tests\configs\wslc_filesystem.json and
@@ -322,18 +331,23 @@ Write-Host "`n--- Network Tests ---" -ForegroundColor Cyan
 $null = $results.Add((Run-WslcTest "wslc_network_isolated.json"))
 # Delegate the cooperative proxy fixture to its owning script, which asserts
 # HTTP_PROXY injection/scrub, NO_PROXY neutralization, and attacker-value
-# removal -- assertions the marker-only Run-WslcTest path cannot make.
+# removal -- assertions the marker-only Run-WslcTest path cannot make. Both
+# environment scopes run: the injected variables reach the container through
+# argv when the caller's environment replaces the image's, and through the SDK's
+# setter when it layers over it.
 $proxyScript = Join-Path $PSScriptRoot "run_wslc_proxy_test.ps1"
-$proxyArgs = @{ WxcExecPath = $WxcExec }
-if ($Debug) { $proxyArgs.Debug = $true }
-& $proxyScript @proxyArgs
-$proxyPass = ($LASTEXITCODE -eq 0)
-$null = $results.Add(@{
-    Name    = "wslc_network_proxy.json"
-    Pass    = $proxyPass
-    Skipped = $false
-    Reason  = $(if ($proxyPass) { "" } else { "cooperative proxy test failed" })
-})
+foreach ($proxyConfig in @("wslc_network_proxy.json", "wslc_network_proxy_inherit.json")) {
+    $proxyArgs = @{ WxcExecPath = $WxcExec; ConfigFile = $proxyConfig }
+    if ($Debug) { $proxyArgs.Debug = $true }
+    & $proxyScript @proxyArgs
+    $proxyPass = ($LASTEXITCODE -eq 0)
+    $null = $results.Add(@{
+        Name    = $proxyConfig
+        Pass    = $proxyPass
+        Skipped = $false
+        Reason  = $(if ($proxyPass) { "" } else { "cooperative proxy test failed" })
+    })
+}
 $null = $results.Add((Run-WslcTest "wslc_port_mapping_tcp.json" -OutputContains "PORT_MAPPING_TCP_OK"))
 $null = $results.Add((Run-WslcTest "wslc_port_mapping_multiple.json" -OutputContains "PORT_MAPPING_MULTI_OK"))
 

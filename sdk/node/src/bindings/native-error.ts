@@ -44,6 +44,8 @@ export function _errorCodeForNativeStatus(status: number): ErrorCode {
     12: 'backend_error',
     100: 'malformed_request',
     101: 'malformed_request',
+    102: 'backend_error',
+    103: 'backend_error',
   };
   return codes[status] ?? 'backend_error';
 }

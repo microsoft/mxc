@@ -5,15 +5,15 @@
 .SYNOPSIS
     Runs Windows Sandbox state-aware lifecycle E2E tests. Companion to the
     one-shot Windows Sandbox path; this script drives the multi-invocation
-    state-aware lifecycle (`phase` / `sandboxId` envelope style):
+    CLI-routed state-aware lifecycle:
     provision -> start -> exec* -> stop -> deprovision, against a REAL
     wxc-exec.exe + the detached host-side daemon + a live Windows Sandbox VM.
 
 .DESCRIPTION
-    Each test invokes wxc-exec.exe with a base64-encoded state-aware request
-    envelope, parses the JSON response on stdout, and asserts on the
-    envelope's `result` or `error` fields (and, for exec, on the streamed
-    stdout / exit code).
+    Each test invokes wxc-exec.exe with lifecycle routing in --operation /
+    --sandbox-id and a base64-encoded phase-specific request payload, parses
+    the JSON response on stdout, and asserts on the envelope's `result` or
+    `error` fields (and, for exec, on the streamed stdout / exit code).
 
     Windows Sandbox is single-instance per host and boots a fresh VM at
     `start`, so this script must run INTERACTIVELY on a host that has the
@@ -120,7 +120,8 @@ Write-Host "Pre-flight OK: $freeMb MB free, no orphan vmmem`n" -ForegroundColor 
 
 # ---------------- Helpers ----------------
 
-# Encode a state-aware request envelope and run wxc-exec against it. Captures
+# Clone a state-aware request, move lifecycle routing to executor arguments,
+# encode the remaining phase-specific payload, and run wxc-exec. Captures
 # stdout / stderr to files (so the single-envelope stdout is not interleaved
 # with ConPTY) and returns a hashtable with ExitCode / Stdout / Stderr. A
 # bounded wait guards against a wedged phase (the cold-boot `start` needs a
@@ -131,24 +132,49 @@ function Invoke-StateAware {
         [int]$TimeoutSec = 120
     )
 
-    if (-not $Request.ContainsKey('version')) {
-        $Request = $Request.Clone()
-        $Request['version'] = '0.10.0-alpha'
+    $requestObject = $Request.Clone()
+    if (-not $requestObject.ContainsKey('version')) {
+        $requestObject['version'] = '0.10.0-alpha'
     }
-    $json = $Request | ConvertTo-Json -Compress -Depth 12
+
+    $phaseKey = $requestObject.Keys | Where-Object { $_ -ceq 'phase' } | Select-Object -First 1
+    if ($null -eq $phaseKey -or $requestObject[$phaseKey] -isnot [string]) {
+        throw "State-aware request must contain a string 'phase'"
+    }
+    $phase = [string]$requestObject[$phaseKey]
+    $null = $requestObject.Remove($phaseKey)
+
+    $routingSandboxId = $null
+    if ($phase -ne 'provision') {
+        $sandboxIdKey = $requestObject.Keys |
+            Where-Object { $_ -ceq 'sandboxId' } |
+            Select-Object -First 1
+        if ($null -eq $sandboxIdKey -or $requestObject[$sandboxIdKey] -isnot [string]) {
+            throw "State-aware '$phase' request must contain a string 'sandboxId'"
+        }
+        $routingSandboxId = [string]$requestObject[$sandboxIdKey]
+        $null = $requestObject.Remove($sandboxIdKey)
+    }
+
+    $json = $requestObject | ConvertTo-Json -Compress -Depth 12
     $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
+    $argList = @('--operation', $phase)
+    if ($phase -ne 'provision') {
+        $argList += @('--sandbox-id', $routingSandboxId)
+    }
+    $argList += @('--experimental', '--config-base64', $b64)
 
     $stdoutFile = [System.IO.Path]::GetTempFileName()
     $stderrFile = [System.IO.Path]::GetTempFileName()
     try {
         $proc = Start-Process -FilePath $WxcExec `
-            -ArgumentList @('--experimental', '--config-base64', $b64) `
+            -ArgumentList $argList `
             -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile `
             -NoNewWindow -PassThru
         $null = $proc.Handle  # cache the handle so ExitCode survives the timed wait
         if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
             try { $proc.Kill() } catch { }
-            throw "phase '$($Request.phase)' timed out after $TimeoutSec s"
+            throw "phase '$phase' timed out after $TimeoutSec s"
         }
         $proc.WaitForExit()
         $stdoutText = Get-Content $stdoutFile -Raw -ErrorAction SilentlyContinue

@@ -920,6 +920,7 @@ describe('createConfigFromPolicy', () => {
         });
         assert.ok(config.processContainer!.capabilities!.includes('internetClient'));
         assert.ok(config.processContainer!.capabilities!.includes('privateNetworkClientServer'));
+        assert.strictEqual(config.network!.defaultPolicy, 'block');
         assert.deepStrictEqual(config.network!.allowedHosts, ['example.com']);
         assert.deepStrictEqual(config.network!.blockedHosts, ['evil.com']);
       } finally {
@@ -1129,6 +1130,7 @@ describe('createConfigFromPolicy', () => {
         // Abstract 'process' on Linux must apply the same iptables firewall
         // enforcement as explicit 'bubblewrap', because the native binary
         // resolves the abstract intent to Bubblewrap server-side.
+        assert.strictEqual(config.network!.defaultPolicy, 'block');
         assert.strictEqual(config.network!.enforcementMode, 'firewall');
       } finally {
         restore();
@@ -1201,6 +1203,7 @@ describe('createConfigFromPolicy', () => {
           'bubblewrap',
         );
         assert.strictEqual(config.containment, 'bubblewrap');
+        assert.strictEqual(config.network!.defaultPolicy, 'block');
         assert.strictEqual(config.network!.enforcementMode, undefined);
         assert.deepStrictEqual(config.network!.proxy, { builtinTestServer: true });
         assert.deepStrictEqual(config.network!.allowedHosts, ['example.com']);
@@ -1498,7 +1501,7 @@ describe('createConfigFromPolicy', () => {
       }
     };
 
-    it('should pass allowedHosts through for Seatbelt compatibility', () => {
+    it('should preserve a shared-valid allowlist for native Seatbelt validation', () => {
       mockDarwin();
       try {
         const config = createConfigFromPolicy({
@@ -1515,16 +1518,16 @@ describe('createConfigFromPolicy', () => {
       }
     });
 
-    it('should pass blockedHosts through for native Seatbelt validation', () => {
+    it('should pass blocklist-only outbound policy through for native Seatbelt validation', () => {
       mockDarwin();
       try {
         const config = createConfigFromPolicy({
           version: '0.7.0-alpha',
-          network: { blockedHosts: ['evil.com'] },
+          network: { allowOutbound: true, blockedHosts: ['evil.com'] },
         });
         assert.strictEqual(config.containment, 'seatbelt');
         assert.deepStrictEqual(config.network!.blockedHosts, ['evil.com']);
-        assert.strictEqual(config.network!.defaultPolicy, 'block');
+        assert.strictEqual(config.network!.defaultPolicy, 'allow');
       } finally {
         restore();
       }
@@ -1837,7 +1840,9 @@ describe('createConfigFromPolicy', () => {
             version: '0.6.0-alpha',
             network: { blockedHosts: ['evil.com'] },
           }),
-          { message: /allowedHosts\/blockedHosts require allowOutbound/ },
+          {
+            message: /allowedHosts\/blockedHosts require allowOutbound/,
+          },
         );
       } finally {
         restore();
@@ -1972,6 +1977,7 @@ describe('createConfigFromPolicy', () => {
       assert.deepStrictEqual(config.filesystem!.readwritePaths, ['/workspace']);
       assert.deepStrictEqual(config.filesystem!.readonlyPaths, ['/data']);
       assert.deepStrictEqual(config.filesystem!.deniedPaths, ['/secrets']);
+      assert.strictEqual(config.network!.defaultPolicy, 'block');
       // Per applyLinuxNetworkPolicy, host filtering forces firewall mode.
       assert.strictEqual(config.network!.enforcementMode, 'firewall');
     });
@@ -2017,6 +2023,7 @@ describe('createConfigFromPolicy', () => {
         network: { allowOutbound: true, allowedHosts: ['example.com'] },
       }, 'lxc');
       assert.strictEqual(config.containment, 'lxc');
+      assert.strictEqual(config.network!.defaultPolicy, 'block');
       assert.strictEqual(config.network!.enforcementMode, 'firewall');
     });
 
@@ -2029,6 +2036,18 @@ describe('createConfigFromPolicy', () => {
       assert.deepStrictEqual(config.network!.allowedHosts, ['example.com']);
       assert.strictEqual(config.network!.defaultPolicy, 'block');
       assert.strictEqual(config.network!.enforcementMode, 'firewall');
+    });
+
+    it('should defer block-default blocklist validation to the backend', () => {
+      const config = createConfigFromPolicy(
+        {
+          version: '0.6.0-alpha',
+          network: { blockedHosts: ['evil.com'] },
+        },
+        'lxc',
+      );
+      assert.strictEqual(config.network!.defaultPolicy, 'block');
+      assert.deepStrictEqual(config.network!.blockedHosts, ['evil.com']);
     });
   });
 });

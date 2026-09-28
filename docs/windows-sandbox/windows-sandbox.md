@@ -67,8 +67,11 @@ reuses a warm VM.
 
 ## State-Aware Lifecycle
 
-The state-aware surface keeps the VM alive across separate `wxc-exec` phase
-processes. The backend is inferred from the `wsb:` sandbox ID after provision.
+The state-aware surface keeps the VM alive across separate `wxc-exec
+--operation` processes. Raw SDK/FFI requests carry `phase` and, after
+provision, `sandboxId` in JSON. Direct executor calls omit those routing fields
+from JSON and pass them as `--operation` and `--sandbox-id`. The backend is
+inferred from the `wsb:` sandbox ID after provision.
 
 | Phase | Behaviour |
 |---|---|
@@ -108,6 +111,8 @@ There is no idle watchdog. A started state-aware sandbox remains active until
 
 ### State-aware provision
 
+The raw SDK/FFI provision request is:
+
 ```json
 {
   "version": "0.10.0-alpha",
@@ -120,7 +125,15 @@ There is no idle watchdog. A started state-aware sandbox remains active until
 }
 ```
 
-Subsequent phases use the returned `sandboxId`.
+For a direct executor call, remove `phase` from that JSON and invoke:
+
+```text
+wxc-exec.exe config.json --operation provision
+```
+
+Subsequent raw SDK/FFI phases carry the returned `sandboxId` in JSON. Direct
+executor calls remove `phase` and `sandboxId` from JSON and pass
+`--operation <phase> --sandbox-id <id>`.
 
 The legacy `windowsSandbox.idleTimeoutMs`, `idleTimeout`, and
 `daemonPipeName` fields remain parseable for schema compatibility but do not

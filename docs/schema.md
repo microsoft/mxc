@@ -80,6 +80,27 @@ schema 0.6 and 0.7. During the additive schema 0.8 transition, requests may
 continue to use those legacy fields or use the directional fields above, but
 cannot mix both formats in one request.
 
+#### Legacy network host-list semantics
+
+Legacy host lists refine `defaultPolicy`; they do not replace it. Shared
+validation rejects a list that cannot refine the selected default before the
+backend executes.
+
+| `defaultPolicy` | `allowedHosts` | `blockedHosts` | Result |
+| --- | --- | --- | --- |
+| `block` | empty | empty | Valid: no egress |
+| `block` | non-empty | empty | Valid: allow only listed destinations |
+| `block` | empty | non-empty | Invalid: a blocklist cannot refine a block default without an allowlist |
+| `block` | non-empty | non-empty | Valid shared policy: explicit blocks override allowed destinations; backends may reject if they cannot represent both lists |
+| `allow` | empty | empty | Valid: unrestricted egress |
+| `allow` | empty | non-empty | Valid: allow all except listed destinations |
+| `allow` | non-empty | empty | Invalid: an allowlist cannot refine an allow default |
+| `allow` | non-empty | non-empty | Invalid: `allowedHosts` cannot be used with an allow default |
+
+For the valid block-default combination containing both lists, explicit blocks
+take precedence over allowed destinations. A backend that cannot represent both
+lists must reject the combination rather than dropping either list.
+
 ### IsolationSession unrestricted networking (0.9)
 
 IsolationSession cannot restrict networking. Exact v0.9 requests must describe
@@ -219,6 +240,8 @@ that can be executed independently.
                                            // Native PSEC/V2 capture cannot combine with leastPrivilege
                                            // or network.proxy. Hosts without that complete native set
                                            // retain an eligible legacy containment tier and use guarded WPR.
+                                           // If guarded-WPR prerequisites are unavailable, the request
+                                           // fails before MXC creates the sandbox.
     },
 
     "lxc": {                               // LXC-specific
@@ -249,6 +272,10 @@ that can be executed independently.
         "portMappings": [                  // Host<->container port forwarding. TCP only -- the WSLC SDK runtime returns E_NOTIMPL for UDP, so the parser hard-rejects "udp" entries with a clear message.
             { "windowsPort": 8080, "containerPort": 80, "protocol": "tcp" }
         ]
+    },
+
+    "hyperlight": {                        // Hyperlight settings (v0.10+)
+        "runtime": "node"                  // Guest runtime: agent (default), python, python-shell, node, bash or dotnet-jit
     }
 }
 ```
@@ -278,11 +305,41 @@ use:
 |---------|----------------------------------------|
 | Windows ProcessContainer (AppContainer / BaseContainer) | First `readwritePaths` entry that is an existing directory, else the first such `readonlyPaths` entry, else the system drive root (`%SystemDrive%\`). Never `NULL`. |
 | Seatbelt (macOS) | Same precedence, with `~` expanded as the profile expands it; falls back to `/`. |
+| Bubblewrap (Linux) | No substitution — a policy grant is never adopted. `--chdir` is emitted only for an explicit `process.cwd`, which from 0.9 is also normalized against the sandbox root and used as `HOME`. With no explicit `cwd` there is no `--chdir` and `HOME` is unset — see [`docs/bwrap-support/bubblewrap-backend.md`](bwrap-support/bubblewrap-backend.md). |
 | LXC / WSL Container | The container root — see [`docs/lxc-support/lxc-backend.md`](lxc-support/lxc-backend.md). |
 | MicroVM (NanVix) / Hyperlight | Not applicable — these backends reject a working directory outright. |
 
 Policy entries that are blank, name a file, or do not exist yet are skipped:
 a process cannot be launched in any of them.
+
+### Environment
+
+`process.env` and `process.inheritDefaultEnv` combine as follows from
+`0.9.0-alpha`:
+
+| `process.env` | `inheritDefaultEnv` | The child gets |
+|---|---|---|
+| omitted | ignored | the backend default |
+| `[]` | `false` (default) | nothing |
+| `[]` | `true` | the backend default |
+| `["FOO=bar"]` | `false` (default) | only `FOO` |
+| `["FOO=bar"]` | `true` | the default, plus `FOO`; a caller entry wins |
+
+`inheritDefaultEnv` layers the supplied entries over the default, so supplying
+none of them asks for the default itself — the same environment an omitted
+`process.env` gets.
+
+Two backends depart from the table. The Windows process container requires
+`SYSTEMROOT` and `LOCALAPPDATA` to be present, so a caller-owned block that
+omits them — including `[]` — is rejected before launch rather than used; the
+rejection names the missing variables. IsolationSession does not yet
+distinguish an omitted `process.env` from `[]`, and treats both as the session's
+default environment.
+
+What the default block contains is backend-specific; see the backend's guide.
+On the WSL Container backend it is the container image's own `ENV`, which MXC
+neither authors nor enumerates — see
+[`docs/wsl/wsl-container-getting-started.md`](wsl/wsl-container-getting-started.md#environment).
 
 ### Filesystem Policy
 

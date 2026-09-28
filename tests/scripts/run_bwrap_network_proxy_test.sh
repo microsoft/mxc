@@ -2,7 +2,9 @@
 # Bubblewrap network-proxy sandbox tests.
 #
 # These tests do NOT require root. Proxy mode uses a private network namespace
-# with rootless slirp4netns routing to the host-side builtin proxy.
+# with rootless slirp4netns routing to a host-side proxy: the builtin test
+# server on schema 0.7/0.8, and a real loopback endpoint named by
+# `runtimeConfig.networkProxy` on 0.9.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,17 +50,26 @@ resolve_test_proxy() {
 # Direct-egress assertions aim at it rather than an internet address, so a
 # refusal is evidence of the drop and not of a runner with no outbound route.
 # It doubles as the CONNECT target below, which is what proves it was live.
-CONTROL_PROXY="$(resolve_test_proxy)" || {
+PROXY_BIN="$(resolve_test_proxy)" || {
     echo "Error: unix-test-proxy not found. Run build.sh first."
     exit 1
 }
 CONTROL_DIR="$(mktemp -d)"
 CONTROL_PID=""
+PROXY_ENDPOINT_PID=""
 cleanup_control() {
-    if [ -n "$CONTROL_PID" ]; then
-        kill "$CONTROL_PID" 2>/dev/null || true
-        wait "$CONTROL_PID" 2>/dev/null || true
-    fi
+    local pid
+    for pid in "$CONTROL_PID" "$PROXY_ENDPOINT_PID"; do
+        if [ -n "$pid" ]; then
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+        fi
+    done
+    # This runs once explicitly and again from the EXIT trap. A reaped PID can
+    # be reused by an unrelated process before then, so forget it once reaped.
+    CONTROL_PID=""
+    PROXY_ENDPOINT_PID=""
+    exec 7>&- 2>/dev/null || true
     exec 8>&- 2>/dev/null || true
     rm -rf "$CONTROL_DIR"
 }
@@ -70,7 +81,7 @@ mkfifo "$CONTROL_DIR/parent.pipe"
 exec 8<>"$CONTROL_DIR/parent.pipe"
 # 8>&- keeps the listener from inheriting the write end: holding one itself
 # would mean its stdin never reports EOF, orphaning it if this script is killed.
-"$CONTROL_PROXY" --ready-file "$CONTROL_DIR/ready.port" --bind-address 127.0.0.1 \
+"$PROXY_BIN" --ready-file "$CONTROL_DIR/ready.port" --bind-address 127.0.0.1 \
     <"$CONTROL_DIR/parent.pipe" >"$CONTROL_DIR/listener.log" 2>&1 8>&- &
 CONTROL_PID=$!
 for _ in $(seq 1 100); do
@@ -90,10 +101,40 @@ if [ -z "$CONTROL_PORT" ]; then
 fi
 echo "  control listener on 127.0.0.1:$CONTROL_PORT (10.0.2.2:$CONTROL_PORT from the sandbox)"
 
-# The control port is assigned by the OS per run, so configs carry a
-# placeholder and are rendered into the run's scratch directory.
+# Schema 0.9 removed `network.proxy` entirely, so `builtinTestServer` has no
+# 0.9 spelling: a proxy is a real endpoint named by
+# `runtimeConfig.networkProxy`, which the parser accepts only on loopback. This
+# second listener is that endpoint, and the backend translates it to slirp's
+# gateway on the way in. It serves `http://mxc-test.invalid/`, so the 0.9
+# workloads assert the same sentinels the builtin server used to produce.
+mkfifo "$CONTROL_DIR/proxy.pipe"
+exec 7<>"$CONTROL_DIR/proxy.pipe"
+# 7>&- and 8>&- keep this listener from holding either fifo's write end open,
+# which would stop its own stdin from ever reporting EOF.
+"$PROXY_BIN" --ready-file "$CONTROL_DIR/proxy.port" --bind-address 127.0.0.1 \
+    <"$CONTROL_DIR/proxy.pipe" >"$CONTROL_DIR/proxy.log" 2>&1 7>&- 8>&- &
+PROXY_ENDPOINT_PID=$!
+for _ in $(seq 1 100); do
+    [ -s "$CONTROL_DIR/proxy.port" ] && break
+    if ! kill -0 "$PROXY_ENDPOINT_PID" 2>/dev/null; then
+        cat "$CONTROL_DIR/proxy.log"
+        echo "FAIL: the proxy endpoint exited before publishing its port."
+        exit 1
+    fi
+    sleep 0.1
+done
+PROXY_PORT="$(cat "$CONTROL_DIR/proxy.port" 2>/dev/null || true)"
+if [ -z "$PROXY_PORT" ]; then
+    cat "$CONTROL_DIR/proxy.log"
+    echo "FAIL: the proxy endpoint did not publish a port."
+    exit 1
+fi
+echo "  proxy endpoint on 127.0.0.1:$PROXY_PORT (10.0.2.2:$PROXY_PORT from the sandbox)"
+
+# Both ports are assigned by the OS per run, so configs carry placeholders and
+# are rendered into the run's scratch directory.
 render_config() {
-    sed -e "s/{{CONTROL_PORT}}/$CONTROL_PORT/g" \
+    sed -e "s/{{CONTROL_PORT}}/$CONTROL_PORT/g" -e "s/{{PROXY_PORT}}/$PROXY_PORT/g" \
         "$REPO_DIR/tests/configs/$1" >"$CONTROL_DIR/$1"
     printf '%s\n' "$CONTROL_DIR/$1"
 }
@@ -154,10 +195,10 @@ if [ -z "$HOSTRULES_NETNS" ] || [ "$HOSTRULES_NETNS" = "$HOST_NETNS" ]; then
 fi
 echo "PASS: proxy host-rules egress"
 
-echo "Running Bubblewrap private proxy namespace test..."
+echo "Running Bubblewrap private proxy namespace test (schema 0.9)..."
 HOST_NETNS="$(readlink /proc/self/ns/net)"
-if ! NAMESPACE_OUT=$("$LXC_EXEC" --experimental --allow-testing-features \
-    "$REPO_DIR/tests/configs/bubblewrap_network_proxy_namespace.json" 2>&1); then
+NAMESPACE_CONFIG="$(render_config bubblewrap_network_proxy_namespace.json)"
+if ! NAMESPACE_OUT=$("$LXC_EXEC" --experimental "$NAMESPACE_CONFIG" 2>&1); then
     echo "$NAMESPACE_OUT"
     echo "FAIL: private proxy namespace (lxc-exec returned non-zero)"
     exit 1
@@ -271,8 +312,8 @@ STUB
 chmod +x "$BWRAP_STUB_DIR/bwrap"
 
 SUPERVISOR_PATTERN="mxc-bwrap-proxy-supervisor"
-PATH="$BWRAP_STUB_DIR:$PATH" "$LXC_EXEC" --experimental --allow-testing-features \
-    "$REPO_DIR/tests/configs/bubblewrap_network_proxy_namespace.json" >/dev/null 2>&1 &
+PATH="$BWRAP_STUB_DIR:$PATH" "$LXC_EXEC" --experimental \
+    "$NAMESPACE_CONFIG" >/dev/null 2>&1 &
 ORPHAN_EXEC_PID=$!
 
 SUPERVISOR_SEEN=0
@@ -319,8 +360,8 @@ if [ "$SUPERVISOR_REAPED" -ne 1 ]; then
 fi
 echo "PASS: supervisor orphan reaping"
 
-echo "Running Bubblewrap proxy-only egress enforcement test..."
-if ! EGRESS_OUT=$("$LXC_EXEC" --experimental --allow-testing-features \
+echo "Running Bubblewrap proxy-only egress enforcement test (schema 0.9)..."
+if ! EGRESS_OUT=$("$LXC_EXEC" --experimental \
     "$(render_config bubblewrap_network_proxy_egress_denied.json)" 2>&1); then
     echo "$EGRESS_OUT"
     echo "FAIL: proxy-only egress (lxc-exec returned non-zero)"
@@ -340,8 +381,8 @@ echo "PASS: proxy-only egress enforcement"
 # path could regress while the suite stayed green. The target is the control
 # listener, so the sentinel coming back proves both that the tunnel carried
 # bytes and that the endpoint refused above was live.
-echo "Running Bubblewrap proxy CONNECT tunnel test..."
-if ! CONNECT_OUT=$("$LXC_EXEC" --experimental --allow-testing-features \
+echo "Running Bubblewrap proxy CONNECT tunnel test (schema 0.9)..."
+if ! CONNECT_OUT=$("$LXC_EXEC" --experimental \
     "$(render_config bubblewrap_network_proxy_connect.json)" 2>&1); then
     echo "$CONNECT_OUT"
     echo "FAIL: proxy CONNECT tunnel (lxc-exec returned non-zero)"
@@ -356,9 +397,12 @@ for sentinel in CONNECT_DIRECT_BLOCKED_OK CONNECT_TUNNEL_ESTABLISHED_OK CONNECT_
 done
 echo "PASS: proxy CONNECT tunnel"
 
-# Hostname proxy endpoints. The endpoint is resolved on the host and pinned
-# into the sandbox's /etc/hosts, because DNS is closed inside the sandbox.
-echo "Running Bubblewrap hostname proxy pin test..."
+# Hostname proxy endpoints, which are legacy-only: 0.9 names the proxy through
+# `runtimeConfig.networkProxy`, and the parser accepts only loopback there, so
+# this and the two /etc/hosts cases below stay on 0.8. The endpoint is resolved
+# on the host and pinned into the sandbox's /etc/hosts, because DNS is closed
+# inside the sandbox.
+echo "Running Bubblewrap hostname proxy pin test (schema 0.8)..."
 PROXY_HOST="$(hostname)"
 # The host's own name is used because it resolves everywhere without editing
 # /etc/hosts (which would need root). Where it points is not fixed, though: a
@@ -379,15 +423,6 @@ case "$PROXY_BIND" in
     127.*) PROXY_BIND=127.0.0.1 ;;
 esac
 echo "  host name '$PROXY_HOST' resolves to $PROXY_BIND"
-# The proxy lives beside lxc-exec, wherever that came from: CI overrides
-# LXC_EXEC with a --target build under src/target/<triple>/release, which the
-# repo-relative fallbacks below do not cover. Every other case in this file
-# reaches the proxy through the coordinator, which already resolves it that
-# way -- this is the one that spawns it directly.
-TEST_PROXY="$(resolve_test_proxy)" || {
-    echo "FAIL: hostname proxy pin (unix-test-proxy not built)"
-    exit 1
-}
 
 PIN_DIR="$(mktemp -d)"
 PIN_PROXY_PID=""
@@ -410,9 +445,11 @@ mkfifo "$PIN_DIR/parent.pipe"
 exec 9<>"$PIN_DIR/parent.pipe"
 
 # The proxy binds an OS-assigned port and publishes it, so the config is
-# generated per run rather than committed with a fixed port.
-"$TEST_PROXY" --ready-file "$PIN_DIR/ready.port" --bind-address "$PROXY_BIND" \
-    <"$PIN_DIR/parent.pipe" >"$PIN_DIR/proxy.log" 2>&1 &
+# generated per run rather than committed with a fixed port. The fifo write
+# ends are closed so this proxy cannot hold open its own stdin or either
+# listener's.
+"$PROXY_BIN" --ready-file "$PIN_DIR/ready.port" --bind-address "$PROXY_BIND" \
+    <"$PIN_DIR/parent.pipe" >"$PIN_DIR/proxy.log" 2>&1 7>&- 8>&- 9>&- &
 PIN_PROXY_PID=$!
 for _ in $(seq 1 100); do
     [ -s "$PIN_DIR/ready.port" ] && break
@@ -423,14 +460,14 @@ for _ in $(seq 1 100); do
     fi
     sleep 0.1
 done
-PROXY_PORT="$(cat "$PIN_DIR/ready.port" 2>/dev/null || true)"
-if [ -z "$PROXY_PORT" ]; then
+PIN_PROXY_PORT="$(cat "$PIN_DIR/ready.port" 2>/dev/null || true)"
+if [ -z "$PIN_PROXY_PORT" ]; then
     cat "$PIN_DIR/proxy.log"
     echo "FAIL: hostname proxy pin (test proxy did not publish a port)"
     exit 1
 fi
 
-sed -e "s/{{PROXY_HOST}}/$PROXY_HOST/g" -e "s/{{PROXY_PORT}}/$PROXY_PORT/g" \
+sed -e "s/{{PROXY_HOST}}/$PROXY_HOST/g" -e "s/{{PROXY_PORT}}/$PIN_PROXY_PORT/g" \
     -e "s/{{CONTROL_PORT}}/$CONTROL_PORT/g" \
     "$REPO_DIR/tests/configs/bubblewrap_network_proxy_hostname.json" \
     >"$PIN_DIR/hostname.json"
@@ -506,7 +543,7 @@ cat >"$DOTDOT_DIR/dotdot.json" <<JSON
   "filesystem": { "deniedPaths": ["/etc/../etc/hosts"] },
   "network": {
     "defaultPolicy": "allow",
-    "proxy": { "url": "http://$PROXY_HOST:$PROXY_PORT" }
+    "proxy": { "url": "http://$PROXY_HOST:$PIN_PROXY_PORT" }
   }
 }
 JSON

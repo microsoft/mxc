@@ -6,7 +6,7 @@ set -euo pipefail
 # matrix entry works on Ubuntu, Debian, and RHEL images.
 
 usage() {
-    echo "Usage: $0 <bubblewrap|lxc|microvm|hyperlight> <binary-directory>" >&2
+    echo "Usage: $0 <bubblewrap|lxc|microvm> <binary-directory>" >&2
 }
 
 if [[ $# -ne 2 ]]; then
@@ -320,9 +320,6 @@ case "$backend" in
         for file in nanvixd.elf nanvix_rootfs.img python3.initrd bin/kernel.elf; do
             test -f "$binary_directory/$file"
         done
-        ;;
-    hyperlight)
-        echo "Hyperlight has no artifact-only Linux test prerequisites yet."
         ;;
     *)
         usage

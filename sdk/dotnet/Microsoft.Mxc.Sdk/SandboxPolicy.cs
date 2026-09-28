@@ -199,7 +199,7 @@ public sealed class NetworkPolicy
         _legacyFields.Add(field);
     }
 
-    /// <summary>Allow outbound network access.</summary>
+    /// <summary>Allow outbound by default when no allowlist narrows the policy.</summary>
     [JsonPropertyName("allowOutbound")]
     public bool AllowOutbound
     {
@@ -215,7 +215,7 @@ public sealed class NetworkPolicy
         set => AuthoredAllowLocalNetwork = value;
     }
 
-    /// <summary>Hosts explicitly allowed.</summary>
+    /// <summary>Destinations allowed under a default-block policy.</summary>
     [JsonPropertyName("allowedHosts")]
     public List<string> AllowedHosts
     {
@@ -228,7 +228,7 @@ public sealed class NetworkPolicy
         }
     }
 
-    /// <summary>Hosts explicitly blocked.</summary>
+    /// <summary>Destinations denied after allow rules are applied.</summary>
     [JsonPropertyName("blockedHosts")]
     public List<string> BlockedHosts
     {

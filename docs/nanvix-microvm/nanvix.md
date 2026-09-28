@@ -189,18 +189,16 @@ The following describes the retained legacy runtime filter, not accepted v0.10
 JSON vocabulary. The exact cutover does not silently translate directional
 rules into this weaker contract.
 
-`allowedHosts` and `blockedHosts` are supported and forwarded to the guest's
-host-side socket proxy, which enforces egress at `connect()`. The guest filter
-is **allow-XOR-block**, so the two lists are mutually exclusive (specifying both
-is rejected at preflight). Presence of either list implies host networking, so
-`defaultPolicy` is ignored when a list is set:
+Legacy `defaultPolicy` and host-list interactions follow the
+[backend-agnostic network policy semantics](../schema.md#legacy-network-host-list-semantics).
+Invalid legacy combinations are rejected by shared policy validation:
+`blockedHosts` requires an `allowedHosts` exception set under a block default,
+and `allowedHosts` cannot be used under an allow default.
 
-| `allowedHosts` | `blockedHosts` | Effect |
-| -------------- | -------------- | ------ |
-| _(empty)_      | _(empty)_      | follows `defaultPolicy` (`block` = no egress, `allow` = unrestricted) |
-| `[A, ...]`     | _(empty)_      | **allowlist** — only the listed destinations are reachable |
-| _(empty)_      | `[B, ...]`     | **blocklist** — everything except the listed destinations is reachable |
-| `[A, ...]`     | `[B, ...]`     | rejected at preflight (mutually exclusive) |
+NanVix forwards the validated host list to the guest's host-side socket proxy,
+which enforces egress at `connect()`. The guest filter is **allow-XOR-block**,
+so NanVix rejects requests that supply both lists instead of dropping either
+one.
 
 Entries may be IPv4 literals (`93.184.216.34`), IPv4 CIDR blocks
 (`10.0.0.0/8`), or hostnames. Hostnames are resolved to their IPv4 (A-record)

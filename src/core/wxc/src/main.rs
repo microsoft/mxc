@@ -9,18 +9,19 @@ use std::process;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use process_container_common::appcontainer_runner::delete_app_container_profile;
 use wxc_common::audit::{AuditEvent, AuditEventName, RejectionReason};
-use wxc_common::config_parser::{LoadOptions, ParseError};
+use wxc_common::config_parser::{LoadOptions, ParseError, RequestInputError};
 #[cfg(target_os = "windows")]
 use wxc_common::diagnostic::DiagnosticConfig;
+use wxc_common::error::WxcError;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use wxc_common::mxc_error::{MxcError, MxcErrorCode, ResponseEnvelope};
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 use wxc_common::state_aware_dispatch::{resolve_backend, DispatchOutcome};
-use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest};
+use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
 use wxc_common::telemetry;
 
 #[derive(Parser)]
@@ -64,22 +65,59 @@ struct Cli {
     #[arg(long = "dry-run")]
     dry_run: bool,
 
+    /// Sandbox lifecycle operation. Lifecycle operations are selected only by
+    /// this argument, never by the config document.
+    #[arg(
+        long,
+        value_enum,
+        conflicts_with_all = [
+            "delete",
+            "containername",
+            "setup_hyperlight",
+            "force",
+            "setup_wslc",
+            "image",
+            "storage_path",
+            "probe",
+            "force_reclaim"
+        ]
+    )]
+    #[cfg_attr(
+        target_os = "windows",
+        arg(conflicts_with_all = ["audit", "audit_verbose"])
+    )]
+    operation: Option<CliOperation>,
+
+    /// Existing sandbox targeted by start, exec, stop, or deprovision.
+    #[arg(long = "sandbox-id", requires = "operation")]
+    sandbox_id: Option<String>,
+
     /// Path to diagnostic log file (appends, creates if missing)
     #[arg(long = "log-file")]
     log_file: Option<String>,
 
-    /// Install the warmed Hyperlight snapshot and exit. Pulls the
-    /// published kernel + initrd from GHCR (via docker or podman),
-    /// warms them up, and writes the snapshot into the default user
-    /// data dir (~/.local/share/pyhl on Linux, %LOCALAPPDATA%\pyhl on
-    /// Windows). $PYHL_HOME overrides the destination if set. Intended
-    /// for tool install hooks so first-run has zero warmup cost.
-    #[arg(long = "setup-hyperlight")]
-    setup_hyperlight: bool,
+    /// Install the warmed Hyperlight snapshot and exit, for the default
+    /// runtime (`agent`) or the comma-separated runtimes given with `=`:
+    /// `--setup-hyperlight=python,node`. Names are `agent`, `python`,
+    /// `python-shell`, `node`, `bash` and `dotnet-jit`. For each, pulls the
+    /// published rootfs from GHCR unless the image home already holds it,
+    /// boots it once, and writes the snapshot into the default user data
+    /// dir (~/.local/share/mxc-hyperlight on Linux,
+    /// %LOCALAPPDATA%\mxc-hyperlight on Windows). $MXC_HYPERLIGHT_HOME
+    /// overrides the destination if set. Intended for tool install hooks
+    /// so first-run has zero warmup cost.
+    #[arg(
+        long = "setup-hyperlight",
+        value_name = "RUNTIMES",
+        num_args = 0..=1,
+        require_equals = true,
+        value_delimiter = ','
+    )]
+    setup_hyperlight: Option<Vec<String>>,
 
     /// Rebuild the snapshot even if one already exists. Use after
-    /// upgrading `kernel` or `initrd.cpio` so the warm state matches
-    /// the new bits. Requires --setup-hyperlight.
+    /// replacing `initrd.cpio` so the warm state matches the new
+    /// bits. Requires --setup-hyperlight.
     #[arg(long, requires = "setup_hyperlight")]
     force: bool,
 
@@ -126,7 +164,9 @@ struct Cli {
             "image",
             "storage_path",
             "probe",
-            "force_reclaim"
+            "force_reclaim",
+            "operation",
+            "sandbox_id"
         ]
     )]
     #[cfg_attr(
@@ -176,6 +216,27 @@ impl Cli {
             }
         }
         self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliOperation {
+    Provision,
+    Start,
+    Exec,
+    Stop,
+    Deprovision,
+}
+
+impl From<CliOperation> for wxc_common::state_aware_request::Phase {
+    fn from(operation: CliOperation) -> Self {
+        match operation {
+            CliOperation::Provision => Self::Provision,
+            CliOperation::Start => Self::Start,
+            CliOperation::Exec => Self::Exec,
+            CliOperation::Stop => Self::Stop,
+            CliOperation::Deprovision => Self::Deprovision,
+        }
     }
 }
 
@@ -259,11 +320,48 @@ fn validate_audit_request(request: &ExecutionRequest) -> Result<(), String> {
 /// Read the request source (file path / base64 blob) once, returning the
 /// decoded JSON. Reused by `--probe` and the normal request loader so a single
 /// source is only read once per invocation.
-fn decode_config_input_once(cli: &Cli) -> Option<Result<String, wxc_common::error::WxcError>> {
+fn decode_config_input_once(cli: &Cli) -> Option<Result<String, RequestInputError>> {
     let (input, is_base64) = config_input(cli)?;
-    Some(wxc_common::config_parser::decode_request_input(
+    Some(wxc_common::config_parser::decode_request_input_classified(
         &input, is_base64,
     ))
+}
+
+fn lifecycle_input_error(
+    operation: CliOperation,
+    logger: &mut Logger,
+    error: RequestInputError,
+) -> MxcError {
+    let (error, reason) = match error {
+        RequestInputError::Decode(error) => (error, RejectionReason::MalformedJson),
+        RequestInputError::Source(error) => (error, RejectionReason::InputSourceUnavailable),
+    };
+    let message = error.to_string();
+    let phase: Phase = operation.into();
+    log_config_rejected(logger, reason, UNKNOWN_BACKEND, "", phase.as_str());
+    MxcError::malformed_request(message)
+}
+
+fn logger_for_cli(cli: &Cli) -> Logger {
+    let mode = if cli.operation.is_some() {
+        // Lifecycle stdout belongs exclusively to the result envelope or exec
+        // workload. Buffer every primary diagnostic, including future
+        // downstream log_line calls, so --debug cannot write prose to stdout.
+        Mode::Buffer
+    } else if cli.debug {
+        Mode::Console
+    } else {
+        Mode::Buffer
+    };
+    let mut logger = Logger::new(mode);
+
+    if let Some(ref log_path) = cli.log_file {
+        if let Err(error) = logger.enable_file_sink(std::path::Path::new(log_path)) {
+            eprintln!("Warning: could not open log file '{log_path}': {error}");
+        }
+    }
+
+    logger
 }
 
 /// On a state-aware dispatch failure, record the error only on the auxiliary
@@ -409,9 +507,10 @@ fn sandbox_id_for_identity_record(
 /// Drives the state-aware dispatch flow. On envelope success, writes the
 /// JSON to stdout and exits 0. On exec success, exits with the script's
 /// exit code (output already streamed). On failure, writes a JSON error
-/// envelope to stdout and exits 1. Diagnostic logger output goes to stderr
-/// regardless of mode (per design §7.3 stream protocol — stdout reserved
-/// for the response envelope).
+/// envelope and exits 1 — to stderr for a live exec, whose stdout belongs
+/// to the script, and to stdout otherwise. Diagnostic logger output goes to
+/// stderr regardless of mode (per design §7.3 stream protocol — stdout
+/// reserved for the response envelope).
 fn run_state_aware_main(
     parsed: ParsedStateAwareRequest,
     dry_run: bool,
@@ -575,10 +674,9 @@ fn run_state_aware_main(
         elapsed,
     );
 
-    // On dispatch failure, route the error to the auxiliary diagnostic sinks
-    // only (log file / diagnostic pipe) — never the primary buffer/stderr — so
-    // the stdout error envelope written below stays the single client-facing
-    // channel and is not shadowed by a duplicate on stderr.
+    // Route dispatch failures to the auxiliary diagnostic sinks only (log file
+    // / diagnostic pipe), so the envelope written below is the single
+    // client-facing copy of the error.
     if let Err(error) = &outcome {
         log_state_aware_dispatch_error(logger, error);
     }
@@ -591,7 +689,7 @@ fn run_state_aware_main(
     if !buffered.is_empty() {
         eprint!("{}", buffered);
     }
-    match finalize_state_aware_outcome(outcome) {
+    match finalize_state_aware_outcome(outcome, phase, dry_run) {
         StateAwareExit::Envelope(json) => {
             println!("{}", json);
             process::exit(0);
@@ -599,6 +697,12 @@ fn run_state_aware_main(
         StateAwareExit::ExecCode(exit_code) => process::exit(exit_code),
         StateAwareExit::Error(json) => {
             println!("{}", json);
+            process::exit(1);
+        }
+        StateAwareExit::ExecError(json) => {
+            // The script's own stderr may not end in a newline, and gluing the
+            // envelope onto those bytes would leave it unparseable.
+            eprintln!("\n{}", json);
             process::exit(1);
         }
     }
@@ -615,16 +719,33 @@ enum StateAwareExit {
     ExecCode(i32),
     /// Print this JSON error envelope to stdout, then exit 1.
     Error(String),
+    /// Print this JSON error envelope to stderr, then exit 1.
+    ExecError(String),
 }
 
 /// Map a dispatch outcome to its terminal exit action. Pure — it neither prints
 /// nor exits — so [`run_state_aware_main`]'s final branch can be exercised in a
-/// unit test. The `-> !` caller performs the actual stdout write + exit.
-fn finalize_state_aware_outcome(outcome: Result<DispatchOutcome, MxcError>) -> StateAwareExit {
+/// unit test. The `-> !` caller performs the actual write + exit.
+fn finalize_state_aware_outcome(
+    outcome: Result<DispatchOutcome, MxcError>,
+    phase: &str,
+    dry_run: bool,
+) -> StateAwareExit {
     match outcome {
         Ok(DispatchOutcome::Envelope(value)) => StateAwareExit::Envelope(value.to_string()),
         Ok(DispatchOutcome::ExecCompleted { exit_code }) => StateAwareExit::ExecCode(exit_code),
-        Err(e) => StateAwareExit::Error(error_envelope_string(&e)),
+        Err(e) => {
+            let json = error_envelope_string(&e);
+
+            // A failed exec has already streamed the script's output to stdout,
+            // so an envelope appended there would corrupt both. A dry run
+            // streams nothing and keeps its envelope on stdout.
+            if phase == "exec" && !dry_run {
+                StateAwareExit::ExecError(json)
+            } else {
+                StateAwareExit::Error(json)
+            }
+        }
     }
 }
 
@@ -643,7 +764,19 @@ fn request_error_route(error: &ParseError) -> RequestErrorRoute<'_> {
     }
 }
 
-fn log_request_parse_rejection(logger: &mut Logger, error: &ParseError) {
+fn reject_state_aware_without_operation(logger: &mut Logger) -> ! {
+    let message = "state-aware lifecycle requests require --operation; \
+        remove 'phase' and 'sandboxId' from the config JSON";
+    let error = ParseError::OneShot(WxcError::ConfigParse(message.to_string()));
+    log_request_parse_rejection(logger, &error, None);
+    eprintln!("Request error");
+    eprintln!("{message}");
+    eprint!("{}", logger.get_buffer());
+    process::exit(1);
+}
+
+fn log_request_parse_rejection(logger: &mut Logger, error: &ParseError, phase: Option<Phase>) {
+    let phase = phase.map(Phase::as_str).unwrap_or("");
     match error {
         ParseError::Decode(_) => {
             log_config_rejected(
@@ -651,7 +784,7 @@ fn log_request_parse_rejection(logger: &mut Logger, error: &ParseError) {
                 RejectionReason::MalformedJson,
                 UNKNOWN_BACKEND,
                 "",
-                "",
+                phase,
             );
         }
         ParseError::OneShotMalformed(error) => {
@@ -661,7 +794,7 @@ fn log_request_parse_rejection(logger: &mut Logger, error: &ParseError) {
                 RejectionReason::MalformedJson,
                 UNKNOWN_BACKEND,
                 offending_field_from_message(&message),
-                "",
+                phase,
             );
         }
         ParseError::Version(error) | ParseError::OneShot(error) => {
@@ -671,7 +804,7 @@ fn log_request_parse_rejection(logger: &mut Logger, error: &ParseError) {
                 RejectionReason::SchemaViolation,
                 UNKNOWN_BACKEND,
                 offending_field_from_message(&message),
-                "",
+                phase,
             );
         }
         ParseError::StateAware(error) => {
@@ -680,7 +813,7 @@ fn log_request_parse_rejection(logger: &mut Logger, error: &ParseError) {
                 rejection_reason_for(error),
                 UNKNOWN_BACKEND,
                 offending_field_from_message(&error.message),
-                "",
+                phase,
             );
         }
     }
@@ -925,8 +1058,7 @@ fn main() {
         process::exit(outcome.emit());
     }
     // Decode the request source (file path / base64) once, up front.
-    let decoded_config: Option<Result<String, wxc_common::error::WxcError>> =
-        decode_config_input_once(&cli);
+    let decoded_config: Option<Result<String, RequestInputError>> = decode_config_input_once(&cli);
 
     // Propagate --force-reclaim via the environment so it reaches both the
     // in-process one-shot reconcile and the detached daemon. Set before any
@@ -962,11 +1094,6 @@ fn main() {
     // --probe is a detection-only fast path used by SDK
     // `getPlatformSupport()` on every first call. It does not spawn a
     // sandbox and never parks a DaclManager.
-    //
-    // It does activate WinRT: `isolation_session_available()` resolves the
-    // IsolationSession activation factory. That probe owns and releases its
-    // own COM apartment, so it neither needs nor disturbs the process-wide
-    // init below — this ordering is not a claim that the probe is COM-free.
     //
     // Run it AFTER recovery (so consumers that rely on `--probe`-as-
     // reaper still get it) but BEFORE COM init / SetConsoleCtrlHandler
@@ -1006,7 +1133,7 @@ fn main() {
                 process::exit(1);
             }
         };
-        match serde_json::to_string_pretty(&output) {
+        match process_container_common::probe::to_json_pretty(&output) {
             Ok(s) => println!("{s}"),
             Err(e) => {
                 eprintln!("Error: probe serialization failed: {e}");
@@ -1047,10 +1174,19 @@ fn main() {
     // --setup-hyperlight: warm up the snapshot and exit. Runs before
     // config parsing so the user doesn't need a JSON file on disk
     // just to install.
-    if cli.setup_hyperlight {
+    if let Some(runtime_names) = &cli.setup_hyperlight {
+        // Setup exits before any config is read, so a positional here is
+        // most likely a runtime name given with a space instead of `=`.
+        if let Some(stray) = &cli.config_path {
+            eprintln!(
+                "Error: --setup-hyperlight takes no config path; name runtimes with \
+                 --setup-hyperlight={stray}"
+            );
+            process::exit(1);
+        }
         #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
         {
-            // WHP is delay-loaded; check before pyhl::install warms a VM.
+            // WHP is delay-loaded; check before setup boots a VM.
             #[cfg(target_os = "windows")]
             if !hyperlight_common::is_whp_available() {
                 eprintln!(
@@ -1060,14 +1196,19 @@ fn main() {
                 process::exit(1);
             }
 
-            let mut logger = Logger::new(if cli.debug {
-                Mode::Console
-            } else {
-                Mode::Buffer
-            });
-            match hyperlight_common::setup(cli.force, &mut logger) {
-                Ok(snap) => {
-                    eprintln!("hyperlight setup: snapshot ready at {:?}", snap);
+            // Setup is an interactive install: the pull and the warm-up
+            // report progress as they go.
+            let mut logger = Logger::new(Mode::Console);
+            let runtimes = match hyperlight_common::parse_runtimes(runtime_names) {
+                Ok(runtimes) => runtimes,
+                Err(msg) => {
+                    eprintln!("Error: {msg}");
+                    process::exit(1);
+                }
+            };
+            match hyperlight_common::setup(cli.force, &runtimes, &mut logger) {
+                Ok(home) => {
+                    eprintln!("hyperlight setup: image home ready at {:?}", home);
                     process::exit(0);
                 }
                 Err(msg) => {
@@ -1078,6 +1219,7 @@ fn main() {
         }
         #[cfg(not(all(feature = "hyperlight", target_arch = "x86_64")))]
         {
+            let _ = runtime_names;
             eprintln!("Error: --setup-hyperlight requires x86_64 (Hyperlight needs KVM or WHP)");
             process::exit(1);
         }
@@ -1136,6 +1278,16 @@ fn main() {
     // --probe is handled at the top of `main` (before COM init) for
     // SDK first-call latency. See note there.
 
+    // Initialize diagnostics before unpacking the input so lifecycle source
+    // and decode failures use the same envelope contract as parser failures.
+    let mut logger = logger_for_cli(&cli);
+    #[cfg(target_os = "windows")]
+    let diag_config = DiagnosticConfig::from_environment();
+    #[cfg(target_os = "windows")]
+    if diag_config.console_enabled {
+        logger.enable_diagnostics(&diag_config);
+    }
+
     // Determine config input. In delete mode the config is optional; every
     // other path requires it. `decoded_config` above already read the source
     // once — if it's populated, unpack the decoded JSON (or surface the
@@ -1143,42 +1295,41 @@ fn main() {
     // delete mode or report the missing-config error.
     let config_json: Option<String> = match decoded_config {
         Some(Ok(json)) => Some(json),
-        Some(Err(error)) => {
-            eprintln!("Request error");
-            eprintln!("{error}");
-            process::exit(1);
-        }
+        Some(Err(error)) => match cli.operation {
+            Some(operation) => {
+                let error = lifecycle_input_error(operation, &mut logger, error);
+                log_state_aware_dispatch_error(&mut logger, &error);
+                print_error_envelope(&error);
+                eprint!("{}", logger.get_buffer());
+                process::exit(1);
+            }
+            None => {
+                eprintln!("Request error");
+                eprintln!("{}", error.into_error());
+                process::exit(1);
+            }
+        },
         None => {
             if !cli.delete {
-                eprintln!(
-                    "Error: No config provided. Use a positional path, --config, or --config-base64"
-                );
+                let message =
+                    "No config provided. Use a positional path, --config, or --config-base64";
+                if let Some(operation) = cli.operation {
+                    let error = lifecycle_input_error(
+                        operation,
+                        &mut logger,
+                        RequestInputError::Source(WxcError::ConfigParse(message.to_string())),
+                    );
+                    log_state_aware_dispatch_error(&mut logger, &error);
+                    print_error_envelope(&error);
+                    eprint!("{}", logger.get_buffer());
+                    process::exit(1);
+                }
+                eprintln!("Error: {message}");
                 process::exit(1);
             }
             None
         }
     };
-
-    let mut logger = Logger::new(if cli.debug {
-        Mode::Console
-    } else {
-        Mode::Buffer
-    });
-
-    if let Some(ref log_path) = cli.log_file {
-        if let Err(e) = logger.enable_file_sink(std::path::Path::new(log_path)) {
-            eprintln!("Warning: could not open log file '{}': {}", log_path, e);
-        }
-    }
-
-    // Initialize the diagnostic console before parsing so early rejection
-    // records have an active sink.
-    #[cfg(target_os = "windows")]
-    let diag_config = DiagnosticConfig::from_environment();
-    #[cfg(target_os = "windows")]
-    if diag_config.console_enabled {
-        logger.enable_diagnostics(&diag_config);
-    }
 
     // Delete mode
     if cli.delete {
@@ -1197,11 +1348,47 @@ fn main() {
     // Non-delete paths always have a config JSON at this point (or exited
     // above with the missing-config error).
     let config_json = config_json.expect("config_json is Some on non-delete paths");
+    if let Some(operation) = cli.operation {
+        let phase = operation.into();
+        let parsed =
+            match wxc_common::config_parser::load_state_aware_request_from_json_with_options(
+                &config_json,
+                &mut logger,
+                phase,
+                cli.sandbox_id.as_deref(),
+                &cli.command,
+            ) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    log_request_parse_rejection(&mut logger, &error, Some(phase));
+                    let error = match error {
+                        ParseError::StateAware(error) => error,
+                        ParseError::Decode(error)
+                        | ParseError::Version(error)
+                        | ParseError::OneShot(error)
+                        | ParseError::OneShotMalformed(error) => {
+                            MxcError::malformed_request(error.to_string())
+                        }
+                    };
+                    print_error_envelope(&error);
+                    eprint!("{}", logger.get_buffer());
+                    process::exit(1);
+                }
+            };
+        let mut parsed = parsed;
+        let telemetry_active = parsed
+            .request()
+            .telemetry
+            .as_ref()
+            .map(|config| telemetry::init(config, &mut logger))
+            .unwrap_or(false);
+        parsed.set_experimental_enabled(cli.experimental);
+        parsed.set_dry_run(cli.dry_run);
+        run_state_aware_main(parsed, cli.dry_run, telemetry_active, &mut logger)
+    }
 
-    // Load request — discriminates state-aware (top-level `phase` field) from
-    // one-shot. State-aware failures emit a JSON envelope on stdout; one-shot
-    // and pre-discrimination failures keep the existing diagnostic-on-stderr
-    // convention.
+    // Without --operation, the executor accepts only one-shot requests. Raw
+    // exact APIs retain phase-bearing lifecycle JSON for compatibility.
     let load_opts = LoadOptions {
         is_base64: false,
         cli_command: &cli.command,
@@ -1213,27 +1400,11 @@ fn main() {
     );
     let request = match parsed_request {
         Ok(MxcRequest::OneShot(req)) => req,
-        Ok(MxcRequest::StateAware(mut parsed)) => {
-            let telemetry_active = parsed
-                .request()
-                .telemetry
-                .as_ref()
-                .map(|config| telemetry::init(config, &mut logger))
-                .unwrap_or(false);
-            // Mirror what the one-shot path does at the post-dispatch stage
-            // below: copy the CLI `--experimental` flag into the parsed
-            // request so backends that gate on it (e.g. Windows Sandbox
-            // experimental features) see the same value regardless of which
-            // dispatch branch the request entered through. Without this, the
-            // state-aware path runs without the gate -- a phase-envelope request
-            // could provision/start/exec experimental backends with no
-            // `--experimental` on the CLI.
-            parsed.set_experimental_enabled(cli.experimental);
-            parsed.set_dry_run(cli.dry_run);
-            run_state_aware_main(parsed, cli.dry_run, telemetry_active, &mut logger)
+        Ok(MxcRequest::StateAware(_)) | Err(ParseError::StateAware(_)) => {
+            reject_state_aware_without_operation(&mut logger)
         }
         Err(error) => {
-            log_request_parse_rejection(&mut logger, &error);
+            log_request_parse_rejection(&mut logger, &error, None);
             match request_error_route(&error) {
                 RequestErrorRoute::Diagnostic => {
                     eprint!("Request error\n{}", logger.get_buffer());
@@ -1631,6 +1802,86 @@ mod tests {
         base64_encode(json.as_bytes())
     }
 
+    #[test]
+    fn cli_accepts_lifecycle_operation_and_sandbox_id() {
+        for (name, expected) in [
+            ("provision", CliOperation::Provision),
+            ("start", CliOperation::Start),
+            ("exec", CliOperation::Exec),
+            ("stop", CliOperation::Stop),
+            ("deprovision", CliOperation::Deprovision),
+        ] {
+            let cli = parse_cli(&["wxc-exec", "policy.json", "--operation", name]);
+            assert_eq!(cli.operation, Some(expected));
+        }
+
+        let cli = parse_cli(&[
+            "wxc-exec",
+            "policy.json",
+            "--operation",
+            "start",
+            "--sandbox-id",
+            "wsb:abcd1234",
+        ]);
+        assert_eq!(cli.sandbox_id.as_deref(), Some("wsb:abcd1234"));
+
+        let error = match Cli::try_parse_from([
+            "wxc-exec",
+            "policy.json",
+            "--sandbox-id",
+            "wsb:abcd1234",
+        ]) {
+            Err(error) => error,
+            Ok(_) => panic!("--sandbox-id must require --operation"),
+        };
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+    }
+
+    #[test]
+    fn cli_rejects_lifecycle_operation_with_utility_modes() {
+        for utility_mode in [
+            "--delete",
+            "--setup-hyperlight",
+            "--setup-wslc",
+            "--probe",
+            "--force-reclaim",
+        ] {
+            let error = match Cli::try_parse_from([
+                "wxc-exec",
+                "policy.json",
+                "--operation",
+                "provision",
+                utility_mode,
+            ]) {
+                Err(error) => error,
+                Ok(_) => panic!("--operation must conflict with {utility_mode}"),
+            };
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{utility_mode}"
+            );
+        }
+
+        let error = match Cli::try_parse_from([
+            "wxc-exec",
+            "policy.json",
+            "--operation",
+            "deprovision",
+            "--sandbox-id",
+            "iso:abc",
+            "--containername",
+            "legacy-profile",
+        ]) {
+            Err(error) => error,
+            Ok(_) => panic!("--operation must conflict with --containername"),
+        };
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
     fn test_logger() -> Logger {
         Logger::new(Mode::Buffer)
     }
@@ -1852,6 +2103,181 @@ mod tests {
     }
 
     #[test]
+    fn cli_operation_routes_input_failures_to_lifecycle_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_path = directory.path().join("audit.log");
+        let mut logger = test_logger();
+        logger.enable_file_sink(&log_path).unwrap();
+
+        for operation in [
+            CliOperation::Provision,
+            CliOperation::Start,
+            CliOperation::Exec,
+            CliOperation::Stop,
+            CliOperation::Deprovision,
+        ] {
+            let error = lifecycle_input_error(
+                operation,
+                &mut logger,
+                RequestInputError::Decode(WxcError::ConfigParse("decode failed".to_string())),
+            );
+            assert_eq!(
+                error.code,
+                wxc_common::mxc_error::MxcErrorCode::MalformedRequest
+            );
+            assert!(error.message.contains("decode failed"), "{}", error.message);
+            let envelope: serde_json::Value =
+                serde_json::from_str(&error_envelope_string(&error)).unwrap();
+            assert_eq!(envelope["error"]["code"], "malformed_request");
+            let buffered = logger.get_buffer();
+            assert!(
+                !buffered.contains("decode failed"),
+                "lifecycle diagnostics must remain auxiliary"
+            );
+        }
+        drop(logger);
+
+        let log = std::fs::read_to_string(log_path).unwrap();
+        assert_eq!(
+            log.matches(r#""reason":"malformed_json""#).count(),
+            5,
+            "each lifecycle input failure must emit one ConfigRejected record: {log}"
+        );
+        for phase in ["provision", "start", "exec", "stop", "deprovision"] {
+            assert_eq!(
+                log.matches(&format!(r#""phase":"{phase}""#)).count(),
+                1,
+                "missing lifecycle phase {phase}: {log}"
+            );
+        }
+
+        let mut logger = test_logger();
+        let source_path = directory.path().join("source-audit.log");
+        logger.enable_file_sink(&source_path).unwrap();
+        let error = lifecycle_input_error(
+            CliOperation::Provision,
+            &mut logger,
+            RequestInputError::Source(WxcError::ConfigParse(
+                "configuration source missing".to_string(),
+            )),
+        );
+        assert!(error.message.contains("configuration source missing"));
+        drop(logger);
+        let source_log = std::fs::read_to_string(source_path).unwrap();
+        assert_eq!(
+            source_log
+                .matches(r#""reason":"input_source_unavailable""#)
+                .count(),
+            1,
+            "source failures need their own audit classification: {source_log}"
+        );
+        assert!(
+            source_log.contains(r#""phase":"provision""#),
+            "source rejection must retain the known phase: {source_log}"
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_file_is_a_malformed_lifecycle_input() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("invalid-utf8.json");
+        std::fs::write(&config_path, [0xff, 0xfe]).unwrap();
+        let input_error = wxc_common::config_parser::decode_request_input_classified(
+            config_path.to_str().unwrap(),
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(input_error, RequestInputError::Decode(_)));
+
+        let audit_path = directory.path().join("audit.log");
+        let mut logger = test_logger();
+        logger.enable_file_sink(&audit_path).unwrap();
+        let error = lifecycle_input_error(CliOperation::Provision, &mut logger, input_error);
+        assert!(
+            error.message.contains("not valid UTF-8"),
+            "{}",
+            error.message
+        );
+        drop(logger);
+
+        let audit = std::fs::read_to_string(audit_path).unwrap();
+        assert!(
+            audit.contains(r#""reason":"malformed_json""#),
+            "invalid content must be classified as malformed JSON: {audit}"
+        );
+        assert!(
+            audit.contains(r#""phase":"provision""#),
+            "invalid content must retain the selected lifecycle phase: {audit}"
+        );
+        assert!(
+            !audit.contains(r#""reason":"input_source_unavailable""#),
+            "an existing source with malformed content is still available: {audit}"
+        );
+    }
+
+    #[test]
+    fn lifecycle_debug_logging_is_buffered_without_changing_one_shot_console_mode() {
+        let lifecycle = parse_cli(&[
+            "wxc-exec",
+            "policy.json",
+            "--operation",
+            "provision",
+            "--debug",
+        ]);
+        let mut lifecycle_logger = logger_for_cli(&lifecycle);
+        lifecycle_logger.log_line("lifecycle diagnostic");
+        assert!(
+            lifecycle_logger
+                .get_buffer()
+                .contains("lifecycle diagnostic"),
+            "lifecycle diagnostics must be buffered away from stdout"
+        );
+
+        let one_shot = parse_cli(&["wxc-exec", "policy.json", "--debug"]);
+        let mut one_shot_logger = logger_for_cli(&one_shot);
+        one_shot_logger.log_line("one-shot diagnostic");
+        assert!(
+            one_shot_logger.get_buffer().is_empty(),
+            "one-shot --debug must retain console logging behavior"
+        );
+    }
+
+    #[test]
+    fn parse_rejection_logging_preserves_optional_phase_context() {
+        let directory = tempfile::tempdir().unwrap();
+
+        let lifecycle_path = directory.path().join("lifecycle.log");
+        let mut lifecycle_logger = test_logger();
+        lifecycle_logger.enable_file_sink(&lifecycle_path).unwrap();
+        log_request_parse_rejection(
+            &mut lifecycle_logger,
+            &ParseError::Version(WxcError::ConfigParse("bad version".to_string())),
+            Some(Phase::Exec),
+        );
+        drop(lifecycle_logger);
+        let lifecycle_log = std::fs::read_to_string(lifecycle_path).unwrap();
+        assert!(
+            lifecycle_log.contains(r#""phase":"exec""#),
+            "lifecycle parser rejection must retain phase: {lifecycle_log}"
+        );
+
+        let one_shot_path = directory.path().join("one-shot.log");
+        let mut one_shot_logger = test_logger();
+        one_shot_logger.enable_file_sink(&one_shot_path).unwrap();
+        log_request_parse_rejection(
+            &mut one_shot_logger,
+            &ParseError::Version(WxcError::ConfigParse("bad version".to_string())),
+            None,
+        );
+        drop(one_shot_logger);
+        let one_shot_log = std::fs::read_to_string(one_shot_path).unwrap();
+        assert!(
+            !one_shot_log.contains("\"phase\""),
+            "one-shot parser rejection must omit phase: {one_shot_log}"
+        );
+    }
+
+    #[test]
     fn request_parse_failures_preserve_audit_classification_and_output_route() {
         for (case, json, reason) in [
             (
@@ -1903,7 +2329,7 @@ mod tests {
             let path = directory.path().join("audit.log");
             let mut logger = test_logger();
             logger.enable_file_sink(&path).unwrap();
-            log_request_parse_rejection(&mut logger, &error);
+            log_request_parse_rejection(&mut logger, &error, None);
             drop(logger);
             let contents = std::fs::read_to_string(path).unwrap();
             assert!(
@@ -2738,7 +3164,7 @@ mod tests {
     fn finalize_maps_envelope_to_stdout_exit_zero() {
         let outcome: Result<DispatchOutcome, MxcError> =
             Ok(DispatchOutcome::Envelope(serde_json::json!({ "ok": true })));
-        match finalize_state_aware_outcome(outcome) {
+        match finalize_state_aware_outcome(outcome, "provision", false) {
             StateAwareExit::Envelope(json) => {
                 assert_eq!(json, r#"{"ok":true}"#);
             }
@@ -2751,7 +3177,7 @@ mod tests {
         let outcome: Result<DispatchOutcome, MxcError> =
             Ok(DispatchOutcome::ExecCompleted { exit_code: 7 });
         assert!(matches!(
-            finalize_state_aware_outcome(outcome),
+            finalize_state_aware_outcome(outcome, "exec", false),
             StateAwareExit::ExecCode(7)
         ));
     }
@@ -2760,7 +3186,7 @@ mod tests {
     fn finalize_maps_error_to_serialised_envelope() {
         let outcome: Result<DispatchOutcome, MxcError> =
             Err(MxcError::malformed_request("boom".to_string()));
-        match finalize_state_aware_outcome(outcome) {
+        match finalize_state_aware_outcome(outcome, "provision", false) {
             StateAwareExit::Error(json) => {
                 // Must be a parseable envelope carrying the error code so consumers
                 // that key off `error.code` still work.
@@ -2769,5 +3195,29 @@ mod tests {
             }
             other => panic!("expected Error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn finalize_routes_a_failed_exec_to_stderr() {
+        let outcome: Result<DispatchOutcome, MxcError> =
+            Err(MxcError::backend_error("output was truncated".to_string()));
+        match finalize_state_aware_outcome(outcome, "exec", false) {
+            StateAwareExit::ExecError(json) => {
+                // Still a parseable envelope; only the stream it lands on changes.
+                let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+                assert!(parsed["error"]["code"].is_string(), "{json}");
+            }
+            other => panic!("expected ExecError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finalize_keeps_a_failed_exec_dry_run_on_stdout() {
+        let outcome: Result<DispatchOutcome, MxcError> =
+            Err(MxcError::malformed_request("boom".to_string()));
+        assert!(matches!(
+            finalize_state_aware_outcome(outcome, "exec", true),
+            StateAwareExit::Error(_)
+        ));
     }
 }

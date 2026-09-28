@@ -144,8 +144,8 @@ pub fn validate_seatbelt_network_policy(policy: &ContainerPolicy) -> Result<(), 
                     would degrade to allow-all outbound -- the inverse of the \
                     requested policy. Use 'network.proxy.builtinTestServer: true' \
                     (testing only) for MXC-enforced host filtering, remove \
-                    allowedHosts to keep the deny, or use defaultPolicy='allow' if \
-                    unrestricted egress is intended."
+                    allowedHosts to keep the deny, or remove allowedHosts and use \
+                    defaultPolicy='allow' if unrestricted egress is intended."
             .to_string());
     }
 
@@ -154,8 +154,8 @@ pub fn validate_seatbelt_network_policy(policy: &ContainerPolicy) -> Result<(), 
     if !policy.blocked_hosts.is_empty() {
         return Err(
             "macOS Seatbelt does not support per-host network filtering. \
-                    'blockedHosts' cannot be enforced; remove it or use \
-                    defaultPolicy: \"block\" to deny all network."
+                    'blockedHosts' cannot be enforced; remove it. To deny all \
+                    network, use defaultPolicy: \"block\" without host lists."
                 .to_string(),
         );
     }
@@ -361,7 +361,9 @@ mod tests {
     }
 
     #[test]
-    fn accepts_allowed_hosts_with_default_allow() {
+    fn seatbelt_specific_validation_defers_allow_default_allowlist_to_shared_validation() {
+        // Shared validation rejects this combination before Seatbelt validation.
+        // This helper owns only the remaining backend-representability checks.
         let mut p = policy();
         p.default_network_policy = NetworkPolicy::Allow;
         p.allowed_hosts = vec!["api.github.com".to_string()];

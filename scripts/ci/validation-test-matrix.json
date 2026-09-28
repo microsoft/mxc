@@ -3,9 +3,8 @@
   "platforms": [
     {
       "id": "windows-prerelease-process-container",
-      "displayName": "Windows Prerelease T1 Process Container",
+      "displayName": "Windows Prerelease Process Container",
       "family": "windows",
-      "prerelease": true,
       "architectures": {
         "x64": {
           "target": "x86_64-pc-windows-msvc",
@@ -13,24 +12,19 @@
           "pool": "1es-mxc-windows-prerelease-t1-x64",
           "backends": [
             "process-t1",
-            "process-t3",
             "isolation-session",
             "wslc",
             "windows-sandbox",
-            "microvm",
-            "hyperlight"
+            "microvm"
           ]
         },
         "arm64": {
           "target": "aarch64-pc-windows-msvc",
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
-          "pool": "",
+          "pool": "1es-mxc-windows-prerelease-t1-arm64",
           "backends": [
             "process-t1",
-            "process-t3",
-            "isolation-session",
-            "wslc",
-            "windows-sandbox"
+            "isolation-session"
           ]
         }
       }
@@ -39,7 +33,6 @@
       "id": "windows-prerelease-isolation-session",
       "displayName": "Windows Prerelease Isolation Session",
       "family": "windows",
-      "prerelease": true,
       "architectures": {
         "x64": {
           "target": "x86_64-pc-windows-msvc",
@@ -47,55 +40,45 @@
           "pool": "1es-mxc-e2e-win-prerelease-isolationsesh-x64",
           "backends": [
             "process-t1",
-            "process-t3",
             "isolation-session",
             "wslc",
             "windows-sandbox",
-            "microvm",
-            "hyperlight"
+            "microvm"
           ]
         },
         "arm64": {
           "target": "aarch64-pc-windows-msvc",
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
-          "pool": "",
+          "pool": "1es-mxc-e2e-win-prerelease-isosesh-arm64",
           "backends": [
             "process-t1",
-            "process-t3",
-            "isolation-session",
-            "wslc",
-            "windows-sandbox"
+            "isolation-session"
           ]
         }
       }
     },
     {
-      "id": "windows-canary",
-      "displayName": "Windows Canary",
+      "id": "windows-prerelease-26h1",
+      "displayName": "Windows Prerelease 26H1",
       "family": "windows",
       "architectures": {
         "x64": {
           "target": "x86_64-pc-windows-msvc",
           "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
-          "pool": "",
+          "pool": "1es-mxc-windows-prerelease-26h1-x64",
           "backends": [
             "process-t1",
-            "process-t3",
             "wslc",
             "windows-sandbox",
-            "microvm",
-            "hyperlight"
+            "microvm"
           ]
         },
         "arm64": {
           "target": "aarch64-pc-windows-msvc",
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
-          "pool": "",
+          "pool": "1es-mxc-windows-prerelease-26h1-arm64",
           "backends": [
-            "process-t1",
-            "process-t3",
-            "wslc",
-            "windows-sandbox"
+            "process-t1"
           ]
         }
       }
@@ -111,22 +94,18 @@
           "pool": "1es-mxc-e2e-windows-25h2-pro-x64",
           "backends": [
             "process-t1",
-            "process-t3",
             "wslc",
             "windows-sandbox",
-            "microvm",
-            "hyperlight"
+            "microvm"
           ]
         },
         "arm64": {
           "target": "aarch64-pc-windows-msvc",
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
-          "pool": "",
+          "pool": "1es-mxc-e2e-windows-25h2-pro-arm64",
           "backends": [
             "process-t1",
-            "process-t3",
-            "wslc",
-            "windows-sandbox"
+            "isolation-session"
           ]
         }
       }
@@ -142,22 +121,18 @@
           "pool": "1es-mxc-e2e-windows-24h2-pro-x64",
           "backends": [
             "process-t1",
-            "process-t3",
             "wslc",
             "windows-sandbox",
-            "microvm",
-            "hyperlight"
+            "microvm"
           ]
         },
         "arm64": {
           "target": "aarch64-pc-windows-msvc",
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
-          "pool": "",
+          "pool": "1es-mxc-e2e-windows-24h2-pro-arm64",
           "backends": [
             "process-t1",
-            "process-t3",
-            "wslc",
-            "windows-sandbox"
+            "isolation-session"
           ]
         }
       }
@@ -175,18 +150,7 @@
             "process-t3",
             "wslc",
             "windows-sandbox",
-            "microvm",
-            "hyperlight"
-          ]
-        },
-        "arm64": {
-          "target": "aarch64-pc-windows-msvc",
-          "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
-          "pool": "",
-          "backends": [
-            "process-t3",
-            "wslc",
-            "windows-sandbox"
+            "microvm"
           ]
         }
       }
@@ -202,7 +166,6 @@
           "pool": "1es-mxc-e2e-ubuntu-26.04-x64",
           "backends": [
             "bubblewrap",
-            "hyperlight",
             "lxc"
           ]
         },
@@ -229,7 +192,6 @@
           "backends": [
             "bubblewrap",
             "microvm",
-            "hyperlight",
             "lxc"
           ]
         },
@@ -255,7 +217,6 @@
           "pool": "1es-mxc-e2e-rhel-10-x64",
           "backends": [
             "bubblewrap",
-            "hyperlight",
             "lxc"
           ]
         },
@@ -281,7 +242,6 @@
           "pool": "1es-mxc-e2e-debian-13-x64",
           "backends": [
             "bubblewrap",
-            "hyperlight",
             "lxc"
           ]
         },
@@ -325,6 +285,21 @@
           ]
         }
       }
+    },
+    {
+      "id": "macos-27",
+      "displayName": "macOS 27",
+      "family": "macos",
+      "architectures": {
+        "arm64": {
+          "target": "aarch64-apple-darwin",
+          "artifact": "mxc-binaries-aarch64-apple-darwin",
+          "runner": "xcode-27",
+          "backends": [
+            "seatbelt"
+          ]
+        }
+      }
     }
   ],
   "backendDelayedStart": [],
@@ -342,6 +317,13 @@
         "os": "windows-prerelease-isolation-session",
         "backends": [
           "isolation-session"
+        ]
+      },
+      {
+        "os": "windows-prerelease-26h1",
+        "backends": [
+          "process-t1",
+          "wslc"
         ]
       },
       {
@@ -401,6 +383,12 @@
       },
       {
         "os": "macos-15",
+        "backends": [
+          "seatbelt"
+        ]
+      },
+      {
+        "os": "macos-27",
         "backends": [
           "seatbelt"
         ]

@@ -989,15 +989,26 @@ describe('windows_sandbox state-aware lifecycle', () => {
       );
     });
 
-    it('execInSandboxAsync can dry-run a wsb exec request', async () => {
-      const request = installStateAwareReply('{"result":{"validated":true}}');
+    it('execInSandboxAsync rejects dry-run execution for a wsb: id', async () => {
       const id = 'wsb:prov-1' as SandboxId<'windows_sandbox'>;
-      await execInSandboxAsync(
-        id,
-        { process: { commandLine: 'echo hello-from-wsb' } },
-        { dryRun: true, experimental: true },
+      if (false) {
+        void execInSandboxAsync(
+          // @ts-expect-error Windows Sandbox cannot execute through this API, including dry-run.
+          id,
+          { process: { commandLine: 'echo hello-from-wsb' } },
+          { dryRun: true, experimental: true },
+        );
+      }
+      await assert.rejects(
+        () => execInSandboxAsync(
+          id as unknown as SandboxId<'isolation_session'>,
+          { process: { commandLine: 'echo hello-from-wsb' } },
+          { dryRun: true, experimental: true },
+        ),
+        (error: unknown) =>
+          error instanceof MxcError &&
+          error.code === 'unsupported_containment',
       );
-      assert.strictEqual(requestEnvelope(request()).phase, 'exec');
     });
 
     it('stopSandbox and deprovisionSandbox build minimal envelopes for a wsb: id', async () => {
@@ -1132,17 +1143,22 @@ describe('wslc state-aware lifecycle', () => {
       assert.strictEqual(envelope.experimental, undefined);
     });
 
-    it('execInSandboxAsync rejects live execution for a wslc: id', async () => {
-      const id = 'wslc:0123abcd' as SandboxId<'wslc'>;
-      await assert.rejects(
-        () => execInSandboxAsync(
-          id as unknown as SandboxId<'isolation_session'>,
-          { process: { commandLine: 'echo hello-from-wslc' } },
-        ),
-        (error: unknown) =>
-          error instanceof MxcError &&
-          error.code === 'unsupported_containment',
+    it('execInSandboxAsync runs live execution for a wslc: id', async () => {
+      const exec = installStateAwareExecBinding(
+        () => new FakeStateAwareExecBinding(31, 'hello-from-wslc\n', ''),
       );
+      const id = 'wslc:0123abcd' as SandboxId<'wslc'>;
+      const result = await execInSandboxAsync(
+        id,
+        { process: { commandLine: 'echo hello-from-wslc' } },
+      );
+      assert.deepStrictEqual(result, {
+        stdout: 'hello-from-wslc\n',
+        stderr: '',
+        exitCode: 0,
+      });
+      assert.strictEqual(exec.request().phase, 'exec');
+      assert.strictEqual(exec.request().sandboxId, 'wslc:0123abcd');
     });
 
     it('stopSandbox and deprovisionSandbox build minimal envelopes for a wslc: id', async () => {

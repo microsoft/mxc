@@ -18,7 +18,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use wxc_common::models::ContainerPolicy;
+use crate::base_container_runner::{BaseContainerRequestDecision, BaseContainerRunner};
+use wxc_common::models::{ContainerPolicy, ExecutionRequest, NetworkAction};
 
 /// Declares [`IsolationTier`] together with its variant↔string mapping in one
 /// place, so [`ALL`](IsolationTier::ALL), [`as_str`](IsolationTier::as_str), and
@@ -136,9 +137,8 @@ pub struct TierDecision {
     /// The selected isolation tier.
     pub tier: IsolationTier,
     /// `true` if this tier needs DACL augmentation on host paths to enforce
-    /// the policy. T3 always sets this; T1/T2 set it when `denied_paths` is
-    /// non-empty (since neither BaseContainer nor BFS currently models a
-    /// "deny" semantic and we have to fall back to host DACLs for those).
+    /// the policy. T3 always sets this; T2 sets it when `denied_paths` is
+    /// non-empty because BFS does not model a "deny" semantic.
     pub needs_dacl_augmentation: bool,
     /// Absolute path to `bfscfg.exe` as resolved at probe time.
     ///
@@ -160,14 +160,6 @@ pub struct TierDecision {
     /// populated at the same branches. Empty when the preferred tier was
     /// selected.
     pub reasons: Vec<DegradationReason>,
-}
-
-/// Request-specific BaseContainer capabilities used for tier selection.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct BaseContainerRequestCapabilities {
-    pub(crate) usable: bool,
-    pub(crate) supports_deny_paths: bool,
-    pub(crate) supports_enumerate_paths: bool,
 }
 
 impl TierDecision {
@@ -246,18 +238,24 @@ pub enum FallbackError {
          enumeration-only access requires native ProcessContainer support"
     )]
     EnumeratePathsUnsupported,
+
+    /// Host-loopback ingress cannot be represented by AppContainer fallback tiers.
+    #[error(
+        "network.ingress.hostLoopback='allow' is not supported by this version of Windows; \
+         host-loopback ingress requires native ProcessContainer support"
+    )]
+    IngressUnsupported,
 }
 
-/// Decide which isolation tier to use for a run.
+/// Decide which isolation tier to use for a run after BaseContainer has made
+/// its authoritative request-level serviceability decision.
 ///
 /// The algorithm matches the design doc:
 ///
 /// 1. If `MXC_FORCE_TIER` is set in a unit test or a build with the
 ///    `force-tier-testing` feature, honor it.
-/// 2. Try Tier 1 (BaseContainer) when `prefer_base_container` is true and the
-///    backend is *usable*. See [`is_base_container_usable`], a capability check
-///    (not just symbol presence) so a disabled build degrades to a lower tier
-///    instead of failing at launch.
+/// 2. Try Tier 1 (BaseContainer) when the request-level BaseContainer decision
+///    says the backend can service the complete request.
 /// 3. Otherwise try Tier 2 (AppContainer + BFS), but **only when this binary
 ///    was compiled with the `tier2_bfs` Cargo feature**. With the feature on,
 ///    Tier 2 is selected when there's no filesystem policy at all, or
@@ -270,7 +268,7 @@ pub enum FallbackError {
 ///    `\Device\Null` descriptor) that is read-only-detected as not already in
 ///    effect on this machine.
 ///
-/// Any tier that needs to modify host DACLs (T3 always; T1/T2 when
+/// Any tier that needs to modify host DACLs (T3 always; T2 when
 /// `denied_paths` is non-empty) requires `fallback.allow_dacl_mutation = true`
 /// and `WRITE_DAC` on every target path. If either check fails the function
 /// returns the corresponding [`FallbackError`].
@@ -281,42 +279,27 @@ pub enum FallbackError {
 /// environment-driven Tier 2 → Tier 3 downgrade primitive. Callers can
 /// receive [`FallbackError::SystemRootUnresolved`] when the OS API itself
 /// fails, which on a healthy Windows host should never happen.
-pub fn detect(
-    policy: &ContainerPolicy,
-    prefer_base_container: bool,
+pub(crate) fn choose_backend_tier(
+    request: &ExecutionRequest,
 ) -> Result<TierDecision, FallbackError> {
-    let supports_enumerate_paths = policy.enumerate_paths.is_empty()
-        || crate::base_container_runner::BaseContainerRunner::supports_enumerate_paths();
-    detect_with_base_container_capabilities(
-        policy,
-        prefer_base_container,
-        BaseContainerRequestCapabilities {
-            usable: is_base_container_usable(),
-            supports_deny_paths: base_container_supports_deny_paths(),
-            supports_enumerate_paths,
-        },
-    )
-}
-
-/// Variant of [`detect`] for callers that have already selected which
-/// BaseContainer contract applies to a request and probed that contract's
-/// capabilities.
-pub(crate) fn detect_with_base_container_capabilities(
-    policy: &ContainerPolicy,
-    prefer_base_container: bool,
-    capabilities: BaseContainerRequestCapabilities,
-) -> Result<TierDecision, FallbackError> {
+    let policy = &request.policy;
+    let base_container_decision = BaseContainerRunner::can_backend_service_request(request);
     let denied = !policy.denied_paths.is_empty();
     let enumerate = !policy.enumerate_paths.is_empty();
+    let host_loopback = policy
+        .network_ingress
+        .as_ref()
+        .is_some_and(|ingress| ingress.host_loopback == NetworkAction::Allow);
     let has_fs_policy = !policy.readwrite_paths.is_empty()
         || !policy.readonly_paths.is_empty()
         || enumerate
         || denied;
 
-    if enumerate
-        && !(prefer_base_container && capabilities.usable && capabilities.supports_enumerate_paths)
-    {
+    if enumerate && !base_container_decision.can_service_request() {
         return Err(FallbackError::EnumeratePathsUnsupported);
+    }
+    if host_loopback && !base_container_decision.can_service_request() {
+        return Err(FallbackError::IngressUnsupported);
     }
 
     // Test-executor injection seam. An invalid value is silently ignored and
@@ -336,19 +319,16 @@ pub(crate) fn detect_with_base_container_capabilities(
     let mut reasons: Vec<DegradationReason> = Vec::new();
 
     // Tier 1 — BaseContainer
-    if prefer_base_container && capabilities.usable {
-        // Keep deny on Tier 1 only with native deny-path support from the
-        // selected PSEC contract. T1 applies no host DACL, so
-        // otherwise fall through to a DACL-enforcing tier.
-        if !denied || capabilities.supports_deny_paths {
-            return Ok(TierDecision {
-                tier: IsolationTier::BaseContainer,
-                needs_dacl_augmentation: false,
-                bfscfg_path: None,
-                warnings,
-                reasons,
-            });
-        }
+    if base_container_decision.can_service_request() {
+        return Ok(TierDecision {
+            tier: IsolationTier::BaseContainer,
+            needs_dacl_augmentation: false,
+            bfscfg_path: None,
+            warnings,
+            reasons,
+        });
+    }
+    if base_container_decision == BaseContainerRequestDecision::DeniedPathsUnsupported {
         warnings.push(
             "BaseContainer usable but the selected OS contract does not advertise native \
              deniedPaths support; \
@@ -635,23 +615,6 @@ fn forced_decision(
 // Probes
 // ---------------------------------------------------------------------------
 
-/// Returns `true` when the BaseContainer (Tier 1) backend is **usable** here
-/// (feature enabled, not merely symbol-present). The signal [`detect`] uses to
-/// decide whether Tier 1 is eligible. The result is probed once and cached for
-/// the process lifetime.
-pub fn is_base_container_usable() -> bool {
-    // Test seam: force the capability so tier-selection tests can simulate
-    // "symbol present but feature disabled" (and the reverse) without real OS
-    // support. Checked before the cache so it always takes effect.
-    #[cfg(test)]
-    if let Ok(forced) = std::env::var("MXC_FORCE_BC_USABLE") {
-        return forced == "1";
-    }
-
-    static USABLE: OnceLock<bool> = OnceLock::new();
-    *USABLE.get_or_init(crate::base_container_runner::BaseContainerRunner::is_base_container_usable)
-}
-
 /// Whether the OS advertises native deny-paths enforcement
 /// (`PSE_SUPPORT_FS_DENY`).
 /// [`detect`] uses this to keep deny on Tier 1; otherwise it falls through to a
@@ -772,15 +735,6 @@ fn parse_utf16(slice: &[u16]) -> Result<PathBuf, FallbackError> {
         })
 }
 
-// TODO(security follow-up): audit other native-binary lookups for
-// executable/DLL search-order hijacking. In particular,
-// `BaseContainerRunner::is_base_container_api_present` performs a
-// `LoadLibrary` on `processmodel.dll`; verify it uses
-// `LOAD_LIBRARY_SEARCH_SYSTEM32` (or an absolute path) so an attacker
-// who can plant `processmodel.dll` next to `wxc-exec.exe`, in the CWD,
-// or in `PATH` cannot impersonate the Tier 1 API surface. Tracked
-// separately from this commit.
-
 /// Returns `Ok(true)` if the current process holds (or can be granted)
 /// `WRITE_DAC` on `path`, `Ok(false)` if the OS reported access denied, and
 /// an `Err` for any other failure (e.g. the path does not exist).
@@ -846,7 +800,7 @@ pub(crate) fn has_write_dac(path: &Path) -> Result<bool, std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::ContainerPolicy;
+    use wxc_common::models::{ContainerPolicy, ExecutionRequest};
     // Shared ENV_LOCK + guards live in `crate::test_env` so they're
     // honored uniformly across the dispatcher and fallback_detector
     // test modules. A per-module lock would let cross-module test
@@ -865,11 +819,19 @@ mod tests {
         p.denied_paths.push("C:\\Windows".to_string());
         p
     }
+
+    fn detect(policy: &ContainerPolicy) -> Result<TierDecision, FallbackError> {
+        super::choose_backend_tier(&ExecutionRequest {
+            policy: policy.clone(),
+            ..ExecutionRequest::default()
+        })
+    }
+
     #[test]
     fn empty_policy_t1_when_bc_present_and_preferred() {
         let _g = ForceTierGuard::set_tier(IsolationTier::BaseContainer);
         let policy = empty_policy();
-        let d = detect(&policy, true).expect("forced base-container should succeed");
+        let d = detect(&policy).expect("forced base-container should succeed");
         assert!(matches!(d.tier, IsolationTier::BaseContainer));
         assert!(!d.needs_dacl_augmentation);
         assert!(d.warnings.is_empty());
@@ -940,7 +902,7 @@ mod tests {
     fn empty_policy_no_filesystem_t2_path() {
         let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerBfs);
         let policy = empty_policy();
-        let d = detect(&policy, true).expect("forced bfs should succeed");
+        let d = detect(&policy).expect("forced bfs should succeed");
         assert!(matches!(d.tier, IsolationTier::AppContainerBfs));
         assert!(!d.needs_dacl_augmentation);
     }
@@ -950,7 +912,7 @@ mod tests {
         let mut policy = policy_with_denied();
         policy.fallback.allow_dacl_mutation = false;
         assert!(matches!(
-            detect(&policy, true),
+            detect(&policy),
             Err(FallbackError::DaclFallbackDisabled)
         ));
     }
@@ -960,7 +922,7 @@ mod tests {
         let mut policy = policy_with_denied();
         policy.fallback.allow_dacl_mutation = false;
         assert!(matches!(
-            detect(&policy, true),
+            detect(&policy),
             Err(FallbackError::DaclFallbackDisabled)
         ));
     }
@@ -970,7 +932,7 @@ mod tests {
         let mut policy = policy_with_denied();
         policy.fallback.allow_dacl_mutation = false;
         assert!(matches!(
-            detect(&policy, true),
+            detect(&policy),
             Err(FallbackError::DaclFallbackDisabled)
         ));
     }
@@ -987,7 +949,7 @@ mod tests {
             std::env::set_var("MXC_FORCE_DENY_PATHS", "1");
         }
         let policy = policy_with_denied();
-        let d = detect(&policy, true).expect("native deny support keeps T1");
+        let d = detect(&policy).expect("native deny support keeps T1");
         // SAFETY: serialized by ENV_LOCK.
         unsafe {
             std::env::remove_var("MXC_FORCE_BC_USABLE");
@@ -1015,7 +977,7 @@ mod tests {
             .denied_paths
             .push(dir.path().to_string_lossy().into_owned());
         policy.fallback.allow_dacl_mutation = true;
-        let d = detect(&policy, true).expect("falls through to a DACL tier");
+        let d = detect(&policy).expect("falls through to a DACL tier");
         // SAFETY: serialized by ENV_LOCK.
         unsafe {
             std::env::remove_var("MXC_FORCE_BC_USABLE");
@@ -1077,7 +1039,7 @@ mod tests {
         // presence) and any tier-specific check here would be coincidental.
         let _g = ForceTierGuard::set("not-a-real-tier");
         let policy = empty_policy();
-        detect(&policy, false).expect("invalid value should not error");
+        detect(&policy).expect("invalid value should not error");
     }
 
     #[test]
@@ -1178,15 +1140,14 @@ mod tests {
 
     #[test]
     fn base_container_api_probe_smoke() {
-        let _ = crate::base_container_runner::BaseContainerRunner::is_base_container_api_present();
-    }
-
-    #[test]
-    fn base_container_usable_probe_smoke() {
         // Must not panic and must be deterministic; concrete value is
         // host-dependent.
-        let first = is_base_container_usable();
-        assert_eq!(first, is_base_container_usable());
+        let first =
+            crate::base_container_runner::BaseContainerRunner::is_base_container_api_present();
+        assert_eq!(
+            first,
+            crate::base_container_runner::BaseContainerRunner::is_base_container_api_present()
+        );
     }
 
     #[test]
@@ -1194,14 +1155,14 @@ mod tests {
         // Symbol may be present, but capability disabled: detection must drop
         // to Tier 3 rather than pick a BaseContainer that cannot launch.
         let _g = BcUsableGuard::set(false);
-        let d = detect(&empty_policy(), true).expect("detect should succeed");
+        let d = detect(&empty_policy()).expect("detect should succeed");
         assert!(matches!(d.tier, IsolationTier::AppContainerDacl));
     }
 
     #[test]
     fn detect_selects_tier1_when_bc_usable() {
         let _g = BcUsableGuard::set(true);
-        let d = detect(&empty_policy(), true).expect("detect should succeed");
+        let d = detect(&empty_policy()).expect("detect should succeed");
         assert!(matches!(d.tier, IsolationTier::BaseContainer));
     }
 
@@ -1226,7 +1187,7 @@ mod tests {
         let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerDacl);
         let mut policy = empty_policy();
         policy.fallback.allow_dacl_mutation = true;
-        let d = detect(&policy, true).expect("forced dacl with allow_dacl_mutation=true");
+        let d = detect(&policy).expect("forced dacl with allow_dacl_mutation=true");
         assert!(matches!(d.tier, IsolationTier::AppContainerDacl));
         assert!(d.needs_dacl_augmentation);
         assert!(
@@ -1327,19 +1288,10 @@ mod tests {
     fn no_bfs_feature_falls_through_to_dacl_for_empty_policy() {
         // Clear MXC_FORCE_TIER under ENV_LOCK so the test-only force
         // seam in `detect` doesn't observe a sibling test's value.
-        let _lock = {
-            let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-            // SAFETY: env-var mutation in tests; serialized by ENV_LOCK.
-            unsafe {
-                std::env::remove_var("MXC_FORCE_TIER");
-            }
-            lock
-        };
+        let _guard = BcUsableGuard::set(false);
         let mut policy = empty_policy();
         policy.fallback.allow_dacl_mutation = true;
-        // `prefer_base_container = false` skips Tier 1 deterministically;
-        // with `tier2_bfs` off, Tier 2 is skipped too.
-        let d = detect(&policy, false).expect("empty policy must resolve");
+        let d = detect(&policy).expect("empty policy must resolve");
         assert!(
             matches!(d.tier, IsolationTier::AppContainerDacl),
             "tier2_bfs off must select AppContainerDacl, got {:?}",
@@ -1361,16 +1313,9 @@ mod tests {
     #[cfg(feature = "tier2_bfs")]
     #[test]
     fn bfs_feature_selects_bfs_for_empty_policy_when_bc_skipped() {
-        let _lock = {
-            let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-            // SAFETY: env-var mutation in tests; serialized by ENV_LOCK.
-            unsafe {
-                std::env::remove_var("MXC_FORCE_TIER");
-            }
-            lock
-        };
+        let _guard = BcUsableGuard::set(false);
         let policy = empty_policy();
-        let d = detect(&policy, false).expect("empty policy must resolve");
+        let d = detect(&policy).expect("empty policy must resolve");
         assert!(
             matches!(d.tier, IsolationTier::AppContainerBfs),
             "tier2_bfs on with empty policy must select AppContainerBfs, got {:?}",

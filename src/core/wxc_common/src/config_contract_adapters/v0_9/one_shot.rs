@@ -258,6 +258,7 @@ pub(super) fn into_common_request_ir(
         schema: schema.into_option(),
         comment: comment.into_option(),
         source_contract: mxc_config_contract::ContractVersion::V0_9_0Alpha,
+        default_env_compatibility: crate::models::DefaultEnvCompatibility::DefaultBlock,
         network_enforcement_compatibility: crate::models::NetworkEnforcementCompatibility::Strict,
         phase: None,
         sandbox_id: None,
@@ -279,6 +280,7 @@ pub(super) fn into_common_request_ir(
         seatbelt: seatbelt.into_option().map(convert_seatbelt),
         test_feature: None,
         windows_sandbox: None,
+        hyperlight: None,
     }
 }
 

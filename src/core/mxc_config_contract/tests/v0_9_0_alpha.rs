@@ -37,6 +37,8 @@ mod fixtures;
 mod network;
 #[path = "support/one_shot.rs"]
 mod one_shot;
+#[path = "v0_9_0_alpha/one_shot_backend_sections.rs"]
+mod one_shot_backend_sections;
 #[path = "support/optional_fields.rs"]
 mod optional_fields;
 #[path = "v0_9_0_alpha/request.rs"]

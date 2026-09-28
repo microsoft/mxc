@@ -120,7 +120,9 @@ contract-valid, and no relaxed schema twin is generated.
 - `wire-conformance-state-aware.test.ts` checks backend-specific state-aware
   public types against the exact v0.9 and v0.10 oracles.
 - `check-schema-versions.js` and `check-version-sync.js` enforce schema and
-  product version synchronization.
+  product version synchronization. The schema-version check also validates the
+  canonical high-level SDK major target against the exact Rust contract
+  registry; generated schemas are not the authority for that mapping.
 
 The generated TypeScript files are drift oracles, not public SDK exports. The
 public SDK types remain hand-written and are checked at TypeScript compile time.

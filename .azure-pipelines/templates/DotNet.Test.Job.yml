@@ -1,0 +1,76 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+
+jobs:
+- job: test_dotnet_sdk
+  displayName: Test .NET SDK
+  pool:
+    name: Azure-Pipelines-1ESPT-ExDShared
+    image: windows-2022
+    os: windows
+  variables:
+    testProject: $(Build.SourcesDirectory)\sdk\dotnet\Microsoft.Mxc.Sdk.Tests\Microsoft.Mxc.Sdk.Tests.csproj
+    prebuiltNativeDir: $(Pipeline.Workspace)\dotnet-rust-x64
+    prebuiltTestNativeDir: $(Pipeline.Workspace)\dotnet-rust-test-support-x64
+    prebuiltTestNativeLibrary: $(prebuiltTestNativeDir)\mxc_ffi.dll
+
+  steps:
+  - checkout: self
+
+  - task: UseDotNet@2
+    displayName: Use .NET runtime 8
+    inputs:
+      packageType: runtime
+      version: 8.0.x
+
+  - task: UseDotNet@2
+    displayName: Use .NET SDK 10
+    inputs:
+      packageType: sdk
+      version: 10.x
+
+  - task: NuGetAuthenticate@1
+    displayName: Authenticate to Mxc-Azure-Feed
+
+  - task: DownloadPipelineArtifact@2
+    displayName: Download x64 Rust runtime
+    inputs:
+      artifact: wxc-binaries-x86_64-pc-windows-msvc
+      path: $(prebuiltNativeDir)
+
+  - task: DownloadPipelineArtifact@2
+    displayName: Download .NET test-support native library
+    inputs:
+      artifact: mxc-dotnet-test-support-x86_64-pc-windows-msvc
+      path: $(prebuiltTestNativeDir)
+
+  - task: CopyFiles@2
+    displayName: Stage generated .NET bindings
+    inputs:
+      sourceFolder: $(prebuiltNativeDir)\dotnet
+      contents: NativeMethods.g.cs
+      targetFolder: $(Build.SourcesDirectory)\sdk\dotnet\Microsoft.Mxc.Sdk\Native
+      overWrite: true
+
+  - task: DotNetCoreCLI@2
+    displayName: Restore .NET SDK tests
+    inputs:
+      command: restore
+      projects: $(testProject)
+      feedsToUse: config
+      nugetConfigPath: $(Build.SourcesDirectory)\.azure-pipelines\.nuget\nuget.private.config
+
+  - task: DotNetCoreCLI@2
+    displayName: Run .NET SDK tests
+    inputs:
+      command: test
+      projects: $(testProject)
+      # MTP rejects the VSTest TRX arguments injected by this task's default.
+      publishTestResults: false
+      arguments: >-
+        --configuration Release
+        --no-restore
+        -p:MxcWithIsolationSession=true
+        -p:MxcWithWslc=true
+        -p:MxcPrebuiltNativeDir="$(prebuiltNativeDir)"
+        -p:MxcTestPrebuiltNativeLibrary="$(prebuiltTestNativeLibrary)"

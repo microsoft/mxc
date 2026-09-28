@@ -1,8 +1,15 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { execFile, spawn } from 'node:child_process';
-import { findWxcExecutable } from './platform.js';
+import {
+  readTelemetryConsentStatusJsonAsync,
+  TELEMETRY_CONSENT_DECISION_DISMISSED,
+  TELEMETRY_CONSENT_DECISION_NO,
+  TELEMETRY_CONSENT_DECISION_YES,
+  withdrawTelemetryConsentJsonAsync,
+} from './bindings/telemetry.js';
+import { runTelemetryConsentRequestAsync } from './bindings/telemetry-request-worker.js';
+import { MxcError } from './errors.js';
 
 const TELEMETRY_CONSENT_STATES = ['granted', 'denied', 'undetermined', 'not-applicable'] as const;
 const TELEMETRY_POLICY_STATES = ['unrestricted', 'allowed', 'blocked', 'not-applicable'] as const;
@@ -28,22 +35,12 @@ const CONSENT_STATUS_REASONS = [
   'presentation-unavailable',
   'not-applicable',
 ] as const;
-// Protocol-only results: never a successful outcome for a caller.
-const CONSENT_PROTOCOL_ONLY_RESULTS = [
-  'status',
-  'presentationRequired',
-] as const;
-const CONSENT_PROTOCOL_RESULTS = [
-  ...CONSENT_PROTOCOL_ONLY_RESULTS,
-  ...TELEMETRY_CONSENT_RESULTS,
-] as const;
 
 export type TelemetryConsentState = (typeof TELEMETRY_CONSENT_STATES)[number];
 export type TelemetryPolicyState = (typeof TELEMETRY_POLICY_STATES)[number];
 export type TelemetryConsentDecision = (typeof TELEMETRY_CONSENT_DECISIONS)[number];
 export type TelemetryConsentResult = (typeof TELEMETRY_CONSENT_RESULTS)[number];
 type ConsentStatusReason = (typeof CONSENT_STATUS_REASONS)[number];
-type TelemetryConsentProtocolResult = (typeof CONSENT_PROTOCOL_RESULTS)[number];
 
 export interface TelemetryConsentMessage {
   id: string;
@@ -70,15 +67,6 @@ export interface TelemetryConsentOutcome {
   needsPrompt: boolean;
 }
 
-interface TelemetryConsentProtocolResponse
-  extends Omit<TelemetryConsentOutcome, 'action' | 'result'> {
-  action: ConsentAction;
-  result: TelemetryConsentProtocolResult;
-  reason: ConsentStatusReason | null;
-  prompt?: TelemetryConsentPrompt | null;
-  challenge?: string | null;
-}
-
 export type TelemetryConsentPresenter = (
   prompt: TelemetryConsentPrompt,
   signal?: AbortSignal,
@@ -93,380 +81,26 @@ export interface TelemetryConsentQuery {
   error?: string;
 }
 
-interface ConsentCommandOutput {
-  stdout: string;
-  stderr: string;
+interface TelemetryConsentStatusPayload {
+  storedState: TelemetryConsentState;
+  effectiveState: TelemetryConsentState;
+  policy: TelemetryPolicyState;
+  reason: ConsentStatusReason | null;
 }
 
-type ConsentAsyncRunner = (args: readonly string[]) => Promise<ConsentCommandOutput>;
-type ConsentAction = 'request' | 'withdraw' | 'status';
-type ConsentProtocolRunner = (
-  locale: string | undefined,
-  presenter: TelemetryConsentPresenter,
-) => Promise<TelemetryConsentOutcome>;
-type ConsentChildFactory = (args: readonly string[]) => ReturnType<typeof spawn>;
-
-const DEFAULT_CONSENT_REQUEST_TIMEOUT_MS = 30_000;
-const MAX_CONSENT_STDOUT_BYTES = 1024 * 1024;
-const MAX_CONSENT_STDERR_BYTES = 64 * 1024;
-const MAX_CONSENT_PROTOCOL_LINES = 16;
-let consentRequestTimeoutMs = DEFAULT_CONSENT_REQUEST_TIMEOUT_MS;
-const defaultConsentChildFactory: ConsentChildFactory = (args) =>
-  spawn(executable(), [...args], {
-    env: process.env,
-    stdio: ['pipe', 'pipe', 'pipe'],
-    windowsHide: true,
-  });
-let consentChildFactory: ConsentChildFactory = defaultConsentChildFactory;
-
-function maintenanceArgs(action: 'request' | 'withdraw' | 'status', locale?: string): string[] {
-  const args = ['--telemetry-consent', action];
-  if (action === 'request') {
-    if (locale !== undefined) {
-      args.push(`--telemetry-consent-locale=${locale}`);
-    }
-  }
-  return args;
-}
-
-function executable(): string {
-  const path = findWxcExecutable();
-  if (!path) {
-    throw new Error('wxc-exec was not found; the MXC native binary is missing from this installation');
-  }
-  return path;
-}
-
-function defaultConsentAsyncRunner(args: readonly string[]): Promise<ConsentCommandOutput> {
-  return new Promise((resolve, reject) => {
-    execFile(
-      executable(),
-      [...args],
-      {
-        timeout: 5000,
-        encoding: 'utf-8',
-        windowsHide: true,
-      },
-      (error, stdout, stderr) => {
-        if (error) {
-          reject(error);
-        } else {
-          resolve({ stdout, stderr });
-        }
-      },
-    );
-  });
-}
-
-async function defaultConsentProtocolRunner(
-  locale: string | undefined,
-  presenter: TelemetryConsentPresenter,
-): Promise<TelemetryConsentOutcome> {
-  return new Promise((resolve, reject) => {
-    const child = consentChildFactory(maintenanceArgs('request', locale));
-    const childStdin = child.stdin;
-    const childStdout = child.stdout;
-    const childStderr = child.stderr;
-    if (childStdin === null || childStdout === null || childStderr === null) {
-      child.kill();
-      reject(new Error('telemetry consent process did not expose stdio pipes'));
-      return;
-    }
-    let stdout = '';
-    let stderr = '';
-    let finalResponse: TelemetryConsentOutcome | undefined;
-    let presentationSeen = false;
-    let presenterResponsePending = false;
-    let terminalSeen = false;
-    let settled = false;
-    let timeout: NodeJS.Timeout | null = null;
-    let timeoutStartedAt = 0;
-    let timeoutRemainingMs = consentRequestTimeoutMs;
-    let lineQueue: Promise<void> = Promise.resolve();
-    let childKilled = false;
-    let stdoutBytes = 0;
-    let stderrBytes = 0;
-    let protocolLines = 0;
-    let bufferedOutputReceivedWhilePresenterPending = false;
-    let childExitCode: number | null | undefined;
-    const presenterAbort = new AbortController();
-    let rejectPresenterWait: ((error: Error) => void) | undefined;
-
-    const clearProtocolDeadline = (): void => {
-      if (timeout !== null) {
-        clearTimeout(timeout);
-        timeout = null;
-      }
-    };
-    const pauseProtocolDeadline = (): boolean => {
-      if (timeout !== null) {
-        timeoutRemainingMs -= Date.now() - timeoutStartedAt;
-        clearProtocolDeadline();
-      }
-      if (timeoutRemainingMs <= 0) {
-        fail(new Error('telemetry consent request timed out'));
-        return false;
-      }
-      return true;
-    };
-    const resumeProtocolDeadline = (): void => {
-      if (settled) {
-        return;
-      }
-      clearProtocolDeadline();
-      if (timeoutRemainingMs <= 0) {
-        fail(new Error('telemetry consent request timed out'));
-        return;
-      }
-      timeoutStartedAt = Date.now();
-      timeout = setTimeout(() => {
-        fail(new Error('telemetry consent request timed out'));
-      }, timeoutRemainingMs);
-    };
-
-    const fail = (error: unknown): void => {
-      if (!settled) {
-        settled = true;
-        clearProtocolDeadline();
-        presenterAbort.abort();
-        rejectPresenterWait?.(
-          error instanceof Error ? error : new Error(String(error)),
-        );
-        rejectPresenterWait = undefined;
-        if (!childKilled) {
-          childKilled = true;
-          child.kill();
-        }
-        reject(error instanceof Error ? error : new Error(String(error)));
-      }
-    };
-    resumeProtocolDeadline();
-
-    const processResponse = async (
-      response: TelemetryConsentProtocolResponse,
-    ): Promise<void> => {
-      if (settled) {
-        return;
-      }
-
-      if (response.result !== 'presentationRequired') {
-        if (terminalSeen) {
-          fail(new Error('telemetry consent protocol emitted multiple terminal responses'));
-          return;
-        }
-        terminalSeen = true;
-        finalResponse = toConsentOutcome(response);
-        return;
-      }
-      if (terminalSeen) {
-        fail(new Error('telemetry consent protocol emitted a presentation after its terminal response'));
-        return;
-      }
-      if (presentationSeen) {
-        fail(new Error('telemetry consent protocol emitted multiple presentations'));
-        return;
-      }
-      presentationSeen = true;
-      if (!isConsentPrompt(response.prompt) || !isChallenge(response.challenge)) {
-        fail(new Error('telemetry consent presentation omitted its prompt or challenge'));
-        return;
-      }
-      if (childExitCode !== undefined) {
-        fail(new Error(
-          `telemetry consent process exited before presentation completed (${childExitCode ?? 'no exit code'})`,
-        ));
-        return;
-      }
-
-      const resourceVersion = response.prompt.resourceVersion;
-      let decision: TelemetryConsentDecision = 'dismissed';
-      if (!pauseProtocolDeadline()) {
-        return;
-      }
-      try {
-        const processEnded = new Promise<never>((_resolve, reject) => {
-          rejectPresenterWait = reject;
-        });
-        decision = await Promise.race([
-          Promise.resolve(presenter(response.prompt, presenterAbort.signal)),
-          processEnded,
-        ]);
-        if (!isDecision(decision)) {
-          throw new Error(`consent presenter returned invalid decision '${String(decision)}'`);
-        }
-      } catch (error) {
-        rejectPresenterWait = undefined;
-        fail(error);
-        return;
-      } finally {
-        rejectPresenterWait = undefined;
-      }
-      if (settled) {
-        return;
-      }
-      resumeProtocolDeadline();
-      if (settled) {
-        return;
-      }
-      presenterResponsePending = false;
-      childStdin.write(`${JSON.stringify({
-        challenge: response.challenge,
-        resourceVersion,
-        decision,
-      })}\n`);
-      childStdin.end();
-    };
-
-    const receiveLine = (
-      line: string,
-      receivedWhilePresenterPending = false,
-    ): void => {
-      if (settled) {
-        return;
-      }
-      protocolLines += 1;
-      if (protocolLines > MAX_CONSENT_PROTOCOL_LINES) {
-        fail(new Error('telemetry consent process exceeded the protocol line limit'));
-        return;
-      }
-      if (line.trim() === '') {
-        return;
-      }
-
-      let response: TelemetryConsentProtocolResponse;
-      try {
-        response = parseMaintenanceResponse(line, 'request');
-      } catch (error) {
-        fail(error);
-        return;
-      }
-      if (
-        (receivedWhilePresenterPending || presenterResponsePending)
-        && response.result !== 'presentationRequired'
-      ) {
-        fail(new Error(
-          'telemetry consent protocol emitted a terminal response before the presenter decision was written',
-        ));
-        return;
-      }
-      if (response.result === 'presentationRequired') {
-        presenterResponsePending = true;
-      }
-      lineQueue = lineQueue
-        .then(() => processResponse(response))
-        .catch(fail);
-    };
-
-    childStdout.setEncoding('utf8');
-    childStdout.on('data', (chunk: string) => {
-      if (settled) {
-        return;
-      }
-      stdoutBytes += Buffer.byteLength(chunk, 'utf8');
-      if (stdoutBytes > MAX_CONSENT_STDOUT_BYTES) {
-        fail(new Error('telemetry consent process exceeded the stdout limit'));
-        return;
-      }
-      stdout += chunk;
-      const lines = stdout.split(/\r?\n/);
-      stdout = lines.pop() ?? '';
-      const bufferedLineWasPremature = bufferedOutputReceivedWhilePresenterPending;
-      bufferedOutputReceivedWhilePresenterPending = false;
-      for (const [index, line] of lines.entries()) {
-        receiveLine(line, index === 0 && bufferedLineWasPremature);
-      }
-      if (lines.length === 0 && bufferedLineWasPremature) {
-        bufferedOutputReceivedWhilePresenterPending = true;
-      }
-      if (presenterResponsePending && stdout.trim() !== '') {
-        bufferedOutputReceivedWhilePresenterPending = true;
-      }
-    });
-    childStdout.on('error', fail);
-    childStderr.setEncoding('utf8');
-    childStderr.on('data', (chunk: string) => {
-      if (settled) {
-        return;
-      }
-      stderrBytes += Buffer.byteLength(chunk, 'utf8');
-      if (stderrBytes > MAX_CONSENT_STDERR_BYTES) {
-        fail(new Error('telemetry consent process exceeded the stderr limit'));
-        return;
-      }
-      stderr += chunk;
-    });
-    childStderr.on('error', fail);
-    childStdin.on('error', (error) => {
-      if (!settled) {
-        fail(error);
-      }
-    });
-    child.on('error', fail);
-    child.on('close', (code) => {
-      childExitCode = code;
-      if (rejectPresenterWait !== undefined) {
-        presenterAbort.abort();
-        rejectPresenterWait(
-          new Error(`telemetry consent process exited before presentation completed (${code ?? 'no exit code'})`),
-        );
-        rejectPresenterWait = undefined;
-      }
-      void (async (): Promise<void> => {
-        await lineQueue;
-        if (settled) return;
-        clearProtocolDeadline();
-        if (stdout.trim() !== '') {
-          receiveLine(stdout, bufferedOutputReceivedWhilePresenterPending);
-          await lineQueue;
-          if (settled) return;
-        }
-        if (finalResponse === undefined) {
-          fail(new Error(`telemetry consent process failed (${code ?? 'no exit code'}): ${stderr.trim()}`));
-          return;
-        }
-        const validTerminalExit = (
-          (finalResponse.result === 'presentationUnavailable' && code === 1)
-          || (finalResponse.result !== 'presentationUnavailable' && code === 0)
-        );
-        if (!validTerminalExit) {
-          fail(new Error(`telemetry consent process failed (${code ?? 'no exit code'}): ${stderr.trim()}`));
-          return;
-        }
-        reportNativeDiagnostic('requestTelemetryConsent', stderr);
-        settled = true;
-        resolve(finalResponse);
-      })().catch(fail);
-    });
-  });
-}
-
-let consentAsyncRunner: ConsentAsyncRunner = defaultConsentAsyncRunner;
-let protocolRunner: ConsentProtocolRunner = defaultConsentProtocolRunner;
+const MAX_REPORTED_FAILURE_CATEGORIES = 64;
+const MAX_DIAGNOSTIC_LENGTH = 512;
+const reportedFailureCategories = new Set<string>();
 let platformOverride: NodeJS.Platform | null = null;
-
-/** @internal Test-only. */
-export function _setTelemetryConsentAsyncRunner(runner: ConsentAsyncRunner | null): void {
-  consentAsyncRunner = runner ?? defaultConsentAsyncRunner;
-}
-
-/** @internal Test-only. */
-export function _setTelemetryConsentProtocolRunner(runner: ConsentProtocolRunner | null): void {
-  protocolRunner = runner ?? defaultConsentProtocolRunner;
-}
-
-/** @internal Test-only. */
-export function _setTelemetryConsentChildFactory(factory: ConsentChildFactory | null): void {
-  consentChildFactory = factory ?? defaultConsentChildFactory;
-}
-
-/** @internal Test-only. */
-export function _setTelemetryConsentTimeoutMs(timeoutMs: number | null): void {
-  consentRequestTimeoutMs = timeoutMs ?? DEFAULT_CONSENT_REQUEST_TIMEOUT_MS;
-}
 
 /** @internal Test-only. */
 export function _setTelemetryPlatform(platform: NodeJS.Platform | null): void {
   platformOverride = platform;
+}
+
+/** @internal Test-only. */
+export function _resetTelemetryFailureReporting(): void {
+  reportedFailureCategories.clear();
 }
 
 function isWindows(): boolean {
@@ -517,35 +151,17 @@ function isConsentPrompt(value: unknown): value is TelemetryConsentPrompt {
     && typeof prompt.learnMoreUrl === 'string';
 }
 
-function isChallenge(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0;
+function isRequestResult(value: unknown): value is TelemetryConsentResult {
+  return value === 'granted'
+    || value === 'denied'
+    || value === 'dismissed'
+    || value === 'alreadyGranted'
+    || value === 'policyBlocked'
+    || value === 'notApplicable';
 }
 
-function isResult(value: unknown): value is TelemetryConsentProtocolResult {
-  return includes(CONSENT_PROTOCOL_RESULTS, value);
-}
-
-function isResultForAction(
-  action: ConsentAction,
-  result: TelemetryConsentProtocolResult,
-): boolean {
-  switch (action) {
-    case 'status':
-      return result === 'status' || result === 'notApplicable';
-    case 'withdraw':
-      return result === 'withdrawn' || result === 'notApplicable';
-    case 'request':
-      return [
-        'presentationRequired',
-        'granted',
-        'denied',
-        'dismissed',
-        'alreadyGranted',
-        'policyBlocked',
-        'presentationUnavailable',
-        'notApplicable',
-      ].includes(result);
-  }
+function isWithdrawResult(value: unknown): value is TelemetryConsentResult {
+  return value === 'withdrawn' || value === 'notApplicable';
 }
 
 function shouldPrompt(
@@ -556,61 +172,83 @@ function shouldPrompt(
     && (policy === 'unrestricted' || policy === 'allowed');
 }
 
-function parseMaintenanceResponse(
-  stdout: string,
-  expectedAction: ConsentAction,
-): TelemetryConsentProtocolResponse {
-  const parsed: unknown = JSON.parse(stdout);
+function invalidTelemetryOutput(detail: string): Error {
+  return new Error(`unrecognised telemetry consent output: ${detail.trim().slice(0, 200)}`);
+}
+
+function parseStatusPayload(json: string): TelemetryConsentStatusPayload {
+  const parsed: unknown = JSON.parse(json);
   if (parsed === null || typeof parsed !== 'object') {
-    throw new Error('unrecognised telemetry consent output');
+    throw invalidTelemetryOutput(json);
   }
   const value = parsed as Record<string, unknown>;
   if (
     !isConsentState(value.storedState)
     || !isConsentState(value.effectiveState)
     || !isPolicyState(value.policy)
-    || !isResult(value.result)
-    || value.action !== expectedAction
-    || !isResultForAction(expectedAction, value.result)
-    || typeof value.needsPrompt !== 'boolean'
-    || value.needsPrompt !== shouldPrompt(value.effectiveState, value.policy)
     || !Object.hasOwn(value, 'reason')
-    || (
-      value.reason !== null
-      && !isStatusReason(value.reason)
-    )
+    || (value.reason !== null && !isStatusReason(value.reason))
   ) {
-    throw new Error(`unrecognised telemetry consent output: ${stdout.trim().slice(0, 200)}`);
-  }
-  if (
-    value.result === 'presentationRequired'
-    && (!isConsentPrompt(value.prompt) || !isChallenge(value.challenge))
-  ) {
-    throw new Error(`unrecognised telemetry consent output: ${stdout.trim().slice(0, 200)}`);
-  }
-  return parsed as TelemetryConsentProtocolResponse;
-}
-
-function toConsentOutcome(response: TelemetryConsentProtocolResponse): TelemetryConsentOutcome {
-  if (
-    response.action === 'status'
-    || includes(CONSENT_PROTOCOL_ONLY_RESULTS, response.result)
-  ) {
-    throw new Error('unrecognised telemetry consent terminal output');
+    throw invalidTelemetryOutput(json);
   }
   return {
-    action: response.action,
-    result: response.result,
-    storedState: response.storedState,
-    effectiveState: response.effectiveState,
-    policy: response.policy,
-    needsPrompt: response.needsPrompt,
+    storedState: value.storedState,
+    effectiveState: value.effectiveState,
+    policy: value.policy,
+    reason: value.reason,
   };
 }
 
-const MAX_REPORTED_FAILURE_CATEGORIES = 64;
-const MAX_DIAGNOSTIC_LENGTH = 512;
-const reportedFailureCategories = new Set<string>();
+function parseConsentOutcome(
+  json: string,
+  action: 'request' | 'withdraw',
+): TelemetryConsentOutcome {
+  const parsed: unknown = JSON.parse(json);
+  if (parsed === null || typeof parsed !== 'object') {
+    throw invalidTelemetryOutput(json);
+  }
+  const value = parsed as Record<string, unknown>;
+  const status = parseStatusPayload(json);
+  let result: TelemetryConsentResult;
+  if (action === 'request') {
+    if (!isRequestResult(value.result)) {
+      throw invalidTelemetryOutput(json);
+    }
+    result = value.result;
+  } else {
+    if (!isWithdrawResult(value.result)) {
+      throw invalidTelemetryOutput(json);
+    }
+    result = value.result;
+  }
+  return {
+    action,
+    result,
+    storedState: status.storedState,
+    effectiveState: status.effectiveState,
+    policy: status.policy,
+    needsPrompt: shouldPrompt(status.effectiveState, status.policy),
+  };
+}
+
+function parseConsentPromptJson(promptJson: string): TelemetryConsentPrompt {
+  const parsed: unknown = JSON.parse(promptJson);
+  if (!isConsentPrompt(parsed)) {
+    throw invalidTelemetryOutput(promptJson);
+  }
+  return parsed;
+}
+
+function decisionCode(decision: TelemetryConsentDecision): number {
+  switch (decision) {
+    case 'yes':
+      return TELEMETRY_CONSENT_DECISION_YES;
+    case 'no':
+      return TELEMETRY_CONSENT_DECISION_NO;
+    case 'dismissed':
+      return TELEMETRY_CONSENT_DECISION_DISMISSED;
+  }
+}
 
 function tryRegisterFailureCategory(category: string): boolean {
   if (
@@ -634,32 +272,13 @@ function reportFailClosed(operation: string, safeResult: string, detail: string)
   try {
     const category = `${operation}:${safeResult}:failure`;
     if (tryRegisterFailureCategory(category)) {
-      const message = `mxc-sdk: ${operation} failed and is reporting '${safeResult}' to stay fail-closed: ${boundedDiagnostic(detail)}`;
-      console.warn(message);
+      console.warn(
+        `mxc-sdk: ${operation} failed and is reporting '${safeResult}' to stay fail-closed: ${boundedDiagnostic(detail)}`,
+      );
     }
   } catch {
     // Reporting must not affect the fail-closed result.
   }
-}
-
-function reportNativeDiagnostic(operation: string, stderr: string): void {
-  const detail = stderr.trim();
-  if (detail === '') {
-    return;
-  }
-  try {
-    const category = `${operation}:native`;
-    if (tryRegisterFailureCategory(category)) {
-      console.warn(`mxc-sdk: ${operation} native diagnostic: ${boundedDiagnostic(detail)}`);
-    }
-  } catch {
-    // Reporting must not affect the native result.
-  }
-}
-
-/** @internal Test-only. */
-export function _resetTelemetryFailureReporting(): void {
-  reportedFailureCategories.clear();
 }
 
 function notApplicable(action: 'request' | 'withdraw'): TelemetryConsentOutcome {
@@ -670,18 +289,6 @@ function notApplicable(action: 'request' | 'withdraw'): TelemetryConsentOutcome 
     effectiveState: 'not-applicable',
     needsPrompt: false,
     policy: 'not-applicable',
-  };
-}
-
-function consentQueryFromResponse(
-  response: TelemetryConsentProtocolResponse,
-): TelemetryConsentQuery {
-  return {
-    state: response.effectiveState,
-    storedState: response.storedState,
-    effectiveState: response.effectiveState,
-    needsPrompt: shouldPrompt(response.effectiveState, response.policy),
-    policy: response.policy,
   };
 }
 
@@ -698,6 +305,25 @@ function failedConsentQuery(operation: string, error: unknown): TelemetryConsent
   };
 }
 
+function validateLocale(locale?: string): void {
+  if (locale?.includes('\0')) {
+    throw new Error('Telemetry consent locale cannot contain embedded NUL characters.');
+  }
+}
+
+async function presentConsentDecision(
+  presenter: TelemetryConsentPresenter,
+  promptJson: string,
+  signal: AbortSignal,
+): Promise<number> {
+  const prompt = parseConsentPromptJson(promptJson);
+  const decision = await presenter(prompt, signal);
+  if (!isDecision(decision)) {
+    throw new Error(`consent presenter returned invalid decision '${String(decision)}'`);
+  }
+  return decisionCode(decision);
+}
+
 /** Read persisted/effective consent and policy without blocking the event loop. */
 export async function queryTelemetryConsentAsync(): Promise<TelemetryConsentQuery> {
   if (!isWindows()) {
@@ -710,11 +336,14 @@ export async function queryTelemetryConsentAsync(): Promise<TelemetryConsentQuer
     };
   }
   try {
-    const output = await consentAsyncRunner(maintenanceArgs('status'));
-    reportNativeDiagnostic('queryTelemetryConsentAsync', output.stderr);
-    return consentQueryFromResponse(
-      parseMaintenanceResponse(output.stdout, 'status'),
-    );
+    const status = parseStatusPayload(await readTelemetryConsentStatusJsonAsync());
+    return {
+      state: status.effectiveState,
+      storedState: status.storedState,
+      effectiveState: status.effectiveState,
+      needsPrompt: shouldPrompt(status.effectiveState, status.policy),
+      policy: status.policy,
+    };
   } catch (error) {
     return failedConsentQuery('queryTelemetryConsentAsync', error);
   }
@@ -728,7 +357,12 @@ export async function requestTelemetryConsent(
   if (!isWindows()) {
     return notApplicable('request');
   }
-  return protocolRunner(locale, presenter);
+  validateLocale(locale);
+  const json = await runTelemetryConsentRequestAsync(
+    locale,
+    (promptJson, signal) => presentConsentDecision(presenter, promptJson, signal),
+  );
+  return parseConsentOutcome(json, 'request');
 }
 
 /** Idempotently withdraw telemetry consent without blocking the event loop. */
@@ -737,15 +371,15 @@ export async function withdrawTelemetryConsentAsync(): Promise<TelemetryConsentO
     return notApplicable('withdraw');
   }
   try {
-    const output = await consentAsyncRunner(maintenanceArgs('withdraw'));
-    reportNativeDiagnostic('withdrawTelemetryConsentAsync', output.stderr);
-    return toConsentOutcome(parseMaintenanceResponse(
-      output.stdout,
-      'withdraw',
-    ));
+    const json = await withdrawTelemetryConsentJsonAsync();
+    return parseConsentOutcome(json, 'withdraw');
   } catch (error) {
+    if (error instanceof MxcError) {
+      throw error;
+    }
     throw new Error(
       `failed to withdraw telemetry consent: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error instanceof Error ? error : undefined },
     );
   }
 }

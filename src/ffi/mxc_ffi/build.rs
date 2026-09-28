@@ -5,11 +5,11 @@
 //! "C"` surface, using csbindgen. The generated file is gitignored rather than
 //! committed, so it is regenerated rather than diffed.
 //!
-//! Code generation is gated behind the **`dotnetsdk`** cargo feature so that
-//! normal builds — including the whole-workspace backend build matrix — do
-//! **not** compile csbindgen or write into the source tree. Two callers pass
-//! that feature: the C# csproj's `GenerateNativeBindings` target, which keeps
-//! the bindings current for each C# compile, and
+//! Code generation is gated behind the **`dotnetsdk`** cargo feature so normal
+//! builds do not compile csbindgen or write into the source tree. Callers that
+//! need generated bindings opt in explicitly: local C# builds through the
+//! csproj's `GenerateNativeBindings` target, the Windows x64 pipeline build
+//! that publishes bindings for downstream managed jobs, and
 //! `scripts/check-dotnet-bindings-codegen.js`, which regenerates and asserts
 //! the expected entry points are produced.
 

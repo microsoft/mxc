@@ -1,0 +1,10 @@
+{
+  "version": "0.10.0-alpha",
+  "containment": "hyperlight",
+  "process": {
+    "commandLine": "console.log(process.version)"
+  },
+  "hyperlight": {
+    "runtime": "node"
+  }
+}

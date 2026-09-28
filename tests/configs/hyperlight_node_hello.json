@@ -1,0 +1,11 @@
+{
+    "version": "0.10.0-alpha",
+    "process": {
+        "commandLine": "const os = require('os');\nconsole.log(`hello from node ${process.version} on ${os.platform()}`);",
+        "timeout": 30000
+    },
+    "containment": "hyperlight",
+    "hyperlight": {
+        "runtime": "node"
+    }
+}

@@ -227,6 +227,9 @@ pub enum DispatchError {
     /// captureDenials requires the native BaseContainer tier and cannot
     /// proceed through an AppContainer fallback.
     CaptureDenialsUnsupported { tier: IsolationTier },
+    /// The selected AppContainer fallback requires guarded capture, but its
+    /// prerequisites are not available.
+    CaptureDenialsUnavailable { tier: IsolationTier, reason: String },
 }
 
 impl std::fmt::Display for DispatchError {
@@ -251,15 +254,22 @@ impl std::fmt::Display for DispatchError {
                 "Could not resolve the Windows system directory while probing for bfscfg.exe \
                  ({reason}). This indicates a corrupted or unsupported OS configuration."
             ),
-            DispatchError::Fallback(error @ FallbackError::EnumeratePathsUnsupported) => {
-                write!(f, "{error}")
-            }
+            DispatchError::Fallback(
+                error @ (FallbackError::EnumeratePathsUnsupported
+                | FallbackError::IngressUnsupported),
+            ) => write!(f, "{error}"),
             DispatchError::Dacl { error, .. } => write!(f, "Failed to apply DACL ACEs: {error}"),
             DispatchError::Sid(e) => write!(f, "Failed to derive AppContainer SID: {e}"),
             DispatchError::CaptureDenialsUnsupported { tier } => write!(
                 f,
                 "captureDenials requires the native BaseContainer backend; \
                  the selected fallback tier '{}' does not support denial capture.",
+                tier.as_str()
+            ),
+            DispatchError::CaptureDenialsUnavailable { tier, reason } => write!(
+                f,
+                "the guarded WPR captureDenials fallback required by isolation tier '{}' \
+                 is unavailable: {reason}",
                 tier.as_str()
             ),
         }
@@ -418,17 +428,17 @@ struct BackendPlan {
 /// Run tier selection and construct the backend + (optional) DACL guard for
 /// `request`. This is the single source of truth for the tier → (backend, DACL)
 /// mapping, shared by the run-to-completion ([`dispatch_with_fallback`]) and
-/// streaming ([`spawn_with_fallback`]) surfaces (and their capture-aware
-/// counterparts, [`dispatch_with_fallback_and_capture`] /
-/// [`spawn_with_fallback_and_capture`]).
+/// streaming ([`spawn_with_fallback`]) surfaces.
 ///
 /// `capture_factory` is the optional guarded-WPR-capture DI boundary (see
 /// [`crate::guarded_capture`]). When `request.policy.capture_denials` is set
 /// and the selected tier is not the native BaseContainer backend:
-/// - `capture_factory` present → the factory is threaded onto the chosen
+/// - available `capture_factory` → the factory is threaded onto the chosen
 ///   AppContainer runner via `with_guarded_capture_factory`, so the runner
 ///   itself performs the guarded WPR fallback capture (see
-///   `appcontainer_runner`'s `validate`/`spawn`).
+///   `appcontainer_runner`'s `validate`/`spawn`);
+/// - unavailable `capture_factory` → dispatch fails before backend construction
+///   or DACL mutation with [`DispatchError::CaptureDenialsUnavailable`];
 /// - `capture_factory` absent → dispatch fails closed with
 ///   [`DispatchError::CaptureDenialsUnsupported`], preserving the legacy
 ///   behavior for callers that haven't opted into the fallback (e.g. callers
@@ -445,34 +455,27 @@ fn select_backend_with_fallback(
     // Keep the established tier fallback behavior for every schema version.
     // BaseContainerRunner uses PSEC whenever it is available and compatible.
     // Otherwise detection continues to the AppContainer tiers.
-    let capabilities = BaseContainerRunner::capabilities_for_request(request);
-    let prefer_base_container = capabilities.usable;
-    let uses_native_capture = BaseContainerRunner::uses_native_capture_for_request(request);
-    let decision = fallback_detector::detect_with_base_container_capabilities(
-        &request.policy,
-        prefer_base_container,
-        capabilities,
-    )?;
-    let guarded_capture_required = request.policy.capture_denials.is_some()
-        && (decision.tier != IsolationTier::BaseContainer || !uses_native_capture);
+    let decision = fallback_detector::choose_backend_tier(request)?;
+    let guarded_capture_required =
+        request.policy.capture_denials.is_some() && decision.tier != IsolationTier::BaseContainer;
     if guarded_capture_required && capture_factory.is_none() {
         return Err(DispatchError::CaptureDenialsUnsupported {
             tier: decision.tier,
         });
     }
-    // Only thread the factory into the runner when it will actually be used —
-    // an AppContainer tier honoring `captureDenials`. Reuse the already-derived
-    // `guarded_capture_required` rather than re-deriving the condition from
-    // `capture_denials`: for every AppContainer tier the two are equivalent
-    // (those arms only run when `tier != BaseContainer`), and in the
-    // BaseContainer arm this value is unused. This keeps
-    // T1/T2-without-capture/T3-without-capture identical to their pre-fallback
-    // construction.
     let capture_factory_for_appcontainer = if guarded_capture_required {
-        capture_factory
+        let factory = capture_factory.expect("guarded capture factory checked above");
+        factory
+            .verify_available()
+            .map_err(|reason| DispatchError::CaptureDenialsUnavailable {
+                tier: decision.tier,
+                reason,
+            })?;
+        Some(factory)
     } else {
         None
     };
+
     let (backend, dacl_manager): (SelectedBackend, Option<DaclManager>) = match decision.tier {
         IsolationTier::BaseContainer => {
             // Tier 1 delegates filesystem-policy enforcement to
@@ -480,7 +483,7 @@ fn select_backend_with_fallback(
             // here: the detector only routes a denied-paths policy to T1
             // when the OS enforces `fs_deny` natively, so there is nothing
             // for a host DACL to add.
-            let runner = BaseContainerRunner::new();
+            let runner = BaseContainerRunner::new_for_selected_request();
             (SelectedBackend::BaseContainer(runner), None)
         }
         IsolationTier::AppContainerBfs => {
@@ -521,6 +524,7 @@ fn select_backend_with_fallback(
                 } else {
                     base_runner
                 };
+
                 let runner = with_capture_factory(base_runner, capture_factory_for_appcontainer);
                 (SelectedBackend::AppContainer(runner), mgr)
             }
@@ -596,23 +600,9 @@ fn with_capture_factory(
 /// applied its ACEs. Use [`Dispatched::into_runner_and_guard`] to
 /// extract both; the manager MUST stay alive through the run.
 ///
-/// This is the legacy, capture-unaware entrypoint: `captureDenials` on a
-/// non-BaseContainer tier always fails closed. Use
-/// [`dispatch_with_fallback_and_capture`] to additionally opt into the
-/// guarded-WPR fallback.
-pub fn dispatch_with_fallback(request: &ExecutionRequest) -> Result<Dispatched, DispatchError> {
-    dispatch_with_fallback_and_capture(request, None)
-}
-
-/// Capture-aware counterpart of [`dispatch_with_fallback`]: identical tier
-/// selection, but when `request.policy.capture_denials` is set and the
-/// selected tier is an AppContainer fallback (not the native BaseContainer
-/// backend), `capture_factory` — when present — is threaded onto the chosen
-/// runner via `with_guarded_capture_factory` so the runner performs a guarded
-/// WPR fallback capture instead of failing closed.
-///
-/// Passing `None` is equivalent to [`dispatch_with_fallback`].
-pub fn dispatch_with_fallback_and_capture(
+/// When `capture_factory` is `None`, `captureDenials` fails closed if the
+/// request cannot use native BaseContainer capture.
+pub fn dispatch_with_fallback(
     request: &ExecutionRequest,
     capture_factory: Option<Arc<dyn GuardedCaptureFactory>>,
 ) -> Result<Dispatched, DispatchError> {
@@ -685,25 +675,7 @@ pub enum SpawnDispatchError {
 /// (restoring host ACEs) — the same order the run-to-completion path enforces
 /// via [`Dispatched::into_runner_and_guard`].
 ///
-/// This is the legacy, capture-unaware entrypoint: `captureDenials` on a
-/// non-BaseContainer tier always fails closed. Use
-/// [`spawn_with_fallback_and_capture`] to additionally opt into the
-/// guarded-WPR fallback.
 pub fn spawn_with_fallback(
-    request: &ExecutionRequest,
-    logger: &mut Logger,
-    stdio: StdioMode,
-) -> Result<DispatchedProcess, SpawnDispatchError> {
-    spawn_with_fallback_and_capture(request, logger, stdio, None)
-}
-
-/// Capture-aware counterpart of [`spawn_with_fallback`]: identical tier
-/// selection and spawn behavior, but threads `capture_factory` through to
-/// [`select_backend_with_fallback`] so an AppContainer fallback tier can
-/// perform a guarded WPR capture instead of failing closed when
-/// `request.policy.capture_denials` is set. Passing `None` is equivalent to
-/// [`spawn_with_fallback`].
-pub fn spawn_with_fallback_and_capture(
     request: &ExecutionRequest,
     logger: &mut Logger,
     stdio: StdioMode,
@@ -924,11 +896,26 @@ mod tests {
         }
     }
 
+    struct UnavailableGuardedCaptureFactory;
+
+    impl GuardedCaptureFactory for UnavailableGuardedCaptureFactory {
+        fn verify_available(&self) -> Result<(), String> {
+            Err("plm.exe is not trusted".to_string())
+        }
+
+        fn start(
+            &self,
+            _owner_pid: u32,
+        ) -> Result<Box<dyn crate::guarded_capture::GuardedCaptureSession>, String> {
+            panic!("unavailable factory must be rejected before start")
+        }
+    }
+
     #[test]
     fn dispatch_t1_no_denied_paths_no_dacl() {
         let _g = ForceTierGuard::set_tier(IsolationTier::BaseContainer);
         let req = test_request(empty_policy());
-        let d = dispatch_with_fallback(&req).expect("T1 dispatch should succeed");
+        let d = dispatch_with_fallback(&req, None).expect("T1 dispatch should succeed");
         assert!(matches!(d.tier, IsolationTier::BaseContainer));
         assert!(
             !d.has_dacl_guard(),
@@ -944,7 +931,7 @@ mod tests {
         let _g = ForceTierGuard::set_tier(IsolationTier::BaseContainer);
         let (policy, _tmp) = policy_with_denied_temp();
         let req = test_request(policy);
-        let d = dispatch_with_fallback(&req).expect("T1+deny dispatch should succeed");
+        let d = dispatch_with_fallback(&req, None).expect("T1+deny dispatch should succeed");
         assert!(matches!(d.tier, IsolationTier::BaseContainer));
         assert!(
             !d.has_dacl_guard(),
@@ -956,7 +943,7 @@ mod tests {
         let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerBfs);
         let (policy, _tmp) = policy_with_denied_temp();
         let req = test_request(policy);
-        let d = dispatch_with_fallback(&req).expect("T2+deny dispatch should succeed");
+        let d = dispatch_with_fallback(&req, None).expect("T2+deny dispatch should succeed");
         assert!(matches!(d.tier, IsolationTier::AppContainerBfs));
         assert!(d.has_dacl_guard());
     }
@@ -965,7 +952,7 @@ mod tests {
         let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerDacl);
         let (policy, _tmp) = policy_with_rw_temp();
         let req = test_request(policy);
-        let d = dispatch_with_fallback(&req).expect("T3 dispatch should succeed");
+        let d = dispatch_with_fallback(&req, None).expect("T3 dispatch should succeed");
         assert!(matches!(d.tier, IsolationTier::AppContainerDacl));
         assert!(
             d.has_dacl_guard(),
@@ -980,7 +967,7 @@ mod tests {
         policy.capture_denials = Some(Default::default());
         let req = test_request(policy);
 
-        let result = dispatch_with_fallback(&req);
+        let result = dispatch_with_fallback(&req, None);
         assert!(matches!(
             result,
             Err(DispatchError::CaptureDenialsUnsupported {
@@ -990,15 +977,13 @@ mod tests {
     }
 
     #[test]
-    fn capture_denials_rejects_appcontainer_fallback_via_capture_entrypoint_without_factory() {
-        // The capture-aware entrypoint with `None` must behave identically to
-        // the legacy `dispatch_with_fallback` fail-closed path.
+    fn capture_denials_rejects_appcontainer_fallback_without_factory() {
         let _g = ForceTierGuard::set("appcontainer-dacl");
         let (mut policy, _tmp) = policy_with_rw_temp();
         policy.capture_denials = Some(Default::default());
         let req = test_request(policy);
 
-        let result = dispatch_with_fallback_and_capture(&req, None);
+        let result = dispatch_with_fallback(&req, None);
         assert!(matches!(
             result,
             Err(DispatchError::CaptureDenialsUnsupported {
@@ -1017,7 +1002,7 @@ mod tests {
         let req = test_request(policy);
 
         let factory: Arc<dyn GuardedCaptureFactory> = Arc::new(FakeGuardedCaptureFactory);
-        let dispatched = dispatch_with_fallback_and_capture(&req, Some(factory))
+        let dispatched = dispatch_with_fallback(&req, Some(factory))
             .expect("a guarded capture factory should let AppContainer+DACL honor captureDenials");
         assert!(matches!(dispatched.tier, IsolationTier::AppContainerDacl));
         assert!(
@@ -1027,29 +1012,60 @@ mod tests {
     }
 
     #[test]
+    fn capture_denials_rejects_unavailable_guarded_factory_before_backend_setup() {
+        let _g = ForceTierGuard::set("appcontainer-dacl");
+        let (mut policy, _temporary_path) = policy_with_rw_temp();
+        policy.capture_denials = Some(Default::default());
+        let req = test_request(policy);
+
+        let factory: Arc<dyn GuardedCaptureFactory> = Arc::new(UnavailableGuardedCaptureFactory);
+        let result = dispatch_with_fallback(&req, Some(factory));
+
+        assert!(matches!(
+            result,
+            Err(DispatchError::CaptureDenialsUnavailable {
+                tier: IsolationTier::AppContainerDacl,
+                ref reason
+            }) if reason == "plm.exe is not trusted"
+        ));
+    }
+
+    #[test]
     fn capture_denials_prefers_native_psec_v2_when_complete() {
         let _guard = CaptureCapabilityGuard::set(true, true);
         let mut policy = empty_policy();
         policy.capture_denials = Some(Default::default());
         let request = test_request(policy);
 
-        let dispatched = dispatch_with_fallback(&request)
+        let dispatched = dispatch_with_fallback(&request, None)
             .expect("complete native capture should not require guarded WPR");
 
         assert!(matches!(dispatched.tier, IsolationTier::BaseContainer));
     }
 
     #[test]
-    fn spawn_with_fallback_and_capture_none_matches_legacy_rejection() {
-        // `spawn_with_fallback_and_capture(..., None)` must fail closed the
-        // same way the run-to-completion entrypoint does.
+    fn capture_denials_native_capture_does_not_check_guarded_factory_availability() {
+        let _guard = CaptureCapabilityGuard::set(true, true);
+        let mut policy = empty_policy();
+        policy.capture_denials = Some(Default::default());
+        let request = test_request(policy);
+
+        let factory: Arc<dyn GuardedCaptureFactory> = Arc::new(UnavailableGuardedCaptureFactory);
+        let dispatched = dispatch_with_fallback(&request, Some(factory))
+            .expect("native capture must not depend on guarded WPR prerequisites");
+
+        assert!(matches!(dispatched.tier, IsolationTier::BaseContainer));
+    }
+
+    #[test]
+    fn spawn_with_fallback_without_factory_rejects_capture() {
         let _g = ForceTierGuard::set("appcontainer-dacl");
         let (mut policy, _tmp) = policy_with_rw_temp();
         policy.capture_denials = Some(Default::default());
         let req = test_request(policy);
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
 
-        let result = spawn_with_fallback_and_capture(&req, &mut logger, StdioMode::Inherit, None);
+        let result = spawn_with_fallback(&req, &mut logger, StdioMode::Inherit, None);
         assert!(matches!(
             result,
             Err(SpawnDispatchError::Dispatch(
@@ -1061,12 +1077,34 @@ mod tests {
     }
 
     #[test]
+    fn capture_denials_spawn_rejects_unavailable_guarded_factory_before_spawn() {
+        let _g = ForceTierGuard::set("appcontainer-dacl");
+        let (mut policy, _temporary_path) = policy_with_rw_temp();
+        policy.capture_denials = Some(Default::default());
+        let req = test_request(policy);
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let factory: Arc<dyn GuardedCaptureFactory> = Arc::new(UnavailableGuardedCaptureFactory);
+
+        let result = spawn_with_fallback(&req, &mut logger, StdioMode::Inherit, Some(factory));
+
+        assert!(matches!(
+            result,
+            Err(SpawnDispatchError::Dispatch(
+                DispatchError::CaptureDenialsUnavailable {
+                    tier: IsolationTier::AppContainerDacl,
+                    ref reason
+                }
+            )) if reason == "plm.exe is not trusted"
+        ));
+    }
+
+    #[test]
     fn ordinary_request_keeps_appcontainer_fallback() {
         let _g = ForceTierGuard::set("appcontainer-dacl");
         let (policy, _tmp) = policy_with_rw_temp();
         let req = test_request(policy);
 
-        let dispatched = dispatch_with_fallback(&req).expect("fallback should be selected");
+        let dispatched = dispatch_with_fallback(&req, None).expect("fallback should be selected");
         assert!(matches!(dispatched.tier, IsolationTier::AppContainerDacl));
         assert!(
             dispatched.has_dacl_guard(),
@@ -1097,7 +1135,7 @@ mod tests {
         let (mut policy, _tmp) = policy_with_rw_temp();
         policy.fallback.allow_dacl_mutation = false;
         let req = test_request(policy);
-        let res = dispatch_with_fallback(&req);
+        let res = dispatch_with_fallback(&req, None);
         assert!(matches!(
             res,
             Err(DispatchError::Fallback(FallbackError::DaclFallbackDisabled))
@@ -1227,12 +1265,12 @@ mod tests {
             }
             lock
         };
-        if !crate::fallback_detector::is_base_container_usable() {
+        if !crate::base_container_runner::BaseContainerRunner::is_base_container_api_present() {
             eprintln!("skipping: BaseContainer backend not usable on this machine");
             return;
         }
         let req = test_request(empty_policy());
-        let d = dispatch_with_fallback(&req).expect("dispatch should succeed");
+        let d = dispatch_with_fallback(&req, None).expect("dispatch should succeed");
         assert!(matches!(d.tier, IsolationTier::BaseContainer));
     }
 
@@ -1243,7 +1281,7 @@ mod tests {
         // the doomed BaseContainerRunner is never constructed.
         let _g = BcUsableGuard::set(false);
         let req = test_request(empty_policy());
-        let d = dispatch_with_fallback(&req).expect("dispatch should succeed");
+        let d = dispatch_with_fallback(&req, None).expect("dispatch should succeed");
         assert!(matches!(d.tier, IsolationTier::AppContainerDacl));
     }
 

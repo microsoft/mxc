@@ -14,10 +14,10 @@ use wxc_common::models::{CaptureDenialsConfig, ExecutionRequest, NetworkAction, 
 use wxc_common::sandbox_process::{SandboxBackend, StdioMode};
 use wxc_common::state_aware_request::MxcRequest;
 
-use super::{build_psec_spec, ResolvedPsecContract, LOOPBACK_NETWORK_PEER};
+use super::{build_psec_v1_security_environment_spec, LOOPBACK_NETWORK_PEER};
 use crate::base_container_runner::BaseContainerRunner;
 use crate::network_policy_helpers::PRIVATE_NETWORK_CAPABILITY;
-use crate::secenv::{SecurityEnvironmentApi, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE};
+use crate::secenv::{create, SecurityEnvironmentVersion, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE};
 
 fn runtime_proxy_request(proxy: &TcpListener) -> ExecutionRequest {
     let config = json!({
@@ -49,10 +49,8 @@ fn runtime_proxy_request(proxy: &TcpListener) -> ExecutionRequest {
 fn runtime_proxy_uses_peer_and_capability_without_native_ingress() {
     let proxy = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let request = runtime_proxy_request(&proxy);
-    let bytes = build_psec_spec(
-        &request,
-        ResolvedPsecContract::with_all_contract_capabilities(&request),
-    );
+    let bytes =
+        build_psec_v1_security_environment_spec(&request, SecurityEnvironmentVersion::V1_1, true);
     let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
     let network = spec.network_policy().expect("network policy");
     let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
@@ -85,14 +83,10 @@ fn runtime_proxy_creates_native_security_environment() {
     }
     let proxy = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let request = runtime_proxy_request(&proxy);
-    let bytes = build_psec_spec(
-        &request,
-        ResolvedPsecContract::with_all_contract_capabilities(&request),
-    );
-    let environment = SecurityEnvironmentApi::load()
-        .unwrap()
-        .create(&bytes, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE)
-        .unwrap_or_else(|error| {
+    let bytes =
+        build_psec_v1_security_environment_spec(&request, SecurityEnvironmentVersion::V1_1, true);
+    let environment =
+        create(&bytes, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE).unwrap_or_else(|error| {
             panic!("valid runtime proxy policy failed to create PSEC: {error}")
         });
     environment.close();
@@ -109,10 +103,8 @@ fn identity_scoped_proxy_does_not_grant_host_loopback() {
         .unwrap()
         .host_loopback = NetworkAction::Deny;
     request.policy.allowed_proxy_peer = Some("Contoso.Proxy_12345".to_string());
-    let bytes = build_psec_spec(
-        &request,
-        ResolvedPsecContract::with_all_contract_capabilities(&request),
-    );
+    let bytes =
+        build_psec_v1_security_environment_spec(&request, SecurityEnvironmentVersion::V1_0, false);
     let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
     let network = spec.network_policy().unwrap();
 

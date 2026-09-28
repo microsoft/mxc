@@ -23,6 +23,8 @@
     <MxcTestNativeFileName Condition="$([MSBuild]::IsOSPlatform('Windows'))">mxc_ffi.dll</MxcTestNativeFileName>
     <MxcTestNativeFileName Condition="$([MSBuild]::IsOSPlatform('OSX'))">libmxc_ffi.dylib</MxcTestNativeFileName>
     <MxcTestNativeFileName Condition="'$(MxcTestNativeFileName)' == ''">libmxc_ffi.so</MxcTestNativeFileName>
+    <MxcUsePrebuiltTestNativeLibrary Condition="'$(MxcTestPrebuiltNativeLibrary)' != ''">true</MxcUsePrebuiltTestNativeLibrary>
+    <MxcUsePrebuiltTestNativeLibrary Condition="'$(MxcUsePrebuiltTestNativeLibrary)' == ''">false</MxcUsePrebuiltTestNativeLibrary>
   </PropertyGroup>
 
   <ItemGroup>
@@ -31,7 +33,7 @@
 
   <Target Name="BuildMxcTestSupportNativeLibrary"
           AfterTargets="Build"
-          Condition="'$(DesignTimeBuild)' != 'true'">
+          Condition="'$(DesignTimeBuild)' != 'true' and '$(MxcUsePrebuiltTestNativeLibrary)' != 'true'">
     <Exec Command="rustc -vV"
           WorkingDirectory="$(MxcSrcDir)"
           ConsoleToMSBuild="true"
@@ -56,6 +58,15 @@
     <Error Condition="!Exists('$(MxcTestNativeOutput)')"
            Text="The test-support native build did not produce $(MxcTestNativeOutput)." />
     <Copy SourceFiles="$(MxcTestNativeOutput)"
+          DestinationFolder="$(TargetDir)" />
+  </Target>
+
+  <Target Name="StageMxcTestSupportNativeLibrary"
+          AfterTargets="Build"
+          Condition="'$(DesignTimeBuild)' != 'true' and '$(MxcUsePrebuiltTestNativeLibrary)' == 'true'">
+    <Error Condition="!Exists('$(MxcTestPrebuiltNativeLibrary)')"
+           Text="The prebuilt test-support native library does not exist at $(MxcTestPrebuiltNativeLibrary)." />
+    <Copy SourceFiles="$(MxcTestPrebuiltNativeLibrary)"
           DestinationFolder="$(TargetDir)" />
   </Target>
 

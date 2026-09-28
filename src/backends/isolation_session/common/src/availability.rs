@@ -10,14 +10,24 @@
 use std::sync::OnceLock;
 
 use isolation_session_bindings::bindings::{IsoSessionFeature, IsoSessionOps};
-use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 use windows_core::HRESULT;
+
+use super::owned_thread;
 
 static AVAILABLE: OnceLock<bool> = OnceLock::new();
 
-/// Cached for the process; never requires elevation.
+/// The host's answer is cached for the process; never requires elevation.
 pub fn is_isolation_session_available() -> bool {
-    *AVAILABLE.get_or_init(|| available_from(probe_feature_level()))
+    if let Some(available) = AVAILABLE.get() {
+        return *available;
+    }
+    let probed = owned_thread::Impersonation::of_this_thread()
+        .and_then(|impersonation| owned_thread::call(&impersonation, || Ok(probe_feature_level())));
+    match probed {
+        Ok(level) => *AVAILABLE.get_or_init(|| available_from(level)),
+        // The probe did not run, so there is no answer to cache.
+        Err(_) => false,
+    }
 }
 
 /// Split from [`probe_feature_level`] so the decision is testable without
@@ -27,40 +37,9 @@ fn available_from(probe: Result<i32, HRESULT>) -> bool {
 }
 
 fn probe_feature_level() -> Result<i32, HRESULT> {
-    // Guard uninitializes on drop, so a panic in `IsoSessionOps::new()` still
-    // balances `CoInitializeEx`. The `ops` handle drops before `_apartment`
-    // (reverse declaration order), preserving COM's create-before-uninit rule.
-    let _apartment = ComApartment::enter();
     let ops = IsoSessionOps::new().map_err(|e| e.code())?;
     ops.GetFeatureLevel(IsoSessionFeature::LocalAgentUser)
         .map_err(|e| e.code())
-}
-
-/// Owns the COM apartment for the duration of a probe and uninitializes it on
-/// drop, but only when this guard actually performed the initialization.
-struct ComApartment {
-    owns_com: bool,
-}
-
-impl ComApartment {
-    fn enter() -> Self {
-        // `is_ok()` covers S_OK and the S_FALSE "already initialized (same
-        // mode)" success — both of which we own and must balance. A failure
-        // (e.g. RPC_E_CHANGED_MODE) means another apartment is already active on
-        // this thread: activation still works, and we must NOT uninitialize it.
-        // SAFETY: standard COM init; balanced by `CoUninitialize` in `drop`.
-        let owns_com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
-        Self { owns_com }
-    }
-}
-
-impl Drop for ComApartment {
-    fn drop(&mut self) {
-        if self.owns_com {
-            // SAFETY: balances the `CoInitializeEx` in `enter`; only when owned.
-            unsafe { CoUninitialize() };
-        }
-    }
 }
 
 #[cfg(test)]

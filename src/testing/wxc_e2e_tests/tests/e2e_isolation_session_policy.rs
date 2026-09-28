@@ -82,10 +82,7 @@ fn one_shot_refuses_ui_policy() {
     // UI from the contained code but does not deny it UI capabilities — window
     // creation, GDI, and the session's own clipboard all work inside it. A `ui`
     // policy therefore cannot be honored and must not be silently accepted.
-    let result = run_wxc_config(
-        "isolation_session_one_shot_ui_rejected.json",
-        &["--experimental"],
-    );
+    let result = run_wxc_config("isolation_session_one_shot_ui_rejected.json", &[]);
     if skipped_not_compiled(&result) {
         return;
     }
@@ -109,10 +106,7 @@ fn one_shot_refuses_destroy_on_exit_false() {
     // The in-proc API exposes no session-lifetime knob: one-shot always stops
     // the session and removes the agent user before returning. `false` asks for
     // something the backend cannot deliver.
-    let result = run_wxc_config(
-        "isolation_session_one_shot_lifecycle_rejected.json",
-        &["--experimental"],
-    );
+    let result = run_wxc_config("isolation_session_one_shot_lifecycle_rejected.json", &[]);
     if skipped_not_compiled(&result) {
         return;
     }
@@ -144,7 +138,7 @@ fn state_aware_provision_refuses_ui_policy_at_the_exact_contract_boundary() {
         "network": {"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}},
         "ui": { "disable": true }
     });
-    let result = run_wxc_state_aware("iso provision + ui", &request, &["--experimental"]);
+    let result = run_wxc_state_aware("iso provision + ui", &request, &[]);
     if skipped_not_compiled(&result) {
         return;
     }
@@ -184,7 +178,7 @@ fn state_aware_provision_accepts_canonical_request_shape() {
     let result = run_wxc_state_aware(
         "iso provision canonical (dry-run)",
         &request,
-        &["--experimental", "--dry-run"],
+        &["--dry-run"],
     );
     if skipped_not_compiled(&result) {
         return;

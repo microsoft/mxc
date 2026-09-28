@@ -48,9 +48,16 @@ jobs:
           name: ${{ matrix.artifact }}
           path: artifacts/bin
 
+      - name: Download isolation-session test bundle
+        if: matrix.backend == 'isolation-session'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: isolation-session-test-bundle-${{ matrix.target }}
+          path: artifacts/bin/isolation-session-bundle
+
       - name: Delayed start
         if: matrix.startup_delay_seconds > 0
-        shell: pwsh
+        shell: powershell
         run: |
           # Spreads network-heavy setup across the pool's shared egress address
           # instead of issuing every job's downloads at once. Configured by
@@ -60,8 +67,8 @@ jobs:
           Start-Sleep -Seconds $seconds
 
       - name: Prepare backend prerequisites
-        timeout-minutes: 15
-        shell: pwsh
+        timeout-minutes: 20
+        shell: powershell
         run: |
           & ./scripts/ci/prepare-windows-host.ps1 `
             -Backend '${{ matrix.backend }}' `

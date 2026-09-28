@@ -42,8 +42,6 @@ fn iso_policy_with_deadline(timeout_ms: Option<u32>) -> SandboxPolicy {
     }
 }
 
-/// Safe to call before anything else has initialised COM: the backend's probe
-/// owns its own apartment.
 fn host_supports_isolation_session() -> bool {
     mxc_sdk::available_backends()
         .iter()
@@ -59,7 +57,7 @@ fn skips_are_failures() -> bool {
     )
 }
 
-/// Enters a single-threaded apartment, which the backend refuses.
+/// Enters a single-threaded apartment.
 ///
 /// libtest runs every test on its own thread and apartment membership is
 /// per-thread, so a test that wants an STA enters one itself.
@@ -75,6 +73,23 @@ fn enter_sta() {
     // with the test.
     let hr = unsafe { CoInitializeEx(core::ptr::null_mut(), COINIT_APARTMENTTHREADED) };
     assert!(hr >= 0, "CoInitializeEx failed: 0x{hr:08x}");
+}
+
+fn impersonate_at_identification_level() {
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn ImpersonateSelf(impersonation_level: i32) -> i32;
+    }
+    const SECURITY_IDENTIFICATION: i32 = 1;
+
+    // SAFETY: impersonates on this thread only. Deliberately not reverted — the
+    // thread ends with the test.
+    let impersonating = unsafe { ImpersonateSelf(SECURITY_IDENTIFICATION) };
+    assert!(
+        impersonating != 0,
+        "ImpersonateSelf failed: {}",
+        std::io::Error::last_os_error()
+    );
 }
 
 macro_rules! skip_unless_supported {
@@ -94,28 +109,36 @@ macro_rules! skip_unless_supported {
 }
 
 #[test]
-fn a_single_threaded_apartment_is_refused_before_the_service_is_reached() {
-    enter_sta();
+fn a_single_threaded_apartment_drives_the_full_lifecycle() {
+    skip_unless_supported!();
 
-    let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
-        "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#;
-    let err = mxc_sdk::run_state_aware_json(provision, false, true)
-        .expect_err("a single-threaded apartment must be refused");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        enter_sta();
+        let started = provision_and_start();
+        let captured =
+            exec_capture_stdout(&started.sandbox_id, "cmd.exe /c echo sta-lifecycle-marker");
 
-    assert_eq!(
-        err.code,
-        ErrorCode::BackendError,
-        "message: {}",
-        err.message
-    );
-    assert_eq!(
-        err.operation, None,
-        "the apartment query succeeds, so the refusal has no call to name"
-    );
-    assert_eq!(err.native_code, None);
+        let stop = format!(
+            r#"{{"version":"0.9.0-alpha","phase":"stop","sandboxId":"{}"}}"#,
+            started.sandbox_id
+        );
+        mxc_sdk::run_state_aware_json(&stop, false, true).expect("stop must succeed");
+        let deprovision = format!(
+            r#"{{"version":"0.9.0-alpha","phase":"deprovision","sandboxId":"{}"}}"#,
+            started.sandbox_id
+        );
+        mxc_sdk::run_state_aware_json(&deprovision, false, true).expect("deprovision must succeed");
+        started.teardown.defuse();
+        let _ = tx.send(captured);
+    });
+
+    let captured = rx
+        .recv_timeout(std::time::Duration::from_secs(180))
+        .expect("the lifecycle must finish on the STA thread");
     assert!(
-        err.remediation.is_some(),
-        "the refusal must tell the caller what to do instead"
+        captured.contains("sta-lifecycle-marker"),
+        "exec stdout did not carry the marker, got: {captured:?}"
     );
 }
 
@@ -502,6 +525,33 @@ fn one_shot_finished_on_an_sta_thread_still_tears_down() {
     rx.recv_timeout(std::time::Duration::from_secs(120))
         .expect("kill on an STA thread must return rather than block")
         .expect("kill on an STA thread must still stop the session");
+}
+
+/// Fails if teardown is made under the finishing thread's impersonation, whose
+/// token cannot be duplicated at `SecurityImpersonation` level.
+#[test]
+fn one_shot_killed_on_an_sta_thread_impersonating_at_identification_level_stops_its_session() {
+    skip_unless_supported!();
+    let request = build_request_with_containment(
+        &iso_policy(),
+        &Containment::IsolationSession,
+        "ping -n 300 127.0.0.1",
+        None,
+    )
+    .expect("building the request must succeed");
+
+    let mut sandbox = mxc_sdk::spawn_sandbox(request).expect("spawn must reach the backend");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        enter_sta();
+        impersonate_at_identification_level();
+        let _ = tx.send(sandbox.kill().map_err(|e| e.to_string()));
+    });
+
+    rx.recv_timeout(std::time::Duration::from_secs(120))
+        .expect("kill must return rather than block")
+        .expect("kill must stop the session");
 }
 
 /// An abandoned handle's teardown completes without blocking.

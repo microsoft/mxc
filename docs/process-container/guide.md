@@ -72,9 +72,9 @@ artifacts by hand.
 Update the helpers under
 `src/backends/process_container/common/src/base_container_helpers.rs` to encode
 the runtime policy into the PSEC FlatBuffer. Update
-`BaseContainerRunner::is_usable_for_request()` so the BaseContainer tier is
-selected only when the runtime OS probe reports every capability required to
-enforce the request.
+`BaseContainerRunner::can_backend_service_request()` so the BaseContainer tier
+is selected only when the single request-level decision reports that the
+runtime OS can enforce the complete request.
 
 If PSEC cannot represent the request, selection must continue to an
 AppContainer tier that can fully enforce it. Never silently omit a requested

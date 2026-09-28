@@ -193,6 +193,8 @@ try {
 
     $executionTimeoutSeconds = 60
     $proc = Start-Process -FilePath $wxcExe -ArgumentList '--debug', $configFile -PassThru -NoNewWindow
+    # Caching the handle keeps ExitCode readable after the process exits.
+    $null = $proc.Handle
     if (-not $proc.WaitForExit($executionTimeoutSeconds * 1000)) {
         Stop-Process -Id $proc.Id -Force
         $proc.WaitForExit()

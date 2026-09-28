@@ -136,6 +136,8 @@ export interface Filesystem {
   readwritePaths?: string[];
 }
 
+export type HyperlightRuntime = "agent" | "python" | "python-shell" | "node" | "bash" | "dotnet-jit";
+
 export type IsolationSessionContainment = "isolation_session";
 
 /**
@@ -357,6 +359,16 @@ export type NonEmptyString = string;
 export type OneShotContainment = "process" | "processcontainer" | "appcontainer" | "lxc" | "bubblewrap" | "seatbelt" | "macos_sandbox" | "vm" | "windows_sandbox" | "microvm" | "hyperlight" | "wslc" | "isolation_session";
 
 /**
+ * One-shot Hyperlight backend settings.
+ */
+export interface OneShotHyperlight {
+  /**
+   * Guest runtime that `process.commandLine` is source for. Defaults to `agent`.
+   */
+  runtime?: HyperlightRuntime;
+}
+
+/**
  * A complete one-shot `0.10.0-alpha` configuration request.
  */
 export type OneShotRequest = {
@@ -388,6 +400,10 @@ export type OneShotRequest = {
    * Optional filesystem policy.
    */
   filesystem?: Filesystem;
+  /**
+   * Optional one-shot Hyperlight backend settings.
+   */
+  hyperlight?: OneShotHyperlight;
   /**
    * Optional lifecycle settings.
    */

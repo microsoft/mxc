@@ -539,11 +539,9 @@ export function createConfigFromPolicy(
                 );
             }
         }
-        // Unix backends accept host lists without allowOutbound. Bubblewrap and
-        // LXC enforce them; WSLC does not (per-host filtering is non-functional —
-        // no in-kernel iptables + no CAP_NET_ADMIN — and is rejected at parse
-        // time); Seatbelt accepts them for SDK compatibility and leaves its
-        // limitations to native validation.
+        // Unix backends accept allowlists without allowOutbound. Bubblewrap and
+        // LXC enforce them under a block default; WSLC and Seatbelt leave their
+        // backend-specific limitations to native validation.
         const acceptsHostRulesWithoutOutbound =
             containment === 'wslc' ||
             containment === 'seatbelt' ||
@@ -558,7 +556,10 @@ export function createConfigFromPolicy(
         }
 
         config.network = {
-            defaultPolicy: policy.network.allowOutbound ? 'allow' : 'block',
+            defaultPolicy:
+                policy.network.allowOutbound && !policy.network.allowedHosts?.length
+                    ? 'allow'
+                    : 'block',
             allowLocalNetwork: policy.network.allowLocalNetwork,
             allowedHosts: policy.network.allowedHosts,
             blockedHosts: policy.network.blockedHosts,
@@ -1028,6 +1029,15 @@ export async function spawnSandboxAsync(
     inheritDefaultEnv: options.inheritDefaultEnv,
     experimental: options.experimental,
   });
+  // The generated wire config uses a block default when an allowlist narrows
+  // outbound access. Preserve the caller's authored legacy capability intent
+  // for native platform-specific validation.
+  if (
+    request.policy.network !== undefined &&
+    policy.network?.allowOutbound !== undefined
+  ) {
+    request.policy.network.allowOutbound = policy.network.allowOutbound;
+  }
   const result = await runBindingRequestAsync(request);
   if (result.timedOut) {
     throw new MxcError('backend_error', 'sandbox execution timed out', {

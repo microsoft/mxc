@@ -18,6 +18,7 @@ describe('native run binding', () => {
     assert.strictEqual(_errorCodeForNativeStatus(100), 'malformed_request');
     assert.strictEqual(_errorCodeForNativeStatus(101), 'malformed_request');
     assert.strictEqual(_errorCodeForNativeStatus(102), 'backend_error');
+    assert.strictEqual(_errorCodeForNativeStatus(103), 'backend_error');
     assert.strictEqual(_errorCodeForNativeStatus(999), 'backend_error');
   });
 });

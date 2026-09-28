@@ -376,6 +376,52 @@
       },
       "type": "object"
     },
+    "HyperlightRuntime": {
+      "oneOf": [
+        {
+          "description": "Agent",
+          "enum": [
+            "agent"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Python",
+          "enum": [
+            "python"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "PythonShell",
+          "enum": [
+            "python-shell"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Node",
+          "enum": [
+            "node"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Bash",
+          "enum": [
+            "bash"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "DotnetJit",
+          "enum": [
+            "dotnet-jit"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "IsolationSessionContainment": {
       "enum": [
         "isolation_session"
@@ -800,6 +846,17 @@
         }
       ]
     },
+    "OneShotHyperlight": {
+      "additionalProperties": false,
+      "description": "One-shot Hyperlight backend settings.",
+      "properties": {
+        "runtime": {
+          "$ref": "#/definitions/HyperlightRuntime",
+          "description": "Guest runtime that `process.commandLine` is source for. Defaults to `agent`."
+        }
+      },
+      "type": "object"
+    },
     "OneShotRequest": {
       "additionalProperties": false,
       "allOf": [
@@ -848,6 +905,10 @@
         "filesystem": {
           "$ref": "#/definitions/Filesystem",
           "description": "Optional filesystem policy."
+        },
+        "hyperlight": {
+          "$ref": "#/definitions/OneShotHyperlight",
+          "description": "Optional one-shot Hyperlight backend settings."
         },
         "lifecycle": {
           "$ref": "#/definitions/Lifecycle",

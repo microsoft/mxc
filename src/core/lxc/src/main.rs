@@ -63,18 +63,28 @@ struct Cli {
     #[arg(long = "log-file")]
     log_file: Option<String>,
 
-    /// Install the warmed Hyperlight snapshot and exit. Pulls the
-    /// published kernel + initrd from GHCR (via docker or podman),
-    /// warms them up, and writes the snapshot into the default user
-    /// data dir (~/.local/share/pyhl on Linux, %LOCALAPPDATA%\pyhl on
-    /// Windows). $PYHL_HOME overrides the destination if set. Intended
-    /// for tool install hooks so first-run has zero warmup cost.
-    #[arg(long = "setup-hyperlight")]
-    setup_hyperlight: bool,
+    /// Install the warmed Hyperlight snapshot and exit, for the default
+    /// runtime (`agent`) or the comma-separated runtimes given with `=`:
+    /// `--setup-hyperlight=python,node`. Names are `agent`, `python`,
+    /// `python-shell`, `node`, `bash` and `dotnet-jit`. For each, pulls the
+    /// published rootfs from GHCR unless the image home already holds it,
+    /// boots it once, and writes the snapshot into the default user data
+    /// dir (~/.local/share/mxc-hyperlight on Linux,
+    /// %LOCALAPPDATA%\mxc-hyperlight on Windows). $MXC_HYPERLIGHT_HOME
+    /// overrides the destination if set. Intended for tool install hooks
+    /// so first-run has zero warmup cost.
+    #[arg(
+        long = "setup-hyperlight",
+        value_name = "RUNTIMES",
+        num_args = 0..=1,
+        require_equals = true,
+        value_delimiter = ','
+    )]
+    setup_hyperlight: Option<Vec<String>>,
 
     /// Rebuild the snapshot even if one already exists. Use after
-    /// upgrading `kernel` or `initrd.cpio` so the warm state matches
-    /// the new bits. Requires --setup-hyperlight.
+    /// replacing `initrd.cpio` so the warm state matches the new
+    /// bits. Requires --setup-hyperlight.
     #[arg(long, requires = "setup_hyperlight")]
     force: bool,
 }
@@ -159,10 +169,19 @@ fn main() {
     // --setup-hyperlight: eagerly warm up the snapshot and exit. Runs
     // before config parsing so the user doesn't need a JSON file on
     // disk just to install.
-    if cli.setup_hyperlight {
+    if let Some(runtime_names) = &cli.setup_hyperlight {
+        // Setup exits before any config is read, so a positional here is
+        // most likely a runtime name given with a space instead of `=`.
+        if let Some(stray) = &cli.config_path {
+            eprintln!(
+                "Error: --setup-hyperlight takes no config path; name runtimes with \
+                 --setup-hyperlight={stray}"
+            );
+            process::exit(1);
+        }
         #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
         {
-            // WHP is delay-loaded; check before pyhl::install warms a VM.
+            // WHP is delay-loaded; check before setup boots a VM.
             #[cfg(target_os = "windows")]
             if !hyperlight_common::is_whp_available() {
                 eprintln!(
@@ -171,15 +190,29 @@ fn main() {
                 );
                 process::exit(1);
             }
+            // KVM is checked before anything is pulled.
+            #[cfg(target_os = "linux")]
+            if !hyperlight_common::is_kvm_available() {
+                eprintln!(
+                    "Error: --setup-hyperlight requires KVM: /dev/kvm must be readable and \
+                     writable by this user."
+                );
+                process::exit(1);
+            }
 
-            let mut logger = Logger::new(if cli.debug {
-                Mode::Console
-            } else {
-                Mode::Buffer
-            });
-            match hyperlight_common::setup(cli.force, &mut logger) {
-                Ok(snap) => {
-                    eprintln!("hyperlight setup: snapshot ready at {:?}", snap);
+            // Setup is an interactive install: the pull and the warm-up
+            // report progress as they go.
+            let mut logger = Logger::new(Mode::Console);
+            let runtimes = match hyperlight_common::parse_runtimes(runtime_names) {
+                Ok(runtimes) => runtimes,
+                Err(msg) => {
+                    eprintln!("Error: {msg}");
+                    process::exit(1);
+                }
+            };
+            match hyperlight_common::setup(cli.force, &runtimes, &mut logger) {
+                Ok(home) => {
+                    eprintln!("hyperlight setup: image home ready at {:?}", home);
                     process::exit(0);
                 }
                 Err(msg) => {
@@ -190,6 +223,7 @@ fn main() {
         }
         #[cfg(not(all(feature = "hyperlight", target_arch = "x86_64")))]
         {
+            let _ = runtime_names;
             eprintln!("Error: --setup-hyperlight requires x86_64 (Hyperlight needs KVM or WHP)");
             process::exit(1);
         }

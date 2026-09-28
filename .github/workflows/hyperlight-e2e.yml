@@ -63,45 +63,21 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/check-whp.ps1
 
-      - name: Install crane (OCI tool)
+      - name: Set up Hyperlight (pull rootfs, warm snapshot)
         if: steps.whp-check.outputs.whp_available == 'true'
         shell: pwsh
         run: |
-          $url = "https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Windows_x86_64.tar.gz"
-          Invoke-WebRequest -Uri $url -OutFile crane.tar.gz -UseBasicParsing
-          tar -xzf crane.tar.gz crane.exe
-
-      - name: Download Hyperlight kernel and initrd
-        if: steps.whp-check.outputs.whp_available == 'true'
-        shell: pwsh
-        run: |
-          $pyhlHome = Join-Path $env:LOCALAPPDATA "pyhl"
-          New-Item -ItemType Directory -Force -Path $pyhlHome | Out-Null
-
-          $tag = "v0.12.1"
-          .\crane.exe export ghcr.io/hyperlight-dev/hyperlight-unikraft/python-agent-driver-kernel:$tag kernel.tar
-          tar -xf kernel.tar -C $pyhlHome kernel
-
-          .\crane.exe export ghcr.io/hyperlight-dev/hyperlight-unikraft/python-agent-driver-initrd:$tag initrd.tar
-          tar -xf initrd.tar -C $pyhlHome initrd.cpio
-
-          Write-Host "Downloaded to ${pyhlHome}:"
-          Get-ChildItem $pyhlHome
-
-      - name: Warm Hyperlight snapshot
-        if: steps.whp-check.outputs.whp_available == 'true'
-        shell: pwsh
-        run: |
+          # Pulls each runtime's rootfs straight from GHCR (no container
+          # runtime needed), boots it once, and saves the snapshot under
+          # %LOCALAPPDATA%\mxc-hyperlight\<runtime>, where the e2e tests look.
           $binDir = Join-Path $env:GITHUB_WORKSPACE "src\target\x86_64-pc-windows-msvc\debug"
-          $json = '{"version":"0.10.0-alpha","process":{"commandLine":"print(\"snapshot warm\")"},"containment":"hyperlight"}'
-          $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
-          & "$binDir\wxc-exec.exe" --experimental --config-base64 $b64 2>&1
+          & "$binDir\wxc-exec.exe" --setup-hyperlight=agent,python,node --debug 2>&1
           if ($LASTEXITCODE -ne 0) {
-            Write-Host "::error::Hyperlight snapshot warmup failed"
+            Write-Host "::error::Hyperlight setup failed"
             exit 1
           }
-          Write-Host "Snapshot created:"
-          Get-ChildItem (Join-Path $env:LOCALAPPDATA "pyhl")
+          Write-Host "Image home:"
+          Get-ChildItem (Join-Path $env:LOCALAPPDATA "mxc-hyperlight")
 
       - name: Run Hyperlight E2E Tests
         if: steps.whp-check.outputs.whp_available == 'true'

@@ -39,8 +39,8 @@ available bounds what policy can be enforced.
 
 - **T1 (BaseContainer)** requires an enabled processmodel.dll PSEC contract.
   This is a 25H2+ capability. Usability is resolved up front by
-  `BaseContainerRunner::is_usable_for_request()` so tier selection never picks
-  a T1 that cannot launch the requested policy.
+  `BaseContainerRunner::can_backend_service_request()` so tier selection never
+  picks a T1 that cannot service the complete requested policy.
 - **T2 (BFS)** is compiled out by default. `bfscfg.exe` ships only on 24H2 and
   later, but the `tier2_bfs` Cargo feature is **off** in all shipping builds
   because invoking `bfscfg.exe` can deadlock the host on 25H2. Treat T2 as
@@ -55,18 +55,9 @@ whenever its runtime probe succeeds and the contract can represent the complete
 requested policy, independent of schema version. Otherwise selection continues
 through the AppContainer fallback tiers.
 
-The PSEC probe requires:
-
-- `CreateProcessSecurityEnvironment`
-- `QueryProcessSecurityEnvironmentSupport`
-- `CloseProcessSecurityEnvironment`
-
 When `processContainer.captureDenials` is present, MXC treats PSEC plus the
-official V2 Learning Mode exports as one native capture capability set:
-
-- `StartLearningModeTrace`
-- `StopLearningModeTrace`
-- `CloseLearningModeTrace`
+`api-win-appmodel-processmodel~learningmodetrace` API set as one native capture
+capability set.
 
 When that complete set is available, MXC uses PSEC with native V2 capture.
 Otherwise it retains the highest AppContainer containment tier that can fully

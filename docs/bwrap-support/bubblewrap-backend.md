@@ -194,6 +194,45 @@ bypass kernel DAC.
 Bubblewrap uses the shared cross-backend configuration fields. No
 backend-specific config block is needed.
 
+### Process environment
+
+The host environment is never inherited — the sandbox is built with
+`--clearenv`, so host secrets can't leak into untrusted code.
+
+**From schema 0.9** the child gets a default block of `PATH`
+(`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`), `TERM`
+(`xterm-256color`), and — only when `process.cwd` resolves one — `HOME` (the
+directory the child is started in):
+
+| `process.env` | `inheritDefaultEnv` | Result |
+| --- | --- | --- |
+| omitted | — | the default block |
+| `[]` | — | nothing at all |
+| `["FOO=bar"]` | `false` (default) | `FOO` only — **no `PATH`** |
+| `["FOO=bar"]` | `true` | the default block plus `FOO`; a same-named entry wins |
+
+> ⚠️ **`HOME` is only set when `process.cwd` is supplied.** MXC has no private
+> directory it can guarantee otherwise: a `readwritePaths` grant is bind-mounted
+> after `--tmpfs /tmp` and therefore replaces it, so `/tmp` may be the host's
+> shared directory. Pass `"HOME=…"` in `process.env` if your command needs it.
+
+> ⚠️ **`HOME` is the working directory.** Dotfiles inside it — `.gitconfig`,
+> `.npmrc`, `.curlrc`, `.config/*` — are therefore read as *user-level* tool
+> configuration, not just project input. Pass `"HOME=…"` to point elsewhere
+> when the workspace is untrusted.
+
+The table is the environment MXC hands the child. Bubblewrap runs the workload
+under the host's `/bin/sh`, and a shell started without these assigns its own:
+dash (Debian, Ubuntu) fabricates a `PATH` that happens to equal the default
+block's value, while bash (RHEL) fabricates a shorter `/usr/local/bin:/usr/bin`
+plus `TERM=dumb`. So neither reads back as empty from inside the workload,
+whatever MXC passed.
+
+**Before 0.9** the child got only what `process.env` supplied — with no `PATH`,
+command resolution fell through to the shell's compiled-in default, which
+matches the value above on Debian and Ubuntu but omits the `sbin` directories
+on RHEL. `inheritDefaultEnv` is rejected below 0.9.
+
 ### Filesystem Policy
 
 | Field | bwrap Mapping | Description |
@@ -641,11 +680,16 @@ request fails if its private namespace cannot be configured.
    proxy-mode execution on the host indefinitely. A successful probe is cached
    for the life of the process; failures are not, so installing the missing
    tool takes effect without a restart.
-1. When `network.proxy` is set, the runner launches an unprivileged HTTP
-   proxy on loopback (`127.0.0.1:N`). For tests, the bundled
-   `unix-test-proxy` binary is used (`builtinTestServer: true`,
-   testing-only and gated behind `--allow-testing-features`); in production callers
-   supply their own proxy via `localhost: <port>` or `url: <url>`.
+1. When a proxy is requested, the runner routes the sandbox to it; the caller
+   starts it. `runtimeConfig.networkProxy` names it from schema 0.8 onward and
+   is the only spelling on 0.9; the parser accepts only a loopback endpoint
+   there. The legacy `network.proxy` field names it on 0.6–0.8 and also accepts
+   a hostname or routable endpoint, which is resolved on the host and pinned
+   into the sandbox's `/etc/hosts`; there `builtinTestServer: true`
+   additionally makes the runner launch the bundled `unix-test-proxy` on
+   loopback (testing-only, gated behind `--allow-testing-features`). Both
+   spellings normalize to the same `policy.network_proxy`, so 0.8 accepts
+   either and enforces them identically.
 2. The runner creates a same-UID user-namespace supervisor, starts Bubblewrap
    with `--unshare-net`, and keeps the workload behind a startup barrier.
 3. The supervisor attaches `slirp4netns` to Bubblewrap's private network
@@ -685,7 +729,60 @@ request fails if its private namespace cannot be configured.
    the `allowedHosts` / `blockedHosts` lists. Non-cooperating clients are not
    merely unrouted — their traffic is dropped by the egress chain.
 
-### Example: builtin test proxy with allowlist
+### Losing the network provider mid-run
+
+`slirp4netns` carries the sandbox's only route, so a slirp that dies under a
+running workload leaves the sandbox running against a dead network: every
+connection fails with a generic transport error, and the run is attributed to
+whatever the workload reported. Two checks close that, and both apply to
+firewall-enforcement mode as well, since it stands up the same supervisor and
+the same slirp.
+
+**Before the workload starts.** Readiness is latched, not revoked — it says
+slirp *came up*, not that it is still up — so it can already be stale by the
+time the startup gate opens. The supervisor is re-checked immediately before
+the gate is released. Any exit fails the run, including a successful one:
+slirp's exit code says nothing about whether the sandbox still has a route.
+
+**For the lifetime of the workload.** The supervisor inherits the write end of
+a pipe nothing ever writes to, and slirp inherits it in turn; the runner keeps
+only the read end. That descriptor reaches EOF when *both* have exited, which
+is what separates a dead network from an orphaned slirp still carrying traffic
+after its supervisor was killed. A monitor thread in the executor watches the
+descriptor, terminates the sandbox when it closes, and fails the run naming the
+supervisor's exit status and a bounded tail of its stderr:
+
+```text
+wait failed: Bubblewrap: the sandbox lost its network provider while the
+workload was running; the proxy network supervisor exited with exit status: 137
+(stderr: sent tapfd=7 for tap0
+received tapfd=7
+Killed)
+```
+
+The monitor is disarmed *before* teardown stops the supervisor, so an ordinary
+shutdown — which closes the same descriptor — is never reported as a loss. Only
+an exit is detected; see [Limitations](#limitations).
+
+### Example: proxy on v0.9
+
+```json
+{
+  "version": "0.9.0-alpha",
+  "containment": "bubblewrap",
+  "process": { "commandLine": "curl -fsSL https://example.com" },
+  "network": {
+    "egress": { "default": "deny" },
+    "ingress": { "default": "deny", "hostLoopback": "deny" }
+  },
+  "runtimeConfig": { "networkProxy": "http://127.0.0.1:8080" }
+}
+```
+
+A proxy request is the proxy-only posture, so `egress.default` must be `deny`
+with no `allow` / `deny` rules; the chain opens the proxy endpoint alone.
+
+### Example (legacy, ≤0.8): builtin test proxy with allowlist
 
 ```json
 {
@@ -696,14 +793,14 @@ request fails if its private namespace cannot be configured.
     "commandLine": "curl -fsSL https://api.github.com/zen && echo OK"
   },
   "network": {
-    "defaultPolicy": "allow",
+    "defaultPolicy": "block",
     "proxy": { "builtinTestServer": true },
     "allowedHosts": ["api.github.com"]
   }
 }
 ```
 
-### Example: external proxy on loopback
+### Example (legacy, ≤0.8): external proxy on loopback
 
 ```json
 {
@@ -716,10 +813,11 @@ request fails if its private namespace cannot be configured.
 }
 ```
 
-> Both examples declare `0.8.0-alpha` deliberately: the private-namespace and
-> egress-enforcement behavior described above is selected by the schema version,
-> so the same config on `0.6`/`0.7` runs the legacy shared-host-network proxy
-> path instead.
+> Both legacy examples declare `0.8.0-alpha` deliberately: the
+> private-namespace and egress-enforcement behavior described above is selected
+> by the schema version, so the same config on `0.6`/`0.7` runs the legacy
+> shared-host-network proxy path instead. `network.proxy`, `allowedHosts`, and
+> `blockedHosts` are not accepted on v0.9.
 
 ### Checking host support before you run
 
@@ -944,3 +1042,6 @@ Test configs are in `tests/configs/bubblewrap_*.json`.
   retained for compatibility but does not filter unprivileged.
 - **No state-aware lifecycle** — Bubblewrap implements `ScriptRunner` only
   (one-shot), not `StatefulSandboxBackend`
+- **Provider-loss detection is exit-based** — in the private-namespace modes a
+  `slirp4netns` that exits mid-run fails the run; one that is alive but wedged
+  is not detected, and reaches the workload as an unreachable network

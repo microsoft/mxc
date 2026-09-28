@@ -495,6 +495,15 @@ pub struct WindowsSandbox {
     pub daemon_pipe_name: Option<String>,
 }
 
+/// Hyperlight backend config.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Hyperlight {
+    /// Guest runtime that `process.commandLine` is source for; `agent` is
+    /// the default.
+    pub runtime: Option<crate::models::HyperlightRuntime>,
+}
+
 /// WSL container backend config.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]

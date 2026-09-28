@@ -95,7 +95,11 @@ fn plm_exe_path() -> Result<std::path::PathBuf, String> {
 /// immediately. It intentionally does not attempt to elevate or start WPR
 /// because callers use it from the read-only host probe.
 pub(crate) fn is_available() -> bool {
-    prerequisites_available(plm::wpr_path::verify_wpr_present, || {
+    verify_prerequisites().is_ok()
+}
+
+fn verify_prerequisites() -> Result<(), String> {
+    verify_prerequisites_with(plm::wpr_path::verify_wpr_present, || {
         let path = plm_exe_path()?;
         plm::trust::verify_and_pin_launch_binary(&path)
             .map(|_| ())
@@ -103,11 +107,11 @@ pub(crate) fn is_available() -> bool {
     })
 }
 
-fn prerequisites_available(
+fn verify_prerequisites_with(
     verify_wpr: impl FnOnce() -> Result<(), String>,
     verify_guardian: impl FnOnce() -> Result<(), String>,
-) -> bool {
-    verify_wpr().and_then(|()| verify_guardian()).is_ok()
+) -> Result<(), String> {
+    verify_wpr().and_then(|()| verify_guardian())
 }
 
 /// [`GuardedCaptureSession`] backed by a live `plm::elevated::GuardedSession`.
@@ -197,6 +201,10 @@ impl GuardedCaptureSession for PlmGuardedCaptureSession {
 pub struct PlmGuardedCaptureFactory;
 
 impl GuardedCaptureFactory for PlmGuardedCaptureFactory {
+    fn verify_available(&self) -> Result<(), String> {
+        verify_prerequisites()
+    }
+
     fn allows_trace_transfer(&self) -> bool {
         true
     }
@@ -240,10 +248,7 @@ fn start_with_plm_path(
 }
 
 /// Build the guarded-capture factory to hand to the dispatcher for `request`,
-/// or `None` when `captureDenials` isn't requested. Centralizing this (rather
-/// than constructing a `PlmGuardedCaptureFactory` unconditionally at every call
-/// site) keeps `run.rs` / `dispatch.rs` from wiring a factory the request never
-/// needed.
+/// or `None` when `captureDenials` isn't requested.
 pub(crate) fn factory_for_request(
     request: &wxc_common::models::ExecutionRequest,
 ) -> Option<std::sync::Arc<dyn GuardedCaptureFactory>> {
@@ -262,7 +267,7 @@ mod tests {
     fn guarded_capture_is_unavailable_without_wpr() {
         let mut guardian_checked = false;
 
-        let available = prerequisites_available(
+        let available = verify_prerequisites_with(
             || Err("wpr.exe is missing".to_string()),
             || {
                 guardian_checked = true;
@@ -270,17 +275,17 @@ mod tests {
             },
         );
 
-        assert!(!available);
+        assert!(available.is_err());
         assert!(!guardian_checked);
     }
 
     #[test]
     fn guarded_capture_requires_both_prerequisites() {
-        assert!(!prerequisites_available(
-            || Ok(()),
-            || Err("plm.exe is unavailable".to_string())
-        ));
-        assert!(prerequisites_available(|| Ok(()), || Ok(())));
+        assert!(
+            verify_prerequisites_with(|| Ok(()), || Err("plm.exe is unavailable".to_string()))
+                .is_err()
+        );
+        assert!(verify_prerequisites_with(|| Ok(()), || Ok(())).is_ok());
     }
 
     #[test]
@@ -317,7 +322,7 @@ mod tests {
         request.policy.capture_denials = Some(Default::default());
 
         assert!(factory_for_request(&request)
-            .unwrap()
+            .expect("capture request should get a factory")
             .allows_trace_transfer());
     }
 

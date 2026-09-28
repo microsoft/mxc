@@ -13,9 +13,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use wxc_e2e_tests::{
     assert_exit, assert_pwsh, assert_python, assert_success,
-    assert_success_or_skip_missing_prerequisite, examples_dir, has_hyperlight_snapshot,
-    has_nanvix_binaries, has_test_driver, has_windows_sandbox_feature, has_wxc_exe, repo_root,
-    run_test_driver, run_wxc_config, run_wxc_config_value, run_wxc_example, run_wxc_state_aware,
+    assert_success_or_skip_missing_prerequisite, examples_dir, has_hyperlight_runtime,
+    has_hyperlight_snapshot, has_nanvix_binaries, has_test_driver, has_windows_sandbox_feature,
+    has_wxc_exe, repo_root, run_test_driver, run_wxc_config, run_wxc_config_value, run_wxc_example,
     test_configs_dir, TempDirs,
 };
 
@@ -981,6 +981,9 @@ fn expected_exit_description(case: &MicrovmCase) -> String {
 #[derive(Debug)]
 struct HyperlightCase {
     config: &'static str,
+    /// The guest runtime the config names; the case is skipped when its
+    /// snapshot is not installed.
+    runtime: &'static str,
     description: &'static str,
     expected_exit: i32,
     output_contains: Option<&'static str>,
@@ -990,18 +993,21 @@ fn hyperlight_suite() {
     let cases = [
         HyperlightCase {
             config: "hyperlight_hello.json",
+            runtime: "agent",
             description: "Hello world",
             expected_exit: 0,
             output_contains: Some("Hello from Hyperlight!"),
         },
         HyperlightCase {
             config: "hyperlight_pandas.json",
+            runtime: "agent",
             description: "numpy + pandas",
             expected_exit: 0,
             output_contains: Some("'x':"),
         },
         HyperlightCase {
             config: "hyperlight_exit_code.json",
+            runtime: "agent",
             description: "sys.exit(42) propagates exit code",
             expected_exit: 42,
             output_contains: None,
@@ -1009,7 +1015,29 @@ fn hyperlight_suite() {
         // The legacy hostname-policy fixtures are intentional v0.9 parser
         // rejections covered by run_hyperlight_network_migration_test.ps1.
         HyperlightCase {
+            config: "hyperlight_python_hello.json",
+            runtime: "python",
+            description: "plain CPython image (hyperlight.runtime = python)",
+            expected_exit: 0,
+            output_contains: Some("hello from plain python"),
+        },
+        HyperlightCase {
+            config: "hyperlight_node_hello.json",
+            runtime: "node",
+            description: "Node.js hello (hyperlight.runtime = node)",
+            expected_exit: 0,
+            output_contains: Some("hello from node"),
+        },
+        HyperlightCase {
+            config: "hyperlight_node_exit_code.json",
+            runtime: "node",
+            description: "Node.js process.exit(42) propagates exit code",
+            expected_exit: 42,
+            output_contains: None,
+        },
+        HyperlightCase {
             config: "hyperlight_timeout.json",
+            runtime: "agent",
             description: "time.sleep(120) killed by 1s timeout",
             expected_exit: -1,
             output_contains: Some("timed out"),
@@ -1019,6 +1047,13 @@ fn hyperlight_suite() {
     let mut failures = Vec::new();
     for case in cases {
         println!("--- {} ({}) ---", case.description, case.config);
+        if !has_hyperlight_runtime(case.runtime) {
+            println!(
+                "  SKIPPED: {} runtime not installed (run --setup-hyperlight={})",
+                case.runtime, case.runtime
+            );
+            continue;
+        }
         let result = run_wxc_config(case.config, &["--debug", "--experimental"]);
 
         if result.code != Some(case.expected_exit) {
@@ -1068,7 +1103,7 @@ fn hyperlight_suite() {
             "filesystem": { "readwritePaths": [mount_dir.to_string_lossy()] }
         });
 
-        let result = run_wxc_state_aware("hyperlight-fs", &config, &["--debug", "--experimental"]);
+        let result = run_wxc_config_value("hyperlight-fs", &config, &["--debug", "--experimental"]);
 
         if result.code != Some(0) {
             failures.push(format!(
@@ -1136,7 +1171,7 @@ fn hyperlight_suite() {
             }
         });
 
-        let result = run_wxc_state_aware(
+        let result = run_wxc_config_value(
             "hyperlight-fs-readonly",
             &config,
             &["--debug", "--experimental"],

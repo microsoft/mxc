@@ -29,9 +29,13 @@ use std::path::Path;
 
 use windows::Win32::Foundation::HANDLE;
 
-use learning_mode_windows::{LearningModeApi, LearningModeError, LearningModeTraceHandle};
+#[cfg(test)]
+use learning_mode_windows::LearningModeApi;
+use learning_mode_windows::{start_trace, LearningModeError, LearningModeTraceHandle};
 
-use crate::secenv::{ProcessSecurityEnvironment, SecurityEnvironmentApi};
+#[cfg(test)]
+use crate::secenv::SecurityEnvironmentApi;
+use crate::secenv::{self, ProcessSecurityEnvironment};
 
 /// An in-flight Learning Mode capture: a live security environment with a trace already
 /// started against it.
@@ -41,7 +45,6 @@ use crate::secenv::{ProcessSecurityEnvironment, SecurityEnvironmentApi};
 /// Dropping without `finish` closes and discards the trace, then closes the environment.
 #[derive(Debug)]
 pub struct CaptureSession {
-    learning_mode_api: LearningModeApi,
     /// `Some` until `finish`/`Drop` closes it.
     environment: Option<ProcessSecurityEnvironment>,
     /// `Some` until `finish`/`Drop` closes it.
@@ -58,29 +61,42 @@ impl CaptureSession {
     /// - [`LearningModeError::HResultCall`] if `CreateProcessSecurityEnvironment` fails.
     /// - [`LearningModeError::HResultCall`] if `StartLearningModeTrace` fails — in which
     ///   case the just-created environment is closed before returning so it is not leaked.
-    pub fn begin(
-        secenv_api: SecurityEnvironmentApi,
-        learning_mode_api: LearningModeApi,
-        sandbox_specification: &[u8],
-        flags: u32,
-    ) -> Result<Self, LearningModeError> {
-        let environment = secenv_api.create(sandbox_specification, flags)?;
+    pub fn begin(sandbox_specification: &[u8], flags: u32) -> Result<Self, LearningModeError> {
+        let environment = secenv::create(sandbox_specification, flags)?;
+        // SAFETY: `environment` was just created and remains live until this
+        // session closes it.
+        let trace = unsafe { start_trace(environment.raw()) };
+        Self::finish_begin(environment, trace)
+    }
 
-        // SAFETY: `environment` was just created by `secenv_api.create` and is live for
-        // the duration of this call; `start_trace` only reads it.
-        let trace = match unsafe { learning_mode_api.start_trace(environment.raw()) } {
+    fn finish_begin(
+        environment: ProcessSecurityEnvironment,
+        trace: Result<LearningModeTraceHandle, LearningModeError>,
+    ) -> Result<Self, LearningModeError> {
+        let trace = match trace {
             Ok(trace) => trace,
             Err(start_err) => {
                 environment.close();
                 return Err(start_err);
             }
         };
-
         Ok(Self {
-            learning_mode_api,
             environment: Some(environment),
             trace: Some(trace),
         })
+    }
+
+    #[cfg(test)]
+    fn begin_with_apis(
+        secenv_api: SecurityEnvironmentApi,
+        learning_mode_api: LearningModeApi,
+        sandbox_specification: &[u8],
+        flags: u32,
+    ) -> Result<Self, LearningModeError> {
+        let environment = secenv_api.create(sandbox_specification, flags)?;
+        // SAFETY: the fake environment remains live for the session.
+        let trace = unsafe { learning_mode_api.start_trace(environment.raw()) };
+        Self::finish_begin(environment, trace)
     }
 
     /// The `HPROCESS_SECURITY_ENVIRONMENT` handle to pass to
@@ -110,9 +126,7 @@ impl CaptureSession {
     /// - [`LearningModeError::HResultCall`] from `StopLearningModeTrace`.
     pub fn finish(mut self, output_path: Option<&Path>) -> Result<(), LearningModeError> {
         let stop_result = match self.trace.as_ref() {
-            Some(trace) => self
-                .learning_mode_api
-                .stop_trace_with_retry(trace, output_path),
+            Some(trace) => trace.stop_with_retry(output_path),
             None => Ok(()),
         };
         if let Some(trace) = self.trace.take() {
@@ -237,7 +251,7 @@ mod tests {
     }
 
     fn begin_session() -> Result<CaptureSession, LearningModeError> {
-        CaptureSession::begin(
+        CaptureSession::begin_with_apis(
             fake_secenv_api(),
             fake_learning_mode_api(),
             b"PSEC-fake-spec",

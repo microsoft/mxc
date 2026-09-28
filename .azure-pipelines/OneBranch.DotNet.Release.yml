@@ -1,0 +1,120 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+
+trigger: none
+pr: none
+
+name: $(SourceBranchName)_$(Date:yyyyMMdd)$(Rev:.r)
+
+parameters:
+- name: publishTarget
+  displayName: Publish target (NuGet.org is public)
+  type: string
+  default: Internal Mxc-Azure-Feed
+  values:
+  - Internal Mxc-Azure-Feed
+  - NuGet.org
+
+resources:
+  repositories:
+  - repository: templates
+    type: git
+    name: OneBranch.Pipelines/GovernedTemplates
+    ref: refs/heads/main
+  pipelines:
+  - pipeline: MXC
+    source: MXC-Official-Build
+    trigger: none
+
+extends:
+  template: v2/OneBranch.Official.CrossPlat.yml@templates
+  parameters:
+    release:
+      category: NonAzure
+    featureFlags:
+      use1esentry: false
+
+    stages:
+    - stage: Publish_DotNet
+      displayName: Publish .NET SDK to ${{ parameters.publishTarget }}
+      ${{ if eq(parameters.publishTarget, 'NuGet.org') }}:
+        variables:
+          ob_release_environment: Production
+          NuGetPayloadKind: public
+      ${{ else }}:
+        variables:
+          ob_release_environment: Test
+          NuGetPayloadKind: internal
+
+      jobs:
+      - job: PublishNugetPackage
+        displayName: Publish Microsoft.Mxc.Sdk to ${{ parameters.publishTarget }}
+        pool:
+          type: release
+        variables:
+          ob_nugetPublishing_enabled: true
+        templateContext:
+          inputs:
+          - input: pipelineArtifact
+            pipeline: MXC
+            artifactName: mxc-dotnet-sdk-nuget-unsigned
+
+        steps:
+        - task: PowerShell@2
+          displayName: Restore NuGet package extension
+          inputs:
+            targetType: inline
+            script: |
+              $transportPackages = @(
+                Get-ChildItem -LiteralPath "$(Pipeline.Workspace)" -Recurse -File |
+                  Where-Object { $_.Name -like "Microsoft.Mxc.Sdk.*.$(NuGetPayloadKind)-unsigned-package" }
+              )
+              if ($transportPackages.Count -ne 1) {
+                throw "Expected exactly one $(NuGetPayloadKind) Microsoft.Mxc.Sdk release payload, found $($transportPackages.Count)"
+              }
+
+              $transportPackage = $transportPackages[0]
+              $transportSuffix = ".$(NuGetPayloadKind)-unsigned-package"
+              if (-not $transportPackage.Name.EndsWith($transportSuffix, [StringComparison]::Ordinal)) {
+                throw "Release payload has an unexpected name: $($transportPackage.Name)"
+              }
+              $packageFileName = $transportPackage.Name.Substring(
+                0,
+                $transportPackage.Name.Length - $transportSuffix.Length
+              ) + ".nupkg"
+              $packagePath = Join-Path $transportPackage.DirectoryName $packageFileName
+              if (Test-Path -LiteralPath $packagePath) {
+                throw "NuGet package path already exists: $packagePath"
+              }
+
+              Move-Item -LiteralPath $transportPackage.FullName -Destination $packagePath
+
+              Write-Host "##vso[task.setvariable variable=NuGetPackageDirectory]$($transportPackage.DirectoryName)"
+              Write-Host "##vso[task.setvariable variable=NuGetPackageFileName]$packageFileName"
+              Write-Host "##vso[task.setvariable variable=NuGetPackagePath]$packagePath"
+
+        - task: onebranch.pipeline.signing@1
+          displayName: Sign Microsoft.Mxc.Sdk NuGet package
+          inputs:
+            command: sign
+            cp_code: CP-401405
+            files_to_sign: $(NuGetPackageFileName)
+            search_root: $(NuGetPackageDirectory)
+
+        - ${{ if eq(parameters.publishTarget, 'NuGet.org') }}:
+          - task: NuGetCommand@2
+            displayName: Push Microsoft.Mxc.Sdk to NuGet.org
+            inputs:
+              command: push
+              packagesToPush: '$(NuGetPackagePath)'
+              nuGetFeedType: external
+              publishFeedCredentials: 'MXC Nuget'
+
+        - ${{ else }}:
+          - task: NuGetCommand@2
+            displayName: Push Microsoft.Mxc.Sdk to Mxc-Azure-Feed
+            inputs:
+              command: push
+              packagesToPush: '$(NuGetPackagePath)'
+              nuGetFeedType: internal
+              publishVstsFeed: 'Dart/Mxc-Azure-Feed'

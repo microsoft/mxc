@@ -8,6 +8,7 @@ pub mod cmdline;
 mod common_request_ir;
 mod config_deserialize;
 pub mod config_parser;
+pub mod default_env;
 pub mod encoding;
 pub mod error;
 pub mod exec_stream;
@@ -29,6 +30,8 @@ pub use network_parser::host_is_canonical_loopback;
 pub mod proxy_env;
 pub mod sandbox_process;
 pub mod script_runner;
+#[doc(hidden)]
+pub mod sdk_input;
 pub(crate) mod splice;
 pub mod state_aware_backend;
 pub mod state_aware_binding;
@@ -41,6 +44,7 @@ pub mod ui_policy;
 pub mod validator;
 
 // Reusable DTOs shared by exact-contract adapters and typed SDK builders.
+// Public only for the cross-crate Rust SDK adapter; not an external wire API.
 pub(crate) mod wire;
 
 // Adapters that map specific JSON contracts into the internal config input.
@@ -50,6 +54,8 @@ pub(crate) mod config_contract_adapters;
 // runners live in dedicated crates under `backends/`; only utilities
 // shared across host tools (e.g. wxc_host_prep, mxc_diagnostic_console)
 // and ≥1 backend stay here.
+#[cfg(target_os = "windows")]
+pub mod api_set;
 #[cfg(target_os = "windows")]
 pub mod diagnostic;
 #[cfg(target_os = "windows")]

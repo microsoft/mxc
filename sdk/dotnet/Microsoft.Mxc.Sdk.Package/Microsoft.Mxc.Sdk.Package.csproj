@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <IsPackable>true</IsPackable>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+    <NuspecFile>Microsoft.Mxc.Sdk.nuspec</NuspecFile>
+    <NuspecBasePath>$(RepositoryRoot)</NuspecBasePath>
+    <NuspecProperties>version=$(PackageVersion);managedOutput=$(ManagedOutput);x64Native=$(X64Native);arm64Native=$(Arm64Native);linuxX64Native=$(LinuxX64Native);linuxArm64Native=$(LinuxArm64Native);macArm64Native=$(MacArm64Native);repositoryRoot=$(RepositoryRoot)</NuspecProperties>
+  </PropertyGroup>
+
+  <Target Name="ValidatePackageInputs" BeforeTargets="Pack">
+    <Error Condition="'$(PackageVersion)' == ''" Text="PackageVersion is required." />
+    <Error Condition="'$(ManagedOutput)' == ''" Text="ManagedOutput is required." />
+    <Error Condition="'$(X64Native)' == ''" Text="X64Native is required." />
+    <Error Condition="'$(Arm64Native)' == ''" Text="Arm64Native is required." />
+    <Error Condition="'$(LinuxX64Native)' == ''" Text="LinuxX64Native is required." />
+    <Error Condition="'$(LinuxArm64Native)' == ''" Text="LinuxArm64Native is required." />
+    <Error Condition="'$(MacArm64Native)' == ''" Text="MacArm64Native is required." />
+    <Error Condition="'$(RepositoryRoot)' == ''" Text="RepositoryRoot is required." />
+  </Target>
+
+</Project>

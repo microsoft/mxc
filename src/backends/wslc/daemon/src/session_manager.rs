@@ -24,9 +24,9 @@
 //! `deprovision` stop + delete. The completion reply carries the exit code;
 //! output flows over the sink. (Client `Stdin` forwarding is a later fill-in.)
 
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 
 use anyhow::Result;
 use tokio::sync::mpsc::error::TrySendError;
@@ -34,9 +34,11 @@ use tokio::sync::{mpsc, oneshot};
 
 use wslc_common::container_steps::{self, OutStream, OutputSink, ProcessSettings};
 use wslc_common::daemon_protocol::{
-    DeprovisionConfig, ErrKind, ExecConfig, NetworkMode, ProvisionConfig, StartConfig, StopConfig,
+    DeprovisionConfig, ErrKind, ExecConfig, ExecTerminal, NetworkMode, ProvisionConfig,
+    StartConfig, StopConfig,
 };
 use wslc_common::policy_mapping;
+use wslc_common::process_env::EnvScope;
 use wslc_common::wslc_bindings::{
     WslcContainer, WslcContainerGuard, WslcContainerNetworkingMode, WslcSdk, WslcSessionGuard,
 };
@@ -144,8 +146,10 @@ pub enum WorkerCommand {
         /// stdout/stderr callbacks push chunks through it to the pipe handler as
         /// bytes arrive, alongside the capped capture buffers.
         sink: OutputSink,
+        cancellation: Arc<AtomicBool>,
+        registration: Arc<ExecRegistration>,
         admit: oneshot::Sender<Result<(), WorkerError>>,
-        done: oneshot::Sender<Result<i32, WorkerError>>,
+        done: oneshot::Sender<Result<ExecTerminal, WorkerError>>,
     },
     Stop {
         config: StopConfig,
@@ -224,19 +228,91 @@ fn enqueue_output(
 /// An admitted exec: the completion receiver (the run's exit code), the
 /// live-output receiver the pipe handler drains into `Stdout`/`Stderr` frames,
 /// and the `overflowed` latch the sink sets when it had to drop output because a
-/// slow client let the bounded queue fill. The pipe handler reports a set latch
-/// as a terminal `Error` frame.
+/// slow client let the bounded queue fill. The registration keeps the exec id
+/// reserved until the pipe handler finishes terminal delivery. The pipe handler
+/// reports a set overflow latch as a terminal `Error` frame.
 #[derive(Debug)]
 pub struct ExecStream {
-    pub done: oneshot::Receiver<Result<i32, WorkerError>>,
+    pub done: oneshot::Receiver<Result<ExecTerminal, WorkerError>>,
     pub output: mpsc::Receiver<OutputChunk>,
     pub overflowed: Arc<AtomicBool>,
+    pub(crate) registration: Arc<ExecRegistration>,
+}
+
+pub(crate) type ActiveExecs = Arc<Mutex<HashMap<String, ActiveExec>>>;
+
+#[derive(Debug)]
+pub(crate) struct ActiveExec {
+    run_token: String,
+    cancellation: Weak<AtomicBool>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ExecRegistration {
+    exec_id: String,
+    run_token: String,
+    active_execs: ActiveExecs,
+    cancellation: Arc<AtomicBool>,
+}
+
+impl Drop for ExecRegistration {
+    fn drop(&mut self) {
+        let mut active_execs = self
+            .active_execs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active_execs.get(&self.exec_id).is_some_and(|current| {
+            current.run_token == self.run_token
+                && current
+                    .cancellation
+                    .ptr_eq(&Arc::downgrade(&self.cancellation))
+        }) {
+            active_execs.remove(&self.exec_id);
+        }
+    }
+}
+
+pub(crate) fn register_exec(
+    active_execs: &ActiveExecs,
+    exec_id: &str,
+    run_token: &str,
+    cancellation: &Arc<AtomicBool>,
+) -> Result<ExecRegistration, WorkerError> {
+    let active_exec = ActiveExec {
+        run_token: run_token.to_string(),
+        cancellation: Arc::downgrade(cancellation),
+    };
+    let mut active_execs_guard = active_execs
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match active_execs_guard.entry(exec_id.to_string()) {
+        Entry::Occupied(mut entry) if entry.get().cancellation.upgrade().is_none() => {
+            entry.insert(active_exec);
+        }
+        Entry::Occupied(_) => {
+            return Err(WorkerError::Rejected(anyhow::anyhow!(
+                "exec id {exec_id:?} is already active"
+            )));
+        }
+        Entry::Vacant(entry) => {
+            entry.insert(active_exec);
+        }
+    }
+    drop(active_execs_guard);
+
+    Ok(ExecRegistration {
+        exec_id: exec_id.to_string(),
+        run_token: run_token.to_string(),
+        active_execs: Arc::clone(active_execs),
+        cancellation: Arc::clone(cancellation),
+    })
 }
 
 /// A cheap, clonable handle async tasks use to drive the worker thread.
 #[derive(Clone)]
 pub struct SessionHandle {
     tx: mpsc::UnboundedSender<WorkerCommand>,
+    active_execs: ActiveExecs,
 }
 
 impl SessionHandle {
@@ -280,9 +356,18 @@ impl SessionHandle {
         let sink: OutputSink = Box::new(move |kind, bytes| {
             enqueue_output(&stream_tx, &sink_overflowed, kind, bytes);
         });
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let registration = Arc::new(register_exec(
+            &self.active_execs,
+            &config.exec_id,
+            &config.run_token,
+            &cancellation,
+        )?);
         self.send(WorkerCommand::Exec {
             config,
             sink,
+            cancellation,
+            registration: Arc::clone(&registration),
             admit,
             done,
         })?;
@@ -291,7 +376,23 @@ impl SessionHandle {
             done: done_rx,
             output,
             overflowed,
+            registration,
         })
+    }
+
+    /// Signal an admitted exec without waiting for the apartment-affine worker,
+    /// which is blocked in that exec until the process exits.
+    pub fn cancel_exec(&self, exec_id: &str, run_token: &str) {
+        if let Some(cancellation) = self
+            .active_execs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(exec_id)
+            .filter(|current| current.run_token == run_token)
+            .and_then(|current| current.cancellation.upgrade())
+        {
+            cancellation.store(true, Ordering::Release);
+        }
     }
 
     /// Stop a running container.
@@ -339,6 +440,7 @@ fn worker_gone(_e: oneshot::error::RecvError) -> WorkerError {
 /// map key.
 struct ContainerEntry {
     started: bool,
+    quarantined: bool,
     container: WslcContainerGuard,
 }
 
@@ -428,9 +530,17 @@ impl Worker {
             )
             .map_err(sr_err)?;
 
-            let mut keepalive =
-                ProcessSettings::build_detached(sdk, container_steps::KEEPALIVE_SCRIPT, &[], "")
-                    .map_err(sr_err)?;
+            // Merge keeps the keepalive out of `env -i`, so a container whose
+            // execs never replace an environment does not need `/usr/bin/env`
+            // in its image.
+            let mut keepalive = ProcessSettings::build_detached(
+                sdk,
+                container_steps::KEEPALIVE_SCRIPT,
+                &[],
+                EnvScope::Merge,
+                "",
+            )
+            .map_err(sr_err)?;
 
             container_steps::create_daemon_container(
                 sdk,
@@ -449,6 +559,7 @@ impl Worker {
             sandbox_id.clone(),
             ContainerEntry {
                 started: false,
+                quarantined: false,
                 container,
             },
         );
@@ -469,6 +580,13 @@ impl Worker {
             .containers
             .get_mut(&config.sandbox_id)
             .expect("checked above");
+        if entry.quarantined {
+            return Err(WorkerError::Backend(anyhow::anyhow!(
+                "sandbox {} is quarantined after an exec whose termination could not be \
+                 confirmed; deprovision it before reuse",
+                config.sandbox_id
+            )));
+        }
         // SAFETY: `sdk` is valid and `entry.container` is a live handle.
         unsafe {
             container_steps::start_daemon_container(sdk, entry.container.as_raw(), &mut self.logger)
@@ -485,6 +603,10 @@ impl Worker {
     fn validate_exec(&self, sandbox_id: &str) -> Result<WslcContainer, WorkerError> {
         match self.containers.get(sandbox_id) {
             None => Err(WorkerError::NotProvisioned(sandbox_id.to_string())),
+            Some(entry) if entry.quarantined => Err(WorkerError::Backend(anyhow::anyhow!(
+                "sandbox {sandbox_id} is quarantined after an exec whose termination could not \
+                 be confirmed; deprovision it before reuse"
+            ))),
             Some(entry) if !entry.started => Err(WorkerError::NotStarted(sandbox_id.to_string())),
             Some(entry) => Ok(entry.container.as_raw()),
         }
@@ -498,7 +620,8 @@ impl Worker {
         config: ExecConfig,
         container: WslcContainer,
         sink: OutputSink,
-    ) -> Result<i32, WorkerError> {
+        cancellation: &AtomicBool,
+    ) -> Result<ExecTerminal, WorkerError> {
         let sdk = self
             .sdk
             .as_ref()
@@ -518,42 +641,69 @@ impl Worker {
                 container,
                 &config.script_code,
                 &env,
+                config.env_scope,
                 &config.working_directory,
                 config.timeout_ms,
+                cancellation,
                 Some(sink),
                 &mut self.logger,
             )
         }
         .map_err(sr_err)?;
 
-        if outcome.terminated_unconfirmed {
-            // The process could not be confirmed dead, so the container may
-            // still be running untrusted work and must not be reused for a
-            // later exec. Quarantine it: best-effort delete, then drop the
-            // handle so a subsequent exec fails with "unknown sandbox".
-            if let Some(sdk) = self.sdk.as_ref() {
-                // SAFETY: `sdk` is valid and `container` is a live handle.
-                let _ = unsafe {
-                    container_steps::delete_daemon_container(sdk, container, &mut self.logger)
-                };
+        match outcome.completion {
+            container_steps::ProcessCompletion::TerminationUnconfirmed => {
+                let detail = outcome
+                    .post_launch_error
+                    .map(|error| error.error_message)
+                    .unwrap_or_else(|| "process termination could not be confirmed".to_string());
+                Err(self.quarantine(&config.sandbox_id, container, &detail))
             }
-            self.containers.remove(&config.sandbox_id);
-            return Err(WorkerError::Backend(anyhow::anyhow!(
-                "exec on sandbox {} could not be confirmed terminated; the container was \
-                 quarantined",
-                config.sandbox_id
-            )));
+            container_steps::ProcessCompletion::Confirmed(terminal) => Ok(terminal),
         }
+    }
 
-        if outcome.timed_out {
-            return Err(WorkerError::Backend(anyhow::anyhow!(
-                "exec timed out after {}ms",
-                config.timeout_ms
-            )));
+    fn quarantine(
+        &mut self,
+        sandbox_id: &str,
+        container: WslcContainer,
+        detail: &str,
+    ) -> WorkerError {
+        let delete_result = self.sdk.as_ref().map(|sdk| {
+            // SAFETY: `sdk` is valid and `container` is the live handle stored
+            // for `sandbox_id`.
+            unsafe { container_steps::delete_daemon_container(sdk, container, &mut self.logger) }
+        });
+
+        match delete_result {
+            Some(Ok(())) => {
+                self.containers.remove(sandbox_id);
+                WorkerError::Backend(anyhow::anyhow!(
+                    "exec on sandbox {sandbox_id} could not be confirmed terminated ({detail}); \
+                     the container was quarantined and deleted"
+                ))
+            }
+            Some(Err(delete_error)) => {
+                if let Some(entry) = self.containers.get_mut(sandbox_id) {
+                    entry.quarantined = true;
+                }
+                WorkerError::Backend(anyhow::anyhow!(
+                    "exec on sandbox {sandbox_id} could not be confirmed terminated ({detail}); \
+                     quarantine deletion failed and the sandbox remains blocked until \
+                     deprovision succeeds: {}",
+                    delete_error.error_message
+                ))
+            }
+            None => {
+                if let Some(entry) = self.containers.get_mut(sandbox_id) {
+                    entry.quarantined = true;
+                }
+                WorkerError::Backend(anyhow::anyhow!(
+                    "exec on sandbox {sandbox_id} could not be confirmed terminated ({detail}); \
+                     the sandbox remains quarantined because no active WSLc SDK is available"
+                ))
+            }
         }
-        // outcome.stdout/stderr were captured (and already streamed live via the
-        // sink); the completion reply carries only the exit code.
-        Ok(outcome.exit_code)
     }
 
     fn stop(&mut self, config: StopConfig) -> Result<(), WorkerError> {
@@ -638,6 +788,7 @@ impl Worker {
 /// is received or the command channel closes.
 pub fn spawn() -> Result<SessionHandle> {
     let (tx, mut rx) = mpsc::unbounded_channel::<WorkerCommand>();
+    let active_execs = Arc::new(Mutex::new(HashMap::new()));
 
     std::thread::Builder::new()
         .name("wslc-session-worker".to_string())
@@ -663,6 +814,8 @@ pub fn spawn() -> Result<SessionHandle> {
                     WorkerCommand::Exec {
                         config,
                         sink,
+                        cancellation,
+                        registration: _registration,
                         admit,
                         done,
                     } => {
@@ -673,13 +826,18 @@ pub fn spawn() -> Result<SessionHandle> {
                             Err(e) => {
                                 let _ = admit.send(Err(e));
                             }
+                            Ok(_) if cancellation.load(Ordering::Acquire) => {
+                                if admit.send(Ok(())).is_ok() {
+                                    let _ = done.send(Ok(ExecTerminal::Cancelled));
+                                }
+                            }
                             // Only run if the admission receiver is still there:
                             // if the client handler was dropped before it read
                             // admission, the blocking exec would otherwise starve
                             // every other lifecycle command for its full timeout.
                             Ok(container) if admit.send(Ok(())).is_ok() => {
                                 let sandbox_id = config.sandbox_id.clone();
-                                let outcome = worker.exec(config, container, sink);
+                                let outcome = worker.exec(config, container, sink, &cancellation);
                                 if let Err(orphaned) = done.send(outcome) {
                                     // The client handler is gone (e.g. its
                                     // post-admission Ok write failed) but the run
@@ -713,7 +871,7 @@ pub fn spawn() -> Result<SessionHandle> {
         })
         .map_err(|e| anyhow::anyhow!("spawn WSLc worker thread: {e}"))?;
 
-    Ok(SessionHandle { tx })
+    Ok(SessionHandle { tx, active_execs })
 }
 
 /// RAII guard that keeps the calling thread in the COM MTA for the WSLc SDK.
@@ -804,10 +962,13 @@ mod tests {
         let handle = spawn().unwrap();
         let err = handle
             .exec(ExecConfig {
+                exec_id: "unknown-1".to_string(),
+                run_token: "run-unknown-1".to_string(),
                 sandbox_id: "wslc:does-not-exist".to_string(),
                 script_code: "echo hi".to_string(),
                 working_directory: String::new(),
                 env: Vec::new(),
+                env_scope: EnvScope::Merge,
                 timeout_ms: 0,
             })
             .await
@@ -861,16 +1022,144 @@ mod tests {
         let handle = spawn().unwrap();
         let err = handle
             .exec(ExecConfig {
+                exec_id: "unknown-2".to_string(),
+                run_token: "run-unknown-2".to_string(),
                 sandbox_id: "wslc:does-not-exist".to_string(),
                 script_code: "echo hi".to_string(),
                 working_directory: String::new(),
                 env: Vec::new(),
+                env_scope: EnvScope::Merge,
                 timeout_ms: 0,
             })
             .await
             .unwrap_err();
         assert_eq!(err.kind(), ErrKind::NotProvisioned);
         handle.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn cancel_exec_marks_the_registered_run() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let active_execs = Arc::new(Mutex::new(HashMap::from([(
+            "exec-1".to_string(),
+            ActiveExec {
+                run_token: "run-1".to_string(),
+                cancellation: Arc::downgrade(&cancellation),
+            },
+        )])));
+        let handle = SessionHandle { tx, active_execs };
+
+        handle.cancel_exec("exec-1", "run-1");
+
+        assert!(cancellation.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn delayed_cancellation_does_not_target_reused_exec_id() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let active_execs = Arc::new(Mutex::new(HashMap::new()));
+        let registration =
+            register_exec(&active_execs, "exec-1", "replacement-run", &cancellation).unwrap();
+        let handle = SessionHandle { tx, active_execs };
+
+        handle.cancel_exec("exec-1", "completed-run");
+        assert!(!cancellation.load(Ordering::Acquire));
+
+        handle.cancel_exec("exec-1", "replacement-run");
+        assert!(cancellation.load(Ordering::Acquire));
+        drop(registration);
+    }
+
+    #[test]
+    fn duplicate_live_exec_id_is_rejected_without_replacing_registration() {
+        let active_execs = Arc::new(Mutex::new(HashMap::new()));
+        let first = Arc::new(AtomicBool::new(false));
+        let second = Arc::new(AtomicBool::new(false));
+        let registration = register_exec(&active_execs, "exec-1", "run-1", &first).unwrap();
+
+        let error = register_exec(&active_execs, "exec-1", "run-2", &second).unwrap_err();
+
+        assert_eq!(error.kind(), ErrKind::Rejected);
+        let registered = active_execs
+            .lock()
+            .unwrap()
+            .get("exec-1")
+            .and_then(|entry| entry.cancellation.upgrade())
+            .unwrap();
+        assert!(Arc::ptr_eq(&registered, &first));
+        drop(registration);
+    }
+
+    #[test]
+    fn stale_exec_id_can_be_registered_again() {
+        let stale = Arc::new(AtomicBool::new(false));
+        let active_execs = Arc::new(Mutex::new(HashMap::from([(
+            "exec-1".to_string(),
+            ActiveExec {
+                run_token: "stale-run".to_string(),
+                cancellation: Arc::downgrade(&stale),
+            },
+        )])));
+        drop(stale);
+        let cancellation = Arc::new(AtomicBool::new(false));
+
+        let registration =
+            register_exec(&active_execs, "exec-1", "replacement-run", &cancellation).unwrap();
+
+        let registered = active_execs
+            .lock()
+            .unwrap()
+            .get("exec-1")
+            .and_then(|entry| entry.cancellation.upgrade())
+            .unwrap();
+        assert!(Arc::ptr_eq(&registered, &cancellation));
+        drop(registration);
+        assert!(!active_execs.lock().unwrap().contains_key("exec-1"));
+    }
+
+    #[test]
+    fn older_registration_does_not_remove_replacement() {
+        let active_execs = Arc::new(Mutex::new(HashMap::new()));
+        let first = Arc::new(AtomicBool::new(false));
+        let first_registration = register_exec(&active_execs, "exec-1", "run-1", &first).unwrap();
+        let second = Arc::new(AtomicBool::new(false));
+        active_execs.lock().unwrap().insert(
+            "exec-1".to_string(),
+            ActiveExec {
+                run_token: "run-2".to_string(),
+                cancellation: Arc::downgrade(&second),
+            },
+        );
+
+        drop(first_registration);
+
+        let registered = active_execs
+            .lock()
+            .unwrap()
+            .get("exec-1")
+            .and_then(|entry| entry.cancellation.upgrade())
+            .unwrap();
+        assert!(Arc::ptr_eq(&registered, &second));
+    }
+
+    #[test]
+    fn cancelling_unknown_or_stale_exec_id_is_a_no_op() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let stale = Arc::new(AtomicBool::new(false));
+        let active_execs = Arc::new(Mutex::new(HashMap::from([(
+            "stale".to_string(),
+            ActiveExec {
+                run_token: "stale-run".to_string(),
+                cancellation: Arc::downgrade(&stale),
+            },
+        )])));
+        drop(stale);
+        let handle = SessionHandle { tx, active_execs };
+
+        handle.cancel_exec("unknown", "unknown-run");
+        handle.cancel_exec("stale", "stale-run");
     }
 
     #[tokio::test]
@@ -939,10 +1228,13 @@ mod tests {
 
         let mut exec = handle
             .exec(ExecConfig {
+                exec_id: "full-lifecycle".to_string(),
+                run_token: "full-lifecycle-run".to_string(),
                 sandbox_id: id.clone(),
                 script_code: "echo hi".to_string(),
                 working_directory: String::new(),
                 env: Vec::new(),
+                env_scope: EnvScope::Merge,
                 timeout_ms: 30_000,
             })
             .await
@@ -955,7 +1247,7 @@ mod tests {
             }
         }
         let code = exec.done.await.unwrap().unwrap();
-        assert_eq!(code, 0);
+        assert_eq!(code, ExecTerminal::Exited(0));
         assert_eq!(String::from_utf8_lossy(&stdout).trim(), "hi");
 
         handle
@@ -971,6 +1263,116 @@ mod tests {
             .unwrap();
         assert_eq!(count(&handle).await, 0);
 
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a WSL2 host with alpine:latest pre-pulled into the daemon session cache"]
+    async fn cancelled_queued_exec_never_starts_process() {
+        let handle = spawn().unwrap();
+        let id = handle
+            .provision(ProvisionConfig {
+                image: "alpine:latest".to_string(),
+                image_tar_path: None,
+                volumes: Vec::new(),
+                network: Default::default(),
+            })
+            .await
+            .unwrap();
+        handle
+            .start(StartConfig {
+                sandbox_id: id.clone(),
+            })
+            .await
+            .unwrap();
+
+        let blocker = handle
+            .exec(ExecConfig {
+                exec_id: "queue-blocker".to_string(),
+                run_token: "queue-blocker-run".to_string(),
+                sandbox_id: id.clone(),
+                script_code: "sleep 2".to_string(),
+                working_directory: String::new(),
+                env: Vec::new(),
+                env_scope: EnvScope::Merge,
+                timeout_ms: 30_000,
+            })
+            .await
+            .unwrap();
+
+        let queued_handle = handle.clone();
+        let queued_id = id.clone();
+        let queued = tokio::spawn(async move {
+            queued_handle
+                .exec(ExecConfig {
+                    exec_id: "cancelled-queued".to_string(),
+                    run_token: "cancelled-queued-run".to_string(),
+                    sandbox_id: queued_id,
+                    script_code: "touch /tmp/mxc-cancelled-queued-marker".to_string(),
+                    working_directory: String::new(),
+                    env: Vec::new(),
+                    env_scope: EnvScope::Merge,
+                    timeout_ms: 30_000,
+                })
+                .await
+        });
+
+        for _ in 0..100 {
+            if handle
+                .active_execs
+                .lock()
+                .unwrap()
+                .contains_key("cancelled-queued")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            handle
+                .active_execs
+                .lock()
+                .unwrap()
+                .contains_key("cancelled-queued"),
+            "queued exec was not registered"
+        );
+        handle.cancel_exec("cancelled-queued", "cancelled-queued-run");
+        assert_eq!(
+            blocker.done.await.unwrap().unwrap(),
+            ExecTerminal::Exited(0)
+        );
+
+        let queued = queued.await.unwrap().unwrap();
+        assert_eq!(queued.done.await.unwrap().unwrap(), ExecTerminal::Cancelled);
+
+        let marker_check = handle
+            .exec(ExecConfig {
+                exec_id: "marker-check".to_string(),
+                run_token: "marker-check-run".to_string(),
+                sandbox_id: id.clone(),
+                script_code: "test ! -e /tmp/mxc-cancelled-queued-marker".to_string(),
+                working_directory: String::new(),
+                env: Vec::new(),
+                env_scope: EnvScope::Merge,
+                timeout_ms: 30_000,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            marker_check.done.await.unwrap().unwrap(),
+            ExecTerminal::Exited(0)
+        );
+
+        handle
+            .stop(StopConfig {
+                sandbox_id: id.clone(),
+            })
+            .await
+            .unwrap();
+        handle
+            .deprovision(DeprovisionConfig { sandbox_id: id })
+            .await
+            .unwrap();
         handle.shutdown().await.unwrap();
     }
 }

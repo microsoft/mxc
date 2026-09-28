@@ -13,7 +13,6 @@ import {
   EveryBackendConfigIsOptional,
   ExecConfigFor,
   ExecResult,
-  IsolationSessionExecConfig,
   ProvisionConfigFor,
   ProvisionMetadataFor,
   ProvisionResult,
@@ -47,6 +46,12 @@ export interface StateAwareStreamingOptions {
   /** Authorizes a backend that is experimental in the selected contract. */
   experimental?: boolean;
 }
+
+const PIPED_EXEC_BACKENDS = [
+  'isolation_session',
+  'wslc',
+] as const satisfies readonly StateAwareContainmentBackend[];
+type PipedExecBackend = typeof PIPED_EXEC_BACKENDS[number];
 
 type StateAwareOptionSupport = 'supported' | 'unsupported-when-true' | 'unsupported-when-defined';
 
@@ -82,15 +87,16 @@ function assertStateAwareOptions(
   }
 }
 
-function assertNativeExecBackend(
+function assertPipedExecBackend(
   apiName: string,
   sandboxId: SandboxId<StateAwareContainmentBackend>,
 ): void {
   const backend = backendForSandboxId(sandboxId);
-  if (backend !== 'isolation_session') {
+  const supportedBackends: readonly StateAwareContainmentBackend[] = PIPED_EXEC_BACKENDS;
+  if (!supportedBackends.includes(backend)) {
     throw new MxcError(
       'unsupported_containment',
-      `${apiName} supports native execution only for IsolationSession; ${backend} does not expose piped native exec streams.`,
+      `${apiName} requires piped native exec streams; ${backend} does not expose them.`,
     );
   }
 }
@@ -219,7 +225,7 @@ function spawnStateAwareExecProcess<C extends StateAwareContainmentBackend>(
   apiName: string,
 ): MxcSandboxProcess {
   assertStateAwareOptions(apiName, options);
-  assertNativeExecBackend(apiName, sandboxId);
+  assertPipedExecBackend(apiName, sandboxId);
   return spawnStateAwareBindingSandboxProcess(
     JSON.stringify(buildExecEnvelope(sandboxId, config)),
     options.experimental === true,
@@ -330,13 +336,13 @@ export async function startSandbox<C extends StateAwareContainmentBackend>(
 }
 
 /**
- * Streams a script execution inside a started IsolationSession over Node
+ * Streams a script execution inside a started IsolationSession or WSLC sandbox over Node
  * pipes, returning an owning `MxcSandboxProcess` for waiting, termination,
  * stream access, and disposal.
  */
-export function execInSandbox(
-  sandboxId: SandboxId<'isolation_session'>,
-  config: IsolationSessionExecConfig,
+export function execInSandbox<C extends PipedExecBackend>(
+  sandboxId: SandboxId<C>,
+  config: ExecConfigFor<C>,
   options: StateAwareStreamingOptions = {},
 ): MxcSandboxProcess {
   const uncheckedOptions = options as SandboxSpawnOptions;
@@ -365,21 +371,17 @@ export function execInSandbox(
  * on script completion. Native dispatch failures reject with `MxcError`;
  * workload failures are returned through the process exit code and streams.
  */
-export async function execInSandboxAsync<C extends StateAwareContainmentBackend>(
+export async function execInSandboxAsync<C extends PipedExecBackend>(
   sandboxId: SandboxId<C>,
   config: ExecConfigFor<C>,
-  options: SandboxSpawnOptions & { dryRun: true },
-): Promise<ExecResult>;
-export async function execInSandboxAsync(
-  sandboxId: SandboxId<'isolation_session'>,
-  config: IsolationSessionExecConfig,
   options?: SandboxSpawnOptions,
 ): Promise<ExecResult>;
-export async function execInSandboxAsync<C extends StateAwareContainmentBackend>(
+export async function execInSandboxAsync<C extends PipedExecBackend>(
   sandboxId: SandboxId<C>,
   config: ExecConfigFor<C>,
   options: SandboxSpawnOptions = {},
 ): Promise<ExecResult> {
+  assertPipedExecBackend('execInSandboxAsync', sandboxId);
   const envelope = buildExecEnvelope(sandboxId, config);
   if (options.dryRun === true) {
     const responseJson = await runStateAwareEnvelopeRequest(

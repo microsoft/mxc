@@ -6,7 +6,7 @@ set -euo pipefail
 # explicitly rather than reporting a false-success placeholder job.
 
 usage() {
-    echo "Usage: $0 <bubblewrap|lxc|microvm|hyperlight|seatbelt> <binary-directory>" >&2
+    echo "Usage: $0 <bubblewrap|lxc|microvm|seatbelt> <binary-directory>" >&2
 }
 
 if [[ $# -ne 2 ]]; then
@@ -26,12 +26,6 @@ case "$backend" in
         # Keep unwired commands explicit so accidental activation fails loudly.
         # Future test script: run_microvm_tests.sh
         echo "The MicroVM CI backend is not wired to an artifact-only Linux test entry point yet." >&2
-        exit 2
-        ;;
-    hyperlight)
-        # Keep unwired commands explicit so accidental activation fails loudly.
-        # Future test script: run_hyperlight_tests.sh
-        echo "The Hyperlight CI backend is not wired to an existing test entry point yet." >&2
         exit 2
         ;;
     bubblewrap)

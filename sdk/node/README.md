@@ -94,6 +94,13 @@ as directional default-deny for egress, ingress, and host loopback. See the
 [Sandbox Policy 0.8.0 specification](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.8.0/policy.md)
 for the complete cross-platform authoring shape.
 
+For legacy `SandboxPolicy` authoring, a non-empty `allowedHosts` list selects a
+block default even when `allowOutbound` is true, so the list narrows outbound
+access rather than forming the invalid `allow` + allowlist wire combination.
+With no allowlist, `allowOutbound: true` selects an allow default and
+`blockedHosts` expresses allow-all-except-these. A blocklist without either an
+allowlist or `allowOutbound` is rejected.
+
 Model 1 permits direct connections selected by IP/CIDR, protocol, and port
 rules; it does not configure an application-layer proxy. Model 2 denies direct
 internet access and supplies a loopback HTTP/S proxy endpoint. Backend-specific
@@ -350,7 +357,7 @@ console.log(result.stdout);
 | `seatbelt` | `process` | macOS | `0.7.0-alpha` | ✅ | [`docs/seatbelt/seatbelt-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/seatbelt/seatbelt-backend.md) |
 | `windows_sandbox` | `vm` | Windows | `0.10.0-alpha` | Experimental | [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) |
 | `microvm` | `microvm` | Windows | `0.10.0-alpha` | Experimental | [`docs/nanvix-microvm/nanvix.md`](https://github.com/microsoft/mxc/blob/main/docs/nanvix-microvm/nanvix.md) — MicroVM via NanVix on Windows Hypervisor Platform |
-| `hyperlight` | (concrete only) | Windows x64 / Linux x64 | `0.10.0-alpha` | Experimental | No dedicated guide |
+| `hyperlight` | (concrete only) | Windows x64 / Linux x64 | `0.10.0-alpha` | Experimental | [`docs/hyperlight/hyperlight-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/hyperlight/hyperlight-backend.md) — Hyperlight + Unikraft micro-VM on KVM / WHP; `hyperlight.runtime` selects the guest image: `agent` (default), `python`, `python-shell`, `node`, `bash` or `dotnet-jit` |
 | `wslc` | (concrete only) | Windows | `0.9.0-alpha` | Stable | [`docs/wsl/wsl-container-getting-started.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wsl-container-getting-started.md) |
 | `isolation_session` | (concrete only) | Windows | `0.9.0-alpha` | Stable | [`docs/isolation-session/oneshot.md`](https://github.com/microsoft/mxc/blob/main/docs/isolation-session/oneshot.md) |
 
@@ -410,7 +417,7 @@ capability names are reserved and must not be added directly to
 
 For long-lived sandboxes where you provision once, exec many times, and tear down at the end (e.g. agentic loops), use the state-aware lifecycle.
 
-> **Backend support:** the state-aware lifecycle is currently implemented for `isolation_session`, `windows_sandbox`, and `wslc` (all Windows-only). Node live and buffered exec require native piped streams and currently support only IsolationSession; `execInSandboxAsync(..., { dryRun: true })` can validate exec requests for all three backends. IsolationSession and WSLC do not require an experimental opt-in; Windows Sandbox does. The one-shot spawn APIs (`spawnSandbox` / `spawnSandboxFromConfig`) are the supported execution path for every other backend.
+> **Backend support:** the state-aware lifecycle is currently implemented for `isolation_session`, `windows_sandbox`, and `wslc` (all Windows-only). Node exposes live, buffered, and dry-run exec only for backends that support native piped execution: IsolationSession and WSLC. Windows Sandbox supports provision, start, stop, and deprovision through Node, but its exec APIs are unavailable because the backend cannot return native pipes. IsolationSession and WSLC do not require an experimental opt-in; Windows Sandbox does. The one-shot spawn APIs (`spawnSandbox` / `spawnSandboxFromConfig`) are the supported execution path for every other backend.
 
 ```typescript
 import {
@@ -452,9 +459,9 @@ remain available for every state-aware backend.
 
 `windows_sandbox` follows the same provision/start/stop/deprovision shape
 (substitute the containment string and provide `filesystem.readwritePaths` /
-`readonlyPaths` at provision if needed). Node can dry-run its exec requests,
-but live or buffered execution is not available because the backend does not
-expose piped native exec streams. See
+`readonlyPaths` at provision if needed). Node does not expose its exec phase,
+including dry-run, because the backend cannot execute through the native piped
+contract used by `execInSandbox` and `execInSandboxAsync`. See
 [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md)
 for the per-phase config matrix.
 
@@ -473,9 +480,8 @@ const provisioned = await provisionSandbox('wslc', {
 
 Provision may also supply `filesystem.readwritePaths` / `readonlyPaths`
 (mounted for the sandbox's lifetime) and a backend-specific `image` /
-`imageTarPath`. Node can dry-run WSLC exec requests, including
-`runtimeConfig.networkProxy`, but live or buffered execution is not available
-because WSLC does not expose piped native exec streams.
+`imageTarPath`. Node live and buffered WSLC exec support stdout/stderr streaming,
+timeouts, and cancellation. WSLC does not currently expose process stdin.
 
 IsolationSession state-aware requests default to published `0.9.0-alpha`.
 Windows Sandbox requests default to development `0.10.0-alpha`; WSLC requests
@@ -628,9 +634,8 @@ spawnSandboxAsync(script, policy, ...) → Promise<{ stdout, stderr, exitCode }>
 // optional otherwise (windows_sandbox, wslc).
 provisionSandbox(containment, config, options?)  → Promise<ProvisionResult>
 startSandbox(sandboxId, config?, options?)       → Promise<StartResult>
-execInSandbox(isolationSessionId, config, options) → MxcSandboxProcess // streaming
-execInSandboxAsync(isolationSessionId, config, options?) → Promise<ExecResult>
-execInSandboxAsync(sandboxId, config, { dryRun: true }) → Promise<ExecResult>
+execInSandbox(sandboxId, config, options?)        → MxcSandboxProcess // streaming
+execInSandboxAsync(sandboxId, config, options?)   → Promise<ExecResult>
 stopSandbox(sandboxId, config?, options?)        → Promise<StopResult>
 deprovisionSandbox(sandboxId, config?, options?) → Promise<DeprovisionResult>
 
@@ -641,7 +646,7 @@ getUserProfilePolicy()                  → FilesystemPolicyResult
 getTemporaryFilesPolicy(env?)           → FilesystemPolicyResult
 
 // Telemetry consent (Windows-only; see Telemetry Consent section below)
-queryTelemetryConsentAsync()      → Promise<{ storedState, effectiveState, needsPrompt, policy, error? }>
+queryTelemetryConsentAsync()      → Promise<{ state, storedState, effectiveState, needsPrompt, policy, error? }>
 requestTelemetryConsent(presenter, locale?) → Promise<TelemetryConsentOutcome>
 withdrawTelemetryConsentAsync()   → Promise<TelemetryConsentOutcome>
 
@@ -717,10 +722,10 @@ telemetry remains off. On non-Windows hosts requests and withdrawals return
 `notApplicable` without invoking the presenter.
 
 `queryTelemetryConsentAsync()` fails closed to `'undetermined'` rather than
-`'granted'`. Its `error` field is present when the command fails or returns an
-invalid response. A valid native fail-closed response can return
-`'undetermined'` or a blocked policy without `error`; any accompanying native
-diagnostic is reported once through `console.warn`:
+`'granted'`. Its `error` field is present when the native query fails or
+returns an invalid response, and the SDK writes a one-time diagnostic to the
+process's standard error stream. A valid native fail-closed response can return
+`'undetermined'` or a blocked policy without `error` or diagnostic output:
 
 ```typescript
 const { effectiveState, storedState, needsPrompt, policy, error } =

@@ -37,6 +37,7 @@ use wxc_common::mxc_error::MxcError;
 use wxc_common::validator::NetworkPolicySupport;
 
 use crate::policy_mapping::validate_denied_path_overlap;
+use crate::process_env::EnvScope;
 
 const ERR_FILESYSTEM_IMMUTABLE: &str =
     "filesystem policy (readwritePaths / readonlyPaths / deniedPaths and processContainer.filesystem.enumeratePaths) is bound to the provision \
@@ -71,6 +72,14 @@ const ERR_ENFORCEMENT_MODE: &str =
      no CAP_NET_ADMIN for in-container firewall rules, and VM-level enforcement is not available \
      without breaking other security guarantees (e.g. MDE). Remove the field or set it to \
      'capabilities' — WSLc's network is all-or-nothing at the container level";
+const ERR_PROXY_CREDENTIALS_IN_ARGV: &str =
+    "WSLc: runtimeConfig.networkProxy (legacy network.proxy) must not carry credentials when \
+     process.env is supplied without process.inheritDefaultEnv. That combination replaces the \
+     container image's environment, which WSLc performs by prefixing the command line with \
+     'env -i NAME=VALUE', so the proxy URL becomes a process argument readable through \
+     /proc/<pid>/cmdline for the lifetime of the command. Set process.inheritDefaultEnv to keep \
+     the URL out of the command line, use a proxy that needs no inline credentials, or supply \
+     them to the proxy itself";
 
 /// WSLc enforces these axes only as a single all-or-nothing networking mode.
 /// `validate_directional_network` rejects every independently filtered posture.
@@ -178,7 +187,29 @@ pub(crate) fn validate_exec_policy(request: &ExecutionRequest) -> Result<(), Mxc
     if request.policy.network_proxy.is_enabled() && exec_proxy_url(request).is_none() {
         return Err(MxcError::policy_validation(ERR_PROXY_URL_FORM));
     }
+    reject_proxy_credentials_in_argv(request)?;
     Ok(())
+}
+
+/// Refuse a credential-bearing proxy URL for a request that replaces the image
+/// environment.
+///
+/// [`EnvScope::Replace`] carries every entry as a command-line argument, and
+/// `apply_cooperative_proxy_env` puts the configured URL among them, so the
+/// credential would be readable through `/proc/<pid>/cmdline` while the command
+/// runs. The other scopes leave the entries with the SDK's environment setter,
+/// which argv never sees.
+pub(crate) fn reject_proxy_credentials_in_argv(request: &ExecutionRequest) -> Result<(), MxcError> {
+    if EnvScope::of(request) != EnvScope::Replace {
+        return Ok(());
+    }
+
+    match exec_proxy_url(request) {
+        Some(url) if wxc_common::proxy_env::proxy_url_has_credentials(url) => {
+            Err(MxcError::policy_validation(ERR_PROXY_CREDENTIALS_IN_ARGV))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// The routable proxy URL to inject at exec, or `None` when the proxy is
@@ -289,6 +320,32 @@ mod tests {
         ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8888)),
             builtin_test_server: false,
+        }
+    }
+
+    fn credential_proxy() -> ProxyConfig {
+        ProxyConfig {
+            address: Some(ProxyAddress::from_url(
+                "http://alice:hunter2@proxy.example:8080",
+                "proxy.example".to_string(),
+                8080,
+            )),
+            builtin_test_server: false,
+        }
+    }
+
+    fn credential_proxy_request(
+        env: Option<Vec<&str>>,
+        inherit_default_env: bool,
+    ) -> ExecutionRequest {
+        ExecutionRequest {
+            policy: ContainerPolicy {
+                network_proxy: credential_proxy(),
+                ..Default::default()
+            },
+            env: env.map(|e| e.into_iter().map(String::from).collect()),
+            inherit_default_env,
+            ..Default::default()
         }
     }
 
@@ -730,5 +787,57 @@ mod tests {
             let err = validate_provision_policy(&request_with_policy(policy)).unwrap_err();
             assert_eq!(err.code, MxcErrorCode::PolicyValidation);
         }
+    }
+
+    #[test]
+    fn a_replaced_environment_refuses_a_credential_bearing_proxy_url() {
+        let request = credential_proxy_request(Some(vec!["FOO=bar"]), false);
+
+        let err = reject_proxy_credentials_in_argv(&request).unwrap_err();
+        assert_policy_validation(err.clone(), "must not carry credentials");
+        assert!(
+            !err.message.contains("hunter2"),
+            "the rejection must not repeat the password: {:?}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn an_environment_the_sdk_applies_accepts_a_credential_bearing_proxy_url() {
+        // These reach the container through the SDK's environment setter, which
+        // never puts a value on the command line.
+        for (env, inherit_default_env) in [
+            (None, false),
+            (None, true),
+            (Some(vec!["FOO=bar"]), true),
+            (Some(vec![]), true),
+        ] {
+            let request = credential_proxy_request(env, inherit_default_env);
+            assert!(reject_proxy_credentials_in_argv(&request).is_ok());
+        }
+    }
+
+    #[test]
+    fn a_replaced_environment_accepts_a_proxy_url_without_credentials() {
+        let request = ExecutionRequest {
+            policy: ContainerPolicy {
+                network_proxy: url_proxy(),
+                ..Default::default()
+            },
+            env: Some(vec!["FOO=bar".to_string()]),
+            ..Default::default()
+        };
+
+        assert!(reject_proxy_credentials_in_argv(&request).is_ok());
+    }
+
+    #[test]
+    fn the_exec_phase_refuses_a_credential_bearing_proxy_url_in_a_replaced_environment() {
+        let request = credential_proxy_request(Some(vec!["FOO=bar"]), false);
+
+        assert_policy_validation(
+            validate_exec_policy(&request).unwrap_err(),
+            "must not carry credentials",
+        );
     }
 }

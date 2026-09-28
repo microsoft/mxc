@@ -24,6 +24,71 @@ use crate::signal_cleanup;
 
 const HOSTS_PIN_MARKER: &str = "#mxc-proxy-pin";
 
+/// `PATH` for the contained child, from schema 0.9.
+///
+/// The script runs with `lxc-attach` in clear-env mode, which supplies a small
+/// baseline of its own. Setting `PATH` explicitly makes command resolution the
+/// same on every distribution instead of depending on the liblxc default, and
+/// names the `sbin` directories so tools kept there resolve on RHEL too.
+const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/// `TERM` for the contained child. Curses-based tools error out when it is
+/// unset; it does not make a tool believe it has a terminal, which is `isatty`.
+const DEFAULT_TERM: &str = "xterm-256color";
+
+/// The directory the child is actually started in, if any.
+///
+/// [`LxcContainer::attach_run`] wraps the command in a `cd` for exactly this
+/// value and [`default_env`] points `HOME` at it, so the two cannot name
+/// different directories — `lxc-attach` starts at the container root, so a
+/// relative `process.cwd` would otherwise leave `HOME` naming a different
+/// directory than the one the child landed in. Normalizing against the
+/// container root is what makes them agree, so it is gated on the schema that
+/// introduced `HOME`; below 0.9 the caller's spelling reaches `cd` untouched.
+///
+/// A policy grant is deliberately *not* consulted: with `process.cwd` omitted
+/// the child starts at the container root, so treating a grant as the start
+/// directory would put `HOME` somewhere it never went.
+fn start_directory(request: &ExecutionRequest) -> Option<String> {
+    Some(request.working_directory.as_str())
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| {
+            if request.supplies_default_env() {
+                wxc_common::models::sandbox_absolute_path(dir)
+            } else {
+                dir.to_string()
+            }
+        })
+}
+
+/// The default environment, from schema 0.9: `PATH`, `TERM`, and -- when one
+/// resolves -- `HOME`.
+///
+/// `HOME` names the directory the child actually runs in, so it is a path the
+/// container has rather than a host path that was never mounted. With no start
+/// directory it is left unset: a policy grant can bind a host path over the
+/// container's `/tmp`, and a reused container keeps whatever its image left
+/// there, so a `/tmp` fallback would not be a private home.
+fn default_env(request: &ExecutionRequest) -> Vec<(String, String)> {
+    let mut entries = vec![("PATH".to_string(), DEFAULT_PATH.to_string())];
+
+    if let Some(home) = start_directory(request) {
+        entries.push(("HOME".to_string(), home));
+    }
+
+    entries.push(("TERM".to_string(), DEFAULT_TERM.to_string()));
+    entries
+}
+
+/// The entries the child should get, as `KEY=VALUE` strings.
+///
+/// The state dispatch and overlay merge are shared; see
+/// [`wxc_common::default_env::resolve_env`]. Below 0.9 the caller's entries are
+/// passed through untouched and the `lxc-attach` baseline is the only default.
+fn resolved_env(request: &ExecutionRequest) -> Vec<String> {
+    wxc_common::default_env::resolve_env(request, || default_env(request))
+}
+
 /// The `/etc/hosts` rewrites are short shell commands and must not inherit the script timeout.
 const HOSTS_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -552,14 +617,14 @@ impl LxcScriptRunner {
             Some(Duration::from_millis(u64::from(request.script_timeout)))
         };
         let _ = writeln!(logger, "Executing script inside container...");
-        let mut exec_env = request.env_entries().to_vec();
+        let mut exec_env = resolved_env(request);
         wxc_common::proxy_env::apply_proxy_env(&mut exec_env, &request.policy.network_proxy);
 
         // An empty env makes `lxc-attach` inherit the host process
         // environment, proxy variables and credentials included.
         let result = container.attach_run(
             &request.script_code,
-            &request.working_directory,
+            start_directory(request).unwrap_or_default().as_str(),
             &exec_env,
             true,
             timeout,
@@ -938,6 +1003,177 @@ mod tests {
             ContainerFirewall::Absent,
             "a run with no firewall must not be confined"
         );
+    }
+
+    /// `process.env` resolution, which schema 0.9 gave a default block.
+    mod env {
+        use super::*;
+        use wxc_common::models::DefaultEnvCompatibility;
+
+        fn request(compatibility: DefaultEnvCompatibility) -> ExecutionRequest {
+            ExecutionRequest {
+                default_env_compatibility: compatibility,
+                ..Default::default()
+            }
+        }
+
+        fn value<'a>(entries: &'a [String], key: &str) -> Option<&'a str> {
+            entries
+                .iter()
+                .find_map(|kv| kv.strip_prefix(&format!("{key}=")))
+        }
+
+        #[test]
+        fn below_0_9_the_caller_env_passes_through_untouched() {
+            // Pre-0.9 the only default is whatever `lxc-attach` supplies.
+            let mut r = request(DefaultEnvCompatibility::LegacyCompatible);
+            r.env = None;
+            assert!(resolved_env(&r).is_empty());
+
+            r.env = Some(vec!["FOO=bar".into()]);
+            assert_eq!(resolved_env(&r), vec!["FOO=bar".to_string()]);
+        }
+
+        /// A direct typed SDK request that named no contract takes the current
+        /// behavior.
+        #[test]
+        fn a_direct_sdk_request_gets_the_default_block() {
+            let r = ExecutionRequest::default();
+            assert_eq!(value(&resolved_env(&r), "PATH"), Some(DEFAULT_PATH));
+        }
+
+        #[test]
+        fn an_omitted_env_gets_the_default_block() {
+            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+            r.env = None;
+            r.working_directory = "/workspace".into();
+            let entries = resolved_env(&r);
+            assert_eq!(value(&entries, "PATH"), Some(DEFAULT_PATH));
+            assert_eq!(value(&entries, "HOME"), Some("/workspace"));
+            assert_eq!(value(&entries, "TERM"), Some(DEFAULT_TERM));
+        }
+
+        #[test]
+        fn the_default_path_covers_sbin() {
+            for dir in ["/usr/sbin", "/sbin", "/usr/bin", "/bin"] {
+                assert!(
+                    DEFAULT_PATH.split(':').any(|entry| entry == dir),
+                    "{dir} must be on the default PATH"
+                );
+            }
+        }
+
+        #[test]
+        fn an_explicitly_empty_env_stays_empty() {
+            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+            r.env = Some(vec![]);
+            assert!(resolved_env(&r).is_empty());
+        }
+
+        #[test]
+        fn a_supplied_env_is_used_verbatim() {
+            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+            r.env = Some(vec!["FOO=bar".into()]);
+            assert_eq!(resolved_env(&r), vec!["FOO=bar".to_string()]);
+        }
+
+        #[test]
+        fn inherit_default_env_layers_over_the_default_block() {
+            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+            r.env = Some(vec!["FOO=bar".into(), "PATH=/only/mine".into()]);
+            r.inherit_default_env = true;
+            let entries = resolved_env(&r);
+
+            assert_eq!(value(&entries, "FOO"), Some("bar"));
+            assert_eq!(value(&entries, "TERM"), Some(DEFAULT_TERM));
+            // Replaced, not appended: `lxc-attach` takes the last -v for a
+            // name, so a duplicate would silently depend on ordering.
+            assert_eq!(value(&entries, "PATH"), Some("/only/mine"));
+            assert_eq!(
+                entries.iter().filter(|kv| kv.starts_with("PATH=")).count(),
+                1
+            );
+        }
+
+        #[test]
+        fn home_follows_the_directory_the_child_starts_in() {
+            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+            r.env = None;
+            r.working_directory = "/workspace".into();
+            assert_eq!(value(&resolved_env(&r), "HOME"), Some("/workspace"));
+        }
+
+        #[test]
+        fn a_relative_start_directory_is_anchored_to_the_container_root() {
+            for (cwd, expected) in [
+                ("work", "/work"),
+                ("./work", "/work"),
+                ("a/../b", "/b"),
+                ("/x/../y/./z", "/y/z"),
+            ] {
+                let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+                r.env = None;
+                r.working_directory = cwd.into();
+                assert_eq!(value(&resolved_env(&r), "HOME"), Some(expected));
+                assert_eq!(start_directory(&r).as_deref(), Some(expected));
+            }
+        }
+
+        #[test]
+        fn below_0_9_a_relative_start_directory_reaches_cd_untouched() {
+            for cwd in ["work", "./work", "a/../b"] {
+                let mut r = request(DefaultEnvCompatibility::LegacyCompatible);
+                r.working_directory = cwd.into();
+                assert_eq!(start_directory(&r).as_deref(), Some(cwd), "cwd {cwd:?}");
+            }
+        }
+
+        /// A policy grant is not a working directory: with `process.cwd`
+        /// omitted the child starts at the container root, so a granted host
+        /// directory -- which may not even be mounted -- must not become its
+        /// `HOME`.
+        #[test]
+        fn a_policy_grant_alone_does_not_become_home() {
+            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+            r.env = None;
+            r.working_directory = String::new();
+            // A real directory, so the shared resolver's `is_dir` probe would
+            // accept it if `HOME` consulted the policy.
+            r.policy.readwrite_paths = vec![std::env::temp_dir().display().to_string()];
+
+            assert_eq!(value(&resolved_env(&r), "HOME"), None);
+            assert_eq!(start_directory(&r), None);
+        }
+
+        /// `HOME` and the directory handed to `attach_run` come from one
+        /// resolution, so they cannot name different directories.
+        #[test]
+        fn home_and_the_attach_directory_agree() {
+            for cwd in ["", "/workspace", "work", "./work", "a/../b", "/x/../y/./z"] {
+                let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+                r.env = None;
+                r.working_directory = cwd.into();
+                assert_eq!(
+                    value(&resolved_env(&r), "HOME"),
+                    start_directory(&r).as_deref(),
+                    "HOME must name the directory the child starts in (cwd {cwd:?})"
+                );
+            }
+        }
+
+        #[test]
+        fn a_caller_entry_without_a_value_is_dropped_by_the_merge() {
+            let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+            r.env = Some(vec!["FEATURE_FLAG".into(), "FOO=bar".into()]);
+
+            // Verbatim: carried through, dropped when `lxc-attach` args build.
+            assert!(resolved_env(&r).contains(&"FEATURE_FLAG".to_string()));
+
+            r.inherit_default_env = true;
+            let inherited = resolved_env(&r);
+            assert!(!inherited.iter().any(|kv| kv.starts_with("FEATURE_FLAG")));
+            assert_eq!(value(&inherited, "FOO"), Some("bar"));
+        }
     }
 
     #[test]

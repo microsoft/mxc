@@ -23,17 +23,13 @@ use isolation_session_bindings::bindings::{IsoSessionError, IsoSessionResult};
 /// telemetry.
 pub(super) mod op {
     pub(crate) const CO_INCREMENT_MTA_USAGE: &str = "Com.CoIncrementMTAUsage";
-    pub(crate) const CO_GET_APARTMENT_TYPE: &str = "Com.CoGetApartmentType";
 
     pub(crate) const ACTIVATE: &str = "IsoSessionOps.ActivateInstance";
-    /// The app-scoped provisioning overload, preferred when the host advertises
-    /// `IsoSessionFeature::AppScopedRegistration`.
     pub(crate) const ADD_USER: &str = "IsoSessionOps.AddUserAsync2";
-    /// The legacy provisioning overload, used on hosts that do not support the
-    /// app-scoped one. Reported instead of [`ADD_USER`] so telemetry attributes
-    /// a failure to the overload actually invoked.
     pub(crate) const ADD_USER_LEGACY: &str = "IsoSessionOps.AddUserAsync";
+    pub(crate) const ADD_USER_DEDUCED: &str = "IsoSessionOps.AddUserAsync3";
     pub(crate) const START_SESSION: &str = "IsoSessionOps.StartSessionAsync";
+    pub(crate) const START_SESSION_DEDUCED: &str = "IsoSessionOps.StartSessionAsync2";
     pub(crate) const RUN_PROCESS: &str = "IsoSessionOps.RunProcessWithOptionsAsync";
     pub(crate) const STOP_SESSION: &str = "IsoSessionOps.StopSessionAsync";
     pub(crate) const REMOVE_USER: &str = "IsoSessionOps.RemoveUserAsync";
@@ -322,16 +318,16 @@ pub(super) fn activation_error(code: u32, detail: &str) -> IsolationSessionError
     ))
 }
 
-/// The refusal for a caller already in a single-threaded apartment.
-///
-/// The apartment query succeeded and no API call was in flight, so the refusal
-/// names no operation and carries no status.
-pub(super) fn sta_refusal() -> IsolationSessionError {
+/// The refusal for a caller whose impersonation token cannot be carried onto
+/// the thread that makes the call.
+pub(super) fn identity_refusal(err: windows_core::Error) -> IsolationSessionError {
     IsolationSessionError::Lifecycle(LifecycleFailure::Refused {
-        message: "this thread is in a single-threaded apartment, where the lifecycle deadlocks"
-            .to_string(),
-        remediation: "Call from a multi-threaded apartment; a UI application must marshal this \
-                      onto a background thread."
+        message: format!(
+            "the calling thread's impersonation token could not be carried onto the thread that \
+             makes the call: {err}"
+        ),
+        remediation: "Call without impersonating, or with an impersonation token this process can \
+                      duplicate at SecurityImpersonation level."
             .to_string(),
     })
 }
@@ -868,11 +864,11 @@ mod tests {
         assert_eq!(mapped.native_code(), None);
     }
 
-    /// The apartment query succeeds, so the refusal has no call to name and no
-    /// status to report — only a hint the caller can act on.
     #[test]
-    fn the_sta_refusal_carries_a_hint_and_no_api_detail() {
-        let mapped = map_lifecycle_error(sta_refusal());
+    fn the_identity_refusal_carries_a_hint_and_no_operation_or_native_code() {
+        use windows::Win32::Foundation::E_ACCESSDENIED;
+
+        let mapped = map_lifecycle_error(identity_refusal(E_ACCESSDENIED.into()));
         assert_eq!(mapped.code, MxcErrorCode::BackendError);
         assert_eq!(mapped.operation(), None);
         assert_eq!(mapped.native_code(), None);
@@ -880,20 +876,20 @@ mod tests {
             mapped
                 .remediation
                 .as_deref()
-                .is_some_and(|hint| hint.contains("multi-threaded apartment")),
+                .is_some_and(|hint| hint.contains("SecurityImpersonation")),
             "{:?}",
             mapped.remediation
         );
     }
 
-    /// The one-shot path has no structured envelope, so the hint has to reach
-    /// the caller folded into the message.
     #[test]
-    fn the_sta_refusal_folds_its_hint_into_the_one_shot_rendering() {
-        let rendered = sta_refusal().to_string();
-        assert!(rendered.contains("single-threaded apartment"), "{rendered}");
+    fn the_identity_refusal_folds_its_hint_into_the_one_shot_rendering() {
+        use windows::Win32::Foundation::E_ACCESSDENIED;
+
+        let rendered = identity_refusal(E_ACCESSDENIED.into()).to_string();
+        assert!(rendered.contains("impersonation token"), "{rendered}");
         assert!(
-            rendered.contains("remediation: Call from a multi-threaded apartment"),
+            rendered.contains("remediation: Call without impersonating"),
             "{rendered}"
         );
     }
@@ -964,10 +960,12 @@ mod tests {
     fn operation_constants_are_qualified_and_parameter_free() {
         for value in [
             op::CO_INCREMENT_MTA_USAGE,
-            op::CO_GET_APARTMENT_TYPE,
             op::ACTIVATE,
             op::ADD_USER,
+            op::ADD_USER_LEGACY,
+            op::ADD_USER_DEDUCED,
             op::START_SESSION,
+            op::START_SESSION_DEDUCED,
             op::RUN_PROCESS,
             op::STOP_SESSION,
             op::REMOVE_USER,

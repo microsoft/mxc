@@ -27,17 +27,48 @@
 
 use serde::de::DeserializeOwned;
 use serde::ser::Error as _;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+use crate::process_env::EnvScope;
 
 /// Upper bound on a single decoded frame (16 MiB). Guards the decoder against a
 /// hostile or corrupt length prefix demanding an unbounded allocation.
 pub const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 
+/// Maximum UTF-8 byte length of an exec identifier or per-run token.
+///
+/// Both values are generated as 32-byte UUID hex strings. The larger bound
+/// leaves room for diagnostics/test callers without allowing a control frame
+/// to retain multi-megabyte map keys.
+pub const MAX_EXEC_ID_BYTES: usize = 128;
+
 /// Control-channel wire-protocol version. The daemon and client are shipped
 /// from the same build, so in normal operation both sides always match; the
 /// version guards against a stale daemon left running by a different mxc
 /// install. Bump only for incompatible changes to framing or message shape.
-pub const PROTOCOL_VERSION: u32 = 2;
+///
+/// A new optional field counts: these structs do not deny unknown fields, so a
+/// daemon predating one drops it and acts on a request it only partly
+/// understood.
+pub const PROTOCOL_VERSION: u32 = 6;
+
+fn deserialize_exec_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.is_empty() {
+        return Err(<D::Error as serde::de::Error>::custom(
+            "exec identifier must not be empty",
+        ));
+    }
+    if value.len() > MAX_EXEC_ID_BYTES {
+        return Err(<D::Error as serde::de::Error>::custom(format!(
+            "exec identifier exceeds {MAX_EXEC_ID_BYTES} bytes"
+        )));
+    }
+    Ok(value)
+}
 
 // ---------------------------------------------------------------------------
 // Per-phase config structs (daemon-internal; NOT the public wire schema)
@@ -97,6 +128,13 @@ pub struct StartConfig {
 /// stdio back over the pipe.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecConfig {
+    /// Correlates this run with an out-of-band [`DaemonRequest::CancelExec`].
+    #[serde(deserialize_with = "deserialize_exec_id")]
+    pub exec_id: String,
+    /// Identifies this specific use of `exec_id`, preventing a delayed
+    /// cancellation from affecting a later run that reuses the same ID.
+    #[serde(deserialize_with = "deserialize_exec_id")]
+    pub run_token: String,
     pub sandbox_id: String,
     /// Command line to run inside the container (shell-interpreted, mirroring
     /// the one-shot runner's `script_code`).
@@ -107,6 +145,10 @@ pub struct ExecConfig {
     /// Environment variables applied to the process, as `(name, value)` pairs.
     #[serde(default)]
     pub env: Vec<(String, String)>,
+
+    /// How `env` combines with the container image's own environment.
+    #[serde(default)]
+    pub env_scope: EnvScope,
     /// Timeout in milliseconds (0 = no timeout).
     #[serde(default)]
     pub timeout_ms: u32,
@@ -126,6 +168,27 @@ pub struct DeprovisionConfig {
     pub sandbox_id: String,
 }
 
+/// Inputs to `cancel_exec`: request termination of one admitted exec without
+/// stopping its warm container.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelExecConfig {
+    #[serde(deserialize_with = "deserialize_exec_id")]
+    pub exec_id: String,
+    #[serde(deserialize_with = "deserialize_exec_id")]
+    pub run_token: String,
+}
+
+/// Confirmed terminal outcome shared by the daemon worker and client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecTerminal {
+    /// The process exited naturally with its exit code.
+    Exited(i32),
+    /// The configured timeout elapsed and termination was confirmed.
+    TimedOut,
+    /// Caller cancellation was observed and termination was confirmed.
+    Cancelled,
+}
+
 // ---------------------------------------------------------------------------
 // Control frames
 // ---------------------------------------------------------------------------
@@ -139,8 +202,10 @@ pub enum DaemonRequest {
     /// Boot the created container. Replies [`DaemonResponse::Ok`].
     Start(StartConfig),
     /// Run a command and stream its stdio. After an [`DaemonResponse::Ok`]
-    /// admission, both sides exchange [`StreamFrame`]s until [`StreamFrame::Exit`].
+    /// admission, the daemon streams output followed by one terminal frame.
     Exec(ExecConfig),
+    /// Request termination of one admitted exec. Replies [`DaemonResponse::Ok`].
+    CancelExec(CancelExecConfig),
     /// Stop the running container. Replies [`DaemonResponse::Ok`].
     Stop(StopConfig),
     /// Delete the container (refcount--). Replies [`DaemonResponse::Ok`].
@@ -209,7 +274,7 @@ pub enum ErrKind {
 /// A frame exchanged during the exec data phase (after an admitted
 /// [`DaemonRequest::Exec`]). Client→daemon carries [`StreamFrame::Stdin`];
 /// daemon→client carries [`StreamFrame::Stdout`] / [`StreamFrame::Stderr`] and
-/// a terminal [`StreamFrame::Exit`] (or [`StreamFrame::Error`]).
+/// one terminal exit, timeout, cancellation, or error frame.
 ///
 /// The raw byte payloads are base64-encoded on the wire (see [`base64_bytes`]).
 /// serde_json renders a `Vec<u8>` as a JSON array of decimal integers (`[104,
@@ -239,6 +304,14 @@ pub enum StreamFrame {
     /// Daemon→client: terminal frame; the process exited with `code`. No more
     /// stream frames follow.
     Exit { code: i32 },
+    /// Daemon→client: terminal frame; the request timeout elapsed and the
+    /// process was confirmed terminated.
+    TimedOut,
+    /// Daemon→client: terminal frame; an explicit cancellation request was
+    /// accepted and the process was confirmed terminated.
+    Cancelled,
+    /// Daemon→client: live output was dropped; the terminal frame still follows.
+    Truncated,
     /// Daemon→client: terminal frame; the exec failed before or during the run.
     Error { message: String },
 }
@@ -355,11 +428,18 @@ mod tests {
             sandbox_id: "wslc:abc123".to_string(),
         }));
         roundtrip(DaemonRequest::Exec(ExecConfig {
+            exec_id: "exec-1".to_string(),
+            run_token: "run-1".to_string(),
             sandbox_id: "wslc:abc123".to_string(),
             script_code: "echo hi".to_string(),
             working_directory: "/work".to_string(),
             env: vec![("PATH".to_string(), "/usr/bin".to_string())],
+            env_scope: EnvScope::Replace,
             timeout_ms: 30_000,
+        }));
+        roundtrip(DaemonRequest::CancelExec(CancelExecConfig {
+            exec_id: "exec-1".to_string(),
+            run_token: "run-1".to_string(),
         }));
         roundtrip(DaemonRequest::Stop(StopConfig {
             sandbox_id: "wslc:abc123".to_string(),
@@ -368,6 +448,38 @@ mod tests {
             sandbox_id: "wslc:abc123".to_string(),
         }));
         roundtrip(DaemonRequest::Ping);
+    }
+
+    #[test]
+    fn an_exec_config_keeps_repeated_environment_names_in_order() {
+        // `env -i` and the SDK's setter both apply entries left to right, so a
+        // reordered or deduplicated wire form would hand the child a different
+        // value than the caller asked for.
+        let config = ExecConfig {
+            exec_id: "exec-1".to_string(),
+            run_token: "run-1".to_string(),
+            sandbox_id: "wslc:abc123".to_string(),
+            script_code: "echo hi".to_string(),
+            working_directory: String::new(),
+            env: vec![
+                ("FOO".to_string(), "1".to_string()),
+                ("BAR".to_string(), "keep".to_string()),
+                ("FOO".to_string(), "2".to_string()),
+            ],
+            env_scope: EnvScope::Replace,
+            timeout_ms: 0,
+        };
+
+        let frame = encode_frame(&DaemonRequest::Exec(config.clone())).unwrap();
+        let DecodeResult::Message { message, .. } = decode_frame::<DaemonRequest>(&frame).unwrap()
+        else {
+            panic!("expected a complete message");
+        };
+        let DaemonRequest::Exec(decoded) = message else {
+            panic!("expected an exec request");
+        };
+
+        assert_eq!(decoded.env, config.env);
     }
 
     #[test]
@@ -409,6 +521,29 @@ mod tests {
     }
 
     #[test]
+    fn oversized_exec_identifiers_are_rejected_during_decode() {
+        let oversized = "x".repeat(MAX_EXEC_ID_BYTES + 1);
+        let exec = serde_json::json!({
+            "op": "exec",
+            "exec_id": oversized,
+            "run_token": "run-1",
+            "sandbox_id": "wslc:abc123",
+            "script_code": "true",
+            "working_directory": "",
+            "env": [],
+            "timeout_ms": 0
+        });
+        assert!(serde_json::from_value::<DaemonRequest>(exec).is_err());
+
+        let cancel = serde_json::json!({
+            "op": "cancel_exec",
+            "exec_id": "exec-1",
+            "run_token": "x".repeat(MAX_EXEC_ID_BYTES + 1)
+        });
+        assert!(serde_json::from_value::<DaemonRequest>(cancel).is_err());
+    }
+
+    #[test]
     fn roundtrip_stream_frames() {
         roundtrip(StreamFrame::Stdin {
             data: b"input".to_vec(),
@@ -420,6 +555,9 @@ mod tests {
             data: b"err".to_vec(),
         });
         roundtrip(StreamFrame::Exit { code: 42 });
+        roundtrip(StreamFrame::TimedOut);
+        roundtrip(StreamFrame::Cancelled);
+        roundtrip(StreamFrame::Truncated);
         roundtrip(StreamFrame::Error {
             message: "spawn failed".to_string(),
         });
@@ -530,5 +668,13 @@ mod tests {
         buf.extend_from_slice(body);
         let r: Result<DecodeResult<DaemonRequest>, _> = decode_frame(&buf);
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn an_exec_config_without_an_env_scope_defaults_to_merge() {
+        let without = r#"{"exec_id":"e","run_token":"r","sandbox_id":"s","script_code":"run"}"#;
+        let parsed: ExecConfig = serde_json::from_str(without).expect("env_scope is optional");
+
+        assert_eq!(parsed.env_scope, EnvScope::Merge);
     }
 }

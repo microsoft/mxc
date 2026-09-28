@@ -166,8 +166,8 @@ public static class MxcLifecycle
 
     /// <summary>
     /// Run a command in a started sandbox and return live stdio streams.
-    /// Windows Sandbox and WSLC currently support attached exec and exec
-    /// dry-run, but not this streaming form.
+    /// IsolationSession and WSLC support this streaming form. Windows Sandbox
+    /// currently supports attached exec and exec dry-run only.
     /// </summary>
     public static MxcSandboxProcess ExecInSandbox(
         SandboxId id,

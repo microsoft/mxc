@@ -43,20 +43,48 @@ use windows::Win32::System::Threading::{
     DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, UpdateProcThreadAttribute,
     LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTUPINFOEXW, STARTUPINFOW,
 };
-use windows::Win32::System::WindowsProgramming::IsApiSetImplemented;
 use windows_core::{HRESULT, PCSTR, PCWSTR};
+use wxc_common::api_set::is_api_set_implemented;
 use wxc_common::string_util;
 
 use learning_mode_windows::LearningModeError;
 
 /// System DLL that hosts the flat process security-environment exports.
 const PROCESSMODEL_DLL: &str = "processmodel.dll";
-const SECURITY_ENVIRONMENT_API_SET_NAME: &str = "api-win-appmodel-processmodel~securityenvironment";
-const SECURITY_ENVIRONMENT_API_SET: &core::ffi::CStr =
+pub(crate) const SECURITY_ENVIRONMENT_API_SET: &core::ffi::CStr =
     c"api-win-appmodel-processmodel~securityenvironment";
-const PSE_SUPPORT_FS_DENY: u64 = 0x0000_0000_0000_0001;
-const PSE_SUPPORT_FS_ENUMERATE: u64 = 0x0000_0000_0000_0004;
-const PSE_SUPPORT_NETWORK_INGRESS: u64 = 0x0000_0000_0000_0008;
+
+/// Capability advertised by `QueryProcessSecurityEnvironmentSupport`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u64)]
+pub enum SecurityEnvironmentSupport {
+    /// Native filesystem deny paths.
+    FileSystemDeny = 0x0000_0000_0000_0001,
+    /// Enumeration-only filesystem paths.
+    FileSystemEnumerate = 0x0000_0000_0000_0004,
+    /// The ingress policy table.
+    NetworkIngress = 0x0000_0000_0000_0008,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct SecurityEnvironmentVersion {
+    pub(crate) major: u16,
+    pub(crate) minor: u16,
+}
+
+impl SecurityEnvironmentVersion {
+    pub(crate) const V1_0: Self = Self { major: 1, minor: 0 };
+    pub(crate) const V1_1: Self = Self { major: 1, minor: 1 };
+}
+
+impl SecurityEnvironmentSupport {
+    pub(crate) const fn required_version(self) -> SecurityEnvironmentVersion {
+        match self {
+            Self::FileSystemDeny => SecurityEnvironmentVersion::V1_0,
+            Self::FileSystemEnumerate | Self::NetworkIngress => SecurityEnvironmentVersion::V1_1,
+        }
+    }
+}
 
 /// No special behaviour when creating the security environment
 /// (`PROCESS_SECURITY_ENVIRONMENT_FLAGS` value `0`).
@@ -327,8 +355,8 @@ const CLOSE_NAMES: &[&core::ffi::CStr] = &[c"CloseProcessSecurityEnvironment"];
 /// `cacheable` records whether this surface was produced by the memoizing
 /// [`SecurityEnvironmentApi::load`] (the real, process-wide singleton) as opposed
 /// to a test fake. Only cacheable surfaces are allowed to populate the process-wide
-/// [`supports_deny_paths`](Self::supports_deny_paths) cache, so injected fakes can
-/// never poison it for the real API or for each other.
+/// support-flags cache, so injected fakes can never poison it for the real API or
+/// for each other.
 #[derive(Clone, Copy)]
 pub struct SecurityEnvironmentApi {
     create: PfnCreateProcessSecurityEnvironment,
@@ -353,11 +381,6 @@ impl std::fmt::Debug for SecurityEnvironmentApi {
     }
 }
 
-fn is_security_environment_api_set_implemented() -> bool {
-    // SAFETY: the contract is a valid static null-terminated string.
-    unsafe { IsApiSetImplemented(PCSTR(SECURITY_ENVIRONMENT_API_SET.as_ptr().cast())).as_bool() }
-}
-
 impl SecurityEnvironmentApi {
     /// Load `processmodel.dll` and resolve the 2-phase security-environment exports.
     ///
@@ -366,8 +389,7 @@ impl SecurityEnvironmentApi {
     /// not change while the process runs, so repeated probes would only repeat the
     /// same work and return the same answer. The cached error is cloned (see
     /// [`LearningModeError`]), preserving the original diagnostic on every call. The
-    /// cached surface is marked cacheable so its
-    /// [`supports_deny_paths`](Self::supports_deny_paths) result is memoized too.
+    /// cached surface is marked cacheable so its support flags are memoized too.
     ///
     /// # Errors
     /// - [`LearningModeError::ApiSetUnavailable`] if the security-environment
@@ -381,10 +403,12 @@ impl SecurityEnvironmentApi {
 
     /// Perform the actual DLL load and export resolution, bypassing the cache.
     fn load_uncached() -> Result<Self, LearningModeError> {
-        if !is_security_environment_api_set_implemented() {
+        if !is_api_set_implemented(SECURITY_ENVIRONMENT_API_SET) {
             return Err(LearningModeError::ApiSetUnavailable {
                 api: "process security-environment",
-                api_set: SECURITY_ENVIRONMENT_API_SET_NAME,
+                api_set: SECURITY_ENVIRONMENT_API_SET
+                    .to_str()
+                    .expect("API-set contract names must be UTF-8"),
             });
         }
 
@@ -433,8 +457,7 @@ impl SecurityEnvironmentApi {
 
     /// Construct an API surface directly from raw export pointers, bypassing the
     /// DLL load. Test-only: lets sibling modules inject fakes. The surface is marked
-    /// non-cacheable so its [`supports_deny_paths`](Self::supports_deny_paths) result
-    /// never populates the process-wide cache.
+    /// non-cacheable so its support flags never populate the process-wide cache.
     #[cfg(test)]
     pub(crate) fn from_raw_parts(
         create: PfnCreateProcessSecurityEnvironment,
@@ -450,9 +473,8 @@ impl SecurityEnvironmentApi {
         }
     }
 
-    /// Like [`from_raw_parts`](Self::from_raw_parts) but marked cacheable, so the
-    /// memoization of [`supports_deny_paths`](Self::supports_deny_paths) can be
-    /// exercised host-independently. Test-only.
+    /// Like [`from_raw_parts`](Self::from_raw_parts) but marked cacheable, so support
+    /// flag memoization can be exercised host-independently. Test-only.
     #[cfg(test)]
     pub(crate) fn from_raw_parts_cacheable(
         create: PfnCreateProcessSecurityEnvironment,
@@ -468,21 +490,6 @@ impl SecurityEnvironmentApi {
         }
     }
 
-    /// Whether the official V2 API supports native deny paths.
-    pub fn supports_deny_paths(&self) -> Result<bool, LearningModeError> {
-        self.query_support(PSE_SUPPORT_FS_DENY)
-    }
-
-    /// Whether the official PSEC API supports enumeration-only filesystem paths.
-    pub fn supports_enumerate_paths(&self) -> Result<bool, LearningModeError> {
-        self.query_support(PSE_SUPPORT_FS_ENUMERATE)
-    }
-
-    /// Whether the official PSEC API supports the ingress policy table.
-    pub fn supports_network_ingress(&self) -> Result<bool, LearningModeError> {
-        self.query_support(PSE_SUPPORT_NETWORK_INGRESS)
-    }
-
     /// Whether the requested PSEC contract version is supported.
     pub fn supports_version(&self, major: u32, minor: u32) -> Result<bool, LearningModeError> {
         let Some(version_support) = self.version_support else {
@@ -492,19 +499,23 @@ impl SecurityEnvironmentApi {
             .map(|supported| supported.is_some_and(|supported| supported >= minor))
     }
 
-    fn query_support(&self, capability: u64) -> Result<bool, LearningModeError> {
+    /// Whether the official PSEC API advertises `capability`.
+    pub fn query_support(
+        &self,
+        capability: SecurityEnvironmentSupport,
+    ) -> Result<bool, LearningModeError> {
         self.support_flags()
-            .map(|support_flags| support_flags & capability != 0)
+            .map(|support_flags| support_flags & capability as u64 != 0)
     }
 
     #[cfg(test)]
     fn query_support_cached(
         &self,
-        capability: u64,
+        capability: SecurityEnvironmentSupport,
         cache: &OnceLock<Result<u64, LearningModeError>>,
     ) -> Result<bool, LearningModeError> {
         self.support_flags_cached(cache)
-            .map(|support_flags| support_flags & capability != 0)
+            .map(|support_flags| support_flags & capability as u64 != 0)
     }
 
     /// Return the immutable support flags advertised by the official PSEC API.
@@ -590,6 +601,40 @@ impl SecurityEnvironmentApi {
     }
 }
 
+/// Whether the process security-environment API supports `capability`.
+///
+/// API loading, contract-version validation, and query failures all fail closed.
+#[must_use]
+pub(crate) fn query_support(capability: SecurityEnvironmentSupport) -> bool {
+    try_query_support(capability).unwrap_or(false)
+}
+
+pub(crate) fn try_query_support(
+    capability: SecurityEnvironmentSupport,
+) -> Result<bool, LearningModeError> {
+    SecurityEnvironmentApi::load().and_then(|api| {
+        let version = capability.required_version();
+        if !api.supports_version(u32::from(version.major), u32::from(version.minor))? {
+            return Ok(false);
+        }
+        api.query_support(capability)
+    })
+}
+
+pub(crate) fn supports_version(
+    version: SecurityEnvironmentVersion,
+) -> Result<bool, LearningModeError> {
+    SecurityEnvironmentApi::load()?
+        .supports_version(u32::from(version.major), u32::from(version.minor))
+}
+
+pub(crate) fn create(
+    sandbox_specification: &[u8],
+    flags: u32,
+) -> Result<ProcessSecurityEnvironment, LearningModeError> {
+    SecurityEnvironmentApi::load()?.create(sandbox_specification, flags)
+}
+
 fn query_supported_minor_version_with(
     major: u32,
     version_support: PfnIsProcessSecurityEnvironmentVersionSupported,
@@ -649,7 +694,7 @@ fn last_error() -> u32 {
 /// resolved. Returns an all-`None` report if the DLL itself cannot be loaded.
 #[must_use]
 pub fn probe_security_environment_exports() -> SecurityEnvironmentExportReport {
-    if !is_security_environment_api_set_implemented() {
+    if !is_api_set_implemented(SECURITY_ENVIRONMENT_API_SET) {
         return SecurityEnvironmentExportReport::default();
     }
 
@@ -870,22 +915,49 @@ mod tests {
         let api = fake_uncached_api();
 
         reset_query_fakes();
-        QUERY_FLAGS.store(PSE_SUPPORT_FS_DENY, Ordering::SeqCst);
-        assert!(api.supports_deny_paths().unwrap());
-        assert!(!api.supports_enumerate_paths().unwrap());
-        assert!(!api.supports_network_ingress().unwrap());
+        QUERY_FLAGS.store(
+            SecurityEnvironmentSupport::FileSystemDeny as u64,
+            Ordering::SeqCst,
+        );
+        assert!(api
+            .query_support(SecurityEnvironmentSupport::FileSystemDeny)
+            .unwrap());
+        assert!(!api
+            .query_support(SecurityEnvironmentSupport::FileSystemEnumerate)
+            .unwrap());
+        assert!(!api
+            .query_support(SecurityEnvironmentSupport::NetworkIngress)
+            .unwrap());
 
         reset_query_fakes();
-        QUERY_FLAGS.store(PSE_SUPPORT_FS_ENUMERATE, Ordering::SeqCst);
-        assert!(!api.supports_deny_paths().unwrap());
-        assert!(api.supports_enumerate_paths().unwrap());
-        assert!(!api.supports_network_ingress().unwrap());
+        QUERY_FLAGS.store(
+            SecurityEnvironmentSupport::FileSystemEnumerate as u64,
+            Ordering::SeqCst,
+        );
+        assert!(!api
+            .query_support(SecurityEnvironmentSupport::FileSystemDeny)
+            .unwrap());
+        assert!(api
+            .query_support(SecurityEnvironmentSupport::FileSystemEnumerate)
+            .unwrap());
+        assert!(!api
+            .query_support(SecurityEnvironmentSupport::NetworkIngress)
+            .unwrap());
 
         reset_query_fakes();
-        QUERY_FLAGS.store(PSE_SUPPORT_NETWORK_INGRESS, Ordering::SeqCst);
-        assert!(!api.supports_deny_paths().unwrap());
-        assert!(!api.supports_enumerate_paths().unwrap());
-        assert!(api.supports_network_ingress().unwrap());
+        QUERY_FLAGS.store(
+            SecurityEnvironmentSupport::NetworkIngress as u64,
+            Ordering::SeqCst,
+        );
+        assert!(!api
+            .query_support(SecurityEnvironmentSupport::FileSystemDeny)
+            .unwrap());
+        assert!(!api
+            .query_support(SecurityEnvironmentSupport::FileSystemEnumerate)
+            .unwrap());
+        assert!(api
+            .query_support(SecurityEnvironmentSupport::NetworkIngress)
+            .unwrap());
     }
 
     #[test]
@@ -918,13 +990,15 @@ mod tests {
     }
 
     #[test]
-    fn supports_deny_paths_maps_failing_hresult() {
+    fn query_support_maps_failing_hresult() {
         let _guard = QUERY_LOCK.lock().unwrap();
         reset_query_fakes();
         QUERY_RESULT.store(E_FAIL.0, Ordering::SeqCst);
         let api = fake_uncached_api();
 
-        let error = api.supports_deny_paths().unwrap_err();
+        let error = api
+            .query_support(SecurityEnvironmentSupport::FileSystemDeny)
+            .unwrap_err();
         assert!(matches!(
             error,
             LearningModeError::HResultCall {
@@ -938,11 +1012,18 @@ mod tests {
     fn non_cacheable_api_queries_every_call() {
         let _guard = QUERY_LOCK.lock().unwrap();
         reset_query_fakes();
-        QUERY_FLAGS.store(PSE_SUPPORT_FS_DENY, Ordering::SeqCst);
+        QUERY_FLAGS.store(
+            SecurityEnvironmentSupport::FileSystemDeny as u64,
+            Ordering::SeqCst,
+        );
         let api = fake_uncached_api();
 
-        assert!(api.supports_deny_paths().unwrap());
-        assert!(api.supports_deny_paths().unwrap());
+        assert!(api
+            .query_support(SecurityEnvironmentSupport::FileSystemDeny)
+            .unwrap());
+        assert!(api
+            .query_support(SecurityEnvironmentSupport::FileSystemDeny)
+            .unwrap());
         // A test fake must never be memoized: both calls hit the underlying query.
         assert_eq!(QUERY_CALLS.load(Ordering::SeqCst), 2);
     }
@@ -953,19 +1034,22 @@ mod tests {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         reset_query_fakes();
-        QUERY_FLAGS.store(PSE_SUPPORT_FS_DENY, Ordering::SeqCst);
+        QUERY_FLAGS.store(
+            SecurityEnvironmentSupport::FileSystemDeny as u64,
+            Ordering::SeqCst,
+        );
         let api =
             SecurityEnvironmentApi::from_raw_parts_cacheable(fake_create, fake_query, fake_close);
         let cache = OnceLock::new();
 
         assert!(api
-            .query_support_cached(PSE_SUPPORT_FS_DENY, &cache)
+            .query_support_cached(SecurityEnvironmentSupport::FileSystemDeny, &cache)
             .unwrap());
         assert!(!api
-            .query_support_cached(PSE_SUPPORT_FS_ENUMERATE, &cache)
+            .query_support_cached(SecurityEnvironmentSupport::FileSystemEnumerate, &cache)
             .unwrap());
         assert!(!api
-            .query_support_cached(PSE_SUPPORT_NETWORK_INGRESS, &cache)
+            .query_support_cached(SecurityEnvironmentSupport::NetworkIngress, &cache)
             .unwrap());
         assert_eq!(QUERY_CALLS.load(Ordering::SeqCst), 1);
     }

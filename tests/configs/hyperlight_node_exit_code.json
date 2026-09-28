@@ -1,0 +1,11 @@
+{
+    "version": "0.10.0-alpha",
+    "process": {
+        "commandLine": "console.log('exiting with 42');\nprocess.exit(42);",
+        "timeout": 30000
+    },
+    "containment": "hyperlight",
+    "hyperlight": {
+        "runtime": "node"
+    }
+}

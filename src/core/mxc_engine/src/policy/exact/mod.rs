@@ -10,7 +10,7 @@ use wxc_common::mxc_error::MxcError;
 
 use crate::configs::{Lxc, ProcessContainer, Seatbelt};
 
-use super::network::{select_network_format, NetworkFormat};
+use super::network::{legacy_default_allows, select_network_format, NetworkFormat};
 use super::{Containment, NetworkAction, ProxySpec, SandboxPolicy, SandboxRequest};
 
 macro_rules! optional {

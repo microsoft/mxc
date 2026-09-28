@@ -24,12 +24,6 @@
 //! As elsewhere in this crate, every entry point is [`catch_unwind`]-wrapped,
 //! strings in/out are UTF-8 NUL-terminated, and owned out-pointers must be
 //! freed with the matching destructor.
-//!
-//! ## Apartment (IsolationSession)
-//!
-//! These entry points run on the calling thread, so the caller's apartment is
-//! the one the backend sees. IsolationSession is refused from a single-threaded
-//! apartment.
 
 use std::ffi::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};

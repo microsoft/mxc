@@ -31,6 +31,7 @@ windows = { workspace = true, features = [
     "Win32_Globalization",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
+    "Win32_System_WindowsProgramming",
 ] }
 windows-core = { workspace = true }
 widestring = { workspace = true }

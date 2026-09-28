@@ -47,7 +47,8 @@ Linux / macOS (`.sh`):
 | `run_processcontainer_all_tests.ps1` | Process container (AppContainer / BaseContainer) primitives suite — tier probes, rw/ro/denied matrix, enumeration-only grants, UI mitigations, DACL restore, crash recovery, schema 0.8 networking. Dispatches to the per-area `run_processcontainer_*_test.ps1` scripts | `wxc-exec.exe`, `wxc-ui-probe.exe`, `plm.exe` and `winhttp-proxy-shim.exe` beside `wxc-exec.exe` |
 | `T3-Workloads.ps1` | Real workloads (pwsh, git, node, python, cmd) on top of the T3 primitives. A missing interpreter is reported as a skip, not a failure | `wxc-exec.exe`; `pwsh` / `git` / `node` / `python` each optional, gating their own cases |
 | `run_telemetry_consent_smoke_test.ps1` | Consent maintenance, presentation, policy, and exit-code smoke tests | Debug `wxc-exec.exe` built with `test-support` |
-| `run_telemetry_etw_smoke_test.ps1` | Isolated consent flow plus public-provider ETW capture | Debug `wxc-exec.exe` built with `test-support`; ETW tooling |
+| `run_telemetry_etw_smoke_test.ps1` | Isolated consent flow plus public-provider ETW capture | Debug `wxc-exec.exe` built with `test-support`; ETW tooling; Administrator, otherwise the test skips |
+| `run_telemetry_consent_release_test.ps1` | Consent path in a **release** executor, where the debug store/policy overrides are compiled out. Mutates the real consent store and HKLM policy, so it requires `-AcceptRealMachineMutation` and an ephemeral machine | Release `wxc-exec.exe`; Administrator for the HKLM policy section, otherwise that section skips unless `-RequirePolicyCeiling` is passed |
 | `run_on_repeat.ps1` | Stress test (loops core tests) | `wxc-exec.exe` |
 
 Each `run_processcontainer_<area>_test.ps1` also runs standalone against a
@@ -77,65 +78,7 @@ one raises MXC-FATAL and stops the whole suite (child exit code 78).
 | `run_seatbelt_all_tests.sh` | All Seatbelt tests; missing prerequisites are failures rather than skips | macOS, `mxc-exec-mac`, unprivileged user, backend prerequisites |
 
 Individual `run_bwrap_*.sh`, `run_lxc_*.sh`, and `run_seatbelt_*.sh` scripts
-run focused backend suites; the aggregate scripts above are what CI dispatches to.
-
-Not every script runs in CI: several depend on local OS features such as
-Windows Sandbox, WHP, proxy setup, or stress-test duration. The ones CI does
-run are reached through the dispatchers below rather than being invoked
-directly.
-
-### CI dispatch
-
-The validation matrix (see `scripts/ci/validation-test-matrix.json` and
-`.github/workflows/Validation.Tests.Matrix.Job.yml`, documented end to end in
-[`docs/ci-validation-infrastructure.md`](../../docs/ci-validation-infrastructure.md))
-never builds from source.
-It downloads a build artifact, prepares the host, and then hands off to one of
-these dispatchers, which map a matrix backend id to the suites above:
-
-| Dispatcher | Platforms | Backend ids |
-|------------|-----------|-------------|
-| `scripts/ci/run_backend_validation_tests.ps1` | Windows | `process-t1`, `process-t3`, `isolation-session`, `windows-sandbox`, `wslc`, `microvm`, `hyperlight` |
-| `scripts/ci/run_backend_validation_tests.sh` | Linux, macOS | `bubblewrap`, `lxc`, `seatbelt`, `microvm`, `hyperlight` |
-
-Pass the backend id exactly as it appears in the catalog — there is no separate
-handler name. Ids that share a suite have their own case in the dispatcher:
-`process-t1` and `process-t3` both run `run_processcontainer_all_tests.ps1`,
-which determines the tier it expects from the host's own `wxc-exec --probe` and
-is passed `-RequireTier` so a mis-provisioned runner aborts rather than quietly
-testing the other tier. `process-t3` additionally runs `T3-Workloads.ps1`; both
-suites run even if the first one fails, and the job reports their exit codes
-together.
-
-```powershell
-scripts\ci\run_backend_validation_tests.ps1 -Backend process-t1 `
-    -BinaryDirectory <dir> -Architecture x64
-```
-
-```bash
-scripts/ci/run_backend_validation_tests.sh bubblewrap <binary-directory>
-```
-
-A backend with no wired suite exits non-zero on purpose, so accidentally
-enabling it in a trigger fails loudly instead of reporting a false success.
-
-To see exactly what a plan would schedule without pushing:
-
-```bash
-node scripts/ci/resolve-validation-test-matrix.mjs --plan nightly
-```
-
-**Skip semantics.** Several suites degrade gracefully on an unsupported host:
-the IsolationSession suites decide availability from a single `wxc-exec --probe`
-read of `probes.isolationSessionAvailable`, print `SKIPPED`, and exit 0.
-
-Because a skip exits 0 and the dispatchers propagate only the exit code, **a
-green CI job does not by itself prove the suite ran.** Anything treating these
-suites as validation evidence must check the `SKIPPED` line or the executed
-count, not just the exit status — the matrix entry says the host is expected to
-support the backend, so a silent skip there is a gap in coverage rather than a
-graceful degradation. Independently, a run that reaches the summary having
-executed zero tests always fails, since it substantiates nothing.
+run focused backend suites.
 
 ### Manual smoke tests
 
@@ -166,12 +109,6 @@ itself and takes a `-ComputerName` / `-VMName` plus `-Credential`.
 | `push_exes_to_vm.ps1` | Native Rust binaries (Debug + Release) | TShell (active `Open-Device` session) |
 | `push_batch_and_config_files_to_vm.ps1` | `tests\configs\`, `examples\`, runner batch files, helper scripts | TShell (active `Open-Device` session) |
 | `push_sdk_integration_tests_to_vm.ps1` | SDK integration test artifacts (`sdk\bin\x64`, compiled tests, `node_modules`, `package.json`, `run-tests.js`) | PowerShell Remoting (`-ComputerName`/`-VMName` + `-Credential`) |
-
-Backend E2E coverage runs on a schedule (not on PRs) through the validation
-matrix described under [CI dispatch](#ci-dispatch), against binaries downloaded
-from the build artifacts. Suites whose backend is not yet wired into a trigger —
-and any test needing a Windows feature or hardware the pool images lack — remain
-local/prerequisite-gated and should be run on a machine that has them.
 
 ## Test ownership
 

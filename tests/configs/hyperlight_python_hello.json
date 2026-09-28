@@ -1,0 +1,11 @@
+{
+    "version": "0.10.0-alpha",
+    "process": {
+        "commandLine": "import sys\nprint(f'hello from plain python {sys.version.split()[0]}')",
+        "timeout": 30000
+    },
+    "containment": "hyperlight",
+    "hyperlight": {
+        "runtime": "python"
+    }
+}

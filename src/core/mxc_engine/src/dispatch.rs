@@ -156,15 +156,15 @@ fn spawn_process_container(
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     use process_container_common::dispatcher::{
-        spawn_with_fallback_and_capture, DispatchError, SpawnDispatchError,
+        spawn_with_fallback, DispatchError, SpawnDispatchError,
     };
     use std::fmt::Write;
     use wxc_common::sandbox_process::StdioMode;
 
     // ProcessContainer resolves to a concrete backend + isolation tier purely
-    // by host capability, via the shared `spawn_with_fallback_and_capture`
+    // by host capability, via the shared `spawn_with_fallback`
     // dispatcher — the streaming counterpart of the run-to-completion
-    // `dispatch_with_fallback_and_capture` the executor binaries use. Both
+    // `dispatch_with_fallback` the executor binaries use. Both
     // share `select_backend_with_fallback`, so the streaming and
     // run-to-completion paths agree on tier selection and the streaming path
     // gets the full three-tier fallback: BaseContainer (Tier 1), AppContainer
@@ -175,7 +175,7 @@ fn spawn_process_container(
     // AppContainer fallback tier can still honor it instead of failing
     // closed.
     let capture_factory = crate::guarded_capture::factory_for_request(request);
-    match spawn_with_fallback_and_capture(request, logger, StdioMode::Pipes, capture_factory) {
+    match spawn_with_fallback(request, logger, StdioMode::Pipes, capture_factory) {
         Ok(dispatched) => {
             for w in &dispatched.warnings {
                 let _ = writeln!(logger, "warning: {w}");

@@ -30,6 +30,8 @@ mod manager;
 #[cfg(target_os = "windows")]
 mod one_shot;
 #[cfg(target_os = "windows")]
+mod owned_thread;
+#[cfg(target_os = "windows")]
 mod pipe_relay;
 #[cfg(target_os = "windows")]
 mod policy;

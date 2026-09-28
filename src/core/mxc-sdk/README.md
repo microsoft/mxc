@@ -58,6 +58,12 @@ BaseProcessContainer UI isolation, proxy peer identity, and denial capture.
 Schema 0.8 directional networking is available through
 `NetworkSection::{egress, ingress, runtime_config}`.
 
+For legacy networking, a non-empty `NetworkSection::allowed_hosts` list selects
+a block default even when `allow_outbound` is true, so the allowlist narrows
+outbound access. With no allowlist, `allow_outbound = true` selects an allow
+default and `blocked_hosts` expresses allow-all-except-these. A blocklist
+without either an allowlist or `allow_outbound` is rejected.
+
 The new ProcessContainer and directional-network configuration types are
 non-exhaustive so fields can be added compatibly. Construct types whose fields
 are all optional with `Default`, then assign the settings the request needs.
@@ -167,9 +173,10 @@ Filesystem-policy discovery helpers are also available to feed a policy:
 
 Every fallible **entry point** — [`build_request`],
 [`build_request_with_containment`], [`run`], [`spawn_sandbox`],
-[`exec_sandbox`], [`exec_attached`], [`run_state_aware_json`] — returns an
-[`Error`] carrying a closed [`ErrorCode`] and a message, plus, when the failure
-came from an underlying platform API, the call that failed and its status.
+the typed state-aware lifecycle calls, and the raw JSON compatibility calls —
+returns an [`Error`] carrying a closed [`ErrorCode`] and a message, plus, when
+the failure came from an underlying platform API, the call that failed and its
+status.
 
 The live [`Sandbox`] handle is the deliberate exception: `wait`, `try_wait`,
 `wait_with_output` and `kill` return [`std::io::Result`], mirroring
@@ -418,8 +425,7 @@ The handle is modelled on [`std::process::Child`]:
 
 Streaming is implemented for **Seatbelt (macOS)**, **Bubblewrap (Linux)**,
 **Windows ProcessContainer (AppContainer + BaseContainer)**, and — behind their
-compile-time features — **WSLC** and **IsolationSession**. Neither WSLC nor
-IsolationSession requires a runtime experimental opt-in.
+compile-time features — **WSLC** and **IsolationSession**.
 
 > **Windows note:** the ProcessContainer backend resolves to a concrete
 > isolation tier by host capability, using the **same** three-tier fallback as
@@ -432,69 +438,86 @@ IsolationSession requires a runtime experimental opt-in.
 ## State-aware lifecycle
 
 Beyond the one-shot `run` / `spawn_sandbox` paths, the SDK exposes the
-state-aware sandbox lifecycle from a wire-format request JSON string:
+state-aware sandbox lifecycle under `mxc_sdk::sandbox`:
 
-- `run_state_aware_json(request_json, dry_run, experimental)` drives the
-  **envelope phases** — `provision`, `start`, `stop`, `deprovision` (and a dry
-  run of any phase) — and returns the response-envelope JSON string.
-- `exec_attached(request_json, experimental)` runs the `exec` phase **attached
-  to this process's stdio**, blocking until the workload exits and returning a
-  `WaitOutcome`. See *Pty allocation* for the terminal requirement and what each
-  backend does with the streams. Parser and telemetry-initialization warnings
-  are written to the attached host stderr because this API returns no process
-  handle with a `warnings()` channel.
-- `exec_sandbox(request_json, experimental)` runs the same `exec` phase as a
-  **live streaming** `Sandbox` (the same handle `spawn_sandbox` returns), for a
-  caller that drives the pipes itself. The child sees no TTY and this process's
-  console is left untouched.
+- `sandbox::provision` returns a `ProvisionResult` with an opaque `SandboxId`;
+- `sandbox::start`, `sandbox::stop`, and `sandbox::deprovision` return a
+  `LifecycleResult`;
+- `sandbox::exec` returns a live streaming `Sandbox`;
+- `sandbox::exec_attached` attaches the workload to this process's stdio and
+  returns a `WaitOutcome`;
+- `sandbox::validate_*` validates the matching operation without executing it.
 
-Both take the same request JSON and differ only in where the workload's stdio
-goes.
+These high-level calls adapt Rust values directly into MXC's common request
+model. They do not serialize or parse JSON, and typed backend results are
+returned without constructing a JSON response envelope. Sandbox identity is a
+separate typed argument rather than policy, while authorization, telemetry
+preference, and other invocation controls live in `OperationOptions`.
 
-Windows Sandbox requires `experimental`; WSLC and IsolationSession do not. The
-parameter is the in-process equivalent of the executor's `--experimental` flag
-and is not a field in the request JSON.
+Raw exact-contract entry points remain available for callers that intentionally
+provide wire JSON:
+
+- `run_state_aware_json`;
+- `exec_sandbox_json`;
+- `exec_attached_json`.
+
+The existing `exec_sandbox` and `exec_attached` names remain compatibility
+aliases for their raw JSON counterparts.
+
+Windows Sandbox requires `experimental`. The parameter is the in-process
+equivalent of the executor's `--experimental` flag and is not a field in the
+request JSON.
+
+`ExecRequest` contains only backend-neutral process settings. Backend-specific
+exec capabilities use
+`set_backend_options(StateAwareExecBackendOptions)`. A backend rejects options
+that it cannot enforce; currently only WSLc defines an option, for its
+cooperative network proxy.
 
 The example needs this crate's `isolation_session` feature and a host running the
 OS-side service.
 
 ```rust,no_run
 use std::error::Error;
-use mxc_sdk::{run_state_aware_json, exec_attached};
+use mxc_sdk::{
+    sandbox, ExecRequest, LifecycleRequest, OperationOptions, ProvisionRequest,
+};
 
 fn main() -> Result<(), Box<dyn Error>> {
-// Provision. Describe the backend's unrestricted network posture explicitly.
-let provisioned = run_state_aware_json(
-    r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
-        "network":{"egress":{"default":"allow"},
-          "ingress":{"default":"allow","hostLoopback":"allow"}}}"#,
-    false, // dry_run
-    false, // experimental
+let provisioned = sandbox::provision(
+    ProvisionRequest::isolation_session("0.9.0-alpha", None),
+    OperationOptions::default(),
 )?;
 // The returned `sandboxId` is opaque — carry it forward, never parse it.
+let sandbox_id = provisioned.sandbox_id;
 
 // Start. The exec phase runs against a started session.
-run_state_aware_json(
-    r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"..."}"#,
-    false, // dry_run
-    false, // experimental
+sandbox::start(
+    &sandbox_id,
+    LifecycleRequest::new("0.9.0-alpha"),
+    OperationOptions::default(),
 )?;
 
 // Exec phase, attached: an interactive shell on this console.
-let outcome = exec_attached(
-    r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"...","process":{"commandLine":"powershell.exe"}}"#,
-    false, // experimental
+let outcome = sandbox::exec_attached(
+    &sandbox_id,
+    ExecRequest::new("0.9.0-alpha", "powershell.exe"),
+    OperationOptions::default(),
 )?;
 let _ = outcome;
-let _ = provisioned;
 Ok(())
 }
 ```
 
 Three backends implement the state-aware lifecycle — IsolationSession, WSLc and
-Windows Sandbox. Only IsolationSession serves `exec_sandbox`.
+Windows Sandbox. IsolationSession and WSLc serve streaming typed exec through
+`sandbox::exec`; WSLc exposes stdout/stderr only because its SDK has no
+process-input API. Windows Sandbox supports attached exec but cannot return
+native exec pipes.
 
-`exec_attached` is verified against **IsolationSession** only.
+All three state-aware backends serve `sandbox::exec_attached`. IsolationSession
+also forwards stdin through a pseudo-console; Windows Sandbox drops terminal
+input pending PTY support, and WSLc has no process-input API.
 
 What an unavailable backend returns differs, so branch on the code rather than
 assuming one: a build without the `wslc` or `isolation_session` feature answers
@@ -502,9 +525,6 @@ assuming one: a build without the `wslc` or `isolation_session` feature answers
 state-aware arm on the path you called answers `ErrorCode::UnsupportedPhase`.
 Windows Sandbox is compiled in unconditionally on Windows; IsolationSession and
 WSLc each need their engine feature, both of which this crate forwards.
-
-**IsolationSession is refused from a single-threaded apartment.** Call it from an
-MTA thread or one with no apartment of its own.
 
 ## Supported backends
 
@@ -525,11 +545,12 @@ Constructing the listed variants is unaffected.
 
 `Containment::IsolationSession` names the isolation-session backend, served by
 `run` and `spawn_sandbox` with piped stdio. It requires the
-`isolation_session` build feature but no runtime experimental opt-in. Its exec has no host
-process id (`Sandbox::id()` is `0`), `kill()` stops the whole session, and
+`isolation_session` build feature. Its exec has no host process id
+(`Sandbox::id()` is `0`), `kill()` stops the whole session, and
 dropping the handle tears the session down synchronously rather than in the
-background. Reach its multi-call lifecycle through
-`run_state_aware_json` plus `exec_attached` or `exec_sandbox`.
+background. Reach its multi-call lifecycle through the typed state-aware calls. Use
+`run_state_aware_json`, `exec_attached_json`, or `exec_sandbox_json` only when
+the caller intentionally owns exact wire JSON.
 
 Backends with no variant at all — Windows Sandbox, MicroVM, and Hyperlight —
 cannot be named from this crate; use the executor binaries. Windows Sandbox is
@@ -542,13 +563,11 @@ pipe-based execution. Use the standalone `lxc-exec` binary for LXC.
 ### WSLC
 
 WSLC runs a Linux container on a Windows host through the WSLC SDK. It is
-available when this crate is built with its **`wslc` feature**; no runtime
-experimental opt-in is required. Its settings — image, vCPUs, memory, GPU,
-storage path, port forwards — are carried by the [`WslcSection`] inside
-[`Containment::Wslc`] and go through the same production parser as the
-executor, so a rejected value
-(e.g. a port mapping with a zero or duplicated host port) fails at build time,
-not at spawn.
+available when this crate is built with its **`wslc` feature**. Its settings —
+image, vCPUs, memory, GPU, storage path, port forwards — are carried by the
+[`WslcSection`] inside [`Containment::Wslc`] and go through the same production
+parser as the executor, so a rejected value (e.g. a port mapping with a zero or
+duplicated host port) fails at build time, not at spawn.
 
 ```rust,no_run
 use std::error::Error;
@@ -578,6 +597,46 @@ Two WSLC-specific limits follow from the SDK's surface: the container has no
 stdin (`Sandbox::take_stdin()` returns `None`), and its process has no host
 process id (`Sandbox::id()` is `0`) — `kill()` stops the whole container.
 [`platform_support`] reports `"wslc"` only on a host that can actually run it.
+
+#### Native runtime files
+
+WSLC needs native files that cargo places on no search path. They are resolved
+**beside the module holding this crate's code** — your executable for a Rust
+binary, `mxc_ffi.dll` for the C ABI — never from `PATH` or the working
+directory.
+
+| File | Needed by | Built by |
+|------|-----------|----------|
+| `wslcsdk.dll` | every WSLC path, including the host probe | the `wslc` feature, automatically |
+| `wxc-wslc-daemon.exe` | the state-aware lifecycle only | a separate `wxc_wslc_daemon` build (below) |
+
+Building with `--features wslc` downloads the pinned `Microsoft.WSL.Containers`
+package from the MxcDependencies Azure Artifacts feed and copies `wslcsdk.dll`
+into the cargo profile directory — `target/<profile>/`, or
+`target/<triple>/<profile>/` under an explicit target. That is where your own
+binary lands, so `cargo run` and anything launched from that directory find it.
+A build that cannot acquire the SDK at all fails rather than producing a binary
+that cannot load the DLL; set `WSLC_SDK_PATH` to a directory holding a
+pre-fetched `wslcsdk.dll` to build offline. See
+[`external/wslc-sdk/README.md`](../../../external/wslc-sdk/README.md) for the
+resolution order, the pinned version, and the feed URL.
+
+`--features wslc` does not pull the daemon into your dependency graph. Build it
+from a checkout of this repository —
+`cargo build -p wxc_wslc_daemon --release --target <triple>` — then copy
+`wxc-wslc-daemon.exe` beside your binary before running a state-aware request
+with `"containment": "wslc"`. Use the same `--target` as your own build: the
+daemon loads the staged `wslcsdk.dll` from the directory they share.
+
+**`cargo install` carries neither file.** It copies the executable out of the
+profile directory and leaves the staged DLL behind, so an installed binary
+cannot run WSLC until you copy `wslcsdk.dll` — and the daemon, if you need the
+state-aware lifecycle — into the install directory beside it.
+
+A `wslcsdk.dll` that is missing or fails to load is not a startup error: the
+host probe fails closed, which is why [`platform_support`] drops `"wslc"`, and a
+`Containment::Wslc` run then fails with an error naming the directory it
+searched.
 
 ## Telemetry consent
 
@@ -657,8 +716,11 @@ Under `exec_attached`, IsolationSession allocates a pseudo-console and forwards
 stdin, so interactive shells render and resize. A pseudo-console has one output
 stream, so the sandbox's stderr arrives merged into stdout.
 
-`exec_attached` refuses with `MalformedRequest` unless this process's stdout and
-stdin are both terminals; use `exec_sandbox` for a workload with no terminal.
+Windows Sandbox and WSLc relay attached output without interactive stdin.
+
+`sandbox::exec_attached` refuses with `MalformedRequest` unless this process's
+stdout and stdin are both terminals; use `sandbox::exec` for a typed workload
+with no terminal.
 
 ## Relationship to `mxc_engine` and the executor binaries
 

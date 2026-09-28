@@ -174,6 +174,104 @@ describe('Linux Bubblewrap network proxy (schema 0.6.0-alpha)', {
   });
 });
 
+// Schema 0.9 names a real loopback proxy endpoint in
+// `runtimeConfig.networkProxy`. The native capability probe is the gate for
+// the complete proxy-only posture, including private namespaces and packet
+// filtering dependencies.
+const PROXY_SCHEMA_09 = '0.9.0-alpha';
+const hasProxyEnforcement =
+  isLinuxBubblewrap &&
+  sdk.getPlatformSupport().bubblewrapNetwork?.proxyEnforcement === 'supported';
+
+describe(`Linux Bubblewrap network proxy (schema ${PROXY_SCHEMA_09})`, {
+  skip: !isLinuxBubblewrap
+    ? 'Linux Bubblewrap proxy tests require Linux with bwrap installed'
+    : !hasProxyEnforcement
+      ? 'this host cannot enforce proxy-only egress (see PlatformSupport.bubblewrapNetwork.warnings)'
+      : undefined,
+}, () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-sdk-bwrap-proxy-09-'));
+  const proxies: ChildProcess[] = [];
+
+  const startProxy = (): number => {
+    const { port, proxyProcess } = startUnixTestProxy(
+      fs.mkdtempSync(path.join(tmpDir, 'proxy-')),
+    );
+    proxies.push(proxyProcess);
+    return port;
+  };
+
+  after(() => {
+    for (const proxy of proxies) {
+      try { proxy.kill('SIGTERM'); } catch { /* ignore */ }
+    }
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  it('should route traffic through the endpoint named by runtimeConfig.networkProxy', async () => {
+    const port = startProxy();
+    const config = sdk.createConfigFromPolicy(
+      { version: PROXY_SCHEMA_09 },
+      'bubblewrap',
+      'bwrap-runtime-proxy-09',
+    );
+    config.process!.commandLine =
+      `curl -fsSL '${NETWORK_TEST_URL}' > /dev/null && echo PROXY_09_OK`;
+    config.network = {
+      egress: { default: 'deny' },
+      ingress: { default: 'deny', hostLoopback: 'deny' },
+    };
+    config.runtimeConfig = {
+      ...(config.runtimeConfig ?? {}),
+      networkProxy: `http://127.0.0.1:${port}`,
+    };
+
+    const result = await spawnFromConfigAsync(config, { ...debugSpawnOptions, experimental: true });
+    assert.strictEqual(result.exitCode, 0, `0.9 proxy run failed: ${result.stdout}`);
+    assert.ok(result.stdout.includes('PROXY_09_OK'), `missing PROXY_09_OK in: ${result.stdout}`);
+  });
+
+  it('should confine egress to the proxy endpoint', async () => {
+    const port = startProxy();
+    const config = sdk.createConfigFromPolicy(
+      { version: PROXY_SCHEMA_09 },
+      'bubblewrap',
+      'bwrap-runtime-proxy-09-egress',
+    );
+    config.process!.commandLine =
+      'set -e; ' +
+      `if curl -fsS --noproxy '*' --max-time 10 '${NETWORK_TEST_URL}' > /dev/null 2>&1; then ` +
+      '  echo DIRECT_09_LEAKED; exit 1; ' +
+      'else ' +
+      '  echo DIRECT_09_BLOCKED_OK; ' +
+      'fi; ' +
+      `curl -fsSL '${NETWORK_TEST_URL}' > /dev/null && echo PROXY_09_STILL_OK`;
+    config.network = {
+      egress: { default: 'deny' },
+      ingress: { default: 'deny', hostLoopback: 'deny' },
+    };
+    config.runtimeConfig = {
+      ...(config.runtimeConfig ?? {}),
+      networkProxy: `http://127.0.0.1:${port}`,
+    };
+
+    const result = await spawnFromConfigAsync(config, { ...debugSpawnOptions, experimental: true });
+    assert.strictEqual(result.exitCode, 0, `0.9 egress run failed: ${result.stdout}`);
+    assert.ok(
+      result.stdout.includes('DIRECT_09_BLOCKED_OK'),
+      `direct egress was not blocked: ${result.stdout}`,
+    );
+    assert.ok(
+      result.stdout.includes('PROXY_09_STILL_OK'),
+      `the proxied request did not complete: ${result.stdout}`,
+    );
+    assert.ok(
+      !result.stdout.includes('DIRECT_09_LEAKED'),
+      `proxy-only egress leaked: ${result.stdout}`,
+    );
+  });
+});
+
 describe('public backend discovery projection', () => {
   it('projects public discovery into PlatformSupport.bubblewrapNetwork', (t) => {
     const backends = sdk.getAvailableBackends();

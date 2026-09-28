@@ -120,6 +120,18 @@ describe('getPlatformSupport', () => {
     assert.ok(support.availableMethods.includes('isolation_session'));
   });
 
+  it('keeps the retained Hyperlight availability projection', { skip: os.platform() !== 'win32' }, () => {
+    _setProbeRunner(() => JSON.stringify({
+      probes: {
+        isolationSessionAvailable: false,
+        hyperlightAvailable: true,
+      },
+    }));
+    const support = getPlatformSupport();
+    assert.ok(support.availableMethods.includes('hyperlight'));
+    assert.ok(!support.availableMethods.includes('isolation_session'));
+  });
+
   it('ignores malformed retained Windows probe output', { skip: os.platform() !== 'win32' }, () => {
     _setProbeRunner(() => 'not json');
     assert.doesNotThrow(() => getPlatformSupport());
@@ -150,5 +162,26 @@ describe('findWxcExecutable', () => {
     assert.strictEqual(first, second);
     assert.match(first ?? '', /custom/);
     assert.strictEqual(checks, 2, 'one initial verification and one cache verification');
+  });
+
+  it('does not cache a failed executable lookup', () => {
+    process.env.MXC_BIN_DIR = 'missing';
+    _setWxcExecutableVerifier(() => false);
+    assert.strictEqual(findWxcExecutable(), null);
+
+    _setWxcExecutableVerifier((candidate) => candidate.includes('missing'));
+    assert.match(findWxcExecutable() ?? '', /missing/);
+  });
+
+  it('honors an explicit binary directory configured after a cached lookup', () => {
+    delete process.env.MXC_BIN_DIR;
+    _setWxcExecutableVerifier(() => true);
+    const initial = findWxcExecutable();
+    assert.ok(initial);
+
+    process.env.MXC_BIN_DIR = 'override';
+    const resolved = findWxcExecutable();
+    assert.match(resolved ?? '', /override/);
+    assert.notStrictEqual(resolved, initial);
   });
 });

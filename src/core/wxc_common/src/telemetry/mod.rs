@@ -999,6 +999,39 @@ pub fn emit_sdk_state_aware_with_kind(
     );
 }
 
+/// Emit telemetry for a typed SDK envelope-phase result without constructing a
+/// response envelope.
+#[doc(hidden)]
+pub fn emit_sdk_state_aware_typed(
+    active: bool,
+    requested_sandbox_kind: Option<&'static str>,
+    ctx: TelemetryContext<'_>,
+    outcome: &Result<(), MxcError>,
+    elapsed: Duration,
+) {
+    emit_sdk_with_release(active, |_auth| {
+        let sandbox_kind = sandbox_kind_for(ctx.backend, requested_sandbox_kind);
+        let duration_ms = elapsed.as_millis() as u64;
+        let (exit_code, status, failure_reason) = match outcome {
+            Ok(()) => (0, "success", None),
+            Err(error) => (1, "failure", Some(classify_mxc_error(error))),
+        };
+        log_execution(&ExecutionEvent {
+            backend: ctx.backend,
+            sandbox_kind,
+            exit_code,
+            outcome: status,
+            duration_ms,
+            failure_reason,
+            phase: ctx.phase,
+            correlation_vector: ctx.correlation_vector,
+        });
+        if let Some(reason) = failure_reason {
+            log_error(ctx, sandbox_kind, reason, exit_code);
+        }
+    });
+}
+
 /// Emit SDK state-aware telemetry with an optional terminal failure override.
 #[doc(hidden)]
 pub fn emit_sdk_state_aware_with_kind_and_failure(
@@ -1948,6 +1981,49 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].sandbox_kind, "vm");
         assert_eq!(errors[0].backend, "windows_sandbox");
+
+        reset_for_test();
+    }
+
+    #[test]
+    fn typed_sdk_state_aware_events_do_not_require_dispatch_envelopes() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_test();
+        events::test_sink::install();
+        TEST_AUTHORIZATION_OVERRIDE.with(|allowed| allowed.set(Some(true)));
+
+        emit_sdk_state_aware_typed(
+            true,
+            Some("isolation_session"),
+            TelemetryContext {
+                backend: "isolation_session",
+                phase: "provision",
+                correlation_vector: "typed-success",
+            },
+            &Ok(()),
+            Duration::from_millis(3),
+        );
+        emit_sdk_state_aware_typed(
+            true,
+            Some("isolation_session"),
+            TelemetryContext {
+                backend: "isolation_session",
+                phase: "start",
+                correlation_vector: "typed-error",
+            },
+            &Err(MxcError::policy_validation("simulated")),
+            Duration::from_millis(4),
+        );
+
+        let executions = events::test_sink::take_executions();
+        assert_eq!(executions.len(), 2);
+        assert_eq!(executions[0].outcome, "success");
+        assert_eq!(executions[0].correlation_vector, "typed-success");
+        assert_eq!(executions[1].outcome, "failure");
+        assert_eq!(executions[1].correlation_vector, "typed-error");
+        let errors = events::test_sink::take_errors();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].error_type, FailureReason::PolicyError);
 
         reset_for_test();
     }
