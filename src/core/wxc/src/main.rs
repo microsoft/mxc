@@ -700,7 +700,9 @@ fn run_state_aware_main(
             process::exit(1);
         }
         StateAwareExit::ExecError(json) => {
-            eprintln!("{}", json);
+            // The script's own stderr may not end in a newline, and gluing the
+            // envelope onto those bytes would leave it unparseable.
+            eprintln!("\n{}", json);
             process::exit(1);
         }
     }

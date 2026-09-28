@@ -111,7 +111,10 @@ output is dropped and the run is reported as truncated; incomplete output is
 never reported as successful. A run that would otherwise have exited cleanly
 becomes an explicit backend error carrying the process's exit code in
 `details.exitCode`. A run that timed out or was cancelled keeps that outcome —
-truncation is reported alongside it rather than replacing it.
+truncation is reported alongside it rather than replacing it. For an in-process
+piped caller that pairing is only available on a clean exit: `ExecOutcome` has no
+field for a modifier, so a piped run that both timed out and truncated reports
+only the timeout.
 
 If process termination cannot be positively confirmed after creation, the
 container is quarantined and cannot be started or used for another exec. The

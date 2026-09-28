@@ -824,18 +824,22 @@ type NonExecResponseEnvelope<TResult> = { result: TResult } | { error: ErrorEnve
 
 **Distinguishing exec dispatch-failure from script execution:**
 
-The SDK uses exit code plus stdout content:
+Which stream carries the typed error depends on whether the script could already
+have written output, so the SDK discriminates differently per phase:
 
-- `exitCode == 0`: the script ran and exited successfully. SDK constructs
-  `{stdout, stderr, exitCode}` from PTY / pipe events.
-- `exitCode != 0` AND stdout's entire content parses as a complete `{error: {...}}`
-  envelope: dispatch failed before the script ran; SDK surfaces the typed error.
-- `exitCode != 0` AND stdout does NOT parse as an envelope: the script ran and exited
+- Non-exec phases and exec **dry-run**: stdout is exactly one envelope. `{error}`
+  is the typed failure; `{result}` is success.
+- Non-dry-run **exec**, `exitCode == 0`: the script ran and exited successfully.
+  SDK constructs `{stdout, stderr, exitCode}` from PTY / pipe events.
+- Non-dry-run **exec**, `exitCode != 0` AND the final non-empty line of stderr
+  parses as a complete `{error: {...}}` envelope: dispatch failed; SDK surfaces
+  the typed error.
+- Non-dry-run **exec**, `exitCode != 0` otherwise: the script ran and exited
   non-zero. SDK constructs `{stdout, stderr, exitCode}`.
 
-Because MXC diagnostic output is routed to `stderr` in state-aware mode, this
-stdout-based discrimination has no false positives or negatives — the content is always
-either pure envelope or pure script output.
+For a non-dry-run exec, stdout is always pure script output, so it is never
+parsed for an envelope. The executor writes its error envelope on its own line,
+because a script's stderr may not end in a newline.
 
 `code` and `message` are always present. `code` is the machine-readable category a
 consumer branches on; `message` is the human-readable description, and for a failure

@@ -178,7 +178,10 @@ impl AdmittedExec {
                 StreamFrame::TimedOut => DaemonExecOutcome::TimedOut,
                 StreamFrame::Cancelled => DaemonExecOutcome::Cancelled,
                 StreamFrame::Error { message } => {
-                    return Err(DaemonError::transport(format!("exec failed: {message}")))
+                    return Err(DaemonError::transport(format!(
+                        "exec failed: {message}{}",
+                        truncation_suffix(truncated)
+                    )))
                 }
                 StreamFrame::Stdin { .. } => {
                     return Err(DaemonError::transport(
@@ -188,6 +191,17 @@ impl AdmittedExec {
             };
             return Ok(DaemonExecCompletion { outcome, truncated });
         }
+    }
+}
+
+/// Suffix naming lost output, for an error whose own classification the caller
+/// still needs.
+pub(crate) fn truncation_suffix(truncated: bool) -> &'static str {
+    if truncated {
+        " (live output was truncated: it was not drained fast enough and a bounded output queue \
+         overflowed)"
+    } else {
+        ""
     }
 }
 
@@ -365,9 +379,17 @@ impl DaemonClient {
         })?;
         let exit_code = match completion.outcome {
             DaemonExecOutcome::Exited(code) => code,
-            DaemonExecOutcome::TimedOut => return Err(DaemonError::transport("exec timed out")),
+            DaemonExecOutcome::TimedOut => {
+                return Err(DaemonError::transport(format!(
+                    "exec timed out{}",
+                    truncation_suffix(completion.truncated)
+                )))
+            }
             DaemonExecOutcome::Cancelled => {
-                return Err(DaemonError::transport("exec was cancelled"))
+                return Err(DaemonError::transport(format!(
+                    "exec was cancelled{}",
+                    truncation_suffix(completion.truncated)
+                )))
             }
         };
         if completion.truncated {

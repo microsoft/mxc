@@ -33,7 +33,7 @@ use wxc_common::state_aware_backend::{
 use wxc_common::validator::validate_state_aware_network_policy_support;
 
 use crate::container_steps::OutStream;
-use crate::daemon_client::{DaemonClient, DaemonError, DaemonExecOutcome};
+use crate::daemon_client::{truncation_suffix, DaemonClient, DaemonError, DaemonExecOutcome};
 use crate::daemon_protocol::{
     DeprovisionConfig, ErrKind, ExecConfig, NetworkMode, ProvisionConfig, StartConfig, StopConfig,
     VolumeMount,
@@ -460,17 +460,6 @@ fn connect_daemon() -> Result<DaemonClient, MxcError> {
     DaemonClient::connect().map_err(|e| {
         MxcError::backend_unavailable(format!("failed to reach the WSLc daemon: {e:#}"))
     })
-}
-
-/// Suffix naming lost output, for an error whose own classification the client
-/// still needs.
-fn truncation_suffix(truncated: bool) -> &'static str {
-    if truncated {
-        " (live output was truncated: it was not drained fast enough and a bounded output queue \
-         overflowed)"
-    } else {
-        ""
-    }
 }
 
 /// The process finished, but the caller's copy of its output is incomplete.

@@ -1140,6 +1140,21 @@ try {
         } | Out-Null
     }
 
+    # F2c: printf, not echo, so the script's stderr ends without a newline.
+    if ($edgeStartedOk) {
+        Run-StateAwareTest "F: exec error envelope survives unterminated script stderr" {
+            $req = @{ phase = 'exec'; sandboxId = $script:edgeSandboxId; process = @{ commandLine = "sh -c 'printf SCRIPT_STDERR_NO_NEWLINE >&2; sleep 30'"; timeout = 5000 } }
+            $r = Invoke-StateAware -Request $req
+            Assert-True ($r.ExitCode -ne 0) "post-admission failure exits non-zero"
+            Assert-True ($r.Stderr -match 'SCRIPT_STDERR_NO_NEWLINE') `
+                "stderr carries the script's unterminated output"
+            $envObj = Parse-StderrEnvelope -Stderr $r.Stderr
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'backend_error') `
+                "the envelope is still parseable on its own line (got '$code')"
+        } | Out-Null
+    }
+
     # F3: working directory (cwd) is honored per exec.
     if ($edgeStartedOk) {
         Run-StateAwareTest "F: exec honors working directory (cwd)" {
