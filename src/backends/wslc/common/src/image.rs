@@ -211,9 +211,8 @@ pub(crate) unsafe fn import_image_from_tar(
     Ok(())
 }
 
-/// Ensure `image` is available in the session's local cache: use it if already
-/// present, import it from `image_tar_path` if provided, otherwise fail with the
-/// same pre-pull guidance as the one-shot path (MXC never pulls at run time).
+/// Ensure `image` is in the session's local cache, importing it from
+/// `image_tar_path` when one is supplied and the cache misses.
 ///
 /// # Safety
 /// `sdk` must hold valid function pointers and `session` must be a live handle.
@@ -223,6 +222,7 @@ pub unsafe fn resolve_image(
     image: &str,
     image_tar_path: Option<&str>,
     storage_path: Option<&str>,
+    log_prefix: &str,
     logger: &mut Logger,
 ) -> Result<(), ScriptResponse> {
     let mut images: *mut WslcImageInfo = ptr::null_mut();
@@ -236,6 +236,8 @@ pub unsafe fn resolve_image(
     if !images.is_null() {
         let images_slice = std::slice::from_raw_parts(images, image_count as usize);
         for info in images_slice {
+            // `info.name` is a fixed-size, possibly-unterminated C buffer; read
+            // up to the first NUL, or the whole buffer if there is none.
             let name_bytes =
                 std::slice::from_raw_parts(info.name.as_ptr().cast::<u8>(), info.name.len());
             let end = name_bytes
@@ -256,11 +258,11 @@ pub unsafe fn resolve_image(
         if image_tar_path.is_some() {
             let _ = writeln!(
                 logger,
-                "[WSLC][daemon] Image '{}' already cached, skipping tar import",
-                image
+                "{} Image '{}' already cached, skipping tar import",
+                log_prefix, image
             );
         } else {
-            let _ = writeln!(logger, "[WSLC][daemon] Image '{}' found", image);
+            let _ = writeln!(logger, "{} Image '{}' found", log_prefix, image);
         }
         return Ok(());
     }
@@ -269,9 +271,8 @@ pub unsafe fn resolve_image(
         return import_image_from_tar(sdk, session, image, tar_path, logger);
     }
 
-    // MXC is an execution layer; image management is out of band. Mirror the
-    // one-shot runner's pre-pull guidance so operators get the same actionable
-    // command.
+    // A pull into a different storage path lands in a cache this run will not
+    // read, so an overridden path has to travel with the suggested commands.
     let (storage_arg_wxc, storage_arg_ps) = match storage_path {
         Some(sp) => (
             format!(" --storage-path \"{}\"", sp),

@@ -528,6 +528,7 @@ impl Worker {
                 &config.image,
                 config.image_tar_path.as_deref(),
                 None,
+                "[WSLC][daemon]",
                 &mut self.logger,
             )
             .map_err(sr_err)?;

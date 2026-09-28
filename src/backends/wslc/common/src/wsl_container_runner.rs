@@ -684,89 +684,6 @@ impl WSLContainerRunner {
         ))
     }
 
-    /// Check if image exists, import from tar, or pull from registry.
-    ///
-    /// # Safety
-    /// `sdk` must contain valid function pointers and `session` must be a
-    /// live session handle obtained from `WslcCreateSession`.
-    unsafe fn resolve_image(
-        &self,
-        sdk: &'static WslcSdk,
-        session: WslcSession,
-        logger: &mut Logger,
-    ) -> Result<(), ScriptResponse> {
-        let mut images: *mut WslcImageInfo = ptr::null_mut();
-        let mut image_count: u32 = 0;
-        let hr = sdk.WslcListSessionImages(session, &mut images, &mut image_count);
-        if hr != S_OK {
-            return Err(sdk_error("WslcListSessionImages failed", hr, ""));
-        }
-
-        let image_name = &self.config.image;
-        let mut image_found = false;
-        if !images.is_null() {
-            let images_slice = std::slice::from_raw_parts(images, image_count as usize);
-            for info in images_slice {
-                // `info.name` is a fixed-size, possibly-unterminated C buffer;
-                // read up to the first NUL (or the whole buffer if there is
-                // none) without allocating, matching the SDK's own truncation.
-                let name_bytes =
-                    std::slice::from_raw_parts(info.name.as_ptr().cast::<u8>(), info.name.len());
-                let end = name_bytes
-                    .iter()
-                    .position(|&b| b == 0)
-                    .unwrap_or(name_bytes.len());
-                if let Ok(name) = std::str::from_utf8(&name_bytes[..end]) {
-                    if name == image_name.as_str() {
-                        image_found = true;
-                        break;
-                    }
-                }
-            }
-            windows::Win32::System::Com::CoTaskMemFree(Some(images as *const c_void));
-        }
-
-        if image_found {
-            if self.config.image_tar_path.is_some() {
-                let _ = writeln!(
-                    logger,
-                    "[WSLC] Image '{}' already cached, skipping tar import",
-                    image_name
-                );
-            } else {
-                let _ = writeln!(logger, "[WSLC] Image '{}' found", image_name);
-            }
-        } else if let Some(tar_path) = &self.config.image_tar_path {
-            image::import_image_from_tar(sdk, session, image_name, tar_path, logger)?;
-        } else {
-            // MXC is an execution layer; image management is out of band. The
-            // setup script `scripts\setup-wslc.ps1` (or `wxc-exec.exe
-            // --setup-wslc --image <name>`) pre-pulls images into the same
-            // WSLC storage_path the runner uses. When the config overrides
-            // `wslc.storagePath`, include it in the suggested
-            // commands so the operator's first copy-paste lands the image in
-            // the cache the next run will actually read.
-            let (storage_arg_wxc, storage_arg_ps) = match &self.config.storage_path {
-                Some(sp) => (
-                    format!(" --storage-path \"{}\"", sp),
-                    format!(" -StoragePath \"{}\"", sp),
-                ),
-                None => (String::new(), String::new()),
-            };
-            return Err(WslcError::Rejected(format!(
-                "WSLC image '{}' not found locally. Pre-pull it with: \
-                 wxc-exec.exe --setup-wslc --image {}{} \
-                 (or scripts\\setup-wslc.ps1 -Image {}{}). \
-                 MXC does not pull images at run time; \
-                 see docs/wsl/wsl-container-getting-started.md.",
-                image_name, image_name, storage_arg_wxc, image_name, storage_arg_ps,
-            ))
-            .into_response());
-        }
-
-        Ok(())
-    }
-
     /// Pre-pull a WSLC image into the SDK's local image cache.
     ///
     /// Loads the SDK, opens a minimal session against `storage_path` (or the
@@ -1204,7 +1121,15 @@ impl WSLContainerRunner {
         let session_guard = self.create_session(sdk, request, logger)?;
 
         // -- Image resolution --
-        self.resolve_image(sdk, session_guard.as_raw(), logger)?;
+        image::resolve_image(
+            sdk,
+            session_guard.as_raw(),
+            &self.config.image,
+            self.config.image_tar_path.as_deref(),
+            self.config.storage_path.as_deref(),
+            "[WSLC]",
+            logger,
+        )?;
 
         // -- Process settings --
         // String data (script_cstr, env_cstrings, _cwd_cstr) must stay alive
