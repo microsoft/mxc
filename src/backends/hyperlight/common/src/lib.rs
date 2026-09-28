@@ -501,8 +501,8 @@ impl HyperlightScriptRunner {
                     PathRelationship::Overlaps => {
                         return Err(RunnerError::Preflight(format!(
                             "deniedPaths entry {denied:?} overlaps allow list path {allowed:?}; \
-                             Hyperlight cannot combine a denied subtree with a mounted path \
-                             inside it"
+                             Hyperlight cannot safely expose overlapping allowed and denied \
+                             host paths"
                         )));
                     }
                     PathRelationship::Separate => {}
@@ -1557,6 +1557,9 @@ fn append_non_windows_tail(base: PathBuf, tail: &[std::path::Component<'_>]) -> 
             }
             Component::CurDir => {}
             Component::RootDir => {}
+            Component::Prefix(_) => {
+                unreachable!("non-Windows paths cannot contain a Windows prefix")
+            }
         }
     }
     path
@@ -1638,6 +1641,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         tmp
+    }
+
+    fn assert_denied_overlap_message(message: &str) {
+        assert!(message.contains("deniedPaths"), "got: {message}");
+        assert!(
+            message.contains("overlapping allowed and denied host paths"),
+            "got: {message}"
+        );
     }
 
     #[test]
@@ -1864,7 +1875,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = r.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(resp.error_message.contains("deniedPaths"));
+        assert_denied_overlap_message(&resp.error_message);
     }
 
     #[test]
@@ -1879,7 +1890,7 @@ mod tests {
             ..Default::default()
         };
         let err = HyperlightScriptRunner::validate_policies(&request).unwrap_err();
-        assert!(err.to_string().contains("deniedPaths"), "got: {err}");
+        assert_denied_overlap_message(&err.to_string());
     }
 
     #[test]
@@ -1894,7 +1905,7 @@ mod tests {
             ..Default::default()
         };
         let err = HyperlightScriptRunner::validate_policies(&request).unwrap_err();
-        assert!(err.to_string().contains("deniedPaths"), "got: {err}");
+        assert_denied_overlap_message(&err.to_string());
     }
 
     #[cfg(unix)]
@@ -1926,7 +1937,7 @@ mod tests {
             ..Default::default()
         };
         let err = HyperlightScriptRunner::validate_policies(&request).unwrap_err();
-        assert!(err.to_string().contains("deniedPaths"), "got: {err}");
+        assert_denied_overlap_message(&err.to_string());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1947,7 +1958,7 @@ mod tests {
             ..Default::default()
         };
         let err = HyperlightScriptRunner::validate_policies(&request).unwrap_err();
-        assert!(err.to_string().contains("deniedPaths"), "got: {err}");
+        assert_denied_overlap_message(&err.to_string());
     }
 
     #[cfg(target_os = "windows")]
@@ -1968,11 +1979,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = r.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(
-            resp.error_message.contains("deniedPaths"),
-            "got: {}",
-            resp.error_message
-        );
+        assert_denied_overlap_message(&resp.error_message);
     }
 
     #[cfg(target_os = "windows")]
@@ -1993,11 +2000,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = r.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(
-            resp.error_message.contains("deniedPaths"),
-            "got: {}",
-            resp.error_message
-        );
+        assert_denied_overlap_message(&resp.error_message);
     }
 
     #[cfg(target_os = "windows")]
@@ -2015,7 +2018,7 @@ mod tests {
             ..Default::default()
         };
         let err = HyperlightScriptRunner::validate_policies(&request).unwrap_err();
-        assert!(err.to_string().contains("deniedPaths"), "got: {err}");
+        assert_denied_overlap_message(&err.to_string());
     }
 
     #[cfg(target_os = "windows")]
