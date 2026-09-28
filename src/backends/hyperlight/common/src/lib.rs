@@ -498,10 +498,11 @@ impl HyperlightScriptRunner {
                 .chain(request.policy.readonly_paths.iter())
             {
                 match path_relationship(allowed, denied) {
-                    PathRelationship::Covered => {
+                    PathRelationship::Overlaps => {
                         return Err(RunnerError::Preflight(format!(
-                            "path {denied:?} appears in deniedPaths but is exposed by allow list \
-                             path {allowed:?}"
+                            "deniedPaths entry {denied:?} overlaps allow list path {allowed:?}; \
+                             Hyperlight cannot combine a denied subtree with a mounted path \
+                             inside it"
                         )));
                     }
                     PathRelationship::Separate => {}
@@ -1338,7 +1339,7 @@ fn stamp_matches(home: &Path, runtime: HyperlightRuntime) -> bool {
     }
 }
 
-/// Whether an allowed host path exposes a denied path after canonicalization,
+/// Whether an allowed host path overlaps a denied path after canonicalization,
 /// with a platform-aware lexical fallback for paths that do not exist yet.
 fn path_relationship(allowed: &str, denied: &str) -> PathRelationship {
     let Ok(allowed) = anchor_policy_path(allowed) else {
@@ -1351,7 +1352,9 @@ fn path_relationship(allowed: &str, denied: &str) -> PathRelationship {
         std::fs::canonicalize(&allowed),
         std::fs::canonicalize(&denied),
     ) {
-        (Ok(allowed), Ok(denied)) => PathRelationship::from_covered(denied.starts_with(allowed)),
+        (Ok(allowed), Ok(denied)) => PathRelationship::from_overlaps(
+            denied.starts_with(&allowed) || allowed.starts_with(&denied),
+        ),
         _ => path_relationship_fallback(&allowed.to_string_lossy(), &denied.to_string_lossy()),
     }
 }
@@ -1367,15 +1370,15 @@ fn anchor_policy_path(path: &str) -> Result<PathBuf, std::io::Error> {
 
 #[derive(Debug, PartialEq, Eq)]
 enum PathRelationship {
-    Covered,
+    Overlaps,
     Separate,
     Indeterminate,
 }
 
 impl PathRelationship {
-    fn from_covered(covered: bool) -> Self {
-        if covered {
-            Self::Covered
+    fn from_overlaps(overlaps: bool) -> Self {
+        if overlaps {
+            Self::Overlaps
         } else {
             Self::Separate
         }
@@ -1407,7 +1410,7 @@ fn path_relationship_fallback_with(
                 &denied_resolved,
                 has_verbatim_trim_sensitive_component(denied),
             );
-            return PathRelationship::from_covered(allowed_norm.covers(&denied_norm));
+            return PathRelationship::from_overlaps(allowed_norm.overlaps(&denied_norm));
         }
         (PathCanonical::Unknown, _) | (_, PathCanonical::Unknown) => {
             return PathRelationship::Indeterminate;
@@ -1415,8 +1418,8 @@ fn path_relationship_fallback_with(
         _ => {}
     }
 
-    PathRelationship::from_covered(
-        WindowsFallbackPath::parse(allowed).covers(&WindowsFallbackPath::parse(denied)),
+    PathRelationship::from_overlaps(
+        WindowsFallbackPath::parse(allowed).overlaps(&WindowsFallbackPath::parse(denied)),
     )
 }
 
@@ -1476,10 +1479,11 @@ impl WindowsFallbackPath {
         }
     }
 
-    fn covers(&self, denied: &Self) -> bool {
+    fn overlaps(&self, denied: &Self) -> bool {
         self.drive == denied.drive
             && self.rooted == denied.rooted
-            && denied.components.starts_with(&self.components)
+            && (denied.components.starts_with(&self.components)
+                || self.components.starts_with(&denied.components))
     }
 }
 
@@ -1506,7 +1510,9 @@ fn has_verbatim_trim_sensitive_component(path: &str) -> bool {
 
 #[cfg(not(target_os = "windows"))]
 fn path_relationship_fallback(allowed: &str, denied: &str) -> PathRelationship {
-    PathRelationship::from_covered(Path::new(denied).starts_with(Path::new(allowed)))
+    let allowed = Path::new(allowed);
+    let denied = Path::new(denied);
+    PathRelationship::from_overlaps(denied.starts_with(allowed) || allowed.starts_with(denied))
 }
 
 fn mounts_equal(a: &[Mount], b: &[Mount]) -> bool {
@@ -1810,6 +1816,21 @@ mod tests {
     }
 
     #[test]
+    fn policy_rejects_allowed_mount_inside_denied_parent() {
+        let request = ExecutionRequest {
+            script_code: "print('x')".to_string(),
+            policy: ContainerPolicy {
+                readwrite_paths: vec!["/tmp/hyperlight-denied-parent/child".to_string()],
+                denied_paths: vec!["/tmp/hyperlight-denied-parent".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = HyperlightScriptRunner::validate_policies(&request).unwrap_err();
+        assert!(err.to_string().contains("deniedPaths"), "got: {err}");
+    }
+
+    #[test]
     fn policy_rejects_denied_absolute_descendant_of_missing_relative_mount() {
         let relative_mount = format!("hyperlight-relative-{}", std::process::id());
         let denied = std::env::current_dir()
@@ -1948,7 +1969,7 @@ mod tests {
                     _ => PathCanonical::Absent,
                 },
             ),
-            PathRelationship::Covered
+            PathRelationship::Overlaps
         );
     }
 
@@ -1957,7 +1978,7 @@ mod tests {
     fn fallback_path_comparison_stays_case_sensitive_off_windows() {
         assert_eq!(
             path_relationship("/tmp/mxc-missing-case", "/tmp/mxc-missing-case"),
-            PathRelationship::Covered
+            PathRelationship::Overlaps
         );
         assert_eq!(
             path_relationship("/tmp/MXC-MISSING-CASE", "/tmp/mxc-missing-case"),
