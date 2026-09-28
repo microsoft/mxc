@@ -191,6 +191,7 @@ unrecognised prefix, and this is by design:
 | Source                  | Behaviour for an unrecognised `sandboxId` prefix |
 | ----------------------- | ------------------------------------------------ |
 | SDK (TypeScript)        | Throws `MxcError { code: 'malformed_id' }` before invoking `mxc_state_aware` or `mxc_state_aware_exec`. The SDK matches the prefix against the closed `StateAwareContainmentBackend` union it was compiled with; an unknown prefix is treated as a malformed id. See `sdk/node/src/state-aware-helper.ts`. |
+| SDK (Rust)              | `SandboxId::parse` accepts a syntactically valid opaque id without interpreting its prefix. Dispatch returns `MxcError { code: 'unsupported_containment' }` when that prefix is not registered. Empty ids, ids without prefix structure, and ids containing NUL are `malformed_id`. |
 | Native FFI entry points | Return `MxcError { code: 'unsupported_containment' }`. The Rust dispatcher parses the prefix successfully but the prefix-to-backend lookup table has no entry for it. See `src/core/wxc_common/src/state_aware_dispatch.rs`. |
 
 A recognised prefix with a malformed body is `malformed_id` from both sources
@@ -596,12 +597,12 @@ omits it.
 
 ## 7. Wire contract
 
-The wire contract is a typed, JSON-serialised envelope shared by the TypeScript SDK,
-`mxc_ffi`, and the executor CLI. The SDK passes the envelope to `mxc_ffi`; direct CLI
-callers can provide the same envelope through `--config-base64`. Rust parses both paths
-into the same request types (§9.1). The only open content is at the leaves of
-`ErrorEnvelope.details`; every other field, including the error envelope's named
-structured fields, is statically typed.
+The raw exact wire contract is a typed, JSON-serialised envelope shared by the
+TypeScript SDK and `mxc_ffi`. Direct executor calls carry lifecycle routing in CLI
+arguments while retaining the same phase-specific exact contracts internally. Rust
+normalizes both paths into the same request types (§9.1). The only open content is at
+the leaves of `ErrorEnvelope.details`; every other field, including the error
+envelope's named structured fields, is statically typed.
 
 ### 7.1 Request envelope
 
@@ -681,6 +682,30 @@ State-aware-only fields:
 | `phase` | `Phase` member | Yes | Discriminator. Absence means a one-shot request. |
 | `process` | `ProcessConfig` | Required for `exec`; absent otherwise. | Cross-backend execution fields. |
 
+#### `wxc-exec` lifecycle transport
+
+Raw exact SDK and FFI calls retain `phase` and `sandboxId` in JSON. Direct
+`wxc-exec` lifecycle calls instead remove those routing fields from the supplied JSON
+and pass them as command-line arguments:
+
+```text
+wxc-exec.exe policy.json --operation provision
+wxc-exec.exe policy.json --operation start --sandbox-id iso:abc
+wxc-exec.exe policy.json --operation exec --sandbox-id iso:abc -- command arg
+wxc-exec.exe policy.json --operation stop --sandbox-id iso:abc
+wxc-exec.exe policy.json --operation deprovision --sandbox-id iso:abc
+```
+
+Provision JSON still contains `containment`; later operations route from the
+`--sandbox-id` prefix. Supplying `phase` or `sandboxId` in CLI JSON is rejected rather
+than overriding the command-line routing. Without `--operation`, `wxc-exec` accepts
+only one-shot JSON.
+
+`--operation` cannot be combined with delete or maintenance routing, including
+`--delete`, its `--containername` option, setup modes, probing, force-reclaim, or
+audit modes. Lifecycle identity comes only from `--sandbox-id`; conflicting options
+are rejected rather than ignored.
+
 Cross-cutting fields available to state-aware (state-aware-only at top level — backends
 declare which phases honor them, see §10.3):
 
@@ -739,39 +764,41 @@ the executor CLI represents the same outcomes through stdout, stderr, and its ex
 
 | Phase / outcome | stdout | stderr |
 |---|---|---|
-| Non-exec (provision, start, stop, deprovision), success or failure | Single JSON envelope (`{result}` or `{error}`) | MXC diagnostic output (when `--debug`); empty otherwise |
-| Exec, dispatch succeeded | Script's stdout | Script's stderr; MXC diagnostic also lands here when `--debug` is passed |
-| Exec, dispatch failed | Single JSON envelope (`{error}`) | MXC diagnostic output (when `--debug`); empty otherwise |
+| Non-exec (provision, start, stop, deprovision), success or failure | Single JSON envelope (`{result}` or `{error}`) | Buffered MXC diagnostics and warnings, when produced; may be empty |
+| Exec dry-run, success or failure | Single JSON envelope (`{result}` or `{error}`) | Buffered MXC diagnostics and warnings, when produced; may be empty |
+| Exec, dispatch succeeded | Script's stdout | Script's stderr plus buffered MXC diagnostics and warnings, when produced |
+| Exec, dispatch failed | Script's stdout, up to the point of failure | Single JSON envelope (`{error}`), after the script's stderr and any buffered MXC diagnostics |
 
-`stdout` is authoritative: for non-exec phases it carries exactly one envelope; for exec
-it carries either the script's output (success) or exactly one envelope (failure).
-`stderr` is informational. MXC routes its diagnostic logger output to `stderr` in
-state-aware mode so `stdout` remains parseable without sentinels. (One-shot dispatch
-keeps its existing `stdout` logger behaviour — the stricter routing applies to
-state-aware only.)
+`stdout` is authoritative: for non-exec phases and exec dry-run it carries exactly one
+envelope; for a non-dry-run exec it carries the script's output and nothing else. An exec
+can fail after the script has already streamed output, so its error envelope goes to
+`stderr` — appending it to `stdout` would leave neither the script's output nor the
+envelope parseable. `stderr` is otherwise informational. MXC routes its diagnostic logger
+output to `stderr` in state-aware mode so `stdout` remains parseable without sentinels.
+(One-shot dispatch keeps its existing `stdout` logger behaviour — the stricter routing
+applies to state-aware only.)
 
-Configuration parse-phase failures that occur **after** the request is
-discriminated as state-aware (i.e. the `phase` field was recognized) follow the
-state-aware contract: the typed `{error}` envelope is the only primary output,
-while the human-readable actionable parse diagnostic is written only to
-configured auxiliary sinks (`--log-file` and the Windows diagnostic console). It
-is not duplicated to the logger's primary console/buffer output, so such a parse
-failure does not add stderr noise even with `--debug`. Dispatch-time failures,
-including typed per-backend configuration errors, use the same auxiliary-only
-diagnostic routing before the executor emits their typed `{error}` envelope.
+When `--operation` is present, the executor selects the lifecycle contract before
+reading or decoding the configuration source. Every failure from that point onward —
+an unreadable file, malformed base64, non-UTF-8 bytes, malformed JSON, an invalid
+version, exact-contract rejection, or dispatch failure — emits a typed `{error}`
+envelope as the only primary output. The human-readable diagnostic is written only to
+the buffered diagnostic channel and may be flushed to stderr; configured auxiliary
+sinks (`--log-file` and the Windows diagnostic console) may receive the same
+diagnostic. The rejection is recorded through the same `ConfigRejected` audit path.
+Diagnostics are never duplicated to stdout, and lifecycle stderr is not gated on
+`--debug`.
 
-CLI failures that occur **before** discrimination is possible — malformed base64,
-non-UTF-8 bytes, or JSON so malformed that the `phase` field cannot be read —
-cannot be attributed to the state-aware path. The diagnostic is written to the
-primary output (stderr) and **no**
-`{error}` envelope is emitted. Callers that require an envelope even for
-unparseable input should validate that the payload is well-formed JSON before
-invoking `wxc-exec`.
+Without `--operation`, `wxc-exec` accepts only one-shot requests. Input-source and
+pre-parse failures on that path retain the legacy primary diagnostic on stderr and do
+not emit a lifecycle envelope. Raw SDK and FFI lifecycle calls do not use this CLI
+stream protocol; they return their status and error data through their binding result
+surfaces.
 
-For exec specifically, MXC diagnostic output mixes with the script's own stderr when
-`--debug` is passed. This is a small amount of pre- and post-dispatch noise; consumers
-wanting clean separation should use `--log-file <path>` instead, which routes diagnostic
-output to a file and leaves stderr as pure script content.
+For exec specifically, buffered MXC diagnostic output may mix with the script's own
+stderr whether or not `--debug` is passed; `--debug` may cause additional diagnostics.
+`--log-file <path>` preserves a file copy but does not suppress the stderr flush.
+Consumers should treat stdout as the protocol channel and stderr as informational.
 
 **Envelope shape:**
 
@@ -797,18 +824,22 @@ type NonExecResponseEnvelope<TResult> = { result: TResult } | { error: ErrorEnve
 
 **Distinguishing exec dispatch-failure from script execution:**
 
-The SDK uses exit code plus stdout content:
+Which stream carries the typed error depends on whether the script could already
+have written output, so the SDK discriminates differently per phase:
 
-- `exitCode == 0`: the script ran and exited successfully. SDK constructs
-  `{stdout, stderr, exitCode}` from PTY / pipe events.
-- `exitCode != 0` AND stdout's entire content parses as a complete `{error: {...}}`
-  envelope: dispatch failed before the script ran; SDK surfaces the typed error.
-- `exitCode != 0` AND stdout does NOT parse as an envelope: the script ran and exited
+- Non-exec phases and exec **dry-run**: stdout is exactly one envelope. `{error}`
+  is the typed failure; `{result}` is success.
+- Non-dry-run **exec**, `exitCode == 0`: the script ran and exited successfully.
+  SDK constructs `{stdout, stderr, exitCode}` from PTY / pipe events.
+- Non-dry-run **exec**, `exitCode != 0` AND the final non-empty line of stderr
+  parses as a complete `{error: {...}}` envelope: dispatch failed; SDK surfaces
+  the typed error.
+- Non-dry-run **exec**, `exitCode != 0` otherwise: the script ran and exited
   non-zero. SDK constructs `{stdout, stderr, exitCode}`.
 
-Because MXC diagnostic output is routed to `stderr` in state-aware mode, this
-stdout-based discrimination has no false positives or negatives — the content is always
-either pure envelope or pure script output.
+For a non-dry-run exec, stdout is always pure script output, so it is never
+parsed for an envelope. The executor writes its error envelope on its own line,
+because a script's stderr may not end in a newline.
 
 `code` and `message` are always present. `code` is the machine-readable category a
 consumer branches on; `message` is the human-readable description, and for a failure
@@ -849,9 +880,11 @@ codes.
 
 ### 7.4 Worked example: IsolationSession end-to-end
 
-A complete state-aware lifecycle, threading TS call → JSON the SDK serialises and passes
-to the executor via `--config-base64` → Rust trait method that dispatches → response
-shape, across all five phases.
+A complete state-aware lifecycle, threading TS call → exact JSON the SDK passes through
+`mxc_ffi` → Rust trait method that dispatches → response shape, across all five phases.
+Each phase also identifies the equivalent direct `wxc-exec` routing; that transport
+removes `phase` and `sandboxId` from the shown exact JSON and supplies them as CLI
+arguments.
 
 #### Phase 1 — provision
 
@@ -872,14 +905,16 @@ const { sandboxId } = await provisionSandbox(
 ```json
 {
   "version": "0.9.0-alpha",
-  "containment": "isolation_session",
   "phase": "provision",
+  "containment": "isolation_session",
   "network": {
     "egress": { "default": "allow" },
     "ingress": { "default": "allow", "hostLoopback": "allow" }
   }
 }
 ```
+
+Direct executor routing: remove `phase` and pass `--operation provision`.
 
 ```rust
 // Exact adaptation carries the all-allow network policy on the request. After
@@ -916,6 +951,9 @@ await startSandbox(
 }
 ```
 
+Direct executor routing: remove `phase` and `sandboxId`, then pass
+`--operation start --sandbox-id <id>`.
+
 ```rust
 // `start` carries no per-phase config for this backend — its StartConfig is
 // `()`, so the envelope above has no backend-specific section and the
@@ -951,6 +989,9 @@ const r = await execInSandboxAsync(
 }
 ```
 
+Direct executor routing: remove `phase` and `sandboxId`, then pass
+`--operation exec --sandbox-id <id>`.
+
 ```rust
 // Parser populates request.script_code = "echo hello", request.script_timeout =
 // 5000 from the wire-format `process` block (same path as one-shot). The
@@ -981,6 +1022,9 @@ await stopSandbox(sandboxId, {});
 }
 ```
 
+Direct executor routing: remove `phase` and `sandboxId`, then pass
+`--operation stop --sandbox-id <id>`.
+
 ```rust
 backend.stop("iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0", &request, /* config */ None)
 // returns Ok(StopResult { metadata: None })
@@ -1004,6 +1048,9 @@ await deprovisionSandbox(sandboxId, {});
 }
 ```
 
+Direct executor routing: remove `phase` and `sandboxId`, then pass
+`--operation deprovision --sandbox-id <id>`.
+
 ```rust
 backend.deprovision("iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0", &request, /* config */ None)
 // returns Ok(DeprovisionResult { metadata: None })
@@ -1021,12 +1068,14 @@ section when serialising state-aware calls — consumers write `appId` directly 
 fields (`filesystem` / `network` / `runtimeConfig` / `ui`) on a per-(backend, phase) Config map directly
 to top-level wire fields — they are already wire-format-aligned in the Config, so the
 SDK passes them through unchanged. Cross-backend exec fields (`commandLine`, `cwd`,
-`env`, `timeout`) flow through the top-level `process` block. The typed SDK requires `commandLine`. The executor CLI can complete an `exec`
-template from arguments after `--`; it sets `process.commandLine` before parsing.
-Trailing commands are rejected for every non-exec phase. The Node SDK receives
-owned response data and native process streams through `mxc_ffi`. Responses unwrap
-any `result` envelope at the SDK boundary so the caller sees a plain `ProvisionResult` /
-`StartResult` / `ExecResult` / `StopResult` / `DeprovisionResult`.
+`env`, `timeout`) flow through the top-level `process` block. The typed SDK requires
+`commandLine`. The executor CLI supplies operation and existing sandbox identity through
+`--operation` and `--sandbox-id`; it can complete an `exec` template from arguments
+after `--` by setting `process.commandLine` before parsing. Trailing commands are
+rejected for every non-exec operation. The Node SDK receives owned response data and
+native process streams through `mxc_ffi`. Responses unwrap any `result` envelope at the
+SDK boundary so the caller sees a plain `ProvisionResult` / `StartResult` /
+`ExecResult` / `StopResult` / `DeprovisionResult`.
 
 ## 8. Error model
 
@@ -1041,10 +1090,10 @@ other state-aware backend, so caller error-handling code is portable across back
 | Code | Meaning |
 |---|---|
 | `malformed_request` | Structural request error: malformed JSON, missing required field, unknown or phase-inappropriate field, recursively unknown backend-specific field, or invalid phase-specific shape |
-| `unsupported_containment` | The backend named by `containment` (provision) or implied by the `sandboxId` prefix (non-provision) is not a recognised backend in this build. **SDK callers**: the SDK type-checks unknown `sandboxId` prefixes against the closed `StateAwareContainmentBackend` union *before* dispatching and instead throws `malformed_id` for an unknown prefix; `unsupported_containment` is reachable from the SDK only on the provision path. See §6.4 |
+| `unsupported_containment` | The backend named by `containment` (provision) or implied by a syntactically valid `sandboxId` prefix (non-provision) is not recognised in this build. The TypeScript SDK checks its closed prefix union before dispatch and instead throws `malformed_id`; the typed Rust SDK keeps ids opaque and therefore returns `unsupported_containment` from dispatch, matching raw FFI requests. See §6.4. |
 | `unsupported_phase` | The backend does not support the requested call mode (state-aware call against an ephemeral-only backend, or one-shot call against a state-aware-only backend) |
 | `backend_unavailable` | The backend's runtime dependency is missing or unreachable (service not running, daemon stopped) |
-| `malformed_id` | The `sandboxId` does not have a recognised backend prefix, or has a recognised prefix but does not deserialise into the backend's native form. **SDK callers** also see this error code for any non-provision call whose `sandboxId` prefix is not in `StateAwareContainmentBackend` |
+| `malformed_id` | The `sandboxId` is structurally invalid or has a recognised prefix but does not deserialize into the backend's native form. The TypeScript SDK also uses this code for a prefix outside its closed `StateAwareContainmentBackend` union; typed Rust and raw FFI calls classify a syntactically valid unknown prefix as `unsupported_containment`. |
 | `stale_id` | The `sandboxId` deserialised but refers to a resource the backend no longer recognises |
 | `not_provisioned` | Phase requires a provisioned sandbox; none provided, or the id is in a pre-provision state |
 | `not_started` | Phase requires a started sandbox; the id is provisioned but not started |
@@ -1122,6 +1171,46 @@ before backend binding or policy validation. Exact adapters convert backend
 payloads directly to runtime configurations, while common fields reuse
 `common_request_ir::CommonRequestIR` conversion in `config_parser.rs`. The
 internal common parser and executable equivalence harness have been removed.
+
+The Rust SDK also has a direct typed ingress lane. High-level lifecycle calls
+construct `SdkStateAwareInput` from `ProvisionRequest`,
+`LifecycleRequest`, or `ExecRequest`. An opaque `SandboxId` is passed separately
+for operations on an existing sandbox, and authorization, telemetry preference,
+and other invocation controls are carried by `OperationOptions`. The combined
+input then normalizes through the same private `CommonRequestIR` and
+`StateAwareInput` seam:
+
+```text
+typed Rust request
+  -> SDK adapter
+  -> CommonRequestIR + StateAwareOperation
+  -> shared normalization
+  -> ParsedStateAwareRequest
+  -> checked backend binding
+```
+
+This lane does not serialize or parse JSON and does not invoke an exact-contract
+adapter. Its selected version still controls compatibility semantics, but the
+normalized request has no `source_contract` because no external exact contract
+produced it. Raw callers follow the separate exact path:
+
+```text
+raw JSON
+  -> exact registered request root
+  -> exact adapter
+  -> CommonRequestIR + StateAwareOperation
+  -> shared normalization
+  -> ParsedStateAwareRequest
+```
+
+Both lanes converge before backend resolution and binding. Equivalence tests
+compare their operation and normalized execution intent for every lifecycle
+phase and supported provision backend.
+
+The existing high-level one-shot Rust path is also JSON-free: it constructs an
+in-memory exact contract value and invokes that contract's adapter directly.
+It does not serialize or parse JSON. The state-aware work described here closes
+the missing lifecycle path while preserving that established one-shot bridge.
 
 When the native CLI supplies trailing command arguments, the loader first
 splices the rendered command into `process.commandLine` and then parses that
@@ -1499,6 +1588,16 @@ surface introduces none, so the trait stays minimal and reuses `ExecutionRequest
 ### 9.3 Dispatch
 
 ```rust
+/// Typed backend result before raw response-envelope encoding.
+enum TypedDispatchOutcome<P, S, T, D> {
+    DryRun,
+    Provision(ProvisionResult<P>),
+    Start(StartResult<S>),
+    ExecCompleted { exit_code: i32 },
+    Stop(StopResult<T>),
+    Deprovision(DeprovisionResult<D>),
+}
+
 /// Dispatch outcome. Distinguishes structured-envelope responses (non-exec phases or
 /// dispatch failure) from exec success (where stdio has already streamed live through
 /// the relay).
@@ -1568,6 +1667,14 @@ fn dispatch_state_aware<B: StatefulSandboxBackend>(
     }
 }
 ```
+
+`dispatch_state_aware_typed` returns `TypedDispatchOutcome` without serializing
+backend metadata. The high-level Rust SDK maps that result into
+`ProvisionResult`, `LifecycleResult`, or `ValidationResult` and typed backend
+metadata. The raw JSON lane wraps the same typed dispatch result in
+`DispatchOutcome::Envelope` and serializes it for the wire response. JSON
+response construction is therefore confined to raw/executor entry points
+rather than being an implementation step of typed Rust calls.
 
 `resolve_backend(&parsed)` reads `parsed.containment()` when `phase() == Provision`; for the
 other phases it reads the prefix from `parsed.sandbox_id()` and looks it up in the

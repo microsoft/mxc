@@ -12,6 +12,8 @@ delete spawnEnv.NODE_OPTIONS;
 
 interface ProbeWorkerData {
   shared: SharedArrayBuffer;
+  // Test-only: signal once the worker has installed its anchor handlers.
+  workerReadyBarrier?: SharedArrayBuffer;
   // Test-only: pause after exit so the unit test can observe pre-close state.
   anchorExitBarrier?: SharedArrayBuffer;
   anchorPath: string;
@@ -24,6 +26,9 @@ interface ProbeWorkerData {
 const data = workerData as ProbeWorkerData;
 const header = new Int32Array(data.shared, 0, 3);
 const payload = new Uint8Array(data.shared, 12);
+const workerReadyBarrier = data.workerReadyBarrier
+  ? new Int32Array(data.workerReadyBarrier)
+  : undefined;
 const anchorExitBarrier = data.anchorExitBarrier
   ? new Int32Array(data.anchorExitBarrier)
   : undefined;
@@ -149,6 +154,10 @@ if (Atomics.load(header, 0) === 0) {
       () => completeAfterCleanup({ kind: 'timeout' }, true),
       data.publishTimeoutMs,
     );
+    if (workerReadyBarrier) {
+      Atomics.store(workerReadyBarrier, 0, 1);
+      Atomics.notify(workerReadyBarrier, 0);
+    }
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     publish({ kind: 'spawnError', detail });

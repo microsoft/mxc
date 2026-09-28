@@ -48,6 +48,7 @@ use crate::daemon_protocol::ExecTerminal;
 
 use crate::error::WslcError;
 use crate::policy_mapping::VolumeMount;
+use crate::process_env::{self, EnvScope};
 use crate::wsl_container_runner::{wslc_prerequisite_error, WSLContainerRunner};
 use crate::wslc_bindings::*;
 
@@ -244,6 +245,66 @@ unsafe extern "C" fn exit_callback(_exit_code: i32, context: *mut c_void) {
     ctx.exited.1.notify_all();
 }
 
+/// The command-line and environment buffers the SDK stored pointers into.
+///
+/// The SDK does not copy them, so this must outlive the create call that reads
+/// them.
+pub(crate) struct CommandLineBuffers {
+    _argv_cstrings: Vec<Vec<u8>>,
+    _argv: Vec<PCSTR>,
+    _env_cstrings: Vec<Vec<u8>>,
+    _env_ptrs: Vec<PCSTR>,
+}
+
+/// Set `settings`' command line and environment from `script_code` and `env`
+/// applied at `scope`, returning the buffers the SDK now points into.
+///
+/// # Safety
+/// `sdk` must hold valid, currently-loaded function pointers, and `settings`
+/// must remain at a fixed address while the returned buffers are alive.
+pub(crate) unsafe fn set_command_line_and_env(
+    sdk: &WslcSdk,
+    settings: *mut WslcProcessSettings,
+    scope: EnvScope,
+    env: &[String],
+    script_code: &str,
+) -> Result<CommandLineBuffers, ScriptResponse> {
+    let argv_cstrings = process_env::argv_words(scope, env, script_code)
+        .iter()
+        .map(|word| cstr_bytes("command", word))
+        .collect::<Result<Vec<_>, _>>()?;
+    let argv: Vec<PCSTR> = argv_cstrings.iter().map(|w| w.as_ptr() as PCSTR).collect();
+    let hr = sdk.WslcSetProcessSettingsCmdLine(settings, argv.as_ptr(), argv.len());
+    if hr != S_OK {
+        return Err(sdk_error("WslcSetProcessSettingsCmdLine failed", hr, ""));
+    }
+
+    let env_cstrings: Vec<Vec<u8>> = process_env::sdk_entries(scope, env)
+        .iter()
+        .map(|e| cstr_bytes("environment variable", e))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut env_ptrs: Vec<PCSTR> = Vec::new();
+    if !env_cstrings.is_empty() {
+        env_ptrs = env_cstrings.iter().map(|e| e.as_ptr() as PCSTR).collect();
+        let hr =
+            sdk.WslcSetProcessSettingsEnvVariables(settings, env_ptrs.as_ptr(), env_ptrs.len());
+        if hr != S_OK {
+            return Err(sdk_error(
+                "WslcSetProcessSettingsEnvVariables failed",
+                hr,
+                "",
+            ));
+        }
+    }
+
+    Ok(CommandLineBuffers {
+        _argv_cstrings: argv_cstrings,
+        _argv: argv,
+        _env_cstrings: env_cstrings,
+        _env_ptrs: env_ptrs,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // ProcessSettings builder
 // ---------------------------------------------------------------------------
@@ -264,12 +325,7 @@ pub struct ProcessSettings {
     // and dereferences at `WslcCreateContainerProcess` time. They must outlive
     // the create call, so the struct owns them; the `_` prefix marks them as
     // held purely to anchor those lifetimes, never read directly.
-    _sh: Vec<u8>,
-    _dash_c: Vec<u8>,
-    _script_cstr: Vec<u8>,
-    _argv: Vec<PCSTR>,
-    _env_cstrings: Vec<Vec<u8>>,
-    _env_ptrs: Vec<PCSTR>,
+    _command: CommandLineBuffers,
     _cwd_cstr: Option<Vec<u8>>,
 }
 
@@ -307,9 +363,10 @@ impl Drop for SdkIoRef {
 
 impl ProcessSettings {
     /// Build process settings that run `script_code` under `/bin/sh -c`, with
-    /// the given `env` (already proxy-adjusted by the caller) and
-    /// `working_directory` (an absolute in-container path, e.g. `/work`; empty =
-    /// container default). Registers stdout/stderr/exit capture callbacks.
+    /// the given `env` (already proxy-adjusted by the caller) applied at `scope`
+    /// and `working_directory` (an absolute in-container path, e.g. `/work`;
+    /// empty = container default). Registers stdout/stderr/exit capture
+    /// callbacks.
     ///
     /// # Safety
     /// `sdk` must hold valid, currently-loaded function pointers and COM must be
@@ -318,10 +375,11 @@ impl ProcessSettings {
         sdk: &WslcSdk,
         script_code: &str,
         env: &[String],
+        scope: EnvScope,
         working_directory: &str,
         sink: Option<OutputSink>,
     ) -> Result<Self, ScriptResponse> {
-        Self::build_inner(sdk, script_code, env, working_directory, true, sink)
+        Self::build_inner(sdk, script_code, env, scope, working_directory, true, sink)
     }
 
     /// Like [`build`](Self::build) but registers no stdio callbacks and shares no
@@ -334,15 +392,17 @@ impl ProcessSettings {
         sdk: &WslcSdk,
         script_code: &str,
         env: &[String],
+        scope: EnvScope,
         working_directory: &str,
     ) -> Result<Self, ScriptResponse> {
-        Self::build_inner(sdk, script_code, env, working_directory, false, None)
+        Self::build_inner(sdk, script_code, env, scope, working_directory, false, None)
     }
 
     unsafe fn build_inner(
         sdk: &WslcSdk,
         script_code: &str,
         env: &[String],
+        scope: EnvScope,
         working_directory: &str,
         register_callbacks: bool,
         sink: Option<OutputSink>,
@@ -384,41 +444,7 @@ impl ProcessSettings {
             sdk_io_ref = SdkIoRef(Some(io_ctx_raw as *const IoContext));
         }
 
-        // Command line: /bin/sh -c <script>. argv points into the sh/dash_c/
-        // script heaps; all are owned by the returned struct.
-        let sh = b"/bin/sh\0".to_vec();
-        let dash_c = b"-c\0".to_vec();
-        let script_cstr = cstr_bytes("command", script_code)?;
-        let argv: Vec<PCSTR> = vec![
-            sh.as_ptr() as PCSTR,
-            dash_c.as_ptr() as PCSTR,
-            script_cstr.as_ptr() as PCSTR,
-        ];
-        let hr = sdk.WslcSetProcessSettingsCmdLine(&mut raw, argv.as_ptr(), argv.len());
-        if hr != S_OK {
-            return Err(sdk_error("WslcSetProcessSettingsCmdLine failed", hr, ""));
-        }
-
-        // Environment variables (only when non-empty, matching the one-shot
-        // path). env_ptrs point into env_cstrings; both are owned below.
-        let mut env_cstrings: Vec<Vec<u8>> = Vec::new();
-        let mut env_ptrs: Vec<PCSTR> = Vec::new();
-        if !env.is_empty() {
-            env_cstrings = env
-                .iter()
-                .map(|e| cstr_bytes("environment variable", e))
-                .collect::<Result<Vec<_>, _>>()?;
-            env_ptrs = env_cstrings.iter().map(|e| e.as_ptr() as PCSTR).collect();
-            let hr =
-                sdk.WslcSetProcessSettingsEnvVariables(&mut raw, env_ptrs.as_ptr(), env_ptrs.len());
-            if hr != S_OK {
-                return Err(sdk_error(
-                    "WslcSetProcessSettingsEnvVariables failed",
-                    hr,
-                    "",
-                ));
-            }
-        }
+        let command = set_command_line_and_env(sdk, &mut raw, scope, env, script_code)?;
 
         // Working directory (an absolute in-container path, e.g. `/work`; empty =
         // container default). It is passed straight to the SDK; a non-absolute
@@ -447,12 +473,7 @@ impl ProcessSettings {
             raw,
             io_ctx,
             sdk_io_ref,
-            _sh: sh,
-            _dash_c: dash_c,
-            _script_cstr: script_cstr,
-            _argv: argv,
-            _env_cstrings: env_cstrings,
-            _env_ptrs: env_ptrs,
+            _command: command,
             _cwd_cstr: cwd_cstr,
         })
     }
@@ -796,7 +817,7 @@ pub unsafe fn resolve_image(
          wxc-exec.exe --setup-wslc --image {}{} \
          (or scripts\\setup-wslc.ps1 -Image {}{}). \
          MXC does not pull images at run time; \
-         see docs/wsl/wsl-container-support-plan.md.",
+         see docs/wsl/wsl-container-getting-started.md.",
         image, image, storage_arg_wxc, image, storage_arg_ps,
     ))
     .into_response())
@@ -1064,6 +1085,7 @@ pub unsafe fn exec_in_container(
     container: WslcContainer,
     script_code: &str,
     env: &[String],
+    scope: EnvScope,
     working_directory: &str,
     timeout_ms: u32,
     cancellation: &AtomicBool,
@@ -1074,7 +1096,7 @@ pub unsafe fn exec_in_container(
     // `WslcCreateContainerProcess` time plus the I/O-capture context; it is held
     // as a stationary local until after the process exits below.
     let mut process_settings =
-        ProcessSettings::build(sdk, script_code, env, working_directory, sink)?;
+        ProcessSettings::build(sdk, script_code, env, scope, working_directory, sink)?;
 
     let mut process: WslcProcess = ptr::null_mut();
     let mut err_msg = CoTaskMemPWSTR::null();

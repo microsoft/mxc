@@ -12,7 +12,7 @@
 use std::sync::OnceLock;
 
 use serde_json::{json, Value};
-use wxc_e2e_tests::{has_wxc_exe, run_wxc_state_aware, CommandResult};
+use wxc_e2e_tests::{has_wxc_exe, run_wxc_config_value, run_wxc_state_aware, CommandResult};
 
 static HAS_WXC_EXE: OnceLock<bool> = OnceLock::new();
 
@@ -101,4 +101,52 @@ fn state_aware_provision_rejects_a_non_state_aware_containment_structurally() {
         result.stdout
     );
     assert_ne!(result.code, Some(0), "non-zero exit expected on error");
+}
+
+#[test]
+fn phase_bearing_json_without_operation_reports_migration_guidance() {
+    if !cached_has_wxc_exe() {
+        return;
+    }
+
+    for (label, request) in [
+        (
+            "valid state-aware missing operation",
+            json!({
+                "version": "0.9.0-alpha",
+                "phase": "start",
+                "sandboxId": "iso:abc"
+            }),
+        ),
+        (
+            "invalid state-aware missing operation",
+            json!({
+                "version": "0.9.0-alpha",
+                "phase": "start"
+            }),
+        ),
+    ] {
+        let result = run_wxc_config_value(label, &request, &[]);
+
+        assert_ne!(result.code, Some(0), "{label}: non-zero exit expected");
+        assert!(
+            result.stdout.is_empty(),
+            "{label}: stdout must remain empty: {:?}",
+            result.stdout
+        );
+        assert!(
+            result
+                .stderr
+                .contains("state-aware lifecycle requests require --operation"),
+            "{label}: missing operation guidance: stderr={:?}",
+            result.stderr
+        );
+        assert!(
+            result
+                .stderr
+                .contains("remove 'phase' and 'sandboxId' from the config JSON"),
+            "{label}: missing JSON migration guidance: stderr={:?}",
+            result.stderr
+        );
+    }
 }

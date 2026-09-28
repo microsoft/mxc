@@ -33,10 +33,11 @@ use wxc_common::script_runner::ScriptRunner;
 use wxc_common::string_util::{to_wide, CoTaskMemPWSTR};
 use wxc_common::validator::validate_network_policy_support;
 
-use crate::container_steps::sdk_error;
+use crate::container_steps::{self, sdk_error};
 use crate::error::WslcError;
 use crate::policy;
 use crate::policy_mapping;
+use crate::process_env;
 use crate::stream_buffer::{stream_pair, StreamReader, StreamWriter};
 use crate::wslc_bindings::*;
 
@@ -688,6 +689,7 @@ impl ScriptRunner for WSLContainerRunner {
         validate_network_policy_support(request, policy::network_policy_support())
             .map_err(|resp| WslcError::Rejected(resp.error_message).into_response())?;
         policy::validate_directional_network(request).map_err(as_wslc_rejection)?;
+        policy::reject_proxy_credentials_in_argv(request).map_err(as_wslc_rejection)?;
         Ok(())
     }
 
@@ -950,7 +952,7 @@ impl WSLContainerRunner {
                  wxc-exec.exe --setup-wslc --image {}{} \
                  (or scripts\\setup-wslc.ps1 -Image {}{}). \
                  MXC does not pull images at run time; \
-                 see docs/wsl/wsl-container-support-plan.md.",
+                 see docs/wsl/wsl-container-getting-started.md.",
                 image_name, image_name, storage_arg_wxc, image_name, storage_arg_ps,
             ))
             .into_response());
@@ -1431,21 +1433,6 @@ impl WSLContainerRunner {
             return Err(sdk_error("WslcSetProcessSettingsCallbacks failed", hr, ""));
         }
 
-        let sh = b"/bin/sh\0";
-        let dash_c = b"-c\0";
-        let script_cstr = format!("{}\0", request.script_code);
-        let script_bytes = script_cstr.as_bytes();
-        let argv: [PCSTR; 3] = [
-            sh.as_ptr() as PCSTR,
-            dash_c.as_ptr() as PCSTR,
-            script_bytes.as_ptr() as PCSTR,
-        ];
-        let hr =
-            sdk.WslcSetProcessSettingsCmdLine(&mut process_settings, argv.as_ptr(), argv.len());
-        if hr != S_OK {
-            return Err(sdk_error("WslcSetProcessSettingsCmdLine failed", hr, ""));
-        }
-
         // Route egress through the cooperative proxy: WSLc cannot apply an
         // iptables drop-floor (no CAP_NET_ADMIN, no VM-level enforcement hook),
         // so per-host policy is enforced at the proxy layer by injecting
@@ -1483,32 +1470,17 @@ impl WSLContainerRunner {
             request.env_entries().to_vec()
         };
 
-        // Env buffers must outlive WslcCreateContainer: the SDK stores the
+        // These buffers must outlive WslcCreateContainer: the SDK stores the
         // pointers into process_settings (it does not copy), and reads them at
-        // container-create time. Hoisting to function scope keeps them alive —
-        // mirrors the cmdline/_cwd_cstr handling. Scoping them inside the `if`
-        // below frees them early and causes a use-after-free (0xC0000005).
-        let _env_cstrings: Vec<Vec<u8>>;
-        let _env_ptrs: Vec<PCSTR>;
-        if !effective_env.is_empty() {
-            _env_cstrings = effective_env
-                .iter()
-                .map(|e| format!("{}\0", e).into_bytes())
-                .collect();
-            _env_ptrs = _env_cstrings.iter().map(|e| e.as_ptr() as PCSTR).collect();
-            let hr = sdk.WslcSetProcessSettingsEnvVariables(
-                &mut process_settings,
-                _env_ptrs.as_ptr(),
-                _env_ptrs.len(),
-            );
-            if hr != S_OK {
-                return Err(sdk_error(
-                    "WslcSetProcessSettingsEnvVariables failed",
-                    hr,
-                    "",
-                ));
-            }
-        }
+        // container-create time. Dropping them earlier causes a use-after-free
+        // (0xC0000005).
+        let _command = container_steps::set_command_line_and_env(
+            sdk,
+            &mut process_settings,
+            process_env::EnvScope::of(request),
+            &effective_env,
+            &request.script_code,
+        )?;
 
         let _cwd_cstr;
         if !request.working_directory.is_empty() {

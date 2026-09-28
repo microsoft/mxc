@@ -23,19 +23,26 @@
 # so `PROXY_HIT` in the client output is an unambiguous "the proxy was used"
 # signal.
 #
+# The default fixture supplies `process.env` without `inheritDefaultEnv`, so the
+# injected variables travel through the `env -i` argv path. Pass -ConfigFile to
+# run the same assertions against the inherit fixture, where they travel through
+# the SDK's environment setter instead.
+#
 # Usage:
 #   .\run_wslc_proxy_test.ps1                       # auto-discovers wxc-exec.exe
 #   .\run_wslc_proxy_test.ps1 -WxcExecPath <path>   # explicit binary
+#   .\run_wslc_proxy_test.ps1 -ConfigFile <name>    # a different proxy fixture
 #   .\run_wslc_proxy_test.ps1 -Debug                # debug build + --debug
 
 param(
     [switch]$Debug,
-    [string]$WxcExecPath
+    [string]$WxcExecPath,
+    [string]$ConfigFile = "wslc_network_proxy.json"
 )
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$ConfigPath = Join-Path $RepoRoot "tests\configs\wslc_network_proxy.json"
+$ConfigPath = Join-Path $RepoRoot "tests\configs\$ConfigFile"
 
 # Find binary -- prefer explicit path, then probe target-specific and default
 # dirs. Use the host arch to determine which target to use. 
@@ -59,7 +66,7 @@ if (-not $WxcExec -or -not (Test-Path $WxcExec)) {
     exit 1
 }
 
-Write-Host "Running WSLC cooperative proxy functional test..."
+Write-Host "Running WSLC cooperative proxy functional test ($ConfigFile)..."
 Write-Host "Binary: $WxcExec" -ForegroundColor Gray
 
 $wxcArgs = @()
@@ -124,7 +131,7 @@ if ($pass -and ($output -notmatch "WSLC_PROXY_FUNCTIONAL_OK")) {
 }
 
 if ($pass) {
-    Write-Host "PASS: WSLC cooperative proxy is functional (env injected, caller vars scrubbed, NO_PROXY neutralized, client routed)." -ForegroundColor Green
+    Write-Host "PASS: WSLC cooperative proxy is functional (${ConfigFile}: env injected, caller vars scrubbed, NO_PROXY neutralized, client routed)." -ForegroundColor Green
     exit 0
 } else {
     Write-Host "FAIL: $reason" -ForegroundColor Red

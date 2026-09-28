@@ -1,4 +1,5 @@
 {
+    "$schema": "../../schemas/dev/mxc-config.schema.0.10.0-alpha.json",
     "version": "0.10.0-alpha",
     "process": {
         "commandLine": "import sys\nprint(f'Hello from Hyperlight! Python {sys.version.split()[0]} on {sys.platform}')",

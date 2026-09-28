@@ -1,41 +1,70 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Shared `process.env` resolution for the backends that supply a default
-//! environment block (schema 0.9+).
+//! Shared `process.env` resolution.
 //!
-//! Only the block itself is backend-specific — the `PATH` value, and whether a
-//! `HOME` can be named. The state dispatch and the overlay merge are the same
-//! everywhere and live here so the backends cannot drift apart.
+//! [`EnvResolution`] names the state the caller asked for; every backend
+//! answers to the same one. [`resolve_env`] then builds the entries for a
+//! backend whose default block MXC can enumerate — only the block itself is
+//! backend-specific, so the state dispatch and the overlay merge live here and
+//! cannot drift apart. A backend whose default MXC cannot enumerate, such as a
+//! container image's own environment, matches on [`EnvResolution`] directly.
 
 use std::collections::HashMap;
 
 use crate::models::ExecutionRequest;
+
+/// What the caller asked for with `process.env` and `process.inheritDefaultEnv`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvResolution {
+    /// The backend's default; the caller supplied no environment.
+    Default,
+    /// The caller's entries and nothing else.
+    Replace,
+    /// The caller's entries layered over the backend's default.
+    Overlay,
+    /// The caller's entries, with no default block and an omitted environment
+    /// indistinguishable from an empty one.
+    Legacy,
+}
+
+impl EnvResolution {
+    /// The state `request` selects.
+    ///
+    /// A request whose contract predates the distinct four states resolves to
+    /// [`EnvResolution::Legacy`].
+    pub fn of(request: &ExecutionRequest) -> Self {
+        if !request.supplies_default_env() {
+            return Self::Legacy;
+        }
+
+        match (&request.env, request.inherit_default_env) {
+            (None, _) => Self::Default,
+            (Some(_), false) => Self::Replace,
+            (Some(_), true) => Self::Overlay,
+        }
+    }
+}
 
 /// The entries the child should get, as `KEY=VALUE` strings.
 ///
 /// `defaults` builds the backend's default block, in the order the child should
 /// receive it. It is only called when the request actually needs it.
 ///
-/// From schema 0.9 the four states of `process.env` stay distinct: omitted
-/// takes the default, `[]` is empty, a supplied environment is used verbatim,
-/// and `inheritDefaultEnv` layers a supplied environment over the default. A
-/// caller entry replaces the same-named default in place rather than being
+/// A caller entry replaces the same-named default in place rather than being
 /// appended, so a consumer that applies entries in order cannot end up setting
 /// one name twice; a caller entry naming no default is appended in the order
-/// supplied. Below 0.9 the caller's entries are passed through untouched.
+/// supplied.
 pub fn resolve_env(
     request: &ExecutionRequest,
     defaults: impl FnOnce() -> Vec<(String, String)>,
 ) -> Vec<String> {
-    if !request.supplies_default_env() {
-        return request.env_entries().to_vec();
-    }
+    let supplied = request.env_entries();
 
-    let entries = match (&request.env, request.inherit_default_env) {
-        (None, _) => defaults(),
-        (Some(supplied), false) => return supplied.clone(),
-        (Some(supplied), true) => overlay(defaults(), supplied),
+    let entries = match EnvResolution::of(request) {
+        EnvResolution::Legacy | EnvResolution::Replace => return supplied.to_vec(),
+        EnvResolution::Default => defaults(),
+        EnvResolution::Overlay => overlay(defaults(), supplied),
     };
 
     entries
@@ -177,6 +206,42 @@ mod tests {
 
         r.env = None;
         assert!(resolved(&r).is_empty());
+    }
+
+    #[test]
+    fn each_state_of_process_env_resolves_to_its_own_outcome() {
+        let mut r = request(DefaultEnvCompatibility::DefaultBlock);
+
+        r.env = None;
+        assert_eq!(EnvResolution::of(&r), EnvResolution::Default);
+
+        r.inherit_default_env = true;
+        assert_eq!(EnvResolution::of(&r), EnvResolution::Default);
+
+        r.env = Some(Vec::new());
+        assert_eq!(EnvResolution::of(&r), EnvResolution::Overlay);
+
+        r.inherit_default_env = false;
+        assert_eq!(EnvResolution::of(&r), EnvResolution::Replace);
+
+        r.env = Some(vec!["FOO=bar".to_string()]);
+        assert_eq!(EnvResolution::of(&r), EnvResolution::Replace);
+
+        r.inherit_default_env = true;
+        assert_eq!(EnvResolution::of(&r), EnvResolution::Overlay);
+    }
+
+    #[test]
+    fn below_0_9_every_state_resolves_to_legacy() {
+        let mut r = request(DefaultEnvCompatibility::LegacyCompatible);
+
+        for env in [None, Some(Vec::new()), Some(vec!["FOO=bar".to_string()])] {
+            for inherit in [false, true] {
+                r.env = env.clone();
+                r.inherit_default_env = inherit;
+                assert_eq!(EnvResolution::of(&r), EnvResolution::Legacy);
+            }
+        }
     }
 
     #[test]

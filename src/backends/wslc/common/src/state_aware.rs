@@ -33,7 +33,7 @@ use wxc_common::state_aware_backend::{
 use wxc_common::validator::validate_state_aware_network_policy_support;
 
 use crate::container_steps::OutStream;
-use crate::daemon_client::{DaemonClient, DaemonError, DaemonExecOutcome};
+use crate::daemon_client::{truncation_suffix, DaemonClient, DaemonError, DaemonExecOutcome};
 use crate::daemon_protocol::{
     DeprovisionConfig, ErrKind, ExecConfig, NetworkMode, ProvisionConfig, StartConfig, StopConfig,
     VolumeMount,
@@ -41,6 +41,7 @@ use crate::daemon_protocol::{
 use crate::policy::{
     exec_proxy_url, validate_exec_policy, validate_post_provision_policy, validate_provision_policy,
 };
+use crate::process_env::EnvScope;
 #[cfg(windows)]
 use crate::sandbox::prepare_native_output;
 #[cfg(windows)]
@@ -157,31 +158,10 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         _config: Option<()>,
         stdio: ExecStdio,
     ) -> Result<ExecHandle, MxcError> {
-        // Cooperative proxy: inject HTTP(S)_PROXY (and scrub caller-supplied
-        // proxy vars). `exec_proxy_url` yields the routable URL only when the
-        // proxy is enabled *and* in the required `url` form — `validate_exec`
-        // has already rejected the non-`url` form before we get here, so a
-        // `None` here means the proxy is disabled, not malformed.
-        let env = match exec_proxy_url(request) {
-            Some(proxy_url) => split_env(&wxc_common::proxy_env::apply_cooperative_proxy_env(
-                request.env_entries(),
-                proxy_url,
-            )),
-            None => split_env(request.env_entries()),
-        };
-
         let client = connect_daemon()?;
         let exec_id = uuid::Uuid::new_v4().simple().to_string();
         let run_token = uuid::Uuid::new_v4().simple().to_string();
-        let config = ExecConfig {
-            exec_id: exec_id.clone(),
-            run_token: run_token.clone(),
-            sandbox_id: sandbox_id.to_string(),
-            script_code: request.script_code.clone(),
-            working_directory: request.working_directory.clone(),
-            env,
-            timeout_ms: request.script_timeout,
-        };
+        let config = exec_config(sandbox_id, request, exec_id.clone(), run_token.clone());
 
         match stdio {
             ExecStdio::Relayed => exec_relayed(client, config),
@@ -271,7 +251,7 @@ fn exec_relayed(client: DaemonClient, config: ExecConfig) -> Result<ExecHandle, 
     // Best-effort: a failed local write must not mask the container's exit code.
     let stdout = std::io::stdout();
     let stderr = std::io::stderr();
-    let exit_code = {
+    let completion = {
         let mut out = stdout.lock();
         let mut err = stderr.lock();
         let result = client.exec_streaming(config, |stream, bytes| match stream {
@@ -296,17 +276,22 @@ fn exec_relayed(client: DaemonClient, config: ExecConfig) -> Result<ExecHandle, 
         result.map_err(map_daemon_error)?
     };
 
-    let exit_code = match exit_code {
+    let exit_code = match completion.outcome {
+        DaemonExecOutcome::Exited(code) if completion.truncated => {
+            return Err(truncated_run_error(code))
+        }
         DaemonExecOutcome::Exited(code) => code,
         DaemonExecOutcome::TimedOut => {
             return Err(MxcError::backend_error(format!(
-                "WSLc exec timed out after {timeout_ms}ms"
+                "WSLc exec timed out after {timeout_ms}ms{}",
+                truncation_suffix(completion.truncated)
             )))
         }
         DaemonExecOutcome::Cancelled => {
-            return Err(MxcError::backend_error(
-                "WSLc relayed exec was cancelled unexpectedly",
-            ))
+            return Err(MxcError::backend_error(format!(
+                "WSLc relayed exec was cancelled unexpectedly{}",
+                truncation_suffix(completion.truncated)
+            )))
         }
     };
 
@@ -369,25 +354,24 @@ fn exec_piped(
                         OutStream::Stderr => stderr_writer.write(bytes),
                     })
                 })
-                .map(|outcome| match outcome {
-                    DaemonExecOutcome::Exited(code) => ExecOutcome::Exited(code),
-                    DaemonExecOutcome::TimedOut => ExecOutcome::TimedOut,
-                    // `SandboxProcess::kill` is a request followed by reaping;
-                    // there is no distinct cancelled variant in `ExecOutcome`.
-                    DaemonExecOutcome::Cancelled => ExecOutcome::Exited(-1),
-                })
-                .map_err(map_daemon_error);
-            let result = match result {
-                Ok(ExecOutcome::Exited(_))
-                    if stdout_overflow.has_overflowed() || stderr_overflow.has_overflowed() =>
-                {
-                    Err(MxcError::backend_error(
-                        "WSLc live output was truncated because the caller did not drain the \
-                         synthesized stdout/stderr pipes fast enough",
-                    ))
-                }
-                other => other,
-            };
+                .map_err(map_daemon_error)
+                .and_then(|completion| {
+                    // Either end of the bridge can drop output: the daemon's
+                    // queue on the way out, or these pipes if the caller is slow.
+                    let truncated = completion.truncated
+                        || stdout_overflow.has_overflowed()
+                        || stderr_overflow.has_overflowed();
+                    match completion.outcome {
+                        DaemonExecOutcome::Exited(code) if truncated => {
+                            Err(truncated_run_error(code))
+                        }
+                        DaemonExecOutcome::Exited(code) => Ok(ExecOutcome::Exited(code)),
+                        DaemonExecOutcome::TimedOut => Ok(ExecOutcome::TimedOut),
+                        // `SandboxProcess::kill` is a request followed by reaping;
+                        // there is no distinct cancelled variant in `ExecOutcome`.
+                        DaemonExecOutcome::Cancelled => Ok(ExecOutcome::Exited(-1)),
+                    }
+                });
             stdout_writer.close();
             stderr_writer.close();
             let _ = done_tx.send(result);
@@ -439,12 +423,55 @@ fn exec_piped(
     ))
 }
 
+/// The daemon's inputs for one exec, with the cooperative proxy applied.
+fn exec_config(
+    sandbox_id: &str,
+    request: &ExecutionRequest,
+    exec_id: String,
+    run_token: String,
+) -> ExecConfig {
+    // `exec_proxy_url` yields the routable URL only when the proxy is enabled
+    // *and* in the required `url` form — `validate_exec` has already rejected
+    // the non-`url` form before we get here, so a `None` here means the proxy
+    // is disabled, not malformed.
+    let env = match exec_proxy_url(request) {
+        Some(proxy_url) => split_env(&wxc_common::proxy_env::apply_cooperative_proxy_env(
+            request.env_entries(),
+            proxy_url,
+        )),
+        None => split_env(request.env_entries()),
+    };
+
+    ExecConfig {
+        exec_id,
+        run_token,
+        sandbox_id: sandbox_id.to_string(),
+        script_code: request.script_code.clone(),
+        working_directory: request.working_directory.clone(),
+        env,
+        env_scope: EnvScope::of(request),
+        timeout_ms: request.script_timeout,
+    }
+}
+
 /// Discover (or spawn) the daemon. A discovery/spawn failure is a
 /// `backend_unavailable` — the backend cannot service any phase without it.
 fn connect_daemon() -> Result<DaemonClient, MxcError> {
     DaemonClient::connect().map_err(|e| {
         MxcError::backend_unavailable(format!("failed to reach the WSLc daemon: {e:#}"))
     })
+}
+
+/// The process finished, but the caller's copy of its output is incomplete.
+///
+/// Reported as a failure so a short capture is never mistaken for a whole one,
+/// with `details.exitCode` keeping the code the process produced.
+fn truncated_run_error(exit_code: i32) -> MxcError {
+    MxcError::backend_error(
+        "WSLc live output was truncated: it was not drained fast enough and a bounded output \
+         queue overflowed",
+    )
+    .with_details(serde_json::json!({ "exitCode": exit_code }))
 }
 
 /// Map a typed [`DaemonError`] onto the matching wire-format [`MxcError`] code.
@@ -584,13 +611,11 @@ fn map_network(request: &ExecutionRequest) -> NetworkMode {
 }
 
 /// Split `"KEY=VALUE"` env entries into `(name, value)` pairs (the daemon's
-/// `ExecConfig.env` shape). An entry without `=` becomes `(entry, "")`.
+/// `ExecConfig.env` shape). An entry naming no variable is dropped.
 fn split_env(env: &[String]) -> Vec<(String, String)> {
-    env.iter()
-        .map(|entry| match entry.split_once('=') {
-            Some((k, v)) => (k.to_string(), v.to_string()),
-            None => (entry.clone(), String::new()),
-        })
+    wxc_common::default_env::env_pairs(env)
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
         .collect()
 }
 
@@ -598,8 +623,30 @@ fn split_env(env: &[String]) -> Vec<(String, String)> {
 mod tests {
     use super::*;
     use wxc_common::models::{
-        ContainerPolicy, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy,
+        ContainerPolicy, DefaultEnvCompatibility, NetworkAction, NetworkEgressPolicy,
+        NetworkIngressPolicy, ProxyAddress, ProxyConfig,
     };
+
+    /// The exit code is unrecoverable once dropped, so failing the call must not
+    /// discard it.
+    #[test]
+    fn a_truncated_run_reports_the_exit_code_it_produced() {
+        let error = truncated_run_error(3);
+        assert_eq!(
+            error.code,
+            wxc_common::mxc_error::MxcErrorCode::BackendError
+        );
+        assert_eq!(
+            error.details.as_ref().and_then(|d| d.get("exitCode")),
+            Some(&serde_json::json!(3))
+        );
+    }
+
+    #[test]
+    fn an_untruncated_run_adds_no_suffix() {
+        assert_eq!(truncation_suffix(false), "");
+        assert!(truncation_suffix(true).contains("truncated"));
+    }
 
     #[test]
     fn backend_key_matches_wire_format() {
@@ -1042,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn split_env_splits_pairs_and_bare_keys() {
+    fn split_env_splits_pairs_and_drops_bare_keys() {
         let env = vec![
             "PATH=/usr/bin".to_string(),
             "EMPTY=".to_string(),
@@ -1052,9 +1099,147 @@ mod tests {
         let pairs = split_env(&env);
         assert_eq!(pairs[0], ("PATH".to_string(), "/usr/bin".to_string()));
         assert_eq!(pairs[1], ("EMPTY".to_string(), String::new()));
-        assert_eq!(pairs[2], ("BARE".to_string(), String::new()));
         // Only the first '=' splits; the value keeps the rest verbatim.
-        assert_eq!(pairs[3], ("URL".to_string(), "http://a=b".to_string()));
+        assert_eq!(pairs[2], ("URL".to_string(), "http://a=b".to_string()));
+        assert_eq!(pairs.len(), 3);
+    }
+
+    #[test]
+    fn the_exec_config_carries_the_scope_each_state_of_process_env_selects() {
+        struct Case {
+            label: &'static str,
+            compatibility: DefaultEnvCompatibility,
+            env: Option<Vec<&'static str>>,
+            inherit_default_env: bool,
+            scope: EnvScope,
+            entries: &'static [(&'static str, &'static str)],
+        }
+
+        let cases = [
+            Case {
+                label: "omitted takes the image environment",
+                compatibility: DefaultEnvCompatibility::DefaultBlock,
+                env: None,
+                inherit_default_env: false,
+                scope: EnvScope::Merge,
+                entries: &[],
+            },
+            Case {
+                label: "explicitly empty leaves the child nothing",
+                compatibility: DefaultEnvCompatibility::DefaultBlock,
+                env: Some(vec![]),
+                inherit_default_env: false,
+                scope: EnvScope::Replace,
+                entries: &[],
+            },
+            Case {
+                label: "explicitly empty plus inheritDefaultEnv takes the image environment",
+                compatibility: DefaultEnvCompatibility::DefaultBlock,
+                env: Some(vec![]),
+                inherit_default_env: true,
+                scope: EnvScope::Merge,
+                entries: &[],
+            },
+            Case {
+                label: "supplied is used verbatim",
+                compatibility: DefaultEnvCompatibility::DefaultBlock,
+                env: Some(vec!["FOO=bar"]),
+                inherit_default_env: false,
+                scope: EnvScope::Replace,
+                entries: &[("FOO", "bar")],
+            },
+            Case {
+                label: "supplied plus inheritDefaultEnv layers over the image environment",
+                compatibility: DefaultEnvCompatibility::DefaultBlock,
+                env: Some(vec!["FOO=bar"]),
+                inherit_default_env: true,
+                scope: EnvScope::Merge,
+                entries: &[("FOO", "bar")],
+            },
+            Case {
+                label: "a legacy contract keeps the image environment",
+                compatibility: DefaultEnvCompatibility::LegacyCompatible,
+                env: Some(vec!["FOO=bar"]),
+                inherit_default_env: false,
+                scope: EnvScope::Merge,
+                entries: &[("FOO", "bar")],
+            },
+        ];
+
+        for case in cases {
+            let request = ExecutionRequest {
+                default_env_compatibility: case.compatibility,
+                env: case.env.map(|e| e.into_iter().map(String::from).collect()),
+                inherit_default_env: case.inherit_default_env,
+                script_code: "echo hi".to_string(),
+                ..Default::default()
+            };
+
+            let config = exec_config(
+                "wslc:abc",
+                &request,
+                "exec-1".to_string(),
+                "run-1".to_string(),
+            );
+
+            assert_eq!(config.env_scope, case.scope, "scope for {}", case.label);
+            let expected: Vec<(String, String)> = case
+                .entries
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            assert_eq!(config.env, expected, "entries for {}", case.label);
+            assert_eq!(config.sandbox_id, "wslc:abc");
+            assert_eq!(config.script_code, "echo hi");
+        }
+    }
+
+    #[test]
+    fn the_exec_config_keeps_the_cooperative_proxy_out_of_the_callers_reach() {
+        let request = ExecutionRequest {
+            default_env_compatibility: DefaultEnvCompatibility::DefaultBlock,
+            env: Some(vec![
+                "FOO=bar".to_string(),
+                "HTTP_PROXY=http://attacker.invalid:1".to_string(),
+            ]),
+            policy: ContainerPolicy {
+                network_proxy: ProxyConfig {
+                    address: Some(ProxyAddress::from_url(
+                        "http://127.0.0.1:8888",
+                        "127.0.0.1".to_string(),
+                        8888,
+                    )),
+                    builtin_test_server: false,
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let config = exec_config(
+            "wslc:abc",
+            &request,
+            "exec-1".to_string(),
+            "run-1".to_string(),
+        );
+
+        // Replacement still applies, so the proxy variables must survive into
+        // the entries argv carries rather than being left to the SDK's setter.
+        assert_eq!(config.env_scope, EnvScope::Replace);
+        let value = |name: &str| {
+            config
+                .env
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(value("FOO").as_deref(), Some("bar"));
+        assert_eq!(
+            value("HTTP_PROXY").as_deref(),
+            Some("http://127.0.0.1:8888")
+        );
+        assert_eq!(value("NO_PROXY").as_deref(), Some(""));
+        assert!(!config.env.iter().any(|(_, v)| v.contains("attacker")));
     }
 
     #[test]

@@ -38,6 +38,7 @@ use wslc_common::daemon_protocol::{
     StartConfig, StopConfig,
 };
 use wslc_common::policy_mapping;
+use wslc_common::process_env::EnvScope;
 use wslc_common::wslc_bindings::{
     WslcContainer, WslcContainerGuard, WslcContainerNetworkingMode, WslcSdk, WslcSessionGuard,
 };
@@ -529,9 +530,17 @@ impl Worker {
             )
             .map_err(sr_err)?;
 
-            let mut keepalive =
-                ProcessSettings::build_detached(sdk, container_steps::KEEPALIVE_SCRIPT, &[], "")
-                    .map_err(sr_err)?;
+            // Merge keeps the keepalive out of `env -i`, so a container whose
+            // execs never replace an environment does not need `/usr/bin/env`
+            // in its image.
+            let mut keepalive = ProcessSettings::build_detached(
+                sdk,
+                container_steps::KEEPALIVE_SCRIPT,
+                &[],
+                EnvScope::Merge,
+                "",
+            )
+            .map_err(sr_err)?;
 
             container_steps::create_daemon_container(
                 sdk,
@@ -632,6 +641,7 @@ impl Worker {
                 container,
                 &config.script_code,
                 &env,
+                config.env_scope,
                 &config.working_directory,
                 config.timeout_ms,
                 cancellation,
@@ -958,6 +968,7 @@ mod tests {
                 script_code: "echo hi".to_string(),
                 working_directory: String::new(),
                 env: Vec::new(),
+                env_scope: EnvScope::Merge,
                 timeout_ms: 0,
             })
             .await
@@ -1017,6 +1028,7 @@ mod tests {
                 script_code: "echo hi".to_string(),
                 working_directory: String::new(),
                 env: Vec::new(),
+                env_scope: EnvScope::Merge,
                 timeout_ms: 0,
             })
             .await
@@ -1222,6 +1234,7 @@ mod tests {
                 script_code: "echo hi".to_string(),
                 working_directory: String::new(),
                 env: Vec::new(),
+                env_scope: EnvScope::Merge,
                 timeout_ms: 30_000,
             })
             .await
@@ -1281,6 +1294,7 @@ mod tests {
                 script_code: "sleep 2".to_string(),
                 working_directory: String::new(),
                 env: Vec::new(),
+                env_scope: EnvScope::Merge,
                 timeout_ms: 30_000,
             })
             .await
@@ -1297,6 +1311,7 @@ mod tests {
                     script_code: "touch /tmp/mxc-cancelled-queued-marker".to_string(),
                     working_directory: String::new(),
                     env: Vec::new(),
+                    env_scope: EnvScope::Merge,
                     timeout_ms: 30_000,
                 })
                 .await
@@ -1338,6 +1353,7 @@ mod tests {
                 script_code: "test ! -e /tmp/mxc-cancelled-queued-marker".to_string(),
                 working_directory: String::new(),
                 env: Vec::new(),
+                env_scope: EnvScope::Merge,
                 timeout_ms: 30_000,
             })
             .await

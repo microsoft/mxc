@@ -183,6 +183,10 @@ echo "  host listener is on 127.0.0.1:$ALLOWED_PORT (10.0.2.2:$ALLOWED_PORT from
 # been reachable without the rule. On a runner with no outbound access every
 # "blocked" assertion below would pass while filtering nothing, so establish
 # reachability first and skip rather than report a false green.
+#
+# The probe allowlists the target under defaultPolicy='block': a legacy
+# allowlist only refines a block default, and the block default is what puts
+# the probe in the same private namespace as the runs it anchors.
 PROBE_CONFIG="$WORK_DIR/reachability_probe.json"
 cat >"$PROBE_CONFIG" <<'PROBE'
 {
@@ -193,7 +197,7 @@ cat >"$PROBE_CONFIG" <<'PROBE'
     "commandLine": "bash -c 'echo PROBE_WORKLOAD_STARTED; timeout 8 bash -c \"exec 3<>/dev/tcp/1.1.1.1/443\" >/dev/null 2>&1 && echo DENY_TARGET_REACHABLE; exit 0'"
   },
   "network": {
-    "defaultPolicy": "allow",
+    "defaultPolicy": "block",
     "enforcementMode": "firewall",
     "allowedHosts": ["1.1.1.0/24"]
   }
@@ -218,7 +222,18 @@ if ! grep -q PROBE_WORKLOAD_STARTED <<<"$PROBE_OUT"; then
     exit 1
 fi
 if ! grep -q DENY_TARGET_REACHABLE <<<"$PROBE_OUT"; then
-    echo "SKIP: 1.1.1.1:443 is not reachable from an unfiltered sandbox on this host."
+    # Unreachable is only an environment verdict if the host has no route out
+    # either. A target the host can reach but an allowlisting sandbox cannot
+    # means the allowlist was never programmed or the sandbox's network never
+    # came up -- exactly the enforcement path these tests measure, so it must
+    # fail rather than skip.
+    if timeout 8 bash -c "exec 3<>/dev/tcp/1.1.1.1/443" >/dev/null 2>&1; then
+        echo "FAIL: 1.1.1.1:443 is reachable from the host but not from a sandbox that allows it."
+        echo "      The legacy allowlist or the sandbox's network namespace is broken."
+        echo "$PROBE_OUT"
+        exit 1
+    fi
+    echo "SKIP: 1.1.1.1:443 is not reachable from a sandbox that allows it on this host."
     echo "      The deny assertions would pass without proving anything."
     # 77, not 0: run_bwrap_all_tests.sh must record SKIPPED, not a false PASS.
     exit 77

@@ -79,6 +79,16 @@ pub fn on_provision_outcome(active: bool, root: &str, outcome: &Result<DispatchO
     }
 }
 
+/// Persist a typed provision result without requiring a JSON response envelope.
+#[doc(hidden)]
+pub fn on_typed_provision_result(active: bool, root: &str, sandbox_id: Option<&str>) {
+    if active {
+        if let Some(sandbox_id) = sandbox_id {
+            persist(sandbox_id, root);
+        }
+    }
+}
+
 /// After a `deprovision` dispatch succeeds, forget `sandbox_id`'s persisted
 /// lifecycle root. Dry runs keep the record intact, because the sandbox still
 /// exists. Terminal `not_provisioned` outcomes are also safe to forget: the
@@ -98,7 +108,20 @@ pub fn on_deprovision_outcome(
     with_store(|store| store.forget(sandbox_id));
 }
 
-fn should_forget_after_deprovision(outcome: &Result<DispatchOutcome, MxcError>) -> bool {
+/// Reap correlation state after a typed deprovision result.
+#[doc(hidden)]
+pub fn on_typed_deprovision_result(
+    sandbox_id: &str,
+    dry_run: bool,
+    outcome: &Result<(), MxcError>,
+) {
+    if dry_run || !should_forget_after_deprovision(outcome) {
+        return;
+    }
+    with_store(|store| store.forget(sandbox_id));
+}
+
+fn should_forget_after_deprovision<T>(outcome: &Result<T, MxcError>) -> bool {
     match outcome {
         Ok(_) => true,
         Err(error) => error.code == MxcErrorCode::NotProvisioned,
@@ -595,6 +618,33 @@ mod tests {
         // teardown) finds no record and gets a disconnected vector.
         let after_teardown = pre_dispatch_vector(true, false, Some(sandbox_id));
         assert_ne!(base_of(&after_teardown), provisioned_base);
+    }
+
+    #[test]
+    fn typed_lifecycle_hooks_share_and_reap_the_correlation_root() {
+        let store = Arc::new(MemoryStore::default());
+        let _guard = replace_store(store.clone());
+        let sandbox_id = "iso:typed000";
+        let root = seed();
+
+        on_typed_provision_result(true, &root, Some(sandbox_id));
+        assert_eq!(store.record(sandbox_id).as_deref(), Some(root.as_str()));
+
+        on_typed_deprovision_result(sandbox_id, false, &Ok(()));
+        assert!(store.record(sandbox_id).is_none());
+    }
+
+    #[test]
+    fn typed_deprovision_failure_keeps_the_correlation_root() {
+        let store = Arc::new(MemoryStore::default());
+        let _guard = replace_store(store.clone());
+        let sandbox_id = "iso:typed001";
+        let root = seed();
+
+        on_typed_provision_result(true, &root, Some(sandbox_id));
+        on_typed_deprovision_result(sandbox_id, false, &Err(MxcError::backend_error("retry")));
+
+        assert_eq!(store.record(sandbox_id).as_deref(), Some(root.as_str()));
     }
 
     #[test]

@@ -40,6 +40,7 @@ mod probe;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 mod run;
 mod state_aware;
+mod state_aware_sdk;
 #[cfg(target_os = "windows")]
 mod verbose_telemetry;
 
@@ -63,7 +64,15 @@ pub use run::resolve_runner_for_audit;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 pub use run::{log_policy_hash, resolve_runner, run, ResolvedRunner};
 pub use state_aware::{
-    exec_state_aware_attached, exec_state_aware_json, run_state_aware, run_state_aware_json,
+    deprovision_sandbox, exec_attached_request, exec_sandbox_request, exec_state_aware_attached,
+    exec_state_aware_json, provision_sandbox, run_state_aware, run_state_aware_json, start_sandbox,
+    stop_sandbox, validate_deprovision, validate_exec, validate_provision, validate_start,
+    validate_stop,
+};
+pub use state_aware_sdk::{
+    ExecRequest, IsolationSessionProvisionMetadata, LifecycleRequest, LifecycleResult,
+    OperationOptions, ProvisionMetadata, ProvisionRequest, ProvisionResult, SandboxId,
+    StateAwareExecBackendOptions, StateAwareProvision, ValidationResult,
 };
 #[cfg(target_os = "windows")]
 pub use verbose_telemetry::emit_verbose_telemetry;

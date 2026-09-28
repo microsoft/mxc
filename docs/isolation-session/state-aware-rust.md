@@ -14,22 +14,24 @@ concurrency story, and error mapping.
 - The Rust layer of state-aware IsolationSession in `wxc-exec.exe`, behind
   the `--features isolation_session` Cargo feature. The published v0.9
   surface requires no runtime experimental opt-in.
-- The wire format consumed by `wxc-exec.exe` for state-aware requests
-  (top-level `phase` discriminator, `sandboxId`,
-  `isolationSession.provision` typed configuration).
+- The exact state-aware phase contracts. Raw SDK and FFI JSON carries the
+  top-level `phase` discriminator and `sandboxId`; direct `wxc-exec.exe`
+  calls supply those routing values through `--operation` and
+  `--sandbox-id`.
 - Mapping from the OS-side service's HRESULTs to the wire-format `MxcError`
   codes.
 
 ### In-process callers reach the same lifecycle
 
 The Rust SDK (`mxc-sdk`) and the C ABI over it (`mxc_ffi`), each with an
-`isolation_session` feature, take the same phases and the same request JSON as
-`wxc-exec`; only the entry point differs.
+`isolation_session` feature, use the raw exact envelope containing `phase` and,
+for non-provision operations, `sandboxId`. The executor uses the same exact
+phase contracts after taking those routing values from CLI arguments.
 
 | Phase | `wxc-exec` | In-process |
 |---|---|---|
-| provision / start / stop / deprovision | `wxc-exec --config …` | `mxc_sdk::run_state_aware_json`, `mxc_state_aware` |
-| exec, attached to the caller's stdio | `wxc-exec --config …` | `mxc_sdk::exec_attached`, `mxc_state_aware_exec_attached` |
+| provision / start / stop / deprovision | `wxc-exec --operation <phase> [--sandbox-id <id>] --config …` | `mxc_sdk::run_state_aware_json`, `mxc_state_aware` |
+| exec, attached to the caller's stdio | `wxc-exec --operation exec --sandbox-id <id> --config …` | `mxc_sdk::exec_attached`, `mxc_state_aware_exec_attached` |
 | exec, caller drives the pipes | *(no CLI equivalent)* | `mxc_sdk::exec_sandbox`, `mxc_state_aware_exec` |
 
 Requirements on an in-process caller:
@@ -43,10 +45,10 @@ Requirements on an in-process caller:
 - **An attached exec takes over this process's console for its duration**:
   raw VT, so no echo, no line input, and keystrokes — `Ctrl-C` included — go to
   the sandboxed workload rather than to this process. Restored on return.
-- **`start` cannot run from Session 0.** `StartSessionAsync` fails with
-  *"requires an interactive session"* (`0x80040233`), so a caller running as a
-  service, or over a remote SYSTEM-context shell, cannot complete the lifecycle.
-  `provision` succeeds first and mints an OS account that must be deprovisioned.
+- **`start` cannot run from Session 0.** It fails with `0x80040233`, so a caller
+  running as a service, or over a remote SYSTEM-context shell, cannot complete
+  the lifecycle. `provision` succeeds first and mints an OS account that must be
+  deprovisioned.
 - **An impersonating caller is refused unless this process can duplicate its
   token at `SecurityImpersonation` level.**
 
@@ -109,8 +111,8 @@ legacy fields, mixing postures, or adding rules or proxy settings is a structura
 
 | Field | Type | Description |
 |---|---|---|
-| `agentUserName` | string | The OS-assigned agent account name returned by the selected `AddUser` overload (`AddUserAsync2`, or `AddUserAsync` on hosts without app-scoped support), also carried inside the `sandboxId` payload where it serves as the addressing key for every post-provision phase. Format is OS-internal and not stable across builds. |
-| `agentUserSid` | string | The security identifier (SID) of the agent user, returned by the selected `AddUser` overload (`AddUserAsync2`, or `AddUserAsync` on hosts without app-scoped support). Diagnostic only. |
+| `agentUserName` | string | The OS-assigned agent account name returned by provisioning, also carried inside the `sandboxId` payload where it serves as the addressing key for every post-provision phase. Format is OS-internal and not stable across builds. |
+| `agentUserSid` | string | The security identifier (SID) of the agent user, returned by provisioning. Diagnostic only. |
 | `ephemeralWorkspacePath` | string | A directory shared between the calling user and this isolated agent user, through which the caller can stage files into the session. Each isolated user can access only its own workspace; the caller can access every concurrent sandbox's workspace. Created at provision and deleted when the sandbox is deprovisioned. It does **not** change the workload's working directory. |
 
 `appId` is deliberately **not** echoed in the metadata — the caller supplied
@@ -188,10 +190,10 @@ wrong-nesting cases are rejected as `malformed_request`.
 **Config (none).** Exec uses only the cross-cutting `process` block on the
 top-level wire envelope (`commandLine`, `cwd`, `env`, `timeout`).
 
-**Output.** Stdout is the agent process's live-streamed output (the SDK
-discriminates this from a JSON envelope by exit code + stdout-parseability;
-the dispatcher never emits a JSON envelope on stdout for exec on success).
-The wxc-exec process exit code is the agent process's exit code.
+**Output.** Stdout is the agent process's live-streamed output; the dispatcher
+never emits a JSON envelope on stdout for a non-dry-run exec, so a failure's
+`{error}` envelope goes to stderr instead. The wxc-exec process exit code is the
+agent process's exit code.
 
 ### Stop
 
@@ -368,6 +370,10 @@ whole section for every backend. See the matrix notes above.
 
 ### Fields valid in state-aware only
 
+These are fields in the raw exact SDK/FFI envelope. Direct `wxc-exec` calls
+remove `phase` and `sandboxId` from the JSON payload and pass them as
+`--operation` and `--sandbox-id`.
+
 - `phase` — the discriminator. Required for state-aware; absent for one-shot.
 - `sandboxId` — required for non-provision phases.
 - `isolationSession.provision` — optional provision configuration;
@@ -381,7 +387,7 @@ whole section for every backend. See the matrix notes above.
 | Phase | Repeated call | Notes |
 |---|---|---|
 | provision | non-idempotent | Each provision mints a fresh agent user. Two provision calls produce two distinct sandboxes. Acceptable: callers manage `sandboxId` state themselves. |
-| start | OS-side dependent | Starting an already-started session surfaces an HRESULT from `StartSessionAsync`; mapped to `backend_error` (no specific MXC code). Callers should not call start twice; if they do, the second call's failure does not corrupt the first session. |
+| start | OS-side dependent | Starting an already-started session surfaces an HRESULT from the OS session-start call; mapped to `backend_error` (no specific MXC code). Callers should not call start twice; if they do, the second call's failure does not corrupt the first session. |
 | exec | per-call | Each exec creates a fresh agent process via `RunProcessWithOptionsAsync`. No deduplication — repeated `commandLine` runs the command repeatedly. |
 | stop | OS-side dependent | Stopping an already-stopped session surfaces an HRESULT from `StopSessionAsync`; mapped to `backend_error`. The agent user remains — only the running session is gone. |
 | deprovision | becomes `stale_id` | After a successful deprovision, the agent user is gone. A second deprovision on the same `sandboxId` fails the OS-side agent-user lookup (`HRESULT_FROM_WIN32(ERROR_NOT_FOUND)`), which the runner maps to `MxcError::StaleId`. |
@@ -390,9 +396,8 @@ whole section for every backend. See the matrix notes above.
 
 ### Multiple sandboxes
 
-Distinct `sandboxId`s map to distinct OS agent users (each provisioning call —
-`AddUserAsync2`, or `AddUserAsync` on hosts without app-scoped support — mints a
-fresh account). There is no shared registration between them, so
+Distinct `sandboxId`s map to distinct OS agent users (each provisioning call
+mints a fresh account). There is no shared registration between them, so
 concurrent provisions are independent and all succeed.
 
 ### Multiple exec calls against the same sandbox

@@ -111,38 +111,39 @@
 //!
 //! ## Choosing an entry point
 //!
-//! |             | one-shot            | state-aware                           | Stdio                                    |
-//! |-------------|---------------------|---------------------------------------|------------------------------------------|
-//! | **capture** | [`run`]             | `exec_sandbox(…)?.wait_with_output()` | captured                                 |
-//! | **handle**  | [`spawn_sandbox`]   | [`exec_sandbox`]                      | live pipes (stream, kill); no TTY        |
-//! | **attach**  | *not available*     | [`exec_attached`]                     | this process's stdio; TTY if it has one  |
+//! |             | one-shot          | typed state-aware | Stdio                             |
+//! |-------------|-------------------|-------------------|-----------------------------------|
+//! | **capture** | [`run`]           | `sandbox::exec(…)?.wait_with_output()` | captured |
+//! | **handle**  | [`spawn_sandbox`] | [`sandbox::exec`] | live pipes (stream, kill); no TTY |
+//! | **attach**  | *not available*   | [`sandbox::exec_attached`] | this process's stdio; TTY if present |
 //!
-//! [`run_state_aware_json`] sits alongside these and drives the *other*
-//! state-aware phases — `provision`, `start`, `stop`, `deprovision`, and a dry
-//! run of any phase — taking the wire-format request JSON and returning the
-//! response-envelope JSON. The crate README covers which backends implement the
-//! lifecycle and how each is compiled in.
+//! [`sandbox::provision`], [`sandbox::start`], [`sandbox::stop`], and
+//! [`sandbox::deprovision`] drive the lifecycle with typed Rust requests.
+//! [`run_state_aware_json`], [`exec_sandbox_json`], and [`exec_attached_json`]
+//! are the separate raw exact-JSON lane. The crate README covers which backends
+//! implement the lifecycle and how each is compiled in.
 //!
 //! ## Pty allocation
 //!
-//! Every entry point except [`exec_attached`] wires the child's stdio to
+//! Every entry point except [`sandbox::exec_attached`] and [`exec_attached`]
+//! wires the child's stdio to
 //! ordinary pipes and allocates no pty. [`run`] captures both streams; with
-//! [`spawn_sandbox`] or [`exec_sandbox`], stream the handle's
+//! [`spawn_sandbox`] or [`sandbox::exec`], stream the handle's
 //! `take_stdout`/`take_stderr`, or let [`wait`](Sandbox::wait) drain and
 //! discard any untaken stream. WSLC exposes no stdin because its SDK has no
 //! process-input API.
 //!
-//! Under [`exec_attached`], IsolationSession allocates a pseudo-console and
+//! Under an attached exec, IsolationSession allocates a pseudo-console and
 //! forwards stdin, so interactive shells render and resize. A pseudo-console
 //! has one output stream, so the sandbox's stderr arrives merged into stdout.
 //!
-//! IsolationSession, WSLC, and Windows Sandbox serve [`exec_attached`].
-//! IsolationSession additionally forwards stdin through a pseudo-console;
-//! Windows Sandbox drops terminal input pending PTY support, and WSLC has no
-//! process-input API.
+//! IsolationSession, WSLC, and Windows Sandbox serve attached exec through
+//! [`sandbox::exec_attached`] and [`exec_attached`]. IsolationSession additionally
+//! forwards stdin through a pseudo-console; Windows Sandbox drops terminal
+//! input pending PTY support, and WSLC has no process-input API.
 //!
 //! Policy and operational warnings are available through [`Sandbox::warnings`]
-//! and [`Output::warnings`]. [`exec_attached`] has no returned handle, so it
+//! and [`Output::warnings`]. Attached exec has no returned handle, so it
 //! writes those warnings to the host stderr that the caller explicitly attached.
 //! These include security warnings, network rules that cannot carry traffic,
 //! and operational warnings such as unavailable telemetry routing.
@@ -154,7 +155,7 @@
 //! `mxc-sdk` re-exports the curated surface and wraps the engine's streaming
 //! handle in [`Sandbox`].
 
-mod sandbox;
+pub mod sandbox;
 
 pub mod telemetry;
 
@@ -163,10 +164,13 @@ pub use mxc_engine::policy;
 pub use mxc_engine::{
     available_backends, available_tools_policy, build_request, build_request_with_containment,
     platform_support, temporary_files_policy, user_profile_policy, AvailableBackend,
-    BackendCapability, BubblewrapNetworkSupport, Containment, Error, ErrorCode,
-    FilesystemPolicyResult, NetworkAction, NetworkEgressSection, NetworkIngressSection,
-    NetworkPeerSection, NetworkPortSection, NetworkProtocol, NetworkRuleSection, PlatformSupport,
-    ProxyEnforcement, RuntimeConfigSection, SandboxPolicy, SandboxRequest, WslcSection,
+    BackendCapability, BubblewrapNetworkSupport, Containment, Error, ErrorCode, ExecRequest,
+    FilesystemPolicyResult, IsolationSessionProvisionMetadata, LifecycleRequest, LifecycleResult,
+    NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkPeerSection,
+    NetworkPortSection, NetworkProtocol, NetworkRuleSection, OperationOptions, PlatformSupport,
+    ProvisionMetadata, ProvisionRequest, ProvisionResult, ProxyEnforcement, RuntimeConfigSection,
+    SandboxId, SandboxPolicy, SandboxRequest, StateAwareExecBackendOptions, StateAwareProvision,
+    ValidationResult, WslcSection,
 };
 
 pub use sandbox::{
@@ -252,6 +256,11 @@ pub fn run_state_aware_json(
 /// workload backgrounded is reclaimed when the sandbox is stopped and
 /// deprovisioned.
 pub fn exec_sandbox(request_json: &str, experimental: bool) -> Result<Sandbox, Error> {
+    exec_sandbox_json(request_json, experimental)
+}
+
+/// Run a raw exact-JSON state-aware exec request as a live streaming sandbox.
+pub fn exec_sandbox_json(request_json: &str, experimental: bool) -> Result<Sandbox, Error> {
     mxc_engine::exec_state_aware_json(request_json, experimental).map(Sandbox::new)
 }
 
@@ -273,6 +282,12 @@ pub fn exec_sandbox(request_json: &str, experimental: bool) -> Result<Sandbox, E
 /// `experimental` opts in to the experimental backends, as for
 /// [`run_state_aware_json`].
 pub fn exec_attached(request_json: &str, experimental: bool) -> Result<WaitOutcome, Error> {
+    exec_attached_json(request_json, experimental)
+}
+
+/// Run a raw exact-JSON state-aware exec request attached to this process's
+/// stdio.
+pub fn exec_attached_json(request_json: &str, experimental: bool) -> Result<WaitOutcome, Error> {
     use wxc_common::state_aware_backend::ExecOutcome;
     mxc_engine::exec_state_aware_attached(request_json, experimental).map(|outcome| match outcome {
         ExecOutcome::Exited(code) => WaitOutcome::Exited(code),

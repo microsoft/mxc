@@ -1,4 +1,5 @@
 {
+  "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
   "version": "0.8.0-alpha",
   "containerId": "CLI-LXC-Denied-Masking",
   "containment": "lxc",

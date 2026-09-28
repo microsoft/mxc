@@ -717,21 +717,20 @@ mod tests {
         assert_eq!(c.config_file_path(), "/var/lib/lxc/box/config");
     }
 
-    fn container_with_config(body: &str) -> (LxcContainer, std::path::PathBuf) {
-        let base = std::env::temp_dir().join(format!(
-            "mxc-lxc-cfg-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let dir = base.join("box");
+    fn container_with_config(body: &str) -> (tempfile::TempDir, LxcContainer, std::path::PathBuf) {
+        let base = tempfile::Builder::new()
+            .prefix("mxc-lxc-cfg-")
+            .tempdir()
+            .expect("create temp LXC directory");
+        let dir = base.path().join("box");
         std::fs::create_dir_all(&dir).expect("temp container dir");
         let config = dir.join("config");
         std::fs::write(&config, body).expect("seed config");
-        let container = LxcContainer::new("box", Some(base.to_str().unwrap()));
-        (container, config)
+        let container = LxcContainer::new(
+            "box",
+            Some(base.path().to_str().expect("temp path must be UTF-8")),
+        );
+        (base, container, config)
     }
 
     const TEMPLATE_CONFIG: &str = "# Template used to create this container\n\
@@ -741,7 +740,7 @@ mod tests {
 
     #[test]
     fn a_reused_container_does_not_inherit_an_earlier_runs_mounts() {
-        let (container, config) = container_with_config(TEMPLATE_CONFIG);
+        let (_temp_dir, container, config) = container_with_config(TEMPLATE_CONFIG);
 
         container
             .set_filesystem_access_points(&[
@@ -766,7 +765,7 @@ mod tests {
 
     #[test]
     fn rewriting_mounts_preserves_every_line_the_backend_does_not_own() {
-        let (container, config) = container_with_config(TEMPLATE_CONFIG);
+        let (_temp_dir, container, config) = container_with_config(TEMPLATE_CONFIG);
 
         container
             .set_filesystem_access_points(&["/data data none bind,create=dir 0 0".into()])
@@ -797,7 +796,7 @@ mod tests {
         // a stale grant on a container MXC has not rewritten since.
         let unmarked = "lxc.rootfs.path = dir:/var/lib/lxc/box/rootfs\n\
                         lxc.mount.entry = /srv/mydata srv/mydata none bind,create=dir 0 0\n";
-        let (container, config) = container_with_config(unmarked);
+        let (_temp_dir, container, config) = container_with_config(unmarked);
 
         container
             .set_filesystem_access_points(&[])
@@ -816,7 +815,7 @@ mod tests {
 
     #[test]
     fn repeated_runs_do_not_accumulate_managed_blocks() {
-        let (container, config) = container_with_config(TEMPLATE_CONFIG);
+        let (_temp_dir, container, config) = container_with_config(TEMPLATE_CONFIG);
 
         for _ in 0..3 {
             container
@@ -843,7 +842,7 @@ mod tests {
             "lxc.rootfs.path = dir:/var/lib/lxc/box/rootfs\n{}\nlxc.mount.entry = /tmp/secret tmp/secret none bind 0 0\n",
             MANAGED_MOUNTS_BEGIN
         );
-        let (container, config) = container_with_config(&truncated);
+        let (_temp_dir, container, config) = container_with_config(&truncated);
 
         container
             .set_filesystem_access_points(&[])
@@ -862,7 +861,7 @@ mod tests {
 
     #[test]
     fn a_failed_rewrite_leaves_no_temporary_file_behind() {
-        let (container, config) = container_with_config(TEMPLATE_CONFIG);
+        let (_temp_dir, container, config) = container_with_config(TEMPLATE_CONFIG);
         let err = LxcContainer::new("ghost", Some("/nonexistent-mxc-base"))
             .set_filesystem_access_points(&[])
             .expect_err("a missing config must fail loudly");
