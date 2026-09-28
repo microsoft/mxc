@@ -2042,8 +2042,9 @@ mod tests {
     use process_security_environment_spec::process_security_environment_layout as psec_layout;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use wxc_common::models::{
-        ContainerPolicy, DefaultEnvCompatibility, NetworkAction, NetworkCidr, NetworkPeer,
-        NetworkPolicy, NetworkPort, NetworkProtocol, NetworkRule, ProxyConfig,
+        BaseProcessUiConfig, ClipboardPolicy, ContainerPolicy, DefaultEnvCompatibility,
+        NetworkAction, NetworkCidr, NetworkPeer, NetworkPolicy, NetworkPort, NetworkProtocol,
+        NetworkRule, ProxyConfig, UiPolicy,
     };
     use wxc_common::ui_policy::EffectiveUiRestrictions;
 
@@ -2736,6 +2737,28 @@ mod tests {
         assert_eq!(egress.default_action(), psec_layout::FilterAction::deny);
         assert!(egress.allow().is_none());
         assert!(egress.deny().is_none());
+    }
+
+    #[test]
+    fn permissive_ui_policy_serializes_no_tier1_ui_restrictions() {
+        let mut request = ExecutionRequest::default();
+        request.policy.ui = UiPolicy {
+            disable: false,
+            clipboard: ClipboardPolicy::All,
+            injection: true,
+        };
+        request.policy.base_process_ui = BaseProcessUiConfig {
+            isolation: "desktop".to_string(),
+            desktop_system_control: true,
+            system_settings: "all".to_string(),
+            ime: true,
+        };
+
+        let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
+        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+
+        assert!(!spec.disallow_win32k_system_calls());
+        assert_eq!(spec.ui_restrictions(), 0);
     }
 
     #[test]
