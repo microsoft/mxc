@@ -1339,7 +1339,18 @@ fn same_path(a: &str, b: &str) -> bool {
 
 #[cfg(target_os = "windows")]
 fn same_path_fallback(a: &str, b: &str) -> bool {
-    WindowsFallbackPath::parse(a) == WindowsFallbackPath::parse(b)
+    use wxc_common::filesystem_canonical::{canonicalize_allowing_absent_tail, PathCanonical};
+
+    match (
+        canonicalize_allowing_absent_tail(a),
+        canonicalize_allowing_absent_tail(b),
+    ) {
+        (PathCanonical::Canonical(ap), PathCanonical::Canonical(bp)) => {
+            WindowsFallbackPath::parse(&ap) == WindowsFallbackPath::parse(&bp)
+        }
+        (PathCanonical::Unknown, _) | (_, PathCanonical::Unknown) => true,
+        _ => WindowsFallbackPath::parse(a) == WindowsFallbackPath::parse(b),
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1353,7 +1364,7 @@ struct WindowsFallbackPath {
 #[cfg(target_os = "windows")]
 impl WindowsFallbackPath {
     fn parse(path: &str) -> Self {
-        let folded = path.to_lowercase();
+        let folded = normalize_windows_verbatim_prefix(&path.to_lowercase());
         let bytes = folded.as_bytes();
         let (drive, rest) =
             if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
@@ -1383,6 +1394,17 @@ impl WindowsFallbackPath {
             rooted,
             components,
         }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn normalize_windows_verbatim_prefix(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\unc\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = path.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        path.to_string()
     }
 }
 
@@ -1687,6 +1709,31 @@ mod tests {
                     "C:\\MXC\\HyperlightMissingCase\\temp\\..\\PRIVATECACHE\\\\".to_string()
                 ],
                 denied_paths: vec!["c:/mxc//hyperlightmissingcase/./privatecache".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+        let resp = r.run(&request, &mut logger);
+        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
+        assert!(
+            resp.error_message.contains("deniedPaths"),
+            "got: {}",
+            resp.error_message
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn policy_rejects_denied_missing_windows_verbatim_allow_overlap() {
+        let mut r = runner();
+        let request = ExecutionRequest {
+            script_code: "print('x')".to_string(),
+            policy: ContainerPolicy {
+                readwrite_paths: vec![
+                    "\\\\?\\C:\\MXC\\HyperlightVerbatim\\temp\\..\\PRIVATECACHE\\".to_string(),
+                ],
+                denied_paths: vec!["c:/mxc/hyperlightverbatim/privatecache".to_string()],
                 ..Default::default()
             },
             ..Default::default()
