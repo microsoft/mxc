@@ -192,7 +192,21 @@ export function getPlatformSupport(): PlatformSupport {
 
   const platform = os.platform();
   if (platform === 'linux') {
-    cachedSupport = computeLinuxSupport();
+    try {
+      cachedSupport = computeLinuxSupport();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const reason = `Native backend discovery failed: ${detail}`;
+      cachedSupport = {
+        isSupported: false,
+        reason,
+        availableMethods: [],
+        unavailableReasons: {
+          lxc: reason,
+          bubblewrap: reason,
+        },
+      };
+    }
     return cachedSupport;
   }
   if (platform === 'darwin') {

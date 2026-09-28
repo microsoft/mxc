@@ -1,17 +1,34 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+import koffi from 'koffi';
+import { MxcError } from '../errors.js';
 import { getMxcFfi } from '../native-library.js';
-import { decodeString } from './native-error.js';
+import {
+  AbiErrorDetailType,
+  decodeString,
+  nativeStatusError,
+  type AbiErrorDetail,
+} from './native-error.js';
 import { bindNativeFunction } from './native-function.js';
 
 type Pointer = unknown;
-type ProbeRequestFunction = (requestJson: string | null) => Pointer | null;
+type ProbeRequestFunction = (
+  requestJson: string | null,
+  outJson: Pointer[],
+  outError: AbiErrorDetail,
+) => number;
 type FreeStringFunction = (value: Pointer) => void;
+type FreeErrorFunction = (error: AbiErrorDetail) => void;
 
 export interface ProbeNativeFacade {
-  probeRequest(requestJson: string | null): Pointer | null;
+  probeRequest(
+    requestJson: string | null,
+    outJson: Pointer[],
+    outError: AbiErrorDetail,
+  ): number;
   freeString(value: Pointer): void;
+  freeError(error: AbiErrorDetail): void;
 }
 
 /**
@@ -24,9 +41,23 @@ export function readProbeJsonWithNative(
   requestJson?: string,
   decode: (pointer: Pointer) => string | undefined = decodeString,
 ): string {
-  const pointer = native.probeRequest(requestJson ?? null);
+  const output: Pointer[] = [null];
+  const error = {} as AbiErrorDetail;
+  const status = native.probeRequest(requestJson ?? null, output, error);
+  if (status !== 0) {
+    try {
+      throw nativeStatusError(status, error);
+    } finally {
+      native.freeError(error);
+    }
+  }
+
+  const pointer = output[0];
   if (pointer === null || pointer === undefined || pointer === 0 || pointer === 0n) {
-    throw new Error('native request probe failed');
+    throw new MxcError(
+      'backend_error',
+      'native request probe returned a null success result',
+    );
   }
 
   try {
@@ -44,14 +75,23 @@ export function readProbeJson(requestJson?: string): string {
   const native = getMxcFfi();
   return readProbeJsonWithNative({
     probeRequest: bindNativeFunction<ProbeRequestFunction>(native.handle, {
-      symbol: 'mxc_probe_request_json',
-      result: 'void *',
-      parameters: ['const char *'],
+      symbol: 'mxc_probe_request_json_with_error',
+      result: 'int32_t',
+      parameters: [
+        'const char *',
+        koffi.out(koffi.pointer('char', 2)),
+        koffi.out(koffi.pointer(AbiErrorDetailType)),
+      ],
     }),
     freeString: bindNativeFunction<FreeStringFunction>(native.handle, {
       symbol: 'mxc_string_free',
       result: 'void',
       parameters: ['void *'],
+    }),
+    freeError: bindNativeFunction<FreeErrorFunction>(native.handle, {
+      symbol: 'mxc_error_detail_free',
+      result: 'void',
+      parameters: [koffi.pointer(AbiErrorDetailType)],
     }),
   }, requestJson);
 }

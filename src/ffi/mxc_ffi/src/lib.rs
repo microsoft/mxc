@@ -9,8 +9,9 @@
 //! - **Host discovery** — [`mxc_available_backends_json`] reports every
 //!   host-available backend, while [`mxc_platform_support_json`] reports the
 //!   subset this SDK can launch.
-//! - **Windows request probe** — `mxc_probe_request_json` evaluates a
-//!   ProcessContainer config without creating a sandbox.
+//! - **Windows request probe** — `mxc_probe_request_json_with_error` evaluates
+//!   a ProcessContainer config without creating a sandbox and preserves
+//!   structured failure detail.
 //! - **Streaming** (`streaming` module) — [`mxc_spawn_request`] accepts the
 //!   same binding request and returns an opaque live handle.
 //! - **State-aware lifecycle** (`state_aware` module) — [`mxc_state_aware`]
@@ -509,9 +510,8 @@ pub extern "C" fn mxc_platform_support_json() -> *mut c_char {
 /// `request_json_utf8` may be null to probe the default ProcessContainer
 /// request. Otherwise it must point to a NUL-terminated UTF-8 MXC config
 /// document. The returned JSON string is owned by the caller and must be freed
-/// with [`mxc_string_free`]. Returns null for invalid input, state-aware or
-/// non-ProcessContainer requests, probe failures, serialization failures, or
-/// panics.
+/// with [`mxc_string_free`]. This compatibility entry point returns null on
+/// failure; new callers should use [`mxc_probe_request_json_with_error`].
 ///
 /// This ABI is present only in Windows builds.
 ///
@@ -521,28 +521,108 @@ pub extern "C" fn mxc_platform_support_json() -> *mut c_char {
 #[cfg(target_os = "windows")]
 #[no_mangle]
 pub unsafe extern "C" fn mxc_probe_request_json(request_json_utf8: *const c_char) -> *mut c_char {
-    catch_unwind(|| probe_request_json_inner(request_json_utf8)).unwrap_or_else(|panic| {
+    catch_unwind(|| {
+        let mut output = ptr::null_mut();
+        let mut error = MxcErrorDetail::none();
+        // SAFETY: local output storage is writable and the input has this
+        // compatibility entry point's caller contract.
+        let status = unsafe {
+            mxc_probe_request_json_with_error(request_json_utf8, &mut output, &mut error)
+        };
+        error.free_strings();
+        if status == MXC_STATUS_SUCCESS {
+            output
+        } else {
+            ptr::null_mut()
+        }
+    })
+    .unwrap_or_else(|panic| {
         report_panic("mxc_probe_request_json", &*panic);
         ptr::null_mut()
     })
 }
 
+/// Probe a Windows ProcessContainer request and preserve structured errors.
+///
+/// On success, `*out_json_utf8` is an owned JSON string that must be released
+/// with [`mxc_string_free`]. On failure it remains null and `out_error`, when
+/// non-null, receives owned detail that must be released with
+/// [`mxc_error_detail_free`].
+///
+/// # Safety
+/// - `request_json_utf8` must be null or a valid NUL-terminated C string.
+/// - `out_json_utf8` must point to writable pointer-sized storage.
+/// - `out_error` must be null or point to writable fresh detail storage.
 #[cfg(target_os = "windows")]
-fn probe_request_json_inner(request_json_utf8: *const c_char) -> *mut c_char {
+#[no_mangle]
+pub unsafe extern "C" fn mxc_probe_request_json_with_error(
+    request_json_utf8: *const c_char,
+    out_json_utf8: *mut *mut c_char,
+    out_error: *mut MxcErrorDetail,
+) -> i32 {
+    if !out_json_utf8.is_null() {
+        // SAFETY: caller-guaranteed writable pointer-sized storage.
+        unsafe { *out_json_utf8 = ptr::null_mut() };
+    }
+    if !out_error.is_null() {
+        // SAFETY: caller-guaranteed writable storage for one fresh detail.
+        unsafe { ptr::write(out_error, MxcErrorDetail::none()) };
+    }
+    if out_json_utf8.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+
+    let outcome =
+        catch_unwind(|| probe_request_json_inner(request_json_utf8)).unwrap_or_else(|panic| {
+            report_panic("mxc_probe_request_json_with_error", &*panic);
+            Err((
+                MXC_STATUS_PANIC,
+                MxcErrorDetail::from_message("the mxc engine panicked"),
+            ))
+        });
+
+    match outcome {
+        Ok(output) => {
+            // SAFETY: checked non-null above and writable by contract.
+            unsafe { *out_json_utf8 = output };
+            MXC_STATUS_SUCCESS
+        }
+        Err((status, mut error)) => {
+            if out_error.is_null() {
+                error.free_strings();
+            } else {
+                // SAFETY: caller-guaranteed writable fresh detail storage.
+                unsafe { ptr::write(out_error, error) };
+            }
+            status
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn probe_request_json_inner(
+    request_json_utf8: *const c_char,
+) -> Result<*mut c_char, (i32, MxcErrorDetail)> {
     let request_json = if request_json_utf8.is_null() {
         None
     } else {
-        // SAFETY: caller contract on `mxc_probe_request_json`; borrowed only
-        // for this synchronous call.
+        // SAFETY: caller contract on the public probe entry points; borrowed
+        // only for this synchronous call.
         let Some(request_json) = (unsafe { cstr_to_str(request_json_utf8) }) else {
-            return ptr::null_mut();
+            return Err((
+                MXC_STATUS_INVALID_UTF8,
+                MxcErrorDetail::from_message("request probe JSON is not UTF-8"),
+            ));
         };
         Some(request_json)
     };
 
     match mxc_sdk::probe_request_json_for_ffi(request_json) {
-        Ok(output) => alloc_cstring(output.as_bytes()),
-        Err(_) => ptr::null_mut(),
+        Ok(output) => Ok(alloc_cstring(output.as_bytes())),
+        Err(error) => Err((
+            status_from_error_code(error.code),
+            MxcErrorDetail::from_error(&error),
+        )),
     }
 }
 

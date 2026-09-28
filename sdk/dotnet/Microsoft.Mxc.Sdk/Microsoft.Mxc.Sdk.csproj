@@ -211,6 +211,8 @@
            Text="mxc: prebuilt native directory '$(MxcPrebuiltNativeDir)' is missing $(MxcNativeFileName)." />
     <Error Condition="'$(MxcSidecarFileName)' != '' and !Exists('$(MxcPrebuiltNativeDir)/$(MxcSidecarFileName)')"
            Text="mxc: prebuilt native directory '$(MxcPrebuiltNativeDir)' is missing $(MxcSidecarFileName)." />
+    <Error Condition="'$(MxcExecutorFileName)' != '' and !Exists('$(MxcPrebuiltNativeDir)/$(MxcExecutorFileName)')"
+           Text="mxc: prebuilt native directory '$(MxcPrebuiltNativeDir)' is missing $(MxcExecutorFileName)." />
     <Error Condition="'$(MxcWithWslc)' == 'true' and $([MSBuild]::IsOSPlatform('Windows')) and !Exists('$(MxcPrebuiltNativeDir)/wxc-wslc-daemon.exe')"
            Text="mxc: prebuilt native directory '$(MxcPrebuiltNativeDir)' is missing wxc-wslc-daemon.exe." />
     <Error Condition="'$(MxcWithWslc)' == 'true' and $([MSBuild]::IsOSPlatform('Windows')) and !Exists('$(MxcPrebuiltNativeDir)/wslcsdk.dll')"
@@ -219,6 +221,8 @@
       <MxcNativeUnit Include="$(MxcPrebuiltNativeDir)/$(MxcNativeFileName)" />
       <MxcNativeUnit Include="$(MxcPrebuiltNativeDir)/$(MxcSidecarFileName)"
                      Condition="'$(MxcSidecarFileName)' != ''" />
+      <MxcNativeUnit Include="$(MxcPrebuiltNativeDir)/$(MxcExecutorFileName)"
+                     Condition="'$(MxcExecutorFileName)' != ''" />
       <MxcNativeUnit Include="$(MxcPrebuiltNativeDir)/wxc-wslc-daemon.exe;$(MxcPrebuiltNativeDir)/wslcsdk.dll"
                      Condition="'$(MxcWithWslc)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))" />
     </ItemGroup>

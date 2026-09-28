@@ -274,6 +274,61 @@ public class MxcSandboxTests
         Assert.Equal(Encoding.UTF8.WebName, startInfo.StandardErrorEncoding.WebName);
     }
 
+    [Fact]
+    public void RequestProbeExecutor_PreservesDirectoryCreationFailure()
+    {
+        var primary = new IOException("cannot create probe directory");
+        RequestProbeExecutor.IsWindows = () => true;
+        RequestProbeExecutor.FindExecutable = () => "wxc-exec.exe";
+        RequestProbeExecutor.CreateDirectory = _ => throw primary;
+        RequestProbeExecutor.DeleteDirectory = _ =>
+            throw new DirectoryNotFoundException("cleanup must not run");
+
+        try
+        {
+            var caught = Assert.Throws<IOException>(
+                () => RequestProbeExecutor.Run("{}"));
+            Assert.Same(primary, caught);
+        }
+        finally
+        {
+            RequestProbeExecutor.ResetTestHooks();
+        }
+    }
+
+    [Theory]
+    [InlineData("egress")]
+    [InlineData("ingress")]
+    [InlineData("runtimeConfig")]
+    public void Probe_RejectsMixedLegacyAndDirectionalNetworkAuthoring(string directionalField)
+    {
+        var network = new NetworkPolicy { AllowOutbound = true };
+        switch (directionalField)
+        {
+            case "egress":
+                network.Egress = new NetworkEgressPolicy();
+                break;
+            case "ingress":
+                network.Ingress = new NetworkIngressPolicy();
+                break;
+            case "runtimeConfig":
+                network.RuntimeConfig = new NetworkRuntimeConfig();
+                break;
+        }
+        var request = new SandboxRequest(
+            new SandboxPolicy
+            {
+                Version = "0.8.0-alpha",
+                Network = network,
+            },
+            "cmd /c exit 0");
+
+        var error = Assert.Throws<ArgumentException>(
+            () => MxcSandbox.Probe(request));
+
+        Assert.Contains("cannot be combined", error.Message);
+    }
+
     [Theory]
     [InlineData("0.9.0-alpha")]
     [InlineData("0.10.0-alpha")]

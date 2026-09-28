@@ -105,6 +105,24 @@ describe('getPlatformSupport', () => {
     },
   );
 
+  it(
+    'reports Linux unsupported when canonical discovery fails',
+    { skip: os.platform() !== 'linux' },
+    () => {
+      _setAvailableBackendsProbe(() => {
+        throw new Error('native library missing');
+      });
+
+      assert.doesNotThrow(() => getPlatformSupport());
+      const support = getPlatformSupport();
+      assert.strictEqual(support.isSupported, false);
+      assert.deepStrictEqual(support.availableMethods, []);
+      assert.match(support.reason ?? '', /native library missing/i);
+      assert.match(support.unavailableReasons?.lxc ?? '', /discovery failed/i);
+      assert.match(support.unavailableReasons?.bubblewrap ?? '', /discovery failed/i);
+    },
+  );
+
   it('keeps the retained Windows probe projection', { skip: os.platform() !== 'win32' }, () => {
     _setProbeRunner(() => JSON.stringify({
       tier: 'appcontainer-bfs',

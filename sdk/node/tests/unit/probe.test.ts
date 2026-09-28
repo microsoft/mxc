@@ -95,6 +95,18 @@ describe('probeSandboxSupport', () => {
     assert.equal(forwarded, 'default');
   });
 
+  it('uses the default native request when config is explicitly undefined', () => {
+    let forwarded = 'not-called';
+    _setRequestProbeDependencies((requestJson) => {
+      forwarded = requestJson ?? 'default';
+      return JSON.stringify(completeProbe);
+    }, 'win32');
+
+    probeSandboxSupport(undefined);
+
+    assert.equal(forwarded, 'default');
+  });
+
   it('rejects a supplied config that does not serialize to a string', () => {
     let nativeCalls = 0;
     _setRequestProbeDependencies(() => {
@@ -119,7 +131,7 @@ describe('probeSandboxSupport', () => {
       return JSON.stringify(completeProbe);
     }, 'win32');
 
-    for (const config of [undefined, () => undefined, Symbol('config')]) {
+    for (const config of [() => undefined, Symbol('config')]) {
       assert.throws(
         () => probeSandboxSupport(config as never),
         /config must serialize to a JSON string/,
@@ -128,24 +140,19 @@ describe('probeSandboxSupport', () => {
     assert.equal(nativeCalls, 0);
   });
 
-  it('surfaces native probe failures with the original cause', () => {
+  it('preserves native probe failures', () => {
     const nativeError = new Error('unsupported containment');
     _setRequestProbeDependencies(() => {
       throw nativeError;
     }, 'win32');
 
-    let caught: unknown;
-    try {
+    assert.throws(() => {
       probeSandboxSupport({
         version: '0.9.0-alpha',
         containment: 'wslc',
         process: { commandLine: 'echo hi' },
       });
-    } catch (error) {
-      caught = error;
-    }
-    assert.match(String(caught), /native request probe failed/);
-    assert.equal((caught as Error).cause, nativeError);
+    }, (error) => error === nativeError);
   });
 
   it('surfaces malformed native output', () => {
@@ -274,14 +281,34 @@ describe('request probe native ownership', () => {
       let frees = 0;
       assert.throws(
         () => readProbeJsonWithNative({
-          probeRequest: () => pointer,
+          probeRequest: (_request, output) => {
+            output[0] = pointer;
+            return 0;
+          },
           freeString: () => { frees += 1; },
+          freeError: () => {},
         }),
-        /native request probe failed/,
+        /null success result/,
       );
       assert.equal(frees, 0);
     });
   }
+
+  it('preserves native status and error detail', () => {
+    let errorFrees = 0;
+    assert.throws(
+      () => readProbeJsonWithNative({
+        probeRequest: () => 2,
+        freeString: () => {},
+        freeError: () => { errorFrees += 1; },
+      }),
+      (error) => error instanceof Error
+        && 'code' in error
+        && error.code === 'unsupported_containment'
+        && error.message.includes('status 2'),
+    );
+    assert.equal(errorFrees, 1);
+  });
 
   it('forwards the request, decodes, and frees exactly once', () => {
     const pointer = { address: 1 };
@@ -289,11 +316,13 @@ describe('request probe native ownership', () => {
     let forwarded: string | null | undefined;
     const json = readProbeJsonWithNative(
       {
-        probeRequest: (requestJson) => {
+        probeRequest: (requestJson, output) => {
           forwarded = requestJson;
-          return pointer;
+          output[0] = pointer;
+          return 0;
         },
         freeString: (candidate) => freed.push(candidate),
+        freeError: () => {},
       },
       '{"version":"0.9.0-alpha"}',
       (candidate) => candidate === pointer ? '{}' : undefined,
@@ -309,11 +338,13 @@ describe('request probe native ownership', () => {
     let forwarded: string | null | undefined;
     readProbeJsonWithNative(
       {
-        probeRequest: (requestJson) => {
+        probeRequest: (requestJson, output) => {
           forwarded = requestJson;
-          return pointer;
+          output[0] = pointer;
+          return 0;
         },
         freeString: () => {},
+        freeError: () => {},
       },
       undefined,
       () => '{}',
@@ -327,8 +358,12 @@ describe('request probe native ownership', () => {
     assert.throws(
       () => readProbeJsonWithNative(
         {
-          probeRequest: () => pointer,
+          probeRequest: (_request, output) => {
+            output[0] = pointer;
+            return 0;
+          },
           freeString: () => { frees += 1; },
+          freeError: () => {},
         },
         undefined,
         () => { throw new Error('decode failed'); },
@@ -344,8 +379,12 @@ describe('request probe native ownership', () => {
     assert.throws(
       () => readProbeJsonWithNative(
         {
-          probeRequest: () => pointer,
+          probeRequest: (_request, output) => {
+            output[0] = pointer;
+            return 0;
+          },
           freeString: () => { frees += 1; },
+          freeError: () => {},
         },
         undefined,
         () => undefined,

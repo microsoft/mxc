@@ -16,6 +16,10 @@ internal static class RequestProbeExecutor
 {
     internal static Func<bool> IsWindows { get; set; } = OperatingSystem.IsWindows;
     internal static Func<string?> FindExecutable { get; set; } = FindWxcExecutable;
+    internal static Action<string> CreateDirectory { get; set; } =
+        path => Directory.CreateDirectory(path);
+    internal static Action<string> DeleteDirectory { get; set; } =
+        path => Directory.Delete(path, recursive: true);
     internal static Func<string, string?, RequestProbeProcessResult> RunProcess { get; set; } =
         RunWxcProcess;
 
@@ -39,6 +43,7 @@ internal static class RequestProbeExecutor
         string? tempDirectory = null;
         string? configPath = null;
 
+        string output;
         try
         {
             if (configJson is not null)
@@ -46,7 +51,7 @@ internal static class RequestProbeExecutor
                 tempDirectory = Path.Combine(
                     Path.GetTempPath(),
                     $"mxc-request-probe-{Guid.NewGuid():N}");
-                Directory.CreateDirectory(tempDirectory);
+                CreateDirectory(tempDirectory);
                 configPath = Path.Combine(tempDirectory, "config.json");
                 File.WriteAllText(configPath, configJson);
             }
@@ -80,21 +85,37 @@ internal static class RequestProbeExecutor
                 throw new MxcException(code, $"wxc-exec request probe failed: {detail}");
             }
 
-            return result.Stdout;
+            output = result.Stdout;
         }
-        finally
+        catch
         {
-            if (tempDirectory is not null)
+            if (tempDirectory is not null && Directory.Exists(tempDirectory))
             {
-                Directory.Delete(tempDirectory, recursive: true);
+                try
+                {
+                    DeleteDirectory(tempDirectory);
+                }
+                catch
+                {
+                    // Preserve the primary probe/setup failure.
+                }
             }
+            throw;
         }
+
+        if (tempDirectory is not null && Directory.Exists(tempDirectory))
+        {
+            DeleteDirectory(tempDirectory);
+        }
+        return output;
     }
 
     internal static void ResetTestHooks()
     {
         IsWindows = OperatingSystem.IsWindows;
         FindExecutable = FindWxcExecutable;
+        CreateDirectory = path => Directory.CreateDirectory(path);
+        DeleteDirectory = path => Directory.Delete(path, recursive: true);
         RunProcess = RunWxcProcess;
     }
 

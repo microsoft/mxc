@@ -142,7 +142,7 @@ pub fn probe_bwrap_available() -> Result<BwrapVersion, BwrapAvailabilityError> {
     probe_bwrap_available_cached(
         Arc::clone(BWRAP_AVAILABILITY_STATE.get_or_init(|| Arc::new(AvailabilityState::default()))),
         BWRAP_AVAILABILITY_TIMEOUT,
-        bwrap_version::probe_bwrap,
+        bwrap_version::probe_bwrap_uncached,
         run_viability_until,
     )
 }
@@ -383,6 +383,7 @@ mod tests {
     fn failed_combined_probe_is_not_cached() {
         let state = Arc::new(AvailabilityState::default());
         let version = BwrapVersion::new(0, 11, 0);
+        let version_probes = Arc::new(AtomicUsize::new(0));
         let failure = BwrapAvailabilityError::LaunchFailed {
             status: Some(1),
             detail: "denied".to_string(),
@@ -392,7 +393,13 @@ mod tests {
             probe_bwrap_available_cached(
                 Arc::clone(&state),
                 Duration::from_secs(1),
-                || Ok(version),
+                {
+                    let version_probes = Arc::clone(&version_probes);
+                    move || {
+                        version_probes.fetch_add(1, Ordering::SeqCst);
+                        Ok(version)
+                    }
+                },
                 {
                     let failure = failure.clone();
                     move |_, _| Err(failure)
@@ -404,11 +411,18 @@ mod tests {
             probe_bwrap_available_cached(
                 state,
                 Duration::from_secs(1),
-                || Ok(version),
+                {
+                    let version_probes = Arc::clone(&version_probes);
+                    move || {
+                        version_probes.fetch_add(1, Ordering::SeqCst);
+                        Ok(version)
+                    }
+                },
                 |_, _| Ok(()),
             ),
             Ok(version)
         );
+        assert_eq!(version_probes.load(Ordering::SeqCst), 2);
     }
 
     #[test]

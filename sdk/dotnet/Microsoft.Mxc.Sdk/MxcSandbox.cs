@@ -645,6 +645,16 @@ public static class MxcSandbox
             return;
         }
 
+        if (policy.Network.Egress is not null
+            || policy.Network.Ingress is not null
+            || policy.Network.RuntimeConfig is not null)
+        {
+            throw new ArgumentException(
+                $"network.{field} cannot be combined with directional network authoring. "
+                    + "Use Network.Egress/Ingress and Network.RuntimeConfig exclusively.",
+                nameof(policy));
+        }
+
         if (!SchemaVersions.IsSupported(policy.Version))
         {
             throw new ArgumentException(

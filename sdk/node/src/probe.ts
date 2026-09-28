@@ -81,7 +81,7 @@ export function probeSandboxSupport(config?: ContainerConfig): ProbeOutput {
   }
 
   let requestJson: string | undefined;
-  if (arguments.length > 0) {
+  if (config !== undefined) {
     requestJson = JSON.stringify(config);
     if (typeof requestJson !== 'string') {
       throw new TypeError(
@@ -90,12 +90,7 @@ export function probeSandboxSupport(config?: ContainerConfig): ProbeOutput {
     }
   }
 
-  let stdout: string;
-  try {
-    stdout = requestProbeJsonReader(requestJson);
-  } catch (error) {
-    throw new Error('native request probe failed', { cause: error });
-  }
+  const stdout = requestProbeJsonReader(requestJson);
 
   let value: unknown;
   try {
