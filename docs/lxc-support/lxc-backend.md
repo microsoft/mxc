@@ -57,7 +57,7 @@ IPv4 DHCP while permitting router advertisement, so the container configures
 itself an IPv6 address, never receives a lease, and the run fails:
 
 ```bash
-sudo firewall-cmd --zone=trusted --change-interface=lxcbr0
+sudo firewall-cmd --zone=<ZONE> --change-interface=lxcbr0
 ```
 
 ## Configuration
@@ -267,12 +267,13 @@ pty.onExit((e) => console.log('Exit:', e.exitCode));
    receive a lease, and every run that asks for network fails:
 
    ```bash
-   sudo firewall-cmd --zone=trusted --change-interface=lxcbr0
+   sudo firewall-cmd --zone=<ZONE> --change-interface=lxcbr0
    ```
 
-   Add `--permanent` and reload to keep the assignment across reboots. Do not
-   reload while containers are running: a reload rebuilds the ruleset and
-   discards the rules the backend installed for them.
+   `<ZONE>` has to admit DHCP and DNS from the bridge, since dnsmasq answers
+   both on the bridge address.
+
+   Add `--permanent` and reload to keep the assignment across reboots. 
 
 ### Verifying the host
 
@@ -282,7 +283,7 @@ ip -4 addr show lxcbr0
 sudo firewall-cmd --get-zone-of-interface=lxcbr0
 ```
 
-The zone query should answer `trusted`.
+The zone query should answer the zone you assigned.
 
 ## Limitations
 
