@@ -7,7 +7,7 @@
 
 import koffi from 'koffi';
 import { MxcError } from '../errors.js';
-import { loadMxcFfi } from '../native-library.js';
+import { getMxcFfi, type MxcNativeLibrary } from '../native-library.js';
 import type { RequestSpec } from './request.js';
 import { bindNativeFunction } from './native-function.js';
 import {
@@ -55,7 +55,7 @@ const AbiRunResultType = koffi.struct('MxcNodeJsonRunResult', {
 });
 
 function bindRunFunctions(
-  native: ReturnType<typeof loadMxcFfi>,
+  native: MxcNativeLibrary,
 ): {
   run: ReturnType<typeof bindNativeFunction<RunFunction>>;
   free: ReturnType<typeof bindNativeFunction<FreeFunction>>;
@@ -93,49 +93,41 @@ function decodeRunResult(status: number, result: AbiRunResult): BindingRunResult
 }
 
 export function runBindingRequest(request: RequestSpec): BindingRunResult {
-  const native = loadMxcFfi();
+  const native = getMxcFfi();
+  const { run, free } = bindRunFunctions(native);
+  const result = {} as AbiRunResult;
+  let filled = false;
   try {
-    const { run, free } = bindRunFunctions(native);
-    const result = {} as AbiRunResult;
-    let filled = false;
-    try {
-      const status = run(JSON.stringify(request), result);
-      filled = true;
-      return decodeRunResult(status, result);
-    } finally {
-      if (filled) free(result);
-    }
+    const status = run(JSON.stringify(request), result);
+    filled = true;
+    return decodeRunResult(status, result);
   } finally {
-    native.handle.unload();
+    if (filled) free(result);
   }
 }
 
 async function runBindingRequestAsyncNative(
   request: RequestSpec,
 ): Promise<BindingRunResult> {
-  const native = loadMxcFfi();
+  const native = getMxcFfi();
+  const { run, free } = bindRunFunctions(native);
+  const result = {} as AbiRunResult;
+  let filled = false;
   try {
-    const { run, free } = bindRunFunctions(native);
-    const result = {} as AbiRunResult;
-    let filled = false;
-    try {
-      const requestJson = JSON.stringify(request);
-      const status = await new Promise<number>((resolve, reject) => {
-        run.async(requestJson, result, (error, nativeStatus) => {
-          if (error !== null) {
-            reject(error);
-            return;
-          }
-          filled = true;
-          resolve(nativeStatus);
-        });
+    const requestJson = JSON.stringify(request);
+    const status = await new Promise<number>((resolve, reject) => {
+      run.async(requestJson, result, (error, nativeStatus) => {
+        if (error !== null) {
+          reject(error);
+          return;
+        }
+        filled = true;
+        resolve(nativeStatus);
       });
-      return decodeRunResult(status, result);
-    } finally {
-      if (filled) free(result);
-    }
+    });
+    return decodeRunResult(status, result);
   } finally {
-    native.handle.unload();
+    if (filled) free(result);
   }
 }
 

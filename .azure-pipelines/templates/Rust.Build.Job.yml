@@ -147,12 +147,19 @@ jobs:
 
       - script: |
           set -euo pipefail
+          cargo test --locked --release --target $(triplet) -p bwrap_common --lib bwrap_availability
+          cargo test --locked --release --target $(triplet) -p bwrap_common --lib bwrap_version
+          cargo test --locked --release --target $(triplet) -p bwrap_common --lib probe_exec
+          cargo test --locked --release --target $(triplet) -p lxc_common --lib availability
+          cargo test --locked --release --target $(triplet) -p mxc_engine --lib --no-default-features --features "$(cargoFeatures)" platform::tests
+          cargo test --locked --release --target $(triplet) -p mxc_engine --lib --no-default-features --features "$(cargoFeatures)" probe::tests
+          cargo test --locked --release --target $(triplet) -p mxc-sdk --test sdk_helpers
           cargo test --locked --release --target $(triplet) -p wxc_common --lib
           cargo test --locked --release --target $(triplet) -p wxc_common --doc
           cargo test --locked --release --target $(triplet) -p mxc_config_contract --all-features
           cargo test --locked --release --target $(triplet) -p mxc_engine -p mxc_ffi --lib state_aware
           cargo test --locked --release --target $(triplet) -p mxc-sdk --test state_aware
-        displayName: Test common contracts and state-aware SDK boundaries
+        displayName: Test Linux availability, common contracts, and SDK boundaries
         workingDirectory: $(Build.SourcesDirectory)/src
         condition: and(eq('${{ item.os }}', 'linux'), eq('${{ item.arch }}', 'x64'))
 

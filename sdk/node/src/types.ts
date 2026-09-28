@@ -589,6 +589,29 @@ export type IsolationTier =
   | 'appcontainer-bfs'
   | 'appcontainer-dacl';
 
+/** Capabilities currently recognized by this SDK's broad discovery surface. */
+export type KnownBackendCapability =
+  | 'captureDenials'
+  | 'filesystemDeniedPaths'
+  | 'filesystemEnumeratePaths'
+  | 'ingressHostLoopbackAllow'
+  | 'proxyEnforcement';
+
+/** Open backend name returned by native broad discovery. */
+export type AvailableBackendName = ContainmentBackend | (string & {});
+/** Open isolation tier returned by native broad discovery. */
+export type AvailableBackendTier = IsolationTier | (string & {});
+/** Open capability name returned by native broad discovery. */
+export type BackendCapability = KnownBackendCapability | (string & {});
+
+/** One backend the native engine can currently run on this host. */
+export interface AvailableBackend {
+  backend: AvailableBackendName;
+  tier?: AvailableBackendTier;
+  capabilities: BackendCapability[];
+  warnings: string[];
+}
+
 /**
  * Host support for enforcing sandbox UI restrictions.
  *
@@ -620,39 +643,6 @@ export interface UiCapabilitySupport {
   canBlockSystemParameterChanges: boolean;
   /** Whether the host can block display settings changes. */
   canBlockDisplaySettingsChanges: boolean;
-}
-
-/**
- * Result of probing which Windows ProcessContainer tier can serve a config.
- */
-export interface ProbeOutput {
-  /** Selected tier, omitted when detection failed. */
-  tier?: IsolationTier;
-  /** Whether the selected tier needs DACL deny augmentation. */
-  needsDaclAugmentation?: boolean;
-  /** Tier degradation warnings. */
-  warnings: string[];
-  /** Raw host facts used by tier selection. */
-  probes: ProbeFacts;
-  /** Detector failure, omitted when detection succeeded. */
-  error?: string;
-}
-
-/** Raw host facts gathered before request tier selection. */
-export interface ProbeFacts {
-  baseContainerApiPresent: boolean;
-  nativeCaptureAvailable: boolean;
-  guardedCaptureAvailable: boolean;
-  bfscfgPresent: boolean;
-  bfsCompiledIn: boolean;
-  baseContainerSupportsDenyPaths: boolean;
-  baseContainerSupportsEnumeratePaths: boolean;
-  baseContainerSupportsIngressHostLoopbackAllow: boolean;
-  /** True when this CLI build includes IsolationSession and the host can activate it. */
-  isolationSessionAvailable: boolean;
-  /** True when this CLI build includes Hyperlight and its host runtime is available. */
-  hyperlightAvailable: boolean;
-  uiCapabilities: UiCapabilitySupport;
 }
 
 /**

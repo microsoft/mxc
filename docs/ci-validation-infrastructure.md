@@ -20,6 +20,16 @@ the individual local test scripts are documented in
   `scripts/ci/resolve-validation-test-matrix.mjs` validates it and expands a
   plan into GitHub Actions matrices.
 - Validation runs **on a schedule, not on PRs**.
+- The SDK integration jobs separately install the packed public Node package.
+  On Linux they run `available-backends.test.js` as the unprivileged runner
+  before the existing sudo suites, with `MXC_FFI_DIR` cleared by the test. The
+  package-CI flag requires the prepared LXC backend, so an empty or stubbed
+  native result cannot pass. Bubblewrap may be absent on a runner that blocks
+  unprivileged namespaces; if discovery advertises it, the test performs a real
+  exit-zero shared-network launch through the public package. A lane that
+  independently guarantees unprivileged namespace creation can additionally
+  set `MXC_EXPECT_BWRAP_LAUNCHABILITY=1`; that turns absence into a failure
+  instead of weakening restricted-runner behavior globally.
 
 ## Moving parts
 
@@ -59,7 +69,7 @@ test jobs only ever `download-artifact`.
 |-----|--------------|
 | `dependency-feed-check` | Resolves the locked crate graph through the public `MxcDependencies` feed. Gates the builds. |
 | `windows` | `Build.Windows.Job.yml` — x64 + arm64 release build, unit tests, uploads `wxc-binaries-<target>`. |
-| `linux` | `Build.Linux.Job.yml` — x64 + arm64 release build, unit tests, `wxc_e2e_tests`, uploads `lxc-binaries-<target>`. |
+| `linux` | `Build.Linux.Job.yml` — x64 + arm64 release build; executes Bubblewrap/LXC availability, engine discovery/platform, Rust SDK host-support, streaming, and `wxc_e2e_tests` coverage on native runners; uploads `lxc-binaries-<target>`. The ADO Linux x64 build runs the same focused availability and SDK contracts. |
 | `macos` | `Build.MacOS.Job.yml` — arm64 release build, unit + `wxc_e2e_tests`, uploads `mxc-binaries-aarch64-apple-darwin`. |
 | `test-nightly` | Calls the matrix job with `plan: nightly`. Runs on every schedule tick and on a `nightly` dispatch. |
 | `test-weekly` | Calls the matrix job with `plan: weekly`. Runs only on the Sunday cron and on a `weekly` dispatch. |

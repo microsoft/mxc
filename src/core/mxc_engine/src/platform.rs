@@ -48,8 +48,8 @@ pub struct PlatformSupport {
     pub bubblewrap_network: Option<BubblewrapNetworkSupport>,
 }
 
-/// The `bwrap --version` gate, injected so the reporting is testable without a
-/// host that has (or lacks) a suitable `bwrap`.
+/// The combined Bubblewrap gate, injected so reporting is testable without a
+/// host that can launch a suitable sandbox.
 #[cfg(target_os = "linux")]
 struct BwrapProbe<F>(F);
 
@@ -67,7 +67,7 @@ fn linux_platform_support_with<F, G>(
 where
     F: FnOnce() -> Result<
         bwrap_common::bwrap_version::BwrapVersion,
-        bwrap_common::bwrap_version::BwrapUnavailable,
+        bwrap_common::bwrap_availability::BwrapAvailabilityError,
     >,
     G: FnOnce() -> Result<(), String>,
 {
@@ -124,7 +124,7 @@ pub fn platform_support() -> PlatformSupport {
         // host-capability backend the SDK can't launch, so it is reported by
         // `available_backends()` rather than here.
         linux_platform_support_with(
-            BwrapProbe(bwrap_common::bwrap_version::probe_bwrap),
+            BwrapProbe(bwrap_common::bwrap_availability::probe_bwrap_available),
             ProxyEnforcementProbe(bwrap_common::proxy_network::probe_proxy_enforcement),
         )
     }
@@ -228,6 +228,8 @@ mod tests {
     use super::platform_support;
     #[cfg(target_os = "linux")]
     use super::{bubblewrap_network_support, BwrapProbe, ProxyEnforcement, ProxyEnforcementProbe};
+    #[cfg(target_os = "linux")]
+    use bwrap_common::bwrap_availability::BwrapAvailabilityError;
     #[cfg(target_os = "linux")]
     use bwrap_common::bwrap_version::{BwrapUnavailable, BwrapVersion, MIN_BWRAP_VERSION};
     use wxc_common::models::ContainmentBackend;
@@ -335,9 +337,29 @@ mod tests {
         let failure = BwrapUnavailable::TooOld(BwrapVersion::new(0, 4, 1));
         let expected = failure.to_string();
         let support = linux_platform_support_with(
-            BwrapProbe(|| Err(failure)),
+            BwrapProbe(|| Err(BwrapAvailabilityError::Version(failure))),
             ProxyEnforcementProbe(|| {
                 panic!("the network walk must not run without a usable bwrap")
+            }),
+        );
+        assert!(!support.is_supported);
+        assert_eq!(support.reason.as_deref(), Some(expected.as_str()));
+        assert!(support.available_methods.is_empty());
+        assert!(support.bubblewrap_network.is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_support_preserves_launch_failure_reason() {
+        let failure = BwrapAvailabilityError::LaunchFailed {
+            status: Some(1),
+            detail: "user namespaces disabled".to_string(),
+        };
+        let expected = failure.to_string();
+        let support = linux_platform_support_with(
+            BwrapProbe(|| Err(failure)),
+            ProxyEnforcementProbe(|| {
+                panic!("the network walk must not run without a launchable bwrap")
             }),
         );
         assert!(!support.is_supported);

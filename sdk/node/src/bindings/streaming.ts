@@ -9,7 +9,7 @@ import {
   type NativeLifecycleDriver,
   type NativeLifecycleStatus,
 } from '../sandbox-process.js';
-import { loadMxcFfi, type MxcNativeLibrary } from '../native-library.js';
+import { getMxcFfi, type MxcNativeLibrary } from '../native-library.js';
 import type { RequestSpec } from './request.js';
 import { bindNativeFunction } from './native-function.js';
 import {
@@ -223,7 +223,7 @@ let stateAwareSandboxProcessFactory:
   | undefined;
 
 function getNative(): StreamingNativeFacade {
-  return sharedNative ??= bindStreamingNativeFacade(loadMxcFfi().handle);
+  return sharedNative ??= bindStreamingNativeFacade(getMxcFfi().handle);
 }
 
 function throwIfFailed(status: number, message: string): void {

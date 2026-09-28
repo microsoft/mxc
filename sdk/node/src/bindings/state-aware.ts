@@ -5,7 +5,7 @@
 
 import koffi from 'koffi';
 import { MxcError } from '../errors.js';
-import { loadMxcFfi } from '../native-library.js';
+import { getMxcFfi, type MxcNativeLibrary } from '../native-library.js';
 import { bindNativeFunction } from './native-function.js';
 import {
   AbiErrorDetailType,
@@ -54,7 +54,7 @@ export interface StateAwareNativeFacade {
 }
 
 function bindStateAwareNativeFacade(
-  native: ReturnType<typeof loadMxcFfi>,
+  native: MxcNativeLibrary,
 ): StateAwareNativeFacade {
   const run = bindNativeFunction<StateAwareFunction>(native.handle, {
     symbol: 'mxc_state_aware',
@@ -138,15 +138,10 @@ export async function runBindingStateAwareRequestWithNative(
 async function runBindingStateAwareRequestAsyncNative(
   request: BindingStateAwareRequest,
 ): Promise<string> {
-  const native = loadMxcFfi();
-  try {
-    return await runBindingStateAwareRequestWithNative(
-      request,
-      bindStateAwareNativeFacade(native),
-    );
-  } finally {
-    native.handle.unload();
-  }
+  return runBindingStateAwareRequestWithNative(
+    request,
+    bindStateAwareNativeFacade(getMxcFfi()),
+  );
 }
 
 type AsyncStateAwareImplementation = (

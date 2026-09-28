@@ -43,7 +43,7 @@ pub const MIN_BWRAP_VERSION: BwrapVersion = BwrapVersion::new(0, 5, 0);
 /// Why [`MIN_BWRAP_VERSION`] is the compatibility floor.
 pub const MIN_BWRAP_VERSION_REASON: &str = "the sandbox uses `--clearenv`, added in bwrap 0.5.0";
 
-const BWRAP_VERSION_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const BWRAP_VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 /// The shared probe cap, named locally so the user-facing message can cite it.
 const MAX_BWRAP_VERSION_OUTPUT_BYTES: usize = probe_exec::MAX_PROBE_OUTPUT_BYTES;
 

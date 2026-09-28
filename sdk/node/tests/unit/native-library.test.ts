@@ -6,8 +6,15 @@ import assert from 'node:assert';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { Worker } from 'node:worker_threads';
 import koffi from 'koffi';
-import { _mxcFfiCandidates, loadMxcFfi } from '../../src/native-library.js';
+import {
+  _mxcFfiCandidates,
+  createMxcFfiOwner,
+  findMxcFfiLibrary,
+  loadMxcFfi,
+  type MxcNativeLibrary,
+} from '../../src/native-library.js';
 
 const oldFfiDir = process.env.MXC_FFI_DIR;
 
@@ -17,6 +24,69 @@ afterEach(() => {
 });
 
 describe('mxc_ffi library resolution', () => {
+  it('pins one native library per module isolate', () => {
+    let loads = 0;
+    const library = {
+      path: 'fake',
+      handle: { func() { return () => 'test-version'; } },
+      version: () => 'test-version',
+    } as unknown as MxcNativeLibrary;
+    const getTestMxcFfi = createMxcFfiOwner(() => {
+      loads += 1;
+      return library;
+    });
+
+    assert.strictEqual(getTestMxcFfi(), library);
+    assert.strictEqual(getTestMxcFfi(), library);
+    assert.strictEqual(loads, 1);
+  });
+
+  it('invokes public native discovery in a worker isolate', async (t) => {
+    if (findMxcFfiLibrary() === null) {
+      t.skip('mxc_ffi is not available in this source checkout');
+      return;
+    }
+
+    const worker = new Worker(
+      new URL('./native-library-worker.js', import.meta.url),
+    );
+    let workerResult: unknown;
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        worker.once('message', (value: unknown) => {
+          workerResult = value;
+        });
+        worker.once('error', reject);
+        worker.once('exit', (code) => {
+          if (code !== 0) {
+            reject(new Error(`native discovery worker exited with code ${code}`));
+            return;
+          }
+          if (workerResult === undefined) {
+            reject(new Error('native discovery worker exited without a result'));
+            return;
+          }
+          resolve();
+        });
+      });
+    } finally {
+      if (worker.threadId !== -1) {
+        await worker.terminate();
+      }
+    }
+
+    assert.ok(
+      typeof workerResult === 'object'
+        && workerResult !== null
+        && 'isMainThread' in workerResult
+        && workerResult.isMainThread === false
+        && 'backends' in workerResult
+        && Array.isArray(workerResult.backends),
+      'a worker isolate must return the public getAvailableBackends() result',
+    );
+  });
+
   it('uses the packaged library for each platform', () => {
     delete process.env.MXC_FFI_DIR;
 

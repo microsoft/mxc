@@ -5,12 +5,9 @@
 //! the SandboxPolicy -> SandboxRequest builder.
 
 use mxc_sdk::{
-    available_tools_policy, build_request, platform_support, probe, temporary_files_policy,
+    available_tools_policy, build_request, platform_support, temporary_files_policy,
     user_profile_policy, SandboxPolicy,
 };
-
-#[cfg(target_os = "windows")]
-use mxc_sdk::{build_request_with_containment, Containment, WslcSection};
 
 #[cfg(target_os = "macos")]
 use mxc_sdk::{spawn_sandbox, WaitOutcome};
@@ -25,64 +22,41 @@ fn env_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
 #[test]
 fn platform_support_reports_host() {
     let support = platform_support();
-    // Every platform this test runs on (macOS/Linux/Windows in CI) is supported.
-    assert!(support.is_supported, "reason: {:?}", support.reason);
-    assert!(!support.available_methods.is_empty());
-}
+    #[cfg(target_os = "linux")]
+    assert_linux_platform_support_outcome(&support);
 
-#[test]
-fn request_probe_reports_the_current_host() {
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_os = "linux"))]
     {
-        let output = probe(None).expect("Windows exposes the ProcessContainer request probe");
-        assert!(matches!(
-            output.tier.as_deref(),
-            Some("base-container" | "appcontainer-bfs" | "appcontainer-dacl") | None
-        ));
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let error = probe(None).expect_err("the request-aware probe is Windows-only");
-        assert_eq!(error.code, mxc_sdk::ErrorCode::UnsupportedContainment);
+        // Windows always has ProcessContainer. Supported macOS CI images have
+        // the system Seatbelt executable.
+        assert!(support.is_supported, "reason: {:?}", support.reason);
+        assert!(!support.available_methods.is_empty());
     }
 }
 
-#[cfg(target_os = "windows")]
-fn probe_test_policy() -> SandboxPolicy {
-    SandboxPolicy {
-        version: "0.9.0-alpha".to_string(),
-        filesystem: None,
-        network: None,
-        ui: None,
-        timeout_ms: None,
+#[cfg(target_os = "linux")]
+fn assert_linux_platform_support_outcome(support: &mxc_sdk::PlatformSupport) {
+    if support.is_supported {
+        assert_eq!(
+            support.available_methods,
+            vec!["bubblewrap".to_string()],
+            "a launchable Linux host reports exactly the SDK-launchable backend"
+        );
+        assert_eq!(support.reason, None);
+    } else {
+        assert!(
+            support.available_methods.is_empty(),
+            "a restricted Linux host must not advertise an unlaunchable backend: {:?}",
+            support.available_methods
+        );
+        assert!(
+            support
+                .reason
+                .as_deref()
+                .is_some_and(|reason| !reason.trim().is_empty()),
+            "a restricted Linux host must report an actionable reason"
+        );
     }
-}
-
-#[cfg(target_os = "windows")]
-#[test]
-fn request_probe_accepts_a_supplied_process_container_request() {
-    let request = build_request(&probe_test_policy(), "echo hi", None).expect("request builds");
-
-    let output = probe(Some(&request)).expect("ProcessContainer request probes");
-    let value = serde_json::to_value(output).expect("probe output serializes");
-    assert!(value.get("probes").is_some());
-}
-
-#[cfg(target_os = "windows")]
-#[test]
-fn request_probe_rejects_a_supplied_wslc_request() {
-    let request = build_request_with_containment(
-        &probe_test_policy(),
-        &Containment::Wslc(WslcSection::default()),
-        "echo hi",
-        None,
-    )
-    .expect("WSLC request builds");
-
-    let error = probe(Some(&request)).expect_err("WSLC is outside this probe");
-    assert_eq!(error.code, mxc_sdk::ErrorCode::UnsupportedContainment);
-    assert!(error.message.contains("got wslc"));
 }
 
 #[cfg(target_os = "macos")]
@@ -348,12 +322,9 @@ fn platform_support_linux_reports_only_bubblewrap() {
     let support = platform_support();
     // Bubblewrap is the only SDK-launchable Linux backend; `lxc` is a
     // host-capability backend reported by `available_backends()`, not here.
-    // Assert the exact set so re-advertising a non-launchable backend fails.
-    assert_eq!(
-        support.available_methods,
-        vec!["bubblewrap".to_string()],
-        "Linux platform_support must report exactly bubblewrap (lxc excluded)"
-    );
+    // Assert both exact valid outcomes so neither a restricted-host result nor
+    // an empty launchable result can pass vacuously.
+    assert_linux_platform_support_outcome(&support);
 }
 
 #[cfg(target_os = "windows")]

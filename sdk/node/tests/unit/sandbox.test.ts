@@ -7,8 +7,7 @@ import { buildSandboxPayload, createConfigFromPolicy, spawnSandbox, spawnSandbox
 import { resolveExecutableAndArgs } from '../../src/helper.js';
 import {
   _resetPlatformSupportCache,
-  _setBwrapVersionRunner,
-  _setLxcAvailabilityProbe,
+  _setAvailableBackendsProbe,
 } from '../../src/platform.js';
 import { ContainerConfig, SandboxPolicy, SandboxingMethod } from '../../src/types.js';
 import { MxcError } from '../../src/errors.js';
@@ -2171,21 +2170,17 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
       return;
     }
     try {
-      _setLxcAvailabilityProbe(() => true);
-      _setBwrapVersionRunner(() => ({
-        kind: 'failed',
-        status: null,
-        detail: 'timed out after 5000ms',
-      }));
+      _setAvailableBackendsProbe(() => [
+        { backend: 'lxc', capabilities: [], warnings: [] },
+      ]);
       _resetPlatformSupportCache();
 
       assert.throws(
         () => resolveExecutableAndArgs(makeConfig('bubblewrap'), { executablePath: fakeExe }),
-        { message: /timed out after 5000ms/ },
+        { message: /not launchable/i },
       );
     } finally {
-      _setLxcAvailabilityProbe(null);
-      _setBwrapVersionRunner(null);
+      _setAvailableBackendsProbe();
       _resetPlatformSupportCache();
     }
   });

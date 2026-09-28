@@ -63,9 +63,12 @@ export {
   RuntimeConfig,
   PlatformSupport,
   UiCapabilitySupport,
-  ProbeOutput,
-  ProbeFacts,
   BubblewrapNetworkSupport,
+  AvailableBackend,
+  AvailableBackendName,
+  AvailableBackendTier,
+  BackendCapability,
+  KnownBackendCapability,
 } from './types.js';
 
 // Export platform detection functions
@@ -74,8 +77,8 @@ export {
 } from './platform.js';
 
 export {
-  probeSandboxSupport,
-} from './probe.js';
+  getAvailableBackends,
+} from './available-backends.js';
 
 // Export sandbox spawning functions
 export {

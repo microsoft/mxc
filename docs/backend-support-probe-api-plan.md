@@ -5,13 +5,15 @@ Licensed under the MIT License.
 
 # Backend Support Probe API - Design & Discussion
 
-> **Status:** Design Proposal
+> **Status:** Implemented for the currently supported discovery set
 
 ## 1. Purpose
 
 Provide a read-only Rust API that reports which containment backends the
-current host can actually run. Callers can read at startup
-to choose a backend without attempting an execution. 
+current host can actually run. Callers can read it at startup to choose a
+backend. Bubblewrap is the deliberate exception to presence-only detection:
+discovery performs a minimal launch so it does not advertise a version-valid
+but unusable installation.
 
 
 
@@ -82,7 +84,8 @@ matrix of this machine?".
 - Capabilities list selected features supported by the reported tier:
   `captureDenials`, `filesystemDeniedPaths`, and `ingressHostLoopbackAllow`.
 - A missing capability is unavailable or could not be detected.
-- For per-backend **diagnostics and reasons**, the tool is `wxc-exec --probe`
+- For request-specific Windows ProcessContainer **diagnostics and reasons**,
+  the tool is `wxc-exec --probe`.
 - Each capability is **detected once, in Rust**, and the TypeScript SDK projects that result rather than re-checking.
 ## 3. Detection & isolation tiers
 
@@ -97,7 +100,8 @@ ones.
 | --- | --- | --- | --- |
 | `base-container` | `fallback_detector::is_base_container_usable()` loads `processmodel.dll`<br>and calls an OS capability/create API.<br>No process or VM launch; result cached in a `OnceLock`. | Rust | A cached result (`true` **or** `false`) can go stale if BaseContainer enablement<br>changes mid-process, and the probe is not perfectly pure since it loads a DLL. |
 | `windows_sandbox` | `isWindowsSandboxAvailable()` runs `dism /online /get-featureinfo `<br>`/featurename:Containers-DisposableClientVM ` and looks for `State : Enabled`<br>if DISM throws (usually non-elevated) it falls back to<br>`fs.existsSync(%SystemRoot%\\System32\\WindowsSandbox.exe)`; result cached. | TypeScript SDK | `dism /online` needs elevation, so a non-elevated caller can't tell *disabled* from<br>*no permission* and drops to the exe-existence checkwhich proves the feature is installed,<br>not that a sandbox VM can boot. (Will move to Rust) |
-| `lxc` | `isLxcAvailable()` runs `lxc-ls --version`; a clean exit means available. | TypeScript SDK | Only proves the `lxc-ls` CLI is on `PATH`, not that liblxc is loadable or that the caller has<br>the privileges to actually start a container, so it can report available on a host where a real run fails.<br>(Will move to Rust) |
+| `lxc` | Rust runs `lxc-ls --version`; a clean exit means available. | Rust | This proves the CLI is on `PATH`, not that the caller can start a container. The supervised check is bounded to 3 seconds. |
+| `bubblewrap` | Rust verifies the supported version, then launches a minimal shared-network sandbox through production validation and argument construction. | Rust | The launch proves the current caller can create the required base namespaces. Optional private-network/proxy tooling is probed separately. |
 | `wslc` | `WslcSdk::load()` loads `wslcsdk.dll` from the executable's own directory;<br>validates that every required export resolves. | Rust (execute path) | Runs on the *execute* path, not as a cheap standalone probe:<br>it actually loads the DLL and resolves symbols. Proves the SDK runtime loads,<br>not that a WSL distro/runtime is functional. Feature-gated. |
 
 ### 3.2 Isolation tiers (process-container only)
@@ -159,7 +163,11 @@ See §7.9 for why the canonical probe stays in Rust rather than moving into the 
 (`#[serde(skip_serializing_if = "Option::is_none")]`), never serialized as `null`.
 - Every non-`None` `tier` is one of the canonical `IsolationTier::as_str()` strings,
 guarding against drift between this API and the tier ladder.
-- On Linux, `bubblewrap` and `lxc` each appear when their check passes (`bwrap --version` / `lxc-ls --version`).
+- On Linux, `lxc` appears when its bounded `lxc-ls --version` check passes.
+- Bubblewrap is reported only after its supported version is verified and a
+  minimal shared-network sandbox built through the production argument path
+  exits successfully. Private-network and proxy enforcement remain separately
+  reported capabilities.
 - On Linux, `bubblewrap` carries the `proxyEnforcement` capability when the private-namespace
 dependencies are present, and a `warnings` entry naming the missing dependency when they are not;
 the backend itself still appears either way. Both directions are covered by exercising the pure
@@ -178,22 +186,15 @@ Writing the missing detectors and wiring the TypeScript projection, one issue ea
 1. `windows_sandbox` - optional-feature (DISM/registry) detector.
 2. `isolation_session` - probe whether the `Windows.AI.IsolationSession.Preview` `IsoSessionOps` API class is registered on the OS (activation-factory resolvable), replacing the old build-number gate (see #761), and expose it to Rust.
 3. `microvm` / `hyperlight` - hypervisor-presence probe.
-4. `lxc` - port the `lxc-ls` presence check from TypeScript to Rust,
-so the probe (not just the SDK) can report it (§4.2, step 1).
-5. TypeScript projection - make `getPlatformSupport()` read the native backend availability via a
-side-effect-free transport (e.g. a new `wxc-exec --available-backends` mode handled **before**
-`recover_orphaned_state()`, or `mxc_ffi`) instead of running its own `dism`/`lxc-ls`, so the two
-layers can't drift (§4.2, step 2). Do **not** extend the existing `--probe` flag: it runs after
-`recover_orphaned_state()`, which can restore/prune DACL state and would violate the read-only
-contract of this API.
+4. Extend detector coverage only when a backend has a truthful, bounded host
+   predicate. Do not infer launchability from schema support alone.
 
-   **Partially landed (Linux).** `lxc-exec --available-backends` serializes
-   `available_backends()` and exits, handled immediately after argument parsing so it stays
-   read-only with respect to host state. The SDK uses it on Linux to populate
-   `PlatformSupport.bubblewrapNetwork`.
-
-   Still open: it is not yet the transport for the rest of `getPlatformSupport()` on Linux,
-   so the drift risk in step 2 stands, and Windows is untouched.
+Linux projection is complete: Node reads `mxc_available_backends_json` from the
+packaged native library, and both `getAvailableBackends()` and Linux
+`getPlatformSupport()` project the same Rust result. The executor
+`--available-backends` mode remains available for CLI consumers but is not the
+Node transport. The Windows request diagnostic `wxc-exec --probe` is unchanged
+and intentionally separate.
 
 ---
 
@@ -246,13 +247,22 @@ They are *abstract intents*, not backends with their own runner.
 enablement changes mid-process. Both are accepted and documented rather than
 worked around.
 
-### 7.8 Ordering
+### 7.8 Linux deadline and Bubblewrap cache
+
+An uncontended Linux discovery walk has a conservative 16-second native bound:
+10 seconds for Bubblewrap version plus launchability, 3 seconds for the
+optional proxy capability, and 3 seconds for LXC. The bound excludes scheduler
+and host-load delay. Bubblewrap caches only combined success; failed version or
+launch checks remain retryable. Normal request validation remains authoritative
+at execution time.
+
+### 7.9 Ordering
 
 Results are returned in a stable order, but callers
 should **match by `backend` name, not by position**, so the order is free to
 change without breaking anyone.
 
-### 7.9 Why Rust, not the TS layer
+### 7.10 Why Rust, not the TS layer
 
 The decision to keep the probe in Rust comes down to one asymmetry: 
 the *easy* checks are equally easy in Rust, while the *hard* Windows check

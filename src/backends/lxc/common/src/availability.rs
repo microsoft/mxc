@@ -5,8 +5,11 @@ use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-/// A version check returns almost instantly; anything slower than this should not block discovery.
-const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+/// Total caller-visible budget for the LXC availability probe.
+pub const LXC_AVAILABILITY_TIMEOUT: Duration = Duration::from_secs(3);
+
+const LXC_COMMAND_TIMEOUT: Duration = Duration::from_millis(2_750);
+const LXC_REAP_TIMEOUT: Duration = Duration::from_millis(250);
 
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
@@ -32,28 +35,49 @@ fn probe_lxc_ls() -> LxcLsOutcome {
         .stderr(Stdio::null())
         .spawn();
     match child {
-        Ok(mut child) => wait_bounded(&mut child, PROBE_TIMEOUT),
+        Ok(mut child) => wait_bounded(&mut child),
         Err(_) => LxcLsOutcome::SpawnFailed,
     }
 }
 
-fn wait_bounded(child: &mut Child, timeout: Duration) -> LxcLsOutcome {
-    let deadline = Instant::now() + timeout;
+fn wait_bounded(child: &mut Child) -> LxcLsOutcome {
+    wait_bounded_with_deadlines(child, LXC_COMMAND_TIMEOUT, LXC_AVAILABILITY_TIMEOUT)
+}
+
+fn wait_bounded_with_deadlines(
+    child: &mut Child,
+    command_timeout: Duration,
+    total_timeout: Duration,
+) -> LxcLsOutcome {
+    let started = Instant::now();
+    let command_deadline = started + command_timeout;
+    let total_deadline = started + total_timeout;
     loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => return LxcLsOutcome::ExitedSuccess,
             Ok(Some(_)) => return LxcLsOutcome::ExitedFailure,
             Ok(None) => {
-                if Instant::now() >= deadline {
+                if Instant::now() >= command_deadline {
                     let _ = child.kill();
-                    let _ = child.wait();
-                    return LxcLsOutcome::TimedOut;
+                    break;
                 }
                 std::thread::sleep(POLL_INTERVAL);
             }
             Err(_) => return LxcLsOutcome::SpawnFailed,
         }
     }
+
+    let reap_deadline = (Instant::now() + LXC_REAP_TIMEOUT).min(total_deadline);
+    while Instant::now() < reap_deadline {
+        match child.try_wait() {
+            Ok(Some(_)) => return LxcLsOutcome::TimedOut,
+            Ok(None) => std::thread::sleep(
+                POLL_INTERVAL.min(reap_deadline.saturating_duration_since(Instant::now())),
+            ),
+            Err(_) => return LxcLsOutcome::TimedOut,
+        }
+    }
+    LxcLsOutcome::TimedOut
 }
 
 fn available_from(outcome: LxcLsOutcome) -> bool {
@@ -63,6 +87,7 @@ fn available_from(outcome: LxcLsOutcome) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Stdio;
 
     #[test]
     fn only_a_clean_exit_means_available() {
@@ -70,5 +95,38 @@ mod tests {
         assert!(!available_from(LxcLsOutcome::ExitedFailure));
         assert!(!available_from(LxcLsOutcome::SpawnFailed));
         assert!(!available_from(LxcLsOutcome::TimedOut));
+    }
+
+    #[test]
+    fn timeout_terminates_and_reaps_the_real_subprocess_within_the_total_budget() {
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("test shell starts");
+        let started = Instant::now();
+
+        assert_eq!(
+            wait_bounded_with_deadlines(
+                &mut child,
+                Duration::from_millis(40),
+                Duration::from_millis(290),
+            ),
+            LxcLsOutcome::TimedOut
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "bounded timeout took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            child
+                .try_wait()
+                .expect("reap status remains queryable")
+                .is_some(),
+            "timed-out child must already be reaped"
+        );
     }
 }

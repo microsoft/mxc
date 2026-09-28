@@ -243,20 +243,37 @@ wxc-exec.exe --debug config.json
 
 See [docs/diagnostics.md](docs/diagnostics.md) for full diagnostics reference.
 
-### Request-Aware Support Probe
+### Backend Discovery and CLI Diagnostics
 
-The Windows executor and SDKs expose the same ProcessContainer fallback
-decision and machine facts without creating a sandbox:
+The Node.js and .NET SDKs expose broad, read-only host discovery:
 
-- CLI: `wxc-exec --probe [config.json]`
-- Rust: `mxc_sdk::probe(Some(&request))`
-- Node.js: `probeSandboxSupport(config)`
-- .NET: `MxcSandbox.Probe(request)`
+```typescript
+import {
+  getAvailableBackends,
+  getPlatformSupport,
+} from '@microsoft/mxc-sdk';
 
-Omit the request/config to probe the default empty policy. Supplying a one-shot
-request checks the isolation tier and host capabilities that request needs.
-Detector failures are returned in the probe result's `error` field; malformed
-requests and non-Windows calls fail as API errors.
+const hostBackends = getAvailableBackends();
+const launchableByNode = getPlatformSupport().availableMethods;
+```
+
+`getAvailableBackends()` (and .NET `MxcSandbox.GetAvailableBackends()`) reports
+every backend native discovery can currently affirm on the host. An empty array
+is a successful result. `getPlatformSupport()` reports the narrower set the
+in-process SDK surface can launch. A reported ProcessContainer tier is the
+host's strongest reachable tier, not a guarantee for a particular request;
+normal request parsing, authorization, and backend validation still run when a
+sandbox is launched.
+
+On Linux, the first uncontended discovery walk has a conservative 16-second
+native bound: 10 seconds for Bubblewrap version plus a real minimal
+shared-network launch, 3 seconds for its optional proxy capability, and 3
+seconds for LXC. This excludes scheduler and host-load delay. Only successful
+Bubblewrap discovery is cached, so failures remain retryable.
+
+For detailed Windows ProcessContainer request diagnostics, use
+`wxc-exec --probe [config.json]`. This CLI contract is unchanged and remains
+separate from broad SDK discovery.
 
 ### Audit Mode (Permissive Learning Mode)
 

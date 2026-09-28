@@ -10,6 +10,8 @@
 //! narrower "what can `mxc-sdk` itself launch?" question and reports no tier.
 
 use serde::Serialize;
+#[cfg(target_os = "linux")]
+use std::time::Duration;
 use wxc_common::models::ContainmentBackend;
 
 #[cfg(target_os = "windows")]
@@ -59,6 +61,14 @@ pub struct AvailableBackend {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }
+
+/// Conservative deadline for one uncontended Linux broad-discovery call.
+#[cfg(target_os = "linux")]
+pub const LINUX_DISCOVERY_WORST_CASE: Duration = Duration::from_secs(
+    bwrap_common::bwrap_availability::BWRAP_AVAILABILITY_TIMEOUT.as_secs()
+        + bwrap_common::proxy_network::PROXY_ENFORCEMENT_PROBE_TIMEOUT.as_secs()
+        + lxc_common::availability::LXC_AVAILABILITY_TIMEOUT.as_secs(),
+);
 
 impl AvailableBackend {
     fn tierless(backend: &str) -> Self {
@@ -133,13 +143,27 @@ fn macos_backends() -> Vec<AvailableBackend> {
 
 #[cfg(target_os = "linux")]
 fn linux_backends() -> Vec<AvailableBackend> {
+    linux_backends_with(
+        bwrap_common::bwrap_availability::probe_bwrap_available(),
+        bwrap_common::proxy_network::probe_proxy_enforcement,
+        lxc_common::availability::is_lxc_available(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn linux_backends_with(
+    bwrap: Result<
+        bwrap_common::bwrap_version::BwrapVersion,
+        bwrap_common::bwrap_availability::BwrapAvailabilityError,
+    >,
+    proxy_enforcement: impl FnOnce() -> Result<(), String>,
+    lxc_available: bool,
+) -> Vec<AvailableBackend> {
     let mut backends = Vec::new();
-    if bwrap_common::bwrap_version::probe_bwrap().is_ok() {
-        backends.push(bubblewrap_backend(
-            bwrap_common::proxy_network::probe_proxy_enforcement(),
-        ));
+    if bwrap.is_ok() {
+        backends.push(bubblewrap_backend(proxy_enforcement()));
     }
-    if lxc_common::availability::is_lxc_available() {
+    if lxc_available {
         backends.push(AvailableBackend::tierless(
             ContainmentBackend::Lxc.wire_name(),
         ));
@@ -365,6 +389,35 @@ mod tests {
             json,
             r#"{"backend":"bubblewrap","warnings":["slirp4netns not found"]}"#
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_discovery_omits_bubblewrap_when_launchability_fails() {
+        let backends = linux_backends_with(
+            Err(
+                bwrap_common::bwrap_availability::BwrapAvailabilityError::LaunchFailed {
+                    status: Some(1),
+                    detail: "user namespaces disabled".to_string(),
+                },
+            ),
+            || panic!("proxy capability must not run"),
+            true,
+        );
+
+        assert_eq!(
+            backends
+                .iter()
+                .map(|backend| backend.backend.as_str())
+                .collect::<Vec<_>>(),
+            vec!["lxc"]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_discovery_deadline_matches_native_phase_budgets() {
+        assert_eq!(LINUX_DISCOVERY_WORST_CASE, Duration::from_secs(16));
     }
 
     #[test]

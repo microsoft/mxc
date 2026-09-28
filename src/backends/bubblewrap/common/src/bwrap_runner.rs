@@ -184,7 +184,7 @@ impl BubblewrapScriptRunner {
     /// Tests use this to assert that user-input validation runs *before* the
     /// environmental `bwrap` probe, and to drive every probe failure without
     /// depending on what the host happens to have installed.
-    fn validate_prepared_with_probe<F>(
+    pub(crate) fn validate_prepared_with_probe<F>(
         &self,
         request: &ExecutionRequest,
         probe: F,

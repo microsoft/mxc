@@ -9,9 +9,6 @@ namespace Microsoft.Mxc.Sdk.Tests;
 
 public class SandboxAdapterTests
 {
-    private static readonly HashSet<string> NonInjectableRunnerMethods =
-        [nameof(MxcSandbox.Probe)];
-
     [Fact]
     public void DefaultAdaptersImplementInjectableContracts()
     {
@@ -62,8 +59,6 @@ public class SandboxAdapterTests
         var contractMethods = contract.GetMethods();
         foreach (var facadeMethod in staticFacade
             .GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly)
-            .Where(method => staticFacade != typeof(MxcSandbox)
-                || !NonInjectableRunnerMethods.Contains(method.Name))
             .Where(method => !method.IsSpecialName))
         {
             var parameterTypes = facadeMethod.GetParameters()
