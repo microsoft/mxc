@@ -106,11 +106,13 @@ Ingress has two allow/deny controls and no rule arrays:
 - `ingress.hostLoopback` controls host-loopback connectivity in both directions: container-to-host and
   host-to-container, except for the single outbound proxy endpoint named by `runtimeConfig.networkProxy`.
 
-The specific `hostLoopback` value overrides `default` for the host-loopback
-path. For example, `default: deny` with `hostLoopback: allow` permits
-bidirectional host-loopback connectivity while denying other inbound traffic.
-A backend that cannot enforce both directions must reject `hostLoopback: allow`
-rather than accept it with partial enforcement.
+`ingress.hostLoopback` is independent of `ingress.default`. If omitted, it
+defaults to `deny`, even when `ingress.default` is `allow`. For example,
+`default: allow` with no `hostLoopback` allows LAN/private-network inbound
+traffic but denies host-loopback connectivity. Conversely, `default: deny` with
+`hostLoopback: allow` permits bidirectional host-loopback connectivity while
+denying other inbound traffic. A backend that cannot enforce both directions
+must reject `hostLoopback: allow` rather than accept it with partial enforcement.
 
 When `runtimeConfig.networkProxy` is present, `hostLoopback: deny` remains valid
 and blocks every host-loopback path other than outbound connections to that
