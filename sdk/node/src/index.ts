@@ -63,6 +63,8 @@ export {
   RuntimeConfig,
   PlatformSupport,
   UiCapabilitySupport,
+  ProbeOutput,
+  ProbeFacts,
   BubblewrapNetworkSupport,
   AvailableBackend,
   AvailableBackendName,
@@ -79,6 +81,10 @@ export {
 export {
   getAvailableBackends,
 } from './available-backends.js';
+
+export {
+  probeSandboxSupport,
+} from './probe.js';
 
 // Export sandbox spawning functions
 export {

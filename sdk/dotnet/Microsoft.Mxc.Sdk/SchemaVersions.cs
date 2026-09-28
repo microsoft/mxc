@@ -37,6 +37,12 @@ public static class SchemaVersions
     internal static bool UsesLegacyNetworkDefaults(string version) =>
         version is Minimum or V0_7_0Alpha or "0.8.0-alpha";
 
+    internal static bool SupportsV0_8OneShotFields(string version) =>
+        version is "0.8.0-alpha" or LatestStable or MaximumSupported;
+
+    internal static bool SupportsV0_9OneShotFields(string version) =>
+        version is LatestStable or MaximumSupported;
+
     internal static bool IsSupported(string version) =>
         IsPublished(version) || version == MaximumSupported;
 }

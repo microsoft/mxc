@@ -4,6 +4,7 @@
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Microsoft.Mxc.Sdk.Native;
 using NativeSandbox = Microsoft.Mxc.Sdk.Native.MxcSandbox;
@@ -32,6 +33,11 @@ public static class MxcSandbox
             new JsonStringEnumConverter(JsonNamingPolicy.CamelCase),
             new NetworkProxyPolicyJsonConverter(),
         },
+    };
+
+    private static readonly JsonSerializerOptions ProbeJsonOptions = new(JsonOptions)
+    {
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
     };
 
     private static readonly JsonSerializerOptions PublishedPolicyJsonOptions = new(JsonOptions)
@@ -113,6 +119,315 @@ public static class MxcSandbox
                 AvailableMethods = support.AvailableMethods.Select(ParseBackend).ToArray(),
             };
         }
+    }
+
+    /// <summary>
+    /// Probe which Windows ProcessContainer tier can serve a request.
+    /// </summary>
+    /// <remarks>
+    /// This diagnostic does not create a sandbox. It serializes the request to
+    /// a temporary executor config and invokes the packaged
+    /// <c>wxc-exec --probe</c>. It is intentionally not part of
+    /// <see cref="ISandboxRunner"/>, preserving compatibility for existing
+    /// interface implementations.
+    /// </remarks>
+    public static ProbeOutput Probe(SandboxRequest? request = null)
+    {
+        var configJson = request is null ? null : SerializeProbeConfig(request);
+        return ParseProbeOutput(RequestProbeExecutor.Run(configJson));
+    }
+
+    internal static string SerializeProbeConfig(SandboxRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ValidateNetworkVersion(request.Policy);
+        var prepared = PrepareRequest(request);
+        if (prepared.Containment is not ProcessContainment
+            and not ProcessContainerContainment)
+        {
+            var containment = prepared.Containment switch
+            {
+                WslcContainment => "wslc",
+                BubblewrapContainment => "bubblewrap",
+                LxcContainment => "lxc",
+                SeatbeltContainment => "seatbelt",
+                IsolationSessionContainment => "isolation_session",
+                _ => prepared.Containment.GetType().Name,
+            };
+            throw new MxcException(
+                ErrorCode.UnsupportedContainment,
+                $"request-aware probe supports only ProcessContainer containment; got {containment}");
+        }
+
+        var policy = JsonSerializer.SerializeToNode(
+            prepared.Policy,
+            PolicyJsonOptions(prepared.Policy.Version))?.AsObject()
+            ?? throw new JsonException("Request policy serialized to null JSON.");
+        var config = new JsonObject
+        {
+            ["version"] = prepared.Policy.Version,
+            ["containment"] = "processcontainer",
+            ["lifecycle"] = new JsonObject
+            {
+                ["destroyOnExit"] = true,
+                ["preservePolicy"] = prepared.Policy.Filesystem?.ClearPolicyOnExit == false,
+            },
+        };
+        if (prepared.ContainerName is not null)
+        {
+            config["containerId"] = prepared.ContainerName;
+        }
+        if (policy["filesystem"] is JsonObject filesystem)
+        {
+            var probeFilesystem = filesystem.DeepClone().AsObject();
+            probeFilesystem.Remove("clearPolicyOnExit");
+            config["filesystem"] = probeFilesystem;
+        }
+        if (SchemaVersions.SupportsV0_9OneShotFields(prepared.Policy.Version)
+            && policy["telemetry"] is JsonNode telemetry)
+        {
+            config["telemetry"] = telemetry.DeepClone();
+        }
+
+        var process = new JsonObject
+        {
+            ["commandLine"] = prepared.Command,
+            ["timeout"] = prepared.Policy.TimeoutMs ?? 0,
+        };
+        if (prepared.WorkingDirectory is not null)
+        {
+            process["cwd"] = prepared.WorkingDirectory;
+        }
+        if (prepared.Environment is not null)
+        {
+            process["env"] = new JsonArray(
+                prepared.Environment
+                    .Select(pair => JsonValue.Create($"{pair.Key}={pair.Value}"))
+                    .ToArray());
+        }
+        if (SchemaVersions.SupportsV0_9OneShotFields(prepared.Policy.Version)
+            && prepared.InheritDefaultEnvironment)
+        {
+            process["inheritDefaultEnv"] = true;
+        }
+        config["process"] = process;
+
+        var processContainer = prepared.Containment as ProcessContainerContainment;
+        var network = policy["network"]?.DeepClone()?.AsObject();
+        var authoredNetwork = prepared.Policy.Network;
+        var hasDirectionalNetworkAuthoring =
+            authoredNetwork?.Egress is not null
+            || authoredNetwork?.Ingress is not null
+            || authoredNetwork?.RuntimeConfig is not null
+            || processContainer?.Network is not null;
+        var usesLegacyNetworkRepresentation =
+            SchemaVersions.UsesLegacyNetworkDefaults(prepared.Policy.Version)
+            && !hasDirectionalNetworkAuthoring;
+        if (network is null && usesLegacyNetworkRepresentation)
+        {
+            config["network"] = new JsonObject { ["defaultPolicy"] = "block" };
+        }
+        else if (network is not null && !usesLegacyNetworkRepresentation)
+        {
+            var probeNetwork = new JsonObject();
+            if (network["egress"] is JsonNode egress)
+            {
+                probeNetwork["egress"] = egress.DeepClone();
+            }
+            if (network["ingress"] is JsonNode ingress)
+            {
+                probeNetwork["ingress"] = ingress.DeepClone();
+            }
+            config["network"] = probeNetwork;
+            if (SchemaVersions.SupportsV0_8OneShotFields(prepared.Policy.Version)
+                && network["runtimeConfig"] is JsonObject runtimeConfig)
+            {
+                config["runtimeConfig"] = runtimeConfig.DeepClone();
+            }
+        }
+        else if (network is not null)
+        {
+            var hasHostRules =
+                network["allowedHosts"] is JsonArray { Count: > 0 }
+                || network["blockedHosts"] is JsonArray { Count: > 0 };
+            var probeNetwork = new JsonObject
+            {
+                ["defaultPolicy"] =
+                    network["allowOutbound"]?.GetValue<bool>() == true ? "allow" : "block",
+                ["enforcementMode"] = hasHostRules ? "both" : "capabilities",
+            };
+            if (network["allowLocalNetwork"] is JsonNode allowLocalNetwork)
+            {
+                probeNetwork["allowLocalNetwork"] = allowLocalNetwork.DeepClone();
+            }
+            if (network["allowedHosts"] is JsonNode allowedHosts)
+            {
+                probeNetwork["allowedHosts"] = allowedHosts.DeepClone();
+            }
+            if (network["blockedHosts"] is JsonNode blockedHosts)
+            {
+                probeNetwork["blockedHosts"] = blockedHosts.DeepClone();
+            }
+            if (network["proxy"] is JsonNode proxy)
+            {
+                probeNetwork["proxy"] = proxy.DeepClone();
+            }
+            config["network"] = probeNetwork;
+        }
+
+        var ui = policy["ui"]?.AsObject();
+        config["ui"] = new JsonObject
+        {
+            ["disable"] = ui?["allowWindows"]?.GetValue<bool>() != true,
+            ["clipboard"] = ui?["clipboard"]?.DeepClone() ?? JsonValue.Create("none"),
+            ["injection"] = ui?["allowInputInjection"]?.GetValue<bool>() == true,
+        };
+
+        var processContainerNode = processContainer is null
+            ? new JsonObject()
+            : JsonSerializer.SerializeToNode(processContainer, JsonOptions)?.AsObject()
+                ?? throw new JsonException("ProcessContainer settings serialized to null JSON.");
+        processContainerNode.Remove("type");
+        if (!SchemaVersions.SupportsV0_8OneShotFields(prepared.Policy.Version))
+        {
+            processContainerNode.Remove("learningMode");
+            processContainerNode.Remove("captureDenials");
+            processContainerNode.Remove("network");
+        }
+        if (!SchemaVersions.SupportsV0_9OneShotFields(prepared.Policy.Version))
+        {
+            processContainerNode.Remove("filesystem");
+        }
+        processContainerNode["leastPrivilege"] = processContainer?.LeastPrivilege ?? false;
+        processContainerNode["capabilities"] ??= new JsonArray();
+        var capabilities = processContainerNode["capabilities"]!.AsArray();
+        var allowsInternet = authoredNetwork?.AllowOutbound == true
+            || authoredNetwork?.Egress?.Default == NetworkAction.Allow
+            || authoredNetwork?.Egress?.Allow?.Count > 0;
+        var allowsLocalNetwork = authoredNetwork?.AllowLocalNetwork == true
+            || authoredNetwork?.Ingress?.Default == NetworkAction.Allow;
+        AddCapabilityIfMissing(capabilities, "internetClient", allowsInternet);
+        AddCapabilityIfMissing(
+            capabilities,
+            "privateNetworkClientServer",
+            allowsLocalNetwork);
+        processContainerNode["ui"] ??= new JsonObject
+        {
+            ["isolation"] = "container",
+            ["desktopSystemControl"] = false,
+            ["systemSettings"] = "none",
+            ["ime"] = false,
+        };
+        config["processContainer"] = processContainerNode;
+
+        return config.ToJsonString(JsonOptions);
+    }
+
+    private static void AddCapabilityIfMissing(
+        JsonArray capabilities,
+        string capability,
+        bool add)
+    {
+        if (add && !capabilities.Any(value =>
+            string.Equals(value?.GetValue<string>(), capability, StringComparison.OrdinalIgnoreCase)))
+        {
+            capabilities.Add(capability);
+        }
+    }
+
+    internal static ProbeOutput ParseProbeOutput(string json)
+    {
+        var output = JsonSerializer.Deserialize<NativeProbeOutput>(json, ProbeJsonOptions)
+            ?? throw new JsonException("wxc-exec request probe returned null JSON.");
+        var warnings = output.Warnings
+            ?? throw new JsonException("wxc-exec request probe returned null warnings.");
+        if (warnings.Any(static warning => warning is null))
+        {
+            throw new JsonException(
+                "wxc-exec request probe returned a non-string warning.");
+        }
+
+        var probes = output.Probes
+            ?? throw new JsonException("wxc-exec request probe omitted probes.");
+        var ui = probes.UiCapabilities
+            ?? throw new JsonException("wxc-exec request probe omitted UI capabilities.");
+
+        IsolationTier? tier;
+        if (!output.HasTier)
+        {
+            if (!output.HasError)
+            {
+                throw new JsonException(
+                    "wxc-exec request probe omitted both tier and error.");
+            }
+            if (output.Error is null)
+            {
+                throw new JsonException(
+                    "wxc-exec request probe returned a null error.");
+            }
+            if (output.HasNeedsDaclAugmentation)
+            {
+                throw new JsonException(
+                    "wxc-exec request probe returned DACL augmentation with an error.");
+            }
+            tier = null;
+        }
+        else
+        {
+            if (output.Tier is null)
+            {
+                throw new JsonException(
+                    "wxc-exec request probe returned a null tier.");
+            }
+            if (output.HasError)
+            {
+                throw new JsonException(
+                    "wxc-exec request probe returned both tier and error.");
+            }
+            if (!output.HasNeedsDaclAugmentation
+                || output.NeedsDaclAugmentation is null)
+            {
+                throw new JsonException(
+                    "wxc-exec request probe omitted DACL augmentation for a selected tier.");
+            }
+            tier = ParseProbeIsolationTier(output.Tier);
+        }
+
+        return new ProbeOutput
+        {
+            Tier = tier,
+            NeedsDaclAugmentation = output.NeedsDaclAugmentation,
+            Warnings = warnings.Select(static warning => warning!).ToArray(),
+            Error = output.Error,
+            Probes = new ProbeFacts
+            {
+                BaseContainerApiPresent = probes.BaseContainerApiPresent,
+                NativeCaptureAvailable = probes.NativeCaptureAvailable,
+                GuardedCaptureAvailable = probes.GuardedCaptureAvailable,
+                BfscfgPresent = probes.BfscfgPresent,
+                BfsCompiledIn = probes.BfsCompiledIn,
+                BaseContainerSupportsDenyPaths = probes.BaseContainerSupportsDenyPaths,
+                BaseContainerSupportsEnumeratePaths =
+                    probes.BaseContainerSupportsEnumeratePaths,
+                BaseContainerSupportsIngressHostLoopbackAllow =
+                    probes.BaseContainerSupportsIngressHostLoopbackAllow,
+                IsolationSessionAvailable = probes.IsolationSessionAvailable,
+                HyperlightAvailable = probes.HyperlightAvailable,
+                UiCapabilities = new UiCapabilitySupport
+                {
+                    CanBlockClipboardRead = ui.CanBlockClipboardRead,
+                    CanBlockClipboardWrite = ui.CanBlockClipboardWrite,
+                    CanBlockInputInjection = ui.CanBlockInputInjection,
+                    CanBlockInputMethodChanges = ui.CanBlockInputMethodChanges,
+                    CanBlockExternalUiObjects = ui.CanBlockExternalUiObjects,
+                    CanBlockGlobalUiNamespace = ui.CanBlockGlobalUiNamespace,
+                    CanBlockDesktopSwitching = ui.CanBlockDesktopSwitching,
+                    CanBlockLogoffOrShutdown = ui.CanBlockLogoffOrShutdown,
+                    CanBlockSystemParameterChanges = ui.CanBlockSystemParameterChanges,
+                    CanBlockDisplaySettingsChanges = ui.CanBlockDisplaySettingsChanges,
+                },
+            },
+        };
     }
 
     /// <summary>
@@ -407,6 +722,16 @@ public static class MxcSandbox
             "appcontainer-bfs" => IsolationTier.AppContainerBfs,
             "appcontainer-dacl" => IsolationTier.AppContainerDacl,
             _ => IsolationTier.Unknown,
+        };
+
+    private static IsolationTier ParseProbeIsolationTier(string value) =>
+        value switch
+        {
+            "base-container" => IsolationTier.BaseContainer,
+            "appcontainer-bfs" => IsolationTier.AppContainerBfs,
+            "appcontainer-dacl" => IsolationTier.AppContainerDacl,
+            _ => throw new JsonException(
+                $"wxc-exec request probe returned unknown tier '{value}'."),
         };
 
     internal static BackendCapability ParseBackendCapability(string value) =>

@@ -646,6 +646,39 @@ export interface UiCapabilitySupport {
 }
 
 /**
+ * Result of probing which Windows ProcessContainer tier can serve a config.
+ */
+export interface ProbeOutput {
+  /** Selected tier, omitted when detection failed. */
+  tier?: IsolationTier;
+  /** Whether the selected tier needs DACL deny augmentation. */
+  needsDaclAugmentation?: boolean;
+  /** Tier degradation warnings. */
+  warnings: string[];
+  /** Raw host facts used by tier selection. */
+  probes: ProbeFacts;
+  /** Detector failure, present when detection failed and omitted on success. */
+  error?: string;
+}
+
+/** Raw host facts gathered before request tier selection. */
+export interface ProbeFacts {
+  baseContainerApiPresent: boolean;
+  nativeCaptureAvailable: boolean;
+  guardedCaptureAvailable: boolean;
+  bfscfgPresent: boolean;
+  bfsCompiledIn: boolean;
+  baseContainerSupportsDenyPaths: boolean;
+  baseContainerSupportsEnumeratePaths: boolean;
+  baseContainerSupportsIngressHostLoopbackAllow: boolean;
+  /** True when this executor includes IsolationSession and the host can activate it. */
+  isolationSessionAvailable: boolean;
+  /** True when this executor includes Hyperlight and its host runtime is available. */
+  hyperlightAvailable: boolean;
+  uiCapabilities: UiCapabilitySupport;
+}
+
+/**
  * Host support for enforcing Bubblewrap proxy-only egress.
  *
  * Schema `0.8.0-alpha`+ proxy policies run the sandbox in a private network

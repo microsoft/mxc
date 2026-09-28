@@ -272,8 +272,13 @@ seconds for LXC. This excludes scheduler and host-load delay. Only successful
 Bubblewrap discovery is cached, so failures remain retryable.
 
 For detailed Windows ProcessContainer request diagnostics, use
-`wxc-exec --probe [config.json]`. This CLI contract is unchanged and remains
-separate from broad SDK discovery.
+`wxc-exec --probe [config.json]`. The Node.js
+`probeSandboxSupport(config)` and .NET `MxcSandbox.Probe(request)` APIs expose
+that same request-aware diagnostic by serializing a temporary config and
+invoking the packaged executor. They are Windows ProcessContainer-only and
+surface executor and JSON errors rather than converting them into an
+unsupported result. The Rust SDK and C FFI intentionally expose only broad
+in-process discovery; they do not add a native request-probe ABI.
 
 ### Audit Mode (Permissive Learning Mode)
 

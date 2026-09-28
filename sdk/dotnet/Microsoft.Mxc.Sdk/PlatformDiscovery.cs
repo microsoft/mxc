@@ -125,6 +125,47 @@ public sealed class PlatformSupport
         Array.Empty<ContainmentBackend>();
 }
 
+/// <summary>Result of probing which Windows ProcessContainer tier can serve a request.</summary>
+public sealed class ProbeOutput
+{
+    public IsolationTier? Tier { get; init; }
+    public bool? NeedsDaclAugmentation { get; init; }
+    public IReadOnlyList<string> Warnings { get; init; } = Array.Empty<string>();
+    public required ProbeFacts Probes { get; init; }
+    public string? Error { get; init; }
+}
+
+/// <summary>Raw host facts used by request tier selection.</summary>
+public sealed class ProbeFacts
+{
+    public bool BaseContainerApiPresent { get; init; }
+    public bool NativeCaptureAvailable { get; init; }
+    public bool GuardedCaptureAvailable { get; init; }
+    public bool BfscfgPresent { get; init; }
+    public bool BfsCompiledIn { get; init; }
+    public bool BaseContainerSupportsDenyPaths { get; init; }
+    public bool BaseContainerSupportsEnumeratePaths { get; init; }
+    public bool BaseContainerSupportsIngressHostLoopbackAllow { get; init; }
+    public bool IsolationSessionAvailable { get; init; }
+    public bool HyperlightAvailable { get; init; }
+    public required UiCapabilitySupport UiCapabilities { get; init; }
+}
+
+/// <summary>Host support for enforcing sandbox UI restrictions.</summary>
+public sealed class UiCapabilitySupport
+{
+    public bool CanBlockClipboardRead { get; init; }
+    public bool CanBlockClipboardWrite { get; init; }
+    public bool CanBlockInputInjection { get; init; }
+    public bool CanBlockInputMethodChanges { get; init; }
+    public bool CanBlockExternalUiObjects { get; init; }
+    public bool CanBlockGlobalUiNamespace { get; init; }
+    public bool CanBlockDesktopSwitching { get; init; }
+    public bool CanBlockLogoffOrShutdown { get; init; }
+    public bool CanBlockSystemParameterChanges { get; init; }
+    public bool CanBlockDisplaySettingsChanges { get; init; }
+}
+
 internal sealed class NativeAvailableBackend
 {
     [JsonPropertyName("backend")]
@@ -150,4 +191,146 @@ internal sealed class NativePlatformSupport
 
     [JsonPropertyName("availableMethods")]
     public string[] AvailableMethods { get; init; } = [];
+}
+
+internal sealed class NativeProbeOutput
+{
+    private string? tier;
+    private bool? needsDaclAugmentation;
+    private string? error;
+
+    internal bool HasTier { get; private set; }
+    internal bool HasNeedsDaclAugmentation { get; private set; }
+    internal bool HasError { get; private set; }
+
+    [JsonPropertyName("tier")]
+    public string? Tier
+    {
+        get => tier;
+        init
+        {
+            tier = value;
+            HasTier = true;
+        }
+    }
+
+    [JsonPropertyName("needsDaclAugmentation")]
+    public bool? NeedsDaclAugmentation
+    {
+        get => needsDaclAugmentation;
+        init
+        {
+            needsDaclAugmentation = value;
+            HasNeedsDaclAugmentation = true;
+        }
+    }
+
+    [JsonRequired]
+    [JsonPropertyName("warnings")]
+    public string?[]? Warnings { get; init; }
+
+    [JsonRequired]
+    [JsonPropertyName("probes")]
+    public NativeProbeFacts? Probes { get; init; }
+
+    [JsonPropertyName("error")]
+    public string? Error
+    {
+        get => error;
+        init
+        {
+            error = value;
+            HasError = true;
+        }
+    }
+}
+
+internal sealed class NativeProbeFacts
+{
+    [JsonRequired]
+    [JsonPropertyName("baseContainerApiPresent")]
+    public bool BaseContainerApiPresent { get; init; }
+
+    [JsonRequired]
+    [JsonPropertyName("nativeCaptureAvailable")]
+    public bool NativeCaptureAvailable { get; init; }
+
+    [JsonRequired]
+    [JsonPropertyName("guardedCaptureAvailable")]
+    public bool GuardedCaptureAvailable { get; init; }
+
+    [JsonRequired]
+    [JsonPropertyName("bfscfgPresent")]
+    public bool BfscfgPresent { get; init; }
+
+    [JsonRequired]
+    [JsonPropertyName("bfsCompiledIn")]
+    public bool BfsCompiledIn { get; init; }
+
+    [JsonRequired]
+    [JsonPropertyName("baseContainerSupportsDenyPaths")]
+    public bool BaseContainerSupportsDenyPaths { get; init; }
+
+    [JsonRequired]
+    [JsonPropertyName("baseContainerSupportsEnumeratePaths")]
+    public bool BaseContainerSupportsEnumeratePaths { get; init; }
+
+    [JsonRequired]
+    [JsonPropertyName("baseContainerSupportsIngressHostLoopbackAllow")]
+    public bool BaseContainerSupportsIngressHostLoopbackAllow { get; init; }
+
+    [JsonRequired]
+    [JsonPropertyName("isolationSessionAvailable")]
+    public bool IsolationSessionAvailable { get; init; }
+
+    [JsonRequired]
+    [JsonPropertyName("hyperlightAvailable")]
+    public bool HyperlightAvailable { get; init; }
+
+    [JsonRequired]
+    [JsonPropertyName("uiCapabilities")]
+    public NativeUiCapabilitySupport? UiCapabilities { get; init; }
+}
+
+internal sealed class NativeUiCapabilitySupport
+{
+    [JsonRequired]
+    [JsonPropertyName("canBlockClipboardRead")]
+    public bool CanBlockClipboardRead { get; init; }
+
+    [JsonRequired]
+    [JsonPropertyName("canBlockClipboardWrite")]
+    public bool CanBlockClipboardWrite { get; init; }
+
+    [JsonRequired]
+    [JsonPropertyName("canBlockInputInjection")]
+    public bool CanBlockInputInjection { get; init; }
+
+    [JsonRequired]
+    [JsonPropertyName("canBlockInputMethodChanges")]
+    public bool CanBlockInputMethodChanges { get; init; }
+
+    [JsonRequired]
+    [JsonPropertyName("canBlockExternalUiObjects")]
+    public bool CanBlockExternalUiObjects { get; init; }
+
+    [JsonRequired]
+    [JsonPropertyName("canBlockGlobalUiNamespace")]
+    public bool CanBlockGlobalUiNamespace { get; init; }
+
+    [JsonRequired]
+    [JsonPropertyName("canBlockDesktopSwitching")]
+    public bool CanBlockDesktopSwitching { get; init; }
+
+    [JsonRequired]
+    [JsonPropertyName("canBlockLogoffOrShutdown")]
+    public bool CanBlockLogoffOrShutdown { get; init; }
+
+    [JsonRequired]
+    [JsonPropertyName("canBlockSystemParameterChanges")]
+    public bool CanBlockSystemParameterChanges { get; init; }
+
+    [JsonRequired]
+    [JsonPropertyName("canBlockDisplaySettingsChanges")]
+    public bool CanBlockDisplaySettingsChanges { get; init; }
 }

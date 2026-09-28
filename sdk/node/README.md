@@ -203,9 +203,22 @@ if (network.proxyEnforcement !== 'supported') {
 
 It is reported **fail closed**: if the probe cannot run, the result is `'unsupported'` with the reason in `warnings`, never absent. The check is advisory — the runner still verifies the dependencies at launch, since the probe runs in a different process at an earlier time. See [the Bubblewrap backend guide](../../docs/bwrap-support/bubblewrap-backend.md#checking-host-support-before-you-run).
 
-For detailed Windows ProcessContainer request diagnostics, use
-`wxc-exec --probe [config.json]`. The CLI diagnostic includes request-specific
-machine facts and is intentionally separate from the broad Node discovery API.
+For request-specific Windows ProcessContainer diagnostics, call
+`probeSandboxSupport(config)`. It accepts the same `ContainerConfig` used by
+`spawnSandboxFromConfig`, writes it to a short-lived temporary file, and invokes
+the packaged `wxc-exec --probe <config>`:
+
+```typescript
+import { probeSandboxSupport } from '@microsoft/mxc-sdk';
+
+const result = probeSandboxSupport(config);
+console.log(result.tier, result.warnings, result.probes.uiCapabilities);
+```
+
+This API is synchronous, Windows-only, and does not create a sandbox. Missing
+executors, non-ProcessContainer requests, nonzero executor exits, and malformed
+JSON throw errors; they are not reported as successful unsupported results.
+The CLI remains the authoritative ProcessContainer diagnostic.
 
 ---
 
@@ -633,7 +646,7 @@ requestTelemetryConsent(presenter, locale?) → Promise<TelemetryConsentOutcome>
 withdrawTelemetryConsentAsync()   → Promise<TelemetryConsentOutcome>
 
 // Capability types
-UiCapabilitySupport, BubblewrapNetworkSupport
+ProbeOutput, ProbeFacts, UiCapabilitySupport, BubblewrapNetworkSupport
 
 // Errors (typed wire-format errors from wxc-exec)
 ErrorCode, MxcError, MxcErrorFields

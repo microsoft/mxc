@@ -59,7 +59,8 @@ public class SandboxAdapterTests
         var contractMethods = contract.GetMethods();
         foreach (var facadeMethod in staticFacade
             .GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly)
-            .Where(method => !method.IsSpecialName))
+            .Where(method => !method.IsSpecialName)
+            .Where(method => staticFacade != typeof(MxcSandbox) || method.Name != nameof(MxcSandbox.Probe)))
         {
             var parameterTypes = facadeMethod.GetParameters()
                 .Select(parameter => parameter.ParameterType)

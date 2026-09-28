@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Microsoft.Mxc.Sdk;
 using Xunit;
@@ -10,6 +11,566 @@ namespace Microsoft.Mxc.Sdk.Tests;
 
 public class MxcSandboxTests
 {
+    private const string CompleteProbeJson = """
+        {
+          "tier": "appcontainer-dacl",
+          "needsDaclAugmentation": true,
+          "warnings": ["fell through"],
+          "probes": {
+            "baseContainerApiPresent": true,
+            "nativeCaptureAvailable": false,
+            "guardedCaptureAvailable": true,
+            "bfscfgPresent": false,
+            "bfsCompiledIn": false,
+            "baseContainerSupportsDenyPaths": true,
+            "baseContainerSupportsEnumeratePaths": false,
+            "baseContainerSupportsIngressHostLoopbackAllow": true,
+            "isolationSessionAvailable": true,
+            "hyperlightAvailable": false,
+            "uiCapabilities": {
+              "canBlockClipboardRead": true,
+              "canBlockClipboardWrite": false,
+              "canBlockInputInjection": true,
+              "canBlockInputMethodChanges": false,
+              "canBlockExternalUiObjects": true,
+              "canBlockGlobalUiNamespace": false,
+              "canBlockDesktopSwitching": true,
+              "canBlockLogoffOrShutdown": false,
+              "canBlockSystemParameterChanges": true,
+              "canBlockDisplaySettingsChanges": false
+            }
+          }
+        }
+        """;
+
+    private static JsonObject CreateCompleteProbeJson() =>
+        JsonNode.Parse(CompleteProbeJson)!.AsObject();
+
+    private static void AssertProbeJsonRejected(Action<JsonObject> mutate)
+    {
+        var json = CreateCompleteProbeJson();
+        mutate(json);
+        Assert.Throws<JsonException>(() => MxcSandbox.ParseProbeOutput(json.ToJsonString()));
+    }
+
+    private static void AssertNoExplicitNulls(JsonElement element, string path = "$")
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in element.EnumerateObject())
+            {
+                var propertyPath = $"{path}.{property.Name}";
+                Assert.True(
+                    property.Value.ValueKind != JsonValueKind.Null,
+                    $"Generated probe config contains explicit null at {propertyPath}.");
+                AssertNoExplicitNulls(property.Value, propertyPath);
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            var index = 0;
+            foreach (var item in element.EnumerateArray())
+            {
+                var itemPath = $"{path}[{index}]";
+                Assert.True(
+                    item.ValueKind != JsonValueKind.Null,
+                    $"Generated probe config contains explicit null at {itemPath}.");
+                AssertNoExplicitNulls(item, itemPath);
+                index++;
+            }
+        }
+    }
+
+    [Fact]
+    public void Probe_UsesExecutorConfigAndCleansTemporaryFile()
+    {
+        string? configPath = null;
+        RequestProbeExecutor.IsWindows = () => true;
+        RequestProbeExecutor.FindExecutable = () => "wxc-exec.exe";
+        RequestProbeExecutor.RunProcess = (executable, path) =>
+        {
+            Assert.Equal("wxc-exec.exe", executable);
+            Assert.NotNull(path);
+            configPath = path;
+            using var document = JsonDocument.Parse(File.ReadAllText(path));
+            Assert.Equal(
+                "processcontainer",
+                document.RootElement.GetProperty("containment").GetString());
+            Assert.Equal(
+                "cmd /c exit 0",
+                document.RootElement.GetProperty("process").GetProperty("commandLine").GetString());
+            Assert.Equal(
+                "0.9.0-alpha",
+                document.RootElement.GetProperty("version").GetString());
+            AssertNoExplicitNulls(document.RootElement);
+            Assert.False(document.RootElement.TryGetProperty("containerId", out _));
+            Assert.False(document.RootElement.TryGetProperty("filesystem", out _));
+            Assert.False(document.RootElement.TryGetProperty("telemetry", out _));
+            var process = document.RootElement.GetProperty("process");
+            Assert.False(process.TryGetProperty("cwd", out _));
+            Assert.False(process.TryGetProperty("inheritDefaultEnv", out _));
+            return new RequestProbeProcessResult(0, CompleteProbeJson, string.Empty);
+        };
+
+        try
+        {
+            var output = MxcSandbox.Probe(new SandboxRequest(
+                new SandboxPolicy { Version = "0.9.0-alpha" },
+                "cmd /c exit 0"));
+
+            Assert.Equal(IsolationTier.AppContainerDacl, output.Tier);
+            Assert.True(output.Probes.BaseContainerApiPresent);
+            Assert.NotNull(configPath);
+            Assert.False(File.Exists(configPath));
+            Assert.False(Directory.Exists(Path.GetDirectoryName(configPath)));
+        }
+        finally
+        {
+            RequestProbeExecutor.ResetTestHooks();
+        }
+    }
+
+    [Theory]
+    [InlineData("0.6.0-alpha", false, false, false)]
+    [InlineData("0.8.0-alpha", false, true, false)]
+    [InlineData("0.9.0-alpha", true, true, true)]
+    [InlineData("0.10.0-alpha", true, true, true)]
+    public void ProbeConfig_OmitsNullsAndGatesVersionedFields(
+        string version,
+        bool supportsV09Fields,
+        bool supportsV08ProcessContainerFields,
+        bool supportsProcessContainerFilesystem)
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy
+            {
+                Version = version,
+                Telemetry = new TelemetrySettings { Enabled = true },
+            },
+            "cmd /c exit 0")
+        {
+            Environment = new() { ["GREETING"] = "hello" },
+            InheritDefaultEnvironment = true,
+            Containment = new ProcessContainerContainment
+            {
+                LearningMode = true,
+                CaptureDenials = new CaptureDenialsPolicy(),
+                Filesystem = new ProcessContainerFilesystemPolicy(),
+                Network = new ProcessContainerNetworkPolicy
+                {
+                    AllowedProxyPeer = "Contoso.Proxy_123",
+                },
+            },
+        };
+
+        using var document = JsonDocument.Parse(MxcSandbox.SerializeProbeConfig(request));
+        var root = document.RootElement;
+        var process = root.GetProperty("process");
+        var processContainer = root.GetProperty("processContainer");
+
+        AssertNoExplicitNulls(root);
+        Assert.False(root.TryGetProperty("containerId", out _));
+        Assert.False(root.TryGetProperty("filesystem", out _));
+        Assert.False(process.TryGetProperty("cwd", out _));
+        Assert.Equal(supportsV09Fields, process.TryGetProperty("inheritDefaultEnv", out _));
+        if (supportsV09Fields)
+        {
+            Assert.True(process.GetProperty("inheritDefaultEnv").GetBoolean());
+        }
+        Assert.Equal(supportsV09Fields, root.TryGetProperty("telemetry", out _));
+        Assert.Equal(
+            supportsV08ProcessContainerFields,
+            processContainer.TryGetProperty("learningMode", out _));
+        Assert.Equal(
+            supportsV08ProcessContainerFields,
+            processContainer.TryGetProperty("captureDenials", out _));
+        Assert.Equal(
+            supportsV08ProcessContainerFields,
+            processContainer.TryGetProperty("network", out _));
+        Assert.Equal(
+            supportsProcessContainerFilesystem,
+            processContainer.TryGetProperty("filesystem", out _));
+    }
+
+    [Theory]
+    [InlineData("0.9.0-alpha")]
+    [InlineData("0.10.0-alpha")]
+    public void ProbeConfig_ExactVersionsPreserveEmptyDirectionalNetwork(string version)
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy
+            {
+                Version = version,
+                Network = new NetworkPolicy(),
+            },
+            "cmd /c exit 0");
+
+        using var document = JsonDocument.Parse(MxcSandbox.SerializeProbeConfig(request));
+        var root = document.RootElement;
+        var network = root.GetProperty("network");
+
+        Assert.Equal(JsonValueKind.Object, network.ValueKind);
+        Assert.Empty(network.EnumerateObject());
+        Assert.False(root.TryGetProperty("runtimeConfig", out _));
+        Assert.False(network.TryGetProperty("defaultPolicy", out _));
+        Assert.False(network.TryGetProperty("enforcementMode", out _));
+    }
+
+    [Theory]
+    [InlineData("0.8.0-alpha")]
+    [InlineData("0.9.0-alpha")]
+    [InlineData("0.10.0-alpha")]
+    public void ProbeConfig_ExactVersionsHoistRuntimeOnlyNetworkWithoutLegacyFields(
+        string version)
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy
+            {
+                Version = version,
+                Network = new NetworkPolicy
+                {
+                    RuntimeConfig = new NetworkRuntimeConfig(),
+                },
+            },
+            "cmd /c exit 0");
+
+        using var document = JsonDocument.Parse(MxcSandbox.SerializeProbeConfig(request));
+        var root = document.RootElement;
+        var network = root.GetProperty("network");
+
+        Assert.Empty(network.EnumerateObject());
+        Assert.Empty(root.GetProperty("runtimeConfig").EnumerateObject());
+        Assert.False(network.TryGetProperty("defaultPolicy", out _));
+        Assert.False(network.TryGetProperty("enforcementMode", out _));
+    }
+
+    [Fact]
+    public void ProbeConfig_V08ProcessContainerNetworkDoesNotSynthesizeLegacyNetwork()
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy { Version = "0.8.0-alpha" },
+            "cmd /c exit 0")
+        {
+            Containment = new ProcessContainerContainment
+            {
+                Network = new ProcessContainerNetworkPolicy(),
+            },
+        };
+
+        using var document = JsonDocument.Parse(MxcSandbox.SerializeProbeConfig(request));
+        var root = document.RootElement;
+        var processContainerNetwork = root
+            .GetProperty("processContainer")
+            .GetProperty("network");
+
+        Assert.False(root.TryGetProperty("network", out _));
+        Assert.False(root.TryGetProperty("runtimeConfig", out _));
+        Assert.Empty(processContainerNetwork.EnumerateObject());
+    }
+
+    [Fact]
+    public void ProbeConfig_PreV09EmptyNetworkKeepsLegacyDefaults()
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy
+            {
+                Version = "0.8.0-alpha",
+                Network = new NetworkPolicy(),
+            },
+            "cmd /c exit 0");
+
+        using var document = JsonDocument.Parse(MxcSandbox.SerializeProbeConfig(request));
+        var network = document.RootElement.GetProperty("network");
+
+        Assert.Equal("block", network.GetProperty("defaultPolicy").GetString());
+        Assert.Equal("capabilities", network.GetProperty("enforcementMode").GetString());
+        Assert.False(network.TryGetProperty("egress", out _));
+        Assert.False(network.TryGetProperty("ingress", out _));
+    }
+
+    [Theory]
+    [InlineData("0.8.0-alpha", true, false)]
+    [InlineData("0.8.0-alpha", false, true)]
+    [InlineData("0.9.0-alpha", true, false)]
+    [InlineData("0.9.0-alpha", false, true)]
+    [InlineData("0.10.0-alpha", true, false)]
+    [InlineData("0.10.0-alpha", false, true)]
+    public void ProbeConfig_MapsClearPolicyOnExitWithoutEmittingFilesystemField(
+        string version,
+        bool clearPolicyOnExit,
+        bool preservePolicy)
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy
+            {
+                Version = version,
+                Filesystem = new FilesystemPolicy
+                {
+                    ClearPolicyOnExit = clearPolicyOnExit,
+                },
+            },
+            "cmd /c exit 0");
+
+        using var document = JsonDocument.Parse(MxcSandbox.SerializeProbeConfig(request));
+        var root = document.RootElement;
+        var filesystem = root.GetProperty("filesystem");
+
+        Assert.False(filesystem.TryGetProperty("clearPolicyOnExit", out _));
+        Assert.Equal(
+            preservePolicy,
+            root.GetProperty("lifecycle").GetProperty("preservePolicy").GetBoolean());
+
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        RequestProbeExecutor.ResetTestHooks();
+        var output = MxcSandbox.Probe(request);
+
+        Assert.NotNull(output.Probes);
+    }
+
+    [Theory]
+    [InlineData("0.6.0-alpha")]
+    [InlineData("0.7.0-alpha")]
+    [InlineData("0.8.0-alpha")]
+    [InlineData("0.9.0-alpha")]
+    public void ProbeConfig_PackagedExecutorAcceptsPublishedVersions(string version)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        RequestProbeExecutor.ResetTestHooks();
+        var output = MxcSandbox.Probe(new SandboxRequest(
+            new SandboxPolicy { Version = version },
+            "cmd /c exit 0"));
+
+        Assert.NotNull(output.Probes);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ProbeConfig_PackagedExecutorAcceptsV08DirectionalIndicators(
+        bool processContainerNetworkOnly)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        RequestProbeExecutor.ResetTestHooks();
+        var request = new SandboxRequest(
+            new SandboxPolicy
+            {
+                Version = "0.8.0-alpha",
+                Network = processContainerNetworkOnly
+                    ? null
+                    : new NetworkPolicy
+                    {
+                        RuntimeConfig = new NetworkRuntimeConfig(),
+                    },
+            },
+            "cmd /c exit 0");
+        if (processContainerNetworkOnly)
+        {
+            request.Containment = new ProcessContainerContainment
+            {
+                Network = new ProcessContainerNetworkPolicy(),
+            };
+        }
+
+        var output = MxcSandbox.Probe(request);
+
+        Assert.NotNull(output.Probes);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ProbeConfig_PackagedExecutorAcceptsV09NetworkBoundaries(bool runtimeOnly)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        RequestProbeExecutor.ResetTestHooks();
+        var network = new NetworkPolicy();
+        if (runtimeOnly)
+        {
+            network.RuntimeConfig = new NetworkRuntimeConfig();
+        }
+
+        var output = MxcSandbox.Probe(new SandboxRequest(
+            new SandboxPolicy
+            {
+                Version = "0.9.0-alpha",
+                Network = network,
+            },
+            "cmd /c exit 0"));
+
+        Assert.NotNull(output.Probes);
+    }
+
+    [Fact]
+    public void Probe_SurfacesSubprocessFailure()
+    {
+        RequestProbeExecutor.IsWindows = () => true;
+        RequestProbeExecutor.FindExecutable = () => "wxc-exec.exe";
+        RequestProbeExecutor.RunProcess = (_, _) =>
+            new RequestProbeProcessResult(17, string.Empty, "probe exploded");
+
+        try
+        {
+            var error = Assert.Throws<MxcException>(() => MxcSandbox.Probe(
+                new SandboxRequest(
+                    new SandboxPolicy { Version = "0.9.0-alpha" },
+                    "cmd /c exit 0")));
+            Assert.Equal(ErrorCode.BackendError, error.Code);
+            Assert.Contains("probe exploded", error.Message);
+        }
+        finally
+        {
+            RequestProbeExecutor.ResetTestHooks();
+        }
+    }
+
+    [Fact]
+    public void Probe_SurfacesMalformedOutput()
+    {
+        RequestProbeExecutor.IsWindows = () => true;
+        RequestProbeExecutor.FindExecutable = () => "wxc-exec.exe";
+        RequestProbeExecutor.RunProcess = (_, _) =>
+            new RequestProbeProcessResult(0, "not json", string.Empty);
+
+        try
+        {
+            Assert.Throws<JsonException>(() => MxcSandbox.Probe(
+                new SandboxRequest(
+                    new SandboxPolicy { Version = "0.9.0-alpha" },
+                    "cmd /c exit 0")));
+        }
+        finally
+        {
+            RequestProbeExecutor.ResetTestHooks();
+        }
+    }
+
+    [Fact]
+    public void ProbeParser_RejectsCompleteFactsWithoutTierOrError()
+    {
+        AssertProbeJsonRejected(json =>
+        {
+            json.Remove("tier");
+            json.Remove("needsDaclAugmentation");
+        });
+    }
+
+    [Fact]
+    public void ProbeParser_RejectsMissingWarnings()
+    {
+        AssertProbeJsonRejected(json => json.Remove("warnings"));
+    }
+
+    [Fact]
+    public void ProbeParser_RejectsUnknownEnvelopeField()
+    {
+        AssertProbeJsonRejected(json => json["unknownEnvelopeField"] = true);
+    }
+
+    [Fact]
+    public void ProbeParser_RejectsUnknownProbeFactsField()
+    {
+        AssertProbeJsonRejected(json =>
+            json["probes"]!["unknownProbeField"] = true);
+    }
+
+    [Fact]
+    public void ProbeParser_RejectsUnknownUiCapabilityField()
+    {
+        AssertProbeJsonRejected(json =>
+            json["probes"]!["uiCapabilities"]!["unknownUiField"] = true);
+    }
+
+    [Fact]
+    public void ProbeParser_RejectsMissingRequiredProbeBoolean()
+    {
+        AssertProbeJsonRejected(json =>
+            json["probes"]!.AsObject().Remove("bfscfgPresent"));
+    }
+
+    [Fact]
+    public void ProbeParser_RejectsMissingRequiredUiBoolean()
+    {
+        AssertProbeJsonRejected(json =>
+            json["probes"]!["uiCapabilities"]!.AsObject()
+                .Remove("canBlockClipboardRead"));
+    }
+
+    [Theory]
+    [InlineData("unknown-tier")]
+    [InlineData("baseContainer")]
+    public void ProbeParser_RejectsUnknownTier(string tier)
+    {
+        AssertProbeJsonRejected(json => json["tier"] = tier);
+    }
+
+    [Fact]
+    public void ProbeParser_RejectsNonStringTier()
+    {
+        AssertProbeJsonRejected(json => json["tier"] = 1);
+    }
+
+    [Fact]
+    public void ProbeParser_RejectsSuccessWithoutDaclAugmentationState()
+    {
+        AssertProbeJsonRejected(json => json.Remove("needsDaclAugmentation"));
+    }
+
+    [Fact]
+    public void ProbeParser_AcceptsErrorWithoutTierSelectionFields()
+    {
+        var json = CreateCompleteProbeJson();
+        json.Remove("tier");
+        json.Remove("needsDaclAugmentation");
+        json["error"] = "tier detection failed";
+
+        var output = MxcSandbox.ParseProbeOutput(json.ToJsonString());
+
+        Assert.Null(output.Tier);
+        Assert.Null(output.NeedsDaclAugmentation);
+        Assert.Equal("tier detection failed", output.Error);
+    }
+
+    [Fact]
+    public void ProbeParser_RejectsDaclAugmentationStateWithError()
+    {
+        AssertProbeJsonRejected(json =>
+        {
+            json.Remove("tier");
+            json["error"] = "tier detection failed";
+        });
+    }
+
+    [Fact]
+    public void Probe_RejectsNonProcessContainerRequest()
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy { Version = "0.9.0-alpha" },
+            "echo hi")
+        {
+            Containment = new WslcContainment(),
+        };
+
+        var error = Assert.Throws<MxcException>(() => MxcSandbox.Probe(request));
+        Assert.Equal(ErrorCode.UnsupportedContainment, error.Code);
+        Assert.Contains("got wslc", error.Message);
+    }
+
     [Theory]
     [InlineData("allowOutbound")]
     [InlineData("allowLocalNetwork")]
