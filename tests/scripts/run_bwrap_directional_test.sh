@@ -212,13 +212,17 @@ echo "  control listener is on 127.0.0.1:$CONTROL_PORT (10.0.2.2:$CONTROL_PORT f
 # The two external anchors the egress assertions are built on. An allow proves
 # the rule fired only if the destination is otherwise reachable, and a deny
 # proves enforcement only under the same condition -- hence two addresses, one
-# to allow and one to deny, each probed unfiltered first.
+# to allow and one to deny, each probed under a legacy allowlist first.
 ALLOW_ANCHOR="1.1.1.1"
 DENY_ANCHOR="9.9.9.9"
 
 # Probed through the legacy path, so the probe cannot be broken by the
 # directional code it exists to measure. Skips rather than fails when an anchor
 # is unreachable: the assertions would still pass, having proven nothing.
+#
+# The anchor is allowlisted under defaultPolicy='block': a legacy allowlist only
+# refines a block default, and the block default is what puts the probe in the
+# same private namespace as the runs it anchors.
 probe_anchor() {
     local address="$1"
     local port="$2"
@@ -234,7 +238,7 @@ probe_anchor() {
     "commandLine": "bash -c 'echo PROBE_WORKLOAD_STARTED; timeout 8 bash -c \"exec 3<>/dev/tcp/$address/$port\" >/dev/null 2>&1 && echo ANCHOR_REACHABLE; exit 0'"
   },
   "network": {
-    "defaultPolicy": "allow",
+    "defaultPolicy": "block",
     "enforcementMode": "firewall",
     "allowedHosts": ["$subnet"]
   }
@@ -255,7 +259,17 @@ PROBE
         exit 1
     fi
     if ! grep -q ANCHOR_REACHABLE <<<"$out"; then
-        echo "SKIP: $address:$port is not reachable from an unfiltered sandbox on this host."
+        # Unreachable is only an environment verdict if the host has no route
+        # out either. An anchor the host can reach but an allowlisting sandbox
+        # cannot means the allowlist was never programmed or the sandbox's
+        # network never came up, which must fail rather than skip.
+        if timeout 8 bash -c "exec 3<>/dev/tcp/$address/$port" >/dev/null 2>&1; then
+            echo "$out"
+            echo "FAIL: $address:$port is reachable from the host but not from a sandbox that allows it."
+            echo "      The legacy allowlist or the sandbox's network namespace is broken."
+            exit 1
+        fi
+        echo "SKIP: $address:$port is not reachable from a sandbox that allows it on this host."
         echo "      The assertions built on it would pass without proving anything."
         exit 77
     fi
