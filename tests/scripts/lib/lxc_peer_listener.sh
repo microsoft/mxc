@@ -84,6 +84,20 @@ sys.exit(1)
 PY
 }
 
+# Report whether a listener started in the background is still running.
+#
+# A zombie answers `kill -0`, so the kernel's process state is the only source
+# that separates a listener that is merely unreachable from one that exited.
+peer_listener_running() {
+    local pid="$1" state
+    [ -n "$pid" ] || return 1
+    state="$(awk '/^State:/ { print $2; exit }' "/proc/$pid/status" 2>/dev/null)"
+    case "$state" in
+        '' | Z | X | x) return 1 ;;
+    esac
+    return 0
+}
+
 # Print whatever the listener wrote, which is otherwise lost.
 peer_listener_output() {
     if [ -n "$1" ] && [ -s "$1" ]; then

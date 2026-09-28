@@ -223,8 +223,13 @@ PROXY_PID=$!
 
 # Wait until the proxy is listening *and* reachable across the veth. A proxy
 # that never came up would fail this test as though the firewall had blocked
-# it, which would be a false accusation.
+# it, which would be a false accusation; a proxy that exited is harness
+# breakage and has to fail rather than skip.
 if ! PROXY_PROBE_ERROR="$(await_peer_tcp "$PROXY_IP" "$PROXY_PORT")"; then
+    if ! peer_listener_running "$PROXY_PID"; then
+        fail "the proxy exited before it could serve on $PROXY_IP:$PROXY_PORT. \
+Proxy output: $(peer_listener_output "$PROXY_LOG")"
+    fi
     skip_live "the proxy namespace is not reachable from the host at \
 $PROXY_IP:$PROXY_PORT ($PROXY_PROBE_ERROR); the environment does not route to it. \
 Proxy output: $(peer_listener_output "$PROXY_LOG")"
