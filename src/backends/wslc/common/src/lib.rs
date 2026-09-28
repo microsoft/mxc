@@ -18,6 +18,7 @@ pub mod daemon_client;
 pub mod daemon_protocol;
 pub mod daemon_record;
 pub mod error;
+pub mod image;
 pub mod policy;
 pub mod policy_mapping;
 pub mod process_env;

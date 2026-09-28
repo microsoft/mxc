@@ -49,7 +49,7 @@ use crate::daemon_protocol::ExecTerminal;
 use crate::error::WslcError;
 use crate::policy_mapping::VolumeMount;
 use crate::process_env::{self, EnvScope};
-use crate::wsl_container_runner::{wslc_prerequisite_error, WSLContainerRunner};
+use crate::wsl_container_runner::wslc_prerequisite_error;
 use crate::wslc_bindings::*;
 
 // ---------------------------------------------------------------------------
@@ -742,85 +742,6 @@ pub unsafe fn create_daemon_session(
         sdk.terminate_session_fn(),
         sdk.release_session_fn(),
     ))
-}
-
-/// Ensure `image` is available in the session's local cache: use it if already
-/// present, import it from `image_tar_path` if provided, otherwise fail with the
-/// same pre-pull guidance as the one-shot path (MXC never pulls at run time).
-///
-/// # Safety
-/// `sdk` must hold valid function pointers and `session` must be a live handle.
-pub unsafe fn resolve_image(
-    sdk: &WslcSdk,
-    session: WslcSession,
-    image: &str,
-    image_tar_path: Option<&str>,
-    storage_path: Option<&str>,
-    logger: &mut Logger,
-) -> Result<(), ScriptResponse> {
-    let mut images: *mut WslcImageInfo = ptr::null_mut();
-    let mut image_count: u32 = 0;
-    let hr = sdk.WslcListSessionImages(session, &mut images, &mut image_count);
-    if hr != S_OK {
-        return Err(sdk_error("WslcListSessionImages failed", hr, ""));
-    }
-
-    let mut image_found = false;
-    if !images.is_null() {
-        let images_slice = std::slice::from_raw_parts(images, image_count as usize);
-        for info in images_slice {
-            let name_bytes =
-                std::slice::from_raw_parts(info.name.as_ptr().cast::<u8>(), info.name.len());
-            let end = name_bytes
-                .iter()
-                .position(|&b| b == 0)
-                .unwrap_or(name_bytes.len());
-            if let Ok(name) = std::str::from_utf8(&name_bytes[..end]) {
-                if name == image {
-                    image_found = true;
-                    break;
-                }
-            }
-        }
-        windows::Win32::System::Com::CoTaskMemFree(Some(images as *const c_void));
-    }
-
-    if image_found {
-        if image_tar_path.is_some() {
-            let _ = writeln!(
-                logger,
-                "[WSLC][daemon] Image '{}' already cached, skipping tar import",
-                image
-            );
-        } else {
-            let _ = writeln!(logger, "[WSLC][daemon] Image '{}' found", image);
-        }
-        return Ok(());
-    }
-
-    if let Some(tar_path) = image_tar_path {
-        return WSLContainerRunner::import_image_from_tar(sdk, session, image, tar_path, logger);
-    }
-
-    // MXC is an execution layer; image management is out of band. Mirror the
-    // one-shot runner's pre-pull guidance so operators get the same actionable
-    // command.
-    let (storage_arg_wxc, storage_arg_ps) = match storage_path {
-        Some(sp) => (
-            format!(" --storage-path \"{}\"", sp),
-            format!(" -StoragePath \"{}\"", sp),
-        ),
-        None => (String::new(), String::new()),
-    };
-    Err(WslcError::Rejected(format!(
-        "WSLC image '{}' not found locally. Pre-pull it with: \
-         wxc-exec.exe --setup-wslc --image {}{} \
-         (or scripts\\setup-wslc.ps1 -Image {}{}). \
-         MXC does not pull images at run time; \
-         see docs/wsl/wsl-container-getting-started.md.",
-        image, image, storage_arg_wxc, image, storage_arg_ps,
-    ))
-    .into_response())
 }
 
 /// Create a daemon-owned container with `keepalive` as its init process, so it

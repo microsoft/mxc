@@ -17,8 +17,9 @@
 //! elapses.
 //!
 //! Each phase drives the real WSLc SDK via the reusable steps in
-//! [`wslc_common::container_steps`]: `provision` ensures the session + resolves
-//! the image + creates a container with a keepalive init process; `start` boots
+//! [`wslc_common::container_steps`] and [`wslc_common::image`]: `provision`
+//! ensures the session + resolves the image + creates a container with a
+//! keepalive init process; `start` boots
 //! it; `exec` runs a fresh `WslcCreateContainerProcess` to completion, streaming
 //! its stdout/stderr live to the pipe handler via an [`OutputSink`]; `stop` /
 //! `deprovision` stop + delete. The completion reply carries the exit code;
@@ -37,6 +38,7 @@ use wslc_common::daemon_protocol::{
     DeprovisionConfig, ErrKind, ExecConfig, ExecTerminal, NetworkMode, ProvisionConfig,
     StartConfig, StopConfig,
 };
+use wslc_common::image;
 use wslc_common::policy_mapping;
 use wslc_common::process_env::EnvScope;
 use wslc_common::wslc_bindings::{
@@ -520,7 +522,7 @@ impl Worker {
         // SAFETY: `sdk`/`session` are valid; every buffer the SDK stores pointers
         // into is owned by a stationary local (`keepalive`) until create returns.
         let container = unsafe {
-            container_steps::resolve_image(
+            image::resolve_image(
                 sdk,
                 session,
                 &config.image,
