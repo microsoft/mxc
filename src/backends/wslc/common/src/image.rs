@@ -68,47 +68,39 @@ fn pull_failure(
 
     match hr {
         WSLC_E_IMAGE_NOT_FOUND => WslcError::Rejected(format!(
-            "WSLC image '{}' could not be pulled: {}. Check the image reference; \
-             a private registry additionally needs credentials, which MXC does not \
-             yet supply.",
+            "WSLC image '{}' could not be pulled: {}. Check the image name and tag. \
+             For a private registry, MXC cannot supply credentials — set \
+             wslc.imageTarPath to a local tar, or import the image out of band.",
             image, detail
         )),
         WSLC_E_REGISTRY_BLOCKED_BY_POLICY => WslcError::Rejected(format!(
             "WSLC image '{}' could not be pulled: {}. Administrative policy on this \
-             host blocks the registry.",
+             host blocks the registry. Use a permitted registry, or set \
+             wslc.imageTarPath to a local tar.",
             image, detail
         )),
         // Reaching the registry is what failed, so a later run, or a run on a
         // connected host, can still succeed.
         _ => WslcError::Host(format!(
-            "WSLC image '{}' could not be pulled: {}. If this host cannot reach a \
-             registry, warm the cache first with wxc-exec.exe --setup-wslc --image {}{} \
-             (or scripts\\setup-wslc.ps1 -Image {}{}), or set wslc.imageTarPath to a \
-             local tar; see docs/wsl/wsl-container-getting-started.md.",
+            "WSLC image '{}' could not be pulled: {}. Restore network access and retry. \
+             To run on a host that stays offline, set wslc.imageTarPath to a local tar, \
+             or warm this cache from a connected machine with: wxc-exec.exe \
+             --setup-wslc --image {}{}. See docs/wsl/wsl-container-getting-started.md.",
             image,
             detail,
             image,
-            storage_arg(storage_path, StorageArg::Wxc),
-            image,
-            storage_arg(storage_path, StorageArg::PowerShell),
+            storage_arg(storage_path),
         )),
     }
     .into_response()
 }
 
-/// Which command spelling a storage-path override should be rendered for.
-enum StorageArg {
-    Wxc,
-    PowerShell,
-}
-
-/// Render a storage-path override as an argument for the suggested command, or
-/// nothing when the run uses the default path.
-fn storage_arg(storage_path: Option<&str>, flavor: StorageArg) -> String {
-    match (storage_path, flavor) {
-        (None, _) => String::new(),
-        (Some(sp), StorageArg::Wxc) => format!(" --storage-path \"{}\"", sp),
-        (Some(sp), StorageArg::PowerShell) => format!(" -StoragePath \"{}\"", sp),
+/// Render a storage-path override as a `--storage-path` argument for the
+/// suggested command, or nothing when the run uses the default path.
+fn storage_arg(storage_path: Option<&str>) -> String {
+    match storage_path {
+        None => String::new(),
+        Some(sp) => format!(" --storage-path \"{}\"", sp),
     }
 }
 
@@ -474,22 +466,49 @@ mod tests {
         let resp = pull_failure("alpine:latest", None, E_FAIL, "no such host");
         assert!(resp
             .error_message
-            .contains("--setup-wslc --image alpine:latest"));
+            .contains("Restore network access and retry"));
         assert!(resp.error_message.contains("imageTarPath"));
+    }
+
+    #[test]
+    fn an_unreachable_registry_does_not_prescribe_the_pull_that_just_failed() {
+        // `--setup-wslc` shares `pull_image`, so it fails the same way here.
+        let resp = pull_failure("alpine:latest", None, E_FAIL, "no such host");
+        let advice = &resp.error_message;
+        let setup = advice
+            .find("--setup-wslc")
+            .expect("offers the warm-cache route");
+        let connected = advice
+            .find("from a connected machine")
+            .expect("qualifies where that route has to run");
+        assert!(
+            connected < setup,
+            "the connected-machine qualifier must precede the command: {advice}"
+        );
     }
 
     #[test]
     fn an_overridden_store_travels_with_the_suggested_command() {
         let resp = pull_failure("alpine:latest", Some(r"C:\store"), E_FAIL, "down");
         assert!(resp.error_message.contains(r#"--storage-path "C:\store""#));
-        assert!(resp.error_message.contains(r#"-StoragePath "C:\store""#));
     }
 
     #[test]
     fn a_default_store_adds_no_path_argument() {
         let resp = pull_failure("alpine:latest", None, E_FAIL, "down");
         assert!(!resp.error_message.contains("--storage-path"));
-        assert!(!resp.error_message.contains("-StoragePath"));
+    }
+
+    #[test]
+    fn every_rejection_names_a_way_forward() {
+        for hr in [WSLC_E_IMAGE_NOT_FOUND, WSLC_E_REGISTRY_BLOCKED_BY_POLICY] {
+            let resp = pull_failure("ghcr.io/nope:1", None, hr, "denied");
+            assert!(
+                resp.error_message.contains("imageTarPath"),
+                "a rejection that only diagnoses leaves the caller stuck: {}",
+                resp.error_message
+            );
+        }
     }
 
     #[test]

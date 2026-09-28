@@ -1,0 +1,16 @@
+{
+  "_comment": "Cold-cache coverage: names a real image under a storagePath the runner purges first, so resolve_image must pull before the container can run. Guards the one-call pull-then-execute path, which the pre-pull preflight otherwise hides.",
+  "version": "0.9.0-alpha",
+  "containerId": "wslc-cold-cache-pull",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "echo COLD_CACHE_PULL_OK"
+  },
+  "network": {
+    "egress": { "default": "deny" }
+  },
+  "wslc": {
+    "image": "busybox:latest",
+    "storagePath": "C:\\mxc_wslc_cold_cache_test"
+  }
+}

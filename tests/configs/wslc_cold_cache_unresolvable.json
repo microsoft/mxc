@@ -1,0 +1,16 @@
+{
+  "_comment": "Cold-cache failure coverage: an image reference no registry resolves, under a storagePath the runner purges first. Pins the non-retryable classification and that the message names a way forward.",
+  "version": "0.9.0-alpha",
+  "containerId": "wslc-cold-cache-unresolvable",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "echo SHOULD_NOT_RUN"
+  },
+  "network": {
+    "egress": { "default": "deny" }
+  },
+  "wslc": {
+    "image": "library/mxc-no-such-image-should-not-resolve:latest",
+    "storagePath": "C:\\mxc_wslc_cold_cache_test"
+  }
+}

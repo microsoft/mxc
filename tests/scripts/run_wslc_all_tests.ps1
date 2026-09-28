@@ -360,6 +360,21 @@ $null = $results.Add((Run-WslcTest "wslc_custom_registry_quay.json" -OutputConta
 $null = $results.Add((Run-WslcTest "wslc_tar_import_rootfs.json" -OutputContains "Hello from tar-imported image"))
 $null = $results.Add((Run-WslcTest "wslc_tar_import_docker_save.json" -OutputContains "Hello from docker-save image"))
 
+Write-Host "`n--- Cold-Cache Tests ---" -ForegroundColor Cyan
+# The preflight above warms the default store, so nothing else here reaches the
+# cache-miss branch.
+$ColdCacheStore = "C:\mxc_wslc_cold_cache_test"
+if (Test-Path $ColdCacheStore) {
+    Remove-Item $ColdCacheStore -Recurse -Force -ErrorAction SilentlyContinue
+}
+$null = $results.Add((Run-WslcTest "wslc_cold_cache_pull.json" -OutputContains "COLD_CACHE_PULL_OK"))
+# Second run over the store the first one filled: the image must now be reused.
+$null = $results.Add((Run-WslcTest "wslc_cold_cache_pull.json" -OutputContains "COLD_CACHE_PULL_OK"))
+$null = $results.Add((Run-WslcTest "wslc_cold_cache_unresolvable.json" -ExpectedExit -1 -OutputContains "could not be pulled"))
+if (Test-Path $ColdCacheStore) {
+    Remove-Item $ColdCacheStore -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 Write-Host "`n--- Timeout Tests ---" -ForegroundColor Cyan
 $null = $results.Add((Run-WslcTest "wslc_timeout.json" -ExpectedExit -1 -OutputContains "Starting long task"))
 
