@@ -2096,7 +2096,7 @@ mod tests {
     #[test]
     fn validate_rejects_block_default_blocklist_without_allowlist() {
         let mut req = base_request();
-        req.schema_version = "0.8.0-alpha".into();
+        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
         req.policy.default_network_policy = wxc_common::models::NetworkPolicy::Block;
         req.policy.blocked_hosts = vec!["evil.example.com".into()];
         req.policy.network_proxy = ProxyConfig {
