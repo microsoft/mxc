@@ -491,20 +491,29 @@ impl HyperlightScriptRunner {
 
         // Denied paths: block early if any appears in the allow lists.
         for denied in &request.policy.denied_paths {
-            if request
+            for allowed in request
                 .policy
                 .readwrite_paths
                 .iter()
-                .any(|p| same_path(p, denied))
-                || request
-                    .policy
-                    .readonly_paths
-                    .iter()
-                    .any(|p| same_path(p, denied))
+                .chain(request.policy.readonly_paths.iter())
             {
-                return Err(RunnerError::Preflight(format!(
-                    "path {denied:?} appears in both deniedPaths and an allow list"
-                )));
+                match same_path(allowed, denied) {
+                    PathComparison::Same => {
+                        return Err(RunnerError::Preflight(format!(
+                            "path {denied:?} appears in both deniedPaths and an allow list"
+                        )));
+                    }
+                    PathComparison::Different => {}
+                    PathComparison::Indeterminate => {
+                        return Err(RunnerError::Preflight(format!(
+                            "Hyperlight: cannot verify deniedPaths against allow lists because \
+                             {allowed:?} or {denied:?} could not be resolved to a canonical \
+                             location. With deniedPaths present, MXC fails closed rather than \
+                             risk an unenforced deny. Ensure both paths are accessible, or remove \
+                             the deniedPaths entry."
+                        )));
+                    }
+                }
             }
         }
 
@@ -1330,27 +1339,60 @@ fn stamp_matches(home: &Path, runtime: HyperlightRuntime) -> bool {
 
 /// Paths equal after canonicalization, with a platform-aware lexical fallback
 /// for paths that do not exist yet.
-fn same_path(a: &str, b: &str) -> bool {
+fn same_path(a: &str, b: &str) -> PathComparison {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(ap), Ok(bp)) => ap == bp,
+        (Ok(ap), Ok(bp)) => PathComparison::from_bool(ap == bp),
         _ => same_path_fallback(a, b),
     }
 }
 
-#[cfg(target_os = "windows")]
-fn same_path_fallback(a: &str, b: &str) -> bool {
-    use wxc_common::filesystem_canonical::{canonicalize_allowing_absent_tail, PathCanonical};
+#[derive(Debug, PartialEq, Eq)]
+enum PathComparison {
+    Same,
+    Different,
+    Indeterminate,
+}
 
-    match (
-        canonicalize_allowing_absent_tail(a),
-        canonicalize_allowing_absent_tail(b),
-    ) {
-        (PathCanonical::Canonical(ap), PathCanonical::Canonical(bp)) => {
-            WindowsFallbackPath::parse(&ap) == WindowsFallbackPath::parse(&bp)
+impl PathComparison {
+    fn from_bool(equal: bool) -> Self {
+        if equal {
+            Self::Same
+        } else {
+            Self::Different
         }
-        (PathCanonical::Unknown, _) | (_, PathCanonical::Unknown) => true,
-        _ => WindowsFallbackPath::parse(a) == WindowsFallbackPath::parse(b),
     }
+}
+
+#[cfg(target_os = "windows")]
+fn same_path_fallback(a: &str, b: &str) -> PathComparison {
+    use wxc_common::filesystem_canonical::canonicalize_allowing_absent_tail;
+
+    same_path_fallback_with(a, b, canonicalize_allowing_absent_tail)
+}
+
+#[cfg(target_os = "windows")]
+fn same_path_fallback_with(
+    a: &str,
+    b: &str,
+    resolve: impl Fn(&str) -> wxc_common::filesystem_canonical::PathCanonical,
+) -> PathComparison {
+    use wxc_common::filesystem_canonical::PathCanonical;
+
+    if !has_verbatim_trim_sensitive_component(a) && !has_verbatim_trim_sensitive_component(b) {
+        match (resolve(a), resolve(b)) {
+            (PathCanonical::Canonical(ap), PathCanonical::Canonical(bp)) => {
+                return PathComparison::from_bool(
+                    WindowsFallbackPath::parse(&ap) == WindowsFallbackPath::parse(&bp),
+                );
+            }
+            (PathCanonical::Unknown, _) | (_, PathCanonical::Unknown) => {
+                return PathComparison::Indeterminate;
+            }
+            _ => {}
+        }
+    }
+
+    PathComparison::from_bool(WindowsFallbackPath::parse(a) == WindowsFallbackPath::parse(b))
 }
 
 #[cfg(target_os = "windows")]
@@ -1364,7 +1406,7 @@ struct WindowsFallbackPath {
 #[cfg(target_os = "windows")]
 impl WindowsFallbackPath {
     fn parse(path: &str) -> Self {
-        let folded = normalize_windows_verbatim_prefix(&path.to_lowercase());
+        let (folded, verbatim) = normalize_windows_verbatim_prefix(&path.to_lowercase());
         let bytes = folded.as_bytes();
         let (drive, rest) =
             if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
@@ -1385,7 +1427,16 @@ impl WindowsFallbackPath {
                         components.push("..".to_string());
                     }
                 }
-                other => components.push(other.to_string()),
+                _ => {
+                    let component = if verbatim {
+                        segment
+                    } else {
+                        segment.trim_end_matches(['.', ' '])
+                    };
+                    if !component.is_empty() {
+                        components.push(component.to_string());
+                    }
+                }
             }
         }
 
@@ -1398,19 +1449,29 @@ impl WindowsFallbackPath {
 }
 
 #[cfg(target_os = "windows")]
-fn normalize_windows_verbatim_prefix(path: &str) -> String {
+fn normalize_windows_verbatim_prefix(path: &str) -> (String, bool) {
     if let Some(rest) = path.strip_prefix(r"\\?\unc\") {
-        format!(r"\\{rest}")
+        (format!(r"\\{rest}"), true)
     } else if let Some(rest) = path.strip_prefix(r"\\?\") {
-        rest.to_string()
+        (rest.to_string(), true)
     } else {
-        path.to_string()
+        (path.to_string(), false)
     }
 }
 
+#[cfg(target_os = "windows")]
+fn has_verbatim_trim_sensitive_component(path: &str) -> bool {
+    let folded = path.to_lowercase();
+    let (_, verbatim) = normalize_windows_verbatim_prefix(&folded);
+    verbatim
+        && folded
+            .split(['\\', '/'])
+            .any(|segment| segment.ends_with(['.', ' ']))
+}
+
 #[cfg(not(target_os = "windows"))]
-fn same_path_fallback(a: &str, b: &str) -> bool {
-    PathBuf::from(a) == PathBuf::from(b)
+fn same_path_fallback(a: &str, b: &str) -> PathComparison {
+    PathComparison::from_bool(PathBuf::from(a) == PathBuf::from(b))
 }
 
 fn mounts_equal(a: &[Mount], b: &[Mount]) -> bool {
@@ -1748,11 +1809,67 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn policy_rejects_denied_missing_windows_trailing_dot_allow_overlap() {
+        let request = ExecutionRequest {
+            script_code: "print('x')".to_string(),
+            policy: ContainerPolicy {
+                readwrite_paths: vec![
+                    "C:\\MXC\\HyperlightTrailingDot\\temp\\..\\PRIVATECACHE.\\".to_string()
+                ],
+                denied_paths: vec!["c:/mxc/hyperlighttrailingdot/privatecache".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = HyperlightScriptRunner::validate_policies(&request).unwrap_err();
+        assert!(err.to_string().contains("deniedPaths"), "got: {err}");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn policy_keeps_verbatim_windows_trailing_dot_distinct() {
+        let request = ExecutionRequest {
+            script_code: "print('x')".to_string(),
+            policy: ContainerPolicy {
+                readwrite_paths: vec![
+                    "\\\\?\\C:\\MXC\\HyperlightVerbatimDot\\PRIVATECACHE.".to_string()
+                ],
+                denied_paths: vec!["c:/mxc/hyperlightverbatimdot/privatecache".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        HyperlightScriptRunner::validate_policies(&request).unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn fallback_reports_indeterminate_for_unresolved_windows_paths() {
+        use wxc_common::filesystem_canonical::PathCanonical;
+
+        assert_eq!(
+            same_path_fallback_with(
+                "C:\\MXC\\HyperlightUnknown\\allow",
+                "C:\\MXC\\HyperlightUnknown\\deny",
+                |_| PathCanonical::Unknown,
+            ),
+            PathComparison::Indeterminate
+        );
+    }
+
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn fallback_path_comparison_stays_case_sensitive_off_windows() {
-        assert!(same_path("/tmp/mxc-missing-case", "/tmp/mxc-missing-case"));
-        assert!(!same_path("/tmp/MXC-MISSING-CASE", "/tmp/mxc-missing-case"));
+        assert_eq!(
+            same_path("/tmp/mxc-missing-case", "/tmp/mxc-missing-case"),
+            PathComparison::Same
+        );
+        assert_eq!(
+            same_path("/tmp/MXC-MISSING-CASE", "/tmp/mxc-missing-case"),
+            PathComparison::Different
+        );
     }
 
     #[test]
