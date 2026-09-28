@@ -1328,11 +1328,38 @@ fn stamp_matches(home: &Path, runtime: HyperlightRuntime) -> bool {
     }
 }
 
-/// Paths equal after canonicalization (best-effort).
+/// Paths equal after canonicalization, with a platform-aware lexical fallback
+/// for paths that do not exist yet.
 fn same_path(a: &str, b: &str) -> bool {
-    let ap = std::fs::canonicalize(a).unwrap_or_else(|_| PathBuf::from(a));
-    let bp = std::fs::canonicalize(b).unwrap_or_else(|_| PathBuf::from(b));
-    ap == bp
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ap), Ok(bp)) => ap == bp,
+        _ => same_path_fallback(a, b),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn same_path_fallback(a: &str, b: &str) -> bool {
+    windows_fallback_path_key(a).eq_ignore_ascii_case(&windows_fallback_path_key(b))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_fallback_path_key(path: &str) -> String {
+    let mut normalized = path.replace('/', "\\");
+    while normalized.len() > 1 && normalized.ends_with('\\') {
+        if normalized.len() == 3 && normalized.as_bytes()[1] == b':' {
+            break;
+        }
+        if normalized.chars().all(|c| c == '\\') {
+            break;
+        }
+        normalized.pop();
+    }
+    normalized
+}
+
+#[cfg(not(target_os = "windows"))]
+fn same_path_fallback(a: &str, b: &str) -> bool {
+    PathBuf::from(a) == PathBuf::from(b)
 }
 
 fn mounts_equal(a: &[Mount], b: &[Mount]) -> bool {
@@ -1618,6 +1645,36 @@ mod tests {
         let resp = r.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
         assert!(resp.error_message.contains("deniedPaths"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn policy_rejects_denied_missing_windows_case_variant_allow_overlap() {
+        let mut r = runner();
+        let request = ExecutionRequest {
+            script_code: "print('x')".to_string(),
+            policy: ContainerPolicy {
+                readwrite_paths: vec!["C:\\MXC\\HyperlightMissingCase\\PRIVATECACHE".to_string()],
+                denied_paths: vec!["c:/mxc/hyperlightmissingcase/privatecache/".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+        let resp = r.run(&request, &mut logger);
+        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
+        assert!(
+            resp.error_message.contains("deniedPaths"),
+            "got: {}",
+            resp.error_message
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn fallback_path_comparison_stays_case_sensitive_off_windows() {
+        assert!(same_path("/tmp/mxc-missing-case", "/tmp/mxc-missing-case"));
+        assert!(!same_path("/tmp/MXC-MISSING-CASE", "/tmp/mxc-missing-case"));
     }
 
     #[test]
