@@ -223,7 +223,7 @@ it can observe idle-teardown within seconds.
 ## Testing
 
 `tests/scripts/run_wslc_state_aware_tests.ps1` is the multi-invocation E2E harness (requires a WSL2
-host with the image pre-pulled and `wxc-wslc-daemon.exe` staged next to `wxc-exec.exe`). It exercises
+host that can reach a registry or already has the image cached, and `wxc-wslc-daemon.exe` staged next to `wxc-exec.exe`). It exercises
 core lifecycle, warm-reuse (a marker written by one `exec` is read back by a separate `exec`
 process — only possible if the container stayed warm), filesystem volumes, bridged networking +
 proxy, validation rejections, and idle teardown. Fixtures live in

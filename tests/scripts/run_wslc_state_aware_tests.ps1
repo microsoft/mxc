@@ -23,7 +23,8 @@
     exits on its own.
 
     Requires: Windows 11, WSL2, the WSLC SDK runtime (wslcsdk.dll staged next
-    to the binaries), pre-pulled images, and a wxc-exec.exe + wxc-wslc-daemon.exe
+    to the binaries), registry access or an already-cached alpine:latest, and a
+    wxc-exec.exe + wxc-wslc-daemon.exe
     built with `--features wslc`. Cannot run in GitHub Actions CI.
 
     Prerequisite probes (skip, not fail, if missing):
@@ -48,7 +49,8 @@
     Probe the debug target dir and pass --debug to wxc-exec.
 
 .PARAMETER SkipSetup
-    Skip the WSLC image pre-pull preflight (assume the cache is warm).
+    Skip the image-cache warming preflight. The runner pulls on a miss, so this
+    exercises that path instead.
 
 .EXAMPLE
     .\run_wslc_state_aware_tests.ps1

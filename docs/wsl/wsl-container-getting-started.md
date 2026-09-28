@@ -14,7 +14,7 @@ MXC, which lets you run Linux containers on Windows using the WSLC SDK.
 | **Windows 10 1903 (build 18362.1049)+ on x64, or Windows 10 2004 (build 19041)+ on ARM64** | WSL 2's own [system requirements](https://learn.microsoft.com/windows/wsl/install-manual#step-2---check-requirements-for-running-wsl-2). MXC does not check the OS version itself — see [How an unsupported Windows version is reported](#how-an-unsupported-windows-version-is-reported) below. The WSL runtime package installs only on build 19041 and later, so in practice a 1903/1909 host still needs an upgrade to reach the WSL version below. |
 | **WSL 2.9.9+** | The installed WSL runtime package must meet the WSLC minimum; see Step 1 below for installation |
 | **WSLC SDK** | `wslcsdk.dll` is a separate client SDK and must be in the same directory as the running executable (`wxc-exec.exe`, or your own binary when using the Rust SDK) |
-| **Container images** | Pre-pulled or available from a registry with network access |
+| **Container images** | Reachable from a registry, already cached, or supplied as a local tar |
 
 ### How an unsupported Windows version is reported
 
@@ -110,11 +110,12 @@ Verify the binary starts without errors:
 > DLL is loaded at runtime only when the WSLC backend is invoked. All other
 > backends (Process Container, Windows Sandbox) work without it.
 
-## Step 3 — Pre-pull container images
+## Step 3 — Container images (optional pre-pull)
 
-MXC is an execution layer and does **not** pull container images at run
-time. Pre-pull each image you intend to use into the WSLC SDK cache
-before invoking a config that references it:
+A run pulls its image on a cache miss, so you can skip straight to
+Step 4. Pre-pulling is still worth doing in two cases: to keep the
+download off the critical path of a later run, and to populate a cache
+for a host that cannot reach a registry.
 
 ```powershell
 cd <repo-root>
@@ -136,12 +137,14 @@ cost once per image, not once per run.
 > configs override `wslc.storagePath`, pass the same
 > value here with `-StoragePath` (or `--storage-path` on
 > `wxc-exec.exe`), otherwise the runner will not find what you just
-> pulled.
+> pulled and will pull it again under its own path.
 
-If you forget this step, the next `wxc-exec.exe` invocation will fail
-fast with an actionable error pointing back at the `--setup-wslc`
-command — your image name pre-filled — so the first-time stumble is
-self-correcting.
+> **Bring-up reaches the network.** A cache miss makes the host fetch
+> from the image's registry before the container starts. This is
+> outside the sandbox's own network policy: a config setting
+> `network.egress.default` to `deny` constrains the container once it
+> is running, not the pull that precedes it. Pre-pull, or set
+> `wslc.imageTarPath`, to keep bring-up off the network entirely.
 
 ## Step 4 — Verify WSLC is working
 
@@ -159,21 +162,21 @@ Hello from WSL Container!
 Linux <hostname> 6.6.x-microsoft-standard-WSL2 ... x86_64 Linux
 ```
 
-## Two-step lifecycle
+## Warming the cache
 
-Once setup is done, the day-to-day flow is two distinct commands:
+The day-to-day flow is a single command:
 
 ```powershell
-# (one-time per image) pre-pull into the SDK cache
-.\scripts\setup-wslc.ps1 -Image <image>
-
-# (any number of times) execute against the cached image
 .\src\target\x86_64-pc-windows-msvc\release\wxc-exec.exe my-config.json
 ```
 
-This separation keeps `wxc-exec.exe` hermetic and fast at run time —
-the runner never reaches for the network, never blocks on a pull, and
-its failure modes are decoupled from registry availability.
+The first run of a given image pays for its download; later runs read
+it from the cache. To pay that cost ahead of time instead — or to
+prepare a machine that will run offline — warm the cache first:
+
+```powershell
+.\scripts\setup-wslc.ps1 -Image <image>
+```
 
 ## Usage
 
@@ -286,33 +289,28 @@ WSLC-specific settings go under `wslc` in the JSON config:
 
 ### Image sources
 
-> **All three sources require pre-pulling/importing before the runner
-> can use them.** The runner only checks the local cache; see
-> [Step 3](#step-3--pre-pull-container-images) for the setup commands.
+> The store is consulted first in every case. A miss pulls from the
+> registry, except with `imageTarPath`, which imports the tar instead.
+> See [Step 3](#step-3--container-images-optional-pre-pull) for warming
+> the cache ahead of time.
 
-**1. Pre-pulled from DockerHub (default registry):**
-
-```powershell
-.\scripts\setup-wslc.ps1 -Image alpine:latest
-```
+**1. From DockerHub (default registry):**
 
 ```json
 "wslc": { "image": "alpine:latest" }
 ```
 
-**2. Pre-pulled from a custom registry (no auth):**
-
-```powershell
-.\scripts\setup-wslc.ps1 -Image ghcr.io/linuxserver/baseimage-alpine:3.21
-```
+**2. From a custom registry (no auth):**
 
 ```json
 "wslc": { "image": "ghcr.io/linuxserver/baseimage-alpine:3.21" }
 ```
 
 Tested registries: DockerHub, `mcr.microsoft.com`, `ghcr.io`, `quay.io`.
+Private registries needing credentials are not supported yet; pre-pull
+those out of band or supply a tar.
 
-**3. Import from a local tar file (no pre-pull needed):**
+**3. Import from a local tar file (never touches a registry):**
 
 ```json
 "wslc": {
@@ -581,7 +579,9 @@ images — cannot be used.
 | `Failed to load wslcsdk.dll` | DLL not in same directory as `wxc-exec.exe` | Copy `wslcsdk.dll` next to the binary |
 | `WSLC runtime unavailable` | WSL runtime package is missing, older than 2.9.9, or the Virtual Machine Platform optional component is disabled | Update WSL with `wsl --update --pre-release`, verify the installed version with `wsl --version`, and enable the Virtual Machine Platform optional component if required. The WSLC SDK DLL is a separate dependency and does not replace the WSL runtime package. |
 | `WSLC runtime unavailable. Missing components: SdkNeedsUpdate` | The opposite direction: your installed WSL is **newer** than the WSLc SDK this MXC build ships (pinned by `WSLC_SDK_VERSION` in `src/backends/wslc/common/build.rs`) | Update MXC to a build with a newer pinned SDK. Do **not** update WSL — it is already ahead, and updating it further will not clear this. |
-| `WSLC image '<name>' not found locally` | Image was not pre-pulled, and no `imageTarPath` is set | Run `.\scripts\setup-wslc.ps1 -Image <name>` (or `wxc-exec.exe --setup-wslc --image <name>`); match the `-StoragePath` to your config's `wslc.storagePath` if set |
+| `WSLC image '<name>' could not be pulled` with `repository does not exist or may require 'docker login'` | The reference is wrong, or the registry needs credentials MXC cannot supply | Fix the reference. For a private registry, pre-pull out of band or use `imageTarPath` |
+| `WSLC image '<name>' could not be pulled` with `no such host` or a connection error | This host cannot reach the registry | Restore network access, or warm the cache from a connected machine with `--setup-wslc` and match `storagePath`. `imageTarPath` removes the dependency entirely |
+| `WSLC image '<name>' could not be pulled` with `HRESULT 0x8004060D` | Administrative policy on the host blocks the registry | Use a permitted registry, or supply the image with `imageTarPath` |
 | Container exits with code -1 | Process failed or timed out | Check stderr output with `--debug` flag |
 
 ## Example Configs

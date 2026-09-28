@@ -553,7 +553,9 @@ impl WSLContainerRunner {
     /// Must be called once per process before any other WSLC SDK functions.
     /// The returned `WslcSdk` holds raw function pointers loaded from `wslcsdk.dll`;
     /// callers must keep it alive for the duration of all SDK use.
-    unsafe fn init_and_load_sdk(logger: &mut Logger) -> Result<&'static WslcSdk, ScriptResponse> {
+    pub(crate) unsafe fn init_and_load_sdk(
+        logger: &mut Logger,
+    ) -> Result<&'static WslcSdk, ScriptResponse> {
         // Accept exactly what `ComApartment` accepts, so a probe and a spawn on
         // the same thread can never disagree: an STA caller
         // (`RPC_E_CHANGED_MODE`) reuses its existing apartment rather than
@@ -682,94 +684,6 @@ impl WSLContainerRunner {
             sdk.terminate_session_fn(),
             sdk.release_session_fn(),
         ))
-    }
-
-    /// Pre-pull a WSLC image into the SDK's local image cache.
-    ///
-    /// Loads the SDK, opens a minimal session against `storage_path` (or the
-    /// runner default), pulls `image_name`, then releases the session. The
-    /// image persists in the storage path's cache for subsequent runner
-    /// invocations that pass the same `storage_path`.
-    ///
-    /// # Safety
-    /// Must be called once per process before any other WSLC SDK functions
-    /// (it initialises COM via `init_and_load_sdk`).
-    pub unsafe fn setup_pull_image(
-        image_name: &str,
-        storage_path: Option<&str>,
-        logger: &mut Logger,
-    ) -> Result<(), String> {
-        let sdk = match Self::init_and_load_sdk(logger) {
-            Ok(s) => s,
-            Err(resp) => return Err(resp.error_message),
-        };
-
-        let storage_path_str = storage_path.map(|s| s.to_string()).unwrap_or_else(|| {
-            std::env::temp_dir()
-                .join("mxc-wslc-sessions")
-                .to_string_lossy()
-                .to_string()
-        });
-        let session_name: Vec<u16> = to_wide("mxc-setup-wslc");
-        let storage_path_wide: Vec<u16> = to_wide(&storage_path_str);
-
-        let mut settings = std::mem::zeroed::<WslcSessionSettings>();
-        let hr = sdk.WslcInitSessionSettings(
-            session_name.as_ptr(),
-            storage_path_wide.as_ptr(),
-            &mut settings,
-        );
-        if hr != S_OK {
-            return Err(format!(
-                "WslcInitSessionSettings failed (HRESULT 0x{:08X})",
-                hr as u32
-            ));
-        }
-
-        let mut session: WslcSession = ptr::null_mut();
-        let mut create_err = CoTaskMemPWSTR::null();
-        let hr = sdk.WslcCreateSession(&mut settings, &mut session, create_err.as_mut_ptr());
-        if hr != S_OK {
-            return Err(format!(
-                "WslcCreateSession failed (HRESULT 0x{:08X}): {}",
-                hr as u32,
-                create_err.to_string_lossy()
-            ));
-        }
-        let _session_guard = WslcSessionGuard::from_raw(
-            session,
-            sdk.terminate_session_fn(),
-            sdk.release_session_fn(),
-        );
-
-        let _ = writeln!(
-            logger,
-            "[WSLC setup] Pulling image '{}' into {}",
-            image_name, storage_path_str
-        );
-        let uri_cstr = format!("{}\0", image_name);
-        let pull_opts = WslcPullImageOptions {
-            uri: uri_cstr.as_bytes().as_ptr() as PCSTR,
-            progressCallback: None,
-            progressCallbackContext: ptr::null_mut(),
-            registryAuth: ptr::null(),
-        };
-        let mut pull_err = CoTaskMemPWSTR::null();
-        let hr = sdk.WslcPullSessionImage(session, &pull_opts, pull_err.as_mut_ptr());
-        if hr != S_OK {
-            return Err(format!(
-                "WslcPullSessionImage('{}') failed (HRESULT 0x{:08X}): {}",
-                image_name,
-                hr as u32,
-                pull_err.to_string_lossy()
-            ));
-        }
-        let _ = writeln!(
-            logger,
-            "[WSLC setup] Image '{}' pulled successfully",
-            image_name
-        );
-        Ok(())
     }
 
     /// Apply iptables rules inside a running container for host filtering.

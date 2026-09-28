@@ -2,7 +2,8 @@
 # Licensed under the MIT License.
 
 # WSLC (WSL Container) E2E test runner.
-# Requires: Windows 11, WSL2 enabled, WSLC SDK installed, pre-pulled images.
+# Requires: Windows 11, WSL2 enabled, WSLC SDK installed, and either network
+# access to the test images' registries or those images already cached.
 # Cannot run in GitHub Actions CI (needs WSL2 + WSLC runtime).
 #
 # Runs the one-shot WSLC configs directly, then delegates to
@@ -17,9 +18,9 @@
 #
 # Image pre-pull:
 #   This script invokes scripts\setup-wslc.ps1 as a preflight to populate the
-#   WSLC image cache. MXC's runner no longer auto-pulls images at run time
-#   (see issue #165), so the cache must be warmed before any test that
-#   references a registry image. Pass -SkipSetup to bypass.
+#   WSLC image cache. The runner pulls on a cache miss by itself, so this only
+#   keeps per-test timings clear of one-off download cost. Pass -SkipSetup to
+#   bypass and let the first test that needs an image pull it.
 #
 # Prerequisites for tar import tests:
 #
@@ -74,10 +75,9 @@ if (-not $WxcExec -or -not (Test-Path $WxcExec)) {
     exit 1
 }
 
-# Preflight: ensure the WSLC image cache is populated. The runner no longer
-# auto-pulls (see scripts\setup-wslc.ps1 and #165). Skipping is supported for
-# the common case where the caller has already pre-pulled or wants to test
-# a hermetic environment.
+# Preflight: warm the WSLC image cache so per-test timings stay clear of one-off
+# download cost. The runner pulls on a miss by itself, so -SkipSetup is a
+# supported way to exercise that path instead.
 if (-not $SkipSetup) {
     $SetupScript = Join-Path $RepoRoot "scripts\setup-wslc.ps1"
     if (Test-Path $SetupScript) {

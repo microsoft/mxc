@@ -51,7 +51,7 @@ use wxc_common::models::{FailurePhase, ScriptResponse};
 const SESSION_NAME: &str = "mxc-wslc-daemon";
 
 /// Default on-disk WSLc image/session store. Matches the one-shot runner's
-/// default so images pre-pulled via `setup-wslc.ps1` are found by the daemon.
+/// default so both surfaces read and fill the same cache.
 fn default_storage_path() -> String {
     std::env::temp_dir()
         .join("mxc-wslc-sessions")
@@ -1201,12 +1201,12 @@ mod tests {
     //
     // Exercises the real SDK path end to end: provision (boot VM + create
     // container) → start → exec → stop → deprovision → refcount back to 0. It
-    // needs a WSL2 host with `alpine:latest` pre-pulled into the daemon session
-    // cache (`%TEMP%\mxc-wslc-sessions`, e.g. via `scripts\setup-wslc.ps1
-    // -Image alpine:latest`), so it is `#[ignore]`d and run explicitly with
+    // needs a WSL2 host that can reach Docker Hub, or one with `alpine:latest`
+    // already in the daemon session cache (`%TEMP%\mxc-wslc-sessions`), so it
+    // is `#[ignore]`d and run explicitly with
     // `cargo test -p wxc_wslc_daemon -- --ignored`.
     #[tokio::test]
-    #[ignore = "requires a WSL2 host with alpine:latest pre-pulled into the daemon session cache"]
+    #[ignore = "requires a WSL2 host that can reach a registry, or alpine:latest already cached"]
     async fn full_lifecycle_on_wsl_host() {
         let handle = spawn().unwrap();
         assert_eq!(count(&handle).await, 0);
@@ -1270,7 +1270,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires a WSL2 host with alpine:latest pre-pulled into the daemon session cache"]
+    #[ignore = "requires a WSL2 host that can reach a registry, or alpine:latest already cached"]
     async fn cancelled_queued_exec_never_starts_process() {
         let handle = spawn().unwrap();
         let id = handle

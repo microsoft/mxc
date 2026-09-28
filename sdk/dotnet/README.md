@@ -415,8 +415,9 @@ var request = new SandboxRequest(
 };
 ```
 
-The image must already be cached unless `ImageTarPath` is supplied. The image
-store wins over the tar when both identify an already-cached image. The native
+The image store is consulted first; a miss pulls `Image` from its registry
+unless `ImageTarPath` supplies it instead. The store wins over the tar when
+both identify an already-cached image. The native
 unit must be built with WSLC support or execution returns
 `UnsupportedContainment`.
 

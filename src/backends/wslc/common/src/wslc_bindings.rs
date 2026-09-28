@@ -25,6 +25,21 @@ pub use crate::wslcsdk_sys::*;
 
 /// COM success sentinel. Not declared in `wslcsdk.h`, so defined here.
 pub const S_OK: HRESULT = 0;
+
+// The header declares its error codes with `MAKE_HRESULT(SEVERITY_ERROR,
+// FACILITY_ITF, WSLC_E_BASE + n)`, which bindgen cannot evaluate, so only the
+// base survives into the generated module. Packing severity 1 and facility 4
+// into the high half reproduces the header's values from that base.
+const fn wslc_error(offset: u32) -> HRESULT {
+    (0x8004_0000u32 | (WSLC_E_BASE + offset)) as HRESULT
+}
+
+/// The registry answered, but the image reference does not resolve there or needs credentials.
+pub const WSLC_E_IMAGE_NOT_FOUND: HRESULT = wslc_error(1);
+
+/// Administrative policy on this host forbids reaching the registry.
+pub const WSLC_E_REGISTRY_BLOCKED_BY_POLICY: HRESULT = wslc_error(13);
+
 // ---------------------------------------------------------------------------
 // Raw function-pointer types used by the RAII guards.
 //
@@ -573,5 +588,12 @@ mod tests {
     fn check_hresult_ok_and_err() {
         assert!(check_hresult(S_OK).is_ok());
         assert!(check_hresult(-2147467259).is_err()); // E_FAIL
+    }
+
+    #[test]
+    fn wslc_error_codes_match_the_header() {
+        // The values the header spells out in its trailing comments.
+        assert_eq!(WSLC_E_IMAGE_NOT_FOUND as u32, 0x8004_0601);
+        assert_eq!(WSLC_E_REGISTRY_BLOCKED_BY_POLICY as u32, 0x8004_060D);
     }
 }

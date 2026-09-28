@@ -70,7 +70,7 @@ pub(crate) fn sdk_error(context: &str, hr: HRESULT, sdk_msg: &str) -> ScriptResp
 /// image, or container path can contain `\u{0}`. Rust keeps such a string whole,
 /// but the SDK stops at the first NUL — so validation/logging and execution
 /// would disagree about what actually ran. Reject at the marshalling boundary.
-fn cstr_bytes(field: &str, value: &str) -> Result<Vec<u8>, ScriptResponse> {
+pub(crate) fn cstr_bytes(field: &str, value: &str) -> Result<Vec<u8>, ScriptResponse> {
     std::ffi::CString::new(value)
         .map(|c| c.into_bytes_with_nul())
         .map_err(|_| {

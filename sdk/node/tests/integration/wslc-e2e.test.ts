@@ -9,7 +9,8 @@
 //   - WSLC SDK runtime installed
 //   - wxc-exec.exe built with --features wslc
 //   - wslcsdk.dll in the same directory as wxc-exec.exe
-//   - alpine:latest and python:3.12-alpine images pre-pulled
+//   - network access to Docker Hub, or alpine:latest and python:3.12-alpine
+//     already cached
 //
 // Run via: npm test (from integration directory)
 
@@ -74,10 +75,8 @@ describe('WSLC SDK E2E — createConfigFromPolicy → customize → spawn', {
       config.wslc!.cpuCount = 2;
       config.wslc!.memoryMb = 1024;
       // Intentionally omit `storagePath` so this test reuses the default
-      // image store where `python:3.12-alpine` has already been pre-pulled
-      // (the docs require operators to pre-pull). Setting storagePath to a
-      // fresh temp directory would point WSLC at an empty image store and
-      // fail with "image not found" — MXC does not pull at runtime.
+      // image store, where `python:3.12-alpine` is already cached. Pointing at
+      // a fresh temp directory would make the run pull the image again.
 
       const { stdout, stderr, exitCode } = await new Promise<{ stdout: string; stderr: string; exitCode: number }>((resolve, reject) => {
         const child = sdk.spawnSandboxFromConfig(config, { debug: true, usePty: false }) as ChildProcess;

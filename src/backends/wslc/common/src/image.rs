@@ -11,9 +11,106 @@ use wxc_common::logger::Logger;
 use wxc_common::models::ScriptResponse;
 use wxc_common::string_util::{to_wide, CoTaskMemPWSTR};
 
-use crate::container_steps::sdk_error;
+use crate::container_steps::{cstr_bytes, sdk_error};
 use crate::error::WslcError;
+use crate::wsl_container_runner::WSLContainerRunner;
 use crate::wslc_bindings::*;
+
+/// Pull `image` from its registry into the session's local image cache.
+///
+/// # Safety
+/// `sdk` must hold valid function pointers and `session` must be a live handle.
+pub unsafe fn pull_image(
+    sdk: &WslcSdk,
+    session: WslcSession,
+    image: &str,
+    storage_path: Option<&str>,
+    log_prefix: &str,
+    logger: &mut Logger,
+) -> Result<(), ScriptResponse> {
+    let _ = writeln!(logger, "{} Pulling image '{}'", log_prefix, image);
+
+    let uri_cstr = cstr_bytes("image", image)?;
+    let pull_opts = WslcPullImageOptions {
+        uri: uri_cstr.as_ptr() as PCSTR,
+        progressCallback: None,
+        progressCallbackContext: ptr::null_mut(),
+        registryAuth: ptr::null(),
+    };
+
+    let mut pull_err = CoTaskMemPWSTR::null();
+    let hr = sdk.WslcPullSessionImage(session, &pull_opts, pull_err.as_mut_ptr());
+    if hr != S_OK {
+        return Err(pull_failure(
+            image,
+            storage_path,
+            hr,
+            &pull_err.to_string_lossy(),
+        ));
+    }
+
+    let _ = writeln!(logger, "{} Image '{}' pulled", log_prefix, image);
+    Ok(())
+}
+
+/// Classify a `WslcPullSessionImage` failure and render it for the caller.
+fn pull_failure(
+    image: &str,
+    storage_path: Option<&str>,
+    hr: HRESULT,
+    sdk_msg: &str,
+) -> ScriptResponse {
+    let detail = if sdk_msg.is_empty() {
+        format!("HRESULT 0x{:08X}", hr as u32)
+    } else {
+        format!("{} (HRESULT 0x{:08X})", sdk_msg, hr as u32)
+    };
+
+    match hr {
+        WSLC_E_IMAGE_NOT_FOUND => WslcError::Rejected(format!(
+            "WSLC image '{}' could not be pulled: {}. Check the image reference; \
+             a private registry additionally needs credentials, which MXC does not \
+             yet supply.",
+            image, detail
+        )),
+        WSLC_E_REGISTRY_BLOCKED_BY_POLICY => WslcError::Rejected(format!(
+            "WSLC image '{}' could not be pulled: {}. Administrative policy on this \
+             host blocks the registry.",
+            image, detail
+        )),
+        // Reaching the registry is what failed, so a later run, or a run on a
+        // connected host, can still succeed.
+        _ => WslcError::Host(format!(
+            "WSLC image '{}' could not be pulled: {}. If this host cannot reach a \
+             registry, warm the cache first with wxc-exec.exe --setup-wslc --image {}{} \
+             (or scripts\\setup-wslc.ps1 -Image {}{}), or set wslc.imageTarPath to a \
+             local tar; see docs/wsl/wsl-container-getting-started.md.",
+            image,
+            detail,
+            image,
+            storage_arg(storage_path, StorageArg::Wxc),
+            image,
+            storage_arg(storage_path, StorageArg::PowerShell),
+        )),
+    }
+    .into_response()
+}
+
+/// Which command spelling a storage-path override should be rendered for.
+enum StorageArg {
+    Wxc,
+    PowerShell,
+}
+
+/// Render a storage-path override as an argument for the suggested command, or
+/// nothing when the run uses the default path.
+fn storage_arg(storage_path: Option<&str>, flavor: StorageArg) -> String {
+    match (storage_path, flavor) {
+        (None, _) => String::new(),
+        (Some(sp), StorageArg::Wxc) => format!(" --storage-path \"{}\"", sp),
+        (Some(sp), StorageArg::PowerShell) => format!(" -StoragePath \"{}\"", sp),
+    }
+}
 
 /// Detected tar file format for image import.
 enum TarFormat {
@@ -211,8 +308,8 @@ pub(crate) unsafe fn import_image_from_tar(
     Ok(())
 }
 
-/// Ensure `image` is in the session's local cache, importing it from
-/// `image_tar_path` when one is supplied and the cache misses.
+/// Ensure `image` is in the session's local cache: import it from
+/// `image_tar_path` when one is supplied, otherwise pull it from its registry.
 ///
 /// # Safety
 /// `sdk` must hold valid function pointers and `session` must be a live handle.
@@ -271,30 +368,135 @@ pub unsafe fn resolve_image(
         return import_image_from_tar(sdk, session, image, tar_path, logger);
     }
 
-    // A pull into a different storage path lands in a cache this run will not
-    // read, so an overridden path has to travel with the suggested commands.
-    let (storage_arg_wxc, storage_arg_ps) = match storage_path {
-        Some(sp) => (
-            format!(" --storage-path \"{}\"", sp),
-            format!(" -StoragePath \"{}\"", sp),
-        ),
-        None => (String::new(), String::new()),
+    pull_image(sdk, session, image, storage_path, log_prefix, logger)
+}
+
+/// Warm a storage path's image cache with `image_name` and release the session,
+/// backing `wxc-exec.exe --setup-wslc`.
+///
+/// # Safety
+/// Must be called once per process before any other WSLC SDK functions
+/// (it initialises COM via `init_and_load_sdk`).
+pub unsafe fn setup_pull_image(
+    image_name: &str,
+    storage_path: Option<&str>,
+    logger: &mut Logger,
+) -> Result<(), String> {
+    let sdk = match WSLContainerRunner::init_and_load_sdk(logger) {
+        Ok(s) => s,
+        Err(resp) => return Err(resp.error_message),
     };
-    Err(WslcError::Rejected(format!(
-        "WSLC image '{}' not found locally. Pre-pull it with: \
-         wxc-exec.exe --setup-wslc --image {}{} \
-         (or scripts\\setup-wslc.ps1 -Image {}{}). \
-         MXC does not pull images at run time; \
-         see docs/wsl/wsl-container-getting-started.md.",
-        image, image, storage_arg_wxc, image, storage_arg_ps,
-    ))
-    .into_response())
+
+    let storage_path_str = storage_path.map(|s| s.to_string()).unwrap_or_else(|| {
+        std::env::temp_dir()
+            .join("mxc-wslc-sessions")
+            .to_string_lossy()
+            .to_string()
+    });
+    let session_name: Vec<u16> = to_wide("mxc-setup-wslc");
+    let storage_path_wide: Vec<u16> = to_wide(&storage_path_str);
+
+    let mut settings = std::mem::zeroed::<WslcSessionSettings>();
+    let hr = sdk.WslcInitSessionSettings(
+        session_name.as_ptr(),
+        storage_path_wide.as_ptr(),
+        &mut settings,
+    );
+    if hr != S_OK {
+        return Err(format!(
+            "WslcInitSessionSettings failed (HRESULT 0x{:08X})",
+            hr as u32
+        ));
+    }
+
+    let mut session: WslcSession = ptr::null_mut();
+    let mut create_err = CoTaskMemPWSTR::null();
+    let hr = sdk.WslcCreateSession(&mut settings, &mut session, create_err.as_mut_ptr());
+    if hr != S_OK {
+        return Err(format!(
+            "WslcCreateSession failed (HRESULT 0x{:08X}): {}",
+            hr as u32,
+            create_err.to_string_lossy()
+        ));
+    }
+    let _session_guard = WslcSessionGuard::from_raw(
+        session,
+        sdk.terminate_session_fn(),
+        sdk.release_session_fn(),
+    );
+
+    let _ = writeln!(logger, "[WSLC setup] Target store: {}", storage_path_str);
+    pull_image(
+        sdk,
+        session,
+        image_name,
+        storage_path,
+        "[WSLC setup]",
+        logger,
+    )
+    .map_err(|resp| resp.error_message)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+    use wxc_common::models::FailurePhase;
+
+    /// `E_FAIL`, which the SDK returns when it cannot reach the registry at all.
+    const E_FAIL: HRESULT = -2147467259;
+
+    #[test]
+    fn a_refused_reference_is_not_worth_retrying() {
+        let resp = pull_failure("ghcr.io/nope:1", None, WSLC_E_IMAGE_NOT_FOUND, "denied");
+        assert_eq!(resp.failure_phase, FailurePhase::Rejected);
+    }
+
+    #[test]
+    fn a_blocked_registry_is_not_worth_retrying() {
+        let resp = pull_failure(
+            "ghcr.io/nope:1",
+            None,
+            WSLC_E_REGISTRY_BLOCKED_BY_POLICY,
+            "blocked",
+        );
+        assert_eq!(resp.failure_phase, FailurePhase::Rejected);
+    }
+
+    #[test]
+    fn an_unreachable_registry_is_retryable() {
+        let resp = pull_failure("alpine:latest", None, E_FAIL, "no such host");
+        assert_eq!(resp.failure_phase, FailurePhase::LaunchFailed);
+    }
+
+    #[test]
+    fn an_unreachable_registry_says_how_to_work_offline() {
+        let resp = pull_failure("alpine:latest", None, E_FAIL, "no such host");
+        assert!(resp
+            .error_message
+            .contains("--setup-wslc --image alpine:latest"));
+        assert!(resp.error_message.contains("imageTarPath"));
+    }
+
+    #[test]
+    fn an_overridden_store_travels_with_the_suggested_command() {
+        let resp = pull_failure("alpine:latest", Some(r"C:\store"), E_FAIL, "down");
+        assert!(resp.error_message.contains(r#"--storage-path "C:\store""#));
+        assert!(resp.error_message.contains(r#"-StoragePath "C:\store""#));
+    }
+
+    #[test]
+    fn a_default_store_adds_no_path_argument() {
+        let resp = pull_failure("alpine:latest", None, E_FAIL, "down");
+        assert!(!resp.error_message.contains("--storage-path"));
+        assert!(!resp.error_message.contains("-StoragePath"));
+    }
+
+    #[test]
+    fn a_failure_without_an_sdk_message_still_reports_the_code() {
+        let resp = pull_failure("alpine:latest", None, WSLC_E_IMAGE_NOT_FOUND, "");
+        assert!(resp.error_message.contains("0x80040601"));
+    }
 
     /// Create a temporary tar file from in-memory entries and return its path.
     fn build_test_tar(entries: &[(&str, &[u8])]) -> tempfile::NamedTempFile {
