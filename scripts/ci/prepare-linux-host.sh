@@ -218,43 +218,6 @@ ensure_bridge_firewall_zone() {
     fi
 }
 
-# Outbound container traffic leaves the bridge subnet with a private source
-# address, so it needs a MASQUERADE rule to reach anything off-host. lxc-net
-# normally installs one, but it skips its firewall setup when it believes
-# another manager owns the ruleset, leaving a bridge that hands out leases the
-# container cannot use. The symptom is a name-resolution failure inside the
-# guest, which reads like a policy problem and is not one.
-ensure_bridge_nat() {
-    local bridge="${LXC_BRIDGE:-lxcbr0}"
-    local subnet
-
-    # The kernel's scope-link route names the bridge's network. The interface
-    # address is a single host inside it, and no NAT rule is ever written in
-    # those terms, so matching on it below would never recognize one.
-    subnet="$(ip -4 -o route show dev "$bridge" proto kernel scope link 2>/dev/null |
-        awk '{print $1}' | head -n 1)"
-    if [[ -z "$subnet" ]]; then
-        echo "WARNING: $bridge has no IPv4 subnet; skipping NAT setup." >&2
-        return 0
-    fi
-
-    # Match on the source subnet rather than the rule text: lxc-net's own rule
-    # and ours are equivalent however they are spelled.
-    if sudo iptables -t nat -S POSTROUTING 2>/dev/null |
-        grep -qF -- "-s $subnet"; then
-        echo "NAT for $subnet is already present."
-        return 0
-    fi
-
-    if sudo iptables -t nat -A POSTROUTING -s "$subnet" ! -d "$subnet" -j MASQUERADE; then
-        echo "Installed MASQUERADE for $subnet."
-    else
-        echo "WARNING: could not install MASQUERADE for $subnet; containers will not reach off-host destinations." >&2
-    fi
-}
-
-
-
 # Verifies the interpreters test suites drive inside the sandbox and reports
 # what the image actually provides, so a tool the image was built without stays
 # visible instead of silently absent. These are baked into the image rather
@@ -347,7 +310,6 @@ case "$backend" in
         fi
         start_lxc_bridge
         ensure_bridge_firewall_zone
-        ensure_bridge_nat
         ;;
     microvm)
         for file in nanvixd.elf nanvix_rootfs.img python3.initrd bin/kernel.elf; do
