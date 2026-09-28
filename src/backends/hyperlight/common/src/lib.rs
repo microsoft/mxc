@@ -1339,7 +1339,7 @@ fn same_path(a: &str, b: &str) -> bool {
 
 #[cfg(target_os = "windows")]
 fn same_path_fallback(a: &str, b: &str) -> bool {
-    windows_fallback_path_key(a).eq_ignore_ascii_case(&windows_fallback_path_key(b))
+windows_fallback_path_key(a).to_lowercase() == windows_fallback_path_key(b).to_lowercase()
 }
 
 #[cfg(target_os = "windows")]
