@@ -3,6 +3,7 @@
 
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace Microsoft.Mxc.Sdk;
 
@@ -101,18 +102,7 @@ internal static class RequestProbeExecutor
         string executable,
         string? configPath)
     {
-        var startInfo = new ProcessStartInfo(executable)
-        {
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true,
-        };
-        startInfo.ArgumentList.Add("--probe");
-        if (configPath is not null)
-        {
-            startInfo.ArgumentList.Add(configPath);
-        }
+        var startInfo = CreateStartInfo(executable, configPath);
 
         using var process = Process.Start(startInfo)
             ?? throw new InvalidOperationException("Process.Start returned null.");
@@ -130,6 +120,26 @@ internal static class RequestProbeExecutor
             process.ExitCode,
             stdout.GetAwaiter().GetResult(),
             stderr.GetAwaiter().GetResult());
+    }
+
+    internal static ProcessStartInfo CreateStartInfo(string executable, string? configPath)
+    {
+        var startInfo = new ProcessStartInfo(executable)
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8,
+            CreateNoWindow = true,
+        };
+        startInfo.ArgumentList.Add("--probe");
+        if (configPath is not null)
+        {
+            startInfo.ArgumentList.Add(configPath);
+        }
+
+        return startInfo;
     }
 
     private static string? FindWxcExecutable()

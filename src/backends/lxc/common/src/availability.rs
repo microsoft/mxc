@@ -35,17 +35,17 @@ fn probe_lxc_ls() -> LxcLsOutcome {
         .stderr(Stdio::null())
         .spawn();
     match child {
-        Ok(mut child) => wait_bounded(&mut child),
+        Ok(child) => wait_bounded(child),
         Err(_) => LxcLsOutcome::SpawnFailed,
     }
 }
 
-fn wait_bounded(child: &mut Child) -> LxcLsOutcome {
+fn wait_bounded(child: Child) -> LxcLsOutcome {
     wait_bounded_with_deadlines(child, LXC_COMMAND_TIMEOUT, LXC_AVAILABILITY_TIMEOUT)
 }
 
 fn wait_bounded_with_deadlines(
-    child: &mut Child,
+    mut child: Child,
     command_timeout: Duration,
     total_timeout: Duration,
 ) -> LxcLsOutcome {
@@ -74,10 +74,20 @@ fn wait_bounded_with_deadlines(
             Ok(None) => std::thread::sleep(
                 POLL_INTERVAL.min(reap_deadline.saturating_duration_since(Instant::now())),
             ),
-            Err(_) => return LxcLsOutcome::TimedOut,
+            Err(_) => {
+                handoff_reaper(child);
+                return LxcLsOutcome::TimedOut;
+            }
         }
     }
+    handoff_reaper(child);
     LxcLsOutcome::TimedOut
+}
+
+fn handoff_reaper(mut child: Child) {
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
 }
 
 fn available_from(outcome: LxcLsOutcome) -> bool {
@@ -87,6 +97,7 @@ fn available_from(outcome: LxcLsOutcome) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::process::Stdio;
 
     #[test]
@@ -97,22 +108,24 @@ mod tests {
         assert!(!available_from(LxcLsOutcome::TimedOut));
     }
 
+    #[cfg(unix)]
     #[test]
-    fn timeout_terminates_and_reaps_the_real_subprocess_within_the_total_budget() {
-        let mut child = Command::new("sh")
+    fn timeout_terminates_and_eventually_reaps_the_real_subprocess() {
+        let child = Command::new("sh")
             .args(["-c", "sleep 30"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .expect("test shell starts");
+        let pid = child.id();
         let started = Instant::now();
 
         assert_eq!(
             wait_bounded_with_deadlines(
-                &mut child,
+                child,
                 Duration::from_millis(40),
-                Duration::from_millis(290),
+                Duration::from_millis(40),
             ),
             LxcLsOutcome::TimedOut
         );
@@ -121,12 +134,21 @@ mod tests {
             "bounded timeout took {:?}",
             started.elapsed()
         );
-        assert!(
-            child
-                .try_wait()
-                .expect("reap status remains queryable")
-                .is_some(),
-            "timed-out child must already be reaped"
-        );
+        assert_eventually_reaped(pid);
+    }
+
+    #[cfg(unix)]
+    fn assert_eventually_reaped(pid: u32) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while process_exists(pid) && Instant::now() < deadline {
+            std::thread::sleep(POLL_INTERVAL);
+        }
+        assert!(!process_exists(pid), "timed-out child {pid} was not reaped");
+    }
+
+    #[cfg(unix)]
+    fn process_exists(pid: u32) -> bool {
+        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
     }
 }

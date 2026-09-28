@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
@@ -145,21 +146,29 @@ public class MxcSandboxTests
             new SandboxPolicy
             {
                 Version = version,
-                Telemetry = new TelemetrySettings { Enabled = true },
+                Telemetry = supportsV09Fields
+                    ? new TelemetrySettings { Enabled = true }
+                    : null,
             },
             "cmd /c exit 0")
         {
             Environment = new() { ["GREETING"] = "hello" },
-            InheritDefaultEnvironment = true,
+            InheritDefaultEnvironment = supportsV09Fields,
             Containment = new ProcessContainerContainment
             {
-                LearningMode = true,
-                CaptureDenials = new CaptureDenialsPolicy(),
-                Filesystem = new ProcessContainerFilesystemPolicy(),
-                Network = new ProcessContainerNetworkPolicy
-                {
-                    AllowedProxyPeer = "Contoso.Proxy_123",
-                },
+                LearningMode = supportsV08ProcessContainerFields,
+                CaptureDenials = supportsV08ProcessContainerFields
+                    ? new CaptureDenialsPolicy()
+                    : null,
+                Filesystem = supportsProcessContainerFilesystem
+                    ? new ProcessContainerFilesystemPolicy()
+                    : null,
+                Network = supportsV08ProcessContainerFields
+                    ? new ProcessContainerNetworkPolicy
+                    {
+                        AllowedProxyPeer = "Contoso.Proxy_123",
+                    }
+                    : null,
             },
         };
 
@@ -190,6 +199,79 @@ public class MxcSandboxTests
         Assert.Equal(
             supportsProcessContainerFilesystem,
             processContainer.TryGetProperty("filesystem", out _));
+    }
+
+    [Theory]
+    [InlineData("captureDenials")]
+    [InlineData("enumeratePaths")]
+    [InlineData("inheritDefaultEnv")]
+    [InlineData("learningMode")]
+    [InlineData("processContainerNetwork")]
+    [InlineData("telemetry")]
+    public void Probe_RejectsVersionIncompatibleAuthoredFieldsBeforeExecution(string field)
+    {
+        var version = field == "captureDenials"
+            || field == "learningMode"
+            || field == "processContainerNetwork"
+            ? "0.7.0-alpha"
+            : "0.8.0-alpha";
+        var policy = new SandboxPolicy { Version = version };
+        var processContainer = new ProcessContainerContainment();
+        var request = new SandboxRequest(policy, "cmd /c exit 0")
+        {
+            Containment = processContainer,
+        };
+
+        switch (field)
+        {
+            case "captureDenials":
+                processContainer.CaptureDenials = new CaptureDenialsPolicy();
+                break;
+            case "enumeratePaths":
+                processContainer.Filesystem = new ProcessContainerFilesystemPolicy
+                {
+                    EnumeratePaths = { @"C:\tools" },
+                };
+                break;
+            case "inheritDefaultEnv":
+                request.InheritDefaultEnvironment = true;
+                break;
+            case "learningMode":
+                processContainer.LearningMode = true;
+                break;
+            case "processContainerNetwork":
+                processContainer.Network = new ProcessContainerNetworkPolicy
+                {
+                    AllowedProxyPeer = "Contoso.Proxy_123",
+                };
+                break;
+            case "telemetry":
+                policy.Telemetry = new TelemetrySettings { Enabled = true };
+                break;
+        }
+
+        var error = Assert.Throws<MxcException>(
+            () => MxcSandbox.Probe(request));
+
+        Assert.Equal(ErrorCode.MalformedRequest, error.Code);
+        Assert.Contains(field switch
+        {
+            "processContainerNetwork" => "processContainer.network",
+            _ => field,
+        }, error.Message);
+    }
+
+    [Fact]
+    public void RequestProbeExecutor_ConfiguresUtf8RedirectedStreams()
+    {
+        var startInfo = RequestProbeExecutor.CreateStartInfo(
+            "wxc-exec.exe",
+            @"C:\probe\config.json");
+
+        Assert.NotNull(startInfo.StandardOutputEncoding);
+        Assert.NotNull(startInfo.StandardErrorEncoding);
+        Assert.Equal(Encoding.UTF8.WebName, startInfo.StandardOutputEncoding.WebName);
+        Assert.Equal(Encoding.UTF8.WebName, startInfo.StandardErrorEncoding.WebName);
     }
 
     [Theory]

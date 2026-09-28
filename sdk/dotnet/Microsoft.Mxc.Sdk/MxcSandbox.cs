@@ -142,6 +142,7 @@ public static class MxcSandbox
         ArgumentNullException.ThrowIfNull(request);
         ValidateNetworkVersion(request.Policy);
         var prepared = PrepareRequest(request);
+        ValidateProbeVersionedFields(prepared);
         if (prepared.Containment is not ProcessContainment
             and not ProcessContainerContainment)
         {
@@ -321,6 +322,56 @@ public static class MxcSandbox
         config["processContainer"] = processContainerNode;
 
         return config.ToJsonString(JsonOptions);
+    }
+
+    private static void ValidateProbeVersionedFields(SandboxRequest request)
+    {
+        var version = request.Policy.Version;
+        var processContainer = request.Containment as ProcessContainerContainment;
+
+        if (!SchemaVersions.SupportsV0_8OneShotFields(version))
+        {
+            if (processContainer?.LearningMode == true)
+            {
+                throw new MxcException(
+                    ErrorCode.MalformedRequest,
+                    "processContainer.learningMode requires schema version 0.8 or later");
+            }
+            if (processContainer?.CaptureDenials is not null)
+            {
+                throw new MxcException(
+                    ErrorCode.MalformedRequest,
+                    "processContainer.captureDenials requires schema version 0.8 or later");
+            }
+            if (processContainer?.Network?.AllowedProxyPeer is not null)
+            {
+                throw new MxcException(
+                    ErrorCode.MalformedRequest,
+                    "processContainer.network requires schema version 0.8 or later");
+            }
+        }
+
+        if (!SchemaVersions.SupportsV0_9OneShotFields(version))
+        {
+            if (request.Policy.Telemetry is not null)
+            {
+                throw new MxcException(
+                    ErrorCode.MalformedRequest,
+                    "policy.telemetry requires config schema version 0.9.0-alpha or later");
+            }
+            if (request.InheritDefaultEnvironment)
+            {
+                throw new MxcException(
+                    ErrorCode.MalformedRequest,
+                    "process.inheritDefaultEnv requires config schema version 0.9.0-alpha or later");
+            }
+            if (processContainer?.Filesystem?.EnumeratePaths.Count > 0)
+            {
+                throw new MxcException(
+                    ErrorCode.MalformedRequest,
+                    "processContainer.filesystem.enumeratePaths requires schema version 0.9.0-alpha");
+            }
+        }
     }
 
     private static void AddCapabilityIfMissing(
