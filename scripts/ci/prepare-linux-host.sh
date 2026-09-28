@@ -310,13 +310,6 @@ case "$backend" in
         fi
         start_lxc_bridge
         ensure_bridge_firewall_zone
-        # TEMP DIAGNOSTICS: confirm lxc-net installed masquerade itself.
-        echo "::group::TEMP diagnostics: bridge NAT"
-        echo "--- nft table ip lxc ---"
-        sudo nft list table ip lxc 2>&1 || true
-        echo "--- iptables nat POSTROUTING ---"
-        sudo iptables -t nat -S POSTROUTING 2>&1 || true
-        echo "::endgroup::"
         ;;
     microvm)
         for file in nanvixd.elf nanvix_rootfs.img python3.initrd bin/kernel.elf; do
