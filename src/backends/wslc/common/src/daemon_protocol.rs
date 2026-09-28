@@ -50,7 +50,7 @@ pub const MAX_EXEC_ID_BYTES: usize = 128;
 /// A new optional field counts: these structs do not deny unknown fields, so a
 /// daemon predating one drops it and acts on a request it only partly
 /// understood.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 fn deserialize_exec_id<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
@@ -310,6 +310,8 @@ pub enum StreamFrame {
     /// Daemon→client: terminal frame; an explicit cancellation request was
     /// accepted and the process was confirmed terminated.
     Cancelled,
+    /// Daemon→client: live output was dropped; the terminal frame still follows.
+    Truncated,
     /// Daemon→client: terminal frame; the exec failed before or during the run.
     Error { message: String },
 }
@@ -555,6 +557,7 @@ mod tests {
         roundtrip(StreamFrame::Exit { code: 42 });
         roundtrip(StreamFrame::TimedOut);
         roundtrip(StreamFrame::Cancelled);
+        roundtrip(StreamFrame::Truncated);
         roundtrip(StreamFrame::Error {
             message: "spawn failed".to_string(),
         });

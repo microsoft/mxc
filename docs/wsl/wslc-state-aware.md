@@ -107,8 +107,11 @@ without creating the process.
 
 Live output uses bounded queues in both the daemon and the in-process native
 pipe bridge. If a caller does not drain stdout/stderr quickly enough, excess
-output is dropped and completion becomes an explicit backend error reporting
-truncation; incomplete output is never reported as successful.
+output is dropped and the run is reported as truncated; incomplete output is
+never reported as successful. A run that would otherwise have exited cleanly
+becomes an explicit backend error carrying the process's exit code in
+`details.exitCode`. A run that timed out or was cancelled keeps that outcome —
+truncation is reported alongside it rather than replacing it.
 
 If process termination cannot be positively confirmed after creation, the
 container is quarantined and cannot be started or used for another exec. The

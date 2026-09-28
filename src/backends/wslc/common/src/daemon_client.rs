@@ -138,6 +138,14 @@ pub struct ExecResult {
 /// Terminal outcome of a streaming daemon exec.
 pub type DaemonExecOutcome = ExecTerminal;
 
+/// How a streaming exec finished, and whether the daemon had to drop live
+/// output on the way there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DaemonExecCompletion {
+    pub outcome: DaemonExecOutcome,
+    pub truncated: bool,
+}
+
 /// An exec request that the daemon has admitted and whose pipe is now carrying
 /// only the [`StreamFrame`] data phase.
 #[derive(Debug)]
@@ -150,14 +158,25 @@ impl AdmittedExec {
     pub(crate) fn read_to_completion(
         mut self,
         mut on_output: impl FnMut(OutStream, &[u8]),
-    ) -> DaemonResult<DaemonExecOutcome> {
+    ) -> DaemonResult<DaemonExecCompletion> {
+        let mut truncated = false;
         loop {
-            match read_frame::<StreamFrame>(&mut self.pipe)? {
-                StreamFrame::Stdout { data } => on_output(OutStream::Stdout, &data),
-                StreamFrame::Stderr { data } => on_output(OutStream::Stderr, &data),
-                StreamFrame::Exit { code } => return Ok(DaemonExecOutcome::Exited(code)),
-                StreamFrame::TimedOut => return Ok(DaemonExecOutcome::TimedOut),
-                StreamFrame::Cancelled => return Ok(DaemonExecOutcome::Cancelled),
+            let outcome = match read_frame::<StreamFrame>(&mut self.pipe)? {
+                StreamFrame::Stdout { data } => {
+                    on_output(OutStream::Stdout, &data);
+                    continue;
+                }
+                StreamFrame::Stderr { data } => {
+                    on_output(OutStream::Stderr, &data);
+                    continue;
+                }
+                StreamFrame::Truncated => {
+                    truncated = true;
+                    continue;
+                }
+                StreamFrame::Exit { code } => DaemonExecOutcome::Exited(code),
+                StreamFrame::TimedOut => DaemonExecOutcome::TimedOut,
+                StreamFrame::Cancelled => DaemonExecOutcome::Cancelled,
                 StreamFrame::Error { message } => {
                     return Err(DaemonError::transport(format!("exec failed: {message}")))
                 }
@@ -166,7 +185,8 @@ impl AdmittedExec {
                         "protocol error: daemon sent a Stdin frame to the client",
                     ))
                 }
-            }
+            };
+            return Ok(DaemonExecCompletion { outcome, truncated });
         }
     }
 }
@@ -339,17 +359,23 @@ impl DaemonClient {
     pub fn exec(&self, config: ExecConfig) -> DaemonResult<ExecResult> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let outcome = self.exec_streaming(config, |stream, data| match stream {
+        let completion = self.exec_streaming(config, |stream, data| match stream {
             OutStream::Stdout => stdout.extend_from_slice(data),
             OutStream::Stderr => stderr.extend_from_slice(data),
         })?;
-        let exit_code = match outcome {
+        let exit_code = match completion.outcome {
             DaemonExecOutcome::Exited(code) => code,
             DaemonExecOutcome::TimedOut => return Err(DaemonError::transport("exec timed out")),
             DaemonExecOutcome::Cancelled => {
                 return Err(DaemonError::transport("exec was cancelled"))
             }
         };
+        if completion.truncated {
+            return Err(DaemonError::transport(format!(
+                "exec output was truncated before it could be captured (the process exited \
+                 {exit_code})"
+            )));
+        }
         Ok(ExecResult {
             exit_code,
             stdout,
@@ -369,7 +395,7 @@ impl DaemonClient {
         &self,
         config: ExecConfig,
         on_output: impl FnMut(OutStream, &[u8]),
-    ) -> DaemonResult<DaemonExecOutcome> {
+    ) -> DaemonResult<DaemonExecCompletion> {
         self.admit_exec(config)?.read_to_completion(on_output)
     }
 
