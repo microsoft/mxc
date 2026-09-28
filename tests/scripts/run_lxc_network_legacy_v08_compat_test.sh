@@ -74,18 +74,19 @@ if ! echo "$block_ver" | grep -q '^0\.8\.'; then
     fail "Case C fixture declares schema '$block_ver', not 0.8; the negative guard must be a 0.8 request."
 fi
 
-# Identity: Cases A and B must be identical except for version and containerId.
-# Strip both fields and diff; any remaining difference means the test is not
-# isolating the version string as the sole variable.
+# Identity: Cases A and B must be identical except for the version declaration
+# and containerId.  Strip those and diff; any remaining difference means the
+# test is not isolating the version string as the sole variable.
 normalize_for_diff() {
-    sed -e '/[[:space:]]*"version"[[:space:]]*:/d' \
+    sed -e '/[[:space:]]*"\$schema"[[:space:]]*:/d' \
+        -e '/[[:space:]]*"version"[[:space:]]*:/d' \
         -e '/[[:space:]]*"containerId"[[:space:]]*:/d' \
         "$1"
 }
 if ! diff <(normalize_for_diff "$CTRL_CONFIG") <(normalize_for_diff "$CASE_CONFIG") >/dev/null 2>&1; then
-    echo "--- diff (Case A vs Case B with version and containerId stripped) ---"
+    echo "--- diff (Case A vs Case B with the version declaration and containerId stripped) ---"
     diff <(normalize_for_diff "$CTRL_CONFIG") <(normalize_for_diff "$CASE_CONFIG") || true
-    fail "Cases A and B differ in fields other than version and containerId.  The test is not isolating the version string as the sole variable."
+    fail "Cases A and B differ in fields other than the version declaration and containerId.  The test is not isolating the version string as the sole variable."
 fi
 
 # Container ids must be distinct across all three cases.
