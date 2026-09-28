@@ -1510,9 +1510,76 @@ fn has_verbatim_trim_sensitive_component(path: &str) -> bool {
 
 #[cfg(not(target_os = "windows"))]
 fn path_relationship_fallback(allowed: &str, denied: &str) -> PathRelationship {
-    let allowed = Path::new(allowed);
-    let denied = Path::new(denied);
-    PathRelationship::from_overlaps(denied.starts_with(allowed) || allowed.starts_with(denied))
+    let Ok(allowed) = resolve_non_windows_fallback_path(Path::new(allowed)) else {
+        return PathRelationship::Indeterminate;
+    };
+    let Ok(denied) = resolve_non_windows_fallback_path(Path::new(denied)) else {
+        return PathRelationship::Indeterminate;
+    };
+    PathRelationship::from_overlaps(denied.starts_with(&allowed) || allowed.starts_with(&denied))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn resolve_non_windows_fallback_path(path: &Path) -> Result<PathBuf, std::io::Error> {
+    use std::io::ErrorKind;
+    use std::path::Component;
+
+    let mut tail: Vec<Component<'_>> = Vec::new();
+    let mut current = path;
+
+    loop {
+        match std::fs::canonicalize(current) {
+            Ok(resolved) => return Ok(append_non_windows_tail(resolved, &tail)),
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                let Some(parent) = current.parent() else {
+                    return Ok(normalize_non_windows_fallback_path(path));
+                };
+                if let Some(component) = current.components().next_back() {
+                    tail.push(component);
+                }
+                current = parent;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn append_non_windows_tail(base: PathBuf, tail: &[std::path::Component<'_>]) -> PathBuf {
+    use std::path::Component;
+
+    let mut path = base;
+    for component in tail.iter().rev() {
+        match component {
+            Component::Normal(name) => path.push(name),
+            Component::ParentDir => {
+                path.pop();
+            }
+            Component::CurDir => {}
+            Component::RootDir => {}
+        }
+    }
+    path
+}
+
+#[cfg(not(target_os = "windows"))]
+fn normalize_non_windows_fallback_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut normalized = PathBuf::new();
+    let is_absolute = path.is_absolute();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() && !is_absolute {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 fn mounts_equal(a: &[Mount], b: &[Mount]) -> bool {
@@ -1828,6 +1895,39 @@ mod tests {
         };
         let err = HyperlightScriptRunner::validate_policies(&request).unwrap_err();
         assert!(err.to_string().contains("deniedPaths"), "got: {err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn policy_rejects_denied_overlap_when_allow_is_symlink_alias() {
+        let tmp = fresh_tmp("deny-symlink-alias");
+        let real = tmp.join("real");
+        let link = tmp.join("link");
+        std::fs::create_dir_all(&real).unwrap();
+        match std::os::unix::fs::symlink(&real, &link) {
+            Ok(()) => {}
+            Err(e)
+                if e.kind() == std::io::ErrorKind::Unsupported
+                    || e.kind() == std::io::ErrorKind::PermissionDenied =>
+            {
+                let _ = std::fs::remove_dir_all(&tmp);
+                return;
+            }
+            Err(e) => panic!("create symlink {link:?} -> {real:?}: {e}"),
+        }
+
+        let request = ExecutionRequest {
+            script_code: "print('x')".to_string(),
+            policy: ContainerPolicy {
+                readwrite_paths: vec![link.to_string_lossy().to_string()],
+                denied_paths: vec![real.join("secret").to_string_lossy().to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = HyperlightScriptRunner::validate_policies(&request).unwrap_err();
+        assert!(err.to_string().contains("deniedPaths"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
