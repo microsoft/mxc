@@ -24,6 +24,7 @@ use windows::Win32::System::Console::{
     GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
 };
 use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
+use windows::UI::WindowId;
 use windows_core::{HSTRING, PCWSTR};
 
 use super::console_mode::{get_local_console_size, ConsoleModeRestorer, CtrlHandlerGuard};
@@ -88,12 +89,13 @@ fn check_service_available_and_activate() -> Result<IsoSessionOps, IsolationSess
     }
 }
 
-/// Decides whether the host supports app-scoped registration — i.e. the
-/// `AddUserAsync2` overload that carries an `appId` — from the result of
-/// `GetFeatureLevel(IsoSessionFeature::AppScopedRegistration)`.
-fn app_scoped_supported_from(level: windows_core::Result<i32>) -> bool {
+/// `GetFeatureLevel` fails on a host that does not recognize the feature
+/// value, so an error reads as not supported.
+fn feature_supported_from(level: windows_core::Result<i32>) -> bool {
     matches!(level, Ok(level) if level > 0)
 }
+
+const ZERO_WINDOW_ID: WindowId = WindowId { Value: 0 };
 
 /// The provision-time facts the OS assigns to a freshly-created agent user,
 /// read from `IsoSessionUserResult` at `add_user`. The addressing key for
@@ -178,10 +180,16 @@ impl IsolationSessionManager {
             let mta = MtaReference::acquire()?;
             let ops = check_service_available_and_activate()?;
             // Prefer the newest overload the host advertises.
-            let app_scoped = app_scoped_supported_from(
+            let (op_add_user, started) = if feature_supported_from(
+                ops.GetFeatureLevel(IsoSessionFeature::DeducedEnterpriseAgentUser),
+            ) {
+                (
+                    op::ADD_USER_DEDUCED,
+                    ops.AddUserAsync3(&HSTRING::from(app_id.unwrap_or_default()), ZERO_WINDOW_ID),
+                )
+            } else if feature_supported_from(
                 ops.GetFeatureLevel(IsoSessionFeature::AppScopedRegistration),
-            );
-            let (op_add_user, started) = if app_scoped {
+            ) {
                 (
                     op::ADD_USER,
                     ops.AddUserAsync2(
@@ -277,12 +285,25 @@ impl IsolationSessionManager {
     /// Step 2: Start the isolation session for the pegged agent user.
     pub(super) fn start_session(&self) -> Result<(), IsolationSessionError> {
         owned_thread::call(&self.impersonation, || {
-            let result = owned_thread::wait_for(
-                op::START_SESSION,
+            // Prefer the newest overload the host advertises.
+            let (op_start_session, started) = if feature_supported_from(
                 self.ops
-                    .StartSessionAsync(&self.agent_user_name, &HSTRING::new()),
-            )?;
-            check_result(&result, op::START_SESSION, StalePromotion::Eligible)
+                    .GetFeatureLevel(IsoSessionFeature::DeducedEnterpriseAgentUser),
+            ) {
+                (
+                    op::START_SESSION_DEDUCED,
+                    self.ops
+                        .StartSessionAsync2(&self.agent_user_name, ZERO_WINDOW_ID),
+                )
+            } else {
+                (
+                    op::START_SESSION,
+                    self.ops
+                        .StartSessionAsync(&self.agent_user_name, &HSTRING::new()),
+                )
+            };
+            let result = owned_thread::wait_for(op_start_session, started)?;
+            check_result(&result, op_start_session, StalePromotion::Eligible)
         })
     }
 
@@ -1444,17 +1465,17 @@ mod tests {
     }
 
     #[test]
-    fn app_scoped_support_requires_a_positive_feature_level() {
+    fn feature_support_requires_a_positive_feature_level() {
         // Supported: any positive level.
-        assert!(app_scoped_supported_from(Ok(1)));
-        assert!(app_scoped_supported_from(Ok(7)));
+        assert!(feature_supported_from(Ok(1)));
+        assert!(feature_supported_from(Ok(7)));
 
         // Not supported: the host knows the feature but does not offer it.
-        assert!(!app_scoped_supported_from(Ok(0)));
-        assert!(!app_scoped_supported_from(Ok(-1)));
+        assert!(!feature_supported_from(Ok(0)));
+        assert!(!feature_supported_from(Ok(-1)));
 
         // Not supported: an older host rejects the unknown feature value.
-        assert!(!app_scoped_supported_from(Err(
+        assert!(!feature_supported_from(Err(
             windows_core::Error::from_hresult(
                 windows_core::HRESULT(0x8007_0057u32 as i32), // E_INVALIDARG
             )

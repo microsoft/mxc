@@ -14,7 +14,7 @@ base64 = { workspace = true }
 serde_json = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { workspace = true }
+windows = { workspace = true, features = ["UI"] }
 windows-core = { workspace = true }
 windows-future = "0.3"
 windows-collections = "0.3"
