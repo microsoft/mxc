@@ -10,8 +10,6 @@
 //! narrower "what can `mxc-sdk` itself launch?" question and reports no tier.
 
 use serde::Serialize;
-#[cfg(target_os = "linux")]
-use std::time::Duration;
 use wxc_common::models::ContainmentBackend;
 
 #[cfg(target_os = "windows")]
@@ -61,14 +59,6 @@ pub struct AvailableBackend {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }
-
-/// Conservative deadline for one uncontended Linux broad-discovery call.
-#[cfg(target_os = "linux")]
-pub const LINUX_DISCOVERY_WORST_CASE: Duration = Duration::from_secs(
-    bwrap_common::bwrap_availability::BWRAP_AVAILABILITY_TIMEOUT.as_secs()
-        + bwrap_common::proxy_network::PROXY_ENFORCEMENT_PROBE_TIMEOUT.as_secs()
-        + lxc_common::availability::LXC_AVAILABILITY_TIMEOUT.as_secs(),
-);
 
 impl AvailableBackend {
     fn tierless(backend: &str) -> Self {
@@ -415,12 +405,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["lxc"]
         );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn linux_discovery_deadline_matches_native_phase_budgets() {
-        assert_eq!(LINUX_DISCOVERY_WORST_CASE, Duration::from_secs(16));
     }
 
     #[test]
