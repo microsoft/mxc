@@ -395,6 +395,13 @@
       }
     ],
     "weekly": [],
-    "enabled": []
+    "enabled": [
+      {
+        "os": "rhel-10",
+        "backends": [
+          "lxc"
+        ]
+      }
+    ]
   }
 }

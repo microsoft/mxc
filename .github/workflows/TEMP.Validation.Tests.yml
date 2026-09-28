@@ -1,0 +1,24 @@
+name: Validation Infrastructure Testing
+
+on:
+  push:
+    branches:
+      - user/emichlin/fix-rhel-lxc-failure
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  dependency-feed-check:
+    uses: ./.github/workflows/Dependency.Feed.Check.Job.yml
+
+  linux:
+    needs: dependency-feed-check
+    uses: ./.github/workflows/Build.Linux.Job.yml
+
+  tests:
+    needs: [linux]
+    uses: ./.github/workflows/Validation.Tests.Matrix.Job.yml
+    with:
+      plan: enabled
