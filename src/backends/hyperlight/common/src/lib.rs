@@ -1341,12 +1341,27 @@ fn stamp_matches(home: &Path, runtime: HyperlightRuntime) -> bool {
 /// Whether an allowed host path exposes a denied path after canonicalization,
 /// with a platform-aware lexical fallback for paths that do not exist yet.
 fn path_relationship(allowed: &str, denied: &str) -> PathRelationship {
+    let Ok(allowed) = anchor_policy_path(allowed) else {
+        return PathRelationship::Indeterminate;
+    };
+    let Ok(denied) = anchor_policy_path(denied) else {
+        return PathRelationship::Indeterminate;
+    };
     match (
-        std::fs::canonicalize(allowed),
-        std::fs::canonicalize(denied),
+        std::fs::canonicalize(&allowed),
+        std::fs::canonicalize(&denied),
     ) {
         (Ok(allowed), Ok(denied)) => PathRelationship::from_covered(denied.starts_with(allowed)),
-        _ => path_relationship_fallback(allowed, denied),
+        _ => path_relationship_fallback(&allowed.to_string_lossy(), &denied.to_string_lossy()),
+    }
+}
+
+fn anchor_policy_path(path: &str) -> Result<PathBuf, std::io::Error> {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
     }
 }
 
@@ -1786,6 +1801,26 @@ mod tests {
             policy: ContainerPolicy {
                 readwrite_paths: vec!["/tmp/hyperlight-allowed".to_string()],
                 denied_paths: vec!["/tmp/hyperlight-allowed/secret".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = HyperlightScriptRunner::validate_policies(&request).unwrap_err();
+        assert!(err.to_string().contains("deniedPaths"), "got: {err}");
+    }
+
+    #[test]
+    fn policy_rejects_denied_absolute_descendant_of_missing_relative_mount() {
+        let relative_mount = format!("hyperlight-relative-{}", std::process::id());
+        let denied = std::env::current_dir()
+            .unwrap()
+            .join(&relative_mount)
+            .join("secret");
+        let request = ExecutionRequest {
+            script_code: "print('x')".to_string(),
+            policy: ContainerPolicy {
+                readwrite_paths: vec![relative_mount],
+                denied_paths: vec![denied.to_string_lossy().to_string()],
                 ..Default::default()
             },
             ..Default::default()
