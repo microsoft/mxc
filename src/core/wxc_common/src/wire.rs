@@ -451,6 +451,10 @@ pub struct Seatbelt {
     pub keychain_access: Option<bool>,
     /// Additional Mach service global-names the inner process may resolve.
     pub extra_mach_lookups: Option<Vec<String>>,
+    /// Literal names denied, with everything below them, at any depth.
+    pub denied_path_names: Option<Vec<String>>,
+    /// Paths at or below which AF_UNIX sockets cannot be bound or connected.
+    pub denied_unix_socket_paths: Option<Vec<String>>,
 }
 
 /// Seatbelt inner-process launch method.

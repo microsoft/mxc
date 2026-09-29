@@ -707,6 +707,8 @@ fn empty_seatbelt_section_maps_to_present_empty_wire_section() {
     assert!(seatbelt.nested_pty.is_none());
     assert!(seatbelt.keychain_access.is_none());
     assert!(seatbelt.extra_mach_lookups.is_none());
+    assert!(seatbelt.denied_path_names.is_none());
+    assert!(seatbelt.denied_unix_socket_paths.is_none());
 }
 
 #[test]

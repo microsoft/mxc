@@ -593,6 +593,27 @@ mod tests {
     }
 
     #[test]
+    fn seatbelt_path_exclusions_change_the_hash_only_when_set() {
+        let mut baseline = request();
+        baseline.seatbelt = Some(crate::models::SeatbeltConfig::default());
+        let Value::Object(projection) = policy_projection(&baseline) else {
+            panic!("policy projection must be an object");
+        };
+        let seatbelt = projection["seatbelt"].as_object().unwrap();
+        assert!(!seatbelt.contains_key("deniedPathNames"));
+        assert!(!seatbelt.contains_key("deniedUnixSocketPaths"));
+
+        let mut changed = baseline.clone();
+        changed
+            .seatbelt
+            .as_mut()
+            .unwrap()
+            .denied_unix_socket_paths
+            .push("/work".to_string());
+        assert_ne!(policy_hash(&baseline), policy_hash(&changed));
+    }
+
+    #[test]
     fn changing_the_network_policy_changes_the_hash() {
         let baseline = policy_hash(&request());
         let mut changed = request();

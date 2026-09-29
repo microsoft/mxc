@@ -218,6 +218,8 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::OneShotReques
             extra_mach_lookups: contract::OptionalField::present(
                 seatbelt.extra_mach_lookups.clone(),
             ),
+            denied_path_names: Default::default(),
+            denied_unix_socket_paths: Default::default(),
         })
         .map(contract::OptionalField::present)
         .unwrap_or_default();

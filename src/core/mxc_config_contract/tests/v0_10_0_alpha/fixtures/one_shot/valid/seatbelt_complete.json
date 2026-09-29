@@ -12,6 +12,8 @@
     "extraMachLookups": [
       "com.apple.SecurityServer",
       "com.apple.coreservices.launchservicesd"
-    ]
+    ],
+    "deniedPathNames": [".ssh", ".config/gh"],
+    "deniedUnixSocketPaths": ["/Users/example/project"]
   }
 }

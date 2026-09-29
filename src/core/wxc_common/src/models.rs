@@ -195,6 +195,24 @@ pub struct SeatbeltConfig {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub extra_mach_lookups: Vec<String>,
+
+    /// Literal names (`.ssh`, `.config/gh`) denied, with everything below
+    /// them, at any depth. Rendered as regex deny rules, so nothing is scanned.
+    #[serde(
+        rename = "deniedPathNames",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub denied_path_names: Vec<String>,
+
+    /// Paths at or below which AF_UNIX `bind()` and `connect()` are denied,
+    /// without changing file access.
+    #[serde(
+        rename = "deniedUnixSocketPaths",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub denied_unix_socket_paths: Vec<String>,
 }
 
 fn default_nested_pty() -> bool {
@@ -210,6 +228,8 @@ impl Default for SeatbeltConfig {
             nested_pty: true,
             keychain_access: false,
             extra_mach_lookups: Vec::new(),
+            denied_path_names: Vec::new(),
+            denied_unix_socket_paths: Vec::new(),
         }
     }
 }

@@ -20,6 +20,43 @@ fn accepts_complete_seatbelt_object() {
 }
 
 #[test]
+fn accepts_path_exclusions() {
+    let json = r#"{
+        "version": "0.10.0-alpha",
+        "seatbelt": {
+            "deniedPathNames": [".ssh", ".config/gh"],
+            "deniedUnixSocketPaths": ["/work"]
+        },
+        "process": {"commandLine": "echo"}
+    }"#;
+
+    assert_valid(json);
+}
+
+#[test]
+fn rejects_non_string_path_exclusions() {
+    for field in ["deniedPathNames", "deniedUnixSocketPaths"] {
+        for value in [
+            r#"".ssh""#,
+            "[true]",
+            "[null]",
+            "{}",
+            r#"[{"root": "/work", "names": [".ssh"]}]"#,
+        ] {
+            let json = format!(
+                r#"{{
+                    "version": "0.10.0-alpha",
+                    "seatbelt": {{"{field}": {value}}},
+                    "process": {{"commandLine": "echo"}}
+                }}"#
+            );
+
+            assert_invalid(&json);
+        }
+    }
+}
+
+#[test]
 fn rejects_seatbelt_launch_method() {
     for launch_method in ["exec", "open", "invalid"] {
         let json = format!(

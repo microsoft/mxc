@@ -1247,6 +1247,20 @@
       "additionalProperties": false,
       "description": "macOS Seatbelt backend settings.",
       "properties": {
+        "deniedPathNames": {
+          "description": "Literal names denied, with everything below them, at any depth: one path component such as `.ssh`, or several joined by `/` such as `.config/gh`. Requires `--experimental`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "deniedUnixSocketPaths": {
+          "description": "Paths at or below which AF_UNIX sockets cannot be bound or connected, even inside a read-write grant. Requires `--experimental`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "extraMachLookups": {
           "description": "Additional Mach service global names the process may resolve.",
           "items": {

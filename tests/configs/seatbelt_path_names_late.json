@@ -1,0 +1,16 @@
+{
+    "$schema": "../../schemas/dev/mxc-config.schema.0.10.0-alpha.json",
+    "version": "0.10.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "/usr/bin/python3 -c 'import os, time\nroot = \"{{ROOT}}\"\nopen(root + \"/late-started\", \"w\").close()\ndeadline = time.time() + 10\nwhile not os.path.exists(root + \"/late-ready\") and time.time() < deadline:\n    time.sleep(0.05)\nif os.path.exists(root + \"/late-ready\"):\n    print(\"LATE_READY\")\ntry:\n    open(root + \"/late/.ssh/id\").read()\n    print(\"LATE=READ\")\nexcept OSError as e:\n    print(\"LATE=DENIED(\" + str(e.errno) + \")\")\nprint(\"PATH_NAMES_PROBE_DONE\")'",
+        "timeout": 20000
+    },
+    "filesystem": {
+        "readonlyPaths": ["{{DEVDIR}}"],
+        "readwritePaths": ["{{ROOT}}", "{{TESTDIR}}/other"]
+    },
+    "seatbelt": {
+        "deniedPathNames": [".ssh"]
+    }
+}

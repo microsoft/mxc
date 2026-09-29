@@ -135,6 +135,8 @@ impl SandboxBackend for SeatbeltScriptRunner {
         crate::seatbelt_policy::validate_seatbelt_network_policy(&request.policy)
             .map_err(error_response)?;
         crate::seatbelt_policy::validate_seatbelt_ui_policy(request).map_err(error_response)?;
+        crate::seatbelt_policy::validate_seatbelt_path_exclusions(request)
+            .map_err(error_response)?;
 
         Ok(())
     }
