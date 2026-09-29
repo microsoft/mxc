@@ -1,7 +1,7 @@
 #!/bin/bash
-# LXC schema 0.8 omitted-network-section test
+# LXC omitted-network-section test
 #
-# Proves that a 0.8 request with the `network` section omitted entirely receives
+# Proves that a request with the `network` section omitted entirely receives
 # the directional deny defaults stated in the contract: the workload cannot reach
 # the network.  The contract is docs/sandbox-policy/0.8.0/policy.md: "A schema
 # 0.8 policy with no network fields selects directional deny defaults."
@@ -37,8 +37,8 @@ command -v ip6tables >/dev/null 2>&1 || skip "ip6tables is not installed."
 command -v lxc-create >/dev/null 2>&1 || skip "LXC (lxc-create) is not installed."
 [ -f "$LXC_EXEC" ] || skip "lxc-exec binary not built; run build.sh first."
 
-ALLOW_CONFIG="$REPO_DIR/tests/configs/lxc_network_v08_no_network_allow.json"
-OMIT_CONFIG="$REPO_DIR/tests/configs/lxc_network_v08_no_network_omit.json"
+ALLOW_CONFIG="$REPO_DIR/tests/configs/lxc_network_no_network_allow.json"
+OMIT_CONFIG="$REPO_DIR/tests/configs/lxc_network_no_network_omit.json"
 
 PROBE_ADDRESS="140.82.114.6"
 
@@ -47,8 +47,8 @@ for config in "$ALLOW_CONFIG" "$OMIT_CONFIG"; do
     [ -f "$config" ] || fail "fixture $config is missing."
 
     schema_ver="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$config" | head -1)"
-    if ! echo "$schema_ver" | grep -q '^0\.8\.'; then
-        fail "fixture $(basename "$config") declares schema '$schema_ver', not 0.8; this test is specific to the 0.8 no-network-section behavior."
+    if ! echo "$schema_ver" | grep -q '^0\.9\.'; then
+        fail "fixture $(basename "$config") declares schema '$schema_ver', not 0.9; this test covers the no-network-section behavior of the current contract."
     fi
 
     if ! grep -Fq "$PROBE_ADDRESS" "$config"; then
@@ -106,13 +106,13 @@ assert_blocked() {
     fi
 }
 
-echo "Running LXC schema 0.8 omitted-network-section test..."
+echo "Running LXC omitted-network-section test..."
 
-run_config "positive control: 0.8 request with explicit egress allow to $PROBE_ADDRESS" "$ALLOW_CONFIG"
+run_config "positive control: request with explicit egress allow to $PROBE_ADDRESS" "$ALLOW_CONFIG"
 assert_allowed "an explicitly allowed destination was unreachable on the positive control.  The second run's blocked result would prove nothing, so this test fails rather than proceeding."
 
-run_config "case under test: 0.8 request with network section omitted entirely" "$OMIT_CONFIG"
-assert_blocked "the workload reached $PROBE_ADDRESS under a 0.8 request with no network section.  The contract (docs/sandbox-policy/0.8.0/policy.md) states that omitted permissions remain denied and a 0.8 policy with no network fields selects directional deny defaults."
+run_config "case under test: request with network section omitted entirely" "$OMIT_CONFIG"
+assert_blocked "the workload reached $PROBE_ADDRESS under a request with no network section.  The contract (docs/sandbox-policy/0.8.0/policy.md) states that omitted permissions remain denied and a 0.8 policy with no network fields selects directional deny defaults."
 
-echo "PASS: a 0.8 request with the network section omitted cannot reach the network."
-echo "LXC schema 0.8 omitted-network-section test complete."
+echo "PASS: a request with the network section omitted cannot reach the network."
+echo "LXC omitted-network-section test complete."

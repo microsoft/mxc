@@ -1,7 +1,7 @@
 #!/bin/bash
-# LXC schema 0.8 deny-all loopback behavior test
+# LXC deny-all loopback behavior test
 #
-# A 0.8 request that permits nothing and names no proxy denies traffic in both
+# A request that permits nothing and names no proxy denies traffic in both
 # directions and leaves the container its own loopback.  That is the behavior
 # this test measures, on both halves:
 #
@@ -30,8 +30,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-CTRL_CONFIG="$REPO_DIR/tests/configs/lxc_network_v08_deny_all_loopback_ctrl.json"
-OMIT_CONFIG="$REPO_DIR/tests/configs/lxc_network_v08_deny_all_loopback_omit.json"
+CTRL_CONFIG="$REPO_DIR/tests/configs/lxc_network_deny_all_loopback_ctrl.json"
+OMIT_CONFIG="$REPO_DIR/tests/configs/lxc_network_deny_all_loopback_omit.json"
 
 LXC_EXEC="$REPO_DIR/src/target/release/lxc-exec"
 [ -x "$LXC_EXEC" ] || LXC_EXEC="$REPO_DIR/src/target/debug/lxc-exec"
@@ -66,8 +66,8 @@ for config in "$CTRL_CONFIG" "$OMIT_CONFIG"; do
     [ -f "$config" ] || fail "fixture $config is missing."
 
     schema_ver="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$config" | head -1)"
-    if ! echo "$schema_ver" | grep -q '^0\.8\.'; then
-        fail "fixture $(basename "$config") declares schema '$schema_ver', not 0.8; this test is specific to 0.8 deny-all behavior."
+    if ! echo "$schema_ver" | grep -q '^0\.9\.'; then
+        fail "fixture $(basename "$config") declares schema '$schema_ver', not 0.9; this test covers the deny-all behavior of the current contract."
     fi
 
     for marker in "$LOOPBACK_OK" "$NET_BLOCKED"; do
@@ -150,7 +150,7 @@ assert_reported() {
     fi
 }
 
-run_config "positive control: 0.8 request permitting one destination" "$CTRL_CONFIG"
+run_config "positive control: request permitting one destination" "$CTRL_CONFIG"
 assert_reported "loopback" "$LOOPBACK_OK" "$LOOPBACK_DEAD"
 assert_reported "egress" "$NET_ALLOWED" "$NET_BLOCKED"
 
@@ -164,7 +164,7 @@ fi
 
 echo "Control reached the network and its own loopback."
 
-run_config "case under test: 0.8 request permitting nothing and naming no proxy" "$OMIT_CONFIG"
+run_config "case under test: request permitting nothing and naming no proxy" "$OMIT_CONFIG"
 assert_reported "loopback" "$LOOPBACK_OK" "$LOOPBACK_DEAD"
 assert_reported "egress" "$NET_ALLOWED" "$NET_BLOCKED"
 
@@ -176,5 +176,5 @@ if ! reported "$LOOPBACK_OK"; then
     fail "the container could not reach a listener on its own loopback; a policy that permits nothing denies the network, and leaves loopback."
 fi
 
-echo "PASS: a 0.8 request permitting nothing is denied the network and keeps its own loopback."
-echo "LXC schema 0.8 deny-all loopback behavior test complete."
+echo "PASS: a request permitting nothing is denied the network and keeps its own loopback."
+echo "LXC deny-all loopback behavior test complete."
