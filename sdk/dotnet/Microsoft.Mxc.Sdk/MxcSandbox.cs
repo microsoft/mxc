@@ -136,7 +136,7 @@ public static class MxcSandbox
     public static ProbeOutput Probe(SandboxRequest? request = null)
     {
         var configJson = request is null ? null : SerializeProbeConfig(request);
-        if (!OperatingSystem.IsWindows())
+        if (!RequestProbeInterop.IsSupportedOnCurrentPlatform)
         {
             throw new MxcException(
                 ErrorCode.UnsupportedContainment,

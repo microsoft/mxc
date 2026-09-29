@@ -5,6 +5,8 @@ namespace Microsoft.Mxc.Sdk.Native;
 
 internal unsafe interface IRequestProbeInterop
 {
+    bool IsSupportedOnCurrentPlatform { get; }
+
     int Probe(byte* requestJsonUtf8, byte** outputJsonUtf8, MxcErrorDetail* error);
 
     void FreeString(byte* value);
@@ -19,6 +21,8 @@ internal sealed unsafe class PInvokeRequestProbeInterop : IRequestProbeInterop
     private PInvokeRequestProbeInterop()
     {
     }
+
+    public bool IsSupportedOnCurrentPlatform => OperatingSystem.IsWindows();
 
     public int Probe(
         byte* requestJsonUtf8,

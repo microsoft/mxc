@@ -588,6 +588,29 @@ public class MxcSandboxTests
     }
 
     [Fact]
+    public void Probe_WhenInteropReportsUnsupportedPlatform_ThrowsBeforeNativeCall()
+    {
+        using var native = new FakeRequestProbeInterop
+        {
+            IsSupportedOnCurrentPlatform = false,
+            OutputJson = CompleteProbeJson,
+        };
+        var previous = MxcSandbox.RequestProbeInterop;
+        MxcSandbox.RequestProbeInterop = native;
+
+        try
+        {
+            var error = Assert.Throws<MxcException>(() => MxcSandbox.Probe());
+            Assert.Equal(ErrorCode.UnsupportedContainment, error.Code);
+            Assert.Equal(0, native.ProbeCalls);
+        }
+        finally
+        {
+            MxcSandbox.RequestProbeInterop = previous;
+        }
+    }
+
+    [Fact]
     public void ProbeParser_RejectsCompleteFactsWithoutTierOrError()
     {
         AssertProbeJsonRejected(json =>
@@ -2106,12 +2129,16 @@ public class MxcSandboxTests
         internal string? RequestJson { get; private set; }
         internal bool OutputFreed { get; private set; }
         internal bool ErrorFreed { get; private set; }
+        internal int ProbeCalls { get; private set; }
+
+        public bool IsSupportedOnCurrentPlatform { get; init; } = true;
 
         public int Probe(
             byte* requestJsonUtf8,
             byte** outputJsonUtf8,
             MxcErrorDetail* error)
         {
+            ProbeCalls++;
             RequestJson = requestJsonUtf8 is null
                 ? null
                 : Marshal.PtrToStringUTF8((IntPtr)requestJsonUtf8);
