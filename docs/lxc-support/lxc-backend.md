@@ -35,12 +35,29 @@ sudo apt install lxc lxc-utils liblxc-dev
 
 **Fedora/RHEL:**
 ```bash
-sudo dnf install lxc lxc-devel
+sudo dnf install lxc lxc-templates dnsmasq lxc-devel
 ```
+RHEL needs EPEL enabled first, and a few more steps besides — see
+[Red Hat Enterprise Linux setup](#red-hat-enterprise-linux-setup) for the whole
+process.
 
 **Arch Linux:**
 ```bash
 sudo pacman -S lxc
+```
+
+### Container networking
+
+A policy that permits any network needs `lxcbr0` to hand the container an IPv4
+lease, so the bridge has to be up before a run: `sudo systemctl start lxc-net`.
+
+On a host running firewalld, which is the default on Fedora and RHEL, the bridge
+also has to sit in a zone that permits the traffic. The default zone rejects
+IPv4 DHCP while permitting router advertisement, so the container configures
+itself an IPv6 address, never receives a lease, and the run fails:
+
+```bash
+sudo firewall-cmd --zone=<ZONE> --change-interface=lxcbr0
 ```
 
 ## Configuration
@@ -217,6 +234,56 @@ pty.onExit((e) => console.log('Exit:', e.exitCode));
 # Rust only
 ./build.sh --rust-only
 ```
+
+## Red Hat Enterprise Linux setup
+
+1. **Enable EPEL.** LXC ships in EPEL.
+
+   ```bash
+   sudo subscription-manager repos --enable "codeready-builder-for-rhel-10-$(arch)-rpms"
+   sudo dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm
+   ```
+   Substitute `9` for `10` on RHEL 9.
+
+2. **Install LXC and the pieces it needs at runtime.**
+   ```bash
+   sudo dnf install -y lxc lxc-templates dnsmasq iptables
+   ```
+
+   Add `lxc-devel` as well if you are building MXC against liblxc rather than
+   running a released binary.
+
+3. **Start the bridge.**
+
+   ```bash
+   sudo systemctl enable --now lxc-net
+   ip -4 addr show lxcbr0
+   ```
+
+4. **Move the bridge into a firewalld zone that permits its traffic.**
+   firewalld is running by default on RHEL, and its default `public` zone
+   admits `ssh`, `cockpit` and `dhcpv6-client` but not IPv4 DHCP. Containers
+   therefore configure an IPv6 address from the router advertisement, never
+   receive a lease, and every run that asks for network fails:
+
+   ```bash
+   sudo firewall-cmd --zone=<ZONE> --change-interface=lxcbr0
+   ```
+
+   `<ZONE>` has to admit DHCP and DNS from the bridge, since dnsmasq answers
+   both on the bridge address.
+
+   Add `--permanent` and reload to keep the assignment across reboots. 
+
+### Verifying the host
+
+```bash
+sudo lxc-checkconfig
+ip -4 addr show lxcbr0
+sudo firewall-cmd --get-zone-of-interface=lxcbr0
+```
+
+The zone query should answer the zone you assigned.
 
 ## Limitations
 

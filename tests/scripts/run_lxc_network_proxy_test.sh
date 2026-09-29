@@ -63,6 +63,9 @@ fail() {
     exit 1
 }
 
+# shellcheck source=lib/lxc_peer_listener.sh
+. "$SCRIPT_DIR/lib/lxc_peer_listener.sh"
+
 # ---------------------------------------------------------------------------
 # Always-run assertions (offline-safe): the fixture must exist, parse, and
 # still say what this test assumes. These run even without root/LXC/python3 so
@@ -134,12 +137,14 @@ fi
 # request with the sentinel body, so the positive path needs no real internet.
 # ---------------------------------------------------------------------------
 PROXY_PID=""
+PROXY_LOG="$(mktemp)"
 cleanup() {
     [ -n "$PROXY_PID" ] && kill "$PROXY_PID" >/dev/null 2>&1
+    rm -f "$PROXY_LOG"
 }
 trap cleanup EXIT
 
-python3 - "$PROXY_BIND_IP" "$PROXY_PORT" >/dev/null 2>&1 <<'PY' &
+python3 - "$PROXY_BIND_IP" "$PROXY_PORT" >"$PROXY_LOG" 2>&1 <<'PY' &
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -159,10 +164,12 @@ HTTPServer((sys.argv[1], int(sys.argv[2])), Proxy).serve_forever()
 PY
 PROXY_PID=$!
 
-# Give the proxy a moment to bind, then confirm it is actually listening.
-sleep 1
-if ! kill -0 "$PROXY_PID" >/dev/null 2>&1; then
-    fail "local proxy failed to start on $PROXY_BIND_IP:$PROXY_PORT"
+# Wait for the proxy to accept a connection. The container's positive path
+# depends on it, so a proxy that never bound has to fail here as harness
+# breakage rather than later as the policy blocking the proxy.
+if ! PROXY_PROBE_ERROR="$(await_peer_tcp "$PROXY_BIND_IP" "$PROXY_PORT")"; then
+    fail_unreachable_peer "the local proxy" "$PROXY_BIND_IP:$PROXY_PORT" \
+        "$PROXY_PROBE_ERROR" "$PROXY_LOG"
 fi
 
 # ---------------------------------------------------------------------------

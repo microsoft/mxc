@@ -573,7 +573,11 @@ try {
 
             $r = Invoke-StateAware -Request $req
             Assert-True ($r.ExitCode -ne 0) "$phase (real): exit code is non-zero"
-            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $envObj = if ($phase -eq 'exec') {
+                Parse-StderrEnvelope -Stderr $r.Stderr
+            } else {
+                Parse-Envelope -Stdout $r.Stdout
+            }
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
             Assert-True ($code -eq 'malformed_id') "$phase (real): error.code is 'malformed_id' (got '$code')"
 

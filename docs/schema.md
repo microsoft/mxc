@@ -312,6 +312,13 @@ use:
 Policy entries that are blank, name a file, or do not exist yet are skipped:
 a process cannot be launched in any of them.
 
+WSL Container one-shot runs accept an explicit `process.cwd` only as a local
+Windows drive path, which is mapped under `/mnt/<drive>` (for example
+`C:\work` becomes `/mnt/c/work`); any other value is rejected before the
+container is created. WSL Container state-aware `exec` takes an absolute
+in-container path instead. See
+[`docs/wsl/wsl-container-getting-started.md`](wsl/wsl-container-getting-started.md).
+
 ### Environment
 
 `process.env` and `process.inheritDefaultEnv` combine as follows from

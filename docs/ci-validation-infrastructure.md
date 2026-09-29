@@ -287,8 +287,11 @@ a process-container job selects follows from that build.
   `kernel.apparmor_restrict_unprivileged_userns` (ephemeral CI hosts only).
 - `lxc` — installs the LXC stack, reloads the AppArmor profile, starts and waits
   for `lxcbr0`, enables bridge netfilter, and makes sure the bridge's NAT rule
-  is in place. On RHEL-likes it needs EPEL first, because Red Hat dropped LXC
-  after RHEL 7 and ships no replacement.
+  is in place. On a host running firewalld, it also moves the bridge into the
+  trusted zone; without that zone assignment, the default zone rejects the
+  container's IPv4 DHCP and a container holding only an IPv6 address fails
+  every network test. On RHEL-likes it needs EPEL first, because Red Hat
+  dropped LXC after RHEL 7 and ships no replacement.
 - `microvm` — asserts the NanVix payload exists.
 
 Every install above goes through two shared helpers rather than its own
