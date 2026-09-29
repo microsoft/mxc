@@ -118,6 +118,44 @@ jobs:
           cargo test --locked --release --target "${{ matrix.target }}" -p mxc_engine -p mxc_ffi --lib state_aware
           cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk --test state_aware
 
+      # The LXC streaming arm and the discovery matrix it feeds are Linux-only
+      # code that no other lane compiles, let alone runs. None of these need LXC
+      # installed: the engine tests inject their probes, and the dispatch and
+      # FFI pins are refused inside LXC's own preparation before a container is
+      # created. The live suite that does need LXC runs in lxc-e2e.yml.
+      #
+      # Each run is checked for a non-zero pass count because `cargo test` with
+      # a name filter that matches nothing also exits 0, so a renamed test would
+      # otherwise turn this gate into a no-op.
+      - name: Test LXC dispatch and discovery
+        working-directory: src
+        shell: bash
+        run: |
+          # No `-e`: the pipeline's status is checked explicitly below so a
+          # failure reports which pinned run failed, rather than aborting mute.
+          set -uo pipefail
+          run_pinned() {
+            local label="$1"; shift
+            local log status
+            log="$(mktemp)"
+            cargo test --locked --release --target "${{ matrix.target }}" "$@" 2>&1 | tee "$log"
+            # `tee` succeeds even when cargo does not, so read cargo's own
+            # status before trusting the summary below.
+            status=${PIPESTATUS[0]}
+            if [ "$status" -ne 0 ]; then
+              echo "::error::$label failed (cargo exited $status)."
+              exit "$status"
+            fi
+            if ! grep -qE 'test result: ok\. [1-9][0-9]* passed' "$log"; then
+              echo "::error::$label ran no test; the filter no longer matches anything."
+              exit 1
+            fi
+          }
+          run_pinned "LXC discovery matrix" -p mxc_engine --lib linux_support
+          run_pinned "LXC dispatch arm" -p mxc_engine --lib streaming_lxc_reaches_the_backend_on_linux
+          run_pinned "LXC FFI routing" -p mxc_ffi --test ffi extern_spawn_request_reaches_the_lxc_backend
+          run_pinned "SDK platform helpers" -p mxc-sdk --test sdk_helpers
+
       # Runs the Bubblewrap executor characterization tests. lxc-exec was built
       # into src/target/<triple>/release above, where find_binary() locates it.
       - name: Test executor characterization (wxc_e2e_tests)

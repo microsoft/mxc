@@ -207,16 +207,50 @@ fn build_request_then_run_seatbelt() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn platform_support_linux_reports_only_bubblewrap() {
+fn platform_support_linux_reports_the_backends_it_can_launch() {
+    // Asserted as invariants rather than by re-running the probes: an
+    // expectation rebuilt from the same calls `platform_support` makes has no
+    // independent oracle and cannot fail. The LXC-only and both-present
+    // matrices are pinned by the injected-probe tests in `mxc_engine`.
     let support = platform_support();
-    // Bubblewrap is the only SDK-launchable Linux backend; `lxc` is a
-    // host-capability backend reported by `available_backends()`, not here.
-    // Assert the exact set so re-advertising a non-launchable backend fails.
+
+    for method in &support.available_methods {
+        assert!(
+            matches!(method.as_str(), "lxc" | "bubblewrap"),
+            "only the two SDK-launchable Linux backends may be reported, got: {method}"
+        );
+    }
     assert_eq!(
-        support.available_methods,
-        vec!["bubblewrap".to_string()],
-        "Linux platform_support must report exactly bubblewrap (lxc excluded)"
+        support.available_methods.len(),
+        support
+            .available_methods
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        "a backend must not be reported twice: {:?}",
+        support.available_methods
     );
+    assert_eq!(
+        support.is_supported,
+        !support.available_methods.is_empty(),
+        "a host with a launchable backend must report itself supported, and one \
+         without must not: {support:?}"
+    );
+    assert_eq!(
+        support.bubblewrap_network.is_some(),
+        support
+            .available_methods
+            .iter()
+            .any(|method| method == "bubblewrap"),
+        "the bubblewrap network capability is reported exactly when bubblewrap is: {support:?}"
+    );
+    if support.available_methods.len() == 2 {
+        assert_eq!(
+            support.available_methods,
+            ["lxc", "bubblewrap"],
+            "the reported order must match the TypeScript SDK's"
+        );
+    }
 }
 
 #[cfg(target_os = "windows")]

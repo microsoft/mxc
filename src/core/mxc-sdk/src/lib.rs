@@ -38,16 +38,16 @@
 //! | Backend | Host | Selected by |
 //! |---------|------|-------------|
 //! | Bubblewrap | Linux | [`Containment::Process`] or [`Containment::Bubblewrap`] |
+//! | LXC | Linux | [`Containment::Lxc`] |
 //! | Seatbelt | macOS | [`Containment::Process`] or [`Containment::Seatbelt`] |
 //! | ProcessContainer (AppContainer / BaseContainer) | Windows | [`Containment::Process`] |
 //! | Explicit ProcessContainer configuration | Windows | [`Containment::ProcessContainer`] |
 //! | WSLC (WSL Container) | Windows | [`Containment::Wslc`] |
 //! | IsolationSession | Windows | [`Containment::IsolationSession`] |
 //!
-//! [`Containment::Lxc`] models explicit LXC settings, but the in-process
-//! [`run`] and [`spawn_sandbox`] APIs return
-//! [`ErrorCode::UnsupportedContainment`] because LXC does not expose captured
-//! pipe-based execution. Use the standalone `lxc-exec` binary for LXC.
+//! LXC is reachable only by naming it: [`Containment::Process`] resolves to
+//! Bubblewrap on Linux. It needs root, and it streams over pipes, so the
+//! workload sees no TTY — unlike the `lxc-exec` binary, which allocates a pty.
 //!
 //! WSLC requires the crate's `wslc` build feature, and IsolationSession
 //! requires the `isolation_session` build feature. WSLC's container has no

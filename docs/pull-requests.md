@@ -9,6 +9,26 @@ it fans out to the reusable `Build.Windows.Job.yml`, `Build.Linux.Job.yml`, and
 x64/arm64, Linux x64/arm64, and macOS arm64 hosts, then runs the lint,
 versioning, and SDK jobs.
 
+### LXC (`lxc-e2e.yml`)
+
+A separate workflow, because the primary Linux lane does not install LXC and
+does not run as root. It triggers on PRs targeting `main`, so a PR stacked on
+another branch gets no LXC gating until it is retargeted — dispatch it manually
+for a stacked head. It runs, in order:
+
+| Step | What it covers |
+|------|----------------|
+| `tests/scripts/run_lxc_all_tests.sh` | The shell suites, driving the `lxc-exec` binary end to end. |
+| `cargo test -p wxc_e2e_tests --test e2e_lxc_network_capability` | That the attached workload has `CAP_NET_ADMIN` dropped. |
+| `cargo test -p mxc-sdk --test streaming_lxc --test sdk_helpers` | The in-process streaming handle: live stdio, exit codes, container-scoped kill, timeout, concurrent-name refusal, and that every terminal path releases the container. `sdk_helpers` rides along because this is the only lane where `platform_support()` sees a host with LXC. `lxc-exec` routes through `mxc_engine::run` and never reaches `spawn_sandbox`, so no shell script can cover this. |
+
+All three set `MXC_LXC_TESTS_REQUIRE_EXECUTION=1`, which turns a skipped
+prerequisite into a failure. Without it a lane provisioned for LXC could go
+green having run nothing.
+
+The .NET binding's LXC tests run in `SDK.Dotnet.Test.Job.yml`, which installs
+LXC on its Linux leg and reruns just those tests as root.
+
 ## Azure Pipelines (optional on PRs, required on `main`)
 
 The ADO pipeline (`MXC-PR-Build`) is the Azure version of the PR pipeline. The official

@@ -312,3 +312,43 @@ fn extern_run_executes_command() {
     // SAFETY: `out` was filled by `mxc_run_request`.
     unsafe { mxc_run_result_free(&mut out) };
 }
+
+/// Pins that the C ABI routes an LXC request into the LXC backend rather than
+/// refusing the containment. The empty distribution is refused by LXC's own
+/// preparation before any container is created, so the answer is the same on
+/// every Linux host and nothing is left behind.
+#[cfg(target_os = "linux")]
+#[test]
+fn extern_spawn_request_reaches_the_lxc_backend() {
+    let request = CString::new(
+        r#"{
+            "policy": { "version": "0.7.0-alpha" },
+            "command": "echo hello-lxc",
+            "containment": { "type": "lxc", "distribution": "", "release": "" }
+        }"#,
+    )
+    .unwrap();
+    let mut handle: *mut MxcSandbox = ptr::null_mut();
+    // SAFETY: `MxcErrorDetail` contains integers and nullable pointers.
+    let mut error: MxcErrorDetail = unsafe { std::mem::zeroed() };
+    // SAFETY: valid request and writable fresh out-parameters.
+    let status = unsafe { mxc_spawn_request(request.as_ptr(), &mut handle, &mut error) };
+
+    assert_ne!(
+        status,
+        mxc_ffi::MXC_STATUS_UNSUPPORTED_CONTAINMENT,
+        "the engine must route LXC to a real backend arm on Linux"
+    );
+    assert!(handle.is_null());
+    // SAFETY: the message is a valid C string filled by `mxc_spawn_request`.
+    let message = unsafe { CStr::from_ptr(error.message_utf8) }
+        .to_str()
+        .unwrap();
+    assert!(
+        message.contains("LXC distribution and release are required"),
+        "unexpected message: {message}"
+    );
+
+    // SAFETY: `error` was filled by `mxc_spawn_request`.
+    unsafe { mxc_error_detail_free(&mut error) };
+}

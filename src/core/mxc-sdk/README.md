@@ -140,8 +140,9 @@ let request = build_request_with_containment(
 # Ok::<(), mxc_sdk::Error>(())
 ```
 
-This models the LXC request for configuration parity. The in-process `run` and
-`spawn_sandbox` APIs reject it; execute LXC requests with `lxc-exec`.
+This runs through `run` and `spawn_sandbox` like any other backend. LXC needs
+root, and it streams over pipes, so the workload sees no TTY — unlike the
+`lxc-exec` binary, which allocates a pty.
 
 Filesystem-policy discovery helpers are also available to feed a policy:
 [`available_tools_policy`] (PATH + tool/SDK environment directories),
@@ -506,6 +507,7 @@ default):
 | Host    | Backend(s)                                      | Selected by                      |
 |---------|-------------------------------------------------|----------------------------------|
 | Linux   | Bubblewrap                                      | `Containment::Process` or `Containment::Bubblewrap` |
+| Linux   | LXC                                             | `Containment::Lxc`               |
 | macOS   | Seatbelt                                        | `Containment::Process` or `Containment::Seatbelt` |
 | Windows | ProcessContainer (AppContainer + BaseContainer) | `Containment::Process`           |
 | Windows | Explicit ProcessContainer configuration         | `Containment::ProcessContainer`  |
@@ -529,9 +531,13 @@ Hyperlight — cannot be selected with `build_request_with_containment`; use the
 executor binaries instead. Windows Sandbox state-aware lifecycle is also
 available through the raw exact-JSON entry points above.
 
-`Containment::Lxc` models explicit LXC distribution settings, but `run` and
-`spawn_sandbox` reject it because the LXC backend does not expose captured
-pipe-based execution. Use the standalone `lxc-exec` binary for LXC.
+`Containment::Lxc` names the LXC backend, served by `run` and `spawn_sandbox`
+with piped stdio. `Containment::Process` resolves to Bubblewrap on Linux, so
+LXC is reachable only by naming it. It needs root. Its stdio is pipes rather
+than a pty, so the workload sees no TTY — unlike the `lxc-exec` binary, which
+allocates one. `kill()` stops the whole container, which is the only way to
+reach a workload in its PID namespace, and dropping the handle tears the
+container down synchronously.
 
 ### WSLC
 

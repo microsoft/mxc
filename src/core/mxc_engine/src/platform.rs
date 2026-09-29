@@ -41,6 +41,11 @@ pub struct PlatformSupport {
     pub reason: Option<String>,
     /// Containment backends available on this host, by wire name
     /// (e.g. `"seatbelt"`, `"bubblewrap"`, `"processcontainer"`).
+    ///
+    /// Reports that the backend's tooling is present and usable, not that the
+    /// calling process is privileged enough to reach it. `"lxc"` in particular
+    /// needs root for a system container, or a configured subuid/subgid
+    /// delegation for an unprivileged one; neither is probed here.
     pub available_methods: Vec<String>,
     /// Bubblewrap host network capability. `None` off Linux, and when
     /// `bubblewrap` itself is unavailable.
@@ -59,8 +64,13 @@ struct BwrapProbe<F>(F);
 #[cfg(target_os = "linux")]
 struct ProxyEnforcementProbe<G>(G);
 
+/// The `lxc-ls` gate, injected for the same reason.
 #[cfg(target_os = "linux")]
-fn linux_platform_support_with<F, G>(
+struct LxcProbe<H>(H);
+
+#[cfg(target_os = "linux")]
+fn linux_platform_support_with<F, G, H>(
+    lxc: LxcProbe<H>,
     bwrap: BwrapProbe<F>,
     proxy_enforcement: ProxyEnforcementProbe<G>,
 ) -> PlatformSupport
@@ -70,19 +80,42 @@ where
         bwrap_common::bwrap_version::BwrapUnavailable,
     >,
     G: FnOnce() -> Result<(), String>,
+    H: FnOnce() -> bool,
 {
-    match (bwrap.0)() {
+    let lxc_available = (lxc.0)();
+    let bwrap_probe = (bwrap.0)();
+
+    // Listed in the TypeScript SDK's order, so a caller moving off
+    // `getPlatformSupport` reads the same answer.
+    let mut available_methods = Vec::new();
+    if lxc_available {
+        available_methods.push("lxc".to_string());
+    }
+    if bwrap_probe.is_ok() {
+        available_methods.push("bubblewrap".to_string());
+    }
+
+    match bwrap_probe {
         Ok(_) => PlatformSupport {
             is_supported: true,
-            available_methods: vec!["bubblewrap".to_string()],
+            available_methods,
             // Walked only once `bwrap` itself is usable: the network
             // dependencies say nothing on a host that cannot run the backend,
             // and the walk costs several subprocess spawns.
             bubblewrap_network: Some(bubblewrap_network_support((proxy_enforcement.0)())),
             ..Default::default()
         },
+        // `reason` says why the platform is unsupported, and LXC alone makes it
+        // supported, so the bwrap detail has nowhere to go here.
+        Err(_) if lxc_available => PlatformSupport {
+            is_supported: true,
+            available_methods,
+            ..Default::default()
+        },
         Err(err) => PlatformSupport {
-            reason: Some(err.to_string()),
+            reason: Some(format!(
+                "Neither LXC nor Bubblewrap is available on this system ({err})"
+            )),
             ..Default::default()
         },
     }
@@ -91,12 +124,17 @@ where
 /// Detect MXC support on the current host.
 ///
 /// Mirrors the SDK's `getPlatformSupport`, restricted to the backends the
-/// `mxc-sdk` library can actually run. On Windows the isolation tier and UI
-/// capabilities come from the in-process fallback probe rather than a
-/// `wxc-exec --probe` subprocess, and `wslc` is reported when the host has the
-/// WSL Container runtime (requires the `wslc` feature). The broader
-/// host-capability set (backends the host can run but the SDK cannot launch) is
-/// reported separately by [`available_backends`](crate::available_backends).
+/// `mxc-sdk` library can actually run. On Linux both `bubblewrap` and `lxc` are
+/// reported when present, and either one alone makes the host supported. On
+/// Windows the isolation tier and UI capabilities come from the in-process
+/// fallback probe rather than a `wxc-exec --probe` subprocess, and `wslc` is
+/// reported when the host has the WSL Container runtime (requires the `wslc`
+/// feature). The broader host-capability set (backends the host can run but the
+/// SDK cannot launch) is reported separately by
+/// [`available_backends`](crate::available_backends).
+///
+/// Every probe here answers "is the tooling usable", not "may this process use
+/// it" — see [`PlatformSupport::available_methods`].
 pub fn platform_support() -> PlatformSupport {
     #[cfg(target_os = "macos")]
     {
@@ -118,12 +156,12 @@ pub fn platform_support() -> PlatformSupport {
 
     #[cfg(target_os = "linux")]
     {
-        // Presence alone is not enough: `bwrap` must also be new enough for
-        // every flag the argument builder emits (see
-        // `bwrap_common::bwrap_version::MIN_BWRAP_VERSION`). `lxc` is a
-        // host-capability backend the SDK can't launch, so it is reported by
-        // `available_backends()` rather than here.
+        // Presence alone is not enough for `bwrap`: it must also be new enough
+        // for every flag the argument builder emits (see
+        // `bwrap_common::bwrap_version::MIN_BWRAP_VERSION`). LXC has no such
+        // floor, so a clean `lxc-ls --version` is its whole gate.
         linux_platform_support_with(
+            LxcProbe(lxc_common::availability::is_lxc_available),
             BwrapProbe(bwrap_common::bwrap_version::probe_bwrap),
             ProxyEnforcementProbe(bwrap_common::proxy_network::probe_proxy_enforcement),
         )
@@ -226,7 +264,9 @@ mod tests {
     use super::linux_platform_support_with;
     use super::platform_support;
     #[cfg(target_os = "linux")]
-    use super::{bubblewrap_network_support, BwrapProbe, ProxyEnforcement, ProxyEnforcementProbe};
+    use super::{
+        bubblewrap_network_support, BwrapProbe, LxcProbe, ProxyEnforcement, ProxyEnforcementProbe,
+    };
     #[cfg(target_os = "linux")]
     use bwrap_common::bwrap_version::{BwrapUnavailable, BwrapVersion, MIN_BWRAP_VERSION};
     use wxc_common::models::ContainmentBackend;
@@ -313,6 +353,7 @@ mod tests {
     #[test]
     fn linux_support_reports_bubblewrap_when_probe_succeeds() {
         let support = linux_platform_support_with(
+            LxcProbe(|| false),
             BwrapProbe(|| Ok(MIN_BWRAP_VERSION)),
             ProxyEnforcementProbe(|| Ok(())),
         );
@@ -328,19 +369,54 @@ mod tests {
         );
     }
 
+    /// Both Linux backends are SDK-launchable, so a host carrying both must
+    /// advertise both.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_support_reports_lxc_alongside_bubblewrap() {
+        let support = linux_platform_support_with(
+            LxcProbe(|| true),
+            BwrapProbe(|| Ok(MIN_BWRAP_VERSION)),
+            ProxyEnforcementProbe(|| Ok(())),
+        );
+        assert!(support.is_supported);
+        assert_eq!(support.available_methods, ["lxc", "bubblewrap"]);
+    }
+
+    /// An LXC-only host can launch a sandbox, so reporting it unsupported would
+    /// send every discovery caller away from a backend that works.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_support_stands_on_lxc_alone() {
+        let support = linux_platform_support_with(
+            LxcProbe(|| true),
+            BwrapProbe(|| Err(BwrapUnavailable::TooOld(BwrapVersion::new(0, 4, 1)))),
+            ProxyEnforcementProbe(|| {
+                panic!("the network walk must not run without a usable bwrap")
+            }),
+        );
+        assert!(support.is_supported);
+        assert_eq!(support.reason, None);
+        assert_eq!(support.available_methods, ["lxc"]);
+        assert!(support.bubblewrap_network.is_none());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_support_preserves_probe_failure_reason() {
         let failure = BwrapUnavailable::TooOld(BwrapVersion::new(0, 4, 1));
         let expected = failure.to_string();
         let support = linux_platform_support_with(
+            LxcProbe(|| false),
             BwrapProbe(|| Err(failure)),
             ProxyEnforcementProbe(|| {
                 panic!("the network walk must not run without a usable bwrap")
             }),
         );
         assert!(!support.is_supported);
-        assert_eq!(support.reason.as_deref(), Some(expected.as_str()));
+        let reason = support.reason.expect("an unsupported host explains itself");
+        assert!(reason.contains(&expected), "got: {reason}");
+        assert!(reason.contains("LXC"), "got: {reason}");
         assert!(support.available_methods.is_empty());
         assert!(support.bubblewrap_network.is_none());
     }
@@ -351,6 +427,7 @@ mod tests {
     #[test]
     fn linux_support_reports_bubblewrap_without_proxy_enforcement() {
         let support = linux_platform_support_with(
+            LxcProbe(|| false),
             BwrapProbe(|| Ok(MIN_BWRAP_VERSION)),
             ProxyEnforcementProbe(|| Err("slirp4netns not found".to_string())),
         );

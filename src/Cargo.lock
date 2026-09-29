@@ -1579,6 +1579,7 @@ version = "0.9.0"
 dependencies = [
  "bwrap_common",
  "libc",
+ "lxc_common",
  "mxc_engine",
  "serde_json",
  "wxc_common",
