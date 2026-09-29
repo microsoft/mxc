@@ -78,10 +78,14 @@ internal static class RequestProbeExecutor
                     ? $"wxc-exec exited with code {result.ExitCode}"
                     : result.Stderr.Trim();
                 var code = detail.Contains(
-                    "supports only ProcessContainer containment",
+                    "failed to load probe config",
                     StringComparison.Ordinal)
-                    ? ErrorCode.UnsupportedContainment
-                    : ErrorCode.BackendError;
+                    ? ErrorCode.MalformedRequest
+                    : detail.Contains(
+                        "supports only ProcessContainer containment",
+                        StringComparison.Ordinal)
+                        ? ErrorCode.UnsupportedContainment
+                        : ErrorCode.BackendError;
                 throw new MxcException(code, $"wxc-exec request probe failed: {detail}");
             }
 
