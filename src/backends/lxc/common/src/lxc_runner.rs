@@ -2829,8 +2829,7 @@ mod tests {
         assert_eq!(refusal.error_message, LXC_INHERIT_STDIO_UNSUPPORTED);
         assert!(
             !logger.get_buffer().contains("Container name:"),
-            "the refusal must land before a container is named; log={}",
-            logger.get_buffer()
+            "the refusal must land before a container is named"
         );
     }
 
@@ -2855,8 +2854,7 @@ mod tests {
         assert_eq!(refusal.error_message, LXC_RUNTIME_PROXY_UNSUPPORTED);
         assert!(
             !logger.get_buffer().contains("Container name:"),
-            "validation must run before the container is named; log={}",
-            logger.get_buffer()
+            "validation must run before the container is named"
         );
     }
 

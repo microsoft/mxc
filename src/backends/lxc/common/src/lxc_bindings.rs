@@ -335,10 +335,12 @@ impl LxcContainer {
         if outcome.is_err() {
             let _ = child.kill();
             let _ = child.wait();
+        } else {
+            wait_for_drain(&None, &stderr);
         }
 
-        // Fired once the process is gone, so a descendant that inherited the
-        // pipe cannot park the join below.
+        // A descendant holding the pipe open would park the join below
+        // indefinitely.
         if let Some(canceller) = stderr_canceller {
             canceller.close();
         }
@@ -1425,6 +1427,54 @@ mod tests {
         assert!(
             unconfined.status().is_ok(),
             "a run with no chains to protect must spawn without any privilege"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_failed_release_carries_the_tools_own_diagnosis() {
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg("printf 'mxc: container is not running\\n' >&2; exit 3");
+
+        let failure = LxcContainer::run_release_tool(cmd)
+            .expect_err("a tool exiting non-zero must be reported as a failure");
+
+        assert!(
+            failure.contains("container is not running"),
+            "the tool's stderr is the only account of why the release failed, so it has to \
+             reach the caller; got {failure:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_release_that_succeeds_is_not_reported_as_a_failure() {
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.arg("-c").arg("printf 'noise\\n'; exit 0");
+
+        assert!(
+            LxcContainer::run_release_tool(cmd).is_ok(),
+            "a tool that exited cleanly released the container"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_release_waits_for_stderr_a_descendant_writes_after_the_tool_exits() {
+        let mut cmd = std::process::Command::new("/bin/sh");
+
+        // The subshell holds the stderr pipe open past the tool's own exit and
+        // writes only after it, which is the ordering a prompt cancel drops.
+        cmd.arg("-c")
+            .arg("( sleep 0.2; printf 'late diagnosis\\n' >&2 ) & exit 3");
+
+        let failure = LxcContainer::run_release_tool(cmd)
+            .expect_err("a tool exiting non-zero must be reported as a failure");
+
+        assert!(
+            failure.contains("late diagnosis"),
+            "stderr that lands after the tool exits still explains the failure; got {failure:?}"
         );
     }
 }
