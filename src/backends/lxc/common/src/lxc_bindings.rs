@@ -327,8 +327,17 @@ impl LxcContainer {
             .spawn()
             .map_err(|e| format!("Failed to run {}: {}", tool, e))?;
 
-        let (stderr, stderr_canceller) = wrap_pipe(child.stderr.take())
-            .map_err(|e| format!("Failed to wrap the {} stderr pipe: {}", tool, e))?;
+        let (stderr, stderr_canceller) = match wrap_pipe(child.stderr.take()) {
+            Ok(pipe) => pipe,
+
+            // Without this the tool keeps running, unreaped, after this call
+            // has reported failure.
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("Failed to wrap the {} stderr pipe: {}", tool, e));
+            }
+        };
         let stderr = read_to_end_on_thread(stderr);
 
         let outcome = wait_with_timeout(&mut child, Some(RELEASE_TIMEOUT));

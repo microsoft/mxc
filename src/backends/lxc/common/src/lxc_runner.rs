@@ -916,7 +916,8 @@ impl PreparedSandbox {
         // Chains that were never hooked live on the host and still have to
         // come out below.
         let destroying = destroy_on_exit && !self.released;
-        if !(destroying && self.fw_manager.is_hooked()) {
+        let skipped_in_container = destroying && self.fw_manager.is_hooked();
+        if !skipped_in_container {
             failures.extend(self.remove_in_container_state(cleanup_policy, logger));
         }
 
@@ -928,6 +929,12 @@ impl PreparedSandbox {
                     self.note_namespace_gone();
                 }
                 Err(e) => {
+                    // The container outlived the destroy, so the chains skipped
+                    // above are still filtering a workload that may be alive.
+                    if skipped_in_container {
+                        self.retain_rules_past_drop();
+                    }
+
                     let failure = format!("failed to destroy container: {}", e);
                     let _ = writeln!(logger, "Warning: {}", failure);
                     failures.push(failure);
@@ -1306,8 +1313,10 @@ impl SandboxProcess for LxcSandboxProcess {
             .map(|status| status.code().unwrap_or(-1)))
     }
 
+    /// Always `0` — the workload runs in the container's PID namespace, and the
+    /// host-side `lxc-attach` pid is not a handle that reaches it.
     fn id(&self) -> u32 {
-        self.inner.child.id()
+        0
     }
 
     fn kill(&mut self) -> std::io::Result<()> {
@@ -1771,6 +1780,34 @@ mod tests {
         assert!(
             launch_failure_message("Execution failed: no", &failures).contains("destroy container"),
             "the launch error must carry the cleanup failure"
+        );
+    }
+
+    #[test]
+    fn a_container_that_would_not_be_destroyed_keeps_its_rules_through_the_drop() {
+        let fake = crate::network_iptables::test_firewall::install();
+        let mut prepared = prepared_with_applied_rules("destroy-refused-drop");
+        apply_hooked_egress_rules(&mut prepared, 4242);
+
+        // The fixture names a container that was never created, so the destroy
+        // fails and leaves one that may still be running the workload.
+        let mut logger = Logger::new(Mode::Buffer);
+        let failures = prepared.tear_down(true, true, &mut logger);
+
+        assert!(
+            failures.iter().any(|f| f.contains("destroy container")),
+            "a leaked root-owned container has to reach the caller; got {failures:?}"
+        );
+
+        let issued_before = fake.issued().len();
+        drop(prepared);
+
+        assert_eq!(
+            fake.issued().len(),
+            issued_before,
+            "the container survived the destroy, so dropping the sandbox must not strip the \
+             chains still filtering it; issued {:?}",
+            fake.issued()
         );
     }
 
