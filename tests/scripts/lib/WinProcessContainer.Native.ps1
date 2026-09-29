@@ -104,4 +104,9 @@ namespace Mxc {
 '@ | Out-Null
 }
 
+function Set-UiProbeClipboardSeed {
+    $token = "MXC_UI_PROBE_READ_$([guid]::NewGuid().ToString('N'))"
+    Set-Clipboard -Value $token
+}
+
 # Result accumulator

@@ -129,4 +129,12 @@
         HarnessArguments = "Default"
         Destructive = $false
     }
+    "1246" = @{
+        FriendlyName = "Tier 1 Clipboard Policy Matrix"
+        Script = "test_cases\Invoke-Issue1246-Tier1ClipboardRestrictions.ps1"
+        ExpectedTierSupport = @("base-container-psec")
+        Prerequisites = @("wxc-exec", "BaseContainer-capable host", "Windows PowerShell 5.1", "interactive desktop with host clipboard access")
+        HarnessArguments = "Default"
+        Destructive = $false
+    }
 }

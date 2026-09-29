@@ -68,6 +68,7 @@ function Phase-UiMitigationMatrix {
             -BpUiIme $false `
             -Env (Get-ProbeEnvWithDestructive)
         $logA = Join-Path $ScratchRoot 'logs\ui-matrix-A.log'
+        Set-UiProbeClipboardSeed
         $rA = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfgA -LogPath $logA
         $logContentA = Read-Log $logA
 
@@ -177,4 +178,3 @@ function Phase-UiMitigationMatrix {
 
 Invoke-WpcPhase -Key 'UiMitigationMatrix' -Body { Phase-UiMitigationMatrix }
 Complete-WpcChild
-
