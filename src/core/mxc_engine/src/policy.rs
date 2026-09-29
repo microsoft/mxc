@@ -627,7 +627,9 @@ impl SandboxRequest {
     /// to be present, so a sparse environment fails the launch with a
     /// diagnostic naming them — see [`Self::inherit_default_env`] and
     /// [`Self::inherit_process_env`] for the supported ways to start from a
-    /// complete environment.
+    /// complete environment. IsolationSession cannot launch a process without
+    /// the agent user's default environment, so it refuses an environment set
+    /// here; use [`Self::inherit_default_env`] to layer entries over it.
     ///
     /// Calling this with an empty iterator requests an *empty* environment,
     /// which is distinct from never calling it at all (see [`Self::clear_env`]).
@@ -677,7 +679,8 @@ impl SandboxRequest {
     /// From schema 0.9 LXC, Bubblewrap, and Seatbelt supply `PATH` + `HOME` +
     /// `TERM`. Below 0.9 their default is empty and this is equivalent to
     /// [`Self::set_env`]. WSLc supplies the container image's own `ENV` at
-    /// every version, so `extra` always layers over it.
+    /// every version, so `extra` always layers over it. IsolationSession
+    /// supplies the agent user's default environment.
     pub fn inherit_default_env<K, V>(
         &mut self,
         extra: impl IntoIterator<Item = (K, V)>,
@@ -698,6 +701,8 @@ impl SandboxRequest {
     /// running with, so anything you inherited — including secrets in the
     /// ambient environment — is handed to the sandboxed child. Prefer
     /// `inherit_default_env` unless you specifically need your own variables.
+    /// The environment is set with [`Self::set_env`], which IsolationSession
+    /// refuses.
     pub fn inherit_process_env<K, V>(
         &mut self,
         extra: impl IntoIterator<Item = (K, V)>,

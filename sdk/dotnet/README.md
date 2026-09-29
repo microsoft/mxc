@@ -438,6 +438,9 @@ container's network, so it accepts only an explicit acknowledgment of that and
 refuses an absent policy, whose default is a deny it could not enforce. It also
 refuses filesystem paths and any `Ui`: supplying either is an error rather than
 a no-op, so the policy shown under Usage does not carry over to this backend.
+It also refuses an `Environment` unless `InheritDefaultEnvironment` is set:
+every process starts from the agent user's default environment, which cannot be
+replaced or emptied.
 
 The native unit must be built with isolation-session support or execution returns
 `UnsupportedContainment`.

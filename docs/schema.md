@@ -339,9 +339,10 @@ none of them asks for the default itself — the same environment an omitted
 Two backends depart from the table. The Windows process container requires
 `SYSTEMROOT` and `LOCALAPPDATA` to be present, so a caller-owned block that
 omits them — including `[]` — is rejected before launch rather than used; the
-rejection names the missing variables. IsolationSession does not yet
-distinguish an omitted `process.env` from `[]`, and treats both as the session's
-default environment.
+rejection names the missing variables. IsolationSession starts every process
+from the agent user's default environment and cannot replace or empty it, so
+`process.env` without `inheritDefaultEnv` — including `[]` — is rejected before
+launch.
 
 What the default block contains is backend-specific; see the backend's guide.
 On the WSL Container backend it is the container image's own `ENV`, which MXC

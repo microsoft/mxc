@@ -79,7 +79,7 @@ in the SDK parses past the `iso:` prefix.
 | Field | Type | Description |
 |---|---|---|
 | `version` | `0.9.0-alpha` | Optional explicit declaration of the registered state-aware contract; other values are rejected by the SDK. |
-| `process` | `ProcessConfig` (required) | Cross-cutting process info — `commandLine`, `cwd`, `env`, `timeout`. |
+| `process` | `ProcessConfig` (required) | Cross-cutting process info — `commandLine`, `cwd`, `env`, `inheritDefaultEnv`, `timeout`. |
 
 **Metadata:** n/a — exec returns an exit code and streamed stdio, not a structured result.
 
