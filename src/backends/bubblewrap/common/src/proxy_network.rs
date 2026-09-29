@@ -93,8 +93,6 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// caller-owned timeout and is fail-closed, so being killed from outside would
 /// report the host as *unsupported*.
 const PRE_FLIGHT_BUDGET: Duration = Duration::from_secs(3);
-/// Total caller-visible budget for the advisory proxy-enforcement probe.
-pub const PROXY_ENFORCEMENT_PROBE_TIMEOUT: Duration = PRE_FLIGHT_BUDGET;
 const SLIRP_HOST_GATEWAY: &str = "10.0.2.2";
 /// The gateway as an address, for rules and pins. Kept in step with
 /// [`SLIRP_HOST_GATEWAY`] by [`tests::gateway_constants_agree`].

@@ -164,37 +164,7 @@ The default `processcontainer`, `bubblewrap`, `lxc`, `seatbelt`, `wslc`, and `is
 
 > **Hyperlight** is an opt-in build flavor (Linux x64 and Windows x64) gated by the `--with-hyperlight` cargo feature. Default shipped binaries do not include it; build from source with `build.bat --with-hyperlight` (Windows) or the equivalent cargo invocation on Linux.
 
-`getAvailableBackends()` and `getPlatformSupport()` answer different questions:
-
-```typescript
-import {
-  getAvailableBackends,
-  getPlatformSupport,
-} from '@microsoft/mxc-sdk';
-
-const hostBackends = getAvailableBackends();
-const launchableByNode = getPlatformSupport().availableMethods;
-```
-
-`getAvailableBackends()` reports every backend native discovery can currently
-affirm on the host, including backends outside the Node one-shot surface. An
-empty array is a valid successful result. `getPlatformSupport()` reports the
-narrower set this SDK can launch and, when the native platform probe can
-determine it, `uiCapabilities`: a platform-neutral view of which UI
-restrictions the host can enforce. This is currently populated only by the
-Windows native probe, where it is derived from `JOB_OBJECT_UILIMIT_*` support;
-Linux and macOS omit the field until their probes expose equivalent data. On
-Linux, `unavailableReasons` provides a diagnostic for each unavailable LXC or
-Bubblewrap backend even when the other backend keeps the platform supported.
-
-Discovery is advisory. A reported ProcessContainer tier is the strongest tier
-the host can reach, not a guarantee for a particular config, and normal request
-validation still runs at spawn time. The first uncontended synchronous Linux
-discovery walk has a conservative 16-second native bound (10 seconds for
-Bubblewrap version plus launchability, 3 seconds for its optional proxy
-capability, and 3 seconds for LXC), excluding scheduler and host-load delay.
-Successful Bubblewrap discovery is cached; failures are retried. The complete
-`getPlatformSupport()` result is module-cached.
+`getPlatformSupport()` reports backend availability and, when the native probe can determine it, `uiCapabilities`: a platform-neutral view of which UI restrictions the host can enforce. This is currently populated only by the Windows native probe, where it is derived from `JOB_OBJECT_UILIMIT_*` support; Linux and macOS omit the field until their probes expose equivalent data. On Linux, `unavailableReasons` provides a diagnostic for each unavailable LXC or Bubblewrap backend even when the other backend keeps the platform supported.
 
 On Linux, when Bubblewrap is available, `getPlatformSupport()` also reports `bubblewrapNetwork`: whether this host can enforce **proxy-only egress** (schema `0.8.0-alpha`+ proxy mode, which runs the sandbox in a private network namespace and default-drops everything except the proxy). That mode has no fallback — a policy the host cannot satisfy fails rather than silently degrading — so check it before spawning:
 
@@ -210,22 +180,11 @@ if (network.proxyEnforcement !== 'supported') {
 
 It is reported **fail closed**: if the probe cannot run, the result is `'unsupported'` with the reason in `warnings`, never absent. The check is advisory — the runner still verifies the dependencies at launch, since the probe runs in a different process at an earlier time. See [the Bubblewrap backend guide](../../docs/bwrap-support/bubblewrap-backend.md#checking-host-support-before-you-run).
 
-For request-specific Windows ProcessContainer diagnostics, call
-`probeSandboxSupport(config)`. It accepts the same `ContainerConfig` used by
-`spawnSandboxFromConfig` and calls the packaged `mxc_ffi` native library in
-process:
-
-```typescript
-import { probeSandboxSupport } from '@microsoft/mxc-sdk';
-
-const result = probeSandboxSupport(config);
-console.log(result.tier, result.warnings, result.probes.uiCapabilities);
-```
-
-This API is synchronous, Windows-only, and does not create a sandbox. Native
-probe failures, non-ProcessContainer requests, and malformed JSON throw errors;
-they are not reported as successful unsupported results. The CLI remains the
-authoritative ProcessContainer diagnostic.
+For request-specific Windows ProcessContainer diagnostics,
+`probeSandboxSupport(config?)` synchronously calls the packaged `mxc_ffi`
+library in process and returns the selected tier, warnings, and host facts. It
+does not create a sandbox. Non-ProcessContainer requests and native or JSON
+failures throw rather than becoming an unsupported result.
 
 ---
 
@@ -641,7 +600,6 @@ deprovisionSandbox(sandboxId, config?, options?) → Promise<DeprovisionResult>
 
 // Platform & policy discovery
 getPlatformSupport() → PlatformSupport
-getAvailableBackends() → AvailableBackend[]
 getAvailableToolsPolicy(env?, options?) → FilesystemPolicyResult
 getUserProfilePolicy()                  → FilesystemPolicyResult
 getTemporaryFilesPolicy(env?)           → FilesystemPolicyResult
@@ -654,9 +612,8 @@ queryTelemetryConsentAsync()      → Promise<{ state, storedState, effectiveSta
 requestTelemetryConsent(presenter, locale?) → Promise<TelemetryConsentOutcome>
 withdrawTelemetryConsentAsync()   → Promise<TelemetryConsentOutcome>
 
-// Capability types
-AvailableBackend, AvailableBackendName, AvailableBackendTier
-ProbeOutput, ProbeFacts, UiCapabilitySupport, BubblewrapNetworkSupport
+// Capability and probe types
+UiCapabilitySupport, BubblewrapNetworkSupport, ProbeOutput, ProbeFacts
 
 // Errors (typed wire-format errors from wxc-exec)
 ErrorCode, MxcError, MxcErrorFields

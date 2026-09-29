@@ -1,13 +1,14 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { afterEach, beforeEach, describe, it } from 'node:test';
+import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { buildSandboxPayload, createConfigFromPolicy, spawnSandbox, spawnSandboxFromConfig } from '../../src/sandbox.js';
 import { resolveExecutableAndArgs } from '../../src/helper.js';
 import {
   _resetPlatformSupportCache,
-  _setAvailableBackendsProbe,
+  _setBwrapVersionRunner,
+  _setLxcAvailabilityProbe,
 } from '../../src/platform.js';
 import { ContainerConfig, SandboxPolicy, SandboxingMethod } from '../../src/types.js';
 import { MxcError } from '../../src/errors.js';
@@ -2120,21 +2121,6 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
   // anything; it just builds the path + args.
   const fakeExe = process.execPath;
 
-  beforeEach(() => {
-    // These tests validate argument construction, not the native discovery
-    // boundary. Keep the production fail-closed path covered by platform.test.
-    _setAvailableBackendsProbe(() => [
-      { backend: 'lxc', capabilities: [], warnings: [] },
-      { backend: 'bubblewrap', capabilities: [], warnings: [] },
-    ]);
-    _resetPlatformSupportCache();
-  });
-
-  afterEach(() => {
-    _setAvailableBackendsProbe();
-    _resetPlatformSupportCache();
-  });
-
   function makeConfig(containment: string): ContainerConfig {
     const version =
       containment === 'isolation_session' || containment === 'wslc'
@@ -2204,20 +2190,21 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
       return;
     }
     try {
-      _setAvailableBackendsProbe(() => [
-        { backend: 'lxc', capabilities: [], warnings: [] },
-      ]);
+      _setLxcAvailabilityProbe(() => true);
+      _setBwrapVersionRunner(() => ({
+        kind: 'failed',
+        status: null,
+        detail: 'timed out after 5000ms',
+      }));
       _resetPlatformSupportCache();
 
       assert.throws(
         () => resolveExecutableAndArgs(makeConfig('bubblewrap'), { executablePath: fakeExe }),
-        { message: /not launchable/i },
+        { message: /timed out after 5000ms/ },
       );
     } finally {
-      _setAvailableBackendsProbe(() => [
-        { backend: 'lxc', capabilities: [], warnings: [] },
-        { backend: 'bubblewrap', capabilities: [], warnings: [] },
-      ]);
+      _setLxcAvailabilityProbe(null);
+      _setBwrapVersionRunner(null);
       _resetPlatformSupportCache();
     }
   });

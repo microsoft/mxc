@@ -21,16 +21,6 @@ the individual local test scripts are documented in
   `scripts/ci/resolve-validation-test-matrix.mjs` validates it and expands a
   plan into GitHub Actions matrices.
 - Validation runs **on a schedule, not on PRs**.
-- The SDK integration jobs separately install the packed public Node package.
-  On Linux they run `available-backends.test.js` as the unprivileged runner
-  before the existing sudo suites, with `MXC_FFI_DIR` cleared by the test. The
-  package-CI flag requires the prepared LXC backend, so an empty or stubbed
-  native result cannot pass. Bubblewrap may be absent on a runner that blocks
-  unprivileged namespaces; if discovery advertises it, the test performs a real
-  exit-zero shared-network launch through the public package. A lane that
-  independently guarantees unprivileged namespace creation can additionally
-  set `MXC_EXPECT_BWRAP_LAUNCHABILITY=1`; that turns absence into a failure
-  instead of weakening restricted-runner behavior globally.
 
 ## Moving parts
 
@@ -73,7 +63,7 @@ test jobs only ever `download-artifact`.
 |-----|--------------|
 | `dependency-feed-check` | Resolves the locked crate graph through the public `MxcDependencies` feed. Gates the builds. |
 | `windows` | `Build.Windows.Job.yml` — x64 + arm64 release build, unit tests, uploads `wxc-binaries-<target>`. |
-| `linux` | `Build.Linux.Job.yml` — x64 + arm64 release build; executes Bubblewrap/LXC availability, engine discovery/platform, Rust SDK host-support, streaming, and `wxc_e2e_tests` coverage on native runners; uploads `lxc-binaries-<target>`. The ADO Linux x64 build runs the same focused availability and SDK contracts. |
+| `linux` | `Build.Linux.Job.yml` — x64 + arm64 release build, unit tests, `wxc_e2e_tests`, uploads `lxc-binaries-<target>`. |
 | `macos` | `Build.MacOS.Job.yml` — arm64 release build, unit + `wxc_e2e_tests`, uploads `mxc-binaries-aarch64-apple-darwin`. |
 | `isolation-session-bundle` | `Package.IsolationSession.TestBundle.Job.yml` — uploads `isolation-session-test-bundle-<target>` for x64 + arm64. |
 | `test-nightly` | Calls the matrix job with `plan: nightly`. Runs on every schedule tick and on a `nightly` dispatch. |
@@ -286,12 +276,11 @@ a process-container job selects follows from that build.
   (apt/dnf/yum/microdnf), verifies their required commands, and relaxes
   `kernel.apparmor_restrict_unprivileged_userns` (ephemeral CI hosts only).
 - `lxc` — installs the LXC stack, reloads the AppArmor profile, starts and waits
-  for `lxcbr0`, enables bridge netfilter, and makes sure the bridge's NAT rule
-  is in place. On a host running firewalld, it also moves the bridge into the
-  trusted zone; without that zone assignment, the default zone rejects the
-  container's IPv4 DHCP and a container holding only an IPv6 address fails
-  every network test. On RHEL-likes it needs EPEL first, because Red Hat
-  dropped LXC after RHEL 7 and ships no replacement.
+  for `lxcbr0`, and moves the bridge into firewalld's trusted zone on a host
+  running firewalld. On RHEL-likes it needs EPEL first, because Red Hat dropped
+  LXC after RHEL 7 and ships no replacement. Without the zone assignment the
+  default zone rejects the container's IPv4 DHCP, and a container holding only
+  an IPv6 address fails every network test.
 - `microvm` — asserts the NanVix payload exists.
 
 Every install above goes through two shared helpers rather than its own

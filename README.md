@@ -243,41 +243,14 @@ wxc-exec.exe --debug config.json
 
 See [docs/diagnostics.md](docs/diagnostics.md) for full diagnostics reference.
 
-### Backend Discovery and CLI Diagnostics
+### Request-aware ProcessContainer probe
 
-The Node.js and .NET SDKs expose broad, read-only host discovery:
-
-```typescript
-import {
-  getAvailableBackends,
-  getPlatformSupport,
-} from '@microsoft/mxc-sdk';
-
-const hostBackends = getAvailableBackends();
-const launchableByNode = getPlatformSupport().availableMethods;
-```
-
-`getAvailableBackends()` (and .NET `MxcSandbox.GetAvailableBackends()`) reports
-every backend native discovery can currently affirm on the host. An empty array
-is a successful result. `getPlatformSupport()` reports the narrower set the
-in-process SDK surface can launch. A reported ProcessContainer tier is the
-host's strongest reachable tier, not a guarantee for a particular request;
-normal request parsing, authorization, and backend validation still run when a
-sandbox is launched.
-
-On Linux, the first uncontended discovery walk has a conservative 16-second
-native bound: 10 seconds for Bubblewrap version plus a real minimal
-shared-network launch, 3 seconds for its optional proxy capability, and 3
-seconds for LXC. This excludes scheduler and host-load delay. Only successful
-Bubblewrap discovery is cached, so failures remain retryable.
-
-For detailed Windows ProcessContainer request diagnostics, use
-`wxc-exec --probe [config.json]`. The Node.js
-`probeSandboxSupport(config)` API calls the packaged `mxc_ffi` native library
-in process, as does the .NET `MxcSandbox.Probe(request)` API. Both are Windows
-ProcessContainer-only and surface probe and JSON errors rather than converting
-them into an unsupported result. The standalone `wxc-exec` CLI remains a
-separate diagnostic. The Rust SDK does not expose a public request-probe API.
+On Windows, `wxc-exec --probe [config.json]`, Node.js
+`probeSandboxSupport(config?)`, and .NET `MxcSandbox.Probe(request?)` use the
+shared engine probe to report the ProcessContainer tier and host facts for a
+specific request. The SDK calls use the structured `mxc_ffi` C ABI in process;
+they do not create a sandbox, and preserve native, parse, and unsupported
+containment errors.
 
 ### Audit Mode (Permissive Learning Mode)
 

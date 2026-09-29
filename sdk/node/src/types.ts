@@ -599,29 +599,6 @@ export type IsolationTier =
   | 'appcontainer-bfs'
   | 'appcontainer-dacl';
 
-/** Capabilities currently recognized by this SDK's broad discovery surface. */
-export type KnownBackendCapability =
-  | 'captureDenials'
-  | 'filesystemDeniedPaths'
-  | 'filesystemEnumeratePaths'
-  | 'ingressHostLoopbackAllow'
-  | 'proxyEnforcement';
-
-/** Open backend name returned by native broad discovery. */
-export type AvailableBackendName = ContainmentBackend | (string & {});
-/** Open isolation tier returned by native broad discovery. */
-export type AvailableBackendTier = IsolationTier | (string & {});
-/** Open capability name returned by native broad discovery. */
-export type BackendCapability = KnownBackendCapability | (string & {});
-
-/** One backend the native engine can currently run on this host. */
-export interface AvailableBackend {
-  backend: AvailableBackendName;
-  tier?: AvailableBackendTier;
-  capabilities: BackendCapability[];
-  warnings: string[];
-}
-
 /**
  * Host support for enforcing sandbox UI restrictions.
  *

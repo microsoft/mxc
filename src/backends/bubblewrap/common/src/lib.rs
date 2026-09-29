@@ -16,8 +16,6 @@
 //! - [`bwrap_runner`] is gated to `target_os = "linux"` since it actually
 //!   spawns the `bwrap` binary.
 
-#[cfg(target_os = "linux")]
-pub mod bwrap_availability;
 pub mod bwrap_command;
 #[cfg(target_os = "linux")]
 pub mod bwrap_runner;

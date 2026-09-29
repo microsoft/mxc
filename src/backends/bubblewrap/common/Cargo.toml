@@ -15,4 +15,3 @@ thiserror = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
-mxc_config_contract = { workspace = true }

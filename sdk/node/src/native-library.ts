@@ -99,18 +99,3 @@ export function loadMxcFfi(candidates = _mxcFfiCandidates()): MxcNativeLibrary {
   const version = handle.func('const char *mxc_version(void)') as () => string;
   return { path: libraryPath, handle, version };
 }
-
-type MxcFfiLoader = () => MxcNativeLibrary;
-
-/** @internal Exported for deterministic ownership tests. */
-export function createMxcFfiOwner(loader: MxcFfiLoader): MxcFfiLoader {
-  let pinned: MxcNativeLibrary | undefined;
-  return () => pinned ??= loader();
-}
-
-const getPinnedMxcFfi = createMxcFfiOwner(() => loadMxcFfi());
-
-/** Return the native library pinned for this Node module isolate. */
-export function getMxcFfi(): MxcNativeLibrary {
-  return getPinnedMxcFfi();
-}

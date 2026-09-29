@@ -32,28 +32,16 @@ requiring root privileges or a container runtime.
   The deny-by-default baseline (see [How It Works](#how-it-works)) emits its
   read-only mounts via `--ro-bind-try` (bwrap 0.3.1+) and the sandbox
   environment is built with `--clearenv` (bwrap 0.5.0+), so **bwrap 0.5.0 or
-  newer** is required. Broad discovery first probes `bwrap --version`, then
-  validates and launches a minimal schema `0.7.0-alpha` shared-network sandbox
-  through the production argument path. The fixture runs `exit 0` from `/`
-  with `PATH=/usr/bin:/bin`, legacy `defaultPolicy: "allow"`, and
-  `allowLocalNetwork: true`; it does not request experimental or testing-only
-  features. Bubblewrap is advertised only when that launch exits successfully,
-  so a host that blocks user namespaces does not get a false availability
-  result.
-
-  Version and viability each have a 5-second deadline. The complete
-  uncontended Linux discovery walk is conservatively bounded to 16 seconds:
-  10 seconds for those two Bubblewrap stages, 3 seconds for the optional proxy
-  capability, and 3 seconds for LXC, excluding scheduler and host-load delay.
-  Supervised probes retain at most 64 KB from each output stream and terminate
-  and reap their process groups on timeout.
-
-  Only combined version-plus-launch success is cached for the Rust process
-  lifetime. Failures are not cached and can recover after host configuration
-  changes. Execution validates each real request again, so the advisory cache
-  never authorizes policy or bypasses launch-time checks. The Node SDK also
-  module-caches the complete `getPlatformSupport()` projection; restart the
-  Node process after remediating a cached platform result.
+  newer** is required. Platform detection probes `bwrap --version` and reports
+  the backend as unavailable — with the detected version — when the host is
+  below that floor. The probe has a 5-second deadline and retains at most 64 KB
+  from each output stream. On timeout, its process group is terminated with
+  `SIGKILL` so wrappers and descendants cannot keep the probe alive. Successful
+  Rust-executor advisory results are cached for the process lifetime; Rust
+  failures are not cached, and execution validation probes again before launch
+  so a changed PATH target cannot reuse an advisory result. The Node SDK caches
+  the complete `getPlatformSupport()` result, including failures, for the module
+  lifetime; restart the Node process after remediating the host.
 - **Schema 0.8 private-namespace modes:** `slirp4netns` installed and on PATH,
   plus util-linux `unshare` (with `--map-current-user` and `--keep-caps`) and
   `nsenter`, `iptables`, `ip6tables`, `iptables-restore`, and

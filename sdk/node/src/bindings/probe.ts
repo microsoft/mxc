@@ -3,7 +3,7 @@
 
 import koffi from 'koffi';
 import { MxcError } from '../errors.js';
-import { getMxcFfi } from '../native-library.js';
+import { loadMxcFfi } from '../native-library.js';
 import {
   AbiErrorDetailType,
   decodeString,
@@ -11,6 +11,21 @@ import {
   type AbiErrorDetail,
 } from './native-error.js';
 import { bindNativeFunction } from './native-function.js';
+
+let loadProbeLibrary = loadMxcFfi;
+let bindProbeFunction = bindNativeFunction;
+let decodeProbeString = decodeString;
+
+/** @internal Test seam for the synchronous native probe boundary. */
+export function _setProbeNativeDependencies(
+  load = loadMxcFfi,
+  bind = bindNativeFunction,
+  decode = decodeString,
+): void {
+  loadProbeLibrary = load;
+  bindProbeFunction = bind;
+  decodeProbeString = decode;
+}
 
 type Pointer = unknown;
 type ProbeRequestFunction = (
@@ -72,26 +87,32 @@ export function readProbeJsonWithNative(
 }
 
 export function readProbeJson(requestJson?: string): string {
-  const native = getMxcFfi();
-  return readProbeJsonWithNative({
-    probeRequest: bindNativeFunction<ProbeRequestFunction>(native.handle, {
-      symbol: 'mxc_probe_request_json_with_error',
-      result: 'int32_t',
-      parameters: [
-        'const char *',
-        koffi.out(koffi.pointer('char', 2)),
-        koffi.out(koffi.pointer(AbiErrorDetailType)),
-      ],
-    }),
-    freeString: bindNativeFunction<FreeStringFunction>(native.handle, {
-      symbol: 'mxc_string_free',
-      result: 'void',
-      parameters: ['void *'],
-    }),
-    freeError: bindNativeFunction<FreeErrorFunction>(native.handle, {
-      symbol: 'mxc_error_detail_free',
-      result: 'void',
-      parameters: [koffi.pointer(AbiErrorDetailType)],
-    }),
-  }, requestJson);
+  const native = loadProbeLibrary();
+  try {
+    return readProbeJsonWithNative({
+      probeRequest: bindProbeFunction<ProbeRequestFunction>(native.handle, {
+        symbol: 'mxc_probe_request_json_with_error',
+        result: 'int32_t',
+        parameters: [
+          'const char *',
+          // Keep the owned char* opaque so Koffi does not convert it to a JS
+          // string and lose the allocation identity required by mxc_string_free.
+          koffi.out(koffi.pointer('void *')),
+          koffi.out(koffi.pointer(AbiErrorDetailType)),
+        ],
+      }),
+      freeString: bindProbeFunction<FreeStringFunction>(native.handle, {
+        symbol: 'mxc_string_free',
+        result: 'void',
+        parameters: ['void *'],
+      }),
+      freeError: bindProbeFunction<FreeErrorFunction>(native.handle, {
+        symbol: 'mxc_error_detail_free',
+        result: 'void',
+        parameters: [koffi.pointer(AbiErrorDetailType)],
+      }),
+    }, requestJson, decodeProbeString);
+  } finally {
+    native.handle.unload();
+  }
 }

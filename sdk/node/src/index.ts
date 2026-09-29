@@ -66,21 +66,12 @@ export {
   ProbeOutput,
   ProbeFacts,
   BubblewrapNetworkSupport,
-  AvailableBackend,
-  AvailableBackendName,
-  AvailableBackendTier,
-  BackendCapability,
-  KnownBackendCapability,
 } from './types.js';
 
 // Export platform detection functions
 export {
   getPlatformSupport,
 } from './platform.js';
-
-export {
-  getAvailableBackends,
-} from './available-backends.js';
 
 export {
   probeSandboxSupport,

@@ -277,6 +277,98 @@ public class MxcSandboxTests
     }
 
     [Theory]
+    [InlineData("0.6.0-alpha")]
+    [InlineData("0.7.0-alpha")]
+    public void ProbeConfig_RejectsEmptyProcessContainerNetworkBeforeV08(string version)
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy { Version = version },
+            "cmd /c exit 0")
+        {
+            Containment = new ProcessContainerContainment
+            {
+                Network = new ProcessContainerNetworkPolicy(),
+            },
+        };
+
+        var error = Assert.Throws<MxcException>(
+            () => MxcSandbox.SerializeProbeConfig(request));
+
+        Assert.Equal(ErrorCode.MalformedRequest, error.Code);
+        Assert.Contains("processContainer.network", error.Message);
+    }
+
+    [Theory]
+    [InlineData("0.6.0-alpha")]
+    [InlineData("0.7.0-alpha")]
+    [InlineData("0.8.0-alpha")]
+    public void ProbeConfig_RejectsEmptyProcessContainerFilesystemBeforeV09(string version)
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy { Version = version },
+            "cmd /c exit 0")
+        {
+            Containment = new ProcessContainerContainment
+            {
+                Filesystem = new ProcessContainerFilesystemPolicy(),
+            },
+        };
+
+        var error = Assert.Throws<MxcException>(
+            () => MxcSandbox.SerializeProbeConfig(request));
+
+        Assert.Equal(ErrorCode.MalformedRequest, error.Code);
+        Assert.Contains("processContainer.filesystem", error.Message);
+    }
+
+    [Theory]
+    [InlineData("0.8.0-alpha")]
+    [InlineData("0.9.0-alpha")]
+    [InlineData("0.10.0-alpha")]
+    public void ProbeConfig_PreservesEmptyProcessContainerNetworkWhenSupported(string version)
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy { Version = version },
+            "cmd /c exit 0")
+        {
+            Containment = new ProcessContainerContainment
+            {
+                Network = new ProcessContainerNetworkPolicy(),
+            },
+        };
+
+        using var document = JsonDocument.Parse(MxcSandbox.SerializeProbeConfig(request));
+        var network = document.RootElement
+            .GetProperty("processContainer")
+            .GetProperty("network");
+
+        Assert.Empty(network.EnumerateObject());
+    }
+
+    [Theory]
+    [InlineData("0.9.0-alpha")]
+    [InlineData("0.10.0-alpha")]
+    public void ProbeConfig_PreservesEmptyProcessContainerFilesystemWhenSupported(string version)
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy { Version = version },
+            "cmd /c exit 0")
+        {
+            Containment = new ProcessContainerContainment
+            {
+                Filesystem = new ProcessContainerFilesystemPolicy(),
+            },
+        };
+
+        using var document = JsonDocument.Parse(MxcSandbox.SerializeProbeConfig(request));
+        var filesystem = document.RootElement
+            .GetProperty("processContainer")
+            .GetProperty("filesystem");
+
+        Assert.Empty(filesystem.GetProperty("enumeratePaths").EnumerateArray());
+    }
+
+    [Theory]
     [InlineData("egress")]
     [InlineData("ingress")]
     [InlineData("runtimeConfig")]

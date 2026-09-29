@@ -205,8 +205,8 @@ public static class MxcSandbox
     {
         ArgumentNullException.ThrowIfNull(request);
         ValidateNetworkVersion(request.Policy);
+        ValidateProbeVersionedFields(request);
         var prepared = PrepareRequest(request);
-        ValidateProbeVersionedFields(prepared);
         if (prepared.Containment is not ProcessContainment
             and not ProcessContainerContainment)
         {
@@ -409,7 +409,7 @@ public static class MxcSandbox
                     ErrorCode.MalformedRequest,
                     "processContainer.captureDenials requires schema version 0.8 or later");
             }
-            if (processContainer?.Network?.AllowedProxyPeer is not null)
+            if (processContainer?.Network is not null)
             {
                 throw new MxcException(
                     ErrorCode.MalformedRequest,
@@ -431,11 +431,13 @@ public static class MxcSandbox
                     ErrorCode.MalformedRequest,
                     "process.inheritDefaultEnv requires config schema version 0.9.0-alpha or later");
             }
-            if (processContainer?.Filesystem?.EnumeratePaths.Count > 0)
+            if (processContainer?.Filesystem is { } filesystem)
             {
                 throw new MxcException(
                     ErrorCode.MalformedRequest,
-                    "processContainer.filesystem.enumeratePaths requires schema version 0.9.0-alpha");
+                    filesystem.EnumeratePaths.Count > 0
+                        ? "processContainer.filesystem.enumeratePaths requires schema version 0.9.0-alpha"
+                        : "processContainer.filesystem requires schema version 0.9.0-alpha");
             }
         }
     }

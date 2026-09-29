@@ -6,6 +6,8 @@ import assert from 'node:assert';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import {
   sdk,
   supportedVersions,
@@ -14,6 +16,8 @@ import {
   debugSpawnOptions,
   spawnFromConfigAsync,
   startUnixTestProxy,
+  getSdkBinDir,
+  getSdkPackageRoot,
   NETWORK_TEST_URL,
 } from './test-helpers.js';
 import type { ChildProcess } from 'node:child_process';
@@ -82,10 +86,14 @@ describe(`Linux Bubblewrap (schema ${schemaVersion})`, {
 // Network proxy tests use the cooperative env-var proxy, which is
 // unprivileged by design -- the entire reason the proxy path exists is to
 // avoid the root requirement of iptables-based enforcement. Gate on
-// "Linux + bwrap available" rather than "Linux + root". Pinned to schema
-// 0.6.0-alpha because Bubblewrap proxy support is only available in 0.6+.
-const PROXY_SCHEMA = '0.6.0-alpha';
-describe('Linux Bubblewrap network proxy (schema 0.6.0-alpha)', {
+// "Linux + bwrap available" rather than "Linux + root".
+//
+// Pinned to 0.7 to hold the *legacy* proxy shape: `network.proxy`,
+// `defaultPolicy` and `allowedHosts` were removed in 0.9, and below 0.8 they
+// run on the shared host network, so this block needs no slirp4netns. The 0.9
+// spelling is covered separately below.
+const PROXY_SCHEMA = '0.7.0-alpha';
+describe(`Linux Bubblewrap network proxy, legacy shape (schema ${PROXY_SCHEMA})`, {
   skip: !isLinuxBubblewrap
     ? 'Linux Bubblewrap proxy tests require Linux with bwrap installed'
     : undefined,
@@ -174,10 +182,23 @@ describe('Linux Bubblewrap network proxy (schema 0.6.0-alpha)', {
   });
 });
 
-// Schema 0.9 names a real loopback proxy endpoint in
-// `runtimeConfig.networkProxy`. The native capability probe is the gate for
-// the complete proxy-only posture, including private namespaces and packet
-// filtering dependencies.
+// Schema 0.9 removed `network.proxy` along with `defaultPolicy` and the host
+// lists, so the legacy block above has no 0.9 translation. A 0.9 proxy is a
+// real endpoint named by `runtimeConfig.networkProxy`, which the parser accepts
+// only on loopback, and the request resolves to the proxy-only posture: egress
+// must be deny-by-default with no rules, and the backend opens the proxy
+// endpoint alone.
+//
+// That posture is enforced from inside a private network namespace routed by
+// rootless slirp4netns, which the legacy path does not need -- hence the extra
+// prerequisite here.
+//
+// The SDK's own capability answers it: the native probe runs `slirp4netns
+// --version`, checks that private namespaces can actually be unshared, and
+// inspects the iptables backend, so it fails closed on any part of the
+// dependency set. Testing for the binary alone would let a host with an
+// unusable slirp, `unshare`, `nsenter`, `iptables`, or `ip6tables` past the
+// gate and report an environmental failure as a test failure.
 const PROXY_SCHEMA_09 = '0.9.0-alpha';
 const hasProxyEnforcement =
   isLinuxBubblewrap &&
@@ -193,6 +214,9 @@ describe(`Linux Bubblewrap network proxy (schema ${PROXY_SCHEMA_09})`, {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-sdk-bwrap-proxy-09-'));
   const proxies: ChildProcess[] = [];
 
+  // The helper announces its port through a fixed-name ready file, so two
+  // proxies sharing a directory would have the second read the first one's
+  // port. Each gets its own directory instead.
   const startProxy = (): number => {
     const { port, proxyProcess } = startUnixTestProxy(
       fs.mkdtempSync(path.join(tmpDir, 'proxy-')),
@@ -202,14 +226,15 @@ describe(`Linux Bubblewrap network proxy (schema ${PROXY_SCHEMA_09})`, {
   };
 
   after(() => {
-    for (const proxy of proxies) {
-      try { proxy.kill('SIGTERM'); } catch { /* ignore */ }
+    for (const p of proxies) {
+      try { p.kill('SIGTERM'); } catch { /* ignore */ }
     }
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
   });
 
   it('should route traffic through the endpoint named by runtimeConfig.networkProxy', async () => {
     const port = startProxy();
+
     const config = sdk.createConfigFromPolicy(
       { version: PROXY_SCHEMA_09 },
       'bubblewrap',
@@ -226,6 +251,8 @@ describe(`Linux Bubblewrap network proxy (schema ${PROXY_SCHEMA_09})`, {
       networkProxy: `http://127.0.0.1:${port}`,
     };
 
+    // No allowTestingFeatures: that flag gates `builtinTestServer`, which has
+    // no 0.9 spelling. Needing it here would mean the gate had gone slack.
     const result = await spawnFromConfigAsync(config, { ...debugSpawnOptions, experimental: true });
     assert.strictEqual(result.exitCode, 0, `0.9 proxy run failed: ${result.stdout}`);
     assert.ok(result.stdout.includes('PROXY_09_OK'), `missing PROXY_09_OK in: ${result.stdout}`);
@@ -233,11 +260,15 @@ describe(`Linux Bubblewrap network proxy (schema ${PROXY_SCHEMA_09})`, {
 
   it('should confine egress to the proxy endpoint', async () => {
     const port = startProxy();
+
     const config = sdk.createConfigFromPolicy(
       { version: PROXY_SCHEMA_09 },
       'bubblewrap',
       'bwrap-runtime-proxy-09-egress',
     );
+    // `--noproxy '*'` is the load-bearing part: it opts the request out of the
+    // proxy env vars, so a success would mean the sandbox reached the internet
+    // directly and the proxy-only posture was never enforced.
     config.process!.commandLine =
       'set -e; ' +
       `if curl -fsS --noproxy '*' --max-time 10 '${NETWORK_TEST_URL}' > /dev/null 2>&1; then ` +
@@ -272,29 +303,120 @@ describe(`Linux Bubblewrap network proxy (schema ${PROXY_SCHEMA_09})`, {
   });
 });
 
-describe('public backend discovery projection', () => {
-  it('projects public discovery into PlatformSupport.bubblewrapNetwork', (t) => {
-    const backends = sdk.getAvailableBackends();
+// The Rust serializer and the TypeScript parser are each unit-tested against
+// fixtures, but a fixture cannot catch the two drifting apart. This pins the
+// transport: the real `lxc-exec --available-backends` payload is fed to the
+// real SDK parser, so a rename or reshape on either side fails here.
+//
+// The gate is only "Linux with a bwrap on PATH" — whether that bwrap is
+// actually *usable* is what the tests below assert, not something they assume.
+describe('lxc-exec --available-backends contract', {
+  skip: !isLinuxBubblewrap
+    ? 'the backend-discovery contract test requires Linux with bwrap installed'
+    : undefined,
+}, () => {
+  /** Raw stdout of the real CLI, and the array it parses to. */
+  function runAvailableBackends(): { stdout: string; backends: Record<string, unknown>[] } {
+    const lxcExec = path.join(getSdkBinDir(), 'lxc-exec');
+    assert.ok(fs.existsSync(lxcExec), `lxc-exec not found at ${lxcExec}`);
+    const stdout = execFileSync(lxcExec, ['--available-backends'], {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const parsed = JSON.parse(stdout);
+    assert.ok(Array.isArray(parsed), `--available-backends must emit a JSON array, got: ${stdout}`);
+    return { stdout, backends: parsed };
+  }
+
+  it('emits the array shape the SDK parser consumes', () => {
+    const { stdout, backends } = runAvailableBackends();
+
+    for (const entry of backends) {
+      assert.strictEqual(
+        typeof entry.backend, 'string',
+        `every entry needs a string 'backend' wire name, got: ${stdout}`);
+      // The parser reads these as string arrays and would silently fall back
+      // to "unsupported" if either became an object or a bare string.
+      for (const field of ['capabilities', 'warnings'] as const) {
+        if (entry[field] !== undefined) {
+          assert.ok(Array.isArray(entry[field]), `'${field}' must be an array, got: ${stdout}`);
+          for (const value of entry[field] as unknown[]) {
+            assert.strictEqual(
+              typeof value, 'string', `'${field}' must hold strings, got: ${stdout}`);
+          }
+        }
+      }
+    }
+  });
+
+  // Deliberately an assertion rather than a skip gate. `isLinuxBubblewrap` only
+  // proves a `bwrap` file is on PATH; both probes additionally require it to run
+  // and be >= MIN_BWRAP_VERSION. Those two version floors live in different
+  // languages, so pin that they agree instead of trusting either.
+  it('agrees with getPlatformSupport on whether bubblewrap is usable', () => {
+    const { stdout, backends } = runAvailableBackends();
+
+    const nativeReportsBubblewrap = backends.some((entry) => entry.backend === 'bubblewrap');
+    const sdkReportsBubblewrap = sdk.getPlatformSupport().availableMethods.includes('bubblewrap');
+
+    assert.strictEqual(
+      nativeReportsBubblewrap,
+      sdkReportsBubblewrap,
+      'the native probe and the SDK disagree about whether bubblewrap is usable; ' +
+        'MIN_BWRAP_VERSION is mirrored between bwrap_version.rs and platform.ts and ' +
+        `may have drifted. --available-backends said: ${stdout}`,
+    );
+  });
+
+  it('projects the native payload into PlatformSupport.bubblewrapNetwork', async (t) => {
+    const { stdout, backends } = runAvailableBackends();
     const bubblewrap = backends.find((entry) => entry.backend === 'bubblewrap');
     if (!bubblewrap) {
+      // A `bwrap` on PATH can still be too old or not executable, in which case
+      // omitting it is the correct contract and there is nothing to project.
       t.skip('this host has no usable bubblewrap to project');
       return;
     }
-    const supportsProxyEnforcement = bubblewrap.capabilities.includes('proxyEnforcement');
-    const network = sdk.getPlatformSupport().bubblewrapNetwork;
+    const capabilities = (bubblewrap.capabilities ?? []) as string[];
+    const cliSupportsProxyEnforcement = capabilities.includes('proxyEnforcement');
 
-    assert.ok(network, 'bubblewrapNetwork must be reported when bubblewrap is available');
-    assert.strictEqual(
-      network.proxyEnforcement,
-      supportsProxyEnforcement ? 'supported' : 'unsupported',
-    );
-    if (supportsProxyEnforcement) {
-      assert.deepStrictEqual(network.warnings, []);
-    } else {
-      assert.ok(network.warnings.length > 0, 'an unsupported host must explain why');
-      for (const warning of network.warnings) {
-        assert.strictEqual(typeof warning, 'string');
+    // Drive the real parser with the bytes this CLI just produced. Injecting
+    // them rather than re-probing keeps the comparison exact: a second live
+    // walk could legitimately disagree by exhausting its pre-flight budget.
+    const platform = await import(
+      pathToFileURL(path.join(getSdkPackageRoot(), 'dist', 'platform.js')).href
+    ) as {
+      getPlatformSupport(): { bubblewrapNetwork?: { proxyEnforcement: string; warnings: string[] } };
+      _setLinuxProbeRunner(runner: (() => string) | null): void;
+      _resetPlatformSupportCache(): void;
+    };
+
+    try {
+      platform._setLinuxProbeRunner(() => stdout);
+      platform._resetPlatformSupportCache();
+      const network = platform.getPlatformSupport().bubblewrapNetwork;
+
+      assert.ok(network, `bubblewrapNetwork must be reported when bubblewrap is available: ${stdout}`);
+      assert.strictEqual(
+        network.proxyEnforcement,
+        cliSupportsProxyEnforcement ? 'supported' : 'unsupported',
+        `the SDK disagreed with the CLI capability list: ${stdout}`);
+
+      if (cliSupportsProxyEnforcement) {
+        assert.deepStrictEqual(network.warnings, [], 'a supported host reports no warnings');
+      } else {
+        // Never fail closed anonymously: the reason is the only actionable
+        // detail an unsupported host gives a caller.
+        assert.ok(
+          network.warnings.length > 0,
+          `an unsupported host must explain why, got: ${JSON.stringify(network)}`);
+        for (const warning of network.warnings) {
+          assert.strictEqual(typeof warning, 'string');
+        }
       }
+    } finally {
+      platform._setLinuxProbeRunner(null);
+      platform._resetPlatformSupportCache();
     }
   });
 });

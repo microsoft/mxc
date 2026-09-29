@@ -136,27 +136,13 @@ fn macos_backends() -> Vec<AvailableBackend> {
 
 #[cfg(target_os = "linux")]
 fn linux_backends() -> Vec<AvailableBackend> {
-    linux_backends_with(
-        bwrap_common::bwrap_availability::probe_bwrap_available(),
-        bwrap_common::proxy_network::probe_proxy_enforcement,
-        lxc_common::availability::is_lxc_available(),
-    )
-}
-
-#[cfg(target_os = "linux")]
-fn linux_backends_with(
-    bwrap: Result<
-        bwrap_common::bwrap_version::BwrapVersion,
-        bwrap_common::bwrap_availability::BwrapAvailabilityError,
-    >,
-    proxy_enforcement: impl FnOnce() -> Result<(), String>,
-    lxc_available: bool,
-) -> Vec<AvailableBackend> {
     let mut backends = Vec::new();
-    if bwrap.is_ok() {
-        backends.push(bubblewrap_backend(proxy_enforcement()));
+    if bwrap_common::bwrap_version::probe_bwrap().is_ok() {
+        backends.push(bubblewrap_backend(
+            bwrap_common::proxy_network::probe_proxy_enforcement(),
+        ));
     }
-    if lxc_available {
+    if lxc_common::availability::is_lxc_available() {
         backends.push(AvailableBackend::tierless(
             ContainmentBackend::Lxc.wire_name(),
         ));
@@ -381,29 +367,6 @@ mod tests {
         assert_eq!(
             json,
             r#"{"backend":"bubblewrap","warnings":["slirp4netns not found"]}"#
-        );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn linux_discovery_omits_bubblewrap_when_launchability_fails() {
-        let backends = linux_backends_with(
-            Err(
-                bwrap_common::bwrap_availability::BwrapAvailabilityError::LaunchFailed {
-                    status: Some(1),
-                    detail: "user namespaces disabled".to_string(),
-                },
-            ),
-            || panic!("proxy capability must not run"),
-            true,
-        );
-
-        assert_eq!(
-            backends
-                .iter()
-                .map(|backend| backend.backend.as_str())
-                .collect::<Vec<_>>(),
-            vec!["lxc"]
         );
     }
 

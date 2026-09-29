@@ -22,41 +22,9 @@ fn env_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
 #[test]
 fn platform_support_reports_host() {
     let support = platform_support();
-    #[cfg(target_os = "linux")]
-    assert_linux_platform_support_outcome(&support);
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        // Windows always has ProcessContainer. Supported macOS CI images have
-        // the system Seatbelt executable.
-        assert!(support.is_supported, "reason: {:?}", support.reason);
-        assert!(!support.available_methods.is_empty());
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn assert_linux_platform_support_outcome(support: &mxc_sdk::PlatformSupport) {
-    if support.is_supported {
-        assert_eq!(
-            support.available_methods,
-            vec!["bubblewrap".to_string()],
-            "a launchable Linux host reports exactly the SDK-launchable backend"
-        );
-        assert_eq!(support.reason, None);
-    } else {
-        assert!(
-            support.available_methods.is_empty(),
-            "a restricted Linux host must not advertise an unlaunchable backend: {:?}",
-            support.available_methods
-        );
-        assert!(
-            support
-                .reason
-                .as_deref()
-                .is_some_and(|reason| !reason.trim().is_empty()),
-            "a restricted Linux host must report an actionable reason"
-        );
-    }
+    // Every platform this test runs on (macOS/Linux/Windows in CI) is supported.
+    assert!(support.is_supported, "reason: {:?}", support.reason);
+    assert!(!support.available_methods.is_empty());
 }
 
 #[cfg(target_os = "macos")]
@@ -352,9 +320,12 @@ fn platform_support_linux_reports_only_bubblewrap() {
     let support = platform_support();
     // Bubblewrap is the only SDK-launchable Linux backend; `lxc` is a
     // host-capability backend reported by `available_backends()`, not here.
-    // Assert both exact valid outcomes so neither a restricted-host result nor
-    // an empty launchable result can pass vacuously.
-    assert_linux_platform_support_outcome(&support);
+    // Assert the exact set so re-advertising a non-launchable backend fails.
+    assert_eq!(
+        support.available_methods,
+        vec!["bubblewrap".to_string()],
+        "Linux platform_support must report exactly bubblewrap (lxc excluded)"
+    );
 }
 
 #[cfg(target_os = "windows")]

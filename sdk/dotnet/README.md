@@ -164,35 +164,13 @@ warning. Missing capabilities otherwise are unavailable or could not be detected
 Discovery is advisory. Availability can change before launch, and a backend in
 `GetAvailableBackends()` is not necessarily one the one-shot SDK can launch.
 Cross-check `GetPlatformSupport()` and continue handling
-`ErrorCode.BackendUnavailable`. An empty backend list is a normal successful
-discovery result, and every real request still passes normal parsing,
-authorization, and backend validation.
+`ErrorCode.BackendUnavailable`.
 
-On Linux, an uncontended broad discovery call has a conservative 16-second
-native bound, excluding scheduler and host-load delay. Bubblewrap is included
-only after a supported version and a minimal shared-network sandbox launch both
-succeed. Only successful Bubblewrap discovery is cached; failed checks remain
-retryable.
-
-For request-specific Windows ProcessContainer diagnostics, call the static
-request probe:
-
-```csharp
-ProbeOutput probe = MxcSandbox.Probe(request);
-Console.WriteLine($"tier={probe.Tier}");
-foreach (string warning in probe.Warnings)
-{
-    Console.Error.WriteLine(warning);
-}
-```
-
-`Probe` serializes the `SandboxRequest` and calls the packaged `mxc_ffi` native
-library in process. It is Windows-only and does not create a sandbox.
-Unsupported containment, native failures, and malformed JSON are surfaced as
-exceptions. The method is static only and was deliberately not added to
-`ISandboxRunner`, so existing adapter implementations remain source and binary
-compatible. The standalone `wxc-exec --probe` CLI remains a separate
-ProcessContainer diagnostic.
+For request-specific Windows ProcessContainer diagnostics,
+`MxcSandbox.Probe(request?)` calls the packaged `mxc_ffi` library in process
+and returns the selected tier, warnings, and host facts without creating a
+sandbox. It is a static API only; `ISandboxRunner` is unchanged. Unsupported
+containment and native or JSON failures remain exceptions.
 
 #### Bubblewrap proxy-only egress (Linux)
 
@@ -978,10 +956,10 @@ one on Linux or macOS fails the build instead of silently ignoring it. An
 IsolationSession build has the normal Windows native unit
 (`mxc_ffi.dll` + `plm.exe`). A WSLC build additionally builds, stages, and
 packages `wxc-wslc-daemon.exe` and the pinned `wslcsdk.dll`; all four files
-must stay together beside the loaded `mxc_ffi.dll`.
-`build.bat --with-wslc` stages the same complete unit into the Windows RID
-package directories. A multi-RID pack fails if the pre-staged second RID was
-built with a different optional-backend set.
+must stay together beside the loaded `mxc_ffi.dll`. `build.bat --with-wslc`
+stages the same complete unit into the Windows RID package directories. A
+multi-RID pack fails if the pre-staged second RID was built with a different
+optional-backend set.
 
 On a host or build without the selected backend, lifecycle calls throw
 `MxcException` with `ErrorCode.BackendUnavailable`. IsolationSession also needs

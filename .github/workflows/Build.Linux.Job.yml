@@ -100,33 +100,6 @@ jobs:
         run: cargo test --locked --release --target ${{ matrix.target }}
              -p mxc-sdk --test streaming_bubblewrap
 
-      # Run the Linux-only availability contracts on native x64 and ARM64
-      # runners. Narrow module filters keep this focused on discovery while
-      # still executing the real subprocess supervision tests.
-      - name: Test Linux backend availability contracts
-        working-directory: src
-        shell: bash
-        run: |
-          set -euo pipefail
-          features=()
-          if [[ -n "${{ matrix.features }}" ]]; then
-            features=(--features "${{ matrix.features }}")
-          fi
-          cargo test --locked --release --target "${{ matrix.target }}" -p bwrap_common --lib \
-            bwrap_availability
-          cargo test --locked --release --target "${{ matrix.target }}" -p bwrap_common --lib \
-            bwrap_version
-          cargo test --locked --release --target "${{ matrix.target }}" -p bwrap_common --lib \
-            probe_exec
-          cargo test --locked --release --target "${{ matrix.target }}" -p lxc_common --lib \
-            availability
-          cargo test --locked --release --target "${{ matrix.target }}" -p mxc_engine --lib \
-            --no-default-features "${features[@]}" platform::tests
-          cargo test --locked --release --target "${{ matrix.target }}" -p mxc_engine --lib \
-            --no-default-features "${features[@]}" probe::tests
-          cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk \
-            --test sdk_helpers
-
       - name: Test common contracts and state-aware SDK boundaries
         working-directory: src
         shell: bash

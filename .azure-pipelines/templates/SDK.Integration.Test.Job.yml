@@ -108,12 +108,6 @@ jobs:
             sudo apt-get install -y -qq lxc lxc-utils dnsmasq-base iptables bubblewrap slirp4netns
           displayName: Install LXC, Bubblewrap, and slirp4netns
 
-        - script: env -u MXC_FFI_DIR node --test dist/available-backends.test.js
-          workingDirectory: $(integrationDirectory)
-          displayName: Verify unprivileged installed-package backend discovery
-          env:
-            MXC_EXPECT_LINUX_BACKEND_DISCOVERY: '1'
-
         - script: sudo MXC_SKIP_LXC_NETWORK_TESTS=1 MXC_DEBUG=${{ parameters.debug }} npm test
           workingDirectory: $(integrationDirectory)
           displayName: npm test (sudo, with LXC)
