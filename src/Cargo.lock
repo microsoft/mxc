@@ -3370,6 +3370,7 @@ dependencies = [
  "tempfile",
  "uuid",
  "windows",
+ "winreg",
  "wxc_common",
  "zip",
 ]

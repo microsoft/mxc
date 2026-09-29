@@ -404,9 +404,13 @@ async fn release_undelivered_sandbox(session: &SessionHandle, sandbox_id: &str) 
             Err(e) if attempt == UNDELIVERED_RELEASE_ATTEMPTS => {
                 eprintln!(
                     "[wslc-daemon] could not release {sandbox_id} after \
-                     {UNDELIVERED_RELEASE_ATTEMPTS} attempts: {e}. It will hold the daemon \
-                     open until the session is retired."
+                     {UNDELIVERED_RELEASE_ATTEMPTS} attempts: {e}. It was retired from the live \
+                     count and will be deleted when the daemon shuts down."
                 );
+
+                // Nothing can reach this sandbox, so counting it would hold the
+                // daemon open for a client that will never call back.
+                session.retire(sandbox_id.to_string()).await.ok();
             }
             Err(e) => {
                 eprintln!("[wslc-daemon] release of {sandbox_id} failed ({e}); retrying");
@@ -414,6 +418,29 @@ async fn release_undelivered_sandbox(session: &SessionHandle, sandbox_id: &str) 
             }
         }
     }
+}
+
+/// Write a provision reply, releasing the sandbox if the reply did not land.
+///
+/// An id that never reaches its caller names a container nobody can
+/// deprovision, and its entry holds the idle watchdog's count above zero.
+///
+/// `release` is a parameter so this path can be tested without a live session.
+async fn deliver_provision_reply<S, F, Fut>(
+    pipe: &mut S,
+    resp: &DaemonResponse,
+    release: F,
+) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let delivered = write_frame(pipe, resp).await;
+    if let (Err(_), DaemonResponse::Provisioned { sandbox_id }) = (&delivered, resp) {
+        release(sandbox_id.clone()).await;
+    }
+    delivered
 }
 
 /// Service exactly one request on a freshly-connected pipe instance.
@@ -439,14 +466,11 @@ where
                 Ok(sandbox_id) => DaemonResponse::Provisioned { sandbox_id },
                 Err(e) => worker_err_response(e),
             };
-            let delivered = write_frame(&mut pipe, &resp).await;
-            // A sandbox_id that never reaches its caller names a container
-            // nobody can deprovision, and its entry holds the idle watchdog's
-            // count above zero.
-            if let (Err(_), DaemonResponse::Provisioned { sandbox_id }) = (&delivered, &resp) {
-                release_undelivered_sandbox(&session, sandbox_id).await;
-            }
-            delivered?;
+            deliver_provision_reply(&mut pipe, &resp, |sandbox_id| {
+                let session = &session;
+                async move { release_undelivered_sandbox(session, &sandbox_id).await }
+            })
+            .await?;
         }
         DaemonRequest::Start(config) => {
             let resp = ok_or_err(session.start(config).await);
@@ -713,6 +737,94 @@ mod tests {
         session.shutdown().await.unwrap();
     }
 
+    /// A writer that always fails, standing in for a client that has gone.
+    struct BrokenPipe;
+
+    impl AsyncWrite for BrokenPipe {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe)))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn an_undelivered_provisioned_reply_releases_that_sandbox() {
+        let released = std::cell::RefCell::new(Vec::new());
+        let resp = DaemonResponse::Provisioned {
+            sandbox_id: "wslc:abc".to_string(),
+        };
+
+        let outcome = deliver_provision_reply(&mut BrokenPipe, &resp, |id| {
+            released.borrow_mut().push(id);
+            std::future::ready(())
+        })
+        .await;
+
+        assert!(outcome.is_err(), "a failed write must not report success");
+        assert_eq!(released.into_inner(), vec!["wslc:abc".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn an_undelivered_error_reply_releases_nothing() {
+        let released = std::cell::RefCell::new(Vec::new());
+        let resp = DaemonResponse::Err {
+            kind: ErrKind::Backend,
+            message: "provision failed".to_string(),
+        };
+
+        let outcome = deliver_provision_reply(&mut BrokenPipe, &resp, |id| {
+            released.borrow_mut().push(id);
+            std::future::ready(())
+        })
+        .await;
+
+        assert!(outcome.is_err(), "a failed write must not report success");
+        assert!(
+            released.into_inner().is_empty(),
+            "an error reply names no sandbox to release"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delivered_provisioned_reply_releases_nothing() {
+        let released = std::cell::RefCell::new(Vec::new());
+        let resp = DaemonResponse::Provisioned {
+            sandbox_id: "wslc:abc".to_string(),
+        };
+        let (mut client, mut server) = duplex(64 * 1024);
+
+        let outcome = deliver_provision_reply(&mut server, &resp, |id| {
+            released.borrow_mut().push(id);
+            std::future::ready(())
+        })
+        .await;
+
+        assert!(outcome.is_ok(), "the write succeeded");
+        assert!(
+            released.into_inner().is_empty(),
+            "a delivered id has an owner; releasing it would destroy a live sandbox"
+        );
+        let echoed: DaemonResponse = read_frame(&mut client).await.unwrap();
+        assert_eq!(echoed, resp);
+    }
+
     /// A client that disappears before reading its reply must surface as an
     /// error from the handler, which is what triggers releasing the sandbox its
     /// id would have named.
@@ -739,6 +851,10 @@ mod tests {
             outcome.is_err(),
             "an undelivered reply must not be reported as a served request"
         );
+
+        // Whichever way provision went, no sandbox may be left behind: a minted
+        // id was released above, and a failure minted none.
+        assert_eq!(session.container_count().await.unwrap(), 0);
         session.shutdown().await.unwrap();
     }
 

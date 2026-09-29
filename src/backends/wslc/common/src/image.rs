@@ -6,6 +6,8 @@
 use std::ffi::c_void;
 use std::fmt::Write;
 use std::ptr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use wxc_common::logger::Logger;
 use wxc_common::models::ScriptResponse;
@@ -13,8 +15,98 @@ use wxc_common::string_util::{to_wide, CoTaskMemPWSTR};
 
 use crate::container_steps::{cstr_bytes, sdk_error};
 use crate::error::WslcError;
-use crate::wsl_container_runner::WSLContainerRunner;
+use crate::registry_policy;
+use crate::sdk_init;
 use crate::wslc_bindings::*;
+
+/// How long a single pull may run before it is aborted.
+///
+/// Deliberately under the daemon client's 600s response deadline, so a wedged
+/// pull surfaces as a failed provision the caller still receives rather than a
+/// timeout that abandons a container nobody can name.
+const PULL_TIMEOUT: Duration = Duration::from_secs(540);
+
+/// Env override (positive whole seconds) for [`PULL_TIMEOUT`]. Lets a test drive
+/// the abort path without waiting out the production budget.
+const PULL_TIMEOUT_ENV: &str = "MXC_WSLC_PULL_TIMEOUT_SECS";
+
+/// Gap between progress lines while a pull is running.
+const PULL_REPORT_INTERVAL: Duration = Duration::from_secs(10);
+
+/// `E_ABORT` — returned from the progress callback to stop a pull, and reported
+/// back by the SDK as the pull's own result.
+const E_ABORT: HRESULT = 0x8000_4004u32 as HRESULT;
+
+/// The pull deadline, honouring [`PULL_TIMEOUT_ENV`].
+fn pull_timeout() -> Duration {
+    std::env::var(PULL_TIMEOUT_ENV)
+        .ok()
+        .as_deref()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&secs| secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(PULL_TIMEOUT)
+}
+
+/// Shared with the SDK's progress callback for the duration of one pull.
+struct PullWatch {
+    deadline: Instant,
+    started: Instant,
+    /// Milliseconds since `started` at the last progress line, so the callback
+    /// can rate-limit itself without a lock.
+    last_report_ms: AtomicU64,
+    image: String,
+}
+
+/// Called by the SDK as a pull advances; returns [`E_ABORT`] once the deadline
+/// has passed, which stops the transfer.
+///
+/// # Safety
+/// `context` must be the `*const PullWatch` handed to `WslcPullSessionImage`,
+/// and must outlive the call.
+unsafe extern "C" fn pull_progress(
+    progress: *const WslcImageProgressMessage,
+    context: PVOID,
+) -> HRESULT {
+    // This runs on an SDK thread across the C ABI, where an unwind would be
+    // undefined behaviour. Reporting allocates, so the whole body is guarded.
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let Some(watch) = (context as *const PullWatch).as_ref() else {
+            return S_OK;
+        };
+        let now = Instant::now();
+        if now >= watch.deadline {
+            return E_ABORT;
+        }
+
+        let elapsed_ms = now.duration_since(watch.started).as_millis() as u64;
+        let last = watch.last_report_ms.load(Ordering::Relaxed);
+        if elapsed_ms.saturating_sub(last) >= PULL_REPORT_INTERVAL.as_millis() as u64
+            && watch
+                .last_report_ms
+                .compare_exchange(last, elapsed_ms, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            let detail = progress.as_ref().map(|p| p.detail);
+            let transferred = match detail {
+                Some(d) if d.totalBytes > 0 => format!(
+                    " {}/{} MiB",
+                    d.currentBytes / 1_048_576,
+                    d.totalBytes / 1_048_576
+                ),
+                _ => String::new(),
+            };
+            eprintln!(
+                "[WSLC] Pulling '{}' — {}s elapsed{}",
+                watch.image,
+                elapsed_ms / 1000,
+                transferred
+            );
+        }
+        S_OK
+    }));
+    outcome.unwrap_or(S_OK)
+}
 
 /// Pull `image` from its registry into the session's local image cache.
 ///
@@ -28,13 +120,28 @@ pub unsafe fn pull_image(
     log_prefix: &str,
     logger: &mut Logger,
 ) -> Result<(), ScriptResponse> {
-    let _ = writeln!(logger, "{} Pulling image '{}'", log_prefix, image);
+    let budget = pull_timeout();
+    let _ = writeln!(
+        logger,
+        "{} Pulling image '{}' (up to {}s)",
+        log_prefix,
+        image,
+        budget.as_secs()
+    );
 
     let uri_cstr = cstr_bytes("image", image)?;
+    let started = Instant::now();
+    // Stationary for the whole call: the SDK holds this pointer across it.
+    let watch = PullWatch {
+        deadline: started + budget,
+        started,
+        last_report_ms: AtomicU64::new(0),
+        image: image.to_string(),
+    };
     let pull_opts = WslcPullImageOptions {
         uri: uri_cstr.as_ptr() as PCSTR,
-        progressCallback: None,
-        progressCallbackContext: ptr::null_mut(),
+        progressCallback: Some(pull_progress),
+        progressCallbackContext: &watch as *const PullWatch as PVOID,
         registryAuth: ptr::null(),
     };
 
@@ -46,6 +153,7 @@ pub unsafe fn pull_image(
             storage_path,
             hr,
             &pull_err.to_string_lossy(),
+            budget,
         ));
     }
 
@@ -59,6 +167,7 @@ fn pull_failure(
     storage_path: Option<&str>,
     hr: HRESULT,
     sdk_msg: &str,
+    budget: Duration,
 ) -> ScriptResponse {
     let sanitized = sanitize_sdk_message(sdk_msg);
     let detail = if sanitized.is_empty() {
@@ -68,6 +177,18 @@ fn pull_failure(
     };
 
     match hr {
+        // Our own progress callback stopped this, so the registry is not at
+        // fault and the SDK's text describes the abort rather than a cause.
+        E_ABORT => WslcError::Host(format!(
+            "WSLC image '{}' did not finish pulling within {}s and was stopped. \
+             Retry, raise the budget with {}, or warm the cache from a machine \
+             that can reach the registry with: wxc-exec.exe --setup-wslc --image {}{}.",
+            image,
+            budget.as_secs(),
+            PULL_TIMEOUT_ENV,
+            image,
+            storage_arg(storage_path),
+        )),
         WSLC_E_IMAGE_NOT_FOUND => WslcError::Rejected(format!(
             "WSLC image '{}' could not be pulled: {}. Check the image name and tag. \
              For a private registry, MXC cannot supply credentials — set \
@@ -349,45 +470,24 @@ pub unsafe fn resolve_image(
     log_prefix: &str,
     logger: &mut Logger,
 ) -> Result<(), ScriptResponse> {
-    let mut images: *mut WslcImageInfo = ptr::null_mut();
-    let mut image_count: u32 = 0;
-    let hr = sdk.WslcListSessionImages(session, &mut images, &mut image_count);
-    if hr != S_OK {
-        return Err(sdk_error("WslcListSessionImages failed", hr, ""));
-    }
+    let cached = list_cached_images(sdk, session)?;
+    let matched = cached.iter().find(|entry| entry.satisfies(image));
 
-    let mut image_found = false;
-    if !images.is_null() {
-        let images_slice = std::slice::from_raw_parts(images, image_count as usize);
-        for info in images_slice {
-            // `info.name` is a fixed-size, possibly-unterminated C buffer; read
-            // up to the first NUL, or the whole buffer if there is none.
-            let name_bytes =
-                std::slice::from_raw_parts(info.name.as_ptr().cast::<u8>(), info.name.len());
-            let end = name_bytes
-                .iter()
-                .position(|&b| b == 0)
-                .unwrap_or(name_bytes.len());
-            if let Ok(name) = std::str::from_utf8(&name_bytes[..end]) {
-                if names_same_image(name, image) {
-                    image_found = true;
-                    break;
-                }
-            }
-        }
-        windows::Win32::System::Com::CoTaskMemFree(Some(images as *const c_void));
-    }
-
-    match select_action(image_found, image_tar_path.is_some(), registry) {
+    match select_action(matched.is_some(), image_tar_path.is_some(), registry) {
         ImageAction::UseCache => {
+            let digest = matched.map(|e| e.digest_hex()).unwrap_or_default();
             if image_tar_path.is_some() {
                 let _ = writeln!(
                     logger,
-                    "{} Image '{}' already cached, skipping tar import",
-                    log_prefix, image
+                    "{} Image '{}' already cached ({}), skipping tar import",
+                    log_prefix, image, digest
                 );
             } else {
-                let _ = writeln!(logger, "{} Image '{}' found", log_prefix, image);
+                let _ = writeln!(
+                    logger,
+                    "{} Image '{}' found ({})",
+                    log_prefix, image, digest
+                );
             }
             Ok(())
         }
@@ -398,7 +498,30 @@ pub unsafe fn resolve_image(
             image_tar_path.expect("tar action implies a tar path"),
             logger,
         ),
-        ImageAction::Pull => pull_image(sdk, session, image, storage_path, log_prefix, logger),
+        ImageAction::Pull => {
+            // Administrative policy decides which registries this machine may
+            // contact at all, independent of what the request asks for.
+            let policy = registry_policy::get_policy();
+            if !policy.permits(image) {
+                return Err(WslcError::Rejected(policy.refusal(image)).into_response());
+            }
+            pull_image(sdk, session, image, storage_path, log_prefix, logger)?;
+            // What the reference actually resolved to. A tag is mutable, so the
+            // digest is the only record of which content this run executed.
+            if let Some(entry) = list_cached_images(sdk, session)?
+                .iter()
+                .find(|entry| entry.is_same_repository(image))
+            {
+                let _ = writeln!(
+                    logger,
+                    "{} Image '{}' resolved to sha256:{}",
+                    log_prefix,
+                    image,
+                    entry.digest_hex()
+                );
+            }
+            Ok(())
+        }
         ImageAction::RefuseNoEgress => Err(WslcError::Rejected(format!(
             "WSLC image '{}' is not cached, and this sandbox declares no egress. \
              Pulling it would reach the registry on the host's network, before the \
@@ -412,6 +535,107 @@ pub unsafe fn resolve_image(
         ))
         .into_response()),
     }
+}
+
+/// An image the session's store already holds.
+pub struct CachedImage {
+    name: String,
+    sha256: [u8; 32],
+}
+
+impl CachedImage {
+    /// Whether this entry satisfies a request for `requested`.
+    ///
+    /// A reference pinning a digest never does. The store reports the config
+    /// digest while the reference carries the manifest digest, and the SDK
+    /// exposes no mapping between them, so honouring the pin from the cache is
+    /// not possible — matching on the repository name would silently serve
+    /// whatever was fetched first, which is the opposite of pinning. Such a
+    /// reference goes to the registry every time, which is slower and correct.
+    fn satisfies(&self, requested: &str) -> bool {
+        digest_of(requested).is_none() && names_same_image(&self.name, requested)
+    }
+
+    /// Whether this entry is the repository `requested` names, pin aside.
+    ///
+    /// Only for reporting what a completed pull produced; too weak to decide a
+    /// cache hit.
+    fn is_same_repository(&self, requested: &str) -> bool {
+        repository_of(&self.name) == repository_of(requested)
+    }
+
+    /// The stored content digest, as lowercase hex.
+    fn digest_hex(&self) -> String {
+        use std::fmt::Write as _;
+        self.sha256.iter().fold(String::new(), |mut out, b| {
+            let _ = write!(out, "{:02x}", b);
+            out
+        })
+    }
+}
+
+/// A reference with any tag and digest stripped off.
+fn repository_of(reference: &str) -> &str {
+    let without_digest = reference
+        .rsplit_once('@')
+        .map_or(reference, |(head, _)| head);
+    // A colon in the last path segment is a tag; one before a `/` is a
+    // registry port, as in `localhost:5000/img`.
+    match without_digest.rsplit_once('/') {
+        Some((registry, last)) => match last.split_once(':') {
+            Some((name, _)) => &without_digest[..registry.len() + 1 + name.len()],
+            None => without_digest,
+        },
+        None => without_digest
+            .split_once(':')
+            .map_or(without_digest, |(name, _)| name),
+    }
+}
+
+/// The `sha256:<hex>` a reference pins, if it carries one.
+fn digest_of(reference: &str) -> Option<&str> {
+    reference
+        .rsplit_once('@')
+        .and_then(|(_, digest)| digest.strip_prefix("sha256:"))
+}
+
+/// Read the session's image store.
+///
+/// # Safety
+/// `sdk` must hold valid function pointers and `session` must be a live handle.
+unsafe fn list_cached_images(
+    sdk: &WslcSdk,
+    session: WslcSession,
+) -> Result<Vec<CachedImage>, ScriptResponse> {
+    let mut images: *mut WslcImageInfo = ptr::null_mut();
+    let mut image_count: u32 = 0;
+    let hr = sdk.WslcListSessionImages(session, &mut images, &mut image_count);
+    if hr != S_OK {
+        return Err(sdk_error("WslcListSessionImages failed", hr, ""));
+    }
+    if images.is_null() {
+        return Ok(Vec::new());
+    }
+
+    let mut cached = Vec::with_capacity(image_count as usize);
+    for info in std::slice::from_raw_parts(images, image_count as usize) {
+        // `info.name` is a fixed-size, possibly-unterminated C buffer; read up
+        // to the first NUL, or the whole buffer if there is none.
+        let name_bytes =
+            std::slice::from_raw_parts(info.name.as_ptr().cast::<u8>(), info.name.len());
+        let end = name_bytes
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(name_bytes.len());
+        if let Ok(name) = std::str::from_utf8(&name_bytes[..end]) {
+            cached.push(CachedImage {
+                name: name.to_string(),
+                sha256: info.sha256,
+            });
+        }
+    }
+    windows::Win32::System::Com::CoTaskMemFree(Some(images as *const c_void));
+    Ok(cached)
 }
 
 /// How `resolve_image` satisfies the request once the cache has been consulted.
@@ -465,7 +689,7 @@ pub unsafe fn setup_pull_image(
     storage_path: Option<&str>,
     logger: &mut Logger,
 ) -> Result<(), String> {
-    let sdk = match WSLContainerRunner::init_and_load_sdk(logger) {
+    let sdk = match sdk_init::init_and_load_sdk(logger) {
         Ok(s) => s,
         Err(resp) => return Err(resp.error_message),
     };
@@ -528,6 +752,107 @@ mod tests {
 
     /// `E_FAIL`, which the SDK returns when it cannot reach the registry at all.
     const E_FAIL: HRESULT = -2147467259;
+
+    /// `pull_failure` at the production budget, which most cases do not care about.
+    fn failure(
+        image: &str,
+        storage_path: Option<&str>,
+        hr: HRESULT,
+        sdk_msg: &str,
+    ) -> ScriptResponse {
+        pull_failure(image, storage_path, hr, sdk_msg, PULL_TIMEOUT)
+    }
+
+    #[test]
+    fn an_abort_is_reported_as_a_budget_overrun_not_a_registry_failure() {
+        let resp = pull_failure(
+            "alpine:latest",
+            None,
+            E_ABORT,
+            "operation aborted",
+            Duration::from_secs(90),
+        );
+        assert!(
+            resp.error_message.contains("within 90s"),
+            "the budget that was exceeded has to be in the message: {}",
+            resp.error_message
+        );
+        assert!(
+            resp.error_message.contains(PULL_TIMEOUT_ENV),
+            "the operator needs the knob that raises it"
+        );
+        assert!(
+            !resp.error_message.contains("registry was unreachable"),
+            "we stopped this, so the registry must not be blamed: {}",
+            resp.error_message
+        );
+        // Raising the budget or retrying can succeed, so this is not a rejection.
+        assert_eq!(resp.failure_phase, FailurePhase::LaunchFailed);
+    }
+
+    #[test]
+    fn the_pull_budget_is_under_the_daemon_response_deadline() {
+        // A pull that outlives the client's wait produces a container whose id
+        // never reaches anyone.
+        assert!(
+            PULL_TIMEOUT < Duration::from_secs(600),
+            "PULL_TIMEOUT must stay below the daemon client's CALL_TIMEOUT"
+        );
+    }
+
+    fn cached(name: &str) -> CachedImage {
+        CachedImage {
+            name: name.to_string(),
+            sha256: [0u8; 32],
+        }
+    }
+
+    #[test]
+    fn a_digest_reference_never_satisfies_from_cache() {
+        // The store reports a config digest; the reference carries a manifest
+        // digest. Matching on the repository alone would serve whatever was
+        // fetched first, which defeats the pin.
+        let entry = cached("busybox");
+        assert!(!entry.satisfies("busybox@sha256:ab33eacc"));
+        assert!(entry.satisfies("busybox"));
+    }
+
+    #[test]
+    fn a_repository_is_read_without_its_tag_or_digest() {
+        assert_eq!(repository_of("busybox"), "busybox");
+        assert_eq!(repository_of("busybox:1.36"), "busybox");
+        assert_eq!(repository_of("busybox@sha256:abc"), "busybox");
+        assert_eq!(repository_of("ghcr.io/owner/img:tag"), "ghcr.io/owner/img");
+        assert_eq!(repository_of("localhost:5000/img"), "localhost:5000/img");
+        assert_eq!(
+            repository_of("localhost:5000/img:tag"),
+            "localhost:5000/img"
+        );
+    }
+
+    #[test]
+    fn a_pulled_digest_is_reported_against_its_repository() {
+        // The pull's audit line has to find the entry even though the store
+        // filed it under the bare repository name.
+        let entry = cached("busybox");
+        assert!(entry.is_same_repository("busybox@sha256:ab33eacc"));
+        assert!(!entry.is_same_repository("alpine@sha256:ab33eacc"));
+    }
+
+    #[test]
+    fn a_digest_is_rendered_as_lowercase_hex() {
+        let mut sha = [0u8; 32];
+        sha[0] = 0x0e;
+        sha[31] = 0xff;
+        let hex = CachedImage {
+            name: "x".to_string(),
+            sha256: sha,
+        }
+        .digest_hex();
+        assert_eq!(hex.len(), 64, "32 bytes render as 64 hex digits");
+        assert!(hex.starts_with("0e"), "leading zero nibble is kept: {hex}");
+        assert!(hex.ends_with("ff"));
+    }
 
     #[test]
     fn a_cached_image_is_used_whatever_else_was_offered() {
@@ -606,13 +931,13 @@ mod tests {
 
     #[test]
     fn a_refused_reference_is_not_worth_retrying() {
-        let resp = pull_failure("ghcr.io/nope:1", None, WSLC_E_IMAGE_NOT_FOUND, "denied");
+        let resp = failure("ghcr.io/nope:1", None, WSLC_E_IMAGE_NOT_FOUND, "denied");
         assert_eq!(resp.failure_phase, FailurePhase::Rejected);
     }
 
     #[test]
     fn a_blocked_registry_is_not_worth_retrying() {
-        let resp = pull_failure(
+        let resp = failure(
             "ghcr.io/nope:1",
             None,
             WSLC_E_REGISTRY_BLOCKED_BY_POLICY,
@@ -623,13 +948,13 @@ mod tests {
 
     #[test]
     fn an_unreachable_registry_is_retryable() {
-        let resp = pull_failure("alpine:latest", None, E_FAIL, "no such host");
+        let resp = failure("alpine:latest", None, E_FAIL, "no such host");
         assert_eq!(resp.failure_phase, FailurePhase::LaunchFailed);
     }
 
     #[test]
     fn an_unreachable_registry_says_how_to_work_offline() {
-        let resp = pull_failure("alpine:latest", None, E_FAIL, "no such host");
+        let resp = failure("alpine:latest", None, E_FAIL, "no such host");
         assert!(resp.error_message.contains("retry once it is available"));
         assert!(resp.error_message.contains("imageTarPath"));
     }
@@ -638,7 +963,7 @@ mod tests {
     fn an_unrecognised_failure_does_not_diagnose_the_network() {
         // A full disk reaches this arm too, so the wording offers the network
         // as one possibility rather than asserting it.
-        let resp = pull_failure("alpine:latest", None, E_FAIL, "no space left on device");
+        let resp = failure("alpine:latest", None, E_FAIL, "no space left on device");
         assert!(
             resp.error_message
                 .contains("If the registry was unreachable"),
@@ -650,7 +975,7 @@ mod tests {
     #[test]
     fn registry_text_cannot_smuggle_control_characters() {
         let hostile = "denied\u{1b}[2Jcleared\u{7}\nnext";
-        let resp = pull_failure("alpine:latest", None, E_FAIL, hostile);
+        let resp = failure("alpine:latest", None, E_FAIL, hostile);
         assert!(!resp.error_message.contains('\u{1b}'));
         assert!(!resp.error_message.contains('\u{7}'));
         assert!(!resp.error_message.contains('\n'));
@@ -660,7 +985,7 @@ mod tests {
     #[test]
     fn registry_text_is_capped() {
         let flood = "x".repeat(5_000);
-        let resp = pull_failure("alpine:latest", None, E_FAIL, &flood);
+        let resp = failure("alpine:latest", None, E_FAIL, &flood);
         assert!(resp.error_message.contains('…'));
         assert!(
             resp.error_message.len() < 1_500,
@@ -673,14 +998,14 @@ mod tests {
     fn a_multibyte_registry_message_is_cut_on_a_character_boundary() {
         // Slicing by byte offset here would panic mid-character.
         let flood = "é".repeat(5_000);
-        let resp = pull_failure("alpine:latest", None, E_FAIL, &flood);
+        let resp = failure("alpine:latest", None, E_FAIL, &flood);
         assert!(resp.error_message.contains('…'));
     }
 
     #[test]
     fn an_unreachable_registry_does_not_prescribe_the_pull_that_just_failed() {
         // `--setup-wslc` shares `pull_image`, so it fails the same way here.
-        let resp = pull_failure("alpine:latest", None, E_FAIL, "no such host");
+        let resp = failure("alpine:latest", None, E_FAIL, "no such host");
         let advice = &resp.error_message;
         let setup = advice
             .find("--setup-wslc")
@@ -696,20 +1021,20 @@ mod tests {
 
     #[test]
     fn an_overridden_store_travels_with_the_suggested_command() {
-        let resp = pull_failure("alpine:latest", Some(r"C:\store"), E_FAIL, "down");
+        let resp = failure("alpine:latest", Some(r"C:\store"), E_FAIL, "down");
         assert!(resp.error_message.contains(r#"--storage-path "C:\store""#));
     }
 
     #[test]
     fn a_default_store_adds_no_path_argument() {
-        let resp = pull_failure("alpine:latest", None, E_FAIL, "down");
+        let resp = failure("alpine:latest", None, E_FAIL, "down");
         assert!(!resp.error_message.contains("--storage-path"));
     }
 
     #[test]
     fn every_rejection_names_a_way_forward() {
         for hr in [WSLC_E_IMAGE_NOT_FOUND, WSLC_E_REGISTRY_BLOCKED_BY_POLICY] {
-            let resp = pull_failure("ghcr.io/nope:1", None, hr, "denied");
+            let resp = failure("ghcr.io/nope:1", None, hr, "denied");
             assert!(
                 resp.error_message.contains("imageTarPath"),
                 "a rejection that only diagnoses leaves the caller stuck: {}",
@@ -720,7 +1045,7 @@ mod tests {
 
     #[test]
     fn a_failure_without_an_sdk_message_still_reports_the_code() {
-        let resp = pull_failure("alpine:latest", None, WSLC_E_IMAGE_NOT_FOUND, "");
+        let resp = failure("alpine:latest", None, WSLC_E_IMAGE_NOT_FOUND, "");
         assert!(resp.error_message.contains("0x80040601"));
     }
 

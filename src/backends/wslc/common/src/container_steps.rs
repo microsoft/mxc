@@ -49,7 +49,7 @@ use crate::daemon_protocol::ExecTerminal;
 use crate::error::WslcError;
 use crate::policy_mapping::VolumeMount;
 use crate::process_env::{self, EnvScope};
-use crate::wsl_container_runner::wslc_prerequisite_error;
+use crate::sdk_init;
 use crate::wslc_bindings::*;
 
 // ---------------------------------------------------------------------------
@@ -697,7 +697,7 @@ pub unsafe fn load_sdk_checked(logger: &mut Logger) -> Result<WslcSdk, ScriptRes
         return Err(sdk_error("WslcGetMissingComponents failed", hr, ""));
     }
     if missing.any_missing() {
-        return Err(WslcError::Unavailable(wslc_prerequisite_error(missing)).into_response());
+        return Err(WslcError::Unavailable(sdk_init::prerequisite_error(missing)).into_response());
     }
     let _ = writeln!(logger, "[WSLC][daemon] Runtime check passed");
     Ok(sdk)

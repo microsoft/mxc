@@ -161,6 +161,11 @@ pub enum WorkerCommand {
         config: DeprovisionConfig,
         reply: oneshot::Sender<Result<(), WorkerError>>,
     },
+    /// Give up on a sandbox whose provision reply never reached a client.
+    Retire {
+        sandbox_id: String,
+        reply: oneshot::Sender<()>,
+    },
     /// Report the current live-container count (drives the idle watchdog).
     ContainerCount { reply: oneshot::Sender<usize> },
     /// Release all containers + the session and stop the worker thread.
@@ -418,6 +423,14 @@ impl SessionHandle {
         rx.await.map_err(worker_gone)
     }
 
+    /// Stop counting a sandbox that no client can reach, so the idle watchdog
+    /// can shut the daemon down.
+    pub async fn retire(&self, sandbox_id: String) -> Result<(), WorkerError> {
+        let (reply, rx) = oneshot::channel();
+        self.send(WorkerCommand::Retire { sandbox_id, reply })?;
+        rx.await.map_err(worker_gone)
+    }
+
     /// Ask the worker to release everything and stop. Awaits confirmation.
     pub async fn shutdown(&self) -> Result<(), WorkerError> {
         let (reply, rx) = oneshot::channel();
@@ -443,6 +456,13 @@ fn worker_gone(_e: oneshot::error::RecvError) -> WorkerError {
 struct ContainerEntry {
     started: bool,
     quarantined: bool,
+
+    /// Set when a sandbox's provision reply never reached a client, so nobody
+    /// can deprovision it.
+    ///
+    /// Kept in the map rather than dropped so [`Worker::shutdown`] still stops
+    /// and deletes the container.
+    retired: bool,
     container: WslcContainerGuard,
 }
 
@@ -567,6 +587,7 @@ impl Worker {
             ContainerEntry {
                 started: false,
                 quarantined: false,
+                retired: false,
                 container,
             },
         );
@@ -734,6 +755,20 @@ impl Worker {
         Ok(())
     }
 
+    /// Stop counting a sandbox that no client can reach.
+    fn retire(&mut self, sandbox_id: &str) {
+        if let Some(entry) = self.containers.get_mut(sandbox_id) {
+            entry.retired = true;
+        }
+    }
+
+    /// Containers a client could still act on.
+    ///
+    /// Drives the idle watchdog, which shuts the daemon down only at zero.
+    fn live_container_count(&self) -> usize {
+        self.containers.values().filter(|e| !e.retired).count()
+    }
+
     fn deprovision(&mut self, config: DeprovisionConfig) -> Result<(), WorkerError> {
         let container_raw = match self.containers.get(&config.sandbox_id) {
             Some(e) => e.container.as_raw(),
@@ -865,8 +900,12 @@ pub fn spawn() -> Result<SessionHandle> {
                     WorkerCommand::Deprovision { config, reply } => {
                         let _ = reply.send(worker.deprovision(config));
                     }
+                    WorkerCommand::Retire { sandbox_id, reply } => {
+                        worker.retire(&sandbox_id);
+                        let _ = reply.send(());
+                    }
                     WorkerCommand::ContainerCount { reply } => {
-                        let _ = reply.send(worker.containers.len());
+                        let _ = reply.send(worker.live_container_count());
                     }
                     WorkerCommand::Shutdown { reply } => {
                         worker.shutdown();
@@ -920,6 +959,70 @@ mod tests {
     }
 
     // ---- No-WSL unit tests (run everywhere, never touch the SDK) ----
+
+    /// Build a worker entry around a handle that is never dereferenced.
+    fn test_entry(retired: bool) -> ContainerEntry {
+        unsafe extern "C" fn release_noop(_: wslc_common::wslc_bindings::WslcContainer) -> i32 {
+            0
+        }
+
+        // Non-null only because the guard rejects null; the value is never used
+        // as a pointer.
+        let sentinel = std::ptr::dangling_mut();
+        ContainerEntry {
+            started: false,
+            quarantined: false,
+            retired,
+            // SAFETY: `release_noop` never dereferences the handle, so the guard
+            // owns a value it can release without touching memory.
+            container: unsafe { WslcContainerGuard::from_raw(sentinel, release_noop) },
+        }
+    }
+
+    #[test]
+    fn a_retired_sandbox_stops_holding_the_daemon_open() {
+        let mut worker = Worker::new();
+        worker
+            .containers
+            .insert("wslc:orphan".to_string(), test_entry(false));
+        assert_eq!(worker.live_container_count(), 1);
+
+        worker.retire("wslc:orphan");
+
+        assert_eq!(
+            worker.live_container_count(),
+            0,
+            "a retired sandbox must not keep the daemon alive"
+        );
+        assert!(
+            worker.containers.contains_key("wslc:orphan"),
+            "the handle stays so shutdown can still delete the container"
+        );
+    }
+
+    #[test]
+    fn retiring_one_sandbox_leaves_the_others_counted() {
+        let mut worker = Worker::new();
+        worker
+            .containers
+            .insert("wslc:orphan".to_string(), test_entry(false));
+        worker
+            .containers
+            .insert("wslc:live".to_string(), test_entry(false));
+
+        worker.retire("wslc:orphan");
+
+        assert_eq!(worker.live_container_count(), 1);
+    }
+
+    /// Retirement is driven by a failed release, which can name a sandbox that
+    /// is already gone.
+    #[test]
+    fn retiring_an_unknown_sandbox_is_a_no_op() {
+        let mut worker = Worker::new();
+        worker.retire("wslc:never-existed");
+        assert_eq!(worker.live_container_count(), 0);
+    }
 
     #[test]
     fn sr_err_carries_the_step_failure_phase() {

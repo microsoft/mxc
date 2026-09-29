@@ -146,6 +146,32 @@ cost once per image, not once per run.
 > warm the cache first, or set `wslc.imageTarPath`. A config that
 > allows egress pulls on a miss.
 
+### Limiting which registries a machine may use
+
+An administrator can restrict runtime pulls to named registries with a
+`REG_MULTI_SZ` value under the machine policy key:
+
+```
+HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Mxc
+    WslcAllowedImageRegistries  (REG_MULTI_SZ)
+        docker.io
+        mcr.microsoft.com
+```
+
+A reference with no registry (`alpine:latest`) resolves against
+`docker.io`. With no value configured the machine is unmanaged and any
+registry may be used. A value that exists but cannot be read permits
+**nothing**, so a misconfigured policy denies rather than silently
+falling open. The allowlist governs runtime pulls only; `--setup-wslc`
+and `wslc.imageTarPath` are unaffected.
+
+### How long a pull may take
+
+A single pull is bounded at 540 seconds, deliberately under the daemon
+client's 600-second response deadline so a slow registry surfaces as a
+failed provision rather than a timeout that abandons a container. Set
+`MXC_WSLC_PULL_TIMEOUT_SECS` to override.
+
 ## Step 4 — Verify WSLC is working
 
 Run the included hello world example config from the repo root:
@@ -580,6 +606,8 @@ images — cannot be used.
 | `WSLC runtime unavailable` | WSL runtime package is missing, older than 2.9.9, or the Virtual Machine Platform optional component is disabled | Update WSL with `wsl --update --pre-release`, verify the installed version with `wsl --version`, and enable the Virtual Machine Platform optional component if required. The WSLC SDK DLL is a separate dependency and does not replace the WSL runtime package. |
 | `WSLC runtime unavailable. Missing components: SdkNeedsUpdate` | The opposite direction: your installed WSL is **newer** than the WSLc SDK this MXC build ships (pinned by `WSLC_SDK_VERSION` in `src/backends/wslc/common/build.rs`) | Update MXC to a build with a newer pinned SDK. Do **not** update WSL — it is already ahead, and updating it further will not clear this. |
 | `WSLC image '<name>' is not cached, and this sandbox declares no egress` | An isolated config named an image the store does not have | Warm the cache with `--setup-wslc`, set `imageTarPath`, or allow egress |
+| `WSLC image '<name>' cannot be pulled: '<host>' is not in the administrative registry allowlist` | Machine policy restricts which registries may be used | Use a permitted registry, set `imageTarPath`, or ask an administrator to widen `WslcAllowedImageRegistries` |
+| `WSLC image '<name>' did not finish pulling within <n>s and was stopped` | The pull exceeded its budget and was aborted | Retry, raise `MXC_WSLC_PULL_TIMEOUT_SECS`, or warm the cache from a faster network |
 | `WSLC image '<name>' could not be pulled` with `repository does not exist or may require 'docker login'` | The reference is wrong, or the registry needs credentials MXC cannot supply | Fix the image name and tag. For a private registry, use `imageTarPath` or import the image out of band |
 | `WSLC image '<name>' could not be pulled` with `no such host` or a connection error | This host cannot reach the registry | Restore network access, or warm the cache from a connected machine with `--setup-wslc` and match `storagePath`. `imageTarPath` removes the dependency entirely |
 | `WSLC image '<name>' could not be pulled` with `HRESULT 0x8004060D` | Administrative policy on the host blocks the registry | Use a permitted registry, or supply the image with `imageTarPath` |

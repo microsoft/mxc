@@ -111,6 +111,8 @@ function Run-WslcTest {
         [string]$OutputNotContains = "",
         [string]$OutputMatches = "",
         [switch]$ForceDebug,
+        [hashtable]$EnvVars = $null,
+        [string]$As = "",
         [scriptblock]$PostExitCheck = $null
     )
 
@@ -118,7 +120,7 @@ function Run-WslcTest {
     if (-not (Test-Path $configPath)) {
         Write-Host "  $ConfigFile ... " -NoNewline
         Write-Host "SKIP (file not found)" -ForegroundColor Yellow
-        return @{ Name = $ConfigFile; Pass = $true; Skipped = $true; Reason = "File not found" }
+        return @{ Name = $(if ($As) { $As } else { $ConfigFile }); Pass = $true; Skipped = $true; Reason = "File not found" }
     }
 
     # Skip if the config references a tar file that doesn't exist locally
@@ -127,13 +129,22 @@ function Run-WslcTest {
     if ($tarPath -and -not (Test-Path $tarPath)) {
         Write-Host "  $ConfigFile ... " -NoNewline
         Write-Host "SKIP (tar not found: $tarPath)" -ForegroundColor Yellow
-        return @{ Name = $ConfigFile; Pass = $true; Skipped = $true; Reason = "Tar file not found: $tarPath" }
+        return @{ Name = $(if ($As) { $As } else { $ConfigFile }); Pass = $true; Skipped = $true; Reason = "Tar file not found: $tarPath" }
     }
 
-    Write-Host "  $ConfigFile ... " -NoNewline
+    Write-Host "  $(if ($As) { $As } else { $ConfigFile }) ... " -NoNewline
 
     $prevPref = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
+    # Scoped to this one invocation so a policy or budget override cannot leak
+    # into the tests that follow.
+    $restore = @{}
+    if ($EnvVars) {
+        foreach ($k in $EnvVars.Keys) {
+            $restore[$k] = [Environment]::GetEnvironmentVariable($k)
+            [Environment]::SetEnvironmentVariable($k, $EnvVars[$k])
+        }
+    }
     $wxcArgs = @()
     if ($Debug -or $ForceDebug) {
         $wxcArgs += "--debug"
@@ -142,6 +153,9 @@ function Run-WslcTest {
     $output = & $WxcExec @wxcArgs 2>&1 | Out-String
     $exitCode = $LASTEXITCODE
     $ErrorActionPreference = $prevPref
+    foreach ($k in $restore.Keys) {
+        [Environment]::SetEnvironmentVariable($k, $restore[$k])
+    }
 
     # Access violation (0xC0000005) or other hard crashes corrupt WSL runtime
     # state, causing subsequent WslcCreateSession calls to fail with
@@ -209,7 +223,7 @@ function Run-WslcTest {
     # session resources (mounts, networking) before the next test starts.
     Start-Sleep 2
 
-    return @{ Name = $ConfigFile; Pass = $pass; Skipped = $false; Reason = $reason }
+    return @{ Name = $(if ($As) { $As } else { $ConfigFile }); Pass = $pass; Skipped = $false; Reason = $reason }
 }
 
 # Banner
@@ -399,6 +413,22 @@ $null = $results.Add((Run-WslcTest "wslc_cold_cache_denied_egress.json" -Expecte
 # says `could not be pulled`.
 $null = $results.Add((Run-WslcTest "wslc_cold_cache_unresolvable.json" -ExpectedExit -1 `
     -OutputContains "Check the image name and tag"))
+Clear-ColdCacheStore
+
+# A one-second budget on a real pull: the progress callback must abort it rather
+# than let a stalled registry hold the lifecycle worker.
+$null = $results.Add((Run-WslcTest "wslc_cold_cache_pull.json" -ExpectedExit -1 `
+    -As "wslc_cold_cache_pull.json (deadline)" `
+    -EnvVars @{ MXC_WSLC_PULL_TIMEOUT_SECS = "1" } `
+    -OutputContains "did not finish pulling within 1s"))
+Clear-ColdCacheStore
+
+# Administrative policy naming only a registry this config does not use.
+$null = $results.Add((Run-WslcTest "wslc_cold_cache_pull.json" -ExpectedExit -1 `
+    -As "wslc_cold_cache_pull.json (registry allowlist)" `
+    -EnvVars @{ MXC_TEST_WSLC_REGISTRY_ALLOWLIST = "ghcr.io" } `
+    -OutputContains "not in the administrative registry allowlist" `
+    -OutputNotContains "Pulling image"))
 Clear-ColdCacheStore
 
 Write-Host "`n--- Timeout Tests ---" -ForegroundColor Cyan

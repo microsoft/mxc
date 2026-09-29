@@ -265,7 +265,7 @@ const RPC_E_CHANGED_MODE: u32 = 0x8001_0106;
 /// the duration of a batch of WSLC SDK calls.
 ///
 /// The SDK is entered under `COINIT_MULTITHREADED` (see
-/// `WSLContainerRunner::init_and_load_sdk`), but `CoInitializeEx` is per-thread,
+/// `sdk_init::init_and_load_sdk`), but `CoInitializeEx` is per-thread,
 /// and the streaming handle is `Send` — so `wait`/`kill`/`Drop` can call the SDK
 /// from a thread that never initialized COM. Every such entry point takes one of
 /// these first, mirroring `process_container_common`'s `ComApartment`, so the calling
