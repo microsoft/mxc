@@ -140,11 +140,11 @@ cost once per image, not once per run.
 > pulled and will pull it again under its own path.
 
 > **Bring-up reaches the network.** A cache miss makes the host fetch
-> from the image's registry before the container starts. This is
-> outside the sandbox's own network policy: a config setting
-> `network.egress.default` to `deny` constrains the container once it
-> is running, not the pull that precedes it. Pre-pull, or set
-> `wslc.imageTarPath`, to keep bring-up off the network entirely.
+> from the image's registry before the container starts. That fetch is
+> outside the sandbox's own network policy, so a config declaring
+> `network.egress.default: "deny"` is **refused** rather than pulled —
+> warm the cache first, or set `wslc.imageTarPath`. A config that
+> allows egress pulls on a miss.
 
 ## Step 4 — Verify WSLC is working
 
@@ -579,6 +579,7 @@ images — cannot be used.
 | `Failed to load wslcsdk.dll` | DLL not in same directory as `wxc-exec.exe` | Copy `wslcsdk.dll` next to the binary |
 | `WSLC runtime unavailable` | WSL runtime package is missing, older than 2.9.9, or the Virtual Machine Platform optional component is disabled | Update WSL with `wsl --update --pre-release`, verify the installed version with `wsl --version`, and enable the Virtual Machine Platform optional component if required. The WSLC SDK DLL is a separate dependency and does not replace the WSL runtime package. |
 | `WSLC runtime unavailable. Missing components: SdkNeedsUpdate` | The opposite direction: your installed WSL is **newer** than the WSLc SDK this MXC build ships (pinned by `WSLC_SDK_VERSION` in `src/backends/wslc/common/build.rs`) | Update MXC to a build with a newer pinned SDK. Do **not** update WSL — it is already ahead, and updating it further will not clear this. |
+| `WSLC image '<name>' is not cached, and this sandbox declares no egress` | An isolated config named an image the store does not have | Warm the cache with `--setup-wslc`, set `imageTarPath`, or allow egress |
 | `WSLC image '<name>' could not be pulled` with `repository does not exist or may require 'docker login'` | The reference is wrong, or the registry needs credentials MXC cannot supply | Fix the image name and tag. For a private registry, use `imageTarPath` or import the image out of band |
 | `WSLC image '<name>' could not be pulled` with `no such host` or a connection error | This host cannot reach the registry | Restore network access, or warm the cache from a connected machine with `--setup-wslc` and match `storagePath`. `imageTarPath` removes the dependency entirely |
 | `WSLC image '<name>' could not be pulled` with `HRESULT 0x8004060D` | Administrative policy on the host blocks the registry | Use a permitted registry, or supply the image with `imageTarPath` |

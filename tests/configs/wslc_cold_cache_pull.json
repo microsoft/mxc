@@ -1,5 +1,5 @@
 {
-  "_comment": "Cold-cache coverage: names a real image under a storagePath the runner purges first, so resolve_image must pull before the container can run. Guards the one-call pull-then-execute path, which the pre-pull preflight otherwise hides.",
+  "_comment": "Cold-cache coverage: names a real image under a storagePath the runner purges first, so resolve_image must pull before the container can run. Egress is allowed because an isolated posture now refuses the pull outright -- see wslc_cold_cache_denied_egress.json for that half.",
   "version": "0.9.0-alpha",
   "containerId": "wslc-cold-cache-pull",
   "containment": "wslc",
@@ -7,7 +7,8 @@
     "commandLine": "echo COLD_CACHE_PULL_OK"
   },
   "network": {
-    "egress": { "default": "deny" }
+    "egress": { "default": "allow" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
   },
   "wslc": {
     "image": "busybox:latest",

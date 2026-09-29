@@ -529,8 +529,8 @@ impl Containment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WslcSection {
     /// Container image reference (e.g. `"alpine:latest"`, `"python:3.12"`).
-    /// Pulled from its registry when the store misses and `image_tar_path` is
-    /// unset, so a run on a host without registry access needs a warmed cache.
+    /// Pulled from its registry when the store misses, unless `image_tar_path`
+    /// supplies it or the request declares no egress, which refuses the pull.
     pub image: String,
     /// Path to a local tar (a `docker save` archive or a rootfs) imported as
     /// the image.

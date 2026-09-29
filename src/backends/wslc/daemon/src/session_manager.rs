@@ -528,6 +528,10 @@ impl Worker {
                 &config.image,
                 config.image_tar_path.as_deref(),
                 None,
+                match config.network {
+                    NetworkMode::None => image::RegistryAccess::Denied,
+                    NetworkMode::Bridged => image::RegistryAccess::Allowed,
+                },
                 "[WSLC][daemon]",
                 &mut self.logger,
             )
@@ -809,27 +813,7 @@ pub fn spawn() -> Result<SessionHandle> {
             while let Some(cmd) = rx.blocking_recv() {
                 match cmd {
                     WorkerCommand::Provision { config, reply } => {
-                        let result = worker.provision(config);
-                        // A container filed under a sandbox_id nobody receives
-                        // can never be deprovisioned, and holds the idle
-                        // watchdog's count above zero.
-                        if reply.is_closed() {
-                            if let Ok(sandbox_id) = &result {
-                                worker.logger.log_line(&format!(
-                                    "provision of {sandbox_id} completed after the client \
-                                     disconnected; releasing it"
-                                ));
-                                let abandoned = DeprovisionConfig {
-                                    sandbox_id: sandbox_id.clone(),
-                                };
-                                if let Err(e) = worker.deprovision(abandoned) {
-                                    worker.logger.log_line(&format!(
-                                        "releasing abandoned sandbox {sandbox_id} failed: {e}"
-                                    ));
-                                }
-                            }
-                        }
-                        let _ = reply.send(result);
+                        let _ = reply.send(worker.provision(config));
                     }
                     WorkerCommand::Start { config, reply } => {
                         let _ = reply.send(worker.start(config));
@@ -1285,46 +1269,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count(&handle).await, 0);
-
-        handle.shutdown().await.unwrap();
-    }
-
-    #[tokio::test]
-    #[ignore = "requires a WSL2 host that can reach a registry, or alpine:latest already cached"]
-    async fn abandoned_provision_is_released_not_leaked() {
-        let handle = spawn().unwrap();
-
-        let (reply, rx) = oneshot::channel();
-        handle
-            .send(WorkerCommand::Provision {
-                config: ProvisionConfig {
-                    image: "alpine:latest".to_string(),
-                    image_tar_path: None,
-                    volumes: Vec::new(),
-                    network: Default::default(),
-                },
-                reply,
-            })
-            .unwrap();
-
-        // What a client that hit its deadline mid-pull leaves behind.
-        drop(rx);
-
-        // Nobody holds the sandbox_id, so the count has to fall on its own.
-        let mut waited = std::time::Duration::ZERO;
-        let step = std::time::Duration::from_millis(500);
-        while waited < std::time::Duration::from_secs(180) {
-            if count(&handle).await == 0 {
-                break;
-            }
-            tokio::time::sleep(step).await;
-            waited += step;
-        }
-        assert_eq!(
-            count(&handle).await,
-            0,
-            "a provision whose client disconnected must not hold the idle watchdog above zero"
-        );
 
         handle.shutdown().await.unwrap();
     }

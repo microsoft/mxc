@@ -7,7 +7,8 @@
     "commandLine": "echo SHOULD_NOT_RUN"
   },
   "network": {
-    "egress": { "default": "deny" }
+    "egress": { "default": "allow" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
   },
   "wslc": {
     "image": "library/mxc-no-such-image-should-not-resolve:latest",

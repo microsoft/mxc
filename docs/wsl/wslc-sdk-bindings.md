@@ -112,7 +112,7 @@ match the pinned SDK.
    .\tests\scripts\run_wslc_all_tests.ps1
    ```
 
-   Expect all configs to pass (the `quay.io` pre-pull and the two tar-import
+   Expect all configs to pass (the `quay.io` custom registry test and the two tar-import
    tests are environment-dependent and may skip).
 
 8. **Commit** the regenerated `wslcsdk_sys.rs` **together with** the

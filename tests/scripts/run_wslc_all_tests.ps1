@@ -108,7 +108,9 @@ function Run-WslcTest {
         [string]$ConfigFile,
         [int]$ExpectedExit = 0,
         [string]$OutputContains = "",
+        [string]$OutputNotContains = "",
         [string]$OutputMatches = "",
+        [switch]$ForceDebug,
         [scriptblock]$PostExitCheck = $null
     )
 
@@ -133,7 +135,7 @@ function Run-WslcTest {
     $prevPref = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     $wxcArgs = @()
-    if ($Debug) {
+    if ($Debug -or $ForceDebug) {
         $wxcArgs += "--debug"
     }
     $wxcArgs += $configPath
@@ -163,6 +165,11 @@ function Run-WslcTest {
     if ($pass -and $OutputContains -and $output -notmatch [regex]::Escape($OutputContains)) {
         $pass = $false
         $reason = "Output missing '$OutputContains'"
+    }
+
+    if ($pass -and $OutputNotContains -and $output -match [regex]::Escape($OutputNotContains)) {
+        $pass = $false
+        $reason = "Output unexpectedly contained '$OutputNotContains'"
     }
 
     # OutputMatches is a regex pattern (no escaping).
@@ -364,16 +371,35 @@ Write-Host "`n--- Cold-Cache Tests ---" -ForegroundColor Cyan
 # The preflight above warms the default store, so nothing else here reaches the
 # cache-miss branch.
 $ColdCacheStore = "C:\mxc_wslc_cold_cache_test"
-if (Test-Path $ColdCacheStore) {
+
+# A predictable path any local user can pre-create is a path they can turn into
+# a junction; deleting through one would reach whatever it targets.
+function Clear-ColdCacheStore {
+    if (-not (Test-Path $ColdCacheStore)) { return }
+    $item = Get-Item $ColdCacheStore -Force
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        Write-Host "  REFUSING to purge $ColdCacheStore -- it is a reparse point" -ForegroundColor Red
+        exit 1
+    }
     Remove-Item $ColdCacheStore -Recurse -Force -ErrorAction SilentlyContinue
 }
-$null = $results.Add((Run-WslcTest "wslc_cold_cache_pull.json" -OutputContains "COLD_CACHE_PULL_OK"))
-# Second run over the store the first one filled: the image must now be reused.
-$null = $results.Add((Run-WslcTest "wslc_cold_cache_pull.json" -OutputContains "COLD_CACHE_PULL_OK"))
-$null = $results.Add((Run-WslcTest "wslc_cold_cache_unresolvable.json" -ExpectedExit -1 -OutputContains "could not be pulled"))
-if (Test-Path $ColdCacheStore) {
-    Remove-Item $ColdCacheStore -Recurse -Force -ErrorAction SilentlyContinue
-}
+
+Clear-ColdCacheStore
+# --debug is forced: the pull and cache-hit signals are only logged there, and
+# asserting on the workload marker alone would pass on a needless re-pull.
+$null = $results.Add((Run-WslcTest "wslc_cold_cache_pull.json" -ForceDebug `
+    -OutputContains "Pulling image 'busybox:latest'"))
+$null = $results.Add((Run-WslcTest "wslc_cold_cache_pull.json" -ForceDebug `
+    -OutputContains "Image 'busybox:latest' found" -OutputNotContains "Pulling image"))
+# The store is warm now, so a miss here can only come from the denied posture.
+Clear-ColdCacheStore
+$null = $results.Add((Run-WslcTest "wslc_cold_cache_denied_egress.json" -ExpectedExit -1 `
+    -OutputContains "declares no egress" -OutputNotContains "SHOULD_NOT_RUN"))
+# `Check the image name and tag` is unique to the non-retryable arm; every arm
+# says `could not be pulled`.
+$null = $results.Add((Run-WslcTest "wslc_cold_cache_unresolvable.json" -ExpectedExit -1 `
+    -OutputContains "Check the image name and tag"))
+Clear-ColdCacheStore
 
 Write-Host "`n--- Timeout Tests ---" -ForegroundColor Cyan
 $null = $results.Add((Run-WslcTest "wslc_timeout.json" -ExpectedExit -1 -OutputContains "Starting long task"))

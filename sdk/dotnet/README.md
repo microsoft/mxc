@@ -416,7 +416,9 @@ var request = new SandboxRequest(
 ```
 
 The image store is consulted first; a miss pulls `Image` from its registry
-unless `ImageTarPath` supplies it instead. The store wins over the tar when
+unless `ImageTarPath` supplies it instead, or the request declares no egress,
+which refuses the pull rather than fetching outside the declared policy. The
+store wins over the tar when
 both identify an already-cached image. The native
 unit must be built with WSLC support or execution returns
 `UnsupportedContainment`.

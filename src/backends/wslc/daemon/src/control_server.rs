@@ -42,7 +42,8 @@ use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use wslc_common::container_steps::OutStream;
 use wslc_common::daemon_protocol::{
-    encode_frame, DaemonRequest, DaemonResponse, ExecTerminal, StreamFrame, MAX_FRAME_SIZE,
+    encode_frame, DaemonRequest, DaemonResponse, DeprovisionConfig, ExecTerminal, StreamFrame,
+    MAX_FRAME_SIZE,
 };
 
 use crate::session_manager::{ExecStream, SessionHandle, WorkerError};
@@ -378,6 +379,43 @@ fn current_user_sid_string() -> Result<String> {
     }
 }
 
+/// Attempts to release a sandbox whose id never reached its caller, and the
+/// wait between them. The container holds the idle watchdog open, so a
+/// transient SDK failure is worth retrying rather than logging once.
+const UNDELIVERED_RELEASE_ATTEMPTS: u32 = 3;
+const UNDELIVERED_RELEASE_BACKOFF: Duration = Duration::from_secs(2);
+
+/// Deprovision a sandbox whose `Provisioned` reply could not be delivered.
+///
+/// Nobody else can: the id exists only here, so this is its last owner.
+async fn release_undelivered_sandbox(session: &SessionHandle, sandbox_id: &str) {
+    for attempt in 1..=UNDELIVERED_RELEASE_ATTEMPTS {
+        let config = DeprovisionConfig {
+            sandbox_id: sandbox_id.to_string(),
+        };
+        match session.deprovision(config).await {
+            Ok(()) => {
+                eprintln!(
+                    "[wslc-daemon] released {sandbox_id}: its provision reply never \
+                     reached the client"
+                );
+                return;
+            }
+            Err(e) if attempt == UNDELIVERED_RELEASE_ATTEMPTS => {
+                eprintln!(
+                    "[wslc-daemon] could not release {sandbox_id} after \
+                     {UNDELIVERED_RELEASE_ATTEMPTS} attempts: {e}. It will hold the daemon \
+                     open until the session is retired."
+                );
+            }
+            Err(e) => {
+                eprintln!("[wslc-daemon] release of {sandbox_id} failed ({e}); retrying");
+                tokio::time::sleep(UNDELIVERED_RELEASE_BACKOFF).await;
+            }
+        }
+    }
+}
+
 /// Service exactly one request on a freshly-connected pipe instance.
 async fn handle_client<S>(
     mut pipe: S,
@@ -401,7 +439,14 @@ where
                 Ok(sandbox_id) => DaemonResponse::Provisioned { sandbox_id },
                 Err(e) => worker_err_response(e),
             };
-            write_frame(&mut pipe, &resp).await?;
+            let delivered = write_frame(&mut pipe, &resp).await;
+            // A sandbox_id that never reaches its caller names a container
+            // nobody can deprovision, and its entry holds the idle watchdog's
+            // count above zero.
+            if let (Err(_), DaemonResponse::Provisioned { sandbox_id }) = (&delivered, &resp) {
+                release_undelivered_sandbox(&session, sandbox_id).await;
+            }
+            delivered?;
         }
         DaemonRequest::Start(config) => {
             let resp = ok_or_err(session.start(config).await);
@@ -623,7 +668,7 @@ mod tests {
     use crate::session_manager::{register_exec, spawn};
     use tokio::io::duplex;
     use tokio::sync::mpsc;
-    use wslc_common::daemon_protocol::{CancelExecConfig, ErrKind, ExecConfig};
+    use wslc_common::daemon_protocol::{CancelExecConfig, ErrKind, ExecConfig, ProvisionConfig};
 
     fn test_registration() -> Arc<crate::session_manager::ExecRegistration> {
         let active_execs = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -664,6 +709,35 @@ mod tests {
                 kind: ErrKind::Busy,
                 message: "WSLc daemon exec capacity is exhausted".to_string(),
             }
+        );
+        session.shutdown().await.unwrap();
+    }
+
+    /// A client that disappears before reading its reply must surface as an
+    /// error from the handler, which is what triggers releasing the sandbox its
+    /// id would have named.
+    #[tokio::test]
+    async fn a_vanished_client_fails_the_provision_handler() {
+        let session = spawn().unwrap();
+        let exec_limiter = Arc::new(Semaphore::new(1));
+        let (mut client, server) = duplex(64 * 1024);
+        write_frame(
+            &mut client,
+            &DaemonRequest::Provision(ProvisionConfig {
+                image: "alpine:latest".to_string(),
+                image_tar_path: None,
+                volumes: Vec::new(),
+                network: Default::default(),
+            }),
+        )
+        .await
+        .unwrap();
+        drop(client);
+
+        let outcome = handle_client(server, session.clone(), exec_limiter).await;
+        assert!(
+            outcome.is_err(),
+            "an undelivered reply must not be reported as a served request"
         );
         session.shutdown().await.unwrap();
     }

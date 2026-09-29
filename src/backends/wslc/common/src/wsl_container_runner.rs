@@ -1035,12 +1035,20 @@ impl WSLContainerRunner {
         let session_guard = self.create_session(sdk, request, logger)?;
 
         // -- Image resolution --
+        // An isolated sandbox gets no registry fetch on its behalf; the pull
+        // would run on the host's network before the container exists.
+        let registry = if policy::network_is_isolated(request) {
+            image::RegistryAccess::Denied
+        } else {
+            image::RegistryAccess::Allowed
+        };
         image::resolve_image(
             sdk,
             session_guard.as_raw(),
             &self.config.image,
             self.config.image_tar_path.as_deref(),
             self.config.storage_path.as_deref(),
+            registry,
             "[WSLC]",
             logger,
         )?;

@@ -468,7 +468,9 @@ const provisioned = await provisionSandbox('wslc', {
 
 Provision may also supply `filesystem.readwritePaths` / `readonlyPaths`
 (mounted for the sandbox's lifetime) and a backend-specific `image` /
-`imageTarPath`. Node live and buffered WSLC exec support stdout/stderr streaming,
+`imageTarPath`. The image store is consulted first; a miss pulls `image` from
+its registry unless `imageTarPath` supplies it, or the request declares no
+egress, which refuses the pull. Node live and buffered WSLC exec support stdout/stderr streaming,
 timeouts, and cancellation. WSLC does not currently expose process stdin.
 
 IsolationSession state-aware requests default to published `0.9.0-alpha`.

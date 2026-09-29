@@ -60,10 +60,11 @@ fn pull_failure(
     hr: HRESULT,
     sdk_msg: &str,
 ) -> ScriptResponse {
-    let detail = if sdk_msg.is_empty() {
+    let sanitized = sanitize_sdk_message(sdk_msg);
+    let detail = if sanitized.is_empty() {
         format!("HRESULT 0x{:08X}", hr as u32)
     } else {
-        format!("{} (HRESULT 0x{:08X})", sdk_msg, hr as u32)
+        format!("{} (HRESULT 0x{:08X})", sanitized, hr as u32)
     };
 
     match hr {
@@ -79,13 +80,15 @@ fn pull_failure(
              wslc.imageTarPath to a local tar.",
             image, detail
         )),
-        // Reaching the registry is what failed, so a later run, or a run on a
-        // connected host, can still succeed.
+        // The cause is not one this code recognises, so the remedy is stated as
+        // a possibility rather than a diagnosis: a full disk and a corrupt
+        // download reach here too, and neither is fixed by restoring network.
         _ => WslcError::Host(format!(
-            "WSLC image '{}' could not be pulled: {}. Restore network access and retry. \
-             To run on a host that stays offline, set wslc.imageTarPath to a local tar, \
-             or warm this cache from a connected machine with: wxc-exec.exe \
-             --setup-wslc --image {}{}. See docs/wsl/wsl-container-getting-started.md.",
+            "WSLC image '{}' could not be pulled: {}. If the registry was unreachable, \
+             retry once it is available. Otherwise set wslc.imageTarPath to a local tar, \
+             or warm this cache from a machine that can reach the registry with: \
+             wxc-exec.exe --setup-wslc --image {}{}. \
+             See docs/wsl/wsl-container-getting-started.md.",
             image,
             detail,
             image,
@@ -93,6 +96,25 @@ fn pull_failure(
         )),
     }
     .into_response()
+}
+
+/// Longest run of registry-supplied text kept in a user-facing message.
+const MAX_SDK_MESSAGE: usize = 400;
+
+/// Make a registry's error text safe to print and to carry over the daemon pipe.
+///
+/// The string reaches here from whatever server the image reference named, so
+/// it can carry terminal escapes or run arbitrarily long.
+fn sanitize_sdk_message(sdk_msg: &str) -> String {
+    let cleaned: String = sdk_msg
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let cleaned = cleaned.trim();
+    match cleaned.char_indices().nth(MAX_SDK_MESSAGE) {
+        None => cleaned.to_string(),
+        Some((cut, _)) => format!("{}…", &cleaned[..cut]),
+    }
 }
 
 /// Render a storage-path override as a `--storage-path` argument for the
@@ -300,17 +322,30 @@ pub(crate) unsafe fn import_image_from_tar(
     Ok(())
 }
 
+/// Whether a cache miss may reach the image's registry.
+///
+/// A sandbox that declares no egress gets no pull: the fetch would run on the
+/// host's network before the container exists, so the declared posture could
+/// not constrain it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RegistryAccess {
+    Allowed,
+    Denied,
+}
+
 /// Ensure `image` is in the session's local cache: import it from
 /// `image_tar_path` when one is supplied, otherwise pull it from its registry.
 ///
 /// # Safety
 /// `sdk` must hold valid function pointers and `session` must be a live handle.
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn resolve_image(
     sdk: &WslcSdk,
     session: WslcSession,
     image: &str,
     image_tar_path: Option<&str>,
     storage_path: Option<&str>,
+    registry: RegistryAccess,
     log_prefix: &str,
     logger: &mut Logger,
 ) -> Result<(), ScriptResponse> {
@@ -334,7 +369,7 @@ pub unsafe fn resolve_image(
                 .position(|&b| b == 0)
                 .unwrap_or(name_bytes.len());
             if let Ok(name) = std::str::from_utf8(&name_bytes[..end]) {
-                if name == image {
+                if names_same_image(name, image) {
                     image_found = true;
                     break;
                 }
@@ -343,24 +378,80 @@ pub unsafe fn resolve_image(
         windows::Win32::System::Com::CoTaskMemFree(Some(images as *const c_void));
     }
 
-    if image_found {
-        if image_tar_path.is_some() {
-            let _ = writeln!(
-                logger,
-                "{} Image '{}' already cached, skipping tar import",
-                log_prefix, image
-            );
-        } else {
-            let _ = writeln!(logger, "{} Image '{}' found", log_prefix, image);
+    match select_action(image_found, image_tar_path.is_some(), registry) {
+        ImageAction::UseCache => {
+            if image_tar_path.is_some() {
+                let _ = writeln!(
+                    logger,
+                    "{} Image '{}' already cached, skipping tar import",
+                    log_prefix, image
+                );
+            } else {
+                let _ = writeln!(logger, "{} Image '{}' found", log_prefix, image);
+            }
+            Ok(())
         }
-        return Ok(());
+        ImageAction::ImportTar => import_image_from_tar(
+            sdk,
+            session,
+            image,
+            image_tar_path.expect("tar action implies a tar path"),
+            logger,
+        ),
+        ImageAction::Pull => pull_image(sdk, session, image, storage_path, log_prefix, logger),
+        ImageAction::RefuseNoEgress => Err(WslcError::Rejected(format!(
+            "WSLC image '{}' is not cached, and this sandbox declares no egress. \
+             Pulling it would reach the registry on the host's network, before the \
+             container exists and outside the policy the request declares. Warm the \
+             cache first with wxc-exec.exe --setup-wslc --image {}{}, set \
+             wslc.imageTarPath to a local tar, or allow egress. \
+             See docs/wsl/wsl-container-getting-started.md.",
+            image,
+            image,
+            storage_arg(storage_path),
+        ))
+        .into_response()),
     }
+}
 
-    if let Some(tar_path) = image_tar_path {
-        return import_image_from_tar(sdk, session, image, tar_path, logger);
+/// How `resolve_image` satisfies the request once the cache has been consulted.
+#[derive(Debug, PartialEq, Eq)]
+enum ImageAction {
+    UseCache,
+    ImportTar,
+    Pull,
+    RefuseNoEgress,
+}
+
+/// Choose between the cache, the caller's tar, and the registry.
+fn select_action(cached: bool, has_tar: bool, registry: RegistryAccess) -> ImageAction {
+    match (cached, has_tar, registry) {
+        (true, _, _) => ImageAction::UseCache,
+        (false, true, _) => ImageAction::ImportTar,
+        (false, false, RegistryAccess::Allowed) => ImageAction::Pull,
+        (false, false, RegistryAccess::Denied) => ImageAction::RefuseNoEgress,
     }
+}
 
-    pull_image(sdk, session, image, storage_path, log_prefix, logger)
+/// Whether a stored image name denotes the image `requested`.
+///
+/// A reference with no tag means `:latest`, which the store spells out, so
+/// comparing the two literally would miss and re-pull on every run.
+fn names_same_image(stored: &str, requested: &str) -> bool {
+    stored == requested || stored == with_implicit_tag(requested)
+}
+
+/// `name` with the `:latest` the registry implies when a reference omits a tag.
+fn with_implicit_tag(name: &str) -> String {
+    // A colon in the final path segment is the tag; one before a `/` is a
+    // registry port, as in `localhost:5000/img`. A digest pins its own content
+    // and never takes an implicit tag.
+    let last_segment = name.rsplit('/').next().unwrap_or(name);
+    if last_segment.contains(':') || name.contains('@') {
+        name.to_string()
+    } else {
+        format!("{}:latest", name)
+    }
 }
 
 /// Warm a storage path's image cache with `image_name` and release the session,
@@ -439,6 +530,81 @@ mod tests {
     const E_FAIL: HRESULT = -2147467259;
 
     #[test]
+    fn a_cached_image_is_used_whatever_else_was_offered() {
+        for has_tar in [false, true] {
+            for registry in [RegistryAccess::Allowed, RegistryAccess::Denied] {
+                assert_eq!(
+                    select_action(true, has_tar, registry),
+                    ImageAction::UseCache
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_tar_is_imported_rather_than_pulled() {
+        // A local tar needs no registry, so an isolated sandbox keeps working.
+        assert_eq!(
+            select_action(false, true, RegistryAccess::Denied),
+            ImageAction::ImportTar
+        );
+        assert_eq!(
+            select_action(false, true, RegistryAccess::Allowed),
+            ImageAction::ImportTar
+        );
+    }
+
+    #[test]
+    fn a_miss_pulls_only_when_egress_is_allowed() {
+        assert_eq!(
+            select_action(false, false, RegistryAccess::Allowed),
+            ImageAction::Pull
+        );
+        assert_eq!(
+            select_action(false, false, RegistryAccess::Denied),
+            ImageAction::RefuseNoEgress
+        );
+    }
+
+    #[test]
+    fn an_untagged_reference_matches_the_stored_latest_tag() {
+        assert!(names_same_image("busybox:latest", "busybox"));
+        assert!(names_same_image("busybox:latest", "busybox:latest"));
+        assert!(names_same_image(
+            "ghcr.io/owner/img:latest",
+            "ghcr.io/owner/img"
+        ));
+    }
+
+    #[test]
+    fn a_registry_port_is_not_mistaken_for_a_tag() {
+        assert_eq!(
+            with_implicit_tag("localhost:5000/img"),
+            "localhost:5000/img:latest"
+        );
+        assert!(names_same_image(
+            "localhost:5000/img:latest",
+            "localhost:5000/img"
+        ));
+    }
+
+    #[test]
+    fn an_explicit_tag_or_digest_is_left_alone() {
+        assert_eq!(with_implicit_tag("busybox:1.36"), "busybox:1.36");
+        assert_eq!(
+            with_implicit_tag("busybox@sha256:abc"),
+            "busybox@sha256:abc"
+        );
+        assert!(!names_same_image("busybox:latest", "busybox:1.36"));
+    }
+
+    #[test]
+    fn a_different_image_never_matches() {
+        assert!(!names_same_image("alpine:latest", "busybox"));
+        assert!(!names_same_image("busyboxer:latest", "busybox"));
+    }
+
+    #[test]
     fn a_refused_reference_is_not_worth_retrying() {
         let resp = pull_failure("ghcr.io/nope:1", None, WSLC_E_IMAGE_NOT_FOUND, "denied");
         assert_eq!(resp.failure_phase, FailurePhase::Rejected);
@@ -464,10 +630,51 @@ mod tests {
     #[test]
     fn an_unreachable_registry_says_how_to_work_offline() {
         let resp = pull_failure("alpine:latest", None, E_FAIL, "no such host");
-        assert!(resp
-            .error_message
-            .contains("Restore network access and retry"));
+        assert!(resp.error_message.contains("retry once it is available"));
         assert!(resp.error_message.contains("imageTarPath"));
+    }
+
+    #[test]
+    fn an_unrecognised_failure_does_not_diagnose_the_network() {
+        // A full disk reaches this arm too, so the wording offers the network
+        // as one possibility rather than asserting it.
+        let resp = pull_failure("alpine:latest", None, E_FAIL, "no space left on device");
+        assert!(
+            resp.error_message
+                .contains("If the registry was unreachable"),
+            "unknown causes must be stated conditionally: {}",
+            resp.error_message
+        );
+    }
+
+    #[test]
+    fn registry_text_cannot_smuggle_control_characters() {
+        let hostile = "denied\u{1b}[2Jcleared\u{7}\nnext";
+        let resp = pull_failure("alpine:latest", None, E_FAIL, hostile);
+        assert!(!resp.error_message.contains('\u{1b}'));
+        assert!(!resp.error_message.contains('\u{7}'));
+        assert!(!resp.error_message.contains('\n'));
+        assert!(resp.error_message.contains("cleared"));
+    }
+
+    #[test]
+    fn registry_text_is_capped() {
+        let flood = "x".repeat(5_000);
+        let resp = pull_failure("alpine:latest", None, E_FAIL, &flood);
+        assert!(resp.error_message.contains('…'));
+        assert!(
+            resp.error_message.len() < 1_500,
+            "a hostile registry must not dictate the message length, got {}",
+            resp.error_message.len()
+        );
+    }
+
+    #[test]
+    fn a_multibyte_registry_message_is_cut_on_a_character_boundary() {
+        // Slicing by byte offset here would panic mid-character.
+        let flood = "é".repeat(5_000);
+        let resp = pull_failure("alpine:latest", None, E_FAIL, &flood);
+        assert!(resp.error_message.contains('…'));
     }
 
     #[test]
@@ -478,12 +685,12 @@ mod tests {
         let setup = advice
             .find("--setup-wslc")
             .expect("offers the warm-cache route");
-        let connected = advice
-            .find("from a connected machine")
+        let elsewhere = advice
+            .find("from a machine that can reach the registry")
             .expect("qualifies where that route has to run");
         assert!(
-            connected < setup,
-            "the connected-machine qualifier must precede the command: {advice}"
+            elsewhere < setup,
+            "the other-machine qualifier must precede the command: {advice}"
         );
     }
 
