@@ -1,5 +1,5 @@
 #!/bin/bash
-# LXC schema 0.8 egress enforcement test
+# LXC schema 0.9 egress enforcement test
 #
 # Asserts reachability rather than a log line: a chain can install cleanly,
 # name the right chain, and still filter nothing.
@@ -106,7 +106,7 @@ assert_no_forward_reference() {
 # success, which is a silent unenforced run rather than a failure.
 assert_enforcement_not_skipped() {
     if echo "$1" | grep -Fq "requests no firewall; skipping iptables"; then
-        fail "the 0.8 config was treated as not using the firewall, so no rules were installed. The directional posture is not reaching the firewall gate."
+        fail "the 0.9 config was treated as not using the firewall, so no rules were installed. The directional posture is not reaching the firewall gate."
     fi
 }
 
@@ -375,5 +375,5 @@ assert_allowed "udp/$PEER_UDP_PORT was unreachable while protocol any allowed th
 run_case "protocol-any case: peer allowed on any port 8054, probe udp/$PEER_UDP_PORT" "$ANY_UDP_WRONG_PORT_CONFIG"
 assert_blocked "udp/$PEER_UDP_PORT succeeded while protocol any allowed only port 8054. The UDP half of the fan-out ignores the port selector."
 
-echo "PASS: schema 0.8 egress rules filtered by destination, by port, by port range, by protocol, by resolver, by deny rule, and by exclusion, and no exclusion answered for a destination a later rule denied."
-echo "LXC schema 0.8 egress enforcement test complete."
+echo "PASS: schema 0.9 egress rules filtered by destination, by port, by port range, by protocol, by resolver, by deny rule, and by exclusion, and no exclusion answered for a destination a later rule denied."
+echo "LXC schema 0.9 egress enforcement test complete."
