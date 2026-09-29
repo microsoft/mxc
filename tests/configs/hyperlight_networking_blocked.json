@@ -1,4 +1,5 @@
 {
+    "$schema": "../../schemas/dev/mxc-config.schema.0.10.0-alpha.json",
     "version": "0.10.0-alpha",
     "_comment": "Intentional v0.10 migration rejection: preserve the former example.com allowlist/httpbin.org denial request as rejected input rather than replacing hostname filtering with unrestricted access or all-network denial. run_hyperlight_network_migration_test.ps1 asserts network.allowedHosts is rejected before the workload runs.",
     "process": {

@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { describe, it } from 'node:test';
+import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert';
 import { buildSandboxPayload, createConfigFromPolicy, spawnSandbox, spawnSandboxFromConfig } from '../../src/sandbox.js';
 import { resolveExecutableAndArgs } from '../../src/helper.js';
@@ -2120,6 +2120,21 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
   // anything; it just builds the path + args.
   const fakeExe = process.execPath;
 
+  beforeEach(() => {
+    // These tests validate argument construction, not the native discovery
+    // boundary. Keep the production fail-closed path covered by platform.test.
+    _setAvailableBackendsProbe(() => [
+      { backend: 'lxc', capabilities: [], warnings: [] },
+      { backend: 'bubblewrap', capabilities: [], warnings: [] },
+    ]);
+    _resetPlatformSupportCache();
+  });
+
+  afterEach(() => {
+    _setAvailableBackendsProbe();
+    _resetPlatformSupportCache();
+  });
+
   function makeConfig(containment: string): ContainerConfig {
     const version =
       containment === 'isolation_session' || containment === 'wslc'
@@ -2199,7 +2214,10 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
         { message: /not launchable/i },
       );
     } finally {
-      _setAvailableBackendsProbe();
+      _setAvailableBackendsProbe(() => [
+        { backend: 'lxc', capabilities: [], warnings: [] },
+        { backend: 'bubblewrap', capabilities: [], warnings: [] },
+      ]);
       _resetPlatformSupportCache();
     }
   });

@@ -285,12 +285,11 @@ version and a minimal shared-network launch both succeed; only that combined
 success is cached, while failures remain retryable. A real request still goes
 through normal parsing and backend validation.
 
-For request-specific Windows ProcessContainer machine facts, use
-`wxc-exec --probe [config.json]`, Node.js `probeSandboxSupport(config)`, or
-.NET `MxcSandbox.Probe(request)`. The language SDK APIs invoke the packaged
-executor and parse its typed output. This Rust SDK and the C FFI intentionally
-do not expose a native request-probe API; their in-process surface remains
-broad discovery only.
+For request-specific Windows ProcessContainer machine facts, Node.js
+`probeSandboxSupport(config)` calls the in-process `mxc_ffi` request-probe ABI
+through Koffi, while .NET `MxcSandbox.Probe(request)` invokes the packaged
+`wxc-exec --probe`. This Rust SDK has no public request-probe API. The C FFI
+exposes the request-probe ABI for native consumers, including the Node bridge.
 
 On Linux, [`platform_support`] additionally reports `bubblewrap_network`: whether
 this host can enforce **proxy-only egress** (schema `0.8.0-alpha`+ proxy mode,

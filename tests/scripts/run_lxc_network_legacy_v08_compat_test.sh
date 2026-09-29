@@ -9,9 +9,9 @@
 # Case A is the positive control at schema 0.7.  Its failure fails the suite:
 # if the 0.7 fixture cannot reach the destination, Case B's result proves
 # nothing.  Case B is the case under test: byte-for-byte the same request with
-# the version string bumped to "0.8.0-alpha" and a distinct container id.  Case
-# C guards against a fix that simply allows everything at 0.8: the same bare
-# network section with "defaultPolicy": "block" must still deny outbound.
+# the version declaration bumped to "0.8.0-alpha" and a distinct container id.
+# Case C guards against a fix that simply allows everything at 0.8: the same
+# bare network section with "defaultPolicy": "block" must still deny outbound.
 #
 # The probe is a raw IP connection -- no DNS -- so DNS handling differences
 # between schema versions cannot confound the result.
@@ -74,18 +74,20 @@ if ! echo "$block_ver" | grep -q '^0\.8\.'; then
     fail "Case C fixture declares schema '$block_ver', not 0.8; the negative guard must be a 0.8 request."
 fi
 
-# Identity: Cases A and B must be identical except for version and containerId.
-# Strip both fields and diff; any remaining difference means the test is not
-# isolating the version string as the sole variable.
+# Identity: Cases A and B must be identical except for the version declaration
+# (`version` and its matching editor-only `$schema`) and containerId. Strip
+# those fields and diff; any remaining difference means the test is not
+# isolating the contract version as the sole policy variable.
 normalize_for_diff() {
-    sed -e '/[[:space:]]*"version"[[:space:]]*:/d' \
+    sed -e '/[[:space:]]*"\$schema"[[:space:]]*:/d' \
+        -e '/[[:space:]]*"version"[[:space:]]*:/d' \
         -e '/[[:space:]]*"containerId"[[:space:]]*:/d' \
         "$1"
 }
 if ! diff <(normalize_for_diff "$CTRL_CONFIG") <(normalize_for_diff "$CASE_CONFIG") >/dev/null 2>&1; then
-    echo "--- diff (Case A vs Case B with version and containerId stripped) ---"
+    echo "--- diff (Case A vs Case B with version declaration and containerId stripped) ---"
     diff <(normalize_for_diff "$CTRL_CONFIG") <(normalize_for_diff "$CASE_CONFIG") || true
-    fail "Cases A and B differ in fields other than version and containerId.  The test is not isolating the version string as the sole variable."
+    fail "Cases A and B differ in fields other than the version declaration and containerId. The test is not isolating the contract version as the sole policy variable."
 fi
 
 # Container ids must be distinct across all three cases.

@@ -1351,10 +1351,14 @@ mod platform {
 
 #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
 pub mod test_support {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
+    #[cfg(target_os = "windows")]
+    use std::path::PathBuf;
     use std::sync::{Mutex, MutexGuard};
 
+    #[cfg(target_os = "windows")]
     const LOCAL_APPDATA_OVERRIDE_ENV: &str = "MXC_TEST_LOCALAPPDATA_OVERRIDE";
+    #[cfg(target_os = "windows")]
     const LOCAL_APPDATA_OVERRIDE_OWNER_ENV: &str = "MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID";
 
     /// `get_consent`/`set_consent` read the debug-only override, which is
@@ -1364,6 +1368,7 @@ pub mod test_support {
     /// directly (bypassing the guard, e.g. to test the "no override set"
     /// fallback path) can still serialize against guard-holding tests.
     pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
+    #[cfg(target_os = "windows")]
     static LOCAL_APP_DATA_OVERRIDE: Mutex<Option<PathBuf>> = Mutex::new(None);
 
     /// Redirects the consent store (Windows only) to a fresh temp directory
@@ -1403,7 +1408,10 @@ pub mod test_support {
         }
     }
 
-    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
+    #[cfg(all(
+        target_os = "windows",
+        any(test, all(feature = "test-support", debug_assertions))
+    ))]
     pub(crate) fn current_local_app_data_override() -> Option<PathBuf> {
         LOCAL_APP_DATA_OVERRIDE
             .lock()
@@ -1411,7 +1419,10 @@ pub mod test_support {
             .clone()
     }
 
-    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
+    #[cfg(all(
+        target_os = "windows",
+        any(test, all(feature = "test-support", debug_assertions))
+    ))]
     pub(crate) fn inherited_local_app_data_override() -> Option<PathBuf> {
         let path = std::env::var_os(LOCAL_APPDATA_OVERRIDE_ENV)
             .filter(|value| !value.is_empty())
@@ -1423,7 +1434,10 @@ pub mod test_support {
         )
     }
 
-    #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
+    #[cfg(all(
+        target_os = "windows",
+        any(test, all(feature = "test-support", debug_assertions))
+    ))]
     fn scoped_local_app_data_override(
         path: PathBuf,
         owner: Option<std::ffi::OsString>,
@@ -1467,15 +1481,7 @@ pub mod test_support {
         parent
     }
 
-    #[cfg(all(
-        not(target_os = "windows"),
-        any(test, all(feature = "test-support", debug_assertions))
-    ))]
-    fn direct_parent_process_id() -> Option<u32> {
-        None
-    }
-
-    #[cfg(test)]
+    #[cfg(all(target_os = "windows", test))]
     pub(crate) fn apply_inherited_override(command: &mut std::process::Command, path: &Path) {
         command.env(LOCAL_APPDATA_OVERRIDE_ENV, path).env(
             LOCAL_APPDATA_OVERRIDE_OWNER_ENV,
@@ -1492,7 +1498,7 @@ pub mod test_support {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(target_os = "windows", test))]
     mod tests {
         use super::scoped_local_app_data_override;
         use std::path::PathBuf;
