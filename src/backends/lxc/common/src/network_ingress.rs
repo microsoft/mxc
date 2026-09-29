@@ -2030,6 +2030,79 @@ mod tests {
         );
     }
 
+    /// Stubbing `-D` as already absent never reaches the unhook step's own
+    /// failure arm. A denial or a contended xtables lock is not "already
+    /// absent", and it must stop the rest of the family: flushing and deleting
+    /// a chain whose INPUT reference still stands would leave the hook
+    /// pointing at a chain that no longer exists.
+    #[test]
+    fn a_genuine_unhook_failure_blocks_the_rest_of_the_family() {
+        let cases = [
+            (
+                "iptables v1.8.10 (nf_tables): Could not delete rule: Permission denied",
+                "iptables -D INPUT failed: Permission denied",
+            ),
+            (
+                "Another app is currently holding the xtables lock. \
+                 Perhaps you want to use the -w option?",
+                "iptables -D INPUT failed: xtables lock is held",
+            ),
+        ];
+
+        for (stderr, msg) in cases {
+            let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+            let mut mgr = IngressManager::new("blocked-unhook-container", 94u32);
+            mgr.v4_chain_created = true;
+            mgr.v4_hooked = true;
+            // The flags stay set by design below, so keep Drop from reaching a
+            // real iptables.
+            mgr.set_preserve_policy(true);
+
+            let mut runner = FakeRunner {
+                calls: Vec::new(),
+                respond: |argv: &[String]| match verb(argv) {
+                    "-D" => Err(RunError::Exit {
+                        stderr: stderr.to_string(),
+                        msg: msg.to_string(),
+                    }),
+                    _ => Ok(()),
+                },
+            };
+
+            let error = mgr
+                .remove_firewall_rules_with(&mut runner, &mut logger)
+                .expect_err("a denied unhook is not 'already absent'");
+
+            assert!(
+                error.contains(msg),
+                "the unhook failure must surface to the caller: {error:?}"
+            );
+            assert!(
+                logger.get_buffer().contains(msg),
+                "the unhook failure must reach the log: {:?}",
+                logger.get_buffer()
+            );
+            assert_eq!(
+                runner.calls.iter().filter(|a| verb(a) == "-D").count(),
+                1,
+                "a denial is not the retryable 'still draining' case: {:?}",
+                runner.calls
+            );
+            assert!(
+                !runner
+                    .calls
+                    .iter()
+                    .any(|a| verb(a) == "-F" || verb(a) == "-X"),
+                "flush and delete must not run while the hook stands: {:?}",
+                runner.calls
+            );
+            assert!(
+                mgr.v4_hooked && mgr.v4_chain_created,
+                "nothing was removed, so the manager still owns the chain"
+            );
+        }
+    }
+
     #[test]
     fn partial_body_failure_plans_flush_delete_no_unhook() {
         let pid = 7u32;
