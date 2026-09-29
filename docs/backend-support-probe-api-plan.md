@@ -193,7 +193,8 @@ Linux projection is complete: Node reads `mxc_available_backends_json` from the
 packaged native library, and both `getAvailableBackends()` and Linux
 `getPlatformSupport()` project the same Rust result. The executor
 `--available-backends` mode remains available for CLI consumers but is not the
-Node transport. The Windows request diagnostic `wxc-exec --probe` remains authoritative.
+Node transport. The Windows request diagnostic `wxc-exec --probe` remains
+available as a CLI surface over the shared engine probe.
 Node.js `probeSandboxSupport(config)` provides its public request-aware
 projection in process through the Windows-only request-probe C ABI. .NET
 `MxcSandbox.Probe(request)` uses the same in-process `mxc_ffi` path. Both

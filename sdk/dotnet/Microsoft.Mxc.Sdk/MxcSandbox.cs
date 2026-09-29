@@ -315,10 +315,12 @@ public static class MxcSandbox
             var hasHostRules =
                 network["allowedHosts"] is JsonArray { Count: > 0 }
                 || network["blockedHosts"] is JsonArray { Count: > 0 };
+            var legacyDefaultAllows =
+                network["allowOutbound"]?.GetValue<bool>() == true
+                && network["allowedHosts"] is not JsonArray { Count: > 0 };
             var probeNetwork = new JsonObject
             {
-                ["defaultPolicy"] =
-                    network["allowOutbound"]?.GetValue<bool>() == true ? "allow" : "block",
+                ["defaultPolicy"] = legacyDefaultAllows ? "allow" : "block",
                 ["enforcementMode"] = hasHostRules ? "both" : "capabilities",
             };
             if (network["allowLocalNetwork"] is JsonNode allowLocalNetwork)
@@ -385,7 +387,7 @@ public static class MxcSandbox
         };
         config["processContainer"] = processContainerNode;
 
-        return config.ToJsonString(JsonOptions);
+        return config.ToJsonString();
     }
 
     private static void ValidateProbeVersionedFields(SandboxRequest request)

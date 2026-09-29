@@ -287,9 +287,11 @@ through normal parsing and backend validation.
 
 For request-specific Windows ProcessContainer machine facts, Node.js
 `probeSandboxSupport(config)` calls the in-process `mxc_ffi` request-probe ABI
-through Koffi, while .NET `MxcSandbox.Probe(request)` invokes the packaged
-`wxc-exec --probe`. This Rust SDK has no public request-probe API. The C FFI
-exposes the request-probe ABI for native consumers, including the Node bridge.
+through Koffi, while .NET `MxcSandbox.Probe(request)` calls the same packaged
+`mxc_ffi` library in process through P/Invoke. `wxc-exec --probe` remains a
+CLI diagnostic surface, not an SDK runtime dependency. This Rust SDK has no
+public request-probe API. The C FFI exposes the request-probe ABI for native
+consumers, including the Node and .NET bridges.
 
 On Linux, [`platform_support`] additionally reports `bubblewrap_network`: whether
 this host can enforce **proxy-only egress** (schema `0.8.0-alpha`+ proxy mode,

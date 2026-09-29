@@ -406,6 +406,40 @@ public class MxcSandboxTests
     }
 
     [Theory]
+    [InlineData(false, false, "block", "capabilities")]
+    [InlineData(true, false, "allow", "capabilities")]
+    [InlineData(false, true, "block", "both")]
+    [InlineData(true, true, "block", "both")]
+    public void ProbeConfig_LegacyNetworkDefaultsHonorAllowlist(
+        bool allowOutbound,
+        bool hasAllowlist,
+        string expectedDefaultPolicy,
+        string expectedEnforcementMode)
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy
+            {
+                Version = "0.8.0-alpha",
+                Network = new NetworkPolicy
+                {
+                    AllowOutbound = allowOutbound,
+                    AllowedHosts = hasAllowlist ? ["example.com"] : [],
+                },
+            },
+            "cmd /c exit 0");
+
+        using var document = JsonDocument.Parse(MxcSandbox.SerializeProbeConfig(request));
+        var network = document.RootElement.GetProperty("network");
+
+        Assert.Equal(expectedDefaultPolicy, network.GetProperty("defaultPolicy").GetString());
+        Assert.Equal(expectedEnforcementMode, network.GetProperty("enforcementMode").GetString());
+        if (hasAllowlist)
+        {
+            Assert.Equal("example.com", network.GetProperty("allowedHosts")[0].GetString());
+        }
+    }
+
+    [Theory]
     [InlineData("0.8.0-alpha", true, false)]
     [InlineData("0.8.0-alpha", false, true)]
     [InlineData("0.9.0-alpha", true, false)]
