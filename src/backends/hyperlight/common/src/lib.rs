@@ -1402,14 +1402,15 @@ fn path_relationship_fallback_with(
 
     match (resolve(allowed), resolve(denied)) {
         (PathCanonical::Canonical(allowed_resolved), PathCanonical::Canonical(denied_resolved)) => {
-            let allowed_norm = WindowsFallbackPath::parse_with_trailing_policy(
-                &allowed_resolved,
-                has_verbatim_trim_sensitive_component(allowed),
-            );
-            let denied_norm = WindowsFallbackPath::parse_with_trailing_policy(
-                &denied_resolved,
-                has_verbatim_trim_sensitive_component(denied),
-            );
+            let Some(allowed_norm) =
+                WindowsFallbackPath::parse_canonical(allowed, &allowed_resolved)
+            else {
+                return PathRelationship::Indeterminate;
+            };
+            let Some(denied_norm) = WindowsFallbackPath::parse_canonical(denied, &denied_resolved)
+            else {
+                return PathRelationship::Indeterminate;
+            };
             return PathRelationship::from_overlaps(allowed_norm.overlaps(&denied_norm));
         }
         (PathCanonical::Unknown, _) | (_, PathCanonical::Unknown) => {
@@ -1435,6 +1436,23 @@ struct WindowsFallbackPath {
 impl WindowsFallbackPath {
     fn parse(path: &str) -> Self {
         Self::parse_with_trailing_policy(path, has_verbatim_trim_sensitive_component(path))
+    }
+
+    fn parse_canonical(source: &str, resolved: &str) -> Option<Self> {
+        // Canonical components name actual objects and must retain the spelling
+        // returned by the OS. The shared resolver can also append an absent
+        // tail, but does not expose where that tail starts. An ordinary source
+        // containing a trim-sensitive name is therefore ambiguous when that
+        // name survives in the result: trimming it could corrupt the resolved
+        // prefix, while preserving it could corrupt the replayed tail.
+        if has_trim_sensitive_component(source)
+            && !has_verbatim_trim_sensitive_component(source)
+            && has_trim_sensitive_component(resolved)
+        {
+            return None;
+        }
+
+        Some(Self::parse_with_trailing_policy(resolved, true))
     }
 
     fn parse_with_trailing_policy(path: &str, preserve_trailing_dots_and_spaces: bool) -> Self {
@@ -1500,12 +1518,16 @@ fn normalize_windows_verbatim_prefix(path: &str) -> (String, bool) {
 
 #[cfg(target_os = "windows")]
 fn has_verbatim_trim_sensitive_component(path: &str) -> bool {
+    normalize_windows_verbatim_prefix(&path.to_lowercase()).1 && has_trim_sensitive_component(path)
+}
+
+#[cfg(target_os = "windows")]
+fn has_trim_sensitive_component(path: &str) -> bool {
     let folded = path.to_lowercase();
-    let (_, verbatim) = normalize_windows_verbatim_prefix(&folded);
-    verbatim
-        && folded
-            .split(['\\', '/'])
-            .any(|segment| segment.ends_with(['.', ' ']))
+    let (normalized, _) = normalize_windows_verbatim_prefix(&folded);
+    normalized
+        .split(['\\', '/'])
+        .any(|segment| segment.ends_with(['.', ' ']))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -1647,6 +1669,18 @@ mod tests {
         assert!(message.contains("deniedPaths"), "got: {message}");
         assert!(
             message.contains("overlapping allowed and denied host paths"),
+            "got: {message}"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    fn assert_denied_resolution_message(message: &str) {
+        assert!(
+            message.contains("cannot verify deniedPaths against allow lists"),
+            "got: {message}"
+        );
+        assert!(
+            message.contains("fails closed rather than risk an unenforced deny"),
             "got: {message}"
         );
     }
@@ -2018,7 +2052,7 @@ mod tests {
             ..Default::default()
         };
         let err = HyperlightScriptRunner::validate_policies(&request).unwrap_err();
-        assert_denied_overlap_message(&err.to_string());
+        assert_denied_resolution_message(&err.to_string());
     }
 
     #[cfg(target_os = "windows")]
@@ -2073,6 +2107,50 @@ mod tests {
                 },
             ),
             PathRelationship::Overlaps
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn fallback_never_separates_mixed_spelling_of_same_dotted_canonical_tree() {
+        use wxc_common::filesystem_canonical::PathCanonical;
+
+        let relationship =
+            path_relationship_fallback_with("C:\\link\\child", "\\\\?\\C:\\real.\\child", |path| {
+                match path {
+                    "C:\\link\\child" | "\\\\?\\C:\\real.\\child" => {
+                        PathCanonical::Canonical("C:\\real.\\child".to_string())
+                    }
+                    _ => PathCanonical::Absent,
+                }
+            });
+
+        assert!(
+            matches!(
+                relationship,
+                PathRelationship::Overlaps | PathRelationship::Indeterminate
+            ),
+            "same resolved tree must overlap or fail closed, got {relationship:?}"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn fallback_fails_closed_when_dotted_canonical_component_provenance_is_ambiguous() {
+        use wxc_common::filesystem_canonical::PathCanonical;
+
+        assert_eq!(
+            path_relationship_fallback_with(
+                "C:\\link.\\child",
+                "\\\\?\\C:\\real.\\child",
+                |path| match path {
+                    "C:\\link.\\child" | "\\\\?\\C:\\real.\\child" => {
+                        PathCanonical::Canonical("C:\\real.\\child".to_string())
+                    }
+                    _ => PathCanonical::Absent,
+                },
+            ),
+            PathRelationship::Indeterminate
         );
     }
 
