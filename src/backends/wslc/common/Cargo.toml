@@ -24,4 +24,4 @@ tempfile.workspace = true
 
 [build-dependencies]
 zip = { version = "2", default-features = false, features = ["deflate"] }
-sha2 = "0.10"
+sha2 = { workspace = true }

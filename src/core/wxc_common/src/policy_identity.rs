@@ -76,8 +76,8 @@
 //! keyed construction first.
 
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 
+use crate::hashing::sha256_hex;
 use crate::models::{ExecutionRequest, IsolationSessionProvisionConfig, WslcProvisionConfig};
 use crate::state_aware_operation::{StateAwareOperation, StateAwareProvision};
 
@@ -171,14 +171,11 @@ fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
 }
 
 fn hash_canonical_json(canonical: &str) -> String {
-    let digest = Sha256::digest(canonical.as_bytes());
-    let mut out = String::with_capacity(ALGORITHM_TAG.len() + 1 + digest.len() * 2);
+    let digest = sha256_hex(canonical.as_bytes());
+    let mut out = String::with_capacity(ALGORITHM_TAG.len() + 1 + digest.len());
     out.push_str(ALGORITHM_TAG);
     out.push(':');
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(out, "{byte:02x}");
-    }
+    out.push_str(&digest);
     out
 }
 

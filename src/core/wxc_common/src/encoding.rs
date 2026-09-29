@@ -13,6 +13,18 @@ pub fn base64_encode(input: &[u8]) -> String {
     STANDARD.encode(input)
 }
 
+/// Encode raw bytes as lowercase hexadecimal.
+pub fn lowercase_hex(input: &[u8]) -> String {
+    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+    let mut encoded = String::with_capacity(input.len() * 2);
+    for &byte in input {
+        encoded.push(HEX_DIGITS[(byte >> 4) as usize] as char);
+        encoded.push(HEX_DIGITS[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -47,5 +59,15 @@ mod tests {
         let original = b"Hello World";
         let decoded = base64_decode(&base64_encode(original)).unwrap();
         assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn lowercase_hex_encodes_each_nibble() {
+        assert_eq!(lowercase_hex(&[0x00, 0x01, 0xab, 0xff]), "0001abff");
+    }
+
+    #[test]
+    fn lowercase_hex_encodes_empty_input() {
+        assert_eq!(lowercase_hex(&[]), "");
     }
 }

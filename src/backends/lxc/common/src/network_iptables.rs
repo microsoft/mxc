@@ -4,7 +4,7 @@
 use std::net::{IpAddr, Ipv6Addr, ToSocketAddrs};
 use std::process::Command;
 
-use sha2::{Digest, Sha256};
+use wxc_common::hashing::sha256;
 use wxc_common::logger::Logger;
 use wxc_common::models::{
     ContainerPolicy, NetworkAction, NetworkCidr, NetworkEgressPolicy, NetworkPeer, NetworkPolicy,
@@ -324,7 +324,7 @@ pub fn ingress_chain_name_for(container_name: &str) -> String {
 }
 
 fn chain_name_with_prefix(prefix: &str, slug_len: usize, container_name: &str) -> String {
-    let digest = Sha256::digest(container_name.as_bytes());
+    let digest = sha256(container_name.as_bytes());
     let hash = base32_lower(&digest[..CHAIN_HASH_BYTES]);
 
     let slug: String = container_name

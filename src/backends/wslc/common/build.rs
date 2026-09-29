@@ -319,11 +319,12 @@ fn verify_sha256(nupkg_path: &Path, version: &str) -> Result<(), String> {
         .map_err(|e| format!("cannot read {} for hashing: {}", nupkg_path.display(), e))?;
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
-    let actual = hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
+    let digest = hasher.finalize();
+    let mut actual = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(actual, "{byte:02x}");
+    }
     // Compare case-insensitively so an upper- or mixed-case pinned hash still matches.
     if !actual.eq_ignore_ascii_case(&expected) {
         let _ = std::fs::remove_file(nupkg_path);

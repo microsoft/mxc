@@ -1099,6 +1099,7 @@ mod oci {
     use std::time::Duration;
 
     use sha2::{Digest, Sha256};
+    use wxc_common::encoding::lowercase_hex;
     use wxc_common::logger::Logger;
 
     const MANIFEST_TYPES: &str = "application/vnd.oci.image.manifest.v1+json, \
@@ -1277,7 +1278,8 @@ mod oci {
         /// The digest of everything read so far, in the registry's
         /// `sha256:<hex>` form.
         fn digest(&self) -> String {
-            format!("sha256:{:x}", self.hasher.clone().finalize())
+            let digest = lowercase_hex(&self.hasher.clone().finalize());
+            format!("sha256:{digest}")
         }
     }
 

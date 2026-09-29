@@ -53,8 +53,8 @@
 use learning_mode_core::{
     AccessType, ResourceType, VerboseLoggingOutcomeReason, VerboseLoggingProvider,
 };
-use sha2::{Digest, Sha256};
 use windows::core::GUID;
+use wxc_common::hashing::sha256_hex;
 
 /// Microsoft-Windows-Kernel-General provider.
 pub(crate) const KERNEL_GENERAL_PROVIDER: GUID = GUID {
@@ -508,8 +508,8 @@ pub(crate) fn bound_properties(mut properties: Vec<(String, String)>) -> Vec<(St
 }
 
 fn bound_property_value(value: &str, char_count: usize) -> String {
-    let digest = Sha256::digest(value.as_bytes());
-    let marker = format!("...<sha256={digest:x}>...");
+    let digest = sha256_hex(value.as_bytes());
+    let marker = format!("...<sha256={digest}>...");
     debug_assert_eq!(marker.len(), BOUNDED_VALUE_MARKER_LEN);
     let context_len = MAX_SIGNATURE_VALUE_LEN - BOUNDED_VALUE_MARKER_LEN;
     let prefix_len = context_len.div_ceil(2);
