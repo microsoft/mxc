@@ -77,6 +77,14 @@ jobs:
           cargo test --locked --release --target "${{ matrix.target }}" \
             --no-default-features "${features[@]}"
 
+      # The step above runs from src/core/lxc and so covers only the lxc
+      # package. The backend's own crate holds the LXC-gated unit tests, which
+      # compile on no other platform and would otherwise never run.
+      - name: Test lxc_common
+        working-directory: src
+        run: cargo test --locked --release --target ${{ matrix.target }}
+             -p lxc_common --lib
+
       # Bubblewrap is required to run the executor characterization tests in
       # wxc_e2e_tests (they skip via has_bwrap() when it is absent). lxc-exec
       # always includes the Bubblewrap backend (bwrap_common is a non-optional
