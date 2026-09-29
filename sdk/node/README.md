@@ -641,9 +641,13 @@ deprovisionSandbox(sandboxId, config?, options?) → Promise<DeprovisionResult>
 
 // Platform & policy discovery
 getPlatformSupport() → PlatformSupport
+getAvailableBackends() → AvailableBackend[]
 getAvailableToolsPolicy(env?, options?) → FilesystemPolicyResult
 getUserProfilePolicy()                  → FilesystemPolicyResult
 getTemporaryFilesPolicy(env?)           → FilesystemPolicyResult
+
+// Request-aware Windows ProcessContainer probing
+probeSandboxSupport(config?) → ProbeOutput
 
 // Telemetry consent (Windows-only; see Telemetry Consent section below)
 queryTelemetryConsentAsync()      → Promise<{ state, storedState, effectiveState, needsPrompt, policy, error? }>
@@ -651,6 +655,7 @@ requestTelemetryConsent(presenter, locale?) → Promise<TelemetryConsentOutcome>
 withdrawTelemetryConsentAsync()   → Promise<TelemetryConsentOutcome>
 
 // Capability types
+AvailableBackend, AvailableBackendName, AvailableBackendTier
 ProbeOutput, ProbeFacts, UiCapabilitySupport, BubblewrapNetworkSupport
 
 // Errors (typed wire-format errors from wxc-exec)
