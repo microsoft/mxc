@@ -422,7 +422,7 @@ they cannot preserve either posture.
 **Connectivity models:**
 
 - **Model 2 (recommended):** Grants no `internetClient`, so direct internet traffic is blocked. Any packaged proxy,
-  with or without AppContainer isolation, uses its Package Family Name in `allowedProxyPeer`; an unpackaged
+  with or without AppContainer isolation, uses its Package Family Name in a non-blank `allowedProxyPeer`; an unpackaged
   AppContainer proxy uses its profile name. Windows requires `ingress.default: "allow"` to grant the bidirectional
   `privateNetworkClientServer` capability. With `allowedProxyPeer`, proxy reachability remains scoped to that peer and
   endpoint and `ingress.hostLoopback` stays `"deny"`. An identity-less host proxy cannot use peer scoping and is the

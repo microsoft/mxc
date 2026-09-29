@@ -4453,22 +4453,38 @@ mod tests {
         assert!(request.policy.network_proxy.is_enabled());
     }
 
+    const BLANK_PROXY_PEER_ERROR: &str =
+        "processContainer.network.allowedProxyPeer must not be blank";
+
+    fn process_container_proxy_json(version: &str, peer: &str) -> String {
+        format!(
+            r#"{{
+            "version": {version:?},
+            "containment": "processcontainer",
+            "process": {{"commandLine": "echo hi"}},
+            "network": {{
+                "egress": {{"default": "deny"}},
+                "ingress": {{"default": "allow", "hostLoopback": "deny"}}
+            }},
+            "runtimeConfig": {{"networkProxy": "http://127.0.0.1:8080"}},
+            "processContainer": {{
+                "network": {{"allowedProxyPeer": {peer:?}}}
+            }}
+        }}"#
+        )
+    }
+
+    fn proxy_peer_contract_versions() -> impl Iterator<Item = &'static str> {
+        supported_versions()
+            .iter()
+            .skip_while(|version| **version != ContractVersion::V0_8_0Alpha)
+            .map(|version| version.as_str())
+    }
+
     #[test]
     fn schema_v08_parses_runtime_proxy_and_peer() {
-        let json = r#"{
-            "version": "0.8.0-alpha",
-            "containment": "processcontainer",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "egress": {"default": "deny"},
-                "ingress": {"default": "allow", "hostLoopback": "deny"}
-            },
-            "runtimeConfig": {"networkProxy": "http://127.0.0.1:8080"},
-            "processContainer": {
-                "network": {"allowedProxyPeer": "Contoso.Proxy_123"}
-            }
-        }"#;
-        let request = match load_mxc(json).unwrap() {
+        let json = process_container_proxy_json("0.8.0-alpha", "Contoso.Proxy_123");
+        let request = match load_mxc(&json).unwrap() {
             MxcRequest::OneShot(request) => request,
             _ => panic!("expected one-shot request"),
         };
@@ -4516,26 +4532,31 @@ mod tests {
     }
 
     #[test]
-    fn schema_v08_treats_empty_proxy_peer_as_identityless() {
-        let json = r#"{
-            "version": "0.8.0-alpha",
-            "containment": "processcontainer",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "egress": {"default": "deny"},
-                "ingress": {"default": "allow", "hostLoopback": "allow"}
-            },
-            "runtimeConfig": {"networkProxy": "http://127.0.0.1:8080"},
-            "processContainer": {
-                "network": {"allowedProxyPeer": ""}
+    fn processcontainer_proxy_peer_must_not_be_blank() {
+        for version in proxy_peer_contract_versions() {
+            for peer in ["", "   "] {
+                let json = process_container_proxy_json(version, peer);
+                let error = match load_mxc(&json) {
+                    Err(ParseError::OneShot(WxcError::ConfigParse(message))) => message,
+                    other => panic!("expected config parse rejection, got: {other:?}"),
+                };
+                assert_eq!(error, BLANK_PROXY_PEER_ERROR, "version {version:?}");
             }
-        }"#;
-        let request = match load_mxc(json).unwrap() {
-            MxcRequest::OneShot(request) => request,
-            _ => panic!("expected one-shot request"),
-        };
+        }
+    }
 
-        assert!(request.policy.allowed_proxy_peer.is_none());
+    #[test]
+    fn processcontainer_proxy_peer_preserves_non_blank_value() {
+        for version in proxy_peer_contract_versions() {
+            let peer = " Contoso.Proxy_123 ";
+            let json = process_container_proxy_json(version, peer);
+            let request = match load_mxc(&json).unwrap() {
+                MxcRequest::OneShot(request) => request,
+                _ => panic!("expected one-shot request"),
+            };
+
+            assert_eq!(request.policy.allowed_proxy_peer.as_deref(), Some(peer));
+        }
     }
 
     #[test]
@@ -4724,6 +4745,7 @@ mod tests {
             r#""runtimeConfig": null"#,
             r#""processContainer": {"network": {}}"#,
             r#""processContainer": {"network": null}"#,
+            r#""processContainer": {"network": {"allowedProxyPeer": ""}}"#,
         ] {
             let json = format!(
                 r#"{{

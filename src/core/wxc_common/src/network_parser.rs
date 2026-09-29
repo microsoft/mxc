@@ -29,10 +29,7 @@ fn has_runtime_fields(runtime: &wire::RuntimeConfig) -> bool {
 }
 
 fn has_process_container_network_fields(network: &wire::ProcessContainerNetwork) -> bool {
-    network
-        .allowed_proxy_peer
-        .as_ref()
-        .is_some_and(|peer| !peer.trim().is_empty())
+    network.allowed_proxy_peer.is_some()
 }
 
 pub(crate) fn directional_network_version_error() -> WxcError {
@@ -314,9 +311,7 @@ fn apply_directional_network(
         process_container,
     } = sections;
     policy.network_specified = network.is_some();
-    policy.allowed_proxy_peer = process_container
-        .and_then(|network| network.allowed_proxy_peer)
-        .filter(|peer| !peer.trim().is_empty());
+    policy.allowed_proxy_peer = convert_allowed_proxy_peer(process_container)?;
 
     match network {
         Some(network) => {
@@ -370,6 +365,18 @@ fn apply_directional_network(
     }
 
     validate_proxy_policy(policy, containment)
+}
+
+fn convert_allowed_proxy_peer(
+    network: Option<wire::ProcessContainerNetwork>,
+) -> Result<Option<String>, WxcError> {
+    match network.and_then(|network| network.allowed_proxy_peer) {
+        Some(peer) if peer.trim().is_empty() => Err(WxcError::ConfigParse(
+            "processContainer.network.allowedProxyPeer must not be blank".to_string(),
+        )),
+        Some(peer) => Ok(Some(peer)),
+        None => Ok(None),
+    }
 }
 
 fn validate_directional_proxy_policy(policy: &ContainerPolicy) -> Result<(), WxcError> {
