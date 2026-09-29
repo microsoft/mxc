@@ -6,7 +6,8 @@
 use std::ffi::c_void;
 use std::fmt::Write;
 use std::ptr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use wxc_common::logger::Logger;
@@ -30,6 +31,11 @@ const PULL_TIMEOUT: Duration = Duration::from_secs(540);
 /// the abort path without waiting out the production budget.
 const PULL_TIMEOUT_ENV: &str = "MXC_WSLC_PULL_TIMEOUT_SECS";
 
+/// Gap kept between the pull budget and the caller's own response deadline, so
+/// a pull that runs its full budget still fails back to a caller that is
+/// listening.
+const PULL_HEADROOM: Duration = Duration::from_secs(60);
+
 /// Gap between progress lines while a pull is running.
 const PULL_REPORT_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -38,14 +44,31 @@ const PULL_REPORT_INTERVAL: Duration = Duration::from_secs(10);
 const E_ABORT: HRESULT = 0x8000_4004u32 as HRESULT;
 
 /// The pull deadline, honouring [`PULL_TIMEOUT_ENV`].
+///
+/// Capped below the deadline the caller is waiting on, because a pull allowed
+/// to outlive it would surface as an abandoned container rather than the failed
+/// provision the caller can act on.
 fn pull_timeout() -> Duration {
-    std::env::var(PULL_TIMEOUT_ENV)
+    let requested = std::env::var(PULL_TIMEOUT_ENV)
         .ok()
         .as_deref()
         .and_then(|s| s.trim().parse::<u64>().ok())
         .filter(|&secs| secs > 0)
         .map(Duration::from_secs)
-        .unwrap_or(PULL_TIMEOUT)
+        .unwrap_or(PULL_TIMEOUT);
+
+    requested.min(pull_budget_ceiling(crate::daemon_client::call_timeout()))
+}
+
+/// The most a pull may take for its failure to still reach the caller.
+///
+/// [`PULL_HEADROOM`] leaves the caller time to render that failure before its
+/// own deadline expires.
+fn pull_budget_ceiling(call_timeout: Duration) -> Duration {
+    call_timeout
+        .checked_sub(PULL_HEADROOM)
+        .filter(|d| !d.is_zero())
+        .unwrap_or(call_timeout)
 }
 
 /// Shared with the SDK's progress callback for the duration of one pull.
@@ -133,7 +156,11 @@ pub unsafe fn pull_image(
     let started = Instant::now();
     // Stationary for the whole call: the SDK holds this pointer across it.
     let watch = PullWatch {
-        deadline: started + budget,
+        // A budget too large for the clock to represent falls back to the
+        // default, which is bounded rather than instantly expired.
+        deadline: started
+            .checked_add(budget)
+            .unwrap_or_else(|| started + PULL_TIMEOUT),
         started,
         last_report_ms: AtomicU64::new(0),
         image: image.to_string(),
@@ -159,6 +186,175 @@ pub unsafe fn pull_image(
 
     let _ = writeln!(logger, "{} Image '{}' pulled", log_prefix, image);
     Ok(())
+}
+
+/// Where the SDK pull runs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PullExecution {
+    /// On the calling thread.
+    Inline,
+
+    /// On a thread of its own, abandoned if it outlives the deadline.
+    OffCallerThread,
+}
+
+/// Off-thread pulls that have not returned.
+///
+/// The session outlives the daemon's worker only if nothing is still using it,
+/// so teardown consults this before releasing the handle.
+static PULLS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+/// Everything an off-thread pull needs, in a form that can cross a thread.
+struct PullJob {
+    sdk: *const WslcSdk,
+    session: WslcSession,
+    image: String,
+    storage_path: Option<String>,
+}
+
+// SAFETY: the SDK is apartment-affine, not thread-affine. Both this thread and
+// the spawned one join the MTA, where a handle may be used from any member
+// thread. Measured against a live 31s pull: 298 concurrent `WslcListSessionImages`
+// calls on the same session all returned inside 29ms, so the SDK neither rejects
+// nor serializes the overlap.
+unsafe impl Send for PullJob {}
+
+/// Pull on a thread of its own, giving up once `budget` expires.
+///
+/// The daemon serves every sandbox from a single worker, so a pull that stops
+/// responding must not be sitting on it. A caller that gives up here leaves the
+/// pull running: the SDK reports progress only as response chunks arrive and
+/// exposes no cancellation handle, so a transfer stalled before its next chunk
+/// cannot be stopped from outside. Bounding the *worker* is what this buys; the
+/// abandoned thread ends when the SDK's own network timeouts fire.
+///
+/// # Safety
+/// `sdk` must hold valid function pointers and `session` must be a live handle,
+/// both outliving the pull -- see [`wait_for_pulls_in_flight`].
+unsafe fn pull_off_caller_thread(
+    sdk: &WslcSdk,
+    session: WslcSession,
+    image: &str,
+    storage_path: Option<&str>,
+    log_prefix: &str,
+    logger: &mut Logger,
+) -> Result<(), ScriptResponse> {
+    let budget = pull_timeout();
+    let job = PullJob {
+        sdk: sdk as *const WslcSdk,
+        session,
+        image: image.to_string(),
+        storage_path: storage_path.map(str::to_string),
+    };
+
+    let (tx, rx) = mpsc::channel();
+    let prefix = log_prefix.to_string();
+    PULLS_IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+    let spawned = std::thread::Builder::new()
+        .name("wslc-pull".to_string())
+        .spawn(move || {
+            let job = job;
+            let _apartment = match PullApartment::enter() {
+                Ok(apartment) => apartment,
+                Err(e) => {
+                    PULLS_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+                    let _ = tx.send(Err(e));
+                    return;
+                }
+            };
+            let mut log = Logger::new(wxc_common::logger::Mode::Console);
+
+            // SAFETY: the caller keeps both alive for as long as this runs.
+            let outcome = unsafe {
+                pull_image(
+                    &*job.sdk,
+                    job.session,
+                    &job.image,
+                    job.storage_path.as_deref(),
+                    &prefix,
+                    &mut log,
+                )
+            };
+            PULLS_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+            let _ = tx.send(outcome);
+        });
+
+    if spawned.is_err() {
+        PULLS_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+        let _ = writeln!(
+            logger,
+            "{} Could not start a pull thread; pulling on this thread instead",
+            log_prefix
+        );
+        return pull_image(sdk, session, image, storage_path, log_prefix, logger);
+    }
+
+    match rx.recv_timeout(budget) {
+        Ok(outcome) => outcome,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(pull_deadline_expired(image, budget)),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(WslcError::Host(format!(
+            "the thread pulling WSLC image '{image}' ended without reporting a result"
+        ))
+        .into_response()),
+    }
+}
+
+/// Block until no off-thread pull is outstanding, or `budget` expires.
+///
+/// Reports whether the wait drained. An abandoned pull is still using the
+/// session it was handed, so releasing that handle while one is outstanding
+/// would free memory the SDK holds.
+pub fn wait_for_pulls_in_flight(budget: Duration) -> bool {
+    let deadline = Instant::now() + budget;
+    while PULLS_IN_FLIGHT.load(Ordering::SeqCst) > 0 {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    true
+}
+
+/// Keeps a pull thread in the COM MTA for the SDK call.
+struct PullApartment;
+
+impl PullApartment {
+    fn enter() -> Result<Self, ScriptResponse> {
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+
+        // SAFETY: called once on a freshly spawned thread; `Drop` below pairs it.
+        let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        if hr.is_err() {
+            return Err(sdk_error(
+                "could not join the COM apartment for a WSLC pull",
+                hr.0,
+                "",
+            ));
+        }
+        Ok(Self)
+    }
+}
+
+impl Drop for PullApartment {
+    fn drop(&mut self) {
+        use windows::Win32::System::Com::CoUninitialize;
+
+        // SAFETY: pairs the `CoInitializeEx` that produced this guard.
+        unsafe { CoUninitialize() };
+    }
+}
+
+/// Report a pull the caller stopped waiting for.
+fn pull_deadline_expired(image: &str, budget: Duration) -> ScriptResponse {
+    WslcError::Host(format!(
+        "WSLC image '{}' did not finish pulling within {}s. The transfer was \
+         abandoned and this sandbox was not created. Retry, raise the budget with \
+         {}, or warm the cache from a machine that can reach the registry.",
+        image,
+        budget.as_secs(),
+        PULL_TIMEOUT_ENV,
+    ))
+    .into_response()
 }
 
 /// Classify a `WslcPullSessionImage` failure and render it for the caller.
@@ -467,13 +663,21 @@ pub unsafe fn resolve_image(
     image_tar_path: Option<&str>,
     storage_path: Option<&str>,
     registry: RegistryAccess,
+    execution: PullExecution,
     log_prefix: &str,
     logger: &mut Logger,
 ) -> Result<(), ScriptResponse> {
     let cached = list_cached_images(sdk, session)?;
     let matched = cached.iter().find(|entry| entry.satisfies(image));
+    let policy = registry_policy::get_policy();
 
-    match select_action(matched.is_some(), image_tar_path.is_some(), registry) {
+    match select_action(
+        matched.is_some(),
+        image_tar_path.is_some(),
+        registry,
+        &policy,
+        image,
+    ) {
         ImageAction::UseCache => {
             let digest = matched.map(|e| e.digest_hex()).unwrap_or_default();
             if image_tar_path.is_some() {
@@ -499,18 +703,25 @@ pub unsafe fn resolve_image(
             logger,
         ),
         ImageAction::Pull => {
-            // Administrative policy decides which registries this machine may
-            // contact at all, independent of what the request asks for.
-            let policy = registry_policy::get_policy();
-            if !policy.permits(image) {
-                return Err(WslcError::Rejected(policy.refusal(image)).into_response());
+            match execution {
+                PullExecution::Inline => {
+                    pull_image(sdk, session, image, storage_path, log_prefix, logger)?
+                }
+                PullExecution::OffCallerThread => {
+                    pull_off_caller_thread(sdk, session, image, storage_path, log_prefix, logger)?
+                }
             }
-            pull_image(sdk, session, image, storage_path, log_prefix, logger)?;
+
             // What the reference actually resolved to. A tag is mutable, so the
             // digest is the only record of which content this run executed.
+            //
+            // Matched exactly: a store holding several tags of one repository
+            // would otherwise report whichever was found first. A digest
+            // reference reports nothing, since the store's digest is not the
+            // one the reference pinned.
             if let Some(entry) = list_cached_images(sdk, session)?
                 .iter()
-                .find(|entry| entry.is_same_repository(image))
+                .find(|entry| entry.satisfies(image))
             {
                 let _ = writeln!(
                     logger,
@@ -521,6 +732,9 @@ pub unsafe fn resolve_image(
                 );
             }
             Ok(())
+        }
+        ImageAction::RefuseByPolicy => {
+            Err(WslcError::Rejected(policy.refusal(image)).into_response())
         }
         ImageAction::RefuseNoEgress => Err(WslcError::Rejected(format!(
             "WSLC image '{}' is not cached, and this sandbox declares no egress. \
@@ -556,14 +770,6 @@ impl CachedImage {
         digest_of(requested).is_none() && names_same_image(&self.name, requested)
     }
 
-    /// Whether this entry is the repository `requested` names, pin aside.
-    ///
-    /// Only for reporting what a completed pull produced; too weak to decide a
-    /// cache hit.
-    fn is_same_repository(&self, requested: &str) -> bool {
-        repository_of(&self.name) == repository_of(requested)
-    }
-
     /// The stored content digest, as lowercase hex.
     fn digest_hex(&self) -> String {
         use std::fmt::Write as _;
@@ -571,24 +777,6 @@ impl CachedImage {
             let _ = write!(out, "{:02x}", b);
             out
         })
-    }
-}
-
-/// A reference with any tag and digest stripped off.
-fn repository_of(reference: &str) -> &str {
-    let without_digest = reference
-        .rsplit_once('@')
-        .map_or(reference, |(head, _)| head);
-    // A colon in the last path segment is a tag; one before a `/` is a
-    // registry port, as in `localhost:5000/img`.
-    match without_digest.rsplit_once('/') {
-        Some((registry, last)) => match last.split_once(':') {
-            Some((name, _)) => &without_digest[..registry.len() + 1 + name.len()],
-            None => without_digest,
-        },
-        None => without_digest
-            .split_once(':')
-            .map_or(without_digest, |(name, _)| name),
     }
 }
 
@@ -645,15 +833,27 @@ enum ImageAction {
     ImportTar,
     Pull,
     RefuseNoEgress,
+
+    /// Administrative policy does not permit this image's registry.
+    RefuseByPolicy,
 }
 
 /// Choose between the cache, the caller's tar, and the registry.
-fn select_action(cached: bool, has_tar: bool, registry: RegistryAccess) -> ImageAction {
+fn select_action(
+    cached: bool,
+    has_tar: bool,
+    registry: RegistryAccess,
+    policy: &registry_policy::RegistryPolicy,
+    image: &str,
+) -> ImageAction {
     match (cached, has_tar, registry) {
         (true, _, _) => ImageAction::UseCache,
         (false, true, _) => ImageAction::ImportTar,
-        (false, false, RegistryAccess::Allowed) => ImageAction::Pull,
         (false, false, RegistryAccess::Denied) => ImageAction::RefuseNoEgress,
+        (false, false, RegistryAccess::Allowed) if !policy.permits(image) => {
+            ImageAction::RefuseByPolicy
+        }
+        (false, false, RegistryAccess::Allowed) => ImageAction::Pull,
     }
 }
 
@@ -764,6 +964,47 @@ mod tests {
     }
 
     #[test]
+    fn a_pull_the_caller_gave_up_on_says_no_sandbox_was_created() {
+        let resp = pull_deadline_expired("alpine:latest", Duration::from_secs(90));
+        assert!(
+            resp.error_message.contains("within 90s"),
+            "the budget that was exceeded has to be in the message: {}",
+            resp.error_message
+        );
+        assert!(
+            resp.error_message.contains(PULL_TIMEOUT_ENV),
+            "the operator needs the knob that raises it"
+        );
+        assert!(
+            resp.error_message.contains("was not created"),
+            "the caller has to know no sandbox is waiting for it: {}",
+            resp.error_message
+        );
+        // Retrying can succeed, so this is not a rejection.
+        assert_eq!(resp.failure_phase, FailurePhase::LaunchFailed);
+    }
+
+    /// Teardown consults this before releasing the session, so an idle daemon
+    /// must not be delayed by it.
+    #[test]
+    fn draining_returns_at_once_when_no_pull_is_outstanding() {
+        let start = Instant::now();
+        assert!(wait_for_pulls_in_flight(Duration::from_secs(30)));
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn draining_reports_failure_once_the_budget_expires() {
+        PULLS_IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+        let drained = wait_for_pulls_in_flight(Duration::from_millis(150));
+        PULLS_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+        assert!(
+            !drained,
+            "an outstanding pull must be reported, not waited out silently"
+        );
+    }
+
+    #[test]
     fn an_abort_is_reported_as_a_budget_overrun_not_a_registry_failure() {
         let resp = pull_failure(
             "alpine:latest",
@@ -817,26 +1058,50 @@ mod tests {
         assert!(entry.satisfies("busybox"));
     }
 
+    /// A store holding several tags of one repository must not attribute one
+    /// tag's digest to another.
     #[test]
-    fn a_repository_is_read_without_its_tag_or_digest() {
-        assert_eq!(repository_of("busybox"), "busybox");
-        assert_eq!(repository_of("busybox:1.36"), "busybox");
-        assert_eq!(repository_of("busybox@sha256:abc"), "busybox");
-        assert_eq!(repository_of("ghcr.io/owner/img:tag"), "ghcr.io/owner/img");
-        assert_eq!(repository_of("localhost:5000/img"), "localhost:5000/img");
-        assert_eq!(
-            repository_of("localhost:5000/img:tag"),
-            "localhost:5000/img"
-        );
+    fn a_pulled_digest_is_reported_against_the_exact_tag() {
+        let other_tag = cached("busybox:1.35");
+        assert!(!other_tag.satisfies("busybox:latest"));
+        assert!(!other_tag.satisfies("busybox"));
+
+        let pulled = cached("busybox:latest");
+        assert!(pulled.satisfies("busybox:latest"));
+        assert!(pulled.satisfies("busybox"));
     }
 
+    /// The store reports a config digest, which is not the manifest digest a
+    /// reference pins, so a pinned reference gets no audit line rather than a
+    /// wrong one.
     #[test]
-    fn a_pulled_digest_is_reported_against_its_repository() {
-        // The pull's audit line has to find the entry even though the store
-        // filed it under the bare repository name.
+    fn a_pinned_reference_reports_no_digest() {
         let entry = cached("busybox");
-        assert!(entry.is_same_repository("busybox@sha256:ab33eacc"));
-        assert!(!entry.is_same_repository("alpine@sha256:ab33eacc"));
+        assert!(!entry.satisfies("busybox@sha256:ab33eacc"));
+    }
+
+    /// The budget has to leave the caller time to receive the failure, or a
+    /// slow pull becomes an abandoned container instead of a failed provision.
+    #[test]
+    fn the_budget_ceiling_stays_under_the_callers_deadline() {
+        let ceiling = pull_budget_ceiling(Duration::from_secs(600));
+        assert!(ceiling < Duration::from_secs(600));
+        assert_eq!(ceiling, Duration::from_secs(540));
+    }
+
+    /// A caller deadline shorter than the headroom leaves nothing to subtract;
+    /// the pull gets the whole window rather than a zero budget that would
+    /// abort every pull immediately.
+    #[test]
+    fn a_short_caller_deadline_does_not_collapse_the_budget() {
+        for secs in [1u64, 30, 60] {
+            let ceiling = pull_budget_ceiling(Duration::from_secs(secs));
+            assert_eq!(
+                ceiling,
+                Duration::from_secs(secs),
+                "caller deadline {secs}s"
+            );
+        }
     }
 
     #[test]
@@ -854,12 +1119,18 @@ mod tests {
         assert!(hex.ends_with("ff"));
     }
 
+    /// Policy is only consulted for a pull, so the other branches are decided
+    /// against an unmanaged machine.
+    fn unmanaged() -> registry_policy::RegistryPolicy {
+        registry_policy::RegistryPolicy::Unmanaged
+    }
+
     #[test]
     fn a_cached_image_is_used_whatever_else_was_offered() {
         for has_tar in [false, true] {
             for registry in [RegistryAccess::Allowed, RegistryAccess::Denied] {
                 assert_eq!(
-                    select_action(true, has_tar, registry),
+                    select_action(true, has_tar, registry, &unmanaged(), "alpine:latest"),
                     ImageAction::UseCache
                 );
             }
@@ -870,11 +1141,11 @@ mod tests {
     fn a_tar_is_imported_rather_than_pulled() {
         // A local tar needs no registry, so an isolated sandbox keeps working.
         assert_eq!(
-            select_action(false, true, RegistryAccess::Denied),
+            select_action(false, true, RegistryAccess::Denied, &unmanaged(), "a:1"),
             ImageAction::ImportTar
         );
         assert_eq!(
-            select_action(false, true, RegistryAccess::Allowed),
+            select_action(false, true, RegistryAccess::Allowed, &unmanaged(), "a:1"),
             ImageAction::ImportTar
         );
     }
@@ -882,12 +1153,67 @@ mod tests {
     #[test]
     fn a_miss_pulls_only_when_egress_is_allowed() {
         assert_eq!(
-            select_action(false, false, RegistryAccess::Allowed),
+            select_action(false, false, RegistryAccess::Allowed, &unmanaged(), "a:1"),
             ImageAction::Pull
         );
         assert_eq!(
-            select_action(false, false, RegistryAccess::Denied),
+            select_action(false, false, RegistryAccess::Denied, &unmanaged(), "a:1"),
             ImageAction::RefuseNoEgress
+        );
+    }
+
+    #[test]
+    fn a_registry_outside_the_allowlist_is_refused() {
+        let policy = registry_policy::RegistryPolicy::Allowed(vec!["ghcr.io".to_string()]);
+        assert_eq!(
+            select_action(
+                false,
+                false,
+                RegistryAccess::Allowed,
+                &policy,
+                "docker.io/library/alpine:3"
+            ),
+            ImageAction::RefuseByPolicy
+        );
+        assert_eq!(
+            select_action(
+                false,
+                false,
+                RegistryAccess::Allowed,
+                &policy,
+                "ghcr.io/owner/img:1"
+            ),
+            ImageAction::Pull
+        );
+    }
+
+    /// A cached image and a local tar reach no registry, so policy must not
+    /// block work that was never going to leave the machine.
+    #[test]
+    fn policy_does_not_block_the_cache_or_a_tar() {
+        let policy = registry_policy::RegistryPolicy::Unreadable;
+        assert_eq!(
+            select_action(true, false, RegistryAccess::Allowed, &policy, "a:1"),
+            ImageAction::UseCache
+        );
+        assert_eq!(
+            select_action(false, true, RegistryAccess::Allowed, &policy, "a:1"),
+            ImageAction::ImportTar
+        );
+    }
+
+    /// An unreadable policy is a deployment an administrator meant to restrict.
+    #[test]
+    fn an_unreadable_policy_refuses_a_pull() {
+        assert_eq!(
+            select_action(
+                false,
+                false,
+                RegistryAccess::Allowed,
+                &registry_policy::RegistryPolicy::Unreadable,
+                "a:1"
+            ),
+            ImageAction::RefuseByPolicy
         );
     }
 

@@ -957,6 +957,8 @@ impl WSLContainerRunner {
             self.config.image_tar_path.as_deref(),
             self.config.storage_path.as_deref(),
             registry,
+            // This run owns the process, so a stalled pull delays nothing else.
+            image::PullExecution::Inline,
             "[WSLC]",
             logger,
         )?;

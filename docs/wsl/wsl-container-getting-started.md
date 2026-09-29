@@ -165,6 +165,9 @@ registry may be used. A value that exists but cannot be read permits
 falling open. The allowlist governs runtime pulls only; `--setup-wslc`
 and `wslc.imageTarPath` are unaffected.
 
+See [`wslc-registry-allowlist-policy.md`](wslc-registry-allowlist-policy.md)
+for the full administrator reference, including deployment and verification.
+
 ### How long a pull may take
 
 A single pull is bounded at 540 seconds, deliberately under the daemon

@@ -110,7 +110,12 @@ fn spawn_lock_timeout() -> Duration {
 }
 
 /// The overall per-request response deadline, honoring [`CALL_TIMEOUT_ENV`].
-fn call_timeout() -> Duration {
+/// The overall per-request response deadline, honoring [`CALL_TIMEOUT_ENV`].
+///
+/// Exposed so a pull can keep its own budget under the deadline its caller is
+/// waiting on; a pull that outlives it would surface as an abandoned container
+/// rather than a failed provision.
+pub fn call_timeout() -> Duration {
     duration_from_env(CALL_TIMEOUT_ENV, CALL_TIMEOUT)
 }
 
@@ -891,6 +896,108 @@ mod tests {
         );
         // The whole call must return promptly on deadline, not after the read.
         assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    /// The sleeping reader above leaves no pending I/O for `CancelSynchronousIo`
+    /// to find, so it never reaches the cancellation path. This blocks a real
+    /// synchronous pipe read instead, and checks the server observes the close
+    /// — which is what lets the daemon release an undelivered sandbox.
+    #[cfg(windows)]
+    #[test]
+    fn a_timed_out_pipe_read_is_cancelled_so_the_server_sees_the_close() {
+        use std::io::Read;
+        use std::sync::mpsc::channel;
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+        use windows::Win32::System::Pipes::{
+            ConnectNamedPipe, CreateNamedPipeW, PIPE_TYPE_BYTE, PIPE_WAIT,
+        };
+
+        let name = format!(
+            r"\\.\pipe\mxc-wslc-cancel-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        );
+        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+
+        // SAFETY: a single-instance byte pipe; the handle is closed below.
+        let server = unsafe {
+            CreateNamedPipeW(
+                PCWSTR(wide.as_ptr()),
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_BYTE | PIPE_WAIT,
+                1,
+                4096,
+                4096,
+                0,
+                None,
+            )
+        };
+        assert!(!server.is_invalid(), "could not create the test pipe");
+
+        let (connected_tx, connected_rx) = channel();
+        let (write_tx, write_rx) = channel();
+        let server_raw = server.0 as isize;
+        let server_thread = std::thread::spawn(move || {
+            let handle = HANDLE(server_raw as *mut _);
+            // SAFETY: this thread owns the handle until it closes it below.
+            unsafe {
+                let _ = ConnectNamedPipe(handle, None);
+                let _ = connected_tx.send(());
+
+                // The client is blocked in a read that its deadline will cancel.
+                // Once it does, this write has nobody to deliver to.
+                std::thread::sleep(Duration::from_millis(600));
+                let mut written = 0u32;
+                let wrote = windows::Win32::Storage::FileSystem::WriteFile(
+                    handle,
+                    Some(b"frame"),
+                    Some(&mut written),
+                    None,
+                );
+                let _ = write_tx.send(wrote.is_ok());
+                let _ = CloseHandle(handle);
+            }
+        });
+
+        let mut client = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&name)
+            .expect("open the test pipe");
+        connected_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("server accepted the connection");
+
+        // Nothing is ever written before the deadline, so this read blocks in
+        // the kernel rather than returning.
+        let start = Instant::now();
+        let outcome: DaemonResult<usize> = read_frame_with_deadline(
+            move || {
+                let mut buf = [0u8; 8];
+                let n = client.read(&mut buf)?;
+                Ok(n)
+            },
+            Duration::from_millis(150),
+        );
+
+        let err = outcome.unwrap_err();
+        assert!(matches!(err, DaemonError::Transport(_)));
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the deadline must return promptly, not wait out the read"
+        );
+
+        let server_wrote = write_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("server reported its write");
+        assert!(
+            !server_wrote,
+            "the client's end must be closed, so the server's reply cannot land"
+        );
+
+        server_thread.join().expect("server thread");
     }
 
     #[test]

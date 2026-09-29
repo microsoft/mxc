@@ -423,13 +423,9 @@ $null = $results.Add((Run-WslcTest "wslc_cold_cache_pull.json" -ExpectedExit -1 
     -OutputContains "did not finish pulling within 1s"))
 Clear-ColdCacheStore
 
-# Administrative policy naming only a registry this config does not use.
-$null = $results.Add((Run-WslcTest "wslc_cold_cache_pull.json" -ExpectedExit -1 `
-    -As "wslc_cold_cache_pull.json (registry allowlist)" `
-    -EnvVars @{ MXC_TEST_WSLC_REGISTRY_ALLOWLIST = "ghcr.io" } `
-    -OutputContains "not in the administrative registry allowlist" `
-    -OutputNotContains "Pulling image"))
-Clear-ColdCacheStore
+# The allowlist is covered by wslc_common's registry-policy tests, which drive
+# the real registry read through a redirected HKCU key. A release binary has no
+# override to point at a test key, which is what makes the policy trustworthy.
 
 Write-Host "`n--- Timeout Tests ---" -ForegroundColor Cyan
 $null = $results.Add((Run-WslcTest "wslc_timeout.json" -ExpectedExit -1 -OutputContains "Starting long task"))

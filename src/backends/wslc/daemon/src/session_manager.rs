@@ -28,6 +28,7 @@
 use std::collections::{hash_map::Entry, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 use anyhow::Result;
 use tokio::sync::mpsc::error::TrySendError;
@@ -49,6 +50,9 @@ use wxc_common::models::{FailurePhase, ScriptResponse};
 
 /// Fixed name of the single WSL2 utility-VM session the daemon owns.
 const SESSION_NAME: &str = "mxc-wslc-daemon";
+
+/// How long teardown waits for an abandoned pull before giving up on it.
+const PULL_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Default on-disk WSLc image/session store. Matches the one-shot runner's
 /// default so both surfaces read and fill the same cache.
@@ -552,6 +556,9 @@ impl Worker {
                     NetworkMode::None => image::RegistryAccess::Denied,
                     NetworkMode::Bridged => image::RegistryAccess::Allowed,
                 },
+                // Every sandbox is served from this one thread, so a pull that
+                // stops responding must not be sitting on it.
+                image::PullExecution::OffCallerThread,
                 "[WSLC][daemon]",
                 &mut self.logger,
             )
@@ -817,6 +824,20 @@ impl Worker {
         } else {
             self.containers.clear();
         }
+
+        // An abandoned pull is still using this session, so releasing it now
+        // would free memory the SDK holds. Leaking both handles costs one
+        // process's worth of memory until it exits; the alternative is a crash.
+        if !image::wait_for_pulls_in_flight(PULL_DRAIN_TIMEOUT) {
+            self.logger.log_line(
+                "a WSLC image pull is still running; leaking the session rather than \
+                 releasing a handle it is using",
+            );
+            std::mem::forget(self.session.take());
+            std::mem::forget(self.sdk.take());
+            return;
+        }
+
         // Session guard drops before the SDK unloads the DLL.
         self.session = None;
         self.sdk = None;
