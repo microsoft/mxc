@@ -168,7 +168,8 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
         )
     )
 
-    :: Copy the C# SDK's native runtime unit into its NuGet runtime assets.
+    :: Copy the C# SDK's native library (mxc_ffi) into its runtime assets so a
+    :: NuGet pack picks it up as runtimes/<rid>/native/mxc_ffi.dll.
     if "%%T"=="x86_64-pc-windows-msvc" (set "RID=win-x64") else (set "RID=win-arm64")
     if "!COPY_WSLC_RUNTIME!"=="1" if not "%WITH_WSLC%"=="1" (
         if exist "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\wxc-wslc-daemon.exe" del /Q "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\wxc-wslc-daemon.exe"
@@ -181,10 +182,6 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
         if exist "!BIN_DIR!\plm.exe" (
             copy /Y "!BIN_DIR!\plm.exe" "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\" >nul
             echo   Copied !RID!\native\plm.exe
-        )
-        if exist "!BIN_DIR!\wxc-exec.exe" (
-            copy /Y "!BIN_DIR!\wxc-exec.exe" "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\" >nul
-            echo   Copied !RID!\native\wxc-exec.exe
         )
         if "%WITH_WSLC%"=="1" if "!COPY_WSLC_RUNTIME!"=="1" (
             for %%B in (wxc-wslc-daemon.exe wslcsdk.dll) do (

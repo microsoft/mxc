@@ -3,25 +3,5 @@
 # Preserve these historically CRLF files so focused edits do not rewrite every line.
 docs/telemetry/telemetry.md -text whitespace=cr-at-eol
 sdk/node/src/types.ts -text whitespace=cr-at-eol
-tests/configs/bwrap_env_08_inherit_rejected.json -text whitespace=cr-at-eol
-tests/configs/lxc_denied_masking.json -text whitespace=cr-at-eol
-tests/configs/lxc_denied_symlink_dir.json -text whitespace=cr-at-eol
-tests/configs/lxc_denied_symlink_file.json -text whitespace=cr-at-eol
-tests/configs/lxc_inbound_v08_deny_ingress.json -text whitespace=cr-at-eol
-tests/configs/lxc_inbound_v08_permissive_ingress.json -text whitespace=cr-at-eol
-tests/configs/lxc_most_specific_denied_parent.json -text whitespace=cr-at-eol
-tests/configs/lxc_network_ga_egress_deny_rule.json -text whitespace=cr-at-eol
-tests/configs/lxc_network_ga_egress_dns_allowed.json -text whitespace=cr-at-eol
-tests/configs/lxc_network_ga_egress_dns_denied.json -text whitespace=cr-at-eol
-tests/configs/lxc_network_ga_egress_except_excluded.json -text whitespace=cr-at-eol
-tests/configs/lxc_network_ga_egress_except_sibling.json -text whitespace=cr-at-eol
-tests/configs/lxc_network_preserve_policy.json -text whitespace=cr-at-eol
-tests/configs/lxc_network_proxy_credentials_rejected.json -text whitespace=cr-at-eol
-tests/configs/lxc_network_proxy_reuse.json -text whitespace=cr-at-eol
-tests/configs/lxc_network_proxy_reuse_noproxy.json -text whitespace=cr-at-eol
-tests/configs/lxc_network_v07_capabilities.json -text whitespace=cr-at-eol
-tests/configs/lxc_network_v07_dns_exemption.json -text whitespace=cr-at-eol
-tests/configs/seatbelt_env_09_default_block.json -text whitespace=cr-at-eol
-tests/configs/seatbelt_env_09_no_cwd.json -text whitespace=cr-at-eol
 .github/copilot-instructions.md whitespace=cr-at-eol
 .github/workflows/*.lock.yml linguist-generated=true

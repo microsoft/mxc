@@ -186,13 +186,13 @@ foreach (string warning in probe.Warnings)
 }
 ```
 
-`Probe` serializes the `SandboxRequest` to a short-lived executor config and
-invokes the packaged `wxc-exec --probe <config>`. It is Windows-only and does
-not create a sandbox. Missing executors, unsupported containment, subprocess
-failures, and malformed JSON are surfaced as exceptions. The method is static
-only and was deliberately not added to `ISandboxRunner`, so existing adapter
-implementations remain source and binary compatible. The CLI remains the
-authoritative ProcessContainer diagnostic.
+`Probe` serializes the `SandboxRequest` and calls the packaged `mxc_ffi` native
+library in process. It is Windows-only and does not create a sandbox.
+Unsupported containment, native failures, and malformed JSON are surfaced as
+exceptions. The method is static only and was deliberately not added to
+`ISandboxRunner`, so existing adapter implementations remain source and binary
+compatible. The standalone `wxc-exec --probe` CLI remains a separate
+ProcessContainer diagnostic.
 
 #### Bubblewrap proxy-only egress (Linux)
 
@@ -976,9 +976,9 @@ dotnet pack sdk\dotnet\Microsoft.Mxc.Sdk\Microsoft.Mxc.Sdk.csproj `
 The switches compose, so either backend can be enabled independently. Passing
 one on Linux or macOS fails the build instead of silently ignoring it. An
 IsolationSession build has the normal Windows native unit
-(`mxc_ffi.dll` + `plm.exe` + `wxc-exec.exe`). A WSLC build additionally builds,
-stages, and packages `wxc-wslc-daemon.exe` and the pinned `wslcsdk.dll`; all
-five files must stay together beside the loaded `mxc_ffi.dll`.
+(`mxc_ffi.dll` + `plm.exe`). A WSLC build additionally builds, stages, and
+packages `wxc-wslc-daemon.exe` and the pinned `wslcsdk.dll`; all four files
+must stay together beside the loaded `mxc_ffi.dll`.
 `build.bat --with-wslc` stages the same complete unit into the Windows RID
 package directories. A multi-RID pack fails if the pre-staged second RID was
 built with a different optional-backend set.

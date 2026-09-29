@@ -1,11 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using System.Runtime.InteropServices;
 using Microsoft.Mxc.Sdk;
+using Microsoft.Mxc.Sdk.Native;
 using Xunit;
 
 namespace Microsoft.Mxc.Sdk.Tests;
@@ -83,17 +84,24 @@ public class MxcSandboxTests
     }
 
     [Fact]
-    public void Probe_UsesExecutorConfigAndCleansTemporaryFile()
+    public void Probe_UsesNativeConfigAndFreesNativeResults()
     {
-        string? configPath = null;
-        RequestProbeExecutor.IsWindows = () => true;
-        RequestProbeExecutor.FindExecutable = () => "wxc-exec.exe";
-        RequestProbeExecutor.RunProcess = (executable, path) =>
+        using var native = new FakeRequestProbeInterop
         {
-            Assert.Equal("wxc-exec.exe", executable);
-            Assert.NotNull(path);
-            configPath = path;
-            using var document = JsonDocument.Parse(File.ReadAllText(path));
+            OutputJson = CompleteProbeJson,
+        };
+        var previous = MxcSandbox.RequestProbeInterop;
+        MxcSandbox.RequestProbeInterop = native;
+
+        try
+        {
+            var output = MxcSandbox.Probe(new SandboxRequest(
+                new SandboxPolicy { Version = "0.9.0-alpha" },
+                "cmd /c exit 0"));
+
+            Assert.Equal(IsolationTier.AppContainerDacl, output.Tier);
+            Assert.True(output.Probes.BaseContainerApiPresent);
+            using var document = JsonDocument.Parse(native.RequestJson!);
             Assert.Equal(
                 "processcontainer",
                 document.RootElement.GetProperty("containment").GetString());
@@ -104,30 +112,37 @@ public class MxcSandboxTests
                 "0.9.0-alpha",
                 document.RootElement.GetProperty("version").GetString());
             AssertNoExplicitNulls(document.RootElement);
-            Assert.False(document.RootElement.TryGetProperty("containerId", out _));
-            Assert.False(document.RootElement.TryGetProperty("filesystem", out _));
-            Assert.False(document.RootElement.TryGetProperty("telemetry", out _));
-            var process = document.RootElement.GetProperty("process");
-            Assert.False(process.TryGetProperty("cwd", out _));
-            Assert.False(process.TryGetProperty("inheritDefaultEnv", out _));
-            return new RequestProbeProcessResult(0, CompleteProbeJson, string.Empty);
-        };
-
-        try
-        {
-            var output = MxcSandbox.Probe(new SandboxRequest(
-                new SandboxPolicy { Version = "0.9.0-alpha" },
-                "cmd /c exit 0"));
-
-            Assert.Equal(IsolationTier.AppContainerDacl, output.Tier);
-            Assert.True(output.Probes.BaseContainerApiPresent);
-            Assert.NotNull(configPath);
-            Assert.False(File.Exists(configPath));
-            Assert.False(Directory.Exists(Path.GetDirectoryName(configPath)));
+            Assert.True(native.OutputFreed);
+            Assert.True(native.ErrorFreed);
         }
         finally
         {
-            RequestProbeExecutor.ResetTestHooks();
+            MxcSandbox.RequestProbeInterop = previous;
+        }
+    }
+
+    [Fact]
+    public void Probe_WithoutRequestPassesNullToNative()
+    {
+        using var native = new FakeRequestProbeInterop
+        {
+            OutputJson = CompleteProbeJson,
+        };
+        var previous = MxcSandbox.RequestProbeInterop;
+        MxcSandbox.RequestProbeInterop = native;
+
+        try
+        {
+            var output = MxcSandbox.Probe();
+
+            Assert.Equal(IsolationTier.AppContainerDacl, output.Tier);
+            Assert.Null(native.RequestJson);
+            Assert.True(native.OutputFreed);
+            Assert.True(native.ErrorFreed);
+        }
+        finally
+        {
+            MxcSandbox.RequestProbeInterop = previous;
         }
     }
 
@@ -259,41 +274,6 @@ public class MxcSandboxTests
             "processContainerNetwork" => "processContainer.network",
             _ => field,
         }, error.Message);
-    }
-
-    [Fact]
-    public void RequestProbeExecutor_ConfiguresUtf8RedirectedStreams()
-    {
-        var startInfo = RequestProbeExecutor.CreateStartInfo(
-            "wxc-exec.exe",
-            @"C:\probe\config.json");
-
-        Assert.NotNull(startInfo.StandardOutputEncoding);
-        Assert.NotNull(startInfo.StandardErrorEncoding);
-        Assert.Equal(Encoding.UTF8.WebName, startInfo.StandardOutputEncoding.WebName);
-        Assert.Equal(Encoding.UTF8.WebName, startInfo.StandardErrorEncoding.WebName);
-    }
-
-    [Fact]
-    public void RequestProbeExecutor_PreservesDirectoryCreationFailure()
-    {
-        var primary = new IOException("cannot create probe directory");
-        RequestProbeExecutor.IsWindows = () => true;
-        RequestProbeExecutor.FindExecutable = () => "wxc-exec.exe";
-        RequestProbeExecutor.CreateDirectory = _ => throw primary;
-        RequestProbeExecutor.DeleteDirectory = _ =>
-            throw new DirectoryNotFoundException("cleanup must not run");
-
-        try
-        {
-            var caught = Assert.Throws<IOException>(
-                () => RequestProbeExecutor.Run("{}"));
-            Assert.Same(primary, caught);
-        }
-        finally
-        {
-            RequestProbeExecutor.ResetTestHooks();
-        }
     }
 
     [Theory]
@@ -462,7 +442,6 @@ public class MxcSandboxTests
             return;
         }
 
-        RequestProbeExecutor.ResetTestHooks();
         var output = MxcSandbox.Probe(request);
 
         Assert.NotNull(output.Probes);
@@ -473,14 +452,13 @@ public class MxcSandboxTests
     [InlineData("0.7.0-alpha")]
     [InlineData("0.8.0-alpha")]
     [InlineData("0.9.0-alpha")]
-    public void ProbeConfig_PackagedExecutorAcceptsPublishedVersions(string version)
+    public void ProbeConfig_NativeProbeAcceptsPublishedVersions(string version)
     {
         if (!OperatingSystem.IsWindows())
         {
             return;
         }
 
-        RequestProbeExecutor.ResetTestHooks();
         var output = MxcSandbox.Probe(new SandboxRequest(
             new SandboxPolicy { Version = version },
             "cmd /c exit 0"));
@@ -491,7 +469,7 @@ public class MxcSandboxTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void ProbeConfig_PackagedExecutorAcceptsV08DirectionalIndicators(
+    public void ProbeConfig_NativeProbeAcceptsV08DirectionalIndicators(
         bool processContainerNetworkOnly)
     {
         if (!OperatingSystem.IsWindows())
@@ -499,7 +477,6 @@ public class MxcSandboxTests
             return;
         }
 
-        RequestProbeExecutor.ResetTestHooks();
         var request = new SandboxRequest(
             new SandboxPolicy
             {
@@ -528,14 +505,13 @@ public class MxcSandboxTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void ProbeConfig_PackagedExecutorAcceptsV09NetworkBoundaries(bool runtimeOnly)
+    public void ProbeConfig_NativeProbeAcceptsV09NetworkBoundaries(bool runtimeOnly)
     {
         if (!OperatingSystem.IsWindows())
         {
             return;
         }
 
-        RequestProbeExecutor.ResetTestHooks();
         var network = new NetworkPolicy();
         if (runtimeOnly)
         {
@@ -553,13 +529,22 @@ public class MxcSandboxTests
         Assert.NotNull(output.Probes);
     }
 
-    [Fact]
-    public void Probe_SurfacesSubprocessFailure()
+    [Theory]
+    [InlineData(ErrorCode.MalformedRequest)]
+    [InlineData(ErrorCode.UnsupportedContainment)]
+    [InlineData(ErrorCode.BackendError)]
+    public void Probe_MapsStructuredNativeFailure(ErrorCode code)
     {
-        RequestProbeExecutor.IsWindows = () => true;
-        RequestProbeExecutor.FindExecutable = () => "wxc-exec.exe";
-        RequestProbeExecutor.RunProcess = (_, _) =>
-            new RequestProbeProcessResult(17, string.Empty, "probe exploded");
+        using var native = new FakeRequestProbeInterop
+        {
+            Status = (int)code,
+            ErrorMessage = "probe exploded",
+            ErrorOperation = "ProcessModel.Probe",
+            ErrorNativeCode = "0x80070005",
+            ErrorRemediation = "check policy",
+        };
+        var previous = MxcSandbox.RequestProbeInterop;
+        MxcSandbox.RequestProbeInterop = native;
 
         try
         {
@@ -567,22 +552,25 @@ public class MxcSandboxTests
                 new SandboxRequest(
                     new SandboxPolicy { Version = "0.9.0-alpha" },
                     "cmd /c exit 0")));
-            Assert.Equal(ErrorCode.BackendError, error.Code);
+            Assert.Equal(code, error.Code);
             Assert.Contains("probe exploded", error.Message);
+            Assert.Equal("ProcessModel.Probe", error.Operation);
+            Assert.Equal("0x80070005", error.NativeCode);
+            Assert.Equal("check policy", error.Remediation);
+            Assert.True(native.ErrorFreed);
         }
         finally
         {
-            RequestProbeExecutor.ResetTestHooks();
+            MxcSandbox.RequestProbeInterop = previous;
         }
     }
 
     [Fact]
     public void Probe_SurfacesMalformedOutput()
     {
-        RequestProbeExecutor.IsWindows = () => true;
-        RequestProbeExecutor.FindExecutable = () => "wxc-exec.exe";
-        RequestProbeExecutor.RunProcess = (_, _) =>
-            new RequestProbeProcessResult(0, "not json", string.Empty);
+        using var native = new FakeRequestProbeInterop { OutputJson = "not json" };
+        var previous = MxcSandbox.RequestProbeInterop;
+        MxcSandbox.RequestProbeInterop = native;
 
         try
         {
@@ -590,10 +578,12 @@ public class MxcSandboxTests
                 new SandboxRequest(
                     new SandboxPolicy { Version = "0.9.0-alpha" },
                     "cmd /c exit 0")));
+            Assert.True(native.OutputFreed);
+            Assert.True(native.ErrorFreed);
         }
         finally
         {
-            RequestProbeExecutor.ResetTestHooks();
+            MxcSandbox.RequestProbeInterop = previous;
         }
     }
 
@@ -2100,6 +2090,90 @@ public class MxcSandboxTests
                 .GetProperty("enabled")
                 .GetBoolean());
         Assert.False(root.GetProperty("policy").TryGetProperty("captureDenials", out _));
+    }
+
+    private sealed unsafe class FakeRequestProbeInterop : IRequestProbeInterop, IDisposable
+    {
+        private readonly HashSet<nint> allocations = [];
+        private byte* outputPointer;
+
+        internal int Status { get; init; }
+        internal string? OutputJson { get; init; }
+        internal string? ErrorMessage { get; init; }
+        internal string? ErrorOperation { get; init; }
+        internal string? ErrorNativeCode { get; init; }
+        internal string? ErrorRemediation { get; init; }
+        internal string? RequestJson { get; private set; }
+        internal bool OutputFreed { get; private set; }
+        internal bool ErrorFreed { get; private set; }
+
+        public int Probe(
+            byte* requestJsonUtf8,
+            byte** outputJsonUtf8,
+            MxcErrorDetail* error)
+        {
+            RequestJson = requestJsonUtf8 is null
+                ? null
+                : Marshal.PtrToStringUTF8((IntPtr)requestJsonUtf8);
+            outputPointer = Allocate(OutputJson);
+            *outputJsonUtf8 = outputPointer;
+            error->message_utf8 = Allocate(ErrorMessage);
+            error->operation_utf8 = Allocate(ErrorOperation);
+            error->native_code_utf8 = Allocate(ErrorNativeCode);
+            error->remediation_utf8 = Allocate(ErrorRemediation);
+            return Status;
+        }
+
+        public void FreeString(byte* value)
+        {
+            OutputFreed = value == outputPointer;
+            Free(value);
+        }
+
+        public void FreeError(MxcErrorDetail* error)
+        {
+            Free(error->message_utf8);
+            Free(error->operation_utf8);
+            Free(error->native_code_utf8);
+            Free(error->remediation_utf8);
+            *error = default;
+            ErrorFreed = true;
+        }
+
+        public void Dispose()
+        {
+            foreach (var allocation in allocations)
+            {
+                Marshal.FreeCoTaskMem(allocation);
+            }
+            allocations.Clear();
+        }
+
+        private byte* Allocate(string? value)
+        {
+            if (value is null)
+            {
+                return null;
+            }
+
+            var allocation = Marshal.StringToCoTaskMemUTF8(value);
+            allocations.Add(allocation);
+            return (byte*)allocation;
+        }
+
+        private void Free(byte* value)
+        {
+            if (value is null)
+            {
+                return;
+            }
+
+            var allocation = (nint)value;
+            if (allocations.Remove(allocation))
+            {
+                Marshal.FreeCoTaskMem(allocation);
+            }
+        }
     }
 
     private static SandboxPolicy CreateLegacyCaptureDenialsPolicy(

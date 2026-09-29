@@ -40,6 +40,9 @@ public static class MxcSandbox
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
     };
 
+    internal static IRequestProbeInterop RequestProbeInterop { get; set; } =
+        PInvokeRequestProbeInterop.Instance;
+
     private static readonly JsonSerializerOptions PublishedPolicyJsonOptions = new(JsonOptions)
     {
         Converters = { new NetworkPolicyJsonConverter(includeLegacyDefaults: true) },
@@ -125,16 +128,77 @@ public static class MxcSandbox
     /// Probe which Windows ProcessContainer tier can serve a request.
     /// </summary>
     /// <remarks>
-    /// This diagnostic does not create a sandbox. It serializes the request to
-    /// a temporary executor config and invokes the packaged
-    /// <c>wxc-exec --probe</c>. It is intentionally not part of
+    /// This diagnostic does not create a sandbox. It calls the packaged
+    /// <c>mxc_ffi</c> library in process. It is intentionally not part of
     /// <see cref="ISandboxRunner"/>, preserving compatibility for existing
     /// interface implementations.
     /// </remarks>
     public static ProbeOutput Probe(SandboxRequest? request = null)
     {
         var configJson = request is null ? null : SerializeProbeConfig(request);
-        return ParseProbeOutput(RequestProbeExecutor.Run(configJson));
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new MxcException(
+                ErrorCode.UnsupportedContainment,
+                "the request-aware probe is available only for Windows ProcessContainer");
+        }
+
+        return ParseProbeOutput(ProbeNative(configJson));
+    }
+
+    private static unsafe string ProbeNative(string? configJson)
+    {
+        if (configJson is null)
+        {
+            return InvokeNativeProbe(null);
+        }
+
+        var requestBuffer = ToNullTerminatedUtf8(configJson);
+        fixed (byte* requestPtr = requestBuffer)
+        {
+            return InvokeNativeProbe(requestPtr);
+        }
+    }
+
+    private static unsafe string InvokeNativeProbe(byte* requestPtr)
+    {
+        byte* output = null;
+        MxcErrorDetail error = default;
+        var callCompleted = false;
+        try
+        {
+            var status = RequestProbeInterop.Probe(requestPtr, &output, &error);
+            callCompleted = true;
+            if (status != (int)ErrorCode.Success)
+            {
+                throw NativeError.ToException(
+                    status,
+                    error,
+                    "native request probe failed");
+            }
+            if (output is null)
+            {
+                throw new MxcException(
+                    ErrorCode.BackendError,
+                    "native request probe returned no output");
+            }
+
+            return Marshal.PtrToStringUTF8((IntPtr)output)
+                ?? throw new MxcException(
+                    ErrorCode.BackendError,
+                    "native request probe returned invalid JSON");
+        }
+        finally
+        {
+            if (callCompleted)
+            {
+                if (output is not null)
+                {
+                    RequestProbeInterop.FreeString(output);
+                }
+                RequestProbeInterop.FreeError(&error);
+            }
+        }
     }
 
     internal static string SerializeProbeConfig(SandboxRequest request)
@@ -389,19 +453,19 @@ public static class MxcSandbox
     internal static ProbeOutput ParseProbeOutput(string json)
     {
         var output = JsonSerializer.Deserialize<NativeProbeOutput>(json, ProbeJsonOptions)
-            ?? throw new JsonException("wxc-exec request probe returned null JSON.");
+            ?? throw new JsonException("native request probe returned null JSON.");
         var warnings = output.Warnings
-            ?? throw new JsonException("wxc-exec request probe returned null warnings.");
+            ?? throw new JsonException("native request probe returned null warnings.");
         if (warnings.Any(static warning => warning is null))
         {
             throw new JsonException(
-                "wxc-exec request probe returned a non-string warning.");
+                "native request probe returned a non-string warning.");
         }
 
         var probes = output.Probes
-            ?? throw new JsonException("wxc-exec request probe omitted probes.");
+            ?? throw new JsonException("native request probe omitted probes.");
         var ui = probes.UiCapabilities
-            ?? throw new JsonException("wxc-exec request probe omitted UI capabilities.");
+            ?? throw new JsonException("native request probe omitted UI capabilities.");
 
         IsolationTier? tier;
         if (!output.HasTier)
@@ -409,17 +473,17 @@ public static class MxcSandbox
             if (!output.HasError)
             {
                 throw new JsonException(
-                    "wxc-exec request probe omitted both tier and error.");
+                    "native request probe omitted both tier and error.");
             }
             if (output.Error is null)
             {
                 throw new JsonException(
-                    "wxc-exec request probe returned a null error.");
+                    "native request probe returned a null error.");
             }
             if (output.HasNeedsDaclAugmentation)
             {
                 throw new JsonException(
-                    "wxc-exec request probe returned DACL augmentation with an error.");
+                    "native request probe returned DACL augmentation with an error.");
             }
             tier = null;
         }
@@ -428,18 +492,18 @@ public static class MxcSandbox
             if (output.Tier is null)
             {
                 throw new JsonException(
-                    "wxc-exec request probe returned a null tier.");
+                    "native request probe returned a null tier.");
             }
             if (output.HasError)
             {
                 throw new JsonException(
-                    "wxc-exec request probe returned both tier and error.");
+                    "native request probe returned both tier and error.");
             }
             if (!output.HasNeedsDaclAugmentation
                 || output.NeedsDaclAugmentation is null)
             {
                 throw new JsonException(
-                    "wxc-exec request probe omitted DACL augmentation for a selected tier.");
+                    "native request probe omitted DACL augmentation for a selected tier.");
             }
             tier = ParseProbeIsolationTier(output.Tier);
         }
@@ -792,7 +856,7 @@ public static class MxcSandbox
             "appcontainer-bfs" => IsolationTier.AppContainerBfs,
             "appcontainer-dacl" => IsolationTier.AppContainerDacl,
             _ => throw new JsonException(
-                $"wxc-exec request probe returned unknown tier '{value}'."),
+                $"native request probe returned unknown tier '{value}'."),
         };
 
     internal static BackendCapability ParseBackendCapability(string value) =>

@@ -274,10 +274,10 @@ Bubblewrap discovery is cached, so failures remain retryable.
 For detailed Windows ProcessContainer request diagnostics, use
 `wxc-exec --probe [config.json]`. The Node.js
 `probeSandboxSupport(config)` API calls the packaged `mxc_ffi` native library
-in process. The .NET `MxcSandbox.Probe(request)` API invokes the packaged
-executor. Both are Windows ProcessContainer-only and surface probe and JSON
-errors rather than converting them into an unsupported result. The Rust SDK
-does not expose a public request-probe API.
+in process, as does the .NET `MxcSandbox.Probe(request)` API. Both are Windows
+ProcessContainer-only and surface probe and JSON errors rather than converting
+them into an unsupported result. The standalone `wxc-exec` CLI remains a
+separate diagnostic. The Rust SDK does not expose a public request-probe API.
 
 ### Audit Mode (Permissive Learning Mode)
 
