@@ -487,10 +487,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn streaming_lxc_reaches_the_backend_on_linux() {
-        // Locks the dispatch arm itself on the one host where it exists: an
-        // empty distribution is refused inside LXC's own preparation, before a
-        // container name is claimed or a container created, so this needs
-        // neither LXC nor root and still fails if the arm is removed.
+        // Locks the dispatch arm itself on the one host where it exists. The
+        // empty distribution is a backstop: whichever of LXC's own refusals
+        // fires first, all of them are reached only through this arm, and all
+        // of them come before a container name is claimed or a container
+        // created — so this needs neither LXC nor root.
         let mut request =
             build_request(&minimal_policy(), "echo hello", None).expect("build_request");
         request.inner.containment = ContainmentBackend::Lxc;
@@ -498,16 +499,13 @@ mod tests {
         request.inner.lxc_config.release = String::new();
         let mut logger = Logger::new(Mode::Buffer);
         let err = match spawn_runner(&request.inner, &mut logger) {
-            Ok(_) => panic!("an empty LXC distribution must be refused"),
+            Ok(_) => panic!("an LXC request the backend refuses must not spawn"),
             Err(e) => e,
         };
         assert_ne!(err.code, MxcErrorCode::UnsupportedContainment);
-        assert!(
-            err.message
-                .contains("LXC distribution and release are required"),
-            "got: {}",
-            err.message
-        );
+        // Only `lxc_common` produces a message opening with `LXC`, so this is
+        // the request having reached the backend rather than the catch-all.
+        assert!(err.message.starts_with("LXC"), "got: {}", err.message);
     }
 
     #[cfg(all(target_os = "windows", feature = "wslc"))]

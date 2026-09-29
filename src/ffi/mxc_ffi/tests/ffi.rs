@@ -314,9 +314,10 @@ fn extern_run_executes_command() {
 }
 
 /// Pins that the C ABI routes an LXC request into the LXC backend rather than
-/// refusing the containment. The empty distribution is refused by LXC's own
-/// preparation before any container is created, so the answer is the same on
-/// every Linux host and nothing is left behind.
+/// refusing the containment. The empty distribution is a backstop: whichever of
+/// LXC's own refusals fires first, all are reached only through that arm and
+/// all come before a container is created, so the answer is the same on every
+/// Linux host and nothing is left behind.
 #[cfg(target_os = "linux")]
 #[test]
 fn extern_spawn_request_reaches_the_lxc_backend() {
@@ -344,10 +345,8 @@ fn extern_spawn_request_reaches_the_lxc_backend() {
     let message = unsafe { CStr::from_ptr(error.message_utf8) }
         .to_str()
         .unwrap();
-    assert!(
-        message.contains("LXC distribution and release are required"),
-        "unexpected message: {message}"
-    );
+    // Only the LXC backend produces a message opening with `LXC`.
+    assert!(message.starts_with("LXC"), "unexpected message: {message}");
 
     // SAFETY: `error` was filled by `mxc_spawn_request`.
     unsafe { mxc_error_detail_free(&mut error) };

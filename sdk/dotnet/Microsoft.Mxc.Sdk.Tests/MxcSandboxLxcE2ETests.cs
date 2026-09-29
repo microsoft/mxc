@@ -20,8 +20,12 @@ namespace Microsoft.Mxc.Sdk.Tests;
 public class MxcSandboxLxcE2ETests
 {
     // `lxc-attach` runs the command through `/bin/sh -c`, so these are bare
-    // shell lines. A policy that permits no network starts the container with
-    // no interface, which skips the DHCP wait a networked run pays for.
+    // shell lines.
+    //
+    // The network policy is stated in the schema 0.8 directional form and
+    // permits nothing, so the container starts with no interface and skips the
+    // DHCP wait. A legacy policy naming no network would default to
+    // `enforcementMode: 'capabilities'`, which LXC refuses outright.
     //
     // The timeout bounds the backend's own wait: with none, a wedged attach
     // would hang this suite until the CI job's cap. A healthy workload here
@@ -30,7 +34,20 @@ public class MxcSandboxLxcE2ETests
 
     private static SandboxRequest Request(string command, string containerName) =>
         new(
-            new SandboxPolicy { Version = "0.7.0-alpha", TimeoutMs = WaitBoundMs },
+            new SandboxPolicy
+            {
+                Version = "0.9.0-alpha",
+                TimeoutMs = WaitBoundMs,
+                Network = new NetworkPolicy
+                {
+                    Egress = new NetworkEgressPolicy { Default = NetworkAction.Deny },
+                    Ingress = new NetworkIngressPolicy
+                    {
+                        Default = NetworkAction.Deny,
+                        HostLoopback = NetworkAction.Deny,
+                    },
+                },
+            },
             command)
         {
             ContainerName = containerName,

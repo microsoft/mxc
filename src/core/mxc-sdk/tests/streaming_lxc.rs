@@ -20,7 +20,10 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use mxc_sdk::policy::{Containment, FilesystemSection, NetworkSection};
-use mxc_sdk::{build_request_with_containment, spawn_sandbox, SandboxPolicy, WaitOutcome};
+use mxc_sdk::{
+    build_request_with_containment, spawn_sandbox, NetworkAction, NetworkEgressSection,
+    NetworkIngressSection, SandboxPolicy, WaitOutcome,
+};
 
 /// The bound on a read or wait that should already have finished. Long enough
 /// to create a container, start it, and destroy it again on a loaded CI runner.
@@ -129,24 +132,44 @@ fn container_is_running(name: &str) -> bool {
 /// here finishes in well under a second, so the bound only ever fires on a
 /// failure, and it fires as a reported timeout with teardown rather than a hang.
 fn lxc_request(command: &str, name: &str, timeout_ms: u32) -> mxc_sdk::SandboxRequest {
-    lxc_request_with_network(command, name, timeout_ms, None)
+    lxc_request_with_network(command, name, timeout_ms, isolated_network())
+}
+
+/// Permits nothing in either direction, which starts the container with no
+/// interface at all and so skips the DHCP wait a networked run pays for.
+///
+/// Stated in the schema 0.8 directional form on purpose. A legacy policy that
+/// names no network defaults to `enforcementMode: 'capabilities'`, which
+/// selects Windows AppContainer capability SIDs; LXC has no mechanism for that
+/// and refuses the request before it reaches a container.
+fn isolated_network() -> NetworkSection {
+    let mut egress = NetworkEgressSection::default();
+    egress.default = Some(NetworkAction::Deny);
+    let mut ingress = NetworkIngressSection::default();
+    ingress.default = Some(NetworkAction::Deny);
+    ingress.host_loopback = Some(NetworkAction::Deny);
+
+    let mut network = NetworkSection::default();
+    network.egress = Some(egress);
+    network.ingress = Some(ingress);
+    network
 }
 
 fn lxc_request_with_network(
     command: &str,
     name: &str,
     timeout_ms: u32,
-    network: Option<NetworkSection>,
+    network: NetworkSection,
 ) -> mxc_sdk::SandboxRequest {
     let policy = SandboxPolicy {
-        version: "0.7.0-alpha".to_string(),
+        version: "0.8.0-alpha".to_string(),
         filesystem: Some(FilesystemSection {
             readwrite_paths: vec!["/tmp".to_string()],
             readonly_paths: vec![],
             denied_paths: vec![],
             clear_policy_on_exit: None,
         }),
-        network,
+        network: Some(network),
         ui: None,
         timeout_ms: if timeout_ms == 0 {
             None
@@ -507,13 +530,15 @@ fn streaming_lxc_tears_down_a_networked_container() {
 
     // Outbound access puts the container on the bridge and installs egress
     // chains, so this is the case whose teardown has firewall rules to remove.
+    let mut egress = NetworkEgressSection::default();
+    egress.default = Some(NetworkAction::Allow);
     let mut network = NetworkSection::default();
-    network.allow_outbound = true;
+    network.egress = Some(egress);
     let mut proc = spawn_sandbox(lxc_request_with_network(
         "printf 'NETWORKED\\n'",
         &name,
         LIVE_TIMEOUT_MS,
-        Some(network),
+        network,
     ))
     .expect("spawn");
     let stdout = proc.take_stdout().expect("stdout available");

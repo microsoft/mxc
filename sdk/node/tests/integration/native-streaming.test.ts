@@ -230,10 +230,18 @@ describe(`Internal native streaming over LXC (schema ${schemaVersion})`, {
     // a BusyBox image.
     const command = "printf 'STREAM_FIRST\\n'; IFS= read -r _; " +
       "printf 'STREAM_SECOND\\n'; printf 'STREAM_ERROR\\n' >&2";
-    // A policy permitting no network starts the container with no interface,
-    // so this does not wait out a DHCP lease it would never use.
+    // A network policy stated in the directional form and permitting nothing:
+    // the container starts with no interface, so this does not wait out a DHCP
+    // lease it would never use. A policy naming no network at all would default
+    // to `enforcementMode: 'capabilities'`, which LXC refuses outright.
     const config = sdk.createConfigFromPolicy(
-      { version: schemaVersion.raw },
+      {
+        version: schemaVersion.raw,
+        network: {
+          egress: { default: 'deny' },
+          ingress: { default: 'deny', hostLoopback: 'deny' },
+        },
+      },
       'lxc',
       `mxc-node-stream-${process.pid}`,
     );
