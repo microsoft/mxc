@@ -165,6 +165,11 @@ pub enum WorkerCommand {
         config: DeprovisionConfig,
         reply: oneshot::Sender<Result<(), WorkerError>>,
     },
+    /// Report a parked provision's pull, from the pull thread or its deadline.
+    PullFinished {
+        token: u64,
+        outcome: Result<(), ScriptResponse>,
+    },
     /// Give up on a sandbox whose provision reply never reached a client.
     Retire {
         sandbox_id: String,
@@ -470,6 +475,12 @@ struct ContainerEntry {
     container: WslcContainerGuard,
 }
 
+/// A provision waiting on its image to arrive from a registry.
+struct PendingProvision {
+    config: ProvisionConfig,
+    reply: oneshot::Sender<Result<String, WorkerError>>,
+}
+
 /// The single-threaded WSLc session owner. Constructed and run entirely on the
 /// worker thread. Holds the lazily-loaded SDK and the one shared session (the
 /// WSL2 utility VM), plus the `sandbox_id -> container` map. The SDK/session/
@@ -481,6 +492,8 @@ struct Worker {
     // hold handles whose Drop calls into the SDK, so they must drop before `sdk`
     // unloads `wslcsdk.dll`.
     containers: HashMap<String, ContainerEntry>,
+    pending: HashMap<u64, PendingProvision>,
+    next_pull_token: u64,
     session: Option<WslcSessionGuard>,
     sdk: Option<WslcSdk>,
 }
@@ -492,6 +505,8 @@ impl Worker {
             sdk: None,
             session: None,
             containers: HashMap::new(),
+            pending: HashMap::new(),
+            next_pull_token: 0,
         }
     }
 
@@ -521,9 +536,136 @@ impl Worker {
         Ok(())
     }
 
-    fn provision(&mut self, config: ProvisionConfig) -> Result<String, WorkerError> {
-        self.ensure_session()?;
+    /// Start a provision, parking it if the image has to be pulled.
+    ///
+    /// Returning without replying is what keeps this thread free: the pull runs
+    /// elsewhere and posts [`WorkerCommand::PullFinished`] when it lands, so
+    /// every other sandbox keeps being served while a registry is slow.
+    fn begin_provision(
+        &mut self,
+        config: ProvisionConfig,
+        reply: oneshot::Sender<Result<String, WorkerError>>,
+        worker: &mpsc::UnboundedSender<WorkerCommand>,
+    ) {
+        if let Err(e) = self.ensure_session() {
+            let _ = reply.send(Err(e));
+            return;
+        }
 
+        let sdk = self.sdk.as_ref().expect("session ensured");
+        let session = self.session.as_ref().expect("session ensured").as_raw();
+
+        // SAFETY: `sdk`/`session` are valid.
+        let step = unsafe {
+            image::begin_resolve(
+                sdk,
+                session,
+                &config.image,
+                config.image_tar_path.as_deref(),
+                None,
+                match config.network {
+                    NetworkMode::None => image::RegistryAccess::Denied,
+                    NetworkMode::Bridged => image::RegistryAccess::Allowed,
+                },
+                "[WSLC][daemon]",
+                &mut self.logger,
+            )
+        };
+        let step = match step {
+            Ok(step) => step,
+            Err(e) => {
+                let _ = reply.send(Err(sr_err(e)));
+                return;
+            }
+        };
+
+        match step {
+            image::ImageStep::Ready => {
+                let _ = reply.send(self.create_provisioned_container(&config));
+            }
+            image::ImageStep::Pull => {
+                let token = self.next_pull_token;
+                self.next_pull_token += 1;
+
+                let done = worker.clone();
+                let started = unsafe {
+                    image::start_pull(
+                        sdk,
+                        session,
+                        &config.image,
+                        None,
+                        "[WSLC][daemon]",
+                        move |outcome| {
+                            let _ = done.send(WorkerCommand::PullFinished { token, outcome });
+                        },
+                    )
+                };
+                if let Err(e) = started {
+                    let _ = reply.send(Err(sr_err(e)));
+                    return;
+                }
+
+                // Nothing can stop a stalled pull from outside, so the deadline
+                // is enforced by giving up on it rather than by ending it.
+                let budget = image::pull_budget();
+                let image_name = config.image.clone();
+                let expired = worker.clone();
+                std::thread::Builder::new()
+                    .name("wslc-pull-deadline".to_string())
+                    .spawn(move || {
+                        std::thread::sleep(budget);
+                        let _ = expired.send(WorkerCommand::PullFinished {
+                            token,
+                            outcome: Err(image::pull_deadline_expired(&image_name, budget)),
+                        });
+                    })
+                    .ok();
+
+                self.pending
+                    .insert(token, PendingProvision { config, reply });
+            }
+        }
+    }
+
+    /// Resume a parked provision once its pull reported, or its deadline did.
+    ///
+    /// An unknown token is the loser of that race, and has nothing left to do.
+    fn finish_provision(&mut self, token: u64, outcome: Result<(), ScriptResponse>) {
+        let Some(PendingProvision { config, reply }) = self.pending.remove(&token) else {
+            return;
+        };
+
+        if let Err(e) = outcome {
+            let _ = reply.send(Err(sr_err(e)));
+            return;
+        }
+
+        let sdk = self.sdk.as_ref().expect("session ensured");
+        let session = self.session.as_ref().expect("session ensured").as_raw();
+
+        // SAFETY: `sdk`/`session` are valid.
+        if let Err(e) = unsafe {
+            image::report_pulled_digest(
+                sdk,
+                session,
+                &config.image,
+                "[WSLC][daemon]",
+                &mut self.logger,
+            )
+        } {
+            let _ = reply.send(Err(sr_err(e)));
+            return;
+        }
+
+        let _ = reply.send(self.create_provisioned_container(&config));
+    }
+
+    /// Everything after the image is in the store: create the container and
+    /// register it under a fresh sandbox id.
+    fn create_provisioned_container(
+        &mut self,
+        config: &ProvisionConfig,
+    ) -> Result<String, WorkerError> {
         let sdk = self.sdk.as_ref().expect("session ensured");
         let session = self.session.as_ref().expect("session ensured").as_raw();
 
@@ -546,24 +688,6 @@ impl Worker {
         // SAFETY: `sdk`/`session` are valid; every buffer the SDK stores pointers
         // into is owned by a stationary local (`keepalive`) until create returns.
         let container = unsafe {
-            image::resolve_image(
-                sdk,
-                session,
-                &config.image,
-                config.image_tar_path.as_deref(),
-                None,
-                match config.network {
-                    NetworkMode::None => image::RegistryAccess::Denied,
-                    NetworkMode::Bridged => image::RegistryAccess::Allowed,
-                },
-                // Every sandbox is served from this one thread, so a pull that
-                // stops responding must not be sitting on it.
-                image::PullExecution::OffCallerThread,
-                "[WSLC][daemon]",
-                &mut self.logger,
-            )
-            .map_err(sr_err)?;
-
             // Merge keeps the keepalive out of `env -i`, so a container whose
             // execs never replace an environment does not need `/usr/bin/env`
             // in its image.
@@ -771,9 +895,11 @@ impl Worker {
 
     /// Containers a client could still act on.
     ///
-    /// Drives the idle watchdog, which shuts the daemon down only at zero.
+    /// Drives the idle watchdog, which shuts the daemon down only at zero. A
+    /// parked provision has no container yet, so counting it keeps the daemon
+    /// alive for the client still waiting on its pull.
     fn live_container_count(&self) -> usize {
-        self.containers.values().filter(|e| !e.retired).count()
+        self.containers.values().filter(|e| !e.retired).count() + self.pending.len()
     }
 
     fn deprovision(&mut self, config: DeprovisionConfig) -> Result<(), WorkerError> {
@@ -801,7 +927,18 @@ impl Worker {
         Ok(())
     }
 
+    /// Release every container and the session.
+    ///
+    /// A parked provision is answered rather than dropped, since a dropped
+    /// reply reaches its client as a bare "worker gone".
     fn shutdown(&mut self) {
+        for (_, pending) in self.pending.drain() {
+            let _ = pending.reply.send(Err(WorkerError::Backend(anyhow::anyhow!(
+                "the WSLc daemon shut down while pulling image '{}'",
+                pending.config.image
+            ))));
+        }
+
         if let Some(sdk) = self.sdk.as_ref() {
             for (_, entry) in self.containers.drain() {
                 // SAFETY: `sdk` is valid and `entry.container` is a live handle.
@@ -826,8 +963,8 @@ impl Worker {
         }
 
         // An abandoned pull is still using this session, so releasing it now
-        // would free memory the SDK holds. Leaking both handles costs one
-        // process's worth of memory until it exits; the alternative is a crash.
+        // would free memory the SDK holds. The leaked handles cost one
+        // process's worth of memory until it exits.
         if !image::wait_for_pulls_in_flight(PULL_DRAIN_TIMEOUT) {
             self.logger.log_line(
                 "a WSLC image pull is still running; leaking the session rather than \
@@ -853,6 +990,9 @@ pub fn spawn() -> Result<SessionHandle> {
     let (tx, mut rx) = mpsc::unbounded_channel::<WorkerCommand>();
     let active_execs = Arc::new(Mutex::new(HashMap::new()));
 
+    // A parked provision resumes by posting back into this queue.
+    let worker_tx = tx.clone();
+
     std::thread::Builder::new()
         .name("wslc-session-worker".to_string())
         .spawn(move || {
@@ -869,7 +1009,10 @@ pub fn spawn() -> Result<SessionHandle> {
             while let Some(cmd) = rx.blocking_recv() {
                 match cmd {
                     WorkerCommand::Provision { config, reply } => {
-                        let _ = reply.send(worker.provision(config));
+                        worker.begin_provision(config, reply, &worker_tx);
+                    }
+                    WorkerCommand::PullFinished { token, outcome } => {
+                        worker.finish_provision(token, outcome);
                     }
                     WorkerCommand::Start { config, reply } => {
                         let _ = reply.send(worker.start(config));
@@ -998,6 +1141,66 @@ mod tests {
             // owns a value it can release without touching memory.
             container: unsafe { WslcContainerGuard::from_raw(sentinel, release_noop) },
         }
+    }
+
+    /// A parked provision has no container yet, so the watchdog would retire
+    /// the daemon out from under the client still waiting on its pull.
+    #[test]
+    fn a_pending_pull_keeps_the_daemon_alive() {
+        let mut worker = Worker::new();
+        assert_eq!(worker.live_container_count(), 0);
+
+        let (reply, _rx) = oneshot::channel();
+        worker.pending.insert(
+            7,
+            PendingProvision {
+                config: ProvisionConfig {
+                    image: "alpine:latest".to_string(),
+                    image_tar_path: None,
+                    volumes: Vec::new(),
+                    network: Default::default(),
+                },
+                reply,
+            },
+        );
+
+        assert_eq!(
+            worker.live_container_count(),
+            1,
+            "a provision still waiting on its image must hold the daemon open"
+        );
+    }
+
+    /// The pull and its deadline race, and both report.
+    #[test]
+    fn only_the_first_report_of_a_pull_answers_the_client() {
+        let mut worker = Worker::new();
+        let (reply, mut rx) = oneshot::channel();
+        worker.pending.insert(
+            3,
+            PendingProvision {
+                config: ProvisionConfig {
+                    image: "alpine:latest".to_string(),
+                    image_tar_path: None,
+                    volumes: Vec::new(),
+                    network: Default::default(),
+                },
+                reply,
+            },
+        );
+
+        worker.finish_provision(
+            3,
+            Err(image::pull_deadline_expired(
+                "alpine:latest",
+                PULL_DRAIN_TIMEOUT,
+            )),
+        );
+        assert!(rx.try_recv().is_ok(), "the first report answers the client");
+
+        // The loser of the race: nothing left to answer, and no panic.
+        worker.finish_provision(3, Ok(()));
+        assert_eq!(worker.live_container_count(), 0);
     }
 
     #[test]

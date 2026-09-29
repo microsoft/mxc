@@ -558,8 +558,7 @@ mod windows_tests {
         );
     }
 
-    /// The bug both reviewers found: user state must never widen an
-    /// administrator's allowlist.
+    /// User state must never widen an administrator's allowlist.
     #[test]
     fn a_user_environment_variable_cannot_widen_the_allowlist() {
         let guard = RegistryPolicyKeyGuard::new();

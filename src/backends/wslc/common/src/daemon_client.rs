@@ -112,9 +112,8 @@ fn spawn_lock_timeout() -> Duration {
 /// The overall per-request response deadline, honoring [`CALL_TIMEOUT_ENV`].
 /// The overall per-request response deadline, honoring [`CALL_TIMEOUT_ENV`].
 ///
-/// Exposed so a pull can keep its own budget under the deadline its caller is
-/// waiting on; a pull that outlives it would surface as an abandoned container
-/// rather than a failed provision.
+/// Public so a pull can bound itself against the deadline its caller is
+/// waiting on.
 pub fn call_timeout() -> Duration {
     duration_from_env(CALL_TIMEOUT_ENV, CALL_TIMEOUT)
 }

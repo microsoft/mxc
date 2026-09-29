@@ -7,7 +7,6 @@ use std::ffi::c_void;
 use std::fmt::Write;
 use std::ptr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use wxc_common::logger::Logger;
@@ -31,9 +30,10 @@ const PULL_TIMEOUT: Duration = Duration::from_secs(540);
 /// the abort path without waiting out the production budget.
 const PULL_TIMEOUT_ENV: &str = "MXC_WSLC_PULL_TIMEOUT_SECS";
 
-/// Gap kept between the pull budget and the caller's own response deadline, so
-/// a pull that runs its full budget still fails back to a caller that is
-/// listening.
+/// Gap kept between the pull budget and the caller's response deadline.
+///
+/// A pull that outlived that deadline would surface as an abandoned container
+/// rather than a failed provision the caller can act on.
 const PULL_HEADROOM: Duration = Duration::from_secs(60);
 
 /// Gap between progress lines while a pull is running.
@@ -43,11 +43,7 @@ const PULL_REPORT_INTERVAL: Duration = Duration::from_secs(10);
 /// back by the SDK as the pull's own result.
 const E_ABORT: HRESULT = 0x8000_4004u32 as HRESULT;
 
-/// The pull deadline, honouring [`PULL_TIMEOUT_ENV`].
-///
-/// Capped below the deadline the caller is waiting on, because a pull allowed
-/// to outlive it would surface as an abandoned container rather than the failed
-/// provision the caller can act on.
+/// The pull deadline, honouring [`PULL_TIMEOUT_ENV`] and [`PULL_HEADROOM`].
 fn pull_timeout() -> Duration {
     let requested = std::env::var(PULL_TIMEOUT_ENV)
         .ok()
@@ -61,9 +57,6 @@ fn pull_timeout() -> Duration {
 }
 
 /// The most a pull may take for its failure to still reach the caller.
-///
-/// [`PULL_HEADROOM`] leaves the caller time to render that failure before its
-/// own deadline expires.
 fn pull_budget_ceiling(call_timeout: Duration) -> Duration {
     call_timeout
         .checked_sub(PULL_HEADROOM)
@@ -154,13 +147,16 @@ pub unsafe fn pull_image(
 
     let uri_cstr = cstr_bytes("image", image)?;
     let started = Instant::now();
+
+    // A budget too large for the clock to represent falls back to the default,
+    // which is bounded rather than instantly expired.
+    let deadline = started
+        .checked_add(budget)
+        .unwrap_or_else(|| started + PULL_TIMEOUT);
+
     // Stationary for the whole call: the SDK holds this pointer across it.
     let watch = PullWatch {
-        // A budget too large for the clock to represent falls back to the
-        // default, which is bounded rather than instantly expired.
-        deadline: started
-            .checked_add(budget)
-            .unwrap_or_else(|| started + PULL_TIMEOUT),
+        deadline,
         started,
         last_report_ms: AtomicU64::new(0),
         image: image.to_string(),
@@ -188,16 +184,6 @@ pub unsafe fn pull_image(
     Ok(())
 }
 
-/// Where the SDK pull runs.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum PullExecution {
-    /// On the calling thread.
-    Inline,
-
-    /// On a thread of its own, abandoned if it outlives the deadline.
-    OffCallerThread,
-}
-
 /// Off-thread pulls that have not returned.
 ///
 /// The session outlives the daemon's worker only if nothing is still using it,
@@ -219,84 +205,79 @@ struct PullJob {
 // nor serializes the overlap.
 unsafe impl Send for PullJob {}
 
-/// Pull on a thread of its own, giving up once `budget` expires.
+/// How long a pull may run before its caller gives up on it.
+pub fn pull_budget() -> Duration {
+    pull_timeout()
+}
+
+/// Run a pull on a thread of its own, handing the outcome to `on_done`.
 ///
-/// The daemon serves every sandbox from a single worker, so a pull that stops
-/// responding must not be sitting on it. A caller that gives up here leaves the
-/// pull running: the SDK reports progress only as response chunks arrive and
-/// exposes no cancellation handle, so a transfer stalled before its next chunk
-/// cannot be stopped from outside. Bounding the *worker* is what this buys; the
-/// abandoned thread ends when the SDK's own network timeouts fire.
+/// Returns as soon as the thread starts; `on_done` runs on the pull thread.
+///
+/// Nothing here enforces [`pull_budget`]: the SDK reports progress only as
+/// response chunks arrive and exposes no cancellation handle, so a transfer
+/// stalled before its next chunk cannot be stopped from outside. The caller
+/// arms its own deadline and stops waiting; this thread ends when the SDK's own
+/// network timeouts fire.
 ///
 /// # Safety
 /// `sdk` must hold valid function pointers and `session` must be a live handle,
 /// both outliving the pull -- see [`wait_for_pulls_in_flight`].
-unsafe fn pull_off_caller_thread(
+pub unsafe fn start_pull<F>(
     sdk: &WslcSdk,
     session: WslcSession,
     image: &str,
     storage_path: Option<&str>,
     log_prefix: &str,
-    logger: &mut Logger,
-) -> Result<(), ScriptResponse> {
-    let budget = pull_timeout();
+    on_done: F,
+) -> Result<(), ScriptResponse>
+where
+    F: FnOnce(Result<(), ScriptResponse>) + Send + 'static,
+{
     let job = PullJob {
         sdk: sdk as *const WslcSdk,
         session,
         image: image.to_string(),
         storage_path: storage_path.map(str::to_string),
     };
-
-    let (tx, rx) = mpsc::channel();
     let prefix = log_prefix.to_string();
+
     PULLS_IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
     let spawned = std::thread::Builder::new()
         .name("wslc-pull".to_string())
         .spawn(move || {
             let job = job;
-            let _apartment = match PullApartment::enter() {
-                Ok(apartment) => apartment,
-                Err(e) => {
-                    PULLS_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
-                    let _ = tx.send(Err(e));
-                    return;
+            let apartment = PullApartment::enter();
+            let outcome = match apartment {
+                Err(e) => Err(e),
+                Ok(_apartment) => {
+                    let mut log = Logger::new(wxc_common::logger::Mode::Console);
+
+                    // SAFETY: the caller keeps both alive for as long as this runs.
+                    unsafe {
+                        pull_image(
+                            &*job.sdk,
+                            job.session,
+                            &job.image,
+                            job.storage_path.as_deref(),
+                            &prefix,
+                            &mut log,
+                        )
+                    }
                 }
             };
-            let mut log = Logger::new(wxc_common::logger::Mode::Console);
-
-            // SAFETY: the caller keeps both alive for as long as this runs.
-            let outcome = unsafe {
-                pull_image(
-                    &*job.sdk,
-                    job.session,
-                    &job.image,
-                    job.storage_path.as_deref(),
-                    &prefix,
-                    &mut log,
-                )
-            };
             PULLS_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
-            let _ = tx.send(outcome);
+            on_done(outcome);
         });
 
-    if spawned.is_err() {
+    if let Err(e) = spawned {
         PULLS_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
-        let _ = writeln!(
-            logger,
-            "{} Could not start a pull thread; pulling on this thread instead",
-            log_prefix
-        );
-        return pull_image(sdk, session, image, storage_path, log_prefix, logger);
-    }
-
-    match rx.recv_timeout(budget) {
-        Ok(outcome) => outcome,
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(pull_deadline_expired(image, budget)),
-        Err(mpsc::RecvTimeoutError::Disconnected) => Err(WslcError::Host(format!(
-            "the thread pulling WSLC image '{image}' ended without reporting a result"
+        return Err(WslcError::Host(format!(
+            "could not start a thread to pull WSLC image '{image}': {e}"
         ))
-        .into_response()),
+        .into_response());
     }
+    Ok(())
 }
 
 /// Block until no off-thread pull is outstanding, or `budget` expires.
@@ -345,7 +326,7 @@ impl Drop for PullApartment {
 }
 
 /// Report a pull the caller stopped waiting for.
-fn pull_deadline_expired(image: &str, budget: Duration) -> ScriptResponse {
+pub fn pull_deadline_expired(image: &str, budget: Duration) -> ScriptResponse {
     WslcError::Host(format!(
         "WSLC image '{}' did not finish pulling within {}s. The transfer was \
          abandoned and this sandbox was not created. Retry, raise the budget with \
@@ -650,23 +631,34 @@ pub enum RegistryAccess {
     Denied,
 }
 
-/// Ensure `image` is in the session's local cache: import it from
-/// `image_tar_path` when one is supplied, otherwise pull it from its registry.
+/// What a caller must still do to make an image available.
+pub enum ImageStep {
+    /// Nothing: the cache already held it, or a tar supplied it.
+    Ready,
+
+    /// It has to come from its registry; see [`start_pull`].
+    Pull,
+}
+
+/// Decide how `image` will be made available, doing everything that does not
+/// reach the network.
+///
+/// Split from the pull so a caller can park between the two; [`resolve_image`]
+/// joins them back together.
 ///
 /// # Safety
 /// `sdk` must hold valid function pointers and `session` must be a live handle.
 #[allow(clippy::too_many_arguments)]
-pub unsafe fn resolve_image(
+pub unsafe fn begin_resolve(
     sdk: &WslcSdk,
     session: WslcSession,
     image: &str,
     image_tar_path: Option<&str>,
     storage_path: Option<&str>,
     registry: RegistryAccess,
-    execution: PullExecution,
     log_prefix: &str,
     logger: &mut Logger,
-) -> Result<(), ScriptResponse> {
+) -> Result<ImageStep, ScriptResponse> {
     let cached = list_cached_images(sdk, session)?;
     let matched = cached.iter().find(|entry| entry.satisfies(image));
     let policy = registry_policy::get_policy();
@@ -693,46 +685,19 @@ pub unsafe fn resolve_image(
                     log_prefix, image, digest
                 );
             }
-            Ok(())
+            Ok(ImageStep::Ready)
         }
-        ImageAction::ImportTar => import_image_from_tar(
-            sdk,
-            session,
-            image,
-            image_tar_path.expect("tar action implies a tar path"),
-            logger,
-        ),
-        ImageAction::Pull => {
-            match execution {
-                PullExecution::Inline => {
-                    pull_image(sdk, session, image, storage_path, log_prefix, logger)?
-                }
-                PullExecution::OffCallerThread => {
-                    pull_off_caller_thread(sdk, session, image, storage_path, log_prefix, logger)?
-                }
-            }
-
-            // What the reference actually resolved to. A tag is mutable, so the
-            // digest is the only record of which content this run executed.
-            //
-            // Matched exactly: a store holding several tags of one repository
-            // would otherwise report whichever was found first. A digest
-            // reference reports nothing, since the store's digest is not the
-            // one the reference pinned.
-            if let Some(entry) = list_cached_images(sdk, session)?
-                .iter()
-                .find(|entry| entry.satisfies(image))
-            {
-                let _ = writeln!(
-                    logger,
-                    "{} Image '{}' resolved to sha256:{}",
-                    log_prefix,
-                    image,
-                    entry.digest_hex()
-                );
-            }
-            Ok(())
+        ImageAction::ImportTar => {
+            import_image_from_tar(
+                sdk,
+                session,
+                image,
+                image_tar_path.expect("tar action implies a tar path"),
+                logger,
+            )?;
+            Ok(ImageStep::Ready)
         }
+        ImageAction::Pull => Ok(ImageStep::Pull),
         ImageAction::RefuseByPolicy => {
             Err(WslcError::Rejected(policy.refusal(image)).into_response())
         }
@@ -748,6 +713,73 @@ pub unsafe fn resolve_image(
             storage_arg(storage_path),
         ))
         .into_response()),
+    }
+}
+
+/// Record which content a completed pull produced.
+///
+/// A tag is mutable, so the digest is the only record of what this run
+/// executed. A reference pinning a digest reports nothing, since the store's
+/// digest is not the one it pinned.
+///
+/// # Safety
+/// `sdk` must hold valid function pointers and `session` must be a live handle.
+pub unsafe fn report_pulled_digest(
+    sdk: &WslcSdk,
+    session: WslcSession,
+    image: &str,
+    log_prefix: &str,
+    logger: &mut Logger,
+) -> Result<(), ScriptResponse> {
+    if let Some(entry) = list_cached_images(sdk, session)?
+        .iter()
+        .find(|entry| entry.satisfies(image))
+    {
+        let _ = writeln!(
+            logger,
+            "{} Image '{}' resolved to sha256:{}",
+            log_prefix,
+            image,
+            entry.digest_hex()
+        );
+    }
+    Ok(())
+}
+
+/// Ensure `image` is in the session's local cache: import it from
+/// `image_tar_path` when one is supplied, otherwise pull it from its registry.
+///
+/// Pulls on the calling thread. A caller that serves other work from this
+/// thread should drive [`begin_resolve`] and [`start_pull`] instead.
+///
+/// # Safety
+/// `sdk` must hold valid function pointers and `session` must be a live handle.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn resolve_image(
+    sdk: &WslcSdk,
+    session: WslcSession,
+    image: &str,
+    image_tar_path: Option<&str>,
+    storage_path: Option<&str>,
+    registry: RegistryAccess,
+    log_prefix: &str,
+    logger: &mut Logger,
+) -> Result<(), ScriptResponse> {
+    match begin_resolve(
+        sdk,
+        session,
+        image,
+        image_tar_path,
+        storage_path,
+        registry,
+        log_prefix,
+        logger,
+    )? {
+        ImageStep::Ready => Ok(()),
+        ImageStep::Pull => {
+            pull_image(sdk, session, image, storage_path, log_prefix, logger)?;
+            report_pulled_digest(sdk, session, image, log_prefix, logger)
+        }
     }
 }
 
