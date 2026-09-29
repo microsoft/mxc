@@ -14,7 +14,7 @@ use wxc_common::script_runner::ScriptRunner;
 use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
 use super::manager::{log_sandbox_torn_down, IsolationSessionManager, TeardownOutcome};
-use super::policy::validate_provision_policy;
+use super::policy::{reject_unhonorable_environment, validate_provision_policy};
 use super::process_options::build_process_options;
 use super::IsolationSessionRunner;
 
@@ -64,6 +64,7 @@ impl ScriptRunner for IsolationSessionRunner {
                 | NetworkPolicySupport::INGRESS_DEFAULT
                 | NetworkPolicySupport::HOST_LOOPBACK,
         )?;
+        reject_unhonorable_environment(request).map_err(ScriptResponse::from)?;
         Ok(())
     }
 

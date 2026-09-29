@@ -23,7 +23,9 @@ use windows::Win32::Foundation::HANDLE;
 
 use super::error::map_lifecycle_error;
 use super::manager::{log_sandbox_torn_down, IsolationSessionManager, TeardownOutcome};
-use super::policy::{validate_post_provision_policy, validate_provision_policy};
+use super::policy::{
+    reject_unhonorable_environment, validate_post_provision_policy, validate_provision_policy,
+};
 use super::process_options::{build_process_options, with_service_timeout_grace};
 use super::sandbox_id::{self, SandboxIdPayload};
 use super::IsolationSessionRunner;
@@ -238,7 +240,8 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
         extract_agent_user_name(sandbox_id)?;
-        validate_post_provision_policy(request).map_err(map_lifecycle_error)
+        validate_post_provision_policy(request).map_err(map_lifecycle_error)?;
+        reject_unhonorable_environment(request).map_err(map_lifecycle_error)
     }
 
     fn validate_stop(

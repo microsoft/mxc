@@ -20,7 +20,13 @@
 //! Anything else, including an absent policy (which defaults to deny), is
 //! refused. On post-provision phases the network posture is fixed at provision:
 //! any supplied network policy is refused, an absent one is inherited.
+//!
+//! Every process starts from the agent user's default environment, which
+//! `process.env` can be layered over (`process.inheritDefaultEnv`) but cannot
+//! replace or empty. A `process.env` without `process.inheritDefaultEnv` is
+//! therefore refused wherever a process is launched: one-shot and exec.
 
+use wxc_common::default_env::EnvResolution;
 use wxc_common::models::{ExecutionRequest, NetworkAction, NetworkEnforcementMode, NetworkPolicy};
 
 use super::error::IsolationSessionError;
@@ -43,6 +49,10 @@ const ERR_PROXY_POLICY: &str =
 const ERR_NETWORK_IMMUTABLE: &str =
     "network policy is fixed at provision and cannot be changed on \
     this phase; omit the network policy on post-provision phases";
+const ERR_ENVIRONMENT_POLICY: &str = "process.env without process.inheritDefaultEnv=true is not \
+    supported by the isolation session backend: every process starts from the agent user's \
+    default environment, which cannot be replaced or emptied; set process.inheritDefaultEnv to \
+    true to layer process.env over it, or omit process.env";
 
 /// Validates the request for the provision phase (also used by the one-shot
 /// runner, which runs the whole lifecycle in one call so provision-phase
@@ -79,6 +89,19 @@ pub(super) fn validate_post_provision_policy(
         ));
     }
     Ok(())
+}
+
+/// Rejects a `process.env` that asks to replace the default environment
+/// rather than be layered over it.
+pub(super) fn reject_unhonorable_environment(
+    request: &ExecutionRequest,
+) -> Result<(), IsolationSessionError> {
+    match EnvResolution::of(request) {
+        EnvResolution::Replace => Err(IsolationSessionError::Policy(
+            ERR_ENVIRONMENT_POLICY.to_string(),
+        )),
+        EnvResolution::Default | EnvResolution::Overlay | EnvResolution::Legacy => Ok(()),
+    }
 }
 
 /// Rejects any filesystem policy field. Shared by the provision and
