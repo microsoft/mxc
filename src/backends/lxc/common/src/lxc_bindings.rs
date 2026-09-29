@@ -155,14 +155,26 @@ fn confine_network_capabilities(command: &mut std::process::Command) {
     }
 }
 
+/// A `/etc/hosts` helper emits one `mxc:` diagnostic line, so this is far above
+/// any legitimate output.
+#[cfg(target_os = "linux")]
+const MAX_CAPTURED_BYTES: u64 = 8 * 1024;
+
 #[cfg(target_os = "linux")]
 fn read_to_end_on_thread(
     reader: Option<wxc_common::interruptible_reader::InterruptibleReader>,
 ) -> Option<std::thread::JoinHandle<String>> {
-    reader.map(|mut reader| {
+    reader.map(|reader| {
         std::thread::spawn(move || {
             let mut buffer = Vec::new();
-            let _ = std::io::Read::read_to_end(&mut reader, &mut buffer);
+            let mut capped = std::io::Read::take(reader, MAX_CAPTURED_BYTES);
+            let _ = std::io::Read::read_to_end(&mut capped, &mut buffer);
+
+            // Drained past the cap so the child sees its pipe emptied and exits
+            // on its own rather than blocking on a full one.
+            let mut reader = capped.into_inner();
+            let _ = std::io::copy(&mut reader, &mut std::io::sink());
+
             String::from_utf8_lossy(&buffer).into_owned()
         })
     })
@@ -173,6 +185,31 @@ fn joined_capture(handle: Option<std::thread::JoinHandle<String>>) -> String {
     handle
         .and_then(|reader| reader.join().ok())
         .unwrap_or_default()
+}
+
+/// A reaped child's pipes are closed, so a reader still running past this grace
+/// is waiting on a descendant that inherited one.
+#[cfg(target_os = "linux")]
+const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Cancelling a read abandons whatever the pipe still held, so a child whose
+/// output has not been read yet would lose it to a prompt cancel.
+#[cfg(target_os = "linux")]
+fn wait_for_drain(
+    stdout: &Option<std::thread::JoinHandle<String>>,
+    stderr: &Option<std::thread::JoinHandle<String>>,
+) {
+    let drained = |handle: &Option<std::thread::JoinHandle<String>>| {
+        handle.as_ref().is_none_or(|handle| handle.is_finished())
+    };
+    let deadline = std::time::Instant::now() + DRAIN_GRACE;
+
+    while !(drained(stdout) && drained(stderr)) {
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
 }
 
 /// Unblock the signals `lxc-exec` holds for its sigwait watchdog, so the child
@@ -522,10 +559,19 @@ impl LxcContainer {
             .spawn()
             .map_err(|e| format!("Failed to run lxc-attach: {}", e))?;
 
-        let (stdout, stdout_canceller) = wrap_pipe(child.stdout.take())
-            .map_err(|e| format!("Failed to wrap the lxc-attach stdout pipe: {}", e))?;
-        let (stderr, stderr_canceller) = wrap_pipe(child.stderr.take())
-            .map_err(|e| format!("Failed to wrap the lxc-attach stderr pipe: {}", e))?;
+        let wrapped = wrap_pipe(child.stdout.take())
+            .and_then(|out| wrap_pipe(child.stderr.take()).map(|err| (out, err)));
+        let ((stdout, stdout_canceller), (stderr, stderr_canceller)) = match wrapped {
+            Ok(pipes) => pipes,
+
+            // Without this the helper keeps running, and can still rewrite
+            // `/etc/hosts` after this call has reported failure.
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("Failed to wrap an lxc-attach pipe: {}", e));
+            }
+        };
         let stdout = read_to_end_on_thread(stdout);
         let stderr = read_to_end_on_thread(stderr);
 
@@ -533,10 +579,12 @@ impl LxcContainer {
         if outcome.is_err() {
             let _ = child.kill();
             let _ = child.wait();
+        } else {
+            wait_for_drain(&stdout, &stderr);
         }
 
-        // Fired once the process is gone, so a descendant that inherited either
-        // pipe cannot park the joins below past the deadline.
+        // A descendant holding either pipe open would park the joins below
+        // indefinitely.
         for canceller in [stdout_canceller, stderr_canceller].into_iter().flatten() {
             canceller.close();
         }
