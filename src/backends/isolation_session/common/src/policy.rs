@@ -166,8 +166,8 @@ fn validate_provision_network_policy(
 mod tests {
     use super::*;
     use wxc_common::models::{
-        ContainerPolicy, NetworkEgressPolicy, NetworkIngressPolicy, ProxyAddress, ProxyConfig,
-        UiPolicy,
+        ContainerPolicy, DefaultEnvCompatibility, NetworkEgressPolicy, NetworkIngressPolicy,
+        ProxyAddress, ProxyConfig, UiPolicy,
     };
     use wxc_common::mxc_error::MxcErrorCode;
 
@@ -740,5 +740,46 @@ mod tests {
             validate_post_provision_policy(&request).unwrap_err(),
             ERR_FILESYSTEM_POLICY,
         );
+    }
+
+    // ====== process.env (refused when it would replace the default) ======
+
+    fn request_with_env(
+        compatibility: DefaultEnvCompatibility,
+        env: Option<Vec<&str>>,
+        inherit_default_env: bool,
+    ) -> ExecutionRequest {
+        ExecutionRequest {
+            default_env_compatibility: compatibility,
+            env: env.map(|e| e.into_iter().map(String::from).collect()),
+            inherit_default_env,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn only_an_environment_that_would_replace_the_default_is_refused() {
+        use DefaultEnvCompatibility::{DefaultBlock, LegacyCompatible};
+
+        let cases = [
+            (None, false, DefaultBlock, true),
+            (None, true, DefaultBlock, true),
+            (Some(vec![]), false, DefaultBlock, false),
+            (Some(vec![]), true, DefaultBlock, true),
+            (Some(vec!["FOO=bar"]), false, DefaultBlock, false),
+            (Some(vec!["FOO=bar"]), true, DefaultBlock, true),
+            (Some(vec!["FOO=bar"]), false, LegacyCompatible, true),
+        ];
+
+        for (env, inherit_default_env, compatibility, accepted) in cases {
+            let state =
+                format!("{env:?}, inherit_default_env={inherit_default_env}, {compatibility:?}");
+            let request = request_with_env(compatibility, env, inherit_default_env);
+            match (reject_unhonorable_environment(&request), accepted) {
+                (Ok(()), true) => {}
+                (Err(err), false) => assert_policy_err_contains(err, ERR_ENVIRONMENT_POLICY),
+                (result, _) => panic!("{state}: expected accepted={accepted}, got {result:?}"),
+            }
+        }
     }
 }

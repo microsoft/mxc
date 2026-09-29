@@ -744,6 +744,58 @@ mod tests {
         }
     }
 
+    // ====== process.env is checked where a process is launched ======
+
+    const ENV_REFUSAL: &str = "process.env without process.inheritDefaultEnv=true is not supported";
+
+    #[test]
+    fn validate_exec_rejects_env_without_inherit_default_env() {
+        let runner = IsolationSessionRunner::new();
+        let req = ExecutionRequest {
+            env: Some(vec!["FOO=bar".to_string()]),
+            ..Default::default()
+        };
+        let err = runner
+            .validate_exec(&valid_sandbox_id(), &req, None)
+            .unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+        assert!(err.message.contains(ENV_REFUSAL), "got {}", err.message);
+    }
+
+    #[test]
+    fn validate_exec_accepts_env_with_inherit_default_env() {
+        let runner = IsolationSessionRunner::new();
+        let req = ExecutionRequest {
+            env: Some(vec!["FOO=bar".to_string()]),
+            inherit_default_env: true,
+            ..Default::default()
+        };
+        runner
+            .validate_exec(&valid_sandbox_id(), &req, None)
+            .unwrap();
+    }
+
+    #[test]
+    fn validate_exec_reports_a_network_refusal_before_the_environment() {
+        let runner = IsolationSessionRunner::new();
+        let req = ExecutionRequest {
+            env: Some(vec!["FOO=bar".to_string()]),
+            policy: ContainerPolicy {
+                network_specified: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = runner
+            .validate_exec(&valid_sandbox_id(), &req, None)
+            .unwrap_err();
+        assert!(
+            err.message.contains("network policy is fixed at provision"),
+            "got {}",
+            err.message
+        );
+    }
+
     // ====== UI policy is refused on every phase ======
 
     #[test]
