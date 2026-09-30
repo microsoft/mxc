@@ -184,6 +184,7 @@ PEER_UDP_PORT="8053"
 # the same prefix, so an exclusion can name one and leave the other reachable.
 PEER_DNS_IP="203.0.113.53"
 PEER_DNS_SIBLING_IP="203.0.113.54"
+PEER_DNS_ANSWER="203.0.113.99"
 
 PEER_LISTENER_PID=""
 PEER_UDP_LISTENER_PID=""
@@ -271,9 +272,10 @@ if ! PEER_PROBE_ERROR="$(await_peer_udp_echo "$PEER_IP" "$PEER_UDP_PORT")"; then
 fi
 
 # The udp/53 cases assert what the chain does with a DNS query, so the resolver
-# has to be one this suite controls.  Both addresses are served by the single
-# listener the peer binds on 0.0.0.0.
-start_dns_peer "$PEER_NETNS" "$PEER_DNS_LISTENER_LOG"
+# has to be one this suite controls.  Each address is bound separately, so a
+# reply leaves from the address the query named.
+start_dns_peer "$PEER_NETNS" "$PEER_DNS_LISTENER_LOG" "$PEER_DNS_ANSWER" \
+    "$PEER_DNS_IP" "$PEER_DNS_SIBLING_IP"
 for dns_addr in "$PEER_DNS_IP" "$PEER_DNS_SIBLING_IP"; do
     if ! PEER_PROBE_ERROR="$(await_peer_dns "$dns_addr")"; then
         fail_unreachable_peer "the egress peer resolver" "$dns_addr:53" \

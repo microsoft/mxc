@@ -115,7 +115,7 @@ sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 \
 
 # A resolver that never bound has to fail here as harness breakage, rather than
 # below as a chain that dropped its port 53 accept.
-start_dns_peer "$PEER_NETNS" "$PEER_DNS_LISTENER_LOG" "$PEER_DNS_ANSWER"
+start_dns_peer "$PEER_NETNS" "$PEER_DNS_LISTENER_LOG" "$PEER_DNS_ANSWER" "$PEER_DNS_IP"
 if ! PEER_PROBE_ERROR="$(await_peer_dns "$PEER_DNS_IP")"; then
     fail_unreachable_peer "the 0.7 DNS case resolver" "$PEER_DNS_IP:53" \
         "$PEER_PROBE_ERROR" "$PEER_DNS_LISTENER_LOG"
