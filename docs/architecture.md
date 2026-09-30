@@ -111,6 +111,7 @@ flowchart LR
     common["wxc_common<br/>exact contract parser"]
 
     typescript --> executor
+    typescript -. request probe .-> ffi
     cli --> executor
     csharp --> ffi --> sdk
     ffi -. exact config decoding .-> common
