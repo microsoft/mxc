@@ -5,6 +5,10 @@
 //!
 //! The backend owns tier detection and the serialized representation. This
 //! module owns the engine-level optional-backend overlays used by the CLI.
+//! The output describes ProcessContainer isolation tiers and host facts, so it
+//! cannot represent support for backends with different capability models.
+//! Those backends expose availability separately and validate requests on
+//! their normal launch paths.
 
 use wxc_common::models::ContainmentBackend;
 use wxc_common::models::ExecutionRequest;
@@ -14,6 +18,11 @@ use crate::{Error, SandboxRequest};
 pub use process_container_common::probe::{ProbeFacts, ProbeOutput, UiCapabilitySupport};
 
 /// Probe an optional public SDK request without creating a sandbox.
+///
+/// This operation supports only ProcessContainer requests because
+/// [`ProbeOutput`] selects among ProcessContainer-specific isolation tiers.
+/// Use backend availability discovery and normal launch-time validation for
+/// other containment backends.
 pub fn probe(request: Option<&SandboxRequest>) -> Result<ProbeOutput, Error> {
     probe_execution_request(request.map(|request| &request.inner))
 }

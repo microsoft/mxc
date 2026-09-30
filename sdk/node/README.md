@@ -187,15 +187,31 @@ For request-specific Windows ProcessContainer diagnostics, call
 process:
 
 ```typescript
-import { probeSandboxSupport } from '@microsoft/mxc-sdk';
+import {
+  createConfigFromPolicy,
+  probeSandboxSupport,
+  type SandboxPolicy,
+} from '@microsoft/mxc-sdk';
 
+const policy: SandboxPolicy = {
+  version: '0.9.0-alpha',
+  filesystem: {
+    readonlyPaths: ['C:\\Program Files\\MyTool'],
+  },
+};
+const config = createConfigFromPolicy(policy, 'processcontainer');
 const result = probeSandboxSupport(config);
 console.log(result.tier, result.warnings, result.probes.uiCapabilities);
 ```
 
 This API is synchronous, Windows-only, and does not create a sandbox. Native
 probe failures, non-ProcessContainer requests, and malformed JSON throw errors;
-they are not reported as successful unsupported results.
+they are not reported as successful unsupported results. Request-aware probing
+is ProcessContainer-only because its output selects among ProcessContainer
+isolation tiers using that backend's host detector. Other backends have
+different capability models; use `getAvailableBackends()` and normal request
+validation when launching them rather than interpreting ProcessContainer tier
+facts as cross-backend support.
 
 ---
 
