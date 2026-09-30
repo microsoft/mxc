@@ -200,6 +200,7 @@ const policy: SandboxPolicy = {
   },
 };
 const config = createConfigFromPolicy(policy, 'process');
+config.process!.commandLine = 'cmd /c exit 0';
 const result = probeSandboxSupport(config);
 console.log(result.tier, result.warnings, result.probes.uiCapabilities);
 ```

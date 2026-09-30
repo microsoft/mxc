@@ -2,8 +2,16 @@
 // Licensed under the MIT License.
 
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
+import * as path from 'node:path';
 import { afterEach, describe, it } from 'node:test';
-import { readProbeJsonWithNative } from '../../src/bindings/probe.js';
+import {
+  _setProbeNativeDependencies,
+  readProbeJson,
+  readProbeJsonWithNative,
+} from '../../src/bindings/probe.js';
+import { findMxcFfiLibrary } from '../../src/native-library.js';
 import {
   _setRequestProbeDependencies,
   probeSandboxSupport,
@@ -58,7 +66,10 @@ function assertProbeOutputRejected(payload: unknown): void {
   );
 }
 
-afterEach(() => _setRequestProbeDependencies());
+afterEach(() => {
+  _setRequestProbeDependencies();
+  _setProbeNativeDependencies();
+});
 
 describe('probeSandboxSupport', () => {
   it('serializes the config and forwards it to the native binding', () => {
@@ -315,6 +326,149 @@ describe('request probe native ownership', () => {
       assert.equal(frees, 0);
     });
   }
+
+  describe('request probe production wiring', () => {
+    function installNative(
+      probeStatus: number,
+      events: string[],
+      decode: () => string | undefined = () => '{}',
+    ): void {
+      const pointer = { address: 1 };
+      _setProbeNativeDependencies(
+        (() => ({
+          path: 'fake',
+          version: () => 'test',
+          handle: {
+            unload: () => events.push('unload'),
+          },
+        })) as never,
+        ((_: unknown, spec: { symbol: string }) => {
+          if (spec.symbol === 'mxc_probe_request_json_with_error') {
+            return (_request: string | null, output: unknown[]) => {
+              events.push('probe');
+              output[0] = pointer;
+              return probeStatus;
+            };
+          }
+          if (spec.symbol === 'mxc_string_free') {
+            return () => events.push('free-string');
+          }
+          return () => events.push('free-error');
+        }) as never,
+        (() => {
+          events.push('decode');
+          return decode();
+        }) as never,
+      );
+    }
+
+    it('unloads after decoding and freeing a successful result', () => {
+      const events: string[] = [];
+      installNative(0, events);
+
+      assert.equal(readProbeJson(), '{}');
+      assert.deepEqual(events, ['probe', 'decode', 'free-string', 'unload']);
+    });
+
+    it('unloads after freeing a native error', () => {
+      const events: string[] = [];
+      installNative(2, events);
+
+      assert.throws(() => readProbeJson(), /status 2/);
+      assert.deepEqual(events, ['probe', 'free-error', 'unload']);
+    });
+
+    it('unloads after decode failure and result free', () => {
+      const events: string[] = [];
+      installNative(0, events, () => {
+        throw new Error('decode failed');
+      });
+
+      assert.throws(() => readProbeJson(), /decode failed/);
+      assert.deepEqual(events, ['probe', 'decode', 'free-string', 'unload']);
+    });
+
+    it('unloads when symbol binding fails', () => {
+      const events: string[] = [];
+      _setProbeNativeDependencies(
+        (() => ({
+          path: 'fake',
+          version: () => 'test',
+          handle: { unload: () => events.push('unload') },
+        })) as never,
+        (() => {
+          throw new Error('binding failed');
+        }) as never,
+      );
+
+      assert.throws(() => readProbeJson(), /binding failed/);
+      assert.deepEqual(events, ['unload']);
+    });
+
+    it('unloads a null success result without freeing it', () => {
+      const events: string[] = [];
+      _setProbeNativeDependencies(
+        (() => ({
+          path: 'fake',
+          version: () => 'test',
+          handle: { unload: () => events.push('unload') },
+        })) as never,
+        ((_: unknown, spec: { symbol: string }) => {
+          if (spec.symbol === 'mxc_probe_request_json_with_error') {
+            return (_request: string | null, output: unknown[]) => {
+              events.push('probe');
+              output[0] = null;
+              return 0;
+            };
+          }
+          if (spec.symbol === 'mxc_string_free') {
+            return () => events.push('free-string');
+          }
+          return () => events.push('free-error');
+        }) as never,
+      );
+
+      assert.throws(() => readProbeJson(), /null success result/);
+      assert.deepEqual(events, ['probe', 'unload']);
+    });
+
+    it('survives repeated real loads and a malformed native request', {
+      skip: process.platform !== 'win32' || findMxcFfiLibrary() === null
+        ? 'requires a built Windows mxc_ffi library'
+        : false,
+    }, () => {
+      const entrypoint = pathToFileURL(path.join(process.cwd(), 'dist', 'index.js')).href;
+      const script = `
+        import { probeSandboxSupport } from ${JSON.stringify(entrypoint)};
+        const first = probeSandboxSupport();
+        const second = probeSandboxSupport();
+        const hasValidResult = (result) =>
+          result.probes && (result.tier !== undefined || result.error !== undefined);
+        if (!hasValidResult(first) || !hasValidResult(second)) {
+          throw new Error('invalid probe result');
+        }
+        try {
+          probeSandboxSupport({
+            version: 'malformed',
+            containment: 'processcontainer',
+            process: { commandLine: 'cmd /c exit 0' },
+          });
+          throw new Error('malformed request unexpectedly succeeded');
+        } catch (error) {
+          if (error?.code !== 'malformed_request') throw error;
+        }
+        console.log('native-probe-ok');
+      `;
+      const result = spawnSync(
+        process.execPath,
+        ['--input-type=module', '-e', script],
+        { encoding: 'utf8' },
+      );
+
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.match(result.stdout, /native-probe-ok/);
+    });
+  });
 
   it('preserves native status and error detail', () => {
     let errorFrees = 0;
