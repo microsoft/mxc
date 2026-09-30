@@ -19,6 +19,7 @@ public enum StateAwareContainment
 }
 
 /// <summary>The default action for traffic with no matching rule.</summary>
+[JsonConverter(typeof(CamelCaseJsonStringEnumConverter<StateAwareNetworkDefault>))]
 public enum StateAwareNetworkDefault
 {
     /// <summary>Deny traffic by default.</summary>

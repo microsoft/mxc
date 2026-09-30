@@ -276,7 +276,7 @@ public sealed class MxcSandboxProcess : ISandboxProcess
                         var text = Marshal.PtrToStringUTF8((IntPtr)json);
                         return string.IsNullOrEmpty(text)
                             ? Array.Empty<string>()
-                            : JsonSerializer.Deserialize<string[]>(text) ?? Array.Empty<string>();
+                            : MxcJson.Deserialize<string[]>(text) ?? Array.Empty<string>();
                     }
                     finally
                     {
@@ -317,7 +317,7 @@ public sealed class MxcSandboxProcess : ISandboxProcess
                         var text = Marshal.PtrToStringUTF8((IntPtr)json);
                         return string.IsNullOrEmpty(text)
                             ? null
-                            : JsonSerializer.Deserialize<SandboxOutputMetadata>(text);
+                            : MxcJson.Deserialize<SandboxOutputMetadata>(text);
                     }
                     finally
                     {

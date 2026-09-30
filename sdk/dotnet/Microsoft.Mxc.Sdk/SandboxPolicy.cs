@@ -88,6 +88,7 @@ public sealed class TelemetrySettings
 /// <summary>
 /// How <c>captureDenials</c> handles each ungranted access check while recording it.
 /// </summary>
+[JsonConverter(typeof(CamelCaseJsonStringEnumConverter<CaptureDenialsMode>))]
 public enum CaptureDenialsMode
 {
     /// <summary>
@@ -176,6 +177,7 @@ public sealed class NetworkPolicy
 }
 
 /// <summary>Allow or deny a network action.</summary>
+[JsonConverter(typeof(CamelCaseJsonStringEnumConverter<NetworkAction>))]
 public enum NetworkAction
 {
     /// <summary>Allow the traffic.</summary>
@@ -186,6 +188,7 @@ public enum NetworkAction
 }
 
 /// <summary>Transport protocol selector.</summary>
+[JsonConverter(typeof(CamelCaseJsonStringEnumConverter<NetworkProtocol>))]
 public enum NetworkProtocol
 {
     /// <summary>TCP.</summary>
@@ -288,6 +291,7 @@ public sealed class NetworkRuntimeConfig
 }
 
 /// <summary>Clipboard access level. Serialized as camelCase ("none"/"read"/"write"/"all").</summary>
+[JsonConverter(typeof(CamelCaseJsonStringEnumConverter<ClipboardPolicy>))]
 public enum ClipboardPolicy
 {
     /// <summary>No clipboard access.</summary>

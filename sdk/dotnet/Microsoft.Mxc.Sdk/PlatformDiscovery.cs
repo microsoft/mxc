@@ -169,28 +169,28 @@ public sealed class UiCapabilitySupport
 internal sealed class NativeAvailableBackend
 {
     [JsonPropertyName("backend")]
-    public string Backend { get; init; } = string.Empty;
+    public string Backend { get; set; } = string.Empty;
 
     [JsonPropertyName("tier")]
-    public string? Tier { get; init; }
+    public string? Tier { get; set; }
 
     [JsonPropertyName("capabilities")]
-    public string[] Capabilities { get; init; } = [];
+    public string[] Capabilities { get; set; } = [];
 
     [JsonPropertyName("warnings")]
-    public string[] Warnings { get; init; } = [];
+    public string[] Warnings { get; set; } = [];
 }
 
 internal sealed class NativePlatformSupport
 {
     [JsonPropertyName("isSupported")]
-    public bool IsSupported { get; init; }
+    public bool IsSupported { get; set; }
 
     [JsonPropertyName("reason")]
-    public string? Reason { get; init; }
+    public string? Reason { get; set; }
 
     [JsonPropertyName("availableMethods")]
-    public string[] AvailableMethods { get; init; } = [];
+    public string[] AvailableMethods { get; set; } = [];
 }
 
 internal sealed class NativeProbeOutput

@@ -107,3 +107,29 @@ jobs:
             throw 'Expected both backend-switch tests to run and pass with none skipped. The optional-backend lane is no longer verifying the enabled branch.'
           }
           Write-Host 'Optional backend switches verified against native availability.'
+
+      # Native AOT publish gate for the SDK's JSON layer. The smoke test never
+      # calls native code, so this needs neither a prepared backend nor the
+      # cargo-built mxc_ffi at runtime - only the ILCompiler plus the MSVC
+      # linker that windows-latest already provides. A reflection-dependent
+      # serialize/deserialize path (e.g. a wire type missing its
+      # [JsonSerializable] registration) surfaces as an IL/AOT/trim warning here
+      # and fails the publish; the reflection fallback is also disabled at
+      # runtime, so a gap that slips past the compiler throws when the exe runs.
+      - name: AOT publish gate (SDK JSON layer)
+        if: matrix.os_label == 'windows'
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'dotnet-aot-publish.log'
+          $pub = Join-Path $env:RUNNER_TEMP 'aot-smoke-publish'
+          dotnet publish Microsoft.Mxc.Sdk.AotSmokeTest -c Release -r win-x64 -o $pub --nologo 2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) { throw "AOT publish exited $LASTEXITCODE" }
+          $out = Get-Content -LiteralPath $log -Raw
+          if ($out -match 'warning IL|AOT analysis|Trim analysis') {
+            throw 'AOT publish emitted an IL/AOT/trim warning. The SDK JSON layer is no longer reflection-free.'
+          }
+          $exe = Join-Path $pub 'Microsoft.Mxc.Sdk.AotSmokeTest.exe'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Published AOT executable not found: $exe" }
+          & $exe
+          if ($LASTEXITCODE -ne 0) { throw "AOT smoke test exited $LASTEXITCODE" }
+          Write-Host 'AOT publish gate passed: reflection-free JSON layer verified.'

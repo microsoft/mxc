@@ -41,6 +41,14 @@ public static class MxcSandbox
     internal static IRequestProbeInterop RequestProbeInterop { get; set; } =
         PInvokeRequestProbeInterop.Instance;
 
+    private static readonly JsonSerializerOptions PublishedPolicyJsonOptions =
+        MxcJson.PublishedPolicyOptions;
+
+    private static JsonSerializerOptions PolicyJsonOptions(string version) =>
+        SchemaVersions.UsesLegacyNetworkDefaults(version)
+            ? PublishedPolicyJsonOptions
+            : MxcJson.Options;
+
     /// <summary>
     /// The version of the native <c>mxc_ffi</c> library.
     /// </summary>
@@ -85,7 +93,7 @@ public static class MxcSandbox
     /// </remarks>
     internal static IReadOnlyList<AvailableBackend> ParseAvailableBackends(string json)
     {
-        var backends = JsonSerializer.Deserialize<NativeAvailableBackend[]>(json, JsonOptions)
+        var backends = MxcJson.Deserialize<NativeAvailableBackend[]>(json)
             ?? throw new JsonException("Native backend discovery returned null JSON.");
         return backends.Select(MapAvailableBackend).ToArray();
     }
@@ -101,7 +109,7 @@ public static class MxcSandbox
             var json = ReadOwnedJson(
                 NativeMethods.mxc_platform_support_json(),
                 "probing platform support");
-            var support = JsonSerializer.Deserialize<NativePlatformSupport>(json, JsonOptions)
+            var support = MxcJson.Deserialize<NativePlatformSupport>(json)
                 ?? throw new JsonException("Native platform support returned null JSON.");
             return new PlatformSupport
             {
@@ -430,13 +438,42 @@ public static class MxcSandbox
     internal static string SerializePolicy(SandboxPolicy policy)
     {
         ArgumentNullException.ThrowIfNull(policy);
-        return JsonSerializer.Serialize(policy, JsonOptions);
+        ValidateNetworkVersion(policy);
+        return MxcJson.Serialize(policy, PolicyJsonOptions(policy.Version));
     }
 
     internal static string SerializeRequest(SandboxRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-        return JsonSerializer.Serialize(PrepareRequest(request), JsonOptions);
+        ValidateNetworkVersion(request.Policy);
+        return MxcJson.Serialize(PrepareRequest(request), PolicyJsonOptions(request.Policy.Version));
+    }
+
+    private static void ValidateNetworkVersion(SandboxPolicy policy)
+    {
+        if (policy.Network?.LegacyFieldSpecified is not { } field)
+        {
+            return;
+        }
+
+        if (!SchemaVersions.IsSupported(policy.Version))
+        {
+            throw new ArgumentException(
+                $"Schema version '{policy.Version}' is not supported. "
+                    + $"Use a version from {SchemaVersions.Minimum} through "
+                    + $"{SchemaVersions.MaximumSupported}.",
+                nameof(policy));
+        }
+
+        if (!SchemaVersions.UsesLegacyNetworkDefaults(policy.Version))
+        {
+            throw new ArgumentException(
+                $"Schema {policy.Version} no longer supports authored network.{field}, including null. Legacy network authoring "
+                    + "(AllowOutbound, AllowLocalNetwork, AllowedHosts, BlockedHosts, Proxy). "
+                    + "Use Network.Egress/Ingress and Network.RuntimeConfig.NetworkProxy explicitly, "
+                    + "or retain schema 0.8.0-alpha. Hostnames are not converted to CIDRs.",
+                nameof(policy));
+        }
     }
 
     private static SandboxRequest PrepareRequest(SandboxRequest request)
@@ -594,10 +631,10 @@ public static class MxcSandbox
     private static SandboxOutputMetadata? DeserializeOutputMetadata(string? json) =>
         string.IsNullOrEmpty(json)
             ? null
-            : JsonSerializer.Deserialize<SandboxOutputMetadata>(json);
+            : MxcJson.Deserialize<SandboxOutputMetadata>(json);
 
     private static IReadOnlyList<string> DeserializeWarnings(string? json) =>
         string.IsNullOrEmpty(json)
             ? Array.Empty<string>()
-            : JsonSerializer.Deserialize<string[]>(json) ?? Array.Empty<string>();
+            : MxcJson.Deserialize<string[]>(json) ?? Array.Empty<string>();
 }

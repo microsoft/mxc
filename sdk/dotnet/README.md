@@ -741,6 +741,10 @@ exception messages and stack traces. See
   interactive terminal inside an isolation session. Terminal behaviour has no
   automated oracle, so its `interactive`, `streaming` and `resize` scenarios are
   judged by whoever runs them; each states what to look for.
+- **`Microsoft.Mxc.Sdk.AotSmokeTest`** — a console project that proves the JSON
+  layer is Native AOT and trimming safe. It exercises the serialize/
+  deserialize paths with the `System.Text.Json` reflection fallback disabled and
+  is meant to be published with `-p:PublishAot=true`.
 - **`Microsoft.Mxc.Sdk.Tests`** — xUnit v3 tests. The streaming end-to-end tests
   need a capable host and skip, with a reason, unless `MXC_E2E_HOST_PREPPED=1`.
   The isolation-session end-to-end tests skip unless `GetAvailableBackends()`
@@ -771,6 +775,27 @@ Windows RID. The official package includes `mxc_ffi` for `win-x64`,
 `win-arm64`, `linux-x64`, `linux-arm64`, and `osx-arm64`. The managed
 `Microsoft.Mxc.Sdk.dll` is AnyCPU so the same assembly loads with each
 RID-specific native asset.
+
+## Native AOT compatibility
+
+The library is **Native AOT and trimming compatible**: it builds with
+`<IsAotCompatible>true</IsAotCompatible>`, so the .NET Native AOT, trimming, and
+single-file analyzers run under `TreatWarningsAsErrors`. This means that any
+`System.Text.Json` (de)serialization must be done via source-generation rather than
+reflection (the default mode).
+
+The **`Microsoft.Mxc.Sdk.AotSmokeTest`** console project proves this end to end:
+it disables `System.Text.Json` reflection fallback
+(`JsonSerializerIsReflectionEnabledByDefault=false`) and exercises the
+serialize/deserialize paths in isolation. Publish and run it with:
+
+```
+dotnet publish sdk/dotnet/Microsoft.Mxc.Sdk.AotSmokeTest -c Release -r win-x64
+```
+
+A clean publish (no `warning IL*`) plus a passing run is the AOT gate. The
+Native AOT link step needs the platform C toolchain (on Windows, the MSVC linker
+from a Visual Studio / Build Tools install, run from a developer command prompt).
 
 ## Supported surface
 
