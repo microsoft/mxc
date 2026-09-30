@@ -654,7 +654,9 @@ function New-Config {
     if ($PSBoundParameters.ContainsKey('Capabilities')) { $pc['capabilities'] = @($Capabilities) }
     if ($null -ne $LeastPrivilege)  { $pc['leastPrivilege'] = [bool]$LeastPrivilege }
     if ($null -ne $LearningMode)    { $pc['learningMode']   = [bool]$LearningMode }
-    if ($hasEnumerate) { $pc['filesystem'] = [ordered]@{ enumeratePaths = @($EnumeratePaths) } }
+    if ($null -ne $EnumeratePaths -and $EnumeratePaths.Count -gt 0) {
+        $pc['filesystem'] = [ordered]@{ enumeratePaths = @($EnumeratePaths) }
+    }
     if ($CaptureDenialsMode -or $CaptureDenialsOutputPath -or $null -ne $CaptureDenialsRetainEtl) {
         $cd = [ordered]@{}
         if ($CaptureDenialsMode)       { $cd['mode']       = $CaptureDenialsMode }
