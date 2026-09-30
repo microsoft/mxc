@@ -830,18 +830,25 @@ impl PreparedSandbox {
     ) -> Vec<String> {
         let mut failures = Vec::new();
 
-        // The workload is still behind these chains, so taking them out would
-        // leave it running with no enforcement at all. Chains that were never
-        // hooked filter nothing, so they are removed as usual.
-        if self.stop_failed && self.fw_manager.is_hooked() {
-            self.retain_rules_past_drop();
-            let failure = "the container could not be stopped, so its firewall rules were left \
-                           in place rather than removed around a workload that may still be \
-                           running"
-                .to_string();
+        if self.stop_failed {
+            // Hooked chains are still around a workload that may be running, so
+            // taking them out would leave it with no enforcement at all. Ones
+            // that were never hooked filter nothing and come out below.
+            let hooked = self.fw_manager.is_hooked();
+            let failure = if hooked {
+                self.retain_rules_past_drop();
+                "the container could not be stopped, so its firewall rules were left in \
+                 place rather than removed around a workload that may still be running"
+            } else {
+                "the container could not be stopped, so it may still be running"
+            };
+
             let _ = writeln!(logger, "Warning: {}", failure);
-            failures.push(failure);
-            return failures;
+            failures.push(failure.to_string());
+
+            if hooked {
+                return failures;
+            }
         }
 
         if self.pinned && cleanup_policy {
@@ -1807,6 +1814,36 @@ mod tests {
             issued_before,
             "the container survived the destroy, so dropping the sandbox must not strip the \
              chains still filtering it; issued {:?}",
+            fake.issued()
+        );
+    }
+
+    #[test]
+    fn a_container_that_would_not_stop_is_reported_even_with_nothing_hooked() {
+        let fake = crate::network_iptables::test_firewall::install();
+        let mut prepared = prepared_with_applied_rules("stop-refused-unhooked");
+
+        assert!(
+            !prepared.fw_manager.is_hooked(),
+            "precondition: the fixture's chain is on the host, not in a netns"
+        );
+
+        prepared
+            .force_stop()
+            .expect_err("a container that does not exist cannot be stopped");
+
+        let issued_before = fake.issued().len();
+        let mut logger = Logger::new(Mode::Buffer);
+        let failures = prepared.remove_in_container_state(true, &mut logger);
+
+        assert!(
+            failures.iter().any(|f| f.contains("could not be stopped")),
+            "a container left running has to reach the caller whether or not anything was \
+             hooked, and it is what keeps teardown retryable; got {failures:?}"
+        );
+        assert!(
+            fake.issued().len() > issued_before,
+            "an unhooked chain filters nothing, so it still comes out; issued {:?}",
             fake.issued()
         );
     }
