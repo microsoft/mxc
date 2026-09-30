@@ -2604,8 +2604,8 @@ mod tests {
         );
     }
     /// An exclusion outside its peer overlaps nothing, so the peer must survive
-    /// whole. Subtraction that mishandled the disjoint case would carve a hole
-    /// out of a block the caller never narrowed.
+    /// whole. Subtraction that mishandled the disjoint case would incorrectly
+    /// remove addresses from a block the caller never narrowed.
     #[test]
     fn a_disjoint_exclusion_leaves_the_peer_intact() {
         let req = directional_rules_request(
