@@ -25,9 +25,7 @@
 use std::path::Path;
 
 use learning_mode_core::AnalysisResult;
-use wxc_common::models::{
-    CaptureDenialsErrorOutput, FailurePhase, SandboxOutputMetadata, ScriptResponse,
-};
+use wxc_common::models::{CaptureDenialsErrorOutput, SandboxOutputMetadata, ScriptResponse};
 
 /// Error returned when an injected guarded-capture implementation cannot
 /// transfer retained ETL requested by the caller.
@@ -170,10 +168,7 @@ pub fn validate_retain_etl_supported(
     native_capture_retains_etl: bool,
 ) -> Result<(), ScriptResponse> {
     if retain_etl && !native_capture_retains_etl && !provider_allows_trace_transfer {
-        return Err(ScriptResponse {
-            failure_phase: FailurePhase::BackendUnavailable,
-            ..ScriptResponse::error(RETAIN_ETL_UNSUPPORTED_MSG)
-        });
+        return Err(ScriptResponse::unavailable(RETAIN_ETL_UNSUPPORTED_MSG));
     }
     Ok(())
 }
@@ -696,7 +691,10 @@ mod tests {
     #[test]
     fn retain_etl_validation_rejects_when_no_transfer_and_no_native() {
         let error = validate_retain_etl_supported(true, false, false).unwrap_err();
-        assert_eq!(error.failure_phase, FailurePhase::BackendUnavailable);
+        assert_eq!(
+            error.failure_phase,
+            wxc_common::models::FailurePhase::BackendUnavailable
+        );
         assert_eq!(error.error_message, RETAIN_ETL_UNSUPPORTED_MSG);
     }
 

@@ -59,7 +59,7 @@ impl OneShotError {
         };
 
         ScriptResponse {
-            exit_code: -1,
+            exit_code: failure_phase.mxc_exit_code(),
             standard_err: summary.to_string(),
             error_message: summary.to_string(),
             extended_error: detail,
@@ -72,10 +72,13 @@ impl OneShotError {
     /// whether a retry could ever succeed.
     fn failure_phase(&self) -> FailurePhase {
         match self {
-            // Non-retryable preflight: the request/config cannot be honored or a
-            // required host prerequisite is missing. Retrying the same input on
-            // the same host will not succeed.
-            OneShotError::SandboxUnavailable(_) | OneShotError::Policy(_) => FailurePhase::Rejected,
+            // The request's policy cannot be honored as written; the caller has
+            // to change the input.
+            OneShotError::Policy(_) => FailurePhase::Rejected,
+            // The host cannot run Windows Sandbox at all (feature disabled or
+            // missing), so a caller may fall back to another tier rather than
+            // treat this as a refused request.
+            OneShotError::SandboxUnavailable(_) => FailurePhase::BackendUnavailable,
             // Launch attempt failed (incl. transient single-instance contention,
             // async-runtime setup, capture-proof, rendezvous wait, and the
             // initial guest connect) — generally worth retrying.
@@ -102,18 +105,21 @@ mod tests {
     }
 
     #[test]
-    fn policy_and_prereq_errors_map_to_rejected() {
-        for err in [
-            OneShotError::Policy("denied path in share".to_string()),
-            OneShotError::SandboxUnavailable("feature off".to_string()),
-        ] {
-            let resp = err.into_response();
-            assert_eq!(
-                resp.failure_phase,
-                FailurePhase::Rejected,
-                "non-retryable preflight should map to Rejected"
-            );
-        }
+    fn policy_and_prereq_errors_map_to_their_own_phases() {
+        assert_eq!(
+            OneShotError::Policy("denied path in share".to_string())
+                .into_response()
+                .failure_phase,
+            FailurePhase::Rejected,
+            "a refused policy is the caller's to fix"
+        );
+        assert_eq!(
+            OneShotError::SandboxUnavailable("feature off".to_string())
+                .into_response()
+                .failure_phase,
+            FailurePhase::BackendUnavailable,
+            "a host without the feature is not a refused request"
+        );
     }
 
     #[test]

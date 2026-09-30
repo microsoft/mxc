@@ -270,10 +270,11 @@ fn exec_to_response(exec: bridge::ExecResult) -> ScriptResponse {
     } else {
         exec.error_message
     };
-    let failure_phase = if exec.exit_code == 0 {
-        FailurePhase::None
-    } else {
-        FailurePhase::ProcessExited
+    let failure_phase = match exec.termination {
+        bridge::Termination::TimedOut => FailurePhase::Timeout,
+        bridge::Termination::Failed => FailurePhase::PostLaunchFailed,
+        bridge::Termination::Exited if exec.exit_code == 0 => FailurePhase::None,
+        bridge::Termination::Exited => FailurePhase::ProcessExited,
     };
     ScriptResponse {
         exit_code: exec.exit_code,
@@ -330,6 +331,7 @@ mod tests {
     fn exec_to_response_zero_exit_is_no_failure() {
         let exec = bridge::ExecResult {
             exit_code: 0,
+            termination: bridge::Termination::Exited,
             error_message: String::new(),
             stdout: b"hello\n".to_vec(),
             stderr: Vec::new(),
@@ -345,6 +347,7 @@ mod tests {
     fn exec_to_response_nonzero_exit_is_process_exited() {
         let exec = bridge::ExecResult {
             exit_code: 42,
+            termination: bridge::Termination::Exited,
             error_message: String::new(),
             stdout: Vec::new(),
             stderr: b"boom\n".to_vec(),
@@ -355,5 +358,29 @@ mod tests {
         assert_eq!(resp.failure_phase, FailurePhase::ProcessExited);
         // stderr is mirrored into error_message when the agent gave none.
         assert_eq!(resp.error_message, "boom\n");
+    }
+
+    #[test]
+    fn exec_to_response_separates_a_watchdog_kill_from_a_workload_exit() {
+        // Both report -1, so only the termination tells them apart.
+        let timed_out = exec_to_response(bridge::ExecResult {
+            exit_code: -1,
+            termination: bridge::Termination::TimedOut,
+            error_message: "watchdog".to_string(),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            control_residual: Vec::new(),
+        });
+        assert_eq!(timed_out.failure_phase, FailurePhase::Timeout);
+
+        let workload = exec_to_response(bridge::ExecResult {
+            exit_code: -1,
+            termination: bridge::Termination::Exited,
+            error_message: String::new(),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            control_residual: Vec::new(),
+        });
+        assert_eq!(workload.failure_phase, FailurePhase::ProcessExited);
     }
 }

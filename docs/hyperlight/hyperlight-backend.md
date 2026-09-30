@@ -113,7 +113,7 @@ to the snapshot between calls.
 
 | Aspect | Behaviour |
 |---|---|
-| Exit code | The script's: `sys.exit(N)`, `process.exit(N)` or `exit N` gives `N`, an uncaught exception gives `1`, a runner error gives `-1` with the reason in `error_message` |
+| Exit code | The script's: `sys.exit(N)`, `process.exit(N)` or `exit N` gives `N`, an uncaught exception gives `1`. A refused request exits `1` with `error.code = "policy_validation"`; a missing guest image exits `-1` with `"backend_unavailable"`; any other runner failure exits `-1` with `"backend_error"`, the reason in `error_message` |
 | Timeout | `process.timeout` bounds the run; a guest that overruns is interrupted and the run reports `execution timed out` |
 | stdout / stderr | Inherited by the guest; `ScriptResponse.standard_out` stays empty, so capture at the process level |
 

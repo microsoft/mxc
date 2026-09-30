@@ -372,9 +372,9 @@ $null = $results.Add((Run-WslcTest "wslc_destroy_on_exit_true.json" `
     -OutputContains "PASS: container ran (destroyOnExit=true)"))
 # `false` asks for a container that outlives the run, which one-shot cannot
 # deliver. It is refused before any container is created, so the payload must
-# never run.
+# never run. A refusal exits 1, like a parser-side rejection.
 $null = $results.Add((Run-WslcTest "wslc_destroy_on_exit_false_rejected.json" `
-    -ExpectedExit -1 `
+    -ExpectedExit 1 `
     -OutputContains "destroyOnExit=false"))
 
 Write-Host "`n--- State-Aware Lifecycle Tests ---" -ForegroundColor Cyan

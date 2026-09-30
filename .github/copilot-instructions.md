@@ -87,6 +87,28 @@ See [`docs/schema-codegen.md`](../docs/schema-codegen.md) for regeneration comma
 - Do not weaken validation or convert failures into success-shaped fallbacks.
 - Telemetry is Windows-only, requires explicit user consent, and fails closed. Administrative policy may restrict consent but may never grant it. See [`docs/telemetry/`](../docs/telemetry/).
 
+### Classifying a failure
+
+`FailurePhase` derives the wire error code and the process exit status, so pick the
+`ScriptResponse` constructor that matches the *cause*. Never hand-write an exit code.
+
+| Constructor | Phase | Code | Exit | Use when |
+|---|---|---|---|---|
+| `rejected` | `Rejected` | `policy_validation` | 1 | Only a changed request can succeed, on every host. |
+| `unavailable` | `BackendUnavailable` | `backend_unavailable` | -1 | A host prerequisite or build feature is missing, so a caller may fall back a tier. |
+| `error` | any other | `backend_error` | -1 | A runtime fault: spawn, syscall, IO, crash, invariant. |
+
+- A workload that ran keeps its own exit code. A spent deadline is an MXC failure, not a
+  workload exit, so tag it `FailurePhase::Timeout` rather than reporting the kill as the
+  workload's status.
+- When a cause is genuinely mixed, keep `error`. Labelling infrastructure as
+  `policy_validation` tells a caller to edit a request that was never wrong.
+- Distinguish a disabled build feature (`backend_unavailable`) from a missing experimental
+  opt-in (`malformed_request`).
+- For a failure raised before a `ScriptResponse` exists, exit through
+  `script_runner::emit_mxc_error_exit` so the caller still receives a typed envelope.
+- Cover a new failure site with a test that asserts the phase, not just the message.
+
 ## Documentation
 
 Update documentation in the same change when behavior changes:

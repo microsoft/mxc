@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use wxc_common::logger::Logger;
 use wxc_common::models::{
-    ContainerPolicy, ExecutionRequest, LifecycleConfig, LxcConfig, NetworkEnforcementMode,
-    ScriptResponse,
+    ContainerPolicy, ExecutionRequest, FailurePhase, LifecycleConfig, LxcConfig,
+    NetworkEnforcementMode, ScriptResponse,
 };
 use wxc_common::sandbox_process::{SandboxBackend, SandboxProcess, StdioMode};
 use wxc_common::script_runner::ScriptRunner;
@@ -26,7 +26,7 @@ use wxc_common::sandbox_process::{
 };
 
 use crate::filesystem_mounts;
-use crate::lxc_bindings::{ContainerFirewall, LxcContainer, StartNetwork};
+use crate::lxc_bindings::{AttachError, ContainerFirewall, LxcContainer, StartNetwork};
 use crate::network_ingress::IngressManager;
 use crate::network_iptables::{
     needs_network, plan_network, uses_directional_keys, EgressHookPoint, NetworkIptablesManager,
@@ -401,14 +401,14 @@ impl LxcScriptRunner {
                 &normalized
             }
             Ok(None) => request,
-            Err(msg) => return Err(ScriptResponse::error(&msg)),
+            Err(msg) => return Err(ScriptResponse::rejected(&msg)),
         };
         if let Err(msg) = wxc_common::filesystem_access::check_delegation(&request.policy) {
-            return Err(ScriptResponse::error(&msg));
+            return Err(ScriptResponse::rejected(&msg));
         }
 
         if self.config.distribution.is_empty() || self.config.release.is_empty() {
-            return Err(ScriptResponse::error(
+            return Err(ScriptResponse::rejected(
                 "LXC distribution and release are required \
                  (e.g., \"distribution\": \"alpine\", \"release\": \"3.23\")",
             ));
@@ -427,7 +427,7 @@ impl LxcScriptRunner {
             .map(|address| address.to_url())
         {
             if wxc_common::proxy_env::proxy_url_has_credentials(&url) {
-                return Err(ScriptResponse::error(&format!(
+                return Err(ScriptResponse::rejected(&format!(
                     "LXC: network.proxy.url must not carry credentials ('{}'). LXC passes the \
                      proxy URL to lxc-attach as a --set-var command-line argument, and process \
                      arguments are world-readable through /proc/<pid>/cmdline, so the password \
@@ -445,7 +445,7 @@ impl LxcScriptRunner {
             &request.policy,
             uses_directional_keys(&request.policy),
         ) {
-            return Err(ScriptResponse::error(&msg));
+            return Err(ScriptResponse::rejected(&msg));
         }
 
         if self.destroy_on_exit {
@@ -731,7 +731,23 @@ impl LxcScriptRunner {
                 error_message: String::new(),
                 ..Default::default()
             },
-            Err(e) => ScriptResponse::error(&format!("Execution failed: {}", e)),
+            // A spent deadline is an MXC failure like any other here — both
+            // exit -1 with `backend_error` — but the phase keeps them apart for
+            // diagnostics and telemetry. Neither carries workload output, so
+            // the diagnostic stays in `error_message`: `standard_err` is
+            // relayed bare for a phase that ran, which would duplicate it.
+            Err(e) => {
+                let failure_phase = match e {
+                    AttachError::Timeout(_) => FailurePhase::Timeout,
+                    AttachError::Failed(_) => FailurePhase::PostLaunchFailed,
+                };
+                ScriptResponse {
+                    exit_code: failure_phase.mxc_exit_code(),
+                    error_message: format!("Execution failed: {}", e),
+                    failure_phase,
+                    ..Default::default()
+                }
+            }
         };
 
         prepared.tear_down(self.cleanup_policy, self.destroy_on_exit, logger);
@@ -1039,11 +1055,11 @@ fn lxc_network_policy_support() -> NetworkPolicySupport {
 impl ScriptRunner for LxcScriptRunner {
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         if request.policy.runtime_network_proxy_specified {
-            return Err(ScriptResponse::error(LXC_RUNTIME_PROXY_UNSUPPORTED));
+            return Err(ScriptResponse::rejected(LXC_RUNTIME_PROXY_UNSUPPORTED));
         }
         validate_network_policy_support(request, lxc_network_policy_support())?;
         if asks_for_capabilities_enforcement(request) {
-            return Err(ScriptResponse::error(LXC_CAPABILITIES_MODE_UNSUPPORTED));
+            return Err(ScriptResponse::rejected(LXC_CAPABILITIES_MODE_UNSUPPORTED));
         }
         Ok(())
     }
@@ -1097,7 +1113,7 @@ impl LxcScriptRunner {
         stdio: StdioMode,
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
         if stdio == StdioMode::Inherit {
-            return Err(ScriptResponse::error(LXC_INHERIT_STDIO_UNSUPPORTED));
+            return Err(ScriptResponse::rejected(LXC_INHERIT_STDIO_UNSUPPORTED));
         }
         validate_common(request)?;
         SandboxBackend::validate(self, request)?;
@@ -1189,7 +1205,7 @@ impl LxcScriptRunner {
         _request: &ExecutionRequest,
         _logger: &mut Logger,
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
-        Err(ScriptResponse::error(LXC_STREAMING_LINUX_ONLY))
+        Err(ScriptResponse::unavailable(LXC_STREAMING_LINUX_ONLY))
     }
 }
 
@@ -2901,6 +2917,11 @@ mod tests {
             .expect("the library path has no pty to hand a workload");
 
         assert_eq!(refusal.error_message, LXC_INHERIT_STDIO_UNSUPPORTED);
+        assert_eq!(
+            refusal.failure_phase,
+            FailurePhase::Rejected,
+            "only a changed call can succeed, so this is a refusal rather than a fault"
+        );
         assert!(
             !logger.get_buffer().contains("Container name:"),
             "the refusal must land before a container is named"

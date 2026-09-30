@@ -786,7 +786,11 @@ mod runner_tests {
 
         let response = runner.execute(&request, &mut logger);
 
-        assert_eq!(response.exit_code, -1);
+        assert_eq!(response.exit_code, 1);
+        assert_eq!(
+            response.failure_phase,
+            crate::models::FailurePhase::Rejected
+        );
         assert_eq!(validations.load(Ordering::Relaxed), 0);
         assert_eq!(direct_spawns.load(Ordering::Relaxed), 0);
     }

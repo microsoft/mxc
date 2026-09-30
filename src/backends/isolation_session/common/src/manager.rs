@@ -381,16 +381,24 @@ impl IsolationSessionManager {
 
     /// Step 3: Create a process inside the started isolation session and run it
     /// to completion. Output is streamed live to the calling process's stdio via
-    /// internal relay threads; only the exit code is returned.
+    /// internal relay threads; only the outcome is returned.
     ///
     /// This is the **relay** path, reached by `wxc-exec` and by an in-process
     /// caller that asked to attach. A caller that wants the streams handed back
     /// uses [`Self::piped_exec_handle`] instead.
+    ///
+    /// `timeout_ms` is the caller's deadline, enforced by the waiter. Arm the
+    /// service-side timer with [`with_service_timeout_grace`] before calling:
+    /// without that margin the two deadlines coincide, the service wins, and a
+    /// timeout arrives as an ordinary exit.
+    ///
+    /// [`with_service_timeout_grace`]: super::process_options::with_service_timeout_grace
     pub(super) fn create_process(
         &self,
         options: &ProcessOptions,
+        timeout_ms: u32,
         logger: Option<&mut Logger>,
-    ) -> Result<i32, IsolationSessionError> {
+    ) -> Result<ExecOutcome, IsolationSessionError> {
         owned_thread::call(&self.impersonation, || {
             // Everything fallible that does not need the workload runs first, so no
             // failure can strand a running one.
@@ -562,14 +570,11 @@ impl IsolationSessionManager {
                 }
             };
 
-            let outcome = started.wait(options.timeout_ms)?;
+            let outcome = started.wait(timeout_ms)?;
             scope.stop_stdin();
             scope.finish();
 
-            Ok(match outcome {
-                ExecOutcome::Exited(exit_code) => exit_code,
-                ExecOutcome::TimedOut => WAIT_FOR_EXIT_TIMEOUT,
-            })
+            Ok(outcome)
         })
     }
 

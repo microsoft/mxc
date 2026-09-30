@@ -9,13 +9,14 @@ use std::fmt::Write;
 use std::io::IsTerminal;
 
 use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, ScriptResponse};
+use wxc_common::models::{ExecutionRequest, FailurePhase, ScriptResponse};
 use wxc_common::script_runner::ScriptRunner;
+use wxc_common::state_aware_backend::ExecOutcome;
 use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
 use super::manager::{log_sandbox_torn_down, IsolationSessionManager, TeardownOutcome};
 use super::policy::{reject_unhonorable_environment, validate_provision_policy};
-use super::process_options::build_process_options;
+use super::process_options::{build_process_options, with_service_timeout_grace};
 use super::IsolationSessionRunner;
 
 /// Refuses the `lifecycle` settings the backend cannot honor.
@@ -34,13 +35,13 @@ use super::IsolationSessionRunner;
 ///   anything applied — so there is nothing to retain.
 fn reject_unsupported_lifecycle(request: &ExecutionRequest) -> Result<(), ScriptResponse> {
     if !request.lifecycle.destroy_on_exit {
-        return Err(ScriptResponse::error(
+        return Err(ScriptResponse::rejected(
             "lifecycle.destroyOnExit=false is not supported by the isolation session backend; \
              the session is always stopped and the agent user removed",
         ));
     }
     if request.lifecycle.preserve_policy {
-        return Err(ScriptResponse::error(
+        return Err(ScriptResponse::rejected(
             "lifecycle.preservePolicy=true is not supported by the isolation session backend; \
              it installs no persistent filesystem or network enforcement, so there is none \
              to preserve",
@@ -79,6 +80,8 @@ impl ScriptRunner for IsolationSessionRunner {
         // console when launched directly from a shell.
         let interactive = std::io::stdout().is_terminal();
         let options = build_process_options(request, interactive);
+        let timeout_ms = options.timeout_ms;
+        let options = with_service_timeout_grace(options);
 
         let _ = writeln!(
             logger,
@@ -126,7 +129,7 @@ impl ScriptRunner for IsolationSessionRunner {
             return e.into();
         }
 
-        let exit_code = match manager.create_process(&options, Some(logger)) {
+        let exec_outcome = match manager.create_process(&options, timeout_ms, Some(logger)) {
             Ok(code) => code,
             Err(e) => {
                 let stopped = manager.stop_session().is_ok();
@@ -164,12 +167,25 @@ impl ScriptRunner for IsolationSessionRunner {
         // Output already streamed live to wxc-exec's stdio via relay
         // threads in `create_process` — captured fields intentionally
         // empty (same pattern as AppContainer).
-        ScriptResponse {
-            exit_code,
-            standard_out: String::new(),
-            standard_err: String::new(),
-            error_message: String::new(),
-            ..Default::default()
+        match exec_outcome {
+            ExecOutcome::Exited(exit_code) => ScriptResponse {
+                exit_code,
+                standard_out: String::new(),
+                standard_err: String::new(),
+                error_message: String::new(),
+                ..Default::default()
+            },
+            // A spent deadline is an MXC failure, not the workload's own
+            // result: it exits -1 with `backend_error`, distinct from the 1
+            // that a refused policy carries. The diagnostic stays in
+            // `error_message`; `standard_err` is reserved for the workload's
+            // own bytes, which the executor relays for a phase that ran.
+            ExecOutcome::TimedOut => ScriptResponse {
+                exit_code: FailurePhase::Timeout.mxc_exit_code(),
+                error_message: format!("Script execution timed out after {} ms", timeout_ms),
+                failure_phase: FailurePhase::Timeout,
+                ..Default::default()
+            },
         }
     }
 }

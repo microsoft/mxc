@@ -926,7 +926,7 @@ mod tests {
             let resp = ScriptResponse {
                 exit_code: -1,
                 error_message: "boom".to_string(),
-                failure_phase: phase.clone(),
+                failure_phase: phase,
                 ..Default::default()
             };
             assert_eq!(sr_err(resp).kind(), expected, "phase {phase:?}");

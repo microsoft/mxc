@@ -246,3 +246,15 @@ preflight.
 | ------------------------------- | ----------------------------------- |
 | Both `allowedHosts` + `blockedHosts` | Rejected at preflight (mutually exclusive) |
 | File writing outside `/mnt/rw/` | `OSError: Read-only file system`    |
+
+## Exit Codes
+
+A workload that ran keeps its own exit code. MXC's own failures are separated by
+`error.code`:
+
+| Failure | Exit | `error.code` |
+| --- | --- | --- |
+| Refused request (unsupported policy, `workingDirectory`, `deniedPaths`, proxy, mixed network posture) | `1` | `policy_validation` |
+| A runner artifact (`nanvixd`, ramfs, initrd, `bin/`) is missing | `-1` | `backend_unavailable` |
+| Snapshot generation, staging, or host name resolution failed | `-1` | `backend_error` |
+| Spawn failure, guest crash, or watchdog timeout | `-1` | `backend_error` |

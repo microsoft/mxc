@@ -70,7 +70,9 @@ fn require_experimental_optin(
         wxc_common::models::ContainmentBackend::WindowsSandbox
     ) && !parsed.request().experimental_enabled
     {
-        return Err(MxcError::backend_unavailable(format!(
+        // The caller can fix this by opting in, so it matches the
+        // run-to-completion gate rather than reporting a missing backend.
+        return Err(MxcError::malformed_request(format!(
             "{backend:?} is an experimental backend; enable experimental features to use it"
         )));
     }
@@ -1388,7 +1390,7 @@ mod tests {
 
         let error = run_state_aware(parsed, false).unwrap_err();
 
-        assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
+        assert_eq!(error.code, MxcErrorCode::MalformedRequest);
         assert!(error.message.contains("experimental"));
     }
 
@@ -1662,14 +1664,14 @@ mod tests {
                     let error = run_state_aware(parsed.clone(), true).unwrap_err();
                     assert_eq!(
                         error.code,
-                        MxcErrorCode::BackendUnavailable,
+                        MxcErrorCode::MalformedRequest,
                         "{backend} {phase}"
                     );
                     assert!(error.message.contains("experimental"));
                     let error = exec_state_aware(parsed)
                         .err()
                         .expect("opt-in must be required");
-                    assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
+                    assert_eq!(error.code, MxcErrorCode::MalformedRequest);
                     assert!(error.message.contains("experimental"));
                 }
 
@@ -1879,7 +1881,7 @@ mod tests {
         );
 
         // Provision of an experimental backend without --experimental —
-        // `BackendUnavailable` → `InitError`; the shared classifier keeps
+        // `MalformedRequest` → `ConfigError`; the shared classifier keeps
         // streaming and state-aware attribution in lockstep.
         let error = super::run_state_aware_json(
             r#"{"version":"1.1.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
@@ -1887,10 +1889,10 @@ mod tests {
             false,
         )
         .unwrap_err();
-        assert_eq!(error.code, ErrorCode::BackendUnavailable);
+        assert_eq!(error.code, ErrorCode::MalformedRequest);
         assert_eq!(
-            telemetry::classify_mxc_error(&MxcError::backend_unavailable(error.message)),
-            FailureReason::InitError
+            telemetry::classify_mxc_error(&MxcError::malformed_request(error.message)),
+            FailureReason::ConfigError
         );
     }
 
@@ -1916,7 +1918,7 @@ mod tests {
                 false,
             )
             .unwrap_err();
-            assert_eq!(error.code, ErrorCode::BackendUnavailable);
+            assert_eq!(error.code, ErrorCode::MalformedRequest);
         }
     }
 

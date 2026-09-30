@@ -612,7 +612,7 @@ mod tests {
     #[test]
     fn experimental_backend_is_refused_without_the_optin() {
         let mut out = call_opt(WINDOWS_SANDBOX_PROVISION_REQUEST, true, false);
-        assert_eq!(out.status, crate::MXC_STATUS_BACKEND_UNAVAILABLE);
+        assert_eq!(out.status, crate::MXC_STATUS_MALFORMED_REQUEST);
         assert!(!out.error.message_utf8.is_null());
         assert!(out.error.operation_utf8.is_null());
         assert!(out.error.native_code_utf8.is_null());
@@ -622,7 +622,7 @@ mod tests {
     }
 
     /// Passing the opt-in gets past the gate. Asserting "not
-    /// `BACKEND_UNAVAILABLE`" rather than a specific success keeps this
+    /// `MALFORMED_REQUEST`" rather than a specific success keeps this
     /// host-independent while still failing if the flag is dropped on the way
     /// down; the dry run keeps it side-effect-free.
     #[test]
@@ -630,13 +630,8 @@ mod tests {
         let mut out = call_opt(WINDOWS_SANDBOX_PROVISION_REQUEST, true, true);
         assert_ne!(
             out.status,
-            crate::MXC_STATUS_BACKEND_UNAVAILABLE,
-            "the opt-in must pass the experimental-backend gate"
-        );
-        assert_ne!(
-            out.status,
             crate::MXC_STATUS_MALFORMED_REQUEST,
-            "the exact request must reach backend dispatch"
+            "the opt-in must pass the experimental-backend gate"
         );
         // SAFETY: filled by `mxc_state_aware`.
         unsafe { mxc_state_aware_result_free(&mut out) };
@@ -663,9 +658,9 @@ mod tests {
                 unsafe { mxc_state_aware_exec(j.as_ptr(), experimental, &mut handle, &mut err) };
             assert!(handle.is_null(), "no handle is produced either way");
             if expect_refused {
-                assert_eq!(status, crate::MXC_STATUS_BACKEND_UNAVAILABLE);
+                assert_eq!(status, crate::MXC_STATUS_MALFORMED_REQUEST);
             } else {
-                assert_ne!(status, crate::MXC_STATUS_BACKEND_UNAVAILABLE);
+                assert_ne!(status, crate::MXC_STATUS_MALFORMED_REQUEST);
             }
             // SAFETY: filled by `mxc_state_aware_exec` and not yet freed.
             unsafe { crate::mxc_error_detail_free(&mut err) };

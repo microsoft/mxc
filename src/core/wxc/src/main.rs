@@ -19,7 +19,7 @@ use wxc_common::error::WxcError;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use wxc_common::mxc_error::{MxcError, MxcErrorCode, ResponseEnvelope};
-use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
+use wxc_common::script_runner::{emit_mxc_error_exit, handle_dry_run_exit, ScriptRunner};
 use wxc_common::state_aware_dispatch::{resolve_backend, DispatchOutcome};
 use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
 use wxc_common::telemetry;
@@ -1634,15 +1634,13 @@ fn main() {
                 "containment",
                 "",
             );
-            eprintln!("error: {}", e.message);
-            eprint!("{}", logger.get_buffer());
             telemetry::emit_early_exit_with_kind(
                 telemetry_active,
                 &request.containment,
                 requested_sandbox_kind,
                 telemetry::FailureReason::InitError,
             );
-            process::exit(1);
+            emit_mxc_error_exit(&e.to_mxc_error(), &mut logger);
         }
     };
 
@@ -1742,9 +1740,7 @@ fn main() {
     if !response.standard_out.is_empty() {
         print!("{}", response.standard_out);
     }
-    if !response.standard_err.is_empty() {
-        eprint!("{}", response.standard_err);
-    }
+    wxc_common::script_runner::emit_captured_stderr(&response);
     if let Some(pointer) = response
         .output_metadata
         .as_ref()
@@ -1762,7 +1758,7 @@ fn main() {
     // appears inline -- callers (e.g. copilot) can parse it from the output.
     wxc_common::script_runner::emit_backend_error_envelope(&response);
 
-    process::exit(response.exit_code);
+    process::exit(wxc_common::script_runner::process_exit_code(&response));
 }
 
 #[cfg(test)]

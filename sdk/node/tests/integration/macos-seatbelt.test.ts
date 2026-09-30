@@ -199,8 +199,8 @@ describe('macOS Seatbelt Container', {
       },
     };
     // blockedHosts is unsupported on seatbelt; the runner rejects it and emits
-    // a structured `backend_error` envelope, so spawnSandboxAsync rejects with
-    // an MxcError (parity with wxc-exec / lxc-exec — issue #564).
+    // a structured `policy_validation` envelope, so spawnSandboxAsync rejects
+    // with an MxcError (parity with wxc-exec / lxc-exec — issue #564).
     await assert.rejects(
       () =>
         sdk.spawnSandboxAsync(
@@ -212,7 +212,7 @@ describe('macOS Seatbelt Container', {
         ),
       (err: unknown) => {
         assert.ok(err instanceof MxcError, `Expected MxcError, got: ${err}`);
-        assert.strictEqual(err.code, 'backend_error');
+        assert.strictEqual(err.code, 'policy_validation');
         assert.ok(
           err.message.includes('blockedHosts') ||
             err.message.includes('cannot be enforced'),

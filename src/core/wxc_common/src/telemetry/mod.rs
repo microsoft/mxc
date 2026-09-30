@@ -273,8 +273,16 @@ fn sandbox_kind_for<'a>(backend: &'a str, requested: Option<&'a str>) -> &'a str
 }
 
 /// Classify a failed execution into a bounded [`FailureReason`].
-fn classify_failure(phase: &FailurePhase) -> FailureReason {
-    match phase {
+///
+/// A response that names its own wire code is classified from it, so that a
+/// one-shot failure and its state-aware equivalent are recorded alike. The
+/// phase decides otherwise: it separates a timeout from a workload's own
+/// non-zero exit, which the codes alone cannot.
+fn classify_failure(response: &ScriptResponse) -> FailureReason {
+    if let Some(code) = response.error_code {
+        return classify_error_code(code);
+    }
+    match response.failure_phase {
         FailurePhase::LaunchFailed
         | FailurePhase::BackendUnavailable
         | FailurePhase::PostLaunchFailed => FailureReason::InitError,
@@ -332,7 +340,7 @@ fn emit_completion_event(
     let sandbox_kind = sandbox_kind_for(backend, requested_sandbox_kind);
     let failed = response.exit_code != 0;
     let outcome = if failed { "failure" } else { "success" };
-    let failure_reason = failed.then(|| classify_failure(&response.failure_phase));
+    let failure_reason = failed.then(|| classify_failure(response));
 
     log_execution(&ExecutionEvent {
         backend,
@@ -359,7 +367,7 @@ fn emit_completion_event(
                 correlation_vector: "",
             },
             sandbox_kind,
-            classify_failure(&response.failure_phase),
+            classify_failure(response),
             response.exit_code,
         );
     }
@@ -802,7 +810,14 @@ pub fn emit_cancellation() {
 /// actual error category on early-exit telemetry rather than reporting every
 /// dispatch failure as `InitError`.
 pub fn classify_mxc_error(err: &MxcError) -> FailureReason {
-    match err.code {
+    classify_error_code(err.code)
+}
+
+/// Map a wire [`MxcErrorCode`] to a bounded [`FailureReason`]. Exhaustive so a
+/// newly-added code forces a compile error here rather than silently
+/// classifying as `Unknown`.
+fn classify_error_code(code: MxcErrorCode) -> FailureReason {
+    match code {
         MxcErrorCode::MalformedRequest | MxcErrorCode::MalformedId => FailureReason::ConfigError,
         MxcErrorCode::PolicyValidation => FailureReason::PolicyError,
         MxcErrorCode::UnsupportedContainment
@@ -1849,34 +1864,53 @@ mod tests {
 
     #[test]
     fn classify_failure_maps_all_phases() {
+        let in_phase = |phase| {
+            classify_failure(&ScriptResponse {
+                failure_phase: phase,
+                ..Default::default()
+            })
+        };
+
         // Backend/launch failures classify as init errors.
         assert_eq!(
-            classify_failure(&FailurePhase::LaunchFailed),
+            in_phase(FailurePhase::LaunchFailed),
             FailureReason::InitError
         );
         assert_eq!(
-            classify_failure(&FailurePhase::BackendUnavailable),
+            in_phase(FailurePhase::BackendUnavailable),
             FailureReason::InitError
         );
         // A rejected request is a policy error; a post-launch infra failure
         // is an init error.
+        assert_eq!(in_phase(FailurePhase::Rejected), FailureReason::PolicyError);
         assert_eq!(
-            classify_failure(&FailurePhase::Rejected),
-            FailureReason::PolicyError
-        );
-        assert_eq!(
-            classify_failure(&FailurePhase::PostLaunchFailed),
+            in_phase(FailurePhase::PostLaunchFailed),
             FailureReason::InitError
         );
         // A process that ran and exited (or an unclassified failure) is a
         // process error.
         assert_eq!(
-            classify_failure(&FailurePhase::ProcessExited),
+            in_phase(FailurePhase::ProcessExited),
             FailureReason::ProcessError
         );
+        assert_eq!(in_phase(FailurePhase::None), FailureReason::ProcessError);
+        assert_eq!(in_phase(FailurePhase::Timeout), FailureReason::Timeout);
+    }
+
+    #[test]
+    fn an_explicit_wire_code_outranks_the_phase_for_telemetry() {
+        // `ScriptResponse::malformed` is a refusal carrying a more precise
+        // code; it must record what the state-aware path records for the same
+        // condition rather than the phase's generic policy error.
         assert_eq!(
-            classify_failure(&FailurePhase::None),
-            FailureReason::ProcessError
+            classify_failure(&ScriptResponse::malformed(
+                "Script content must not be empty."
+            )),
+            FailureReason::ConfigError
+        );
+        assert_eq!(
+            classify_failure(&ScriptResponse::rejected("unsupported policy")),
+            FailureReason::PolicyError
         );
     }
 

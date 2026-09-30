@@ -79,8 +79,11 @@ impl ResolvedRunner {
 ///
 /// Development backends that still require runtime authorization check
 /// `request.experimental_enabled`; when it is unset they return a
-/// [`malformed_request`](MxcError::malformed_request) error. Backends that are
-/// not available on this host / not compiled in return an
+/// [`malformed_request`](MxcError::malformed_request) error, since the caller
+/// can opt in. A backend this build was not compiled with, or whose host
+/// prerequisite is missing, returns a
+/// [`backend_unavailable`](MxcError::backend_unavailable) error; one that
+/// cannot run on this platform at all returns an
 /// [`unsupported_containment`](MxcError::unsupported_containment) error.
 pub fn resolve_runner(
     request: &ExecutionRequest,
@@ -304,7 +307,7 @@ fn resolve_runner_inner_windows(
             }
             #[cfg(not(feature = "microvm"))]
             {
-                Err(MxcError::unsupported_containment(
+                Err(MxcError::backend_unavailable(
                     "MicroVM backend not compiled in (build with --features microvm)",
                 ))
             }
@@ -378,7 +381,7 @@ fn resolve_runner_inner(
             }
             #[cfg(not(feature = "microvm"))]
             {
-                Err(MxcError::unsupported_containment(
+                Err(MxcError::backend_unavailable(
                     "MicroVM backend not compiled in (build with --features microvm)",
                 ))
             }
@@ -386,13 +389,24 @@ fn resolve_runner_inner(
         ContainmentBackend::Bubblewrap => Ok(ResolvedRunner::without_guard(Box::new(Runner::new(
             bwrap_common::bwrap_runner::BubblewrapScriptRunner::new(),
         )))),
-        ContainmentBackend::Lxc => Ok(ResolvedRunner::without_guard(Box::new(
-            lxc_common::lxc_runner::LxcScriptRunner::new(
-                &request.lxc_config,
-                &request.container_id,
-                &request.lifecycle,
-            ),
-        ))),
+        ContainmentBackend::Lxc => {
+            // Explicit selection gets the same probe discovery uses, so a host
+            // without LXC reports `backend_unavailable` up front instead of
+            // failing later as a generic spawn error.
+            if !lxc_common::availability::is_lxc_available() {
+                return Err(MxcError::backend_unavailable(
+                    "LXC is not available on this host (`lxc-ls --version` did not succeed); \
+                     install the LXC tooling or select another backend",
+                ));
+            }
+            Ok(ResolvedRunner::without_guard(Box::new(
+                lxc_common::lxc_runner::LxcScriptRunner::new(
+                    &request.lxc_config,
+                    &request.container_id,
+                    &request.lifecycle,
+                ),
+            )))
+        }
         ref other => Err(MxcError::unsupported_containment(format!(
             "the '{}' backend is not available on Linux",
             other.wire_name()
@@ -412,10 +426,21 @@ fn resolve_runner_inner(
 ) -> Result<ResolvedRunner, MxcError> {
     use wxc_common::sandbox_process::Runner;
 
+    /// Every Seatbelt launch method shells out to this binary.
+    const SANDBOX_EXEC_PATH: &str = "/usr/bin/sandbox-exec";
+
     if request.containment != ContainmentBackend::Seatbelt {
         return Err(MxcError::unsupported_containment(format!(
             "the '{}' backend is not available on macOS",
             request.containment.wire_name()
+        )));
+    }
+    // The runner shells out to `sandbox-exec` for every launch method, so a
+    // host missing it reports `backend_unavailable` up front rather than
+    // failing later as a spawn error.
+    if !std::path::Path::new(SANDBOX_EXEC_PATH).exists() {
+        return Err(MxcError::backend_unavailable(format!(
+            "{SANDBOX_EXEC_PATH} not found; macOS install is incomplete"
         )));
     }
     Ok(ResolvedRunner::without_guard(Box::new(Runner::new(
@@ -527,7 +552,7 @@ fn resolve_hyperlight(request: &ExecutionRequest) -> Result<ResolvedRunner, MxcE
     #[cfg(not(all(feature = "hyperlight", target_arch = "x86_64")))]
     {
         let _ = request;
-        Err(MxcError::unsupported_containment(
+        Err(MxcError::backend_unavailable(
             "Hyperlight backend requires x86_64 (Hyperlight needs KVM or WHP)",
         ))
     }

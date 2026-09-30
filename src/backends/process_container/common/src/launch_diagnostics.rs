@@ -16,7 +16,7 @@
 
 use std::path::Path;
 
-use wxc_common::models::{ExecutionRequest, FailurePhase, ScriptResponse};
+use wxc_common::models::{ExecutionRequest, ScriptResponse};
 
 /// A structured diagnostic describing *why* a sandboxed process launch failed
 /// and what the user can do about it.
@@ -103,10 +103,7 @@ pub fn validate_required_child_env(request: &ExecutionRequest) -> Result<(), Scr
         return Ok(());
     };
 
-    Err(ScriptResponse {
-        failure_phase: FailurePhase::Rejected,
-        ..ScriptResponse::error(&diagnostic.message)
-    })
+    Err(ScriptResponse::rejected(&diagnostic.message))
 }
 
 /// Diagnose `ERROR_ENVVAR_NOT_FOUND` from a contained-process launch.
@@ -474,7 +471,10 @@ mod tests {
 
         let error = validate_required_child_env(&request)
             .expect_err("a sparse verbatim environment must be rejected");
-        assert_eq!(error.failure_phase, FailurePhase::Rejected);
+        assert_eq!(
+            error.failure_phase,
+            wxc_common::models::FailurePhase::Rejected
+        );
         assert!(error.error_message.contains("SYSTEMROOT"));
         assert!(error.error_message.contains("LOCALAPPDATA"));
     }

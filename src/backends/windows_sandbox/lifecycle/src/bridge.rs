@@ -56,10 +56,26 @@ pub struct GuestConnection {
     pub stderr_stream: TcpStream,
 }
 
+/// How a guest run ended.
+///
+/// `exit_code` alone cannot say: the host watchdog and a transport failure both
+/// report -1, which a workload is equally free to return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Termination {
+    /// The guest reported the workload's own exit code.
+    Exited,
+    /// The host watchdog fired before the guest reported completion.
+    TimedOut,
+    /// The run could not be completed, or its captured output cannot be trusted.
+    Failed,
+}
+
 /// Result of executing a script on the guest agent.
 pub struct ExecResult {
     /// Process exit code (negative values indicate error/timeout).
     pub exit_code: i32,
+    /// How the run ended, which `exit_code` cannot express on its own.
+    pub termination: Termination,
     /// Optional error message from the agent.
     pub error_message: String,
     /// Captured stdout bytes from the child process.
@@ -290,6 +306,7 @@ async fn execute_on_guest_with_grace(
                 );
                 return Ok(ExecResult {
                     exit_code: -1,
+                    termination: Termination::TimedOut,
                     error_message: format!(
                         "guest did not report completion within the host watchdog ({timeout_ms}ms \
                          guest timeout + {}s grace); the sandbox may be frozen",
@@ -320,6 +337,7 @@ async fn execute_on_guest_with_grace(
         if let Some(e) = stdout_err.or(stderr_err) {
             return Ok(ExecResult {
                 exit_code: -1,
+                termination: Termination::Failed,
                 error_message: format!(
                     "transport error draining guest output (captured {} stdout / {} stderr \
                      byte(s) before the error): {e}",
@@ -358,6 +376,7 @@ async fn execute_on_guest_with_grace(
 
     Ok(ExecResult {
         exit_code,
+        termination: Termination::Exited,
         error_message,
         stdout,
         stderr,

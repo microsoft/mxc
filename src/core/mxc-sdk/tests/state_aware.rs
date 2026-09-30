@@ -68,7 +68,7 @@ fn typed_windows_sandbox_requires_experimental_authorization() {
         OperationOptions::new(false),
     )
     .unwrap_err();
-    assert_eq!(error.code, ErrorCode::BackendUnavailable);
+    assert_eq!(error.code, ErrorCode::MalformedRequest);
     assert!(error.message.contains("experimental"));
 }
 
@@ -90,12 +90,12 @@ fn typed_exec_dry_run_honors_experimental_authorization() {
     let request = ExecRequest::new("1.1.0-alpha", "echo hello");
     let error = sandbox::validate_exec(&sandbox_id, request.clone(), OperationOptions::new(false))
         .unwrap_err();
-    assert_eq!(error.code, ErrorCode::BackendUnavailable);
+    assert_eq!(error.code, ErrorCode::MalformedRequest);
 
     if let Err(error) = sandbox::validate_exec(&sandbox_id, request, OperationOptions::new(true)) {
         assert_ne!(
             error.code,
-            ErrorCode::BackendUnavailable,
+            ErrorCode::MalformedRequest,
             "the experimental opt-in must reach typed exec dispatch: {}",
             error.message
         );
@@ -258,7 +258,7 @@ fn experimental_backend_is_refused_without_the_optin() {
     let json = r#"{"version":"1.1.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
     let err = run_state_aware_json(json, true, false)
         .expect_err("an experimental backend without the opt-in must be refused");
-    assert_eq!(err.code, ErrorCode::BackendUnavailable);
+    assert_eq!(err.code, ErrorCode::MalformedRequest);
     assert!(
         err.message.contains("experimental"),
         "the refusal should say what is missing, got: {}",
@@ -268,7 +268,7 @@ fn experimental_backend_is_refused_without_the_optin() {
 
 /// With the opt-in, the same request gets **past** the gate.
 ///
-/// The assertion is deliberately "not `BackendUnavailable`" rather than a
+/// The assertion is deliberately "not `MalformedRequest`" rather than a
 /// specific success: what happens next varies by host and build features (a dry
 /// run on Windows, `unsupported_phase` elsewhere), and pinning that would make
 /// this a host test. What it discriminates is the thing this change adds — if
@@ -280,7 +280,7 @@ fn the_optin_admits_an_experimental_backend() {
     if let Err(err) = run_state_aware_json(json, true, true) {
         assert_ne!(
             err.code,
-            ErrorCode::BackendUnavailable,
+            ErrorCode::MalformedRequest,
             "the opt-in was passed, so the experimental gate must not refuse: {}",
             err.message
         );
@@ -306,23 +306,21 @@ fn the_refusal_carries_no_api_call_detail() {
 /// hardcoded the flag in only one of them would leave the other's tests green.
 /// A `wsb:` id routes to Windows Sandbox, which has no streaming-exec arm — so
 /// once past the gate it lands on `unsupported_phase`, and the two outcomes are
-/// distinguishable without a host, a feature, or any backend work. (A `wslc:`
-/// id would not discriminate: its feature-off arm also answers
-/// `backend_unavailable`, which is the very code the gate returns.)
+/// distinguishable without a host, a feature, or any backend work.
 #[test]
 fn exec_honours_the_optin_on_its_own_path() {
     let json = r#"{"version":"1.1.0-alpha","phase":"exec","sandboxId":"wsb:0a1b2c3d","process":{"commandLine":"echo hi"}}"#;
 
     match exec_sandbox(json, false) {
         Ok(_) => panic!("without the opt-in the gate must refuse"),
-        Err(err) => assert_eq!(err.code, ErrorCode::BackendUnavailable),
+        Err(err) => assert_eq!(err.code, ErrorCode::MalformedRequest),
     }
 
     match exec_sandbox(json, true) {
         Ok(_) => panic!("windows_sandbox serves no streaming exec"),
         Err(err) => assert_ne!(
             err.code,
-            ErrorCode::BackendUnavailable,
+            ErrorCode::MalformedRequest,
             "the opt-in was passed, so the gate must not refuse: {}",
             err.message
         ),

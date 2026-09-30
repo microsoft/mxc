@@ -406,24 +406,21 @@ impl BaseContainerRunner {
         );
 
         let psec_version = Self::choose_min_required_psec_version_for_request(request);
-        let version_supported =
-            secenv::supports_version(psec_version).map_err(|error| ScriptResponse {
-                failure_phase: FailurePhase::BackendUnavailable,
-                ..ScriptResponse::error(&format!(
-                    "failed to query Process Security Environment contract support: {error}"
-                ))
-            })?;
+        let version_supported = secenv::supports_version(psec_version).map_err(|error| {
+            ScriptResponse::unavailable(&format!(
+                "failed to query Process Security Environment contract support: {error}"
+            ))
+        })?;
         if !version_supported {
-            return Err(ScriptResponse {
-                failure_phase: FailurePhase::Rejected,
-                ..ScriptResponse::error(if !request.policy.enumerate_paths.is_empty() {
+            return Err(ScriptResponse::rejected(
+                if !request.policy.enumerate_paths.is_empty() {
                     PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG
                 } else if unrestricted_host_loopback_allowed(&request.policy) {
                     PSEC_INGRESS_UNSUPPORTED_MSG
                 } else {
                     "the required Process Security Environment schema version is not supported"
-                })
-            });
+                },
+            ));
         }
 
         // Launch builtin test proxy if requested (before building spec so we have the port).
@@ -1149,16 +1146,22 @@ impl SandboxBackend for BaseContainerRunner {
         validate_required_child_env(request)?;
         validate_network_policy_support(request, self.network_policy_support())?;
         if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
-            return Err(ScriptResponse::error(
+            return Err(ScriptResponse::rejected(
                 wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
             ));
         }
         if has_conflicting_proxy_identity(&request.policy) {
-            return Err(ScriptResponse::error(
+            return Err(ScriptResponse::rejected(
                 "processContainer.network.allowedProxyPeer grants loopback access only to the \
                  specified peer and cannot be combined with \
                  network.ingress.hostLoopback='allow', which grants unrestricted host-loopback \
                  access",
+            ));
+        }
+        if request.policy.least_privilege_mode {
+            return Err(ScriptResponse::rejected(
+                "the process-security-environment path cannot be combined with \
+                 processContainer.leastPrivilege because it does not support LPAC tokens",
             ));
         }
         // Dry-run validates the schema and policy shape without selecting or
@@ -1166,22 +1169,24 @@ impl SandboxBackend for BaseContainerRunner {
         if request.dry_run {
             return Ok(());
         }
-        if !self.request_serviceability_confirmed
-            && !Self::can_backend_service_request(request).can_service_request()
-        {
-            return Err(ScriptResponse {
-                failure_phase: FailurePhase::BackendUnavailable,
-                ..ScriptResponse::error(
-                    "the request cannot be represented by the process security environment \
-                     available on this host",
-                )
-            });
-        }
-        if request.policy.least_privilege_mode {
-            return Err(ScriptResponse::error(
-                "the process-security-environment path cannot be combined with \
-                 processContainer.leastPrivilege because it does not support LPAC tokens",
-            ));
+        if !self.request_serviceability_confirmed {
+            match Self::can_backend_service_request(request) {
+                BaseContainerRequestDecision::Serviceable => {}
+                // A policy this path cannot represent is the caller's to change;
+                // every other verdict is a host capability to route around.
+                BaseContainerRequestDecision::PolicyIncompatible => {
+                    return Err(ScriptResponse::rejected(
+                        "the process security environment cannot enforce this request's \
+                         policy as written",
+                    ));
+                }
+                _ => {
+                    return Err(ScriptResponse::unavailable(
+                        "the request cannot be represented by the process security \
+                         environment available on this host",
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -3271,6 +3276,28 @@ mod tests {
             .validate(&request)
             .expect_err("blockedHosts is not yet supported");
         assert!(err.error_message.contains("blockedHosts"));
+    }
+
+    #[test]
+    fn validate_runner_rejects_least_privilege_before_host_probing() {
+        let runner = BaseContainerRunner::new();
+        let mut request = ExecutionRequest {
+            dry_run: true,
+            ..Default::default()
+        };
+        request.policy.least_privilege_mode = true;
+
+        // The LPAC refusal is the caller's to fix, so it must precede both the
+        // dry-run return and the serviceability probe that would otherwise
+        // report it as an unavailable host.
+        let err = runner
+            .validate(&request)
+            .expect_err("leastPrivilege is not supported on this path");
+        assert!(err.error_message.contains("leastPrivilege"));
+        assert_eq!(
+            err.failure_phase,
+            wxc_common::models::FailurePhase::Rejected
+        );
     }
 
     #[test]

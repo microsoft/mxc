@@ -99,7 +99,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, HyperlightRuntime, NetworkPolicy, ScriptResponse};
+use wxc_common::models::{
+    ExecutionRequest, FailurePhase, HyperlightRuntime, NetworkPolicy, ScriptResponse,
+};
 use wxc_common::script_runner::ScriptRunner;
 use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
@@ -137,8 +139,19 @@ pub fn is_whp_available() -> bool {
 
 #[derive(Debug)]
 enum RunnerError {
-    /// Pre-spawn validation failures (missing image, unsupported policy).
-    Preflight(String),
+    /// Pre-spawn refusal of the request itself: policy this backend cannot
+    /// enforce, or a path the caller must fix. Deterministic on every host, so
+    /// only a changed request can succeed.
+    Policy(String),
+    /// A host prerequisite is missing — no installed guest image and no source
+    /// to install one from. Nothing in the request can change the outcome.
+    Unavailable(String),
+    /// Pre-spawn environment work failed (filesystem, host name resolution).
+    /// Environment-dependent, so it is neither a refused request nor a missing
+    /// backend.
+    Setup(String),
+    /// The guest call exceeded `scriptTimeout`.
+    Timeout(Duration),
     /// Runtime construction, install, or execution failure.
     Runtime(String),
 }
@@ -146,7 +159,14 @@ enum RunnerError {
 impl std::fmt::Display for RunnerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RunnerError::Preflight(msg) => write!(f, "hyperlight preflight error: {msg}"),
+            RunnerError::Policy(msg) => write!(f, "hyperlight policy error: {msg}"),
+            RunnerError::Unavailable(msg) => write!(f, "hyperlight unavailable: {msg}"),
+            RunnerError::Setup(msg) => write!(f, "hyperlight setup error: {msg}"),
+            RunnerError::Timeout(elapsed) => write!(
+                f,
+                "hyperlight runtime error: execution timed out after {:.1}s",
+                elapsed.as_secs_f64()
+            ),
             RunnerError::Runtime(msg) => write!(f, "hyperlight runtime error: {msg}"),
         }
     }
@@ -154,15 +174,28 @@ impl std::fmt::Display for RunnerError {
 
 impl RunnerError {
     fn to_response(&self) -> ScriptResponse {
+        let failure_phase = self.failure_phase();
         ScriptResponse {
-            exit_code: ERROR_EXIT_CODE,
+            exit_code: failure_phase.mxc_exit_code(),
             error_message: self.to_string(),
+            failure_phase,
             ..Default::default()
         }
     }
-}
 
-const ERROR_EXIT_CODE: i32 = -1;
+    /// The phase is what lets a caller tell a refused request from a timeout or
+    /// an execution failure, and it carries the exit code: a refusal exits 1,
+    /// every other variant exits -1.
+    fn failure_phase(&self) -> FailurePhase {
+        match self {
+            RunnerError::Policy(_) => FailurePhase::Rejected,
+            RunnerError::Unavailable(_) => FailurePhase::BackendUnavailable,
+            RunnerError::Setup(_) => FailurePhase::LaunchFailed,
+            RunnerError::Timeout(_) => FailurePhase::Timeout,
+            RunnerError::Runtime(_) => FailurePhase::PostLaunchFailed,
+        }
+    }
+}
 
 /// Env var override for the Hyperlight image home. Set this to force a
 /// specific location; otherwise the runner uses a standard OS-local
@@ -436,7 +469,7 @@ impl HyperlightScriptRunner {
                 default.join(name)
             ),
         };
-        Err(RunnerError::Preflight(format!(
+        Err(RunnerError::Unavailable(format!(
             "no hyperlight image found for the {name} runtime. searched ${HOME_ENV}, \
              {default:?}, <exe>/{EXE_RELATIVE_HOME}/, <cwd>/{CWD_RELATIVE_HOME}/, each under \
              `{name}/`. {hint}"
@@ -475,16 +508,16 @@ impl HyperlightScriptRunner {
     /// Filesystem mounts and network policies ARE supported.
     fn validate_policies(request: &ExecutionRequest) -> Result<(), RunnerError> {
         if request.policy.network_proxy.is_enabled() {
-            return Err(RunnerError::Preflight(ERR_PROXY_POLICY.to_string()));
+            return Err(RunnerError::Policy(ERR_PROXY_POLICY.to_string()));
         }
         if !request.working_directory.is_empty() {
-            return Err(RunnerError::Preflight(ERR_WORKDIR.to_string()));
+            return Err(RunnerError::Policy(ERR_WORKDIR.to_string()));
         }
         if request.policy.default_network_policy == NetworkPolicy::Block
             && !request.policy.allowed_hosts.is_empty()
             && !request.policy.blocked_hosts.is_empty()
         {
-            return Err(RunnerError::Preflight(
+            return Err(RunnerError::Policy(
                 "allowedHosts and blockedHosts are mutually exclusive".to_string(),
             ));
         }
@@ -502,7 +535,7 @@ impl HyperlightScriptRunner {
                     .iter()
                     .any(|p| same_path(p, denied))
             {
-                return Err(RunnerError::Preflight(format!(
+                return Err(RunnerError::Policy(format!(
                     "path {denied:?} appears in both deniedPaths and an allow list"
                 )));
             }
@@ -522,14 +555,14 @@ impl HyperlightScriptRunner {
     ) -> Result<Option<hyperlight_unikraft::NetworkPolicy>, RunnerError> {
         if !key.allowed.is_empty() {
             let allow_list = AllowList::from_hosts(&key.allowed)
-                .map_err(|e| RunnerError::Preflight(format!("resolve allowed_hosts: {e}")))?;
+                .map_err(|e| RunnerError::Setup(format!("resolve allowed_hosts: {e}")))?;
             return Ok(Some(hyperlight_unikraft::NetworkPolicy::AllowList(
                 allow_list,
             )));
         }
         if !key.blocked.is_empty() {
             let block_list = BlockList::from_hosts(&key.blocked)
-                .map_err(|e| RunnerError::Preflight(format!("resolve blocked_hosts: {e}")))?;
+                .map_err(|e| RunnerError::Setup(format!("resolve blocked_hosts: {e}")))?;
             return Ok(Some(hyperlight_unikraft::NetworkPolicy::BlockList(
                 block_list,
             )));
@@ -569,13 +602,13 @@ impl HyperlightScriptRunner {
                     .map(|p| p.as_os_str().is_empty() || p.exists())
                     .unwrap_or(false);
                 if !parent_ok {
-                    return Err(RunnerError::Preflight(format!(
+                    return Err(RunnerError::Setup(format!(
                         "mount path {host:?} does not exist and its parent doesn't either; \
                          refusing to auto-create (fix the path or `mkdir -p` manually)"
                     )));
                 }
                 std::fs::create_dir_all(&host_path).map_err(|e| {
-                    RunnerError::Preflight(format!("auto-create mount dir {host:?}: {e}"))
+                    RunnerError::Setup(format!("auto-create mount dir {host:?}: {e}"))
                 })?;
             }
 
@@ -583,12 +616,12 @@ impl HyperlightScriptRunner {
             // so a relative path keeps meaning the same directory after a
             // cwd change.
             let host_path = std::fs::canonicalize(&host_path)
-                .map_err(|e| RunnerError::Preflight(format!("resolve mount path {host:?}: {e}")))?;
+                .map_err(|e| RunnerError::Setup(format!("resolve mount path {host:?}: {e}")))?;
             let basename = host_path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .ok_or_else(|| {
-                    RunnerError::Preflight(format!("mount path {host:?} has no filename component"))
+                    RunnerError::Policy(format!("mount path {host:?} has no filename component"))
                 })?;
             // The guest path travels to the kernel in its `vfs.fstab`
             // list, which these characters would break; the library
@@ -597,14 +630,14 @@ impl HyperlightScriptRunner {
                 .chars()
                 .any(|c| c.is_whitespace() || matches!(c, ':' | '[' | ']'))
             {
-                return Err(RunnerError::Preflight(format!(
+                return Err(RunnerError::Policy(format!(
                     "mount path {host:?}: the directory name may not contain whitespace, \
                      ':' or brackets (it names the guest mount point)"
                 )));
             }
             let guest_path = format!("{GUEST_MOUNT_ROOT}/{basename}");
             if !seen_guest_paths.insert(guest_path.clone()) {
-                return Err(RunnerError::Preflight(format!(
+                return Err(RunnerError::Policy(format!(
                     "two mount paths collide on guest path {guest_path:?}; \
                      rename one of the host directories"
                 )));
@@ -804,10 +837,7 @@ impl ScriptRunner for HyperlightScriptRunner {
                 // next call boots another from the rewind point.
                 self.guest = None;
                 let err = match failure {
-                    RunError::TimedOut(timeout) => RunnerError::Runtime(format!(
-                        "execution timed out after {:.1}s",
-                        timeout.as_secs_f64()
-                    )),
+                    RunError::TimedOut(timeout) => RunnerError::Timeout(timeout),
                     RunError::Failed(msg) => RunnerError::Runtime(format!("run: {msg}")),
                 };
                 logger.log_line(&err.to_string());
@@ -1024,7 +1054,7 @@ fn load_persisted_snapshot(
         Err(e) => e,
     };
     if !has_install_source(home, runtime) {
-        return Err(RunnerError::Preflight(no_install_source(runtime)));
+        return Err(RunnerError::Unavailable(no_install_source(runtime)));
     }
     logger.log_line(&match unloadable {
         hyperlight_unikraft::Error::SnapshotRelease { saved_by, .. } => format!(
@@ -1616,7 +1646,8 @@ mod tests {
         };
         let mut logger = Logger::new(Mode::Buffer);
         let resp = r.run(&request, &mut logger);
-        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
+        assert_eq!(resp.exit_code, 1);
+        assert_eq!(resp.failure_phase, FailurePhase::Rejected);
         assert!(resp.error_message.contains("deniedPaths"));
     }
 
@@ -1765,7 +1796,8 @@ mod tests {
         };
         let mut logger = Logger::new(Mode::Buffer);
         let resp = r.run(&request, &mut logger);
-        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
+        assert_eq!(resp.exit_code, 1);
+        assert_eq!(resp.failure_phase, FailurePhase::Rejected);
         assert!(resp.error_message.contains("mutually exclusive"));
     }
 
@@ -1779,7 +1811,8 @@ mod tests {
         };
         let mut logger = Logger::new(Mode::Buffer);
         let resp = r.run(&request, &mut logger);
-        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
+        assert_eq!(resp.exit_code, 1);
+        assert_eq!(resp.failure_phase, FailurePhase::Rejected);
         assert!(resp.error_message.contains(ERR_WORKDIR));
     }
 }

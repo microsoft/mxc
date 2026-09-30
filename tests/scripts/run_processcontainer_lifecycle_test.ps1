@@ -113,8 +113,13 @@ function Phase-InheritDefaultEnv {
     )
     foreach ($case in $versionCases) {
         $slug = $(if ($case.Inherit) { 'true' } else { 'false' })
+        # A minimal env, not a bare one: `inheritDefaultEnv: false` takes the
+        # supplied block verbatim, and a block missing SYSTEMROOT/LOCALAPPDATA
+        # is refused before launch. The pair must vary only by the field under
+        # test, or the `false` case measures the env block instead of the gate.
         $cfg = New-Config -Name "lc-inherit-0900-$slug" -CommandLine $cmd -ReadWrite @($rw) `
-            -Env @('MXC_LC_MINE=yes') -InheritDefaultEnv $case.Inherit -SchemaVersion '0.9.0-alpha'
+            -Env (Get-MinimalEnv -Extra @('MXC_LC_MINE=yes')) -InheritDefaultEnv $case.Inherit `
+            -SchemaVersion '0.9.0-alpha'
         $log = Join-Path $ScratchRoot "logs\lc-inherit-0900-$slug.log"
         $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log -TimeoutSec 30
         $rejected = Test-WasRejected -Run $r -Log (Read-Log $log)

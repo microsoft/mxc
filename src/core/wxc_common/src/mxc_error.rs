@@ -51,6 +51,30 @@ impl MxcErrorCode {
     }
 }
 
+impl MxcErrorCode {
+    /// Exit code to report for a failure carrying this code.
+    ///
+    /// Everything a caller can resolve by changing the request exits 1, the
+    /// same code a policy rejection uses. Only an unusable host or an
+    /// infrastructure failure reports -1, so the two remain distinguishable
+    /// without parsing the message.
+    pub fn mxc_exit_code(self) -> i32 {
+        match self {
+            Self::BackendUnavailable | Self::BackendError => -1,
+            Self::MalformedRequest
+            | Self::UnsupportedContainment
+            | Self::UnsupportedPhase
+            | Self::MalformedId
+            | Self::StaleId
+            | Self::NotProvisioned
+            | Self::NotStarted
+            | Self::AlreadyStarted
+            | Self::AlreadyStopped
+            | Self::PolicyValidation => 1,
+        }
+    }
+}
+
 impl std::fmt::Display for MxcErrorCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
@@ -319,6 +343,27 @@ mod tests {
             assert_eq!(json, Value::String(wire.to_string()));
             let parsed: MxcErrorCode = serde_json::from_value(json).unwrap();
             assert_eq!(parsed, code);
+        }
+    }
+
+    #[test]
+    fn only_host_and_infrastructure_codes_exit_negative_one() {
+        for code in [
+            MxcErrorCode::MalformedRequest,
+            MxcErrorCode::UnsupportedContainment,
+            MxcErrorCode::UnsupportedPhase,
+            MxcErrorCode::MalformedId,
+            MxcErrorCode::StaleId,
+            MxcErrorCode::NotProvisioned,
+            MxcErrorCode::NotStarted,
+            MxcErrorCode::AlreadyStarted,
+            MxcErrorCode::AlreadyStopped,
+            MxcErrorCode::PolicyValidation,
+        ] {
+            assert_eq!(code.mxc_exit_code(), 1, "{code} is caller-correctable");
+        }
+        for code in [MxcErrorCode::BackendUnavailable, MxcErrorCode::BackendError] {
+            assert_eq!(code.mxc_exit_code(), -1, "{code} is not caller-correctable");
         }
     }
 

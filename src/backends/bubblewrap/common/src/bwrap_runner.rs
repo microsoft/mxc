@@ -128,13 +128,13 @@ impl SandboxBackend for BubblewrapScriptRunner {
                 &normalized
             }
             Ok(None) => request,
-            Err(msg) => return Err(ScriptResponse::error(&msg)),
+            Err(msg) => return Err(ScriptResponse::rejected(&msg)),
         };
         // Reject any policy path the invoking user cannot access, so the sandbox
         // never gains access the caller lacks. Runs after object normalization
         // so it sees the already-tightened intents.
         if let Err(msg) = wxc_common::filesystem_access::check_delegation(&request.policy) {
-            return Err(ScriptResponse::error(&msg));
+            return Err(ScriptResponse::rejected(&msg));
         }
         // Resolve denied paths that traverse a symlink to their real host path
         // and classify each as a file/dir mask (see [`resolve_denied_paths`]).
@@ -142,7 +142,7 @@ impl SandboxBackend for BubblewrapScriptRunner {
         // none). See docs/bwrap-support/bubblewrap-backend.md.
         let plan = match resolve_denied_paths(&request.policy, logger) {
             Ok(plan) => plan,
-            Err(msg) => return Err(ScriptResponse::error(&msg)),
+            Err(msg) => return Err(ScriptResponse::rejected(&msg)),
         };
         let resolved;
         let request = match plan.paths {
@@ -160,7 +160,7 @@ impl SandboxBackend for BubblewrapScriptRunner {
         // The masks are built from the list above, not from the one the caller
         // wrote, so the pin conflict has to be judged against it too.
         if let Err(msg) = check_pin_against_denied_hosts(request) {
-            return Err(ScriptResponse::error(&msg));
+            return Err(ScriptResponse::rejected(&msg));
         }
         let child = self.spawn_bwrap(request, &plan.files, egress_plan, logger, stdio)?;
         Ok(Box::new(BubblewrapSandboxProcess::new(child)))
@@ -201,7 +201,7 @@ impl BubblewrapScriptRunner {
         // probe so config errors are reported deterministically even on
         // hosts without bwrap installed.
         if request.script_code.is_empty() {
-            return Err(ScriptResponse::error(
+            return Err(ScriptResponse::rejected(
                 "script_code is empty — nothing to execute.",
             ));
         }
@@ -233,7 +233,7 @@ impl BubblewrapScriptRunner {
             if wxc_common::proxy_env::proxy_url_has_credentials(&url) {
                 // Built from the redacted form so the rejection cannot become
                 // the leak it is rejecting.
-                return Err(ScriptResponse::error(&format!(
+                return Err(ScriptResponse::rejected(&format!(
                     "Bubblewrap: network.proxy.url must not carry credentials ('{}'). \
                      Bubblewrap passes the proxy URL to bwrap as a --setenv command-line \
                      argument, and process arguments are world-readable through \
@@ -264,19 +264,19 @@ impl BubblewrapScriptRunner {
         // caller a different message than the parser gives for the same
         // request.
         if let Some(reason) = bwrap_command::proxy_with_firewall_rejection(request) {
-            return Err(ScriptResponse::error(reason));
+            return Err(ScriptResponse::rejected(reason));
         }
         if let Some(reason) = bwrap_command::external_proxy_host_rules_rejection(request) {
-            return Err(ScriptResponse::error(reason));
+            return Err(ScriptResponse::rejected(reason));
         }
         if let Some(reason) = bwrap_command::unenforced_host_rules_rejection(request) {
-            return Err(ScriptResponse::error(reason));
+            return Err(ScriptResponse::rejected(reason));
         }
         if let Some(reason) = bwrap_command::local_network_rejection(request) {
-            return Err(ScriptResponse::error(reason));
+            return Err(ScriptResponse::rejected(reason));
         }
         if let Some(reason) = bwrap_command::directional_network_rejection(request) {
-            return Err(ScriptResponse::error(reason));
+            return Err(ScriptResponse::rejected(reason));
         }
 
         // Proxy-only networking derives the sandbox-visible endpoint from the
@@ -301,12 +301,12 @@ impl BubblewrapScriptRunner {
         if proxy_only && !request.policy.network_proxy.builtin_test_server {
             if let Some(address) = request.policy.network_proxy.address.as_ref() {
                 if let Err(error) = proxy_network::SandboxProxy::check_without_resolving(address) {
-                    return Err(ScriptResponse::error(&error));
+                    return Err(ScriptResponse::rejected(&error));
                 }
                 if let Err(error) =
                     proxy_network::check_hosts_pin_against_policy(address, &request.policy)
                 {
-                    return Err(ScriptResponse::error(&error));
+                    return Err(ScriptResponse::rejected(&error));
                 }
                 // Repeated in `spawn` against the normalized policy.
             }
@@ -325,7 +325,7 @@ impl BubblewrapScriptRunner {
         let egress_plan = if firewall_enforced {
             match network_rules::EgressPlan::for_request(request) {
                 Ok(plan) => Some(plan),
-                Err(error) => return Err(ScriptResponse::error(&error)),
+                Err(error) => return Err(ScriptResponse::rejected(&error)),
             }
         } else {
             None
@@ -335,7 +335,7 @@ impl BubblewrapScriptRunner {
         // builder emits — an old binary would otherwise fail at spawn time with
         // an opaque "unknown option" error.
         if let Err(err) = probe() {
-            return Err(ScriptResponse::error(&err.to_string()));
+            return Err(ScriptResponse::unavailable(&err.to_string()));
         }
         if proxy_only || firewall_enforced {
             // Proxy and firewall are mutually exclusive, so this names the one
@@ -347,7 +347,7 @@ impl BubblewrapScriptRunner {
                 proxy_network::PrivateNetworkUse::FirewallEnforcement
             };
             if let Err(error) = proxy_network::probe_dependencies(use_case) {
-                return Err(ScriptResponse::error(&error));
+                return Err(ScriptResponse::unavailable(&error));
             }
         }
 
@@ -498,7 +498,7 @@ impl BubblewrapScriptRunner {
                         Ok(plan) => plan,
                         Err(error) => {
                             proxy.stop(logger);
-                            return Err(ScriptResponse::error(&error));
+                            return Err(ScriptResponse::rejected(&error));
                         }
                     },
                 };

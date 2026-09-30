@@ -4,7 +4,7 @@
 //! The SDK's own error type — a crate-owned facade over the internal
 //! `wxc_common` error, so the public API never exposes the foundation crate.
 
-use wxc_common::mxc_error::{MxcError, MxcErrorCode};
+use wxc_common::mxc_error::{ApiFailure, MxcError, MxcErrorCode};
 
 /// Closed set of error codes the SDK can return. Mirrors the wire-format codes
 /// (serialised as snake_case strings) one-for-one.
@@ -131,6 +131,25 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+impl From<ErrorCode> for MxcErrorCode {
+    fn from(code: ErrorCode) -> Self {
+        match code {
+            ErrorCode::MalformedRequest => Self::MalformedRequest,
+            ErrorCode::UnsupportedContainment => Self::UnsupportedContainment,
+            ErrorCode::UnsupportedPhase => Self::UnsupportedPhase,
+            ErrorCode::BackendUnavailable => Self::BackendUnavailable,
+            ErrorCode::MalformedId => Self::MalformedId,
+            ErrorCode::StaleId => Self::StaleId,
+            ErrorCode::NotProvisioned => Self::NotProvisioned,
+            ErrorCode::NotStarted => Self::NotStarted,
+            ErrorCode::AlreadyStarted => Self::AlreadyStarted,
+            ErrorCode::AlreadyStopped => Self::AlreadyStopped,
+            ErrorCode::PolicyValidation => Self::PolicyValidation,
+            ErrorCode::BackendError => Self::BackendError,
+        }
+    }
+}
+
 impl From<MxcError> for Error {
     fn from(error: MxcError) -> Self {
         let (operation, native_code) = match error.api_failure {
@@ -147,6 +166,31 @@ impl From<MxcError> for Error {
             native_code,
             remediation: error.remediation,
         }
+    }
+}
+
+impl Error {
+    /// The inverse of [`From<MxcError> for Error`], so a caller holding the
+    /// facade can reach the shared error-envelope and exit-code helpers in
+    /// `wxc_common` — the executors' early-failure path needs the typed code
+    /// to classify an unusable host apart from a request the caller must
+    /// change.
+    ///
+    /// Every field the facade carries survives; `details` has no facade field
+    /// and is therefore absent rather than reconstructed. An inherent method
+    /// rather than a `From` impl, which would make the error type ambiguous at
+    /// the crate's existing `?` conversions.
+    pub fn to_mxc_error(&self) -> MxcError {
+        let mut inner = MxcError::new(MxcErrorCode::from(self.code), self.message.clone());
+        if let Some(operation) = &self.operation {
+            let mut failure = ApiFailure::new(operation.clone());
+            failure.native_code = self.native_code.clone();
+            inner = inner.with_api_failure(failure);
+        }
+        if let Some(remediation) = &self.remediation {
+            inner = inner.with_remediation(remediation.clone());
+        }
+        inner
     }
 }
 

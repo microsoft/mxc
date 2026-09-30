@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
 use crate::error::WxcError;
+use crate::mxc_error::MxcErrorCode;
 
 /// Selects which containment backend to use for script execution.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1298,7 +1299,7 @@ impl ExecutionRequest {
 
 /// Distinguishes whether an error occurred during process creation (launch)
 /// or after the process started but exited with a failure code.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FailurePhase {
     /// No failure (process exited successfully, or has not been evaluated yet).
     #[default]
@@ -1307,9 +1308,10 @@ pub enum FailurePhase {
     /// the VM/sandbox bring-up, or a transient resource contention (e.g. a
     /// single-instance backend already running). Generally worth retrying.
     LaunchFailed,
-    /// The request cannot be honored and will not succeed on a blind retry
-    /// without changing the input or host: a policy rejection, or a missing
-    /// host prerequisite (backend/runtime not installed).
+    /// The request's own policy was refused: it cannot be honored as written
+    /// and will not succeed on a blind retry without changing the input. A host
+    /// that cannot run the backend at all is [`BackendUnavailable`] instead, so
+    /// that a caller can tell "fix the request" from "try another tier".
     Rejected,
     /// The launch command succeeded but the guest/sandbox infrastructure failed
     /// before or while running user code (agent rendezvous, channel connect, or
@@ -1327,6 +1329,34 @@ pub enum FailurePhase {
     /// [`LaunchFailed`] so callers can fall back to a lower tier rather than
     /// hard-fail.
     BackendUnavailable,
+}
+
+impl FailurePhase {
+    /// Wire error code for a failure in this phase.
+    ///
+    /// A rejection and an unavailable backend are the two outcomes a caller can
+    /// act on — fix the request, or fall back to another tier — so each keeps
+    /// its own code. Everything else is an infrastructure failure with no more
+    /// specific equivalent.
+    pub fn error_code(self) -> MxcErrorCode {
+        match self {
+            Self::Rejected => MxcErrorCode::PolicyValidation,
+            Self::BackendUnavailable => MxcErrorCode::BackendUnavailable,
+            _ => MxcErrorCode::BackendError,
+        }
+    }
+
+    /// Exit code to report when MXC itself fails a run in this phase.
+    ///
+    /// A rejection exits 1, matching a parser-side rejection, so a refused
+    /// request is distinguishable from an infrastructure failure. A workload
+    /// that ran carries its own code and never consults this.
+    pub fn mxc_exit_code(self) -> i32 {
+        match self {
+            Self::Rejected => 1,
+            _ => -1,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1347,6 +1377,15 @@ pub struct ScriptResponse {
     /// Structured metadata produced after the sandboxed process exits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_metadata: Option<Box<SandboxOutputMetadata>>,
+    /// Wire error code, when the phase alone is not precise enough.
+    ///
+    /// [`FailurePhase`] crosses the WSLc daemon IPC boundary, where a cached
+    /// image may predate the host, so it cannot gain a variant per code. This
+    /// optional override lets a refusal name a code the phase cannot —
+    /// structurally malformed input, say, rather than a policy refusal —
+    /// while older peers that omit it keep falling back to the phase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<MxcErrorCode>,
 }
 
 impl Default for ScriptResponse {
@@ -1359,6 +1398,7 @@ impl Default for ScriptResponse {
             extended_error: String::new(),
             failure_phase: FailurePhase::None,
             output_metadata: None,
+            error_code: None,
         }
     }
 }
@@ -1419,6 +1459,53 @@ impl ScriptResponse {
             error_message: msg.to_string(),
             ..Default::default()
         }
+    }
+
+    /// Create a rejection response: the request cannot be honored as written
+    /// and no retry will change that.
+    ///
+    /// Carries [`FailurePhase::Rejected`] so the failure reports exit 1 with a
+    /// `policy_validation` code. Other MXC failures report -1 with
+    /// `backend_error`, while a workload that ran keeps its own exit code.
+    pub fn rejected(msg: &str) -> Self {
+        ScriptResponse {
+            exit_code: FailurePhase::Rejected.mxc_exit_code(),
+            failure_phase: FailurePhase::Rejected,
+            ..Self::error(msg)
+        }
+    }
+
+    /// Create an unavailable-backend response: this host cannot run the
+    /// selected backend, so a caller may fall back to another tier rather than
+    /// treat the request as refused.
+    ///
+    /// Carries [`FailurePhase::BackendUnavailable`] so the failure reports a
+    /// `backend_unavailable` code.
+    pub fn unavailable(msg: &str) -> Self {
+        ScriptResponse {
+            failure_phase: FailurePhase::BackendUnavailable,
+            ..Self::error(msg)
+        }
+    }
+
+    /// Create a malformed-request response: the request is structurally
+    /// invalid rather than refused on policy grounds.
+    ///
+    /// Exits 1 like any other refusal, but reports `malformed_request` so that
+    /// a one-shot caller and a state-aware caller name the same condition the
+    /// same way.
+    pub fn malformed(msg: &str) -> Self {
+        ScriptResponse {
+            error_code: Some(MxcErrorCode::MalformedRequest),
+            ..Self::rejected(msg)
+        }
+    }
+
+    /// The wire error code for this response: the explicit override when one
+    /// is set, otherwise the code its [`FailurePhase`] implies.
+    pub fn wire_error_code(&self) -> MxcErrorCode {
+        self.error_code
+            .unwrap_or_else(|| self.failure_phase.error_code())
     }
 }
 

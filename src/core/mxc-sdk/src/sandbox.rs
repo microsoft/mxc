@@ -145,7 +145,9 @@ pub enum WaitOutcome {
     /// passes the `experimental` opt-in to
     /// [`exec_sandbox`](crate::exec_sandbox) and the backend is compiled in via
     /// this crate's `isolation_session` feature, which forwards to the engine.
-    /// Both refusals are
+    /// A missing opt-in is
+    /// [`ErrorCode::MalformedRequest`](crate::ErrorCode::MalformedRequest),
+    /// since the caller can supply it; a feature this build lacks is
     /// [`ErrorCode::BackendUnavailable`](crate::ErrorCode::BackendUnavailable).
     TimedOut,
 }

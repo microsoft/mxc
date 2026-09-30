@@ -74,7 +74,7 @@ impl WslcError {
         let failure_phase = self.failure_phase();
         let msg = self.to_string();
         ScriptResponse {
-            exit_code: -1,
+            exit_code: failure_phase.mxc_exit_code(),
             standard_err: msg.clone(),
             error_message: msg,
             failure_phase,
@@ -161,16 +161,20 @@ mod tests {
     }
 
     #[test]
-    fn response_matches_the_untyped_shape_apart_from_the_phase() {
+    fn a_rejection_matches_the_shared_rejection_shape() {
         let typed = WslcError::Rejected("bad path".to_string()).into_response();
-        let untyped = ScriptResponse::error("bad path");
+        let shared = ScriptResponse::rejected("bad path");
 
-        assert_eq!(typed.exit_code, untyped.exit_code);
-        assert_eq!(typed.standard_err, untyped.standard_err);
-        assert_eq!(typed.error_message, untyped.error_message);
-        // The untyped helper left this at the default, which is the bug.
-        assert_eq!(untyped.failure_phase, FailurePhase::None);
+        assert_eq!(typed.exit_code, shared.exit_code);
+        assert_eq!(typed.standard_err, shared.standard_err);
+        assert_eq!(typed.error_message, shared.error_message);
         assert_eq!(typed.failure_phase, FailurePhase::Rejected);
+        // An untyped error leaves the phase defaulted, which is what this
+        // mapping exists to avoid.
+        assert_eq!(
+            ScriptResponse::error("bad path").failure_phase,
+            FailurePhase::None
+        );
     }
 
     #[test]

@@ -14,8 +14,8 @@ use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, IsolationSessionProvisionConfig};
 use wxc_common::mxc_error::MxcError;
 use wxc_common::state_aware_backend::{
-    DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult, StartResult,
-    StatefulSandboxBackend, StopResult,
+    DeprovisionResult, ExecHandle, ExecStdio, ProvisionResult, StartResult, StatefulSandboxBackend,
+    StopResult,
 };
 use wxc_common::validator::{validate_state_aware_network_policy_support, NetworkPolicySupport};
 
@@ -312,25 +312,24 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
                     request,
                     wants_interactive_console(stdio, || std::io::stdout().is_terminal()),
                 );
+                let timeout_ms = options.timeout_ms;
+                let options = with_service_timeout_grace(options);
 
                 let mut logger = Logger::inherit_thread_diagnostic_sink();
-                let exit_code = manager
-                    .create_process(&options, Some(&mut logger))
+                let outcome = manager
+                    .create_process(&options, timeout_ms, Some(&mut logger))
                     .map_err(map_lifecycle_error)?;
 
                 // The output relay completed inside `create_process`. The
                 // dispatcher sees zero pipe handles, skips its own relay setup,
-                // and gets the exit code from the waiter closure.
+                // and gets the outcome from the waiter closure.
                 let null = HANDLE(std::ptr::null_mut());
                 Ok(ExecHandle {
                     stdout: null,
                     stderr: null,
                     stdin: null,
                     stdin_closer: None,
-                    // `Exited`, never `TimedOut`: a backend serving
-                    // `ExecStdio::Relayed` reports an exit code, and the
-                    // relay rejects anything else.
-                    waiter: Box::new(move || Ok(ExecOutcome::Exited(exit_code))),
+                    waiter: Box::new(move || Ok(outcome)),
                     // Nothing to terminate: `create_process` returned only once
                     // the process was gone.
                     terminator: Box::new(|| Ok(())),

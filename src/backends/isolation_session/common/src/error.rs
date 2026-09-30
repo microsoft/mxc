@@ -251,7 +251,18 @@ impl std::fmt::Display for IsolationSessionError {
 
 impl From<IsolationSessionError> for ScriptResponse {
     fn from(err: IsolationSessionError) -> Self {
-        ScriptResponse::error(&err.to_string())
+        let message = err.to_string();
+        match err {
+            // The caller's policy carries something this backend cannot
+            // enforce; only a changed request can succeed.
+            IsolationSessionError::Policy(_) => ScriptResponse::rejected(&message),
+            // The runtime API is not registered or the OS feature gate is off,
+            // so a caller may fall back to another tier.
+            IsolationSessionError::ServiceUnavailable(_) => ScriptResponse::unavailable(&message),
+            IsolationSessionError::Lifecycle(_) | IsolationSessionError::Stale(_) => {
+                ScriptResponse::error(&message)
+            }
+        }
     }
 }
 

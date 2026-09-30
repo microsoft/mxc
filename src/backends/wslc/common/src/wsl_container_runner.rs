@@ -26,7 +26,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use wxc_common::logger::{Logger, Mode};
 #[cfg(test)]
 use wxc_common::models::NetworkPolicy;
-use wxc_common::models::{ExecutionRequest, ScriptResponse, WslcConfig};
+use wxc_common::models::{ExecutionRequest, FailurePhase, ScriptResponse, WslcConfig};
 use wxc_common::mxc_error::MxcError;
 use wxc_common::sandbox_process::StdioMode;
 use wxc_common::script_runner::ScriptRunner;
@@ -686,10 +686,7 @@ impl ScriptRunner for WSLContainerRunner {
             .into_response());
         }
         policy::reject_unsupported_enforcement_mode(request).map_err(as_wslc_rejection)?;
-        // The shared validator returns an untagged response; retag it so its
-        // rejections reach SDK callers as `policy_validation` like the checks above.
-        validate_network_policy_support(request, policy::network_policy_support())
-            .map_err(|resp| WslcError::Rejected(resp.error_message).into_response())?;
+        validate_network_policy_support(request, policy::network_policy_support())?;
         policy::validate_directional_network(request).map_err(as_wslc_rejection)?;
         policy::reject_proxy_credentials_in_argv(request).map_err(as_wslc_rejection)?;
         Ok(())
@@ -1322,6 +1319,15 @@ impl WSLContainerRunner {
             exit_code: if outcome.timed_out() { -1 } else { exit_code },
             standard_out: stdout,
             standard_err: stderr,
+            // A spent deadline is an MXC failure, not the workload's own
+            // result. An unconfirmed stop is reported as a post-launch failure
+            // instead: the deadline is only half the story when the container
+            // may still be running.
+            failure_phase: match outcome {
+                WaitOutcome::Exited => FailurePhase::None,
+                WaitOutcome::TimedOutTerminated => FailurePhase::Timeout,
+                WaitOutcome::TimedOutUnconfirmed => FailurePhase::PostLaunchFailed,
+            },
             // The unconfirmed wording is not pedantry: the stop is only ever a
             // request, so claiming a termination the SDK never confirmed can
             // tell a caller their sandboxed code is dead while it is running.
@@ -2262,7 +2268,11 @@ mod tests {
         let mut runner = WSLContainerRunner::new(&WslcConfig::default());
         let response = runner.execute(&request, &mut logger);
 
-        assert_eq!(response.exit_code, -1, "overlap must fail the run");
+        assert_eq!(response.exit_code, 1, "overlap must be refused");
+        assert_eq!(
+            response.failure_phase,
+            wxc_common::models::FailurePhase::Rejected
+        );
         assert!(
             response.error_message.contains("cannot be enforced"),
             "expected the overlap error, got: {}",
@@ -2311,8 +2321,12 @@ mod tests {
         let response = runner.execute(&request, &mut logger);
 
         assert_eq!(
-            response.exit_code, -1,
-            "junction-aliased deny must fail the run"
+            response.exit_code, 1,
+            "junction-aliased deny must be refused"
+        );
+        assert_eq!(
+            response.failure_phase,
+            wxc_common::models::FailurePhase::Rejected
         );
         assert!(
             response.error_message.contains("cannot be enforced"),
@@ -2361,8 +2375,12 @@ mod tests {
         let response = runner.execute(&request, &mut logger);
 
         assert_eq!(
-            response.exit_code, -1,
-            "absent junction-aliased deny must fail the run"
+            response.exit_code, 1,
+            "absent junction-aliased deny must be refused"
+        );
+        assert_eq!(
+            response.failure_phase,
+            wxc_common::models::FailurePhase::Rejected
         );
         assert!(
             response.error_message.contains("cannot be enforced"),
@@ -2466,7 +2484,7 @@ mod tests {
 
     #[test]
     fn validate_runner_tags_shared_validator_rejections() {
-        // The shared network validator builds untagged responses; WSLc retags them
+        // The shared network validator tags its refusals as policy rejections,
         // so callers get `policy_validation` rather than an opaque backend error.
         let mut request = ExecutionRequest {
             containment: wxc_common::models::ContainmentBackend::Wslc,

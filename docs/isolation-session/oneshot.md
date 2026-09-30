@@ -254,11 +254,18 @@ the rationale for each disposition, and the error mapping live in
 | `isolationSession` / one-shot `appId` | rejected as `malformed_request` — IsolationSession one-shot configuration uses only the stable top-level policy |
 | `processContainer` / `lxc` / `seatbelt` / another backend's section | rejected — only the section matching `containment` is accepted |
 
-Refusals surface as a non-zero exit with the reason on stderr. One-shot has no
-typed policy error code: the envelope carries `error.code = "backend_error"` with
-the reason in the message. On the state-aware surface, structurally
-representable backend policy failures emit `policy_validation`; fields excluded
-by an exact phase root fail earlier as `malformed_request`.
+Refusals surface as a non-zero exit with the reason on stderr. Policy refusals
+exit 1 with `error.code = "policy_validation"` — both those raised by the shared
+network-policy validator and the backend's own one-shot checks. A host whose
+IsolationSession service is unavailable exits -1 with `error.code =
+"backend_unavailable"`; MXC-side launch, lifecycle, and timeout failures exit -1
+with `error.code = "backend_error"`. A workload that ran to completion
+propagates its own exit code, so a crashing workload keeps its status rather
+than reporting -1; a workload that outran `scriptTimeout` does not, since a
+spent deadline is an MXC failure. On the
+state-aware surface, structurally representable backend policy failures emit
+`policy_validation`; fields excluded by an exact phase root fail earlier as
+`malformed_request`.
 
 **Why every supplied `ui` is refused.** The `ui` section states intent about the
 contained code's relationship to the *user's* environment, and was modelled on a

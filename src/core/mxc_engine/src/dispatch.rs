@@ -88,8 +88,7 @@ pub fn spawn_runner(
 /// `extended_error` detail into the message — rather than flattening
 /// everything to a generic `BackendError`.
 fn map_spawn_error(resp: ScriptResponse) -> MxcError {
-    use wxc_common::models::FailurePhase;
-
+    let code = resp.wire_error_code();
     let mut message = resp.error_message;
     if !resp.extended_error.is_empty() {
         if message.is_empty() {
@@ -98,12 +97,7 @@ fn map_spawn_error(resp: ScriptResponse) -> MxcError {
             message = format!("{message} ({})", resp.extended_error);
         }
     }
-    match resp.failure_phase {
-        FailurePhase::BackendUnavailable => MxcError::backend_unavailable(message),
-        // The request itself cannot be honored, so a blind retry will not help.
-        FailurePhase::Rejected => MxcError::policy_validation(message),
-        _ => MxcError::backend_error(message),
-    }
+    MxcError::new(code, message)
 }
 
 #[cfg(target_os = "linux")]

@@ -51,7 +51,7 @@ use wxc_common::audit::{
 use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;
 use wxc_common::models::{
-    ContainmentBackend, ExecutionRequest, FailurePhase, SandboxOutputMetadata, ScriptResponse,
+    ContainmentBackend, ExecutionRequest, SandboxOutputMetadata, ScriptResponse,
 };
 use wxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
@@ -1533,7 +1533,7 @@ impl AppContainerScriptRunner {
         let bfscfg_path = if self.filesystem_mode == FilesystemMode::Bfs {
             match crate::fallback_detector::find_bfscfg_exe() {
                 Ok(p) => p,
-                Err(e) => return Err(ScriptResponse::error(&e.to_string())),
+                Err(e) => return Err(ScriptResponse::unavailable(&e.to_string())),
             }
         } else {
             None
@@ -1543,16 +1543,16 @@ impl AppContainerScriptRunner {
             FileSystemBfsManager::new(self.app_container_name.clone(), bfscfg_path);
         if self.filesystem_mode == FilesystemMode::Bfs {
             if let Err(e) = bfs_manager.configure(&request.policy, logger) {
-                let msg = if matches!(&e, WxcError::BfsNotAvailable) {
-                    "Filesystem policy error: bfscfg.exe is not available on this Windows \
-                     build, so the AppContainer + BFS filesystem tier cannot enforce your \
-                     policy. Use an OS build that includes bfscfg.exe, or run on a host that \
-                     supports the BaseContainer backend (which does not require bfscfg.exe)."
-                        .to_string()
+                return Err(if matches!(&e, WxcError::BfsNotAvailable) {
+                    ScriptResponse::unavailable(
+                        "Filesystem policy error: bfscfg.exe is not available on this Windows \
+                         build, so the AppContainer + BFS filesystem tier cannot enforce your \
+                         policy. Use an OS build that includes bfscfg.exe, or run on a host that \
+                         supports the BaseContainer backend (which does not require bfscfg.exe).",
+                    )
                 } else {
-                    e.to_string()
-                };
-                return Err(ScriptResponse::error(&msg));
+                    ScriptResponse::error(&e.to_string())
+                });
             }
         }
 
@@ -1734,7 +1734,7 @@ impl SandboxBackend for AppContainerScriptRunner {
         validate_required_child_env(request)?;
         validate_network_policy_support(request, self.network_policy_support())?;
         if !request.policy.enumerate_paths.is_empty() {
-            return Err(ScriptResponse::error(
+            return Err(ScriptResponse::rejected(
                 &FallbackError::EnumeratePathsUnsupported.to_string(),
             ));
         }
@@ -1745,7 +1745,7 @@ impl SandboxBackend for AppContainerScriptRunner {
             .is_some_and(|ingress| ingress.default == wxc_common::models::NetworkAction::Allow)
             && !allows_network_egress(&request.policy)
         {
-            return Err(ScriptResponse::error(
+            return Err(ScriptResponse::rejected(
                 "network.ingress.default='allow' cannot be combined with denied network egress \
                  on the AppContainer fallback because privateNetworkClientServer grants \
                  bidirectional private-network access",
@@ -1759,7 +1759,7 @@ impl SandboxBackend for AppContainerScriptRunner {
                 ingress.host_loopback == wxc_common::models::NetworkAction::Allow
             })
         {
-            return Err(ScriptResponse::error(
+            return Err(ScriptResponse::rejected(
                 "network.ingress.hostLoopback='allow' is not supported by the AppContainer fallback",
             ));
         }
@@ -1777,21 +1777,20 @@ impl SandboxBackend for AppContainerScriptRunner {
             false,
         )?;
         if request.policy.capture_denials.is_some() && self.guarded_capture_factory.is_none() {
-            return Err(ScriptResponse {
-                failure_phase: FailurePhase::BackendUnavailable,
-                ..ScriptResponse::error(CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG)
-            });
+            return Err(ScriptResponse::unavailable(
+                CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG,
+            ));
         }
         if !request.policy.denied_paths.is_empty()
             && self.filesystem_mode != FilesystemMode::Dacl
             && !self.denied_paths_enforced_externally
         {
-            return Err(ScriptResponse::error(
+            return Err(ScriptResponse::rejected(
                 wxc_common::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
             ));
         }
         if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
-            return Err(ScriptResponse::error(
+            return Err(ScriptResponse::rejected(
                 wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
             ));
         }

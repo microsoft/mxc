@@ -261,6 +261,30 @@ impl StartNetwork {
     }
 }
 
+/// Why an attach ended without an exit code, so a caller can tell a spent
+/// deadline from an infrastructure failure without matching on message text.
+#[derive(Debug)]
+pub enum AttachError {
+    /// The caller's deadline elapsed and the workload was killed.
+    Timeout(String),
+    /// Anything else: the attach could not be set up, or the wait itself failed.
+    Failed(String),
+}
+
+impl std::fmt::Display for AttachError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AttachError::Timeout(msg) | AttachError::Failed(msg) => f.write_str(msg),
+        }
+    }
+}
+
+impl From<String> for AttachError {
+    fn from(msg: String) -> Self {
+        AttachError::Failed(msg)
+    }
+}
+
 pub struct LxcContainer {
     name: String,
     lxc_path: String,
@@ -543,7 +567,7 @@ impl LxcContainer {
         force_clear_env: bool,
         timeout: Option<std::time::Duration>,
         firewall: ContainerFirewall,
-    ) -> Result<(i32, String, String), String> {
+    ) -> Result<(i32, String, String), AttachError> {
         use mxc_pty::{run_with_pty, PtyOptions, PtyOutcome, Signal};
 
         // This process blocks these for its cleanup watchdog; left blocked, the
@@ -577,7 +601,10 @@ impl LxcContainer {
 
             PtyOutcome::TimedOut => {
                 let ms = timeout.map(|d| d.as_millis()).unwrap_or(0);
-                Err(format!("script timed out after {}ms", ms))
+                Err(AttachError::Timeout(format!(
+                    "script timed out after {}ms",
+                    ms
+                )))
             }
         }
     }
@@ -592,8 +619,10 @@ impl LxcContainer {
         _force_clear_env: bool,
         _timeout: Option<std::time::Duration>,
         _firewall: ContainerFirewall,
-    ) -> Result<(i32, String, String), String> {
-        Err("LxcContainer::attach_run is only supported on Linux".to_string())
+    ) -> Result<(i32, String, String), AttachError> {
+        Err(AttachError::Failed(
+            "LxcContainer::attach_run is only supported on Linux".to_string(),
+        ))
     }
 
     /// Run a command in the container and return its output, with no pty and no
