@@ -25,7 +25,7 @@ use wxc_e2e_tests::{
     run_platform_config_value_within_duration,
 };
 
-const SCHEMA_VERSION: &str = "0.7.0-alpha";
+const SCHEMA_VERSION: &str = "0.9.0-alpha";
 
 /// The schema that introduced the default environment block and start-directory
 /// normalization, so cases asserting either must name it explicitly.

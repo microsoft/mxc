@@ -2626,7 +2626,7 @@ mod tests {
         // default block.
         let request = ExecutionRequest {
             env: Some(Vec::new()),
-            default_env_compatibility: DefaultEnvCompatibility::LegacyCompatible,
+            default_env_compatibility: DefaultEnvCompatibility::DefaultBlock,
             ..Default::default()
         };
 

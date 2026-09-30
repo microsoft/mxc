@@ -2163,17 +2163,6 @@ mod tests {
                 .find_map(|kv| kv.strip_prefix(&format!("{key}=")))
         }
 
-        #[test]
-        fn below_0_9_the_caller_env_passes_through_untouched() {
-            // Pre-0.9 the only default is whatever `lxc-attach` supplies.
-            let mut r = request(DefaultEnvCompatibility::LegacyCompatible);
-            r.env = None;
-            assert!(resolved_env(&r).is_empty());
-
-            r.env = Some(vec!["FOO=bar".into()]);
-            assert_eq!(resolved_env(&r), vec!["FOO=bar".to_string()]);
-        }
-
         /// A direct typed SDK request that named no contract takes the current
         /// behavior.
         #[test]
@@ -2256,15 +2245,6 @@ mod tests {
                 r.working_directory = cwd.into();
                 assert_eq!(value(&resolved_env(&r), "HOME"), Some(expected));
                 assert_eq!(start_directory(&r).as_deref(), Some(expected));
-            }
-        }
-
-        #[test]
-        fn below_0_9_a_relative_start_directory_reaches_cd_untouched() {
-            for cwd in ["work", "./work", "a/../b"] {
-                let mut r = request(DefaultEnvCompatibility::LegacyCompatible);
-                r.working_directory = cwd.into();
-                assert_eq!(start_directory(&r).as_deref(), Some(cwd), "cwd {cwd:?}");
             }
         }
 

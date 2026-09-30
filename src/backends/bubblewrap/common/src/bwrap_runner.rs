@@ -1741,7 +1741,7 @@ mod tests {
     #[test]
     fn validate_leaves_a_legacy_schema_proxy_endpoint_untouched() {
         let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::LegacyCompatible;
+        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
         req.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("[::1]".into(), 3128)),
             builtin_test_server: false,
@@ -1919,7 +1919,7 @@ mod tests {
     #[test]
     fn validate_leaves_a_pre_0_8_hostname_rule_address_untouched() {
         let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::LegacyCompatible;
+        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
         req.policy.network_enforcement_mode = wxc_common::models::NetworkEnforcementMode::Firewall;
         req.policy.allowed_hosts = vec!["api.github.com".into()];
 
@@ -1942,7 +1942,7 @@ mod tests {
     #[test]
     fn validate_leaves_a_legacy_schema_hosts_denial_untouched() {
         let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::LegacyCompatible;
+        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
         req.policy.denied_paths = vec!["/etc/hosts".into()];
         req.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("proxy.example.com".into(), 3128)),
@@ -2009,7 +2009,7 @@ mod tests {
         // unaffected. Tolerant of a host without bwrap: it only rules out the
         // local-network rejection.
         let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::LegacyCompatible;
+        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
         req.policy.default_network_policy = wxc_common::models::NetworkPolicy::Allow;
 
         if let Err(err) = BubblewrapScriptRunner::new().validate(&req) {
@@ -2045,7 +2045,7 @@ mod tests {
     fn validate_accepts_a_firewall_mode_request_before_0_8() {
         // GHCP consumes Bubblewrap on 0.6/0.7; the gate must not reach them.
         let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::LegacyCompatible;
+        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
         req.policy.network_enforcement_mode = NetworkEnforcementMode::Firewall;
         req.policy.allowed_hosts = vec!["api.github.com".into()];
         req.policy.allow_local_network = true;
@@ -2126,7 +2126,7 @@ mod tests {
     fn validate_accepts_host_rules_without_a_mechanism_before_0_8() {
         // GHCP consumes Bubblewrap on 0.6/0.7 with exactly this shape.
         let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::LegacyCompatible;
+        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
         req.policy.default_network_policy = wxc_common::models::NetworkPolicy::Block;
         req.policy.allowed_hosts = vec!["api.github.com".into()];
 

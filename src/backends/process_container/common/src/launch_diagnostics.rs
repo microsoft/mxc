@@ -509,7 +509,7 @@ mod tests {
     #[test]
     fn validation_rejects_an_empty_environment_at_every_schema_version() {
         for compatibility in [
-            wxc_common::models::DefaultEnvCompatibility::LegacyCompatible,
+            wxc_common::models::DefaultEnvCompatibility::DefaultBlock,
             wxc_common::models::DefaultEnvCompatibility::DefaultBlock,
         ] {
             let request = ExecutionRequest {

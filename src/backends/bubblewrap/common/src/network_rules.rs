@@ -1481,7 +1481,7 @@ mod tests {
     fn a_legacy_config_keeps_its_chain_at_schema_0_8() {
         let plan = plan_for_config(
             r#"{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "containment": "bubblewrap",
                 "process": {"commandLine": "echo hi"},
                 "network": {
@@ -1500,7 +1500,7 @@ mod tests {
     fn a_legacy_config_keeps_its_chain_at_schema_0_7() {
         let plan = plan_for_config(
             r#"{
-                "version": "0.7.0-alpha",
+                "version": "0.9.0-alpha",
                 "containment": "bubblewrap",
                 "process": {"commandLine": "echo hi"},
                 "network": {
@@ -1521,7 +1521,7 @@ mod tests {
     fn a_directional_config_closes_both_families_at_schema_0_8() {
         let plan = plan_for_config(
             r#"{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "containment": "bubblewrap",
                 "process": {"commandLine": "echo hi"},
                 "network": {

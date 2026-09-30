@@ -100,7 +100,7 @@ pub(super) fn reject_unhonorable_environment(
         EnvResolution::Replace => Err(IsolationSessionError::Policy(
             ERR_ENVIRONMENT_POLICY.to_string(),
         )),
-        EnvResolution::Default | EnvResolution::Overlay | EnvResolution::Legacy => Ok(()),
+        EnvResolution::Default | EnvResolution::Overlay => Ok(()),
     }
 }
 
@@ -759,7 +759,7 @@ mod tests {
 
     #[test]
     fn only_an_environment_that_would_replace_the_default_is_refused() {
-        use DefaultEnvCompatibility::{DefaultBlock, LegacyCompatible};
+        use DefaultEnvCompatibility::DefaultBlock;
 
         let cases = [
             (None, false, DefaultBlock, true),
@@ -768,7 +768,6 @@ mod tests {
             (Some(vec![]), true, DefaultBlock, true),
             (Some(vec!["FOO=bar"]), false, DefaultBlock, false),
             (Some(vec!["FOO=bar"]), true, DefaultBlock, true),
-            (Some(vec!["FOO=bar"]), false, LegacyCompatible, true),
         ];
 
         for (env, inherit_default_env, compatibility, accepted) in cases {

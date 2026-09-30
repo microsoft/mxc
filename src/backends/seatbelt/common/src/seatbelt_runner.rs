@@ -1000,7 +1000,7 @@ mod tests {
         let mut request = ExecutionRequest::default();
         // Pre-0.9, so a test opts into the default environment block
         // explicitly.
-        request.default_env_compatibility = DefaultEnvCompatibility::LegacyCompatible;
+        request.default_env_compatibility = DefaultEnvCompatibility::DefaultBlock;
         request.experimental_enabled = true;
         request.seatbelt = Some(SeatbeltConfig::default());
         request

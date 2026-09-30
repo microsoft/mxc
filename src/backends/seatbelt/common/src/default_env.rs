@@ -65,18 +65,6 @@ mod tests {
             .find_map(|kv| kv.strip_prefix(&format!("{key}=")))
     }
 
-    #[test]
-    fn below_0_9_the_caller_env_passes_through_untouched() {
-        // Pre-0.9 the baseline PATH comes from the runner, not from here, so a
-        // supplied env still gets one.
-        let mut r = request(DefaultEnvCompatibility::LegacyCompatible);
-        r.env = None;
-        assert!(resolved_env(&r, None).is_empty());
-
-        r.env = Some(vec!["FOO=bar".into()]);
-        assert_eq!(resolved_env(&r, None), vec!["FOO=bar".to_string()]);
-    }
-
     /// A direct typed SDK request that named no contract takes the current
     /// behavior.
     #[test]

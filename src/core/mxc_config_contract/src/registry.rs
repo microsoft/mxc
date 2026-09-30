@@ -106,8 +106,6 @@ impl ContractDescriptor {
     }
 }
 
-const NO_GENERATED_ROOTS: &[ContractRequestRoot] = &[];
-
 const V0_9_ROOTS: &[ContractRequestRoot] = &[
     ContractRequestRoot {
         fixture_directory: "one_shot",
@@ -178,39 +176,6 @@ const V1_1_ROOTS: &[ContractRequestRoot] = &[
 /// crate.
 pub const CONTRACTS: &[ContractDescriptor] = &[
     ContractDescriptor {
-        version: ContractVersion::V0_6_0Alpha,
-        status: ContractStatus::Published,
-        schema_id:
-            "https://github.com/microsoft/mxc/schemas/stable/mxc-config.schema.0.6.0-alpha.json",
-        schema_path: "schemas/stable/mxc-config.schema.0.6.0-alpha.json",
-        typescript_path: None,
-        csharp_path: None,
-        generates_artifacts: false,
-        request_roots: NO_GENERATED_ROOTS,
-    },
-    ContractDescriptor {
-        version: ContractVersion::V0_7_0Alpha,
-        status: ContractStatus::Published,
-        schema_id:
-            "https://github.com/microsoft/mxc/schemas/stable/mxc-config.schema.0.7.0-alpha.json",
-        schema_path: "schemas/stable/mxc-config.schema.0.7.0-alpha.json",
-        typescript_path: None,
-        csharp_path: None,
-        generates_artifacts: false,
-        request_roots: NO_GENERATED_ROOTS,
-    },
-    ContractDescriptor {
-        version: ContractVersion::V0_8_0Alpha,
-        status: ContractStatus::Published,
-        schema_id:
-            "https://github.com/microsoft/mxc/schemas/stable/mxc-config.schema.0.8.0-alpha.json",
-        schema_path: "schemas/stable/mxc-config.schema.0.8.0-alpha.json",
-        typescript_path: None,
-        csharp_path: None,
-        generates_artifacts: false,
-        request_roots: NO_GENERATED_ROOTS,
-    },
-    ContractDescriptor {
         version: ContractVersion::V0_9_0Alpha,
         status: ContractStatus::Published,
         schema_id:
@@ -247,17 +212,14 @@ pub const CONTRACTS: &[ContractDescriptor] = &[
 /// Returns the descriptor for a registered contract version.
 pub const fn descriptor(version: ContractVersion) -> ContractDescriptor {
     match version {
-        ContractVersion::V0_6_0Alpha => CONTRACTS[0],
-        ContractVersion::V0_7_0Alpha => CONTRACTS[1],
-        ContractVersion::V0_8_0Alpha => CONTRACTS[2],
-        ContractVersion::V0_9_0Alpha => CONTRACTS[3],
-        ContractVersion::V1_0_0 => CONTRACTS[4],
-        ContractVersion::V1_1_0Alpha => CONTRACTS[5],
+        ContractVersion::V0_9_0Alpha => CONTRACTS[0],
+        ContractVersion::V1_0_0 => CONTRACTS[1],
+        ContractVersion::V1_1_0Alpha => CONTRACTS[2],
     }
 }
 
 static SUPPORTED_VERSIONS: [ContractVersion; CONTRACTS.len()] = {
-    let mut result = [ContractVersion::V0_6_0Alpha; CONTRACTS.len()];
+    let mut result = [ContractVersion::V0_9_0Alpha; CONTRACTS.len()];
     let mut i = 0;
     while i < CONTRACTS.len() {
         result[i] = CONTRACTS[i].version();
@@ -278,13 +240,10 @@ mod tests {
     #[test]
     fn test_supported_versions() {
         let versions = supported_versions();
-        assert_eq!(versions.len(), 6);
-        assert!(versions.contains(&ContractVersion::V0_6_0Alpha));
-        assert!(versions.contains(&ContractVersion::V0_7_0Alpha));
-        assert!(versions.contains(&ContractVersion::V0_8_0Alpha));
-        assert!(versions.contains(&ContractVersion::V0_9_0Alpha));
-        assert!(versions.contains(&ContractVersion::V1_0_0));
-        assert!(versions.contains(&ContractVersion::V1_1_0Alpha));
+        assert_eq!(versions.len(), 3);
+        assert_eq!(versions[0], ContractVersion::V0_9_0Alpha);
+        assert_eq!(versions[1], ContractVersion::V1_0_0);
+        assert_eq!(versions[2], ContractVersion::V1_1_0Alpha);
     }
 
     #[test]
@@ -329,15 +288,15 @@ mod tests {
     }
 
     #[test]
-    fn legacy_contracts_do_not_advertise_generated_request_roots() {
+    fn supported_contracts_advertise_generated_request_roots() {
         for version in [
-            ContractVersion::V0_6_0Alpha,
-            ContractVersion::V0_7_0Alpha,
-            ContractVersion::V0_8_0Alpha,
+            ContractVersion::V0_9_0Alpha,
+            ContractVersion::V1_0_0,
+            ContractVersion::V1_1_0Alpha,
         ] {
             let descriptor = descriptor(version);
-            assert!(!descriptor.generates_artifacts());
-            assert!(descriptor.request_roots().is_empty(), "{version:?}");
+            assert!(descriptor.generates_artifacts());
+            assert!(!descriptor.request_roots().is_empty(), "{version:?}");
         }
     }
 

@@ -1271,7 +1271,7 @@ mod tests {
     #[test]
     fn legacy_launch_arguments_preserve_network_defaults_and_host_filters() {
         for compatibility in [
-            wxc_common::models::NetworkEnforcementCompatibility::LegacyCompatible,
+            wxc_common::models::NetworkEnforcementCompatibility::Strict,
             wxc_common::models::NetworkEnforcementCompatibility::Strict,
         ] {
             for (default, allow, block, expected_prefix) in [

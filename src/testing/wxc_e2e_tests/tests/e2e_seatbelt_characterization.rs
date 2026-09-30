@@ -28,7 +28,7 @@ use std::time::Duration;
 use serde_json::json;
 use wxc_e2e_tests::{has_platform_exec, run_platform_config_value};
 
-const SCHEMA_VERSION: &str = "0.7.0-alpha";
+const SCHEMA_VERSION: &str = "0.9.0-alpha";
 
 /// Build a one-shot config that omits `containment` so the binary selects its
 /// OS-native backend (Seatbelt on macOS). `cwd`/`env`/`timeout` are optional.
@@ -425,7 +425,7 @@ fn egress_probe(loopback_port: u16) -> String {
 /// control.
 fn directional_config(label: &str, port: u16, default: &str) -> serde_json::Value {
     let mut cfg = json!({
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "containerId": format!("char-seatbelt-{label}"),
         "process": { "commandLine": egress_probe(port) },
         "network": { "egress": { "default": default } }
@@ -442,7 +442,7 @@ fn directional_config(label: &str, port: u16, default: &str) -> serde_json::Valu
 /// open, so the only thing under test is the host-loopback posture.
 fn host_loopback_config(label: &str, port: u16, action: &str) -> serde_json::Value {
     json!({
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "containerId": format!("char-seatbelt-{label}"),
         "process": { "commandLine": egress_probe(port) },
         "network": {
