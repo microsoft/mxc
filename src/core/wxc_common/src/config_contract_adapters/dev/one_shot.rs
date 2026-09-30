@@ -91,6 +91,7 @@ fn convert_process_container(value: contract::ProcessContainer) -> wire::Process
         learning_mode,
         capabilities,
         capture_denials,
+        policy_enforcement,
         ui,
         filesystem,
         network,
@@ -105,6 +106,15 @@ fn convert_process_container(value: contract::ProcessContainer) -> wire::Process
                 .collect()
         }),
         capture_denials: capture_denials.into_option().map(convert_capture_denials),
+        policy_enforcement: policy_enforcement.into_option().map(|settings| {
+            crate::policy_enforcement::PolicyEnforcementOptions {
+                mode: settings.mode.into_option().map(|mode| match mode {
+                    contract::PolicyEnforcementMode::PassThrough => {
+                        crate::policy_enforcement::PolicyEnforcementMode::PassThrough
+                    }
+                }),
+            }
+        }),
         ui: ui.into_option().map(convert_process_container_ui),
         filesystem: filesystem
             .into_option()

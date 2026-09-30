@@ -174,8 +174,13 @@ pub use mxc_engine::{
 };
 
 pub use sandbox::{
-    CaptureDenialsErrorOutput, CaptureDenialsOutput, Output, Sandbox, SandboxOutputMetadata,
-    StreamCloser, WaitOutcome,
+    CaptureDenialsErrorOutput, CaptureDenialsOutput, Output, OutputError, ReportedOutput, Sandbox,
+    SandboxOutputMetadata, StreamCloser, WaitOutcome,
+};
+pub use wxc_common::policy_enforcement::{
+    NativePolicyDetail, NativePolicyResult, PolicyChange, PolicyEnforcementAttempt,
+    PolicyEnforcementAvailability, PolicyEnforcementMode, PolicyEnforcementOptions,
+    PolicyEnforcementReport, PolicyEnforcementTermination, PolicyResultCode,
 };
 
 /// Spawn a sandbox from a [`SandboxRequest`] built by [`build_request`] (with
@@ -203,13 +208,20 @@ pub fn spawn_sandbox(request: SandboxRequest) -> Result<Sandbox, Error> {
 /// `Err` is returned when the backend can't be selected/spawned (an
 /// [`Error`]), or when waiting on the child fails at the OS level.
 pub fn run(request: SandboxRequest) -> Result<Output, Error> {
+    run_with_report(request).map(|reported| reported.output)
+}
+
+/// Run once to completion and retain explicitly requested creation-policy
+/// diagnostics alongside the captured output.
+///
+/// Configure `processContainer.policyEnforcement` to request reporting. The
+/// report is absent for legacy requests; this function does not enable it.
+/// On failure, an available policy report is retained in [`Error::details`].
+pub fn run_with_report(request: SandboxRequest) -> Result<ReportedOutput, Error> {
     let sandbox = spawn_sandbox(request)?;
-    sandbox.wait_with_output().map_err(|e| {
-        Error::new(
-            ErrorCode::BackendError,
-            format!("waiting for the sandbox to complete failed: {e}"),
-        )
-    })
+    sandbox
+        .wait_with_output_and_report()
+        .map_err(OutputError::into_sdk_error)
 }
 
 /// Run a **state-aware lifecycle** request (as a JSON string) and return the

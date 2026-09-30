@@ -230,6 +230,28 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::OneShotReques
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(error)?;
             Ok(contract::ProcessContainer {
+                policy_enforcement: optional!(
+                    contract,
+                    process_container
+                        .policy_enforcement
+                        .as_ref()
+                        .map(|settings| {
+                            Ok::<_, MxcError>(contract::PolicyEnforcement {
+                                mode: optional!(
+                                    contract,
+                                    settings.mode.map(|mode| match mode {
+                                        crate::configs::PolicyEnforcementMode::PassThrough => {
+                                            Ok(contract::PolicyEnforcementMode::PassThrough)
+                                        }
+                                        crate::configs::PolicyEnforcementMode::Mutate => {
+                                            Err(error("processContainer.policyEnforcement.mode must be pass-through"))
+                                        }
+                                    }).transpose()?
+                                ),
+                            })
+                        })
+                        .transpose()?
+                ),
                 least_privilege: contract::OptionalField::present(
                     process_container.least_privilege,
                 ),

@@ -50,6 +50,24 @@ available bounds what policy can be enforced.
 
 ## Process security environment preference
 
+Detailed creation-policy results require `QueryProcessSecurityEnvironmentSupport`
+to advertise `PSE_SUPPORT_POLICY_RESULT` (`0x10`) and the
+`CreateProcessSecurityEnvironment2` export to resolve. The old CPSE API, a PSEC
+schema version, or export presence alone does not imply availability.
+`wxc-exec --probe --config <config>` reports
+`probes.baseContainerPolicyResultsAvailable` when the config explicitly includes
+`processContainer.policyEnforcement`. Omitted controls preserve the original
+probe fields and do not perform the extra reporting probe.
+Its raw evidence is exposed as `baseContainerSupportFlags`,
+`baseContainerSupportQueryHresult`, and `baseContainerCreate2ExportPresent`.
+This build targets the multi-action native V1 contract: a 48/40-byte header,
+56-byte details, up to 64 details and a 32,768-character resource pool.
+The query describes host API support, independently of agentic tagging or whether
+an administrative policy governs the caller.
+The development `processContainer.policyEnforcement` controls are ignored when
+that capability is absent or an AppContainer tier is selected. See the
+[creation-policy guide](guide.md#creation-policy-results).
+
 BaseContainer requests use the PSEC process-security-environment contract
 whenever its runtime probe succeeds and the contract can represent the complete
 requested policy, independent of schema version. Otherwise selection continues

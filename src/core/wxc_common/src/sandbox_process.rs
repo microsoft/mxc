@@ -18,7 +18,9 @@
 use std::io::{Read, Write};
 
 use crate::logger::Logger;
-use crate::models::{ExecutionRequest, FailurePhase, SandboxOutputMetadata, ScriptResponse};
+use crate::models::{
+    ExecutionRequest, FailurePhase, SandboxOutputMetadata, ScriptOutputMetadata, ScriptResponse,
+};
 use crate::script_runner::ScriptRunner;
 use crate::validator::{validate_common, validate_network_policy_support, NetworkPolicySupport};
 
@@ -147,9 +149,15 @@ pub trait SandboxProcess: Send {
         Vec::new()
     }
 
-    /// Structured outputs available after the process has reached a terminal
-    /// state and backend teardown has completed.
+    /// Capture outputs become available after terminal wait and backend teardown.
     fn output_metadata(&self) -> Option<&SandboxOutputMetadata> {
+        None
+    }
+
+    /// Explicitly requested creation-policy diagnostics, available after spawn.
+    fn policy_enforcement_report(
+        &self,
+    ) -> Option<&crate::policy_enforcement::PolicyEnforcementReport> {
         None
     }
 
@@ -540,7 +548,11 @@ impl<B: SandboxBackend> Runner<B> {
             Ok(exit_code) => {
                 let mut response = ScriptResponse {
                     exit_code,
-                    output_metadata: child.output_metadata().cloned().map(Box::new),
+                    output_metadata: ScriptOutputMetadata::from_parts(
+                        child.output_metadata().cloned(),
+                        child.policy_enforcement_report().cloned(),
+                    )
+                    .map(Box::new),
                     failure_phase: if exit_code == 0 {
                         FailurePhase::None
                     } else {
@@ -562,14 +574,26 @@ impl<B: SandboxBackend> Runner<B> {
             }
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => ScriptResponse {
                 exit_code: -1,
-                error_message: format!("script timed out after {}ms", request.script_timeout),
-                output_metadata: child.output_metadata().cloned().map(Box::new),
+                error_message: if request.policy.policy_enforcement.is_some() {
+                    format!("script timed out after {}ms: {e}", request.script_timeout)
+                } else {
+                    format!("script timed out after {}ms", request.script_timeout)
+                },
+                output_metadata: ScriptOutputMetadata::from_parts(
+                    child.output_metadata().cloned(),
+                    child.policy_enforcement_report().cloned(),
+                )
+                .map(Box::new),
                 failure_phase: FailurePhase::Timeout,
                 ..Default::default()
             },
             Err(e) => {
                 let mut response = ScriptResponse::error(&format!("wait failed: {e}"));
-                response.output_metadata = child.output_metadata().cloned().map(Box::new);
+                response.output_metadata = ScriptOutputMetadata::from_parts(
+                    child.output_metadata().cloned(),
+                    child.policy_enforcement_report().cloned(),
+                )
+                .map(Box::new);
                 response
             }
         }
@@ -725,6 +749,62 @@ mod runner_tests {
         validations: Arc<AtomicUsize>,
         direct_spawns: Arc<AtomicUsize>,
         reject_validation: bool,
+    }
+
+    #[test]
+    fn policy_enforcement_timeout_keeps_combined_failure_without_changing_legacy_text() {
+        struct TimedOutProcess;
+        impl SandboxProcess for TimedOutProcess {
+            fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
+                None
+            }
+            fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
+                None
+            }
+            fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
+                None
+            }
+            fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+                Ok(None)
+            }
+            fn id(&self) -> u32 {
+                0
+            }
+            fn kill(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+            fn wait(&mut self) -> std::io::Result<i32> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "workload timed out; additionally capture sealing failed",
+                ))
+            }
+        }
+        let runner = Runner::new(CountingBackend {
+            validations: Arc::default(),
+            direct_spawns: Arc::default(),
+            reject_validation: false,
+        });
+        for reporting in [false, true] {
+            let mut request = ExecutionRequest {
+                script_timeout: 42,
+                ..Default::default()
+            };
+            request.policy.policy_enforcement =
+                reporting.then(crate::policy_enforcement::PolicyEnforcementOptions::default);
+            let response = runner.wait_for_child(
+                &request,
+                &mut Logger::new(Mode::Buffer),
+                Ok(Box::new(TimedOutProcess)),
+            );
+            assert_eq!(response.failure_phase, FailurePhase::Timeout);
+            assert_eq!(response.exit_code, -1);
+            if reporting {
+                assert!(response.error_message.contains("capture sealing failed"));
+            } else {
+                assert_eq!(response.error_message, "script timed out after 42ms");
+            }
+        }
     }
 
     impl SandboxBackend for CountingBackend {

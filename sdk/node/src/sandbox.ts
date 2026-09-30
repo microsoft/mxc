@@ -9,12 +9,14 @@ import { parse as semverParse } from 'semver';
 import {
     SandboxPolicy,
     ContainerConfig,
+    ProcessContainerConfig,
     ContainmentType,
     ContainmentBackend,
 } from './types.js';
 import { prepareSpawn, diagLogVersion, applyLinuxNetworkPolicy } from './helper.js';
 import { diagLog } from './diagnostic.js';
 import { MxcError } from './errors.js';
+import { getPolicyEnforcementReport } from './policy-enforcement.js';
 import {
   prepareRequestSpec,
   validateBindingPolicy,
@@ -295,6 +297,7 @@ function buildDarwinProcessConfig(
 function buildProcessBaseContainerConfig(
     config: ContainerConfig,
     policy: SandboxPolicy,
+    policyEnforcement: ProcessContainerConfig['policyEnforcement'],
 ): ContainerConfig {
     const capabilities: string[] = [];
     const allowsInternet =
@@ -324,6 +327,9 @@ function buildProcessBaseContainerConfig(
             ? { allowedProxyPeer: policy.processContainer.network.allowedProxyPeer }
             : undefined,
     };
+    if (policyEnforcement !== undefined) {
+        config.processContainer.policyEnforcement = policyEnforcement;
+    }
 
     // Network enforcement: use firewall only when host filtering is needed (requires admin)
     if (
@@ -441,6 +447,36 @@ export function createConfigFromPolicy(
     validateTelemetryVersion(policy);
     const directionalNetwork = selectDirectionalNetwork(policy);
     const enumeratePaths = policy.processContainer?.filesystem?.enumeratePaths;
+    const policyEnforcement = policy.processContainer?.policyEnforcement;
+    let policyEnforcementConfig: ProcessContainerConfig['policyEnforcement'];
+    if (policyEnforcement !== undefined) {
+        if (policyEnforcement === null || typeof policyEnforcement !== 'object' ||
+            Array.isArray(policyEnforcement)) {
+            throw new MxcError('malformed_request',
+                'processContainer.policyEnforcement must be an object');
+        }
+        if (policy.version !== '0.10.0-alpha') {
+            throw new MxcError('malformed_request',
+                'processContainer.policyEnforcement requires schema version 0.10.0-alpha');
+        }
+        if (platform !== 'win32' || (containment !== 'process' && containment !== 'processcontainer')) {
+            throw new MxcError('malformed_request',
+                'processContainer.policyEnforcement requires the Windows ProcessContainer backend');
+        }
+        if (Object.keys(policyEnforcement).some(key => key !== 'mode') ||
+            'maxAttempts' in policyEnforcement) {
+            throw new MxcError('malformed_request',
+                'processContainer.policyEnforcement contains an unknown field');
+        }
+        // Snapshot getters once so the validated values are exactly what is sent.
+        const { mode } = policyEnforcement;
+        if (mode !== undefined && mode !== 'pass-through') {
+            throw new MxcError('malformed_request',
+                'processContainer.policyEnforcement.mode must be pass-through');
+        }
+        policyEnforcementConfig = {};
+        if (mode !== undefined) policyEnforcementConfig.mode = mode;
+    }
 
     const containerId = containerName ?? generateRandomContainerName();
 
@@ -609,8 +645,8 @@ export function createConfigFromPolicy(
             return buildDarwinProcessConfig(config);
         }
         diagLog(`createConfigFromPolicy: containment=process (BaseContainer), id=${containerId}`);
-        const processConfig = buildProcessBaseContainerConfig(config, policy);
-        if (hasProcessContainerPolicy(policy)) {
+        const processConfig = buildProcessBaseContainerConfig(config, policy, policyEnforcementConfig);
+        if (policyEnforcementConfig !== undefined || hasProcessContainerPolicy(policy)) {
             processConfig.containment = 'processcontainer';
         }
         return processConfig;
@@ -1010,6 +1046,24 @@ export async function spawnSandboxAsync(
   workingDirectory?: string,
   containerName?: string,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const result = await spawnSandboxAsyncWithReport(
+    script, policy, options, workingDirectory, containerName,
+  );
+  return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
+}
+
+/**
+ * Run once through the buffered native path and retain available output metadata.
+ * Policy reports require an explicit processContainer.policyEnforcement section;
+ * choosing this API alone does not enable native policy reporting.
+ */
+export async function spawnSandboxAsyncWithReport(
+  script: string,
+  policy: SandboxPolicy,
+  options: SandboxSpawnOptions = {},
+  workingDirectory?: string,
+  containerName?: string,
+): Promise<{ stdout: string; stderr: string; exitCode: number; outputMetadata?: unknown }> {
   const unsupportedOption = unsupportedInProcessRunOption(options);
   if (unsupportedOption !== undefined) {
     throw new MxcError(
@@ -1020,6 +1074,7 @@ export async function spawnSandboxAsync(
   validateBindingPolicy(policy);
 
   const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
+  const policyReportingRequested = config.processContainer?.policyEnforcement !== undefined;
   // Legacy policy construction derives an executor-specific enforcement mode.
   // The native policy builder derives its own mode from the portable fields.
   if (config.network !== undefined) {
@@ -1040,13 +1095,26 @@ export async function spawnSandboxAsync(
   }
   const result = await runBindingRequestAsync(request);
   if (result.timedOut) {
+    const policyEnforcement = policyReportingRequested
+      ? getPolicyEnforcementReport(result.outputMetadata)
+      : undefined;
     throw new MxcError('backend_error', 'sandbox execution timed out', {
       timedOut: true,
+      ...(policyEnforcement === undefined ? {} : { policyEnforcement }),
+      ...(policyReportingRequested && result.outputMetadata !== undefined
+        ? { outputMetadata: result.outputMetadata }
+        : {}),
+      ...(policyReportingRequested && result.warnings.length > 0
+        ? { warnings: [...result.warnings] }
+        : {}),
     });
   }
   return {
     stdout: result.stdout,
     stderr: bufferedStderr(result),
     exitCode: result.exitCode,
+    ...(result.outputMetadata === undefined
+      ? {}
+      : { outputMetadata: result.outputMetadata }),
   };
 }

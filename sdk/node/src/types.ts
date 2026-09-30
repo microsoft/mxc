@@ -171,6 +171,13 @@ export interface BaseProcessUiConfig {
  * flag.
  */
 export interface ProcessContainerConfig {
+  /**
+   * Explicit native creation-policy reporting (0.10.0-alpha).
+   * Omission retains legacy behavior; an empty section selects pass-through.
+   */
+  policyEnforcement?: {
+    mode?: 'pass-through';
+  };
   /** AppContainer profile name (default: "CLI"). Deprecated: use containerId instead. */
   name?: string;
   /** Use least privilege mode with PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT (default: false) */
@@ -509,7 +516,7 @@ export type SandboxPolicy = {
   /** Per-invocation telemetry opt-in, subject to consent and policy. */
   telemetry?: TelemetryConfig;
   /** ProcessContainer-specific policy fields honored by policy conversion. */
-  processContainer?: Pick<ProcessContainerConfig, 'filesystem' | 'network'>;
+  processContainer?: Pick<ProcessContainerConfig, 'filesystem' | 'network' | 'policyEnforcement'>;
   /** UI access restrictions. All flags default to denied. */
   ui?: {
       /** Whether the sandbox may create visible windows. (default: false) */

@@ -273,6 +273,27 @@ impl schemars::JsonSchema for ProcessContainerCapability {
     }
 }
 
+string_enum! {
+    /// How to handle a native creation-policy refusal.
+    #[derive(Debug)]
+    pub enum PolicyEnforcementMode {
+        /// Return the first failure without changing the request.
+        PassThrough => ["pass-through"],
+    }
+}
+
+/// Explicit CPSE creation-policy reporting. Ignored when the selected native path does not
+/// support detailed policy results; existing sandbox restrictions still apply.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PolicyEnforcement {
+    /// Defaults to pass-through within this explicit section. No experimental
+    /// execution authorization is required.
+    #[serde(default)]
+    pub mode: OptionalField<PolicyEnforcementMode>,
+}
+
 /// ProcessContainer-specific settings.
 #[derive(Debug, serde::Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
@@ -293,6 +314,9 @@ pub struct ProcessContainer {
     /// Optional capture-denials policy.
     #[serde(default)]
     pub capture_denials: OptionalField<CaptureDenials>,
+    /// Explicit native creation-policy reporting; omission retains legacy behavior.
+    #[serde(default)]
+    pub policy_enforcement: OptionalField<PolicyEnforcement>,
     /// Optional ProcessContainer-specific user-interface policy.
     #[serde(default)]
     pub ui: OptionalField<ProcessContainerUi>,

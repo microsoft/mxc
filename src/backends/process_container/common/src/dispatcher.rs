@@ -792,6 +792,12 @@ impl SandboxProcess for DaclGuardedProcess {
         self.inner.output_metadata()
     }
 
+    fn policy_enforcement_report(
+        &self,
+    ) -> Option<&wxc_common::policy_enforcement::PolicyEnforcementReport> {
+        self.inner.policy_enforcement_report()
+    }
+
     fn stdout_closer(&self) -> Option<Box<dyn wxc_common::sandbox_process::StreamCloser>> {
         self.inner.stdout_closer()
     }
@@ -1424,6 +1430,7 @@ mod tests {
             native_stdio_calls: Arc<AtomicUsize>,
             killed: bool,
             output_metadata: wxc_common::models::SandboxOutputMetadata,
+            policy_report: Option<wxc_common::policy_enforcement::PolicyEnforcementReport>,
         }
         impl SandboxProcess for FakeProcess {
             fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
@@ -1461,6 +1468,11 @@ mod tests {
             fn output_metadata(&self) -> Option<&wxc_common::models::SandboxOutputMetadata> {
                 Some(&self.output_metadata)
             }
+            fn policy_enforcement_report(
+                &self,
+            ) -> Option<&wxc_common::policy_enforcement::PolicyEnforcementReport> {
+                self.policy_report.as_ref()
+            }
         }
 
         let _scope = ScopedStateDir::new();
@@ -1468,9 +1480,15 @@ mod tests {
         // test only exercises delegation, not real host-ACE mutation.
         let dacl_manager = DaclManager::new().expect("dacl mgr");
         let native_stdio_calls = Arc::new(AtomicUsize::new(0));
+        let policy_report = wxc_common::policy_enforcement::PolicyEnforcementReport::new(
+            wxc_common::policy_enforcement::PolicyEnforcementMode::PassThrough,
+            wxc_common::policy_enforcement::PolicyEnforcementAvailability::NotApplicable,
+            "hash".into(),
+        );
         let mut guarded = DaclGuardedProcess {
             inner: Box::new(FakeProcess {
                 native_stdio_calls: Arc::clone(&native_stdio_calls),
+                policy_report: Some(policy_report.clone()),
                 ..FakeProcess::default()
             }),
             _dacl_manager: dacl_manager,
@@ -1497,5 +1515,6 @@ mod tests {
             guarded.output_metadata().is_some(),
             "output_metadata() must delegate"
         );
+        assert_eq!(guarded.policy_enforcement_report(), Some(&policy_report));
     }
 }

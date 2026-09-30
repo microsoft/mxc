@@ -92,6 +92,37 @@ Streaming callers read warnings from `MxcSandboxProcess.Warnings` without
 waiting for the process to exit. Cleanup failures are added during teardown,
 so read it again after `Wait`, `WaitAsync` or `Kill` to see them.
 
+### ProcessContainer creation-policy handling
+
+Use `ProcessContainerContainment.PolicyEnforcement` with schema
+`0.10.0-alpha`. Leaving the property null preserves legacy behavior without
+new policy reports. An explicit `new PolicyEnforcementOptions()` requests
+pass-through; an omitted `Mode` selects pass-through and needs no experimental opt-in.
+Mutation and `maxAttempts` are not accepted inputs.
+Without CPSE2, the reporting settings are ignored; normal sandbox
+restrictions and tier selection are preserved.
+
+Successful runs expose `OutputMetadata.PolicyEnforcement`; live handles expose
+that creation report before waiting and merge capture output later. Creation
+errors and buffered wait failures expose `MxcException.PolicyEnforcement` and
+the underlying JSON in `Details`. Native uint64 values are read losslessly into
+`ulong` properties. Inspect availability separately from an OS policy outcome.
+For explicitly requested reporting, buffered wait failures retain available
+capture metadata under `Details.outputMetadata`. Timeout results keep combined
+timeout/teardown diagnostics in `Warnings`, including when no ETL was sealed.
+Live callers should also read `MxcSandboxProcess.Warnings` after waiting.
+`PolicyEnforcementReport.ReportVersion` is 1. Each attempt's `Result.Outcome`
+describes the evaluation; `Result.Details` contains a bounded, non-exhaustive
+list of `NativePolicyDetail` constraints. Default serialization preserves the
+array and lossless uint64 strings.
+The attempt journal retains the native decision without modifying the caller's
+request; policy refusals and workloads are not retried. See the
+[backend reporting contract](../../docs/process-container/guide.md#creation-policy-results).
+Existing public exception constructors and error fields are unchanged. New
+null diagnostic properties are omitted from default JSON serialization.
+Deploy the SDK and native library from the same build together: the enlarged
+native error structure is a co-versioned ABI change.
+
 ### Dependency injection and testing
 
 Applications that use constructor injection can depend on `ISandboxRunner` for

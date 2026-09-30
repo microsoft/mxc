@@ -50,6 +50,7 @@ pub fn finalize(
         .output_metadata
         .as_mut()
         .ok_or_else(|| "captureDenials returned no output metadata".to_string())?;
+    let metadata = &mut metadata.capture;
     if let Some(error) = metadata.capture_denials_error.as_ref() {
         return Err(format!(
             "captureDenials finalization failed: {}; retained ETL: {}",
@@ -352,6 +353,7 @@ mod tests {
             .output_metadata
             .as_ref()
             .unwrap()
+            .capture
             .capture_denials
             .as_ref()
             .unwrap();
@@ -388,6 +390,7 @@ mod tests {
             .output_metadata
             .as_ref()
             .unwrap()
+            .capture
             .capture_denials
             .as_ref()
             .unwrap();
@@ -417,13 +420,16 @@ mod tests {
             .contains("no output metadata"));
 
         let mut failed = ScriptResponse {
-            output_metadata: Some(Box::new(SandboxOutputMetadata {
-                capture_denials: None,
-                capture_denials_error: Some(CaptureDenialsErrorOutput {
-                    message: "decode failed".to_string(),
-                    etl_path: r"C:\retained\capture.etl".to_string(),
-                }),
-            })),
+            output_metadata: Some(Box::new(
+                SandboxOutputMetadata {
+                    capture_denials: None,
+                    capture_denials_error: Some(CaptureDenialsErrorOutput {
+                        message: "decode failed".to_string(),
+                        etl_path: r"C:\retained\capture.etl".to_string(),
+                    }),
+                }
+                .into(),
+            )),
             ..Default::default()
         };
         let error = finalize(&mut failed, &context, directory.path(), false).unwrap_err();
@@ -684,17 +690,20 @@ mod tests {
         .unwrap();
         ScriptResponse {
             exit_code,
-            output_metadata: Some(Box::new(SandboxOutputMetadata {
-                capture_denials: Some(CaptureDenialsOutput {
-                    kind: CaptureDenialsOutput::KIND.to_string(),
-                    output_path: denials_path.to_string_lossy().into_owned(),
-                    exit_code,
-                    total_denials: 0,
-                    denied_resources_truncated: false,
-                    etl_path: Some(etl_path.to_string_lossy().into_owned()),
-                }),
-                capture_denials_error: None,
-            })),
+            output_metadata: Some(Box::new(
+                SandboxOutputMetadata {
+                    capture_denials: Some(CaptureDenialsOutput {
+                        kind: CaptureDenialsOutput::KIND.to_string(),
+                        output_path: denials_path.to_string_lossy().into_owned(),
+                        exit_code,
+                        total_denials: 0,
+                        denied_resources_truncated: false,
+                        etl_path: Some(etl_path.to_string_lossy().into_owned()),
+                    }),
+                    capture_denials_error: None,
+                }
+                .into(),
+            )),
             ..Default::default()
         }
     }

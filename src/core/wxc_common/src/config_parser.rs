@@ -1289,6 +1289,12 @@ fn normalize_common_request_ir(
     // the newer BaseContainer implementation (ui).
     let mut process_container_network = None;
     if let Some(ac) = cfg.process_container {
+        if let Some(settings) = ac.policy_enforcement {
+            settings
+                .validate()
+                .map_err(|message| WxcError::Validation(message.to_string()))?;
+            policy.policy_enforcement = Some(settings);
+        }
         if let Some(lp) = ac.least_privilege {
             policy.least_privilege_mode = lp;
         }

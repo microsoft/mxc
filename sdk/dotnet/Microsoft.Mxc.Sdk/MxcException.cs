@@ -43,6 +43,14 @@ public sealed class MxcException : Exception
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public System.Text.Json.JsonElement? Details { get; }
 
+    /// <summary>The creation-policy report, when this failure carries one.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public PolicyEnforcementReport? PolicyEnforcement =>
+        Details is { ValueKind: System.Text.Json.JsonValueKind.Object } details
+            && details.TryGetProperty("policyEnforcement", out var report)
+                ? System.Text.Json.JsonSerializer.Deserialize<PolicyEnforcementReport>(report)
+                : null;
+
     /// <summary>Create an exception with the given code and message.</summary>
     public MxcException(ErrorCode code, string message)
         : this(code, message, null, null, null)

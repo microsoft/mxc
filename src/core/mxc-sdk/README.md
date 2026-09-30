@@ -10,6 +10,46 @@ Either way it selects the right containment backend for the host and runs the
 sandboxed process over ordinary pipes, with no pty. The state-aware
 [`exec_attached`] path is the one exception — see *Pty allocation*.
 
+## ProcessContainer policy results
+
+For schema `0.10.0-alpha`, set
+`configs::ProcessContainer::policy_enforcement` to `PolicyEnforcementOptions`.
+Construct the non-exhaustive options with `Default`, then assign the fields.
+Only pass-through is accepted; mutation and attempt limits are not supported.
+Omitting the controls preserves legacy
+execution without new reports. `Some(PolicyEnforcementOptions::default())`
+explicitly requests pass-through; it needs no experimental authorization.
+Controls are ignored when the selected path lacks CPSE2; requested sandbox
+restrictions are never ignored.
+
+Use `run_with_report()` and read `ReportedOutput::policy_enforcement`, or use
+`Sandbox::policy_enforcement_report()` while holding a live sandbox. The report
+is available after spawn and remains available after a wait failure.
+`Output::output_metadata` and `Sandbox::output_metadata()` retain their legacy
+capture-only types. `Error::details` preserves
+`policyEnforcement` for creation errors and buffered wait failures. The exported
+`PolicyEnforcementReport` and related types describe attempts, raw native codes,
+unchanged requested/effective identities. Unknown native codes survive;
+native uint64 values use decimal strings in JSON.
+See the [backend guide](../../../docs/process-container/guide.md#creation-policy-results).
+
+`Sandbox::wait_with_output()` preserves the original `std::io::Error`, including
+its native code and custom payload downcasts. For owned diagnostics after
+consuming the handle, use `wait_with_output_and_report()` instead. It returns
+`ReportedOutput` on success or a typed `OutputError` on failure. Read
+`OutputError::io_error()` for the original cause and native code,
+`output_metadata()` for optional capture outputs, and
+`policy_enforcement_report()` for the optional policy report.
+These additive APIs do not implicitly enable reporting in the request.
+With explicit reporting, `run_with_report()` errors retain available capture
+outputs in `details.outputMetadata` alongside the policy report. Timeout
+results retain the underlying terminal diagnostic in `Output::warnings`,
+including a concurrent capture-finalization failure.
+Reports use `report_version: 1`; native `result.version` is 1.
+Read `attempts[n].result.details` for the bounded, non-exhaustive
+`NativePolicyDetail` batch and `result.outcome` for the overall evaluation.
+Pass-through retains the complete returned batch without applying any action.
+
 ## Usage
 
 ```rust,no_run

@@ -103,6 +103,7 @@ function hasExplicitProcessContainerSettings(
     || config.leastPrivilege === true
     || config.learningMode === true
     || config.captureDenials !== undefined
+    || config.policyEnforcement !== undefined
     || Boolean(config.filesystem?.enumeratePaths?.length)
     || config.network?.allowedProxyPeer !== undefined
     || hasCustomUi

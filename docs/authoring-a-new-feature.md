@@ -14,6 +14,15 @@
 
 ## Prerequisites
 
+The development ProcessContainer creation-policy feature is documented in
+[the backend guide](process-container/guide.md#creation-policy-results).
+Its permanent field is `processContainer.policyEnforcement`. An omitted section
+retains legacy execution and diagnostics; an explicit empty section opts into
+pass-through reporting without experimental authorization. Only pass-through is
+accepted; mutation and attempt-limit controls are rejected before execution.
+Older hosts ignore explicit reporting controls when the API is unavailable.
+This exception does not authorize ignoring a sandbox restriction.
+
 Read these in order:
 
 1. [Sandbox Policy spec](sandbox-policy/0.7.0/policy.md): what

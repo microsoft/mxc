@@ -30,7 +30,7 @@ pub struct ProbeOutput {
     pub needs_dacl_augmentation: Option<bool>,
     /// Operator-visible degradation warnings — one per tier fall-through.
     pub warnings: Vec<String>,
-    /// Raw machine probes, independent of the policy argument.
+    /// Machine facts, including policy-result diagnostics only when requested.
     pub probes: ProbeFacts,
     /// Detector error message (only set when detection failed).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -38,11 +38,23 @@ pub struct ProbeOutput {
 }
 
 /// Raw machine facts gathered prior to running tier selection.
-#[derive(Serialize, Debug)]
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProbeFacts {
     /// The process security environment API set is resolvable.
     pub base_container_api_present: bool,
+    /// The CPSE2 export exists and the support query advertises PSE_SUPPORT_POLICY_RESULT.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_container_policy_results_available: Option<bool>,
+    /// Whether the CPSE2 export resolves, independently of feature availability.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_container_create2_export_present: Option<bool>,
+    /// Raw PSEC capability bits, present only when the support query succeeds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_container_support_flags: Option<u32>,
+    /// HRESULT from the non-creating support query, when it could be invoked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_container_support_query_hresult: Option<String>,
     /// Whether the preferred native PSEC plus Learning Mode capture path is usable.
     ///
     /// A false value does not mean `captureDenials` is unsupported: the executor
@@ -85,6 +97,64 @@ pub struct ProbeFacts {
     pub hyperlight_available: bool,
     /// Platform-agnostic UI restrictions this host can enforce.
     pub ui_capabilities: UiCapabilitySupport,
+}
+
+impl std::fmt::Debug for ProbeFacts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = f.debug_struct("ProbeFacts");
+        debug.field(
+            "base_container_api_present",
+            &self.base_container_api_present,
+        );
+        if self.base_container_policy_results_available.is_some() {
+            debug.field(
+                "base_container_policy_results_available",
+                &self.base_container_policy_results_available,
+            );
+        }
+        if self.base_container_create2_export_present.is_some() {
+            debug.field(
+                "base_container_create2_export_present",
+                &self.base_container_create2_export_present,
+            );
+        }
+        if self.base_container_support_flags.is_some() {
+            debug.field(
+                "base_container_support_flags",
+                &self.base_container_support_flags,
+            );
+        }
+        if self.base_container_support_query_hresult.is_some() {
+            debug.field(
+                "base_container_support_query_hresult",
+                &self.base_container_support_query_hresult,
+            );
+        }
+        debug
+            .field("native_capture_available", &self.native_capture_available)
+            .field("guarded_capture_available", &self.guarded_capture_available)
+            .field("bfscfg_present", &self.bfscfg_present)
+            .field("bfs_compiled_in", &self.bfs_compiled_in)
+            .field(
+                "base_container_supports_deny_paths",
+                &self.base_container_supports_deny_paths,
+            )
+            .field(
+                "base_container_supports_enumerate_paths",
+                &self.base_container_supports_enumerate_paths,
+            )
+            .field(
+                "base_container_supports_ingress_host_loopback_allow",
+                &self.base_container_supports_ingress_host_loopback_allow,
+            )
+            .field(
+                "isolation_session_available",
+                &self.isolation_session_available,
+            )
+            .field("hyperlight_available", &self.hyperlight_available)
+            .field("ui_capabilities", &self.ui_capabilities)
+            .finish()
+    }
 }
 
 /// Host support for enforcing sandbox UI restrictions.
@@ -137,8 +207,19 @@ impl From<EffectiveUiRestrictions> for UiCapabilitySupport {
 pub fn run_probe(request: &ExecutionRequest, guarded_capture_available: bool) -> ProbeOutput {
     use crate::base_container_runner::BaseContainerRunner;
 
+    let exports = policy_exports(request, crate::secenv::probe_policy_result_exports);
     let probes = ProbeFacts {
         base_container_api_present: BaseContainerRunner::is_base_container_api_present(),
+        base_container_policy_results_available: exports
+            .as_ref()
+            .map(|exports| exports.policy_results_available()),
+        base_container_create2_export_present: exports
+            .as_ref()
+            .map(|exports| exports.create2.is_some()),
+        base_container_support_flags: exports.and_then(|exports| exports.support_flags),
+        base_container_support_query_hresult: exports
+            .and_then(|exports| exports.support_query_hresult)
+            .map(|code| format!("0x{:08X}", code as u32)),
         native_capture_available: BaseContainerRunner::is_native_capture_available(),
         guarded_capture_available,
         bfscfg_present: fallback_detector::find_bfscfg_exe()
@@ -160,6 +241,13 @@ pub fn run_probe(request: &ExecutionRequest, guarded_capture_available: bool) ->
         probes,
         fallback_detector::choose_backend_tier(request),
     )
+}
+
+fn policy_exports(
+    request: &ExecutionRequest,
+    probe: impl FnOnce() -> crate::secenv::PolicyResultExportReport,
+) -> Option<crate::secenv::PolicyResultExportReport> {
+    request.policy.policy_enforcement.as_ref().map(|_| probe())
 }
 
 fn run_probe_with_tier_decision(
@@ -261,6 +349,10 @@ mod tests {
     ) -> ProbeFacts {
         ProbeFacts {
             base_container_api_present: true,
+            base_container_policy_results_available: None,
+            base_container_create2_export_present: None,
+            base_container_support_flags: None,
+            base_container_support_query_hresult: None,
             native_capture_available,
             guarded_capture_available,
             bfscfg_present: false,
@@ -275,6 +367,75 @@ mod tests {
     }
 
     #[test]
+    fn legacy_probe_debug_preserves_compact_and_pretty_fields() {
+        let facts = test_probe_facts(false, false);
+        let expected = format!(
+            concat!(
+                "ProbeFacts {{ base_container_api_present: true, ",
+                "native_capture_available: false, guarded_capture_available: false, ",
+                "bfscfg_present: false, bfs_compiled_in: false, ",
+                "base_container_supports_deny_paths: false, ",
+                "base_container_supports_enumerate_paths: false, ",
+                "base_container_supports_ingress_host_loopback_allow: false, ",
+                "isolation_session_available: false, hyperlight_available: false, ",
+                "ui_capabilities: {:?} }}"
+            ),
+            facts.ui_capabilities
+        );
+        assert_eq!(format!("{facts:?}"), expected);
+        let ui = format!("{:#?}", facts.ui_capabilities).replace('\n', "\n    ");
+        let expected = format!(
+            concat!(
+                "ProbeFacts {{\n    base_container_api_present: true,\n",
+                "    native_capture_available: false,\n    guarded_capture_available: false,\n",
+                "    bfscfg_present: false,\n    bfs_compiled_in: false,\n",
+                "    base_container_supports_deny_paths: false,\n",
+                "    base_container_supports_enumerate_paths: false,\n",
+                "    base_container_supports_ingress_host_loopback_allow: false,\n",
+                "    isolation_session_available: false,\n    hyperlight_available: false,\n",
+                "    ui_capabilities: {},\n}}"
+            ),
+            ui
+        );
+        assert_eq!(format!("{facts:#?}"), expected);
+        let mut reported = facts;
+        reported.base_container_policy_results_available = Some(false);
+        reported.base_container_create2_export_present = Some(true);
+        reported.base_container_support_flags = Some(0x0f);
+        reported.base_container_support_query_hresult = Some("0x00000000".into());
+        let debug = format!("{reported:?}");
+        assert!(debug.contains("base_container_policy_results_available: Some(false)"));
+        assert!(debug.contains("base_container_create2_export_present: Some(true)"));
+        assert!(debug.contains("base_container_support_flags: Some(15)"));
+        assert!(debug.contains("base_container_support_query_hresult: Some(\"0x00000000\")"));
+    }
+
+    #[test]
+    fn policy_enforcement_probe_is_absent_and_unqueried_without_controls() {
+        let mut request = ExecutionRequest::default();
+        let calls = std::cell::Cell::new(0);
+        let probe = || {
+            calls.set(calls.get() + 1);
+            crate::secenv::PolicyResultExportReport::default()
+        };
+        assert!(policy_exports(&request, probe).is_none());
+        assert_eq!(calls.get(), 0);
+        let json = serde_json::to_value(test_probe_facts(false, false)).unwrap();
+        for name in [
+            "baseContainerPolicyResultsAvailable",
+            "baseContainerCreate2ExportPresent",
+            "baseContainerSupportFlags",
+            "baseContainerSupportQueryHresult",
+        ] {
+            assert!(json.get(name).is_none());
+        }
+        request.policy.policy_enforcement =
+            Some(wxc_common::policy_enforcement::PolicyEnforcementOptions::default());
+        assert!(policy_exports(&request, probe).is_some());
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
     fn probe_output_serializes() {
         let out = ProbeOutput {
             tier: Some("base-container"),
@@ -282,6 +443,10 @@ mod tests {
             warnings: vec!["a warning".to_string()],
             probes: ProbeFacts {
                 base_container_api_present: true,
+                base_container_policy_results_available: Some(true),
+                base_container_create2_export_present: Some(true),
+                base_container_support_flags: Some(0x1f),
+                base_container_support_query_hresult: Some("0x00000000".into()),
                 native_capture_available: true,
                 guarded_capture_available: true,
                 bfscfg_present: false,
@@ -301,6 +466,13 @@ mod tests {
         assert_eq!(v["needsDaclAugmentation"], false);
         assert_eq!(v["warnings"][0], "a warning");
         assert_eq!(v["probes"]["baseContainerApiPresent"], true);
+        assert_eq!(v["probes"]["baseContainerPolicyResultsAvailable"], true);
+        assert_eq!(v["probes"]["baseContainerCreate2ExportPresent"], true);
+        assert_eq!(v["probes"]["baseContainerSupportFlags"], 0x1f);
+        assert_eq!(
+            v["probes"]["baseContainerSupportQueryHresult"],
+            "0x00000000"
+        );
         assert_eq!(v["probes"]["nativeCaptureAvailable"], true);
         assert_eq!(v["probes"]["guardedCaptureAvailable"], true);
         assert_eq!(v["probes"]["bfscfgPresent"], false);
@@ -332,6 +504,10 @@ mod tests {
             warnings: vec![],
             probes: ProbeFacts {
                 base_container_api_present: false,
+                base_container_policy_results_available: None,
+                base_container_create2_export_present: None,
+                base_container_support_flags: None,
+                base_container_support_query_hresult: None,
                 native_capture_available: false,
                 guarded_capture_available: false,
                 bfscfg_present: false,

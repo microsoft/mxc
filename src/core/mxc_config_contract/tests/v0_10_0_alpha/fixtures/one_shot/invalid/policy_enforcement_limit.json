@@ -1,0 +1,5 @@
+{
+  "version": "0.10.0-alpha",
+  "process": { "commandLine": "echo hello" },
+  "processContainer": { "policyEnforcement": { "mode": "pass-through", "maxAttempts": 65 } }
+}

@@ -1759,13 +1759,17 @@ fn main() {
     if !response.standard_err.is_empty() {
         eprint!("{}", response.standard_err);
     }
+    let policy_reporting_requested = request.policy.policy_enforcement.is_some();
     if let Some(pointer) = response
         .output_metadata
         .as_ref()
-        .and_then(|metadata| metadata.capture_denials.as_ref())
+        .and_then(|metadata| metadata.capture.capture_denials.as_ref())
     {
         match serde_json::to_string(pointer) {
-            Ok(line) => eprintln!("{line}"),
+            Ok(record) => wxc_common::script_runner::emit_stderr_json_record(
+                &record,
+                policy_reporting_requested,
+            ),
             Err(error) => eprintln!("failed to serialize captureDenials output pointer: {error}"),
         }
     }
@@ -1774,7 +1778,22 @@ fn main() {
     // when the runner produced an error message (one-shot flows only).
     // In PTY mode stderr is merged into the PTY output stream, so the envelope
     // appears inline -- callers (e.g. copilot) can parse it from the output.
-    wxc_common::script_runner::emit_backend_error_envelope(&response);
+    if let Some(report) = response
+        .output_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.policy_enforcement.as_ref())
+        .filter(|_| policy_reporting_requested)
+    {
+        wxc_common::script_runner::emit_stderr_json_record(
+            &serde_json::json!({
+                "type": "policyEnforcement",
+                "report": report,
+            })
+            .to_string(),
+            true,
+        );
+    }
+    wxc_common::script_runner::emit_backend_error_envelope_for_request(&response, &request);
 
     process::exit(response.exit_code);
 }

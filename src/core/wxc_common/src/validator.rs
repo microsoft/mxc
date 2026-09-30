@@ -209,6 +209,14 @@ pub fn validate_state_aware_network_policy_support(
 
 /// Validates non-backend-specific parts of the request (e.g. non-empty script).
 pub fn validate_common(request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+    if let Some(settings) = &request.policy.policy_enforcement {
+        settings.validate().map_err(ScriptResponse::error)?;
+        if request.containment != crate::models::ContainmentBackend::ProcessContainer {
+            return Err(ScriptResponse::error(
+                "processContainer.policyEnforcement requires the ProcessContainer backend",
+            ));
+        }
+    }
     if request.script_code.is_empty() {
         return Err(ScriptResponse::error("Script content must not be empty."));
     }

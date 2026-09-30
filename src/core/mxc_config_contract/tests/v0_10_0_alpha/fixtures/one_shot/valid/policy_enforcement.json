@@ -1,0 +1,8 @@
+{
+  "version": "0.10.0-alpha",
+  "containment": "processcontainer",
+  "process": { "commandLine": "echo hello" },
+  "processContainer": {
+    "policyEnforcement": { "mode": "pass-through" }
+  }
+}

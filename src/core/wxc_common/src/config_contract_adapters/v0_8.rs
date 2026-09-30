@@ -274,6 +274,7 @@ fn convert_process_container(value: contract::ProcessContainer) -> wire::Process
                 .collect()
         }),
         capture_denials: capture_denials.into_option().map(convert_capture_denials),
+        policy_enforcement: None,
         filesystem: None,
         network: network.into_option().map(convert_process_container_network),
         ui: ui.into_option().map(convert_process_container_ui),

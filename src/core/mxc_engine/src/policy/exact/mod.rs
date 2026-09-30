@@ -56,6 +56,16 @@ fn validate_common(
     containment: &Containment,
     version: ContractVersion,
 ) -> Result<NetworkFormat, MxcError> {
+    if let Containment::ProcessContainer(config) = containment {
+        if let Some(settings) = &config.policy_enforcement {
+            settings.validate().map_err(error)?;
+            if version != ContractVersion::V0_10_0Alpha {
+                return Err(error(
+                    "processContainer.policyEnforcement requires config version 0.10.0-alpha",
+                ));
+            }
+        }
+    }
     let has_process_container_network = match containment {
         Containment::ProcessContainer(process_container) => process_container
             .network

@@ -358,6 +358,7 @@ public static class MxcSandbox
             LearningMode = containment.LearningMode,
             Capabilities = new List<string>(containment.Capabilities),
             CaptureDenials = containment.CaptureDenials ?? legacyCaptureDenials,
+            PolicyEnforcement = containment.PolicyEnforcement,
             Ui = containment.Ui,
             Filesystem = containment.Filesystem,
             Network = containment.Network,

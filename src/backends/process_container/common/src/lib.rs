@@ -38,6 +38,8 @@ pub mod network_manager;
 #[cfg(target_os = "windows")]
 mod network_policy_helpers;
 #[cfg(target_os = "windows")]
+mod policy_enforcement;
+#[cfg(target_os = "windows")]
 pub mod probe;
 #[cfg(target_os = "windows")]
 pub mod process_mitigation;
@@ -47,6 +49,8 @@ pub mod proxy_coordinator;
 pub mod sandbox_tracking;
 #[cfg(target_os = "windows")]
 mod secenv;
+#[cfg(target_os = "windows")]
+mod secenv_policy;
 #[cfg(target_os = "windows")]
 pub use native_capture::CaptureSession;
 #[cfg(target_os = "windows")]

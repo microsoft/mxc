@@ -50,6 +50,62 @@ automatically exposed. Treat details as optional and branch on `code`.
 Use SDK bindings and the native library from the same build: the native error
 layout is co-versioned and is not a stable external ABI.
 
+## ProcessContainer creation-policy reports
+
+On Windows, schema `0.10.0-alpha` accepts
+`policy.processContainer.policyEnforcement` (also available in raw
+`ContainerConfig.processContainer`). To request pass-through diagnostics:
+
+```typescript
+import { spawnSandboxAsyncWithReport, getPolicyEnforcementReport, MxcError } from '@microsoft/mxc-sdk';
+
+try {
+  const result = await spawnSandboxAsyncWithReport('cmd /c echo hello', {
+    version: '0.10.0-alpha',
+    processContainer: { policyEnforcement: { mode: 'pass-through' } },
+  });
+  const report = getPolicyEnforcementReport(result.outputMetadata);
+  console.log(report?.availability, report?.attempts);
+} catch (error) {
+  if (error instanceof MxcError) {
+    const report = getPolicyEnforcementReport(error.details);
+    console.error(error.code, error.nativeCode, report?.termination, report?.attempts);
+  } else {
+    throw error;
+  }
+}
+```
+
+Omitting the setting preserves legacy execution and result shapes, without new
+policy reports. An explicit `{}` or `{ mode: 'pass-through' }` requests
+pass-through reporting without experimental authorization. Mutation and
+`maxAttempts` are not accepted inputs. Reporting controls are ignored on native
+paths without CPSE2. Absence of evaluation is distinct from an OS
+`noApplicablePolicy` result. The original caller policy is never edited and
+neither a policy refusal nor the workload is retried. Native uint64
+values are decimal strings; unknown native codes remain numeric.
+
+The report uses `reportVersion: 1`: read the overall outcome at
+`attempts[n].result.outcome` and the bounded, non-exhaustive action batch at
+`attempts[n].result.details`. Requested/required values within each detail remain
+decimal uint64 strings.
+
+`spawnSandboxAsync` retains its exact three-field return type and result,
+including capture-only runs. Use the additive `spawnSandboxAsyncWithReport`
+to receive optional `outputMetadata` alongside stdout/stderr/exitCode.
+The new API can also return capture-only metadata; it does not implicitly
+enable policy reporting without the configuration section.
+Requested reports also survive its timeout exception.
+For explicit reporting, timeout exceptions retain terminal warnings in
+`details.warnings` and available metadata in `details.outputMetadata`.
+Other buffered wait failures also retain available capture metadata there.
+PTY/ChildProcess APIs retain diagnostic-stream envelopes rather than becoming
+typed native handles. Do not make security-sensitive retry decisions by scraping
+mixed guest output. See the
+[backend reporting contract](../../docs/process-container/guide.md#creation-policy-results).
+Upgrade the SDK and native library from the same build together; the native
+error layout is co-versioned with the binding, not a stable cross-version ABI.
+
 ## Compatibility
 
 <!--
@@ -471,7 +527,9 @@ try {
 
 `operation`, `nativeCode` and `remediation` are optional. A failure MXC raises before reaching the backend — a malformed request or id, or a policy rejection — carries neither `operation` nor `nativeCode`, though it may still carry a `remediation`.
 
-These three are currently populated only by **IsolationSession state-aware** operations — always treat them as optional.
+Platform-backed failures can populate these fields, including IsolationSession
+operations and explicitly requested ProcessContainer creation-policy reporting.
+Always treat them as optional.
 
 Branch program logic on `code`, which is a closed, versioned union. The *values* of `operation` and `nativeCode` are best-effort diagnostics derived from the underlying platform API and may change without a version bump — use them for telemetry, logging and diagnosis rather than control flow.
 

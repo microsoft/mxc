@@ -76,6 +76,7 @@ export {
   createConfigFromPolicy,
   spawnSandbox,
   spawnSandboxAsync,
+  spawnSandboxAsyncWithReport,
   spawnSandboxFromConfig,
   buildSandboxPayload,
   SandboxSpawnOptions,
@@ -104,6 +105,15 @@ export {
   MxcErrorFields,
   mxcErrorFromCode,
 } from './errors.js';
+export {
+  getPolicyEnforcementReport,
+  type NativePolicyDetail,
+  type NativePolicyResult,
+  type PolicyChange,
+  type PolicyEnforcementAttempt,
+  type PolicyEnforcementReport,
+  type PolicyResultCode,
+} from './policy-enforcement.js';
 
 // Export state-aware lifecycle types
 export {

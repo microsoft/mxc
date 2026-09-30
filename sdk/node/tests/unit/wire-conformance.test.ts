@@ -82,6 +82,8 @@ import type {
   RuntimeConfig as WireRuntimeConfig,
   Ui as WireUi,
   ProcessContainer as WireProcessContainer,
+  PolicyEnforcement as WirePolicyEnforcement,
+  PolicyEnforcementMode as WirePolicyEnforcementMode,
   ProcessContainerUi as WireBaseProcessUi,
   OneShotWslc as WireWslc,
   PortMapping as WirePortMapping,
@@ -144,6 +146,19 @@ type _BaseProcessUiIsolation = AssertTrue<
 >;
 type _PortProtocol = AssertTrue<
   Equivalent<NonNullable<PublicPortMapping['protocol']>, WireTransportProtocol>
+>;
+type PublicPolicyEnforcement = NonNullable<ProcessContainerConfig['policyEnforcement']>;
+type _PolicyEnforcementMode = AssertTrue<
+  Equivalent<NonNullable<PublicPolicyEnforcement['mode']>, WirePolicyEnforcementMode>
+>;
+type _PolicyEnforcementVals = AssertTrue<
+  Assignable<PublicPolicyEnforcement, WirePolicyEnforcement>
+>;
+type _PolicyEnforcementKeys = AssertTrue<
+  Equivalent<OnlyInPublic<PublicPolicyEnforcement, WirePolicyEnforcement>, never>
+>;
+type _PolicyEnforcementWireKeys = AssertTrue<
+  Equivalent<OnlyInWire<PublicPolicyEnforcement, WirePolicyEnforcement>, never>
 >;
 
 // --- object-interface value conformance -----------------------------------
@@ -290,6 +305,8 @@ type _RootWireKeys = AssertTrue<
 
 // Reference the assertion aliases so they read as intentionally load-bearing.
 export type WireConformanceAssertions = [
+  _PolicyEnforcementMode, _PolicyEnforcementVals,
+  _PolicyEnforcementKeys, _PolicyEnforcementWireKeys,
   _Clipboard, _Containment,
   _NetworkEgressDefault, _NetworkIngressDefault, _NetworkIngressHostLoopback,
   _NetworkPortProtocol, _BaseProcessUiIsolation, _PortProtocol,

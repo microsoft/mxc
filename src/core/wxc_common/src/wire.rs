@@ -138,6 +138,7 @@ pub struct ProcessContainer {
     /// `leastPrivilege`, `network.proxy`, and deny-path policies can remain
     /// enforced without weakening the request.
     pub capture_denials: Option<CaptureDenials>,
+    pub policy_enforcement: Option<crate::policy_enforcement::PolicyEnforcementOptions>,
     /// BaseProcessContainer UI settings (Windows).
     pub ui: Option<BaseProcessUi>,
     /// ProcessContainer-specific filesystem configuration.

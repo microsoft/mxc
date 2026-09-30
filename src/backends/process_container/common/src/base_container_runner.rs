@@ -41,7 +41,7 @@ use crate::capture_output::{
 use crate::job_object::UiJobObject;
 use crate::launch_diagnostics::{
     diagnose_create_process_failure, diagnose_missing_required_env, diagnose_process_exit,
-    security_environment_failure_message, validate_required_child_env,
+    validate_required_child_env,
 };
 use crate::native_capture::CaptureSession;
 use crate::proxy_coordinator::ProxyCoordinator;
@@ -61,6 +61,7 @@ use wxc_common::models::{
     CaptureDenialsErrorOutput, CaptureDenialsOutput, ContainmentBackend, ExecutionRequest,
     FailurePhase, ProxyAddress, SandboxOutputMetadata, ScriptResponse,
 };
+use wxc_common::policy_enforcement::PolicyEnforcementReport;
 use wxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
     SendOwnedHandle,
@@ -116,6 +117,23 @@ fn build_child_env_block(request: &ExecutionRequest) -> Result<Option<Vec<u16>>,
         }
     };
     Ok(Some(crate::appcontainer_runner::encode_env_block(&entries)))
+}
+
+fn log_proxy_configuration(logger: &mut Logger, address: &str, builtin: bool, reporting: bool) {
+    // The file sink timestamps formatting fragments, so labels stay literals.
+    if reporting {
+        let _ = writeln!(
+            logger,
+            "requested proxy: {} (builtin_test_server={})",
+            address, builtin
+        );
+    } else {
+        let _ = writeln!(
+            logger,
+            "effective proxy: {} (builtin_test_server={})",
+            address, builtin
+        );
+    }
 }
 
 const CAPTURE_API_AVAILABLE_LOG: &str =
@@ -178,6 +196,11 @@ trait CaptureSessionFactory: Send + Sync {
         sandbox_specification: &[u8],
         flags: u32,
     ) -> Result<Box<dyn CaptureSessionOps>, learning_mode_windows::LearningModeError>;
+
+    fn begin_in_environment(
+        &self,
+        environment: ProcessSecurityEnvironment,
+    ) -> Result<Box<dyn CaptureSessionOps>, learning_mode_windows::LearningModeError>;
 }
 
 struct RealCaptureSessionFactory;
@@ -191,6 +214,19 @@ impl CaptureSessionFactory for RealCaptureSessionFactory {
         CaptureSession::begin(sandbox_specification, flags)
             .map(|session| Box::new(session) as Box<dyn CaptureSessionOps>)
     }
+
+    fn begin_in_environment(
+        &self,
+        environment: ProcessSecurityEnvironment,
+    ) -> Result<Box<dyn CaptureSessionOps>, learning_mode_windows::LearningModeError> {
+        CaptureSession::begin_in_environment(environment)
+            .map(|session| Box::new(session) as Box<dyn CaptureSessionOps>)
+    }
+}
+
+enum PendingEnvironment {
+    Legacy(Vec<u8>),
+    Reported(ProcessSecurityEnvironment),
 }
 
 /// Request-level BaseContainer eligibility. This is the authoritative decision
@@ -218,6 +254,7 @@ pub struct BaseContainerRunner {
     proxy_coordinator: ProxyCoordinator,
     capture_factory: Arc<dyn CaptureSessionFactory>,
     request_serviceability_confirmed: bool,
+    effective_filesystem: Option<(Vec<String>, Vec<String>)>,
 }
 
 impl Default for BaseContainerRunner {
@@ -226,6 +263,7 @@ impl Default for BaseContainerRunner {
             proxy_coordinator: ProxyCoordinator::default(),
             capture_factory: Arc::new(RealCaptureSessionFactory),
             request_serviceability_confirmed: false,
+            effective_filesystem: None,
         }
     }
 }
@@ -262,6 +300,7 @@ impl BaseContainerRunner {
             proxy_coordinator: ProxyCoordinator::default(),
             capture_factory,
             request_serviceability_confirmed: true,
+            effective_filesystem: None,
         }
     }
 
@@ -392,20 +431,45 @@ impl BaseContainerRunner {
         logger: &mut Logger,
         capture: bool,
     ) -> Result<BaseChild, ScriptResponse> {
+        self.effective_filesystem = None;
+        let mut report = None;
+        match self.spawn_base_inner(request, logger, capture, &mut report) {
+            Ok(mut child) => {
+                child.policy_report = report;
+                Ok(child)
+            }
+            Err(response) => {
+                if request.policy.policy_enforcement.is_some() {
+                    self.proxy_coordinator.stop(logger);
+                }
+                Err(match report {
+                    Some(report) => response.with_policy_report(&report),
+                    None => response,
+                })
+            }
+        }
+    }
+
+    fn spawn_base_inner(
+        &mut self,
+        original_request: &ExecutionRequest,
+        logger: &mut Logger,
+        capture: bool,
+        policy_report: &mut Option<PolicyEnforcementReport>,
+    ) -> Result<BaseChild, ScriptResponse> {
         let _ = writeln!(
             logger,
             "{EMOJI_SECTION} SECTION: Backend runner 'BaseContainer'"
         );
+        let reporting_requested = original_request.policy.policy_enforcement.is_some();
+        if !reporting_requested {
+            crate::appcontainer_runner::log_learning_mode_capability_diagnostics(
+                &original_request.policy.capabilities,
+                logger,
+            );
+        }
 
-        // --- Learning-mode capabilities (parity with AppContainerScriptRunner) ---
-        // Emit per-capability diagnostics (informational for `learningModeLogging`,
-        // a security warning for `permissiveLearningMode`).
-        crate::appcontainer_runner::log_learning_mode_capability_diagnostics(
-            &request.policy.capabilities,
-            logger,
-        );
-
-        let psec_version = Self::choose_min_required_psec_version_for_request(request);
+        let psec_version = Self::choose_min_required_psec_version_for_request(original_request);
         let version_supported =
             secenv::supports_version(psec_version).map_err(|error| ScriptResponse {
                 failure_phase: FailurePhase::BackendUnavailable,
@@ -416,9 +480,9 @@ impl BaseContainerRunner {
         if !version_supported {
             return Err(ScriptResponse {
                 failure_phase: FailurePhase::Rejected,
-                ..ScriptResponse::error(if !request.policy.enumerate_paths.is_empty() {
+                ..ScriptResponse::error(if !original_request.policy.enumerate_paths.is_empty() {
                     PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG
-                } else if unrestricted_host_loopback_allowed(&request.policy) {
+                } else if unrestricted_host_loopback_allowed(&original_request.policy) {
                     PSEC_INGRESS_UNSUPPORTED_MSG
                 } else {
                     "the required Process Security Environment schema version is not supported"
@@ -427,7 +491,7 @@ impl BaseContainerRunner {
         }
 
         // Launch builtin test proxy if requested (before building spec so we have the port).
-        let mut request = request.clone();
+        let mut request = original_request.clone();
         if request.policy.network_proxy.builtin_test_server {
             match self.proxy_coordinator.launch_test_proxy(logger) {
                 Ok(port) => {
@@ -451,10 +515,11 @@ impl BaseContainerRunner {
                 .as_ref()
                 .map(|a| a.to_url())
                 .unwrap_or_else(|| "<pending>".to_string());
-            let _ = writeln!(
+            log_proxy_configuration(
                 logger,
-                "effective proxy: {} (builtin_test_server={})",
-                addr, request.policy.network_proxy.builtin_test_server
+                &addr,
+                request.policy.network_proxy.builtin_test_server,
+                reporting_requested,
             );
             let _ = writeln!(
                 logger,
@@ -463,25 +528,53 @@ impl BaseContainerRunner {
             );
         }
         let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Build sandbox spec");
-        let capture_denials = request.policy.capture_denials.clone();
-        if capture_denials.is_some() {
+        if request.policy.capture_denials.is_some() {
             let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: captureDenials");
         }
-
         let supports_network_ingress = psec_version >= SecurityEnvironmentVersion::V1_1
             && secenv::query_support(SecurityEnvironmentSupport::NetworkIngress);
-        let process_security_environment_spec = build_psec_v1_security_environment_spec(
-            &request,
-            psec_version,
-            supports_network_ingress,
-        );
-        let _ = writeln!(
-            logger,
-            "process security environment spec built (PSEC {}.{}, {} bytes)",
-            psec_version.major,
-            psec_version.minor,
-            process_security_environment_spec.len()
-        );
+        // Legacy creation stays after fallible launch preparation. Only explicit
+        // reporting may create early to retain the decision on later failures.
+        let environment = if reporting_requested {
+            let negotiated = crate::policy_enforcement::create_environment(
+                &request,
+                psec_version,
+                supports_network_ingress,
+            )?;
+            *policy_report = negotiated.report;
+            self.effective_filesystem = Some((
+                request.policy.readonly_paths.clone(),
+                request.policy.readwrite_paths.clone(),
+            ));
+            if !request.policy.network_proxy.is_enabled() {
+                self.proxy_coordinator.stop(logger);
+            }
+            crate::appcontainer_runner::log_learning_mode_capability_diagnostics(
+                &request.policy.capabilities,
+                logger,
+            );
+            let _ = writeln!(
+                logger,
+                "process security environment created (PSEC {}.{})",
+                psec_version.major, psec_version.minor,
+            );
+            PendingEnvironment::Reported(negotiated.environment)
+        } else {
+            let specification = build_psec_v1_security_environment_spec(
+                &request,
+                psec_version,
+                supports_network_ingress,
+            );
+            let _ = writeln!(
+                logger,
+                "process security environment spec built (PSEC {}.{}, {} bytes)",
+                psec_version.major,
+                psec_version.minor,
+                specification.len()
+            );
+            PendingEnvironment::Legacy(specification)
+        };
+        let capture_denials = request.policy.capture_denials.clone();
 
         // Resolve two paths for the capture:
         //   * `capture_etl_path` — a runner-managed `.etl` in a protected
@@ -512,9 +605,9 @@ impl BaseContainerRunner {
         // 3. Build the command line (passed directly, same as AppContainerScriptRunner).
         let mut cmd_wide = string_util::to_wide(&request.script_code);
 
-        // Resolved via the shared helper so both Windows launch paths agree and
-        // neither can pass a NULL cwd (see `working_directory`).
-        let working_directory = crate::working_directory::launch_working_directory(&request);
+        // Preserve the original preference order for an implicit working directory.
+        let working_directory =
+            crate::working_directory::launch_working_directory(original_request);
         let _ = writeln!(
             logger,
             "working directory: {}",
@@ -702,69 +795,53 @@ impl BaseContainerRunner {
         let current_env_ptr = env_ptr;
         let current_creation_flags = creation_flags;
 
-        let mut capture_session: Option<Box<dyn CaptureSessionOps>> = None;
-        let mut security_environment: Option<ProcessSecurityEnvironment> = None;
-        {
-            let psec_spec = process_security_environment_spec.as_slice();
-            if capture_denials.is_some() {
-                match self
+        let (mut capture_session, security_environment) = if capture_denials.is_some() {
+            let begin = match environment {
+                PendingEnvironment::Legacy(specification) => self
                     .capture_factory
-                    .begin(psec_spec, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE)
-                {
-                    Ok(session) => {
-                        let _ = writeln!(
-                            logger,
-                            "{CAPTURE_API_AVAILABLE_LOG}; security environment and trace started"
-                        );
-                        capture_session = Some(session);
-                    }
-                    Err(e) => {
-                        let msg = security_environment_failure_message(&e, true);
-                        let _ = writeln!(logger, "Error: {msg}");
-                        let failure_phase = if e.is_api_unavailable() {
-                            FailurePhase::BackendUnavailable
-                        } else {
-                            FailurePhase::LaunchFailed
-                        };
-                        self.cleanup_capture_begin_failure(logger);
-                        return Err(ScriptResponse {
-                            exit_code: -1,
-                            error_message: msg.clone(),
-                            standard_err: msg,
-                            failure_phase,
-                            ..Default::default()
-                        });
-                    }
+                    .begin(&specification, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE),
+                PendingEnvironment::Reported(environment) => {
+                    self.capture_factory.begin_in_environment(environment)
                 }
-            } else {
-                let result = secenv::create(psec_spec, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE);
-                match result {
-                    Ok(environment) => {
-                        let _ = writeln!(
-                            logger,
-                            "process security environment created (processmodel.dll)"
-                        );
-                        security_environment = Some(environment);
-                    }
-                    Err(error) => {
-                        let msg = security_environment_failure_message(&error, false);
-                        let _ = writeln!(logger, "Error: {msg}");
-                        let failure_phase = if error.is_api_unavailable() {
-                            FailurePhase::BackendUnavailable
-                        } else {
-                            FailurePhase::LaunchFailed
-                        };
-                        return Err(ScriptResponse {
-                            exit_code: -1,
-                            error_message: msg.clone(),
-                            standard_err: msg,
-                            failure_phase,
-                            ..Default::default()
-                        });
-                    }
+            };
+            match begin {
+                Ok(session) => {
+                    let _ = writeln!(
+                        logger,
+                        "{CAPTURE_API_AVAILABLE_LOG}; security environment and trace started"
+                    );
+                    (Some(session), None)
+                }
+                Err(e) => {
+                    let response = crate::policy_enforcement::legacy_creation_error(e, true);
+                    let _ = writeln!(logger, "Error: {}", response.error_message);
+                    self.cleanup_capture_begin_failure(logger);
+                    return Err(response);
                 }
             }
-        }
+        } else {
+            let environment = match environment {
+                PendingEnvironment::Legacy(specification) => {
+                    match secenv::create(&specification, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE) {
+                        Ok(environment) => {
+                            let _ = writeln!(
+                                logger,
+                                "process security environment created (processmodel.dll)"
+                            );
+                            environment
+                        }
+                        Err(error) => {
+                            let response =
+                                crate::policy_enforcement::legacy_creation_error(error, false);
+                            let _ = writeln!(logger, "Error: {}", response.error_message);
+                            return Err(response);
+                        }
+                    }
+                }
+                PendingEnvironment::Reported(environment) => environment,
+            };
+            (None, Some(environment))
+        };
 
         pi = unsafe { std::mem::zeroed() };
         let inherited_handles = if pipe_mode {
@@ -1080,6 +1157,7 @@ impl BaseContainerRunner {
         // here (we failed closed above); the `Option` and the root-only fallback
         // in `kill()` remain purely as defense-in-depth.
         Ok(BaseChild {
+            policy_report: None,
             process: OwnedHandle::new(pi.hProcess),
             thread: OwnedHandle::new(pi.hThread),
             pid: pi.dwProcessId,
@@ -1107,6 +1185,7 @@ impl BaseContainerRunner {
 /// handle, parent-side pipe ends, and per-run state it tears down once the
 /// child exits.
 struct BaseChild {
+    policy_report: Option<PolicyEnforcementReport>,
     process: OwnedHandle,
     thread: OwnedHandle,
     pid: u32,
@@ -1205,13 +1284,15 @@ impl SandboxBackend for BaseContainerRunner {
     }
 
     fn diagnose_exit(&self, request: &ExecutionRequest, exit_code: i32) -> Option<String> {
-        diagnose_process_exit(
-            &request.script_code,
-            &request.policy.readonly_paths,
-            &request.policy.readwrite_paths,
-            exit_code as u32,
-        )
-        .map(|diag| diag.message)
+        let (readonly, readwrite) = self.effective_filesystem.as_ref().map_or(
+            (
+                &request.policy.readonly_paths,
+                &request.policy.readwrite_paths,
+            ),
+            |(readonly, readwrite)| (readonly, readwrite),
+        );
+        diagnose_process_exit(&request.script_code, readonly, readwrite, exit_code as u32)
+            .map(|diag| diag.message)
     }
 }
 
@@ -1256,6 +1337,7 @@ struct BaseContainerSandboxProcess {
     last_exit_code: Option<i32>,
     /// Structured output published after capture teardown succeeds.
     output_metadata: Option<SandboxOutputMetadata>,
+    policy_report: Option<PolicyEnforcementReport>,
     audit_logger: Logger,
 }
 
@@ -1266,6 +1348,12 @@ struct BaseContainerSandboxProcess {
 unsafe impl Send for BaseContainerSandboxProcess {}
 
 impl BaseContainerSandboxProcess {
+    fn merge_output_metadata(&mut self, metadata: SandboxOutputMetadata) {
+        self.output_metadata
+            .get_or_insert_with(SandboxOutputMetadata::default)
+            .merge(metadata);
+    }
+
     fn from_child(mut child: BaseChild, logger: &Logger) -> Self {
         let process = SendOwnedHandle::take(&mut child.process);
         let thread = SendOwnedHandle::take(&mut child.thread);
@@ -1297,6 +1385,7 @@ impl BaseContainerSandboxProcess {
             retain_capture_etl: child.retain_capture_etl,
             last_exit_code: None,
             output_metadata: None,
+            policy_report: child.policy_report.take(),
             audit_logger: logger.clone_diagnostic_sink(),
         }
     }
@@ -1317,6 +1406,14 @@ impl BaseContainerSandboxProcess {
     }
 
     fn run_teardown(&mut self, allow_retention: bool) -> std::io::Result<()> {
+        self.run_teardown_with_analyzer(allow_retention, &EtlDenialAnalyzer)
+    }
+
+    fn run_teardown_with_analyzer(
+        &mut self,
+        allow_retention: bool,
+        analyzer: &dyn DenialAnalyzer,
+    ) -> std::io::Result<()> {
         if let Some(result) = &self.teardown_result {
             return result.clone().map_err(std::io::Error::other);
         }
@@ -1366,7 +1463,7 @@ impl BaseContainerSandboxProcess {
                     Ok(()) => (
                         match (&etl_path, &output_path) {
                             (Some(etl), Some(output)) => Self::decode_write_and_finalize(
-                                &EtlDenialAnalyzer,
+                                analyzer,
                                 etl,
                                 etl_directory.as_deref(),
                                 output,
@@ -1400,7 +1497,7 @@ impl BaseContainerSandboxProcess {
                 };
                 let result = match (capture_result, promotion_error) {
                     (Ok(Some(metadata)), Some(error)) => {
-                        self.output_metadata = Some(SandboxOutputMetadata {
+                        self.merge_output_metadata(SandboxOutputMetadata {
                             capture_denials: Some(metadata),
                             capture_denials_error: Some(CaptureDenialsErrorOutput {
                                 message: error.to_string(),
@@ -1417,7 +1514,7 @@ impl BaseContainerSandboxProcess {
                             "{capture_error}; additionally {promotion_error}"
                         ));
                         if let Some(etl_path) = etl_path.as_deref() {
-                            self.output_metadata = Some(SandboxOutputMetadata {
+                            self.merge_output_metadata(SandboxOutputMetadata {
                                 capture_denials: None,
                                 capture_denials_error: Some(CaptureDenialsErrorOutput {
                                     message: error.to_string(),
@@ -1428,7 +1525,7 @@ impl BaseContainerSandboxProcess {
                         Err(error)
                     }
                     (Ok(Some(metadata)), None) => {
-                        self.output_metadata = Some(SandboxOutputMetadata {
+                        self.merge_output_metadata(SandboxOutputMetadata {
                             capture_denials: Some(metadata.clone()),
                             capture_denials_error: None,
                         });
@@ -1436,13 +1533,13 @@ impl BaseContainerSandboxProcess {
                     }
                     (Err(error), None) => {
                         if let Some(metadata) = capture_output_from_cleanup_error(&error) {
-                            self.output_metadata = Some(SandboxOutputMetadata {
+                            self.merge_output_metadata(SandboxOutputMetadata {
                                 capture_denials: Some(metadata.clone()),
                                 capture_denials_error: None,
                             });
                         } else if retain_etl && etl_was_sealed {
                             if let Some(etl_path) = etl_path.as_deref() {
-                                self.output_metadata = Some(SandboxOutputMetadata {
+                                self.merge_output_metadata(SandboxOutputMetadata {
                                     capture_denials: None,
                                     capture_denials_error: Some(CaptureDenialsErrorOutput {
                                         message: error.to_string(),
@@ -1727,8 +1824,19 @@ fn base_container_teardown_status(
 }
 
 impl SandboxProcess for BaseContainerSandboxProcess {
+    fn warnings(&self) -> Vec<String> {
+        crate::policy_enforcement::teardown_warnings(
+            self.policy_report.as_ref(),
+            &self.teardown_result,
+        )
+    }
+
     fn output_metadata(&self) -> Option<&SandboxOutputMetadata> {
         self.output_metadata.as_ref()
+    }
+
+    fn policy_enforcement_report(&self) -> Option<&PolicyEnforcementReport> {
+        self.policy_report.as_ref()
     }
 
     fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
@@ -2065,13 +2173,14 @@ mod tests {
     }
 
     struct FakeCaptureSession {
+        environment: ProcessSecurityEnvironment,
         finish_error: Option<(&'static str, i32)>,
         finish_calls: Arc<AtomicUsize>,
     }
 
     impl CaptureSessionOps for FakeCaptureSession {
         fn environment(&self) -> HANDLE {
-            HANDLE(std::ptr::dangling_mut())
+            self.environment.raw()
         }
 
         fn finish(
@@ -2101,6 +2210,13 @@ mod tests {
             _sandbox_specification: &[u8],
             _flags: u32,
         ) -> Result<Box<dyn CaptureSessionOps>, learning_mode_windows::LearningModeError> {
+            self.begin_in_environment(fake_capture_environment())
+        }
+
+        fn begin_in_environment(
+            &self,
+            environment: ProcessSecurityEnvironment,
+        ) -> Result<Box<dyn CaptureSessionOps>, learning_mode_windows::LearningModeError> {
             self.begin_calls.fetch_add(1, Ordering::SeqCst);
             if let Some((function, code)) = self.begin_error {
                 return Err(learning_mode_windows::LearningModeError::HResultCall {
@@ -2109,6 +2225,7 @@ mod tests {
                 });
             }
             Ok(Box::new(FakeCaptureSession {
+                environment,
                 finish_error: self.finish_error,
                 finish_calls: Arc::clone(&self.finish_calls),
             }))
@@ -2122,6 +2239,48 @@ mod tests {
             begin_calls: AtomicUsize::new(0),
             finish_calls: Arc::new(AtomicUsize::new(0)),
         })
+    }
+
+    fn fake_capture_environment() -> ProcessSecurityEnvironment {
+        unsafe extern "system" fn close(_: HANDLE) {}
+        ProcessSecurityEnvironment::from_test_handle(HANDLE(std::ptr::dangling_mut()), close)
+    }
+
+    #[test]
+    fn legacy_proxy_file_log_preserves_formatting_fragments() {
+        fn normalize_timestamps(text: &str) -> String {
+            let mut result = text.to_string();
+            for part in text.split('[').skip(1) {
+                if let Some((stamp, _)) = part.split_once(']') {
+                    if !stamp.is_empty() && stamp.bytes().all(|byte| byte.is_ascii_digit()) {
+                        result = result.replace(&format!("[{stamp}]"), "[T]");
+                    }
+                }
+            }
+            result
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let baseline_path = directory.path().join("baseline.log");
+        let actual_path = directory.path().join("actual.log");
+        let mut baseline = Logger::new(wxc_common::logger::Mode::Buffer);
+        baseline.enable_file_sink(&baseline_path).unwrap();
+        let address = "http://127.0.0.1:8888";
+        let builtin = false;
+        writeln!(
+            baseline,
+            "effective proxy: {} (builtin_test_server={})",
+            address, builtin
+        )
+        .unwrap();
+        drop(baseline);
+        let mut actual = Logger::new(wxc_common::logger::Mode::Buffer);
+        actual.enable_file_sink(&actual_path).unwrap();
+        log_proxy_configuration(&mut actual, address, builtin, false);
+        drop(actual);
+        assert_eq!(
+            normalize_timestamps(&std::fs::read_to_string(actual_path).unwrap()),
+            normalize_timestamps(&std::fs::read_to_string(baseline_path).unwrap())
+        );
     }
 
     struct FakeAnalyzer {
@@ -2461,6 +2620,85 @@ mod tests {
     }
 
     #[test]
+    fn policy_enforcement_report_survives_capture_teardown_and_cleanup_failure() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        use windows::Win32::System::Threading::CreateEventW;
+        use wxc_common::policy_enforcement::{
+            PolicyEnforcementAvailability, PolicyEnforcementMode,
+        };
+
+        for fail_cleanup in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let directory = root.path().join("trace");
+            std::fs::create_dir(&directory).unwrap();
+            let etl_path = directory.join("capture.etl");
+            std::fs::write(&etl_path, b"analyzer fixture").unwrap();
+            let output_path = root.path().join("denials.json");
+            let lease = fail_cleanup.then(|| {
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0)
+                    .open(&etl_path)
+                    .unwrap()
+            });
+            let report = PolicyEnforcementReport::new(
+                PolicyEnforcementMode::Mutate,
+                PolicyEnforcementAvailability::Available,
+                "distinct-creation-policy".into(),
+            );
+            let finish_calls = Arc::new(AtomicUsize::new(0));
+            // No workload is launched. An empty job and signaled event satisfy
+            // only the terminal cleanup/wait contract exercised by this test.
+            // SAFETY: the event is unnamed and its returned handle is owned below.
+            let event = unsafe { CreateEventW(None, true, true, None) }.unwrap();
+            let child = BaseChild {
+                policy_report: Some(report.clone()),
+                process: OwnedHandle::new(event),
+                thread: OwnedHandle::new(HANDLE::default()),
+                pid: 0,
+                job: Some(UiJobObject::new().unwrap()),
+                stdin_write: None,
+                stdout_read: None,
+                stderr_read: None,
+                timeout_ms: 0,
+                preserve_policy: false,
+                identity: "capture-regression".into(),
+                proxy_coordinator: ProxyCoordinator::default(),
+                capture_session: Some(Box::new(FakeCaptureSession {
+                    environment: fake_capture_environment(),
+                    finish_error: None,
+                    finish_calls: Arc::clone(&finish_calls),
+                })),
+                security_environment: None,
+                managed_capture: Some(ManagedCapturePath {
+                    directory,
+                    etl_path,
+                    armed: true,
+                }),
+                capture_output_path: Some(output_path),
+                retain_capture_etl: false,
+            };
+            let logger = Logger::new(wxc_common::logger::Mode::Buffer);
+            let mut process = BaseContainerSandboxProcess::from_child(child, &logger);
+            process.last_exit_code = Some(0);
+            let analyzer = FakeAnalyzer {
+                result: Ok(AnalysisResult::complete(Vec::new())),
+            };
+            let first = process.run_teardown_with_analyzer(true, &analyzer);
+            assert_eq!(first.is_err(), fail_cleanup);
+            let metadata = process.output_metadata().unwrap();
+            assert_eq!(process.policy_enforcement_report(), Some(&report));
+            assert!(metadata.capture_denials.is_some());
+            let second = process.run_teardown_with_analyzer(true, &analyzer);
+            assert_eq!(second.is_err(), fail_cleanup);
+            assert_eq!(finish_calls.load(Ordering::SeqCst), 1);
+            drop(process);
+            drop(lease);
+        }
+    }
+
+    #[test]
     fn wait_and_capture_failures_preserve_retained_etl_path() {
         let error = combine_process_and_teardown_results(
             Err(std::io::Error::new(
@@ -2504,7 +2742,7 @@ mod tests {
 
         let error = match runner
             .capture_factory
-            .begin(&[], PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE)
+            .begin_in_environment(fake_capture_environment())
         {
             Ok(_) => panic!("fake begin must fail"),
             Err(error) => error,
@@ -2529,7 +2767,7 @@ mod tests {
         let runner = BaseContainerRunner::with_capture_factory(factory.clone());
         let session = runner
             .capture_factory
-            .begin(&[], PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE)
+            .begin_in_environment(fake_capture_environment())
             .expect("fake begin");
 
         let error = session.finish(None).expect_err("fake finish must fail");

@@ -289,7 +289,8 @@ public sealed class MxcSandboxProcess : ISandboxProcess
 
     /// <summary>
     /// Structured outputs produced by optional sandbox features. Metadata is
-    /// available after a terminal wait completes; before then this is null.
+    /// includes creation-policy reports after spawn. Capture metadata becomes
+    /// available after a terminal wait completes.
     /// </summary>
     public SandboxOutputMetadata? OutputMetadata
     {

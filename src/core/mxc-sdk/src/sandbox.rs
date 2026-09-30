@@ -168,6 +168,68 @@ pub struct Output {
     pub output_metadata: Option<SandboxOutputMetadata>,
 }
 
+/// Captured output and explicitly requested creation-policy diagnostics.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ReportedOutput {
+    /// Captured workload output, using the unchanged legacy result shape.
+    pub output: Output,
+    /// The creation-policy report requested by the sandbox configuration, if available.
+    pub policy_enforcement: Option<Box<crate::PolicyEnforcementReport>>,
+}
+
+/// Diagnostics retained when [`Sandbox::wait_with_output_and_report`] fails.
+#[derive(Debug)]
+pub struct OutputError {
+    source: std::io::Error,
+    output_metadata: Option<Box<SandboxOutputMetadata>>,
+    policy_enforcement: Option<Box<crate::PolicyEnforcementReport>>,
+}
+
+impl OutputError {
+    /// The original wait error, including its native OS code when present.
+    pub fn io_error(&self) -> &std::io::Error {
+        &self.source
+    }
+
+    /// Outputs available when waiting failed, before the sandbox was dropped.
+    pub fn output_metadata(&self) -> Option<&SandboxOutputMetadata> {
+        self.output_metadata.as_deref()
+    }
+
+    /// The explicitly requested creation-policy report, when available.
+    pub fn policy_enforcement_report(&self) -> Option<&crate::PolicyEnforcementReport> {
+        self.policy_enforcement.as_deref()
+    }
+
+    pub(crate) fn into_sdk_error(self) -> Error {
+        let mut error = Error::new(
+            crate::ErrorCode::BackendError,
+            format!("waiting for the sandbox to complete failed: {self}"),
+        );
+        if let Some(report) = self.policy_enforcement_report() {
+            let mut details = serde_json::json!({ "policyEnforcement": report });
+            if let Some(metadata) = self.output_metadata() {
+                details["outputMetadata"] = serde_json::json!(metadata);
+            }
+            error.details = Some(Box::new(details));
+        }
+        error
+    }
+}
+
+impl std::fmt::Display for OutputError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.source.fmt(formatter)
+    }
+}
+
+impl std::error::Error for OutputError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 /// A live sandboxed process, returned by [`spawn_sandbox`](crate::spawn_sandbox)
 /// and [`exec_sandbox`](crate::exec_sandbox).
 ///
@@ -205,9 +267,14 @@ impl Sandbox {
         self.inner.warnings()
     }
 
-    /// Structured outputs available after a terminal wait completes.
+    /// Capture outputs available after a terminal wait completes.
     pub fn output_metadata(&self) -> Option<&SandboxOutputMetadata> {
         self.inner.output_metadata()
+    }
+
+    /// Explicitly requested creation-policy diagnostics, available after spawn.
+    pub fn policy_enforcement_report(&self) -> Option<&crate::PolicyEnforcementReport> {
+        self.inner.policy_enforcement_report()
     }
 
     /// Take the child's stdin pipe. Returns `None` after the first call.
@@ -320,8 +387,42 @@ impl Sandbox {
     ///
     /// `Err` is reserved for an actual OS / wait failure; a timeout is reported
     /// as [`Output`] with `outcome: WaitOutcome::TimedOut` and whatever each
-    /// stream produced.
+    /// stream produced. Wait errors are returned unchanged, including native
+    /// OS codes and custom error payloads.
     pub fn wait_with_output(mut self) -> std::io::Result<Output> {
+        self.collect_output(false)
+    }
+
+    /// Consume the sandbox while retaining creation-policy diagnostics on
+    /// success or failure. This waits and drains streams exactly once.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OutputError`] for an OS/wait failure, retaining the original
+    /// I/O error and any available capture outputs and policy report.
+    pub fn wait_with_output_and_report(mut self) -> Result<ReportedOutput, OutputError> {
+        match self.collect_output(true) {
+            Ok(output) => Ok(ReportedOutput {
+                output,
+                policy_enforcement: self
+                    .inner
+                    .policy_enforcement_report()
+                    .cloned()
+                    .map(Box::new),
+            }),
+            Err(source) => Err(OutputError {
+                source,
+                output_metadata: self.inner.output_metadata().cloned().map(Box::new),
+                policy_enforcement: self
+                    .inner
+                    .policy_enforcement_report()
+                    .cloned()
+                    .map(Box::new),
+            }),
+        }
+    }
+
+    fn collect_output(&mut self, retain_terminal_diagnostics: bool) -> std::io::Result<Output> {
         fn capture(stream: Option<Box<dyn Read + Send>>) -> std::thread::JoinHandle<Vec<u8>> {
             std::thread::spawn(move || {
                 let mut buf = Vec::new();
@@ -336,10 +437,25 @@ impl Sandbox {
         // read each on its own thread so the child never blocks on a full pipe.
         let stdout = capture(self.inner.take_stdout());
         let stderr = capture(self.inner.take_stderr());
-        let outcome = self.wait()?;
+        let mut terminal_diagnostic = None;
+        let outcome = match self.inner.wait() {
+            Ok(code) => WaitOutcome::Exited(code),
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                if retain_terminal_diagnostics && self.inner.policy_enforcement_report().is_some() {
+                    terminal_diagnostic = Some(error.to_string());
+                }
+                WaitOutcome::TimedOut
+            }
+            Err(error) => return Err(error),
+        };
         // Sampled after the wait: a backend whose teardown runs there reports
         // its failures here.
-        let warnings = self.inner.warnings();
+        let mut warnings = self.inner.warnings();
+        if let Some(message) = terminal_diagnostic {
+            if !warnings.contains(&message) {
+                warnings.push(message);
+            }
+        }
         let output_metadata = self.inner.output_metadata().cloned();
         Ok(Output {
             outcome,
@@ -373,11 +489,15 @@ impl StreamCloser {
 mod tests {
     use super::*;
 
+    #[derive(Default)]
     struct FakeProcess {
         warnings: Vec<String>,
         wait_warning: Option<String>,
         output_metadata: Option<SandboxOutputMetadata>,
         stdout: Option<Box<dyn Read + Send>>,
+        wait_error: Option<std::io::Error>,
+        wait_metadata: Option<SandboxOutputMetadata>,
+        policy_report: Option<crate::PolicyEnforcementReport>,
     }
 
     struct NativeOnlyFake;
@@ -433,6 +553,10 @@ mod tests {
             self.output_metadata.as_ref()
         }
 
+        fn policy_enforcement_report(&self) -> Option<&crate::PolicyEnforcementReport> {
+            self.policy_report.as_ref()
+        }
+
         fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
             None
         }
@@ -465,6 +589,14 @@ mod tests {
             if let Some(warning) = self.wait_warning.take() {
                 self.warnings.push(warning);
             }
+            if let Some(metadata) = self.wait_metadata.take() {
+                self.output_metadata
+                    .get_or_insert_with(SandboxOutputMetadata::default)
+                    .merge(metadata);
+            }
+            if let Some(error) = self.wait_error.take() {
+                return Err(error);
+            }
             Ok(0)
         }
     }
@@ -488,6 +620,7 @@ mod tests {
                 capture_denials_error: None,
             }),
             stdout: None,
+            ..Default::default()
         }));
 
         assert_eq!(sandbox.warnings(), [warning.as_str()]);
@@ -512,6 +645,7 @@ mod tests {
             wait_warning: None,
             output_metadata: None,
             stdout: Some(Box::new(std::io::Cursor::new(Vec::<u8>::new()))),
+            ..Default::default()
         }));
 
         assert!(sandbox.take_stdout().is_some());
@@ -523,6 +657,160 @@ mod tests {
             error.to_string(),
             "native stdio must be taken before taking individual streams"
         );
+    }
+
+    #[test]
+    fn policy_enforcement_consuming_wait_failure_retains_report_and_original_error() {
+        let report = crate::PolicyEnforcementReport::new(
+            crate::PolicyEnforcementMode::Mutate,
+            crate::PolicyEnforcementAvailability::Available,
+            "policy-hash".into(),
+        );
+        let source = std::io::Error::from_raw_os_error(5);
+        let kind = source.kind();
+        let message = source.to_string();
+        let sandbox = Sandbox::new(Box::new(FakeProcess {
+            policy_report: Some(report.clone()),
+            wait_metadata: Some(SandboxOutputMetadata {
+                capture_denials_error: Some(CaptureDenialsErrorOutput {
+                    message: "capture finalization failed".into(),
+                    etl_path: "retained.etl".into(),
+                }),
+                ..Default::default()
+            }),
+            wait_error: Some(source),
+            ..Default::default()
+        }));
+        assert!(sandbox.output_metadata().is_none());
+        assert_eq!(sandbox.policy_enforcement_report(), Some(&report));
+        let error = sandbox.wait_with_output_and_report().unwrap_err();
+        assert_eq!(error.io_error().kind(), kind);
+        assert_eq!(error.to_string(), message);
+        assert_eq!(error.io_error().raw_os_error(), Some(5));
+        assert_eq!(error.policy_enforcement_report(), Some(&report));
+        assert_eq!(
+            error
+                .output_metadata()
+                .unwrap()
+                .capture_denials_error
+                .as_ref()
+                .unwrap()
+                .etl_path,
+            "retained.etl"
+        );
+        let sdk_error = error.into_sdk_error();
+        let details = sdk_error.details.as_deref().unwrap();
+        assert_eq!(details["policyEnforcement"], serde_json::json!(report));
+        assert_eq!(
+            details["outputMetadata"]["captureDenialsError"]["etlPath"],
+            "retained.etl"
+        );
+    }
+
+    #[test]
+    fn policy_enforcement_timeout_retains_terminal_diagnostics_without_capture_metadata() {
+        let message = "sandbox execution timed out; additionally capture sealing failed";
+        for reporting in [false, true] {
+            let report = reporting.then(|| {
+                crate::PolicyEnforcementReport::new(
+                    crate::PolicyEnforcementMode::PassThrough,
+                    crate::PolicyEnforcementAvailability::Available,
+                    "hash".into(),
+                )
+            });
+            let sandbox = Sandbox::new(Box::new(FakeProcess {
+                policy_report: report,
+                wait_error: Some(std::io::Error::new(std::io::ErrorKind::TimedOut, message)),
+                stdout: Some(Box::new(std::io::Cursor::new(b"once".to_vec()))),
+                ..Default::default()
+            }));
+            let reported = sandbox.wait_with_output_and_report().unwrap();
+            assert_eq!(reported.output.outcome, WaitOutcome::TimedOut);
+            assert_eq!(reported.output.stdout, b"once");
+            assert!(reported.output.output_metadata.is_none());
+            assert_eq!(
+                reported.output.warnings,
+                if reporting { vec![message] } else { vec![] }
+            );
+        }
+    }
+
+    #[test]
+    fn policy_enforcement_reported_output_owns_report_and_legacy_capture() {
+        let report = crate::PolicyEnforcementReport::new(
+            crate::PolicyEnforcementMode::PassThrough,
+            crate::PolicyEnforcementAvailability::Available,
+            "hash".into(),
+        );
+        let capture = SandboxOutputMetadata {
+            capture_denials: None,
+            capture_denials_error: Some(CaptureDenialsErrorOutput {
+                message: "retained diagnostic".into(),
+                etl_path: "capture.etl".into(),
+            }),
+        };
+        let sandbox = Sandbox::new(Box::new(FakeProcess {
+            policy_report: Some(report.clone()),
+            output_metadata: Some(capture.clone()),
+            stdout: Some(Box::new(std::io::Cursor::new(b"once".to_vec()))),
+            ..Default::default()
+        }));
+        let reported = sandbox.wait_with_output_and_report().unwrap();
+        assert_eq!(reported.output.stdout, b"once");
+        assert_eq!(reported.output.outcome, WaitOutcome::Exited(0));
+        assert_eq!(reported.output.output_metadata, Some(capture));
+        assert_eq!(reported.policy_enforcement.as_deref(), Some(&report));
+    }
+
+    #[test]
+    fn legacy_consuming_wait_preserves_the_original_os_error() {
+        for output_metadata in [
+            None,
+            Some(SandboxOutputMetadata::default()),
+            Some(SandboxOutputMetadata {
+                capture_denials_error: Some(CaptureDenialsErrorOutput {
+                    message: "capture failed".into(),
+                    etl_path: "capture.etl".into(),
+                }),
+                ..Default::default()
+            }),
+        ] {
+            let source = std::io::Error::from_raw_os_error(5);
+            let kind = source.kind();
+            let message = source.to_string();
+            let sandbox = Sandbox::new(Box::new(FakeProcess {
+                output_metadata,
+                wait_error: Some(source),
+                ..Default::default()
+            }));
+            let error = sandbox.wait_with_output().unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(5));
+            assert_eq!(error.kind(), kind);
+            assert_eq!(error.to_string(), message);
+        }
+    }
+
+    #[test]
+    fn legacy_consuming_wait_preserves_custom_error_downcasts() {
+        #[derive(Debug)]
+        struct OriginalError;
+        impl std::fmt::Display for OriginalError {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("original wait failure")
+            }
+        }
+        impl std::error::Error for OriginalError {}
+
+        let sandbox = Sandbox::new(Box::new(FakeProcess {
+            output_metadata: Some(SandboxOutputMetadata::default()),
+            wait_error: Some(std::io::Error::other(OriginalError)),
+            ..Default::default()
+        }));
+        let error = sandbox.wait_with_output().unwrap_err();
+        assert!(error
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<OriginalError>())
+            .is_some());
     }
 
     #[test]

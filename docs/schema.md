@@ -19,6 +19,19 @@ production configs and the dev schema when working on experimental features:
 "$schema": "./schemas/dev/mxc-config.schema.0.10.0-alpha.json"
 ```
 
+### ProcessContainer creation-policy handling (development)
+
+Exact `0.10.0-alpha` supports `processContainer.policyEnforcement` with optional
+`mode` (`pass-through`, the only supported value and default within an explicit
+section). No experimental authorization is required. Mutation and `maxAttempts`
+are rejected before creation. When CPSE2 is
+unavailable the controls are ignored, not treated as unsupported sandbox policy.
+Omitting the section preserves legacy execution and diagnostics; an explicit
+empty section requests pass-through reporting. Published contracts are unchanged.
+See
+[creation-policy results](process-container/guide.md#creation-policy-results)
+for compatibility and result/error reporting.
+
 ### Schema 0.8 networking
 
 Schema 0.8 uses explicit egress and ingress policy and moves the loopback proxy

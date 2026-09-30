@@ -649,8 +649,8 @@ pub unsafe extern "C" fn mxc_sandbox_id(handle: *mut MxcSandbox) -> u32 {
 }
 
 /// Return structured output metadata as owned JSON. A successful call leaves
-/// `*out_json_utf8` null when the sandbox has not completed or produced no
-/// metadata.
+/// `*out_json_utf8` null when no metadata is available. Creation-policy reports
+/// are available after spawn; capture outputs arrive after terminal wait.
 ///
 /// The caller owns a non-null `*out_json_utf8` and must free it with
 /// [`mxc_string_free`](crate::mxc_string_free).
@@ -674,11 +674,12 @@ pub unsafe extern "C" fn mxc_sandbox_output_metadata_json(
     catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: non-null live handle per the caller contract.
         let sandbox = unsafe { &*handle };
-        let Some(metadata) = sandbox.inner.output_metadata() else {
-            return MXC_STATUS_SUCCESS;
-        };
-        let json = match serde_json::to_vec(metadata) {
-            Ok(json) => json,
+        let json = match crate::serialize_output_metadata(
+            sandbox.inner.output_metadata(),
+            sandbox.inner.policy_enforcement_report(),
+        ) {
+            Ok(Some(json)) => json,
+            Ok(None) => return MXC_STATUS_SUCCESS,
             Err(_) => return MXC_STATUS_BACKEND_ERROR,
         };
         // SAFETY: non-null writable out pointer per the caller contract.

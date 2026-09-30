@@ -47,7 +47,9 @@ use windows_core::{HRESULT, PCSTR, PCWSTR};
 use wxc_common::api_set::is_api_set_implemented;
 use wxc_common::string_util;
 
+use crate::secenv_policy::{RawPolicyDetail, RawPolicyResult, MAX_DETAILS, MAX_RESOURCE_CHARS};
 use learning_mode_windows::LearningModeError;
+use wxc_common::policy_enforcement::NativePolicyResult;
 
 /// System DLL that hosts the flat process security-environment exports.
 const PROCESSMODEL_DLL: &str = "processmodel.dll";
@@ -56,14 +58,16 @@ pub(crate) const SECURITY_ENVIRONMENT_API_SET: &core::ffi::CStr =
 
 /// Capability advertised by `QueryProcessSecurityEnvironmentSupport`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u64)]
+#[repr(u32)]
 pub enum SecurityEnvironmentSupport {
     /// Native filesystem deny paths.
-    FileSystemDeny = 0x0000_0000_0000_0001,
+    FileSystemDeny = 0x0000_0001,
     /// Enumeration-only filesystem paths.
-    FileSystemEnumerate = 0x0000_0000_0000_0004,
+    FileSystemEnumerate = 0x0000_0004,
     /// The ingress policy table.
-    NetworkIngress = 0x0000_0000_0000_0008,
+    NetworkIngress = 0x0000_0008,
+    /// Creation-policy results through CreateProcessSecurityEnvironment2.
+    PolicyResult = 0x0000_0010,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -80,7 +84,7 @@ impl SecurityEnvironmentVersion {
 impl SecurityEnvironmentSupport {
     pub(crate) const fn required_version(self) -> SecurityEnvironmentVersion {
         match self {
-            Self::FileSystemDeny => SecurityEnvironmentVersion::V1_0,
+            Self::FileSystemDeny | Self::PolicyResult => SecurityEnvironmentVersion::V1_0,
             Self::FileSystemEnumerate | Self::NetworkIngress => SecurityEnvironmentVersion::V1_1,
         }
     }
@@ -106,9 +110,28 @@ type PfnCreateProcessSecurityEnvironment = unsafe extern "system" fn(
     process_security_environment: *mut HANDLE,
 ) -> HRESULT;
 
-/// `HRESULT QueryProcessSecurityEnvironmentSupport(UINT64* supportFlags)`.
+type PfnCreateProcessSecurityEnvironment2 = unsafe extern "system" fn(
+    sandbox_specification: *const c_void,
+    sandbox_specification_size: u32,
+    flags: u32,
+    policy_result: *mut RawPolicyResult,
+    process_security_environment: *mut HANDLE,
+) -> HRESULT;
+
+/// The policy decision is independent of provisioning success.
+#[derive(Debug)]
+pub(crate) struct PolicyCreateOutcome {
+    pub hresult: HRESULT,
+    pub policy: NativePolicyResult,
+    pub environment: Option<ProcessSecurityEnvironment>,
+    pub invalid_result: Option<&'static str>,
+}
+
+/// `HRESULT QueryProcessSecurityEnvironmentSupport(
+/// PROCESS_SECURITY_ENVIRONMENT_SUPPORT_FLAGS* supportFlags)`.
+/// The native flags enum is 32-bit.
 type PfnQueryProcessSecurityEnvironmentSupport =
-    unsafe extern "system" fn(support_flags: *mut u64) -> HRESULT;
+    unsafe extern "system" fn(support_flags: *mut u32) -> HRESULT;
 
 /// `HRESULT IsProcessSecurityEnvironmentVersionSupported(
 /// DWORD major, BOOLEAN* available, DWORD* minor)`.
@@ -140,6 +163,14 @@ impl std::fmt::Debug for ProcessSecurityEnvironment {
 }
 
 impl ProcessSecurityEnvironment {
+    #[cfg(test)]
+    pub(crate) fn from_test_handle(
+        handle: HANDLE,
+        close: unsafe extern "system" fn(HANDLE),
+    ) -> Self {
+        Self { handle, close }
+    }
+
     /// The raw `HPROCESS_SECURITY_ENVIRONMENT` handle, for passing to the trace-start
     /// and in-environment launch exports.
     #[must_use]
@@ -344,7 +375,26 @@ impl SecurityEnvironmentExportReport {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct PolicyResultExportReport {
+    pub exports: SecurityEnvironmentExportReport,
+    pub create2: Option<&'static str>,
+    pub support_flags: Option<u32>,
+    pub support_query_hresult: Option<i32>,
+}
+
+impl PolicyResultExportReport {
+    pub fn policy_results_available(&self) -> bool {
+        self.exports.is_complete()
+            && self.create2.is_some()
+            && self
+                .support_flags
+                .is_some_and(|flags| flags & SecurityEnvironmentSupport::PolicyResult as u32 != 0)
+    }
+}
+
 const CREATE_NAMES: &[&core::ffi::CStr] = &[c"CreateProcessSecurityEnvironment"];
+const CREATE2_NAMES: &[&core::ffi::CStr] = &[c"CreateProcessSecurityEnvironment2"];
 const QUERY_SUPPORT_NAMES: &[&core::ffi::CStr] = &[c"QueryProcessSecurityEnvironmentSupport"];
 const VERSION_SUPPORT_NAMES: &[&core::ffi::CStr] =
     &[c"IsProcessSecurityEnvironmentVersionSupported"];
@@ -360,6 +410,7 @@ const CLOSE_NAMES: &[&core::ffi::CStr] = &[c"CloseProcessSecurityEnvironment"];
 #[derive(Clone, Copy)]
 pub struct SecurityEnvironmentApi {
     create: PfnCreateProcessSecurityEnvironment,
+    create2: Option<PfnCreateProcessSecurityEnvironment2>,
     query_support: PfnQueryProcessSecurityEnvironmentSupport,
     version_support: Option<PfnIsProcessSecurityEnvironmentVersionSupported>,
     close: PfnCloseProcessSecurityEnvironment,
@@ -424,6 +475,13 @@ impl SecurityEnvironmentApi {
                 .map_err(|e| LearningModeError::DllLoad(e.to_string()))?;
 
             let create_proc = resolve_any(hmodule, CREATE_NAMES)?;
+            let create2 =
+                GetProcAddress(hmodule, PCSTR(CREATE2_NAMES[0].as_ptr().cast())).map(|function| {
+                    std::mem::transmute::<
+                        unsafe extern "system" fn() -> isize,
+                        PfnCreateProcessSecurityEnvironment2,
+                    >(function)
+                });
             let query_support_proc = resolve_any(hmodule, QUERY_SUPPORT_NAMES)?;
             let version_support =
                 GetProcAddress(hmodule, PCSTR(VERSION_SUPPORT_NAMES[0].as_ptr().cast())).map(
@@ -437,6 +495,7 @@ impl SecurityEnvironmentApi {
             let close_proc = resolve_any(hmodule, CLOSE_NAMES)?;
 
             Ok(Self {
+                create2,
                 create: std::mem::transmute::<
                     unsafe extern "system" fn() -> isize,
                     PfnCreateProcessSecurityEnvironment,
@@ -466,6 +525,7 @@ impl SecurityEnvironmentApi {
     ) -> Self {
         Self {
             create,
+            create2: None,
             query_support,
             version_support: None,
             close,
@@ -483,11 +543,61 @@ impl SecurityEnvironmentApi {
     ) -> Self {
         Self {
             create,
+            create2: None,
             query_support,
             version_support: None,
             close,
             cacheable: true,
         }
+    }
+
+    pub(crate) fn policy_results_available(&self) -> Result<bool, LearningModeError> {
+        if self.create2.is_none() {
+            return Ok(false);
+        }
+        self.query_support(SecurityEnvironmentSupport::PolicyResult)
+    }
+
+    pub(crate) fn create_with_policy_result(
+        &self,
+        specification: &[u8],
+        flags: u32,
+    ) -> Result<PolicyCreateOutcome, LearningModeError> {
+        let create = self.create2.ok_or(LearningModeError::HResultCall {
+            function: "CreateProcessSecurityEnvironment2",
+            code: windows::Win32::Foundation::E_NOTIMPL.0,
+        })?;
+        let size =
+            u32::try_from(specification.len()).map_err(|_| LearningModeError::HResultCall {
+                function: "CreateProcessSecurityEnvironment2",
+                code: windows::Win32::Foundation::E_INVALIDARG.0,
+            })?;
+        let mut storage = vec![0u16; MAX_RESOURCE_CHARS];
+        let mut details = vec![RawPolicyDetail::default(); MAX_DETAILS];
+        let mut result = RawPolicyResult::new(&mut details, &mut storage);
+        let mut handle = HANDLE(ptr::null_mut());
+        // SAFETY: the function has the exact CPSE2 ABI; all input/output storage
+        // stays live through this call and resource counts are checked afterward.
+        let hresult = unsafe {
+            create(
+                specification.as_ptr().cast(),
+                size,
+                flags,
+                &mut result,
+                &mut handle,
+            )
+        };
+        let environment = (!handle.0.is_null()).then_some(ProcessSecurityEnvironment {
+            handle,
+            close: self.close,
+        });
+        let (policy, invalid_result) = result.to_owned(&details, &storage);
+        Ok(PolicyCreateOutcome {
+            hresult,
+            policy,
+            environment,
+            invalid_result,
+        })
     }
 
     /// Whether the requested PSEC contract version is supported.
@@ -505,26 +615,26 @@ impl SecurityEnvironmentApi {
         capability: SecurityEnvironmentSupport,
     ) -> Result<bool, LearningModeError> {
         self.support_flags()
-            .map(|support_flags| support_flags & capability as u64 != 0)
+            .map(|support_flags| support_flags & capability as u32 != 0)
     }
 
     #[cfg(test)]
     fn query_support_cached(
         &self,
         capability: SecurityEnvironmentSupport,
-        cache: &OnceLock<Result<u64, LearningModeError>>,
+        cache: &OnceLock<Result<u32, LearningModeError>>,
     ) -> Result<bool, LearningModeError> {
         self.support_flags_cached(cache)
-            .map(|support_flags| support_flags & capability as u64 != 0)
+            .map(|support_flags| support_flags & capability as u32 != 0)
     }
 
     /// Return the immutable support flags advertised by the official PSEC API.
     ///
     /// The real API is process-wide and immutable, so both successful flags and
     /// typed failures are memoized. Injected test surfaces remain uncached.
-    fn support_flags(&self) -> Result<u64, LearningModeError> {
+    fn support_flags(&self) -> Result<u32, LearningModeError> {
         if self.cacheable {
-            static CACHE: OnceLock<Result<u64, LearningModeError>> = OnceLock::new();
+            static CACHE: OnceLock<Result<u32, LearningModeError>> = OnceLock::new();
             self.support_flags_cached(&CACHE)
         } else {
             self.query_support_flags()
@@ -533,16 +643,13 @@ impl SecurityEnvironmentApi {
 
     fn support_flags_cached(
         &self,
-        cache: &OnceLock<Result<u64, LearningModeError>>,
-    ) -> Result<u64, LearningModeError> {
+        cache: &OnceLock<Result<u32, LearningModeError>>,
+    ) -> Result<u32, LearningModeError> {
         cache.get_or_init(|| self.query_support_flags()).clone()
     }
 
-    fn query_support_flags(&self) -> Result<u64, LearningModeError> {
-        let mut support_flags = 0u64;
-        // SAFETY: `query_support` matches the official V2 declaration and
-        // `support_flags` is a valid out-pointer.
-        let result = unsafe { (self.query_support)(&mut support_flags) };
+    fn query_support_flags(&self) -> Result<u32, LearningModeError> {
+        let (result, support_flags) = query_support_flags_raw(self.query_support);
         if result.is_err() {
             return Err(LearningModeError::HResultCall {
                 function: "QueryProcessSecurityEnvironmentSupport",
@@ -582,22 +689,23 @@ impl SecurityEnvironmentApi {
                 &mut env,
             )
         };
+        let environment = (!env.0.is_null()).then_some(ProcessSecurityEnvironment {
+            handle: env,
+            close: self.close,
+        });
         if result.is_err() {
             return Err(LearningModeError::HResultCall {
                 function: "CreateProcessSecurityEnvironment",
                 code: result.0,
             });
         }
-        if env.0.is_null() {
+        let Some(environment) = environment else {
             return Err(LearningModeError::HResultCall {
                 function: "CreateProcessSecurityEnvironment",
                 code: windows::Win32::Foundation::E_UNEXPECTED.0,
             });
-        }
-        Ok(ProcessSecurityEnvironment {
-            handle: env,
-            close: self.close,
-        })
+        };
+        Ok(environment)
     }
 }
 
@@ -633,6 +741,14 @@ pub(crate) fn create(
     flags: u32,
 ) -> Result<ProcessSecurityEnvironment, LearningModeError> {
     SecurityEnvironmentApi::load()?.create(sandbox_specification, flags)
+}
+
+fn query_support_flags_raw(query: PfnQueryProcessSecurityEnvironmentSupport) -> (HRESULT, u32) {
+    let mut flags = 0u32;
+    // SAFETY: the function has the native enum-pointer ABI; flags is writable
+    // for the complete synchronous query. This does not create an environment.
+    let status = unsafe { query(&mut flags) };
+    (status, flags)
 }
 
 fn query_supported_minor_version_with(
@@ -690,12 +806,20 @@ fn last_error() -> u32 {
     unsafe { GetLastError().0 }
 }
 
-/// Diagnostic probe reporting which official security-environment exports
-/// resolved. Returns an all-`None` report if the DLL itself cannot be loaded.
+/// Resolve the legacy creation exports without invoking any native support query.
 #[must_use]
 pub fn probe_security_environment_exports() -> SecurityEnvironmentExportReport {
+    probe_exports(false).exports
+}
+
+/// Resolve exports and query capabilities for explicitly requested policy reporting.
+pub(crate) fn probe_policy_result_exports() -> PolicyResultExportReport {
+    probe_exports(true)
+}
+
+fn probe_exports(report_policy: bool) -> PolicyResultExportReport {
     if !is_api_set_implemented(SECURITY_ENVIRONMENT_API_SET) {
-        return SecurityEnvironmentExportReport::default();
+        return PolicyResultExportReport::default();
     }
 
     let dll = string_util::to_wide(PROCESSMODEL_DLL);
@@ -704,16 +828,52 @@ pub fn probe_security_environment_exports() -> SecurityEnvironmentExportReport {
     let hmodule =
         match unsafe { LoadLibraryExW(PCWSTR(dll.as_ptr()), None, LOAD_LIBRARY_SEARCH_SYSTEM32) } {
             Ok(h) => h,
-            Err(_) => return SecurityEnvironmentExportReport::default(),
+            Err(_) => return PolicyResultExportReport::default(),
         };
 
-    // SAFETY: `hmodule` is valid; `first_present` only reads exports.
+    // SAFETY: the module is valid and the support-query signature matches the
+    // OS declaration. The called query owns no environment or resource lifetime.
     unsafe {
-        SecurityEnvironmentExportReport {
-            create: first_present(hmodule, CREATE_NAMES),
-            query_support: first_present(hmodule, QUERY_SUPPORT_NAMES),
-            close: first_present(hmodule, CLOSE_NAMES),
-        }
+        probe_exports_with(
+            |names| first_present(hmodule, names),
+            || {
+                GetProcAddress(hmodule, PCSTR(QUERY_SUPPORT_NAMES[0].as_ptr().cast())).map(
+                    |function| {
+                        query_support_flags_raw(std::mem::transmute::<
+                            unsafe extern "system" fn() -> isize,
+                            PfnQueryProcessSecurityEnvironmentSupport,
+                        >(function))
+                    },
+                )
+            },
+            report_policy,
+        )
+    }
+}
+
+fn probe_exports_with(
+    mut resolve: impl FnMut(&[&'static core::ffi::CStr]) -> Option<&'static str>,
+    query: impl FnOnce() -> Option<(HRESULT, u32)>,
+    report_policy: bool,
+) -> PolicyResultExportReport {
+    let exports = SecurityEnvironmentExportReport {
+        create: resolve(CREATE_NAMES),
+        query_support: resolve(QUERY_SUPPORT_NAMES),
+        close: resolve(CLOSE_NAMES),
+    };
+    if !report_policy {
+        return PolicyResultExportReport {
+            exports,
+            ..Default::default()
+        };
+    }
+    let create2 = resolve(CREATE2_NAMES);
+    let query_result = query();
+    PolicyResultExportReport {
+        exports,
+        create2,
+        support_flags: query_result.and_then(|(status, flags)| status.is_ok().then_some(flags)),
+        support_query_hresult: query_result.map(|(status, _)| status.0),
     }
 }
 
@@ -744,9 +904,9 @@ pub fn is_security_environment_api_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
     use std::sync::Mutex;
-    use windows::Win32::Foundation::{E_FAIL, S_OK};
+    use windows::Win32::Foundation::{E_FAIL, E_NOTIMPL, S_OK};
 
     static CLOSE_CALLS: AtomicUsize = AtomicUsize::new(0);
 
@@ -754,7 +914,7 @@ mod tests {
     static QUERY_LOCK: Mutex<()> = Mutex::new(());
     static QUERY_CALLS: AtomicUsize = AtomicUsize::new(0);
     static QUERY_RESULT: AtomicI32 = AtomicI32::new(S_OK.0);
-    static QUERY_FLAGS: AtomicU64 = AtomicU64::new(0);
+    static QUERY_FLAGS: AtomicU32 = AtomicU32::new(0);
     static VERSION_RESULT: AtomicI32 = AtomicI32::new(S_OK.0);
     static VERSION_MINOR: AtomicUsize = AtomicUsize::new(1);
 
@@ -771,7 +931,7 @@ mod tests {
         S_OK
     }
 
-    unsafe extern "system" fn fake_query(support_flags: *mut u64) -> HRESULT {
+    unsafe extern "system" fn fake_query(support_flags: *mut u32) -> HRESULT {
         QUERY_CALLS.fetch_add(1, Ordering::SeqCst);
         let result = HRESULT(QUERY_RESULT.load(Ordering::SeqCst));
         if result.is_ok() {
@@ -799,6 +959,214 @@ mod tests {
 
     fn fake_uncached_api() -> SecurityEnvironmentApi {
         SecurityEnvironmentApi::from_raw_parts(fake_create, fake_query, fake_close)
+    }
+
+    #[test]
+    fn legacy_api_debug_keeps_its_export_fields() {
+        let api = fake_uncached_api();
+        let expected = format!(
+            "SecurityEnvironmentApi {{ create: {:?}, query_support: {:?}, version_support: None, close: {:?}, cacheable: false }}",
+            api.create as *const (),
+            api.query_support as *const (),
+            api.close as *const (),
+        );
+        assert_eq!(format!("{api:?}"), expected);
+        assert!(!format!("{api:#?}").contains("create2"));
+    }
+
+    unsafe extern "system" fn fake_create2(
+        _: *const c_void,
+        _: u32,
+        _: u32,
+        _: *mut RawPolicyResult,
+        _: *mut HANDLE,
+    ) -> HRESULT {
+        E_FAIL
+    }
+
+    #[test]
+    fn policy_enforcement_requires_the_cpse2_export() {
+        for reporting_export_present in [false, true] {
+            let resolve = |names: &[&'static core::ffi::CStr]| {
+                let name = names[0].to_str().unwrap();
+                (matches!(
+                    name,
+                    "CreateProcessSecurityEnvironment"
+                        | "QueryProcessSecurityEnvironmentSupport"
+                        | "CloseProcessSecurityEnvironment"
+                ) || (reporting_export_present && name == "CreateProcessSecurityEnvironment2"))
+                    .then_some(name)
+            };
+            let report = probe_exports_with(resolve, || Some((S_OK, 0x10)), true);
+            assert!(report.exports.is_complete());
+            assert_eq!(report.policy_results_available(), reporting_export_present);
+        }
+        let error = fake_uncached_api()
+            .create_with_policy_result(&[], 0)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            LearningModeError::HResultCall {
+                function: "CreateProcessSecurityEnvironment2",
+                code,
+            } if code == E_NOTIMPL.0
+        ));
+    }
+
+    #[test]
+    fn policy_enforcement_availability_requires_the_support_bit_and_export() {
+        let _guard = QUERY_LOCK.lock().unwrap();
+        reset_query_fakes();
+        let mut api = fake_uncached_api();
+        QUERY_FLAGS.store(0x1f, Ordering::SeqCst);
+        assert!(!api.policy_results_available().unwrap());
+        assert_eq!(QUERY_CALLS.load(Ordering::SeqCst), 0);
+
+        api.create2 = Some(fake_create2);
+        QUERY_FLAGS.store(0x0f, Ordering::SeqCst);
+        assert!(!api.policy_results_available().unwrap());
+        QUERY_FLAGS.store(0x10, Ordering::SeqCst);
+        assert!(api.policy_results_available().unwrap());
+        assert_eq!(std::mem::size_of::<SecurityEnvironmentSupport>(), 4);
+    }
+
+    #[test]
+    fn policy_enforcement_availability_preserves_query_failures() {
+        let _guard = QUERY_LOCK.lock().unwrap();
+        reset_query_fakes();
+        let mut api = fake_uncached_api();
+        api.create2 = Some(fake_create2);
+        QUERY_RESULT.store(E_FAIL.0, Ordering::SeqCst);
+        assert!(matches!(
+            api.policy_results_available(),
+            Err(LearningModeError::HResultCall {
+                function: "QueryProcessSecurityEnvironmentSupport",
+                code,
+            }) if code == E_FAIL.0
+        ));
+    }
+
+    #[test]
+    fn policy_enforcement_export_report_distinguishes_missing_bits_and_symbols() {
+        let supported = PolicyResultExportReport {
+            exports: SecurityEnvironmentExportReport {
+                create: Some("CreateProcessSecurityEnvironment"),
+                query_support: Some("QueryProcessSecurityEnvironmentSupport"),
+                close: Some("CloseProcessSecurityEnvironment"),
+            },
+            create2: Some("CreateProcessSecurityEnvironment2"),
+            support_flags: Some(0x10),
+            support_query_hresult: Some(S_OK.0),
+        };
+        assert!(supported.policy_results_available());
+        assert!(!PolicyResultExportReport {
+            support_flags: Some(0x0f),
+            ..supported
+        }
+        .policy_results_available());
+        assert!(!PolicyResultExportReport {
+            create2: None,
+            ..supported
+        }
+        .policy_results_available());
+        assert!(!PolicyResultExportReport {
+            support_flags: None,
+            support_query_hresult: Some(E_FAIL.0),
+            ..supported
+        }
+        .policy_results_available());
+        assert!(!PolicyResultExportReport {
+            exports: SecurityEnvironmentExportReport {
+                close: None,
+                ..supported.exports
+            },
+            ..supported
+        }
+        .policy_results_available());
+    }
+
+    #[test]
+    fn legacy_export_probe_never_invokes_capability_query() {
+        let _guard = QUERY_LOCK.lock().unwrap();
+        for create2_present in [false, true] {
+            for status in [S_OK, E_FAIL] {
+                reset_query_fakes();
+                QUERY_RESULT.store(status.0, Ordering::SeqCst);
+                QUERY_FLAGS.store(0x10, Ordering::SeqCst);
+                let resolve = |names: &[&'static core::ffi::CStr]| {
+                    if names == CREATE2_NAMES && !create2_present {
+                        None
+                    } else {
+                        names[0].to_str().ok()
+                    }
+                };
+                let query = || Some(query_support_flags_raw(fake_query));
+                let legacy = probe_exports_with(resolve, query, false).exports;
+                assert!(legacy.is_complete());
+                assert_eq!(QUERY_CALLS.load(Ordering::SeqCst), 0);
+                let SecurityEnvironmentExportReport {
+                    create,
+                    query_support,
+                    close,
+                } = legacy;
+                assert!(create.is_some() && query_support.is_some() && close.is_some());
+                let reported = probe_exports_with(resolve, query, true);
+                assert_eq!(QUERY_CALLS.load(Ordering::SeqCst), 1);
+                assert_eq!(reported.support_query_hresult, Some(status.0));
+                assert_eq!(
+                    reported.policy_results_available(),
+                    create2_present && status.is_ok()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn policy_enforcement_create_preserves_failed_hresult_and_output() {
+        unsafe extern "system" fn reported(
+            _: *const c_void,
+            _: u32,
+            _: u32,
+            output: *mut RawPolicyResult,
+            environment: *mut HANDLE,
+        ) -> HRESULT {
+            // SAFETY: the tested adapter supplies the initialized header,
+            // MAX_RESOURCE_CHARS writable code units, and a writable handle.
+            unsafe {
+                *environment = HANDLE(ptr::null_mut());
+                let result = &mut *output;
+                assert_eq!(result.version, 1);
+                assert_eq!(result.details_capacity as usize, MAX_DETAILS);
+                assert_eq!(result.resource_capacity_chars as usize, MAX_RESOURCE_CHARS);
+                let text: Vec<_> = "internetclient".encode_utf16().chain(Some(0)).collect();
+                ptr::copy_nonoverlapping(text.as_ptr(), result.resource_buffer, text.len());
+                result.outcome = 3;
+                result.details_count = 1;
+                let detail = &mut *result.details;
+                detail.failure_class = 1;
+                detail.failure_reason = 1;
+                detail.required_action = 1;
+                detail.resource_kind = 2;
+                detail.flags = 3;
+                detail.resource_chars_written = text.len() as u32;
+                detail.resource_chars_required = text.len() as u32;
+                result.resource_chars_written = text.len() as u32;
+                result.resource_chars_required = text.len() as u32;
+            }
+            HRESULT::from_win32(1260)
+        }
+        let mut api = fake_uncached_api();
+        api.create2 = Some(reported);
+        let output = api.create_with_policy_result(&[1], 0).unwrap();
+        assert_eq!(output.hresult, HRESULT::from_win32(1260));
+        assert_eq!(output.policy.outcome.code, 3);
+        assert_eq!(output.policy.outcome.name.as_deref(), Some("blocked"));
+        assert_eq!(
+            output.policy.details[0].resource.as_deref(),
+            Some("internetclient")
+        );
+        assert_eq!(output.invalid_result, None);
+        assert!(output.environment.is_none());
     }
 
     #[test]
@@ -916,7 +1284,7 @@ mod tests {
 
         reset_query_fakes();
         QUERY_FLAGS.store(
-            SecurityEnvironmentSupport::FileSystemDeny as u64,
+            SecurityEnvironmentSupport::FileSystemDeny as u32,
             Ordering::SeqCst,
         );
         assert!(api
@@ -931,7 +1299,7 @@ mod tests {
 
         reset_query_fakes();
         QUERY_FLAGS.store(
-            SecurityEnvironmentSupport::FileSystemEnumerate as u64,
+            SecurityEnvironmentSupport::FileSystemEnumerate as u32,
             Ordering::SeqCst,
         );
         assert!(!api
@@ -946,7 +1314,7 @@ mod tests {
 
         reset_query_fakes();
         QUERY_FLAGS.store(
-            SecurityEnvironmentSupport::NetworkIngress as u64,
+            SecurityEnvironmentSupport::NetworkIngress as u32,
             Ordering::SeqCst,
         );
         assert!(!api
@@ -1013,7 +1381,7 @@ mod tests {
         let _guard = QUERY_LOCK.lock().unwrap();
         reset_query_fakes();
         QUERY_FLAGS.store(
-            SecurityEnvironmentSupport::FileSystemDeny as u64,
+            SecurityEnvironmentSupport::FileSystemDeny as u32,
             Ordering::SeqCst,
         );
         let api = fake_uncached_api();
@@ -1035,7 +1403,7 @@ mod tests {
             .unwrap_or_else(|poison| poison.into_inner());
         reset_query_fakes();
         QUERY_FLAGS.store(
-            SecurityEnvironmentSupport::FileSystemDeny as u64,
+            SecurityEnvironmentSupport::FileSystemDeny as u32,
             Ordering::SeqCst,
         );
         let api =

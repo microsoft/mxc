@@ -92,6 +92,15 @@ where
     ))
 }
 
+fn deserialize_policy_enforcement<'de, D>(
+    deserializer: D,
+) -> Result<Option<mxc_sdk::configs::PolicyEnforcementOptions>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    mxc_sdk::configs::PolicyEnforcementOptions::deserialize(deserializer).map(Some)
+}
+
 impl RequestPolicy {
     fn into_sdk(self) -> Result<(SandboxPolicy, Option<TelemetrySpec>), Error> {
         let telemetry = match self.telemetry {
@@ -136,6 +145,12 @@ enum RequestContainment {
         capabilities: Vec<String>,
         #[serde(default, rename = "captureDenials")]
         capture_denials: Option<CaptureDenials>,
+        #[serde(
+            default,
+            rename = "policyEnforcement",
+            deserialize_with = "deserialize_policy_enforcement"
+        )]
+        policy_enforcement: Option<mxc_sdk::configs::PolicyEnforcementOptions>,
         #[serde(default = "default_process_container_ui")]
         ui: Option<ProcessContainerUiSpec>,
         #[serde(default)]
@@ -279,6 +294,7 @@ impl RequestContainment {
                 learning_mode,
                 capabilities,
                 capture_denials,
+                policy_enforcement,
                 ui,
                 filesystem,
                 network,
@@ -288,6 +304,7 @@ impl RequestContainment {
                 process_container.learning_mode = learning_mode;
                 process_container.capabilities = capabilities;
                 process_container.capture_denials = capture_denials;
+                process_container.policy_enforcement = policy_enforcement;
                 process_container.ui = ui.map(ProcessContainerUiSpec::into_sdk);
                 process_container.filesystem =
                     filesystem.map(ProcessContainerFilesystemSpec::into_sdk);
@@ -949,6 +966,7 @@ mod tests {
                 "learningMode": true,
                 "capabilities": ["internetClient"],
                 "captureDenials": { "mode": "allow", "retainEtl": true },
+                "policyEnforcement": { "mode": "pass-through" },
                 "ui": {
                     "isolation": "atoms",
                     "desktopSystemControl": true,
@@ -969,6 +987,11 @@ mod tests {
         assert!(config.learning_mode);
         assert_eq!(config.capabilities, ["internetClient"]);
         assert!(config.capture_denials.expect("capture").retain_etl);
+        let enforcement = config.policy_enforcement.expect("policy controls");
+        assert_eq!(
+            enforcement.mode,
+            Some(mxc_sdk::PolicyEnforcementMode::PassThrough)
+        );
         let ui = config.ui.expect("ui");
         assert_eq!(ui.isolation, ProcessContainerUiIsolation::Atoms);
         assert!(ui.desktop_system_control);
@@ -985,6 +1008,54 @@ mod tests {
                 .as_deref(),
             Some("Contoso.Proxy_123")
         );
+    }
+
+    #[test]
+    fn policy_enforcement_binding_preserves_presence_and_version_validation() {
+        for version in [
+            "0.6.0-alpha",
+            "0.7.0-alpha",
+            "0.8.0-alpha",
+            "0.9.0-alpha",
+            "0.10.0-alpha",
+        ] {
+            let document = |field: &str| {
+                format!(
+                    r#"{{"policy":{{"version":"{version}"}},"command":"echo unused",
+                    "containment":{{"type":"processContainer"{field}}}}}"#
+                )
+            };
+            assert!(build_request_from_json(&document("")).is_ok());
+            assert!(build_request_from_json(&document(r#","policyEnforcement":null"#)).is_err());
+            assert!(
+                build_request_from_json(&document(r#","policyEnforcement":{"mode":null}"#))
+                    .is_err()
+            );
+            assert!(build_request_from_json(&document(
+                r#","policyEnforcement":{"maxAttempts":null}"#
+            ))
+            .is_err());
+            for field in [
+                r#","policyEnforcement":{}"#,
+                r#","policyEnforcement":{"mode":"pass-through"}"#,
+            ] {
+                assert_eq!(
+                    build_request_from_json(&document(field)).is_ok(),
+                    version == "0.10.0-alpha",
+                    "{version}: {field}"
+                );
+            }
+            for field in [
+                r#","policyEnforcement":{"mode":"mutate"}"#,
+                r#","policyEnforcement":{"maxAttempts":1}"#,
+                r#","policyEnforcement":{"mode":"pass-through","maxAttempts":64}"#,
+            ] {
+                assert!(
+                    build_request_from_json(&document(field)).is_err(),
+                    "{version}: {field}"
+                );
+            }
+        }
     }
 
     #[test]

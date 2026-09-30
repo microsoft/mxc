@@ -279,7 +279,13 @@ impl TelemetryProcess {
         include_output_metadata: bool,
     ) -> ScriptResponse {
         let output_metadata = include_output_metadata
-            .then(|| self.inner.output_metadata().cloned().map(Box::new))
+            .then(|| {
+                wxc_common::models::ScriptOutputMetadata::from_parts(
+                    self.inner.output_metadata().cloned(),
+                    self.inner.policy_enforcement_report().cloned(),
+                )
+                .map(Box::new)
+            })
             .flatten();
         let mut response = match result {
             Ok(exit_code) => ScriptResponse {
@@ -528,6 +534,12 @@ impl SandboxProcess for TelemetryProcess {
         self.inner.output_metadata()
     }
 
+    fn policy_enforcement_report(
+        &self,
+    ) -> Option<&wxc_common::policy_enforcement::PolicyEnforcementReport> {
+        self.inner.policy_enforcement_report()
+    }
+
     fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
         self.inner.take_stdin()
     }
@@ -666,6 +678,12 @@ impl SandboxProcess for ProcessWithWarnings {
         self.inner.output_metadata()
     }
 
+    fn policy_enforcement_report(
+        &self,
+    ) -> Option<&wxc_common::policy_enforcement::PolicyEnforcementReport> {
+        self.inner.policy_enforcement_report()
+    }
+
     fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
         self.inner.take_stdin()
     }
@@ -741,9 +759,16 @@ mod telemetry_process_tests {
         calls: Arc<AtomicUsize>,
         stdin_closer_calls: Arc<AtomicUsize>,
         timeout_kill_calls: Arc<AtomicUsize>,
+        policy_report: Option<wxc_common::policy_enforcement::PolicyEnforcementReport>,
     }
 
     impl SandboxProcess for NativeStdioProbe {
+        fn policy_enforcement_report(
+            &self,
+        ) -> Option<&wxc_common::policy_enforcement::PolicyEnforcementReport> {
+            self.policy_report.as_ref()
+        }
+
         fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(None)
@@ -885,6 +910,7 @@ mod telemetry_process_tests {
                 calls: Arc::clone(&telemetry_calls),
                 stdin_closer_calls: Arc::clone(&telemetry_closer_calls),
                 timeout_kill_calls: Arc::clone(&telemetry_timeout_calls),
+                policy_report: None,
             }),
             true,
             TelemetryMode::StateAware {
@@ -910,6 +936,7 @@ mod telemetry_process_tests {
                 calls: Arc::clone(&warning_calls),
                 stdin_closer_calls: Arc::clone(&warning_closer_calls),
                 timeout_kill_calls: Arc::clone(&warning_timeout_calls),
+                policy_report: None,
             }),
             vec!["test warning".to_string()],
         );
@@ -919,6 +946,40 @@ mod telemetry_process_tests {
         assert_eq!(warning_calls.load(Ordering::SeqCst), 1);
         assert_eq!(warning_closer_calls.load(Ordering::SeqCst), 1);
         assert_eq!(warning_timeout_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn policy_enforcement_report_survives_process_wrappers() {
+        use wxc_common::policy_enforcement::{
+            PolicyEnforcementAvailability, PolicyEnforcementMode, PolicyEnforcementReport,
+        };
+        let report = PolicyEnforcementReport::new(
+            PolicyEnforcementMode::PassThrough,
+            PolicyEnforcementAvailability::Available,
+            "hash".into(),
+        );
+        let warnings = ProcessWithWarnings::wrap(
+            Box::new(NativeStdioProbe {
+                calls: Arc::default(),
+                stdin_closer_calls: Arc::default(),
+                timeout_kill_calls: Arc::default(),
+                policy_report: Some(report.clone()),
+            }),
+            vec!["test warning".into()],
+        );
+        assert_eq!(warnings.policy_enforcement_report(), Some(&report));
+        let telemetry = TelemetryProcess::new(
+            warnings,
+            false,
+            TelemetryMode::StateAware {
+                backend: "test".into(),
+                phase: "exec".into(),
+                correlation_vector: String::new(),
+                requested_sandbox_kind: None,
+            },
+            std::time::Instant::now(),
+        );
+        assert_eq!(telemetry.policy_enforcement_report(), Some(&report));
     }
 
     #[test]
@@ -1124,7 +1185,7 @@ mod telemetry_process_tests {
         assert!(response
             .output_metadata
             .as_deref()
-            .and_then(|metadata| metadata.capture_denials.as_ref())
+            .and_then(|metadata| metadata.capture.capture_denials.as_ref())
             .is_some());
 
         process.emit(&Err(std::io::Error::other("retention failed")));

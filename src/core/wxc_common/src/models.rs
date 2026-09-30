@@ -797,6 +797,9 @@ pub struct ContainerPolicy {
     /// `Some`, the runner records the sandboxed process's ungranted access
     /// attempts to a learning-mode ETL trace. `None` disables capture.
     pub capture_denials: Option<CaptureDenialsConfig>,
+    /// Creation-policy reporting/remediation controls, not sandbox permissions.
+    #[serde(skip)]
+    pub policy_enforcement: Option<crate::policy_enforcement::PolicyEnforcementOptions>,
 }
 
 /// Do the host lists refine the default egress policy (i.e. require per-host
@@ -1347,7 +1350,7 @@ pub struct ScriptResponse {
     pub error: Option<Box<crate::mxc_error::ErrorEnvelope>>,
     /// Structured metadata produced after the sandboxed process exits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_metadata: Option<Box<SandboxOutputMetadata>>,
+    pub output_metadata: Option<Box<ScriptOutputMetadata>>,
 }
 
 impl std::fmt::Debug for ScriptResponse {
@@ -1384,7 +1387,7 @@ impl Default for ScriptResponse {
     }
 }
 
-/// Structured outputs produced by optional sandbox features.
+/// Capture outputs shared with the public SDK's legacy result shape.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxOutputMetadata {
@@ -1394,6 +1397,71 @@ pub struct SandboxOutputMetadata {
     /// Failure details and retained ETL location when capture finalization fails.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture_denials_error: Option<CaptureDenialsErrorOutput>,
+}
+
+impl SandboxOutputMetadata {
+    /// Merge newly produced capture outputs without erasing retained results.
+    pub fn merge(&mut self, other: Self) {
+        if other.capture_denials.is_some() {
+            self.capture_denials = other.capture_denials;
+        }
+        if other.capture_denials_error.is_some() {
+            self.capture_denials_error = other.capture_denials_error;
+        }
+    }
+}
+
+/// Internal runner metadata, extending the public capture DTO without changing it.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ScriptOutputMetadata {
+    /// The unchanged public capture-output shape.
+    #[serde(flatten)]
+    pub capture: SandboxOutputMetadata,
+    /// Explicitly requested creation-policy diagnostics.
+    #[serde(
+        rename = "policyEnforcement",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub policy_enforcement: Option<Box<crate::policy_enforcement::PolicyEnforcementReport>>,
+}
+
+impl std::fmt::Debug for ScriptOutputMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.policy_enforcement.is_none() {
+            return std::fmt::Debug::fmt(&self.capture, f);
+        }
+        f.debug_struct("ScriptOutputMetadata")
+            .field("capture", &self.capture)
+            .field("policy_enforcement", &self.policy_enforcement)
+            .finish()
+    }
+}
+
+impl ScriptOutputMetadata {
+    /// Combine available outputs without inventing metadata when both are absent.
+    pub fn from_parts(
+        capture: Option<SandboxOutputMetadata>,
+        report: Option<crate::policy_enforcement::PolicyEnforcementReport>,
+    ) -> Option<Self> {
+        if capture.is_none() && report.is_none() {
+            return None;
+        }
+        Some(Self {
+            capture: capture.unwrap_or_default(),
+            policy_enforcement: report.map(Box::new),
+        })
+    }
+}
+
+impl From<SandboxOutputMetadata> for ScriptOutputMetadata {
+    fn from(capture: SandboxOutputMetadata) -> Self {
+        Self {
+            capture,
+            policy_enforcement: None,
+        }
+    }
 }
 
 /// Structured diagnostics for a failed captureDenials finalization.
@@ -1438,6 +1506,34 @@ impl ScriptResponse {
             failure_phase: phase,
             ..Self::error(&error.message)
         }
+    }
+
+    pub fn with_policy_report(
+        mut self,
+        report: &crate::policy_enforcement::PolicyEnforcementReport,
+    ) -> Self {
+        let mut error = match self.error.take() {
+            Some(error) => *error,
+            None => {
+                let error = match self.failure_phase {
+                    FailurePhase::Rejected => {
+                        crate::mxc_error::MxcError::policy_validation(&self.error_message)
+                    }
+                    FailurePhase::BackendUnavailable => {
+                        crate::mxc_error::MxcError::backend_unavailable(&self.error_message)
+                    }
+                    _ => crate::mxc_error::MxcError::backend_error(&self.error_message),
+                };
+                error.to_envelope()
+            }
+        };
+        let details = error.details.get_or_insert_with(|| serde_json::json!({}));
+        if !details.is_object() {
+            *details = serde_json::json!({ "backendDetails": details.take() });
+        }
+        details["policyEnforcement"] = serde_json::json!(report);
+        self.error = Some(Box::new(error));
+        self
     }
 
     /// Create an error response with the given message and exit code -1.
@@ -1488,6 +1584,20 @@ mod tests {
             FailurePhase::LaunchFailed,
         );
         assert!(format!("{reported:?}").contains("error: Some"));
+    }
+
+    #[test]
+    fn legacy_capture_metadata_debug_preserves_capture_shape() {
+        let capture = SandboxOutputMetadata {
+            capture_denials: None,
+            capture_denials_error: Some(CaptureDenialsErrorOutput {
+                message: "capture failed".into(),
+                etl_path: "capture.etl".into(),
+            }),
+        };
+        let extended = ScriptOutputMetadata::from(capture.clone());
+        assert_eq!(format!("{extended:?}"), format!("{capture:?}"));
+        assert_eq!(format!("{extended:#?}"), format!("{capture:#?}"));
     }
 
     #[test]

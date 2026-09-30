@@ -17,3 +17,5 @@ pub use process_container::{
 };
 #[doc(inline)]
 pub use seatbelt::Seatbelt;
+#[doc(inline)]
+pub use wxc_common::policy_enforcement::{PolicyEnforcementMode, PolicyEnforcementOptions};

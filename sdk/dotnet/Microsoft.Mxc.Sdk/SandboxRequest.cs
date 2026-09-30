@@ -142,6 +142,15 @@ public sealed class BubblewrapContainment : SandboxContainment;
 /// <summary>Explicit Windows ProcessContainer configuration.</summary>
 public sealed class ProcessContainerContainment : SandboxContainment
 {
+    /// <summary>
+    /// Explicit native creation-policy reporting (0.10.0-alpha).
+    /// An empty options object selects pass-through without experimental authorization.
+    /// </summary>
+    [JsonPropertyName("policyEnforcement")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    [JsonConverter(typeof(PolicyEnforcementOptionsConverter))]
+    public PolicyEnforcementOptions? PolicyEnforcement { get; set; }
+
     /// <summary>Enable least-privilege process creation.</summary>
     [JsonPropertyName("leastPrivilege")]
     public bool LeastPrivilege { get; set; }

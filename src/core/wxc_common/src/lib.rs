@@ -25,6 +25,7 @@ pub mod models;
 pub mod mxc_error;
 pub mod network_blocks;
 mod network_parser;
+pub mod policy_enforcement;
 pub mod policy_identity;
 pub use network_parser::host_is_canonical_loopback;
 pub mod proxy_env;

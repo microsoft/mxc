@@ -1042,6 +1042,28 @@
       },
       "type": "object"
     },
+    "PolicyEnforcement": {
+      "additionalProperties": false,
+      "description": "Explicit CPSE creation-policy reporting. Ignored when the selected native path does not support detailed policy results; existing sandbox restrictions still apply.",
+      "properties": {
+        "mode": {
+          "$ref": "#/definitions/PolicyEnforcementMode",
+          "description": "Defaults to pass-through within this explicit section. No experimental execution authorization is required."
+        }
+      },
+      "type": "object"
+    },
+    "PolicyEnforcementMode": {
+      "oneOf": [
+        {
+          "description": "PassThrough",
+          "enum": [
+            "pass-through"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "PortMapping": {
       "additionalProperties": false,
       "description": "A host-to-container WSLC port mapping.",
@@ -1134,6 +1156,10 @@
         "network": {
           "$ref": "#/definitions/ProcessContainerNetwork",
           "description": "Optional ProcessContainer-specific network settings."
+        },
+        "policyEnforcement": {
+          "$ref": "#/definitions/PolicyEnforcement",
+          "description": "Explicit native creation-policy reporting; omission retains legacy behavior."
         },
         "ui": {
           "$ref": "#/definitions/ProcessContainerUi",

@@ -58,7 +58,9 @@ use std::panic::catch_unwind;
 use std::ptr;
 use std::sync::OnceLock;
 
-use mxc_sdk::{available_backends, platform_support, run, ErrorCode, SandboxRequest, WaitOutcome};
+use mxc_sdk::{
+    available_backends, platform_support, run_with_report, ErrorCode, SandboxRequest, WaitOutcome,
+};
 
 mod error_detail;
 mod request;
@@ -382,20 +384,19 @@ fn run_request_inner(request_json_utf8: *const c_char) -> MxcRunResult {
 }
 
 fn execute_request(request: SandboxRequest) -> MxcRunResult {
-    match run(request) {
-        Ok(output) => {
+    match run_with_report(request) {
+        Ok(reported) => {
+            let output = reported.output;
             let (exit_code, timed_out) = match output.outcome {
                 WaitOutcome::Exited(code) => (code, 0),
                 WaitOutcome::TimedOut => (-1, 1),
             };
             // Serialize both JSON payloads before allocating any C string, so a
             // failure on the second one can't leak the first.
-            let output_metadata_json = match output
-                .output_metadata
-                .as_ref()
-                .map(serde_json::to_vec)
-                .transpose()
-            {
+            let output_metadata_json = match serialize_output_metadata(
+                output.output_metadata.as_ref(),
+                reported.policy_enforcement.as_deref(),
+            ) {
                 Ok(json) => json,
                 Err(error) => {
                     return MxcRunResult::error(
@@ -432,6 +433,27 @@ fn execute_request(request: SandboxRequest) -> MxcRunResult {
         }
         Err(e) => MxcRunResult::from_sdk_error(&e),
     }
+}
+
+fn serialize_output_metadata(
+    capture: Option<&mxc_sdk::SandboxOutputMetadata>,
+    policy_enforcement: Option<&mxc_sdk::PolicyEnforcementReport>,
+) -> Result<Option<Vec<u8>>, serde_json::Error> {
+    if capture.is_none() && policy_enforcement.is_none() {
+        return Ok(None);
+    }
+    #[derive(serde::Serialize)]
+    struct Metadata<'a> {
+        #[serde(flatten)]
+        capture: Option<&'a mxc_sdk::SandboxOutputMetadata>,
+        #[serde(rename = "policyEnforcement", skip_serializing_if = "Option::is_none")]
+        policy_enforcement: Option<&'a mxc_sdk::PolicyEnforcementReport>,
+    }
+    serde_json::to_vec(&Metadata {
+        capture,
+        policy_enforcement,
+    })
+    .map(Some)
 }
 
 /// Free the owned out-strings of an [`MxcRunResult`] produced by
@@ -864,6 +886,45 @@ pub unsafe extern "C" fn mxc_telemetry_get_policy(out_utf8: *mut *mut c_char) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn policy_enforcement_metadata_keeps_legacy_and_reported_wire_shapes() {
+        assert_eq!(serialize_output_metadata(None, None).unwrap(), None);
+        let capture = mxc_sdk::SandboxOutputMetadata {
+            capture_denials: None,
+            capture_denials_error: Some(mxc_sdk::CaptureDenialsErrorOutput {
+                message: "capture failed".into(),
+                etl_path: "capture.etl".into(),
+            }),
+        };
+        assert_eq!(
+            serialize_output_metadata(Some(&capture), None).unwrap(),
+            Some(serde_json::to_vec(&capture).unwrap())
+        );
+        let report = mxc_sdk::PolicyEnforcementReport::new(
+            mxc_sdk::PolicyEnforcementMode::PassThrough,
+            mxc_sdk::PolicyEnforcementAvailability::Unavailable,
+            "hash".into(),
+        );
+        let combined: serde_json::Value = serde_json::from_slice(
+            &serialize_output_metadata(Some(&capture), Some(&report))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(combined["captureDenialsError"]["etlPath"], "capture.etl");
+        assert_eq!(combined["policyEnforcement"], serde_json::json!(report));
+        let report_only: serde_json::Value = serde_json::from_slice(
+            &serialize_output_metadata(None, Some(&report))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            report_only,
+            serde_json::json!({ "policyEnforcement": report })
+        );
+    }
 
     fn run_with(request_json: &str) -> MxcRunResult {
         let request = CString::new(request_json).unwrap();

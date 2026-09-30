@@ -88,7 +88,7 @@ fn prepare_from_response(
     let Some(capture) = response
         .output_metadata
         .as_deref()
-        .and_then(|metadata| metadata.capture_denials.as_ref())
+        .and_then(|metadata| metadata.capture.capture_denials.as_ref())
     else {
         return Ok(None);
     };
@@ -300,17 +300,20 @@ mod tests {
         std::fs::write(&verbose_path, pretty).unwrap();
 
         let response = ScriptResponse {
-            output_metadata: Some(Box::new(SandboxOutputMetadata {
-                capture_denials: Some(CaptureDenialsOutput {
-                    kind: CaptureDenialsOutput::KIND.to_string(),
-                    output_path: denials_path.to_string_lossy().into_owned(),
-                    exit_code: 0,
-                    total_denials: 0,
-                    denied_resources_truncated: false,
-                    etl_path: None,
-                }),
-                capture_denials_error: None,
-            })),
+            output_metadata: Some(Box::new(
+                SandboxOutputMetadata {
+                    capture_denials: Some(CaptureDenialsOutput {
+                        kind: CaptureDenialsOutput::KIND.to_string(),
+                        output_path: denials_path.to_string_lossy().into_owned(),
+                        exit_code: 0,
+                        total_denials: 0,
+                        denied_resources_truncated: false,
+                        etl_path: None,
+                    }),
+                    capture_denials_error: None,
+                }
+                .into(),
+            )),
             ..Default::default()
         };
         let prepared = prepare_from_response(&response).unwrap().unwrap();

@@ -8,6 +8,11 @@ namespace Microsoft.Mxc.Sdk;
 /// <summary>Structured outputs produced by optional sandbox features.</summary>
 public sealed class SandboxOutputMetadata
 {
+    /// <summary>Creation-policy results, available before workload completion.</summary>
+    [JsonPropertyName("policyEnforcement")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public PolicyEnforcementReport? PolicyEnforcement { get; init; }
+
     /// <summary>Location and summary of a captureDenials output document.</summary>
     [JsonPropertyName("captureDenials")]
     public CaptureDenialsOutput? CaptureDenials { get; init; }

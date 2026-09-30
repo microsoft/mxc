@@ -1809,7 +1809,12 @@ impl SandboxBackend for AppContainerScriptRunner {
         validate_common(request)?;
         self.validate(request)?;
 
-        let mut prepared = self.prepare(request, logger)?;
+        let policy_report = crate::policy_enforcement::ignored_report(request);
+        let attach_report = |error: ScriptResponse| match policy_report.as_ref() {
+            Some(report) => error.with_policy_report(report),
+            None => error,
+        };
+        let mut prepared = self.prepare(request, logger).map_err(attach_report)?;
 
         // Pipes → capture pipes the caller drives; Inherit → the child inherits
         // the binary's own std handles / console (a TTY when the binary has one).
@@ -1818,12 +1823,12 @@ impl SandboxBackend for AppContainerScriptRunner {
             Ok(c) => c,
             Err(e) => {
                 self.teardown(&mut prepared, request.lifecycle.preserve_policy, logger);
-                return Err(ScriptResponse::error(&e.to_string()));
+                return Err(attach_report(ScriptResponse::error(&e.to_string())));
             }
         };
         if let Err(e) = child.resume() {
             self.teardown(&mut prepared, request.lifecycle.preserve_policy, logger);
-            return Err(ScriptResponse::error(&e.to_string()));
+            return Err(attach_report(ScriptResponse::error(&e.to_string())));
         }
 
         Ok(Box::new(AppContainerSandboxProcess::new(
@@ -1884,6 +1889,7 @@ struct AppContainerSandboxProcess {
     last_exit_code: Option<i32>,
     /// Structured output published after capture teardown succeeds.
     output_metadata: Option<SandboxOutputMetadata>,
+    policy_report: Option<wxc_common::policy_enforcement::PolicyEnforcementReport>,
     identity: String,
     tier: &'static str,
     audit_logger: Logger,
@@ -1944,6 +1950,7 @@ impl AppContainerSandboxProcess {
             capture_etl_path: child.capture_etl_path.take(),
             last_exit_code: None,
             output_metadata: None,
+            policy_report: crate::policy_enforcement::ignored_report(request),
             identity: sanitize_identity(&identity).to_string(),
             tier: filesystem_mode.isolation_tier().as_str(),
             audit_logger: logger.clone_diagnostic_sink(),
@@ -2036,7 +2043,11 @@ impl AppContainerSandboxProcess {
             };
             let finalization =
                 finalize_guarded_capture(session.as_mut(), output_path.as_deref(), stop, exit_code);
-            self.output_metadata = finalization.metadata;
+            if let Some(metadata) = finalization.metadata {
+                self.output_metadata
+                    .get_or_insert_with(SandboxOutputMetadata::default)
+                    .merge(metadata);
+            }
             finalization.result.map_err(std::io::Error::other)
         } else {
             Ok(())
@@ -2097,8 +2108,21 @@ impl AppContainerSandboxProcess {
 }
 
 impl SandboxProcess for AppContainerSandboxProcess {
+    fn warnings(&self) -> Vec<String> {
+        crate::policy_enforcement::teardown_warnings(
+            self.policy_report.as_ref(),
+            &self.teardown_result,
+        )
+    }
+
     fn output_metadata(&self) -> Option<&SandboxOutputMetadata> {
         self.output_metadata.as_ref()
+    }
+
+    fn policy_enforcement_report(
+        &self,
+    ) -> Option<&wxc_common::policy_enforcement::PolicyEnforcementReport> {
+        self.policy_report.as_ref()
     }
 
     fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {

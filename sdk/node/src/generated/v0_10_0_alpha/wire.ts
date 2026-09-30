@@ -519,6 +519,18 @@ export interface OneShotWslc {
 }
 
 /**
+ * Explicit CPSE creation-policy reporting. Ignored when the selected native path does not support detailed policy results; existing sandbox restrictions still apply.
+ */
+export interface PolicyEnforcement {
+  /**
+   * Defaults to pass-through within this explicit section. No experimental execution authorization is required.
+   */
+  mode?: PolicyEnforcementMode;
+}
+
+export type PolicyEnforcementMode = "pass-through";
+
+/**
  * A host-to-container WSLC port mapping.
  */
 export interface PortMapping {
@@ -592,6 +604,10 @@ export interface ProcessContainer {
    * Optional ProcessContainer-specific network settings.
    */
   network?: ProcessContainerNetwork;
+  /**
+   * Explicit native creation-policy reporting; omission retains legacy behavior.
+   */
+  policyEnforcement?: PolicyEnforcement;
   /**
    * Optional ProcessContainer-specific user-interface policy.
    */
