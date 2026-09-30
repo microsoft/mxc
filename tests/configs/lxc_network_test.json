@@ -1,6 +1,5 @@
 {
-  "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
-  "version": "0.8.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "CLI-LXC-Network-Test",
   "containment": "lxc",
   "process": {
@@ -14,9 +13,26 @@
     "release": "3.23"
   },
   "network": {
-    "defaultPolicy": "block",
-    "enforcementMode": "firewall",
-    "allowedHosts": ["allowed.nettest.mxc.test"],
-    "blockedHosts": ["blocked.nettest.mxc.test"]
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [
+            {
+              "cidr": "allowed.nettest.mxc.test"
+            }
+          ]
+        }
+      ],
+      "deny": [
+        {
+          "to": [
+            {
+              "cidr": "blocked.nettest.mxc.test"
+            }
+          ]
+        }
+      ]
+    }
   }
 }

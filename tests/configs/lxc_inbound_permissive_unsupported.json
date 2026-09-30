@@ -1,6 +1,6 @@
 {
-  "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
-  "version": "0.8.0-alpha",
+  "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
+  "version": "0.9.0-alpha",
   "containerId": "CLI-LXC-Inbound-Permissive",
   "containment": "lxc",
   "process": {
@@ -14,8 +14,12 @@
     "release": "3.23"
   },
   "network": {
-    "defaultPolicy": "allow",
-    "enforcementMode": "firewall",
-    "allowLocalNetwork": true
+    "egress": {
+      "default": "allow"
+    },
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "allow"
+    }
   }
 }

@@ -1,6 +1,5 @@
 {
-  "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
-  "version": "0.8.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "CLI-Combined-Test",
   "containment": "processcontainer",
   "process": {
@@ -8,22 +7,32 @@
     "timeout": 45000
   },
   "processContainer": {
-    "capabilities": [ "internetClient" ]
+    "capabilities": [
+      "internetClient"
+    ]
   },
   "filesystem": {
-    "readwritePaths": [ 
-      "C:\\temp\\wxc_combined_test", 
-      "C:\\Users\\AdminUser\\AppData\\Local\\Programs" 
+    "readwritePaths": [
+      "C:\\temp\\wxc_combined_test",
+      "C:\\Users\\AdminUser\\AppData\\Local\\Programs"
     ],
-    "deniedPaths": [ 
-      "C:\\Windows\\System32", 
-      "C:\\Program Files" 
+    "deniedPaths": [
+      "C:\\Windows\\System32",
+      "C:\\Program Files"
     ]
   },
   "network": {
-    "enforcementMode": "both",
-    "defaultPolicy": "block",
-    "allowedHosts": [ "api.github.com" ],
-    "blockedHosts": []
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [
+            {
+              "cidr": "api.github.com"
+            }
+          ]
+        }
+      ]
+    }
   }
 }

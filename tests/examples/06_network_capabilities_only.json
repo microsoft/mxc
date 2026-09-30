@@ -1,6 +1,5 @@
 {
-  "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
-  "version": "0.8.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "CLI-Network-Capabilities",
   "containment": "processcontainer",
   "process": {
@@ -8,7 +7,8 @@
     "timeout": 30000
   },
   "network": {
-    "enforcementMode": "capabilities",
-    "defaultPolicy": "allow"
+    "egress": {
+      "default": "allow"
+    }
   }
 }

@@ -9,7 +9,7 @@
 # Case A is the positive control at schema 0.7.  Its failure fails the suite:
 # if the 0.7 fixture cannot reach the destination, Case B's result proves
 # nothing.  Case B is the case under test: byte-for-byte the same request with
-# the version string bumped to "0.8.0-alpha" and a distinct container id.  Case
+# the version string bumped to "0.9.0-alpha" and a distinct container id.  Case
 # C guards against a fix that simply allows everything at 0.8: the same bare
 # network section with "defaultPolicy": "block" must still deny outbound.
 #
@@ -198,7 +198,7 @@ echo "PASS: Case A -- 0.7 legacy default-allow reached $PROBE_ADDRESS."
 # Case B: case under test
 # ---------------------------------------------------------------------------
 
-run_config "Case B (case under test): schema 0.8.0-alpha, same network={defaultPolicy:allow}, probe $PROBE_ADDRESS" "$CASE_CONFIG"
+run_config "Case B (case under test): schema 0.9.0-alpha, same network={defaultPolicy:allow}, probe $PROBE_ADDRESS" "$CASE_CONFIG"
 assert_allowed "a 0.8 request carrying the legacy defaultPolicy:allow field was blocked from reaching $PROBE_ADDRESS.  The version string alone changed the outcome.  The contract at docs/sandbox-policy/0.8.0/policy.md states that allowOutbound (defaultPolicy:allow) is a valid legacy field at schema 0.8, and docs/sandbox-policy/0.8.0/networking/schema-updates.md maps it to the same outbound posture."
 
 echo "PASS: Case B -- 0.8 legacy default-allow reached $PROBE_ADDRESS."
@@ -207,7 +207,7 @@ echo "PASS: Case B -- 0.8 legacy default-allow reached $PROBE_ADDRESS."
 # Case C: negative guard
 # ---------------------------------------------------------------------------
 
-run_config "Case C (negative guard): schema 0.8.0-alpha, network={defaultPolicy:block}, probe $PROBE_ADDRESS" "$BLOCK_CONFIG"
+run_config "Case C (negative guard): schema 0.9.0-alpha, network={defaultPolicy:block}, probe $PROBE_ADDRESS" "$BLOCK_CONFIG"
 assert_blocked "a 0.8 request with a bare legacy default-block reached $PROBE_ADDRESS.  The firewall is not filtering this container's traffic under the 0.8 schema, which would make Case B's pass meaningless."
 
 echo "PASS: Case C -- 0.8 legacy default-block denied $PROBE_ADDRESS."

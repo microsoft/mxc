@@ -1,15 +1,32 @@
 {
-  "$schema": "../../schemas/stable/mxc-config.schema.0.7.0-alpha.json",
-  "version": "0.7.0-alpha",
+  "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
+  "version": "0.9.0-alpha",
   "containerId": "CLI-Bubblewrap-Network-Firewall",
   "containment": "bubblewrap",
   "process": {
     "commandLine": "bash -c 'set -u; echo SANDBOX_NETNS=$(readlink /proc/self/ns/net); echo LEGACY_FIREWALL_OK'"
   },
   "network": {
-    "defaultPolicy": "block",
-    "enforcementMode": "firewall",
-    "allowedHosts": ["api.github.com"],
-    "blockedHosts": ["evil.example.com"]
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [
+            {
+              "cidr": "api.github.com"
+            }
+          ]
+        }
+      ],
+      "deny": [
+        {
+          "to": [
+            {
+              "cidr": "evil.example.com"
+            }
+          ]
+        }
+      ]
+    }
   }
 }

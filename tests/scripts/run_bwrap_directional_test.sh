@@ -231,7 +231,7 @@ probe_anchor() {
 
     cat >"$config" <<PROBE
 {
-  "version": "0.8.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "CLI-Bubblewrap-Directional-Reachability-Probe",
   "containment": "bubblewrap",
   "process": {

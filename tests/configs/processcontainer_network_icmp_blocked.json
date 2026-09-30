@@ -1,6 +1,6 @@
 {
-  "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
-  "version": "0.8.0-alpha",
+  "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
+  "version": "0.9.0-alpha",
   "containerId": "CLI-ProcessContainer-Network-IcmpBlocked",
   "containment": "processcontainer",
   "process": {
@@ -16,8 +16,9 @@
     ]
   },
   "network": {
-    "defaultPolicy": "block",
-    "enforcementMode": "capabilities"
+    "egress": {
+      "default": "deny"
+    }
   },
   "ui": {
     "disable": false

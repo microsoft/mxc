@@ -1,14 +1,23 @@
 {
-  "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
-  "version": "0.8.0-alpha",
+  "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
+  "version": "0.9.0-alpha",
   "containerId": "CLI-Bubblewrap-Network-Host-Rules-Unenforced",
   "containment": "bubblewrap",
   "process": {
     "commandLine": "echo SHOULD_NOT_RUN"
   },
   "network": {
-    "defaultPolicy": "block",
-    "enforcementMode": "capabilities",
-    "allowedHosts": ["203.0.113.7"]
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [
+            {
+              "cidr": "203.0.113.7"
+            }
+          ]
+        }
+      ]
+    }
   }
 }

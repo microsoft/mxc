@@ -11,8 +11,8 @@
 # `tier2_bfs` Cargo feature and Assert-BfsSafety refuses a binary built with it,
 # because bfscfg.exe hard-locks the bfs.sys minifilter on 25H2.
 #
-# Configs are authored at 0.8.0-alpha; only the legacy network fields stay at
-# 0.7.0-alpha. Network areas assert the DOCUMENTED contract (docs/process-
+# Configs are authored at 0.9.0-alpha; only the legacy network fields stay at
+# 0.9.0-alpha. Network areas assert the DOCUMENTED contract (docs/process-
 # container/networking.md, docs/sandbox-policy/0.8.0/networking/networking.md),
 # so an assertion that outruns the backend fails by design.
 #

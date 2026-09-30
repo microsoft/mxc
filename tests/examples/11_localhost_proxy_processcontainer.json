@@ -1,6 +1,5 @@
 {
-  "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
-  "version": "0.8.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "CLI-Proxy-Example",
   "containment": "processcontainer",
   "process": {
@@ -8,10 +7,16 @@
     "timeout": 45000
   },
   "processContainer": {
-    "capabilities": ["internetClient"]
+    "capabilities": [
+      "internetClient"
+    ]
   },
   "network": {
-    "defaultPolicy": "block",
-    "proxy": { "localhost": 8080 }
+    "egress": {
+      "default": "deny"
+    }
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://127.0.0.1:8080"
   }
 }

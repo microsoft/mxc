@@ -1,13 +1,18 @@
 {
-  "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
-  "version": "0.8.0-alpha",
+  "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
+  "version": "0.9.0-alpha",
   "containerId": "CLI-Bubblewrap-LocalNet-Acknowledged",
   "containment": "bubblewrap",
   "process": {
     "commandLine": "bash -c 'set -u; echo SANDBOX_NETNS=$(readlink /proc/self/ns/net); echo LOCALNET_ACK_OK'"
   },
   "network": {
-    "defaultPolicy": "allow",
-    "allowLocalNetwork": true
+    "egress": {
+      "default": "allow"
+    },
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "allow"
+    }
   }
 }

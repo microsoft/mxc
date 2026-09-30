@@ -135,7 +135,7 @@ fail() {
 LEGACY_CONFIG="$WORK_DIR/bubblewrap_inbound_legacy.json"
 cat >"$LEGACY_CONFIG" <<'CONFIG_JSON'
 {
-  "version": "0.7.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "CLI-Bubblewrap-Inbound-Legacy",
   "containment": "bubblewrap",
   "process": {
@@ -183,7 +183,7 @@ CURRENT_OUT="$WORK_DIR/run.out"
 CONFIG="$WORK_DIR/bubblewrap_inbound_deny.json"
 cat >"$CONFIG" <<'CONFIG_JSON'
 {
-  "version": "0.8.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "CLI-Bubblewrap-Inbound-Deny",
   "containment": "bubblewrap",
   "process": {

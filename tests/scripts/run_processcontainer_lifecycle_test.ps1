@@ -93,7 +93,7 @@ function Phase-InheritDefaultEnv {
     $cmd = 'cmd /c echo MINE=[%MXC_LC_MINE%] && echo SYSROOT=[%SystemRoot%]'
 
     $cfg = New-Config -Name 'lc-inherit-0800' -CommandLine $cmd -ReadWrite @($rw) `
-        -Env @('MXC_LC_MINE=yes') -InheritDefaultEnv $true -SchemaVersion '0.8.0-alpha'
+        -Env @('MXC_LC_MINE=yes') -InheritDefaultEnv $true -SchemaVersion '0.9.0-alpha'
     $log = Join-Path $ScratchRoot 'logs\lc-inherit-0800.log'
     $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log -TimeoutSec 30
     $logText = Read-Log $log
@@ -102,7 +102,7 @@ function Phase-InheritDefaultEnv {
     # the config being read back and proves nothing.
     $all = Remove-ConfigEcho "$logText`n$($r.Stderr)"
     $namedField = [bool]($all -match '(?i)inheritDefaultEnv')
-    Record-Result -Phase 'P13b' -Name 'inheritDefaultEnv is rejected on schema 0.8.0-alpha' `
+    Record-Result -Phase 'P13b' -Name 'inheritDefaultEnv is rejected on schema 0.9.0-alpha' `
         -Pass ((Test-WasRejected -Run $r -Log $logText) -and $namedField) `
         -Detail ("exit=$($r.ExitCode); errorNamesTheField=$namedField; " +
                  'documented 0.9.0-alpha+, and the stable surface is closed, so 0.8 must reject rather than ignore')
@@ -249,13 +249,13 @@ function Phase-IntentTelemetryVersion {
     # an unknown-field parse error rather than a bespoke version-gate message;
     # both spellings attribute the refusal to the field and both are accepted.
     $cfg = New-Config -Name 'lc-telemetry-0800' -CommandLine $Script:LifecycleCmd -ReadWrite @($rw) `
-        -TelemetryEnabled $true -SchemaVersion '0.8.0-alpha'
+        -TelemetryEnabled $true -SchemaVersion '0.9.0-alpha'
     $log = Join-Path $ScratchRoot 'logs\lc-telemetry-0800.log'
     $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log -TimeoutSec 30
     $logText = Read-Log $log
     $gated = [bool]((Remove-ConfigEcho "$logText`n$($r.Stderr)") -match
         '(?i)(unknown field .{0,2}telemetry|telemetry.{0,60}schema version)')
-    Record-Result -Phase 'P13d' -Name 'telemetry is rejected on schema 0.8.0-alpha (0.9.0-alpha+ only)' `
+    Record-Result -Phase 'P13d' -Name 'telemetry is rejected on schema 0.9.0-alpha (0.9.0-alpha+ only)' `
         -Pass ((Test-WasRejected -Run $r -Log $logText) -and $gated) `
         -Detail "exit=$($r.ExitCode); errorNamesTelemetry=$gated"
 
@@ -263,9 +263,9 @@ function Phase-IntentTelemetryVersion {
     # accepted. Versions outside that closed set must be rejected, including
     # neighbors below the minimum and above the development contract.
     $versions = @(
-        @{ V = '0.6.0-alpha'; Accept = $true;  Why = 'min supported' }
-        @{ V = '0.7.0-alpha'; Accept = $true;  Why = 'registered stable' }
-        @{ V = '0.8.0-alpha'; Accept = $true;  Why = 'registered stable' }
+        @{ V = '0.9.0-alpha'; Accept = $true;  Why = 'min supported' }
+        @{ V = '0.9.0-alpha'; Accept = $true;  Why = 'registered stable' }
+        @{ V = '0.9.0-alpha'; Accept = $true;  Why = 'registered stable' }
         @{ V = '0.9.0-alpha'; Accept = $true;  Why = 'registered stable' }
         @{ V = '0.10.0-alpha'; Accept = $false; Why = 'retired development contract' }
         @{ V = '1.0.0';       Accept = $true;  Why = 'latest stable' }

@@ -462,13 +462,11 @@ function Record-UiTelemetryResult {
     Record-Result -Phase $Phase -Name $Name -Pass ($actual -eq $Expected) -Detail $Detail
 }
 
-# Default schema version for generated configs. Everything the current stable
-# schema can express is authored there; the legacy network fields stay at 0.7
-# (the legacy area builds those via -RawNetwork + -SchemaVersion), because the
-# directional egress/ingress shape is the documented way to express network
-# intent and no doc describes mixing the two in one config.
+# Default schema version for generated configs. Use the stable contract for
+# supported policy; raw legacy network fields are exercised at the minimum
+# supported version to assert they are rejected.
 $Script:SchemaVersion       = '1.0.0'
-$Script:LegacySchemaVersion = '0.7.0-alpha'
+$Script:LegacySchemaVersion = '0.9.0-alpha'
 
 # Write a config object verbatim. Used by the rejection phase for shapes the
 # typed generator deliberately cannot produce (an explicitly empty `to: []`,
@@ -1427,4 +1425,3 @@ function Write-WpcSummary {
         }
     }
 }
-

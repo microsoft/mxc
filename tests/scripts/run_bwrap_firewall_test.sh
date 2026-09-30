@@ -190,7 +190,7 @@ echo "  host listener is on 127.0.0.1:$ALLOWED_PORT (10.0.2.2:$ALLOWED_PORT from
 PROBE_CONFIG="$WORK_DIR/reachability_probe.json"
 cat >"$PROBE_CONFIG" <<'PROBE'
 {
-  "version": "0.8.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "CLI-Bubblewrap-Firewall-Reachability-Probe",
   "containment": "bubblewrap",
   "process": {

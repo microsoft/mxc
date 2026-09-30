@@ -29,7 +29,7 @@ Set-Content -LiteralPath $inputFile -Value "{}" -Encoding utf8
 # Config
 $configJson = @"
 {
-    "version": "0.6.0-alpha",
+    "version": "0.9.0-alpha",
     "containment": "processcontainer",
     "process": {
         "cwd": $($WorkDirectory | ConvertTo-Json -Compress),

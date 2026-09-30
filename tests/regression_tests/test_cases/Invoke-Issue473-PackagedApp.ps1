@@ -22,7 +22,7 @@ if (-not $exe) { throw "No pwsh.exe was found under '$($package.InstallLocation)
 # Config
 $configJson = @"
 {
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "containment": "processcontainer",
     "process": {
         "cwd": $($package.InstallLocation | ConvertTo-Json -Compress),

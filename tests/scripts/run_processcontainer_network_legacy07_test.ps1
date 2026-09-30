@@ -74,7 +74,7 @@ function Phase-NetworkLegacy07 {
     $allow = Invoke-NetRun -Name 'net07-cap-allow' -ConfigPath $cfgAllow
     $block = Invoke-NetRun -Name 'net07-cap-block' -ConfigPath $cfgBlock
 
-    Record-Result -Phase 'P9' -Name 'schema 0.7 config is accepted (version pinned to 0.7.0-alpha)' `
+    Record-Result -Phase 'P9' -Name 'schema 0.7 config is accepted (version pinned to 0.9.0-alpha)' `
         -Pass ($allow.Verdict -ne 'NORUN' -or $allow.Result.ExitCode -eq 0) `
         -Detail "exit=$($allow.Result.ExitCode)"
     Record-Result -Phase 'P9' -Name 'legacy defaultPolicy=allow reaches the anchor' `

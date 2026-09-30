@@ -1,6 +1,5 @@
 {
-  "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
-  "version": "0.8.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "CLI-Proxy-Builtin-Test",
   "containment": "processcontainer",
   "process": {
@@ -17,12 +16,11 @@
       "C:\\Users\\AdminUser\\AppData\\Local\\Programs"
     ]
   },
-  "network": {
-    "proxy": {
-      "builtinTestServer": true
-    }
-  },
+  "network": {},
   "ui": {
     "disable": false
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://127.0.0.1:8080"
   }
 }

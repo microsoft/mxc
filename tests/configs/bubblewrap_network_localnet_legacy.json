@@ -1,13 +1,18 @@
 {
-  "$schema": "../../schemas/stable/mxc-config.schema.0.7.0-alpha.json",
-  "version": "0.7.0-alpha",
+  "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
+  "version": "0.9.0-alpha",
   "containerId": "CLI-Bubblewrap-LocalNet-Legacy",
   "containment": "bubblewrap",
   "process": {
     "commandLine": "bash -c 'set -u; echo SANDBOX_NETNS=$(readlink /proc/self/ns/net); echo LEGACY_LOCALNET_OK'"
   },
   "network": {
-    "defaultPolicy": "allow",
-    "allowLocalNetwork": false
+    "egress": {
+      "default": "allow"
+    },
+    "ingress": {
+      "default": "deny",
+      "hostLoopback": "deny"
+    }
   }
 }

@@ -1,12 +1,14 @@
 {
-  "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
-  "version": "0.8.0-alpha",
+  "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
+  "version": "0.9.0-alpha",
   "containerId": "CLI-Bubblewrap-Network-Block",
   "containment": "bubblewrap",
   "process": {
     "commandLine": "wget -qO- --timeout=3 https://api.github.com/zen 2>&1 || echo 'Network correctly blocked'"
   },
   "network": {
-    "defaultPolicy": "block"
+    "egress": {
+      "default": "deny"
+    }
   }
 }

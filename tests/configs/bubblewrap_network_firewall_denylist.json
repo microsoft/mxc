@@ -1,15 +1,39 @@
 {
-  "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
-  "version": "0.8.0-alpha",
+  "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
+  "version": "0.9.0-alpha",
   "containerId": "CLI-Bubblewrap-Network-Firewall-Denylist",
   "containment": "bubblewrap",
   "process": {
     "commandLine": "bash -c 'set -u; if ! timeout 6 bash -c \"exec 3<>/dev/tcp/10.0.2.2/{{ALLOWED_PORT}}\" >/dev/null 2>&1; then echo OPEN_TERMINAL_UNREACHABLE; exit 1; fi; echo OPEN_TERMINAL_OK; timeout 6 bash -c \"exec 3<>/dev/tcp/1.1.1.1/443\" >/dev/null 2>&1; if [ $? = 0 ]; then echo DENY_OVERRIDDEN_BY_ALLOW; exit 1; fi; echo DENY_WINS_OK'"
   },
   "network": {
-    "defaultPolicy": "block",
-    "enforcementMode": "firewall",
-    "allowedHosts": ["10.0.2.2/32", "1.1.1.0/24"],
-    "blockedHosts": ["1.1.1.1/32"]
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [
+            {
+              "cidr": "10.0.2.2/32"
+            }
+          ]
+        },
+        {
+          "to": [
+            {
+              "cidr": "1.1.1.0/24"
+            }
+          ]
+        }
+      ],
+      "deny": [
+        {
+          "to": [
+            {
+              "cidr": "1.1.1.1/32"
+            }
+          ]
+        }
+      ]
+    }
   }
 }

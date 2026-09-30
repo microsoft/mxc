@@ -1,6 +1,6 @@
 {
-  "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
-  "version": "0.8.0-alpha",
+  "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
+  "version": "0.9.0-alpha",
   "containerId": "CLI-LXC-Network-Dualstack-Hostname",
   "containment": "lxc",
   "process": {
@@ -14,18 +14,61 @@
     "release": "3.23"
   },
   "network": {
-    "defaultPolicy": "block",
-    "enforcementMode": "firewall",
-    "allowedHosts": [
-      "localhost",
-      "dns.google",
-      "one.one.one.one",
-      "8.8.8.8",
-      "2001:4860:4860::8888"
-    ],
-    "blockedHosts": [
-      "10.0.0.0/8",
-      "2001:db8::/32"
-    ]
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [
+            {
+              "cidr": "localhost"
+            }
+          ]
+        },
+        {
+          "to": [
+            {
+              "cidr": "dns.google"
+            }
+          ]
+        },
+        {
+          "to": [
+            {
+              "cidr": "one.one.one.one"
+            }
+          ]
+        },
+        {
+          "to": [
+            {
+              "cidr": "8.8.8.8"
+            }
+          ]
+        },
+        {
+          "to": [
+            {
+              "cidr": "2001:4860:4860::8888"
+            }
+          ]
+        }
+      ],
+      "deny": [
+        {
+          "to": [
+            {
+              "cidr": "10.0.0.0/8"
+            }
+          ]
+        },
+        {
+          "to": [
+            {
+              "cidr": "2001:db8::/32"
+            }
+          ]
+        }
+      ]
+    }
   }
 }

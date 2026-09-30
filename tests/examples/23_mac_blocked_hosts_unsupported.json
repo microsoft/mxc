@@ -1,15 +1,23 @@
 {
-    "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
-    "version": "0.8.0-alpha",
-    "containment": "seatbelt",
-    "process": {
-        "commandLine": "echo this should not run",
-        "timeout": 10000
-    },
-    "network": {
-        "defaultPolicy": "allow",
-        "blockedHosts": [
-            "evil.example.com"
-        ]
+  "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
+  "version": "0.9.0-alpha",
+  "containment": "seatbelt",
+  "process": {
+    "commandLine": "echo this should not run",
+    "timeout": 10000
+  },
+  "network": {
+    "egress": {
+      "default": "allow",
+      "deny": [
+        {
+          "to": [
+            {
+              "cidr": "evil.example.com"
+            }
+          ]
+        }
+      ]
     }
+  }
 }

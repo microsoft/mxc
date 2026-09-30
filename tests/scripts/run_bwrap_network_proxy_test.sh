@@ -496,7 +496,7 @@ DENY_DIR="$(mktemp -d)"
 trap 'cleanup_control; rm -rf "$DENY_DIR"' EXIT
 cat >"$DENY_DIR/denied.json" <<JSON
 {
-  "version": "0.8.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "CLI-Bubblewrap-Pin-Denied-Hosts",
   "containment": "bubblewrap",
   "process": { "commandLine": "echo PIN_DENIED_HOSTS_RAN" },
@@ -536,7 +536,7 @@ DOTDOT_DIR="$(mktemp -d)"
 trap 'cleanup_control; rm -rf "$DOTDOT_DIR"' EXIT
 cat >"$DOTDOT_DIR/dotdot.json" <<JSON
 {
-  "version": "0.8.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "CLI-Bubblewrap-Pin-DotDot-Hosts",
   "containment": "bubblewrap",
   "process": { "commandLine": "cat /etc/hosts" },
@@ -575,7 +575,7 @@ LEGACY_DIR="$(mktemp -d)"
 trap 'cleanup_control; rm -rf "$LEGACY_DIR"' EXIT
 cat >"$LEGACY_DIR/legacy.json" <<JSON
 {
-  "version": "0.7.0-alpha",
+  "version": "0.9.0-alpha",
   "containerId": "CLI-Bubblewrap-Legacy-Denied-Hosts",
   "containment": "bubblewrap",
   "process": { "commandLine": "echo LEGACY_DENIED_HOSTS_OK" },
