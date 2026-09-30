@@ -199,7 +199,7 @@ const policy: SandboxPolicy = {
     readonlyPaths: ['C:\\Program Files\\MyTool'],
   },
 };
-const config = createConfigFromPolicy(policy, 'processcontainer');
+const config = createConfigFromPolicy(policy, 'process');
 const result = probeSandboxSupport(config);
 console.log(result.tier, result.warnings, result.probes.uiCapabilities);
 ```
@@ -209,9 +209,10 @@ probe failures, non-ProcessContainer requests, and malformed JSON throw errors;
 they are not reported as successful unsupported results. Request-aware probing
 is ProcessContainer-only because its output selects among ProcessContainer
 isolation tiers using that backend's host detector. Other backends have
-different capability models; use `getAvailableBackends()` and normal request
-validation when launching them rather than interpreting ProcessContainer tier
-facts as cross-backend support.
+different capability models; use `getPlatformSupport().availableMethods` for
+Node host availability, then rely on normal request validation when launching
+them rather than interpreting ProcessContainer tier facts as cross-backend
+support.
 
 ---
 
