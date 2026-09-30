@@ -105,7 +105,7 @@ requiring root privileges or a container runtime.
 
 ```json
 {
-  "version": "0.6.0-alpha",
+  "version": "0.9.0-alpha",
   "containment": "bubblewrap",
   "process": {
     "commandLine": "echo 'Hello from Bubblewrap sandbox'"
@@ -256,7 +256,7 @@ nothing behind them to leak.
 Example:
 ```json
 {
-  "version": "0.6.0-alpha",
+  "version": "0.9.0-alpha",
   "containment": "bubblewrap",
   "process": {
     "commandLine": "cat /data/input.txt && echo result > /workspace/output.txt"
@@ -393,7 +393,7 @@ namespace choice alone decides the outcome:
 | `true` | private (`--unshare-net`) | **Partially honored** — the listener is reachable only from inside the sandbox |
 | `true` | shared with host | Honored |
 
-Rows 2 and 3 are rejected on schema `0.8.0-alpha` and later — in the backend's
+Rows 2 and 3 are rejected on schema `0.9.0-alpha` and later — in the backend's
 validation, which every caller passes through, so a programmatic
 `ExecutionRequest` is refused just like a JSON config — and
 emit a
@@ -411,7 +411,7 @@ Callers who want the shared namespace acknowledge the exposure with
 requires for this field.
 
 #### Inbound is closed by the namespace, and by a chain
-On schema `0.8.0-alpha` and later, the modes that build a private network
+On schema `0.9.0-alpha` and later, the modes that build a private network
 namespace (proxy and firewall-enforced) also install an `MXC_INGRESS` chain
 hooked into `INPUT`, for both families:
 
@@ -448,12 +448,12 @@ No RFC 4890 ICMPv6 exemptions are emitted. `slirp4netns` runs without
 `--enable-ipv6`, so the namespace has no IPv6 for them to govern; they must be
 added in the same change that enables it.
 
-Legacy schemas are unaffected. Below `0.8.0-alpha`, proxy mode resolves to the
+Legacy schemas are unaffected. Below `0.9.0-alpha`, proxy mode resolves to the
 shared host network namespace, where no chain of any kind is installed.
 
 #### Directional policy (`network.egress` / `network.ingress`)
 
-Schema `0.8.0-alpha` adds a directional network shape that replaces the
+Schema `0.9.0-alpha` adds a directional network shape that replaces the
 `defaultPolicy` / `allowedHosts` / `blockedHosts` triple with an explicit
 `egress` and `ingress` section. The two shapes are **mutually exclusive**: a
 config that mixes legacy and directional fields is a parse error, and one that
@@ -462,7 +462,7 @@ the declared version selects a closed contract with no directional fields, so
 the error names the unknown field at `network.egress`. Callers that build an
 `ExecutionRequest` programmatically skip the parser and hit the backend's own
 twin of this check, which reports `Bubblewrap: network.egress/network.ingress
-require schema 0.8.0-alpha or later.`
+require schema 0.9.0-alpha or later.`
 
 A config carrying *any* legacy field takes the legacy path described above and
 is byte-identical to what it was before directional support existed. This
@@ -779,7 +779,7 @@ with no `allow` / `deny` rules; the chain opens the proxy endpoint alone.
 
 ```json
 {
-  "version": "0.8.0-alpha",
+  "version": "0.9.0-alpha",
   "platform": "linux",
   "containment": "bubblewrap",
   "process": {
@@ -797,7 +797,7 @@ with no `allow` / `deny` rules; the chain opens the proxy endpoint alone.
 
 ```json
 {
-  "version": "0.8.0-alpha",
+  "version": "0.9.0-alpha",
   "containment": "bubblewrap",
   "process": { "commandLine": "curl -fsSL https://example.com" },
   "network": {
@@ -806,7 +806,7 @@ with no `allow` / `deny` rules; the chain opens the proxy endpoint alone.
 }
 ```
 
-> Both legacy examples declare `0.8.0-alpha` deliberately: the
+> Both legacy examples declare `0.9.0-alpha` deliberately: the
 > private-namespace and egress-enforcement behavior described above is selected
 > by the schema version, so the same config on `0.6`/`0.7` runs the legacy
 > shared-host-network proxy path instead. `network.proxy`, `allowedHosts`, and
@@ -814,7 +814,7 @@ with no `allow` / `deny` rules; the chain opens the proxy endpoint alone.
 
 ### Checking host support before you run
 
-There is deliberately **no automatic fallback**: a `0.8.0-alpha`+ proxy config
+There is deliberately **no automatic fallback**: a `0.9.0-alpha`+ proxy config
 that cannot configure private networking fails rather than silently degrading to
 the weaker shared-host-network model, because a silent degradation would
 reintroduce exactly the proxy-bypass this mode exists to close.

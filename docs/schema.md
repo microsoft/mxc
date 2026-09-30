@@ -26,7 +26,7 @@ endpoint into runtime configuration:
 
 ```json
 {
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "network": {
         "egress": {
             "default": "deny",
@@ -56,7 +56,7 @@ not the strict proxy-endpoint exception defined by the shared model-2 policy.
 
 ```json
 {
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "containment": "processcontainer",
     "network": {
         "egress": { "default": "deny" },
@@ -139,7 +139,7 @@ that can be executed independently.
 
 ```json
 {
-    "version": "1.0.0",                    // Exact schema version. Minimum supported: "0.6.0-alpha"; current stable: "1.0.0".
+    "version": "1.0.0",                    // Exact schema version. Minimum supported: "0.9.0-alpha"; current stable: "1.0.0".
     "containerId": "my-container",         // Externally assigned container ID
     "containment": "processcontainer",     // Backend (see table below)
 
@@ -155,7 +155,7 @@ that can be executed independently.
                                            //  than inheriting the launcher's — see
                                            //  "Working Directory" below)
         "env": ["MY_VAR=value"],           // Omitted: backend default; supplied: used verbatim
-        "inheritDefaultEnv": true,         // Layer env on the backend default (0.9.0-alpha+)
+        "inheritDefaultEnv": true,         // Layer env on the backend default (0.9.0-alpha)
         "timeout": 30000                   // Timeout in ms (0 = no timeout)
     },
 
@@ -383,7 +383,7 @@ containment tier selected at runtime:
 
 For Windows BaseContainer, a path grant in `readwritePaths` applies to that directory
 and its descendants with the exception of root directories. Granting access to a
-**volume root** (e.g. `C:\`) does **not** cascade to its child folders to prevent over-provisioning. 
+**volume root** (e.g. `C:\`) does **not** cascade to its child folders to prevent over-provisioning.
 
 For example, `"readwritePaths": ["C:\\"]` does **not** grant access to files
 under `C:\data`.
@@ -391,9 +391,9 @@ under `C:\data`.
 #### Upward directory traversal for Windows BaseContainer
 
 Many tools search **upward** from the working directory toward the volume root,
-looking for a marker file that defines their project. With Windows BaseContainer, when such a tool reaches a parent directory that is not in the allowlist, `ACCESS_DENIED` will be returned. 
+looking for a marker file that defines their project. With Windows BaseContainer, when such a tool reaches a parent directory that is not in the allowlist, `ACCESS_DENIED` will be returned.
 
-When resolving this error, grant only the specific directories the tool must reach and keep that set as small as possible. 
+When resolving this error, grant only the specific directories the tool must reach and keep that set as small as possible.
 Avoid resolving this error by granting broad profile roots. Each 'readwritePaths' grant also exposes that directory's descendants and granting broad profile roots may result in over-permissioning.
 
 ### UI Policy
@@ -484,8 +484,9 @@ State-aware envelopes use an exact backend-specific contract:
 - WSLC uses published `0.9.0-alpha`; Windows Sandbox uses development
   `1.1.0-alpha`.
 
-The published `0.6.0-alpha`, `0.7.0-alpha`, and `0.8.0-alpha` contracts contain
-only one-shot request roots. This Windows Sandbox example therefore uses the
+Contracts before `0.9.0-alpha` are retired. The supported published
+`0.9.0-alpha` and `1.0.0` contracts contain one-shot plus IsolationSession
+and WSLC state-aware request roots. This Windows Sandbox example therefore uses the
 exact development schema:
 
 ```json
@@ -538,10 +539,8 @@ Registered contracts:
 
 | Config `version` | Status |
 |---|---|
-| `"0.6.0-alpha"` | Published; minimum supported |
-| `"0.7.0-alpha"` | Published |
-| `"0.8.0-alpha"` | Published |
-| `"0.9.0-alpha"` | Published |
+| `"0.9.0-alpha"` | Published; minimum supported |
+
 | `"1.0.0"` | Published; current stable |
 | `"1.1.0-alpha"` | Mutable development contract |
 

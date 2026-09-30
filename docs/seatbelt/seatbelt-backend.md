@@ -9,7 +9,7 @@ framework behind the App Sandbox that every Mac App Store app uses.
 |---|---|
 | **Binary** | `mxc-exec-mac` |
 | **Config value** | `"containment": "seatbelt"` |
-| **Schema** | `0.9.0-alpha` recommended. `0.7.0-alpha` and `0.8.0-alpha` are legacy but still supported. |
+| **Schema** | `0.9.0-alpha` or later. |
 | **Requires** | macOS 15 (Sequoia) or later. No root, no daemon, no install. |
 | **Isolation** | Process tree (no named container, no lifecycle, nothing to clean up) |
 | **Enforced by** | The macOS kernel, via a generated profile |
@@ -52,12 +52,8 @@ That denies all network access. To open it up, see
 
 **Tip:** always run `--dry-run` first.
 > **Which schema version?** This doc uses the directional network shape
-> (`egress` / `ingress` / `runtimeConfig.networkProxy`) throughout — the only
-> form `0.9.0-alpha` accepts, and the same shape 0.8 introduced. The older 0.7
-> fields still work on `0.7.0-alpha` and `0.8.0-alpha` — see
-> [Legacy 0.7 network fields](#legacy-07-network-fields) for the mapping — and
-> are structurally rejected at `0.9.0-alpha`. A single config must use one shape
-> or the other, never both.
+> (`egress` / `ingress` / `runtimeConfig.networkProxy`) throughout. It is the
+> only supported network shape for accepted Seatbelt configs.
 
 Seatbelt's capability limits are the same on 0.9 as on 0.8: in particular,
 `ingress.hostLoopback: "allow"` under `ingress.default: "deny"` is still
@@ -330,7 +326,7 @@ it was independently configured with.
 
 ### Legacy 0.7 network fields
 
-Accepted only on `"version": "0.7.0-alpha"` and `"0.8.0-alpha"`. Prefer the directional shape above for new work. **A config must
+Retired with the pre-0.9 contracts. Use the directional shape above for new work. **A config must
 use one shape or the other — mixing them is rejected.**
 
 | Legacy (0.7) | Directional equivalent | Notes |
@@ -397,7 +393,7 @@ baseline `/Library` and `/System` allows.
 </details>
 
 
-> **`launchMethod` is legacy — `0.7.0-alpha` and `0.8.0-alpha` only.** A
+> **`launchMethod` is retired with the pre-0.9 contracts.** A
 > `0.9.0-alpha` config that sets it is rejected; drop the field and the process
 > is launched with `exec`, like every other backend. On the older schemas,
 > `"exec"` (the default) applies `sandbox_init()` then execs directly, while
@@ -426,7 +422,7 @@ The child gets a default block of `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`),
 | `["FOO=bar"]` | `true` | the default block plus `FOO`; a same-named entry wins |
 
 `PWD` sits outside the table: it is always exported, set to the resolved
-working directory. It is applied *after* everything above. It exists so the 
+working directory. It is applied *after* everything above. It exists so the
 child's `getcwd()` takes its fast `$PWD` path
 instead of walking parent directories the sandbox may not let it read, which
 would otherwise leak a "getcwd: … Operation not permitted" line onto stderr.
@@ -635,7 +631,7 @@ where the rule applies to both.
 | Remote (non-loopback) `network.proxy` + `defaultPolicy: "block"`<br>*(legacy only — the directional field never gets this far, see the row above)* | Seatbelt can't express reachability to a remote host, so the proxy would be unreachable and *nothing* could connect | Loopback proxy, or `builtinTestServer` |
 | Proxy + `enforcementMode: "firewall"` or `"both"` | macOS has no packet-filter layer to enforce with | Drop `enforcementMode` — profile enforcement is implied |
 | `processContainer.network.allowedProxyPeer` | Peer identity pinning isn't supported | Remove it |
-| `egress`/`ingress` on schema `< 0.8.0-alpha` | Fields don't exist yet | Set `"version": "0.9.0-alpha"` |
+| `egress`/`ingress` on schema `< 0.9.0-alpha` | Fields don't exist yet | Set `"version": "0.9.0-alpha"` |
 | Legacy fields on schema `0.9.0-alpha` | The 0.9 contract has no legacy network fields | Use `egress`/`ingress` + `runtimeConfig.networkProxy` |
 | Directional fields **and** legacy fields in one config | Ambiguous | Pick one shape |
 | `blockedHosts` *(legacy only)* | No per-host filtering primitive | `egress.default: "deny"` to deny everything |

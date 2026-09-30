@@ -50,7 +50,7 @@ port rules plus separate ingress defaults:
 
 ```json
 {
-  "version": "0.8.0-alpha",
+  "version": "0.9.0-alpha",
   "containment": "process",
   "process": {
     "commandLine": "echo schema 0.8 directional network example"
@@ -130,7 +130,7 @@ spawn option, which must be set to `true` for a policy that uses
 
 #### Schema 0.8 shape: `egress` / `ingress` / `runtimeConfig.networkProxy`
 
-Starting at `"version": "0.8.0-alpha"`, the `egress`/`ingress`/`runtimeConfig.networkProxy`
+Starting at `"version": "0.9.0-alpha"`, the `egress`/`ingress`/`runtimeConfig.networkProxy`
 shape replaces the legacy `defaultPolicy`/`allowedHosts`/`blockedHosts`/`network.proxy`
 fields above — a config must use one shape or the other, never both. This is
 the official, cross-backend schema (see
@@ -153,7 +153,7 @@ for a complete example:
 
 ```json
 {
-  "version": "0.8.0-alpha",
+  "version": "0.9.0-alpha",
   "containment": "seatbelt",
   "network": {
     "egress": { "default": "deny" },

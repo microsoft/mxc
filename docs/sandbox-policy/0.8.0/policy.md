@@ -11,7 +11,7 @@ may not yet expose every field. When supported, those APIs produce the
 
 ```json
 {
-  "version": "0.8.0-alpha",
+  "version": "0.9.0-alpha",
   "network": {
     "egress": {
       "default": "deny",

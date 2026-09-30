@@ -6,9 +6,8 @@ For exact `0.9.0-alpha`, networking is directional-only: use `network.egress`
 and `network.ingress`. LXC rejects `runtimeConfig.networkProxy`, so a v0.9 LXC
 request has no proxy surface at all — see [Proxy](#proxy) below.
 Legacy host lists and enforcement-mode fields in older examples are not
-accepted in v0.9. Preserve their original published contract when reproducing
-legacy behavior; do not relabel an old request as v0.9 without migrating its
-policy. See [the schema migration reference](../schema.md).
+accepted. Do not relabel an old request as v0.9 without migrating its policy.
+See [the schema migration reference](../schema.md).
 
 ## Overview
 
@@ -66,7 +65,7 @@ Note the required field lxc.
 
 ```json
 {
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "containerId": "my-sandbox",
     "containment": "lxc",
     "process": {
@@ -85,10 +84,14 @@ Note the required field lxc.
         "deniedPaths": ["/etc/shadow"]
     },
     "network": {
-        "defaultPolicy": "block",
-        "enforcementMode": "firewall",
-        "allowedHosts": ["api.github.com"],
-        "blockedHosts": ["notapi.example.com"]
+        "egress": {
+            "default": "deny",
+            "allow": [{
+                "to": [{ "cidr": "140.82.112.0/20" }],
+                "ports": [{ "protocol": "tcp", "port": 443 }]
+            }]
+        },
+        "ingress": { "default": "deny", "hostLoopback": "deny" }
     }
 }
 ```

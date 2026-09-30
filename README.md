@@ -28,7 +28,7 @@ MXC ships a native container wrapper plus a TypeScript SDK — see the [SDK READ
 | --- | --- | --- | --- |
 | Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26340.9212 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26340-9212)) |
 | Linux x64 / ARM64 | `bubblewrap` | `lxc`, `microvm`, `hyperlight` | — |
-| macOS ARM64 / x64 (schema `0.7.0-alpha`+) | `seatbelt` | — | — |
+| macOS ARM64 / x64 (schema `0.9.0-alpha`+) | `seatbelt` | — | — |
 
 
 The stable one-shot backends (`processcontainer`, `bubblewrap`, `lxc`,

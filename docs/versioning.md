@@ -125,8 +125,7 @@ reasons:
 | **Host capability** | What the *running OS* can actually enforce (e.g. whether the BaseContainer sandbox API is usable, velocity keys, Hyper-V). | Negotiated at runtime — **never a string in the config**. | The host, probed at execution time. |
 
 - **Schema version** selects an exact registered contract at the trust boundary:
-  `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, `0.9.0-alpha`,
-  `1.0.0`, or `1.1.0-alpha`.
+  `0.9.0-alpha`, `1.0.0`, or `1.1.0-alpha`.
   Patch and prerelease spelling are significant; `0.6.1-alpha` and `0.8.0-dev`
   are not registered and are rejected. A missing declaration is rejected too.
   Raw SDK entry points enforce the same exact set. High-level v1 one-shot and
@@ -153,10 +152,10 @@ mxc/schemas/
 ├── stable/
 │   ├── mxc-config.schema.0.4.0-alpha.json  (retired — below the supported floor)
 │   ├── mxc-config.schema.0.5.0-alpha.json  (retired — below the supported floor)
-│   ├── mxc-config.schema.0.6.0-alpha.json  (minimum supported)
-│   ├── mxc-config.schema.0.7.0-alpha.json  (shipped)
-│   ├── mxc-config.schema.0.8.0-alpha.json  (shipped)
-│   ├── mxc-config.schema.0.9.0-alpha.json  (shipped)
+│   ├── mxc-config.schema.0.6.0-alpha.json  (retired — below the supported floor)
+│   ├── mxc-config.schema.0.7.0-alpha.json  (retired — below the supported floor)
+│   ├── mxc-config.schema.0.8.0-alpha.json  (retired — below the supported floor)
+│   ├── mxc-config.schema.0.9.0-alpha.json  (minimum supported)
 │   └── mxc-config.schema.1.0.0.json        (shipped — current stable)
 └── dev/
     └── mxc-config.schema.1.1.0-alpha.json  (exact closed development contract)
@@ -164,7 +163,7 @@ mxc/schemas/
 
 Retired stable schema files are **kept as immutable historical artifacts** — the
 parser simply stops accepting those versions (the supported floor is
-`0.6.0-alpha`). Released schemas are never edited or deleted.
+`0.9.0-alpha`). Released schemas are never edited or deleted.
 
 The development artifact is generated from the exact
 `mxc_config_contract::dev` model. It describes all eight closed one-shot and
@@ -697,9 +696,9 @@ what the user should do (upgrade OS, enable feature, change the config).
 
 ## Experimental Features — Clarifications
 
-**Shipping model:** The shipped schema contains **only** non-experimental 
-features. Experimental features exist solely for internal development and 
-testing — they are never shipped to end users. The `--experimental` flag is a 
+**Shipping model:** The shipped schema contains **only** non-experimental
+features. Experimental features exist solely for internal development and
+testing — they are never shipped to end users. The `--experimental` flag is a
 development tool, not a production feature.
 
 **Global flag:** The `--experimental` flag is a single global toggle. When enabled,
