@@ -193,7 +193,7 @@ function ConvertTo-StateAwareInvocation {
     } elseif ($Request) {
         $requestObject = $Request.Clone()
         if (-not $Request.ContainsKey('version')) {
-            $requestObject['version'] = '0.9.0-alpha'
+            $requestObject['version'] = '1.0.0'
         }
     } else {
         throw "State-aware invocation requires either -Request or -ConfigFile"

@@ -209,7 +209,7 @@ $encodedLoop = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($loop
 # restrict networking. timeout=0 lets the loop run until Ctrl-C.
 
 $config = [ordered]@{
-    version     = '0.9.0-alpha'
+    version     = '1.0.0'
     containerId = 'isolation-session-resize-smoke'
     containment = 'isolation_session'
     network = [ordered]@{
