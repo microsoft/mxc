@@ -138,9 +138,8 @@ fn policy_hash_identity(container_id: &str) -> String {
 #[cfg(test)]
 mod attribution_tests {
     use super::config_schema_version;
-    use crate::policy::{build_request, SandboxPolicy};
     use wxc_common::logger::{Logger, Mode};
-    use wxc_common::models::NetworkEnforcementCompatibility;
+    use wxc_common::models::{ExecutionRequest, NetworkEnforcementCompatibility};
     use wxc_common::state_aware_request::MxcRequest;
 
     #[test]
@@ -163,11 +162,14 @@ mod attribution_tests {
             NetworkEnforcementCompatibility::LegacyCompatible
         );
 
-        let direct = build_request(&SandboxPolicy::default(), "echo direct", None).unwrap();
-        assert_eq!(config_schema_version(&direct.inner), "");
-        assert_eq!(direct.inner.source_contract, None);
+        let direct = ExecutionRequest {
+            script_code: "echo direct".to_string(),
+            ..ExecutionRequest::default()
+        };
+        assert_eq!(config_schema_version(&direct), "");
+        assert_eq!(direct.source_contract, None);
         assert_eq!(
-            direct.inner.network_enforcement_compatibility,
+            direct.network_enforcement_compatibility,
             NetworkEnforcementCompatibility::Strict
         );
     }

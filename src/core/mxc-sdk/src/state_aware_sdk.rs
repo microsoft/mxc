@@ -371,21 +371,23 @@ pub(crate) struct StateAwareResult {
 }
 
 impl StateAwareResult {
-    #[cfg(target_os = "windows")]
-    pub(crate) fn empty() -> Self {
+    pub(crate) fn from_engine(result: mxc_engine::EngineStateAwareResult) -> Self {
+        let metadata = result.metadata.map(|metadata| match metadata {
+            mxc_engine::EngineProvisionMetadata::IsolationSession {
+                agent_user_name,
+                agent_user_sid,
+                ephemeral_workspace_path,
+                ..
+            } => ProvisionMetadata::IsolationSessionProvision(IsolationSessionProvisionMetadata {
+                agent_user_name,
+                agent_user_sid,
+                ephemeral_workspace_path,
+            }),
+        });
         Self {
-            sandbox_id: None,
-            metadata: None,
-            warnings: Vec::new(),
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    pub(crate) fn provision(sandbox_id: String, metadata: Option<ProvisionMetadata>) -> Self {
-        Self {
-            sandbox_id: Some(sandbox_id),
+            sandbox_id: result.sandbox_id,
             metadata,
-            warnings: Vec::new(),
+            warnings: result.warnings,
         }
     }
 
@@ -532,5 +534,30 @@ fn map_protocol(value: NetworkProtocol) -> SdkNetworkProtocol {
         NetworkProtocol::Udp => SdkNetworkProtocol::Udp,
         NetworkProtocol::Icmp => SdkNetworkProtocol::Icmp,
         NetworkProtocol::Any => SdkNetworkProtocol::Any,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wxc_common::mxc_error::MxcErrorCode;
+
+    #[test]
+    fn typed_provision_rejects_clear_policy_on_exit() {
+        for enabled in [true, false] {
+            let mut request = ProvisionRequest::wslc(None, None);
+            request.set_filesystem(FilesystemSection {
+                clear_policy_on_exit: Some(enabled),
+                ..Default::default()
+            });
+
+            let error = request.into_sdk_input(None).unwrap_err();
+            assert_eq!(error.code, MxcErrorCode::MalformedRequest);
+            assert!(
+                error.message.contains("clearPolicyOnExit"),
+                "got: {}",
+                error.message
+            );
+        }
     }
 }

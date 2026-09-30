@@ -329,13 +329,15 @@ fn spawn_isolation_session(
 #[cfg(test)]
 mod tests {
     use super::{ensure_host_supported, map_spawn_error, spawn_runner};
-    use crate::policy::{build_request, SandboxPolicy};
     use wxc_common::logger::{Logger, Mode};
-    use wxc_common::models::ContainmentBackend;
+    use wxc_common::models::{ContainmentBackend, ExecutionRequest};
     use wxc_common::mxc_error::MxcErrorCode;
 
-    fn minimal_policy() -> SandboxPolicy {
-        SandboxPolicy::default()
+    fn minimal_request() -> ExecutionRequest {
+        ExecutionRequest {
+            script_code: "echo hello".to_string(),
+            ..ExecutionRequest::default()
+        }
     }
 
     fn spawn_failure(
@@ -379,14 +381,12 @@ mod tests {
 
     #[test]
     fn streaming_rejects_dry_run() {
-        // `dry_run` ("validate, don't execute") has no process to stream, so the
-        // streaming spawn rejects it. The public `SandboxRequest` can't set it,
-        // so drive the dispatch directly with the internal model.
-        let mut request =
-            build_request(&minimal_policy(), "echo hello", None).expect("build_request");
-        request.inner.dry_run = true;
+        // `dry_run` ("validate, don't execute") has no process to stream, so
+        // the streaming spawn rejects it.
+        let mut request = minimal_request();
+        request.dry_run = true;
         let mut logger = Logger::new(Mode::Buffer);
-        let err = match spawn_runner(&request.inner, &mut logger) {
+        let err = match spawn_runner(&request, &mut logger) {
             Ok(_) => panic!("dry_run must be rejected"),
             Err(e) => e,
         };
@@ -396,13 +396,12 @@ mod tests {
     #[test]
     fn streaming_rejects_unsupported_containment() {
         // `Vm` has no streaming arm on any host, so it stands in for every
-        // backend the catch-all must refuse. The public `SandboxRequest` can't
-        // choose a backend, so drive dispatch with the internal model.
-        let mut request =
-            build_request(&minimal_policy(), "echo hello", None).expect("build_request");
-        request.inner.containment = ContainmentBackend::Vm;
+        // backend the catch-all must refuse. Drive dispatch with the internal
+        // model now that SDK authoring lives outside the engine.
+        let mut request = minimal_request();
+        request.containment = ContainmentBackend::Vm;
         let mut logger = Logger::new(Mode::Buffer);
-        let err = match spawn_runner(&request.inner, &mut logger) {
+        let err = match spawn_runner(&request, &mut logger) {
             Ok(_) => panic!("Vm must be rejected"),
             Err(e) => e,
         };
@@ -424,26 +423,14 @@ mod tests {
     fn streaming_rejects_gui_access() {
         // A windowed (guiAccess) app needs inherited stdio, so it can't stream
         // over pipes — the backend must reject it rather than drop the GUI cap.
-        let policy = SandboxPolicy {
-            filesystem: Some(crate::policy::FilesystemSection {
-                readwrite_paths: vec!["/tmp".to_string()],
-                readonly_paths: vec![],
-                denied_paths: vec![],
-                clear_policy_on_exit: None,
-            }),
-            network: None,
-            ui: None,
-            timeout_ms: None,
-        };
-        let mut request = build_request(&policy, "echo hi", None).expect("build_request");
-        request
-            .inner
-            .seatbelt
-            .as_mut()
-            .expect("seatbelt config on macOS")
-            .gui_access = true;
+        let mut request = minimal_request();
+        request.containment = ContainmentBackend::Seatbelt;
+        request.seatbelt = Some(wxc_common::models::SeatbeltConfig {
+            gui_access: true,
+            ..Default::default()
+        });
         let mut logger = Logger::new(Mode::Buffer);
-        let err = match spawn_runner(&request.inner, &mut logger) {
+        let err = match spawn_runner(&request, &mut logger) {
             Ok(_) => panic!("guiAccess must be rejected"),
             Err(e) => e,
         };
@@ -455,11 +442,10 @@ mod tests {
     fn streaming_rejects_wslc_off_windows() {
         // WSLC is a Windows-host backend; selecting it anywhere else must be a
         // clear `UnsupportedContainment` rather than a confusing spawn failure.
-        let mut request =
-            build_request(&minimal_policy(), "echo hello", None).expect("build_request");
-        request.inner.containment = ContainmentBackend::Wslc;
+        let mut request = minimal_request();
+        request.containment = ContainmentBackend::Wslc;
         let mut logger = Logger::new(Mode::Buffer);
-        let err = match spawn_runner(&request.inner, &mut logger) {
+        let err = match spawn_runner(&request, &mut logger) {
             Ok(_) => panic!("WSLC must be rejected off Windows"),
             Err(e) => e,
         };
@@ -472,11 +458,10 @@ mod tests {
     fn streaming_rejects_lxc_off_linux() {
         // LXC is a Linux-host backend; selecting it anywhere else must be a
         // clear `UnsupportedContainment` rather than a confusing spawn failure.
-        let mut request =
-            build_request(&minimal_policy(), "echo hello", None).expect("build_request");
-        request.inner.containment = ContainmentBackend::Lxc;
+        let mut request = minimal_request();
+        request.containment = ContainmentBackend::Lxc;
         let mut logger = Logger::new(Mode::Buffer);
-        let err = match spawn_runner(&request.inner, &mut logger) {
+        let err = match spawn_runner(&request, &mut logger) {
             Ok(_) => panic!("LXC must be rejected off Linux"),
             Err(e) => e,
         };
@@ -492,13 +477,12 @@ mod tests {
         // fires first, all of them are reached only through this arm, and all
         // of them come before a container name is claimed or a container
         // created — so this needs neither LXC nor root.
-        let mut request =
-            build_request(&minimal_policy(), "echo hello", None).expect("build_request");
-        request.inner.containment = ContainmentBackend::Lxc;
-        request.inner.lxc_config.distribution = String::new();
-        request.inner.lxc_config.release = String::new();
+        let mut request = minimal_request();
+        request.containment = ContainmentBackend::Lxc;
+        request.lxc_config.distribution = String::new();
+        request.lxc_config.release = String::new();
         let mut logger = Logger::new(Mode::Buffer);
-        let err = match spawn_runner(&request.inner, &mut logger) {
+        let err = match spawn_runner(&request, &mut logger) {
             Ok(_) => panic!("an LXC request the backend refuses must not spawn"),
             Err(e) => e,
         };
@@ -511,21 +495,11 @@ mod tests {
     #[cfg(all(target_os = "windows", feature = "wslc"))]
     #[test]
     fn streaming_wslc_without_optin_reaches_policy_validation() {
-        use crate::policy::{Containment, UiSection, WslcSection};
-
-        let policy = SandboxPolicy {
-            ui: Some(UiSection::default()),
-            ..minimal_policy()
-        };
-        let request = crate::policy::build_request_with_containment(
-            &policy,
-            &Containment::Wslc(WslcSection::default()),
-            "echo hello",
-            None,
-        )
-        .expect("build_request_with_containment");
+        let mut request = minimal_request();
+        request.containment = ContainmentBackend::Wslc;
+        request.policy.ui_specified = true;
         let mut logger = Logger::new(Mode::Buffer);
-        let err = match spawn_runner(&request.inner, &mut logger) {
+        let err = match spawn_runner(&request, &mut logger) {
             Ok(_) => panic!("WSLC must reject an unsupported UI policy"),
             Err(e) => e,
         };

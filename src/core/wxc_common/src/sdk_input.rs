@@ -3,7 +3,7 @@
 
 //! Typed Rust SDK input to shared request normalization.
 //!
-//! This module is public only because `mxc_engine` owns the high-level SDK
+//! This module is public only because `mxc-sdk` owns the high-level SDK
 //! types while `wxc_common` owns the private normalization boundary.
 
 use mxc_config_contract::ContractVersion;

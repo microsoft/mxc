@@ -694,9 +694,11 @@ with no terminal.
 
 ## Relationship to `mxc_engine` and the executor binaries
 
-Backend dispatch, host probing, and config building live in the internal
-`mxc_engine` crate; this crate is a thin streaming facade that re-exports the
-curated engine surface and wraps the engine's streaming handle in [`Sandbox`].
+The public `mxc-sdk` crate owns V1 policy, backend config, request, and typed
+lifecycle authoring. Its builder targets a published exact contract and
+normalizes it to an `ExecutionRequest` before delegating to the internal
+`mxc_engine` crate. The engine owns backend dispatch, host probing, and
+execution; `mxc-sdk` also wraps the engine's streaming handle in [`Sandbox`].
 
 The `wxc-exec`, `lxc-exec`, and `mxc-exec-mac` binaries do not (yet) depend on
 this crate. The engine reuses the same backend crates they do; on Windows both

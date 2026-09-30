@@ -593,7 +593,7 @@ pub struct SandboxPolicy {
 
 /// A spawnable sandbox request, built from a [`SandboxPolicy`] and a command by
 /// [`build_request`]. Optionally adjust the working directory or environment,
-/// then hand it to [`spawn`](crate::spawn).
+/// then hand it to [`spawn_sandbox`](crate::v1::spawn_sandbox).
 ///
 /// This is the SDK's own request type; the internal execution model it maps to
 /// is an implementation detail callers don't depend on.
@@ -779,7 +779,7 @@ impl SandboxRequest {
 ///
 /// The `script` becomes the request's command line, so the returned request is
 /// complete and needs no post-build patching before streaming it via
-/// [`crate::spawn`]. An empty script is rejected.
+/// [`crate::v1::spawn_sandbox`]. An empty script is rejected.
 ///
 /// Maps the V1 high-level policy into the SDK-owned v1 contract,
 /// then adapts that contract through the shared semantic validation path.
@@ -801,12 +801,14 @@ pub fn build_request(
 /// picks the backend rather than always resolving the host's native one.
 ///
 /// ```no_run
-/// use mxc_engine::policy::{build_request_with_containment, Containment, SandboxPolicy, WslcSection};
+/// use mxc_sdk::v1::{
+///     build_request_with_containment, Containment, SandboxPolicy, WslcSection,
+/// };
 ///
 /// let policy = SandboxPolicy::default();
 /// let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
 /// let request = build_request_with_containment(&policy, &Containment::Wslc(wslc), "python3 -c 'print(1)'", None)?;
-/// # Ok::<(), mxc_engine::Error>(())
+/// # Ok::<(), mxc_sdk::Error>(())
 /// ```
 pub fn build_request_with_containment(
     policy: &SandboxPolicy,

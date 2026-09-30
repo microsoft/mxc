@@ -13,23 +13,13 @@
 use wxc_common::models::ContainmentBackend;
 use wxc_common::models::ExecutionRequest;
 
-use crate::{Error, SandboxRequest};
+use crate::Error;
 
 pub use process_container_common::probe::{ProbeFacts, ProbeOutput, UiCapabilitySupport};
 
-/// Probe an optional public SDK request without creating a sandbox.
-///
-/// This operation supports only ProcessContainer requests because
-/// [`ProbeOutput`] selects among ProcessContainer-specific isolation tiers.
-/// Use backend availability discovery and normal launch-time validation for
-/// other containment backends.
-pub fn probe(request: Option<&SandboxRequest>) -> Result<ProbeOutput, Error> {
-    probe_execution_request(request.map(|request| &request.inner))
-}
-
 /// Probe an optional runtime request without creating a sandbox.
 ///
-/// This is public so the executor can use the same orchestration as the CLI.
+/// The executor and public Rust SDK use the same engine-owned probe seam.
 #[doc(hidden)]
 pub fn probe_execution_request(request: Option<&ExecutionRequest>) -> Result<ProbeOutput, Error> {
     let default_request;
@@ -108,14 +98,5 @@ mod tests {
             error.message,
             "request-aware probe supports only ProcessContainer containment; got wslc"
         );
-    }
-
-    #[test]
-    fn public_request_probe_uses_the_sdk_request_model() {
-        let request = crate::build_request(&crate::SandboxPolicy::default(), "cmd /c exit 0", None)
-            .expect("default Windows policy builds");
-
-        let output = probe(Some(&request)).expect("default request probes");
-        assert!(output.error.is_some() || output.tier.is_some());
     }
 }

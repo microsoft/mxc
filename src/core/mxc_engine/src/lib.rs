@@ -4,10 +4,11 @@
 //! `mxc_engine` — the MXC execution engine.
 //!
 //! This crate owns the logic that turns an execution request into a running
-//! sandbox: backend dispatch, host-platform probing, and config building from
-//! a [`SandboxPolicy`]. It is the single implementation that both the public
-//! Rust SDK (`mxc-sdk`) and — over subsequent increments — the executor
-//! binaries call into, so backend selection lives in exactly one place.
+//! sandbox: backend dispatch, host-platform probing, and execution of requests
+//! already normalized by either the public Rust SDK (`mxc-sdk`) or the JSON
+//! parser. It is the single implementation that both the public Rust SDK and
+//! the executor binaries call into, so backend selection lives in exactly one
+//! place.
 //!
 //! It depends on the `backends/*` crates (cfg-split by target), which is why
 //! it cannot live in `wxc_common` (the cross-platform foundation those backends
@@ -15,12 +16,11 @@
 //!
 //! ## Surface
 //!
-//! - [`build_request`] / [`build_request_with_containment`] / [`SandboxPolicy`]
-//!   / [`SandboxRequest`] — build a spawnable request from a policy (the Rust
-//!   port of the SDK's `createConfigFromPolicy`), for the host's native
-//!   containment or an explicitly selected [`Containment`] backend.
-//! - [`spawn`] — spawn a streaming [`SandboxProcess`] handle for a request.
-//! - [`run()`] / [`resolve_runner`] (Windows) — run-to-completion backend
+//! - [`spawn_execution_request`] — spawn a streaming [`SandboxProcess`] handle
+//!   for a normalized [`ExecutionRequest`].
+//! - [`spawn_one_shot_json`] — parse and spawn a raw exact-version one-shot
+//!   JSON request.
+//! - [`run`] / [`resolve_runner`] (Windows) — run-to-completion backend
 //!   selection and execution.
 //! - [`run_state_aware`] — state-aware lifecycle backend resolution + dispatch.
 //! - [`platform_support`] / [`PlatformSupport`] — host support detection.
@@ -30,21 +30,18 @@
 //!   `wxc_common`'s internal error type.
 
 mod backend_registry;
-pub mod configs;
 mod dispatch;
 mod error;
 mod experimental;
 #[cfg(target_os = "windows")]
 mod guarded_capture;
 mod platform;
-pub mod policy;
 mod probe;
 #[cfg(target_os = "windows")]
 mod request_probe;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 mod run;
 mod state_aware;
-mod state_aware_sdk;
 #[cfg(target_os = "windows")]
 mod verbose_telemetry;
 
@@ -52,17 +49,9 @@ pub use error::{Error, ErrorCode};
 #[cfg(all(target_os = "windows", feature = "isolation_session"))]
 pub use platform::isolation_session_available;
 pub use platform::{platform_support, BubblewrapNetworkSupport, PlatformSupport, ProxyEnforcement};
-pub use policy::{
-    available_tools_policy, build_request, build_request_with_containment, temporary_files_policy,
-    user_profile_policy, Containment, FilesystemPolicyResult, NetworkAction, NetworkEgressSection,
-    NetworkIngressSection, NetworkPeerSection, NetworkPortSection, NetworkProtocol,
-    NetworkRuleSection, RuntimeConfigSection, SandboxPolicy, SandboxRequest, WslcSection,
-};
 pub use probe::{available_backends, to_json_pretty, AvailableBackend, BackendCapability};
 #[cfg(target_os = "windows")]
-pub use request_probe::{
-    probe, probe_execution_request, ProbeFacts, ProbeOutput, UiCapabilitySupport,
-};
+pub use request_probe::{probe_execution_request, ProbeFacts, ProbeOutput, UiCapabilitySupport};
 #[cfg(target_os = "windows")]
 pub fn guarded_capture_available() -> bool {
     guarded_capture::is_available()
@@ -72,15 +61,9 @@ pub use run::resolve_runner_for_audit;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 pub use run::{log_policy_hash, resolve_runner, run, ResolvedRunner};
 pub use state_aware::{
-    deprovision_sandbox, exec_attached_request, exec_sandbox_request, exec_state_aware_attached,
-    exec_state_aware_json, provision_sandbox, run_state_aware, run_state_aware_json, start_sandbox,
-    stop_sandbox, validate_deprovision, validate_exec, validate_provision, validate_start,
-    validate_stop,
-};
-pub use state_aware_sdk::{
-    ExecRequest, IsolationSessionProvisionMetadata, LifecycleResult, OperationOptions,
-    ProvisionMetadata, ProvisionRequest, ProvisionResult, SandboxId, StateAwareExecBackendOptions,
-    StateAwareProvision, ValidationResult,
+    exec_state_aware_attached, exec_state_aware_json, exec_typed_state_aware_attached_request,
+    exec_typed_state_aware_request, run_state_aware, run_state_aware_json,
+    run_typed_state_aware_request, EngineProvisionMetadata, EngineStateAwareResult,
 };
 #[cfg(target_os = "windows")]
 pub use verbose_telemetry::emit_verbose_telemetry;
@@ -92,9 +75,8 @@ use wxc_common::sandbox_process::{NativeStdio, SandboxProcess, StreamCloser};
 use wxc_common::state_aware_request::MxcRequest;
 use wxc_common::telemetry;
 
-/// Spawn a streaming [`SandboxProcess`] handle for a [`SandboxRequest`] built
-/// by [`build_request`] (with the command, and any working directory / env,
-/// filled in).
+/// Spawn a streaming [`SandboxProcess`] handle for a normalized
+/// [`ExecutionRequest`].
 ///
 /// Selects the containment backend for the host, spawns the sandboxed process
 /// with piped stdio, and returns the handle. No pty is allocated. Backends
@@ -116,15 +98,17 @@ use wxc_common::telemetry;
 /// The registration is reference-counted per `telemetry::init` call and
 /// released once when the returned handle is dropped, so multiple concurrent
 /// spawns from the same load are safe as long as the library outlives them.
-pub fn spawn(request: &SandboxRequest) -> Result<Box<dyn SandboxProcess>, Error> {
-    spawn_execution_request(&request.inner, Logger::new(Mode::Buffer))
+pub fn spawn_execution_request(
+    request: &ExecutionRequest,
+) -> Result<Box<dyn SandboxProcess>, Error> {
+    spawn_execution_request_with_logger(request, Logger::new(Mode::Buffer))
 }
 
 /// Spawn a raw exact-version one-shot JSON request as a streaming process.
 ///
 /// `experimental` is the caller's runtime opt-in. It is a parameter rather than
 /// a JSON field so that a configuration cannot grant itself experimental access.
-/// The same library-lifetime contract as [`spawn`] applies.
+/// The same library-lifetime contract as [`spawn_execution_request`] applies.
 pub fn spawn_one_shot_json(
     request_json: &str,
     experimental: bool,
@@ -145,10 +129,10 @@ pub fn spawn_one_shot_json(
         }
     };
     request.experimental_enabled = experimental;
-    spawn_execution_request(&request, logger)
+    spawn_execution_request_with_logger(&request, logger)
 }
 
-fn spawn_execution_request(
+fn spawn_execution_request_with_logger(
     request: &ExecutionRequest,
     mut logger: Logger,
 ) -> Result<Box<dyn SandboxProcess>, Error> {

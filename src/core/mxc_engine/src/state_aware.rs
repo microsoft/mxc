@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::mxc_error::MxcError;
 use wxc_common::sandbox_process::SandboxProcess;
+use wxc_common::sdk_input::SdkStateAwareInput;
 use wxc_common::state_aware_backend::ExecOutcome;
 #[cfg(target_os = "windows")]
 use wxc_common::state_aware_dispatch::TypedDispatchOutcome;
@@ -31,14 +32,6 @@ use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase
 use wxc_common::telemetry;
 
 use crate::error::Error;
-#[cfg(all(target_os = "windows", feature = "isolation_session"))]
-use crate::state_aware_sdk::IsolationSessionProvisionMetadata;
-#[cfg(target_os = "windows")]
-use crate::state_aware_sdk::ProvisionMetadata;
-use crate::state_aware_sdk::{
-    lifecycle_sdk_input, ExecRequest, LifecycleResult, OperationOptions, ProvisionRequest,
-    ProvisionResult, SandboxId, StateAwareResult, ValidationResult,
-};
 use crate::{wrap_state_aware_telemetry_process_with_kind, TelemetryRegistration};
 
 #[cfg(not(all(target_os = "windows", feature = "wslc")))]
@@ -148,6 +141,46 @@ pub fn run_state_aware(
     }
 }
 
+/// Backend-specific metadata returned by typed engine lifecycle dispatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EngineProvisionMetadata {
+    /// IsolationSession provision metadata.
+    IsolationSession {
+        agent_user_name: String,
+        agent_user_sid: String,
+        ephemeral_workspace_path: String,
+    },
+}
+
+/// Neutral result returned by typed engine lifecycle dispatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EngineStateAwareResult {
+    pub sandbox_id: Option<String>,
+    pub metadata: Option<EngineProvisionMetadata>,
+    pub warnings: Vec<String>,
+}
+
+impl EngineStateAwareResult {
+    #[cfg(target_os = "windows")]
+    fn empty() -> Self {
+        Self {
+            sandbox_id: None,
+            metadata: None,
+            warnings: Vec::new(),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn provision(sandbox_id: String, metadata: Option<EngineProvisionMetadata>) -> Self {
+        Self {
+            sandbox_id: Some(sandbox_id),
+            metadata,
+            warnings: Vec::new(),
+        }
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn typed_dispatch_result<
     BackendProvisionMetadata,
@@ -163,11 +196,11 @@ fn typed_dispatch_result<
     >,
     mut map_provision_metadata: impl FnMut(
         BackendProvisionMetadata,
-    ) -> Result<ProvisionMetadata, MxcError>,
-) -> Result<StateAwareResult, MxcError> {
+    ) -> Result<EngineProvisionMetadata, MxcError>,
+) -> Result<EngineStateAwareResult, MxcError> {
     match outcome {
-        TypedDispatchOutcome::DryRun => Ok(StateAwareResult::empty()),
-        TypedDispatchOutcome::Provision(result) => Ok(StateAwareResult::provision(
+        TypedDispatchOutcome::DryRun => Ok(EngineStateAwareResult::empty()),
+        TypedDispatchOutcome::Provision(result) => Ok(EngineStateAwareResult::provision(
             result.sandbox_id,
             result
                 .metadata
@@ -180,7 +213,7 @@ fn typed_dispatch_result<
                     "typed start metadata is not represented by the Rust SDK",
                 ));
             }
-            Ok(StateAwareResult::empty())
+            Ok(EngineStateAwareResult::empty())
         }
         TypedDispatchOutcome::Stop(result) => {
             if result.metadata.is_some() {
@@ -188,7 +221,7 @@ fn typed_dispatch_result<
                     "typed stop metadata is not represented by the Rust SDK",
                 ));
             }
-            Ok(StateAwareResult::empty())
+            Ok(EngineStateAwareResult::empty())
         }
         TypedDispatchOutcome::Deprovision(result) => {
             if result.metadata.is_some() {
@@ -196,7 +229,7 @@ fn typed_dispatch_result<
                     "typed deprovision metadata is not represented by the Rust SDK",
                 ));
             }
-            Ok(StateAwareResult::empty())
+            Ok(EngineStateAwareResult::empty())
         }
         TypedDispatchOutcome::ExecCompleted { .. } => Err(MxcError::backend_error(
             "typed envelope dispatch returned an exec completion",
@@ -205,7 +238,7 @@ fn typed_dispatch_result<
 }
 
 #[cfg(target_os = "windows")]
-fn no_provision_metadata<Metadata>(_: Metadata) -> Result<ProvisionMetadata, MxcError> {
+fn no_provision_metadata<Metadata>(_: Metadata) -> Result<EngineProvisionMetadata, MxcError> {
     Err(MxcError::backend_error(
         "typed provision metadata is not represented by the Rust SDK",
     ))
@@ -214,7 +247,7 @@ fn no_provision_metadata<Metadata>(_: Metadata) -> Result<ProvisionMetadata, Mxc
 fn run_state_aware_typed(
     parsed: ParsedStateAwareRequest,
     dry_run: bool,
-) -> Result<StateAwareResult, MxcError> {
+) -> Result<EngineStateAwareResult, MxcError> {
     let backend = resolve_backend(&parsed)?;
     crate::experimental::require_experimental_optin(
         &backend,
@@ -242,13 +275,11 @@ fn run_state_aware_typed(
                 dry_run,
             )?;
             typed_dispatch_result(outcome, |metadata| {
-                Ok(ProvisionMetadata::IsolationSessionProvision(
-                    IsolationSessionProvisionMetadata {
-                        agent_user_name: metadata.agent_user_name,
-                        agent_user_sid: metadata.agent_user_sid,
-                        ephemeral_workspace_path: metadata.ephemeral_workspace_path,
-                    },
-                ))
+                Ok(EngineProvisionMetadata::IsolationSession {
+                    agent_user_name: metadata.agent_user_name,
+                    agent_user_sid: metadata.agent_user_sid,
+                    ephemeral_workspace_path: metadata.ephemeral_workspace_path,
+                })
             })
         }
         #[cfg(all(target_os = "windows", feature = "wslc"))]
@@ -681,13 +712,15 @@ fn exec_state_aware_parsed(
     }
 }
 
-fn run_typed_state_aware(
-    input: wxc_common::sdk_input::SdkStateAwareInput,
-    options: OperationOptions,
+/// Run or validate a typed SDK lifecycle request already converted to the
+/// shared SDK input model.
+pub fn run_typed_state_aware_request(
+    input: SdkStateAwareInput,
+    experimental: bool,
     dry_run: bool,
-) -> Result<StateAwareResult, Error> {
+) -> Result<EngineStateAwareResult, Error> {
     let mut logger = Logger::new(Mode::Buffer);
-    let parsed = normalize_sdk_state_aware(input, options.experimental, &mut logger)?;
+    let parsed = normalize_sdk_state_aware(input, experimental, &mut logger)?;
     let phase = parsed.phase();
     let sandbox_id = parsed.sandbox_id().map(str::to_owned);
     let requested_sandbox_kind = parsed
@@ -753,161 +786,31 @@ fn run_typed_state_aware(
     outcome.map_err(Error::from)
 }
 
-/// Provision a state-aware sandbox from typed Rust SDK data.
-pub fn provision_sandbox(
-    request: ProvisionRequest,
-    options: OperationOptions,
-) -> Result<ProvisionResult, Error> {
-    let input = request
-        .into_sdk_input(options.telemetry_opt_in)
-        .map_err(Error::from)?;
-    run_typed_state_aware(input, options, false)?
-        .into_provision()
-        .map_err(Error::from)
-}
-
-/// Validate a typed provision request without creating a sandbox.
-pub fn validate_provision(
-    request: ProvisionRequest,
-    options: OperationOptions,
-) -> Result<ValidationResult, Error> {
-    let input = request
-        .into_sdk_input(options.telemetry_opt_in)
-        .map_err(Error::from)?;
-    run_typed_state_aware(input, options, true)?
-        .into_validation()
-        .map_err(Error::from)
-}
-
-/// Start a provisioned state-aware sandbox from typed Rust SDK data.
-pub fn start_sandbox(
-    sandbox_id: &SandboxId,
-    options: OperationOptions,
-) -> Result<LifecycleResult, Error> {
-    let input = lifecycle_sdk_input(sandbox_id, options.telemetry_opt_in, |sandbox_id| {
-        wxc_common::state_aware_operation::StateAwareOperation::Start { sandbox_id }
-    })
-    .map_err(Error::from)?;
-    run_typed_state_aware(input, options, false)?
-        .into_lifecycle()
-        .map_err(Error::from)
-}
-
-/// Validate a typed start request without starting the sandbox.
-pub fn validate_start(
-    sandbox_id: &SandboxId,
-    options: OperationOptions,
-) -> Result<ValidationResult, Error> {
-    let input = lifecycle_sdk_input(sandbox_id, options.telemetry_opt_in, |sandbox_id| {
-        wxc_common::state_aware_operation::StateAwareOperation::Start { sandbox_id }
-    })
-    .map_err(Error::from)?;
-    run_typed_state_aware(input, options, true)?
-        .into_validation()
-        .map_err(Error::from)
-}
-
-/// Stop a state-aware sandbox from typed Rust SDK data.
-pub fn stop_sandbox(
-    sandbox_id: &SandboxId,
-    options: OperationOptions,
-) -> Result<LifecycleResult, Error> {
-    let input = lifecycle_sdk_input(sandbox_id, options.telemetry_opt_in, |sandbox_id| {
-        wxc_common::state_aware_operation::StateAwareOperation::Stop { sandbox_id }
-    })
-    .map_err(Error::from)?;
-    run_typed_state_aware(input, options, false)?
-        .into_lifecycle()
-        .map_err(Error::from)
-}
-
-/// Validate a typed stop request without stopping the sandbox.
-pub fn validate_stop(
-    sandbox_id: &SandboxId,
-    options: OperationOptions,
-) -> Result<ValidationResult, Error> {
-    let input = lifecycle_sdk_input(sandbox_id, options.telemetry_opt_in, |sandbox_id| {
-        wxc_common::state_aware_operation::StateAwareOperation::Stop { sandbox_id }
-    })
-    .map_err(Error::from)?;
-    run_typed_state_aware(input, options, true)?
-        .into_validation()
-        .map_err(Error::from)
-}
-
-/// Deprovision a state-aware sandbox from typed Rust SDK data.
-pub fn deprovision_sandbox(
-    sandbox_id: &SandboxId,
-    options: OperationOptions,
-) -> Result<LifecycleResult, Error> {
-    let input = lifecycle_sdk_input(sandbox_id, options.telemetry_opt_in, |sandbox_id| {
-        wxc_common::state_aware_operation::StateAwareOperation::Deprovision { sandbox_id }
-    })
-    .map_err(Error::from)?;
-    run_typed_state_aware(input, options, false)?
-        .into_lifecycle()
-        .map_err(Error::from)
-}
-
-/// Validate a typed deprovision request without deprovisioning the sandbox.
-pub fn validate_deprovision(
-    sandbox_id: &SandboxId,
-    options: OperationOptions,
-) -> Result<ValidationResult, Error> {
-    let input = lifecycle_sdk_input(sandbox_id, options.telemetry_opt_in, |sandbox_id| {
-        wxc_common::state_aware_operation::StateAwareOperation::Deprovision { sandbox_id }
-    })
-    .map_err(Error::from)?;
-    run_typed_state_aware(input, options, true)?
-        .into_validation()
-        .map_err(Error::from)
-}
-
-/// Run a typed state-aware exec request as a live streaming process.
-pub fn exec_sandbox_request(
-    sandbox_id: &SandboxId,
-    request: ExecRequest,
-    options: OperationOptions,
+/// Run a typed SDK exec request already converted to the shared SDK input
+/// model as a live streaming process.
+pub fn exec_typed_state_aware_request(
+    input: SdkStateAwareInput,
+    experimental: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
-    let input = request
-        .into_sdk_input(sandbox_id, options.telemetry_opt_in)
-        .map_err(Error::from)?;
     let mut logger = Logger::new(Mode::Buffer);
-    let parsed = normalize_sdk_state_aware(input, options.experimental, &mut logger)?;
+    let parsed = normalize_sdk_state_aware(input, experimental, &mut logger)?;
     exec_state_aware_parsed(parsed, &mut logger)
 }
 
-/// Run a typed state-aware exec request attached to this process's stdio.
-pub fn exec_attached_request(
-    sandbox_id: &SandboxId,
-    request: ExecRequest,
-    options: OperationOptions,
+/// Run a typed SDK exec request already converted to the shared SDK input
+/// model attached to this process's stdio.
+pub fn exec_typed_state_aware_attached_request(
+    input: SdkStateAwareInput,
+    experimental: bool,
 ) -> Result<ExecOutcome, Error> {
-    let input = request
-        .into_sdk_input(sandbox_id, options.telemetry_opt_in)
-        .map_err(Error::from)?;
     let mut logger = Logger::new(Mode::Buffer);
-    let parsed = normalize_sdk_state_aware(input, options.experimental, &mut logger)?;
+    let parsed = normalize_sdk_state_aware(input, experimental, &mut logger)?;
     exec_state_aware_attached_parsed(parsed, &mut logger, || {
         host_stdio_is_attachable(
             std::io::stdout().is_terminal(),
             std::io::stdin().is_terminal(),
         )
     })
-}
-
-/// Validate a typed state-aware exec request without running a workload.
-pub fn validate_exec(
-    sandbox_id: &SandboxId,
-    request: ExecRequest,
-    options: OperationOptions,
-) -> Result<ValidationResult, Error> {
-    let input = request
-        .into_sdk_input(sandbox_id, options.telemetry_opt_in)
-        .map_err(Error::from)?;
-    run_typed_state_aware(input, options, true)?
-        .into_validation()
-        .map_err(Error::from)
 }
 
 /// Run a state-aware lifecycle request from a JSON string, returning the
@@ -954,17 +857,98 @@ pub fn exec_state_aware_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::{
-        FilesystemSection, NetworkAction, NetworkEgressSection, NetworkPeerSection,
-        NetworkPortSection, NetworkProtocol, NetworkRuleSection, NetworkSection,
-    };
-    use crate::state_aware_sdk::{
-        lifecycle_sdk_input, ExecRequest, ProvisionRequest, SandboxId, StateAwareExecBackendOptions,
-    };
+    use mxc_config_contract::ContractVersion;
     use wxc_common::mxc_error::MxcErrorCode;
-    use wxc_common::sdk_input::SdkStateAwareInput;
+    use wxc_common::sdk_input::{
+        SdkFilesystemInput, SdkNetworkAction, SdkNetworkEgressInput, SdkNetworkIngressInput,
+        SdkNetworkInput, SdkNetworkPeerInput, SdkNetworkPortInput, SdkNetworkProtocol,
+        SdkNetworkRuleInput, SdkProcessInput, SdkRuntimeConfigInput, SdkStateAwareInput,
+    };
+    use wxc_common::state_aware_operation::{
+        StateAwareOperation, StateAwareProvision as RuntimeProvision,
+    };
     use wxc_common::state_aware_request::Phase;
     use wxc_common::telemetry::correlation_state::test_support::StoreDirGuard;
+
+    fn sdk_input(operation: StateAwareOperation) -> SdkStateAwareInput {
+        SdkStateAwareInput::new(ContractVersion::V1_0_0, operation).unwrap()
+    }
+
+    fn wslc_provision(
+        image: Option<String>,
+        image_tar_path: Option<String>,
+        telemetry_opt_in: Option<bool>,
+    ) -> SdkStateAwareInput {
+        let config = if image.is_none() && image_tar_path.is_none() {
+            None
+        } else {
+            Some(wxc_common::models::WslcProvisionConfig {
+                image,
+                image_tar_path,
+            })
+        };
+        let mut input = sdk_input(StateAwareOperation::Provision(RuntimeProvision::Wslc(
+            config,
+        )));
+        input.telemetry_opt_in = telemetry_opt_in;
+        input
+    }
+
+    fn isolation_session_provision(
+        app_id: Option<String>,
+        telemetry_opt_in: Option<bool>,
+    ) -> SdkStateAwareInput {
+        let config = app_id.map(
+            |app_id| wxc_common::models::IsolationSessionProvisionConfig {
+                app_id: Some(app_id),
+            },
+        );
+        let mut input = sdk_input(StateAwareOperation::Provision(
+            RuntimeProvision::IsolationSession(config),
+        ));
+        input.network = Some(SdkNetworkInput {
+            egress: Some(SdkNetworkEgressInput {
+                default: Some(SdkNetworkAction::Allow),
+                allow: None,
+                deny: None,
+            }),
+            ingress: Some(SdkNetworkIngressInput {
+                default: Some(SdkNetworkAction::Allow),
+                host_loopback: Some(SdkNetworkAction::Allow),
+            }),
+        });
+        input.telemetry_opt_in = telemetry_opt_in;
+        input
+    }
+
+    fn lifecycle_input(
+        sandbox_id: &str,
+        telemetry_opt_in: Option<bool>,
+        operation: fn(String) -> StateAwareOperation,
+    ) -> SdkStateAwareInput {
+        let mut input = sdk_input(operation(sandbox_id.to_string()));
+        input.telemetry_opt_in = telemetry_opt_in;
+        input
+    }
+
+    fn exec_input(
+        sandbox_id: &str,
+        command_line: impl Into<String>,
+        telemetry_opt_in: Option<bool>,
+    ) -> SdkStateAwareInput {
+        let mut input = sdk_input(StateAwareOperation::Exec {
+            sandbox_id: sandbox_id.to_string(),
+        });
+        input.process = Some(SdkProcessInput {
+            command_line: command_line.into(),
+            cwd: None,
+            env: None,
+            inherit_default_env: None,
+            timeout: None,
+        });
+        input.telemetry_opt_in = telemetry_opt_in;
+        input
+    }
 
     fn request_intent(request: &ParsedStateAwareRequest) -> serde_json::Value {
         let mut value = serde_json::to_value(request.request()).unwrap();
@@ -1005,31 +989,20 @@ mod tests {
 
     #[test]
     fn typed_operation_options_preserve_telemetry_preference() {
-        let sandbox_id = SandboxId::parse("wslc:abc").unwrap();
         for enabled in [true, false] {
-            let options = OperationOptions::default().with_telemetry_opt_in(enabled);
-            let telemetry_opt_in = options.telemetry_opt_in;
+            let telemetry_opt_in = Some(enabled);
             let inputs = [
-                ProvisionRequest::wslc(None, None)
-                    .into_sdk_input(telemetry_opt_in)
-                    .unwrap(),
-                lifecycle_sdk_input(&sandbox_id, telemetry_opt_in, |sandbox_id| {
-                    wxc_common::state_aware_operation::StateAwareOperation::Start { sandbox_id }
-                })
-                .unwrap(),
-                lifecycle_sdk_input(&sandbox_id, telemetry_opt_in, |sandbox_id| {
-                    wxc_common::state_aware_operation::StateAwareOperation::Stop { sandbox_id }
-                })
-                .unwrap(),
-                lifecycle_sdk_input(&sandbox_id, telemetry_opt_in, |sandbox_id| {
-                    wxc_common::state_aware_operation::StateAwareOperation::Deprovision {
-                        sandbox_id,
-                    }
-                })
-                .unwrap(),
-                ExecRequest::new("echo hello")
-                    .into_sdk_input(&sandbox_id, telemetry_opt_in)
-                    .unwrap(),
+                wslc_provision(None, None, telemetry_opt_in),
+                lifecycle_input("wslc:abc", telemetry_opt_in, |sandbox_id| {
+                    StateAwareOperation::Start { sandbox_id }
+                }),
+                lifecycle_input("wslc:abc", telemetry_opt_in, |sandbox_id| {
+                    StateAwareOperation::Stop { sandbox_id }
+                }),
+                lifecycle_input("wslc:abc", telemetry_opt_in, |sandbox_id| {
+                    StateAwareOperation::Deprovision { sandbox_id }
+                }),
+                exec_input("wslc:abc", "echo hello", telemetry_opt_in),
             ];
             for input in inputs {
                 assert_typed_telemetry(input, enabled);
@@ -1050,9 +1023,7 @@ mod tests {
                 },
                 "isolationSession":{"provision":{"appId":"example"}}
             }"#,
-            ProvisionRequest::isolation_session(Some("example".to_string()))
-                .into_sdk_input(None)
-                .unwrap(),
+            isolation_session_provision(Some("example".to_string()), None),
         );
 
         assert_typed_matches_exact(
@@ -1065,9 +1036,7 @@ mod tests {
                     "ingress":{"default":"allow","hostLoopback":"allow"}
                 }
             }"#,
-            ProvisionRequest::isolation_session(None)
-                .into_sdk_input(None)
-                .unwrap(),
+            isolation_session_provision(None, None),
         );
 
         assert_typed_matches_exact(
@@ -1081,9 +1050,7 @@ mod tests {
                 },
                 "isolationSession":{"provision":{"appId":""}}
             }"#,
-            ProvisionRequest::isolation_session(Some(String::new()))
-                .into_sdk_input(None)
-                .unwrap(),
+            isolation_session_provision(Some(String::new()), None),
         );
 
         assert_typed_matches_exact(
@@ -1093,12 +1060,11 @@ mod tests {
                 "containment":"wslc",
                 "wslc":{"provision":{"image":"python:3.12","imageTarPath":"image.tar"}}
             }"#,
-            ProvisionRequest::wslc(
+            wslc_provision(
                 Some("python:3.12".to_string()),
                 Some("image.tar".to_string()),
-            )
-            .into_sdk_input(None)
-            .unwrap(),
+                None,
+            ),
         );
 
         assert_typed_matches_exact(
@@ -1107,9 +1073,7 @@ mod tests {
                 "phase":"provision",
                 "containment":"wslc"
             }"#,
-            ProvisionRequest::wslc(None, None)
-                .into_sdk_input(None)
-                .unwrap(),
+            wslc_provision(None, None, None),
         );
 
         assert_typed_matches_exact(
@@ -1119,18 +1083,14 @@ mod tests {
                 "containment":"wslc",
                 "wslc":{"provision":{"image":"","imageTarPath":""}}
             }"#,
-            ProvisionRequest::wslc(Some(String::new()), Some(String::new()))
-                .into_sdk_input(None)
-                .unwrap(),
+            wslc_provision(Some(String::new()), Some(String::new()), None),
         );
 
-        let mut filesystem_provision =
-            ProvisionRequest::wslc(Some("python:3.12".to_string()), None);
-        filesystem_provision.set_filesystem(FilesystemSection {
+        let mut filesystem_provision = wslc_provision(Some("python:3.12".to_string()), None, None);
+        filesystem_provision.filesystem = Some(SdkFilesystemInput {
             readwrite_paths: vec!["/tmp/readwrite".to_string()],
             readonly_paths: vec!["/tmp/readonly".to_string()],
             denied_paths: vec!["/tmp/denied".to_string()],
-            clear_policy_on_exit: None,
         });
         assert_typed_matches_exact(
             r#"{
@@ -1144,11 +1104,10 @@ mod tests {
                     "deniedPaths":["/tmp/denied"]
                 }
             }"#,
-            filesystem_provision.into_sdk_input(None).unwrap(),
+            filesystem_provision,
         );
 
         for enabled in [true, false] {
-            let telemetry_provision = ProvisionRequest::wslc(None, None);
             let json = format!(
                 r#"{{
                     "version":"1.0.0",
@@ -1157,45 +1116,40 @@ mod tests {
                     "telemetry":{{"enabled":{enabled}}}
                 }}"#
             );
-            assert_typed_matches_exact(
-                &json,
-                telemetry_provision.into_sdk_input(Some(enabled)).unwrap(),
-            );
+            assert_typed_matches_exact(&json, wslc_provision(None, None, Some(enabled)));
         }
 
         for (json, input) in [
             (
                 r#"{"version":"1.0.0","phase":"start","sandboxId":"iso:abc"}"#,
-                lifecycle_sdk_input(&SandboxId::parse("iso:abc").unwrap(), None, |sandbox_id| {
-                    wxc_common::state_aware_operation::StateAwareOperation::Start { sandbox_id }
-                })
-                .unwrap(),
+                lifecycle_input("iso:abc", None, |sandbox_id| StateAwareOperation::Start {
+                    sandbox_id,
+                }),
             ),
             (
                 r#"{"version":"1.0.0","phase":"stop","sandboxId":"iso:abc"}"#,
-                lifecycle_sdk_input(&SandboxId::parse("iso:abc").unwrap(), None, |sandbox_id| {
-                    wxc_common::state_aware_operation::StateAwareOperation::Stop { sandbox_id }
-                })
-                .unwrap(),
+                lifecycle_input("iso:abc", None, |sandbox_id| StateAwareOperation::Stop {
+                    sandbox_id,
+                }),
             ),
             (
                 r#"{"version":"1.0.0","phase":"deprovision","sandboxId":"iso:abc"}"#,
-                lifecycle_sdk_input(&SandboxId::parse("iso:abc").unwrap(), None, |sandbox_id| {
-                    wxc_common::state_aware_operation::StateAwareOperation::Deprovision {
-                        sandbox_id,
-                    }
-                })
-                .unwrap(),
+                lifecycle_input("iso:abc", None, |sandbox_id| {
+                    StateAwareOperation::Deprovision { sandbox_id }
+                }),
             ),
         ] {
             assert_typed_matches_exact(json, input);
         }
 
-        let mut exec = ExecRequest::new("echo configured");
-        exec.set_working_directory("C:\\work")
-            .set_environment([("A", "one"), ("B", "two")])
-            .inherit_default_env(false)
-            .set_timeout(1234);
+        let mut exec = exec_input("iso:abc", "echo configured", None);
+        exec.process = Some(SdkProcessInput {
+            command_line: "echo configured".to_string(),
+            cwd: Some("C:\\work".to_string()),
+            env: Some(vec!["A=one".to_string(), "B=two".to_string()]),
+            inherit_default_env: Some(false),
+            timeout: Some(1234),
+        });
         assert_typed_matches_exact(
             r#"{
                 "version":"1.0.0",
@@ -1209,29 +1163,29 @@ mod tests {
                     "timeout":1234
                 }
             }"#,
-            exec.into_sdk_input(&SandboxId::parse("iso:abc").unwrap(), None)
-                .unwrap(),
+            exec,
         );
 
-        let mut peer = NetworkPeerSection::new("10.0.0.0/8");
-        peer.except = Some(vec!["10.1.0.0/16".to_string()]);
-        let network = NetworkSection {
-            egress: Some(NetworkEgressSection {
-                default: Some(NetworkAction::Deny),
-                allow: Some(vec![NetworkRuleSection {
-                    to: Some(vec![peer]),
-                    ports: Some(vec![NetworkPortSection {
-                        protocol: Some(NetworkProtocol::Tcp),
+        let network = SdkNetworkInput {
+            egress: Some(SdkNetworkEgressInput {
+                default: Some(SdkNetworkAction::Deny),
+                allow: Some(vec![SdkNetworkRuleInput {
+                    to: Some(vec![SdkNetworkPeerInput {
+                        cidr: "10.0.0.0/8".to_string(),
+                        except: Some(vec!["10.1.0.0/16".to_string()]),
+                    }]),
+                    ports: Some(vec![SdkNetworkPortInput {
+                        protocol: Some(SdkNetworkProtocol::Tcp),
                         port: Some(80),
                         end_port: Some(81),
                     }]),
                 }]),
                 deny: None,
             }),
-            ..Default::default()
+            ingress: None,
         };
-        let mut network_provision = ProvisionRequest::wslc(Some("python:3.12".to_string()), None);
-        network_provision.set_network(network);
+        let mut network_provision = wslc_provision(Some("python:3.12".to_string()), None, None);
+        network_provision.network = Some(network);
         assert_typed_matches_exact(
             r#"{
                 "version":"1.0.0",
@@ -1255,12 +1209,15 @@ mod tests {
                     }
                 }
             }"#,
-            network_provision.into_sdk_input(None).unwrap(),
+            network_provision,
         );
 
         let mut empty_network_provision =
-            ProvisionRequest::wslc(Some("python:3.12".to_string()), None);
-        empty_network_provision.set_network(NetworkSection::default());
+            wslc_provision(Some("python:3.12".to_string()), None, None);
+        empty_network_provision.network = Some(SdkNetworkInput {
+            egress: None,
+            ingress: None,
+        });
         assert_typed_matches_exact(
             r#"{
                 "version":"1.0.0",
@@ -1269,12 +1226,12 @@ mod tests {
                 "wslc":{"provision":{"image":"python:3.12"}},
                 "network":{}
             }"#,
-            empty_network_provision.into_sdk_input(None).unwrap(),
+            empty_network_provision,
         );
 
-        let mut proxy_exec = ExecRequest::new("echo proxied");
-        proxy_exec.set_backend_options(StateAwareExecBackendOptions::Wslc {
-            network_proxy: "http://127.0.0.1:8080".to_string(),
+        let mut proxy_exec = exec_input("wslc:abc", "echo proxied", None);
+        proxy_exec.runtime_config = Some(SdkRuntimeConfigInput {
+            network_proxy: Some("http://127.0.0.1:8080".to_string()),
         });
         assert_typed_matches_exact(
             r#"{
@@ -1284,29 +1241,8 @@ mod tests {
                 "process":{"commandLine":"echo proxied"},
                 "runtimeConfig":{"networkProxy":"http://127.0.0.1:8080"}
             }"#,
-            proxy_exec
-                .into_sdk_input(&SandboxId::parse("wslc:abc").unwrap(), None)
-                .unwrap(),
+            proxy_exec,
         );
-    }
-
-    #[test]
-    fn typed_provision_rejects_clear_policy_on_exit() {
-        for enabled in [true, false] {
-            let mut request = ProvisionRequest::wslc(None, None);
-            request.set_filesystem(FilesystemSection {
-                clear_policy_on_exit: Some(enabled),
-                ..Default::default()
-            });
-
-            let error = request.into_sdk_input(None).unwrap_err();
-            assert_eq!(error.code, MxcErrorCode::MalformedRequest);
-            assert!(
-                error.message.contains("clearPolicyOnExit"),
-                "got: {}",
-                error.message
-            );
-        }
     }
 
     #[test]

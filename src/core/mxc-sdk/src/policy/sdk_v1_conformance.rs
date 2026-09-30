@@ -419,10 +419,25 @@ fn build_from_input(name: &str, input: ConformanceInput) -> ExecutionRequest {
 fn parse_one_shot(json: &str) -> Result<ExecutionRequest, wxc_common::mxc_error::MxcError> {
     let mut logger = Logger::new(Mode::Buffer);
     match wxc_common::config_parser::load_mxc_request_from_json(json, &mut logger)
-        .map_err(crate::state_aware::parse_error_to_mxc)?
+        .map_err(parse_error_to_mxc)?
     {
         MxcRequest::OneShot(request) => Ok(request),
         MxcRequest::StateAware(_) => panic!("expected a one-shot request"),
+    }
+}
+
+fn parse_error_to_mxc(
+    error: wxc_common::config_parser::ParseError,
+) -> wxc_common::mxc_error::MxcError {
+    use wxc_common::config_parser::ParseError;
+    match error {
+        ParseError::StateAware(error) => error,
+        ParseError::Decode(error)
+        | ParseError::Version(error)
+        | ParseError::OneShot(error)
+        | ParseError::OneShotMalformed(error) => {
+            wxc_common::mxc_error::MxcError::malformed_request(error.to_string())
+        }
     }
 }
 

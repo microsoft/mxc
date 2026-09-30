@@ -113,13 +113,18 @@ Adding a feature may touch these files:
 | `src/core/mxc_config_contract/src/dev/` | Add the field to the authoritative closed mutable development contract |
 | `src/core/wxc_common/src/config_contract_adapters/dev/` | Adapt the exact field into private `CommonRequestIR` |
 | `src/core/wxc_common/src/wire.rs` | Add only reusable nested normalization DTOs needed by the adapter; never add a whole-request root |
-| `src/core/mxc_engine/src/policy/exact/v1_1.rs` | If the Rust SDK exposes the field, update the production development builder |
+| `src/core/mxc-sdk/src/policy/exact/` | Once the field is in the SDK's published target, update that contract's typed builder (currently `v1_0.rs` for `1.0.0`) |
 | `schemas/dev/mxc-config.schema.1.1.0-alpha.json` | **Generated exact artifact** — do not hand-edit |
 | `sdk/node/src/generated/v1_1_0_alpha/wire.ts` | **Generated exact artifact** — do not hand-edit |
 | `src/core/wxc_common/src/models.rs` | Add `GpuIsolationConfig` and an optional field on `ExecutionRequest` |
 | `src/core/wxc_common/src/config_parser.rs` | Map the new config-input field into `ExecutionRequest.gpu_isolation` |
 | Runner (`appcontainer.rs` or `lxc_runner.rs`) | Feature logic, guarded behind `experimental_enabled` |
 | `tests/configs/` | Test config exercising your feature |
+
+The typed Rust V1 SDK currently targets published exact `1.0.0` through
+`src/core/mxc-sdk/src/policy/exact/v1_0.rs`. Use a raw exact-JSON request for a
+field available only in the mutable development contract; add typed mapping
+when the SDK target advances to a published contract containing that field.
 
 ## Step 1: Add the field to the development contract and config input
 

@@ -386,7 +386,7 @@ fn check_pin_against_denied_hosts(request: &ExecutionRequest) -> Result<(), Stri
 ///
 /// Uses [`Logger::warning_line`], not `log_line`: it is the only sink both
 /// paths actually read. `log_line` lands in the console/debug buffer, which
-/// `mxc_engine::spawn` never folds into `Output::warnings` and which
+/// `mxc_engine::spawn_execution_request` never folds into `Output::warnings` and which
 /// `lxc-exec` prints only on an error path (and only under `--debug`, onto
 /// stdout, where it would interleave with the workload's own output).
 fn warn_unreachable_v6_targets(plan: &network_rules::EgressPlan, logger: &mut Logger) {
@@ -1544,7 +1544,8 @@ mod tests {
             "must not name the reachable v4 target: {out}"
         );
         // The retained-warning channel is the point: the debug buffer is not
-        // read back by `mxc_engine::spawn`, so a warning left there is silent.
+        // read back by `mxc_engine::spawn_execution_request`, so a warning left
+        // there is silent.
         assert!(
             logger.get_buffer().is_empty(),
             "the warning must travel as a retained warning, not as buffer output"

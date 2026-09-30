@@ -144,11 +144,14 @@
 //! ## Relationship to `mxc_engine`
 //!
 //! This crate is a thin, streaming-focused public facade. Backend dispatch,
-//! host probing, and config building live in the internal `mxc_engine` crate;
-//! `mxc-sdk` re-exports the curated surface and wraps the engine's streaming
-//! handle in [`Sandbox`].
+//! host probing, and execution live in the internal `mxc_engine` crate;
+//! `mxc-sdk` owns the public policy/config authoring layer and wraps the
+//! engine's streaming handle in [`Sandbox`].
 
+mod configs;
+mod policy;
 mod sandbox;
+mod state_aware_sdk;
 
 pub mod telemetry;
 
@@ -181,17 +184,14 @@ pub use sandbox::{
 /// use mxc_sdk::v1::sandbox;
 /// ```
 pub mod v1 {
-    #[cfg(target_os = "windows")]
-    pub use mxc_engine::probe;
-
     /// Backend-specific V1 configuration sections.
     pub mod configs {
-        pub use mxc_engine::configs::*;
+        pub use crate::configs::*;
     }
 
     /// V1 high-level policy sections.
     pub mod policy {
-        pub use mxc_engine::policy::*;
+        pub use crate::policy::*;
     }
 
     /// V1 typed state-aware lifecycle entry points.
@@ -202,17 +202,29 @@ pub mod v1 {
         };
     }
 
-    pub use mxc_engine::{
+    pub use crate::policy::{
         available_tools_policy, build_request, build_request_with_containment,
-        temporary_files_policy, user_profile_policy, Containment, ExecRequest,
-        FilesystemPolicyResult, IsolationSessionProvisionMetadata, LifecycleResult, NetworkAction,
-        NetworkEgressSection, NetworkIngressSection, NetworkPeerSection, NetworkPortSection,
-        NetworkProtocol, NetworkRuleSection, OperationOptions, ProvisionMetadata, ProvisionRequest,
-        ProvisionResult, RuntimeConfigSection, SandboxId, SandboxPolicy, SandboxRequest,
-        StateAwareExecBackendOptions, StateAwareProvision, ValidationResult, WslcSection,
+        temporary_files_policy, user_profile_policy, Containment, FilesystemPolicyResult,
+        NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkPeerSection,
+        NetworkPortSection, NetworkProtocol, NetworkRuleSection, RuntimeConfigSection,
+        SandboxPolicy, SandboxRequest, WslcSection,
+    };
+    pub use crate::state_aware_sdk::{
+        ExecRequest, IsolationSessionProvisionMetadata, LifecycleResult, OperationOptions,
+        ProvisionMetadata, ProvisionRequest, ProvisionResult, SandboxId,
+        StateAwareExecBackendOptions, StateAwareProvision, ValidationResult,
     };
 
     use crate::{Error, Output, Sandbox};
+
+    /// Probe an optional ProcessContainer request without creating a sandbox.
+    ///
+    /// Other containments use backend availability discovery and their normal
+    /// launch-time validation because this result describes ProcessContainer tiers.
+    #[cfg(target_os = "windows")]
+    pub fn probe(request: Option<&SandboxRequest>) -> Result<crate::ProbeOutput, Error> {
+        mxc_engine::probe_execution_request(request.map(|request| &request.inner))
+    }
 
     /// Spawn a sandbox from a [`SandboxRequest`] built by [`build_request`] (with
     /// the command, and any working directory / env, filled in).
@@ -221,7 +233,7 @@ pub mod v1 {
     /// no pty is allocated. Any stdout/stderr stream the caller does not
     /// `take_*` is drained and discarded by [`wait`](Sandbox::wait).
     pub fn spawn_sandbox(request: SandboxRequest) -> Result<Sandbox, Error> {
-        mxc_engine::spawn(&request).map(Sandbox::new)
+        mxc_engine::spawn_execution_request(&request.inner).map(Sandbox::new)
     }
 
     /// Run a sandbox from a [`SandboxRequest`] **to completion**, capturing its
@@ -240,6 +252,19 @@ pub mod v1 {
     /// [`Error`]), or when waiting on the child fails at the OS level.
     pub fn run(request: SandboxRequest) -> Result<Output, Error> {
         crate::wait_with_output(spawn_sandbox(request)?)
+    }
+
+    #[cfg(all(test, target_os = "windows"))]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn public_request_probe_uses_sdk_request_model() {
+            let request = build_request(&SandboxPolicy::default(), "cmd /c exit 0", None)
+                .expect("default Windows policy builds");
+            let output = probe(Some(&request)).expect("default request probes");
+            assert!(output.error.is_some() || output.tier.is_some());
+        }
     }
 }
 

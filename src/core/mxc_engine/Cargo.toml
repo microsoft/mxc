@@ -3,7 +3,7 @@ name = "mxc_engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "MXC execution engine: backend dispatch, host probing, and config building shared by the public SDK and the executor binaries."
+description = "MXC execution engine: backend dispatch and host probing shared by the public SDK and the executor binaries."
 
 [lib]
 name = "mxc_engine"
@@ -11,7 +11,6 @@ path = "src/lib.rs"
 
 [dependencies]
 wxc_common.workspace = true
-mxc_config_contract.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 # MicroVM runner — used by the Windows and Linux run-to-completion bodies under

@@ -7,23 +7,38 @@
 
 use std::io::{Read, Write};
 
-use crate::Error;
-use mxc_engine::{
-    ExecRequest, LifecycleResult, OperationOptions, ProvisionRequest, ProvisionResult, SandboxId,
-    ValidationResult,
+use crate::state_aware_sdk::{
+    lifecycle_sdk_input, ExecRequest, LifecycleResult, OperationOptions, ProvisionRequest,
+    ProvisionResult, SandboxId, StateAwareResult, ValidationResult,
 };
+use crate::Error;
 pub use wxc_common::models::{
     CaptureDenialsErrorOutput, CaptureDenialsOutput, SandboxOutputMetadata,
 };
 use wxc_common::sandbox_process::{NativeStdio, SandboxProcess, StreamCloser as InnerCloser};
 use wxc_common::state_aware_backend::ExecOutcome;
+use wxc_common::state_aware_operation::StateAwareOperation;
+
+fn run_typed_state_aware(
+    input: wxc_common::sdk_input::SdkStateAwareInput,
+    options: OperationOptions,
+    dry_run: bool,
+) -> Result<StateAwareResult, Error> {
+    mxc_engine::run_typed_state_aware_request(input, options.experimental, dry_run)
+        .map(StateAwareResult::from_engine)
+}
 
 /// Provision a sandbox from typed Rust policy.
 pub fn provision(
     request: ProvisionRequest,
     options: OperationOptions,
 ) -> Result<ProvisionResult, Error> {
-    mxc_engine::provision_sandbox(request, options)
+    let input = request
+        .into_sdk_input(options.telemetry_opt_in)
+        .map_err(Error::from)?;
+    run_typed_state_aware(input, options, false)?
+        .into_provision()
+        .map_err(Error::from)
 }
 
 /// Validate a provision request without creating a sandbox.
@@ -31,12 +46,23 @@ pub fn validate_provision(
     request: ProvisionRequest,
     options: OperationOptions,
 ) -> Result<ValidationResult, Error> {
-    mxc_engine::validate_provision(request, options)
+    let input = request
+        .into_sdk_input(options.telemetry_opt_in)
+        .map_err(Error::from)?;
+    run_typed_state_aware(input, options, true)?
+        .into_validation()
+        .map_err(Error::from)
 }
 
 /// Start an existing sandbox.
 pub fn start(sandbox_id: &SandboxId, options: OperationOptions) -> Result<LifecycleResult, Error> {
-    mxc_engine::start_sandbox(sandbox_id, options)
+    let input = lifecycle_sdk_input(sandbox_id, options.telemetry_opt_in, |sandbox_id| {
+        StateAwareOperation::Start { sandbox_id }
+    })
+    .map_err(Error::from)?;
+    run_typed_state_aware(input, options, false)?
+        .into_lifecycle()
+        .map_err(Error::from)
 }
 
 /// Validate a start request without starting the sandbox.
@@ -44,12 +70,24 @@ pub fn validate_start(
     sandbox_id: &SandboxId,
     options: OperationOptions,
 ) -> Result<ValidationResult, Error> {
-    mxc_engine::validate_start(sandbox_id, options)
+    let input = lifecycle_sdk_input(sandbox_id, options.telemetry_opt_in, |sandbox_id| {
+        StateAwareOperation::Start { sandbox_id }
+    })
+    .map_err(Error::from)?;
+    run_typed_state_aware(input, options, true)?
+        .into_validation()
+        .map_err(Error::from)
 }
 
 /// Stop an existing sandbox.
 pub fn stop(sandbox_id: &SandboxId, options: OperationOptions) -> Result<LifecycleResult, Error> {
-    mxc_engine::stop_sandbox(sandbox_id, options)
+    let input = lifecycle_sdk_input(sandbox_id, options.telemetry_opt_in, |sandbox_id| {
+        StateAwareOperation::Stop { sandbox_id }
+    })
+    .map_err(Error::from)?;
+    run_typed_state_aware(input, options, false)?
+        .into_lifecycle()
+        .map_err(Error::from)
 }
 
 /// Validate a stop request without stopping the sandbox.
@@ -57,7 +95,13 @@ pub fn validate_stop(
     sandbox_id: &SandboxId,
     options: OperationOptions,
 ) -> Result<ValidationResult, Error> {
-    mxc_engine::validate_stop(sandbox_id, options)
+    let input = lifecycle_sdk_input(sandbox_id, options.telemetry_opt_in, |sandbox_id| {
+        StateAwareOperation::Stop { sandbox_id }
+    })
+    .map_err(Error::from)?;
+    run_typed_state_aware(input, options, true)?
+        .into_validation()
+        .map_err(Error::from)
 }
 
 /// Deprovision an existing sandbox.
@@ -65,7 +109,13 @@ pub fn deprovision(
     sandbox_id: &SandboxId,
     options: OperationOptions,
 ) -> Result<LifecycleResult, Error> {
-    mxc_engine::deprovision_sandbox(sandbox_id, options)
+    let input = lifecycle_sdk_input(sandbox_id, options.telemetry_opt_in, |sandbox_id| {
+        StateAwareOperation::Deprovision { sandbox_id }
+    })
+    .map_err(Error::from)?;
+    run_typed_state_aware(input, options, false)?
+        .into_lifecycle()
+        .map_err(Error::from)
 }
 
 /// Validate a deprovision request without changing the sandbox.
@@ -73,7 +123,13 @@ pub fn validate_deprovision(
     sandbox_id: &SandboxId,
     options: OperationOptions,
 ) -> Result<ValidationResult, Error> {
-    mxc_engine::validate_deprovision(sandbox_id, options)
+    let input = lifecycle_sdk_input(sandbox_id, options.telemetry_opt_in, |sandbox_id| {
+        StateAwareOperation::Deprovision { sandbox_id }
+    })
+    .map_err(Error::from)?;
+    run_typed_state_aware(input, options, true)?
+        .into_validation()
+        .map_err(Error::from)
 }
 
 /// Execute in an existing sandbox and return a live streaming handle.
@@ -82,7 +138,10 @@ pub fn exec(
     request: ExecRequest,
     options: OperationOptions,
 ) -> Result<Sandbox, Error> {
-    mxc_engine::exec_sandbox_request(sandbox_id, request, options).map(Sandbox::new)
+    let input = request
+        .into_sdk_input(sandbox_id, options.telemetry_opt_in)
+        .map_err(Error::from)?;
+    mxc_engine::exec_typed_state_aware_request(input, options.experimental).map(Sandbox::new)
 }
 
 /// Execute in an existing sandbox attached to this process's stdio.
@@ -91,10 +150,15 @@ pub fn exec_attached(
     request: ExecRequest,
     options: OperationOptions,
 ) -> Result<WaitOutcome, Error> {
-    mxc_engine::exec_attached_request(sandbox_id, request, options).map(|outcome| match outcome {
-        ExecOutcome::Exited(code) => WaitOutcome::Exited(code),
-        ExecOutcome::TimedOut => WaitOutcome::TimedOut,
-    })
+    let input = request
+        .into_sdk_input(sandbox_id, options.telemetry_opt_in)
+        .map_err(Error::from)?;
+    mxc_engine::exec_typed_state_aware_attached_request(input, options.experimental).map(
+        |outcome| match outcome {
+            ExecOutcome::Exited(code) => WaitOutcome::Exited(code),
+            ExecOutcome::TimedOut => WaitOutcome::TimedOut,
+        },
+    )
 }
 
 /// Validate an exec request without running a workload.
@@ -103,7 +167,12 @@ pub fn validate_exec(
     request: ExecRequest,
     options: OperationOptions,
 ) -> Result<ValidationResult, Error> {
-    mxc_engine::validate_exec(sandbox_id, request, options)
+    let input = request
+        .into_sdk_input(sandbox_id, options.telemetry_opt_in)
+        .map_err(Error::from)?;
+    run_typed_state_aware(input, options, true)?
+        .into_validation()
+        .map_err(Error::from)
 }
 
 /// The outcome of waiting on a [`Sandbox`] (see [`Sandbox::wait`]).

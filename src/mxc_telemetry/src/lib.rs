@@ -109,16 +109,16 @@ mod provider {
         // this module (via `include!("provider_def.rs")`), so its storage
         // outlives every ETW callback the tracelogging runtime installs
         // against it. This function is however now called from library
-        // contexts too (`mxc_engine::spawn` is compiled into the `mxc_ffi`
-        // cdylib and the `mxc-sdk` library, both of which may be dynamically
-        // loaded by a host). To keep the "callbacks always point at mapped
+        // contexts too (`mxc_engine::spawn_execution_request` is compiled into
+        // the `mxc_ffi` cdylib and the `mxc-sdk` library, both of which may be
+        // dynamically loaded by a host). To keep the "callbacks always point at mapped
         // code" invariant, every `init` here is refcounted and paired with a
-        // `shutdown` in the wrapper that returned by `mxc_engine::spawn`
+        // `shutdown` in the wrapper returned by `mxc_engine::spawn_execution_request`
         // (see the `TelemetryProcess` `Drop` contract in `mxc_engine`), so
         // the ETW registration is released before the caller can dlclose /
         // FreeLibrary the containing module. Callers that unload the library
         // while a spawned handle is still live violate this precondition
-        // (documented on `mxc_engine::spawn`) and can leave ETW holding
+        // (documented on `mxc_engine::spawn_execution_request`) and can leave ETW holding
         // callbacks into unmapped memory.
         let status = unsafe { MXC_PROVIDER.register() };
         if status != 0 {

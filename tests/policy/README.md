@@ -43,7 +43,7 @@ an unintended mapping change could update both sides and hide a regression.
 
 ### Consumers
 
-- **Rust** — `src/core/mxc_engine/src/policy/sdk_v1_conformance.rs` builds each
+- **Rust** — `src/core/mxc-sdk/src/policy/sdk_v1_conformance.rs` builds each
   input with the Rust policy builder, parses the expected document, and
   asserts both normalize to the same execution request. It also asserts every
   invalid document is rejected for the recorded reason.
@@ -95,7 +95,7 @@ The expected documents follow these rules, which every SDK mapper applies:
 ### Adding a case
 
 Write both files by hand. Run
-`cargo test -p mxc_engine -- sdk_v1_conformance` and
+`cargo test -p mxc-sdk -- sdk_v1_conformance` and
 `node scripts/versioning/validate-configs.js`, then update each SDK's conformance
 test so it covers the new input.
 

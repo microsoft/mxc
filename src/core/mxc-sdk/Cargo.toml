@@ -22,8 +22,10 @@ test-support = ["wxc_common/test-support"]
 [dependencies]
 wxc_common.workspace = true
 mxc_engine = { workspace = true }
+mxc_config_contract.workspace = true
 
 [dev-dependencies]
+serde = { workspace = true }
 serde_json = { workspace = true }
 
 # Manual operator driver for the in-process IsolationSession lifecycle. Gated on

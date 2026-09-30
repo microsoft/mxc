@@ -70,7 +70,7 @@ impl From<MxcErrorCode> for ErrorCode {
 }
 
 /// An error returned by the SDK's fallible operations
-/// ([`build_request`](crate::build_request) / [`spawn`](crate::spawn)).
+/// ([`spawn_execution_request`](crate::spawn_execution_request)).
 ///
 /// The detail fields sit flat on the error, the same way the wire format, the
 /// C ABI and the C# SDK carry them — one failure reads the same whichever of

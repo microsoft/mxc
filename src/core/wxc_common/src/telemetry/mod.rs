@@ -798,7 +798,7 @@ pub fn emit_cancellation() {
 /// [`FailureReason`]. Exhaustive over [`MxcErrorCode`] so a newly-added code
 /// forces a compile error here rather than silently classifying as `Unknown`.
 ///
-/// Public so the streaming SDK path (`mxc_engine::spawn`) can preserve the
+/// Public so the streaming SDK path (`mxc_engine::spawn_execution_request`) can preserve the
 /// actual error category on early-exit telemetry rather than reporting every
 /// dispatch failure as `InitError`.
 pub fn classify_mxc_error(err: &MxcError) -> FailureReason {

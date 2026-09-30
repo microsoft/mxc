@@ -447,12 +447,12 @@ pub fn external_proxy_host_rules_rejection(request: &ExecutionRequest) -> Option
 /// [`ResolvedNetworkMode::from_request`] tests the proxy first and returns
 /// `ProxyOnly`, so `enforcementMode` is never consulted on that path: without
 /// this gate the runner silently discards an explicitly-set, security-relevant
-/// field. Every *public* entry point reaches the runner through the parser
-/// today -- `mxc_engine::build_request*` maps a policy to wire JSON and runs
-/// `config_parser` over it, and `SandboxRequest`'s inner `ExecutionRequest` is
-/// `pub(crate)` -- so this is layer parity plus defense in depth for an in-tree
-/// caller holding an `ExecutionRequest`, not a live bypass. Not schema-gated,
-/// matching the parser.
+/// field. Public SDK policy entry points validate through the exact parser:
+/// `mxc_sdk::v1::build_request*` constructs an exact `1.0.0` Rust contract
+/// value and normalizes it through `config_parser`, and `SandboxRequest`'s
+/// inner `ExecutionRequest` is `pub(crate)`. This gate also protects direct
+/// engine callers holding an `ExecutionRequest`. Not schema-gated, matching
+/// the parser.
 pub fn proxy_with_firewall_rejection(request: &ExecutionRequest) -> Option<&'static str> {
     let conflicts = request.policy.network_proxy.is_enabled()
         && matches!(
