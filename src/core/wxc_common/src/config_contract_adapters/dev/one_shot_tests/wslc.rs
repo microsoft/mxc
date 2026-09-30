@@ -4,7 +4,7 @@
 use super::common::adapt;
 
 const WSLC_REQUEST_JSON: &str = r#"{
-    "version": "0.10.0-alpha",
+    "version": "1.1.0-alpha",
     "containment": "wslc",
     "process": {
         "commandLine": "echo hello"

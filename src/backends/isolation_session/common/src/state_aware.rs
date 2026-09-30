@@ -23,7 +23,9 @@ use windows::Win32::Foundation::HANDLE;
 
 use super::error::map_lifecycle_error;
 use super::manager::{log_sandbox_torn_down, IsolationSessionManager, TeardownOutcome};
-use super::policy::{validate_post_provision_policy, validate_provision_policy};
+use super::policy::{
+    reject_unhonorable_environment, validate_post_provision_policy, validate_provision_policy,
+};
 use super::process_options::{build_process_options, with_service_timeout_grace};
 use super::sandbox_id::{self, SandboxIdPayload};
 use super::IsolationSessionRunner;
@@ -238,7 +240,8 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
         extract_agent_user_name(sandbox_id)?;
-        validate_post_provision_policy(request).map_err(map_lifecycle_error)
+        validate_post_provision_policy(request).map_err(map_lifecycle_error)?;
+        reject_unhonorable_environment(request).map_err(map_lifecycle_error)
     }
 
     fn validate_stop(
@@ -739,6 +742,58 @@ mod tests {
             assert_eq!(error.code, MxcErrorCode::PolicyValidation, "phase {label}");
             assert!(error.message.contains("proxy"), "phase {label}: {error:?}");
         }
+    }
+
+    // ====== process.env is checked where a process is launched ======
+
+    const ENV_REFUSAL: &str = "process.env without process.inheritDefaultEnv=true is not supported";
+
+    #[test]
+    fn validate_exec_rejects_env_without_inherit_default_env() {
+        let runner = IsolationSessionRunner::new();
+        let req = ExecutionRequest {
+            env: Some(vec!["FOO=bar".to_string()]),
+            ..Default::default()
+        };
+        let err = runner
+            .validate_exec(&valid_sandbox_id(), &req, None)
+            .unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+        assert!(err.message.contains(ENV_REFUSAL), "got {}", err.message);
+    }
+
+    #[test]
+    fn validate_exec_accepts_env_with_inherit_default_env() {
+        let runner = IsolationSessionRunner::new();
+        let req = ExecutionRequest {
+            env: Some(vec!["FOO=bar".to_string()]),
+            inherit_default_env: true,
+            ..Default::default()
+        };
+        runner
+            .validate_exec(&valid_sandbox_id(), &req, None)
+            .unwrap();
+    }
+
+    #[test]
+    fn validate_exec_reports_a_network_refusal_before_the_environment() {
+        let runner = IsolationSessionRunner::new();
+        let req = ExecutionRequest {
+            env: Some(vec!["FOO=bar".to_string()]),
+            policy: ContainerPolicy {
+                network_specified: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = runner
+            .validate_exec(&valid_sandbox_id(), &req, None)
+            .unwrap_err();
+        assert!(
+            err.message.contains("network policy is fixed at provision"),
+            "got {}",
+            err.message
+        );
     }
 
     // ====== UI policy is refused on every phase ======

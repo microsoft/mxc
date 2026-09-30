@@ -948,6 +948,27 @@ try {
         } | Out-Null
     }
 
+    # Test 3d: exec rejects a process.env supplied without inheritDefaultEnv, and
+    # the command does not run.
+    if ($execedOk) {
+        Run-StateAwareTest "exec (process.env without inheritDefaultEnv rejected)" {
+            $req = @{
+                phase     = 'exec'
+                sandboxId = $script:sandboxId
+                process   = @{ commandLine = 'echo MUST_NOT_RUN'; env = @('FOO=bar') }
+            }
+            $r = Invoke-StateAware -Request $req
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+            $envObj = Parse-StderrEnvelope -Stderr $r.Stderr
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True ($msg -match 'process\.env without process\.inheritDefaultEnv=true is not supported') `
+                "error.message identifies the unsupported environment (got '$msg')"
+            Assert-True ($r.Stdout -notmatch 'MUST_NOT_RUN') "the command did not run"
+        } | Out-Null
+    }
+
     # Test 4: sandbox-internal %TEMP% continuity across separate wxc-exec
     # invocations against the same sandbox_id. exec #1 writes a marker file
     # to the agent user's TEMP, exec #2 reads it back. Each exec is a fresh

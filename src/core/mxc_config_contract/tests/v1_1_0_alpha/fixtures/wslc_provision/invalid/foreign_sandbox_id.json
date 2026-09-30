@@ -1,0 +1,6 @@
+{
+  "version": "1.1.0-alpha",
+  "phase": "provision",
+  "containment": "wslc",
+  "sandboxId": "wslc:0123456789abcdef0123456789abcdef"
+}

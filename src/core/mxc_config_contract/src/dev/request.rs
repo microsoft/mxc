@@ -9,7 +9,7 @@ use super::state_aware::{
 };
 use super::NetworkAction;
 
-/// A validated request for the mutable `0.10.0-alpha` development contract.
+/// A validated request for the mutable `1.1.0-alpha` development contract.
 #[derive(Debug)]
 pub enum Request {
     /// A one-shot execution request with no lifecycle phase.
@@ -135,7 +135,7 @@ fn validate_isolation_session_one_shot_network(
 /// An absent `phase` selects the one-shot contract. A present phase selects its
 /// corresponding state-aware contract, with provision requests additionally
 /// selected by their required `containment` declaration. The selected concrete
-/// request still requires the exact `0.10.0-alpha` version marker.
+/// request still requires the exact `1.1.0-alpha` version marker.
 ///
 /// # Errors
 ///

@@ -1070,9 +1070,10 @@ pub struct ExecutionRequest {
     ///   [`ExecutionRequest::inherit_default_env`].
     ///
     /// The Windows process container honors the distinction at every schema
-    /// version; LXC, Bubblewrap, Seatbelt, and WSLc honor it from 0.9. Below
-    /// 0.9 on those four, and on IsolationSession at every version, `None` and
-    /// `Some(vec![])` are treated alike.
+    /// version; LXC, Bubblewrap, Seatbelt, and WSLc honor it from 0.9, and
+    /// below 0.9 treat `None` and `Some(vec![])` alike. IsolationSession starts
+    /// every process from the agent user's default environment, so it rejects
+    /// `Some` without [`ExecutionRequest::inherit_default_env`].
     pub env: Option<Vec<String>>,
 
     /// Layer [`ExecutionRequest::env`] on top of the backend's default
@@ -1231,12 +1232,13 @@ impl ExecutionRequest {
     /// empty" flattened to the same empty slice.
     ///
     /// Only for backends that have no default environment to distinguish them
-    /// against — IsolationSession, plus every backend below schema 0.9. A
-    /// backend with a default block must match on [`ExecutionRequest::env`]
-    /// directly, since `None` means "give the child the default" and
-    /// `Some(vec![])` means "give the child nothing". WSLc's default is the
-    /// container image's `ENV`, which MXC cannot enumerate, so it takes the
-    /// state from `env` and the entries from here.
+    /// against — every backend below schema 0.9. A backend with a default block
+    /// must match on [`ExecutionRequest::env`] directly, since `None` means
+    /// "give the child the default" and `Some(vec![])` means "give the child
+    /// nothing". A backend whose default MXC cannot enumerate takes the state
+    /// from `env` and the entries from here: WSLc, whose default is the
+    /// container image's `ENV`, and IsolationSession, which starts every
+    /// process from the agent user's default environment.
     pub fn env_entries(&self) -> &[String] {
         self.env.as_deref().unwrap_or(&[])
     }

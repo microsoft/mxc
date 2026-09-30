@@ -123,6 +123,7 @@ invocations, without changing the manager's interface. See
         "commandLine": "echo hello & whoami",
         "cwd": "C:\\Windows",
         "env": ["MYVAR=hello"],
+        "inheritDefaultEnv": true,
         "timeout": 30000
     },
     "network": {
@@ -209,7 +210,8 @@ versions and stating that the bindings must be regenerated.
 - `process.commandLine` (the script command, wrapped via `cmd.exe /c "..."`
   — the same pattern the LXC runner uses with `/bin/sh -c`).
 - `process.cwd` (working directory inside the session).
-- `process.env` (environment variables forwarded via the OS-side
+- `process.env` with `process.inheritDefaultEnv: true` (the entries are layered
+  over the agent user's default environment through the OS-side
   `IsoSessionProcessOptions`).
 - `process.timeout` (forwarded to the OS-side per-process timeout
   enforcement).
@@ -226,6 +228,9 @@ versions and stating that the bindings must be regenerated.
   `preservePolicy: true` is refused as meaningless here.
 - `ui` (any value). The backend has no UI-restriction primitive — see the
   cross-cutting policy honor matrix below.
+- `process.env` without `process.inheritDefaultEnv: true`, including `[]`.
+  Every process starts from the agent user's default environment, which the
+  backend cannot replace or empty.
 
 ## Cross-cutting policy honor matrix (one-shot)
 
@@ -236,7 +241,8 @@ the rationale for each disposition, and the error mapping live in
 | Field | one-shot disposition |
 |---|---|
 | `process.commandLine` | **honored** (required) |
-| `process.cwd` / `process.env` / `process.timeout` | **honored** |
+| `process.cwd` / `process.timeout` | **honored** |
+| `process.env` | **honored** with `process.inheritDefaultEnv: true`; rejected without it, including `[]` |
 | `filesystem.{readwritePaths,readonlyPaths,deniedPaths}` | rejected — no host-folder-sharing primitive |
 | `network` — directional all-allow (`egress.default`, `ingress.default`, and `ingress.hostLoopback` all `allow`, no rules) | **required** |
 | `network` — legacy fields, absent, empty, restrictive, mixed, rule-bearing, or proxy-bearing | rejected |
@@ -285,7 +291,7 @@ The full field-by-field table is in
 | Category | Location | What it verifies |
 |---|---|---|
 | Config parsing | `config_parser.rs` | Directional network shape, closure, legacy-field removal, and phase-specific field rejection |
-| Policy validation | `policy.rs` | Filesystem/UI rejection; directional unrestricted form; empty/restrictive/mixed policy rejection; unchanged post-provision rules |
+| Policy validation | `policy.rs` | Filesystem/UI rejection; directional unrestricted form; empty/restrictive/mixed policy rejection; unchanged post-provision rules; `process.env` without `inheritDefaultEnv` rejection |
 | Option building | `process_options.rs` | `ExecutionRequest` → `ProcessOptions` mapping (timeout, cwd, env vars, redirect flags) |
 | Feature unavailable | `manager.rs` | Runner returns a clean error on machines without the IsolationSession feature enabled, so the test passes everywhere |
 

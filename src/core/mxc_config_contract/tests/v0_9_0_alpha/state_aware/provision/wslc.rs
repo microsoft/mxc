@@ -69,7 +69,7 @@ fn rejects_wrong_version_phase_or_containment() {
     for json in [
         r#"{"phase":"provision","containment":"wslc"}"#,
         r#"{"version":"0.9.0-alpha","containment":"wslc"}"#,
-        r#"{"version":"0.10.0-alpha","phase":"provision","containment":"wslc"}"#,
+        r#"{"version":"1.1.0-alpha","phase":"provision","containment":"wslc"}"#,
         r#"{"version":"0.9.0-alpha","phase":"start","containment":"wslc"}"#,
         r#"{"version":"0.9.0-alpha","phase":"provision","containment":"windows_sandbox"}"#,
         r#"{"version":"0.9.0-alpha","phase":"provision","containment":"microvm"}"#,
