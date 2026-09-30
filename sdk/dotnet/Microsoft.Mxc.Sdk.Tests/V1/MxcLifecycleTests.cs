@@ -242,7 +242,7 @@ public class MxcLifecycleTests
     public void StopContainer_MalformedIdWithVersionOverride_ThrowsMalformedId()
     {
         var id = new ContainerId("no-prefix");
-        var options = new StopOptions { Version = "0.8.0-alpha" };
+        var options = new StopOptions { Version = "0.9.0-alpha" };
 
         var ex = Assert.Throws<MxcException>(
             () => MxcLifecycle.StopContainer(id, options));

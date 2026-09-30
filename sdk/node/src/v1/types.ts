@@ -116,9 +116,9 @@ export const UnsupportedV1NetworkFields = [
 ] as const;
 
 const LegacyConfigAliasVersions: Readonly<Record<string, readonly string[]>> = {
-  appcontainer: ['0.6.0-alpha', '0.7.0-alpha', '0.8.0-alpha', '0.9.0-alpha'],
-  appContainer: ['0.6.0-alpha', '0.7.0-alpha', '0.8.0-alpha', '0.9.0-alpha'],
-  macos_sandbox: ['0.7.0-alpha', '0.8.0-alpha', '0.9.0-alpha'],
+  appcontainer: ['0.9.0-alpha'],
+  appContainer: ['0.9.0-alpha'],
+  macos_sandbox: ['0.9.0-alpha'],
 };
 
 /**
@@ -252,8 +252,8 @@ export interface FilesystemConfig {
 }
 
 /**
- * Network access configuration across published versions. The legacy fields
- * are valid only through 0.8; 0.9 accepts DirectionalNetworkConfig exclusively.
+ * Network access configuration across published versions. Legacy fields remain
+ * for TypeScript compatibility; supported contracts accept directional fields only.
  */
 export interface NetworkConfig extends DirectionalNetworkConfig {
   /**
@@ -818,7 +818,7 @@ export interface ProbeFacts {
 /**
  * Host support for enforcing Bubblewrap proxy-only egress.
  *
- * Schema `0.8.0-alpha`+ proxy policies run the sandbox in a private network
+ * Schema `0.9.0-alpha`+ proxy policies run the sandbox in a private network
  * namespace and default-drop everything except the proxy endpoint. That
  * requires host tooling (slirp4netns, util-linux unshare, nsenter, the
  * iptables family) plus unprivileged user and network namespaces the kernel

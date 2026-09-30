@@ -268,8 +268,8 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
         : ['microvm', 'vm', 'hyperlight', 'windows_sandbox'].includes(containment)
         ? '1.1.0-alpha'
         : ['seatbelt', 'macos_sandbox'].includes(containment)
-          ? '0.7.0-alpha'
-          : '0.6.0-alpha';
+          ? '0.9.0-alpha'
+          : '0.9.0-alpha';
     return {
       version,
       containment: containment as ContainerConfig['containment'],
@@ -498,7 +498,7 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
   describe('builtinTestServer testing-features gate', () => {
     it('forwards --allow-testing-features when the caller opts in via allowTestingFeatures', () => {
       const config: ContainerConfig = {
-        version: '0.6.0-alpha',
+        version: '0.9.0-alpha',
         containment: 'process',
         process: { commandLine: 'echo hi' },
         network: { proxy: { builtinTestServer: true } },
@@ -516,7 +516,7 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
 
     it('throws when builtinTestServer is used without allowTestingFeatures', () => {
       const config: ContainerConfig = {
-        version: '0.6.0-alpha',
+        version: '0.9.0-alpha',
         containment: 'process',
         process: { commandLine: 'echo hi' },
         network: { proxy: { builtinTestServer: true } },
@@ -533,7 +533,7 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
 
     it('does not forward --allow-testing-features for a non-test proxy', () => {
       const config: ContainerConfig = {
-        version: '0.6.0-alpha',
+        version: '0.9.0-alpha',
         containment: 'process',
         process: { commandLine: 'echo hi' },
         network: { proxy: { url: 'http://localhost:8080' } },
