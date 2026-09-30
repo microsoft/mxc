@@ -769,7 +769,9 @@ A build of this project puts the freshly built native unit next to the managed
 assembly. `dotnet pack` includes that exact unit under
 `runtimes/<rid>/native/`. Local `build.bat` packages contain only their selected
 Windows RID. The official package includes `mxc_ffi` for `win-x64`,
-`win-arm64`, `linux-x64`, `linux-arm64`, and `osx-arm64`.
+`win-arm64`, `linux-x64`, `linux-arm64`, and `osx-arm64`. The managed
+`Microsoft.Mxc.Sdk.dll` is AnyCPU so the same assembly loads with each
+RID-specific native asset.
 
 ## Supported surface
 
