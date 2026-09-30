@@ -273,12 +273,14 @@ const managedRequest = read(
   "sdk",
   "dotnet",
   "Microsoft.Mxc.Sdk",
+  "V1",
   "SandboxRequest.cs"
 );
 const managedPolicy = read(
   "sdk",
   "dotnet",
   "Microsoft.Mxc.Sdk",
+  "V1",
   "SandboxPolicy.cs"
 );
 const rustOneShot = enumVariants(rustPolicy, "Containment", "rust");
@@ -408,7 +410,7 @@ const managedSandbox = read(
   "sdk",
   "dotnet",
   "Microsoft.Mxc.Sdk",
-  "MxcSandbox.cs"
+  "MxcPlatform.cs"
 );
 
 const discoveredRustBackends = [
@@ -504,6 +506,7 @@ if (rustBackends.length === 0) {
     "sdk",
     "dotnet",
     "Microsoft.Mxc.Sdk",
+    "V1",
     "StateAwareTypes.cs"
   );
   compare(
@@ -524,6 +527,7 @@ const managedLifecycle = read(
   "sdk",
   "dotnet",
   "Microsoft.Mxc.Sdk",
+  "V1",
   "MxcLifecycle.cs"
 );
 const rustPrefixBody = namedBody(rustDispatch, "fn", "backend_from_prefix");

@@ -3,7 +3,7 @@
 
 using System.Text.Json.Serialization;
 
-namespace Microsoft.Mxc.Sdk;
+namespace Microsoft.Mxc.Sdk.V1;
 
 /// <summary>
 /// A cross-platform sandbox policy — describes <em>what</em> to restrict.

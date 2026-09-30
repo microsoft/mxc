@@ -36,6 +36,23 @@ version:
 }
 ```
 
+### SDK major-version namespaces
+
+Contract-mapped SDK types live in a namespace for their schema-contract major:
+`Microsoft.Mxc.Sdk.V1`, `mxc_sdk::v1`, and `@microsoft/mxc-sdk/v1`.
+The V1 namespace contains `SandboxPolicy`, its policy sections, containment
+selection and backend settings, policy-to-request builders, and typed
+state-aware lifecycle request/result/option types and entry points. These APIs
+evolve additively as published 1.x contracts grow; the SDK owns the exact
+contract target (currently `1.0.0`) and callers do not supply a schema version.
+A future breaking schema line adds a side-by-side V2 namespace rather than
+replacing V1.
+
+Version-independent APIs stay at the package root: errors and error codes,
+running-sandbox handles and output/wait types, platform/backend discovery,
+telemetry consent, schema-version constants, raw exact-JSON APIs that take
+caller-declared versions, and executor-backed raw config APIs.
+
 ### Versioning follows Semver
 
 Per [semver.org](https://semver.org/):
@@ -297,7 +314,8 @@ regardless of the flag; parsing is flag-independent. The `--experimental` flag o
   parsed features that still require authorization — no error, those features
   are just not applied
 
-**2. SDK (`@microsoft/mxc-sdk`):**
+**2. SDK:** policy APIs come from `@microsoft/mxc-sdk/v1`; raw config
+spawning comes from `@microsoft/mxc-sdk`.
 ```typescript
 // With policy:
 const pty = spawnSandbox("python app.py", policy, {

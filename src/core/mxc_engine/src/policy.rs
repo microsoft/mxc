@@ -776,9 +776,8 @@ impl SandboxRequest {
 /// complete and needs no post-build patching before streaming it via
 /// [`crate::spawn`]. An empty script is rejected.
 ///
-/// Maps the high-level v1 policy, which has no schema-version field, into the
-/// SDK-owned v1 contract, then adapts that contract through the shared
-/// semantic validation path.
+/// Maps the V1 high-level policy into the SDK-owned v1 contract,
+/// then adapts that contract through the shared semantic validation path.
 ///
 /// Targets the host's native process containment; use
 /// [`build_request_with_containment`] to select a specific backend.
@@ -848,7 +847,7 @@ mod tests {
     #[test]
     fn sandbox_policy_rejects_removed_version_field() {
         let error = serde_json::from_str::<SandboxPolicy>(r#"{ "version": "0.7.0-alpha" }"#)
-            .expect_err("the v1 policy must reject legacy version input");
+            .expect_err("the V1 policy must reject legacy version input");
 
         assert!(error.to_string().contains("unknown field `version`"));
     }

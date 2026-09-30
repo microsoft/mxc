@@ -495,7 +495,7 @@ fail with `Operation not permitted`. Grant the working directory in
 ### SDK
 
 ```typescript
-import { spawnSandbox, SandboxPolicy } from '@microsoft/mxc-sdk';
+import { spawnSandbox, SandboxPolicy } from '@microsoft/mxc-sdk/v1';
 
 const policy: SandboxPolicy = {
     filesystem: {

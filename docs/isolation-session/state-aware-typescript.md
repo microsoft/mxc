@@ -31,9 +31,10 @@ The SDK exposes only the fields the IsolationSession runtime currently honors at
 phase. See the [Rust spec](state-aware-rust.md) for the full Rust-side
 contract (including fields not yet exposed via the SDK).
 
-Like the other high-level v1 APIs, these typed lifecycle APIs do not take a
-schema version. The Node SDK owns and emits exact stable contract `1.0.0`;
-caller-selected versions are reserved for raw exact APIs.
+Like the other high-level v1 APIs, these typed lifecycle APIs are V1
+contract-mapped. The Node SDK owns and emits exact stable contract `1.0.0`;
+callers do not supply a schema version. Caller-selected versions are reserved
+for raw exact APIs.
 
 | Phase | Config | Metadata |
 |---|---|---|
@@ -94,7 +95,7 @@ import {
   execInSandboxAsync,
   stopSandbox,
   deprovisionSandbox,
-} from '@microsoft/mxc-sdk';
+} from '@microsoft/mxc-sdk/v1';
 
 const { sandboxId } = await provisionSandbox(
   'isolation_session',

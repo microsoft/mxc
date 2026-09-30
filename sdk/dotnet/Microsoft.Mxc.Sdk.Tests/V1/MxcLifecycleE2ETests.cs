@@ -3,9 +3,11 @@
 
 using System.Text.Json;
 using Microsoft.Mxc.Sdk;
+using Microsoft.Mxc.Sdk.V1;
+using Microsoft.Mxc.Sdk.Tests;
 using Xunit;
 
-namespace Microsoft.Mxc.Sdk.Tests;
+namespace Microsoft.Mxc.Sdk.Tests.V1;
 
 /// <summary>
 /// Drives the state-aware lifecycle against a live IsolationSession host, which

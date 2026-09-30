@@ -5,10 +5,11 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using Microsoft.Mxc.Sdk;
 using Microsoft.Mxc.Sdk.Native;
 using NativeSandbox = Microsoft.Mxc.Sdk.Native.MxcSandbox;
 
-namespace Microsoft.Mxc.Sdk;
+namespace Microsoft.Mxc.Sdk.V1;
 
 /// <summary>
 /// Drives an IsolationSession or WSLC sandbox through provision, start, exec,

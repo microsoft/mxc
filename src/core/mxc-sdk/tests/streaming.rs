@@ -5,27 +5,27 @@
 //! Seatbelt-specific cases run only on macOS.
 //!
 //! These drive the real consumer path: build a [`SandboxRequest`] from a
-//! [`SandboxPolicy`] via `build_request`, fill in the command, then
-//! `spawn_sandbox`.
+//! [`mxc_sdk::v1::SandboxPolicy`] via `mxc_sdk::v1::build_request`, fill in
+//! the command, then `mxc_sdk::v1::spawn_sandbox`.
 
 #![cfg(target_os = "macos")]
 
-use mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy, SandboxRequest, WaitOutcome};
+use mxc_sdk::v1::{build_request, spawn_sandbox, SandboxPolicy, SandboxRequest};
+use mxc_sdk::WaitOutcome;
 
 /// A Seatbelt streaming request (`/tmp` read-write) with the given command and
 /// timeout (ms; `0` == run until exit, required for interactive/long cases).
 #[cfg(target_os = "macos")]
 fn seatbelt_request(command: &str, timeout_ms: u32) -> SandboxRequest {
     let mut policy = SandboxPolicy::default();
-    policy.filesystem = Some(mxc_sdk::policy::FilesystemSection {
+    policy.filesystem = Some(mxc_sdk::v1::policy::FilesystemSection {
         readwrite_paths: vec!["/tmp".to_string()],
         readonly_paths: vec![],
         denied_paths: vec![],
         clear_policy_on_exit: None,
     });
     policy.timeout_ms = (timeout_ms != 0).then_some(timeout_ms);
-    let request = build_request(&policy, command, None).expect("build_request should succeed");
-    request
+    build_request(&policy, command, None).expect("build_request should succeed")
 }
 
 #[cfg(target_os = "macos")]

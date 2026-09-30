@@ -252,13 +252,14 @@ One-shot calls carry `containerId` (when present); they do not carry `sandboxId`
 
 ## 6. TypeScript SDK
 
-The SDK adds five new functions, exported from `@microsoft/mxc-sdk` alongside the existing
-one-shot entry points. Each function corresponds to a lifecycle phase from §4. The
+The SDK adds five new functions, exported from `@microsoft/mxc-sdk/v1`
+alongside the existing v1 one-shot entry points. Each function corresponds to a
+lifecycle phase from §4. The
 state-aware surface does not use `SandboxPolicy` — its cross-cutting fields live
 directly on the per-(backend, phase) Configs introduced below.
 
-The Rust, .NET, and Node high-level v1 lifecycle APIs do not take a
-caller-supplied schema version; they target exact stable `1.0.0`. Their typed backend sets include IsolationSession
+The Rust, .NET, and Node high-level V1 lifecycle APIs are contract-mapped and
+target exact stable `1.0.0`. Their typed backend sets include IsolationSession
 and WSLC. Windows Sandbox lifecycle remains available only through raw exact
 `1.1.0-alpha` configuration and FFI paths.
 
@@ -487,7 +488,7 @@ import {
   stopSandbox,
   deprovisionSandbox,
   IsolationSessionProvisionConfig,
-} from '@microsoft/mxc-sdk';
+} from '@microsoft/mxc-sdk/v1';
 
 const provisionConfig: IsolationSessionProvisionConfig = {
   // IsolationSession cannot filter or deny the container network, so provision
@@ -1862,8 +1863,8 @@ Validation runs before the phase method; failures short-circuit and surface as t
 ### 11.3 Define typed `*Config` interfaces in the SDK
 
 For each of the five lifecycle phases, add a typed TypeScript interface to
-`@microsoft/mxc-sdk`. Each Config carries only the fields valid for that backend at
-that phase: the cross-cutting `filesystem` / `network` / `ui`
+`@microsoft/mxc-sdk/v1`. Each Config carries only the fields valid for that
+backend at that phase: the cross-cutting `filesystem` / `network` / `ui`
 fields in the phases where the backend honors them (§10.3), and any backend-specific
 fields. Phases with no backend-specific or cross-cutting fields declare a Config
 carrying only optional telemetry. Example shape (mirroring §6.1):

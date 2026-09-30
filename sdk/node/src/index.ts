@@ -12,24 +12,27 @@
  * On Linux, `getPlatformSupport()` reports failures for individual backends
  * through `PlatformSupport.unavailableReasons`, including when none is usable.
  *
- * The v1 policy API uses directional `network.egress` /
- * `network.ingress`; explicit legacy network inputs produce migration errors.
- * Raw exact-version configuration remains available through
- * `spawnSandboxFromConfig`.
+ * V1 policy APIs live in `@microsoft/mxc-sdk/v1` and use directional
+ * `network.egress` / `network.ingress`; explicit legacy network inputs produce
+ * migration errors. Raw exact-version configuration remains available through
+ * this root entrypoint's `spawnSandboxFromConfig`.
  * WSLC state-aware exec uses top-level `runtimeConfig.networkProxy` without
  * restating network posture. IsolationSession provision requires
  * directional egress, ingress, and host-loopback defaults set to `allow`.
  *
  * @example
  * ```typescript
- * import { spawnSandbox, spawnSandboxWithPty, SandboxPolicy, getPlatformSupport } from '@microsoft/mxc-sdk';
+ * import { getPlatformSupport, spawnSandboxFromConfig } from '@microsoft/mxc-sdk';
+ * import { createConfigFromPolicy, SandboxPolicy } from '@microsoft/mxc-sdk/v1';
  *
  * if (getPlatformSupport().isSupported) {
  *   const policy: SandboxPolicy = {
  *     network: { egress: { default: 'allow' } },
  *   };
  *
- *   const ptyProcess = spawnSandboxWithPty('python -c "print(\'Hello from sandbox\')"', policy);
+ *   const config = createConfigFromPolicy(policy);
+ *   config.process!.commandLine = 'python -c "print(\'Hello from sandbox\')"';
+ *   const ptyProcess = spawnSandboxFromConfig(config);
  *   ptyProcess.onData((data) => console.log(data));
  *   ptyProcess.onExit((event) => console.log('Exit code:', event.exitCode));
  * }
@@ -40,16 +43,18 @@
 
 // Export types
 export {
-  SandboxPolicy,
   SandboxingMethod,
   IsolationTier,
   ContainmentType,
   ContainmentTypes,
   ContainmentBackend,
-  SandboxContainment,
   ExperimentalBackends,
   ContainerConfig,
+  ProcessConfig,
+  LifecycleConfig,
   ProcessContainerConfig,
+  FilesystemConfig,
+  NetworkConfig,
   NetworkAction,
   NetworkProtocol,
   NetworkPeerConfig,
@@ -59,6 +64,10 @@ export {
   NetworkIngressConfig,
   DirectionalNetworkConfig,
   RuntimeConfig,
+  WslcConfig,
+  HyperlightConfig,
+  LxcConfig,
+  SeatbeltConfig,
   PlatformSupport,
   UiCapabilitySupport,
   ProbeOutput,
@@ -77,22 +86,9 @@ export {
 
 // Export sandbox spawning functions
 export {
-  createConfigFromPolicy,
-  spawnSandbox,
-  spawnSandboxAsync,
   spawnSandboxFromConfig,
-  buildSandboxPayload,
   SandboxSpawnOptions,
 } from './sandbox.js';
-
-// Export policy discovery functions
-export {
-  getAvailableToolsPolicy,
-  getUserProfilePolicy,
-  getTemporaryFilesPolicy,
-  FilesystemPolicyResult,
-  ToolsPolicyOptions,
-} from './policy.js';
 
 // Export typed wire-format errors.
 //
@@ -108,53 +104,6 @@ export {
   MxcErrorFields,
   mxcErrorFromCode,
 } from './errors.js';
-
-// Export state-aware lifecycle types
-export {
-  Phase,
-  STATE_AWARE_VERSION,
-  StateAwareContainmentBackend,
-  SandboxId,
-  IsolationSessionNetworkConfig,
-  IsolationSessionProvisionConfig,
-  IsolationSessionStartConfig,
-  IsolationSessionExecConfig,
-  IsolationSessionStopConfig,
-  IsolationSessionDeprovisionConfig,
-  IsolationSessionProvisionMetadata,
-  WslcProvisionConfig,
-  WslcStartConfig,
-  WslcExecConfig,
-  WslcStopConfig,
-  WslcDeprovisionConfig,
-  ConfigsForBackend,
-  ProvisionConfigFor,
-  StartConfigFor,
-  ExecConfigFor,
-  StopConfigFor,
-  DeprovisionConfigFor,
-  StateAwareMetadata,
-  ProvisionMetadataFor,
-  StartMetadataFor,
-  StopMetadataFor,
-  DeprovisionMetadataFor,
-  ProvisionResult,
-  StartResult,
-  StopResult,
-  DeprovisionResult,
-  ExecResult,
-} from './state-aware-types.js';
-
-// Export state-aware lifecycle functions
-export {
-  type StateAwareStreamingOptions,
-  provisionSandbox,
-  startSandbox,
-  execInSandbox,
-  execInSandboxAsync,
-  stopSandbox,
-  deprovisionSandbox,
-} from './state-aware.js';
 
 export { MxcSandboxProcess } from './sandbox-process.js';
 

@@ -3,24 +3,24 @@
 
 //! `mxc-sdk` — an importable library for starting MXC sandboxes in-process.
 //!
-//! Build a [`SandboxRequest`] from a [`SandboxPolicy`] with [`build_request`],
-//! then either:
+//! Build a [`v1::SandboxRequest`] from a [`v1::SandboxPolicy`] with
+//! [`v1::build_request`], then either:
 //!
-//! - hand it to [`run`] to run the sandboxed process **to completion** and get
+//! - hand it to [`v1::run`] to run the sandboxed process **to completion** and get
 //!   its captured stdout/stderr and exit outcome in one call, or
-//! - hand it to [`spawn_sandbox`] for a live [`Sandbox`] handle you can stream
-//!   stdio through, feed stdin, and kill while it runs.
+//! - hand it to [`v1::spawn_sandbox`] for a live [`Sandbox`] handle you can
+//!   stream stdio through, feed stdin, and kill while it runs.
 //!
 //! Either way the right containment backend is selected for the host and the
 //! process runs **without ever allocating a pty**.
 //!
 //! ```no_run
-//! use mxc_sdk::{build_request, run, SandboxPolicy, WaitOutcome};
+//! use mxc_sdk::{v1, WaitOutcome};
 //!
 //! // Turn a policy into a request, fill in the command, and run it.
-//! let policy = SandboxPolicy::default();
-//! let request = build_request(&policy, "echo hi", None)?;
-//! let output = run(request)?;
+//! let policy = v1::SandboxPolicy::default();
+//! let request = v1::build_request(&policy, "echo hi", None)?;
+//! let output = v1::run(request)?;
 //! match output.outcome {
 //!     WaitOutcome::Exited(code) => println!("exit={code}"),
 //!     WaitOutcome::TimedOut => println!("timed out"),
@@ -32,22 +32,23 @@
 //! ## Backend support
 //!
 //! The selected backend is driven by the `containment` field in the request:
-//! [`build_request`] resolves the host's native one, and
-//! [`build_request_with_containment`] takes an explicit [`Containment`].
+//! [`v1::build_request`] resolves the host's native one, and
+//! [`v1::build_request_with_containment`] takes an explicit
+//! [`v1::Containment`].
 //!
 //! | Backend | Host | Selected by |
 //! |---------|------|-------------|
-//! | Bubblewrap | Linux | [`Containment::Process`] or [`Containment::Bubblewrap`] |
-//! | LXC | Linux | [`Containment::Lxc`] |
-//! | Seatbelt | macOS | [`Containment::Process`] or [`Containment::Seatbelt`] |
-//! | ProcessContainer (AppContainer / BaseContainer) | Windows | [`Containment::Process`] |
-//! | Explicit ProcessContainer configuration | Windows | [`Containment::ProcessContainer`] |
-//! | WSLC (WSL Container) | Windows | [`Containment::Wslc`] |
-//! | IsolationSession | Windows | [`Containment::IsolationSession`] |
+//! | Bubblewrap | Linux | [`v1::Containment::Process`] or [`v1::Containment::Bubblewrap`] |
+//! | LXC | Linux | [`v1::Containment::Lxc`] |
+//! | Seatbelt | macOS | [`v1::Containment::Process`] or [`v1::Containment::Seatbelt`] |
+//! | ProcessContainer (AppContainer / BaseContainer) | Windows | [`v1::Containment::Process`] |
+//! | Explicit ProcessContainer configuration | Windows | [`v1::Containment::ProcessContainer`] |
+//! | WSLC (WSL Container) | Windows | [`v1::Containment::Wslc`] |
+//! | IsolationSession | Windows | [`v1::Containment::IsolationSession`] |
 //!
-//! LXC is reachable only by naming it: [`Containment::Process`] resolves to
+//! LXC is reachable only by naming it: [`v1::Containment::Process`] resolves to
 //! Bubblewrap on Linux. It needs root, and it streams over pipes, so the
-//! workload sees no TTY — unlike the `lxc-exec` binary, which allocates a pty.
+//! workload sees no TTY, unlike the `lxc-exec` binary, which allocates a pty.
 //!
 //! WSLC requires the crate's `wslc` build feature, and IsolationSession
 //! requires the `isolation_session` build feature. WSLC's container has no
@@ -88,15 +89,13 @@
 //! `Display` renders both, so logging the error alone does not lose them.
 //!
 //! ```no_run
-//! use mxc_sdk::{
-//!     build_request_with_containment, run, Containment, SandboxPolicy, WslcSection,
-//! };
+//! use mxc_sdk::v1;
 //!
-//! # let policy = SandboxPolicy::default();
+//! # let policy = v1::SandboxPolicy::default();
 //! // Run a command inside a WSL container (Windows, --features wslc).
-//! let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
-//! let request = build_request_with_containment(&policy, &Containment::Wslc(wslc), "python3 -c 'print(42)'", None)?;
-//! let output = run(request)?;
+//! let wslc = v1::WslcSection { image: "python:3.12".to_string(), ..Default::default() };
+//! let request = v1::build_request_with_containment(&policy, &v1::Containment::Wslc(wslc), "python3 -c 'print(42)'", None)?;
+//! let output = v1::run(request)?;
 //! # Ok::<(), mxc_sdk::Error>(())
 //! ```
 //!
@@ -104,22 +103,23 @@
 //!
 //! |             | one-shot          | typed state-aware | Stdio                             |
 //! |-------------|-------------------|-------------------|-----------------------------------|
-//! | **capture** | [`run`]           | `sandbox::exec(…)?.wait_with_output()` | captured |
-//! | **handle**  | [`spawn_sandbox`] | [`sandbox::exec`] | live pipes (stream, kill); no TTY |
-//! | **attach**  | *not available*   | [`sandbox::exec_attached`] | this process's stdio; TTY if present |
+//! | **capture** | [`v1::run`]           | `v1::container::exec(…)?.wait_with_output()` | captured |
+//! | **handle**  | [`v1::spawn_sandbox`] | [`v1::container::exec`] | live pipes (stream, kill); no TTY |
+//! | **attach**  | *not available*   | [`v1::container::exec_attached`] | this process's stdio; TTY if present |
 //!
-//! [`sandbox::provision`], [`sandbox::start`], [`sandbox::stop`], and
-//! [`sandbox::deprovision`] drive the lifecycle with typed Rust requests.
+//! [`v1::container::provision`], [`v1::container::start`],
+//! [`v1::container::stop`], and [`v1::container::deprovision`] drive the lifecycle
+//! with typed Rust requests.
 //! [`run_state_aware_json`], [`exec_sandbox_json`], and [`exec_attached_json`]
 //! are the separate raw exact-JSON lane. The crate README covers which backends
 //! implement the lifecycle and how each is compiled in.
 //!
 //! ## Pty allocation
 //!
-//! Every entry point except [`sandbox::exec_attached`] and [`exec_attached`]
+//! Every entry point except [`v1::container::exec_attached`] and [`exec_attached`]
 //! wires the child's stdio to
-//! ordinary pipes and allocates no pty. [`run`] captures both streams; with
-//! [`spawn_sandbox`] or [`sandbox::exec`], stream the handle's
+//! ordinary pipes and allocates no pty. [`v1::run`] captures both streams; with
+//! [`v1::spawn_sandbox`] or [`v1::container::exec`], stream the handle's
 //! `take_stdout`/`take_stderr`, or let [`wait`](Sandbox::wait) drain and
 //! discard any untaken stream. WSLC exposes no stdin because its SDK has no
 //! process-input API.
@@ -128,10 +128,12 @@
 //! forwards stdin, so interactive shells render and resize. A pseudo-console
 //! has one output stream, so the sandbox's stderr arrives merged into stdout.
 //!
-//! IsolationSession, WSLC, and Windows Sandbox serve attached exec through
-//! [`sandbox::exec_attached`] and [`exec_attached`]. IsolationSession additionally
-//! forwards stdin through a pseudo-console; Windows Sandbox drops terminal
-//! input pending PTY support, and WSLC has no process-input API.
+//! IsolationSession and WSLC serve typed attached exec through
+//! [`v1::container::exec_attached`]. Windows Sandbox is reachable only through
+//! the raw [`exec_attached_json`] path with an exact `1.1.0-alpha` request and
+//! the experimental opt-in. IsolationSession additionally forwards stdin
+//! through a pseudo-console; Windows Sandbox drops terminal input pending PTY
+//! support, and WSLC has no process-input API.
 //!
 //! Policy and operational warnings are available through [`Sandbox::warnings`]
 //! and [`Output::warnings`]. Attached exec has no returned handle, so it
@@ -146,63 +148,105 @@
 //! `mxc-sdk` re-exports the curated surface and wraps the engine's streaming
 //! handle in [`Sandbox`].
 
-pub mod sandbox;
+mod sandbox;
 
 pub mod telemetry;
 
-pub use mxc_engine::configs;
-pub use mxc_engine::policy;
 pub use mxc_engine::{
-    available_backends, available_tools_policy, build_request, build_request_with_containment,
-    platform_support, temporary_files_policy, user_profile_policy, AvailableBackend,
-    BackendCapability, BubblewrapNetworkSupport, Containment, Error, ErrorCode, ExecRequest,
-    FilesystemPolicyResult, IsolationSessionProvisionMetadata, LifecycleResult, NetworkAction,
-    NetworkEgressSection, NetworkIngressSection, NetworkPeerSection, NetworkPortSection,
-    NetworkProtocol, NetworkRuleSection, OperationOptions, PlatformSupport, ProvisionMetadata,
-    ProvisionRequest, ProvisionResult, ProxyEnforcement, RuntimeConfigSection, SandboxId,
-    SandboxPolicy, SandboxRequest, StateAwareExecBackendOptions, StateAwareProvision,
-    ValidationResult, WslcSection,
+    available_backends, platform_support, AvailableBackend, BackendCapability,
+    BubblewrapNetworkSupport, Error, ErrorCode, PlatformSupport, ProxyEnforcement,
 };
 #[cfg(target_os = "windows")]
-pub use mxc_engine::{probe, ProbeFacts, ProbeOutput, UiCapabilitySupport};
+pub use mxc_engine::{ProbeFacts, ProbeOutput, UiCapabilitySupport};
 
 pub use sandbox::{
     CaptureDenialsErrorOutput, CaptureDenialsOutput, Output, Sandbox, SandboxOutputMetadata,
     StreamCloser, WaitOutcome,
 };
 
-/// Spawn a sandbox from a [`SandboxRequest`] built by [`build_request`] (with
-/// the command, and any working directory / env, filled in).
+/// V1 contract-mapped policy, request, and typed lifecycle APIs.
 ///
-/// Returns a [`Sandbox`] handle for live bidirectional stdio and termination;
-/// no pty is allocated. Any stdout/stderr stream the caller does not `take_*` is
-/// drained and discarded by [`wait`](Sandbox::wait).
-pub fn spawn_sandbox(request: SandboxRequest) -> Result<Sandbox, Error> {
-    mxc_engine::spawn(&request).map(Sandbox::new)
-}
+/// These types and entry points target the latest published v1 exact contract
+/// owned by this SDK. Callers do not supply a schema version on this path; use
+/// the root raw exact-JSON functions when a request must declare its own
+/// contract version.
+///
+/// The legacy root probe and lifecycle module paths are not exported:
+///
+/// ```compile_fail
+/// use mxc_sdk::probe;
+/// ```
+///
+/// ```compile_fail
+/// use mxc_sdk::v1::sandbox;
+/// ```
+pub mod v1 {
+    #[cfg(target_os = "windows")]
+    pub use mxc_engine::probe;
 
-/// Run a sandbox from a [`SandboxRequest`] **to completion**, capturing its
-/// output.
-///
-/// A convenience over [`spawn_sandbox`] + [`Sandbox::wait_with_output`]: it
-/// spawns the sandboxed process, waits for it to exit (honouring the request's
-/// `scriptTimeout`), and returns the captured stdout/stderr plus the
-/// [`WaitOutcome`]. Both streams are drained concurrently, so an output-heavy
-/// child can't deadlock. No pty is allocated.
-///
-/// Use [`spawn_sandbox`] instead when you need to stream stdio live, feed
-/// stdin, or kill the process while it runs.
-///
-/// `Err` is returned when the backend can't be selected/spawned (an
-/// [`Error`]), or when waiting on the child fails at the OS level.
-pub fn run(request: SandboxRequest) -> Result<Output, Error> {
-    let sandbox = spawn_sandbox(request)?;
-    sandbox.wait_with_output().map_err(|e| {
-        Error::new(
-            ErrorCode::BackendError,
-            format!("waiting for the sandbox to complete failed: {e}"),
-        )
-    })
+    /// Backend-specific V1 configuration sections.
+    pub mod configs {
+        pub use mxc_engine::configs::*;
+    }
+
+    /// V1 high-level policy sections.
+    pub mod policy {
+        pub use mxc_engine::policy::*;
+    }
+
+    /// V1 typed state-aware lifecycle entry points.
+    pub mod container {
+        pub use crate::sandbox::{
+            deprovision, exec, exec_attached, provision, start, stop, validate_deprovision,
+            validate_exec, validate_provision, validate_start, validate_stop,
+        };
+    }
+
+    pub use mxc_engine::{
+        available_tools_policy, build_request, build_request_with_containment,
+        temporary_files_policy, user_profile_policy, Containment, ExecRequest,
+        FilesystemPolicyResult, IsolationSessionProvisionMetadata, LifecycleResult, NetworkAction,
+        NetworkEgressSection, NetworkIngressSection, NetworkPeerSection, NetworkPortSection,
+        NetworkProtocol, NetworkRuleSection, OperationOptions, ProvisionMetadata, ProvisionRequest,
+        ProvisionResult, RuntimeConfigSection, SandboxId, SandboxPolicy, SandboxRequest,
+        StateAwareExecBackendOptions, StateAwareProvision, ValidationResult, WslcSection,
+    };
+
+    use crate::{Error, ErrorCode, Output, Sandbox};
+
+    /// Spawn a sandbox from a [`SandboxRequest`] built by [`build_request`] (with
+    /// the command, and any working directory / env, filled in).
+    ///
+    /// Returns a [`Sandbox`] handle for live bidirectional stdio and termination;
+    /// no pty is allocated. Any stdout/stderr stream the caller does not
+    /// `take_*` is drained and discarded by [`wait`](Sandbox::wait).
+    pub fn spawn_sandbox(request: SandboxRequest) -> Result<Sandbox, Error> {
+        mxc_engine::spawn(&request).map(Sandbox::new)
+    }
+
+    /// Run a sandbox from a [`SandboxRequest`] **to completion**, capturing its
+    /// output.
+    ///
+    /// A convenience over [`spawn_sandbox`] + [`Sandbox::wait_with_output`]: it
+    /// spawns the sandboxed process, waits for it to exit (honouring the
+    /// request's `scriptTimeout`), and returns the captured stdout/stderr plus
+    /// the root [`crate::WaitOutcome`]. Both streams are drained concurrently,
+    /// so an output-heavy child can't deadlock. No pty is allocated.
+    ///
+    /// Use [`spawn_sandbox`] instead when you need to stream stdio live, feed
+    /// stdin, or kill the process while it runs.
+    ///
+    /// `Err` is returned when the backend can't be selected/spawned (an
+    /// [`Error`]), or when waiting on the child fails at the OS level.
+    pub fn run(request: SandboxRequest) -> Result<Output, Error> {
+        let sandbox = spawn_sandbox(request)?;
+        sandbox.wait_with_output().map_err(|e| {
+            Error::new(
+                ErrorCode::BackendError,
+                format!("waiting for the sandbox to complete failed: {e}"),
+            )
+        })
+    }
 }
 
 /// Run a **state-aware lifecycle** request (as a JSON string) and return the
@@ -233,8 +277,8 @@ pub fn run_state_aware_json(
 
 /// Run the `exec` phase of a state-aware request (as a JSON string) as a **live
 /// streaming** process, returning a [`Sandbox`] handle for output streaming,
-/// waiting, and termination — exactly like [`spawn_sandbox`]. Backends that
-/// expose process input also make [`Sandbox::take_stdin`] available.
+/// waiting, and termination — exactly like [`v1::spawn_sandbox`]. Backends
+/// that expose process input also make [`Sandbox::take_stdin`] available.
 ///
 /// The request JSON must be an `exec`-phase state-aware request (with a
 /// `sandboxId` identifying a started sandbox). No pty is allocated.

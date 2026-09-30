@@ -62,9 +62,10 @@ use std::panic::catch_unwind;
 use std::ptr;
 use std::sync::OnceLock;
 
-use mxc_sdk::{available_backends, platform_support, run, ErrorCode, SandboxRequest, WaitOutcome};
+use mxc_sdk::v1::{run, SandboxRequest};
+use mxc_sdk::{available_backends, platform_support, ErrorCode, WaitOutcome};
 #[cfg(target_os = "windows")]
-use mxc_sdk::{probe, Error, ProbeOutput};
+use mxc_sdk::{v1::probe, Error, ProbeOutput};
 
 mod error_detail;
 mod request;

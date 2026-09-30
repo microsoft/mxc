@@ -9,11 +9,12 @@ npm install @microsoft/mxc-sdk
 ```
 
 ```typescript
+import { spawnSandboxFromConfig, getPlatformSupport } from '@microsoft/mxc-sdk';
 import {
-  spawnSandboxFromConfig, createConfigFromPolicy,
-  getAvailableToolsPolicy, getTemporaryFilesPolicy,
-  getPlatformSupport,
-} from '@microsoft/mxc-sdk';
+  createConfigFromPolicy,
+  getAvailableToolsPolicy,
+  getTemporaryFilesPolicy,
+} from '@microsoft/mxc-sdk/v1';
 
 if (!getPlatformSupport().isSupported) {
   throw new Error('MXC not available on this host');
@@ -110,9 +111,9 @@ requirements determine how that proxy endpoint is made reachable.
 
 ```typescript
 import {
-  createConfigFromPolicy,
   spawnSandboxFromConfig,
 } from '@microsoft/mxc-sdk';
+import { createConfigFromPolicy } from '@microsoft/mxc-sdk/v1';
 
 const directConfig = createConfigFromPolicy({
   network: {
@@ -185,10 +186,12 @@ process:
 
 ```typescript
 import {
-  createConfigFromPolicy,
   probeSandboxSupport,
-  type SandboxPolicy,
 } from '@microsoft/mxc-sdk';
+import {
+  createConfigFromPolicy,
+  type SandboxPolicy,
+} from '@microsoft/mxc-sdk/v1';
 
 const policy: SandboxPolicy = {
   filesystem: {
@@ -221,9 +224,13 @@ The SDK provides three entry points. **Prefer the config-based path** (`createCo
 
 ```typescript
 import {
-  createConfigFromPolicy, spawnSandboxFromConfig,
-  getAvailableToolsPolicy, getTemporaryFilesPolicy,
+  spawnSandboxFromConfig,
 } from '@microsoft/mxc-sdk';
+import {
+  createConfigFromPolicy,
+  getAvailableToolsPolicy,
+  getTemporaryFilesPolicy,
+} from '@microsoft/mxc-sdk/v1';
 
 const tools = getAvailableToolsPolicy(process.env);
 const temp  = getTemporaryFilesPolicy();
@@ -262,8 +269,9 @@ Quick path for **process-isolation only** (`processcontainer` on Windows, `lxc` 
 ```typescript
 import {
   spawnSandbox,
-  getAvailableToolsPolicy, getTemporaryFilesPolicy,
-} from '@microsoft/mxc-sdk';
+  getAvailableToolsPolicy,
+  getTemporaryFilesPolicy,
+} from '@microsoft/mxc-sdk/v1';
 
 const tools = getAvailableToolsPolicy(process.env);
 const temp  = getTemporaryFilesPolicy();
@@ -300,8 +308,9 @@ policy contains ProcessContainer-specific settings. Requests execute through
 ```typescript
 import {
   spawnSandboxAsync,
-  getAvailableToolsPolicy, getTemporaryFilesPolicy,
-} from '@microsoft/mxc-sdk';
+  getAvailableToolsPolicy,
+  getTemporaryFilesPolicy,
+} from '@microsoft/mxc-sdk/v1';
 
 const tools = getAvailableToolsPolicy(process.env);
 const temp  = getTemporaryFilesPolicy();
@@ -369,9 +378,9 @@ exact `1.0.0`, and requires the standard directional all-allow network posture:
 
 ```typescript
 import {
-  createConfigFromPolicy,
   spawnSandboxFromConfig,
 } from '@microsoft/mxc-sdk';
+import { createConfigFromPolicy } from '@microsoft/mxc-sdk/v1';
 
 const config = createConfigFromPolicy({
   network: {
@@ -424,7 +433,7 @@ For long-lived sandboxes where you provision once, exec many times, and tear dow
 import {
   provisionSandbox, startSandbox, execInSandbox, execInSandboxAsync,
   stopSandbox, deprovisionSandbox,
-} from '@microsoft/mxc-sdk';
+} from '@microsoft/mxc-sdk/v1';
 
 // isolation_session provision requires its actual unrestricted network posture.
 const { sandboxId } = await provisionSandbox(
@@ -522,7 +531,7 @@ The SDK ships helpers that enumerate the host environment so your policy stays p
 ```typescript
 import {
   getAvailableToolsPolicy, getUserProfilePolicy, getTemporaryFilesPolicy,
-} from '@microsoft/mxc-sdk';
+} from '@microsoft/mxc-sdk/v1';
 
 const tools   = getAvailableToolsPolicy(process.env); // PATH, PYTHONPATH, JAVA_HOME, …
 const profile = getUserProfilePolicy();               // %LOCALAPPDATA%\Programs, ~/.local/*
@@ -550,7 +559,8 @@ Each helper returns `{ readonlyPaths, readwritePaths }` — merge what you want 
 The `policy.ui` block is enforced on all supported schema versions, and `policy.ui.allowWindows` defaults to `false`. Most non-interactive command-line tools work fine, but on Windows some shells make win32k system calls during startup and fail without UI access. **All versions of PowerShell are affected** — both Windows PowerShell 5.1 (`powershell.exe`) and PowerShell 7 (`pwsh.exe`). Set `ui.allowWindows: true` when launching a shell:
 
 ```typescript
-import { spawnSandboxFromConfig, createConfigFromPolicy } from '@microsoft/mxc-sdk';
+import { spawnSandboxFromConfig } from '@microsoft/mxc-sdk';
+import { createConfigFromPolicy } from '@microsoft/mxc-sdk/v1';
 
 const config = createConfigFromPolicy({
   ui: { allowWindows: true },     // ← required for powershell.exe to start

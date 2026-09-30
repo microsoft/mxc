@@ -18,6 +18,8 @@ import os from 'node:os';
 import { describe, it } from 'node:test';
 import {
   MxcError,
+} from '@microsoft/mxc-sdk';
+import {
   deprovisionSandbox,
   execInSandbox,
   execInSandboxAsync,
@@ -26,7 +28,7 @@ import {
   stopSandbox,
   type ExecResult,
   type SandboxId,
-} from '@microsoft/mxc-sdk';
+} from '@microsoft/mxc-sdk/v1';
 import { safeDeprovision } from './test-helpers.js';
 
 const wslcImage = process.env.MXC_WSLC_TEST_IMAGE ?? 'alpine:latest';

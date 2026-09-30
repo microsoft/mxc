@@ -4,6 +4,7 @@
 using System.Linq;
 using System.Reflection;
 using Microsoft.Mxc.Sdk;
+using Microsoft.Mxc.Sdk.V1;
 using Xunit;
 
 namespace Microsoft.Mxc.Sdk.Tests;

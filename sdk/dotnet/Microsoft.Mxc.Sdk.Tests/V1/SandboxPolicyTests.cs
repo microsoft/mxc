@@ -4,12 +4,48 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Mxc.Sdk;
+using Microsoft.Mxc.Sdk.V1;
 using Xunit;
 
-namespace Microsoft.Mxc.Sdk.Tests;
+namespace Microsoft.Mxc.Sdk.Tests.V1;
 
-public class V1SandboxPolicyTests
+public class SandboxPolicyTests
 {
+    [Theory]
+    [InlineData(typeof(SandboxPolicy), "Microsoft.Mxc.Sdk.V1")]
+    [InlineData(typeof(SandboxRequest), "Microsoft.Mxc.Sdk.V1")]
+    [InlineData(typeof(MxcSandbox), "Microsoft.Mxc.Sdk.V1")]
+    [InlineData(typeof(MxcLifecycle), "Microsoft.Mxc.Sdk.V1")]
+    [InlineData(typeof(SandboxId), "Microsoft.Mxc.Sdk.V1")]
+    [InlineData(typeof(MxcPlatform), "Microsoft.Mxc.Sdk")]
+    [InlineData(typeof(MxcSandboxProcess), "Microsoft.Mxc.Sdk")]
+    [InlineData(typeof(RunResult), "Microsoft.Mxc.Sdk")]
+    [InlineData(typeof(SandboxWaitResult), "Microsoft.Mxc.Sdk")]
+    [InlineData(typeof(ProbeOutput), "Microsoft.Mxc.Sdk")]
+    [InlineData(typeof(ProbeFacts), "Microsoft.Mxc.Sdk")]
+    [InlineData(typeof(UiCapabilitySupport), "Microsoft.Mxc.Sdk")]
+    [InlineData(typeof(MxcException), "Microsoft.Mxc.Sdk")]
+    [InlineData(typeof(ErrorCode), "Microsoft.Mxc.Sdk")]
+    public void PublicTypes_KeepAuthoringInV1AndRuntimeTypesAtRoot(
+        Type type,
+        string expectedNamespace)
+    {
+        Assert.Equal(expectedNamespace, type.Namespace);
+    }
+
+    [Theory]
+    [InlineData(nameof(SandboxPolicy))]
+    [InlineData(nameof(SandboxRequest))]
+    [InlineData(nameof(MxcSandbox))]
+    [InlineData(nameof(MxcLifecycle))]
+    [InlineData(nameof(SandboxId))]
+    public void RootNamespace_DoesNotExportV1AuthoringAliases(string typeName)
+    {
+        Assert.DoesNotContain(
+            typeof(SandboxPolicy).Assembly.GetExportedTypes(),
+            type => type.FullName == $"Microsoft.Mxc.Sdk.{typeName}");
+    }
+
     [Fact]
     public void SandboxPolicy_RejectsRemovedVersionDuringDeserialization()
     {
@@ -259,7 +295,7 @@ public class V1SandboxPolicyTests
             ]
             """;
 
-        var backends = MxcSandbox.ParseAvailableBackends(json);
+        var backends = MxcPlatform.ParseAvailableBackends(json);
         Assert.Equal(ContainmentBackend.Bubblewrap, backends[0].Backend);
         Assert.Equal(BackendCapability.ProxyEnforcement, Assert.Single(backends[0].Capabilities));
         Assert.Equal(ContainmentBackend.Unknown, backends[1].Backend);

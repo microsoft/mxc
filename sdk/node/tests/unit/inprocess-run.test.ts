@@ -3,15 +3,54 @@
 
 import assert from 'node:assert';
 import { afterEach, describe, it } from 'node:test';
-import { MxcError } from '../../src/errors.js';
-import { spawnSandboxAsync } from '../../src/sandbox.js';
+import * as rootSdk from '../../src/index.js';
+import * as v1Sdk from '../../src/v1.js';
 import { _setBindingRunAsyncImplementation } from '../../src/bindings/run.js';
 import type { RequestSpec } from '../../src/bindings/request.js';
 
+const { MxcError } = rootSdk;
+const { spawnSandboxAsync } = v1Sdk;
+
 afterEach(() => _setBindingRunAsyncImplementation());
 
+describe('public SDK namespace exports', () => {
+  it('keeps typed authoring and lifecycle functions in V1', () => {
+    for (const name of [
+      'createConfigFromPolicy',
+      'spawnSandbox',
+      'spawnSandboxAsync',
+      'buildSandboxPayload',
+      'getAvailableToolsPolicy',
+      'getUserProfilePolicy',
+      'getTemporaryFilesPolicy',
+      'provisionSandbox',
+      'startSandbox',
+      'execInSandbox',
+      'execInSandboxAsync',
+      'stopSandbox',
+      'deprovisionSandbox',
+    ] as const) {
+      assert.strictEqual(typeof v1Sdk[name], 'function', name);
+      assert.strictEqual(Object.hasOwn(rootSdk, name), false, name);
+    }
+  });
+
+  it('keeps raw config, discovery, errors, and process handles at the root', () => {
+    for (const name of [
+      'spawnSandboxFromConfig',
+      'getPlatformSupport',
+      'probeSandboxSupport',
+      'MxcError',
+      'MxcSandboxProcess',
+    ] as const) {
+      assert.strictEqual(typeof rootSdk[name], 'function', name);
+      assert.strictEqual(Object.hasOwn(v1Sdk, name), false, name);
+    }
+  });
+});
+
 describe('in-process async run routing', () => {
-  it('uses the v1 binding policy', async () => {
+  it('uses the V1 binding policy without caller-supplied schema version', async () => {
     let bindingRequest: RequestSpec | undefined;
     _setBindingRunAsyncImplementation(async (request) => {
       bindingRequest = request;

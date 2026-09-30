@@ -351,17 +351,24 @@ Python 3.12.3 (tags/0715636-nanvix-03bba66:0715636) on nanvix
 
 ### SDK Usage (After Phase 2)
 
-```typescript
-import { spawnSandboxAsync } from '@microsoft/mxc-sdk';
+MicroVM is an experimental backend, so it is outside the v1 high-level API.
+Use a raw exact development-contract config through the root
+`spawnSandboxFromConfig` with the experimental opt-in:
 
-const result = await spawnSandboxAsync(
-  "print('Hello from NanVix!')",
-  {},  // no policy needed — NanVix is isolated by design
-  { containment: 'microvm' }
+```typescript
+import { spawnSandboxFromConfig } from '@microsoft/mxc-sdk';
+
+const child = spawnSandboxFromConfig(
+  {
+    version: '1.1.0-alpha',
+    containment: 'microvm',
+    process: { commandLine: "print('Hello from NanVix!')" },
+  },
+  { experimental: true, usePty: false },
 );
 
-console.log(result.stdout);  // "Hello from NanVix!"
-console.log(result.exitCode); // 0
+child.stdout!.on('data', (d) => process.stdout.write(d)); // "Hello from NanVix!"
+child.on('close', (code) => console.log('exit:', code));  // 0
 ```
 
 

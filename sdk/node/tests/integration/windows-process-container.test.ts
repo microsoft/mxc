@@ -8,7 +8,8 @@ import { EventEmitter } from 'events';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import type { ContainerConfig, SandboxPolicy } from '@microsoft/mxc-sdk';
+import type { ContainerConfig } from '@microsoft/mxc-sdk';
+import type { SandboxPolicy } from '@microsoft/mxc-sdk/v1';
 import {
   sdk,
   supportedVersions,

@@ -21,6 +21,7 @@
 // Must run at a real interactive console.
 
 using Microsoft.Mxc.Sdk;
+using Microsoft.Mxc.Sdk.V1;
 
 namespace Microsoft.Mxc.Sdk.ConsoleDriver;
 

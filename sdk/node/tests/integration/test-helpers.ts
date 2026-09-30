@@ -10,13 +10,16 @@ import os from 'os';
 import semver from 'semver';
 import { createRequire } from 'node:module';
 import * as sdkNamespace from '@microsoft/mxc-sdk';
+import * as sdkV1Namespace from '@microsoft/mxc-sdk/v1';
 import {
   MxcError,
+} from '@microsoft/mxc-sdk';
+import {
   deprovisionSandbox,
   provisionSandbox,
   type SandboxId,
   type StateAwareContainmentBackend,
-} from '@microsoft/mxc-sdk';
+} from '@microsoft/mxc-sdk/v1';
 
 export const isolationSessionNetwork = {
   egress: { default: 'allow' },
@@ -24,7 +27,7 @@ export const isolationSessionNetwork = {
 } as const;
 
 const require = createRequire(import.meta.url);
-export const sdk = sdkNamespace;
+export const sdk = { ...sdkNamespace, ...sdkV1Namespace };
 
 // Schema versions
 

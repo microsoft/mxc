@@ -204,12 +204,10 @@ A request that permits nothing and names no proxy keeps its own loopback and rea
 ### SDK
 
 ```typescript
-import {
-    createConfigFromPolicy, spawnSandboxFromConfig, SandboxPolicy,
-} from '@microsoft/mxc-sdk';
+import { spawnSandboxFromConfig } from '@microsoft/mxc-sdk';
+import { createConfigFromPolicy, SandboxPolicy } from '@microsoft/mxc-sdk/v1';
 
 const policy: SandboxPolicy = {
-    version: '0.8.0-alpha',
     filesystem: {
         readwritePaths: ['/tmp/output'],
         readonlyPaths: ['/opt/tools'],
@@ -232,7 +230,7 @@ pty.onExit((e) => console.log('Exit:', e.exitCode));
 
 ## Streaming
 
-LXC implements `SandboxBackend`, so `mxc_sdk::spawn_sandbox`, `mxc_sdk::run`,
+LXC implements `SandboxBackend`, so `mxc_sdk::v1::spawn_sandbox`, `mxc_sdk::v1::run`,
 and every SDK built on `mxc_spawn_request` / `mxc_run_request` reach it
 in-process. The handle serves live stdin, stdout, and stderr, plus `wait` and
 `kill`.

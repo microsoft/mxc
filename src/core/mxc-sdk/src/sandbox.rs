@@ -7,9 +7,10 @@
 
 use std::io::{Read, Write};
 
-use crate::{
-    Error, ExecRequest, LifecycleResult, OperationOptions, ProvisionRequest, ProvisionResult,
-    SandboxId, ValidationResult,
+use crate::Error;
+use mxc_engine::{
+    ExecRequest, LifecycleResult, OperationOptions, ProvisionRequest, ProvisionResult, SandboxId,
+    ValidationResult,
 };
 pub use wxc_common::models::{
     CaptureDenialsErrorOutput, CaptureDenialsOutput, SandboxOutputMetadata,
@@ -156,7 +157,7 @@ pub struct Output {
     pub output_metadata: Option<SandboxOutputMetadata>,
 }
 
-/// A live sandboxed process, returned by [`spawn_sandbox`](crate::spawn_sandbox)
+/// A live sandboxed process, returned by [`spawn_sandbox`](crate::v1::spawn_sandbox)
 /// and [`exec_sandbox`](crate::exec_sandbox).
 ///
 /// Stream the child's stdio with the `take_*` accessors, wait for it, or kill

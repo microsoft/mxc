@@ -19,13 +19,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'os';
 import {
+  MxcError,
+} from '@microsoft/mxc-sdk';
+import {
   execInSandbox,
   execInSandboxAsync,
-  MxcError,
   provisionSandbox,
   startSandbox,
   stopSandbox,
-} from '@microsoft/mxc-sdk';
+} from '@microsoft/mxc-sdk/v1';
 import {
   isolationSessionNetwork,
   probeIsolationSessionFeature,

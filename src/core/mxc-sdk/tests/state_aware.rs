@@ -19,37 +19,40 @@
 //! experimental opt-in — which stays host-independent because the gate runs
 //! before backend dispatch.
 
+use mxc_sdk::v1::{
+    container, ExecRequest, LifecycleResult, OperationOptions, ProvisionRequest, ProvisionResult,
+    SandboxId, ValidationResult,
+};
 use mxc_sdk::{
-    exec_sandbox, exec_sandbox_json, run_state_aware_json, sandbox, Error, ErrorCode, ExecRequest,
-    LifecycleResult, OperationOptions, ProvisionRequest, ProvisionResult, Sandbox, SandboxId,
-    ValidationResult, WaitOutcome,
+    exec_sandbox, exec_sandbox_json, run_state_aware_json, Error, ErrorCode, Sandbox, WaitOutcome,
 };
 
 #[test]
 fn typed_lifecycle_api_is_operation_specific() {
     let _: fn(ProvisionRequest, OperationOptions) -> Result<ProvisionResult, Error> =
-        sandbox::provision;
+        container::provision;
     let _: fn(ProvisionRequest, OperationOptions) -> Result<ValidationResult, Error> =
-        sandbox::validate_provision;
-    let _: fn(&SandboxId, OperationOptions) -> Result<LifecycleResult, Error> = sandbox::start;
+        container::validate_provision;
+    let _: fn(&SandboxId, OperationOptions) -> Result<LifecycleResult, Error> = container::start;
     let _: fn(&SandboxId, OperationOptions) -> Result<ValidationResult, Error> =
-        sandbox::validate_start;
-    let _: fn(&SandboxId, OperationOptions) -> Result<LifecycleResult, Error> = sandbox::stop;
+        container::validate_start;
+    let _: fn(&SandboxId, OperationOptions) -> Result<LifecycleResult, Error> = container::stop;
     let _: fn(&SandboxId, OperationOptions) -> Result<ValidationResult, Error> =
-        sandbox::validate_stop;
+        container::validate_stop;
     let _: fn(&SandboxId, OperationOptions) -> Result<LifecycleResult, Error> =
-        sandbox::deprovision;
+        container::deprovision;
     let _: fn(&SandboxId, OperationOptions) -> Result<ValidationResult, Error> =
-        sandbox::validate_deprovision;
-    let _: fn(&SandboxId, ExecRequest, OperationOptions) -> Result<Sandbox, Error> = sandbox::exec;
+        container::validate_deprovision;
+    let _: fn(&SandboxId, ExecRequest, OperationOptions) -> Result<Sandbox, Error> =
+        container::exec;
     let _: fn(&SandboxId, ExecRequest, OperationOptions) -> Result<WaitOutcome, Error> =
-        sandbox::exec_attached;
+        container::exec_attached;
     let _: fn(&SandboxId, ExecRequest, OperationOptions) -> Result<ValidationResult, Error> =
-        sandbox::validate_exec;
+        container::validate_exec;
 }
 
 #[test]
-fn typed_state_aware_requests_are_version_free() {
+fn typed_state_aware_requests_have_no_caller_schema_version() {
     let _ = ProvisionRequest::isolation_session(None);
     let _ = ProvisionRequest::wslc(None, None);
     let _ = ExecRequest::new("echo hello");
@@ -58,7 +61,7 @@ fn typed_state_aware_requests_are_version_free() {
 #[test]
 fn typed_lifecycle_routes_by_sandbox_id() {
     let sandbox_id = SandboxId::parse("nosuchbackend:abc123").unwrap();
-    let error = sandbox::validate_start(&sandbox_id, OperationOptions::default()).unwrap_err();
+    let error = container::validate_start(&sandbox_id, OperationOptions::default()).unwrap_err();
     assert_eq!(error.code, ErrorCode::UnsupportedContainment);
 }
 

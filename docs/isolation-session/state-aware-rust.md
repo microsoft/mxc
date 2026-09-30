@@ -53,7 +53,8 @@ Requirements on an in-process caller:
   token at `SecurityImpersonation` level.**
 
 The **one-shot** surface is served in-process with piped stdio:
-`mxc_sdk::run` and `spawn_sandbox`, without a runtime experimental opt-in.
+`mxc_sdk::v1::run` and `mxc_sdk::v1::spawn_sandbox`, without a runtime
+experimental opt-in.
 
 ### Out of scope (for v1)
 

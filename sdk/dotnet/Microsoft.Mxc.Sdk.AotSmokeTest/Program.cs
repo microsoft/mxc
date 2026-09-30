@@ -14,6 +14,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Mxc.Sdk;
+using Microsoft.Mxc.Sdk.V1;
 
 static void Check(bool condition, string what)
 {
@@ -32,7 +33,6 @@ Check(!JsonSerializer.IsReflectionEnabledByDefault, "reflection fallback is disa
 //    so no "version" field is emitted.
 var devPolicy = new SandboxPolicy
 {
-    Version = "0.9.0-alpha",
     TimeoutMs = 5000,
     Filesystem = new FilesystemPolicy
     {
@@ -97,6 +97,9 @@ Check(backends is { Length: 2 }, "two backends parsed");
 Check(backends![0].Capabilities.Length == 1, "first backend capability parsed");
 Check(backends[1].Capabilities.Length == 0, "omitted capabilities default to empty, not null");
 Check(backends[1].Warnings.Length == 0, "omitted warnings default to empty, not null");
+var publicBackends = MxcPlatform.ParseAvailableBackends(backendsJson);
+Check(publicBackends.Count == 2, "root discovery facade parses both backends");
+Check(publicBackends[1].Backend == ContainmentBackend.Lxc, "root discovery maps LXC");
 
 // 4. Deserialize platform support.
 const string supportJson = """{"isSupported":true,"availableMethods":["processcontainer"]}""";

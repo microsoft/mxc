@@ -3,7 +3,7 @@
 
 using System.Collections;
 
-namespace Microsoft.Mxc.Sdk;
+namespace Microsoft.Mxc.Sdk.V1;
 
 /// <summary>
 /// A composable filesystem-policy fragment discovered from the host.

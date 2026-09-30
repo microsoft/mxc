@@ -12,7 +12,8 @@
 
 #![cfg(target_os = "linux")]
 
-use mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy, SandboxRequest, WaitOutcome};
+use mxc_sdk::v1::{build_request, spawn_sandbox, SandboxPolicy, SandboxRequest};
+use mxc_sdk::WaitOutcome;
 
 /// Whether `bwrap` is usable. Reuses the backend's own probe so this gate
 /// cannot drift from the real version check.
@@ -30,7 +31,7 @@ fn bwrap_available() -> bool {
 /// and timeout (ms; `0` == run until exit).
 fn bwrap_request(command: &str, timeout_ms: u32) -> SandboxRequest {
     let mut policy = SandboxPolicy::default();
-    policy.filesystem = Some(mxc_sdk::policy::FilesystemSection {
+    policy.filesystem = Some(mxc_sdk::v1::policy::FilesystemSection {
         readwrite_paths: vec!["/tmp".to_string()],
         readonly_paths: vec![],
         denied_paths: vec![],

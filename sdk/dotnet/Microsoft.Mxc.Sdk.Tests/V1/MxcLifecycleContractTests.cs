@@ -5,11 +5,12 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Microsoft.Mxc.Sdk;
+using Microsoft.Mxc.Sdk.V1;
 using Xunit;
 
-namespace Microsoft.Mxc.Sdk.Tests;
+namespace Microsoft.Mxc.Sdk.Tests.V1;
 
-public class V1LifecycleTests
+public class MxcLifecycleContractTests
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
     {

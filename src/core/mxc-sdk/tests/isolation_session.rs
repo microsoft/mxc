@@ -8,11 +8,12 @@
 
 #![cfg(all(target_os = "windows", feature = "isolation_session"))]
 
-use mxc_sdk::policy::{FilesystemSection, NetworkSection, SandboxPolicy};
-use mxc_sdk::{
-    build_request_with_containment, Containment, ErrorCode, NetworkAction, NetworkEgressSection,
+use mxc_sdk::v1::policy::{FilesystemSection, NetworkSection, SandboxPolicy};
+use mxc_sdk::v1::{
+    build_request_with_containment, Containment, NetworkAction, NetworkEgressSection,
     NetworkIngressSection,
 };
+use mxc_sdk::ErrorCode;
 
 /// The public one-shot API reaches IsolationSession with its required
 /// directional all-allow network posture.
@@ -163,7 +164,7 @@ fn one_shot_refuses_an_unhonorable_policy_as_policy_validation() {
     )
     .expect("building the request must succeed");
 
-    let err = match mxc_sdk::spawn_sandbox(request) {
+    let err = match mxc_sdk::v1::spawn_sandbox(request) {
         Ok(_) => panic!("the policy must be refused"),
         Err(e) => e,
     };
@@ -185,7 +186,7 @@ fn one_shot_refuses_an_environment_it_cannot_launch_as_policy_validation() {
     .expect("building the request must succeed");
     request.set_env([("FOO", "bar")]);
 
-    let err = match mxc_sdk::spawn_sandbox(request) {
+    let err = match mxc_sdk::v1::spawn_sandbox(request) {
         Ok(_) => panic!("the environment must be refused"),
         Err(e) => e,
     };
@@ -208,7 +209,7 @@ fn one_shot_run_captures_output() {
     )
     .expect("building the request must succeed");
 
-    let output = mxc_sdk::run(request).expect("one-shot run must reach the backend");
+    let output = mxc_sdk::v1::run(request).expect("one-shot run must reach the backend");
     assert_eq!(output.outcome, mxc_sdk::WaitOutcome::Exited(0));
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("marker-oneshot"),
@@ -230,7 +231,7 @@ fn one_shot_run_propagates_a_nonzero_exit() {
     )
     .expect("building the request must succeed");
 
-    let output = mxc_sdk::run(request).expect("one-shot run must reach the backend");
+    let output = mxc_sdk::v1::run(request).expect("one-shot run must reach the backend");
     assert_eq!(output.outcome, mxc_sdk::WaitOutcome::Exited(7));
 }
 
@@ -322,7 +323,7 @@ fn concurrent_one_shot_runs_stay_isolated() {
                 .expect("building the request must succeed");
 
                 let mut sandbox =
-                    mxc_sdk::spawn_sandbox(request).expect("spawn must reach the backend");
+                    mxc_sdk::v1::spawn_sandbox(request).expect("spawn must reach the backend");
                 let mut stdin = sandbox.take_stdin();
                 let stdout = sandbox.take_stdout().expect("stdout");
 
@@ -534,7 +535,7 @@ fn one_shot_finished_on_an_sta_thread_still_tears_down() {
     )
     .expect("building the request must succeed");
 
-    let mut sandbox = mxc_sdk::spawn_sandbox(request).expect("spawn must reach the backend");
+    let mut sandbox = mxc_sdk::v1::spawn_sandbox(request).expect("spawn must reach the backend");
 
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -560,7 +561,7 @@ fn one_shot_killed_on_an_sta_thread_impersonating_at_identification_level_stops_
     )
     .expect("building the request must succeed");
 
-    let mut sandbox = mxc_sdk::spawn_sandbox(request).expect("spawn must reach the backend");
+    let mut sandbox = mxc_sdk::v1::spawn_sandbox(request).expect("spawn must reach the backend");
 
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -592,7 +593,7 @@ fn an_abandoned_one_shot_handle_completes_teardown() {
     )
     .expect("building the request must succeed");
 
-    let sandbox = mxc_sdk::spawn_sandbox(request).expect("spawn must reach the backend");
+    let sandbox = mxc_sdk::v1::spawn_sandbox(request).expect("spawn must reach the backend");
 
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -623,7 +624,7 @@ fn one_shot_kill_stops_the_workload() {
     )
     .expect("building the request must succeed");
 
-    let mut sandbox = mxc_sdk::spawn_sandbox(request).expect("spawn must reach the backend");
+    let mut sandbox = mxc_sdk::v1::spawn_sandbox(request).expect("spawn must reach the backend");
     let stdout = sandbox.take_stdout().expect("stdout must be available");
 
     let (tx, rx) = std::sync::mpsc::channel();

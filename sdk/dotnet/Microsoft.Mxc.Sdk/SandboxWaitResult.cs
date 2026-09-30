@@ -12,7 +12,7 @@ public readonly struct SandboxWaitResult
     public int ExitCode { get; init; }
 
     /// <summary>
-    /// True if the run hit its <see cref="SandboxPolicy.TimeoutMs"/> and the
+    /// True if the run hit its <see cref="V1.SandboxPolicy.TimeoutMs"/> and the
     /// process (and its tree) were killed before exiting normally.
     /// </summary>
     public bool TimedOut { get; init; }

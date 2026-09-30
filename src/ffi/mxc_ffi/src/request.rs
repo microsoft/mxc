@@ -5,15 +5,15 @@
 
 use std::collections::BTreeMap;
 
-use mxc_sdk::configs::{
+use mxc_sdk::v1::configs::{
     CaptureDenials, Lxc, ProcessContainer, ProcessContainerFilesystem, ProcessContainerNetwork,
     ProcessContainerSystemSettings, ProcessContainerUi, ProcessContainerUiIsolation, Seatbelt,
 };
-use mxc_sdk::policy::{FilesystemSection, NetworkSection, UiSection};
-use mxc_sdk::{
-    build_request_with_containment, Containment, Error, ErrorCode, SandboxPolicy, SandboxRequest,
-    WslcSection,
+use mxc_sdk::v1::policy::{FilesystemSection, NetworkSection, UiSection};
+use mxc_sdk::v1::{
+    build_request_with_containment, Containment, SandboxPolicy, SandboxRequest, WslcSection,
 };
+use mxc_sdk::{Error, ErrorCode};
 use serde::de::{Error as _, IgnoredAny};
 use serde::{Deserialize, Deserializer};
 
@@ -495,7 +495,7 @@ mod tests {
             .as_ref()
             .expect("UI policy is preserved");
         assert!(!ui.allow_windows);
-        assert_eq!(ui.clipboard, mxc_sdk::policy::ClipboardPolicy::Read);
+        assert_eq!(ui.clipboard, mxc_sdk::v1::policy::ClipboardPolicy::Read);
         assert!(!ui.allow_input_injection);
         let authored_network = process_spec
             .policy
@@ -570,7 +570,7 @@ mod tests {
             Some(["10.20.30.0/24".to_string()].as_slice())
         );
         let ports = allow[0].ports.as_ref().expect("port rule is preserved");
-        assert_eq!(ports[0].protocol, Some(mxc_sdk::NetworkProtocol::Tcp));
+        assert_eq!(ports[0].protocol, Some(mxc_sdk::v1::NetworkProtocol::Tcp));
         assert_eq!(ports[0].port, Some(443));
         assert_eq!(ports[0].end_port, Some(444));
         build_request_from_json(directional_network)

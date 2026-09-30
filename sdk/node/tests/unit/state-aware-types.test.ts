@@ -79,7 +79,7 @@ describe('IsolationSessionProvisionConfig', () => {
     assert.strictEqual(directional.network.egress.default, 'allow');
 
     const oldVersion: IsolationSessionProvisionConfig = {
-      // @ts-expect-error — high-level lifecycle configs have no schema version.
+      // @ts-expect-error — high-level lifecycle configs are V1 contract-mapped.
       version: '0.8.0-alpha',
       network: directionalNetwork,
     };
@@ -90,7 +90,7 @@ describe('IsolationSessionProvisionConfig', () => {
     assert.ok(missing);
   });
 
-  describe('lifecycle configs without a schema version', () => {
+  describe('V1 lifecycle configs without caller-supplied schema versions', () => {
     it('rejects caller-selected versions for each typed backend', () => {
       const isolation: IsolationSessionStartConfig = {
         // @ts-expect-error — the v1 SDK owns the exact contract target.

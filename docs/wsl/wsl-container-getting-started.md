@@ -220,9 +220,12 @@ customize WSLC-specific fields before spawning:
 
 ```typescript
 import {
-  createConfigFromPolicy, spawnSandboxFromConfig,
-  type SandboxPolicy,
+  spawnSandboxFromConfig,
 } from '@microsoft/mxc-sdk';
+import {
+  createConfigFromPolicy,
+  type SandboxPolicy,
+} from '@microsoft/mxc-sdk/v1';
 
 const policy = {
   network: {
@@ -259,7 +262,7 @@ mxc-sdk = { path = "…/src/core/mxc-sdk", features = ["wslc"] }
 ```
 
 ```rust
-use mxc_sdk::{
+use mxc_sdk::v1::{
     build_request_with_containment, run, spawn_sandbox, Containment, SandboxPolicy, WslcSection,
 };
 

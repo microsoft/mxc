@@ -19,11 +19,12 @@ use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use mxc_sdk::policy::{Containment, FilesystemSection, NetworkSection};
-use mxc_sdk::{
+use mxc_sdk::v1::policy::{Containment, FilesystemSection, NetworkSection};
+use mxc_sdk::v1::{
     build_request_with_containment, spawn_sandbox, NetworkAction, NetworkEgressSection,
-    NetworkIngressSection, SandboxPolicy, WaitOutcome,
+    NetworkIngressSection, SandboxPolicy,
 };
+use mxc_sdk::WaitOutcome;
 
 /// The bound on a read or wait that should already have finished. Long enough
 /// to create a container, start it, and destroy it again on a loaded CI runner.
@@ -131,7 +132,7 @@ fn container_is_running(name: &str) -> bool {
 /// would hold this file's mutex until the CI job's own cap. A healthy workload
 /// here finishes in well under a second, so the bound only ever fires on a
 /// failure, and it fires as a reported timeout with teardown rather than a hang.
-fn lxc_request(command: &str, name: &str, timeout_ms: u32) -> mxc_sdk::SandboxRequest {
+fn lxc_request(command: &str, name: &str, timeout_ms: u32) -> mxc_sdk::v1::SandboxRequest {
     lxc_request_with_network(command, name, timeout_ms, isolated_network())
 }
 
@@ -160,7 +161,7 @@ fn lxc_request_with_network(
     name: &str,
     timeout_ms: u32,
     network: NetworkSection,
-) -> mxc_sdk::SandboxRequest {
+) -> mxc_sdk::v1::SandboxRequest {
     let mut policy = SandboxPolicy::default();
     policy.filesystem = Some(FilesystemSection {
         readwrite_paths: vec!["/tmp".to_string()],
@@ -172,7 +173,7 @@ fn lxc_request_with_network(
     policy.timeout_ms = (timeout_ms != 0).then_some(timeout_ms);
     build_request_with_containment(
         &policy,
-        &Containment::Lxc(mxc_sdk::configs::Lxc::default()),
+        &Containment::Lxc(mxc_sdk::v1::configs::Lxc::default()),
         command,
         Some(name),
     )

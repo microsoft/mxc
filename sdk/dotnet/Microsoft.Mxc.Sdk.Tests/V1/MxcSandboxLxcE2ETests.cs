@@ -3,9 +3,11 @@
 
 using System.Text;
 using Microsoft.Mxc.Sdk;
+using Microsoft.Mxc.Sdk.V1;
+using Microsoft.Mxc.Sdk.Tests;
 using Xunit;
 
-namespace Microsoft.Mxc.Sdk.Tests;
+namespace Microsoft.Mxc.Sdk.Tests.V1;
 
 /// <summary>
 /// Runs LXC sandboxes against a live host through this binding.
@@ -25,7 +27,6 @@ public class MxcSandboxLxcE2ETests
         new(
             new SandboxPolicy
             {
-                Version = "0.9.0-alpha",
                 TimeoutMs = WaitBoundMs,
 
                 // A policy naming no network defaults to `enforcementMode:

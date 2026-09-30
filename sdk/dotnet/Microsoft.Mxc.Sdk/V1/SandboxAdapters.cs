@@ -1,7 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-namespace Microsoft.Mxc.Sdk;
+using Microsoft.Mxc.Sdk;
+
+namespace Microsoft.Mxc.Sdk.V1;
 
 /// <summary>
 /// Injectable one-shot sandbox operations. Use <see cref="MxcSandboxRunner.Default"/>
@@ -51,15 +53,15 @@ public sealed class MxcSandboxRunner : ISandboxRunner
     public static MxcSandboxRunner Default { get; } = new();
 
     /// <inheritdoc/>
-    public string NativeVersion => MxcSandbox.NativeVersion;
+    public string NativeVersion => Microsoft.Mxc.Sdk.MxcPlatform.NativeVersion;
 
     /// <inheritdoc/>
     public IReadOnlyList<AvailableBackend> GetAvailableBackends() =>
-        MxcSandbox.GetAvailableBackends();
+        Microsoft.Mxc.Sdk.MxcPlatform.GetAvailableBackends();
 
     /// <inheritdoc/>
     public PlatformSupport GetPlatformSupport() =>
-        MxcSandbox.GetPlatformSupport();
+        Microsoft.Mxc.Sdk.MxcPlatform.GetPlatformSupport();
 
     /// <inheritdoc/>
     public RunResult Run(SandboxPolicy policy, string command) =>

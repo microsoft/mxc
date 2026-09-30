@@ -6,7 +6,7 @@
 //! Where [`mxc_run_request`](crate::mxc_run_request) runs a sandbox to
 //! completion and captures its output, this surface hands the caller a live,
 //! opaque handle it can feed stdin, read stdout/stderr from, wait on, and kill
-//! while the child runs — mirroring [`mxc_sdk::spawn_sandbox`] /
+//! while the child runs — mirroring [`mxc_sdk::v1::spawn_sandbox`] /
 //! [`mxc_sdk::Sandbox`].
 //!
 //! ## Handles & ownership
@@ -64,7 +64,8 @@ use std::io::{Read, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
-use mxc_sdk::{spawn_sandbox, Sandbox, StreamCloser, WaitOutcome};
+use mxc_sdk::v1::spawn_sandbox;
+use mxc_sdk::{Sandbox, StreamCloser, WaitOutcome};
 
 use crate::{
     alloc_cstring, cstr_to_str, request, status_from_error_code, MxcErrorDetail,

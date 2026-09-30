@@ -69,6 +69,11 @@ function loadSdk(): typeof import('@microsoft/mxc-sdk') {
   return require('@microsoft/mxc-sdk');
 }
 
+/** Contract-mapped v1 policy APIs live on the `@microsoft/mxc-sdk/v1` subpath. */
+function loadSdkV1(): typeof import('@microsoft/mxc-sdk/v1') {
+  return require('@microsoft/mxc-sdk/v1');
+}
+
 /** Resolve wxc-exec path — checks extraResources for packaged app, then falls back to SDK discovery. */
 function resolveExecutablePath(): string | undefined {
   const fs = require('fs');
@@ -108,30 +113,27 @@ ipcMain.handle('get-platform-support', () => {
 
 // IPC: Get available tools policy
 ipcMain.handle('get-tools-policy', () => {
-  const sdk = loadSdk();
-  return sdk.getAvailableToolsPolicy();
+  return loadSdkV1().getAvailableToolsPolicy();
 });
 
 // IPC: Get user profile policy
 ipcMain.handle('get-profile-policy', () => {
-  const sdk = loadSdk();
-  return sdk.getUserProfilePolicy();
+  return loadSdkV1().getUserProfilePolicy();
 });
 
 // IPC: Get temp files policy
 ipcMain.handle('get-temp-policy', () => {
-  const sdk = loadSdk();
-  return sdk.getTemporaryFilesPolicy();
+  return loadSdkV1().getTemporaryFilesPolicy();
 });
 
 // IPC: Simple mode — spawnSandbox(script, policy)
 ipcMain.handle('run-sandbox', (_event, scriptText: string, policyJson: string, debug: boolean, experimental: boolean) => {
   killActivePty();
-  const sdk = loadSdk();
+  const sdkV1 = loadSdkV1();
 
   try {
     const policy = JSON.parse(policyJson);
-    const ptyProcess = sdk.spawnSandbox(scriptText, policy, {
+    const ptyProcess = sdkV1.spawnSandbox(scriptText, policy, {
       debug,
       experimental,
       executablePath: resolveExecutablePath(), skipPlatformCheck: true,
@@ -147,10 +149,11 @@ ipcMain.handle('run-sandbox', (_event, scriptText: string, policyJson: string, d
 ipcMain.handle('run-sandbox-advanced', (_event, scriptText: string, policyJson: string, debug: boolean, experimental: boolean) => {
   killActivePty();
   const sdk = loadSdk();
+  const sdkV1 = loadSdkV1();
 
   try {
     const policy = JSON.parse(policyJson);
-    const config = sdk.createConfigFromPolicy(policy);
+    const config = sdkV1.createConfigFromPolicy(policy);
     config.process!.commandLine = scriptText;
     const ptyProcess = sdk.spawnSandboxFromConfig(config, {
       debug,
@@ -173,9 +176,8 @@ ipcMain.handle('kill-sandbox', () => {
 // IPC: Validate policy — returns the generated ContainerConfig
 ipcMain.handle('validate-policy', (_event, policyJson: string) => {
   try {
-    const sdk = loadSdk();
     const policy = JSON.parse(policyJson);
-    const config = sdk.createConfigFromPolicy(policy);
+    const config = loadSdkV1().createConfigFromPolicy(policy);
     return { valid: true, config: JSON.stringify(config, null, 2) };
   } catch (err: any) {
     return { valid: false, error: err.message };

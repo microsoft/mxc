@@ -9,7 +9,8 @@
 
 #![cfg(target_os = "windows")]
 
-use mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy, WaitOutcome};
+use mxc_sdk::v1::{build_request, spawn_sandbox, SandboxPolicy};
+use mxc_sdk::WaitOutcome;
 
 #[test]
 #[ignore = "requires an elevated, host-prepped Windows host (see docs/host-prep.md)"]
@@ -17,7 +18,7 @@ fn streaming_processcontainer_bidirectional_stdio() {
     use std::io::{Read, Write};
 
     let mut policy = SandboxPolicy::default();
-    policy.filesystem = Some(mxc_sdk::policy::FilesystemSection {
+    policy.filesystem = Some(mxc_sdk::v1::policy::FilesystemSection {
         readwrite_paths: vec!["C:\\Windows\\Temp".to_string()],
         readonly_paths: vec![],
         denied_paths: vec![],

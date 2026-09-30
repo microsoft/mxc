@@ -2,9 +2,10 @@
 // Licensed under the MIT License.
 
 using Microsoft.Mxc.Sdk;
+using Microsoft.Mxc.Sdk.V1;
 using Xunit;
 
-namespace Microsoft.Mxc.Sdk.Tests;
+namespace Microsoft.Mxc.Sdk.Tests.V1;
 
 public class SandboxPolicyDiscoveryTests
 {

@@ -2,7 +2,7 @@
 
 A .NET binding for [MXC](../../README.md) (Microsoft eXecution Container),
 implemented in C#. It runs a command inside a sandbox described by a
-`SandboxPolicy`, capturing the output — by P/Invoking the native `mxc_ffi`
+`Microsoft.Mxc.Sdk.V1.SandboxPolicy`, capturing the output — by P/Invoking the native `mxc_ffi`
 library, which wraps the Rust engine.
 
 Breaking changes and migration notes are recorded in
@@ -28,6 +28,8 @@ C# (Microsoft.Mxc.Sdk)
 
 ```csharp
 using Microsoft.Mxc.Sdk;
+using Microsoft.Mxc.Sdk.V1;
+using MxcSandbox = Microsoft.Mxc.Sdk.V1.MxcSandbox;
 
 var policy = new SandboxPolicy
 {
@@ -72,8 +74,9 @@ When deserializing `NetworkPolicy` or `StateAwareNetworkPolicy` from JSON,
 `egress` and `ingress` may be omitted but cannot be explicitly `null`.
 Setting their C# properties to `null` still omits them from SDK requests.
 
-`MxcSandbox.RunAsync(policy, command)` offloads the blocking native call to the
-thread pool. `MxcSandbox.NativeVersion` returns the loaded `mxc_ffi` version.
+`Microsoft.Mxc.Sdk.V1.MxcSandbox.RunAsync(policy, command)` offloads the blocking
+native call to the thread pool. `Microsoft.Mxc.Sdk.MxcPlatform.NativeVersion`
+returns the loaded `mxc_ffi` version.
 Optional feature outputs are returned through `RunResult.OutputMetadata`; for
 `captureDenials`, `OutputMetadata.CaptureDenials.OutputPath` identifies the
 generated JSON document and carries its summary. When ETL retention is enabled,
@@ -121,7 +124,7 @@ interface without loading the native MXC library. Streaming adapter methods
 return `ISandboxProcess`, which can also be implemented with in-memory streams
 and deterministic wait results. Fake processes can return an
 `ISandboxStreamCloser` to model cancellation of a blocking output read. The
-existing `MxcSandbox` and `MxcLifecycle` static methods retain their concrete
+existing V1 `MxcSandbox` and `MxcLifecycle` static methods retain their concrete
 `MxcSandboxProcess` convenience APIs.
 
 ### Discovering host backends
@@ -129,13 +132,13 @@ existing `MxcSandbox` and `MxcLifecycle` static methods retain their concrete
 Two read-only probes answer different availability questions:
 
 ```csharp
-PlatformSupport support = MxcSandbox.GetPlatformSupport();
+PlatformSupport support = MxcPlatform.GetPlatformSupport();
 if (!support.IsSupported)
 {
     Console.Error.WriteLine(support.Reason);
 }
 
-foreach (AvailableBackend backend in MxcSandbox.GetAvailableBackends())
+foreach (AvailableBackend backend in MxcPlatform.GetAvailableBackends())
 {
     Console.WriteLine($"{backend.Backend}: tier={backend.Tier}");
     bool canUseDeniedPaths = backend.Capabilities.Contains(
@@ -147,8 +150,8 @@ foreach (AvailableBackend backend in MxcSandbox.GetAvailableBackends())
 }
 ```
 
-`GetPlatformSupport()` reports whether this public SDK can launch a sandbox and
-the backends it can launch. `GetAvailableBackends()` is broader: it reports
+`MxcPlatform.GetPlatformSupport()` reports whether this public SDK can launch a sandbox and
+the backends it can launch. `MxcPlatform.GetAvailableBackends()` is broader: it reports
 every backend the host can run, including lifecycle-only backends such as
 Windows Sandbox and IsolationSession. Its ProcessContainer `Tier` is the
 strongest tier the host can reach; policy can still select a weaker tier.
@@ -163,8 +166,8 @@ for every absent one: only checks that produce a reason contribute. Bubblewrap's
 warning. Missing capabilities otherwise are unavailable or could not be detected.
 
 Discovery is advisory. Availability can change before launch, and a backend in
-`GetAvailableBackends()` is not necessarily one the one-shot SDK can launch.
-Cross-check `GetPlatformSupport()` and continue handling
+`MxcPlatform.GetAvailableBackends()` is not necessarily one the one-shot SDK can launch.
+Cross-check `MxcPlatform.GetPlatformSupport()` and continue handling
 `ErrorCode.BackendUnavailable`.
 
 For request-specific Windows ProcessContainer diagnostics, call the static
@@ -190,7 +193,7 @@ enforce it as the `ProxyEnforcement` capability, and names what is missing in
 as a `bubblewrapNetwork` field; the C# SDK reports it through the backend array:
 
 ```csharp
-AvailableBackend? bubblewrap = MxcSandbox.GetAvailableBackends()
+AvailableBackend? bubblewrap = MxcPlatform.GetAvailableBackends()
     .FirstOrDefault(backend => backend.Backend == ContainmentBackend.Bubblewrap);
 
 if (bubblewrap is null)
@@ -328,9 +331,9 @@ request.Containment = new ProcessContainerContainment
 };
 ```
 
-The v1 `SandboxPolicy` has no schema-version field. The package owns the v1
-contract target and currently emits exact `1.0.0`; raw exact-version
-configuration remains a separate executor-facing API.
+The V1 `SandboxPolicy` in `Microsoft.Mxc.Sdk.V1` is contract-mapped. The package owns the v1 contract target and
+currently emits exact `1.0.0`; raw exact-version configuration remains a
+separate executor-facing API.
 
 With schema `0.9.0-alpha`,
 `ProcessContainerContainment.Filesystem.EnumeratePaths` requests directory-query
@@ -462,7 +465,7 @@ The native unit must be built with isolation-session support or execution return
 
 ### Network proxy
 
-The v1 `SandboxPolicy` does not expose legacy one-shot proxy
+The V1 `SandboxPolicy` in `Microsoft.Mxc.Sdk.V1` does not expose legacy one-shot proxy
 settings. Consumers that need an older exact proxy contract must use the raw
 executor configuration path. WSLC state-aware exec exposes its supported
 proxy-only runtime override through `WslcExecOptions.RuntimeConfig`.
@@ -743,7 +746,7 @@ exception messages and stack traces. See
   is meant to be published with `-p:PublishAot=true`.
 - **`Microsoft.Mxc.Sdk.Tests`** — xUnit v3 tests. The streaming end-to-end tests
   need a capable host and skip, with a reason, unless `MXC_E2E_HOST_PREPPED=1`.
-  The isolation-session end-to-end tests skip unless `GetAvailableBackends()`
+  The isolation-session end-to-end tests skip unless `MxcPlatform.GetAvailableBackends()`
   reports that backend, which needs both a build with
   `-p:MxcWithIsolationSession=true` and a host running the OS-side service. Set
   `MXC_ISO_TESTS_REQUIRED=1` (or `true`) to turn those skips into failures.
@@ -809,7 +812,7 @@ constants.
 
 ### State-aware lifecycle
 
-`MxcLifecycle` drives a sandbox through provision → start → exec → stop →
+`Microsoft.Mxc.Sdk.V1.MxcLifecycle` drives a sandbox through provision → start → exec → stop →
 deprovision. The backend is chosen explicitly at provision; the later phases
 identify the sandbox by the opaque `SandboxId` provision returns.
 

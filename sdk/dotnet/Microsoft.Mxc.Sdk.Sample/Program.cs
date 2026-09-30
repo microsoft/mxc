@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using Microsoft.Mxc.Sdk;
+using Microsoft.Mxc.Sdk.V1;
 
 // A minimal end-to-end sample: build a policy, run a command in a sandbox, and
 // print what it produced. The command defaults to a simple echo; pass your own
@@ -11,7 +12,7 @@ using Microsoft.Mxc.Sdk;
 // (e.g. an elevated, host-prepped Windows host — see docs/host-prep.md). The
 // sample reports MXC errors instead of crashing so it is safe to run anywhere.
 
-Console.WriteLine($"mxc_ffi native version: {MxcSandbox.NativeVersion}");
+Console.WriteLine($"mxc_ffi native version: {Microsoft.Mxc.Sdk.MxcPlatform.NativeVersion}");
 
 var command = args.Length > 0
     ? string.Join(' ', args)

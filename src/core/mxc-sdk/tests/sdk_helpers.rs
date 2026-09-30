@@ -4,15 +4,20 @@
 //! Tests for the ported SDK helpers: policy discovery, platform support, and
 //! the SandboxPolicy -> SandboxRequest builder.
 
-use mxc_sdk::{
-    available_tools_policy, build_request, platform_support, temporary_files_policy,
-    user_profile_policy, SandboxPolicy,
+use mxc_sdk::platform_support;
+use mxc_sdk::v1::{
+    available_tools_policy, build_request, temporary_files_policy, user_profile_policy,
+    SandboxPolicy,
 };
 #[cfg(target_os = "windows")]
-use mxc_sdk::{build_request_with_containment, Containment, ErrorCode, WslcSection};
+use mxc_sdk::v1::{build_request_with_containment, Containment, WslcSection};
+#[cfg(target_os = "windows")]
+use mxc_sdk::ErrorCode;
 
 #[cfg(target_os = "macos")]
-use mxc_sdk::{spawn_sandbox, WaitOutcome};
+use mxc_sdk::v1::spawn_sandbox;
+#[cfg(target_os = "macos")]
+use mxc_sdk::WaitOutcome;
 
 fn env_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
     pairs
@@ -122,7 +127,7 @@ fn user_profile_policy_does_not_panic() {
 
 #[test]
 fn rust_sdk_builds_directional_networking() {
-    use mxc_sdk::policy::{
+    use mxc_sdk::v1::policy::{
         NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkSection,
     };
 
@@ -144,12 +149,12 @@ fn rust_sdk_builds_directional_networking() {
 
 #[test]
 fn rust_sdk_builds_directional_process_container_networking_and_capture() {
-    use mxc_sdk::configs::{CaptureDenials, ProcessContainer, ProcessContainerNetwork};
-    use mxc_sdk::policy::{
+    use mxc_sdk::v1::configs::{CaptureDenials, ProcessContainer, ProcessContainerNetwork};
+    use mxc_sdk::v1::policy::{
         NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkSection,
         RuntimeConfigSection,
     };
-    use mxc_sdk::{build_request_with_containment, Containment};
+    use mxc_sdk::v1::{build_request_with_containment, Containment};
 
     let mut egress = NetworkEgressSection::default();
     egress.default = Some(NetworkAction::Deny);
@@ -184,7 +189,7 @@ fn rust_sdk_builds_directional_process_container_networking_and_capture() {
 #[test]
 fn build_request_then_run_seatbelt() {
     let mut policy = SandboxPolicy::default();
-    policy.filesystem = Some(mxc_sdk::policy::FilesystemSection {
+    policy.filesystem = Some(mxc_sdk::v1::policy::FilesystemSection {
         readwrite_paths: vec!["/tmp".to_string()],
         readonly_paths: vec![],
         denied_paths: vec![],
@@ -295,12 +300,18 @@ fn platform_support_windows_omits_wslc_when_not_compiled_in() {
 #[cfg(target_os = "windows")]
 #[test]
 fn request_probe_accepts_default_and_typed_requests() {
+    let _: fn(
+        Option<&mxc_sdk::v1::SandboxRequest>,
+    ) -> Result<mxc_sdk::ProbeOutput, mxc_sdk::Error> = mxc_sdk::v1::probe;
+
     let policy = SandboxPolicy::default();
     let request = build_request(&policy, "cmd /c exit 0", None)
         .expect("default ProcessContainer request should build");
 
     for request in [None, Some(&request)] {
-        let output = mxc_sdk::probe(request).expect("ProcessContainer request should probe");
+        let output = mxc_sdk::v1::probe(request).expect("ProcessContainer request should probe");
+        let _: &mxc_sdk::ProbeFacts = &output.probes;
+        let _: &mxc_sdk::UiCapabilitySupport = &output.probes.ui_capabilities;
         assert!(!output.warnings.iter().any(String::is_empty));
     }
 }
@@ -317,7 +328,7 @@ fn request_probe_rejects_non_process_container_requests() {
     )
     .expect("WSLC request should build");
 
-    let error = mxc_sdk::probe(Some(&request))
+    let error = mxc_sdk::v1::probe(Some(&request))
         .expect_err("request probe should reject non-ProcessContainer containment");
     assert_eq!(error.code, ErrorCode::UnsupportedContainment);
 }

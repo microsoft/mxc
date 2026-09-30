@@ -18,7 +18,7 @@ internal static class LxcHost
     private static readonly Lazy<bool> Available = new(() =>
         OperatingSystem.IsLinux()
         && Environment.IsPrivilegedProcess
-        && MxcSandbox.GetAvailableBackends()
+        && MxcPlatform.GetAvailableBackends()
             .Any(b => b.Backend == ContainmentBackend.Lxc));
 
     // Without this, a run in which everything skipped is indistinguishable from

@@ -12,9 +12,9 @@ It complements:
 
 The raw WSLc state-aware surface is available in published exact schemas
 beginning with `0.9.0-alpha`. The Rust, .NET, and Node high-level v1 lifecycle
-APIs do not take a caller-supplied schema version and emit stable exact
-`1.0.0`. Neither path requires a runtime experimental opt-in. Native builds still require the `wslc` feature
-(`build.bat --with-wslc`).
+APIs are V1 contract-mapped and emit stable exact `1.0.0`; callers do not
+supply a schema version. Neither path requires a runtime experimental opt-in.
+Native builds still require the `wslc` feature (`build.bat --with-wslc`).
 
 ## Why a daemon
 

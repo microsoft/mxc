@@ -7,9 +7,12 @@ using System.Text.Json.Serialization;
 using System.Runtime.InteropServices;
 using Microsoft.Mxc.Sdk;
 using Microsoft.Mxc.Sdk.Native;
+using Microsoft.Mxc.Sdk.V1;
+using Microsoft.Mxc.Sdk.Tests;
+using MxcSandbox = Microsoft.Mxc.Sdk.V1.MxcSandbox;
 using Xunit;
 
-namespace Microsoft.Mxc.Sdk.Tests;
+namespace Microsoft.Mxc.Sdk.Tests.V1;
 
 public class MxcSandboxTests
 {
@@ -523,13 +526,13 @@ public class MxcSandboxTests
     public void NativeVersion_IsNotEmpty()
     {
         // Exercises the native load path + mxc_version() end-to-end.
-        Assert.False(string.IsNullOrEmpty(MxcSandbox.NativeVersion));
+        Assert.False(string.IsNullOrEmpty(MxcPlatform.NativeVersion));
     }
 
     [Fact]
     public void GetAvailableBackends_ReturnsTypedNativeProbe()
     {
-        var backends = MxcSandbox.GetAvailableBackends();
+        var backends = MxcPlatform.GetAvailableBackends();
 
         Assert.NotNull(backends);
         if (OperatingSystem.IsWindows())
@@ -544,7 +547,7 @@ public class MxcSandboxTests
     [Fact]
     public void GetPlatformSupport_ReturnsTypedNativeProbe()
     {
-        var support = MxcSandbox.GetPlatformSupport();
+        var support = MxcPlatform.GetPlatformSupport();
 
         Assert.NotNull(support.AvailableMethods);
         if (support.IsSupported)
@@ -570,7 +573,7 @@ public class MxcSandboxTests
         string wireName,
         ContainmentBackend expected)
     {
-        Assert.Equal(expected, MxcSandbox.ParseBackend(wireName));
+        Assert.Equal(expected, MxcPlatform.ParseBackend(wireName));
     }
 
     [Theory]
@@ -581,7 +584,7 @@ public class MxcSandboxTests
         string wireName,
         IsolationTier expected)
     {
-        Assert.Equal(expected, MxcSandbox.ParseIsolationTier(wireName));
+        Assert.Equal(expected, MxcPlatform.ParseIsolationTier(wireName));
     }
 
     [Theory]
@@ -594,7 +597,7 @@ public class MxcSandboxTests
         string wireName,
         BackendCapability expected)
     {
-        Assert.Equal(expected, MxcSandbox.ParseBackendCapability(wireName));
+        Assert.Equal(expected, MxcPlatform.ParseBackendCapability(wireName));
     }
 
     [Fact]
@@ -613,11 +616,11 @@ public class MxcSandboxTests
     [InlineData("processContainer")]
     public void Discovery_PreservesUnknownNativeBackend(string wireName)
     {
-        Assert.Equal(ContainmentBackend.Unknown, MxcSandbox.ParseBackend(wireName));
-        Assert.Equal(IsolationTier.Unknown, MxcSandbox.ParseIsolationTier(wireName));
+        Assert.Equal(ContainmentBackend.Unknown, MxcPlatform.ParseBackend(wireName));
+        Assert.Equal(IsolationTier.Unknown, MxcPlatform.ParseIsolationTier(wireName));
         Assert.Equal(
             BackendCapability.Unknown,
-            MxcSandbox.ParseBackendCapability(wireName));
+            MxcPlatform.ParseBackendCapability(wireName));
     }
 
     /// <summary>
@@ -638,7 +641,7 @@ public class MxcSandboxTests
             ]
             """;
 
-        var backends = MxcSandbox.ParseAvailableBackends(json);
+        var backends = MxcPlatform.ParseAvailableBackends(json);
 
         var bubblewrap = Assert.Single(
             backends,
@@ -660,7 +663,7 @@ public class MxcSandboxTests
         const string json =
             """[{ "backend": "bubblewrap", "capabilities": ["proxyEnforcement"] }]""";
 
-        var bubblewrap = Assert.Single(MxcSandbox.ParseAvailableBackends(json));
+        var bubblewrap = Assert.Single(MxcPlatform.ParseAvailableBackends(json));
 
         Assert.Equal(ContainmentBackend.Bubblewrap, bubblewrap.Backend);
         Assert.Equal(
