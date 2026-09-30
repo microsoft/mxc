@@ -13,10 +13,7 @@ use super::super::{
     ClipboardPolicy, Containment, NetworkAction, NetworkEgressSection, NetworkIngressSection,
     NetworkProtocol, NetworkRuleSection, UiSection, WslcSection,
 };
-use super::{
-    error, non_empty_port, normalized_capabilities, selected_process_container, selected_seatbelt,
-    PreparedInput,
-};
+use super::{error, non_empty_port, selected_process_container, selected_seatbelt, PreparedInput};
 
 fn map_ui(ui: &UiSection) -> contract::Ui {
     contract::Ui {
@@ -223,8 +220,14 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::OneShotReques
     let process_container = process_container
         .as_ref()
         .map(|process_container| {
-            let capabilities = normalized_capabilities(policy, process_container)
-                .into_iter()
+            // Network capabilities are derived from the normalized network
+            // policy by the ProcessContainer backend, so the request carries
+            // only the caller's own capabilities, as an SDK-emitted document
+            // does.
+            let capabilities = process_container
+                .capabilities
+                .iter()
+                .cloned()
                 .map(contract::ProcessContainerCapability::new)
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(error)?;
@@ -283,18 +286,14 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::OneShotReques
         comment: Default::default(),
         version: contract::Version::V1_0_0,
         container_id: contract::OptionalField::present(input.container_id.clone()),
-        containment: contract::OptionalField::present(if selected_seatbelt.is_some() {
-            contract::OneShotContainment::Seatbelt
-        } else {
-            match containment {
-                Containment::Process => contract::OneShotContainment::Process,
-                Containment::ProcessContainer(_) => contract::OneShotContainment::ProcessContainer,
-                Containment::Seatbelt(_) => contract::OneShotContainment::Seatbelt,
-                Containment::Lxc(_) => contract::OneShotContainment::Lxc,
-                Containment::Bubblewrap => contract::OneShotContainment::Bubblewrap,
-                Containment::Wslc(_) => contract::OneShotContainment::Wslc,
-                Containment::IsolationSession => contract::OneShotContainment::IsolationSession,
-            }
+        containment: contract::OptionalField::present(match containment {
+            Containment::Process => contract::OneShotContainment::Process,
+            Containment::ProcessContainer(_) => contract::OneShotContainment::ProcessContainer,
+            Containment::Seatbelt(_) => contract::OneShotContainment::Seatbelt,
+            Containment::Lxc(_) => contract::OneShotContainment::Lxc,
+            Containment::Bubblewrap => contract::OneShotContainment::Bubblewrap,
+            Containment::Wslc(_) => contract::OneShotContainment::Wslc,
+            Containment::IsolationSession => contract::OneShotContainment::IsolationSession,
         }),
         lifecycle: contract::OptionalField::present(contract::Lifecycle {
             destroy_on_exit: contract::OptionalField::present(true),

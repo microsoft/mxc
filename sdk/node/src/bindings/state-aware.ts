@@ -57,7 +57,7 @@ function bindStateAwareNativeFacade(
   native: ReturnType<typeof loadMxcFfi>,
 ): StateAwareNativeFacade {
   const run = bindNativeFunction<StateAwareFunction>(native.handle, {
-    symbol: 'mxc_state_aware',
+    symbol: 'mxc_run_state_aware_json',
     result: 'int32_t',
     parameters: [
       'const char *',

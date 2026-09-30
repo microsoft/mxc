@@ -9,14 +9,15 @@ use std::ffi::{CStr, CString};
 use std::ptr;
 
 use mxc_ffi::{
-    mxc_available_backends_json, mxc_platform_support_json, mxc_run_request, mxc_run_result_free,
-    mxc_sandbox_stderr_closer, mxc_sandbox_stdout_closer, mxc_sandbox_warnings_json,
-    mxc_stream_closer_close, mxc_stream_closer_free, mxc_string_free, mxc_version, MxcRunResult,
+    mxc_available_backends_json, mxc_error_detail_free, mxc_platform_support_json, mxc_run_json,
+    mxc_run_request, mxc_run_result_free, mxc_sandbox_stderr_closer, mxc_sandbox_stdout_closer,
+    mxc_sandbox_warnings_json, mxc_spawn_json, mxc_stream_closer_close, mxc_stream_closer_free,
+    mxc_string_free, mxc_version, MxcErrorDetail, MxcRunResult, MxcSandbox,
 };
 #[cfg(target_os = "windows")]
 use mxc_ffi::{
-    mxc_error_detail_free, mxc_probe_request_json, mxc_probe_request_json_with_error,
-    mxc_probe_sandbox_request_json_with_error, MxcErrorDetail,
+    mxc_probe_request_json, mxc_probe_request_json_with_error,
+    mxc_probe_sandbox_request_json_with_error,
 };
 #[cfg(target_os = "linux")]
 use mxc_ffi::{mxc_error_detail_free, mxc_spawn_request, MxcErrorDetail, MxcSandbox};
@@ -283,6 +284,115 @@ fn extern_run_request_rejects_null_result_before_parsing() {
     let status = unsafe { mxc_run_request(invalid_utf8.as_ptr().cast(), ptr::null_mut()) };
 
     assert_eq!(status, mxc_ffi::MXC_STATUS_NULL_ARGUMENT);
+}
+
+/// Run a raw JSON request that is expected to fail, returning its status and
+/// message after freeing the populated result.
+fn run_json_failure(json: &str) -> (i32, String) {
+    let request = CString::new(json).unwrap();
+    let mut out = zeroed_result();
+    // SAFETY: valid C string and output storage.
+    let status = unsafe { mxc_run_json(request.as_ptr(), 0, &mut out) };
+    assert_eq!(out.status, status);
+    assert!(out.stdout_utf8.is_null());
+    assert!(!out.error.message_utf8.is_null());
+    // SAFETY: failures populate an owned message.
+    let message = unsafe { CStr::from_ptr(out.error.message_utf8) }
+        .to_string_lossy()
+        .into_owned();
+    // SAFETY: `out` was filled by `mxc_run_json`; failures must be freed too.
+    unsafe { mxc_run_result_free(&mut out) };
+    (status, message)
+}
+
+#[test]
+fn extern_run_json_rejects_null_result_before_parsing() {
+    // Invalid UTF-8 would win if the request were parsed before the mandatory
+    // result pointer was checked.
+    let invalid_utf8 = [0xff_u8, 0];
+    // SAFETY: the byte buffer is NUL-terminated and the result pointer is null.
+    let status = unsafe { mxc_run_json(invalid_utf8.as_ptr().cast(), 0, ptr::null_mut()) };
+
+    assert_eq!(status, mxc_ffi::MXC_STATUS_NULL_ARGUMENT);
+}
+
+#[test]
+fn extern_run_json_reports_null_and_invalid_utf8_requests() {
+    let mut out = zeroed_result();
+    // SAFETY: the null request is deliberate; the output storage is valid.
+    let status = unsafe { mxc_run_json(ptr::null(), 0, &mut out) };
+    assert_eq!(status, mxc_ffi::MXC_STATUS_NULL_ARGUMENT);
+    assert_eq!(out.status, status);
+    // SAFETY: `out` was filled by `mxc_run_json`.
+    unsafe { mxc_run_result_free(&mut out) };
+
+    let invalid_utf8 = [0xff_u8, 0];
+    let mut out = zeroed_result();
+    // SAFETY: NUL-terminated bytes and valid output storage.
+    let status = unsafe { mxc_run_json(invalid_utf8.as_ptr().cast(), 0, &mut out) };
+    assert_eq!(status, mxc_ffi::MXC_STATUS_INVALID_UTF8);
+    assert_eq!(out.status, status);
+    // SAFETY: `out` was filled by `mxc_run_json`.
+    unsafe { mxc_run_result_free(&mut out) };
+}
+
+#[test]
+fn extern_run_json_rejects_lifecycle_envelopes() {
+    let (status, message) =
+        run_json_failure(r#"{"version":"1.0.0","phase":"start","sandboxId":"iso:example"}"#);
+
+    assert_eq!(status, mxc_ffi::MXC_STATUS_MALFORMED_REQUEST);
+    assert!(message.contains("one-shot"), "{message}");
+}
+
+#[test]
+fn extern_run_json_rejects_unregistered_versions() {
+    let (status, message) =
+        run_json_failure(r#"{"version":"0.6.1-alpha","process":{"commandLine":"echo hello"}}"#);
+
+    assert_eq!(status, mxc_ffi::MXC_STATUS_MALFORMED_REQUEST);
+    assert!(
+        message.contains("Unsupported contract version"),
+        "{message}"
+    );
+}
+
+#[test]
+fn extern_spawn_json_clears_error_and_rejects_null_handle_before_parsing() {
+    let mut error = MxcErrorDetail {
+        message_utf8: ptr::dangling_mut(),
+        operation_utf8: ptr::dangling_mut(),
+        native_code_utf8: ptr::dangling_mut(),
+        remediation_utf8: ptr::dangling_mut(),
+    };
+    let invalid_utf8 = [0xff_u8, 0];
+    // SAFETY: the error storage is writable and holds no live detail; the null
+    // handle pointer is deliberate.
+    let status =
+        unsafe { mxc_spawn_json(invalid_utf8.as_ptr().cast(), 0, ptr::null_mut(), &mut error) };
+
+    assert_eq!(status, mxc_ffi::MXC_STATUS_NULL_ARGUMENT);
+    assert!(error.message_utf8.is_null());
+    assert!(error.operation_utf8.is_null());
+    assert!(error.native_code_utf8.is_null());
+    assert!(error.remediation_utf8.is_null());
+}
+
+#[test]
+fn extern_spawn_json_failure_returns_no_handle_and_an_owned_error() {
+    let request = CString::new("not json").unwrap();
+    let mut handle: *mut MxcSandbox = ptr::dangling_mut();
+    // SAFETY: an all-null detail is the empty shape.
+    let mut error: MxcErrorDetail = unsafe { std::mem::zeroed() };
+    // SAFETY: valid request and output storage.
+    let status = unsafe { mxc_spawn_json(request.as_ptr(), 0, &mut handle, &mut error) };
+
+    assert_eq!(status, mxc_ffi::MXC_STATUS_MALFORMED_REQUEST);
+    assert!(handle.is_null());
+    assert!(!error.message_utf8.is_null());
+    // SAFETY: the detail was filled by `mxc_spawn_json`.
+    unsafe { mxc_error_detail_free(&mut error) };
+    assert!(error.message_utf8.is_null());
 }
 
 /// A real run requires a host backend; on Windows that means an elevated,

@@ -32,6 +32,7 @@
 pub mod configs;
 mod dispatch;
 mod error;
+mod experimental;
 #[cfg(target_os = "windows")]
 mod guarded_capture;
 mod platform;
@@ -84,8 +85,10 @@ pub use state_aware_sdk::{
 pub use verbose_telemetry::emit_verbose_telemetry;
 
 use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::{ContainmentBackend, FailurePhase, ScriptResponse};
+use wxc_common::models::{ContainmentBackend, ExecutionRequest, FailurePhase, ScriptResponse};
+use wxc_common::mxc_error::MxcError;
 use wxc_common::sandbox_process::{NativeStdio, SandboxProcess, StreamCloser};
+use wxc_common::state_aware_request::MxcRequest;
 use wxc_common::telemetry;
 
 /// Spawn a streaming [`SandboxProcess`] handle for a [`SandboxRequest`] built
@@ -113,22 +116,54 @@ use wxc_common::telemetry;
 /// released once when the returned handle is dropped, so multiple concurrent
 /// spawns from the same load are safe as long as the library outlives them.
 pub fn spawn(request: &SandboxRequest) -> Result<Box<dyn SandboxProcess>, Error> {
+    spawn_execution_request(&request.inner, Logger::new(Mode::Buffer))
+}
+
+/// Spawn a raw exact-version one-shot JSON request as a streaming process.
+///
+/// `experimental` is the caller's runtime opt-in. It is a parameter rather than
+/// a JSON field so that a configuration cannot grant itself experimental access.
+/// The same library-lifetime contract as [`spawn`] applies.
+pub fn spawn_one_shot_json(
+    request_json: &str,
+    experimental: bool,
+) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
+    let mut request = match wxc_common::config_parser::load_mxc_request_from_json(
+        request_json,
+        &mut logger,
+    )
+    .map_err(state_aware::parse_error_to_mxc)
+    .map_err(Error::from)?
+    {
+        MxcRequest::OneShot(request) => request,
+        MxcRequest::StateAware(_) => {
+            return Err(Error::from(MxcError::malformed_request(
+                "expected a one-shot request; lifecycle requests use the state-aware JSON entry points",
+            )));
+        }
+    };
+    request.experimental_enabled = experimental;
+    spawn_execution_request(&request, logger)
+}
+
+fn spawn_execution_request(
+    request: &ExecutionRequest,
+    mut logger: Logger,
+) -> Result<Box<dyn SandboxProcess>, Error> {
     let telemetry_active = request
-        .inner
         .telemetry
         .as_ref()
         .map(|config| telemetry::init(config, &mut logger))
         .unwrap_or(false);
     let mut telemetry_registration = TelemetryRegistration::new(telemetry_active);
     let requested_sandbox_kind = request
-        .inner
         .telemetry
         .as_ref()
         .and_then(|config| config.requested_sandbox_kind);
-    let containment = request.inner.containment.clone();
+    let containment = request.containment.clone();
     let started = std::time::Instant::now();
-    let process = match dispatch::spawn_runner(&request.inner, &mut logger) {
+    let process = match dispatch::spawn_runner(request, &mut logger) {
         Ok(process) => process,
         Err(error) => {
             // Preserve the actual error category so bounded telemetry

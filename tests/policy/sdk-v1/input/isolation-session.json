@@ -1,0 +1,19 @@
+{
+  "description": "IsolationSession requires the all-allow directional network.",
+  "policy": {
+    "network": {
+      "egress": {
+        "default": "allow"
+      },
+      "ingress": {
+        "default": "allow",
+        "hostLoopback": "allow"
+      }
+    }
+  },
+  "containment": {
+    "kind": "isolationSession"
+  },
+  "command": "echo golden",
+  "containerName": "golden-isolation-session"
+}

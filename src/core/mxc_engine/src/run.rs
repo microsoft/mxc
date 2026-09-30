@@ -77,16 +77,22 @@ impl ResolvedRunner {
 /// logging the selected isolation tier and any tier-selection warnings to
 /// `logger`, and surfacing the DACL guard in the returned [`ResolvedRunner`].
 ///
-/// Development backends that still require runtime authorization check
-/// `request.experimental_enabled`; when it is unset they return a
-/// [`malformed_request`](MxcError::malformed_request) error. Backends that are
-/// not available on this host / not compiled in return an
+/// Experimental backends (see
+/// [`ContainmentBackend::is_experimental`]) require
+/// `request.experimental_enabled`; without it they return a
+/// [`backend_unavailable`](MxcError::backend_unavailable) error before any
+/// host-specific resolution. Backends that are not available on this host /
+/// not compiled in return an
 /// [`unsupported_containment`](MxcError::unsupported_containment) error.
 pub fn resolve_runner(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<ResolvedRunner, Error> {
     log_policy_hash(request, logger);
+    crate::experimental::require_experimental_optin(
+        &request.containment,
+        request.experimental_enabled,
+    )?;
     #[cfg(target_os = "windows")]
     {
         resolve_runner_inner_windows(request, logger).map_err(Error::from)
@@ -168,12 +174,17 @@ mod attribution_tests {
     }
 }
 
-/// Resolve a runner for the `wxc-exec --audit` compatibility workflow.
+/// Resolve a runner for the `wxc-exec --audit` compatibility workflow, applying
+/// the same experimental-backend check as [`resolve_runner`].
 #[cfg(target_os = "windows")]
 pub fn resolve_runner_for_audit(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<ResolvedRunner, Error> {
+    crate::experimental::require_experimental_optin(
+        &request.containment,
+        request.experimental_enabled,
+    )?;
     resolve_runner_inner_windows(request, logger).map_err(Error::from)
 }
 
@@ -280,11 +291,6 @@ fn resolve_runner_inner_windows(
             "VM backend not yet implemented",
         )),
         ContainmentBackend::MicroVm => {
-            if !request.experimental_enabled {
-                return Err(MxcError::malformed_request(
-                    "MicroVM is an experimental feature. Use --experimental flag.",
-                ));
-            }
             #[cfg(feature = "microvm")]
             {
                 Ok(ResolvedRunner::without_guard(Box::new(
@@ -298,13 +304,8 @@ fn resolve_runner_inner_windows(
                 ))
             }
         }
-        ContainmentBackend::Hyperlight => resolve_hyperlight(request),
+        ContainmentBackend::Hyperlight => resolve_hyperlight(),
         ContainmentBackend::WindowsSandbox => {
-            if !request.experimental_enabled {
-                return Err(MxcError::malformed_request(
-                    "Windows Sandbox is an experimental feature. Use --experimental flag.",
-                ));
-            }
             if let Some(ws) = &request.windows_sandbox {
                 let default = wxc_common::models::WindowsSandboxConfig::default();
                 if ws.idle_timeout_ms != default.idle_timeout_ms
@@ -352,13 +353,8 @@ fn resolve_runner_inner(
     use wxc_common::sandbox_process::Runner;
 
     match request.containment {
-        ContainmentBackend::Hyperlight => resolve_hyperlight(request),
+        ContainmentBackend::Hyperlight => resolve_hyperlight(),
         ContainmentBackend::MicroVm => {
-            if !request.experimental_enabled {
-                return Err(MxcError::malformed_request(
-                    "MicroVM is an experimental feature. Use --experimental flag.",
-                ));
-            }
             #[cfg(feature = "microvm")]
             {
                 Ok(ResolvedRunner::without_guard(Box::new(
@@ -485,15 +481,9 @@ fn resolve_runner_inner(
 /// WHP becomes a typed error rather than a delay-load SEH exception; on
 /// Linux, that `/dev/kvm` opens for reading and writing, for the same reason.
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-fn resolve_hyperlight(request: &ExecutionRequest) -> Result<ResolvedRunner, MxcError> {
+fn resolve_hyperlight() -> Result<ResolvedRunner, MxcError> {
     #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
     {
-        if !request.experimental_enabled {
-            return Err(MxcError::malformed_request(
-                "Hyperlight (Hyperlight+Unikraft) is an experimental feature. \
-                 Use --experimental flag.",
-            ));
-        }
         // WHP is delay-loaded; check before setup boots a VM.
         #[cfg(target_os = "windows")]
         if !hyperlight_common::is_whp_available() {
@@ -515,7 +505,6 @@ fn resolve_hyperlight(request: &ExecutionRequest) -> Result<ResolvedRunner, MxcE
     }
     #[cfg(not(all(feature = "hyperlight", target_arch = "x86_64")))]
     {
-        let _ = request;
         Err(MxcError::unsupported_containment(
             "Hyperlight backend requires x86_64 (Hyperlight needs KVM or WHP)",
         ))
@@ -546,6 +535,35 @@ mod tests {
         );
         assert_eq!(policy_hash_identity("alice@example.com"), "entra-upn");
         assert_eq!(policy_hash_identity("arbitrary identity"), "redacted");
+    }
+
+    /// Both one-shot resolution paths refuse every experimental backend without
+    /// the opt-in, with the same code the state-aware dispatcher uses, before
+    /// any host-specific check.
+    #[test]
+    fn experimental_backends_require_the_optin_on_both_resolution_paths() {
+        type Resolve = fn(&ExecutionRequest, &mut Logger) -> Result<ResolvedRunner, Error>;
+
+        for containment in [
+            ContainmentBackend::WindowsSandbox,
+            ContainmentBackend::MicroVm,
+            ContainmentBackend::Hyperlight,
+        ] {
+            let request = ExecutionRequest {
+                containment,
+                ..Default::default()
+            };
+            let resolvers: [Resolve; 2] = [resolve_runner, resolve_runner_for_audit];
+            for resolve in resolvers {
+                let mut logger = Logger::new(Mode::Buffer);
+                let error = match resolve(&request, &mut logger) {
+                    Ok(_) => panic!("{:?} must require the opt-in", request.containment),
+                    Err(error) => error,
+                };
+                assert_eq!(error.code, crate::ErrorCode::BackendUnavailable);
+                assert!(error.message.contains("experimental"), "{error}");
+            }
+        }
     }
 
     #[test]

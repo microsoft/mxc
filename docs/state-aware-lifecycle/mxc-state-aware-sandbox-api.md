@@ -190,7 +190,7 @@ unrecognised prefix, and this is by design:
 
 | Source                  | Behaviour for an unrecognised `sandboxId` prefix |
 | ----------------------- | ------------------------------------------------ |
-| SDK (TypeScript)        | Throws `MxcError { code: 'malformed_id' }` before invoking `mxc_state_aware` or `mxc_state_aware_exec`. The SDK matches the prefix against the closed `StateAwareContainmentBackend` union it was compiled with; an unknown prefix is treated as a malformed id. See `sdk/node/src/state-aware-helper.ts`. |
+| SDK (TypeScript)        | Throws `MxcError { code: 'malformed_id' }` before invoking `mxc_run_state_aware_json` or `mxc_exec_state_aware_json`. The SDK matches the prefix against the closed `StateAwareContainmentBackend` union it was compiled with; an unknown prefix is treated as a malformed id. See `sdk/node/src/state-aware-helper.ts`. |
 | SDK (Rust)              | `SandboxId::parse` accepts a syntactically valid opaque id without interpreting its prefix. Dispatch returns `MxcError { code: 'unsupported_containment' }` when that prefix is not registered. Empty ids, ids without prefix structure, and ids containing NUL are `malformed_id`. |
 | Native FFI entry points | Return `MxcError { code: 'unsupported_containment' }`. The Rust dispatcher parses the prefix successfully but the prefix-to-backend lookup table has no entry for it. See `src/core/wxc_common/src/state_aware_dispatch.rs`. |
 
@@ -1054,7 +1054,7 @@ other state-aware backend, so caller error-handling code is portable across back
 | `malformed_request` | Structural request error: malformed JSON, missing required field, unknown or phase-inappropriate field, recursively unknown backend-specific field, or invalid phase-specific shape |
 | `unsupported_containment` | The backend named by `containment` (provision) or implied by a syntactically valid `sandboxId` prefix (non-provision) is not recognised in this build. The TypeScript SDK checks its closed prefix union before dispatch and instead throws `malformed_id`; the typed Rust SDK keeps ids opaque and therefore returns `unsupported_containment` from dispatch, matching raw FFI requests. See §6.4. |
 | `unsupported_phase` | The backend does not support the requested call mode (state-aware call against an ephemeral-only backend, or one-shot call against a state-aware-only backend) |
-| `backend_unavailable` | The backend's runtime dependency is missing or unreachable (service not running, daemon stopped) |
+| `backend_unavailable` | The backend's runtime dependency is missing or unreachable (service not running, daemon stopped), or the backend is experimental and the caller did not enable experimental features |
 | `malformed_id` | The `sandboxId` is structurally invalid or has a recognised prefix but does not deserialize into the backend's native form. The TypeScript SDK also uses this code for a prefix outside its closed `StateAwareContainmentBackend` union; typed Rust and raw FFI calls classify a syntactically valid unknown prefix as `unsupported_containment`. |
 | `stale_id` | The `sandboxId` deserialised but refers to a resource the backend no longer recognises |
 | `not_provisioned` | Phase requires a provisioned sandbox; none provided, or the id is in a pre-provision state |

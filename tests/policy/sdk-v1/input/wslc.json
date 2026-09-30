@@ -1,0 +1,19 @@
+{
+  "description": "WSLc image, resources, and a TCP port mapping.",
+  "policy": {},
+  "containment": {
+    "kind": "wslc",
+    "image": "python:3.12",
+    "cpuCount": 2,
+    "memoryMb": 1024,
+    "gpu": false,
+    "portMappings": [
+      [
+        8080,
+        80
+      ]
+    ]
+  },
+  "command": "echo golden",
+  "containerName": "golden-wslc"
+}

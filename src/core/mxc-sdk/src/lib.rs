@@ -212,7 +212,7 @@ pub mod v1 {
         StateAwareExecBackendOptions, StateAwareProvision, ValidationResult, WslcSection,
     };
 
-    use crate::{Error, ErrorCode, Output, Sandbox};
+    use crate::{Error, Output, Sandbox};
 
     /// Spawn a sandbox from a [`SandboxRequest`] built by [`build_request`] (with
     /// the command, and any working directory / env, filled in).
@@ -239,14 +239,35 @@ pub mod v1 {
     /// `Err` is returned when the backend can't be selected/spawned (an
     /// [`Error`]), or when waiting on the child fails at the OS level.
     pub fn run(request: SandboxRequest) -> Result<Output, Error> {
-        let sandbox = spawn_sandbox(request)?;
-        sandbox.wait_with_output().map_err(|e| {
-            Error::new(
-                ErrorCode::BackendError,
-                format!("waiting for the sandbox to complete failed: {e}"),
-            )
-        })
+        crate::wait_with_output(spawn_sandbox(request)?)
     }
+}
+
+/// Spawn a raw exact-version one-shot JSON request as a live sandbox.
+///
+/// The JSON must declare an exact registered `version` and contain a one-shot
+/// request. Lifecycle requests are rejected; use the state-aware JSON APIs.
+/// `experimental` permits selecting an experimental backend (MicroVM,
+/// Hyperlight, or Windows Sandbox), which is otherwise refused with
+/// [`ErrorCode::BackendUnavailable`]. It is ignored for production backends and
+/// is never read from the JSON.
+pub fn spawn_sandbox_json(request_json: &str, experimental: bool) -> Result<Sandbox, Error> {
+    mxc_engine::spawn_one_shot_json(request_json, experimental).map(Sandbox::new)
+}
+
+/// Run a raw exact-version one-shot JSON request to completion, capturing its
+/// output. The JSON and `experimental` rules match [`spawn_sandbox_json`].
+pub fn run_json(request_json: &str, experimental: bool) -> Result<Output, Error> {
+    wait_with_output(spawn_sandbox_json(request_json, experimental)?)
+}
+
+fn wait_with_output(sandbox: Sandbox) -> Result<Output, Error> {
+    sandbox.wait_with_output().map_err(|e| {
+        Error::new(
+            ErrorCode::BackendError,
+            format!("waiting for the sandbox to complete failed: {e}"),
+        )
+    })
 }
 
 /// Run a **state-aware lifecycle** request (as a JSON string) and return the
@@ -263,8 +284,9 @@ pub mod v1 {
 /// failures) come back as an [`Error`] with the matching [`ErrorCode`].
 ///
 /// `experimental` is the in-process equivalent of the executor's
-/// `--experimental` flag. Windows Sandbox is refused with
-/// [`ErrorCode::BackendUnavailable`] unless it is set, before any work is done.
+/// `--experimental` flag. It permits selecting an experimental backend, which
+/// is otherwise refused with [`ErrorCode::BackendUnavailable`] before any work
+/// is done, and is ignored for production backends.
 /// It is an API parameter rather than a field in the request JSON so that a
 /// config cannot grant itself experimental access.
 pub fn run_state_aware_json(

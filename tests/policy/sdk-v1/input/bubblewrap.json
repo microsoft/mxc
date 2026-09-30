@@ -1,0 +1,9 @@
+{
+  "description": "Bubblewrap containment.",
+  "policy": {},
+  "containment": {
+    "kind": "bubblewrap"
+  },
+  "command": "echo golden",
+  "containerName": "golden-bubblewrap"
+}

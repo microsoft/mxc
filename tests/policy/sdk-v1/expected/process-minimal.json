@@ -1,0 +1,18 @@
+{
+  "version": "1.0.0",
+  "containerId": "golden-process-minimal",
+  "containment": "process",
+  "lifecycle": {
+    "destroyOnExit": true,
+    "preservePolicy": false
+  },
+  "process": {
+    "commandLine": "echo golden",
+    "timeout": 0
+  },
+  "filesystem": {
+    "readwritePaths": [],
+    "readonlyPaths": [],
+    "deniedPaths": []
+  }
+}

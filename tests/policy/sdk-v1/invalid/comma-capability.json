@@ -1,0 +1,17 @@
+{
+  "description": "Each capability entry names one capability.",
+  "errorCode": "malformed_request",
+  "messageContains": "must not contain a comma",
+  "document": {
+    "version": "1.0.0",
+    "containment": "processcontainer",
+    "process": {
+      "commandLine": "echo golden"
+    },
+    "processContainer": {
+      "capabilities": [
+        "internetClient,registryRead"
+      ]
+    }
+  }
+}

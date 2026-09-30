@@ -65,7 +65,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
 use mxc_sdk::v1::spawn_sandbox;
-use mxc_sdk::{Sandbox, StreamCloser, WaitOutcome};
+use mxc_sdk::{spawn_sandbox_json, Sandbox, StreamCloser, WaitOutcome};
 
 use crate::{
     alloc_cstring, cstr_to_str, request, status_from_error_code, MxcErrorDetail,
@@ -86,7 +86,7 @@ pub struct MxcSandbox {
 impl MxcSandbox {
     /// Wrap an [`mxc_sdk::Sandbox`] as an opaque FFI handle. Used by both the
     /// one-shot spawn path ([`mxc_spawn_request`]) and the state-aware streaming exec
-    /// path (`mxc_state_aware_exec`).
+    /// path (`mxc_exec_state_aware_json`).
     pub(crate) fn new(inner: Sandbox) -> Self {
         Self { inner }
     }
@@ -144,6 +144,9 @@ impl MxcNativeStdio {
 ///
 /// Uses the same co-versioned request JSON contract as
 /// [`mxc_run_request`](crate::mxc_run_request).
+///
+/// **Deprecated:** use [`mxc_spawn_json`] with an exact-version configuration.
+/// This export and the binding request it accepts will be removed.
 ///
 /// # Safety
 /// - `request_json_utf8` must be null or valid NUL-terminated UTF-8.
@@ -203,8 +206,80 @@ fn spawn_request_inner(request_json_utf8: *const c_char) -> Result<Sandbox, (i32
     spawn_sandbox(request).map_err(sdk_error_detail)
 }
 
+/// Spawn a raw exact-version one-shot JSON request as a live sandboxed process.
+///
+/// `request_json_utf8` is a public MXC configuration with an exact registered
+/// `version`, unlike the private binding request accepted by
+/// [`mxc_spawn_request`]. `experimental` is nonzero to permit an experimental
+/// backend, which is otherwise refused with `backend_unavailable`; it is
+/// ignored for production backends and never read from the JSON.
+///
+/// # Safety
+/// - `request_json_utf8` must be null or valid NUL-terminated UTF-8.
+/// - `out_handle` must point to writable pointer-sized storage holding no live
+///   handle. On success the caller owns `*out_handle` and frees it with
+///   [`mxc_sandbox_free`].
+/// - `out_error` must be null or point to writable storage holding no live
+///   detail. After a failure the caller frees it with
+///   [`mxc_error_detail_free`](crate::mxc_error_detail_free).
+#[no_mangle]
+pub unsafe extern "C" fn mxc_spawn_json(
+    request_json_utf8: *const c_char,
+    experimental: i32,
+    out_handle: *mut *mut MxcSandbox,
+    out_error: *mut MxcErrorDetail,
+) -> i32 {
+    if !out_handle.is_null() {
+        // SAFETY: caller-guaranteed writable pointer-sized storage.
+        unsafe { *out_handle = ptr::null_mut() };
+    }
+    if !out_error.is_null() {
+        // SAFETY: caller-guaranteed writable storage for one fresh detail.
+        unsafe { ptr::write(out_error, MxcErrorDetail::none()) };
+    }
+    if out_handle.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        spawn_json_inner(request_json_utf8, experimental != 0)
+    }))
+    .unwrap_or_else(|panic| {
+        crate::report_panic("mxc_spawn_json", &*panic);
+        Err((
+            MXC_STATUS_PANIC,
+            MxcErrorDetail::from_message("the mxc engine panicked"),
+        ))
+    });
+
+    // SAFETY: `out_handle` is non-null and `out_error` is null or writable.
+    unsafe { finish_spawn(outcome, out_handle, out_error) }
+}
+
+fn spawn_json_inner(
+    request_json_utf8: *const c_char,
+    experimental: bool,
+) -> Result<Sandbox, (i32, MxcErrorDetail)> {
+    // SAFETY: caller contract on `mxc_spawn_json`; borrowed only within scope.
+    let request_json = match unsafe { cstr_to_str(request_json_utf8) } {
+        Some(value) => value,
+        None if request_json_utf8.is_null() => {
+            return Err((
+                MXC_STATUS_NULL_ARGUMENT,
+                MxcErrorDetail::from_message("request JSON pointer is null"),
+            ))
+        }
+        None => {
+            return Err((
+                MXC_STATUS_INVALID_UTF8,
+                MxcErrorDetail::from_message("request JSON is not UTF-8"),
+            ))
+        }
+    };
+    spawn_sandbox_json(request_json, experimental).map_err(sdk_error_detail)
+}
+
 /// Shared tail of the handle-returning spawn entry points
-/// ([`mxc_spawn_request`] and `mxc_state_aware_exec`): on success box the
+/// ([`mxc_spawn_request`] and `mxc_exec_state_aware_json`): on success box the
 /// [`Sandbox`] into an
 /// [`MxcSandbox`] handle and write it to `*out_handle`; on failure hand the
 /// detail to `*out_error` (when non-null) and return the status.

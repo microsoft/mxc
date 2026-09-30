@@ -30,9 +30,9 @@ phase contracts after taking those routing values from CLI arguments.
 
 | Phase | `wxc-exec` | In-process |
 |---|---|---|
-| provision / start / stop / deprovision | `wxc-exec --operation <phase> [--sandbox-id <id>] --config …` | `mxc_sdk::run_state_aware_json`, `mxc_state_aware` |
-| exec, attached to the caller's stdio | `wxc-exec --operation exec --sandbox-id <id> --config …` | `mxc_sdk::exec_attached`, `mxc_state_aware_exec_attached` |
-| exec, caller drives the pipes | *(no CLI equivalent)* | `mxc_sdk::exec_sandbox`, `mxc_state_aware_exec` |
+| provision / start / stop / deprovision | `wxc-exec --operation <phase> [--sandbox-id <id>] --config …` | `mxc_sdk::run_state_aware_json`, `mxc_run_state_aware_json` |
+| exec, attached to the caller's stdio | `wxc-exec --operation exec --sandbox-id <id> --config …` | `mxc_sdk::exec_attached`, `mxc_exec_state_aware_attached_json` |
+| exec, caller drives the pipes | *(no CLI equivalent)* | `mxc_sdk::exec_sandbox`, `mxc_exec_state_aware_json` |
 
 Requirements on an in-process caller:
 

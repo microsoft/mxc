@@ -57,26 +57,6 @@ fn isolation_session_unavailable() -> MxcError {
     )
 }
 
-/// Reject a Windows Sandbox state-aware request when the caller has not enabled
-/// experimental features. Applied by both the envelope dispatcher
-/// ([`run_state_aware`]) and the streaming exec dispatcher ([`exec_state_aware`])
-/// so no entry point can reach that development backend without the opt-in.
-fn require_experimental_optin(
-    backend: &wxc_common::models::ContainmentBackend,
-    parsed: &ParsedStateAwareRequest,
-) -> Result<(), MxcError> {
-    if matches!(
-        backend,
-        wxc_common::models::ContainmentBackend::WindowsSandbox
-    ) && !parsed.request().experimental_enabled
-    {
-        return Err(MxcError::backend_unavailable(format!(
-            "{backend:?} is an experimental backend; enable experimental features to use it"
-        )));
-    }
-    Ok(())
-}
-
 /// This phase's telemetry correlation vector, purely internal to MXC: no
 /// caller ever supplies or relays one. `provision` (whose `sandboxId` doesn't
 /// exist yet) mints a fresh vector; every later phase recalls the same
@@ -135,7 +115,10 @@ pub fn run_state_aware(
     dry_run: bool,
 ) -> Result<DispatchOutcome, MxcError> {
     let backend = resolve_backend(&parsed)?;
-    require_experimental_optin(&backend, &parsed)?;
+    crate::experimental::require_experimental_optin(
+        &backend,
+        parsed.request().experimental_enabled,
+    )?;
     match backend {
         #[cfg(target_os = "windows")]
         wxc_common::models::ContainmentBackend::WindowsSandbox => {
@@ -233,7 +216,10 @@ fn run_state_aware_typed(
     dry_run: bool,
 ) -> Result<StateAwareResult, MxcError> {
     let backend = resolve_backend(&parsed)?;
-    require_experimental_optin(&backend, &parsed)?;
+    crate::experimental::require_experimental_optin(
+        &backend,
+        parsed.request().experimental_enabled,
+    )?;
     match backend {
         #[cfg(target_os = "windows")]
         wxc_common::models::ContainmentBackend::WindowsSandbox => {
@@ -302,7 +288,10 @@ pub fn exec_state_aware(
     parsed: ParsedStateAwareRequest,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     let backend = resolve_backend(&parsed)?;
-    require_experimental_optin(&backend, &parsed)?;
+    crate::experimental::require_experimental_optin(
+        &backend,
+        parsed.request().experimental_enabled,
+    )?;
     match backend {
         #[cfg(target_os = "windows")]
         wxc_common::models::ContainmentBackend::WindowsSandbox => {
@@ -385,7 +374,7 @@ fn normalize_sdk_state_aware(
 /// Map a [`config_parser::ParseError`](wxc_common::config_parser::ParseError) to
 /// an [`MxcError`]. The state-aware arm already carries one; the decode,
 /// version, and one-shot arms carry a `WxcError` that maps to `malformed_request`.
-fn parse_error_to_mxc(e: wxc_common::config_parser::ParseError) -> MxcError {
+pub(crate) fn parse_error_to_mxc(e: wxc_common::config_parser::ParseError) -> MxcError {
     use wxc_common::config_parser::ParseError;
     match e {
         ParseError::StateAware(err) => err,
@@ -1398,9 +1387,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(require_experimental_optin(
+        assert!(crate::experimental::require_experimental_optin(
             &wxc_common::models::ContainmentBackend::IsolationSession,
-            &parsed
+            parsed.request().experimental_enabled
         )
         .is_ok());
     }

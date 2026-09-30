@@ -1,0 +1,27 @@
+{
+  "version": "1.0.0",
+  "containerId": "golden-invocation-options",
+  "containment": "process",
+  "lifecycle": {
+    "destroyOnExit": true,
+    "preservePolicy": false
+  },
+  "process": {
+    "commandLine": "echo golden",
+    "cwd": "work",
+    "env": [
+      "A=1",
+      "B=2"
+    ],
+    "inheritDefaultEnv": true,
+    "timeout": 0
+  },
+  "filesystem": {
+    "readwritePaths": [],
+    "readonlyPaths": [],
+    "deniedPaths": []
+  },
+  "telemetry": {
+    "enabled": true
+  }
+}

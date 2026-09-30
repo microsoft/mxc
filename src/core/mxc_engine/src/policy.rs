@@ -13,6 +13,8 @@
 
 mod exact;
 pub(crate) mod network;
+#[cfg(test)]
+mod sdk_v1_goldens;
 
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -426,8 +428,7 @@ pub fn temporary_files_policy(env: Option<&[(String, String)]>) -> FilesystemPol
 
 /// Clipboard access level, mirroring the SDK `ClipboardPolicy`
 /// (`"none" | "read" | "write" | "all"`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ClipboardPolicy {
     /// No clipboard access.
     #[default]
@@ -441,8 +442,7 @@ pub enum ClipboardPolicy {
 }
 
 /// Filesystem section of a [`SandboxPolicy`].
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[derive(Debug, Clone, Default)]
 pub struct FilesystemSection {
     pub readwrite_paths: Vec<String>,
     pub readonly_paths: Vec<String>,
@@ -452,8 +452,7 @@ pub struct FilesystemSection {
 }
 
 /// UI section of a [`SandboxPolicy`]. All flags default to denied.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[derive(Debug, Clone, Default)]
 pub struct UiSection {
     pub allow_windows: bool,
     pub clipboard: ClipboardPolicy,
@@ -571,18 +570,13 @@ impl Default for WslcSection {
 /// instrumentation rather than a sandbox restriction, matching the global
 /// sandbox-policy design. Build the request first, then use
 /// [`SandboxRequest::set_telemetry_opt_in`] to opt that invocation in.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct SandboxPolicy {
-    #[serde(default)]
     pub filesystem: Option<FilesystemSection>,
-    #[serde(default)]
     pub network: Option<NetworkSection>,
-    #[serde(default)]
     pub ui: Option<UiSection>,
     /// Execution timeout in milliseconds (`None` = no timeout).
-    #[serde(default)]
     pub timeout_ms: Option<u32>,
 }
 
@@ -845,14 +839,6 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_policy_rejects_removed_version_field() {
-        let error = serde_json::from_str::<SandboxPolicy>(r#"{ "version": "0.7.0-alpha" }"#)
-            .expect_err("the V1 policy must reject legacy version input");
-
-        assert!(error.to_string().contains("unknown field `version`"));
-    }
-
-    #[test]
     fn v1_builder_preserves_absent_empty_and_runtime_only_network_presence() {
         let mut policy = minimal_policy();
         let absent =
@@ -932,12 +918,9 @@ mod tests {
     //
     // The assertion is deliberately about key presence rather than content —
     // that is the only thing that distinguishes the two states downstream.
-    // Policies are built from JSON rather than a literal so the "caller said
-    // nothing about ui" case is expressed the way a real caller expresses it.
     #[test]
     fn exact_builder_preserves_absent_ui() {
-        let policy: super::SandboxPolicy =
-            serde_json::from_str("{}").expect("minimal policy parses");
+        let policy = super::SandboxPolicy::default();
         assert!(policy.ui.is_none(), "precondition: no ui supplied");
 
         let request =
@@ -953,8 +936,10 @@ mod tests {
     fn exact_builder_preserves_explicit_ui() {
         // An explicitly-supplied lockdown `ui` — value-identical to the old
         // synthesized block, which is exactly why presence is what matters.
-        let policy: super::SandboxPolicy =
-            serde_json::from_str(r#"{ "ui": {} }"#).expect("policy with ui parses");
+        let policy = super::SandboxPolicy {
+            ui: Some(super::UiSection::default()),
+            ..Default::default()
+        };
         assert!(policy.ui.is_some(), "precondition: ui supplied");
 
         let request =
@@ -1240,8 +1225,8 @@ mod tests {
             ui: None,
             timeout_ms: None,
         };
-        // build_request resolves Seatbelt on macOS, so the config is present and
-        // the consumer can read its defaults and write back.
+        // build_request leaves `process` for the engine to resolve, so the
+        // setters create the Seatbelt config on first use.
         let mut request = build_request(&policy, TEST_COMMAND, None).expect("build_request");
         let mut union: Vec<String> = request.seatbelt_extra_mach_lookups().to_vec();
         union.push("com.example.service".to_string());
@@ -1340,23 +1325,8 @@ mod tests {
     }
 
     #[test]
-    fn capture_denials_config_deserializes_from_camel_case_json() {
-        let config: CaptureDenials = serde_json::from_value(serde_json::json!({
-            "mode": "allow",
-            "outputPath": "/tmp/denials.json",
-            "retainEtl": true,
-        }))
-        .expect("config deserializes");
-
-        assert_eq!(config.mode, CaptureDenialsMode::Allow);
-        assert_eq!(config.output_path.as_deref(), Some("/tmp/denials.json"));
-        assert!(config.retain_etl);
-    }
-
-    #[test]
     fn capture_denials_config_defaults_to_block_without_output_path() {
-        let config: CaptureDenials =
-            serde_json::from_value(serde_json::json!({})).expect("config deserializes");
+        let config = CaptureDenials::default();
 
         assert_eq!(config.mode, CaptureDenialsMode::Block);
         assert!(config.output_path.is_none());

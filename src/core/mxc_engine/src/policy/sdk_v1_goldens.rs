@@ -1,0 +1,516 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! Shared SDK v1 golden fixtures under `tests/policy/sdk-v1/`.
+//!
+//! Each `input/<name>.json` describes a high-level policy invocation and each
+//! `expected/<name>.json` is the exact 1.0.0 request every SDK must emit for
+//! it. These tests prove that the Rust policy builder and the expected document
+//! produce the same normalized execution request, so an SDK that emits the
+//! expected document runs with the same intent as the Rust SDK. Documents in
+//! `invalid/` must be rejected by the exact parser with the recorded code.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use serde::Deserialize;
+use wxc_common::logger::{Logger, Mode};
+use wxc_common::models::ExecutionRequest;
+use wxc_common::state_aware_request::MxcRequest;
+
+use crate::configs::{Lxc, ProcessContainer, ProcessContainerNetwork, Seatbelt};
+
+use super::{
+    build_request_with_containment, ClipboardPolicy, Containment, FilesystemSection, NetworkAction,
+    NetworkEgressSection, NetworkIngressSection, NetworkPeerSection, NetworkPortSection,
+    NetworkProtocol, NetworkRuleSection, NetworkSection, RuntimeConfigSection, SandboxPolicy,
+    UiSection, WslcSection,
+};
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GoldenInput {
+    #[allow(dead_code)]
+    description: String,
+    policy: PolicyInput,
+    containment: ContainmentInput,
+    command: String,
+    container_name: Option<String>,
+    working_directory: Option<String>,
+    environment: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    inherit_default_env: bool,
+    telemetry: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+enum ContainmentInput {
+    Process,
+    #[serde(rename_all = "camelCase")]
+    ProcessContainer {
+        #[serde(default)]
+        least_privilege: bool,
+        #[serde(default)]
+        learning_mode: bool,
+        #[serde(default)]
+        capabilities: Vec<String>,
+        allowed_proxy_peer: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Seatbelt {
+        profile_override: Option<String>,
+        #[serde(default)]
+        gui_access: bool,
+        #[serde(default = "default_true")]
+        nested_pty: bool,
+        #[serde(default)]
+        keychain_access: bool,
+        #[serde(default)]
+        extra_mach_lookups: Vec<String>,
+    },
+    Lxc {
+        distribution: String,
+        release: String,
+    },
+    Bubblewrap,
+    #[serde(rename_all = "camelCase")]
+    Wslc {
+        image: String,
+        image_tar_path: Option<String>,
+        cpu_count: Option<u32>,
+        memory_mb: Option<u64>,
+        #[serde(default)]
+        gpu: bool,
+        storage_path: Option<String>,
+        #[serde(default)]
+        port_mappings: Vec<(u16, u16)>,
+    },
+    IsolationSession,
+}
+
+// The input files describe the high-level policy in SDK-neutral JSON. These
+// test-only types read that shape; the SDK policy types are plain Rust.
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PolicyInput {
+    filesystem: Option<FilesystemInput>,
+    network: Option<NetworkInput>,
+    ui: Option<UiInput>,
+    timeout_ms: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FilesystemInput {
+    #[serde(default)]
+    readwrite_paths: Vec<String>,
+    #[serde(default)]
+    readonly_paths: Vec<String>,
+    #[serde(default)]
+    denied_paths: Vec<String>,
+    clear_policy_on_exit: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UiInput {
+    #[serde(default)]
+    allow_windows: bool,
+    #[serde(default)]
+    clipboard: ClipboardInput,
+    #[serde(default)]
+    allow_input_injection: bool,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum ClipboardInput {
+    #[default]
+    None,
+    Read,
+    Write,
+    All,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NetworkInput {
+    egress: Option<EgressInput>,
+    ingress: Option<IngressInput>,
+    runtime_config: Option<RuntimeConfigInput>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ActionInput {
+    Allow,
+    Deny,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ProtocolInput {
+    Tcp,
+    Udp,
+    Icmp,
+    Any,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EgressInput {
+    default: Option<ActionInput>,
+    allow: Option<Vec<RuleInput>>,
+    deny: Option<Vec<RuleInput>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct IngressInput {
+    default: Option<ActionInput>,
+    host_loopback: Option<ActionInput>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RuleInput {
+    to: Option<Vec<PeerInput>>,
+    ports: Option<Vec<PortInput>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PeerInput {
+    cidr: String,
+    except: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PortInput {
+    protocol: Option<ProtocolInput>,
+    port: Option<u16>,
+    end_port: Option<u16>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RuntimeConfigInput {
+    network_proxy: Option<String>,
+}
+
+impl ActionInput {
+    fn into_policy(self) -> NetworkAction {
+        match self {
+            Self::Allow => NetworkAction::Allow,
+            Self::Deny => NetworkAction::Deny,
+        }
+    }
+}
+
+impl RuleInput {
+    fn into_policy(self) -> NetworkRuleSection {
+        NetworkRuleSection {
+            to: self.to.map(|peers| {
+                peers
+                    .into_iter()
+                    .map(|peer| NetworkPeerSection {
+                        cidr: peer.cidr,
+                        except: peer.except,
+                    })
+                    .collect()
+            }),
+            ports: self.ports.map(|ports| {
+                ports
+                    .into_iter()
+                    .map(|port| NetworkPortSection {
+                        protocol: port.protocol.map(|protocol| match protocol {
+                            ProtocolInput::Tcp => NetworkProtocol::Tcp,
+                            ProtocolInput::Udp => NetworkProtocol::Udp,
+                            ProtocolInput::Icmp => NetworkProtocol::Icmp,
+                            ProtocolInput::Any => NetworkProtocol::Any,
+                        }),
+                        port: port.port,
+                        end_port: port.end_port,
+                    })
+                    .collect()
+            }),
+        }
+    }
+}
+
+fn rules(rules: Option<Vec<RuleInput>>) -> Option<Vec<NetworkRuleSection>> {
+    rules.map(|rules| rules.into_iter().map(RuleInput::into_policy).collect())
+}
+
+impl PolicyInput {
+    fn into_policy(self) -> SandboxPolicy {
+        SandboxPolicy {
+            filesystem: self.filesystem.map(|filesystem| FilesystemSection {
+                readwrite_paths: filesystem.readwrite_paths,
+                readonly_paths: filesystem.readonly_paths,
+                denied_paths: filesystem.denied_paths,
+                clear_policy_on_exit: filesystem.clear_policy_on_exit,
+            }),
+            network: self.network.map(|network| NetworkSection {
+                egress: network.egress.map(|egress| NetworkEgressSection {
+                    default: egress.default.map(ActionInput::into_policy),
+                    allow: rules(egress.allow),
+                    deny: rules(egress.deny),
+                }),
+                ingress: network.ingress.map(|ingress| NetworkIngressSection {
+                    default: ingress.default.map(ActionInput::into_policy),
+                    host_loopback: ingress.host_loopback.map(ActionInput::into_policy),
+                }),
+                runtime_config: network.runtime_config.map(|runtime| RuntimeConfigSection {
+                    network_proxy: runtime.network_proxy,
+                }),
+            }),
+            ui: self.ui.map(|ui| UiSection {
+                allow_windows: ui.allow_windows,
+                clipboard: match ui.clipboard {
+                    ClipboardInput::None => ClipboardPolicy::None,
+                    ClipboardInput::Read => ClipboardPolicy::Read,
+                    ClipboardInput::Write => ClipboardPolicy::Write,
+                    ClipboardInput::All => ClipboardPolicy::All,
+                },
+                allow_input_injection: ui.allow_input_injection,
+            }),
+            timeout_ms: self.timeout_ms,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl ContainmentInput {
+    fn into_containment(self) -> Containment {
+        match self {
+            Self::Process => Containment::Process,
+            Self::ProcessContainer {
+                least_privilege,
+                learning_mode,
+                capabilities,
+                allowed_proxy_peer,
+            } => Containment::ProcessContainer(ProcessContainer {
+                least_privilege,
+                learning_mode,
+                capabilities,
+                network: allowed_proxy_peer.map(|peer| ProcessContainerNetwork {
+                    allowed_proxy_peer: Some(peer),
+                }),
+                ..Default::default()
+            }),
+            Self::Seatbelt {
+                profile_override,
+                gui_access,
+                nested_pty,
+                keychain_access,
+                extra_mach_lookups,
+            } => Containment::Seatbelt(Seatbelt {
+                profile_override,
+                gui_access,
+                nested_pty,
+                keychain_access,
+                extra_mach_lookups,
+            }),
+            Self::Lxc {
+                distribution,
+                release,
+            } => Containment::Lxc(Lxc {
+                distribution,
+                release,
+            }),
+            Self::Bubblewrap => Containment::Bubblewrap,
+            Self::Wslc {
+                image,
+                image_tar_path,
+                cpu_count,
+                memory_mb,
+                gpu,
+                storage_path,
+                port_mappings,
+            } => Containment::Wslc(WslcSection {
+                image,
+                image_tar_path,
+                cpu_count,
+                memory_mb,
+                gpu,
+                storage_path,
+                port_mappings,
+            }),
+            Self::IsolationSession => Containment::IsolationSession,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InvalidGolden {
+    #[allow(dead_code)]
+    description: String,
+    error_code: String,
+    message_contains: String,
+    document: serde_json::Value,
+}
+
+fn golden_dir(kind: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../tests/policy/sdk-v1")
+        .join(kind)
+}
+
+fn golden_names(kind: &str) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(golden_dir(kind))
+        .unwrap_or_else(|error| panic!("reading {kind} goldens: {error}"))
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .map(|path| path.file_stem().unwrap().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert!(!names.is_empty(), "no {kind} goldens found");
+    names
+}
+
+fn read_golden(kind: &str, name: &str) -> String {
+    std::fs::read_to_string(golden_dir(kind).join(format!("{name}.json")))
+        .unwrap_or_else(|error| panic!("reading {kind}/{name}.json: {error}"))
+}
+
+fn build_from_input(name: &str, input: GoldenInput) -> ExecutionRequest {
+    let containment = input.containment.into_containment();
+    let policy = input.policy.into_policy();
+    let mut request = build_request_with_containment(
+        &policy,
+        &containment,
+        &input.command,
+        input.container_name.as_deref(),
+    )
+    .unwrap_or_else(|error| panic!("input/{name}.json: building the request failed: {error}"));
+    if let Some(working_directory) = input.working_directory {
+        request.set_working_directory(working_directory);
+    }
+    if let Some(environment) = input.environment {
+        if input.inherit_default_env {
+            request.inherit_default_env(environment);
+        } else {
+            request.set_env(environment);
+        }
+    }
+    if let Some(enabled) = input.telemetry {
+        request.set_telemetry_opt_in(enabled);
+    }
+    request.inner
+}
+
+fn parse_one_shot(json: &str) -> Result<ExecutionRequest, wxc_common::mxc_error::MxcError> {
+    let mut logger = Logger::new(Mode::Buffer);
+    match wxc_common::config_parser::load_mxc_request_from_json(json, &mut logger)
+        .map_err(crate::state_aware::parse_error_to_mxc)?
+    {
+        MxcRequest::OneShot(request) => Ok(request),
+        MxcRequest::StateAware(_) => panic!("expected a one-shot request"),
+    }
+}
+
+/// The normalized intent of a request: everything except the external-JSON
+/// provenance, which is diagnostic attribution rather than policy.
+fn intent(request: &ExecutionRequest) -> serde_json::Value {
+    let mut value = serde_json::to_value(request).unwrap();
+    value.as_object_mut().unwrap().remove("source_contract");
+    value
+}
+
+fn differences(path: &str, built: &serde_json::Value, parsed: &serde_json::Value) -> Vec<String> {
+    match (built, parsed) {
+        (serde_json::Value::Object(built), serde_json::Value::Object(parsed)) => {
+            let mut keys: Vec<&String> = built.keys().chain(parsed.keys()).collect();
+            keys.sort();
+            keys.dedup();
+            keys.into_iter()
+                .flat_map(|key| {
+                    let null = serde_json::Value::Null;
+                    differences(
+                        &format!("{path}.{key}"),
+                        built.get(key).unwrap_or(&null),
+                        parsed.get(key).unwrap_or(&null),
+                    )
+                })
+                .collect()
+        }
+        _ if built == parsed => Vec::new(),
+        _ => vec![format!("{path}: builder={built} expected={parsed}")],
+    }
+}
+
+#[test]
+fn expected_documents_match_the_rust_builder() {
+    let names = golden_names("input");
+    assert_eq!(names, golden_names("expected"), "input/expected pairs");
+    let mut failures = Vec::new();
+    for name in names {
+        let input: GoldenInput = serde_json::from_str(&read_golden("input", &name))
+            .unwrap_or_else(|error| panic!("input/{name}.json: {error}"));
+        let expected = read_golden("expected", &name);
+        let document: serde_json::Value = serde_json::from_str(&expected).unwrap();
+        assert_eq!(document["version"], "1.0.0", "expected/{name}.json version");
+
+        let built = build_from_input(&name, input);
+        let parsed = parse_one_shot(&expected)
+            .unwrap_or_else(|error| panic!("expected/{name}.json is rejected: {error}"));
+
+        for difference in differences("", &intent(&built), &intent(&parsed)) {
+            failures.push(format!("{name}: {difference}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "expected documents differ from the Rust builder's intent:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn invalid_documents_are_rejected() {
+    for name in golden_names("invalid") {
+        let golden: InvalidGolden = serde_json::from_str(&read_golden("invalid", &name))
+            .unwrap_or_else(|error| panic!("invalid/{name}.json: {error}"));
+        let error = match parse_one_shot(&golden.document.to_string()) {
+            Ok(_) => panic!("invalid/{name}.json was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.code.as_str(),
+            golden.error_code,
+            "invalid/{name}.json: {}",
+            error.message
+        );
+        assert!(
+            error.message.contains(&golden.message_contains),
+            "invalid/{name}.json was rejected for another reason: {}",
+            error.message
+        );
+    }
+}
+
+/// Without a container name every request gets a fresh random identifier.
+/// SDK mappers must do the same: an absent `containerId` selects a shared
+/// default container instead.
+#[test]
+fn unnamed_requests_mint_a_distinct_container_id() {
+    let policy = SandboxPolicy::default();
+    let first = build_request_with_containment(&policy, &Containment::Process, "echo", None)
+        .unwrap()
+        .inner
+        .container_id;
+    let second = build_request_with_containment(&policy, &Containment::Process, "echo", None)
+        .unwrap()
+        .inner
+        .container_id;
+    assert!(!first.is_empty());
+    assert_ne!(first, second);
+}

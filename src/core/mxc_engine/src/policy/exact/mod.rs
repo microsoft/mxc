@@ -9,7 +9,7 @@ use wxc_common::mxc_error::MxcError;
 
 use crate::configs::{Lxc, ProcessContainer, Seatbelt};
 
-use super::{Containment, NetworkAction, SandboxPolicy, SandboxRequest};
+use super::{Containment, SandboxPolicy, SandboxRequest};
 
 macro_rules! optional {
     ($module:ident, $value:expr) => {
@@ -56,7 +56,6 @@ fn validate_common(containment: &Containment) -> Result<(), MxcError> {
 fn selected_process_container(containment: &Containment) -> Option<ProcessContainer> {
     match containment {
         Containment::ProcessContainer(process_container) => Some(process_container.clone()),
-        Containment::Process if cfg!(target_os = "windows") => Some(ProcessContainer::default()),
         _ => None,
     }
 }
@@ -64,7 +63,6 @@ fn selected_process_container(containment: &Containment) -> Option<ProcessContai
 fn selected_seatbelt(containment: &Containment) -> Option<Seatbelt> {
     match containment {
         Containment::Seatbelt(seatbelt) => Some(seatbelt.clone()),
-        Containment::Process if cfg!(target_os = "macos") => Some(Seatbelt::default()),
         _ => None,
     }
 }
@@ -74,38 +72,6 @@ fn selected_lxc(containment: &Containment) -> Option<Lxc> {
         Containment::Lxc(lxc) => Some(lxc.clone()),
         _ => None,
     }
-}
-
-fn normalized_capabilities(
-    policy: &SandboxPolicy,
-    process_container: &ProcessContainer,
-) -> Vec<String> {
-    let mut capabilities = process_container.capabilities.clone();
-    if let Some(network) = policy.network.as_ref() {
-        let allows_internet = network.egress.as_ref().is_some_and(|egress| {
-            egress.default == Some(NetworkAction::Allow)
-                || egress.allow.as_ref().is_some_and(|rules| !rules.is_empty())
-        });
-        let allows_local_network = network
-            .ingress
-            .as_ref()
-            .is_some_and(|ingress| ingress.default == Some(NetworkAction::Allow));
-        if allows_internet
-            && !capabilities
-                .iter()
-                .any(|capability| capability.eq_ignore_ascii_case("internetClient"))
-        {
-            capabilities.push("internetClient".to_string());
-        }
-        if allows_local_network
-            && !capabilities
-                .iter()
-                .any(|capability| capability.eq_ignore_ascii_case("privateNetworkClientServer"))
-        {
-            capabilities.push("privateNetworkClientServer".to_string());
-        }
-    }
-    capabilities
 }
 
 fn container_id(container_name: Option<&str>) -> String {

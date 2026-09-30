@@ -293,6 +293,19 @@ baselines are captured when the v1.0 SDK surface is established rather than
 through empty placeholder
 descriptors.
 
+### Native ingress
+
+Language bindings pass configuration to the native library only as exact
+versioned JSON. A high-level SDK maps its policy types to the contract named
+by its `sdkMajorTargets` entry, stamps that `version`, and calls
+`mxc_run_json`, `mxc_spawn_json`, or the state-aware JSON exports; raw JSON
+APIs pass caller-authored documents through unchanged. The native side
+parses each document with its declared contract, so every surface shares one
+parser and one normalization path. Controls that are not configuration, such
+as the experimental opt-in, are typed FFI arguments and never JSON fields.
+The shared fixtures in `tests/policy/sdk-v1/` pin the document each SDK emits
+for a given high-level policy.
+
 ### Experimental Flag
 
 The experimental flag must be supported at every layer of the stack:
@@ -313,6 +326,11 @@ regardless of the flag; parsing is flag-independent. The `--experimental` flag o
 - When unset, `experimental_enabled` is false and the runners **ignore** the
   parsed features that still require authorization — no error, those features
   are just not applied
+
+Selecting an experimental backend (MicroVM, Hyperlight, or Windows Sandbox) is
+the exception: without the flag, the engine refuses the request with
+`backend_unavailable` on every one-shot and state-aware entry point. The flag
+has no effect on the choice of a production backend.
 
 **2. SDK:** policy APIs come from `@microsoft/mxc-sdk/v1`; raw config
 spawning comes from `@microsoft/mxc-sdk`.

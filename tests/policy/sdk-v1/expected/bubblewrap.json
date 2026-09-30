@@ -1,0 +1,18 @@
+{
+  "version": "1.0.0",
+  "containerId": "golden-bubblewrap",
+  "containment": "bubblewrap",
+  "lifecycle": {
+    "destroyOnExit": true,
+    "preservePolicy": false
+  },
+  "process": {
+    "commandLine": "echo golden",
+    "timeout": 0
+  },
+  "filesystem": {
+    "readwritePaths": [],
+    "readonlyPaths": [],
+    "deniedPaths": []
+  }
+}

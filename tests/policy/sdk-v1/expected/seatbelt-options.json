@@ -1,0 +1,26 @@
+{
+  "version": "1.0.0",
+  "containerId": "golden-seatbelt-options",
+  "containment": "seatbelt",
+  "lifecycle": {
+    "destroyOnExit": true,
+    "preservePolicy": false
+  },
+  "process": {
+    "commandLine": "echo golden",
+    "timeout": 0
+  },
+  "filesystem": {
+    "readwritePaths": [],
+    "readonlyPaths": [],
+    "deniedPaths": []
+  },
+  "seatbelt": {
+    "guiAccess": true,
+    "nestedPty": false,
+    "keychainAccess": true,
+    "extraMachLookups": [
+      "com.example.service"
+    ]
+  }
+}

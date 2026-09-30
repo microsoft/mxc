@@ -1,5 +1,82 @@
 # Cross-language policy fixtures
 
+This directory holds two fixture families:
+
+- `sdk-v1/` — the exact 1.0.0 documents every v1 SDK must emit for a shared
+  set of high-level policy invocations. See [SDK v1 goldens](#sdk-v1-goldens).
+- The top-level `*.json` files — the private binding request accepted by the
+  deprecated `mxc_run_request` / `mxc_spawn_request` exports. They are removed
+  with those exports.
+
+## SDK v1 goldens
+
+Each case is a pair of files with the same name:
+
+- `sdk-v1/input/<name>.json` describes the invocation in SDK-neutral terms: a
+  `policy` in the high-level `SandboxPolicy` shape, a `containment` tagged by
+  `kind`, the `command`, and optional `containerName`, `workingDirectory`,
+  `environment`, `inheritDefaultEnv`, and `telemetry`.
+- `sdk-v1/expected/<name>.json` is the exact 1.0.0 document an SDK sends to
+  `mxc_run_json` / `mxc_spawn_json` for that invocation.
+
+`sdk-v1/invalid/<name>.json` holds exact documents the native parser must
+reject, with the expected `errorCode` and a `messageContains` fragment.
+
+### Consumers
+
+- **Rust** — `src/core/mxc_engine/src/policy/sdk_v1_goldens.rs` builds each
+  input with the Rust policy builder, parses the expected document, and
+  asserts both normalize to the same execution request. It also asserts every
+  invalid document is rejected for the recorded reason.
+- **Schema** — `scripts/versioning/validate-configs.js` validates every
+  expected document against the registered 1.0.0 schema.
+- **Node and .NET** — each SDK maps the input through its own high-level API
+  and asserts the emitted JSON equals the expected document.
+
+### Mapping rules
+
+The expected documents follow these rules, which every SDK mapper applies:
+
+- `version` is `1.0.0`. `experimental` is never written; it is an FFI
+  argument.
+- `containerId` is the caller's container name or, when there is none, a
+  fresh random identifier per request. It is never omitted: an absent
+  `containerId` selects a shared default container.
+- `containment` is the selected wire name. Abstract `process` stays `process`
+  and carries no backend section; the engine resolves it per host.
+- `lifecycle` is always `{ "destroyOnExit": true, "preservePolicy": P }`,
+  where `P` is the negation of `filesystem.clearPolicyOnExit` (default
+  `true`, so `P` defaults to `false`).
+- `process.timeout` is always present: `timeoutMs`, or `0` for no timeout.
+  `cwd`, `env` (`KEY=VALUE` in caller order), and `inheritDefaultEnv` are
+  written only when the caller sets an environment or working directory.
+- `filesystem` is always present with all three path arrays, empty when
+  unset.
+- `network` is written only when the policy has `egress` or `ingress`; a
+  runtime-only network section authors no sandbox posture. `runtimeConfig` is
+  written when the policy has one.
+- `ui` is written only when the caller supplies one: `disable` is the
+  negation of `allowWindows`, and `injection` is `allowInputInjection`.
+- `processContainer` is written only for `processcontainer`. `leastPrivilege`
+  and `capabilities` are always present; `capabilities` holds only the
+  caller's names. Network capabilities such as `internetClient` are derived by
+  the backend from the network policy. `learningMode` is written only when
+  true, and `network.allowedProxyPeer` only when set.
+- `seatbelt`, `lxc`, and `wslc` are written only for their own containment.
+  `wslc.image` and `wslc.gpu` are always present; `portMappings` is written
+  only when non-empty, each with `"protocol": "tcp"`.
+- `telemetry` is written only when the caller sets the per-invocation
+  opt-in.
+
+### Adding a case
+
+Write both files by hand. Run
+`cargo test -p mxc_engine -- sdk_v1_goldens` and
+`node scripts/versioning/validate-configs.js`, then update each SDK's golden
+test so it covers the new input.
+
+## Binding request fixtures
+
 Hand-authored JSON request fixtures asserted against by **both** language
 bindings. They pin the co-versioned binding request contract — the
 `RequestSpec` / `SandboxRequest` wire shape — so the Rust and C# models cannot
@@ -13,7 +90,7 @@ drift apart silently.
 | `state-aware-wslc-provision.json` | State-aware WSLC `provision` envelope |
 | `state-aware-wslc-exec.json` | State-aware WSLC `exec` envelope |
 
-## Consumers
+### Consumers
 
 - **Rust** — `src/ffi/mxc_ffi/src/request.rs` and `src/ffi/mxc_ffi/src/state_aware.rs`
   pull each file in with `include_str!` and assert the native contract accepts it.
@@ -25,7 +102,7 @@ They live here rather than under either SDK because neither owns them: a Rust
 crate reaching into `sdk/dotnet/` for test data inverts the dependency, and
 reorganizing one SDK would break the other's tests.
 
-## These are written by hand, on purpose
+### These are written by hand, on purpose
 
 Do **not** generate them from the Rust structs or the C# POCOs. Their value is
 that they are an *independent* statement of the expected wire shape. Deriving
@@ -36,7 +113,7 @@ test would still pass.
 When the request contract changes intentionally, edit these files by hand and
 let both test suites confirm the change is what you meant.
 
-## Not config files
+### Not config files
 
 These are **binding request** documents (`{ policy, command, containment, … }`),
 not exact configuration documents. They are deliberately outside

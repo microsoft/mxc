@@ -515,7 +515,7 @@ describe('provisionSandbox', () => {
     });
   });
 
-  it('throws an MxcError carrying backend_unavailable when mxc_state_aware reports it', async () => {
+  it('throws an MxcError carrying backend_unavailable when mxc_run_state_aware_json reports it', async () => {
     installStateAwareError({
       code: 'backend_unavailable',
       message: 'isolation session API not available on this host',

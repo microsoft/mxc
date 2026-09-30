@@ -1,0 +1,12 @@
+{
+  "description": "IsolationSession requires the all-allow directional network.",
+  "errorCode": "malformed_request",
+  "messageContains": "IsolationSession requires an explicit network policy",
+  "document": {
+    "version": "1.0.0",
+    "containment": "isolation_session",
+    "process": {
+      "commandLine": "echo golden"
+    }
+  }
+}

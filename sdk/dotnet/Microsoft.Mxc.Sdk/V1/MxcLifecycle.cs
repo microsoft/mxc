@@ -158,7 +158,7 @@ public static class MxcLifecycle
             {
                 NativeSandbox* handle = null;
                 MxcErrorDetail error = default;
-                var status = NativeMethods.mxc_state_aware_exec(
+                var status = NativeMethods.mxc_exec_state_aware_json(
                     requestPtr, ExperimentalOptInFor(id), &handle, &error);
                 if (status != (int)ErrorCode.Success)
                 {
@@ -196,7 +196,7 @@ public static class MxcLifecycle
             {
                 MxcExecOutcome outcome = default;
                 MxcErrorDetail error = default;
-                var status = NativeMethods.mxc_state_aware_exec_attached(
+                var status = NativeMethods.mxc_exec_state_aware_attached_json(
                     requestPtr, ExperimentalOptInFor(id), &outcome, &error);
                 if (status != (int)ErrorCode.Success)
                 {
@@ -618,7 +618,7 @@ public static class MxcLifecycle
             fixed (byte* requestPtr = requestBuf)
             {
                 MxcStateAwareResult result = default;
-                var status = NativeMethods.mxc_state_aware(
+                var status = NativeMethods.mxc_run_state_aware_json(
                     requestPtr,
                     dryRun ? 1 : 0,
                     ExperimentalOptInFor(envelope),

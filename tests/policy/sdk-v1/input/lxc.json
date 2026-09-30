@@ -1,0 +1,11 @@
+{
+  "description": "LXC with an explicit distribution.",
+  "policy": {},
+  "containment": {
+    "kind": "lxc",
+    "distribution": "ubuntu",
+    "release": "jammy"
+  },
+  "command": "echo golden",
+  "containerName": "golden-lxc"
+}

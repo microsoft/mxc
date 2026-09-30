@@ -1,0 +1,15 @@
+{
+  "description": "A backend section must match the selected containment.",
+  "errorCode": "malformed_request",
+  "messageContains": "unrelated backend section(s): wslc",
+  "document": {
+    "version": "1.0.0",
+    "containment": "process",
+    "process": {
+      "commandLine": "echo golden"
+    },
+    "wslc": {
+      "image": "alpine:latest"
+    }
+  }
+}

@@ -2,14 +2,27 @@
 // Licensed under the MIT License.
 
 //! Co-versioned JSON request contract used by language bindings.
+//!
+//! **Deprecated.** This private binding request backs only the deprecated
+//! [`mxc_run_request`](crate::mxc_run_request) and
+//! [`mxc_spawn_request`](crate::streaming::mxc_spawn_request) exports. Bindings
+//! send exact-version configuration documents to
+//! [`mxc_run_json`](crate::mxc_run_json) and
+//! [`mxc_spawn_json`](crate::streaming::mxc_spawn_json) instead; this module is
+//! removed with those exports.
 
 use std::collections::BTreeMap;
 
 use mxc_sdk::v1::configs::{
-    CaptureDenials, Lxc, ProcessContainer, ProcessContainerFilesystem, ProcessContainerNetwork,
-    ProcessContainerSystemSettings, ProcessContainerUi, ProcessContainerUiIsolation, Seatbelt,
+    CaptureDenials, CaptureDenialsMode, Lxc, ProcessContainer, ProcessContainerFilesystem,
+    ProcessContainerNetwork, ProcessContainerSystemSettings, ProcessContainerUi,
+    ProcessContainerUiIsolation, Seatbelt,
 };
-use mxc_sdk::v1::policy::{FilesystemSection, NetworkSection, UiSection};
+use mxc_sdk::v1::policy::{
+    ClipboardPolicy, FilesystemSection, NetworkAction, NetworkEgressSection, NetworkIngressSection,
+    NetworkPeerSection, NetworkPortSection, NetworkProtocol, NetworkRuleSection, NetworkSection,
+    RuntimeConfigSection, UiSection,
+};
 use mxc_sdk::v1::{
     build_request_with_containment, Containment, SandboxPolicy, SandboxRequest, WslcSection,
 };
@@ -40,11 +53,11 @@ struct RequestSpec {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RequestPolicy {
     #[serde(default)]
-    filesystem: Option<FilesystemSection>,
+    filesystem: Option<FilesystemSpec>,
     #[serde(default)]
-    network: Option<NetworkSection>,
+    network: Option<NetworkSpec>,
     #[serde(default)]
-    ui: Option<UiSection>,
+    ui: Option<UiSpec>,
     #[serde(default)]
     timeout_ms: Option<u32>,
     #[serde(
@@ -98,11 +111,214 @@ impl RequestPolicy {
             TelemetryField::Present(telemetry) => telemetry,
         };
         let mut policy = SandboxPolicy::default();
-        policy.filesystem = self.filesystem;
-        policy.network = self.network;
-        policy.ui = self.ui;
+        policy.filesystem = self.filesystem.map(FilesystemSpec::into_sdk);
+        policy.network = self.network.map(NetworkSpec::into_sdk);
+        policy.ui = self.ui.map(UiSpec::into_sdk);
         policy.timeout_ms = self.timeout_ms;
         (policy, telemetry)
+    }
+}
+
+// The binding request's own policy shape. The public SDK policy types are
+// plain Rust types; only this deprecated request parses them from JSON.
+
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct FilesystemSpec {
+    readwrite_paths: Vec<String>,
+    readonly_paths: Vec<String>,
+    denied_paths: Vec<String>,
+    clear_policy_on_exit: Option<bool>,
+}
+
+impl FilesystemSpec {
+    fn into_sdk(self) -> FilesystemSection {
+        FilesystemSection {
+            readwrite_paths: self.readwrite_paths,
+            readonly_paths: self.readonly_paths,
+            denied_paths: self.denied_paths,
+            clear_policy_on_exit: self.clear_policy_on_exit,
+        }
+    }
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct UiSpec {
+    allow_windows: bool,
+    clipboard: ClipboardSpec,
+    allow_input_injection: bool,
+}
+
+#[derive(Debug, Default, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum ClipboardSpec {
+    #[default]
+    None,
+    Read,
+    Write,
+    All,
+}
+
+impl UiSpec {
+    fn into_sdk(self) -> UiSection {
+        UiSection {
+            allow_windows: self.allow_windows,
+            clipboard: match self.clipboard {
+                ClipboardSpec::None => ClipboardPolicy::None,
+                ClipboardSpec::Read => ClipboardPolicy::Read,
+                ClipboardSpec::Write => ClipboardPolicy::Write,
+                ClipboardSpec::All => ClipboardPolicy::All,
+            },
+            allow_input_injection: self.allow_input_injection,
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NetworkSpec {
+    #[serde(default)]
+    egress: Option<NetworkEgressSpec>,
+    #[serde(default)]
+    ingress: Option<NetworkIngressSpec>,
+    #[serde(default)]
+    runtime_config: Option<RuntimeConfigSpec>,
+}
+
+#[derive(Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum NetworkActionSpec {
+    Allow,
+    Deny,
+}
+
+#[derive(Debug, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum NetworkProtocolSpec {
+    Tcp,
+    Udp,
+    Icmp,
+    Any,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NetworkPeerSpec {
+    cidr: String,
+    except: Option<Vec<String>>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NetworkPortSpec {
+    protocol: Option<NetworkProtocolSpec>,
+    port: Option<u16>,
+    end_port: Option<u16>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NetworkRuleSpec {
+    to: Option<Vec<NetworkPeerSpec>>,
+    ports: Option<Vec<NetworkPortSpec>>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NetworkEgressSpec {
+    default: Option<NetworkActionSpec>,
+    allow: Option<Vec<NetworkRuleSpec>>,
+    deny: Option<Vec<NetworkRuleSpec>>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NetworkIngressSpec {
+    default: Option<NetworkActionSpec>,
+    host_loopback: Option<NetworkActionSpec>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeConfigSpec {
+    network_proxy: Option<String>,
+}
+
+// The SDK network types are `#[non_exhaustive]`, so this crate starts from
+// `Default` and assigns fields.
+#[allow(clippy::field_reassign_with_default)]
+impl NetworkSpec {
+    fn into_sdk(self) -> NetworkSection {
+        let mut network = NetworkSection::default();
+        network.egress = self.egress.map(|egress| {
+            let mut section = NetworkEgressSection::default();
+            section.default = egress.default.map(NetworkActionSpec::into_sdk);
+            section.allow = egress.allow.map(NetworkRuleSpec::into_sdk_list);
+            section.deny = egress.deny.map(NetworkRuleSpec::into_sdk_list);
+            section
+        });
+        network.ingress = self.ingress.map(|ingress| {
+            let mut section = NetworkIngressSection::default();
+            section.default = ingress.default.map(NetworkActionSpec::into_sdk);
+            section.host_loopback = ingress.host_loopback.map(NetworkActionSpec::into_sdk);
+            section
+        });
+        network.runtime_config = self.runtime_config.map(|runtime| {
+            let mut section = RuntimeConfigSection::default();
+            section.network_proxy = runtime.network_proxy;
+            section
+        });
+        network
+    }
+}
+
+impl NetworkActionSpec {
+    fn into_sdk(self) -> NetworkAction {
+        match self {
+            Self::Allow => NetworkAction::Allow,
+            Self::Deny => NetworkAction::Deny,
+        }
+    }
+}
+
+#[allow(clippy::field_reassign_with_default)]
+impl NetworkRuleSpec {
+    fn into_sdk_list(rules: Vec<Self>) -> Vec<NetworkRuleSection> {
+        rules
+            .into_iter()
+            .map(|rule| {
+                let mut section = NetworkRuleSection::default();
+                section.to = rule.to.map(|peers| {
+                    peers
+                        .into_iter()
+                        .map(|peer| {
+                            let mut section = NetworkPeerSection::new(peer.cidr);
+                            section.except = peer.except;
+                            section
+                        })
+                        .collect()
+                });
+                section.ports = rule.ports.map(|ports| {
+                    ports
+                        .into_iter()
+                        .map(|port| {
+                            let mut section = NetworkPortSection::default();
+                            section.protocol = port.protocol.map(|protocol| match protocol {
+                                NetworkProtocolSpec::Tcp => NetworkProtocol::Tcp,
+                                NetworkProtocolSpec::Udp => NetworkProtocol::Udp,
+                                NetworkProtocolSpec::Icmp => NetworkProtocol::Icmp,
+                                NetworkProtocolSpec::Any => NetworkProtocol::Any,
+                            });
+                            section.port = port.port;
+                            section.end_port = port.end_port;
+                            section
+                        })
+                        .collect()
+                });
+                section
+            })
+            .collect()
     }
 }
 
@@ -119,7 +335,7 @@ enum RequestContainment {
         #[serde(default)]
         capabilities: Vec<String>,
         #[serde(default, rename = "captureDenials")]
-        capture_denials: Option<CaptureDenials>,
+        capture_denials: Option<CaptureDenialsSpec>,
         #[serde(default = "default_process_container_ui")]
         ui: Option<ProcessContainerUiSpec>,
         #[serde(default)]
@@ -209,6 +425,35 @@ enum ProcessContainerSystemSettingsSpec {
     None,
 }
 
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct CaptureDenialsSpec {
+    mode: CaptureDenialsModeSpec,
+    output_path: Option<String>,
+    retain_etl: bool,
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum CaptureDenialsModeSpec {
+    #[default]
+    Block,
+    Allow,
+}
+
+impl CaptureDenialsSpec {
+    fn into_sdk(self) -> CaptureDenials {
+        let mut capture = CaptureDenials::default();
+        capture.mode = match self.mode {
+            CaptureDenialsModeSpec::Block => CaptureDenialsMode::Block,
+            CaptureDenialsModeSpec::Allow => CaptureDenialsMode::Allow,
+        };
+        capture.output_path = self.output_path;
+        capture.retain_etl = self.retain_etl;
+        capture
+    }
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ProcessContainerNetworkSpec {
@@ -271,7 +516,8 @@ impl RequestContainment {
                 process_container.least_privilege = least_privilege;
                 process_container.learning_mode = learning_mode;
                 process_container.capabilities = capabilities;
-                process_container.capture_denials = capture_denials;
+                process_container.capture_denials =
+                    capture_denials.map(CaptureDenialsSpec::into_sdk);
                 process_container.ui = ui.map(ProcessContainerUiSpec::into_sdk);
                 process_container.filesystem =
                     filesystem.map(ProcessContainerFilesystemSpec::into_sdk);
@@ -435,6 +681,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn capture_denials_parse_from_camel_case_json() {
+        let spec: CaptureDenialsSpec = serde_json::from_value(serde_json::json!({
+            "mode": "allow",
+            "outputPath": "/tmp/denials.json",
+            "retainEtl": true,
+        }))
+        .expect("captureDenials parses");
+        let capture = spec.into_sdk();
+
+        assert_eq!(capture.mode, CaptureDenialsMode::Allow);
+        assert_eq!(capture.output_path.as_deref(), Some("/tmp/denials.json"));
+        assert!(capture.retain_etl);
+
+        let spec: CaptureDenialsSpec =
+            serde_json::from_value(serde_json::json!({})).expect("empty captureDenials parses");
+        assert_eq!(spec.into_sdk(), CaptureDenials::default());
+    }
+
+    #[test]
     fn process_container_filesystem_is_accepted_by_native_contract() {
         let spec: RequestSpec = serde_json::from_str(
             r#"{
@@ -495,7 +760,7 @@ mod tests {
             .as_ref()
             .expect("UI policy is preserved");
         assert!(!ui.allow_windows);
-        assert_eq!(ui.clipboard, mxc_sdk::v1::policy::ClipboardPolicy::Read);
+        assert_eq!(ui.clipboard, ClipboardSpec::Read);
         assert!(!ui.allow_input_injection);
         let authored_network = process_spec
             .policy
@@ -570,7 +835,7 @@ mod tests {
             Some(["10.20.30.0/24".to_string()].as_slice())
         );
         let ports = allow[0].ports.as_ref().expect("port rule is preserved");
-        assert_eq!(ports[0].protocol, Some(mxc_sdk::v1::NetworkProtocol::Tcp));
+        assert_eq!(ports[0].protocol, Some(NetworkProtocolSpec::Tcp));
         assert_eq!(ports[0].port, Some(443));
         assert_eq!(ports[0].end_port, Some(444));
         build_request_from_json(directional_network)

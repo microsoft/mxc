@@ -1,0 +1,9 @@
+{
+  "description": "Empty policy on the host's native process containment.",
+  "policy": {},
+  "containment": {
+    "kind": "process"
+  },
+  "command": "echo golden",
+  "containerName": "golden-process-minimal"
+}

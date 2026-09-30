@@ -74,7 +74,7 @@ public class MxcLifecycleTests
     [Fact]
     public void ExecInSandboxAttached_WithoutATerminal_ThrowsMalformedRequest()
     {
-        // Crosses mxc_state_aware_exec_attached itself, which the envelope tests
+        // Crosses mxc_exec_state_aware_attached_json itself, which the envelope tests
         // cannot: it is a separate entry point. That gate short-circuits ahead of
         // backend dispatch, which is also why this test cannot pin the
         // experimental opt-in.

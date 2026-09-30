@@ -137,7 +137,7 @@ function bindStreamingNativeFacade(
     },
 
     stateAwareExec: bindNativeFunction(handle, {
-      symbol: 'mxc_state_aware_exec',
+      symbol: 'mxc_exec_state_aware_json',
       result: 'int32_t',
       parameters: [
         'const char *',

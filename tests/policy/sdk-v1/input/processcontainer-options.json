@@ -1,0 +1,14 @@
+{
+  "description": "Explicit ProcessContainer settings.",
+  "policy": {},
+  "containment": {
+    "kind": "processContainer",
+    "leastPrivilege": true,
+    "learningMode": true,
+    "capabilities": [
+      "registryRead"
+    ]
+  },
+  "command": "echo golden",
+  "containerName": "golden-processcontainer-options"
+}
