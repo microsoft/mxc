@@ -7,7 +7,8 @@
 //   - Windows 11 with WSL2 and the WSLC runtime installed
 //   - mxc_ffi.dll built with the wslc feature
 //   - wslcsdk.dll and wxc-wslc-daemon.exe staged with mxc_ffi.dll
-//   - network access to Docker Hub, or alpine:latest already cached
+//   - alpine:latest already in the daemon session cache, since these provision
+//     with the default isolated posture, which refuses a registry pull
 //     (MXC_WSLC_TEST_IMAGE selects another image)
 //
 // Opt in with MXC_ENABLE_WSLC_TESTS=1.

@@ -164,6 +164,9 @@ const EXIT_CALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// abort a cold VM boot.
 const SESSION_BOOT_TIMEOUT_MS: u32 = 180_000;
 
+/// How long to wait for an abandoned pull before giving up on its session.
+const PULL_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Lock a mutex, tolerating poisoning: every mutex here guards plain output
 /// state with no invariant a panicking writer could break.
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -950,7 +953,7 @@ impl WSLContainerRunner {
         } else {
             image::RegistryAccess::Allowed
         };
-        image::resolve_image(
+        let resolved = image::resolve_image(
             sdk,
             session_guard.as_raw(),
             &self.config.image,
@@ -959,7 +962,15 @@ impl WSLContainerRunner {
             registry,
             "[WSLC]",
             logger,
-        )?;
+        );
+        if let Err(e) = resolved {
+            // An abandoned pull is still using this session, so releasing it
+            // here would free memory the SDK holds.
+            if !image::wait_for_pulls_in_flight(PULL_DRAIN_TIMEOUT) {
+                std::mem::forget(session_guard);
+            }
+            return Err(e);
+        }
 
         // -- Process settings --
         // String data (script_cstr, env_cstrings, _cwd_cstr) must stay alive

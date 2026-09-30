@@ -479,6 +479,9 @@ struct ContainerEntry {
 struct PendingProvision {
     config: ProvisionConfig,
     reply: oneshot::Sender<Result<String, WorkerError>>,
+
+    /// Held only so dropping this entry retires the deadline thread.
+    _retire_deadline: std::sync::mpsc::Sender<()>,
 }
 
 /// The single-threaded WSLc session owner. Constructed and run entirely on the
@@ -607,22 +610,45 @@ impl Worker {
 
                 // Nothing can stop a stalled pull from outside, so the deadline
                 // is enforced by giving up on it rather than by ending it.
-                let budget = image::pull_budget();
+                let budget = image::daemon_pull_budget();
                 let image_name = config.image.clone();
                 let expired = worker.clone();
-                std::thread::Builder::new()
+                let (retire_deadline, retired) = std::sync::mpsc::channel::<()>();
+                let armed = std::thread::Builder::new()
                     .name("wslc-pull-deadline".to_string())
                     .spawn(move || {
-                        std::thread::sleep(budget);
+                        // A pull that lands first drops the sender, so this
+                        // returns rather than sleeping out the budget.
+                        if retired.recv_timeout(budget)
+                            != Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                        {
+                            return;
+                        }
                         let _ = expired.send(WorkerCommand::PullFinished {
                             token,
                             outcome: Err(image::pull_deadline_expired(&image_name, budget)),
                         });
-                    })
-                    .ok();
+                    });
 
-                self.pending
-                    .insert(token, PendingProvision { config, reply });
+                if armed.is_err() {
+                    // Parking without a deadline is how a provision waits
+                    // forever, so refuse instead. The pull carries on and warms
+                    // the cache for a retry.
+                    let _ = reply.send(Err(WorkerError::Backend(anyhow::anyhow!(
+                        "could not arm the pull deadline for image '{}'",
+                        config.image
+                    ))));
+                    return;
+                }
+
+                self.pending.insert(
+                    token,
+                    PendingProvision {
+                        config,
+                        reply,
+                        _retire_deadline: retire_deadline,
+                    },
+                );
             }
         }
     }
@@ -631,7 +657,12 @@ impl Worker {
     ///
     /// An unknown token is the loser of that race, and has nothing left to do.
     fn finish_provision(&mut self, token: u64, outcome: Result<(), ScriptResponse>) {
-        let Some(PendingProvision { config, reply }) = self.pending.remove(&token) else {
+        let Some(PendingProvision {
+            config,
+            reply,
+            _retire_deadline: _,
+        }) = self.pending.remove(&token)
+        else {
             return;
         };
 
@@ -1145,6 +1176,24 @@ mod tests {
 
     /// A parked provision has no container yet, so the watchdog would retire
     /// the daemon out from under the client still waiting on its pull.
+    /// A timer that outlived its pull would sit for the rest of the budget, so
+    /// sequential cache misses would pile up sleeping threads.
+    #[test]
+    fn a_pull_that_lands_first_retires_its_deadline_thread() {
+        let (retire_deadline, retired) = std::sync::mpsc::channel::<()>();
+        let woke = std::thread::spawn(move || {
+            retired.recv_timeout(Duration::from_secs(30))
+                == Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        });
+
+        drop(retire_deadline);
+
+        assert!(
+            woke.join().expect("timer thread"),
+            "dropping the parked provision must wake its deadline immediately"
+        );
+    }
+
     #[test]
     fn a_pending_pull_keeps_the_daemon_alive() {
         let mut worker = Worker::new();
@@ -1161,6 +1210,7 @@ mod tests {
                     network: Default::default(),
                 },
                 reply,
+                _retire_deadline: std::sync::mpsc::channel().0,
             },
         );
 
@@ -1186,6 +1236,7 @@ mod tests {
                     network: Default::default(),
                 },
                 reply,
+                _retire_deadline: std::sync::mpsc::channel().0,
             },
         );
 
@@ -1532,12 +1583,12 @@ mod tests {
     //
     // Exercises the real SDK path end to end: provision (boot VM + create
     // container) → start → exec → stop → deprovision → refcount back to 0. It
-    // needs a WSL2 host that can reach Docker Hub, or one with `alpine:latest`
-    // already in the daemon session cache (`%TEMP%\mxc-wslc-sessions`), so it
-    // is `#[ignore]`d and run explicitly with
+    // provisions with the default isolated posture, which refuses a registry
+    // pull, so `alpine:latest` has to be in the daemon session cache already
+    // (`%TEMP%\mxc-wslc-sessions`). It is `#[ignore]`d and run explicitly with
     // `cargo test -p wxc_wslc_daemon -- --ignored`.
     #[tokio::test]
-    #[ignore = "requires a WSL2 host that can reach a registry, or alpine:latest already cached"]
+    #[ignore = "requires a WSL2 host with alpine:latest already in the daemon session cache"]
     async fn full_lifecycle_on_wsl_host() {
         let handle = spawn().unwrap();
         assert_eq!(count(&handle).await, 0);
@@ -1601,7 +1652,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires a WSL2 host that can reach a registry, or alpine:latest already cached"]
+    #[ignore = "requires a WSL2 host with alpine:latest already in the daemon session cache"]
     async fn cancelled_queued_exec_never_starts_process() {
         let handle = spawn().unwrap();
         let id = handle

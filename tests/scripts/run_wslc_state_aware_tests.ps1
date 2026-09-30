@@ -49,8 +49,8 @@
     Probe the debug target dir and pass --debug to wxc-exec.
 
 .PARAMETER SkipSetup
-    Skip the image-cache warming preflight. The runner pulls on a miss, so this
-    exercises that path instead.
+    Skip the image-cache warming preflight. The provision fixtures declare deny
+    egress, which refuses a registry pull, so the cache has to be warm already.
 
 .EXAMPLE
     .\run_wslc_state_aware_tests.ps1

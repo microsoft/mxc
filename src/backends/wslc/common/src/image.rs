@@ -19,18 +19,15 @@ use crate::registry_policy;
 use crate::sdk_init;
 use crate::wslc_bindings::*;
 
-/// How long a single pull may run before it is aborted.
-///
-/// Deliberately under the daemon client's 600s response deadline, so a wedged
-/// pull surfaces as a failed provision the caller still receives rather than a
-/// timeout that abandons a container nobody can name.
+/// How long a single pull may run before it is abandoned.
 const PULL_TIMEOUT: Duration = Duration::from_secs(540);
 
 /// Env override (positive whole seconds) for [`PULL_TIMEOUT`]. Lets a test drive
 /// the abort path without waiting out the production budget.
 const PULL_TIMEOUT_ENV: &str = "MXC_WSLC_PULL_TIMEOUT_SECS";
 
-/// Gap kept between the pull budget and the caller's response deadline.
+/// Gap kept between a daemon pull's budget and the deadline its client is
+/// waiting on.
 ///
 /// A pull that outlived that deadline would surface as an abandoned container
 /// rather than a failed provision the caller can act on.
@@ -39,24 +36,39 @@ const PULL_HEADROOM: Duration = Duration::from_secs(60);
 /// Gap between progress lines while a pull is running.
 const PULL_REPORT_INTERVAL: Duration = Duration::from_secs(10);
 
+/// How long to wait for an abandoned pull before giving up on its session.
+const PULL_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// `E_ABORT` — returned from the progress callback to stop a pull, and reported
 /// back by the SDK as the pull's own result.
 const E_ABORT: HRESULT = 0x8000_4004u32 as HRESULT;
 
-/// The pull deadline, honouring [`PULL_TIMEOUT_ENV`] and [`PULL_HEADROOM`].
-fn pull_timeout() -> Duration {
-    let requested = std::env::var(PULL_TIMEOUT_ENV)
+/// How long a pull may run, honouring [`PULL_TIMEOUT_ENV`].
+pub fn pull_budget() -> Duration {
+    std::env::var(PULL_TIMEOUT_ENV)
         .ok()
         .as_deref()
         .and_then(|s| s.trim().parse::<u64>().ok())
         .filter(|&secs| secs > 0)
         .map(Duration::from_secs)
-        .unwrap_or(PULL_TIMEOUT);
-
-    requested.min(pull_budget_ceiling(crate::daemon_client::call_timeout()))
+        .unwrap_or(PULL_TIMEOUT)
 }
 
-/// The most a pull may take for its failure to still reach the caller.
+/// How long a pull the daemon is waiting on may run.
+///
+/// Capped under the client's response deadline, so raising
+/// [`PULL_TIMEOUT_ENV`] past that gap takes effect only once the client
+/// deadline is raised with it.
+pub fn daemon_pull_budget() -> Duration {
+    capped_for_daemon(pull_budget(), crate::daemon_client::call_timeout())
+}
+
+/// A pull's budget, held under the deadline its client is waiting on.
+fn capped_for_daemon(requested: Duration, call_timeout: Duration) -> Duration {
+    requested.min(pull_budget_ceiling(call_timeout))
+}
+
+/// The most a daemon pull may take for its failure to still reach the client.
 fn pull_budget_ceiling(call_timeout: Duration) -> Duration {
     call_timeout
         .checked_sub(PULL_HEADROOM)
@@ -136,7 +148,7 @@ pub unsafe fn pull_image(
     log_prefix: &str,
     logger: &mut Logger,
 ) -> Result<(), ScriptResponse> {
-    let budget = pull_timeout();
+    let budget = pull_budget();
     let _ = writeln!(
         logger,
         "{} Pulling image '{}' (up to {}s)",
@@ -204,11 +216,6 @@ struct PullJob {
 // calls on the same session all returned inside 29ms, so the SDK neither rejects
 // nor serializes the overlap.
 unsafe impl Send for PullJob {}
-
-/// How long a pull may run before its caller gives up on it.
-pub fn pull_budget() -> Duration {
-    pull_timeout()
-}
 
 /// Run a pull on a thread of its own, handing the outcome to `on_done`.
 ///
@@ -329,11 +336,13 @@ impl Drop for PullApartment {
 pub fn pull_deadline_expired(image: &str, budget: Duration) -> ScriptResponse {
     WslcError::Host(format!(
         "WSLC image '{}' did not finish pulling within {}s. The transfer was \
-         abandoned and this sandbox was not created. Retry, raise the budget with \
-         {}, or warm the cache from a machine that can reach the registry.",
+         abandoned and this sandbox was not created. Retry, raise {} (a \
+         state-aware run needs {} raised past it as well), or warm the cache \
+         from a machine that can reach the registry.",
         image,
         budget.as_secs(),
         PULL_TIMEOUT_ENV,
+        crate::daemon_client::CALL_TIMEOUT_ENV,
     ))
     .into_response()
 }
@@ -752,6 +761,9 @@ pub unsafe fn report_pulled_digest(
 /// Pulls on the calling thread. A caller that serves other work from this
 /// thread should drive [`begin_resolve`] and [`start_pull`] instead.
 ///
+/// A pull that outlives its budget is abandoned rather than ended, so the
+/// caller must drain [`wait_for_pulls_in_flight`] before releasing `session`.
+///
 /// # Safety
 /// `sdk` must hold valid function pointers and `session` must be a live handle.
 #[allow(clippy::too_many_arguments)]
@@ -777,7 +789,25 @@ pub unsafe fn resolve_image(
     )? {
         ImageStep::Ready => Ok(()),
         ImageStep::Pull => {
-            pull_image(sdk, session, image, storage_path, log_prefix, logger)?;
+            // Waiting on the pull thread is what bounds this; the in-callback
+            // deadline cannot fire on a registry that sends no further chunk.
+            let budget = pull_budget();
+            let (done, finished) = std::sync::mpsc::channel();
+            start_pull(
+                sdk,
+                session,
+                image,
+                storage_path,
+                log_prefix,
+                move |outcome| {
+                    let _ = done.send(outcome);
+                },
+            )?;
+
+            match finished.recv_timeout(budget) {
+                Ok(outcome) => outcome?,
+                Err(_) => return Err(pull_deadline_expired(image, budget)),
+            }
             report_pulled_digest(sdk, session, image, log_prefix, logger)
         }
     }
@@ -958,22 +988,38 @@ pub unsafe fn setup_pull_image(
             create_err.to_string_lossy()
         ));
     }
-    let _session_guard = WslcSessionGuard::from_raw(
+    let session_guard = WslcSessionGuard::from_raw(
         session,
         sdk.terminate_session_fn(),
         sdk.release_session_fn(),
     );
 
     let _ = writeln!(logger, "[WSLC setup] Target store: {}", storage_path_str);
-    pull_image(
+    let budget = pull_budget();
+    let (done, finished) = std::sync::mpsc::channel();
+    start_pull(
         sdk,
         session,
         image_name,
         storage_path,
         "[WSLC setup]",
-        logger,
+        move |outcome| {
+            let _ = done.send(outcome);
+        },
     )
-    .map_err(|resp| resp.error_message)
+    .map_err(|resp| resp.error_message)?;
+
+    match finished.recv_timeout(budget) {
+        Ok(outcome) => outcome.map_err(|resp| resp.error_message),
+        Err(_) => {
+            // Leak the session if the pull never drained: dropping the guard
+            // closes a session the SDK is still writing into.
+            if !wait_for_pulls_in_flight(PULL_DRAIN_TIMEOUT) {
+                std::mem::forget(session_guard);
+            }
+            Err(pull_deadline_expired(image_name, budget).error_message)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1134,6 +1180,37 @@ mod tests {
                 "caller deadline {secs}s"
             );
         }
+    }
+
+    /// The default budget already sits at the ceiling, so capping every caller
+    /// would leave the advertised override able to lower the budget but never
+    /// raise it. Only a pull a client is waiting on needs the cap.
+    #[test]
+    fn only_a_daemon_pull_is_capped_by_the_client_deadline() {
+        let raised = Duration::from_secs(900);
+        assert_eq!(
+            capped_for_daemon(raised, Duration::from_secs(600)),
+            Duration::from_secs(540)
+        );
+        assert_eq!(
+            capped_for_daemon(raised, Duration::from_secs(1200)),
+            raised,
+            "a client deadline raised with it must let the budget through"
+        );
+    }
+
+    /// Raising only the pull budget on the daemon path does nothing, so the
+    /// message has to name the deadline that also has to move.
+    #[test]
+    fn the_timeout_message_names_both_knobs() {
+        let resp = pull_deadline_expired("alpine:latest", Duration::from_secs(90));
+        assert!(resp.error_message.contains(PULL_TIMEOUT_ENV));
+        assert!(
+            resp.error_message
+                .contains(crate::daemon_client::CALL_TIMEOUT_ENV),
+            "a state-aware operator needs the coupled deadline: {}",
+            resp.error_message
+        );
     }
 
     #[test]

@@ -20,6 +20,8 @@ anyhow = { workspace = true }
 uuid = { workspace = true }
 tar = "0.4"
 libloading = "0.8"
+
+[target.'cfg(target_os = "windows")'.dependencies]
 winreg = { workspace = true }
 
 [dev-dependencies]

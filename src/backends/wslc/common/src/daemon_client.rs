@@ -74,11 +74,15 @@ const READY_TIMEOUT_ENV: &str = "MXC_WSLC_DAEMON_READY_TIMEOUT_SECS";
 const SPAWN_LOCK_TIMEOUT_ENV: &str = "MXC_WSLC_DAEMON_SPAWN_LOCK_TIMEOUT_SECS";
 
 /// Env override (positive whole seconds) for [`CALL_TIMEOUT`].
-const CALL_TIMEOUT_ENV: &str = "MXC_WSLC_DAEMON_CALL_TIMEOUT_SECS";
+pub const CALL_TIMEOUT_ENV: &str = "MXC_WSLC_DAEMON_CALL_TIMEOUT_SECS";
 
 /// How long to wait for a cancelled reader to unwind and drop the pipe; it only
 /// covers the return of an already-aborted read.
 const READER_CANCEL_GRACE: Duration = Duration::from_secs(5);
+
+/// How long to wait for a reply the reader produced just as the deadline
+/// expired; it only covers handing over a value that already exists.
+const READER_RECOVERY_GRACE: Duration = Duration::from_millis(250);
 
 /// Resolve a `Duration` from an environment variable holding a positive whole
 /// number of seconds, falling back to `default` when the variable is unset,
@@ -748,49 +752,55 @@ where
 
     match rx.recv_timeout(timeout) {
         Ok(result) => result.map_err(DaemonError::Transport),
-        Err(RecvTimeoutError::Timeout) => {
-            close_after_timeout(reader, &rx);
-            Err(DaemonError::transport(format!(
+        Err(RecvTimeoutError::Timeout) => match recover_or_cancel_read(reader, &rx) {
+            Some(result) => result.map_err(DaemonError::Transport),
+            None => Err(DaemonError::transport(format!(
                 "timed out after {timeout:?} waiting for the wslc daemon to respond; it may be \
                  wedged on a prior operation (override with {CALL_TIMEOUT_ENV})"
-            )))
-        }
+            ))),
+        },
         Err(RecvTimeoutError::Disconnected) => Err(DaemonError::transport(
             "wslc daemon reader thread ended without a response",
         )),
     }
 }
 
-/// Unblock a timed-out reader so it drops the pipe.
+/// Take the reply of a read that beat the deadline, or cancel one that did not.
 ///
 /// The daemon releases an undelivered sandbox only when its response write
 /// fails, which cannot happen while a parked reader holds this end open.
 #[cfg(windows)]
-fn close_after_timeout<T>(
+fn recover_or_cancel_read<T>(
     reader: std::thread::JoinHandle<()>,
     rx: &std::sync::mpsc::Receiver<Result<T>>,
-) {
+) -> Option<Result<T>> {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::System::IO::CancelSynchronousIo;
 
     // SAFETY: `reader` owns the thread handle and keeps it alive across the call.
     let cancelled = unsafe { CancelSynchronousIo(HANDLE(reader.as_raw_handle())) }.is_ok();
+
+    // Nothing was pending, so the read completed in the gap between the
+    // deadline expiring and this call. The daemon recorded that reply as
+    // delivered, so reporting a timeout would strand the sandbox it names.
     if !cancelled {
-        return;
+        return rx.recv_timeout(READER_RECOVERY_GRACE).ok();
     }
 
     // Hold here until the pipe is closed, so the daemon sees the disconnect
     // while the caller is still inside this call.
     let _ = rx.recv_timeout(READER_CANCEL_GRACE);
+    None
 }
 
 /// No daemon transport exists off Windows, so nothing can be holding a pipe open.
 #[cfg(not(windows))]
-fn close_after_timeout<T>(
+fn recover_or_cancel_read<T>(
     _reader: std::thread::JoinHandle<()>,
     _rx: &std::sync::mpsc::Receiver<Result<T>>,
-) {
+) -> Option<Result<T>> {
+    None
 }
 
 #[cfg(test)]
@@ -997,6 +1007,25 @@ mod tests {
         );
 
         server_thread.join().expect("server thread");
+    }
+
+    /// Reporting a timeout for a reply the daemon already delivered would
+    /// strand the sandbox that reply names.
+    #[cfg(windows)]
+    #[test]
+    fn a_read_that_beat_the_deadline_is_reported_rather_than_discarded() {
+        let outcome: DaemonResult<u32> = read_frame_with_deadline(
+            || {
+                std::thread::sleep(Duration::from_millis(120));
+                Ok(7u32)
+            },
+            Duration::from_millis(100),
+        );
+
+        assert_eq!(
+            outcome.expect("a completed read must not be reported as a timeout"),
+            7
+        );
     }
 
     #[test]

@@ -93,12 +93,12 @@ fn ping_round_trip_over_pipe() {
 }
 
 /// Full state-aware lifecycle over the pipe: provision -> start -> exec -> stop
-/// -> deprovision. Requires a WSL2 host that can reach Docker Hub, or one with
-/// `alpine:latest` already in the daemon session cache
-/// (`%TEMP%\mxc-wslc-sessions`). Run explicitly with
+/// -> deprovision. Provisions with the default isolated posture, which refuses
+/// a registry pull, so `alpine:latest` has to be in the daemon session cache
+/// already (`%TEMP%\mxc-wslc-sessions`). Run explicitly with
 /// `cargo test -p wxc_wslc_daemon --test daemon_ipc -- --ignored`.
 #[test]
-#[ignore = "requires a WSL2 host that can reach a registry, or alpine:latest already cached"]
+#[ignore = "requires a WSL2 host with alpine:latest already in the daemon session cache"]
 fn full_lifecycle_over_pipe() {
     use wslc_common::daemon_protocol::{
         DeprovisionConfig, ExecConfig, ProvisionConfig, StartConfig, StopConfig,

@@ -170,10 +170,14 @@ for the full administrator reference, including deployment and verification.
 
 ### How long a pull may take
 
-A single pull is bounded at 540 seconds, deliberately under the daemon
-client's 600-second response deadline so a slow registry surfaces as a
-failed provision rather than a timeout that abandons a container. Set
-`MXC_WSLC_PULL_TIMEOUT_SECS` to override.
+A single pull is bounded at 540 seconds; `MXC_WSLC_PULL_TIMEOUT_SECS`
+overrides it.
+
+A state-aware pull is additionally held 60 seconds under the deadline its
+client is waiting on, so that a slow registry surfaces as a failed provision
+rather than a timeout that abandons a container. Raising the budget past
+540 seconds on that path therefore needs
+`MXC_WSLC_DAEMON_CALL_TIMEOUT_SECS` (default 600) raised with it.
 
 ## Step 4 — Verify WSLC is working
 
@@ -611,6 +615,7 @@ images — cannot be used.
 | `WSLC image '<name>' is not cached, and this sandbox declares no egress` | An isolated config named an image the store does not have | Warm the cache with `--setup-wslc`, set `imageTarPath`, or allow egress |
 | `WSLC image '<name>' cannot be pulled: '<host>' is not in the administrative registry allowlist` | Machine policy restricts which registries may be used | Use a permitted registry, set `imageTarPath`, or ask an administrator to widen `WslcAllowedImageRegistries` |
 | `WSLC image '<name>' did not finish pulling within <n>s and was stopped` | The pull exceeded its budget and was aborted | Retry, raise `MXC_WSLC_PULL_TIMEOUT_SECS`, or warm the cache from a faster network |
+| `WSLC image '<name>' did not finish pulling within <n>s. The transfer was abandoned` | The registry stopped responding, so the pull was given up on rather than ended | Retry, or warm the cache from a faster network. On a state-aware run raise `MXC_WSLC_DAEMON_CALL_TIMEOUT_SECS` alongside `MXC_WSLC_PULL_TIMEOUT_SECS`, since the budget is held under it |
 | `WSLC image '<name>' could not be pulled` with `repository does not exist or may require 'docker login'` | The reference is wrong, or the registry needs credentials MXC cannot supply | Fix the image name and tag. For a private registry, use `imageTarPath` or import the image out of band |
 | `WSLC image '<name>' could not be pulled` with `no such host` or a connection error | This host cannot reach the registry | Restore network access, or warm the cache from a connected machine with `--setup-wslc` and match `storagePath`. `imageTarPath` removes the dependency entirely |
 | `WSLC image '<name>' could not be pulled` with `HRESULT 0x8004060D` | Administrative policy on the host blocks the registry | Use a permitted registry, or supply the image with `imageTarPath` |
