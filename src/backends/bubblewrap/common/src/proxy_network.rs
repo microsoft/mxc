@@ -668,6 +668,22 @@ fn ipv6_probe_means_supported(probe: nix::Result<OwnedFd>) -> bool {
     !matches!(probe, Err(Errno::EAFNOSUPPORT))
 }
 
+/// Warn that the IPv6 firewall rules were not installed.
+///
+/// Uses [`Logger::warning_line`], not `log_line`, so that callers see it in
+/// `Output::warnings`; `warn_unreachable_v6_targets` in `bwrap_runner` explains
+/// why the debug buffer is not a channel either path reads.
+fn warn_skipped_ipv6_rules(kernel_ipv6: bool, logger: &mut Logger) {
+    if kernel_ipv6 {
+        return;
+    }
+    logger.warning_line(
+        "WARNING: Bubblewrap did not install IPv6 firewall rules: the kernel reports \
+         no IPv6 support (EAFNOSUPPORT), so the sandbox cannot send IPv6 traffic and \
+         the IPv4 rules alone enforce the network policy.",
+    );
+}
+
 /// A same-UID user-namespace supervisor and its `slirp4netns` process.
 pub(crate) struct ProxyNetworkNamespace {
     state_dir: TempDir,
@@ -721,12 +737,7 @@ impl ProxyNetworkNamespace {
         // A family renders to as many transactions as its size needs; the
         // supervisor applies them in name order.
         let kernel_ipv6 = kernel_supports_ipv6();
-        if !kernel_ipv6 {
-            logger.log_line(
-                "Bubblewrap: the kernel has no IPv6 support; skipping IPv6 firewall rules \
-                 (the sandbox cannot send IPv6 traffic)",
-            );
-        }
+        warn_skipped_ipv6_rules(kernel_ipv6, logger);
         let mut transactions = 0usize;
         for &family in rule_families(kernel_ipv6) {
             let payloads =
@@ -3061,6 +3072,30 @@ mod tests {
     fn ipv6_rules_are_dropped_only_when_the_kernel_lacks_ipv6() {
         assert_eq!(rule_families(true), [RuleFamily::V4, RuleFamily::V6]);
         assert_eq!(rule_families(false), [RuleFamily::V4]);
+    }
+
+    #[test]
+    fn skipping_the_ipv6_rules_is_a_retained_warning() {
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        warn_skipped_ipv6_rules(false, &mut logger);
+        let out = logger.warnings().join("\n");
+        assert!(
+            out.contains("did not install IPv6 firewall rules"),
+            "must say the IPv6 rules were skipped: {out}"
+        );
+        // The debug buffer is not read back by `mxc_engine::spawn`, so a
+        // warning left there would never reach the caller.
+        assert!(
+            logger.get_buffer().is_empty(),
+            "the warning must travel as a retained warning, not as buffer output"
+        );
+
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        warn_skipped_ipv6_rules(true, &mut logger);
+        assert!(
+            logger.warnings().is_empty(),
+            "IPv6 rules installed, no warning"
+        );
     }
 
     /// Dropping the IPv6 rules is only safe when the kernel has proven it has

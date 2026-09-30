@@ -63,9 +63,9 @@ requiring root privileges or a container runtime.
   > closed. An IPv6 destination is unreachable even when a rule allows it
   > (see #955). On a kernel without IPv6 (built without `CONFIG_IPV6`, or
   > booted with `ipv6.disable=1`) the sandbox cannot open an IPv6 socket, so
-  > the runner logs that it is skipping the v6 rules and installs only the
-  > IPv4 chains. The `ip6tables` tools are still probed there, because they
-  > ship in the same package as `iptables`.
+  > the runner returns a warning that it is skipping the v6 rules and installs
+  > only the IPv4 chains. The `ip6tables` tools are still probed there,
+  > because they ship in the same package as `iptables`.
   ```bash
   # Debian/Ubuntu
   sudo apt install slirp4netns util-linux iptables
