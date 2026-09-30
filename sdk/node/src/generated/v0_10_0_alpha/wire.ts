@@ -519,16 +519,20 @@ export interface OneShotWslc {
 }
 
 /**
- * Explicit CPSE creation-policy reporting. Ignored when the selected native path does not support detailed policy results; existing sandbox restrictions still apply.
+ * CPSE creation-policy handling. Ignored when the selected native path does not support detailed policy results; existing sandbox restrictions still apply.
  */
 export interface PolicyEnforcement {
   /**
-   * Defaults to pass-through within this explicit section. No experimental execution authorization is required.
+   * CPSE2 negotiation attempts in mutation mode, including the first; default 8. Initial decision-free unavailability can additionally invoke legacy creation once.
+   */
+  maxAttempts?: number;
+  /**
+   * Defaults to pass-through. Mutation additionally requires experimental execution authorization when detailed policy results are available.
    */
   mode?: PolicyEnforcementMode;
 }
 
-export type PolicyEnforcementMode = "pass-through";
+export type PolicyEnforcementMode = "pass-through" | "mutate";
 
 /**
  * A host-to-container WSLC port mapping.
@@ -605,7 +609,7 @@ export interface ProcessContainer {
    */
   network?: ProcessContainerNetwork;
   /**
-   * Explicit native creation-policy reporting; omission retains legacy behavior.
+   * Optional native creation-policy reporting and tightening controls.
    */
   policyEnforcement?: PolicyEnforcement;
   /**

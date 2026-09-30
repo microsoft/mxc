@@ -1,5 +1,0 @@
-{
-  "version": "0.10.0-alpha",
-  "process": { "commandLine": "echo unused" },
-  "processContainer": { "policyEnforcement": { "mode": "pass-through", "maxAttempts": 1 } }
-}

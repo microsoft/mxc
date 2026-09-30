@@ -521,8 +521,9 @@ collected by a fleet log agent.
 Fields are record-specific. Process-boundary records include `backend`,
 `identity`, `tier` (for `process_container`), and `pid`. Early records emitted
 before a sandbox exists carry only the fields shown in the table below; in
-particular, `mxc.PolicyHash` has `backend`, `policy_hash`, and
-`config_schema_version`, `mxc.EnforcementDegraded` has `backend`, `identity`,
+particular, `mxc.PolicyHash` has `backend`, `policy_hash`,
+`config_schema_version`, and an optional local `policy_stage`;
+`mxc.EnforcementDegraded` has `backend`, `identity`,
 and `tier`, and `mxc.ConfigRejected` has `correlation_id` and `backend` plus its
 rejection fields.
 
@@ -534,7 +535,7 @@ rejection records from the same invocation. A successful launch emits no
 
 | Record | When | Fields beyond the common ones |
 |---|---|---|
-| `mxc.PolicyHash` | Every launch, after the effective request is resolved | `backend`, `policy_hash`, `config_schema_version` |
+| `mxc.PolicyHash` | At request resolution; mutation also records the effective policy in the selected backend | `backend`, `policy_hash`, `config_schema_version`, optional local `policy_stage` |
 | `mxc.SandboxIdentity` | After a successful state-aware phase | `backend`, `identity`, `phase` |
 | `mxc.EnforcementDegraded` | ProcessContainer dispatch resolved below the preferred tier | `backend`, `identity`, `tier`, `needs_dacl_augmentation`, `effective_enforcement_level`, `degradation_reasons`, `degradation_reason_count` |
 | `mxc.NetworkPolicyApplied` | After network policy setup, on success **and** failure | `backend`, `identity`, `tier` (no `pid` yet), plus `enforcement_mode`, `default_policy`, `proxy_port`, `firewall_rules_created`, `firewall_applied`, `status` |
@@ -543,6 +544,15 @@ rejection records from the same invocation. A successful launch emits no
 | `mxc.ProcessKillFailed` | A kill/terminate call failed (**failure only**) | `kill_method`, `error_code` |
 | `mxc.SandboxTornDown` | Per-run resources released, once per handle | ProcessContainer: `backend`, `identity`, `tier`, `pid`, `status`, `firewall_rules_removed`, `firewall_removal_ok`, `bfs_removed`, `proxy_stopped`, `preserve_policy`, `container_released`, `skip_reason`. IsolationSession: `backend`, `identity`, `phase`, `status`, `session_stopped`, `agent_user_deprovisioned`, `client_unregistered` |
 | `mxc.ConfigRejected` | A request was refused before it could run | `correlation_id`, `backend`, `reason`, `offending_field`, `phase` |
+
+For ProcessContainer mutation, the initial local hash record has
+`policy_stage: "requested"` and does not emit an ETW policy hash. The backend
+records `policy_stage: "effective"` once its policy is selected, and emits the
+consent-gated ETW hash then. A refused negotiation can therefore have only a
+requested record. Non-mutation requests retain the unmarked record.
+`policy_stage` is a local-audit field, not an addition to the ETW event schema;
+neither it nor policy-result reporting authorizes sending raw resource paths or
+repair journals through telemetry.
 
 ### Error semantics: `FallbackError` vs `ActivityError`
 

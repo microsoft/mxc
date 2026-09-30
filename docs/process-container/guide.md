@@ -51,17 +51,19 @@ Ordinary access-denied errors (`0x80070005`) and failures from capture-trace
 APIs are not reclassified as sandbox-creation policy refusals. Existing
 process-launch policy guidance remains applicable if the later launch fails.
 
-## Creation-policy results
+## Creation-policy results and mutation
 
 Creation-policy reporting is explicitly opt-in. Requests omitting
 `processContainer.policyEnforcement` retain legacy creation, preparation order,
 error presentation, capture output, and probe JSON. The legacy OS API still
 enforces administrative policy; omitting the controls is not an exemption.
+The basic policy-denied guidance above is automatic; detailed reports and
+automatic remediation are separate opt-in functionality.
 
 For an explicit section, on hosts advertising `PSE_SUPPORT_POLICY_RESULT`
 (`0x10`) through
 `QueryProcessSecurityEnvironmentSupport` and exporting
-`CreateProcessSecurityEnvironment2`, MXC captures the native V1 policy result
+`CreateProcessSecurityEnvironment2` (CPSE2), MXC captures the native V1 policy result
 and its bounded array of action details.
 An empty section or omitted `mode` selects pass-through: a policy refusal is
 returned without changing the request. The HRESULT and policy outcome are
@@ -75,19 +77,26 @@ The mutable `0.10.0-alpha` contract adds:
 {
   "processContainer": {
     "policyEnforcement": {
-      "mode": "pass-through"
+      "mode": "mutate",
+      "maxAttempts": 8
     }
   }
 }
 ```
 
-`mode` accepts only `pass-through`, and an empty section selects that mode.
-No experimental execution authorization is required. Mutation and `maxAttempts`
-are not supported inputs and are rejected before creation, including on hosts
-without CPSE2. Published contracts do not accept this development-only section.
+`mode` accepts `pass-through` or `mutate`. Mutation additionally requires
+experimental execution authorization (`--experimental` for the executor).
+`maxAttempts` accepts integers from 1 through 64 and defaults to 8. It counts
+CPSE2 negotiation calls, including the first: a limit of 1 permits no
+policy-repair retry. An initial decision-free unavailability response may
+additionally invoke legacy creation once; that compatibility call is outside
+the negotiation budget.
+Published contracts do not accept this development-only setting. To request
+diagnostics without mutation, use `"policyEnforcement": {"mode": "pass-through"}`
+or `"policyEnforcement": {}`; neither requires experimental authorization.
 
 If CPSE2 is unavailable, or ordinary tier selection chooses AppContainer, these
-reporting controls are ignored. Existing sandbox
+controls and their additional experimental gate are ignored. Existing sandbox
 restrictions and tier selection are unchanged. Explicitly configured controls
 then report `unavailable` or `notApplicable`, not a fictitious policy success.
 With an explicit section, the read-only probe exposes
@@ -102,31 +111,65 @@ A runtime query failure is an error, not proof that the capability is absent.
 A real policy refusal never triggers legacy creation or a weaker-tier retry.
 Capability absence before a CPSE2 call produces an empty attempt journal. If
 the initial CPSE2 call returns decision-free `E_NOTIMPL`, its unknown-outcome
-attempt remains in the unavailable report before legacy creation. That response
-must have no details and zero pooled resource counts. Neither case claims policy
-evaluation succeeded.
+attempt remains in the unavailable report before legacy creation. Neither case
+claims policy evaluation succeeded.
 
-Pass-through never changes the request or retries a policy refusal. The caller
-can inspect the native decision and decide whether to author a different request.
-Capture starts against the already-created environment without another creation;
-the workload, trace startup, and later process-launch failures are never retried.
+Mutation only removes permissions or adds restrictions. MXC changes a private
+normalized candidate, re-derives its PSEC specification, and lets the OS evaluate
+each attempt. A complete understood batch is planned atomically before one
+retry; an unsupported or incomplete detail stops the entire batch without
+applying or journaling partial changes. All details describe the same submitted
+request. Earlier edits in a batch may already satisfy later constraints, but
+never authorize re-expanding access. The OS can return further conflicts on
+the next call: neither the detail count nor a partially filled array proves
+exhaustive evaluation. It never retries a workload, trace start, or later process-launch
+failure. Capture starts against the final environment, without another creation.
+An omitted `process.cwd` is resolved from the original filesystem preferences,
+not the repaired grant order, so tightening does not redirect relative commands.
+
+| Result | Automatic handling |
+| --- | --- |
+| Forbidden capability | Remove a recognized explicit grant, or tighten the network/capture settings that synthesize it. Proxy removal never opens direct egress. |
+| Missing UI/Win32k restriction | Add supported restriction bits or enable lockdown without clearing existing restrictions. |
+| Excess filesystem access | Lower a matching existing RW grant to RO, retaining its authored spelling, or add a targeted deny. A new RO witness without a matching grant is returned as unrepairable. |
+| Too many filesystem paths | Deduplicate exact entries within a list; do not choose which distinct grant or deny to discard. |
+| Unknown, incomplete, unrepresentable, non-actionable, or evaluation-failed result | Stop and return the details. |
+
+Removing a proxy also closes its otherwise-unscoped host-loopback permission in
+the same repair. This preserves the caller's endpoint restriction even if the OS
+policy changes before the next creation attempt.
+
+Filesystem repairs deliberately reject unresolved aliases, volume/share-root
+write grants, and enumeration-only interactions. A returned path is a comparison
+witness, not a pinned object or a complete ceiling. Removing an RO child rule
+under an RW parent can *increase* access, so deleting arbitrary grants is not a
+safe path-count repair. A new RO grant name could resolve outside the original
+request if a child is replaced by a junction between attempts. MXC therefore
+does not synthesize RO overlays or silently downgrade a covering ancestor.
+Existing OS name-resolution and provisioning guarantees are unchanged.
 
 Reports appear at `error.details.policyEnforcement` on creation failures and
 `outputMetadata.policyEnforcement` on success. They include raw native codes and
 recognized names, HRESULTs, complete resource text when available, termination
-reason, unchanged requested/effective policy hashes, and the creation attempt.
+reason, requested/effective policy hashes, and an ordered attempt/change journal.
 MXC reports use `reportVersion: 1`. Each `attempts[n].result` has one `outcome`
 and a `details` array;
 class/reason/action/resource/value fields belong to `details[m]`. The native
 result version is 1. Detail counts are bounded by 64 and resources share
 a 32,768-UTF-16-character pool; offsets and written/required counts are reported.
 The subset is not an inventory of every policy conflict. Success and
-non-actionable refusals may have no details. Unknown codes and flags survive;
-incomplete resource text is never presented as a complete resource.
+non-actionable refusals may have no details. Unknown codes are retained, but
+unknown actions and incomplete resource text are not used for mutation.
 Native 64-bit requested/required detail values are decimal strings on the JSON wire.
-Pass-through has at most one CPSE2 attempt and no setting changes. Native resource
-text is bounded. The report vocabulary can describe other modes, but this
-request contract does not authorize them.
+Changes name normalized settings, not literal JSON Patch operations against
+the original source; a removed proxy is reported as configured-to-null without
+including credentials.
+Repeated settings in a batch have one before/final-after change entry.
+
+The journal retains at most 64 attempts, bounded native resource strings, and
+1 MiB of encoded setting changes. Unreportable changes are refused, not applied
+silently. Repeated/unchanged candidates and ineffective repairs stop early.
+The final failed attempt has no untried changes attached.
 
 Native live handles expose creation reports after spawn; denial-capture outputs
 arrive after completion. Report-bearing buffered APIs retain diagnostics on

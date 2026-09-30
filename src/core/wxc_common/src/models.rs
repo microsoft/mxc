@@ -1214,6 +1214,16 @@ pub fn sandbox_absolute_path(path: &str) -> String {
 }
 
 impl ExecutionRequest {
+    /// Whether creation can change the requested policy when the host supports it.
+    pub fn policy_mutation_requested(&self) -> bool {
+        self.policy
+            .policy_enforcement
+            .as_ref()
+            .is_some_and(|settings| {
+                settings.mode == Some(crate::policy_enforcement::PolicyEnforcementMode::Mutate)
+            })
+    }
+
     /// Exact external contract spelling for diagnostics and telemetry.
     ///
     /// Direct typed SDK requests return an empty string because they have no

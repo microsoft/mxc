@@ -131,6 +131,71 @@ virtualization on ARM CPUs yet, so only backends that don't require virtualizati
 
 ### Backend ids
 
+The ProcessContainer suite includes the `PolicyEnforcement` area. Without CPSE2 it
+checks that pass-through and mutation settings remain compatible, including
+without experimental authorization. A capable host without governed policy
+fixtures records an explicit skip, not enforcement coverage.
+
+`new_processcontainer_policy_fixtures.ps1 -Directory C:\mxc-policy-fixture`
+creates a small repeatable prepared-host corpus: policy-authoring input,
+pass-through/mutation configs, a manifest, and a console-only workload that
+checks actual read/write/create behavior for RW, RO, and denied paths. It never
+deploys policy or tags a process. It also includes an ordinary LPAC fallback
+case that requires `notApplicable`, zero attempts, and no experimental opt-in;
+use the standard ProcessContainer host prerequisites for that tier. Use a new
+directory in an isolated VM and
+capture/restorably back up existing policy before deploying `agent-policy.json`
+through the OS policy tooling. Run the suite from the intended agentic caller
+context so the test proves governance rather than merely an available API.
+The filesystem workload uses noninteractive Windows PowerShell and explicitly
+allows Win32k for its initialization; it does not exercise UI interactions.
+The corpus also distinguishes explicit empty controls from omitted controls.
+Published-contract legacy cases cover refusal, caller-authored compliant access,
+and capture-only execution, with no new policy report allowed.
+
+Run the isolated enforcing lane directly with
+`run_processcontainer_policy_enforcement_test.ps1 -RequireTier base-container
+-RequirePolicyResults -CaseManifest <manifest.json>`. The fixture owner must
+prepare the OS build, governing policy, expected BFS features, and agentic caller
+context; the script never installs policy or changes feature state. It requires
+an actual blocked creation and a successful creation after applying a
+multi-detail repair batch.
+The parent suite accepts the same opt-in through
+`-Areas PolicyEnforcement -PolicyCaseManifest <manifest.json> -RequirePolicyResults`.
+Ordinary CI does not silently acquire an administrative-policy or private-tool
+dependency.
+
+The manifest is an array of cases with `name`, `config` (absolute or relative to
+the manifest), `experimental`, `expectedExitCode`, `expectedTermination`,
+`expectedOutcomeCode`, `minAttempts`, `maxAttempts`, `stdoutPattern`, and
+`stdoutMatchCount`, and `expectedProcessCreations` (zero or one). Use
+noninteractive, trusted probe workloads that fail on incorrect
+filesystem/network/UI enforcement. Completion sentinels prove the checks ran;
+the independent parent-side process-creation log count catches extra workload
+invocations even when an earlier invocation fails before its sentinel. A missing
+or empty parent log is a failure, not evidence of zero creations. Include pass-through, the
+RW-to-RO-to-deny sequence, default-deny, evaluation failure, and retry exhaustion.
+The metadata protocol is not an authenticated channel for untrusted guest output.
+Optional `expectReport: false` selects a legacy compatibility case. It requires
+the common exit/stdout/process-count fields but not termination, outcome, or
+attempt bounds, and rejects new policy diagnostics anywhere in stderr.
+`stderrPattern` can additionally pin legacy failure presentation for that case.
+`expectedPolicyDeniedGuidance: true` requires the exact policy-denied HRESULT
+and automatic permission-review/admin guidance; an ordinary access-denied or
+generic creation failure cannot satisfy the legacy-refusal case.
+Optional `expectedDetailCounts` pins the detail count in each actual creation
+attempt. The generated filesystem fixture expects three constraints in its
+refusal and zero on successful re-evaluation, with two creation calls in
+mutation mode and one workload. Reports must use `reportVersion: 1`.
+Optional `expectedAvailability` (`available`, `unavailable`, `notApplicable`) and
+`expectedTier` let the same manifest assert ordinary fallback/no-op behavior.
+Ignored controls require `modeApplied=false`. Capability absence before a CPSE2
+call and `notApplicable` require zero attempts and `expectedOutcomeCode: -1`.
+Unavailability discovered by an initial decision-free CPSE2 `E_NOTIMPL` retains
+one attempt, with HRESULT `0x80004001`, outcome code 0, zero details and zero
+pooled resource counts, before
+legacy creation. The oracle does not accept fallback after a policy refusal.
+
 A backend id is passed straight through: the matrix job hands it to the host-prep
 script and then to the dispatcher, which has one `switch`/`case` per id. Ids that
 share a suite each keep their own case so they can diverge later without a

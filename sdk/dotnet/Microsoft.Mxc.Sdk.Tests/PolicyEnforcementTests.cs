@@ -54,9 +54,12 @@ public class PolicyEnforcementTests
     }
 
     [Theory]
-    [InlineData("""{"mode":"pass-through","maxAttemps":1}""")]
+    [InlineData("""{"mode":"mutate","maxAttemps":1}""")]
     [InlineData("""{"mode":"pass-through","typo":true}""")]
     [InlineData("""{"mode":null}""")]
+    [InlineData("""{"maxAttempts":null}""")]
+    [InlineData("""{"maxAttempts":0}""")]
+    [InlineData("""{"maxAttempts":65}""")]
     public void InvalidControlsAreRejectedBeforeTheyCanBeDiscarded(string json)
     {
         Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<PolicyEnforcementOptions>(json));
@@ -69,6 +72,9 @@ public class PolicyEnforcementTests
         Assert.Equal(
             """{"mode":"pass-through"}""",
             JsonSerializer.Serialize(new PolicyEnforcementOptions { Mode = PolicyEnforcementMode.PassThrough }));
+        Assert.Equal(
+            """{"mode":"mutate","maxAttempts":1}""",
+            JsonSerializer.Serialize(new PolicyEnforcementOptions { Mode = PolicyEnforcementMode.Mutate, MaxAttempts = 1 }));
     }
 
     [Theory]
@@ -109,59 +115,22 @@ public class PolicyEnforcementTests
 
     [Theory]
     [InlineData(PolicyEnforcementMode.PassThrough, "pass-through")]
-    public void RequestPreservesPassThroughWithoutExperimental(PolicyEnforcementMode mode, string wireMode)
+    [InlineData(PolicyEnforcementMode.Mutate, "mutate")]
+    public void RequestPreservesModeAndAttemptLimit(PolicyEnforcementMode mode, string wireMode)
     {
         var request = new SandboxRequest(new SandboxPolicy { Version = "0.10.0-alpha" }, "unused")
         {
+            Experimental = true,
             Containment = new ProcessContainerContainment
             {
-                PolicyEnforcement = new PolicyEnforcementOptions { Mode = mode },
+                PolicyEnforcement = new PolicyEnforcementOptions { Mode = mode, MaxAttempts = 64 },
             },
         };
         using var json = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
         var settings = json.RootElement.GetProperty("containment").GetProperty("policyEnforcement");
         Assert.Equal(wireMode, settings.GetProperty("mode").GetString());
-        Assert.False(settings.TryGetProperty("maxAttempts", out _));
-        Assert.False(json.RootElement.TryGetProperty("experimental", out _));
+        Assert.Equal(64, settings.GetProperty("maxAttempts").GetInt32());
         Assert.Equal(mode, JsonSerializer.Deserialize<PolicyEnforcementOptions>(settings)!.Mode);
-    }
-
-    [Fact]
-    public void EmptyOptionsRemainPresentWhileNullOptionsStayAbsent()
-    {
-        var containment = new ProcessContainerContainment();
-        var request = new SandboxRequest(new SandboxPolicy { Version = "0.10.0-alpha" }, "unused")
-        {
-            Containment = containment,
-        };
-        using var absent = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
-        Assert.False(absent.RootElement.GetProperty("containment").TryGetProperty("policyEnforcement", out _));
-        containment.PolicyEnforcement = new PolicyEnforcementOptions();
-        using var present = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
-        Assert.Equal("{}", present.RootElement.GetProperty("containment").GetProperty("policyEnforcement").GetRawText());
-        Assert.False(present.RootElement.TryGetProperty("experimental", out _));
-    }
-
-    [Theory]
-    [InlineData("""{"mode":"mutate"}""")]
-    [InlineData("""{"maxAttempts":1}""")]
-    [InlineData("""{"mode":"pass-through","maxAttempts":64}""")]
-    public void MutationInputsAreRejectedByTheSdkModel(string json)
-    {
-        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<PolicyEnforcementOptions>(json));
-    }
-
-    [Fact]
-    public void UnsupportedModeCannotBeSerializedIntoANativeRequest()
-    {
-        var request = new SandboxRequest(new SandboxPolicy { Version = "0.10.0-alpha" }, "unused")
-        {
-            Containment = new ProcessContainerContainment
-            {
-                PolicyEnforcement = new PolicyEnforcementOptions { Mode = (PolicyEnforcementMode)1 },
-            },
-        };
-        Assert.Throws<JsonException>(() => MxcSandbox.SerializeRequest(request));
     }
 
     [Fact]

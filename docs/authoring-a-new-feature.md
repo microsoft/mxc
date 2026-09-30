@@ -15,12 +15,12 @@
 ## Prerequisites
 
 The development ProcessContainer creation-policy feature is documented in
-[the backend guide](process-container/guide.md#creation-policy-results).
+[the backend guide](process-container/guide.md#creation-policy-results-and-mutation).
 Its permanent field is `processContainer.policyEnforcement`. An omitted section
 retains legacy execution and diagnostics; an explicit empty section opts into
-pass-through reporting without experimental authorization. Only pass-through is
-accepted; mutation and attempt-limit controls are rejected before execution.
-Older hosts ignore explicit reporting controls when the API is unavailable.
+pass-through reporting. Mutation uses the
+existing experimental execution option. Availability is checked before applying
+that extra gate so older hosts continue to ignore the remediation control.
 This exception does not authorize ignoring a sandbox restriction.
 
 Read these in order:

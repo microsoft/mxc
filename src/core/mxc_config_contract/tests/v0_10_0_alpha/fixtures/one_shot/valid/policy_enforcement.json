@@ -3,6 +3,6 @@
   "containment": "processcontainer",
   "process": { "commandLine": "echo hello" },
   "processContainer": {
-    "policyEnforcement": { "mode": "pass-through" }
+    "policyEnforcement": { "mode": "mutate", "maxAttempts": 64 }
   }
 }

@@ -534,10 +534,10 @@ impl BaseContainerRunner {
         let supports_network_ingress = psec_version >= SecurityEnvironmentVersion::V1_1
             && secenv::query_support(SecurityEnvironmentSupport::NetworkIngress);
         // Legacy creation stays after fallible launch preparation. Only explicit
-        // reporting may create early to retain the decision on later failures.
+        // negotiation may create early so repairs can determine that preparation.
         let environment = if reporting_requested {
             let negotiated = crate::policy_enforcement::create_environment(
-                &request,
+                &mut request,
                 psec_version,
                 supports_network_ingress,
             )?;
@@ -546,6 +546,7 @@ impl BaseContainerRunner {
                 request.policy.readonly_paths.clone(),
                 request.policy.readwrite_paths.clone(),
             ));
+            crate::policy_enforcement::log_effective_policy(&request, logger);
             if !request.policy.network_proxy.is_enabled() {
                 self.proxy_coordinator.stop(logger);
             }
@@ -605,7 +606,8 @@ impl BaseContainerRunner {
         // 3. Build the command line (passed directly, same as AppContainerScriptRunner).
         let mut cmd_wide = string_util::to_wide(&request.script_code);
 
-        // Preserve the original preference order for an implicit working directory.
+        // A permission repair must not retarget relative commands by changing
+        // the original preference order for an implicit working directory.
         let working_directory =
             crate::working_directory::launch_working_directory(original_request);
         let _ = writeln!(

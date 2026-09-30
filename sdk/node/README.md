@@ -54,7 +54,7 @@ layout is co-versioned and is not a stable external ABI.
 
 On Windows, schema `0.10.0-alpha` accepts
 `policy.processContainer.policyEnforcement` (also available in raw
-`ContainerConfig.processContainer`). To request pass-through diagnostics:
+`ContainerConfig.processContainer`). For opt-in tightening and bounded retries:
 
 ```typescript
 import { spawnSandboxAsyncWithReport, getPolicyEnforcementReport, MxcError } from '@microsoft/mxc-sdk';
@@ -62,8 +62,8 @@ import { spawnSandboxAsyncWithReport, getPolicyEnforcementReport, MxcError } fro
 try {
   const result = await spawnSandboxAsyncWithReport('cmd /c echo hello', {
     version: '0.10.0-alpha',
-    processContainer: { policyEnforcement: { mode: 'pass-through' } },
-  });
+    processContainer: { policyEnforcement: { mode: 'mutate', maxAttempts: 8 } },
+  }, { experimental: true });
   const report = getPolicyEnforcementReport(result.outputMetadata);
   console.log(report?.availability, report?.attempts);
 } catch (error) {
@@ -78,17 +78,22 @@ try {
 
 Omitting the setting preserves legacy execution and result shapes, without new
 policy reports. An explicit `{}` or `{ mode: 'pass-through' }` requests
-pass-through reporting without experimental authorization. Mutation and
-`maxAttempts` are not accepted inputs. Reporting controls are ignored on native
-paths without CPSE2. Absence of evaluation is distinct from an OS
-`noApplicablePolicy` result. The original caller policy is never edited and
-neither a policy refusal nor the workload is retried. Native uint64
-values are decimal strings; unknown native codes remain numeric.
+pass-through reporting without experimental authorization. MXC never mutates
+the policy implicitly.
+Both controls are ignored on native paths without CPSE2. Absence of evaluation is
+distinct from an OS `noApplicablePolicy` result. The budget counts CPSE2
+negotiation attempts including the first; its range is 1-64 and default is 8.
+An initial decision-free unavailability fallback may additionally call legacy
+creation once. Workload execution is never retried.
 
 The report uses `reportVersion: 1`: read the overall outcome at
 `attempts[n].result.outcome` and the bounded, non-exhaustive action batch at
 `attempts[n].result.details`. Requested/required values within each detail remain
 decimal uint64 strings.
+
+The original caller policy is not edited by negotiation. The report records
+normalized setting changes, not patches into the original object. Native uint64
+values are decimal strings; unknown native codes remain numeric.
 
 `spawnSandboxAsync` retains its exact three-field return type and result,
 including capture-only runs. Use the additive `spawnSandboxAsyncWithReport`
@@ -102,7 +107,7 @@ Other buffered wait failures also retain available capture metadata there.
 PTY/ChildProcess APIs retain diagnostic-stream envelopes rather than becoming
 typed native handles. Do not make security-sensitive retry decisions by scraping
 mixed guest output. See the
-[backend reporting contract](../../docs/process-container/guide.md#creation-policy-results).
+[backend contract and repair limits](../../docs/process-container/guide.md#creation-policy-results-and-mutation).
 Upgrade the SDK and native library from the same build together; the native
 error layout is co-versioned with the binding, not a stable cross-version ABI.
 

@@ -463,19 +463,23 @@ export function createConfigFromPolicy(
             throw new MxcError('malformed_request',
                 'processContainer.policyEnforcement requires the Windows ProcessContainer backend');
         }
-        if (Object.keys(policyEnforcement).some(key => key !== 'mode') ||
-            'maxAttempts' in policyEnforcement) {
+        if (Object.keys(policyEnforcement).some(key => key !== 'mode' && key !== 'maxAttempts')) {
             throw new MxcError('malformed_request',
                 'processContainer.policyEnforcement contains an unknown field');
         }
         // Snapshot getters once so the validated values are exactly what is sent.
-        const { mode } = policyEnforcement;
-        if (mode !== undefined && mode !== 'pass-through') {
+        const { mode, maxAttempts: attempts } = policyEnforcement;
+        if (mode !== undefined && mode !== 'pass-through' && mode !== 'mutate') {
             throw new MxcError('malformed_request',
-                'processContainer.policyEnforcement.mode must be pass-through');
+                'processContainer.policyEnforcement.mode must be pass-through or mutate');
+        }
+        if (attempts !== undefined && (!Number.isInteger(attempts) || attempts < 1 || attempts > 64)) {
+            throw new MxcError('malformed_request',
+                'processContainer.policyEnforcement.maxAttempts must be between 1 and 64');
         }
         policyEnforcementConfig = {};
         if (mode !== undefined) policyEnforcementConfig.mode = mode;
+        if (attempts !== undefined) policyEnforcementConfig.maxAttempts = attempts;
     }
 
     const containerId = containerName ?? generateRandomContainerName();

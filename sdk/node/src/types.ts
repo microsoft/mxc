@@ -172,11 +172,13 @@ export interface BaseProcessUiConfig {
  */
 export interface ProcessContainerConfig {
   /**
-   * Explicit native creation-policy reporting (0.10.0-alpha).
-   * Omission retains legacy behavior; an empty section selects pass-through.
+   * Native creation-policy handling (0.10.0-alpha). Ignored without CPSE2 support.
+   * Mutation requires experimental execution and never widens sandbox access.
    */
   policyEnforcement?: {
-    mode?: 'pass-through';
+    mode?: 'pass-through' | 'mutate';
+    /** CPSE2 negotiation attempts, including the first: 1-64, default 8. Initial unavailability can additionally invoke legacy creation once. */
+    maxAttempts?: number;
   };
   /** AppContainer profile name (default: "CLI"). Deprecated: use containerId instead. */
   name?: string;

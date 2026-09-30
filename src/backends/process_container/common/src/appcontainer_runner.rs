@@ -1810,6 +1810,7 @@ impl SandboxBackend for AppContainerScriptRunner {
         self.validate(request)?;
 
         let policy_report = crate::policy_enforcement::ignored_report(request);
+        crate::policy_enforcement::log_effective_policy(request, logger);
         let attach_report = |error: ScriptResponse| match policy_report.as_ref() {
             Some(report) => error.with_policy_report(report),
             None => error,

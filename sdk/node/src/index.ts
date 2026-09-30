@@ -107,8 +107,8 @@ export {
 } from './errors.js';
 export {
   getPolicyEnforcementReport,
-  type NativePolicyDetail,
-  type NativePolicyResult,
+  type   NativePolicyDetail,
+  NativePolicyResult,
   type PolicyChange,
   type PolicyEnforcementAttempt,
   type PolicyEnforcementReport,

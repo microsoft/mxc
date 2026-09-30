@@ -483,7 +483,10 @@ function New-RawConfig {
         [Parameter(Mandatory)] $Object
     )
     $path = Join-Path (Join-Path $ScratchRoot 'configs') "$Name.json"
-    ($Object | ConvertTo-Json -Depth 12) | Out-File -LiteralPath $path -Encoding utf8 -Force
+    # Native JSON readers require BOM-less UTF-8 on Windows PowerShell too.
+    [IO.File]::WriteAllText(
+        $path, ($Object | ConvertTo-Json -Depth 12) + [Environment]::NewLine,
+        [Text.UTF8Encoding]::new($false))
     return $path
 }
 
@@ -680,9 +683,7 @@ function New-Config {
     }
     if ($pc.Count -gt 0) { $obj['processContainer'] = $pc }
 
-    $path = Join-Path (Join-Path $ScratchRoot 'configs') "$Name.json"
-    ($obj | ConvertTo-Json -Depth 12) | Out-File -LiteralPath $path -Encoding utf8 -Force
-    return $path
+    return (New-RawConfig -Name $Name -Object $obj)
 }
 
 # Test runners
@@ -724,7 +725,8 @@ function Invoke-Wxc {
         [Parameter(Mandatory)] [string]$Wxc,
         [Parameter(Mandatory)] [string]$ConfigPath,
         [Parameter(Mandatory)] [string]$LogPath,
-        [int]$TimeoutSec     = 60
+        [int]$TimeoutSec     = 60,
+        [bool]$Experimental = $true
     )
     # Scrub MXC_FORCE_TIER defensively in case some other process in this
     # session set it. The env var is `#[cfg(test)]`-gated and has no
@@ -734,7 +736,8 @@ function Invoke-Wxc {
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $Wxc
-    $psi.Arguments = "--config `"$ConfigPath`" --experimental --log-file `"$LogPath`""
+    $experimentalArgument = if ($Experimental) { ' --experimental' } else { '' }
+    $psi.Arguments = "--config `"$ConfigPath`"$experimentalArgument --log-file `"$LogPath`""
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError  = $true
     $psi.UseShellExecute = $false
@@ -1431,4 +1434,3 @@ function Write-WpcSummary {
         }
     }
 }
-

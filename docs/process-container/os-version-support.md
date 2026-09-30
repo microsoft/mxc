@@ -66,7 +66,7 @@ The query describes host API support, independently of agentic tagging or whethe
 an administrative policy governs the caller.
 The development `processContainer.policyEnforcement` controls are ignored when
 that capability is absent or an AppContainer tier is selected. See the
-[creation-policy guide](guide.md#creation-policy-results).
+[creation-policy guide](guide.md#creation-policy-results-and-mutation).
 
 BaseContainer requests use the PSEC process-security-environment contract
 whenever its runtime probe succeeds and the contract can represent the complete

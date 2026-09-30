@@ -1044,11 +1044,17 @@
     },
     "PolicyEnforcement": {
       "additionalProperties": false,
-      "description": "Explicit CPSE creation-policy reporting. Ignored when the selected native path does not support detailed policy results; existing sandbox restrictions still apply.",
+      "description": "CPSE creation-policy handling. Ignored when the selected native path does not support detailed policy results; existing sandbox restrictions still apply.",
       "properties": {
+        "maxAttempts": {
+          "description": "CPSE2 negotiation attempts in mutation mode, including the first; default 8. Initial decision-free unavailability can additionally invoke legacy creation once.",
+          "maximum": 64.0,
+          "minimum": 1.0,
+          "type": "integer"
+        },
         "mode": {
           "$ref": "#/definitions/PolicyEnforcementMode",
-          "description": "Defaults to pass-through within this explicit section. No experimental execution authorization is required."
+          "description": "Defaults to pass-through. Mutation additionally requires experimental execution authorization when detailed policy results are available."
         }
       },
       "type": "object"
@@ -1059,6 +1065,13 @@
           "description": "PassThrough",
           "enum": [
             "pass-through"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Mutate",
+          "enum": [
+            "mutate"
           ],
           "type": "string"
         }
@@ -1159,7 +1172,7 @@
         },
         "policyEnforcement": {
           "$ref": "#/definitions/PolicyEnforcement",
-          "description": "Explicit native creation-policy reporting; omission retains legacy behavior."
+          "description": "Optional native creation-policy reporting and tightening controls."
         },
         "ui": {
           "$ref": "#/definitions/ProcessContainerUi",

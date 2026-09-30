@@ -7,11 +7,12 @@ use wxc_common::policy_enforcement::{NativePolicyDetail, NativePolicyResult, Pol
 
 pub(crate) const MAX_DETAILS: usize = 64;
 pub(crate) const MAX_RESOURCE_CHARS: usize = 32_768;
-#[cfg(test)]
 pub(crate) const HAS_ACTIONABLE_DETAILS: u32 = 0x1;
 pub(crate) const RESOURCE_COMPLETE: u32 = 0x2;
 pub(crate) const BUFFER_TOO_SMALL: u32 = 0x4;
 pub(crate) const RESOURCE_UNAVAILABLE: u32 = 0x8;
+pub(crate) const DETAILS_UNREPRESENTABLE: u32 = 0x10;
+pub(crate) const KNOWN_FLAGS: u32 = 0x1f;
 
 /// Recognized V1 discriminators; raw fields remain u32 to preserve unknown values.
 pub(crate) mod codes {

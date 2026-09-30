@@ -966,7 +966,7 @@ mod tests {
                 "learningMode": true,
                 "capabilities": ["internetClient"],
                 "captureDenials": { "mode": "allow", "retainEtl": true },
-                "policyEnforcement": { "mode": "pass-through" },
+                "policyEnforcement": { "mode": "mutate", "maxAttempts": 1 },
                 "ui": {
                     "isolation": "atoms",
                     "desktopSystemControl": true,
@@ -990,8 +990,9 @@ mod tests {
         let enforcement = config.policy_enforcement.expect("policy controls");
         assert_eq!(
             enforcement.mode,
-            Some(mxc_sdk::PolicyEnforcementMode::PassThrough)
+            Some(mxc_sdk::PolicyEnforcementMode::Mutate)
         );
+        assert_eq!(enforcement.max_attempts, Some(1));
         let ui = config.ui.expect("ui");
         assert_eq!(ui.isolation, ProcessContainerUiIsolation::Atoms);
         assert!(ui.desktop_system_control);
@@ -1037,21 +1038,11 @@ mod tests {
             .is_err());
             for field in [
                 r#","policyEnforcement":{}"#,
-                r#","policyEnforcement":{"mode":"pass-through"}"#,
+                r#","policyEnforcement":{"mode":"mutate","maxAttempts":1}"#,
             ] {
                 assert_eq!(
                     build_request_from_json(&document(field)).is_ok(),
                     version == "0.10.0-alpha",
-                    "{version}: {field}"
-                );
-            }
-            for field in [
-                r#","policyEnforcement":{"mode":"mutate"}"#,
-                r#","policyEnforcement":{"maxAttempts":1}"#,
-                r#","policyEnforcement":{"mode":"pass-through","maxAttempts":64}"#,
-            ] {
-                assert!(
-                    build_request_from_json(&document(field)).is_err(),
                     "{version}: {field}"
                 );
             }

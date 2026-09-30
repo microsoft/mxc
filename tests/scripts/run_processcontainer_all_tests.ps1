@@ -56,6 +56,9 @@ param(
     # Opt out of every live-network area (air-gapped bring-up). The parse-only
     # rejection area still runs — it needs no connectivity.
     [switch]$SkipNetwork,
+    # Optional prepared-host policy fixtures; ignored by other areas.
+    [string]$PolicyCaseManifest,
+    [switch]$RequirePolicyResults,
     # Restrict the run to a subset of areas. Accepts the keys in $AreaScripts
     # below. Empty = run everything. `-Phases` is an alias for compatibility
     # with the pre-split harness.
@@ -79,6 +82,7 @@ $AreaScripts = [ordered]@{
     'UiPolicyMatrix'           = 'run_processcontainer_ui_policy_matrix_test.ps1'
     'Capabilities'             = 'run_processcontainer_capabilities_test.ps1'
     'CaptureDenials'           = 'run_processcontainer_capture_denials_test.ps1'
+    'PolicyEnforcement'        = 'run_processcontainer_policy_enforcement_test.ps1'
     'Lifecycle'                = 'run_processcontainer_lifecycle_test.ps1'
     'Privilege'                = 'run_processcontainer_privilege_test.ps1'
     'GlobalAtomIsolation'      = 'run_processcontainer_global_atom_test.ps1'
@@ -109,6 +113,10 @@ if ($Areas.Count -gt 0) {
         throw "Unknown -Areas value(s): $($unknown -join ', '). Valid: $($AreaScripts.Keys -join ', ')"
     }
 }
+if (($PolicyCaseManifest -or $RequirePolicyResults) -and
+    $Areas.Count -gt 0 -and 'PolicyEnforcement' -notin $Areas) {
+    throw 'Policy fixture arguments require the PolicyEnforcement area.'
+}
 foreach ($key in $AreaScripts.Keys) {
     $path = Join-Path $PSScriptRoot $AreaScripts[$key]
     if (-not (Test-Path $path)) { throw "Area '$key' points at a missing script: $path" }
@@ -138,6 +146,8 @@ try {
     $ctx = @{} + $PSBoundParameters
     $ctx.Remove('Areas') | Out-Null
     $ctx.Remove('Phases') | Out-Null
+    $ctx.Remove('PolicyCaseManifest') | Out-Null
+    $ctx.Remove('RequirePolicyResults') | Out-Null
     $ctx['ResultsFile'] = $ResultsFile
     $ctx['ResultsJson'] = $ResultsJson
     Initialize-WpcContext -Fresh @ctx
@@ -163,8 +173,13 @@ try {
         # missing the actual test output is worthless for diagnosing a CI
         # failure. Write-WpcChildOutput also restores the colour the child
         # used, which does not survive the pipe.
+        $areaArguments = @()
+        if ($key -eq 'PolicyEnforcement') {
+            if ($PolicyCaseManifest) { $areaArguments += @('-CaseManifest', $PolicyCaseManifest) }
+            if ($RequirePolicyResults) { $areaArguments += '-RequirePolicyResults' }
+        }
         & $PSHostExe -NoProfile -ExecutionPolicy Bypass -File $script `
-            -ContextJson $contextPath -ResultsJson $childJson 2>&1 |
+            -ContextJson $contextPath -ResultsJson $childJson @areaArguments 2>&1 |
             Write-WpcChildOutput
         $childExit = $LASTEXITCODE
 

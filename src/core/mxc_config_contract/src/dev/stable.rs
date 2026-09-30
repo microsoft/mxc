@@ -279,19 +279,72 @@ string_enum! {
     pub enum PolicyEnforcementMode {
         /// Return the first failure without changing the request.
         PassThrough => ["pass-through"],
+        /// Apply supported tightening-only repairs before retrying creation.
+        Mutate => ["mutate"],
     }
 }
 
-/// Explicit CPSE creation-policy reporting. Ignored when the selected native path does not
+/// A bounded number of CPSE2 negotiation attempts, including the initial call.
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(try_from = "u8")]
+pub struct PolicyEnforcementAttempts(u8);
+
+#[cfg(feature = "schema-gen")]
+impl schemars::JsonSchema for PolicyEnforcementAttempts {
+    fn schema_name() -> String {
+        "PolicyEnforcementAttempts".into()
+    }
+
+    fn is_referenceable() -> bool {
+        false
+    }
+
+    fn json_schema(_: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        use schemars::schema::{InstanceType, NumberValidation, Schema, SchemaObject, SingleOrVec};
+        Schema::Object(SchemaObject {
+            instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::Integer))),
+            number: Some(Box::new(NumberValidation {
+                minimum: Some(1.0),
+                maximum: Some(64.0),
+                ..Default::default()
+            })),
+            ..Default::default()
+        })
+    }
+}
+
+impl TryFrom<u8> for PolicyEnforcementAttempts {
+    type Error = &'static str;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        if (1..=64).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err("policyEnforcement.maxAttempts must be between 1 and 64")
+        }
+    }
+}
+
+impl PolicyEnforcementAttempts {
+    pub fn get(self) -> u8 {
+        self.0
+    }
+}
+
+/// CPSE creation-policy handling. Ignored when the selected native path does not
 /// support detailed policy results; existing sandbox restrictions still apply.
 #[derive(Debug, serde::Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PolicyEnforcement {
-    /// Defaults to pass-through within this explicit section. No experimental
-    /// execution authorization is required.
+    /// Defaults to pass-through. Mutation additionally requires experimental
+    /// execution authorization when detailed policy results are available.
     #[serde(default)]
     pub mode: OptionalField<PolicyEnforcementMode>,
+    /// CPSE2 negotiation attempts in mutation mode, including the first; default 8.
+    /// Initial decision-free unavailability can additionally invoke legacy creation once.
+    #[serde(default)]
+    pub max_attempts: OptionalField<PolicyEnforcementAttempts>,
 }
 
 /// ProcessContainer-specific settings.
@@ -314,7 +367,7 @@ pub struct ProcessContainer {
     /// Optional capture-denials policy.
     #[serde(default)]
     pub capture_denials: OptionalField<CaptureDenials>,
-    /// Explicit native creation-policy reporting; omission retains legacy behavior.
+    /// Optional native creation-policy reporting and tightening controls.
     #[serde(default)]
     pub policy_enforcement: OptionalField<PolicyEnforcement>,
     /// Optional ProcessContainer-specific user-interface policy.

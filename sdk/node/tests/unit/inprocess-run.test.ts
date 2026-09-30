@@ -29,17 +29,19 @@ describe('in-process async run routing', () => {
     assert.deepStrictEqual(opted.processContainer?.policyEnforcement, {});
   });
 
-  it('snapshots own and inherited pass-through mode getters once', { skip: process.platform !== 'win32' }, async () => {
+  it('snapshots getter-backed policy controls without changing the attempt limit', { skip: process.platform !== 'win32' }, async () => {
     for (const ownGetter of [false, true]) {
+      let reads = 0;
       let modeReads = 0;
       class Controls {
-        get mode() { modeReads++; return 'pass-through' as const; }
+        get mode() { modeReads++; return 'mutate' as const; }
+        get maxAttempts() { return ++reads === 1 ? 1 : 64; }
       }
       const controls = new Controls();
       if (ownGetter) {
-        Object.defineProperty(controls, 'mode', {
+        Object.defineProperty(controls, 'maxAttempts', {
           enumerable: true,
-          get: () => { modeReads++; return 'pass-through'; },
+          get: () => ++reads === 1 ? 1 : 64,
         });
       }
       let bindingRequest: RequestSpec | undefined;
@@ -50,10 +52,10 @@ describe('in-process async run routing', () => {
       await spawnSandboxAsync('unused', {
         version: '0.10.0-alpha',
         processContainer: { policyEnforcement: controls },
-      });
+      }, { experimental: true });
       if (bindingRequest?.containment.type !== 'processContainer') assert.fail('wrong containment');
-      assert.deepStrictEqual(bindingRequest.containment.policyEnforcement, { mode: 'pass-through' });
-      assert.strictEqual(bindingRequest.experimental, false);
+      assert.deepStrictEqual(bindingRequest.containment.policyEnforcement, { mode: 'mutate', maxAttempts: 1 });
+      assert.strictEqual(reads, 1);
       assert.strictEqual(modeReads, 1);
     }
   });
@@ -67,9 +69,6 @@ describe('in-process async run routing', () => {
     for (const policyEnforcement of [
       false, true, 0, '', [], ['mutate', 1], null,
       { mode: 'mutate', maxAttempts: 1, typo: true },
-      { mode: 'mutate' }, { maxAttempts: 1 },
-      { mode: 'pass-through', maxAttempts: 64 },
-      Object.create({ maxAttempts: 1 }),
       { mode: false }, { mode: null }, { maxAttempts: null },
     ]) {
       const policy = { version: '0.10.0-alpha', processContainer: { policyEnforcement } };
@@ -85,7 +84,7 @@ describe('in-process async run routing', () => {
   it('forwards policy controls and retains creation metadata', { skip: process.platform !== 'win32' }, async () => {
     let bindingRequest: RequestSpec | undefined;
     const metadata = { policyEnforcement: {
-      reportVersion: 1, requestedMode: 'pass-through', modeApplied: false,
+      reportVersion: 1, requestedMode: 'mutate', modeApplied: false,
       availability: 'unavailable', termination: 'ignored', environmentCreated: false,
       originalPolicyHash: 'same', effectivePolicyHash: 'same', attempts: [],
     } };
@@ -95,18 +94,17 @@ describe('in-process async run routing', () => {
     });
     const result = await spawnSandboxAsyncWithReport('echo unused', {
       version: '0.10.0-alpha',
-      processContainer: { policyEnforcement: { mode: 'pass-through' } },
-    });
+      processContainer: { policyEnforcement: { mode: 'mutate', maxAttempts: 8 } },
+    }, { experimental: true });
     assert.deepStrictEqual(bindingRequest?.containment.type, 'processContainer');
     if (bindingRequest?.containment.type !== 'processContainer') assert.fail('wrong native containment');
-    assert.deepStrictEqual(bindingRequest.containment.policyEnforcement, { mode: 'pass-through' });
-    assert.strictEqual(bindingRequest.experimental, false);
+    assert.deepStrictEqual(bindingRequest.containment.policyEnforcement, { mode: 'mutate', maxAttempts: 8 });
     assert.deepStrictEqual(result.outputMetadata, metadata);
   });
 
   it('retains the policy journal when buffered execution times out', { skip: process.platform !== 'win32' }, async () => {
     const policyEnforcement = {
-      reportVersion: 1, requestedMode: 'pass-through', modeApplied: true,
+      reportVersion: 1, requestedMode: 'mutate', modeApplied: true,
       availability: 'available', termination: 'created', environmentCreated: true,
       originalPolicyHash: 'before', effectivePolicyHash: 'after', attempts: [],
     };
@@ -118,8 +116,8 @@ describe('in-process async run routing', () => {
     await assert.rejects(
       spawnSandboxAsync('unused', {
         version: '0.10.0-alpha',
-        processContainer: { policyEnforcement: {} },
-      }),
+        processContainer: { policyEnforcement: { mode: 'mutate' } },
+      }, { experimental: true }),
       (error: unknown) => error instanceof MxcError
         && error.details?.policyEnforcement === policyEnforcement
         && JSON.stringify(error.details?.warnings) === JSON.stringify(['timed out; additionally capture sealing failed']),

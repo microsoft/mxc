@@ -50,7 +50,7 @@ pub struct ProcessContainer {
     pub capabilities: Vec<String>,
     /// Optional denial-capture settings.
     pub capture_denials: Option<CaptureDenials>,
-    /// Explicit creation-policy reporting (development contract only). Ignored without CPSE2 support.
+    /// Creation-policy handling (development contract only). Ignored without CPSE2 support.
     pub policy_enforcement: Option<super::PolicyEnforcementOptions>,
     /// Optional BaseProcessContainer user-interface settings.
     pub ui: Option<ProcessContainerUi>,
@@ -159,7 +159,8 @@ mod tests {
     #[test]
     fn policy_enforcement_typed_sdk_controls_require_the_exact_development_contract() {
         let mut settings = crate::configs::PolicyEnforcementOptions::default();
-        settings.mode = Some(crate::configs::PolicyEnforcementMode::PassThrough);
+        settings.mode = Some(crate::configs::PolicyEnforcementMode::Mutate);
+        settings.max_attempts = Some(8);
         let process_container = ProcessContainer {
             policy_enforcement: Some(settings),
             ..Default::default()
@@ -184,43 +185,6 @@ mod tests {
             request.inner.policy.policy_enforcement,
             process_container.policy_enforcement
         );
-    }
-
-    #[test]
-    fn policy_enforcement_typed_sdk_empty_opt_in_and_mutation_rejection() {
-        for mode in [
-            None,
-            Some(crate::configs::PolicyEnforcementMode::PassThrough),
-        ] {
-            let mut settings = crate::configs::PolicyEnforcementOptions::default();
-            settings.mode = mode;
-            let config = ProcessContainer {
-                policy_enforcement: Some(settings),
-                ..Default::default()
-            };
-            let request = build_request_with_containment(
-                &policy_for_version("0.10.0-alpha", None),
-                &Containment::ProcessContainer(config),
-                TEST_COMMAND,
-                None,
-            )
-            .unwrap();
-            assert!(!request.inner.experimental_enabled);
-            assert_eq!(request.inner.policy.policy_enforcement.unwrap().mode, mode);
-        }
-        let mut settings = crate::configs::PolicyEnforcementOptions::default();
-        settings.mode = Some(crate::configs::PolicyEnforcementMode::Mutate);
-        let config = ProcessContainer {
-            policy_enforcement: Some(settings),
-            ..Default::default()
-        };
-        assert!(build_request_with_containment(
-            &policy_for_version("0.10.0-alpha", None),
-            &Containment::ProcessContainer(config),
-            TEST_COMMAND,
-            None,
-        )
-        .is_err());
     }
 
     fn policy_for_version(version: &str, network: Option<NetworkSection>) -> SandboxPolicy {

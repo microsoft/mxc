@@ -15,7 +15,10 @@ sandboxed process over ordinary pipes, with no pty. The state-aware
 For schema `0.10.0-alpha`, set
 `configs::ProcessContainer::policy_enforcement` to `PolicyEnforcementOptions`.
 Construct the non-exhaustive options with `Default`, then assign the fields.
-Only pass-through is accepted; mutation and attempt limits are not supported.
+`mode: Some(PolicyEnforcementMode::Mutate)` opts into tightening-only repairs;
+also call `SandboxRequest::set_experimental(true)`. `max_attempts` accepts 1-64
+CPSE2 negotiation calls and defaults to 8. An initial decision-free
+unavailability fallback may additionally call legacy creation once.
 Omitting the controls preserves legacy
 execution without new reports. `Some(PolicyEnforcementOptions::default())`
 explicitly requests pass-through; it needs no experimental authorization.
@@ -29,9 +32,9 @@ is available after spawn and remains available after a wait failure.
 capture-only types. `Error::details` preserves
 `policyEnforcement` for creation errors and buffered wait failures. The exported
 `PolicyEnforcementReport` and related types describe attempts, raw native codes,
-unchanged requested/effective identities. Unknown native codes survive;
+setting changes, and requested/effective identities. Unknown native codes survive;
 native uint64 values use decimal strings in JSON.
-See the [backend guide](../../../docs/process-container/guide.md#creation-policy-results).
+See the [backend guide](../../../docs/process-container/guide.md#creation-policy-results-and-mutation).
 
 `Sandbox::wait_with_output()` preserves the original `std::io::Error`, including
 its native code and custom payload downcasts. For owned diagnostics after
@@ -48,7 +51,7 @@ including a concurrent capture-finalization failure.
 Reports use `report_version: 1`; native `result.version` is 1.
 Read `attempts[n].result.details` for the bounded, non-exhaustive
 `NativePolicyDetail` batch and `result.outcome` for the overall evaluation.
-Pass-through retains the complete returned batch without applying any action.
+Mutation applies a supported complete batch atomically before another OS call.
 
 ## Usage
 

@@ -6,6 +6,9 @@
 
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_POLICY_ATTEMPTS: u8 = 8;
+pub const MAX_POLICY_ATTEMPTS: u8 = 64;
+
 /// How a caller handles a native creation-policy refusal.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -28,19 +31,12 @@ impl<'de> Deserialize<'de> for PolicyEnforcementMode {
     }
 }
 
-fn present_pass_through_mode<'de, D>(
-    deserializer: D,
-) -> Result<Option<PolicyEnforcementMode>, D::Error>
+fn present_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
 {
-    let mode = PolicyEnforcementMode::deserialize(deserializer)?;
-    if mode != PolicyEnforcementMode::PassThrough {
-        return Err(serde::de::Error::custom(
-            "processContainer.policyEnforcement.mode must be pass-through",
-        ));
-    }
-    Ok(Some(mode))
+    T::deserialize(deserializer).map(Some)
 }
 
 /// Optional settings retain presence until the backend applies execution defaults.
@@ -51,15 +47,24 @@ pub struct PolicyEnforcementOptions {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        deserialize_with = "present_pass_through_mode"
+        deserialize_with = "present_option"
     )]
     pub mode: Option<PolicyEnforcementMode>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_option"
+    )]
+    pub max_attempts: Option<u8>,
 }
 
 impl PolicyEnforcementOptions {
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.mode == Some(PolicyEnforcementMode::Mutate) {
-            return Err("processContainer.policyEnforcement.mode must be pass-through");
+        if self
+            .max_attempts
+            .is_some_and(|count| !(1..=MAX_POLICY_ATTEMPTS).contains(&count))
+        {
+            return Err("processContainer.policyEnforcement.maxAttempts must be between 1 and 64");
         }
         Ok(())
     }
@@ -233,29 +238,34 @@ mod policy_enforcement_tests {
     use super::*;
 
     #[test]
-    fn optional_settings_preserve_presence_and_reject_mutation_inputs() {
+    fn optional_settings_preserve_presence_and_enforce_attempt_bounds() {
         let omitted: PolicyEnforcementOptions = serde_json::from_str("{}").unwrap();
         assert_eq!(omitted.mode, None);
+        assert_eq!(omitted.max_attempts, None);
         assert!(omitted.validate().is_ok());
         for invalid in [
             r#"{"mode":null}"#,
             r#"{"maxAttempts":null}"#,
-            r#"{"mode":"mutate"}"#,
-            r#"{"maxAttempts":1}"#,
-            r#"{"mode":"pass-through","maxAttempts":64}"#,
             r#"{"mode":{"mutate":null}}"#,
         ] {
             assert!(serde_json::from_str::<PolicyEnforcementOptions>(invalid).is_err());
         }
-        let explicit: PolicyEnforcementOptions =
-            serde_json::from_str(r#"{"mode":"pass-through"}"#).unwrap();
-        assert_eq!(explicit.mode, Some(PolicyEnforcementMode::PassThrough));
-        assert!(explicit.validate().is_ok());
-        assert!(PolicyEnforcementOptions {
-            mode: Some(PolicyEnforcementMode::Mutate),
+        for count in [1, 8, 64] {
+            assert!(PolicyEnforcementOptions {
+                max_attempts: Some(count),
+                ..Default::default()
+            }
+            .validate()
+            .is_ok());
         }
-        .validate()
-        .is_err());
+        for count in [0, 65, 255] {
+            assert!(PolicyEnforcementOptions {
+                max_attempts: Some(count),
+                ..Default::default()
+            }
+            .validate()
+            .is_err());
+        }
     }
 
     #[test]
@@ -390,11 +400,8 @@ mod policy_enforcement_tests {
             serde_json::json!(null),
             serde_json::json!({"mode": null}),
             serde_json::json!({"mode": "guess"}),
-            serde_json::json!({"mode": "mutate"}),
             serde_json::json!({"mode": {"mutate": null}}),
             serde_json::json!({"maxAttempts": 0}),
-            serde_json::json!({"maxAttempts": 1}),
-            serde_json::json!({"mode":"pass-through","maxAttempts":64}),
             serde_json::json!({"maxAttempts": 65}),
             serde_json::json!({"maxAttempts": 1.5}),
             serde_json::json!({"extra": true}),
@@ -404,14 +411,15 @@ mod policy_enforcement_tests {
                     .is_err()
             );
         }
-        for settings in [
-            serde_json::json!({}),
-            serde_json::json!({"mode":"pass-through"}),
-        ] {
-            assert!(
-                load_mxc_request_from_json(&document("0.10.0-alpha", settings), &mut logger)
-                    .is_ok()
-            );
+        for attempts in [1, 8, 64] {
+            assert!(load_mxc_request_from_json(
+                &document(
+                    "0.10.0-alpha",
+                    serde_json::json!({"mode":"mutate", "maxAttempts":attempts})
+                ),
+                &mut logger
+            )
+            .is_ok());
         }
     }
 }

@@ -241,12 +241,20 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::OneShotReques
                                     contract,
                                     settings.mode.map(|mode| match mode {
                                         crate::configs::PolicyEnforcementMode::PassThrough => {
-                                            Ok(contract::PolicyEnforcementMode::PassThrough)
+                                            contract::PolicyEnforcementMode::PassThrough
                                         }
                                         crate::configs::PolicyEnforcementMode::Mutate => {
-                                            Err(error("processContainer.policyEnforcement.mode must be pass-through"))
+                                            contract::PolicyEnforcementMode::Mutate
                                         }
-                                    }).transpose()?
+                                    })
+                                ),
+                                max_attempts: optional!(
+                                    contract,
+                                    settings
+                                        .max_attempts
+                                        .map(contract::PolicyEnforcementAttempts::try_from)
+                                        .transpose()
+                                        .map_err(error)?
                                 ),
                             })
                         })

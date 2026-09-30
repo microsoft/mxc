@@ -11,18 +11,25 @@ public enum PolicyEnforcementMode
 {
     /// <summary>Return the first refusal without editing the request.</summary>
     PassThrough,
+    /// <summary>Apply supported tightening-only repairs before retrying creation.</summary>
+    Mutate,
 }
 
-/// <summary>Explicit development-only CPSE reporting; ignored without CPSE2 support.</summary>
+/// <summary>Development-only CPSE policy handling; ignored without CPSE2 support.</summary>
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed class PolicyEnforcementOptions
 {
-    /// <summary>Omitted mode selects pass-through without experimental authorization.</summary>
+    /// <summary>Defaults to pass-through. Mutation also requires experimental authorization.</summary>
     [JsonPropertyName("mode")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     [JsonConverter(typeof(PolicyEnforcementModeConverter))]
     public PolicyEnforcementMode? Mode { get; set; }
 
+    /// <summary>CPSE2 negotiation attempts, including the first: 1-64, default 8. Initial unavailability can additionally invoke legacy creation once.</summary>
+    [JsonPropertyName("maxAttempts")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    [JsonConverter(typeof(PolicyEnforcementAttemptLimitConverter))]
+    public byte? MaxAttempts { get; set; }
 }
 
 internal sealed class PolicyEnforcementOptionsConverter : JsonConverter<PolicyEnforcementOptions?>
@@ -58,6 +65,7 @@ internal sealed class PolicyEnforcementModeConverter : JsonConverter<PolicyEnfor
         return reader.GetString() switch
         {
             "pass-through" => PolicyEnforcementMode.PassThrough,
+            "mutate" => PolicyEnforcementMode.Mutate,
             _ => throw new JsonException("Unknown policy-enforcement mode."),
         };
     }
@@ -73,8 +81,31 @@ internal sealed class PolicyEnforcementModeConverter : JsonConverter<PolicyEnfor
         writer.WriteStringValue(value switch
         {
             PolicyEnforcementMode.PassThrough => "pass-through",
+            PolicyEnforcementMode.Mutate => "mutate",
             _ => throw new JsonException("Unknown policy-enforcement mode."),
         });
+    }
+}
+
+internal sealed class PolicyEnforcementAttemptLimitConverter : JsonConverter<byte?>
+{
+    public override bool HandleNull => true;
+
+    public override byte? Read(
+        ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType != JsonTokenType.Number || !reader.TryGetByte(out byte value) ||
+            value is < 1 or > 64)
+        {
+            throw new JsonException("Expected a policy-enforcement attempt count between 1 and 64.");
+        }
+        return value;
+    }
+
+    public override void Write(Utf8JsonWriter writer, byte? value, JsonSerializerOptions options)
+    {
+        if (value is null) writer.WriteNullValue();
+        else writer.WriteNumberValue(value.Value);
     }
 }
 

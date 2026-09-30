@@ -112,7 +112,14 @@ fn convert_process_container(value: contract::ProcessContainer) -> wire::Process
                     contract::PolicyEnforcementMode::PassThrough => {
                         crate::policy_enforcement::PolicyEnforcementMode::PassThrough
                     }
+                    contract::PolicyEnforcementMode::Mutate => {
+                        crate::policy_enforcement::PolicyEnforcementMode::Mutate
+                    }
                 }),
+                max_attempts: settings
+                    .max_attempts
+                    .into_option()
+                    .map(contract::PolicyEnforcementAttempts::get),
             }
         }),
         ui: ui.into_option().map(convert_process_container_ui),

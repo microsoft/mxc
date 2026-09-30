@@ -143,8 +143,8 @@ public sealed class BubblewrapContainment : SandboxContainment;
 public sealed class ProcessContainerContainment : SandboxContainment
 {
     /// <summary>
-    /// Explicit native creation-policy reporting (0.10.0-alpha).
-    /// An empty options object selects pass-through without experimental authorization.
+    /// Native creation-policy handling (0.10.0-alpha). Ignored without CPSE2 support.
+    /// Mutation additionally requires experimental execution authorization.
     /// </summary>
     [JsonPropertyName("policyEnforcement")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

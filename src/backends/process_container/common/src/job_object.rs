@@ -86,14 +86,14 @@ mod version_detect {
 /// `JOB_OBJECT_UILIMIT_INJECTION` from `winnt.h`. The `windows` crate
 /// does not emit this constant; if a future release adds it, the local
 /// definition can be removed and the import above extended.
-const JOB_OBJECT_UILIMIT_INJECTION: u32 = 0x0000_0200;
+pub(crate) const JOB_OBJECT_UILIMIT_INJECTION: u32 = 0x0000_0200;
 
 /// Every `JOB_OBJECT_UILIMIT_*` bit this module's encoder
 /// ([`to_job_object_uilimit_mask`]) can emit. Acts as the universe for the
 /// capability intersection performed by [`supported_ui_limit_mask`]. Must
 /// stay in sync with the encoder — the `encoder_known_bit_positions` test
 /// pins the all-restrictions mask to this value.
-const ALL_DEFINED_UI_LIMITS: u32 = 0x0000_03FF;
+pub(crate) const ALL_DEFINED_UI_LIMITS: u32 = 0x0000_03FF;
 
 /// Minimum OS build that supports `JOB_OBJECT_UILIMIT_IME` (0x100).
 /// This flag is empirically accepted on Windows 11 22H2 (22621) and later

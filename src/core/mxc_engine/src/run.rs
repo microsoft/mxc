@@ -95,8 +95,10 @@ pub fn resolve_runner(
     resolve_runner_inner(request, logger).map_err(Error::from)
 }
 
-/// Record `mxc.PolicyHash`: the canonical identity of the effective policy this
-/// run is about to be launched under, plus the config schema version.
+/// Record the request's canonical policy identity and config schema version.
+///
+/// Mutation requests are marked `requested` in the local audit log. Their
+/// effective record and consent-gated ETW emission occur in the selected backend.
 pub fn log_policy_hash(request: &ExecutionRequest, logger: &mut Logger) {
     use wxc_common::audit::{AuditEvent, AuditEventName};
 
@@ -106,14 +108,18 @@ pub fn log_policy_hash(request: &ExecutionRequest, logger: &mut Logger) {
 
     let policy_hash = wxc_common::policy_identity::policy_hash(request);
     let config_schema_version = config_schema_version(request);
-    if wxc_common::telemetry::is_active() {
+    let deferred = request.policy_mutation_requested();
+    if wxc_common::telemetry::is_active() && !deferred {
         let identity = policy_hash_identity(&request.container_id);
         wxc_common::telemetry::log_policy_hash(&identity, &policy_hash, config_schema_version);
     }
-    let record = AuditEvent::new(AuditEventName::PolicyHash)
+    let mut record = AuditEvent::new(AuditEventName::PolicyHash)
         .str("backend", request.containment.wire_name())
         .str("policy_hash", &policy_hash)
         .str("config_schema_version", config_schema_version);
+    if deferred {
+        record = record.str("policy_stage", "requested");
+    }
     logger.log_audit_event(&record);
 }
 

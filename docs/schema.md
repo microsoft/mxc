@@ -22,15 +22,16 @@ production configs and the dev schema when working on experimental features:
 ### ProcessContainer creation-policy handling (development)
 
 Exact `0.10.0-alpha` supports `processContainer.policyEnforcement` with optional
-`mode` (`pass-through`, the only supported value and default within an explicit
-section). No experimental authorization is required. Mutation and `maxAttempts`
-are rejected before creation. When CPSE2 is
+`mode` (`pass-through`, the default within an explicit section, or `mutate`) and
+`maxAttempts` (integer 1-64,
+default 8, including the initial creation). Mutation is tightening-only and
+requires experimental execution authorization when CPSE2 is available. When CPSE2 is
 unavailable the controls are ignored, not treated as unsupported sandbox policy.
 Omitting the section preserves legacy execution and diagnostics; an explicit
 empty section requests pass-through reporting. Published contracts are unchanged.
 See
-[creation-policy results](process-container/guide.md#creation-policy-results)
-for compatibility and result/error reporting.
+[creation-policy results and mutation](process-container/guide.md#creation-policy-results-and-mutation)
+for compatibility, repair limits, and result/error reporting.
 
 ### Schema 0.8 networking
 
