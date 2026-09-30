@@ -134,7 +134,7 @@ function Invoke-StateAware {
 
     $requestObject = $Request.Clone()
     if (-not $requestObject.ContainsKey('version')) {
-        $requestObject['version'] = '0.10.0-alpha'
+        $requestObject['version'] = '1.1.0-alpha'
     }
 
     $phaseKey = $requestObject.Keys | Where-Object { $_ -ceq 'phase' } | Select-Object -First 1

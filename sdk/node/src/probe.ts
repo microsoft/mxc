@@ -74,12 +74,6 @@ export function _setRequestProbeDependencies(
  * it returns malformed probe JSON.
  */
 export function probeSandboxSupport(config?: ContainerConfig): ProbeOutput {
-  if (requestProbePlatform !== 'win32') {
-    throw new Error(
-      'the request-aware probe is available only for Windows ProcessContainer',
-    );
-  }
-
   let requestJson: string | undefined;
   if (config !== undefined) {
     requestJson = JSON.stringify(config);
@@ -90,11 +84,17 @@ export function probeSandboxSupport(config?: ContainerConfig): ProbeOutput {
     }
   }
 
-  const stdout = requestProbeJsonReader(requestJson);
+  if (requestProbePlatform !== 'win32') {
+    throw new Error(
+      'the request-aware probe is available only for Windows ProcessContainer',
+    );
+  }
+
+  const responseJson = requestProbeJsonReader(requestJson);
 
   let value: unknown;
   try {
-    value = JSON.parse(stdout);
+    value = JSON.parse(responseJson);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(`invalid request probe JSON from mxc_ffi: ${detail}`, {

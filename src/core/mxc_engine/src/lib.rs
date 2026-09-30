@@ -58,7 +58,9 @@ pub use policy::{
 };
 pub use probe::{available_backends, to_json_pretty, AvailableBackend, BackendCapability};
 #[cfg(target_os = "windows")]
-pub use request_probe::{probe_execution_request, ProbeFacts, ProbeOutput, UiCapabilitySupport};
+pub use request_probe::{
+    probe, probe_execution_request, ProbeFacts, ProbeOutput, UiCapabilitySupport,
+};
 #[cfg(target_os = "windows")]
 pub fn guarded_capture_available() -> bool {
     guarded_capture::is_available()

@@ -4,7 +4,6 @@
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Microsoft.Mxc.Sdk.Native;
 using NativeSandbox = Microsoft.Mxc.Sdk.Native.MxcSandbox;
@@ -135,7 +134,7 @@ public static class MxcSandbox
     /// </remarks>
     public static ProbeOutput Probe(SandboxRequest? request = null)
     {
-        var configJson = request is null ? null : SerializeProbeConfig(request);
+        var requestJson = request is null ? null : SerializeRequest(request);
         if (!RequestProbeInterop.IsSupportedOnCurrentPlatform)
         {
             throw new MxcException(
@@ -143,7 +142,7 @@ public static class MxcSandbox
                 "the request-aware probe is available only for Windows ProcessContainer");
         }
 
-        return ParseProbeOutput(ProbeNative(configJson));
+        return ParseProbeOutput(ProbeNative(requestJson));
     }
 
     private static unsafe string ProbeNative(string? configJson)
@@ -198,259 +197,6 @@ public static class MxcSandbox
                 }
                 RequestProbeInterop.FreeError(&error);
             }
-        }
-    }
-
-    internal static string SerializeProbeConfig(SandboxRequest request)
-    {
-        ArgumentNullException.ThrowIfNull(request);
-        ValidateNetworkVersion(request.Policy);
-        ValidateProbeVersionedFields(request);
-        var prepared = PrepareRequest(request);
-        if (prepared.Containment is not ProcessContainment
-            and not ProcessContainerContainment)
-        {
-            var containment = prepared.Containment switch
-            {
-                WslcContainment => "wslc",
-                BubblewrapContainment => "bubblewrap",
-                LxcContainment => "lxc",
-                SeatbeltContainment => "seatbelt",
-                IsolationSessionContainment => "isolation_session",
-                _ => prepared.Containment.GetType().Name,
-            };
-            throw new MxcException(
-                ErrorCode.UnsupportedContainment,
-                $"request-aware probe supports only ProcessContainer containment; got {containment}");
-        }
-
-        var policy = JsonSerializer.SerializeToNode(
-            prepared.Policy,
-            PolicyJsonOptions(prepared.Policy.Version))?.AsObject()
-            ?? throw new JsonException("Request policy serialized to null JSON.");
-        var config = new JsonObject
-        {
-            ["version"] = prepared.Policy.Version,
-            ["containment"] = "processcontainer",
-            ["lifecycle"] = new JsonObject
-            {
-                ["destroyOnExit"] = true,
-                ["preservePolicy"] = prepared.Policy.Filesystem?.ClearPolicyOnExit == false,
-            },
-        };
-        if (prepared.ContainerName is not null)
-        {
-            config["containerId"] = prepared.ContainerName;
-        }
-        if (policy["filesystem"] is JsonObject filesystem)
-        {
-            var probeFilesystem = filesystem.DeepClone().AsObject();
-            probeFilesystem.Remove("clearPolicyOnExit");
-            config["filesystem"] = probeFilesystem;
-        }
-        if (SchemaVersions.SupportsV0_9OneShotFields(prepared.Policy.Version)
-            && policy["telemetry"] is JsonNode telemetry)
-        {
-            config["telemetry"] = telemetry.DeepClone();
-        }
-
-        var process = new JsonObject
-        {
-            ["commandLine"] = prepared.Command,
-            ["timeout"] = prepared.Policy.TimeoutMs ?? 0,
-        };
-        if (prepared.WorkingDirectory is not null)
-        {
-            process["cwd"] = prepared.WorkingDirectory;
-        }
-        if (prepared.Environment is not null)
-        {
-            process["env"] = new JsonArray(
-                prepared.Environment
-                    .Select(pair => JsonValue.Create($"{pair.Key}={pair.Value}"))
-                    .ToArray());
-        }
-        if (SchemaVersions.SupportsV0_9OneShotFields(prepared.Policy.Version)
-            && prepared.InheritDefaultEnvironment)
-        {
-            process["inheritDefaultEnv"] = true;
-        }
-        config["process"] = process;
-
-        var processContainer = prepared.Containment as ProcessContainerContainment;
-        var network = policy["network"]?.DeepClone()?.AsObject();
-        var authoredNetwork = prepared.Policy.Network;
-        var hasDirectionalNetworkAuthoring =
-            authoredNetwork?.Egress is not null
-            || authoredNetwork?.Ingress is not null
-            || authoredNetwork?.RuntimeConfig is not null
-            || processContainer?.Network is not null;
-        var usesLegacyNetworkRepresentation =
-            SchemaVersions.UsesLegacyNetworkDefaults(prepared.Policy.Version)
-            && !hasDirectionalNetworkAuthoring;
-        if (network is null && usesLegacyNetworkRepresentation)
-        {
-            config["network"] = new JsonObject { ["defaultPolicy"] = "block" };
-        }
-        else if (network is not null && !usesLegacyNetworkRepresentation)
-        {
-            var probeNetwork = new JsonObject();
-            if (network["egress"] is JsonNode egress)
-            {
-                probeNetwork["egress"] = egress.DeepClone();
-            }
-            if (network["ingress"] is JsonNode ingress)
-            {
-                probeNetwork["ingress"] = ingress.DeepClone();
-            }
-            config["network"] = probeNetwork;
-            if (SchemaVersions.SupportsV0_8OneShotFields(prepared.Policy.Version)
-                && network["runtimeConfig"] is JsonObject runtimeConfig)
-            {
-                config["runtimeConfig"] = runtimeConfig.DeepClone();
-            }
-        }
-        else if (network is not null)
-        {
-            var hasHostRules =
-                network["allowedHosts"] is JsonArray { Count: > 0 }
-                || network["blockedHosts"] is JsonArray { Count: > 0 };
-            var legacyDefaultAllows =
-                network["allowOutbound"]?.GetValue<bool>() == true
-                && network["allowedHosts"] is not JsonArray { Count: > 0 };
-            var probeNetwork = new JsonObject
-            {
-                ["defaultPolicy"] = legacyDefaultAllows ? "allow" : "block",
-                ["enforcementMode"] = hasHostRules ? "both" : "capabilities",
-            };
-            if (network["allowLocalNetwork"] is JsonNode allowLocalNetwork)
-            {
-                probeNetwork["allowLocalNetwork"] = allowLocalNetwork.DeepClone();
-            }
-            if (network["allowedHosts"] is JsonNode allowedHosts)
-            {
-                probeNetwork["allowedHosts"] = allowedHosts.DeepClone();
-            }
-            if (network["blockedHosts"] is JsonNode blockedHosts)
-            {
-                probeNetwork["blockedHosts"] = blockedHosts.DeepClone();
-            }
-            if (network["proxy"] is JsonNode proxy)
-            {
-                probeNetwork["proxy"] = proxy.DeepClone();
-            }
-            config["network"] = probeNetwork;
-        }
-
-        var ui = policy["ui"]?.AsObject();
-        config["ui"] = new JsonObject
-        {
-            ["disable"] = ui?["allowWindows"]?.GetValue<bool>() != true,
-            ["clipboard"] = ui?["clipboard"]?.DeepClone() ?? JsonValue.Create("none"),
-            ["injection"] = ui?["allowInputInjection"]?.GetValue<bool>() == true,
-        };
-
-        var processContainerNode = processContainer is null
-            ? new JsonObject()
-            : JsonSerializer.SerializeToNode(processContainer, JsonOptions)?.AsObject()
-                ?? throw new JsonException("ProcessContainer settings serialized to null JSON.");
-        processContainerNode.Remove("type");
-        if (!SchemaVersions.SupportsV0_8OneShotFields(prepared.Policy.Version))
-        {
-            processContainerNode.Remove("learningMode");
-            processContainerNode.Remove("captureDenials");
-            processContainerNode.Remove("network");
-        }
-        if (!SchemaVersions.SupportsV0_9OneShotFields(prepared.Policy.Version))
-        {
-            processContainerNode.Remove("filesystem");
-        }
-        processContainerNode["leastPrivilege"] = processContainer?.LeastPrivilege ?? false;
-        processContainerNode["capabilities"] ??= new JsonArray();
-        var capabilities = processContainerNode["capabilities"]!.AsArray();
-        var allowsInternet = authoredNetwork?.AllowOutbound == true
-            || authoredNetwork?.Egress?.Default == NetworkAction.Allow
-            || authoredNetwork?.Egress?.Allow?.Count > 0;
-        var allowsLocalNetwork = authoredNetwork?.AllowLocalNetwork == true
-            || authoredNetwork?.Ingress?.Default == NetworkAction.Allow;
-        AddCapabilityIfMissing(capabilities, "internetClient", allowsInternet);
-        AddCapabilityIfMissing(
-            capabilities,
-            "privateNetworkClientServer",
-            allowsLocalNetwork);
-        processContainerNode["ui"] ??= new JsonObject
-        {
-            ["isolation"] = "container",
-            ["desktopSystemControl"] = false,
-            ["systemSettings"] = "none",
-            ["ime"] = false,
-        };
-        config["processContainer"] = processContainerNode;
-
-        return config.ToJsonString();
-    }
-
-    private static void ValidateProbeVersionedFields(SandboxRequest request)
-    {
-        var version = request.Policy.Version;
-        var processContainer = request.Containment as ProcessContainerContainment;
-
-        if (!SchemaVersions.SupportsV0_8OneShotFields(version))
-        {
-            if (processContainer?.LearningMode == true)
-            {
-                throw new MxcException(
-                    ErrorCode.MalformedRequest,
-                    "processContainer.learningMode requires schema version 0.8 or later");
-            }
-            if (processContainer?.CaptureDenials is not null)
-            {
-                throw new MxcException(
-                    ErrorCode.MalformedRequest,
-                    "processContainer.captureDenials requires schema version 0.8 or later");
-            }
-            if (processContainer?.Network is not null)
-            {
-                throw new MxcException(
-                    ErrorCode.MalformedRequest,
-                    "processContainer.network requires schema version 0.8 or later");
-            }
-        }
-
-        if (!SchemaVersions.SupportsV0_9OneShotFields(version))
-        {
-            if (request.Policy.Telemetry is not null)
-            {
-                throw new MxcException(
-                    ErrorCode.MalformedRequest,
-                    "policy.telemetry requires config schema version 0.9.0-alpha or later");
-            }
-            if (request.InheritDefaultEnvironment)
-            {
-                throw new MxcException(
-                    ErrorCode.MalformedRequest,
-                    "process.inheritDefaultEnv requires config schema version 0.9.0-alpha or later");
-            }
-            if (processContainer?.Filesystem is { } filesystem)
-            {
-                throw new MxcException(
-                    ErrorCode.MalformedRequest,
-                    filesystem.EnumeratePaths.Count > 0
-                        ? "processContainer.filesystem.enumeratePaths requires schema version 0.9.0-alpha"
-                        : "processContainer.filesystem requires schema version 0.9.0-alpha");
-            }
-        }
-    }
-
-    private static void AddCapabilityIfMissing(
-        JsonArray capabilities,
-        string capability,
-        bool add)
-    {
-        if (add && !capabilities.Any(value =>
-            string.Equals(value?.GetValue<string>(), capability, StringComparison.OrdinalIgnoreCase)))
-        {
-            capabilities.Add(capability);
         }
     }
 
@@ -713,16 +459,6 @@ public static class MxcSandbox
             return;
         }
 
-        if (policy.Network.Egress is not null
-            || policy.Network.Ingress is not null
-            || policy.Network.RuntimeConfig is not null)
-        {
-            throw new ArgumentException(
-                $"network.{field} cannot be combined with directional network authoring. "
-                    + "Use Network.Egress/Ingress and Network.RuntimeConfig exclusively.",
-                nameof(policy));
-        }
-
         if (!SchemaVersions.IsSupported(policy.Version))
         {
             throw new ArgumentException(
@@ -732,7 +468,7 @@ public static class MxcSandbox
                 nameof(policy));
         }
 
-        if (policy.Version is "0.9.0-alpha" or "0.10.0-alpha")
+        if (!SchemaVersions.UsesLegacyNetworkDefaults(policy.Version))
         {
             throw new ArgumentException(
                 $"Schema {policy.Version} no longer supports authored network.{field}, including null. Legacy network authoring "

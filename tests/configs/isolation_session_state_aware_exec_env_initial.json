@@ -6,6 +6,7 @@
     "process": {
         "commandLine": "echo %MY_SA_ENV%",
         "env": ["MY_SA_ENV=initial-value"],
+        "inheritDefaultEnv": true,
         "timeout": 30000
     }
 }

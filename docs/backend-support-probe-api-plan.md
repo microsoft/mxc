@@ -7,21 +7,11 @@ Licensed under the MIT License.
 
 > **Status:** Design Proposal
 
-## Request-aware Windows projection
-
-The implemented Windows ProcessContainer request probe is separate from broad
-host discovery. `wxc-exec --probe`, Node.js `probeSandboxSupport(config?)`, and
-.NET `MxcSandbox.Probe(request?)` delegate to the shared engine probe. The SDK
-surfaces use a structured `mxc_ffi` ABI and preserve exact parse, containment,
-and native errors. Node loads the library only for the synchronous call and
-frees native output or error allocations before unloading it. The .NET static
-projection is version-aware and does not expand `ISandboxRunner`.
-
 ## 1. Purpose
 
 Provide a read-only Rust API that reports which containment backends the
 current host can actually run. Callers can read at startup
-to choose a backend without attempting an execution.
+to choose a backend without attempting an execution. 
 
 
 

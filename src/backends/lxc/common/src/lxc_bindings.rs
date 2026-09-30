@@ -155,6 +155,85 @@ fn confine_network_capabilities(command: &mut std::process::Command) {
     }
 }
 
+/// A `/etc/hosts` helper emits one `mxc:` diagnostic line, so this is far above
+/// any legitimate output.
+#[cfg(target_os = "linux")]
+const MAX_CAPTURED_BYTES: u64 = 8 * 1024;
+
+#[cfg(target_os = "linux")]
+fn read_to_end_on_thread(
+    reader: Option<wxc_common::interruptible_reader::InterruptibleReader>,
+) -> Option<std::thread::JoinHandle<String>> {
+    reader.map(|reader| {
+        std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let mut capped = std::io::Read::take(reader, MAX_CAPTURED_BYTES);
+            let _ = std::io::Read::read_to_end(&mut capped, &mut buffer);
+
+            // Drained past the cap so the child sees its pipe emptied and exits
+            // on its own rather than blocking on a full one.
+            let mut reader = capped.into_inner();
+            let _ = std::io::copy(&mut reader, &mut std::io::sink());
+
+            String::from_utf8_lossy(&buffer).into_owned()
+        })
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn joined_capture(handle: Option<std::thread::JoinHandle<String>>) -> String {
+    handle
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default()
+}
+
+/// A reaped child's pipes are closed, so a reader still running past this grace
+/// is waiting on a descendant that inherited one.
+#[cfg(target_os = "linux")]
+const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Cancelling a read abandons whatever the pipe still held, so a child whose
+/// output has not been read yet would lose it to a prompt cancel.
+#[cfg(target_os = "linux")]
+fn wait_for_drain(
+    stdout: &Option<std::thread::JoinHandle<String>>,
+    stderr: &Option<std::thread::JoinHandle<String>>,
+) {
+    let drained = |handle: &Option<std::thread::JoinHandle<String>>| {
+        handle.as_ref().is_none_or(|handle| handle.is_finished())
+    };
+    let deadline = std::time::Instant::now() + DRAIN_GRACE;
+
+    while !(drained(stdout) && drained(stderr)) {
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+/// Unblock the signals `lxc-exec` holds for its sigwait watchdog, so the child
+/// does not inherit a mask that makes it ignore Ctrl-C and termination.
+#[cfg(target_os = "linux")]
+fn unblock_fatal_signals(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+
+    // SAFETY: `pre_exec` runs between fork and exec, where only
+    // async-signal-safe work is permitted. `pthread_sigmask`, which nix's
+    // `thread_unblock` wraps, is async-signal-safe, and this closure allocates
+    // nothing and captures nothing.
+    unsafe {
+        command.pre_exec(|| {
+            let mut mask = nix::sys::signal::SigSet::empty();
+            mask.add(nix::sys::signal::Signal::SIGHUP);
+            mask.add(nix::sys::signal::Signal::SIGTERM);
+            mask.add(nix::sys::signal::Signal::SIGINT);
+            mask.thread_unblock().map_err(std::io::Error::from)?;
+            Ok(())
+        });
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartNetwork {
     FromContainerConfig,
@@ -441,6 +520,103 @@ impl LxcContainer {
         _firewall: ContainerFirewall,
     ) -> Result<(i32, String, String), String> {
         Err("LxcContainer::attach_run is only supported on Linux".to_string())
+    }
+
+    /// Run a command in the container and return its output, with no pty and no
+    /// path from that output to this process's own stdio.
+    #[cfg(target_os = "linux")]
+    pub fn attach_capture(
+        &self,
+        command: &str,
+        working_directory: &str,
+        env: &[String],
+        force_clear_env: bool,
+        timeout: Option<std::time::Duration>,
+        firewall: ContainerFirewall,
+    ) -> Result<(i32, String, String), String> {
+        use std::process::Stdio;
+        use wxc_common::interruptible_reader::wrap_pipe;
+        use wxc_common::sandbox_process::{wait_with_timeout, StreamCloser, WaitError};
+
+        let mut cmd = self.lxc_command("lxc-attach");
+        cmd.args(build_attach_args_with_env_control(
+            env,
+            working_directory,
+            command,
+            force_clear_env,
+        ));
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        unblock_fatal_signals(&mut cmd);
+
+        if firewall == ContainerFirewall::Installed {
+            confine_network_capabilities(&mut cmd);
+        }
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed to run lxc-attach: {}", e))?;
+
+        let wrapped = wrap_pipe(child.stdout.take())
+            .and_then(|out| wrap_pipe(child.stderr.take()).map(|err| (out, err)));
+        let ((stdout, stdout_canceller), (stderr, stderr_canceller)) = match wrapped {
+            Ok(pipes) => pipes,
+
+            // Without this the helper keeps running, and can still rewrite
+            // `/etc/hosts` after this call has reported failure.
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("Failed to wrap an lxc-attach pipe: {}", e));
+            }
+        };
+        let stdout = read_to_end_on_thread(stdout);
+        let stderr = read_to_end_on_thread(stderr);
+
+        let outcome = wait_with_timeout(&mut child, timeout);
+        if outcome.is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+        } else {
+            wait_for_drain(&stdout, &stderr);
+        }
+
+        // A descendant holding either pipe open would park the joins below
+        // indefinitely.
+        for canceller in [stdout_canceller, stderr_canceller].into_iter().flatten() {
+            canceller.close();
+        }
+        let captured_out = joined_capture(stdout);
+        let captured_err = joined_capture(stderr);
+
+        let status = match outcome {
+            Ok(status) => status,
+            Err(WaitError::Timeout) => {
+                let ms = timeout.map(|d| d.as_millis()).unwrap_or(0);
+                return Err(format!("lxc-attach timed out after {}ms", ms));
+            }
+            Err(WaitError::Io(e)) => {
+                return Err(format!("Failed to wait for lxc-attach: {}", e));
+            }
+        };
+
+        Ok((status.code().unwrap_or(-1), captured_out, captured_err))
+    }
+
+    /// Stub for the workspace-wide clippy lane that runs on Windows.
+    #[cfg(not(target_os = "linux"))]
+    pub fn attach_capture(
+        &self,
+        _command: &str,
+        _working_directory: &str,
+        _env: &[String],
+        _force_clear_env: bool,
+        _timeout: Option<std::time::Duration>,
+        _firewall: ContainerFirewall,
+    ) -> Result<(i32, String, String), String> {
+        Err("LxcContainer::attach_capture is only supported on Linux".to_string())
     }
 
     /// Stop the container by killing it, not by asking it to exit.
@@ -1109,8 +1285,8 @@ mod tests {
         );
     }
 
-    // The conditional in `attach_run` exists because of this: the drop is a
-    // privileged operation, so applying it to every run costs an unprivileged
+    // The attach paths drop this capability only when chains are installed: the
+    // drop is privileged, so applying it to every run costs an unprivileged
     // caller the whole execution.
     #[cfg(target_os = "linux")]
     #[test]

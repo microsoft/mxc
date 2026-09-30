@@ -329,7 +329,13 @@ impl LxcScriptRunner {
         ))
     }
 
-    fn run_internal(&self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
+    /// Everything that must succeed before a workload can launch; a failure
+    /// releases whatever it had already acquired.
+    fn prepare(
+        &self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+    ) -> Result<PreparedSandbox, ScriptResponse> {
         let normalized;
         let request = match wxc_common::filesystem_object::normalize_object_conflicts(
             &request.policy,
@@ -343,17 +349,17 @@ impl LxcScriptRunner {
                 &normalized
             }
             Ok(None) => request,
-            Err(msg) => return ScriptResponse::error(&msg),
+            Err(msg) => return Err(ScriptResponse::error(&msg)),
         };
         if let Err(msg) = wxc_common::filesystem_access::check_delegation(&request.policy) {
-            return ScriptResponse::error(&msg);
+            return Err(ScriptResponse::error(&msg));
         }
 
         if self.config.distribution.is_empty() || self.config.release.is_empty() {
-            return ScriptResponse::error(
+            return Err(ScriptResponse::error(
                 "LXC distribution and release are required \
                  (e.g., \"distribution\": \"alpine\", \"release\": \"3.23\")",
-            );
+            ));
         }
 
         let container_name = self.resolve_container_name();
@@ -369,7 +375,7 @@ impl LxcScriptRunner {
             .map(|address| address.to_url())
         {
             if wxc_common::proxy_env::proxy_url_has_credentials(&url) {
-                return ScriptResponse::error(&format!(
+                return Err(ScriptResponse::error(&format!(
                     "LXC: network.proxy.url must not carry credentials ('{}'). LXC passes the \
                      proxy URL to lxc-attach as a --set-var command-line argument, and process \
                      arguments are world-readable through /proc/<pid>/cmdline, so the password \
@@ -377,7 +383,7 @@ impl LxcScriptRunner {
                      that does not require inline credentials, or supply them to the proxy \
                      itself rather than through the URL.",
                     wxc_common::proxy_env::redact_proxy_url(&url)
-                ));
+                )));
             }
         }
 
@@ -387,7 +393,7 @@ impl LxcScriptRunner {
             &request.policy,
             uses_directional_keys(&request.policy),
         ) {
-            return ScriptResponse::error(&msg);
+            return Err(ScriptResponse::error(&msg));
         }
 
         if self.destroy_on_exit {
@@ -416,7 +422,10 @@ impl LxcScriptRunner {
         if !container.is_defined() {
             let _ = writeln!(logger, "Creating LXC container...");
             if let Err(e) = container.create(&self.config.distribution, &self.config.release) {
-                return ScriptResponse::error(&format!("Failed to create container: {}", e));
+                return Err(ScriptResponse::error(&format!(
+                    "Failed to create container: {}",
+                    e
+                )));
             }
             let _ = writeln!(logger, "Container created successfully.");
             container_created = true;
@@ -430,7 +439,10 @@ impl LxcScriptRunner {
             if self.destroy_on_exit || container_created {
                 let _ = container.destroy();
             }
-            return ScriptResponse::error(&format!("Failed to configure filesystem: {}", e));
+            return Err(ScriptResponse::error(&format!(
+                "Failed to configure filesystem: {}",
+                e
+            )));
         }
 
         // LXC reads the network section only at start.  A container an earlier
@@ -444,11 +456,11 @@ impl LxcScriptRunner {
                 if self.destroy_on_exit || container_created {
                     let _ = container.destroy();
                 }
-                return ScriptResponse::error(&format!(
+                return Err(ScriptResponse::error(&format!(
                     "Failed to stop a container left running by an earlier run: {}. \
                      Its network policy is the earlier run's, so the script was not run.",
                     e
-                ));
+                )));
             }
         }
 
@@ -469,7 +481,10 @@ impl LxcScriptRunner {
             if self.destroy_on_exit || container_created {
                 let _ = container.destroy();
             }
-            return ScriptResponse::error(&format!("Failed to start container: {}", e));
+            return Err(ScriptResponse::error(&format!(
+                "Failed to start container: {}",
+                e
+            )));
         }
         let _ = writeln!(logger, "Container started successfully.");
 
@@ -490,13 +505,13 @@ impl LxcScriptRunner {
                     ContainerRelease::Stop => container.stop(),
                 },
             ) {
-                return response;
+                return Err(response);
             }
         }
 
         // The init PID names the container's network namespace.
         let netns_pid = container.init_pid();
-        let hook_point = match self.enforce_netns_discovery(
+        let hook_point = self.enforce_netns_discovery(
             netns_pid,
             plan.installs_firewall(),
             container_created,
@@ -505,10 +520,7 @@ impl LxcScriptRunner {
                 ContainerRelease::Destroy => container.destroy(),
                 ContainerRelease::Stop => container.stop(),
             },
-        ) {
-            Ok(hook_point) => hook_point,
-            Err(response) => return response,
-        };
+        )?;
 
         if let Some(pid) = netns_pid {
             let _ = writeln!(logger, "Container init PID: {}", pid);
@@ -535,11 +547,11 @@ impl LxcScriptRunner {
             )
         };
 
-        let (mut fw_manager, mut ingress_manager) = match setup {
+        let (fw_manager, ingress_manager) = match setup {
             Ok(managers) => managers,
             Err(e) => {
                 self.release_after_failure(&container, container_created, logger);
-                return ScriptResponse::error(&e);
+                return Err(ScriptResponse::error(&e));
             }
         };
 
@@ -561,7 +573,7 @@ impl LxcScriptRunner {
                 pin.hostname(),
                 pin.ip()
             );
-            let pin_outcome = container.attach_run(
+            let pin_outcome = container.attach_capture(
                 &command,
                 "/",
                 &[],
@@ -572,21 +584,23 @@ impl LxcScriptRunner {
             let pin_error = match pin_outcome {
                 Ok((0, _, _)) => None,
 
-                Ok((code, _, _)) => Some(Self::hosts_command_failure("writing", code)),
+                Ok((code, _, stderr)) => {
+                    Some(Self::hosts_command_failure("writing", code, &stderr))
+                }
                 Err(e) => Some(e.to_string()),
             };
             if let Some(reason) = pin_error {
                 self.release_after_failure(&container, container_created, logger);
-                return ScriptResponse::error(&format!(
+                return Err(ScriptResponse::error(&format!(
                     "Failed to pin the network proxy host inside the container: {}. \
                      The proxy would be unreachable, so the script was not run.",
                     reason
-                ));
+                )));
             }
             pinned = true;
         } else if !container_created {
             let clear_stale_pin_command = Self::build_hosts_unpin_command();
-            let stale_pin_error = match container.attach_run(
+            let stale_pin_error = match container.attach_capture(
                 &clear_stale_pin_command,
                 "/",
                 &[],
@@ -595,18 +609,20 @@ impl LxcScriptRunner {
                 firewall,
             ) {
                 Ok((0, _, _)) => None,
-                Ok((code, _, _)) => Some(Self::hosts_command_failure("clearing", code)),
+                Ok((code, _, stderr)) => {
+                    Some(Self::hosts_command_failure("clearing", code, &stderr))
+                }
                 Err(e) => Some(e.to_string()),
             };
 
             if let Some(reason) = stale_pin_error {
                 self.release_after_failure(&container, container_created, logger);
-                return ScriptResponse::error(&format!(
+                return Err(ScriptResponse::error(&format!(
                     "Failed to clear a stale network proxy pin from the container's \
                      /etc/hosts: {}. The script was not run, because it could have resolved \
                      the pinned hostname to an address this policy did not authorize.",
                     reason
-                ));
+                )));
             }
         }
 
@@ -616,19 +632,40 @@ impl LxcScriptRunner {
         } else {
             Some(Duration::from_millis(u64::from(request.script_timeout)))
         };
-        let _ = writeln!(logger, "Executing script inside container...");
         let mut exec_env = resolved_env(request);
         wxc_common::proxy_env::apply_proxy_env(&mut exec_env, &request.policy.network_proxy);
 
-        // An empty env makes `lxc-attach` inherit the host process
-        // environment, proxy variables and credentials included.
-        let result = container.attach_run(
-            &request.script_code,
-            start_directory(request).unwrap_or_default().as_str(),
-            &exec_env,
-            true,
-            timeout,
+        Ok(PreparedSandbox {
+            fw_manager,
+            ingress_manager,
+            container,
             firewall,
+            pinned,
+            released: false,
+            script_code: request.script_code.clone(),
+            start_directory: start_directory(request).unwrap_or_default(),
+            exec_env,
+            timeout,
+        })
+    }
+
+    fn run_internal(&self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
+        let mut prepared = match self.prepare(request, logger) {
+            Ok(prepared) => prepared,
+            Err(response) => return response,
+        };
+
+        let _ = writeln!(logger, "Executing script inside container...");
+
+        // The `true` forces `--clear-env`, without which an empty env list lets
+        // `lxc-attach` inherit the host environment and its proxy credentials.
+        let result = prepared.container.attach_run(
+            &prepared.script_code,
+            &prepared.start_directory,
+            &prepared.exec_env,
+            true,
+            prepared.timeout,
+            prepared.firewall,
         );
 
         let response = match result {
@@ -642,45 +679,7 @@ impl LxcScriptRunner {
             Err(e) => ScriptResponse::error(&format!("Execution failed: {}", e)),
         };
 
-        if pinned && self.cleanup_policy {
-            let clear_run_pin_command = Self::build_hosts_unpin_command();
-            let unpin_error = match container.attach_run(
-                &clear_run_pin_command,
-                "/",
-                &[],
-                true,
-                Some(HOSTS_COMMAND_TIMEOUT),
-                firewall,
-            ) {
-                Ok((0, _, _)) => None,
-                Ok((code, _, _)) => Some(Self::hosts_command_failure("clearing", code)),
-                Err(e) => Some(e.to_string()),
-            };
-
-            if let Some(reason) = unpin_error {
-                let _ = writeln!(
-                    logger,
-                    "Warning: failed to clear the proxy host pin: {}",
-                    reason
-                );
-            }
-        }
-
-        if fw_manager.rules_applied() && self.cleanup_policy {
-            let _ = fw_manager.remove_firewall_rules(logger);
-        }
-        if let Some(mgr) = &mut ingress_manager {
-            if mgr.rules_applied() && self.cleanup_policy {
-                let _ = mgr.remove_firewall_rules(logger);
-            }
-        }
-
-        if self.destroy_on_exit {
-            let _ = writeln!(logger, "Destroying container...");
-            if let Err(e) = container.destroy() {
-                let _ = writeln!(logger, "Warning: failed to destroy container: {}", e);
-            }
-        }
+        prepared.tear_down(self.cleanup_policy, self.destroy_on_exit, logger);
 
         response
     }
@@ -730,8 +729,83 @@ impl LxcScriptRunner {
         )
     }
 
-    fn hosts_command_failure(verb: &str, exit_code: i32) -> String {
-        format!("{} /etc/hosts exited with {}", verb, exit_code)
+    fn hosts_command_failure(verb: &str, exit_code: i32, stderr: &str) -> String {
+        let detail = stderr.trim();
+        if detail.is_empty() {
+            return format!("{} /etc/hosts exited with {}", verb, exit_code);
+        }
+        format!("{} /etc/hosts exited with {}: {}", verb, exit_code, detail)
+    }
+}
+
+/// A started container with its network policy in place, ready to launch a
+/// workload, plus everything whose teardown outlives that launch.
+struct PreparedSandbox {
+    fw_manager: NetworkIptablesManager,
+    ingress_manager: Option<IngressManager>,
+    container: LxcContainer,
+    firewall: ContainerFirewall,
+    pinned: bool,
+    released: bool,
+    script_code: String,
+    start_directory: String,
+    exec_env: Vec<String>,
+    timeout: Option<Duration>,
+}
+
+impl PreparedSandbox {
+    /// Run the completion-path release — pin, then rules, then container —
+    /// repeating only the steps an earlier call failed to complete.
+    fn tear_down(&mut self, cleanup_policy: bool, destroy_on_exit: bool, logger: &mut Logger) {
+        if self.pinned && cleanup_policy {
+            let clear_run_pin_command = LxcScriptRunner::build_hosts_unpin_command();
+            let unpin_error = match self.container.attach_capture(
+                &clear_run_pin_command,
+                "/",
+                &[],
+                true,
+                Some(HOSTS_COMMAND_TIMEOUT),
+                self.firewall,
+            ) {
+                Ok((0, _, _)) => None,
+                Ok((code, _, stderr)) => Some(LxcScriptRunner::hosts_command_failure(
+                    "clearing", code, &stderr,
+                )),
+                Err(e) => Some(e.to_string()),
+            };
+
+            match unpin_error {
+                Some(reason) => {
+                    let _ = writeln!(
+                        logger,
+                        "Warning: failed to clear the proxy host pin: {}",
+                        reason
+                    );
+                }
+                None => self.pinned = false,
+            }
+        }
+
+        // These chains are addressed by the container's init PID, so they have
+        // to come out before the container does.
+        if self.fw_manager.rules_applied() && cleanup_policy {
+            let _ = self.fw_manager.remove_firewall_rules(logger);
+        }
+        if let Some(mgr) = &mut self.ingress_manager {
+            if mgr.rules_applied() && cleanup_policy {
+                let _ = mgr.remove_firewall_rules(logger);
+            }
+        }
+
+        if destroy_on_exit && !self.released {
+            let _ = writeln!(logger, "Destroying container...");
+            match self.container.destroy() {
+                Ok(()) => self.released = true,
+                Err(e) => {
+                    let _ = writeln!(logger, "Warning: failed to destroy container: {}", e);
+                }
+            }
+        }
     }
 }
 
@@ -894,6 +968,180 @@ mod tests {
         );
     }
 
+    /// No other validation layer refuses an unnamed image, so `prepare` must.
+    #[test]
+    fn prepare_refuses_an_unnamed_image_before_touching_lxc() {
+        let runner = LxcScriptRunner::new(
+            &LxcConfig::default(),
+            "prepare-image-test",
+            &LifecycleConfig::default(),
+        );
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let refusal = runner
+            .prepare(&ExecutionRequest::default(), &mut logger)
+            .err()
+            .expect("an empty distribution and release cannot name an image to create");
+
+        assert!(
+            refusal.error_message.contains("distribution and release"),
+            "the refusal must name the missing fields; got: {:?}",
+            refusal.error_message
+        );
+        assert!(
+            !logger.get_buffer().contains("Creating LXC container"),
+            "the refusal must land before any container work"
+        );
+    }
+
+    /// A password in the URL would reach `lxc-attach` as an argument, and
+    /// process arguments are world-readable through `/proc/<pid>/cmdline`.
+    #[test]
+    fn prepare_refuses_a_proxy_url_carrying_credentials() {
+        let runner = LxcScriptRunner::new(
+            &LxcConfig {
+                distribution: "alpine".to_string(),
+                release: "3.23".to_string(),
+            },
+            "prepare-proxy-test",
+            &LifecycleConfig::default(),
+        );
+        let request = request_with_policy(ContainerPolicy {
+            network_proxy: ProxyConfig {
+                address: Some(ProxyAddress::from_url(
+                    "http://user:hunter2@proxy.example.com:3128",
+                    "proxy.example.com".to_string(),
+                    3128,
+                )),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let refusal = runner
+            .prepare(&request, &mut logger)
+            .err()
+            .expect("a proxy URL carrying a password must not become an lxc-attach argument");
+
+        assert!(
+            refusal.error_message.contains("must not carry credentials"),
+            "the refusal must name the cause; got: {:?}",
+            refusal.error_message
+        );
+        assert!(
+            !refusal.error_message.contains("hunter2"),
+            "the refusal must not repeat the secret it is refusing; got: {:?}",
+            refusal.error_message
+        );
+    }
+
+    #[test]
+    fn tear_down_removes_the_rules_before_it_releases_the_container() {
+        let _fake = crate::network_iptables::test_firewall::install();
+        let mut prepared = prepared_with_applied_rules("tear-down-order");
+        let mut logger = Logger::new(Mode::Buffer);
+
+        prepared.tear_down(true, true, &mut logger);
+
+        let log = logger.get_buffer();
+        let removed = log
+            .find("Removing iptables")
+            .unwrap_or_else(|| panic!("the applied chain must be removed; log: {log:?}"));
+        let released = log
+            .find("Destroying container")
+            .unwrap_or_else(|| panic!("destroyOnExit must release the container; log: {log:?}"));
+        assert!(
+            removed < released,
+            "rules must come out of the namespace before the container that owns \
+             it is released; log: {log:?}"
+        );
+    }
+
+    /// A step that succeeded must not run twice, and one that failed must be
+    /// retried — that retry is what lets a later teardown finish a release this
+    /// one could not.
+    #[test]
+    fn tear_down_repeats_only_the_steps_that_failed() {
+        let _fake = crate::network_iptables::test_firewall::install();
+        let mut prepared = prepared_with_applied_rules("tear-down-idempotent");
+        prepared.pinned = true;
+
+        let mut first = Logger::new(Mode::Buffer);
+        prepared.tear_down(true, true, &mut first);
+        let mut second = Logger::new(Mode::Buffer);
+        prepared.tear_down(true, true, &mut second);
+
+        assert!(
+            first.get_buffer().contains("Removing iptables"),
+            "the first pass must remove the applied chain; log: {:?}",
+            first.get_buffer()
+        );
+        assert!(
+            !second.get_buffer().contains("Removing iptables"),
+            "the chain came out on the first pass, so the second must leave it \
+             alone; log: {:?}",
+            second.get_buffer()
+        );
+
+        // The fixture names a container that was never created, so the unpin and
+        // the destroy both fail here and both must be attempted again.
+        assert!(
+            first.get_buffer().contains("proxy host pin")
+                && second.get_buffer().contains("proxy host pin"),
+            "an unpin that failed must be retried; logs: {:?} / {:?}",
+            first.get_buffer(),
+            second.get_buffer()
+        );
+        assert!(
+            second.get_buffer().contains("Destroying container"),
+            "a destroy that failed must be retried; log: {:?}",
+            second.get_buffer()
+        );
+    }
+
+    /// A sandbox whose egress chain is installed, for the teardown tests. The
+    /// container name is unique per process so the release cannot reach a real
+    /// container on a host that has LXC installed.
+    fn prepared_with_applied_rules(tag: &str) -> PreparedSandbox {
+        let name = format!("mxc-{}-{}-{}", tag, std::process::id(), uuid_simple());
+        let runner =
+            LxcScriptRunner::new(&LxcConfig::default(), &name, &LifecycleConfig::default());
+        let policy = ContainerPolicy {
+            network_enforcement_mode: NetworkEnforcementMode::Firewall,
+            allowed_hosts: vec!["192.0.2.10".to_string()],
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let (fw_manager, ingress_manager) = runner
+            .set_up_network_rules_for_v07(
+                &name,
+                EgressHookPoint::Unhooked,
+                None,
+                &policy,
+                &mut logger,
+            )
+            .expect("the fake firewall accepts every command");
+        assert!(
+            fw_manager.rules_applied(),
+            "the fixture must have rules for teardown to remove"
+        );
+
+        PreparedSandbox {
+            fw_manager,
+            ingress_manager,
+            container: LxcContainer::new(&name, Some("/var/lib/lxc")),
+            firewall: ContainerFirewall::Absent,
+            pinned: false,
+            released: false,
+            script_code: "true".to_string(),
+            start_directory: String::new(),
+            exec_env: Vec::new(),
+            timeout: None,
+        }
+    }
+
     #[test]
     fn a_07_network_section_left_on_capabilities_is_refused() {
         let policy = ContainerPolicy {
@@ -907,7 +1155,6 @@ mod tests {
 
         assert_eq!(refusal.error_message, LXC_CAPABILITIES_MODE_UNSUPPORTED);
     }
-
     #[test]
     fn a_07_network_section_naming_the_firewall_is_accepted() {
         let policy = ContainerPolicy {
@@ -1231,7 +1478,7 @@ mod tests {
     #[test]
     fn a_failed_hosts_command_reports_a_reason_it_can_actually_supply() {
         for verb in ["writing", "clearing"] {
-            let reason = LxcScriptRunner::hosts_command_failure(verb, 1);
+            let reason = LxcScriptRunner::hosts_command_failure(verb, 1, "");
 
             assert!(
                 reason.contains('1'),
@@ -1249,10 +1496,35 @@ mod tests {
         }
     }
 
+    /// A symlinked `/etc/hosts` and an unreadable one differ only in what the
+    /// helper says on stderr.
+    #[test]
+    fn a_failed_hosts_command_carries_the_helpers_own_diagnosis() {
+        let reason = LxcScriptRunner::hosts_command_failure(
+            "writing",
+            4,
+            "mxc: refusing to rewrite /etc/hosts: it is a symbolic link\n",
+        );
+
+        assert!(
+            reason.contains("it is a symbolic link"),
+            "the reason must carry what the helper reported; got: {reason:?}"
+        );
+        assert!(
+            reason.contains('4'),
+            "the reason must still name the exit code; got: {reason:?}"
+        );
+        assert_eq!(
+            reason.trim_end(),
+            reason,
+            "the helper's trailing newline must not survive into the reason; got: {reason:?}"
+        );
+    }
+
     #[test]
     fn a_failed_hosts_command_distinguishes_the_step_that_failed() {
-        let pinning = LxcScriptRunner::hosts_command_failure("writing", 2);
-        let clearing = LxcScriptRunner::hosts_command_failure("clearing", 2);
+        let pinning = LxcScriptRunner::hosts_command_failure("writing", 2, "");
+        let clearing = LxcScriptRunner::hosts_command_failure("clearing", 2, "");
 
         assert_ne!(
             pinning, clearing,

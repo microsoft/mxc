@@ -84,7 +84,7 @@ public class MxcSandboxTests
     }
 
     [Fact]
-    public void Probe_UsesNativeConfigAndFreesNativeResults()
+    public void Probe_UsesCanonicalRequestJsonAndFreesNativeResults()
     {
         using var native = new FakeRequestProbeInterop
         {
@@ -95,22 +95,27 @@ public class MxcSandboxTests
 
         try
         {
-            var output = MxcSandbox.Probe(new SandboxRequest(
+            var request = new SandboxRequest(
                 new SandboxPolicy { Version = "0.9.0-alpha" },
-                "cmd /c exit 0"));
+                "cmd /c exit 0");
+            var output = MxcSandbox.Probe(request);
 
             Assert.Equal(IsolationTier.AppContainerDacl, output.Tier);
             Assert.True(output.Probes.BaseContainerApiPresent);
+            Assert.Equal(MxcSandbox.SerializeRequest(request), native.RequestJson);
             using var document = JsonDocument.Parse(native.RequestJson!);
             Assert.Equal(
-                "processcontainer",
-                document.RootElement.GetProperty("containment").GetString());
+                "process",
+                document.RootElement
+                    .GetProperty("containment")
+                    .GetProperty("type")
+                    .GetString());
             Assert.Equal(
                 "cmd /c exit 0",
-                document.RootElement.GetProperty("process").GetProperty("commandLine").GetString());
+                document.RootElement.GetProperty("command").GetString());
             Assert.Equal(
                 "0.9.0-alpha",
-                document.RootElement.GetProperty("version").GetString());
+                document.RootElement.GetProperty("policy").GetProperty("version").GetString());
             AssertNoExplicitNulls(document.RootElement);
             Assert.True(native.OutputFreed);
             Assert.True(native.ErrorFreed);
@@ -144,515 +149,6 @@ public class MxcSandboxTests
         {
             MxcSandbox.RequestProbeInterop = previous;
         }
-    }
-
-    [Theory]
-    [InlineData("0.6.0-alpha", false, false, false)]
-    [InlineData("0.8.0-alpha", false, true, false)]
-    [InlineData("0.9.0-alpha", true, true, true)]
-    [InlineData("0.10.0-alpha", true, true, true)]
-    public void ProbeConfig_OmitsNullsAndGatesVersionedFields(
-        string version,
-        bool supportsV09Fields,
-        bool supportsV08ProcessContainerFields,
-        bool supportsProcessContainerFilesystem)
-    {
-        var request = new SandboxRequest(
-            new SandboxPolicy
-            {
-                Version = version,
-                Telemetry = supportsV09Fields
-                    ? new TelemetrySettings { Enabled = true }
-                    : null,
-            },
-            "cmd /c exit 0")
-        {
-            Environment = new() { ["GREETING"] = "hello" },
-            InheritDefaultEnvironment = supportsV09Fields,
-            Containment = new ProcessContainerContainment
-            {
-                LearningMode = supportsV08ProcessContainerFields,
-                CaptureDenials = supportsV08ProcessContainerFields
-                    ? new CaptureDenialsPolicy()
-                    : null,
-                Filesystem = supportsProcessContainerFilesystem
-                    ? new ProcessContainerFilesystemPolicy()
-                    : null,
-                Network = supportsV08ProcessContainerFields
-                    ? new ProcessContainerNetworkPolicy
-                    {
-                        AllowedProxyPeer = "Contoso.Proxy_123",
-                    }
-                    : null,
-            },
-        };
-
-        using var document = JsonDocument.Parse(MxcSandbox.SerializeProbeConfig(request));
-        var root = document.RootElement;
-        var process = root.GetProperty("process");
-        var processContainer = root.GetProperty("processContainer");
-
-        AssertNoExplicitNulls(root);
-        Assert.False(root.TryGetProperty("containerId", out _));
-        Assert.False(root.TryGetProperty("filesystem", out _));
-        Assert.False(process.TryGetProperty("cwd", out _));
-        Assert.Equal(supportsV09Fields, process.TryGetProperty("inheritDefaultEnv", out _));
-        if (supportsV09Fields)
-        {
-            Assert.True(process.GetProperty("inheritDefaultEnv").GetBoolean());
-        }
-        Assert.Equal(supportsV09Fields, root.TryGetProperty("telemetry", out _));
-        Assert.Equal(
-            supportsV08ProcessContainerFields,
-            processContainer.TryGetProperty("learningMode", out _));
-        Assert.Equal(
-            supportsV08ProcessContainerFields,
-            processContainer.TryGetProperty("captureDenials", out _));
-        Assert.Equal(
-            supportsV08ProcessContainerFields,
-            processContainer.TryGetProperty("network", out _));
-        Assert.Equal(
-            supportsProcessContainerFilesystem,
-            processContainer.TryGetProperty("filesystem", out _));
-    }
-
-    [Theory]
-    [InlineData("captureDenials")]
-    [InlineData("enumeratePaths")]
-    [InlineData("inheritDefaultEnv")]
-    [InlineData("learningMode")]
-    [InlineData("processContainerNetwork")]
-    [InlineData("telemetry")]
-    public void Probe_RejectsVersionIncompatibleAuthoredFieldsBeforeExecution(string field)
-    {
-        var version = field == "captureDenials"
-            || field == "learningMode"
-            || field == "processContainerNetwork"
-            ? "0.7.0-alpha"
-            : "0.8.0-alpha";
-        var policy = new SandboxPolicy { Version = version };
-        var processContainer = new ProcessContainerContainment();
-        var request = new SandboxRequest(policy, "cmd /c exit 0")
-        {
-            Containment = processContainer,
-        };
-
-        switch (field)
-        {
-            case "captureDenials":
-                processContainer.CaptureDenials = new CaptureDenialsPolicy();
-                break;
-            case "enumeratePaths":
-                processContainer.Filesystem = new ProcessContainerFilesystemPolicy
-                {
-                    EnumeratePaths = { @"C:\tools" },
-                };
-                break;
-            case "inheritDefaultEnv":
-                request.InheritDefaultEnvironment = true;
-                break;
-            case "learningMode":
-                processContainer.LearningMode = true;
-                break;
-            case "processContainerNetwork":
-                processContainer.Network = new ProcessContainerNetworkPolicy
-                {
-                    AllowedProxyPeer = "Contoso.Proxy_123",
-                };
-                break;
-            case "telemetry":
-                policy.Telemetry = new TelemetrySettings { Enabled = true };
-                break;
-        }
-
-        var error = Assert.Throws<MxcException>(
-            () => MxcSandbox.Probe(request));
-
-        Assert.Equal(ErrorCode.MalformedRequest, error.Code);
-        Assert.Contains(field switch
-        {
-            "processContainerNetwork" => "processContainer.network",
-            _ => field,
-        }, error.Message);
-    }
-
-    [Theory]
-    [InlineData("0.6.0-alpha")]
-    [InlineData("0.7.0-alpha")]
-    public void ProbeConfig_RejectsEmptyProcessContainerNetworkBeforeV08(string version)
-    {
-        var request = new SandboxRequest(
-            new SandboxPolicy { Version = version },
-            "cmd /c exit 0")
-        {
-            Containment = new ProcessContainerContainment
-            {
-                Network = new ProcessContainerNetworkPolicy(),
-            },
-        };
-
-        var error = Assert.Throws<MxcException>(
-            () => MxcSandbox.SerializeProbeConfig(request));
-
-        Assert.Equal(ErrorCode.MalformedRequest, error.Code);
-        Assert.Contains("processContainer.network", error.Message);
-    }
-
-    [Theory]
-    [InlineData("0.6.0-alpha")]
-    [InlineData("0.7.0-alpha")]
-    [InlineData("0.8.0-alpha")]
-    public void ProbeConfig_RejectsEmptyProcessContainerFilesystemBeforeV09(string version)
-    {
-        var request = new SandboxRequest(
-            new SandboxPolicy { Version = version },
-            "cmd /c exit 0")
-        {
-            Containment = new ProcessContainerContainment
-            {
-                Filesystem = new ProcessContainerFilesystemPolicy(),
-            },
-        };
-
-        var error = Assert.Throws<MxcException>(
-            () => MxcSandbox.SerializeProbeConfig(request));
-
-        Assert.Equal(ErrorCode.MalformedRequest, error.Code);
-        Assert.Contains("processContainer.filesystem", error.Message);
-    }
-
-    [Theory]
-    [InlineData("0.8.0-alpha")]
-    [InlineData("0.9.0-alpha")]
-    [InlineData("0.10.0-alpha")]
-    public void ProbeConfig_PreservesEmptyProcessContainerNetworkWhenSupported(string version)
-    {
-        var request = new SandboxRequest(
-            new SandboxPolicy { Version = version },
-            "cmd /c exit 0")
-        {
-            Containment = new ProcessContainerContainment
-            {
-                Network = new ProcessContainerNetworkPolicy(),
-            },
-        };
-
-        using var document = JsonDocument.Parse(MxcSandbox.SerializeProbeConfig(request));
-        var network = document.RootElement
-            .GetProperty("processContainer")
-            .GetProperty("network");
-
-        Assert.Empty(network.EnumerateObject());
-    }
-
-    [Theory]
-    [InlineData("0.9.0-alpha")]
-    [InlineData("0.10.0-alpha")]
-    public void ProbeConfig_PreservesEmptyProcessContainerFilesystemWhenSupported(string version)
-    {
-        var request = new SandboxRequest(
-            new SandboxPolicy { Version = version },
-            "cmd /c exit 0")
-        {
-            Containment = new ProcessContainerContainment
-            {
-                Filesystem = new ProcessContainerFilesystemPolicy(),
-            },
-        };
-
-        using var document = JsonDocument.Parse(MxcSandbox.SerializeProbeConfig(request));
-        var filesystem = document.RootElement
-            .GetProperty("processContainer")
-            .GetProperty("filesystem");
-
-        Assert.Empty(filesystem.GetProperty("enumeratePaths").EnumerateArray());
-    }
-
-    [Theory]
-    [InlineData("egress")]
-    [InlineData("ingress")]
-    [InlineData("runtimeConfig")]
-    public void Probe_RejectsMixedLegacyAndDirectionalNetworkAuthoring(string directionalField)
-    {
-        var network = new NetworkPolicy { AllowOutbound = true };
-        switch (directionalField)
-        {
-            case "egress":
-                network.Egress = new NetworkEgressPolicy();
-                break;
-            case "ingress":
-                network.Ingress = new NetworkIngressPolicy();
-                break;
-            case "runtimeConfig":
-                network.RuntimeConfig = new NetworkRuntimeConfig();
-                break;
-        }
-        var request = new SandboxRequest(
-            new SandboxPolicy
-            {
-                Version = "0.8.0-alpha",
-                Network = network,
-            },
-            "cmd /c exit 0");
-
-        var error = Assert.Throws<ArgumentException>(
-            () => MxcSandbox.Probe(request));
-
-        Assert.Contains("cannot be combined", error.Message);
-    }
-
-    [Theory]
-    [InlineData("0.9.0-alpha")]
-    [InlineData("0.10.0-alpha")]
-    public void ProbeConfig_ExactVersionsPreserveEmptyDirectionalNetwork(string version)
-    {
-        var request = new SandboxRequest(
-            new SandboxPolicy
-            {
-                Version = version,
-                Network = new NetworkPolicy(),
-            },
-            "cmd /c exit 0");
-
-        using var document = JsonDocument.Parse(MxcSandbox.SerializeProbeConfig(request));
-        var root = document.RootElement;
-        var network = root.GetProperty("network");
-
-        Assert.Equal(JsonValueKind.Object, network.ValueKind);
-        Assert.Empty(network.EnumerateObject());
-        Assert.False(root.TryGetProperty("runtimeConfig", out _));
-        Assert.False(network.TryGetProperty("defaultPolicy", out _));
-        Assert.False(network.TryGetProperty("enforcementMode", out _));
-    }
-
-    [Theory]
-    [InlineData("0.8.0-alpha")]
-    [InlineData("0.9.0-alpha")]
-    [InlineData("0.10.0-alpha")]
-    public void ProbeConfig_ExactVersionsHoistRuntimeOnlyNetworkWithoutLegacyFields(
-        string version)
-    {
-        var request = new SandboxRequest(
-            new SandboxPolicy
-            {
-                Version = version,
-                Network = new NetworkPolicy
-                {
-                    RuntimeConfig = new NetworkRuntimeConfig(),
-                },
-            },
-            "cmd /c exit 0");
-
-        using var document = JsonDocument.Parse(MxcSandbox.SerializeProbeConfig(request));
-        var root = document.RootElement;
-        var network = root.GetProperty("network");
-
-        Assert.Empty(network.EnumerateObject());
-        Assert.Empty(root.GetProperty("runtimeConfig").EnumerateObject());
-        Assert.False(network.TryGetProperty("defaultPolicy", out _));
-        Assert.False(network.TryGetProperty("enforcementMode", out _));
-    }
-
-    [Fact]
-    public void ProbeConfig_V08ProcessContainerNetworkDoesNotSynthesizeLegacyNetwork()
-    {
-        var request = new SandboxRequest(
-            new SandboxPolicy { Version = "0.8.0-alpha" },
-            "cmd /c exit 0")
-        {
-            Containment = new ProcessContainerContainment
-            {
-                Network = new ProcessContainerNetworkPolicy(),
-            },
-        };
-
-        using var document = JsonDocument.Parse(MxcSandbox.SerializeProbeConfig(request));
-        var root = document.RootElement;
-        var processContainerNetwork = root
-            .GetProperty("processContainer")
-            .GetProperty("network");
-
-        Assert.False(root.TryGetProperty("network", out _));
-        Assert.False(root.TryGetProperty("runtimeConfig", out _));
-        Assert.Empty(processContainerNetwork.EnumerateObject());
-    }
-
-    [Fact]
-    public void ProbeConfig_PreV09EmptyNetworkKeepsLegacyDefaults()
-    {
-        var request = new SandboxRequest(
-            new SandboxPolicy
-            {
-                Version = "0.8.0-alpha",
-                Network = new NetworkPolicy(),
-            },
-            "cmd /c exit 0");
-
-        using var document = JsonDocument.Parse(MxcSandbox.SerializeProbeConfig(request));
-        var network = document.RootElement.GetProperty("network");
-
-        Assert.Equal("block", network.GetProperty("defaultPolicy").GetString());
-        Assert.Equal("capabilities", network.GetProperty("enforcementMode").GetString());
-        Assert.False(network.TryGetProperty("egress", out _));
-        Assert.False(network.TryGetProperty("ingress", out _));
-    }
-
-    [Theory]
-    [InlineData(false, false, "block", "capabilities")]
-    [InlineData(true, false, "allow", "capabilities")]
-    [InlineData(false, true, "block", "both")]
-    [InlineData(true, true, "block", "both")]
-    public void ProbeConfig_LegacyNetworkDefaultsHonorAllowlist(
-        bool allowOutbound,
-        bool hasAllowlist,
-        string expectedDefaultPolicy,
-        string expectedEnforcementMode)
-    {
-        var request = new SandboxRequest(
-            new SandboxPolicy
-            {
-                Version = "0.8.0-alpha",
-                Network = new NetworkPolicy
-                {
-                    AllowOutbound = allowOutbound,
-                    AllowedHosts = hasAllowlist ? ["example.com"] : [],
-                },
-            },
-            "cmd /c exit 0");
-
-        using var document = JsonDocument.Parse(MxcSandbox.SerializeProbeConfig(request));
-        var network = document.RootElement.GetProperty("network");
-
-        Assert.Equal(expectedDefaultPolicy, network.GetProperty("defaultPolicy").GetString());
-        Assert.Equal(expectedEnforcementMode, network.GetProperty("enforcementMode").GetString());
-        if (hasAllowlist)
-        {
-            Assert.Equal("example.com", network.GetProperty("allowedHosts")[0].GetString());
-        }
-    }
-
-    [Theory]
-    [InlineData("0.8.0-alpha", true, false)]
-    [InlineData("0.8.0-alpha", false, true)]
-    [InlineData("0.9.0-alpha", true, false)]
-    [InlineData("0.9.0-alpha", false, true)]
-    [InlineData("0.10.0-alpha", true, false)]
-    [InlineData("0.10.0-alpha", false, true)]
-    public void ProbeConfig_MapsClearPolicyOnExitWithoutEmittingFilesystemField(
-        string version,
-        bool clearPolicyOnExit,
-        bool preservePolicy)
-    {
-        var request = new SandboxRequest(
-            new SandboxPolicy
-            {
-                Version = version,
-                Filesystem = new FilesystemPolicy
-                {
-                    ClearPolicyOnExit = clearPolicyOnExit,
-                },
-            },
-            "cmd /c exit 0");
-
-        using var document = JsonDocument.Parse(MxcSandbox.SerializeProbeConfig(request));
-        var root = document.RootElement;
-        var filesystem = root.GetProperty("filesystem");
-
-        Assert.False(filesystem.TryGetProperty("clearPolicyOnExit", out _));
-        Assert.Equal(
-            preservePolicy,
-            root.GetProperty("lifecycle").GetProperty("preservePolicy").GetBoolean());
-
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
-        var output = MxcSandbox.Probe(request);
-
-        Assert.NotNull(output.Probes);
-    }
-
-    [Theory]
-    [InlineData("0.6.0-alpha")]
-    [InlineData("0.7.0-alpha")]
-    [InlineData("0.8.0-alpha")]
-    [InlineData("0.9.0-alpha")]
-    public void ProbeConfig_NativeProbeAcceptsPublishedVersions(string version)
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
-        var output = MxcSandbox.Probe(new SandboxRequest(
-            new SandboxPolicy { Version = version },
-            "cmd /c exit 0"));
-
-        Assert.NotNull(output.Probes);
-    }
-
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void ProbeConfig_NativeProbeAcceptsV08DirectionalIndicators(
-        bool processContainerNetworkOnly)
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
-        var request = new SandboxRequest(
-            new SandboxPolicy
-            {
-                Version = "0.8.0-alpha",
-                Network = processContainerNetworkOnly
-                    ? null
-                    : new NetworkPolicy
-                    {
-                        RuntimeConfig = new NetworkRuntimeConfig(),
-                    },
-            },
-            "cmd /c exit 0");
-        if (processContainerNetworkOnly)
-        {
-            request.Containment = new ProcessContainerContainment
-            {
-                Network = new ProcessContainerNetworkPolicy(),
-            };
-        }
-
-        var output = MxcSandbox.Probe(request);
-
-        Assert.NotNull(output.Probes);
-    }
-
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void ProbeConfig_NativeProbeAcceptsV09NetworkBoundaries(bool runtimeOnly)
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
-        var network = new NetworkPolicy();
-        if (runtimeOnly)
-        {
-            network.RuntimeConfig = new NetworkRuntimeConfig();
-        }
-
-        var output = MxcSandbox.Probe(new SandboxRequest(
-            new SandboxPolicy
-            {
-                Version = "0.9.0-alpha",
-                Network = network,
-            },
-            "cmd /c exit 0"));
-
-        Assert.NotNull(output.Probes);
     }
 
     [Theory]
@@ -835,6 +331,13 @@ public class MxcSandboxTests
     [Fact]
     public void Probe_RejectsNonProcessContainerRequest()
     {
+        using var native = new FakeRequestProbeInterop
+        {
+            Status = (int)ErrorCode.UnsupportedContainment,
+            ErrorMessage = "request-aware probe supports ProcessContainer only; got wslc",
+        };
+        var previous = MxcSandbox.RequestProbeInterop;
+        MxcSandbox.RequestProbeInterop = native;
         var request = new SandboxRequest(
             new SandboxPolicy { Version = "0.9.0-alpha" },
             "echo hi")
@@ -842,9 +345,25 @@ public class MxcSandboxTests
             Containment = new WslcContainment(),
         };
 
-        var error = Assert.Throws<MxcException>(() => MxcSandbox.Probe(request));
-        Assert.Equal(ErrorCode.UnsupportedContainment, error.Code);
-        Assert.Contains("got wslc", error.Message);
+        try
+        {
+            var error = Assert.Throws<MxcException>(() => MxcSandbox.Probe(request));
+            Assert.Equal(ErrorCode.UnsupportedContainment, error.Code);
+            Assert.Contains("got wslc", error.Message);
+            Assert.Equal(1, native.ProbeCalls);
+            using var document = JsonDocument.Parse(native.RequestJson!);
+            Assert.Equal(
+                "wslc",
+                document.RootElement
+                    .GetProperty("containment")
+                    .GetProperty("type")
+                    .GetString());
+            Assert.True(native.ErrorFreed);
+        }
+        finally
+        {
+            MxcSandbox.RequestProbeInterop = previous;
+        }
     }
 
     [Theory]

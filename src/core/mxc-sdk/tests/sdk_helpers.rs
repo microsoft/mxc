@@ -8,6 +8,8 @@ use mxc_sdk::{
     available_tools_policy, build_request, platform_support, temporary_files_policy,
     user_profile_policy, SandboxPolicy,
 };
+#[cfg(target_os = "windows")]
+use mxc_sdk::{build_request_with_containment, Containment, ErrorCode, WslcSection};
 
 #[cfg(target_os = "macos")]
 use mxc_sdk::{spawn_sandbox, WaitOutcome};
@@ -354,49 +356,6 @@ fn platform_support_windows_includes_processcontainer() {
     }
 }
 
-#[cfg(target_os = "windows")]
-#[test]
-fn ffi_request_probe_bridge_parses_exact_json_and_defaults() {
-    let request = r#"{
-        "version": "0.9.0-alpha",
-        "containment": "processcontainer",
-        "process": { "commandLine": "cmd /c exit 0" }
-    }"#;
-
-    for config_json in [None, Some(request)] {
-        let json = mxc_sdk::probe_request_json_for_ffi(config_json)
-            .expect("default and exact ProcessContainer requests should probe");
-        let output: serde_json::Value =
-            serde_json::from_str(&json).expect("probe output should be JSON");
-        assert!(output.get("warnings").is_some());
-        assert!(output.get("probes").is_some());
-    }
-}
-
-#[cfg(target_os = "windows")]
-#[test]
-fn ffi_request_probe_bridge_rejects_invalid_request_kinds() {
-    for request in [
-        "not json",
-        r#"{
-            "version": "0.9.0-alpha",
-            "phase": "exec",
-            "sandboxId": "wslc:test",
-            "process": { "commandLine": "echo hi" }
-        }"#,
-        r#"{
-            "version": "0.9.0-alpha",
-            "containment": "wslc",
-            "process": { "commandLine": "echo hi" }
-        }"#,
-    ] {
-        assert!(
-            mxc_sdk::probe_request_json_for_ffi(Some(request)).is_err(),
-            "request should be rejected: {request}"
-        );
-    }
-}
-
 /// Without the `wslc` feature the backend cannot run at all, so it must never be
 /// advertised — regardless of whether the host happens to have the runtime.
 #[cfg(all(target_os = "windows", not(feature = "wslc")))]
@@ -408,6 +367,48 @@ fn platform_support_windows_omits_wslc_when_not_compiled_in() {
         "wslc must not be advertised without the feature: {:?}",
         support.available_methods
     );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn request_probe_accepts_default_and_typed_requests() {
+    let policy = SandboxPolicy {
+        version: "0.9.0-alpha".to_string(),
+        filesystem: None,
+        network: None,
+        ui: None,
+        timeout_ms: None,
+    };
+    let request = build_request(&policy, "cmd /c exit 0", None)
+        .expect("default ProcessContainer request should build");
+
+    for request in [None, Some(&request)] {
+        let output = mxc_sdk::probe(request).expect("ProcessContainer request should probe");
+        assert!(!output.warnings.iter().any(String::is_empty));
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn request_probe_rejects_non_process_container_requests() {
+    let policy = SandboxPolicy {
+        version: "0.9.0-alpha".to_string(),
+        filesystem: None,
+        network: None,
+        ui: None,
+        timeout_ms: None,
+    };
+    let request = build_request_with_containment(
+        &policy,
+        &Containment::Wslc(WslcSection::default()),
+        "echo hi",
+        None,
+    )
+    .expect("WSLC request should build");
+
+    let error = mxc_sdk::probe(Some(&request))
+        .expect_err("request probe should reject non-ProcessContainer containment");
+    assert_eq!(error.code, ErrorCode::UnsupportedContainment);
 }
 
 #[test]

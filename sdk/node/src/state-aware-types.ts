@@ -38,7 +38,7 @@ export type SandboxId<C extends StateAwareContainmentBackend> =
 export const STATE_AWARE_VERSION = '0.9.0-alpha' as const;
 
 /** Exact state-aware contract used by Windows Sandbox. */
-export const WINDOWS_SANDBOX_STATE_AWARE_VERSION = '0.10.0-alpha' as const;
+export const WINDOWS_SANDBOX_STATE_AWARE_VERSION = '1.1.0-alpha' as const;
 
 /** Exact state-aware contract used by WSLC. */
 export const WSLC_STATE_AWARE_VERSION = '0.9.0-alpha' as const;

@@ -1,0 +1,9 @@
+{
+  "version": "1.0.0",
+  "phase": "provision",
+  "containment": "wslc",
+  "network": {
+    "egress": {"default": "allow"},
+    "ingress": {"default": "allow", "hostLoopback": "allow"}
+  }
+}

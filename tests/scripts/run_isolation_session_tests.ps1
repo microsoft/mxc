@@ -428,6 +428,10 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_lifec
     -ExpectedExit -1 `
     -OutputContains @("lifecycle.destroyOnExit=false")))
 
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_env_rejected.json" `
+    -ExpectedExit -1 `
+    -OutputContains @("process.env without process.inheritDefaultEnv=true is not supported")))
+
 # ---------------- Concurrent one-shot test ----------------
 #
 # Three wxc-exec processes (A, B, C) run a per-agent PowerShell script

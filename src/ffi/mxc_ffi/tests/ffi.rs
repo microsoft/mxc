@@ -15,7 +15,10 @@ use mxc_ffi::{
     mxc_string_free, mxc_version, MxcErrorDetail, MxcRunResult, MxcSandbox,
 };
 #[cfg(target_os = "windows")]
-use mxc_ffi::{mxc_probe_request_json, mxc_probe_request_json_with_error};
+use mxc_ffi::{
+    mxc_probe_request_json, mxc_probe_request_json_with_error,
+    mxc_probe_sandbox_request_json_with_error,
+};
 
 /// An empty, all-null result to hand to `mxc_run_request`.
 fn zeroed_result() -> MxcRunResult {
@@ -184,6 +187,69 @@ fn extern_request_probe_rejects_malformed_and_unsupported_requests() {
         // SAFETY: the request remains a valid NUL-terminated UTF-8 string.
         assert!(unsafe { mxc_probe_request_json(request.as_ptr()) }.is_null());
     }
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn extern_binding_request_probe_uses_the_canonical_interchange() {
+    let request = CString::new(
+        r#"{
+            "policy": { "version": "0.9.0-alpha" },
+            "command": "cmd /c exit 0",
+            "containment": { "type": "processContainer" }
+        }"#,
+    )
+    .unwrap();
+    let mut output = ptr::null_mut();
+    // SAFETY: this all-null representation is valid for MxcErrorDetail.
+    let mut error: MxcErrorDetail = unsafe { std::mem::zeroed() };
+
+    // SAFETY: the request is a valid C string and both out-parameters are writable.
+    let status = unsafe {
+        mxc_probe_sandbox_request_json_with_error(request.as_ptr(), &mut output, &mut error)
+    };
+
+    assert_eq!(status, mxc_ffi::MXC_STATUS_SUCCESS);
+    assert!(!output.is_null());
+    assert!(error.message_utf8.is_null());
+    // SAFETY: both values were initialized by the FFI call.
+    unsafe {
+        mxc_string_free(output);
+        mxc_error_detail_free(&mut error);
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn extern_binding_request_probe_rejects_non_process_container() {
+    let request = CString::new(
+        r#"{
+            "policy": { "version": "0.9.0-alpha" },
+            "command": "echo hi",
+            "containment": {
+                "type": "wslc",
+                "image": "python:3.12"
+            }
+        }"#,
+    )
+    .unwrap();
+    let mut output = ptr::null_mut();
+    // SAFETY: this all-null representation is valid for MxcErrorDetail.
+    let mut error: MxcErrorDetail = unsafe { std::mem::zeroed() };
+
+    // SAFETY: the request is a valid C string and both out-parameters are writable.
+    let status = unsafe {
+        mxc_probe_sandbox_request_json_with_error(request.as_ptr(), &mut output, &mut error)
+    };
+
+    assert_eq!(status, mxc_ffi::MXC_STATUS_UNSUPPORTED_CONTAINMENT);
+    assert!(output.is_null());
+    assert!(!error.message_utf8.is_null());
+    // SAFETY: the detailed probe filled a valid owned C string.
+    let message = unsafe { CStr::from_ptr(error.message_utf8) }.to_string_lossy();
+    assert!(message.contains("got wslc"), "unexpected detail: {message}");
+    // SAFETY: the FFI call initialized this owned error detail.
+    unsafe { mxc_error_detail_free(&mut error) };
 }
 
 #[test]

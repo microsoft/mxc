@@ -58,7 +58,7 @@ import type {
   WslcProvision as WireWslcProvisionPhase,
   WslcProvisionRequest,
 } from '../../src/generated/v0_9_0_alpha/wire.js';
-import type { ExecRequest as V010ExecRequest } from '../../src/generated/v0_10_0_alpha/wire.js';
+import type { ExecRequest as V11ExecRequest } from '../../src/generated/v1_1_0_alpha/wire.js';
 
 import type {
   AssertTrue,
@@ -81,7 +81,7 @@ type _ExactWslcNetwork = AssertTrue<
 type _ExactExecRuntime = AssertTrue<
   Equivalent<
     NonNullable<WslcExecConfig['runtimeConfig']>,
-    NonNullable<V010ExecRequest['runtimeConfig']>
+    NonNullable<V11ExecRequest['runtimeConfig']>
   >
 >;
 type _ExactIsoNetwork = AssertTrue<

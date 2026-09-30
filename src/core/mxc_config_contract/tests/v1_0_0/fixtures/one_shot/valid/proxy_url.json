@@ -1,0 +1,7 @@
+{
+  "version": "1.0.0",
+  "process": {
+    "commandLine": "echo proxy"
+  },
+  "runtimeConfig": {"networkProxy": "http://127.0.0.1:8080"}
+}

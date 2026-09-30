@@ -182,7 +182,7 @@ describe('buildStateAwareEnvelope', () => {
       config: { telemetry: { enabled: true } },
     });
     assert.deepEqual(env.telemetry, { enabled: true });
-    assert.equal(env.version, '0.10.0-alpha');
+    assert.equal(env.version, '1.1.0-alpha');
     assert.equal(env.experimental, undefined);
   });
 
@@ -198,7 +198,7 @@ describe('buildStateAwareEnvelope', () => {
         error instanceof MxcError &&
         error.code === 'malformed_request' &&
         error.message.includes(
-          "State-aware windows_sandbox requests require schema version '0.10.0-alpha'",
+          "State-aware windows_sandbox requests require schema version '1.1.0-alpha'",
         ),
     );
   });
@@ -931,7 +931,7 @@ describe('windows_sandbox state-aware lifecycle', () => {
       backendKey: 'windows_sandbox',
       containment: 'windows_sandbox',
       config: {
-        version: '0.10.0-alpha',
+        version: '1.1.0-alpha',
         filesystem: {
           readwritePaths: ['C:\\workspace'],
           readonlyPaths: ['C:\\inputs'],
