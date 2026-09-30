@@ -1,8 +1,9 @@
 [package]
-name = "mxc_engine"
+name = "mxc-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "MXC execution engine: backend dispatch, host probing, and config building shared by the public SDK and the executor binaries."
 
 [lib]

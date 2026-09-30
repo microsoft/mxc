@@ -1,8 +1,13 @@
 [package]
-name = "hyperlight_common"
+name = "mxc-hyperlight-common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Hyperlight micro-VM backend support for the MXC execution engine."
+
+[lib]
+name = "hyperlight_common"
 
 [dependencies]
 wxc_common = { workspace = true }

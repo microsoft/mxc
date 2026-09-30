@@ -823,11 +823,11 @@ values (plain ETW only).
 ```powershell
 # Test with a dummy group GUID (not the real one) — telemetry-mode metadata
 $env:MXC_TELEMETRY_PROVIDER_GROUP_GUID = '00000000-1111-2222-3333-444444444444'
-cargo build -p mxc_telemetry
+cargo build -p mxc-telemetry
 
 # Test without (public build) — local-only metadata
 Remove-Item Env:\MXC_TELEMETRY_PROVIDER_GROUP_GUID
-cargo build -p mxc_telemetry
+cargo build -p mxc-telemetry
 ```
 
 ### What's public vs. private

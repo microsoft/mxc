@@ -3,12 +3,16 @@
 # see README.md and regenerate.ps1. Provenance (schema hash, pinned flatc
 # version, source build) lives in the schema's .provenance.toml.
 [package]
-name = "process_security_environment_spec"
+name = "mxc-process-security-environment-spec"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 publish = true
 description = "Generated FlatBuffers bindings for ProcessSecurityEnvironment"
+
+[lib]
+name = "process_security_environment_spec"
 
 [dependencies]
 flatbuffers = { workspace = true }

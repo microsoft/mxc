@@ -358,14 +358,14 @@ try {
 
 // --- 4. Committed workspace crate compiles (cross-target validation) --------
 try {
-  execFileSync("cargo", ["check", "-q", "-p", "process_security_environment_spec"], {
+  execFileSync("cargo", ["check", "-q", "-p", "mxc-process-security-environment-spec"], {
     cwd: join(repoRoot, "src"),
     stdio: ["ignore", "ignore", "inherit"],
   });
 } catch (e) {
   fail(
     `committed crate failed to compile via ` +
-      `'cargo check -p process_security_environment_spec': ${e.message}`
+      `'cargo check -p mxc-process-security-environment-spec': ${e.message}`
   );
 }
 

@@ -83,9 +83,9 @@ jobs:
       artifactBaseName: $(artifactPrefix)-$(targetTriple)
       configTomlPath: $(Build.SourcesDirectory)/.cargo/config.toml
 
-    # 1ES Rust virtual tasks read these settings (toolchain feed, registry
-    # auth, target-dir cache) from the job's templateContext. Official-only
-    # because Mxc-Azure-Feed needs System.AccessToken.
+    # 1ES Rust virtual tasks read the toolchain and registry settings from the
+    # job's templateContext. Official-only because Mxc-Azure-Feed needs
+    # System.AccessToken.
     ${{ if eq(parameters.isOfficialBuild, true) }}:
       templateContext:
         rust:
@@ -98,9 +98,6 @@ jobs:
             configFile: $(configTomlPath)
           installOptions:
             configFile: $(configTomlPath)
-          cacheOptions:
-            enabled: true
-            enableTargetCache: true
 
     steps:
       - checkout: self
@@ -156,16 +153,16 @@ jobs:
       # workspace default-members. Tests run on x64 only (arm64 emulation in
       # 1ES windows-11-arm is too slow for the WPR-touching helpers).
       - script: |
-          cargo test --release --target $(triplet) -p plm --manifest-path $(Build.SourcesDirectory)/src/Cargo.toml
+          cargo test --release --target $(triplet) -p mxc-plm --manifest-path $(Build.SourcesDirectory)/src/Cargo.toml
         displayName: Test plm
         condition: and(eq('${{ item.os }}', 'windows'), eq('${{ item.arch }}', 'x64'))
 
       - script: |
           set -euo pipefail
-          cargo test --locked --release --target $(triplet) -p wxc_common --lib
-          cargo test --locked --release --target $(triplet) -p wxc_common --doc
-          cargo test --locked --release --target $(triplet) -p mxc_config_contract --all-features
-          cargo test --locked --release --target $(triplet) -p mxc_engine -p mxc_ffi --lib state_aware
+          cargo test --locked --release --target $(triplet) -p mxc-wxc-common --lib
+          cargo test --locked --release --target $(triplet) -p mxc-wxc-common --doc
+          cargo test --locked --release --target $(triplet) -p mxc-config-contract --all-features
+          cargo test --locked --release --target $(triplet) -p mxc-engine -p mxc_ffi --lib state_aware
           cargo test --locked --release --target $(triplet) -p mxc-sdk --test state_aware
         displayName: Test common contracts and state-aware SDK boundaries
         workingDirectory: $(Build.SourcesDirectory)/src

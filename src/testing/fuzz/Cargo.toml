@@ -22,10 +22,10 @@ microvm = ["dep:nanvix_runner", "wxc_common/microvm"]
 
 [dependencies]
 libfuzzer-sys = "0.4"
-wxc_common = { path = "../../core/wxc_common" }
-nanvix_runner = { path = "../../backends/nanvix/runner", optional = true }
-hyperlight_common = { path = "../../backends/hyperlight/common", optional = true }
-isolation_session_common = { path = "../../backends/isolation_session/common", optional = true }
+wxc_common = { package = "mxc-wxc-common", path = "../../core/wxc_common" }
+nanvix_runner = { package = "mxc-nanvix-runner", path = "../../backends/nanvix/runner", optional = true }
+hyperlight_common = { package = "mxc-hyperlight-common", path = "../../backends/hyperlight/common", optional = true }
+isolation_session_common = { package = "mxc-isolation-session-common", path = "../../backends/isolation_session/common", optional = true }
 
 [[bin]]
 name = "config_parser"

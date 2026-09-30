@@ -1,8 +1,13 @@
 [package]
-name = "windows_sandbox_common"
+name = "mxc-windows-sandbox-common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Shared protocol and state types for the MXC Windows Sandbox backend."
+
+[lib]
+name = "windows_sandbox_common"
 
 [dependencies]
 wxc_common = { workspace = true }

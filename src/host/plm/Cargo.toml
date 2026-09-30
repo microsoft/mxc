@@ -1,7 +1,10 @@
 [package]
-name = "plm"
-version = "0.1.0"
+name = "mxc-plm"
+version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Privileged learning-mode capture helper used by the MXC Windows backend."
 
 [lib]
 name = "plm"

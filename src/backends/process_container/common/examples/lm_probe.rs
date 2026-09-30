@@ -14,7 +14,7 @@
 //! feature-enabled Windows build to confirm the runtime FFI resolves against the real API.
 //!
 //! ```text
-//! cargo run -p process_container_common --example lm_probe
+//! cargo run -p mxc-process-container-common --example lm_probe
 //! ```
 
 fn main() {

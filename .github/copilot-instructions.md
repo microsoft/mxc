@@ -50,8 +50,8 @@ build.bat
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo test -p wxc_common
-cargo test -p wxc_common -- config_parser
+cargo test -p mxc-wxc-common
+cargo test -p mxc-wxc-common -- config_parser
 
 # From sdk/node/
 npm test

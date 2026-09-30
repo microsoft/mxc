@@ -1,9 +1,8 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 #
-# Official-build Rust steps. Toolchain feed, registry auth, and target-dir
-# cache are supplied by the job-level `templateContext.rust` in
-# Rust.Build.Job.yml. Requires System.AccessToken — use
+# Official-build Rust steps. Toolchain feed and registry auth are supplied by
+# the job-level `templateContext.rust`. Requires System.AccessToken — use
 # Rust.Build.Steps.Unofficial.yml for fork/PR builds.
 
 parameters:

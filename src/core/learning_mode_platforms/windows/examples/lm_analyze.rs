@@ -14,10 +14,10 @@
 //!
 //! ```text
 //! # Emit the DeniedResource JSON document to stdout:
-//! cargo run -p learning_mode_windows --example lm_analyze -- <path-to.etl> --exit-code <code>
+//! cargo run -p mxc-learning-mode-windows --example lm_analyze -- <path-to.etl> --exit-code <code>
 //!
 //! # Dump every decoded event (id + property name/value pairs):
-//! cargo run -p learning_mode_windows --example lm_analyze -- <path-to.etl> --raw
+//! cargo run -p mxc-learning-mode-windows --example lm_analyze -- <path-to.etl> --raw
 //! ```
 //!
 //! Exit codes: `0` = decoded; `2` = wrong platform / bad args; `1` = decode

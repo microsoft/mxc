@@ -1,8 +1,13 @@
 [package]
-name = "bwrap_common"
+name = "mxc-bwrap-common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Bubblewrap Linux backend support for MXC sandboxing."
+
+[lib]
+name = "bwrap_common"
 
 [dependencies]
 wxc_common = { workspace = true }

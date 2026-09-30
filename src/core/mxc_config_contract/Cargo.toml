@@ -1,9 +1,13 @@
 [package]
-name = "mxc_config_contract"
+name = "mxc-config-contract"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Represents the policy/configuration contract system containing multiple version contracts"
+
+[lib]
+name = "mxc_config_contract"
 
 [features]
 schema-gen = ["dep:schemars"]

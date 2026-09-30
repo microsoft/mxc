@@ -18,8 +18,8 @@ path = "src/lib.rs"
 microvm = []
 
 [dependencies]
-nanvix_common = { path = "../common" }
+nanvix_common = { package = "mxc-nanvix-common", path = "../common" }
 
 [build-dependencies]
-nanvix_common = { path = "../common" }
+nanvix_common = { package = "mxc-nanvix-common", path = "../common" }
 nanvix_build_common = { path = "../build_common" }

@@ -119,9 +119,9 @@ function Test-Preflight {
             # winhttp-proxy-shim backs the legacy proxy path. Absent, those
             # areas fail as launch errors rather than policy results, so build
             # them here for the same reason CI stages them.
-            & cargo build -p wxc -p plm -p wxc_winhttp_proxy_shim 2>&1 | Out-Host
+            & cargo build -p wxc -p mxc-plm -p wxc_winhttp_proxy_shim 2>&1 | Out-Host
             if ($LASTEXITCODE -ne 0) { throw "cargo build (debug) failed" }
-            & cargo build -p wxc -p plm -p wxc_winhttp_proxy_shim --release 2>&1 | Out-Host
+            & cargo build -p wxc -p mxc-plm -p wxc_winhttp_proxy_shim --release 2>&1 | Out-Host
             if ($LASTEXITCODE -ne 0) { throw "cargo build (release) failed" }
             & cargo build -p wxc_ui_probe 2>&1 | Out-Host
             if ($LASTEXITCODE -ne 0) { throw "cargo build wxc_ui_probe (debug) failed" }
@@ -148,7 +148,7 @@ function Assert-Sidecars {
         foreach ($sidecar in 'plm.exe', 'winhttp-proxy-shim.exe') {
             $path = Join-Path $dir $sidecar
             if (-not (Test-Path $path)) {
-                throw "$sidecar not found beside $exe. Build it with ``cargo build -p plm -p wxc_winhttp_proxy_shim`` (add --release for the release lane) or drop -SkipBuild."
+                throw "$sidecar not found beside $exe. Build it with ``cargo build -p mxc-plm -p wxc_winhttp_proxy_shim`` (add --release for the release lane) or drop -SkipBuild."
             }
         }
     }
@@ -1431,4 +1431,3 @@ function Write-WpcSummary {
         }
     }
 }
-

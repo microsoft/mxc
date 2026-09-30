@@ -144,9 +144,9 @@ PLM is part of the MXC workspace but excluded from `default-members` because it'
 
 ```powershell
 cd C:\src\mxc\src
-cargo build -p plm --target x86_64-pc-windows-msvc
+cargo build -p mxc-plm --target x86_64-pc-windows-msvc
 # or for release:
-cargo build -p plm --target x86_64-pc-windows-msvc --release
+cargo build -p mxc-plm --target x86_64-pc-windows-msvc --release
 ```
 
 The WPR profile is embedded into `plm.exe` itself (see `src/profile_gen.rs`) and is materialized only inside the elevated child's internal temporary scratch area. `build.bat` from the repo root builds `plm.exe` and stages it next to `wxc-exec.exe` for the `--audit` integration.

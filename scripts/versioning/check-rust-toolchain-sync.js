@@ -18,6 +18,8 @@ const repoRoot = join(__dirname, "..", "..");
 const adoTemplates = [
   ".azure-pipelines/templates/Rust.Build.Job.yml",
   ".azure-pipelines/templates/Mac.Build.Job.yml",
+  ".azure-pipelines/templates/Package.Crates.Job.yml",
+  ".azure-pipelines/templates/Publish.CratesIo.Job.yml",
 ];
 
 const read = (relPath) => readFileSync(join(repoRoot, relPath), "utf8");

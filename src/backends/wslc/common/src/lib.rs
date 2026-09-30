@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg(target_os = "windows")]
+
 //! WSLC Common — WSL Container SDK integration for MXC.
 //!
 //! [`wslcsdk_sys`] holds the bindgen-generated FFI declarations for the WSLC

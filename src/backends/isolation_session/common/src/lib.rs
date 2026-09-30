@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg(target_os = "windows")]
+
 //! IsolationSession backend — executes scripts in an isolated Windows
 //! session via the in-proc `Windows.AI.IsolationSession.Preview` `IsoSessionOps`
 //! API. `IsolationSessionRunner` is the only externally-reachable type;
@@ -17,48 +19,31 @@
 //! - `state_aware`: `StatefulSandboxBackend` — per-phase methods called
 //!   across multiple `wxc-exec` invocations by an external orchestrator.
 
-#[cfg(target_os = "windows")]
 pub mod availability;
-#[cfg(target_os = "windows")]
 mod console_mode;
-#[cfg(target_os = "windows")]
 mod console_relay;
-#[cfg(target_os = "windows")]
 mod error;
-#[cfg(target_os = "windows")]
 mod manager;
-#[cfg(target_os = "windows")]
 mod one_shot;
-#[cfg(target_os = "windows")]
 mod owned_thread;
-#[cfg(target_os = "windows")]
 mod pipe_relay;
-#[cfg(target_os = "windows")]
 mod policy;
-#[cfg(target_os = "windows")]
 mod process_options;
-#[cfg(target_os = "windows")]
 mod sandbox;
-#[cfg(target_os = "windows")]
 pub use sandbox::{spawn_one_shot, OneShotSpawnFailure};
-#[cfg(target_os = "windows")]
 mod sandbox_id;
-#[cfg(target_os = "windows")]
 mod state_aware;
 
 /// Stateless marker type. Trait impls live in `one_shot` (`ScriptRunner`)
 /// and `state_aware` (`StatefulSandboxBackend`).
-#[cfg(target_os = "windows")]
 pub struct IsolationSessionRunner;
 
-#[cfg(target_os = "windows")]
 impl IsolationSessionRunner {
     pub fn new() -> Self {
         Self
     }
 }
 
-#[cfg(target_os = "windows")]
 impl Default for IsolationSessionRunner {
     fn default() -> Self {
         Self::new()

@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg(any(target_os = "windows", target_os = "linux"))]
+
 //! `NanVixScriptRunner` -- executes code inside a NanVix micro-VM.
 //!
 //! The initial runtime is CPython 3.12 with a trimmed FAT32 stdlib filesystem.

@@ -1,8 +1,13 @@
 [package]
-name = "wxc_common"
+name = "mxc-wxc-common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Shared execution requests, policy models, parsing, and runtime support for MXC."
+
+[lib]
+name = "wxc_common"
 
 [features]
 microvm = ["dep:nanvix_common", "dep:uuid"]
@@ -20,7 +25,7 @@ base64 = { workspace = true }
 cidr = { workspace = true }
 url = { workspace = true }
 getrandom = { workspace = true }
-nanvix_common = { path = "../../backends/nanvix/common", optional = true }
+nanvix_common = { package = "mxc-nanvix-common", path = "../../backends/nanvix/common", version = "0.9.0", optional = true }
 uuid = { workspace = true, optional = true }
 mxc_config_contract = { workspace = true }
 mxc_telemetry = { workspace = true }

@@ -1,9 +1,13 @@
 [package]
-name = "nanvix_common"
+name = "mxc-nanvix-common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Shared constants and configuration types for NanVix micro-VM binaries"
+
+[lib]
+name = "nanvix_common"
 
 [dependencies]
 serde = { workspace = true }

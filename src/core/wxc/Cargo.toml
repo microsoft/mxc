@@ -25,7 +25,7 @@ nanvix_binaries = { path = "../../backends/nanvix/binaries", optional = true }
 wslc_common = { workspace = true, optional = true }
 # Shared PLM dep: coordination, guarded lifecycle, and restricted WPR control.
 # wxc-exec never bypasses PLM's public singleton.
-plm = { path = "../../host/plm" }
+plm = { package = "mxc-plm", path = "../../host/plm" }
 learning_mode_core.workspace = true
 tempfile.workspace = true
 

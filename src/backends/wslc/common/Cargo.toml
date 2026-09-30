@@ -1,14 +1,19 @@
 [package]
-name = "wslc_common"
+name = "mxc-wslc-common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Windows Subsystem for Linux container backend support for MXC."
+
+[lib]
+name = "wslc_common"
 
 [features]
 default = []
 link-wslcsdk = []
 
-[dependencies]
+[target.'cfg(target_os = "windows")'.dependencies]
 wxc_common = { workspace = true }
 windows = { workspace = true }
 serde = { workspace = true }

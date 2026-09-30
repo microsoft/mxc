@@ -20,7 +20,7 @@
 //! Run on a feature-enabled Windows build (elevated):
 //!
 //! ```text
-//! cargo run -p process_container_common --example lm_capture
+//! cargo run -p mxc-process-container-common --example lm_capture
 //! ```
 //!
 //! Exit codes: `0` = ETL produced; `2` = API unavailable / off-feature build; `1` = a

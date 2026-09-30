@@ -97,6 +97,12 @@ stages:
 
   - template: Mxc.Binary.Packaging.Job.yml
 
+- stage: Package_Crates
+  displayName: 'Package Crates'
+  dependsOn: []
+  jobs:
+  - template: Package.Crates.Job.yml
+
 - stage: Build_DotNet_SDK
   displayName: 'Build .NET SDK'
   dependsOn:

@@ -1,7 +1,13 @@
 [package]
-name = "windows_sandbox_lifecycle"
+name = "mxc-windows-sandbox-lifecycle"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host-side lifecycle management for the MXC Windows Sandbox backend."
+
+[lib]
+name = "windows_sandbox_lifecycle"
 
 [dependencies]
 windows_sandbox_common = { workspace = true }

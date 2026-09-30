@@ -60,37 +60,41 @@ strip = "debuginfo"
 version = "0.9.0"
 edition = "2021"
 license = "MIT"
+repository = "https://github.com/microsoft/mxc"
 
+# Cargo requires explicit versions for publishable path dependencies and cannot
+# inherit these requirements from workspace.package.version. The crate release
+# CI check enforces that they remain synchronized with the workspace version.
 [workspace.dependencies]
 anyhow = "1"
-process_container_common = { path = "backends/process_container/common" }
+process_container_common = { package = "mxc-process-container-common", path = "backends/process_container/common", version = "0.9.0" }
 base64 = "0.22"
-bwrap_common = { path = "backends/bubblewrap/common" }
+bwrap_common = { package = "mxc-bwrap-common", path = "backends/bubblewrap/common", version = "0.9.0" }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 cidr = "0.3.2"
 clap = { version = "4", features = ["derive"] }
 flatbuffers = "25"
 getrandom = "0.2"
-hyperlight_common = { path = "backends/hyperlight/common" }
-isolation_session_bindings = { path = "backends/isolation_session/bindings" }
-isolation_session_common = { path = "backends/isolation_session/common" }
-learning_mode_core = { path = "core/learning_mode_core" }
-learning_mode_windows = { path = "core/learning_mode_platforms/windows" }
+hyperlight_common = { package = "mxc-hyperlight-common", path = "backends/hyperlight/common", version = "0.9.0" }
+isolation_session_bindings = { package = "mxc-isolation-session-bindings", path = "backends/isolation_session/bindings", version = "0.9.0" }
+isolation_session_common = { package = "mxc-isolation-session-common", path = "backends/isolation_session/common", version = "0.9.0" }
+learning_mode_core = { package = "mxc-learning-mode-core", path = "core/learning_mode_core", version = "0.9.0" }
+learning_mode_windows = { package = "mxc-learning-mode-windows", path = "core/learning_mode_platforms/windows", version = "0.9.0" }
 libc = "0.2"
-lxc_common = { path = "backends/lxc/common" }
-mxc_build_common = { path = "core/mxc_build_common" }
-mxc_config_contract = { path = "core/mxc_config_contract" }
-mxc_engine = { path = "core/mxc_engine" }
-mxc_pty = { path = "core/mxc_pty" }
+lxc_common = { package = "mxc-lxc-common", path = "backends/lxc/common", version = "0.9.0" }
+mxc_build_common = { package = "mxc-build-common", path = "core/mxc_build_common", version = "0.9.0" }
+mxc_config_contract = { package = "mxc-config-contract", path = "core/mxc_config_contract", version = "0.9.0" }
+mxc_engine = { package = "mxc-engine", path = "core/mxc_engine", version = "0.9.0" }
+mxc_pty = { package = "mxc-pty", path = "core/mxc_pty", version = "0.9.0" }
 mxc_schema_support = { path = "core/mxc_schema_support" }
-mxc-sdk = { path = "core/mxc-sdk" }
-mxc_telemetry = { path = "mxc_telemetry" }
-nanvix_runner = { path = "backends/nanvix/runner" }
+mxc-sdk = { path = "core/mxc-sdk", version = "0.9.0" }
+mxc_telemetry = { package = "mxc-telemetry", path = "mxc_telemetry", version = "0.9.0" }
+nanvix_runner = { package = "mxc-nanvix-runner", path = "backends/nanvix/runner", version = "0.9.0" }
 nix = { version = "0.29", features = ["fs", "mount", "sched", "signal", "net", "process", "user", "term"] }
-process_security_environment_spec = { path = "core/generated/process_security_environment_specification" }
-plm = { path = "host/plm" }
+process_security_environment_spec = { package = "mxc-process-security-environment-spec", path = "core/generated/process_security_environment_specification", version = "0.9.0" }
+plm = { package = "mxc-plm", path = "host/plm", version = "0.9.0" }
 quick-xml = "0.41"
-seatbelt_common = { path = "backends/seatbelt/common" }
+seatbelt_common = { package = "mxc-seatbelt-common", path = "backends/seatbelt/common", version = "0.9.0" }
 same-file = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
@@ -140,8 +144,8 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell",
 ] }
 windows-core = "0.62"
-windows_sandbox_common = { path = "backends/windows_sandbox/common" }
-windows_sandbox_lifecycle = { path = "backends/windows_sandbox/lifecycle" }
+windows_sandbox_common = { package = "mxc-windows-sandbox-common", path = "backends/windows_sandbox/common", version = "0.9.0" }
+windows_sandbox_lifecycle = { package = "mxc-windows-sandbox-lifecycle", path = "backends/windows_sandbox/lifecycle", version = "0.9.0" }
 winreg = "0.55"
-wslc_common = { path = "backends/wslc/common" }
-wxc_common = { path = "core/wxc_common" }
+wslc_common = { package = "mxc-wslc-common", path = "backends/wslc/common", version = "0.9.0" }
+wxc_common = { package = "mxc-wxc-common", path = "core/wxc_common", version = "0.9.0" }

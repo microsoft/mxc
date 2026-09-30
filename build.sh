@@ -70,7 +70,7 @@ echo "=== Building Rust binaries ($BUILD_TYPE) ==="
 cd "$SRC_DIR"
 
 # Packages to build and lint — kept in one place so build and clippy stay in sync.
-LXC_PACKAGES=(-p lxc -p lxc_common -p wxc_common -p bwrap_common -p unix_test_proxy -p mxc_ffi)
+LXC_PACKAGES=(-p lxc -p mxc-lxc-common -p mxc-wxc-common -p mxc-bwrap-common -p unix_test_proxy -p mxc_ffi)
 
 CARGO_FEATURES=()
 FEATURES_LIST=()

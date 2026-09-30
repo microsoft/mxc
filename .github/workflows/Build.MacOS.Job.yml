@@ -42,7 +42,7 @@ jobs:
       # unix_test_proxy and mxc_ffi ship alongside mxc-exec-mac.
       - name: Build
         run: cargo build --locked --release --target aarch64-apple-darwin
-             -p mxc_darwin -p seatbelt_common -p wxc_common -p wxc_e2e_tests
+             -p mxc_darwin -p mxc-seatbelt-common -p mxc-wxc-common -p wxc_e2e_tests
              -p unix_test_proxy -p mxc_ffi
 
       # wxc_e2e_tests includes the Seatbelt executor characterization tests.
@@ -51,13 +51,13 @@ jobs:
       # no elevation, so they run in this standard macOS job.
       - name: Test
         run: cargo test --locked --release --target aarch64-apple-darwin
-             -p mxc_darwin -p seatbelt_common -p wxc_common -p wxc_e2e_tests
+             -p mxc_darwin -p mxc-seatbelt-common -p mxc-wxc-common -p wxc_e2e_tests
 
       - name: Test state-aware SDK boundaries
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked --release --target aarch64-apple-darwin -p mxc_engine -p mxc_ffi --lib state_aware
+          cargo test --locked --release --target aarch64-apple-darwin -p mxc-engine -p mxc_ffi --lib state_aware
           cargo test --locked --release --target aarch64-apple-darwin -p mxc-sdk --test state_aware
 
       - name: Verify artifact payload

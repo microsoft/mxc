@@ -1,8 +1,13 @@
 [package]
-name = "seatbelt_common"
+name = "mxc-seatbelt-common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Seatbelt macOS backend support for MXC sandboxing."
+
+[lib]
+name = "seatbelt_common"
 
 [dependencies]
 # Provides ExecutionRequest, ContainerPolicy, SeatbeltConfig, Logger, and

@@ -105,9 +105,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked --release --target "${{ matrix.target }}" -p wxc_common --lib
-          cargo test --locked --release --target "${{ matrix.target }}" -p wxc_common --doc
-          cargo test --locked --release --target "${{ matrix.target }}" -p mxc_engine -p mxc_ffi --lib state_aware
+          cargo test --locked --release --target "${{ matrix.target }}" -p mxc-wxc-common --lib
+          cargo test --locked --release --target "${{ matrix.target }}" -p mxc-wxc-common --doc
+          cargo test --locked --release --target "${{ matrix.target }}" -p mxc-engine -p mxc_ffi --lib state_aware
           cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk --test state_aware
 
       # Runs the Bubblewrap executor characterization tests. lxc-exec was built
@@ -126,11 +126,11 @@ jobs:
       # build fails fast rather than rotting silently.
       - name: Build plm (cross-platform stub + lib)
         working-directory: src
-        run: cargo build --locked --release --target ${{ matrix.target }} -p plm
+        run: cargo build --locked --release --target ${{ matrix.target }} -p mxc-plm
 
       - name: Test plm (cross-platform modules)
         working-directory: src
-        run: cargo test --locked --release --target ${{ matrix.target }} -p plm
+        run: cargo test --locked --release --target ${{ matrix.target }} -p mxc-plm
 
       # These are separate workspace members, not dependencies of lxc.
       - name: Build Node runtime dependencies
