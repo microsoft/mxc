@@ -23,8 +23,7 @@ use crate::configs::ProcessContainer;
 use crate::configs::{CaptureDenials, CaptureDenialsMode};
 pub use network::{
     NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkPeerSection,
-    NetworkPortSection, NetworkProtocol, NetworkRuleSection, NetworkSection, ProxySpec,
-    RuntimeConfigSection,
+    NetworkPortSection, NetworkProtocol, NetworkRuleSection, NetworkSection, RuntimeConfigSection,
 };
 #[cfg(test)]
 use wxc_common::logger::{Logger, Mode};
@@ -519,13 +518,10 @@ impl Containment {
 ///
 /// # Network policy
 ///
-/// WSLC derives its networking mode from `allowOutbound` alone (bridged when
-/// true, isolated when false). Per-host rules (`allowedHosts`/`blockedHosts`)
-/// are accepted, but the backend currently enforces them with in-container
-/// `iptables`, which the container lacks `CAP_NET_ADMIN` to install — so such a
-/// policy **fails the run at spawn** rather than silently going unenforced.
-/// Until enforcement moves to a VM-level API, prefer expressing WSLC network
-/// intent with `allowOutbound`.
+/// WSLC accepts the v1 directional network posture. It supports either
+/// all-deny isolation or all-allow bridged networking; filtering rules and
+/// mixed directional defaults fail closed because the backend cannot enforce
+/// them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WslcSection {
     /// Container image reference (e.g. `"alpine:latest"`, `"python:3.12"`).
@@ -575,11 +571,10 @@ impl Default for WslcSection {
 /// instrumentation rather than a sandbox restriction, matching the global
 /// sandbox-policy design. Build the request first, then use
 /// [`SandboxRequest::set_telemetry_opt_in`] to opt that invocation in.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[non_exhaustive]
 pub struct SandboxPolicy {
-    /// Policy/schema version (e.g. `"0.7.0-alpha"`).
-    pub version: String,
     #[serde(default)]
     pub filesystem: Option<FilesystemSection>,
     #[serde(default)]
@@ -781,8 +776,9 @@ impl SandboxRequest {
 /// complete and needs no post-build patching before streaming it via
 /// [`crate::spawn`]. An empty script is rejected.
 ///
-/// Maps the policy into the exact contract selected by `SandboxPolicy.version`,
-/// then adapts that contract through the shared semantic validation path.
+/// Maps the high-level v1 policy, which has no schema-version field, into the
+/// SDK-owned v1 contract, then adapts that contract through the shared
+/// semantic validation path.
 ///
 /// Targets the host's native process containment; use
 /// [`build_request_with_containment`] to select a specific backend.
@@ -803,13 +799,7 @@ pub fn build_request(
 /// ```no_run
 /// use mxc_engine::policy::{build_request_with_containment, Containment, SandboxPolicy, WslcSection};
 ///
-/// let policy = SandboxPolicy {
-///     version: "0.9.0-alpha".to_string(),
-///     filesystem: None,
-///     network: None,
-///     ui: None,
-///     timeout_ms: None,
-/// };
+/// let policy = SandboxPolicy::default();
 /// let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
 /// let request = build_request_with_containment(&policy, &Containment::Wslc(wslc), "python3 -c 'print(1)'", None)?;
 /// # Ok::<(), mxc_engine::Error>(())
@@ -854,79 +844,18 @@ mod tests {
         );
         assert_eq!(execution.script_code, "echo hello");
     }
-    fn host_process_versions() -> &'static [&'static str] {
-        #[cfg(target_os = "macos")]
-        {
-            &[
-                "0.7.0-alpha",
-                "0.8.0-alpha",
-                "0.9.0-alpha",
-                "1.0.0",
-                "1.1.0-alpha",
-            ]
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            &[
-                "0.6.0-alpha",
-                "0.7.0-alpha",
-                "0.8.0-alpha",
-                "0.9.0-alpha",
-                "1.0.0",
-                "1.1.0-alpha",
-            ]
-        }
+
+    #[test]
+    fn sandbox_policy_rejects_removed_version_field() {
+        let error = serde_json::from_str::<SandboxPolicy>(r#"{ "version": "0.7.0-alpha" }"#)
+            .expect_err("the v1 policy must reject legacy version input");
+
+        assert!(error.to_string().contains("unknown field `version`"));
     }
 
     #[test]
-    fn exact_policy_builder_preserves_compatibility_without_source_attribution() {
-        for version in host_process_versions() {
-            let policy = SandboxPolicy {
-                version: (*version).to_string(),
-                filesystem: None,
-                network: None,
-                ui: None,
-                timeout_ms: None,
-            };
-            let request =
-                build_request_with_containment(&policy, &Containment::Process, TEST_COMMAND, None)
-                    .unwrap();
-            assert_eq!(request.inner.source_contract, None);
-            assert_eq!(request.inner.source_contract_version(), "");
-            let expected = if matches!(*version, "0.6.0-alpha" | "0.7.0-alpha") {
-                wxc_common::models::NetworkEnforcementCompatibility::LegacyCompatible
-            } else {
-                wxc_common::models::NetworkEnforcementCompatibility::Strict
-            };
-            assert_eq!(
-                request.inner.network_enforcement_compatibility, expected,
-                "{version}"
-            );
-
-            // A typed SDK request built against an exact pre-0.9 contract keeps
-            // the pre-0.9 environment behavior even though its source
-            // attribution was cleared above.
-            let expected_env = if matches!(*version, "0.6.0-alpha" | "0.7.0-alpha" | "0.8.0-alpha")
-            {
-                wxc_common::models::DefaultEnvCompatibility::LegacyCompatible
-            } else {
-                wxc_common::models::DefaultEnvCompatibility::DefaultBlock
-            };
-            assert_eq!(
-                request.inner.default_env_compatibility, expected_env,
-                "{version}"
-            );
-            assert_eq!(
-                request.inner.supplies_default_env(),
-                expected_env == wxc_common::models::DefaultEnvCompatibility::DefaultBlock,
-                "{version}"
-            );
-        }
-    }
-
-    #[test]
-    fn development_builder_preserves_absent_empty_and_runtime_only_network_presence() {
-        let mut policy = development_policy();
+    fn v1_builder_preserves_absent_empty_and_runtime_only_network_presence() {
+        let mut policy = minimal_policy();
         let absent =
             build_request_with_containment(&policy, &Containment::Process, TEST_COMMAND, None)
                 .unwrap();
@@ -956,62 +885,9 @@ mod tests {
         assert!(!runtime_only.inner.policy.network_mode_specified);
         assert!(runtime_only.inner.policy.runtime_network_proxy_specified);
     }
-    #[cfg(target_os = "macos")]
     #[test]
-    fn exact_v0_6_policy_builder_rejects_seatbelt_host_process() {
+    fn v1_policy_builder_accepts_wslc() {
         let policy = SandboxPolicy {
-            version: "0.6.0-alpha".to_string(),
-            filesystem: None,
-            network: None,
-            ui: None,
-            timeout_ms: None,
-        };
-
-        let error =
-            build_request_with_containment(&policy, &Containment::Process, TEST_COMMAND, None)
-                .unwrap_err();
-        assert_eq!(
-            error.message,
-            "Seatbelt containment requires schema version 0.7.0-alpha or later"
-        );
-    }
-
-    #[test]
-    fn exact_policy_builder_reports_each_containments_minimum_version() {
-        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha"] {
-            let policy = SandboxPolicy {
-                version: version.to_string(),
-                filesystem: None,
-                network: None,
-                ui: None,
-                timeout_ms: None,
-            };
-            for (containment, expected) in [
-                (
-                    Containment::Wslc(WslcSection::default()),
-                    "requires schema version 0.9.0-alpha",
-                ),
-                (
-                    Containment::IsolationSession,
-                    "requires schema version 0.9.0-alpha",
-                ),
-            ] {
-                let error =
-                    build_request_with_containment(&policy, &containment, TEST_COMMAND, None)
-                        .unwrap_err();
-                assert!(
-                    error.message.contains(expected),
-                    "{version}: {}",
-                    error.message
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn exact_v0_9_policy_builder_accepts_wslc() {
-        let policy = SandboxPolicy {
-            version: "0.9.0-alpha".to_string(),
             filesystem: None,
             network: None,
             ui: None,
@@ -1029,9 +905,8 @@ mod tests {
     }
 
     #[test]
-    fn exact_v0_8_policy_builder_enforces_capability_construction_rules() {
+    fn v1_policy_builder_enforces_capability_construction_rules() {
         let policy = SandboxPolicy {
-            version: "0.8.0-alpha".to_string(),
             filesystem: None,
             network: None,
             ui: None,
@@ -1063,7 +938,7 @@ mod tests {
     #[test]
     fn exact_builder_preserves_absent_ui() {
         let policy: super::SandboxPolicy =
-            serde_json::from_str(r#"{ "version": "0.7.0-alpha" }"#).expect("minimal policy parses");
+            serde_json::from_str("{}").expect("minimal policy parses");
         assert!(policy.ui.is_none(), "precondition: no ui supplied");
 
         let request =
@@ -1080,8 +955,7 @@ mod tests {
         // An explicitly-supplied lockdown `ui` — value-identical to the old
         // synthesized block, which is exactly why presence is what matters.
         let policy: super::SandboxPolicy =
-            serde_json::from_str(r#"{ "version": "0.7.0-alpha", "ui": {} }"#)
-                .expect("policy with ui parses");
+            serde_json::from_str(r#"{ "ui": {} }"#).expect("policy with ui parses");
         assert!(policy.ui.is_some(), "precondition: ui supplied");
 
         let request =
@@ -1144,94 +1018,12 @@ mod tests {
 
     use super::{
         build_request, CaptureDenials, CaptureDenialsMode, NetworkAction, NetworkEgressSection,
-        NetworkIngressSection, NetworkSection, ProxySpec, RuntimeConfigSection, SandboxPolicy,
+        NetworkIngressSection, NetworkSection, RuntimeConfigSection, SandboxPolicy,
     };
-
-    fn policy_with_network(network: NetworkSection) -> SandboxPolicy {
-        SandboxPolicy {
-            version: "0.7.0-alpha".to_string(),
-            filesystem: None,
-            network: Some(network),
-            ui: None,
-            timeout_ms: None,
-        }
-    }
-
-    #[test]
-    fn malformed_policy_version_precedes_directional_field_gate() {
-        let mut policy = policy_with_network(NetworkSection {
-            egress: Some(NetworkEgressSection::default()),
-            ..Default::default()
-        });
-        policy.version = "0.8x".to_string();
-
-        let error = build_request(&policy, TEST_COMMAND, None)
-            .expect_err("a malformed schema version must be rejected")
-            .to_string();
-
-        assert!(error.contains("Invalid schema version"), "got: {error}");
-        assert!(
-            !error.contains("require schema version 0.8"),
-            "got: {error}"
-        );
-    }
-
-    // Accept `allowedHosts` with or without `allowOutbound`, even though
-    // Seatbelt cannot enforce the host list.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn macos_allowed_hosts_without_outbound_is_accepted() {
-        // The SDK accepts allowedHosts without allowOutbound on Seatbelt, so the
-        // Rust port must too (the guard only applies to Windows ProcessContainer).
-        let policy = policy_with_network(NetworkSection {
-            allow_outbound: false,
-            allowed_hosts: vec!["192.0.2.10".to_string()],
-            ..Default::default()
-        });
-        assert!(
-            build_request(&policy, TEST_COMMAND, None).is_ok(),
-            "macOS must accept allowedHosts without allowOutbound, matching the SDK"
-        );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn macos_allowed_hosts_with_outbound_is_accepted() {
-        // allowOutbound=true is the caller explicitly allowing outbound, so it
-        // builds (allowedHosts simply isn't enforceable on Seatbelt).
-        let policy = policy_with_network(NetworkSection {
-            allow_outbound: true,
-            allowed_hosts: vec!["192.0.2.10".to_string()],
-            ..Default::default()
-        });
-        assert!(
-            build_request(&policy, TEST_COMMAND, None).is_ok(),
-            "outbound-allowed host filter should build"
-        );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn macos_proxy_is_accepted_and_mapped() {
-        let policy = policy_with_network(NetworkSection {
-            proxy: Some(ProxySpec::Localhost(8080)),
-            ..Default::default()
-        });
-        let request = build_request(&policy, TEST_COMMAND, None)
-            .expect("macOS must accept Seatbelt proxy configuration");
-        let proxy = &request.inner.policy.network_proxy;
-
-        assert!(proxy.is_enabled());
-        assert_eq!(
-            proxy.address.as_ref().map(|address| address.port()),
-            Some(8080)
-        );
-    }
 
     #[test]
     fn build_request_maps_filesystem_and_timeout() {
         let policy = SandboxPolicy {
-            version: "0.7.0-alpha".to_string(),
             filesystem: Some(super::FilesystemSection {
                 readwrite_paths: vec!["/tmp".to_string()],
                 readonly_paths: vec![],
@@ -1258,9 +1050,8 @@ mod tests {
     }
 
     #[test]
-    fn build_request_maps_enumerate_paths_for_v0_9() {
+    fn build_request_maps_enumerate_paths_for_v1() {
         let policy = SandboxPolicy {
-            version: "0.9.0-alpha".to_string(),
             filesystem: None,
             network: None,
             ui: None,
@@ -1280,41 +1071,11 @@ mod tests {
     }
 
     #[test]
-    fn build_request_rejects_enumerate_paths_before_v0_9() {
-        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha"] {
-            let policy = SandboxPolicy {
-                version: version.to_string(),
-                filesystem: None,
-                network: None,
-                ui: None,
-                timeout_ms: None,
-            };
-            let containment = Containment::ProcessContainer(crate::configs::ProcessContainer {
-                filesystem: Some(crate::configs::ProcessContainerFilesystem {
-                    enumerate_paths: vec!["C:\\tools".to_string()],
-                }),
-                ..Default::default()
-            });
-
-            let error = build_request_with_containment(&policy, &containment, TEST_COMMAND, None)
-                .expect_err("older contracts must not silently drop enumeratePaths");
-
-            assert!(
-                error
-                    .to_string()
-                    .contains("requires schema version 0.9.0-alpha"),
-                "{version}: {error}"
-            );
-        }
-    }
-
-    #[test]
     fn set_env_formats_pairs_as_key_value_in_order() {
         // The structured `(key, value)` setter mirrors the SDK env channel
         // (`injectEnvIntoConfig`): each pair becomes a `KEY=VALUE` wire entry, in
         // iteration order so a later duplicate key wins downstream.
         let policy = SandboxPolicy {
-            version: "0.7.0-alpha".to_string(),
             filesystem: None,
             network: None,
             ui: None,
@@ -1338,7 +1099,6 @@ mod tests {
     #[test]
     fn set_env_replaces_rather_than_merging() {
         let policy = SandboxPolicy {
-            version: "0.7.0-alpha".to_string(),
             filesystem: None,
             network: None,
             ui: None,
@@ -1374,7 +1134,6 @@ mod tests {
     #[test]
     fn inherit_default_env_flags_the_request_and_keeps_the_extras() {
         let policy = SandboxPolicy {
-            version: "0.7.0-alpha".to_string(),
             filesystem: None,
             network: None,
             ui: None,
@@ -1426,7 +1185,6 @@ mod tests {
             (P::All, Wire::All),
         ] {
             let policy = SandboxPolicy {
-                version: "0.7.0-alpha".to_string(),
                 filesystem: None,
                 network: None,
                 ui: Some(super::UiSection {
@@ -1446,48 +1204,8 @@ mod tests {
     }
 
     #[test]
-    fn build_request_maps_network_hosts() {
-        let policy = policy_with_network(NetworkSection {
-            allow_outbound: true,
-            allow_local_network: true,
-            allowed_hosts: vec!["192.0.2.10".to_string()],
-            blocked_hosts: vec!["198.51.100.10".to_string()],
-            ..Default::default()
-        });
-        let request = build_request(&policy, TEST_COMMAND, None)
-            .expect("build_request should accept host rules with allowOutbound");
-        assert!(request
-            .inner
-            .policy
-            .allowed_hosts
-            .contains(&"192.0.2.10".to_string()));
-        assert!(request
-            .inner
-            .policy
-            .blocked_hosts
-            .contains(&"198.51.100.10".to_string()));
-        assert!(request.inner.policy.allow_local_network);
-    }
-
-    #[test]
-    fn build_request_rejects_builtin_test_server_proxy() {
-        let policy = policy_with_network(NetworkSection {
-            proxy: Some(ProxySpec::BuiltinTestServer),
-            ..Default::default()
-        });
-
-        let error = build_request(&policy, TEST_COMMAND, None)
-            .expect_err("the in-process SDK cannot start the built-in test proxy");
-
-        assert!(error.message.contains("builtinTestServer"));
-        assert!(error.message.contains("in-process Rust SDK"));
-        assert!(error.message.contains("localhost or url"));
-    }
-
-    #[test]
     fn request_builders_reject_an_empty_script() {
-        let policy: SandboxPolicy =
-            serde_json::from_str(r#"{ "version": "0.7.0-alpha" }"#).expect("minimal policy parses");
+        let policy = SandboxPolicy::default();
 
         let errors = [
             (
@@ -1518,7 +1236,6 @@ mod tests {
     #[test]
     fn seatbelt_extra_mach_lookups_and_keychain_round_trip() {
         let policy = SandboxPolicy {
-            version: "0.7.0-alpha".to_string(),
             filesystem: None,
             network: None,
             ui: None,
@@ -1549,7 +1266,6 @@ mod tests {
         use crate::configs::Seatbelt;
 
         let policy = SandboxPolicy {
-            version: "0.8.0-alpha".to_string(),
             filesystem: None,
             network: None,
             ui: None,
@@ -1657,8 +1373,7 @@ mod tests {
         // the path somewhere guaranteed to be present.
         let output_path = std::env::temp_dir().join("denials.json");
         let expected = output_path.to_string_lossy().into_owned();
-        let mut policy = minimal_policy();
-        policy.version = "0.8.0-alpha".to_string();
+        let policy = minimal_policy();
         let containment = process_container_with_capture_denials(CaptureDenials {
             mode: CaptureDenialsMode::Allow,
             output_path: Some(expected.clone()),
@@ -1681,8 +1396,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn capture_denials_absent_leaves_the_container_policy_untouched() {
-        let mut policy = minimal_policy();
-        policy.version = "0.8.0-alpha".to_string();
+        let policy = minimal_policy();
         let containment = process_container_with_capture_denials(CaptureDenials::default());
         let request = build_request_with_containment(&policy, &containment, TEST_COMMAND, None)
             .expect("build_request_with_containment");
@@ -1801,77 +1515,17 @@ mod tests {
 
     // The end-to-end counterpart of the contract test above: the typed policy
     // emits both sections and the parser accepts the result unchanged.
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn capture_denials_and_network_proxy_survive_the_typed_path_together() {
-        // `build_request` validates that the parent directory exists.
-        let expected = std::env::temp_dir()
-            .join("denials-with-proxy.json")
-            .to_string_lossy()
-            .into_owned();
-        let mut policy = policy_with_network(NetworkSection {
-            allow_outbound: true,
-            proxy: Some(ProxySpec::Localhost(8080)),
-            ..NetworkSection::default()
-        });
-        policy.version = "0.8.0-alpha".to_string();
-        let containment = process_container_with_capture_denials(CaptureDenials {
-            mode: CaptureDenialsMode::Allow,
-            output_path: Some(expected.clone()),
-            retain_etl: true,
-        });
-
-        let request = build_request_with_containment(&policy, &containment, TEST_COMMAND, None)
-            .expect("captureDenials and network.proxy are accepted together");
-
-        let captured = request
-            .inner
-            .policy
-            .capture_denials
-            .as_ref()
-            .expect("captureDenials enabled");
-        assert_eq!(captured.output_path.as_deref(), Some(expected.as_str()));
-        assert!(captured.retain_etl);
-        assert!(request.inner.policy.network_proxy.is_enabled());
-    }
-
     use super::{build_request_with_containment, Containment, ProcessContainer, WslcSection};
     use wxc_common::models::ContainmentBackend;
 
     fn minimal_policy() -> SandboxPolicy {
-        SandboxPolicy {
-            version: "0.7.0-alpha".to_string(),
-            filesystem: None,
-            network: None,
-            ui: None,
-            timeout_ms: None,
-        }
+        SandboxPolicy::default()
     }
 
-    fn development_policy() -> SandboxPolicy {
+    fn policy_with_network(network: NetworkSection) -> SandboxPolicy {
         SandboxPolicy {
-            version: "1.1.0-alpha".to_string(),
-            ..minimal_policy()
-        }
-    }
-
-    fn development_policy_with_network(network: NetworkSection) -> SandboxPolicy {
-        SandboxPolicy {
-            version: "1.1.0-alpha".to_string(),
-            filesystem: None,
             network: Some(network),
-            ui: None,
-            timeout_ms: None,
-        }
-    }
-
-    fn published_v0_9_policy_with_network(network: NetworkSection) -> SandboxPolicy {
-        SandboxPolicy {
-            version: "0.9.0-alpha".to_string(),
-            filesystem: None,
-            network: Some(network),
-            ui: None,
-            timeout_ms: None,
+            ..SandboxPolicy::default()
         }
     }
 
@@ -1898,10 +1552,7 @@ mod tests {
             ..Default::default()
         };
         let request = build_request_with_containment(
-            &SandboxPolicy {
-                version: "0.9.0-alpha".to_string(),
-                ..development_policy()
-            },
+            &minimal_policy(),
             &Containment::Wslc(wslc),
             TEST_COMMAND,
             None,
@@ -1926,10 +1577,7 @@ mod tests {
         // `WslcSection::default()` must produce the same block the TypeScript
         // SDK's `buildWslcContainerConfig` emits (image only, alpine:latest).
         let request = build_request_with_containment(
-            &SandboxPolicy {
-                version: "0.9.0-alpha".to_string(),
-                ..development_policy()
-            },
+            &minimal_policy(),
             &Containment::Wslc(WslcSection::default()),
             TEST_COMMAND,
             None,
@@ -1945,10 +1593,7 @@ mod tests {
     #[test]
     fn wslc_does_not_enable_experimental_features() {
         let request = build_request_with_containment(
-            &SandboxPolicy {
-                version: "0.9.0-alpha".to_string(),
-                ..development_policy()
-            },
+            &minimal_policy(),
             &Containment::Wslc(WslcSection::default()),
             TEST_COMMAND,
             None,
@@ -2016,7 +1661,7 @@ mod tests {
             ..Default::default()
         };
         let err = build_request_with_containment(
-            &development_policy(),
+            &minimal_policy(),
             &Containment::Wslc(wslc),
             TEST_COMMAND,
             None,
@@ -2029,42 +1674,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn wslc_rejects_per_host_filtering() {
-        // WSLc cannot enforce per-host egress filtering (containers lack
-        // CAP_NET_ADMIN), so allowedHosts with a default-block policy is
-        // rejected at build time rather than silently ignored.
-        let policy = development_policy_with_network(NetworkSection {
-            allow_outbound: false,
-            allowed_hosts: vec!["192.0.2.10".to_string()],
-            ..Default::default()
-        });
-        let err = build_request_with_containment(
-            &policy,
-            &Containment::Wslc(WslcSection::default()),
-            TEST_COMMAND,
-            None,
-        )
-        .expect_err("WSLc must reject per-host egress filtering");
-        assert!(
-            err.message
-                .contains("schema 1.1.0-alpha no longer accepts legacy network authoring"),
-            "got: {}",
-            err.message
-        );
-    }
-
     /// The canonical unrestricted-network acknowledgment the IsolationSession
     /// backend requires: outbound allowed, local network allowed, no host
     /// rules, no proxy.
-    fn isolation_session_network() -> NetworkSection {
-        NetworkSection {
-            allow_outbound: true,
-            allow_local_network: true,
-            ..Default::default()
-        }
-    }
-
     fn isolation_session_directional_network() -> NetworkSection {
         NetworkSection {
             egress: Some(NetworkEgressSection {
@@ -2082,7 +1694,7 @@ mod tests {
     #[test]
     fn isolation_session_names_the_backend_and_carries_no_section() {
         // The one-shot surface takes no backend configuration at all.
-        let policy = published_v0_9_policy_with_network(isolation_session_directional_network());
+        let policy = policy_with_network(isolation_session_directional_network());
         let request = build_request_with_containment(
             &policy,
             &Containment::IsolationSession,
@@ -2100,23 +1712,8 @@ mod tests {
     }
 
     #[test]
-    fn isolation_session_rejects_the_removed_legacy_acknowledgment() {
-        let policy = published_v0_9_policy_with_network(isolation_session_network());
-        let error = build_request_with_containment(
-            &policy,
-            &Containment::IsolationSession,
-            TEST_COMMAND,
-            None,
-        )
-        .expect_err("legacy network values cannot acknowledge v0.9 networking");
-        assert!(error
-            .message
-            .contains("schema 0.9.0-alpha no longer accepts legacy"));
-    }
-
-    #[test]
     fn isolation_session_does_not_enable_the_generic_experimental_flag() {
-        let policy = published_v0_9_policy_with_network(isolation_session_directional_network());
+        let policy = policy_with_network(isolation_session_directional_network());
         let request = build_request_with_containment(
             &policy,
             &Containment::IsolationSession,
@@ -2129,7 +1726,7 @@ mod tests {
 
     #[test]
     fn isolation_session_selects_the_backend() {
-        let policy = published_v0_9_policy_with_network(isolation_session_directional_network());
+        let policy = policy_with_network(isolation_session_directional_network());
         let request = build_request_with_containment(
             &policy,
             &Containment::IsolationSession,
@@ -2146,7 +1743,7 @@ mod tests {
     #[test]
     fn isolation_session_requires_an_explicit_network_policy() {
         let error = build_request_with_containment(
-            &development_policy(),
+            &minimal_policy(),
             &Containment::IsolationSession,
             TEST_COMMAND,
             None,

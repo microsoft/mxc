@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace Microsoft.Mxc.Sdk;
@@ -14,9 +13,6 @@ public enum StateAwareContainment
 {
     /// <summary>Windows IsolationSession.</summary>
     IsolationSession,
-
-    /// <summary>Windows Sandbox.</summary>
-    WindowsSandbox,
 
     /// <summary>Windows Subsystem for Linux container.</summary>
     Wslc,
@@ -35,80 +31,22 @@ public enum StateAwareNetworkDefault
 /// <summary>
 /// Network posture sent on a state-aware lifecycle request. Omitted values are
 /// resolved by the native backend using its fail-closed defaults.
-/// Schema 0.9 accepts only Egress and Ingress on WSLC provision. Legacy
-/// properties remain source-visible solely to produce actionable migration errors.
+/// The v1 high-level SDK exposes directional policy only.
 /// </summary>
-[JsonConverter(typeof(StateAwareNetworkPolicyJsonConverter))]
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed class StateAwareNetworkPolicy
 {
-    private StateAwareNetworkDefault? _defaultPolicy;
-    private JsonElement? _enforcementMode;
-    private bool? _allowLocalNetwork;
-    private List<string>? _allowedHosts;
-    private List<string>? _blockedHosts;
-    private NetworkProxyPolicy? _proxy;
-    private string? _firstLegacyField;
-    private readonly HashSet<string> _legacyFields = new(StringComparer.Ordinal);
-
-    internal string? LegacyFieldSpecified => _firstLegacyField;
-
-    internal bool HasLegacyField(string field) => _legacyFields.Contains(field);
-
-    internal JsonElement? AuthoredEnforcementMode
-    {
-        get => _enforcementMode;
-        set { _enforcementMode = value; RecordLegacyField("enforcementMode"); }
-    }
-
-    private void RecordLegacyField(string field)
-    {
-        _firstLegacyField ??= field;
-        _legacyFields.Add(field);
-    }
-
     /// <summary>Directional outbound posture for WSLC provision.</summary>
+    [JsonConverter(typeof(NonNullNetworkSectionJsonConverter<NetworkEgressPolicy>))]
     public NetworkEgressPolicy? Egress { get; set; }
 
     /// <summary>Directional inbound and host-loopback posture for WSLC provision.</summary>
+    [JsonConverter(typeof(NonNullNetworkSectionJsonConverter<NetworkIngressPolicy>))]
     public NetworkIngressPolicy? Ingress { get; set; }
-
-    /// <summary>The default action for outbound traffic.</summary>
-    public StateAwareNetworkDefault? DefaultPolicy
-    {
-        get => _defaultPolicy;
-        set { _defaultPolicy = value; RecordLegacyField("defaultPolicy"); }
-    }
-
-    /// <summary>Whether the sandbox may reach the local network.</summary>
-    public bool? AllowLocalNetwork
-    {
-        get => _allowLocalNetwork;
-        set { _allowLocalNetwork = value; RecordLegacyField("allowLocalNetwork"); }
-    }
-
-    /// <summary>Host names or IP addresses the sandbox may contact.</summary>
-    public List<string>? AllowedHosts
-    {
-        get => _allowedHosts;
-        set { _allowedHosts = value; RecordLegacyField("allowedHosts"); }
-    }
-
-    /// <summary>Host names or IP addresses the sandbox may not contact.</summary>
-    public List<string>? BlockedHosts
-    {
-        get => _blockedHosts;
-        set { _blockedHosts = value; RecordLegacyField("blockedHosts"); }
-    }
-
-    /// <summary>Optional cooperative HTTP/HTTPS proxy configuration.</summary>
-    public NetworkProxyPolicy? Proxy
-    {
-        get => _proxy;
-        set { _proxy = value; RecordLegacyField("proxy"); }
-    }
 }
 
 /// <summary>Filesystem posture sent on a state-aware lifecycle request.</summary>
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed class StateAwareFilesystemPolicy
 {
     /// <summary>Paths the sandbox can read and write.</summary>
@@ -124,11 +62,7 @@ public sealed class StateAwareFilesystemPolicy
 /// <summary>Base class for backend-specific provision options.</summary>
 public abstract class StateAwareProvisionOptions
 {
-    /// <summary>
-    /// Optional explicit state-aware schema version. It must equal the
-    /// registered version for the selected backend.
-    /// </summary>
-    public string? Version { get; set; }
+    internal string? Version { get; set; }
 
     /// <summary>
     /// Optional per-phase telemetry request. Emission is still gated by the
@@ -138,6 +72,7 @@ public abstract class StateAwareProvisionOptions
 }
 
 /// <summary>IsolationSession provision options.</summary>
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed class IsolationSessionProvisionOptions : StateAwareProvisionOptions
 {
     /// <summary>
@@ -156,14 +91,8 @@ public sealed class IsolationSessionProvisionOptions : StateAwareProvisionOption
     public string? AppId { get; set; }
 }
 
-/// <summary>Windows Sandbox provision options.</summary>
-public sealed class WindowsSandboxProvisionOptions : StateAwareProvisionOptions
-{
-    /// <summary>Host paths to map into the sandbox.</summary>
-    public StateAwareFilesystemPolicy? Filesystem { get; set; }
-}
-
 /// <summary>WSLC provision options.</summary>
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed class WslcProvisionOptions : StateAwareProvisionOptions
 {
     /// <summary>Host paths to mount into the container.</summary>
@@ -189,6 +118,7 @@ public sealed class WslcProvisionOptions : StateAwareProvisionOptions
 /// must use <see cref="IsolationSessionProvisionOptions"/>. This type raises a
 /// schema-0.9 migration error; no network data is silently ignored.
 /// </summary>
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed class ProvisionSandboxOptions : StateAwareProvisionOptions
 {
     /// <summary>IsolationSession network acknowledgement.</summary>
@@ -205,13 +135,10 @@ public sealed class ProvisionSandboxOptions : StateAwareProvisionOptions
 }
 
 /// <summary>Options shared by start, stop, and deprovision phases.</summary>
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public class StateAwarePhaseOptions
 {
-    /// <summary>
-    /// Optional explicit state-aware schema version. It must equal the
-    /// registered version inferred from the sandbox id.
-    /// </summary>
-    public string? Version { get; set; }
+    internal string? Version { get; set; }
 
     /// <summary>
     /// Optional per-phase telemetry request. Emission is still gated by the
@@ -221,6 +148,7 @@ public class StateAwarePhaseOptions
 }
 
 /// <summary>Process and schema options for a state-aware exec phase.</summary>
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public class StateAwareExecOptions : StateAwarePhaseOptions
 {
     /// <summary>Working directory inside the sandbox.</summary>
@@ -245,26 +173,11 @@ public class StateAwareExecOptions : StateAwarePhaseOptions
 }
 
 /// <summary>WSLC exec options, including its per-exec proxy override.</summary>
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed class WslcExecOptions : StateAwareExecOptions
 {
     /// <summary>Runtime values emitted at the envelope top level, without network posture.</summary>
     public NetworkRuntimeConfig? RuntimeConfig { get; set; }
-
-    /// <summary>
-    /// Legacy exec-time proxy spelling. Schema 0.9 rejects it with migration
-    /// guidance; use RuntimeConfig.NetworkProxy instead.
-    /// </summary>
-    public WslcExecNetworkPolicy? Network { get; set; }
-}
-
-/// <summary>
-/// Legacy WSLC exec-time network override. Schema 0.9 rejects this spelling;
-/// use <see cref="WslcExecOptions.RuntimeConfig"/> instead.
-/// </summary>
-public sealed class WslcExecNetworkPolicy
-{
-    /// <summary>Optional URL proxy injected into the process environment.</summary>
-    public NetworkProxyPolicy? Proxy { get; set; }
 }
 
 /// <summary>The result of <see cref="MxcLifecycle.ProvisionSandbox"/>.</summary>

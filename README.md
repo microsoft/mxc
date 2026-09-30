@@ -199,12 +199,14 @@ const tools = getAvailableToolsPolicy(process.env);
 const temp  = getTemporaryFilesPolicy();
 
 const config = createConfigFromPolicy({
-  version: '0.6.0-alpha',
   filesystem: {
     readonlyPaths:  tools.readonlyPaths,
     readwritePaths: temp.readwritePaths,
   },
-  network: { allowOutbound: false },
+  network: {
+    egress:  { default: 'deny' },
+    ingress: { default: 'deny', hostLoopback: 'deny' },
+  },
   timeoutMs: 30_000,
 });
 config.process!.commandLine = 'python -c "print(\'hello from sandbox\')"';

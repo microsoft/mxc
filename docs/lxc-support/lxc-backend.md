@@ -204,7 +204,9 @@ A request that permits nothing and names no proxy keeps its own loopback and rea
 ### SDK
 
 ```typescript
-import { spawnSandbox, SandboxPolicy } from '@microsoft/mxc-sdk';
+import {
+    createConfigFromPolicy, spawnSandboxFromConfig, SandboxPolicy,
+} from '@microsoft/mxc-sdk';
 
 const policy: SandboxPolicy = {
     filesystem: {
@@ -212,12 +214,17 @@ const policy: SandboxPolicy = {
         readonlyPaths: ['/opt/tools'],
     },
     network: {
-        allowOutbound: false,
+        egress:  { default: 'deny' },
+        ingress: { default: 'deny', hostLoopback: 'deny' },
     },
 };
 
-// On Linux, this automatically uses lxc-exec
-const pty = spawnSandbox('echo hello', policy);
+// Select LXC explicitly: the default `process` intent resolves to Bubblewrap
+// on Linux. The resulting config runs through lxc-exec.
+const config = createConfigFromPolicy(policy, 'lxc');
+config.process!.commandLine = 'echo hello';
+
+const pty = spawnSandboxFromConfig(config);
 pty.onData((data) => console.log(data));
 pty.onExit((e) => console.log('Exit:', e.exitCode));
 ```

@@ -19,7 +19,6 @@ var command = args.Length > 0
 
 var policy = new SandboxPolicy
 {
-    Version = "0.7.0-alpha",
     Filesystem = new FilesystemPolicy
     {
         ReadwritePaths = { OperatingSystem.IsWindows() ? @"C:\Windows\Temp" : "/tmp" },

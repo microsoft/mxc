@@ -17,13 +17,8 @@ use std::error::Error;
 use mxc_sdk::{build_request, run, SandboxPolicy, WaitOutcome};
 
 fn main() -> Result<(), Box<dyn Error>> {
-let policy = SandboxPolicy {
-    version: "0.7.0-alpha".to_string(),
-    filesystem: None,
-    network: None,
-    ui: None,
-    timeout_ms: Some(10_000),
-};
+let mut policy = SandboxPolicy::default();
+policy.timeout_ms = Some(10_000);
 let mut request = build_request(&policy, "echo hello", None)?;
 request.set_telemetry_opt_in(true);
 
@@ -77,13 +72,7 @@ use mxc_sdk::{
     Containment, SandboxPolicy,
 };
 
-let policy = SandboxPolicy {
-    version: "0.8.0-alpha".to_string(),
-    filesystem: None,
-    network: None,
-    ui: None,
-    timeout_ms: None,
-};
+let policy = SandboxPolicy::default();
 let mut process_container = ProcessContainer::default();
 process_container.capabilities = vec!["registryRead".to_string()];
 process_container.capture_denials = Some(CaptureDenials::default());
@@ -109,16 +98,11 @@ use mxc_sdk::{
     Containment, SandboxPolicy,
 };
 
-let policy = SandboxPolicy {
-    version: "0.8.0-alpha".to_string(),
-    filesystem: None,
-    network: None,
-    ui: Some(UiSection {
-        allow_windows: true,
-        ..Default::default()
-    }),
-    timeout_ms: None,
-};
+let mut policy = SandboxPolicy::default();
+policy.ui = Some(UiSection {
+    allow_windows: true,
+    ..Default::default()
+});
 let mut seatbelt = Seatbelt::default();
 seatbelt.gui_access = true;
 seatbelt.keychain_access = true;
@@ -143,13 +127,7 @@ use mxc_sdk::{
     Containment, SandboxPolicy,
 };
 
-let policy = SandboxPolicy {
-    version: "0.8.0-alpha".to_string(),
-    filesystem: None,
-    network: None,
-    ui: None,
-    timeout_ms: None,
-};
+let policy = SandboxPolicy::default();
 let mut lxc = Lxc::default();
 lxc.distribution = "ubuntu".to_string();
 lxc.release = "24.04".to_string();
@@ -286,13 +264,7 @@ API stays typed; exact-config and binding-request JSON adapters remain in
 ```rust,no_run
 use mxc_sdk::{build_request, probe, SandboxPolicy};
 
-let policy = SandboxPolicy {
-    version: "0.9.0-alpha".to_string(),
-    filesystem: None,
-    network: None,
-    ui: None,
-    timeout_ms: None,
-};
+let policy = SandboxPolicy::default();
 let request = build_request(&policy, "cmd /c exit 0", None)?;
 let result = probe(Some(&request))?;
 println!("{:?}", result.tier);
@@ -366,13 +338,7 @@ use std::io::{Read, Write};
 use mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy, WaitOutcome};
 
 fn main() -> Result<(), Box<dyn Error>> {
-let policy = SandboxPolicy {
-    version: "0.7.0-alpha".to_string(),
-    filesystem: None,
-    network: None,
-    ui: None,
-    timeout_ms: None,
-};
+let policy = SandboxPolicy::default();
 // echoes stdin until EOF
 let request = build_request(&policy, "cat", None)?;
 let mut proc = spawn_sandbox(request)?;
@@ -471,10 +437,6 @@ provide wire JSON:
 The existing `exec_sandbox` and `exec_attached` names remain compatibility
 aliases for their raw JSON counterparts.
 
-Windows Sandbox requires `experimental`. The parameter is the in-process
-equivalent of the executor's `--experimental` flag and is not a field in the
-request JSON.
-
 `ExecRequest` contains only backend-neutral process settings. Backend-specific
 exec capabilities use
 `set_backend_options(StateAwareExecBackendOptions)`. A backend rejects options
@@ -486,13 +448,11 @@ OS-side service.
 
 ```rust,no_run
 use std::error::Error;
-use mxc_sdk::{
-    sandbox, ExecRequest, LifecycleRequest, OperationOptions, ProvisionRequest,
-};
+use mxc_sdk::{sandbox, ExecRequest, OperationOptions, ProvisionRequest};
 
 fn main() -> Result<(), Box<dyn Error>> {
 let provisioned = sandbox::provision(
-    ProvisionRequest::isolation_session("0.9.0-alpha", None),
+    ProvisionRequest::isolation_session(None),
     OperationOptions::default(),
 )?;
 // The returned `sandboxId` is opaque — carry it forward, never parse it.
@@ -501,14 +461,13 @@ let sandbox_id = provisioned.sandbox_id;
 // Start. The exec phase runs against a started session.
 sandbox::start(
     &sandbox_id,
-    LifecycleRequest::new("0.9.0-alpha"),
     OperationOptions::default(),
 )?;
 
 // Exec phase, attached: an interactive shell on this console.
 let outcome = sandbox::exec_attached(
     &sandbox_id,
-    ExecRequest::new("0.9.0-alpha", "powershell.exe"),
+    ExecRequest::new("powershell.exe"),
     OperationOptions::default(),
 )?;
 let _ = outcome;
@@ -517,14 +476,20 @@ Ok(())
 ```
 
 Three backends implement the state-aware lifecycle — IsolationSession, WSLc and
-Windows Sandbox. IsolationSession and WSLc serve streaming typed exec through
-`sandbox::exec`; WSLc exposes stdout/stderr only because its SDK has no
-process-input API. Windows Sandbox supports attached exec but cannot return
-native exec pipes.
+Windows Sandbox. The v1 high-level typed API targets exact `1.0.0` and exposes
+IsolationSession and WSLc. Raw `run_state_aware_json` and `exec_attached_json`
+accept Windows Sandbox requests with exact `1.1.0-alpha` and the `experimental`
+argument set to `true` (the equivalent of the executor's `--experimental`
+flag, not a field in the request JSON).
 
-All three state-aware backends serve `sandbox::exec_attached`. IsolationSession
-also forwards stdin through a pseudo-console; Windows Sandbox drops terminal
-input pending PTY support, and WSLc has no process-input API.
+IsolationSession and WSLc serve streaming typed exec through `sandbox::exec`;
+WSLc exposes stdout/stderr only because its SDK has no process-input API.
+Windows Sandbox supports attached exec but cannot return native exec pipes.
+
+IsolationSession and WSLc serve typed attached exec through
+`sandbox::exec_attached`; Windows Sandbox uses raw `exec_attached_json` and
+drops terminal input pending PTY support. IsolationSession also forwards stdin
+through a pseudo-console, while WSLc has no process-input API.
 
 What an unavailable backend returns differs, so branch on the code rather than
 assuming one: a build without the `wslc` or `isolation_session` feature answers
@@ -559,9 +524,10 @@ background. Reach its multi-call lifecycle through the typed state-aware calls. 
 `run_state_aware_json`, `exec_attached_json`, or `exec_sandbox_json` only when
 the caller intentionally owns exact wire JSON.
 
-Backends with no variant at all — Windows Sandbox, MicroVM, and Hyperlight —
-cannot be named from this crate; use the executor binaries. Windows Sandbox is
-still reachable here through the state-aware lifecycle.
+Backends with no one-shot `Containment` variant — Windows Sandbox, MicroVM, and
+Hyperlight — cannot be selected with `build_request_with_containment`; use the
+executor binaries instead. Windows Sandbox state-aware lifecycle is also
+available through the raw exact-JSON entry points above.
 
 `Containment::Lxc` models explicit LXC distribution settings, but `run` and
 `spawn_sandbox` reject it because the LXC backend does not expose captured
@@ -583,10 +549,7 @@ use mxc_sdk::{
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
-let policy = SandboxPolicy {
-    version: "0.9.0-alpha".to_string(),
-    filesystem: None, network: None, ui: None, timeout_ms: None,
-};
+let policy = SandboxPolicy::default();
 let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
 let request = build_request_with_containment(
     &policy,

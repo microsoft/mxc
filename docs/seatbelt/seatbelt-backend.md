@@ -498,7 +498,6 @@ fail with `Operation not permitted`. Grant the working directory in
 import { spawnSandbox, SandboxPolicy } from '@microsoft/mxc-sdk';
 
 const policy: SandboxPolicy = {
-    version: '0.9.0-alpha',
     filesystem: {
         readwritePaths: ['/tmp/output'],
         readonlyPaths:  ['/opt/tools'],
@@ -515,9 +514,10 @@ pty.onData((data) => console.log(data));
 pty.onExit((e) => console.log('Exit:', e.exitCode));
 ```
 
-`version` is required and must fall in the supported range. The SDK rejects a
-policy that mixes the directional `egress`/`ingress` fields with the legacy
-`allowOutbound`/`allowedHosts`/`blockedHosts` fields.
+The v1 `SandboxPolicy` has no `version` field; the SDK emits exact `1.0.0`.
+Network policy uses the directional `egress`/`ingress` fields only, and the SDK
+rejects the legacy `allowOutbound`/`allowedHosts`/`blockedHosts` fields with a
+migration error.
 
 ## Building from source
 

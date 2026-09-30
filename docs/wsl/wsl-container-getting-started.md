@@ -179,19 +179,21 @@ its failure modes are decoupled from registry availability.
 
 ### TypeScript SDK
 
-Use `createConfigFromPolicy()` to build a config, then customize WSLC-specific
-fields before spawning:
+Use the v1 `createConfigFromPolicy()` API to build an exact `1.0.0` config, then
+customize WSLC-specific fields before spawning:
 
 ```typescript
-import { createConfigFromPolicy, spawnSandboxFromConfig } from '@microsoft/mxc-sdk';
+import {
+  createConfigFromPolicy, spawnSandboxFromConfig,
+  type SandboxPolicy,
+} from '@microsoft/mxc-sdk';
 
 const policy = {
-  version: '0.9.0-alpha',
   network: {
     egress: { default: 'allow' as const },
     ingress: { default: 'allow' as const, hostLoopback: 'allow' as const },
   },
-};
+} satisfies SandboxPolicy;
 
 const config = createConfigFromPolicy(policy, 'wslc');
 config.process!.commandLine = 'python3 -c "print(\'Hello from WSLC\')"';
@@ -225,13 +227,7 @@ use mxc_sdk::{
     build_request_with_containment, run, spawn_sandbox, Containment, SandboxPolicy, WslcSection,
 };
 
-let policy = SandboxPolicy {
-    version: "0.9.0-alpha".to_string(),
-    filesystem: None,
-    network: None,
-    ui: None,
-    timeout_ms: None,
-};
+let policy = SandboxPolicy::default();
 
 let wslc = WslcSection {
     image: "python:3.12-alpine".to_string(),

@@ -109,23 +109,26 @@ impl SdkStateAwareInput {
     pub fn new(version: ContractVersion, operation: StateAwareOperation) -> Result<Self, WxcError> {
         if !matches!(
             version,
-            ContractVersion::V0_9_0Alpha | ContractVersion::V1_0_0 | ContractVersion::V1_1_0Alpha
+            ContractVersion::V1_0_0 | ContractVersion::V1_1_0Alpha
         ) {
             return Err(WxcError::ConfigParse(format!(
                 "typed state-aware Rust SDK requests require schema version \
-                 0.9.0-alpha, 1.0.0, or 1.1.0-alpha, got {}",
+                 1.0.0 or 1.1.0-alpha, got {}",
                 version.as_str()
             )));
         }
-        if matches!(
+        let is_windows_sandbox = matches!(
             operation,
             StateAwareOperation::Provision(
                 crate::state_aware_operation::StateAwareProvision::WindowsSandbox
             )
-        ) && version != ContractVersion::V1_1_0Alpha
-        {
+        ) || operation
+            .sandbox_id()
+            .is_some_and(|sandbox_id| sandbox_id.starts_with("wsb:"));
+        if is_windows_sandbox {
             return Err(WxcError::ConfigParse(
-                "Windows Sandbox state-aware provision requires schema version 1.1.0-alpha"
+                "typed state-aware Rust SDK requests do not support Windows Sandbox; \
+                 use raw exact 1.1.0-alpha JSON"
                     .to_string(),
             ));
         }
@@ -245,5 +248,32 @@ fn map_protocol(protocol: SdkNetworkProtocol) -> wire::NetworkProtocol {
         SdkNetworkProtocol::Udp => wire::NetworkProtocol::Udp,
         SdkNetworkProtocol::Icmp => wire::NetworkProtocol::Icmp,
         SdkNetworkProtocol::Any => wire::NetworkProtocol::Any,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typed_v1_rejects_windows_sandbox_ids_for_every_non_provision_phase() {
+        for operation in [
+            StateAwareOperation::Start {
+                sandbox_id: "wsb:abcd1234".to_string(),
+            },
+            StateAwareOperation::Exec {
+                sandbox_id: "wsb:abcd1234".to_string(),
+            },
+            StateAwareOperation::Stop {
+                sandbox_id: "wsb:abcd1234".to_string(),
+            },
+            StateAwareOperation::Deprovision {
+                sandbox_id: "wsb:abcd1234".to_string(),
+            },
+        ] {
+            let error = SdkStateAwareInput::new(ContractVersion::V1_0_0, operation)
+                .expect_err("typed v1 must keep Windows Sandbox on the raw exact lane");
+            assert!(error.to_string().contains("do not support Windows Sandbox"));
+        }
     }
 }

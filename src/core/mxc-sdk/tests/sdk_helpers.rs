@@ -121,103 +121,6 @@ fn user_profile_policy_does_not_panic() {
 }
 
 #[test]
-fn build_request_rejects_empty_version() {
-    // Parity with the SDK, which throws "Policy version is required".
-    let policy = SandboxPolicy {
-        version: String::new(),
-        filesystem: None,
-        network: None,
-        ui: None,
-        timeout_ms: None,
-    };
-
-    let err = build_request(&policy, "echo hello", None)
-        .expect_err("an empty policy version must be rejected");
-    assert_eq!(err.code, mxc_sdk::ErrorCode::MalformedRequest);
-}
-
-#[test]
-fn build_request_host_rules_require_outbound() {
-    let mut network = mxc_sdk::policy::NetworkSection::default();
-    network.allowed_hosts = vec!["192.0.2.10".to_string()];
-
-    let policy = SandboxPolicy {
-        version: "0.7.0-alpha".to_string(),
-        filesystem: None,
-        network: Some(network),
-        ui: None,
-        timeout_ms: None,
-    };
-
-    // Unix backends accept host rules without `allowOutbound`; only Windows
-    // ProcessContainer requires it. Either way this must not panic.
-    let result = build_request(&policy, "echo hello", None);
-    if cfg!(any(target_os = "linux", target_os = "macos")) {
-        assert!(
-            result.is_ok(),
-            "Linux/macOS accept host rules without allowOutbound (matching the SDK)"
-        );
-    } else {
-        assert!(
-            result.is_err(),
-            "Windows ProcessContainer requires allowOutbound for host rules"
-        );
-    }
-}
-
-#[test]
-fn build_request_blocklist_only_defers_shared_semantic_validation() {
-    let mut network = mxc_sdk::policy::NetworkSection::default();
-    network.blocked_hosts = vec!["198.51.100.10".to_string()];
-
-    let policy = SandboxPolicy {
-        version: "0.7.0-alpha".to_string(),
-        filesystem: None,
-        network: Some(network),
-        ui: None,
-        timeout_ms: None,
-    };
-
-    let result = build_request(&policy, "echo hello", None);
-    if cfg!(any(target_os = "linux", target_os = "macos")) {
-        assert!(
-            result.is_ok(),
-            "Unix SDK construction must defer host-list semantics to backend validation"
-        );
-    } else {
-        assert!(
-            result
-                .expect_err("Windows ProcessContainer requires allowOutbound for host rules")
-                .message
-                .contains("allowedHosts/blockedHosts require allowOutbound"),
-            "Windows must retain its platform-specific authoring requirement"
-        );
-    }
-}
-
-#[test]
-fn rust_sdk_builds_legacy_networking() {
-    use mxc_sdk::policy::NetworkSection;
-
-    let mut network = NetworkSection::default();
-    network.allow_outbound = true;
-    network.allow_local_network = true;
-    network.allowed_hosts = vec!["192.0.2.10".to_string()];
-    network.blocked_hosts = vec!["198.51.100.10".to_string()];
-
-    let policy = SandboxPolicy {
-        version: "0.7.0-alpha".to_string(),
-        filesystem: None,
-        network: Some(network),
-        ui: None,
-        timeout_ms: None,
-    };
-
-    build_request(&policy, "echo hello", None)
-        .expect("the Rust SDK should build legacy networking");
-}
-
-#[test]
 fn rust_sdk_builds_directional_networking() {
     use mxc_sdk::policy::{
         NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkSection,
@@ -232,13 +135,8 @@ fn rust_sdk_builds_directional_networking() {
     network.egress = Some(egress);
     network.ingress = Some(ingress);
 
-    let policy = SandboxPolicy {
-        version: "0.8.0-alpha".to_string(),
-        filesystem: None,
-        network: Some(network),
-        ui: None,
-        timeout_ms: None,
-    };
+    let mut policy = SandboxPolicy::default();
+    policy.network = Some(network);
 
     build_request(&policy, "echo hello", None)
         .expect("the Rust SDK should build directional networking");
@@ -265,13 +163,8 @@ fn rust_sdk_builds_directional_process_container_networking_and_capture() {
     network.ingress = Some(ingress);
     network.runtime_config = Some(runtime_config);
 
-    let policy = SandboxPolicy {
-        version: "0.8.0-alpha".to_string(),
-        filesystem: None,
-        network: Some(network),
-        ui: None,
-        timeout_ms: None,
-    };
+    let mut policy = SandboxPolicy::default();
+    policy.network = Some(network);
     let mut process_network = ProcessContainerNetwork::default();
     process_network.allowed_proxy_peer = Some("Contoso.Proxy_123".to_string());
     let mut process_container = ProcessContainer::default();
@@ -290,18 +183,14 @@ fn rust_sdk_builds_directional_process_container_networking_and_capture() {
 #[cfg(target_os = "macos")]
 #[test]
 fn build_request_then_run_seatbelt() {
-    let policy = SandboxPolicy {
-        version: "0.7.0-alpha".to_string(),
-        filesystem: Some(mxc_sdk::policy::FilesystemSection {
-            readwrite_paths: vec!["/tmp".to_string()],
-            readonly_paths: vec![],
-            denied_paths: vec![],
-            clear_policy_on_exit: None,
-        }),
-        network: None,
-        ui: None,
-        timeout_ms: Some(10000),
-    };
+    let mut policy = SandboxPolicy::default();
+    policy.filesystem = Some(mxc_sdk::policy::FilesystemSection {
+        readwrite_paths: vec!["/tmp".to_string()],
+        readonly_paths: vec![],
+        denied_paths: vec![],
+        clear_policy_on_exit: None,
+    });
+    policy.timeout_ms = Some(10000);
 
     let request = build_request(&policy, "echo built-from-policy", None)
         .expect("build_request should succeed");
@@ -372,13 +261,7 @@ fn platform_support_windows_omits_wslc_when_not_compiled_in() {
 #[cfg(target_os = "windows")]
 #[test]
 fn request_probe_accepts_default_and_typed_requests() {
-    let policy = SandboxPolicy {
-        version: "0.9.0-alpha".to_string(),
-        filesystem: None,
-        network: None,
-        ui: None,
-        timeout_ms: None,
-    };
+    let policy = SandboxPolicy::default();
     let request = build_request(&policy, "cmd /c exit 0", None)
         .expect("default ProcessContainer request should build");
 
@@ -391,13 +274,7 @@ fn request_probe_accepts_default_and_typed_requests() {
 #[cfg(target_os = "windows")]
 #[test]
 fn request_probe_rejects_non_process_container_requests() {
-    let policy = SandboxPolicy {
-        version: "0.9.0-alpha".to_string(),
-        filesystem: None,
-        network: None,
-        ui: None,
-        timeout_ms: None,
-    };
+    let policy = SandboxPolicy::default();
     let request = build_request_with_containment(
         &policy,
         &Containment::Wslc(WslcSection::default()),
