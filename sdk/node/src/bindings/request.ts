@@ -14,7 +14,10 @@ import type {
   SeatbeltConfig,
   WslcConfig,
 } from '../types.js';
-import { LegacyContainmentAliases } from '../types.js';
+import {
+  LegacyContainmentAliases,
+  legacyConfigAliasUnsupportedReason,
+} from '../types.js';
 import { MxcError } from '../errors.js';
 
 export interface RequestSpecOptions {
@@ -153,6 +156,10 @@ export function validateBindingPolicy(policy: SandboxPolicy): void {
 }
 
 export function bindingRequestUnsupportedReason(config: ContainerConfig): string | null {
+  const unsupportedAlias = legacyConfigAliasUnsupportedReason(config);
+  if (unsupportedAlias !== undefined) {
+    return unsupportedAlias;
+  }
   if (config.network?.proxy !== undefined && 'builtinTestServer' in config.network.proxy) {
     return 'network.proxy.builtinTestServer is not supported by the in-process Node SDK; use localhost or url';
   }

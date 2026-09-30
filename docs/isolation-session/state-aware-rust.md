@@ -188,7 +188,8 @@ wrong-nesting cases are rejected as `malformed_request`.
 ### Exec
 
 **Config (none).** Exec uses only the cross-cutting `process` block on the
-top-level wire envelope (`commandLine`, `cwd`, `env`, `timeout`).
+top-level wire envelope (`commandLine`, `cwd`, `env`, `inheritDefaultEnv`,
+`timeout`).
 
 **Output.** Stdout is the agent process's live-streamed output; the dispatcher
 never emits a JSON envelope on stdout for a non-dry-run exec, so a failure's
@@ -292,7 +293,8 @@ meaning for this backend.
 | `fallback.allowDaclMutation` | n/a | n/a | n/a | n/a | n/a | n/a |
 | `containerId` | accepted, no effect | rejected | rejected | rejected | rejected | rejected |
 | `process.commandLine` | **honored** | rejected | rejected | **honored** | rejected | rejected |
-| `process.{cwd,env,timeout}` | **honored** | rejected | rejected | **honored** | rejected | rejected |
+| `process.{cwd,timeout}` | **honored** | rejected | rejected | **honored** | rejected | rejected |
+| `process.env` | **honored** with `inheritDefaultEnv: true`; rejected without it | rejected | rejected | **honored** with `inheritDefaultEnv: true`; rejected without it | rejected | rejected |
 | `isolationSession.provision.appId` | rejected | **honored** | n/a | n/a | n/a | n/a |
 | `isolationSession.<another phase>.*` | rejected | rejected | rejected | rejected | rejected | rejected |
 | `processContainer` / `lxc` / `seatbelt` (stable sections) | rejected | rejected | rejected | rejected | rejected | rejected |
@@ -323,6 +325,9 @@ Notes on the rows that are not a simple accept/reject:
   requests address the sandbox by its returned `sandboxId` after provision.
 - **`process` on non-exec state-aware phases** is structurally rejected. Supply
   process settings only on exec; other phases do not run a workload.
+- **`process.env`**: every process starts from the agent user's default
+  environment and the backend cannot replace or empty it, so `process.env`
+  without `inheritDefaultEnv` — including `[]` — is rejected before launch.
 
 With either valid network spelling, an absent provision member remains `None`,
 while a present empty object remains a configuration with absent fields. An
@@ -348,8 +353,9 @@ also structurally refused as `malformed_request`.
 
 - `process.commandLine` — required for one-shot and for state-aware exec;
   rejected structurally at non-exec state-aware phases.
-- `process.cwd`, `process.env`, `process.timeout` — optional in both modes,
-  honoured per-process (each exec receives its own block).
+- `process.cwd`, `process.env`, `process.inheritDefaultEnv`, `process.timeout` —
+  optional in both modes, honoured per-process (each exec receives its own
+  block); `process.env` only with `process.inheritDefaultEnv: true`.
 
 ### Policy fields and mode parity
 

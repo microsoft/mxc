@@ -178,6 +178,29 @@ fn one_shot_refuses_an_unhonorable_policy_as_policy_validation() {
 }
 
 #[test]
+fn one_shot_refuses_an_environment_it_cannot_launch_as_policy_validation() {
+    let mut request = build_request_with_containment(
+        &iso_policy(),
+        &Containment::IsolationSession,
+        "echo unreachable",
+        None,
+    )
+    .expect("building the request must succeed");
+    request.set_env([("FOO", "bar")]);
+
+    let err = match mxc_sdk::spawn_sandbox(request) {
+        Ok(_) => panic!("the environment must be refused"),
+        Err(e) => e,
+    };
+    assert_eq!(err.code, ErrorCode::PolicyValidation, "{err:?}");
+    assert!(
+        err.message
+            .contains("process.env without process.inheritDefaultEnv=true is not supported"),
+        "{err:?}"
+    );
+}
+
+#[test]
 fn one_shot_run_captures_output() {
     skip_unless_supported!();
     let request = build_request_with_containment(

@@ -1,0 +1,6 @@
+{
+  "version": "1.0.0",
+  "containment": "isolation_session",
+  "process": { "commandLine": "cmd /c exit 0" },
+  "network": { "defaultPolicy": "allow", "allowLocalNetwork": true }
+}

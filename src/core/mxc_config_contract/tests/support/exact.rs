@@ -19,7 +19,10 @@ pub(crate) fn assert_invalid<T: DeserializeOwned>(json: &str, context: &str) {
 }
 
 pub(crate) fn with_contract_version(json: &str, version: &str) -> String {
-    let non_exact = version.strip_suffix("-alpha").unwrap_or(version);
+    let non_exact = version
+        .strip_suffix("-alpha")
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{version}-alpha"));
     json.replace("\"0.9.0-alpha\"", &format!("\"{version}\""))
         .replace("\"0.9.0\"", &format!("\"{non_exact}\""))
 }

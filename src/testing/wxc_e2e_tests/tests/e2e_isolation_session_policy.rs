@@ -121,6 +121,27 @@ fn one_shot_refuses_destroy_on_exit_false() {
     assert_ne!(result.code, Some(0), "non-zero exit expected on refusal");
 }
 
+#[test]
+fn one_shot_refuses_env_without_inherit_default_env() {
+    if !cached_has_wxc_exe() {
+        return;
+    }
+
+    let result = run_wxc_config("isolation_session_one_shot_env_rejected.json", &[]);
+    if skipped_not_compiled(&result) {
+        return;
+    }
+    let combined = result.combined_output_with_decoded_base64();
+    assert!(
+        combined.contains("process.env without process.inheritDefaultEnv=true is not supported"),
+        "expected an environment refusal, got exit {:?}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        result.code,
+        result.stdout,
+        result.stderr,
+    );
+    assert_ne!(result.code, Some(0), "non-zero exit expected on refusal");
+}
+
 // ---------------------------------------------------------------------------
 // State-aware: refusals surface as a typed envelope on stdout.
 // ---------------------------------------------------------------------------

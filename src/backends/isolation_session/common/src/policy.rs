@@ -20,7 +20,13 @@
 //! Anything else, including an absent policy (which defaults to deny), is
 //! refused. On post-provision phases the network posture is fixed at provision:
 //! any supplied network policy is refused, an absent one is inherited.
+//!
+//! Every process starts from the agent user's default environment, which
+//! `process.env` can be layered over (`process.inheritDefaultEnv`) but cannot
+//! replace or empty. A `process.env` without `process.inheritDefaultEnv` is
+//! therefore refused wherever a process is launched: one-shot and exec.
 
+use wxc_common::default_env::EnvResolution;
 use wxc_common::models::{ExecutionRequest, NetworkAction, NetworkEnforcementMode, NetworkPolicy};
 
 use super::error::IsolationSessionError;
@@ -43,6 +49,10 @@ const ERR_PROXY_POLICY: &str =
 const ERR_NETWORK_IMMUTABLE: &str =
     "network policy is fixed at provision and cannot be changed on \
     this phase; omit the network policy on post-provision phases";
+const ERR_ENVIRONMENT_POLICY: &str = "process.env without process.inheritDefaultEnv=true is not \
+    supported by the isolation session backend: every process starts from the agent user's \
+    default environment, which cannot be replaced or emptied; set process.inheritDefaultEnv to \
+    true to layer process.env over it, or omit process.env";
 
 /// Validates the request for the provision phase (also used by the one-shot
 /// runner, which runs the whole lifecycle in one call so provision-phase
@@ -79,6 +89,19 @@ pub(super) fn validate_post_provision_policy(
         ));
     }
     Ok(())
+}
+
+/// Rejects a `process.env` that asks to replace the default environment
+/// rather than be layered over it.
+pub(super) fn reject_unhonorable_environment(
+    request: &ExecutionRequest,
+) -> Result<(), IsolationSessionError> {
+    match EnvResolution::of(request) {
+        EnvResolution::Replace => Err(IsolationSessionError::Policy(
+            ERR_ENVIRONMENT_POLICY.to_string(),
+        )),
+        EnvResolution::Default | EnvResolution::Overlay | EnvResolution::Legacy => Ok(()),
+    }
 }
 
 /// Rejects any filesystem policy field. Shared by the provision and
@@ -143,8 +166,8 @@ fn validate_provision_network_policy(
 mod tests {
     use super::*;
     use wxc_common::models::{
-        ContainerPolicy, NetworkEgressPolicy, NetworkIngressPolicy, ProxyAddress, ProxyConfig,
-        UiPolicy,
+        ContainerPolicy, DefaultEnvCompatibility, NetworkEgressPolicy, NetworkIngressPolicy,
+        ProxyAddress, ProxyConfig, UiPolicy,
     };
     use wxc_common::mxc_error::MxcErrorCode;
 
@@ -717,5 +740,46 @@ mod tests {
             validate_post_provision_policy(&request).unwrap_err(),
             ERR_FILESYSTEM_POLICY,
         );
+    }
+
+    // ====== process.env (refused when it would replace the default) ======
+
+    fn request_with_env(
+        compatibility: DefaultEnvCompatibility,
+        env: Option<Vec<&str>>,
+        inherit_default_env: bool,
+    ) -> ExecutionRequest {
+        ExecutionRequest {
+            default_env_compatibility: compatibility,
+            env: env.map(|e| e.into_iter().map(String::from).collect()),
+            inherit_default_env,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn only_an_environment_that_would_replace_the_default_is_refused() {
+        use DefaultEnvCompatibility::{DefaultBlock, LegacyCompatible};
+
+        let cases = [
+            (None, false, DefaultBlock, true),
+            (None, true, DefaultBlock, true),
+            (Some(vec![]), false, DefaultBlock, false),
+            (Some(vec![]), true, DefaultBlock, true),
+            (Some(vec!["FOO=bar"]), false, DefaultBlock, false),
+            (Some(vec!["FOO=bar"]), true, DefaultBlock, true),
+            (Some(vec!["FOO=bar"]), false, LegacyCompatible, true),
+        ];
+
+        for (env, inherit_default_env, compatibility, accepted) in cases {
+            let state =
+                format!("{env:?}, inherit_default_env={inherit_default_env}, {compatibility:?}");
+            let request = request_with_env(compatibility, env, inherit_default_env);
+            match (reject_unhonorable_environment(&request), accepted) {
+                (Ok(()), true) => {}
+                (Err(err), false) => assert_policy_err_contains(err, ERR_ENVIRONMENT_POLICY),
+                (result, _) => panic!("{state}: expected accepted={accepted}, got {result:?}"),
+            }
+        }
     }
 }

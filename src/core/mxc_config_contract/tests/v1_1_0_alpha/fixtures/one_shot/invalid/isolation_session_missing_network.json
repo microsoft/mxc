@@ -1,0 +1,7 @@
+{
+  "version": "1.1.0-alpha",
+  "containment": "isolation_session",
+  "process": {
+    "commandLine": "echo"
+  }
+}
