@@ -61,12 +61,12 @@ function Phase-FsEnumerate {
     # --- 1. version gate ------------------------------------------------
     # 0.8's processContainer contract is closed and has no `filesystem` member,
     # so authoring the field there must be refused. Without this, a silent
-    # acceptance at 0.8 would look identical to a correct 0.9 run.
+    # acceptance at 0.8 would look identical to a correct run.
     $cfgV08 = New-Config -Name 'fsenum-v08-gate' `
-        -CommandLine 'cmd /c exit 0' -EnumeratePaths @($enum) -SchemaVersion $Script:SchemaVersion
+        -CommandLine 'cmd /c exit 0' -EnumeratePaths @($enum) -SchemaVersion '0.8.0-alpha'
     $logV08 = Join-Path $ScratchRoot 'logs\fsenum-v08-gate.log'
     $rV08 = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfgV08 -LogPath $logV08 -TimeoutSec 30
-    Record-Result -Phase 'P4e' -Name "enumeratePaths is rejected at $($Script:SchemaVersion) (0.9-only field)" `
+    Record-Result -Phase 'P4e' -Name 'enumeratePaths is rejected at 0.8.0-alpha (0.9+ field)' `
         -Pass (Test-WasRejected -Run $rV08 -Log (Read-Log $logV08)) `
         -Detail "exit=$($rV08.ExitCode); stderr=$(Format-Snippet $rV08.Stderr)"
 

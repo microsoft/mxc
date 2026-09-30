@@ -1,6 +1,6 @@
 {
-    "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
-    "version": "0.8.0-alpha",
+    "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+    "version": "1.0.0",
     "containment": "seatbelt",
     "_comment": "The write to /usr fails for an unprivileged user with or without SIP, so the probe reports errno instead of success/failure: rootless returns EPERM, the sealed read-only system volume (SIP off) returns EROFS, and ordinary permissions return EACCES. The two writes before it are the controls.",
     "process": {

@@ -23,7 +23,7 @@ Set-StrictMode -Version Latest
 Initialize-WpcContext @PSBoundParameters
 
 
-# Phase 8e — schema 0.8 runtime proxy (model 2).
+# Phase 8e — runtime proxy (model 2).
 #
 # Per docs/process-container/networking.md: HTTP(S)_PROXY (both cases) point
 # at the loopback endpoint, NO_PROXY must not carry it, direct egress is
@@ -35,7 +35,7 @@ Initialize-WpcContext @PSBoundParameters
 # in for the proxy so one case can go further and prove the endpoint is
 # actually reachable from inside the container.
 function Phase-NetworkProxy {
-    Section 'Phase 8e: schema 0.8 runtime proxy (model 2)'
+    Section 'Phase 8e: runtime proxy (model 2)'
 
     if ($SkipNetwork) {
         Record-Result -Phase 'P8e' -Name 'runtime proxy' -Status 'skip' -Detail '-SkipNetwork'
@@ -151,11 +151,11 @@ function Invoke-NetworkProxyAssertions {
                 -Detail "verdict=$($direct.Verdict); WFP scopes egress to the proxy endpoint only"
         }
     } else {
-        # "schema 0.8 runtime proxy requests do not fall back because
+        # "runtime proxy requests do not fall back because
         # AppContainer cannot preserve their peer or host-loopback
         # requirements."
         $rejected = Test-WasRejected $envRun
-        Record-Result -Phase 'P8e' -Name 'non-PSEC tier rejects schema 0.8 runtime proxy (no fallback)' `
+        Record-Result -Phase 'P8e' -Name 'non-PSEC tier rejects runtime proxy (no fallback)' `
             -Pass $rejected `
             -Detail "exit=$($envRun.Result.ExitCode); timedOut=$($envRun.Result.TimedOut); tier=$($Script:ExpectedTier)"
     }
@@ -188,12 +188,12 @@ function Invoke-NetworkProxyAssertions {
     }
 
     # The two shape rules below are only meaningful on PSEC. On a non-PSEC
-    # tier the phase has already asserted that EVERY schema 0.8 runtime-proxy
+    # tier the phase has already asserted that EVERY runtime-proxy
     # config is refused, so asserting "this particular one is refused" would be
     # green by construction and would test nothing about the rule it names.
     if (-not $psec) {
         Record-Result -Phase 'P8e' -Name 'model-2 shape rules (hostLoopback / ingress.default)' -Status 'skip' `
-            -Detail "tier=$($Script:ExpectedTier) refuses all 0.8 runtime proxies, so a shape-specific rejection is not attributable"
+            -Detail "tier=$($Script:ExpectedTier) refuses all runtime proxies, so a shape-specific rejection is not attributable"
         return
     }
 

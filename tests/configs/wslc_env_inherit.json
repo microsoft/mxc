@@ -1,7 +1,7 @@
 {
-  "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
-  "version": "0.9.0-alpha",
-  "containerId": "wslc-env-09-inherit",
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-Env-inherit",
   "containment": "wslc",
   "process": {
     "commandLine": "echo \"PYVER=[$PYTHON_VERSION]\"; echo \"FOO=[$FOO]\"; echo \"LANG=[$LANG]\"; echo \"LANGCOUNT=[$(env | grep -c '^LANG=')]\"; echo ENV_PROBE_DONE",

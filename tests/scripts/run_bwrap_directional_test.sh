@@ -347,7 +347,7 @@ run_enforced "directional ipv6 and icmp rendering" \
 PORT_CONFIG="$WORK_DIR/directional_ports.json"
 cat >"$PORT_CONFIG" <<PORTS
 {
-  "version": "0.8.0-alpha",
+  "version": "1.0.0",
   "containerId": "CLI-Bubblewrap-Directional-Ports",
   "containment": "bubblewrap",
   "process": {

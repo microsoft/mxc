@@ -96,7 +96,7 @@ require_python3_probe() {
     [ -x /usr/bin/python3 ] || fail "/usr/bin/python3 is required by this suite"
     local probe="$SEATBELT_TMP/_probe.json"
     cat >"$probe" <<EOF
-{"version":"0.8.0-alpha","containment":"seatbelt",
+{"version":"1.0.0","containment":"seatbelt",
  "process":{"commandLine":"/usr/bin/python3 -c 'print(\"PROBE_OK\")'","timeout":20000},
  "filesystem":{"readonlyPaths":["$DEVDIR"]}}
 EOF

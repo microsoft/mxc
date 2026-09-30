@@ -1,5 +1,5 @@
 #!/bin/bash
-# LXC process environment, schema 0.9.
+# LXC process environment.
 #
 # `lxc-exec` always passes `--clear-env`, so the host environment never reaches
 # the container. Schema 0.9 adds a default block on top of the small baseline
@@ -72,7 +72,7 @@ export MXC_LEAK_PROBE="LXC_HOST_ENV_LEAKED"
 # `an_explicitly_empty_env_stays_empty` / `a_supplied_env_is_used_verbatim` in
 # `lxc_runner.rs`, which reads the env MXC builds instead of the container's.
 
-run_config lxc_env_09_default_block.json
+run_config lxc_env_default_block.json
 expect_ok "an omitted env gets the default PATH" "PATH=[$DEFAULT_PATH]"
 expect_ok "an omitted env gets HOME" "HOME=[/tmp]"
 expect_ok "an omitted env gets TERM" "TERM=[xterm-256color]"
@@ -81,7 +81,7 @@ expect_absent "the host value itself does not appear" "LXC_HOST_ENV_LEAKED"
 
 # No `process.cwd` resolves no directory, so no HOME -- a policy grant can bind
 # a host path over the container's /tmp, and a reused container keeps its own.
-run_config lxc_env_09_no_cwd.json
+run_config lxc_env_no_cwd.json
 expect_ok "an unresolved working directory leaves HOME unset" "HOME=[]"
 expect_ok "the rest of the default block still applies" "PATH=[$DEFAULT_PATH]"
 expect_ok "an unset HOME is not the host's" "LEAK=[]"
@@ -89,13 +89,13 @@ expect_ok "an unset HOME is not the host's" "LEAK=[]"
 # Unlike bwrap and Seatbelt, an empty env is not a wholly empty environment:
 # `lxc-attach` injects its own baseline under everything MXC supplies. What
 # 0.9 guarantees is that MXC adds nothing on top of it.
-run_config lxc_env_09_empty.json
+run_config lxc_env_empty.json
 expect_ok "an empty env runs" "ENV_PROBE_DONE"
 expect_ok "an empty env suppresses the default HOME" "HOME=[]"
 expect_ok "an empty env suppresses the default TERM" "TERM=[]"
 expect_ok "an empty env inherits nothing from the host" "LEAK=[]"
 
-run_config lxc_env_09_verbatim.json
+run_config lxc_env_verbatim.json
 expect_ok "a supplied env is honored" "FOO=[bar]"
 expect_ok "a supplied env adds no default HOME" "HOME=[]"
 expect_ok "a supplied env adds no default TERM" "TERM=[]"
@@ -104,7 +104,7 @@ expect_ok "a supplied env adds no default TERM" "TERM=[]"
 expect_ok "a supplied PATH is used verbatim" "PATH=[/mxc-probe/bin:/usr/bin:/bin]"
 expect_absent "a supplied PATH is not appended to the baseline" "PATH=[$DEFAULT_PATH"
 
-run_config lxc_env_09_inherit.json
+run_config lxc_env_inherit.json
 expect_ok "inheritDefaultEnv keeps the default PATH" "PATH=[$DEFAULT_PATH]"
 expect_ok "inheritDefaultEnv keeps the default HOME" "HOME=[/tmp]"
 expect_ok "inheritDefaultEnv adds the caller's variable" "FOO=[bar]"

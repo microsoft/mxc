@@ -126,7 +126,7 @@ function Phase-InheritDefaultEnv {
     # backend default are both present. Only meaningful once a container can
     # actually start, so it reports what it saw either way.
     $cfg = New-Config -Name 'lc-inherit-layered' -CommandLine $cmd -ReadWrite @($rw) `
-        -Env @('MXC_LC_MINE=yes') -InheritDefaultEnv $true -SchemaVersion '0.9.0-alpha'
+        -Env @('MXC_LC_MINE=yes') -InheritDefaultEnv $true
     $log = Join-Path $ScratchRoot 'logs\lc-inherit-layered.log'
     $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log -TimeoutSec 30
     $out = "$($r.Stdout)"

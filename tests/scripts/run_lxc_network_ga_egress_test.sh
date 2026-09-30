@@ -1,5 +1,5 @@
 #!/bin/bash
-# LXC schema 0.9 egress enforcement test
+# LXC egress enforcement test
 #
 # Asserts reachability rather than a log line: a chain can install cleanly,
 # name the right chain, and still filter nothing.
@@ -415,5 +415,5 @@ assert_allowed "udp/$PEER_UDP_PORT was unreachable while protocol any allowed th
 run_case "protocol-any case: peer allowed on any port 8054, probe udp/$PEER_UDP_PORT" "$ANY_UDP_WRONG_PORT_CONFIG"
 assert_blocked "udp/$PEER_UDP_PORT succeeded while protocol any allowed only port 8054. The UDP half of the fan-out ignores the port selector."
 
-echo "PASS: schema 0.9 egress rules filtered by destination, by port, by port range, by protocol, by resolver, by deny rule, and by exclusion, and no exclusion answered for a destination a later rule denied."
-echo "LXC schema 0.9 egress enforcement test complete."
+echo "PASS: egress rules filtered by destination, by port, by port range, by protocol, by resolver, by deny rule, and by exclusion, and no exclusion answered for a destination a later rule denied."
+echo "LXC egress enforcement test complete."
