@@ -1734,7 +1734,7 @@ impl SandboxBackend for AppContainerScriptRunner {
         validate_required_child_env(request)?;
         validate_network_policy_support(request, self.network_policy_support())?;
         if !request.policy.enumerate_paths.is_empty() {
-            return Err(ScriptResponse::error(
+            return Err(ScriptResponse::rejected(
                 &FallbackError::EnumeratePathsUnsupported.to_string(),
             ));
         }
@@ -1745,7 +1745,7 @@ impl SandboxBackend for AppContainerScriptRunner {
             .is_some_and(|ingress| ingress.default == wxc_common::models::NetworkAction::Allow)
             && !allows_network_egress(&request.policy)
         {
-            return Err(ScriptResponse::error(
+            return Err(ScriptResponse::rejected(
                 "network.ingress.default='allow' cannot be combined with denied network egress \
                  on the AppContainer fallback because privateNetworkClientServer grants \
                  bidirectional private-network access",
@@ -1759,7 +1759,7 @@ impl SandboxBackend for AppContainerScriptRunner {
                 ingress.host_loopback == wxc_common::models::NetworkAction::Allow
             })
         {
-            return Err(ScriptResponse::error(
+            return Err(ScriptResponse::rejected(
                 "network.ingress.hostLoopback='allow' is not supported by the AppContainer fallback",
             ));
         }
@@ -1786,12 +1786,12 @@ impl SandboxBackend for AppContainerScriptRunner {
             && self.filesystem_mode != FilesystemMode::Dacl
             && !self.denied_paths_enforced_externally
         {
-            return Err(ScriptResponse::error(
+            return Err(ScriptResponse::rejected(
                 wxc_common::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
             ));
         }
         if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
-            return Err(ScriptResponse::error(
+            return Err(ScriptResponse::rejected(
                 wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
             ));
         }

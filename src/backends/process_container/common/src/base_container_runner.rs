@@ -414,16 +414,15 @@ impl BaseContainerRunner {
                 ))
             })?;
         if !version_supported {
-            return Err(ScriptResponse {
-                failure_phase: FailurePhase::Rejected,
-                ..ScriptResponse::error(if !request.policy.enumerate_paths.is_empty() {
+            return Err(ScriptResponse::rejected(
+                if !request.policy.enumerate_paths.is_empty() {
                     PSEC_ENUMERATE_PATHS_UNSUPPORTED_MSG
                 } else if unrestricted_host_loopback_allowed(&request.policy) {
                     PSEC_INGRESS_UNSUPPORTED_MSG
                 } else {
                     "the required Process Security Environment schema version is not supported"
-                })
-            });
+                },
+            ));
         }
 
         // Launch builtin test proxy if requested (before building spec so we have the port).
@@ -1149,12 +1148,12 @@ impl SandboxBackend for BaseContainerRunner {
         validate_required_child_env(request)?;
         validate_network_policy_support(request, self.network_policy_support())?;
         if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
-            return Err(ScriptResponse::error(
+            return Err(ScriptResponse::rejected(
                 wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
             ));
         }
         if has_conflicting_proxy_identity(&request.policy) {
-            return Err(ScriptResponse::error(
+            return Err(ScriptResponse::rejected(
                 "processContainer.network.allowedProxyPeer grants loopback access only to the \
                  specified peer and cannot be combined with \
                  network.ingress.hostLoopback='allow', which grants unrestricted host-loopback \
@@ -1178,7 +1177,7 @@ impl SandboxBackend for BaseContainerRunner {
             });
         }
         if request.policy.least_privilege_mode {
-            return Err(ScriptResponse::error(
+            return Err(ScriptResponse::rejected(
                 "the process-security-environment path cannot be combined with \
                  processContainer.leastPrivilege because it does not support LPAC tokens",
             ));
