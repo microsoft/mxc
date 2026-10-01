@@ -284,6 +284,11 @@ fn convert_egress(egress: Option<wire::NetworkEgress>) -> Result<NetworkEgressPo
     })
 }
 
+/// Resolves the ingress posture.
+///
+/// Both controls default to `deny`, and `host_loopback` resolves independently
+/// of `default` rather than inheriting it, so host-loopback access is never
+/// granted implicitly by an `ingress.default` of `allow`.
 fn convert_ingress(ingress: Option<wire::NetworkIngress>) -> NetworkIngressPolicy {
     let ingress = ingress.unwrap_or(wire::NetworkIngress {
         default: None,
@@ -700,3 +705,7 @@ mod proxy_policy_tests {
 #[cfg(test)]
 #[path = "network_parser_loopback_spec_tests.rs"]
 mod loopback_spec_tests;
+
+#[cfg(test)]
+#[path = "network_parser_ingress_default_tests.rs"]
+mod ingress_default_tests;

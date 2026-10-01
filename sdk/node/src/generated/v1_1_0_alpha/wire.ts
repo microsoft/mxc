@@ -297,11 +297,11 @@ export interface NetworkEgress {
  */
 export interface NetworkIngress {
   /**
-   * Optional default action for private-network inbound traffic.
+   * Optional default action for private-network inbound traffic. Denies when omitted.
    */
   default?: NetworkAction;
   /**
-   * Optional bidirectional host-loopback connectivity action.
+   * Optional bidirectional host-loopback connectivity action. Denies when omitted, independently of `default`.
    */
   hostLoopback?: NetworkAction;
 }

@@ -639,11 +639,11 @@
       "properties": {
         "default": {
           "$ref": "#/definitions/NetworkAction",
-          "description": "Optional default action for private-network inbound traffic."
+          "description": "Optional default action for private-network inbound traffic. Denies when omitted."
         },
         "hostLoopback": {
           "$ref": "#/definitions/NetworkAction",
-          "description": "Optional bidirectional host-loopback connectivity action."
+          "description": "Optional bidirectional host-loopback connectivity action. Denies when omitted, independently of `default`."
         }
       },
       "type": "object"

@@ -534,9 +534,9 @@ for the cost of a slirp hop.
 
 A consequence worth knowing: on 0.8, a config with **no `network` section at
 all** selects the directional shape with a synthesized default-deny. It renders
-identically to the legacy default only because `NetworkPolicy::default()` and
-`NetworkAction::default()` both mean deny — a coincidence the tests pin rather
-than rely on silently.
+identically to the legacy default because the contract resolves an omitted
+ingress control to `deny` — the same posture `NetworkPolicy::default()`
+carries. The tests pin that agreement rather than rely on it silently.
 
 **What the backend refuses.** Bubblewrap declares support for
 `egress.default`, `egress` rules, `ingress.default`, `ingress.hostLoopback`,
