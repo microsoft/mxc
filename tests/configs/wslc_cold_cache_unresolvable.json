@@ -1,6 +1,7 @@
 {
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
   "_comment": "Cold-cache failure coverage: an image reference no registry resolves, under a storagePath the runner purges first. Pins the non-retryable classification and that the message names a way forward.",
-  "version": "0.9.0-alpha",
+  "version": "1.0.0",
   "containerId": "wslc-cold-cache-unresolvable",
   "containment": "wslc",
   "process": {
