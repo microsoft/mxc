@@ -4,7 +4,7 @@
     "phase": "exec",
     "sandboxId": "wslc:{{SANDBOX_ID}}",
     "process": {
-        "commandLine": "python3 -c 'import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind((\"0.0.0.0\",8080)); s.close(); print(\"STATE_AWARE_PORT_MAPPING_OK\")'",
+        "commandLine": "sh -c 'nohup python3 -c \"import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind((\\\"0.0.0.0\\\",8080)); s.listen(8); c,_=s.accept(); c.sendall(b\\\"STATE_AWARE_PORT_MAPPING_OK\\\"); c.close()\" >/tmp/listener.log 2>&1 & sleep 1; echo LISTENER_STARTED'",
         "timeout": 30000
     }
 }

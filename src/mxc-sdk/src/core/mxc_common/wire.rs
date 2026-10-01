@@ -488,19 +488,20 @@ pub struct Wslc {
     pub provision: Option<WslcProvisionPhase>,
 }
 
-/// Per-phase WSLc **provision** normalization input, constructed from the exact
-/// `wslc.provision` contract. Carries what the amortized daemon session honors:
-/// the container image (or a local tarball to import) and the container's own
-/// host → container port forwards.
+/// Per-phase WSLc **provision** normalization input, mirroring the exact
+/// `wslc.provision` contract: the container image, or a local tarball to
+/// import.
 ///
 /// Filesystem mounts and network mode derive from the top-level `policy`
 /// section (readwrite / readonly paths, network), not from here. The session
-/// sizing knobs (`cpuCount` / `memoryMb` / `gpu` / `storagePath`) are
-/// deliberately absent: the daemon shares a single session across sandboxes, so
-/// they cannot be set per sandbox. `portMappings` is container-scoped and so is
-/// honored here. start / exec / stop / deprovision carry no backend-specific
-/// config (the exec command flows through the top-level `process` section), so
-/// they have no phase struct.
+/// sizing knobs (`cpuCount` / `memoryMb` / `gpu` / `storagePath`) are absent
+/// because the daemon shares a single session across sandboxes and cannot set
+/// them per sandbox. start / exec / stop / deprovision carry no
+/// backend-specific config (the exec command flows through the top-level
+/// `process` section), so they have no phase struct.
+///
+/// State-aware provisioning builds `models::WslcProvisionConfig` directly, so
+/// nothing populates this struct today; it documents the normalized shape.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WslcProvisionPhase {
@@ -510,9 +511,6 @@ pub struct WslcProvisionPhase {
 
     /// Path to a local image tarball to import instead of pulling.
     pub image_tar_path: Option<String>,
-
-    /// Host → container TCP forwards applied to this sandbox's container.
-    pub port_mappings: Option<Vec<PortMapping>>,
 }
 
 /// A single host → container port forward retained in normalized WSLC settings.
