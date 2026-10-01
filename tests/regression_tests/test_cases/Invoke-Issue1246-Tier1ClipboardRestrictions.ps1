@@ -126,21 +126,25 @@ function Invoke-ClipboardCase {
     $outputText = $runOutput | Out-String
     $readAllowed = $outputText -match "(?m)^READCLIPBOARD=allowed\r?$"
     $readBlocked = $outputText -match "(?m)^READCLIPBOARD=blocked\r?$"
+    $readInconclusive = $outputText -match "(?m)^READCLIPBOARD=inconclusive\r?$"
     $writeAllowed = $outputText -match "(?m)^WRITECLIPBOARD=allowed\r?$"
     $writeBlocked = $outputText -match "(?m)^WRITECLIPBOARD=blocked\r?$"
+    $writeInconclusive = $outputText -match "(?m)^WRITECLIPBOARD=inconclusive\r?$"
     & $probe matches $writeToken 2>$null
-    $writeTokenObserved = $LASTEXITCODE -eq 0
+    $writeTokenCheckExitCode = $LASTEXITCODE
+    $writeTokenObserved = $writeTokenCheckExitCode -eq 0
+    $writeTokenCheckConclusive = $writeTokenCheckExitCode -ne 2
 
     $passed = if ($ExpectAllowed) {
-        $exitCode -eq 0 -and $readAllowed -and $writeAllowed -and $writeTokenObserved
+        $exitCode -eq 0 -and $readAllowed -and $writeAllowed -and $writeTokenCheckConclusive -and $writeTokenObserved
     } else {
-        $exitCode -eq 0 -and $readBlocked -and $writeBlocked -and -not $writeTokenObserved
+        $exitCode -eq 0 -and $readBlocked -and $writeBlocked -and $writeTokenCheckConclusive -and -not $writeTokenObserved
     }
 
     [pscustomobject]@{
         Name = $Name
         Passed = $passed
-        Detail = "exit=$exitCode, readAllowed=$readAllowed, readBlocked=$readBlocked, writeAllowed=$writeAllowed, writeBlocked=$writeBlocked, writeTokenObserved=$writeTokenObserved"
+        Detail = "exit=$exitCode, readAllowed=$readAllowed, readBlocked=$readBlocked, readInconclusive=$readInconclusive, writeAllowed=$writeAllowed, writeBlocked=$writeBlocked, writeInconclusive=$writeInconclusive, writeTokenObserved=$writeTokenObserved, writeTokenCheckExitCode=$writeTokenCheckExitCode"
     }
 }
 

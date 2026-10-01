@@ -392,9 +392,17 @@ fn probe_readclipboard(user32: Hmodule) {
         }
     };
 
+    unsafe {
+        SetLastError(0);
+    }
     let opened = unsafe { open(std::ptr::null_mut()) };
+    let open_error = unsafe { GetLastError() };
     if opened == 0 {
-        emit_pass("READCLIPBOARD");
+        emit_diag(
+            "READCLIPBOARD",
+            &format!("OpenClipboard failed gle={open_error}"),
+        );
+        emit_inconclusive("READCLIPBOARD");
         return;
     }
     unsafe {
@@ -515,12 +523,20 @@ fn probe_writeclipboard(user32: Hmodule) {
         return;
     }
 
+    unsafe {
+        SetLastError(0);
+    }
     let opened = unsafe { open(owner) };
+    let open_error = unsafe { GetLastError() };
     if opened == 0 {
         unsafe {
             let _ = destroy_window(owner);
         }
-        emit_pass("WRITECLIPBOARD");
+        emit_diag(
+            "WRITECLIPBOARD",
+            &format!("OpenClipboard failed gle={open_error}"),
+        );
+        emit_inconclusive("WRITECLIPBOARD");
         return;
     }
 

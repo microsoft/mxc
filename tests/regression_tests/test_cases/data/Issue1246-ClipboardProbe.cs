@@ -10,7 +10,15 @@ internal static class ClipboardProbe
 {
     private const uint CfUnicodeText = 13;
     private const uint GmemMoveable = 0x0002;
+    private const int ErrorAccessDenied = 5;
     private static readonly IntPtr HwndMessage = new IntPtr(-3);
+
+    private enum ProbeResult
+    {
+        Allowed,
+        Blocked,
+        Inconclusive
+    }
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr CreateWindowEx(
@@ -57,6 +65,9 @@ internal static class ClipboardProbe
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern IntPtr GlobalFree(IntPtr memory);
 
+    [DllImport("kernel32.dll")]
+    private static extern void SetLastError(uint error);
+
     private static IntPtr CreateClipboardOwner()
     {
         IntPtr owner = CreateWindowEx(
@@ -80,13 +91,13 @@ internal static class ClipboardProbe
         return owner;
     }
 
-    private static bool TryReadText(out string value)
+    private static ProbeResult ProbeReadText(out string value)
     {
         value = null;
         IntPtr owner = CreateClipboardOwner();
         if (owner == IntPtr.Zero)
         {
-            return false;
+            return ProbeResult.Inconclusive;
         }
 
         if (!OpenClipboard(owner))
@@ -94,17 +105,19 @@ internal static class ClipboardProbe
             Console.Error.WriteLine("OpenClipboard for read failed: {0}", Marshal.GetLastWin32Error());
             Thread.Sleep(100);
             DestroyWindow(owner);
-            return false;
+            return ProbeResult.Inconclusive;
         }
 
+        SetLastError(0);
         IntPtr memory = GetClipboardData(CfUnicodeText);
         if (memory == IntPtr.Zero)
         {
-            Console.Error.WriteLine("GetClipboardData failed: {0}", Marshal.GetLastWin32Error());
+            int error = Marshal.GetLastWin32Error();
+            Console.Error.WriteLine("GetClipboardData failed: {0}", error);
             Thread.Sleep(100);
             CloseClipboard();
             DestroyWindow(owner);
-            return false;
+            return error == ErrorAccessDenied ? ProbeResult.Blocked : ProbeResult.Inconclusive;
         }
 
         IntPtr text = GlobalLock(memory);
@@ -114,22 +127,22 @@ internal static class ClipboardProbe
             Thread.Sleep(100);
             CloseClipboard();
             DestroyWindow(owner);
-            return false;
+            return ProbeResult.Inconclusive;
         }
 
         value = Marshal.PtrToStringUni(text);
         GlobalUnlock(memory);
         CloseClipboard();
         DestroyWindow(owner);
-        return true;
+        return ProbeResult.Allowed;
     }
 
-    private static bool TryWriteText(string value)
+    private static ProbeResult ProbeWriteText(string value)
     {
         IntPtr owner = CreateClipboardOwner();
         if (owner == IntPtr.Zero)
         {
-            return false;
+            return ProbeResult.Inconclusive;
         }
 
         byte[] bytes = Encoding.Unicode.GetBytes(value + "\0");
@@ -139,7 +152,7 @@ internal static class ClipboardProbe
             Console.Error.WriteLine("GlobalAlloc failed: {0}", Marshal.GetLastWin32Error());
             Thread.Sleep(100);
             DestroyWindow(owner);
-            return false;
+            return ProbeResult.Inconclusive;
         }
 
         IntPtr text = GlobalLock(memory);
@@ -149,7 +162,7 @@ internal static class ClipboardProbe
             Thread.Sleep(100);
             GlobalFree(memory);
             DestroyWindow(owner);
-            return false;
+            return ProbeResult.Inconclusive;
         }
 
         Marshal.Copy(bytes, 0, text, bytes.Length);
@@ -161,19 +174,22 @@ internal static class ClipboardProbe
             Thread.Sleep(100);
             GlobalFree(memory);
             DestroyWindow(owner);
-            return false;
+            return ProbeResult.Inconclusive;
         }
 
+        SetLastError(0);
         if (!EmptyClipboard())
         {
-            Console.Error.WriteLine("EmptyClipboard failed: {0}", Marshal.GetLastWin32Error());
+            int error = Marshal.GetLastWin32Error();
+            Console.Error.WriteLine("EmptyClipboard failed: {0}", error);
             Thread.Sleep(100);
             CloseClipboard();
             GlobalFree(memory);
             DestroyWindow(owner);
-            return false;
+            return error == ErrorAccessDenied ? ProbeResult.Blocked : ProbeResult.Inconclusive;
         }
 
+        SetLastError(0);
         IntPtr result = SetClipboardData(CfUnicodeText, memory);
         int setError = result == IntPtr.Zero ? Marshal.GetLastWin32Error() : 0;
         CloseClipboard();
@@ -183,33 +199,51 @@ internal static class ClipboardProbe
             Console.Error.WriteLine("SetClipboardData failed: {0}", setError);
             Thread.Sleep(100);
             GlobalFree(memory);
-            return false;
+            return setError == ErrorAccessDenied ? ProbeResult.Blocked : ProbeResult.Inconclusive;
         }
 
-        return true;
+        return ProbeResult.Allowed;
+    }
+
+    private static string FormatResult(ProbeResult result)
+    {
+        return result.ToString().ToLowerInvariant();
     }
 
     private static int Main(string[] args)
     {
         if (args.Length == 2 && args[0] == "write")
         {
-            return TryWriteText(args[1]) ? 0 : 2;
+            ProbeResult result = ProbeWriteText(args[1]);
+            return result == ProbeResult.Allowed ? 0 : result == ProbeResult.Blocked ? 1 : 2;
         }
 
         if (args.Length == 2 && args[0] == "matches")
         {
             string value;
-            return TryReadText(out value) && value == args[1] ? 0 : 1;
+            ProbeResult result = ProbeReadText(out value);
+            if (result == ProbeResult.Inconclusive)
+            {
+                return 2;
+            }
+
+            return result == ProbeResult.Allowed && value == args[1] ? 0 : 1;
         }
 
         if (args.Length == 3 && args[0] == "sandbox")
         {
             string value;
-            bool readAllowed = TryReadText(out value) && value == args[1];
-            bool writeAllowed = TryWriteText(args[2]);
-            Console.WriteLine("READCLIPBOARD={0}", readAllowed ? "allowed" : "blocked");
-            Console.WriteLine("WRITECLIPBOARD={0}", writeAllowed ? "allowed" : "blocked");
-            return 0;
+            ProbeResult readResult = ProbeReadText(out value);
+            if (readResult == ProbeResult.Allowed && value != args[1])
+            {
+                Console.Error.WriteLine("Clipboard read returned an unexpected value.");
+                readResult = ProbeResult.Inconclusive;
+            }
+
+            ProbeResult writeResult = ProbeWriteText(args[2]);
+            Console.WriteLine("READCLIPBOARD={0}", FormatResult(readResult));
+            Console.WriteLine("WRITECLIPBOARD={0}", FormatResult(writeResult));
+            return readResult == ProbeResult.Inconclusive || writeResult == ProbeResult.Inconclusive ? 2 : 0;
         }
 
         Console.Error.WriteLine("Usage: ClipboardProbe write <text> | matches <text> | sandbox <read-token> <write-token>");
