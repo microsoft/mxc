@@ -9,4 +9,6 @@ pub mod mxc_engine;
 pub mod mxc_pty;
 pub mod mxc_schema_support;
 pub mod mxc_telemetry;
+#[allow(dead_code)]
+pub(crate) mod process_security_environment_policy_result;
 pub mod process_security_environment_spec;

@@ -12,6 +12,33 @@ Use [Microsoft.Mxc.Sdk.V1.Dev](https://github.com/microsoft/mxc/blob/main/docs/a
 for MXC request JSON with a caller-declared contract version and separate
 experimental backend authorization.
 
+## ProcessContainer policy errors
+
+On capable Windows BaseContainer hosts, policy-denied creation (`0x800704EC`)
+automatically retrieves the calling thread's cached refusal and includes
+available outcome/action details in `MxcException.Message`. Use ordinary V1
+`MxcContainer.Run`, `RunAsync`, `Spawn`, or `SpawnAsync` errors.
+No new request option, report DTO, or additional experimental authorization
+is required. Successful outputs and existing exception codes are unchanged.
+
+The message includes the native operation and HRESULT; the optional
+`Operation` and `NativeCode` properties can still be null. Always preserve the
+message, not only optional metadata. Missing or failed retrieval cannot
+replace the creation error; success and non-policy failures are not queried.
+MXC does not mutate the request or retry a policy refusal. Returned
+constraints are non-exhaustive and can be unknown or incomplete; the prose
+is not a supported parsing contract. See
+[detailed policy errors](../../docs/development/guides/process-container-adding-os-features.md#detailed-policy-errors).
+
+Recognized details name the MXC configuration settings that supplied the
+permission, including synthesized network capabilities and capture. Direct-mode
+network-decision capture can request `internetClient` even with deny-default
+egress and capture mode `block`.
+Revise the corresponding typed V1 request properties rather than only removing
+a capability-list entry. Unknown or incomplete details do not supply guessed
+edits. See
+[request guidance](../../docs/development/guides/process-container-adding-os-features.md#guidance-in-mxc-request-terms).
+
 ## Run to completion
 
 ```csharp

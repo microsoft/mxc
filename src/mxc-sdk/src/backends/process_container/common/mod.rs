@@ -31,6 +31,8 @@ pub mod process_mitigation;
 #[cfg(target_os = "windows")]
 mod secenv;
 #[cfg(target_os = "windows")]
+mod secenv_policy;
+#[cfg(target_os = "windows")]
 pub use native_capture::CaptureSession;
 #[cfg(target_os = "windows")]
 pub use secenv::{

@@ -69,13 +69,7 @@ pub(crate) fn add_default_network_capabilities(
     policy: &ContainerPolicy,
     capabilities: &mut Vec<String>,
 ) {
-    if policy.network_egress.is_some() || policy.network_ingress.is_some() {
-        capabilities.retain(|capability| {
-            !POLICY_OWNED_NETWORK_CAPABILITIES
-                .iter()
-                .any(|owned| capability.eq_ignore_ascii_case(owned))
-        });
-    }
+    capabilities.retain(|capability| !network_policy_owns_capability(policy, capability));
 
     if allows_network_egress(policy) {
         ensure_capability(capabilities, INTERNET_CLIENT_CAPABILITY);
@@ -90,10 +84,48 @@ pub(crate) fn add_default_network_capabilities(
     }
 }
 
+pub(crate) fn network_policy_owns_capability(policy: &ContainerPolicy, capability: &str) -> bool {
+    (policy.network_egress.is_some() || policy.network_ingress.is_some())
+        && POLICY_OWNED_NETWORK_CAPABILITIES
+            .iter()
+            .any(|owned| capability.eq_ignore_ascii_case(owned))
+}
+
+pub(crate) fn capture_requests_internet_capability(
+    policy: &ContainerPolicy,
+    capture_network_decisions: bool,
+) -> bool {
+    policy.capture_denials.is_some()
+        && capture_network_decisions
+        && policy.network_egress.is_some()
+        && !policy.network_proxy.is_enabled()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::mxc_common::models::{NetworkEgressPolicy, NetworkIngressPolicy};
+
+    #[test]
+    fn capture_capability_requires_the_selected_network_trace_and_direct_mode() {
+        let mut policy = ContainerPolicy {
+            capture_denials: Some(Default::default()),
+            network_egress: Some(NetworkEgressPolicy::default()),
+            ..Default::default()
+        };
+        assert!(capture_requests_internet_capability(&policy, true));
+        assert!(!capture_requests_internet_capability(&policy, false));
+        policy.network_proxy = crate::mxc_common::models::ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".into(), 8080)),
+        };
+        assert!(!capture_requests_internet_capability(&policy, true));
+        policy.network_proxy = Default::default();
+        policy.network_egress = None;
+        assert!(!capture_requests_internet_capability(&policy, true));
+        policy.network_egress = Some(Default::default());
+        policy.capture_denials = None;
+        assert!(!capture_requests_internet_capability(&policy, true));
+    }
 
     #[test]
     fn directional_egress_defaults_and_rules_select_capability() {

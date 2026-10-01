@@ -30,6 +30,13 @@ related_trace_abi_pull_request = 16307987
 # of autocrlf. Verified by regenerate.ps1 and the CI drift gate.
 sha256 = "736cacef37a6c97a0cb97c7132da462a3b51811fca8f1e4076cac51085dfa516"
 
+[policy_result]
+# ExperimentalProcessSecurityEnvironmentPolicyResult.fbs uses the same pinned
+# compiler below, but is a separate OS-owned result contract (PSEP, not PSEC).
+source_revision = "5aec16e3838ab5e9542ef4aeb62209ef0635bbb5"
+source_path = "onecore/base/appmodel/execmodel/processmodel/lib/schema.psec/ExperimentalProcessSecurityEnvironmentPolicyResult.fbs"
+sha256 = "faa6a4e83fb334ffef27e3869139a3736a1859a5659840ba6f8b4b1e0242fa7d"
+
 [tool]
 # Exact flatc version used to generate the committed bindings. Regeneration
 # pins this exact version (not a floor) so output is byte-reproducible.

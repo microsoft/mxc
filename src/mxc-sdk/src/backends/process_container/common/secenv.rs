@@ -36,6 +36,7 @@ use std::ptr;
 use std::sync::OnceLock;
 
 use crate::mxc_common::api_set::is_api_set_implemented;
+use crate::mxc_common::models::ContainerPolicy;
 use crate::mxc_common::string_util;
 use windows::Win32::Foundation::{GetLastError, ERROR_INSUFFICIENT_BUFFER, HANDLE, HMODULE};
 use windows::Win32::System::LibraryLoader::{
@@ -48,6 +49,9 @@ use windows::Win32::System::Threading::{
 use windows_core::{HRESULT, PCSTR, PCWSTR};
 
 use crate::learning_mode_windows::LearningModeError;
+use crate::process_container_common::secenv_policy::{
+    PolicyResult, MAX_RESULT_BYTES, POLICY_RESULT_VERSION,
+};
 
 /// System DLL that hosts the flat process security-environment exports.
 const PROCESSMODEL_DLL: &str = "processmodel.dll";
@@ -93,6 +97,8 @@ impl SecurityEnvironmentSupport {
 /// declared here: explicit [`ProcessSecurityEnvironment::close`] after the child
 /// has exited already provides deterministic teardown.
 pub const PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE: u32 = 0;
+const EXPERIMENTAL_PROCESS_SECURITY_ENVIRONMENT_FLAG_CAPTURE_POLICY_RESULT: u32 = 0x2;
+const EXPERIMENTAL_PSE_SUPPORT_POLICY_RESULT: u64 = 0x10;
 
 /// `HRESULT CreateProcessSecurityEnvironment(LPCVOID sandboxSpecification,
 /// DWORD sandboxSpecificationSize, PROCESS_SECURITY_ENVIRONMENT_FLAGS flags,
@@ -106,9 +112,61 @@ type PfnCreateProcessSecurityEnvironment = unsafe extern "system" fn(
     process_security_environment: *mut HANDLE,
 ) -> HRESULT;
 
-/// `HRESULT QueryProcessSecurityEnvironmentSupport(UINT64* supportFlags)`.
+type PfnGetLastProcessSecurityEnvironmentPolicyResult = unsafe extern "system" fn(
+    requested_version: u32,
+    policy_result_size_bytes: *mut u32,
+    policy_result: *mut *mut u8,
+) -> HRESULT;
+
+/// `HRESULT QueryProcessSecurityEnvironmentSupport(
+/// PROCESS_SECURITY_ENVIRONMENT_SUPPORT_FLAGS* supportFlags)`.
 type PfnQueryProcessSecurityEnvironmentSupport =
-    unsafe extern "system" fn(support_flags: *mut u64) -> HRESULT;
+    unsafe extern "system" fn(support_flags: *mut u32) -> HRESULT;
+
+#[derive(Debug)]
+pub(crate) struct CreationError {
+    cause: LearningModeError,
+    diagnostic: Option<String>,
+}
+
+impl From<LearningModeError> for CreationError {
+    fn from(cause: LearningModeError) -> Self {
+        Self {
+            cause,
+            diagnostic: None,
+        }
+    }
+}
+
+impl CreationError {
+    pub(crate) fn is_api_unavailable(&self) -> bool {
+        self.cause.is_api_unavailable()
+    }
+
+    pub(crate) fn message(&self, capture: bool) -> String {
+        let message =
+            crate::process_container_common::launch_diagnostics::security_environment_failure_message(&self.cause, capture);
+        if let Some(diagnostic) = &self.diagnostic {
+            return format!("{diagnostic}\nNative creation failure: {message}");
+        }
+        message
+    }
+}
+
+impl std::fmt::Display for CreationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(diagnostic) = &self.diagnostic {
+            writeln!(f, "{diagnostic}")?;
+        }
+        self.cause.fmt(f)
+    }
+}
+
+impl std::error::Error for CreationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.cause)
+    }
+}
 
 /// `HRESULT IsProcessSecurityEnvironmentVersionSupported(
 /// DWORD major, BOOLEAN* available, DWORD* minor)`.
@@ -345,6 +403,8 @@ impl SecurityEnvironmentExportReport {
 }
 
 const CREATE_NAMES: &[&core::ffi::CStr] = &[c"CreateProcessSecurityEnvironment"];
+const POLICY_RESULT_NAME: &core::ffi::CStr =
+    c"Experimental_GetLastProcessSecurityEnvironmentPolicyResult";
 const QUERY_SUPPORT_NAMES: &[&core::ffi::CStr] = &[c"QueryProcessSecurityEnvironmentSupport"];
 const VERSION_SUPPORT_NAMES: &[&core::ffi::CStr] =
     &[c"IsProcessSecurityEnvironmentVersionSupported"];
@@ -360,6 +420,7 @@ const CLOSE_NAMES: &[&core::ffi::CStr] = &[c"CloseProcessSecurityEnvironment"];
 #[derive(Clone, Copy)]
 pub struct SecurityEnvironmentApi {
     create: PfnCreateProcessSecurityEnvironment,
+    get_last_policy_result: Option<PfnGetLastProcessSecurityEnvironmentPolicyResult>,
     query_support: PfnQueryProcessSecurityEnvironmentSupport,
     version_support: Option<PfnIsProcessSecurityEnvironmentVersionSupported>,
     close: PfnCloseProcessSecurityEnvironment,
@@ -397,6 +458,10 @@ impl SecurityEnvironmentApi {
     /// - [`LearningModeError::DllLoad`] if `processmodel.dll` cannot be loaded.
     /// - [`LearningModeError::ExportMissing`] if any required export is absent.
     pub fn load() -> Result<Self, LearningModeError> {
+        #[cfg(test)]
+        if let Some(api) = policy_diagnostics_tests::injected_api() {
+            return Ok(api);
+        }
         static CACHE: OnceLock<Result<SecurityEnvironmentApi, LearningModeError>> = OnceLock::new();
         CACHE.get_or_init(Self::load_uncached).clone()
     }
@@ -441,6 +506,16 @@ impl SecurityEnvironmentApi {
                     unsafe extern "system" fn() -> isize,
                     PfnCreateProcessSecurityEnvironment,
                 >(create_proc),
+                get_last_policy_result: GetProcAddress(
+                    hmodule,
+                    PCSTR(POLICY_RESULT_NAME.as_ptr().cast()),
+                )
+                .map(|function| {
+                    std::mem::transmute::<
+                        unsafe extern "system" fn() -> isize,
+                        PfnGetLastProcessSecurityEnvironmentPolicyResult,
+                    >(function)
+                }),
                 query_support: std::mem::transmute::<
                     unsafe extern "system" fn() -> isize,
                     PfnQueryProcessSecurityEnvironmentSupport,
@@ -466,6 +541,7 @@ impl SecurityEnvironmentApi {
     ) -> Self {
         Self {
             create,
+            get_last_policy_result: None,
             query_support,
             version_support: None,
             close,
@@ -483,6 +559,7 @@ impl SecurityEnvironmentApi {
     ) -> Self {
         Self {
             create,
+            get_last_policy_result: None,
             query_support,
             version_support: None,
             close,
@@ -539,8 +616,8 @@ impl SecurityEnvironmentApi {
     }
 
     fn query_support_flags(&self) -> Result<u64, LearningModeError> {
-        let mut support_flags = 0u64;
-        // SAFETY: `query_support` matches the official V2 declaration and
+        let mut support_flags = 0u32;
+        // SAFETY: `query_support` matches the native 32-bit flags declaration and
         // `support_flags` is a valid out-pointer.
         let result = unsafe { (self.query_support)(&mut support_flags) };
         if result.is_err() {
@@ -549,7 +626,34 @@ impl SecurityEnvironmentApi {
                 code: result.0,
             });
         }
-        Ok(support_flags)
+        Ok(u64::from(support_flags))
+    }
+
+    pub(crate) fn create_with_diagnostics(
+        &self,
+        specification: &[u8],
+        flags: u32,
+        policy: Option<&ContainerPolicy>,
+        capture_network_decisions: bool,
+    ) -> Result<ProcessSecurityEnvironment, CreationError> {
+        let get_last_policy_result = match self.get_last_policy_result {
+            Some(get_result) => self.support_flags().map(|support| {
+                (support & EXPERIMENTAL_PSE_SUPPORT_POLICY_RESULT != 0).then_some(get_result)
+            }),
+            None => Ok(None),
+        };
+        let flags = if matches!(&get_last_policy_result, Ok(Some(_))) {
+            flags | EXPERIMENTAL_PROCESS_SECURITY_ENVIRONMENT_FLAG_CAPTURE_POLICY_RESULT
+        } else {
+            flags
+        };
+        self.create_internal(
+            specification,
+            flags,
+            get_last_policy_result,
+            policy,
+            capture_network_decisions,
+        )
     }
 
     /// Create a process security environment from a PSEC FlatBuffer
@@ -562,6 +666,21 @@ impl SecurityEnvironmentApi {
         sandbox_specification: &[u8],
         flags: u32,
     ) -> Result<ProcessSecurityEnvironment, LearningModeError> {
+        self.create_internal(sandbox_specification, flags, Ok(None), None, false)
+            .map_err(|error| error.cause)
+    }
+
+    fn create_internal(
+        &self,
+        sandbox_specification: &[u8],
+        flags: u32,
+        get_last_policy_result: Result<
+            Option<PfnGetLastProcessSecurityEnvironmentPolicyResult>,
+            LearningModeError,
+        >,
+        policy: Option<&ContainerPolicy>,
+        capture_network_decisions: bool,
+    ) -> Result<ProcessSecurityEnvironment, CreationError> {
         let mut env = HANDLE(ptr::null_mut());
         let spec_len = u32::try_from(sandbox_specification.len()).map_err(|_| {
             LearningModeError::HResultCall {
@@ -582,22 +701,97 @@ impl SecurityEnvironmentApi {
                 &mut env,
             )
         };
+        let environment = (!env.0.is_null()).then_some(ProcessSecurityEnvironment {
+            handle: env,
+            close: self.close,
+        });
         if result.is_err() {
-            return Err(LearningModeError::HResultCall {
+            let mut error = CreationError::from(LearningModeError::HResultCall {
                 function: "CreateProcessSecurityEnvironment",
                 code: result.0,
             });
+            if result == windows::Win32::Foundation::ERROR_ACCESS_DISABLED_BY_POLICY.to_hresult() {
+                match get_last_policy_result {
+                    Ok(Some(get_result)) => {
+                        // The snapshot belongs to this native thread. Retrieve it before
+                        // logging, callbacks, another CPSE call, or environment cleanup.
+                        let diagnostic = policy_failure_diagnostic(
+                            get_result,
+                            policy,
+                            capture_network_decisions,
+                        );
+                        error.diagnostic = Some(diagnostic);
+                    }
+                    Err(capture_error) => {
+                        error.diagnostic = Some(format!(
+                            "Creation-policy diagnostics unavailable: {capture_error}."
+                        ));
+                    }
+                    Ok(None) => {}
+                }
+            }
+            return Err(error);
         }
-        if env.0.is_null() {
-            return Err(LearningModeError::HResultCall {
+        environment.ok_or_else(|| {
+            CreationError::from(LearningModeError::HResultCall {
                 function: "CreateProcessSecurityEnvironment",
                 code: windows::Win32::Foundation::E_UNEXPECTED.0,
-            });
-        }
-        Ok(ProcessSecurityEnvironment {
-            handle: env,
-            close: self.close,
+            })
         })
+    }
+}
+
+fn policy_failure_diagnostic(
+    get_result: PfnGetLastProcessSecurityEnvironmentPolicyResult,
+    policy: Option<&ContainerPolicy>,
+    capture_network_decisions: bool,
+) -> String {
+    let mut buffer = PolicyResultBuffer(ptr::null_mut());
+    let mut size = 0u32;
+    // SAFETY: the current getter writes a byte count and CoTaskMem-owned pointer
+    // into valid output locations on the failed creation's native thread.
+    let status = unsafe { get_result(POLICY_RESULT_VERSION, &mut size, &mut buffer.0) };
+    if status.is_err() {
+        let error = LearningModeError::HResultCall {
+            function: "Experimental_GetLastProcessSecurityEnvironmentPolicyResult",
+            code: status.0,
+        };
+        let reason = if status == windows::Win32::Foundation::ERROR_NOT_FOUND.to_hresult() {
+            "No cached policy diagnostic is available. "
+        } else {
+            ""
+        };
+        return format!("Creation-policy diagnostics unavailable: {reason}{error}.");
+    }
+    let decoded = buffer.bytes(size as usize).and_then(PolicyResult::decode);
+    match decoded {
+        Ok(result) => result.diagnostic(policy, capture_network_decisions),
+        Err(error) => format!("Creation-policy diagnostics unavailable: {error}."),
+    }
+}
+
+struct PolicyResultBuffer(*mut u8);
+
+impl PolicyResultBuffer {
+    fn bytes(&self, size: usize) -> Result<&[u8], &'static str> {
+        if self.0.is_null() || size == 0 || size > MAX_RESULT_BYTES {
+            return Err("native result has a null buffer or invalid byte count");
+        }
+        // SAFETY: the getter returns a readable allocation of its reported size.
+        // The size is bounded and this owner remains live through decoding.
+        Ok(unsafe { std::slice::from_raw_parts(self.0, size) })
+    }
+}
+
+impl Drop for PolicyResultBuffer {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: ownership transfers from the getter exactly once, including
+            // unexpected non-null outputs on failure or invalid serialized data.
+            unsafe { windows::Win32::System::Com::CoTaskMemFree(Some(self.0.cast())) };
+            #[cfg(test)]
+            policy_diagnostics_tests::policy_buffer_freed(self.0);
+        }
     }
 }
 
@@ -633,6 +827,20 @@ pub(crate) fn create(
     flags: u32,
 ) -> Result<ProcessSecurityEnvironment, LearningModeError> {
     SecurityEnvironmentApi::load()?.create(sandbox_specification, flags)
+}
+
+pub(crate) fn create_with_diagnostics(
+    specification: &[u8],
+    flags: u32,
+    policy: Option<&ContainerPolicy>,
+    capture_network_decisions: bool,
+) -> Result<ProcessSecurityEnvironment, CreationError> {
+    SecurityEnvironmentApi::load()?.create_with_diagnostics(
+        specification,
+        flags,
+        policy,
+        capture_network_decisions,
+    )
 }
 
 fn query_supported_minor_version_with(
@@ -742,6 +950,10 @@ pub fn is_security_environment_api_available() -> bool {
 }
 
 #[cfg(test)]
+#[path = "secenv_policy_tests.rs"]
+mod policy_diagnostics_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
@@ -771,11 +983,11 @@ mod tests {
         S_OK
     }
 
-    unsafe extern "system" fn fake_query(support_flags: *mut u64) -> HRESULT {
+    unsafe extern "system" fn fake_query(support_flags: *mut u32) -> HRESULT {
         QUERY_CALLS.fetch_add(1, Ordering::SeqCst);
         let result = HRESULT(QUERY_RESULT.load(Ordering::SeqCst));
         if result.is_ok() {
-            unsafe { *support_flags = QUERY_FLAGS.load(Ordering::SeqCst) };
+            unsafe { *support_flags = QUERY_FLAGS.load(Ordering::SeqCst) as u32 };
         }
         result
     }
