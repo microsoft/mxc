@@ -113,13 +113,17 @@ var support = MxcJson.Deserialize<NativePlatformSupport>(supportJson);
 Check(support is { IsSupported: true }, "platform support parsed");
 Check(support!.AvailableMethods.Length == 1, "available methods parsed");
 
-// 6. Deserialize structured output metadata (nested captureDenials object).
+// 6. Deserialize structured output metadata: both the nested captureDenials
+//    success object and the captureDenialsError failure object, so both output
+//    roots are exercised.
 const string metadataJson = """
-{"captureDenials":{"type":"captureDenials","outputPath":"C:\\out.json","exitCode":0,"totalDenials":3,"deniedResourcesTruncated":false}}
+{"captureDenials":{"type":"captureDenials","outputPath":"C:\\out.json","exitCode":0,"totalDenials":3,"deniedResourcesTruncated":false},"captureDenialsError":{"message":"finalize failed","etlPath":"C:\\trace.etl"}}
 """;
 var metadata = MxcJson.Deserialize<SandboxOutputMetadata>(metadataJson);
 Check(metadata?.CaptureDenials?.OutputPath == "C:\\out.json", "output metadata parsed");
 Check(metadata!.CaptureDenials!.TotalDenials == 3, "denial count parsed");
+Check(metadata.CaptureDenialsError?.Message == "finalize failed", "capture denials error parsed");
+Check(metadata.CaptureDenialsError!.EtlPath == "C:\\trace.etl", "capture denials error etl path parsed");
 
 // 7. Deserialize a warnings array (string[]).
 var warnings = MxcJson.Deserialize<string[]>("""["a","b"]""");
@@ -185,5 +189,53 @@ var startEnvelope = MxcLifecycle.BuildStartEnvelope(
 Check(startEnvelope["phase"]?.GetValue<string>() == "start", "start phase");
 Check(startEnvelope["sandboxId"]?.GetValue<string>() == "iso:smoke-test", "start sandbox id");
 Check(startEnvelope["telemetry"]?["enabled"]?.GetValue<bool>() == true, "start telemetry serialized");
+
+// 10. Deserialize IsolationSession provision metadata - the remaining native
+//     provision-output root.
+const string provisionMetadataJson =
+    """{"agentUserName":"sandbox-agent","agentUserSid":"S-1-5-21","ephemeralWorkspacePath":"C:\\ws"}""";
+var provisionMetadata = MxcJson.Deserialize<IsolationSessionProvisionMetadata>(provisionMetadataJson);
+Check(provisionMetadata?.AgentUserName == "sandbox-agent", "provision metadata agent user parsed");
+Check(provisionMetadata!.EphemeralWorkspacePath == "C:\\ws", "provision metadata workspace parsed");
+
+// 11. Parse a native request-probe output. This exercises the NativeProbeOutput
+//     root and MxcJson.ProbeOptions (strict unmapped-member handling), the
+//     deserialize path added with the request-aware probe.
+const string probeJson = """
+{
+  "tier": "appcontainer-dacl",
+  "needsDaclAugmentation": true,
+  "warnings": ["fell through"],
+  "probes": {
+    "baseContainerApiPresent": true,
+    "nativeCaptureAvailable": false,
+    "guardedCaptureAvailable": true,
+    "bfscfgPresent": false,
+    "bfsCompiledIn": false,
+    "baseContainerSupportsDenyPaths": true,
+    "baseContainerSupportsEnumeratePaths": false,
+    "baseContainerSupportsIngressHostLoopbackAllow": true,
+    "isolationSessionAvailable": true,
+    "hyperlightAvailable": false,
+    "uiCapabilities": {
+      "canBlockClipboardRead": true,
+      "canBlockClipboardWrite": false,
+      "canBlockInputInjection": true,
+      "canBlockInputMethodChanges": false,
+      "canBlockExternalUiObjects": true,
+      "canBlockGlobalUiNamespace": false,
+      "canBlockDesktopSwitching": true,
+      "canBlockLogoffOrShutdown": false,
+      "canBlockSystemParameterChanges": true,
+      "canBlockDisplaySettingsChanges": false
+    }
+  }
+}
+""";
+var probe = MxcSandbox.ParseProbeOutput(probeJson);
+Check(probe.Tier == IsolationTier.AppContainerDacl, "probe tier parsed");
+Check(probe.NeedsDaclAugmentation == true, "probe dacl augmentation parsed");
+Check(probe.Probes.BaseContainerApiPresent, "probe facts parsed");
+Check(probe.Probes.UiCapabilities.CanBlockClipboardRead, "probe ui capabilities parsed");
 
 Console.WriteLine("AOT smoke test passed: all JSON paths are reflection-free.");

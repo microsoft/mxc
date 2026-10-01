@@ -76,6 +76,13 @@ Prefer the smallest test command covering the change. Host-dependent backend sui
 - Never edit `schemas/stable/`; released schemas are immutable.
 - Never hand-edit generated development schemas or generated TypeScript wire types.
 - `schemas/schema-version.json` is the canonical source for compatibility constants.
+- In the .NET SDK (`sdk/dotnet/`), every serialized or deserialized wire type
+  must be registered as a `[JsonSerializable]` root in `MxcJsonContext`
+  (`MxcJsonSerialization.cs`) and routed through the `MxcJson` helpers, so the
+  source-generated resolver is used and no path falls back to reflection. When
+  you add or change such a type or an options object, add a matching
+  serialize/deserialize check to `Microsoft.Mxc.Sdk.AotSmokeTest`; its CI AOT
+  publish gate fails on any reflection-dependent path.
 
 See [`docs/schema-codegen.md`](../docs/schema-codegen.md) for regeneration commands.
 
