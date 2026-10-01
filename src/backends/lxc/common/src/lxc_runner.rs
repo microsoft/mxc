@@ -207,27 +207,27 @@ impl LxcScriptRunner {
         }
         ContainerNameClaim::acquire(&self.container_id).ok_or_else(|| {
             ScriptResponse::error(&format!(
-                "LXC: container '{}' already has a live sandbox in this process. LXC reads a \
-                 run's network section only when the container starts, so a second sandbox \
-                 would stop the first one's workload to restart it under this run's policy. \
-                 Let the first sandbox finish, or give this one its own containerId.",
+                "LXC: container '{}' is already in use by a run in this process. LXC reads a \
+                 run's network section only when the container starts, so a second run would \
+                 stop the first one's workload to restart it under its own policy. Let the \
+                 first run finish, or give this one its own containerId.",
                 self.container_id
             ))
         })
     }
 
     fn claim_generated_name(&self) -> Result<ContainerNameClaim, ScriptResponse> {
-        // A generated name carries the low 32 bits of the clock, and two
-        // sandboxes starting together can read the same value.
+        // A generated name carries the low 32 bits of the clock, and two runs
+        // starting together can read the same value.
         for _ in 0..GENERATED_NAME_ATTEMPTS {
             if let Some(claim) = ContainerNameClaim::acquire(&self.resolve_container_name()) {
                 return Ok(claim);
             }
         }
         Err(ScriptResponse::error(
-            "LXC: could not find a free container name for this sandbox; every generated name \
-             was already in use by a live sandbox in this process. Retry, or set containerId to \
-             a name of your own.",
+            "LXC: could not find a free container name for this run; every generated name was \
+             already in use by another run in this process. Retry, or set containerId to a name \
+             of your own.",
         ))
     }
 
