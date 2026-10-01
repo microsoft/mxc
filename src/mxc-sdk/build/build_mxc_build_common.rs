@@ -36,6 +36,13 @@ pub mod isolation_session_sdk {
             return Ok(path);
         }
 
+        let vendored = vendored_package_path();
+        if vendored.is_file() {
+            verify_package(&vendored)?;
+            println!("cargo:rerun-if-changed={}", vendored.display());
+            return Ok(vendored);
+        }
+
         let package_name = format!(
             "{}.{}.nupkg",
             PACKAGE_ID.to_ascii_lowercase(),
@@ -118,6 +125,13 @@ pub mod isolation_session_sdk {
 
         println!("cargo:rerun-if-changed={}", package_path.display());
         Ok(package_path)
+    }
+
+    /// The pinned package checked in under `external/windows-sdk/isolation-session`.
+    pub fn vendored_package_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../external/windows-sdk/isolation-session")
+            .join(format!("{PACKAGE_ID}.{PACKAGE_VERSION}.nupkg"))
     }
 
     pub fn stage_runtime() -> Result<(), String> {
@@ -258,7 +272,15 @@ pub mod isolation_session_sdk {
 
     #[cfg(test)]
     mod tests {
-        use super::{package_runtime_instance, validate_runtime_manifest};
+        use super::{
+            package_runtime_instance, validate_runtime_manifest, vendored_package_path,
+            verify_package,
+        };
+
+        #[test]
+        fn vendored_package_matches_pin() {
+            verify_package(&vendored_package_path()).unwrap();
+        }
 
         const MANIFEST: &str = "\
 <assembly>

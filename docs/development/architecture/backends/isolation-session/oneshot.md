@@ -204,7 +204,8 @@ per-machine fact owned by the MSI:
 
 ### Apartment initialization
 
-The private-CLSID path obtains the factory via `CoCreateInstance` and calls
+The lifted path obtains the factory from the shim's `DllGetActivationFactory`
+export and calls
 `IActivationFactory::ActivateInstance` directly — which, unlike the
 inbox `RoActivateInstance` path, does **not** implicitly initialize the
 WinRT/COM apartment. `src/core/wxc/src/main.rs` calls
@@ -405,7 +406,7 @@ The following were observed during VM testing and are accepted for v0.1.
 | Risk | Mitigation |
 |---|---|
 | Bindings tied to a specific OS API version | `GENERATION_INFO.toml` records the `windows-bindgen` version and target `windows` crate version; `build.rs` panics if the workspace `windows` crate drifts from the recorded `target_windows_crate`. Regeneration is a manual step performed by a Microsoft engineer with WinMD access |
-| OS API not present on older Windows builds | the IsolationSession feature is OS-side; the runner reports a hard, actionable error when the private-CLSID activation is not fused or the runtime fails to bind — it never silently falls back to the inbox binaries. Feature-unavailable test exercises this on CI |
+| OS API not present on older Windows builds | the IsolationSession feature is OS-side; the runner reports a hard, actionable error when the lifted activation payload or MSI runtime is missing or fails to bind — it never silently falls back to the inbox binaries. Feature-unavailable test exercises this on CI |
 | New Cargo feature increases coupling | The `isolation_session` feature is off by default in the workspace; default builds and existing CI are unaffected |
 | Manual VM testing required | The OS-side service has the same constraint for any consumer (it rejects network-logon tokens). Automated suite covers what it can without the OS-side service |
 | One-shot lifecycle is heavy (full provision → start per call) | Inherent to the one-shot path; the experimental flag indicates rough edges. The state-aware lifecycle is the mitigation — it provisions once and reuses the session across `exec` calls |
@@ -416,20 +417,25 @@ The following were observed during VM testing and are accepted for v0.1.
 **For end users:**
 
 - A Windows build with the IsolationSession feature enabled.
-- The paired isolation-session **MSI** installed, providing the runtime
-  binaries at the MSI install directory recorded in HKLM `InstallDir`. MXC
-  binds this coresident runtime by reg-free private-CLSID activation (the
-  fused `<comClass>` manifest in `wxc-exec` redirects to the co-located
-  `IsoSessionApp.dll`). Without the fused manifest MXC reports a hard,
-  actionable error — it does **not** silently fall back to the inbox
-  `System32` runtime.
+- Inbox mode (`isolation_session`): nothing else; MXC activates the OS
+  runtime through normal WinRT activation.
+- Lifted mode (`isolation_session_lifted`): the version-matched runtime MSI
+  (`winget install Microsoft.AI.IsolationSession`). The build stages the SDK's
+  `IsoSessionApp.dll` shim and stamped `IsoSession.manifest` beside
+  `wxc-exec` / `mxc_ffi.dll`; MXC loads the shim's `DllGetActivationFactory`
+  by absolute path, and the shim binds the MSI runtime recorded in HKLM
+  `InstallDir`. A missing payload or runtime is a hard, actionable error — MXC
+  does **not** silently fall back to the inbox `System32` runtime.
 - WinRT/COM initialized as MTA (handled by `wxc-exec` and `regfree.rs`).
 
 **For developers:**
 
 - Standard Rust toolchain.
-- `cargo build --features isolation_session` to build the feature into
-  `wxc-exec`. Default builds skip it — no impact on existing workflows.
+- `cargo build --features isolation_session` (inbox) or
+  `--features isolation_session_lifted` (lifted SDK + MSI) to build the
+  feature into `wxc-exec`. Default builds skip it — no impact on existing
+  workflows. Lifted builds use the pinned SDK package checked in under
+  `external/windows-sdk/isolation-session`.
 - A private WinMD only when **regenerating** bindings. As long as the OS
   API hasn't changed, no regen is needed.
 

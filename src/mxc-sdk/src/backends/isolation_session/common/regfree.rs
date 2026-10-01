@@ -4,7 +4,7 @@
 //! Activation for the lifted IsolationSession runtime.
 //!
 //! The lifted SDK places `IsoSessionApp.dll` and a stamped
-//! `IsoSession.manifest` beside the host. The shim exports
+//! `IsoSession.manifest` beside the host module (or executable). The shim exports
 //! `DllGetActivationFactory`; loading that export directly prevents the inbox
 //! WinRT catalog from shadowing the lifted implementation.
 
@@ -110,17 +110,57 @@ fn resolve_get_activation_factory(
     Ok(*GET_ACTIVATION_FACTORY.get().unwrap_or(&get_factory))
 }
 
+/// Finds the staged payload beside the module hosting this code first, so
+/// in-process hosts (node.exe, dotnet) resolve it beside `mxc_ffi.dll`, then
+/// beside the executable or its parent (`target\<profile>\deps` tests).
 fn adjacent_runtime_directory() -> Option<PathBuf> {
-    let executable = std::env::current_exe().ok()?;
-    let executable_directory = executable.parent()?;
-    let directory = [Some(executable_directory), executable_directory.parent()]
+    let module_directory = current_module_path().and_then(|path| path.parent().map(PathBuf::from));
+    let executable_directory = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(PathBuf::from));
+    let executable_parent = executable_directory
+        .as_deref()
+        .and_then(|directory| directory.parent().map(PathBuf::from));
+
+    [module_directory, executable_directory, executable_parent]
         .into_iter()
         .flatten()
         .find(|directory| {
             directory.join(SHIM_NAME).is_file() && directory.join(MANIFEST_NAME).is_file()
         })
-        .map(PathBuf::from);
-    directory
+}
+
+fn current_module_path() -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows::Win32::Foundation::HMODULE;
+    use windows::Win32::System::LibraryLoader::{
+        GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+    };
+
+    let mut module = HMODULE::default();
+    let address = current_module_path as *const () as *const u16;
+    unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            PCWSTR(address),
+            &mut module,
+        )
+    }
+    .ok()?;
+
+    let mut buffer = vec![0u16; 1024];
+    loop {
+        let length = unsafe { GetModuleFileNameW(Some(module), &mut buffer) } as usize;
+        if length == 0 {
+            return None;
+        }
+        if length < buffer.len() {
+            buffer.truncate(length);
+            return Some(PathBuf::from(std::ffi::OsString::from_wide(&buffer)));
+        }
+        buffer.resize(buffer.len() * 2, 0);
+    }
 }
 
 fn activate_from_factory<T>(factory: IActivationFactory) -> windows_core::Result<T>

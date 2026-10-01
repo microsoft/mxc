@@ -363,14 +363,16 @@ pub(super) fn lifted_payload_missing(operation: &str) -> IsolationSessionError {
         Some(REGDB_E_CLASSNOTREG_HRESULT),
         Some(
             "IsolationSession lifted activation was not taken: IsoSessionApp.dll and \
-             IsoSession.manifest are not co-located with this executable, so the \
-             version-pinned MSI-installed IsolationSession runtime could not be bound. MXC will \
+             IsoSession.manifest are not co-located with this module or executable, or the \
+             shim reported the runtime class as not registered, so the version-pinned \
+             MSI-installed IsolationSession runtime could not be bound. MXC will \
              not silently fall back to the inbox System32 runtime."
                 .to_string(),
         ),
         Some(
             "Rebuild against the Microsoft.Windows.AI.IsolationSession.SDK NuGet so \
-             IsoSessionApp.dll and its stamped IsoSession.manifest are staged beside the host."
+             IsoSessionApp.dll and its stamped IsoSession.manifest are staged beside the host, \
+             and install the matching runtime MSI (`winget install Microsoft.AI.IsolationSession`)."
                 .to_string(),
         ),
     ))
@@ -876,7 +878,8 @@ mod tests {
         assert!(mapped
             .remediation
             .as_deref()
-            .is_some_and(|r| r.contains("IsolationSession.SDK NuGet")));
+            .is_some_and(|r| r.contains("IsolationSession.SDK NuGet")
+                && r.contains("winget install Microsoft.AI.IsolationSession")));
     }
 
     #[test]

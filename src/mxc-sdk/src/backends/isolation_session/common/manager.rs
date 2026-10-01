@@ -83,13 +83,13 @@ unsafe impl Send for MtaReference {}
 unsafe impl Sync for MtaReference {}
 
 /// Activates the in-proc IsolationSession runtime factory and returns the
-/// instance. Activation is redirected reg-free through the fused private-CLSID
-/// activator (see [`super::regfree`]) to the co-located `IsoSessionApp.dll`,
-/// binding the version-pinned MSI-installed runtime.
+/// instance. Activation goes through the `DllGetActivationFactory` export of
+/// the co-located `IsoSessionApp.dll` shim (see [`super::regfree`]), binding
+/// the version-pinned MSI-installed runtime.
 ///
-/// There is **no inbox fallback**: if the private-CLSID activator is not fused
-/// beside this executable, this returns a hard [`lifted_payload_missing`] error rather
-/// than silently binding the inbox `System32` runtime.
+/// There is **no inbox fallback**: if the lifted payload is not staged beside
+/// this module or executable, this returns a hard [`lifted_payload_missing`]
+/// error rather than silently binding the inbox `System32` runtime.
 #[cfg(feature = "lifted_msi")]
 fn check_service_available_and_activate() -> Result<IsoSessionOps, IsolationSessionError> {
     match super::regfree::activate_from_adjacent_shim::<IsoSessionOps>() {
@@ -98,14 +98,14 @@ fn check_service_available_and_activate() -> Result<IsoSessionOps, IsolationSess
         // testable without depending on whether this host can activate the
         // API at all.
         Some(Err(e)) => Err(activation_error(e.code().0 as u32, &e.message())),
-        // The fused manifest is absent: refuse to silently bind the inbox
+        // The lifted payload is absent: refuse to silently bind the inbox
         // runtime, and surface an actionable hard error instead.
         None => Err(lifted_payload_missing(op::ACTIVATE)),
     }
 }
 
-/// Activates the system-registered API for embedders such as the Rust and C#
-/// SDKs. They do not carry `wxc-exec`'s fused lifted-MSI activation manifest.
+/// Inbox mode: activates the system-registered OS API through normal WinRT
+/// activation.
 #[cfg(not(feature = "lifted_msi"))]
 fn check_service_available_and_activate() -> Result<IsoSessionOps, IsolationSessionError> {
     IsoSessionOps::new().map_err(|e| activation_error(e.code().0 as u32, &e.message()))

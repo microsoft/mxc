@@ -13,9 +13,24 @@ exact package version pinned in
 endpoint, verify its SHA-256, and cache it in the standard global NuGet package
 directory.
 
-For offline builds or validation before a package is public, set
-`ISOLATION_SESSION_SDK_PACKAGE` to the exact `.nupkg` path. The same pinned hash
-is enforced for this override.
+1. `ISOLATION_SESSION_SDK_PACKAGE`, if set, for validating a different local
+   copy of the same package.
+2. The standard global NuGet package cache, then the NuGet.org V3
+   flat-container endpoint (cached after download).
+
+## Runtime prerequisite
+
+Lifted binaries bind the version-pinned runtime installed by the
+IsolationSession MSI. Install the matching release with:
+
+```powershell
+winget install Microsoft.AI.IsolationSession
+```
+
+The build stages `IsoSessionApp.dll` and `IsoSession.manifest` beside
+`wxc-exec.exe` and `mxc_ffi.dll`. MXC never falls back to the inbox runtime
+when the payload or MSI is missing; it reports `BackendUnavailable` with this
+remediation.
 
 ## Build commands
 
@@ -29,18 +44,23 @@ cargo build --release -p wxc --features isolation_session
 cargo build --release -p wxc --features isolation_session_lifted
 ```
 
+The same features exist on `mxc-sdk` and `mxc_ffi`. From the repository root,
+`build.bat --with-isolation-session` builds inbox mode and
+`build.bat --with-isolation-session-lifted` builds lifted mode and copies the
+payload into the Node and .NET SDK runtimes. The .NET SDK uses
+`-p:MxcWithIsolationSession=true` (inbox) or `-p:MxcIsolationSessionLifted=true`
+(lifted).
+
 Lifted mode fails the build if package download, integrity validation, metadata
 generation, or activation-payload staging fails. It never silently produces an
 inbox-mode binary.
 
 ## Updating the lifted SDK
 
-1. Publish the new `Microsoft.Windows.AI.IsolationSession.SDK` package version
-   to NuGet.org.
-2. Update `PACKAGE_VERSION` and `PACKAGE_SHA256` in
+1. Update `PACKAGE_VERSION` and `PACKAGE_SHA256` in
    `src/mxc-sdk/build/build_mxc_build_common.rs`.
-3. Update `GENERATION_INFO.toml` with the package and WinMD provenance.
-4. Build and test both feature configurations.
+2. Update `GENERATION_INFO.toml` with the package and WinMD provenance.
+3. Build and test both feature configurations.
 
 `windows-bindgen` is pinned to `=0.62.1` in `src/mxc-sdk/Cargo.toml`
 and must stay in lockstep with the workspace `windows` crate's major.minor
