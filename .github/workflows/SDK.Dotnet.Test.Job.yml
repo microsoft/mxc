@@ -141,4 +141,4 @@ jobs:
           if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Published AOT executable not found: $exe" }
           & $exe
           if ($LASTEXITCODE -ne 0) { throw "AOT smoke test exited $LASTEXITCODE" }
-          Write-Host "AOT publish gate passed on $rid: reflection-free JSON layer verified."
+          Write-Host "AOT publish gate passed on ${rid}: reflection-free JSON layer verified."
