@@ -113,8 +113,16 @@ function Phase-InheritDefaultEnv {
     )
     foreach ($case in $versionCases) {
         $slug = $(if ($case.Inherit) { 'true' } else { 'false' })
+        # A verbatim environment still has to carry the variables Windows needs
+        # to launch a container; these cases are about whether the schema
+        # accepts the field, so don't let an unrelated env check decide them.
+        $envList = $(if ($case.Inherit) {
+            @('MXC_LC_MINE=yes')
+        } else {
+            Get-MinimalEnv -Extra @('MXC_LC_MINE=yes')
+        })
         $cfg = New-Config -Name "lc-inherit-0900-$slug" -CommandLine $cmd -ReadWrite @($rw) `
-            -Env @('MXC_LC_MINE=yes') -InheritDefaultEnv $case.Inherit -SchemaVersion '0.9.0-alpha'
+            -Env $envList -InheritDefaultEnv $case.Inherit -SchemaVersion '0.9.0-alpha'
         $log = Join-Path $ScratchRoot "logs\lc-inherit-0900-$slug.log"
         $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log -TimeoutSec 30
         $rejected = Test-WasRejected -Run $r -Log (Read-Log $log)
