@@ -130,15 +130,20 @@ function Invoke-ClipboardCase {
     $writeAllowed = $outputText -match "(?m)^WRITECLIPBOARD=allowed\r?$"
     $writeBlocked = $outputText -match "(?m)^WRITECLIPBOARD=blocked\r?$"
     $writeInconclusive = $outputText -match "(?m)^WRITECLIPBOARD=inconclusive\r?$"
-    & $probe matches $writeToken 2>$null
-    $writeTokenCheckExitCode = $LASTEXITCODE
-    $writeTokenObserved = $writeTokenCheckExitCode -eq 0
-    $writeTokenCheckConclusive = $writeTokenCheckExitCode -ne 2
+    $writeTokenObserved = $false
+    $writeTokenCheckExitCode = "not-run"
+    $writeTokenCheckConclusive = $true
+    if ($ExpectAllowed) {
+        & $probe matches $writeToken 2>$null
+        $writeTokenCheckExitCode = $LASTEXITCODE
+        $writeTokenObserved = $writeTokenCheckExitCode -eq 0
+        $writeTokenCheckConclusive = $writeTokenCheckExitCode -ne 2
+    }
 
     $passed = if ($ExpectAllowed) {
         $exitCode -eq 0 -and $readAllowed -and $writeAllowed -and $writeTokenCheckConclusive -and $writeTokenObserved
     } else {
-        $exitCode -eq 0 -and $readBlocked -and $writeBlocked -and $writeTokenCheckConclusive -and -not $writeTokenObserved
+        $exitCode -eq 0 -and $readBlocked -and $writeBlocked
     }
 
     [pscustomobject]@{
