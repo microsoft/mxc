@@ -109,15 +109,6 @@ jobs:
           Write-Host 'Optional backend switches verified against native availability.'
 
       # Native AOT publish gate for the SDK's JSON layer, on every OS matrix job.
-      # The smoke test never calls native code, so it needs neither a prepared
-      # backend nor the cargo-built mxc_ffi at runtime - only each platform's AOT
-      # toolchain: the MSVC linker on Windows and Xcode's linker on macOS (both
-      # already on the runners), plus clang and zlib on Linux (installed below).
-      # A reflection-dependent serialize/deserialize path (e.g. a wire type
-      # missing its [JsonSerializable] registration) surfaces as an IL/AOT/trim
-      # warning here and fails the publish; the reflection fallback is also
-      # disabled at runtime, so a gap that slips past the compiler throws when
-      # the exe runs.
       - name: AOT publish gate (SDK JSON layer)
         shell: pwsh
         run: |
