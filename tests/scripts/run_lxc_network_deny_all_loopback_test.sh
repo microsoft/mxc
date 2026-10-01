@@ -66,8 +66,8 @@ for config in "$CTRL_CONFIG" "$OMIT_CONFIG"; do
     [ -f "$config" ] || fail "fixture $config is missing."
 
     schema_ver="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$config" | head -1)"
-    if ! echo "$schema_ver" | grep -q '^0\.9\.'; then
-        fail "fixture $(basename "$config") declares schema '$schema_ver', not 0.9; this test covers the deny-all behavior of the current contract."
+    if ! echo "$schema_ver" | grep -q '^1\.0\.'; then
+        fail "fixture $(basename "$config") declares schema '$schema_ver', not 1.0; this test covers the deny-all behavior of the current contract."
     fi
 
     for marker in "$LOOPBACK_OK" "$NET_BLOCKED"; do

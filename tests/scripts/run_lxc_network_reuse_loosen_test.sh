@@ -55,14 +55,14 @@ fixture_field() {
     sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$1" | head -1
 }
 
-# Drift guard: all three fixtures must exist and declare a 0.9 schema, and all
+# Drift guard: all three fixtures must exist and declare a 1.0 schema, and all
 # must probe the same address.
 for config in "$CTRL_CONFIG" "$DENY_CONFIG" "$ALLOW_CONFIG"; do
     [ -f "$config" ] || fail "fixture $config is missing."
 
     schema_ver="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$config" | head -1)"
-    if ! echo "$schema_ver" | grep -q '^0\.9\.'; then
-        fail "fixture $(basename "$config") declares schema '$schema_ver', not 0.9; this test covers reuse behavior on the current contract."
+    if ! echo "$schema_ver" | grep -q '^1\.0\.'; then
+        fail "fixture $(basename "$config") declares schema '$schema_ver', not 1.0; this test covers reuse behavior on the current contract."
     fi
 
     if ! grep -Fq "$PROBE_ADDRESS" "$config"; then
