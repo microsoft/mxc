@@ -99,102 +99,6 @@ jobs:
       cargoFeatures: isolation_session
       enableTest: 'false'
 
-  - powershell: |
-      $messagesPath = Join-Path $env:AGENT_TEMPDIRECTORY "mxc-sdk-isolation-session-test-build.jsonl"
-      $probeMessagesPath = Join-Path $env:AGENT_TEMPDIRECTORY "mxc-sta-probe-build.jsonl"
-      Push-Location "$(workingDirectory)"
-      try {
-          & cargo test --locked --release --target "$(triplet)" `
-              -p mxc-sdk --features isolation_session `
-              --test isolation_session --no-run --message-format=json `
-              > $messagesPath
-          if ($LASTEXITCODE -ne 0) {
-              throw "Building the mxc-sdk IsolationSession test executable failed with exit code $LASTEXITCODE"
-          }
-
-          & cargo build --locked --release --target "$(triplet)" `
-              -p mxc-sdk --features isolation_session `
-              --example sta_probe --message-format=json `
-              > $probeMessagesPath
-          if ($LASTEXITCODE -ne 0) {
-              throw "Building the mxc-sdk STA probe failed with exit code $LASTEXITCODE"
-          }
-      }
-      finally {
-          Pop-Location
-      }
-
-      $testExe = Get-Content -LiteralPath $messagesPath | ForEach-Object {
-          try { $_ | ConvertFrom-Json -ErrorAction Stop } catch { $null }
-      } | Where-Object {
-          $_.reason -eq 'compiler-artifact' -and
-          $_.target.name -eq 'isolation_session' -and
-          $_.executable
-      } | Select-Object -Last 1 -ExpandProperty executable
-
-      if (-not $testExe -or -not (Test-Path -LiteralPath $testExe -PathType Leaf)) {
-          throw "Cargo did not report the mxc-sdk IsolationSession test executable"
-      }
-
-      Write-Host "##vso[task.setvariable variable=mxcSdkIsolationSessionTestExe]$testExe"
-      Write-Host "  -> $testExe"
-
-      $probeExe = Get-Content -LiteralPath $probeMessagesPath | ForEach-Object {
-          try { $_ | ConvertFrom-Json -ErrorAction Stop } catch { $null }
-      } | Where-Object {
-          $_.reason -eq 'compiler-artifact' -and
-          $_.target.name -eq 'sta_probe' -and
-          $_.executable
-      } | Select-Object -Last 1 -ExpandProperty executable
-
-      if (-not $probeExe -or -not (Test-Path -LiteralPath $probeExe -PathType Leaf)) {
-          throw "Cargo did not report the mxc-sdk STA probe executable"
-      }
-
-      Write-Host "##vso[task.setvariable variable=mxcStaProbeExe]$probeExe"
-      Write-Host "  -> $probeExe"
-    displayName: 'Build in-process IsolationSession tests'
-
-  # Build the SDK and integration tests so the Node E2E suite can be
-  # included in the test bundle.  The SDK has a native dep (node-pty)
-  # that requires node-gyp; the windows-2022 image has VS build tools.
-  # Populate sdk/node/bin/x64 with the freshly-built wxc-exec.exe so the SDK
-  # resolves its binary at runtime.  (build.bat does this; the pipeline
-  # must replicate it since we only build wxc-exec, not the full repo.)
-  - powershell: |
-      $sdkBin = "$(Build.SourcesDirectory)/sdk/node/bin/x64"
-      New-Item -ItemType Directory -Force -Path $sdkBin | Out-Null
-      Copy-Item "$(CARGO_TARGET_DIR)/x86_64-pc-windows-msvc/release/wxc-exec.exe" "$sdkBin/"
-      Write-Host "  -> sdk/node/bin/x64/wxc-exec.exe"
-
-      Push-Location "$(workingDirectory)"
-      try {
-          & cargo build --locked --release --target "$(triplet)" `
-              -p mxc_ffi --features isolation_session
-          if ($LASTEXITCODE -ne 0) {
-              throw "Building the Node SDK native library failed with exit code $LASTEXITCODE"
-          }
-      }
-      finally {
-          Pop-Location
-      }
-
-      $nodeFfi = "$(CARGO_TARGET_DIR)/$(triplet)/release/mxc_ffi.dll"
-      if (-not (Test-Path -LiteralPath $nodeFfi -PathType Leaf)) {
-          throw "The Node SDK native build did not produce $nodeFfi"
-      }
-      Copy-Item $nodeFfi "$sdkBin/"
-      Write-Host "  -> sdk/node/bin/x64/mxc_ffi.dll"
-    displayName: 'Stage native Node SDK binaries'
-
-  - script: npm ci && npm run build
-    displayName: 'Build SDK (@microsoft/mxc-sdk)'
-    workingDirectory: sdk/node
-
-  - script: npm ci && npm run build
-    displayName: 'Build SDK integration tests'
-    workingDirectory: sdk/node/tests/integration
-
   - task: UseDotNet@2
     displayName: 'Use .NET SDK 10'
     inputs:
@@ -204,163 +108,23 @@ jobs:
   - task: NuGetAuthenticate@1
     displayName: 'Authenticate .NET package restore'
 
+  # The recipe comes from this pipeline's checkout, so both packages build and
+  # validate identically to scheduled validation; only the source differs.
   - powershell: |
-      $project = "$(Build.SourcesDirectory)/sdk/dotnet/Microsoft.Mxc.Sdk.Tests/Microsoft.Mxc.Sdk.Tests.csproj"
-      $out = Join-Path $env:AGENT_TEMPDIRECTORY 'mxc-dotnet-tests'
-      Remove-Item -LiteralPath $out -Recurse -Force -ErrorAction SilentlyContinue
-
-      & dotnet publish $project -c Release -r win-x64 `
-          -p:MxcWithIsolationSession=true `
-          --source "https://microsoft.pkgs.visualstudio.com/Dart/_packaging/Mxc-Azure-Feed/nuget/v3/index.json" `
-          --self-contained true -o $out --nologo
-      if ($LASTEXITCODE -ne 0) {
-          throw "Publishing Microsoft.Mxc.Sdk.Tests failed with exit code $LASTEXITCODE"
-      }
-
-      $nativeTarget = Join-Path $env:AGENT_TEMPDIRECTORY 'mxc-dotnet-test-native'
-      & cargo build --locked --target "$(triplet)" --target-dir $nativeTarget `
-          -p mxc_ffi --features 'dotnetsdk,test-support,isolation_session' `
-          --manifest-path "$(workingDirectory)/Cargo.toml"
-      if ($LASTEXITCODE -ne 0) {
-          throw "Building the .NET test-support native library failed with exit code $LASTEXITCODE"
-      }
-
-      $testNative = Join-Path $nativeTarget "$(triplet)/debug/mxc_ffi.dll"
-      if (-not (Test-Path -LiteralPath $testNative -PathType Leaf)) {
-          throw "The .NET test-support native build did not produce $testNative"
-      }
-      Copy-Item $testNative (Join-Path $out 'mxc_ffi.dll') -Force
-
-      foreach ($name in @('Microsoft.Mxc.Sdk.Tests.exe', 'mxc_ffi.dll', 'plm.exe')) {
-          $required = Join-Path $out $name
-          if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
-              throw "The self-contained .NET test payload is missing $name"
-          }
-      }
-
-      Write-Host "##vso[task.setvariable variable=mxcDotNetTestsDir]$out"
-      Write-Host "  -> $out"
-    displayName: 'Publish self-contained .NET SDK tests'
-
-  # Stage the test bundle for publishing as a pipeline artifact.
-  - powershell: |
-      $out = "$(outputDirectory)"
-      New-Item -ItemType Directory -Force -Path "$out/bin/x64", "$out/inproc", "$out/dotnet", "$out/node", "$out/test_configs", "$out/test_scripts" | Out-Null
-
-      # wxc-exec binary (isolation_session enabled)
-      Copy-Item "$(CARGO_TARGET_DIR)/x86_64-pc-windows-msvc/release/wxc-exec.exe" "$out/bin/x64/"
-      Write-Host "  -> bin/x64/wxc-exec.exe"
-
-      # Rust SDK test executable that calls the IsolationSession backend
-      # in-process rather than through wxc-exec.
-      Copy-Item "$(mxcSdkIsolationSessionTestExe)" "$out/inproc/mxc-sdk-isolation-session-tests.exe"
-      Write-Host "  -> inproc/mxc-sdk-isolation-session-tests.exe"
-      Copy-Item "$(mxcStaProbeExe)" "$out/inproc/sta_probe.exe"
-      Write-Host "  -> inproc/sta_probe.exe"
-
-      # Self-contained xUnit v3 executable plus the .NET runtime and native
-      # MXC unit, so the test machine needs no installed .NET SDK/runtime.
-      Copy-Item "$(mxcDotNetTestsDir)/*" "$out/dotnet/" -Recurse -Force
-      Write-Host "  -> dotnet/Microsoft.Mxc.Sdk.Tests.exe"
-
-      # Self-contained Node runtime for the SDK integration tests
-      $nodeExe = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
-      $nodeLicense = Join-Path (Split-Path -Parent $nodeExe) "LICENSE"
-      if (-not (Test-Path -LiteralPath $nodeLicense -PathType Leaf)) {
-          throw "Node.js license not found alongside the UseNode runtime: $nodeLicense"
-      }
-      Copy-Item $nodeExe "$out/node/node.exe"
-      Copy-Item $nodeLicense "$out/node/LICENSE"
-      Write-Host "  -> node/node.exe"
-      Write-Host "  -> node/LICENSE"
-
-      # Test configs (isolation_session subset)
-      $configs = @(Get-ChildItem "$(Build.SourcesDirectory)/tests/configs/isolation_session_*.json" -File)
-      if ($configs.Count -eq 0) {
-          throw "No isolation_session test configs found under tests/configs"
-      }
-
-      foreach ($f in $configs) {
-          Copy-Item $f.FullName "$out/test_configs/"
-          Write-Host "  -> test_configs/$($f.Name)"
-      }
-
-      # Test scripts
-      $scripts = @(
-          'run_isolation_session_tests.ps1',
-          'run_isolation_session_state_aware_tests.ps1',
-          'run_isolation_session_resize_smoke.ps1'
-      )
-      foreach ($s in $scripts) {
-          $src = "$(Build.SourcesDirectory)/tests/scripts/$s"
-          if (-not (Test-Path -LiteralPath $src -PathType Leaf)) {
-               throw "Required test script not found: $src"
-           }
-          Copy-Item $src "$out/test_scripts/"
-          Write-Host "  -> test_scripts/$s"
-      }
-
-      # SDK integration tests (Node E2E suite)
-      $sdkInteg = "$out/sdk-integration"
-      $integSrc = "$(Build.SourcesDirectory)/sdk/node/tests/integration"
-      $sdkRoot  = "$(Build.SourcesDirectory)/sdk/node"
-      New-Item -ItemType Directory -Force -Path $sdkInteg | Out-Null
-
-      # Built test files, runner, and package.json
-      New-Item -ItemType Directory -Force -Path "$sdkInteg/dist" | Out-Null
-      Copy-Item "$integSrc/dist/isolation-session-*.test.js" "$sdkInteg/dist/"
-      Copy-Item "$integSrc/dist/test-helpers.js" "$sdkInteg/dist/"
-      Copy-Item "$integSrc/package.json" "$sdkInteg/package.json"
-      Copy-Item "$integSrc/run-tests.js" "$sdkInteg/run-tests.js"
-
-      # node_modules — skip the @microsoft symlink (it points back into
-      # the repo and would recurse).  Copy the SDK's published shape
-      # directly into @microsoft/mxc-sdk instead.
-      $integNm = "$integSrc/node_modules"
-      $stagingNm = "$sdkInteg/node_modules"
-      New-Item -ItemType Directory -Force -Path $stagingNm | Out-Null
-      foreach ($entry in Get-ChildItem -Path $integNm -Force) {
-          if ($entry.Name -eq '@microsoft') { continue }
-          Copy-Item -Recurse -Force $entry.FullName "$stagingNm/$($entry.Name)"
-      }
-      $sdkStaged = "$stagingNm/@microsoft/mxc-sdk"
-      New-Item -ItemType Directory -Force -Path $sdkStaged | Out-Null
-      Copy-Item -Recurse "$sdkRoot/bin" "$sdkStaged/bin"
-      Copy-Item -Recurse "$sdkRoot/dist" "$sdkStaged/dist"
-      Copy-Item "$sdkRoot/package.json" "$sdkStaged/package.json"
-      if (Test-Path "$sdkRoot/LICENSE.md") {
-          Copy-Item "$sdkRoot/LICENSE.md" "$sdkStaged/LICENSE.md"
-      }
-      Copy-Item -Recurse "$sdkRoot/node_modules" "$sdkStaged/node_modules"
-      Write-Host "  -> sdk-integration/ (Node E2E suite)"
-
-      # Manifest
-      $manifest = @{
-          format_version = 1
-          produced_at    = (Get-Date).ToUniversalTime().ToString('o')
-          branch_name    = "${{ parameters.checkoutRepo }}"
-          # The ref actually checked out for the repository resource, so
-          # consumers validate the real source ref rather than the alias.
-          source_ref     = "$(sourceRepositoryRef)"
-          commit_sha     = (git -C "$(Build.SourcesDirectory)" rev-parse HEAD).Trim()
-          build_id       = "$(Build.BuildId)"
-          pipeline       = "$(Build.DefinitionName)"
-          triplet        = "x86_64-pc-windows-msvc"
-          package        = "${{ parameters.packageName }}"
-          features       = @(
-              'isolation_session',
-              'dotnetsdk',
-              'test-support',
-              'node-sdk-integration'
-          )
-      }
-      $manifest | ConvertTo-Json -Depth 3 | Set-Content "$out/manifest.json" -Encoding UTF8
-      Write-Host "  -> manifest.json"
-
-      Write-Host "`n==> Bundle assembled at $out"
-      Get-ChildItem $out -Recurse -File | ForEach-Object { Write-Host "  $($_.FullName.Replace($out, ''))" }
-    displayName: 'Assemble test bundle'
-
+      & "$(Pipeline.Workspace)/lock-check/scripts/ci/build-isolation-session-test-bundle.ps1" `
+          -Phase Build `
+          -Architecture x64 `
+          -SourceRoot "$(Pipeline.Workspace)/s" `
+          -OutputDirectory "$(outputDirectory)" `
+          -WxcExecPath "$(CARGO_TARGET_DIR)/$(triplet)/release/wxc-exec.exe" `
+          -NuGetSource "https://microsoft.pkgs.visualstudio.com/Dart/_packaging/Mxc-Azure-Feed/nuget/v3/index.json" `
+          -Pipeline "$(Build.DefinitionName)" `
+          -BranchName "${{ parameters.checkoutRepo }}" `
+          -SourceRef "$(sourceRepositoryRef)" `
+          -BuildId "$(Build.BuildId)" `
+          -Package "${{ parameters.packageName }}"
+      Get-ChildItem "$(outputDirectory)" -Recurse -File | ForEach-Object { Write-Host "  $($_.FullName.Replace('$(outputDirectory)', ''))" }
+    displayName: 'Build test bundle'
   # Test sign (CP-230072) the staged binaries so the vpack ships signed binaries.
   - task: EsrpCodeSigning@5
     displayName: Code Sign
@@ -403,94 +167,19 @@ jobs:
           }
         ]
 
-  # Load the packaged entry point with the packaged runtime and verify that
-  # its tests are discoverable. The tests themselves require an
-  # IsolationSession-capable OS test host, which the packaging pool is not.
+  # The tests themselves need an IsolationSession-capable host, which the
+  # packaging pool is not; this checks the signed payloads load and discover.
   - powershell: |
-      $bundleRoot = "$(outputDirectory)"
-      $nodeExe = "$bundleRoot/node/node.exe"
-      $nodeLicense = "$bundleRoot/node/LICENSE"
-      $testRoot = "$bundleRoot/sdk-integration"
-      $testEntry = "dist/isolation-session-state-aware.test.js"
-
-      foreach ($requiredFile in @($nodeExe, $nodeLicense, "$testRoot/$testEntry")) {
-          if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
-              throw "Required packaged SDK test file not found: $requiredFile"
-          }
-      }
-
-      Push-Location $testRoot
-      try {
-          $env:MXC_SKIP_OS_BUILD_DEPENDENT_TESTS = '1'
-          $testOutput = @(& $nodeExe --test --test-force-exit $testEntry 2>&1)
-          $testOutput | ForEach-Object { Write-Host $_ }
-          if ($LASTEXITCODE -ne 0) {
-              throw "Packaged SDK test discovery failed with exit code $LASTEXITCODE"
-          }
-          if (($testOutput -join "`n") -notmatch '(?m)^[^A-Za-z0-9]*tests\s+[1-9][0-9]*\r?$') {
-              throw "Packaged SDK test discovery did not find any tests"
-          }
-      }
-      finally {
-          Pop-Location
-      }
-    displayName: 'Validate packaged SDK integration tests'
-
-  - powershell: |
-      $testExe = "$(outputDirectory)/inproc/mxc-sdk-isolation-session-tests.exe"
-      if (-not (Test-Path -LiteralPath $testExe -PathType Leaf)) {
-          throw "Packaged in-process test executable not found: $testExe"
-      }
-
-      $testList = @(& $testExe --list)
-      $testList | ForEach-Object { Write-Host $_ }
-      if ($LASTEXITCODE -ne 0) {
-          throw "Packaged in-process test discovery failed with exit code $LASTEXITCODE"
-      }
-      if (($testList -join "`n") -notmatch '(?m)^[1-9][0-9]* tests, 0 benchmarks\r?$') {
-          throw "Packaged in-process test discovery did not find any tests"
-      }
-
-      $probeExe = "$(outputDirectory)/inproc/sta_probe.exe"
-      if (-not (Test-Path -LiteralPath $probeExe -PathType Leaf)) {
-          throw "Packaged STA probe executable not found: $probeExe"
-      }
-      $previousPreference = $ErrorActionPreference
-      try {
-          $ErrorActionPreference = 'Continue'
-          $probeOutput = @(& $probeExe invalid 2>&1)
-          $probeExitCode = $LASTEXITCODE
-      }
-      finally {
-          $ErrorActionPreference = $previousPreference
-      }
-      $probeOutput | ForEach-Object { Write-Host $_ }
-      if ($probeExitCode -ne 2 -or ($probeOutput -join "`n") -notmatch 'unknown mode: invalid') {
-          throw "Packaged STA probe launch validation failed with exit code $probeExitCode"
-      }
-      $global:LASTEXITCODE = 0
-    displayName: 'Validate packaged in-process tests'
-
-  - powershell: |
-      $testExe = "$(outputDirectory)/dotnet/Microsoft.Mxc.Sdk.Tests.exe"
-      if (-not (Test-Path -LiteralPath $testExe -PathType Leaf)) {
-          throw "Packaged .NET test executable not found: $testExe"
-      }
-
-      $testList = @(& $testExe -list full 2>&1)
-      $testList | ForEach-Object { Write-Host $_ }
-      if ($LASTEXITCODE -ne 0) {
-          throw "Packaged .NET test discovery failed with exit code $LASTEXITCODE"
-      }
-      if (($testList -join "`n") -notmatch 'Microsoft\.Mxc\.Sdk\.Tests') {
-          throw "Packaged .NET test discovery did not find any tests"
-      }
-
-      & $testExe -class 'Microsoft.Mxc.Sdk.Tests.MxcTelemetryTests' -noLogo
-      if ($LASTEXITCODE -ne 0) {
-          throw "Packaged .NET telemetry tests failed with exit code $LASTEXITCODE"
-      }
-    displayName: 'Validate packaged .NET tests'
+      & "$(Pipeline.Workspace)/lock-check/scripts/ci/build-isolation-session-test-bundle.ps1" `
+          -Phase Validate `
+          -Architecture x64 `
+          -SourceRoot "$(Pipeline.Workspace)/s" `
+          -OutputDirectory "$(outputDirectory)" `
+          -Pipeline "$(Build.DefinitionName)" `
+          -BranchName "${{ parameters.checkoutRepo }}" `
+          -SourceRef "$(sourceRepositoryRef)" `
+          -BuildId "$(Build.BuildId)"
+    displayName: 'Validate signed test bundle'
 
   - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish Isolation Test Bundle (${{ parameters.packageName }})'

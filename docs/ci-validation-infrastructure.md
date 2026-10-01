@@ -29,7 +29,8 @@ the individual local test scripts are documented in
 | `.github/workflows/Validation.Tests.Scheduled.yml` | Scheduled entry point. Builds artifacts, then calls the matrix job. |
 | `.github/workflows/Validation.Tests.Matrix.Job.yml` | `workflow_call`-only. Resolves the plan and runs the per-family test jobs. |
 | `.github/workflows/Package.IsolationSession.TestBundle.Job.yml` | `workflow_call`-only. Builds the IsolationSession test bundle natively on x64 and arm64 and uploads it as `isolation-session-test-bundle-<target>`. |
-| `scripts/ci/build-isolation-session-test-bundle.ps1` | Builds and assembles the IsolationSession test bundle, and checks that each payload discovers its tests. |
+| `scripts/ci/build-isolation-session-test-bundle.ps1` | Builds and assembles the IsolationSession test bundle, and checks that each payload discovers its tests. The Azure Pipelines job that feeds the Windows OS vpack runs the same script, split by `-Phase` around code signing. |
+| `tests/scripts/run_isolation_session_suites.ps1` | Ships in the bundle and defines what each IsolationSession suite runs and what passes. `run_backend_validation_tests.ps1` calls it with `-BackendUnavailable Fail`; the Windows OS lab calls it with `Skip`. |
 | `scripts/ci/validation-test-matrix.json` | The matrix: OS versions, backends, triggers, job staggering. |
 | `scripts/ci/resolve-validation-test-matrix.mjs` | Matrix validator + plan expander. Emits the GitHub Actions matrices. |
 | `scripts/ci/prepare-windows-host.ps1` | Per-backend Windows host preparation / prerequisite assertions, plus the `winget` repair and the workload-tooling install. Runs in Windows PowerShell, because it installs the `pwsh` the steps after it use. |
