@@ -4,7 +4,7 @@
 import assert from 'node:assert';
 import { describe, it } from 'node:test';
 import { _errorCodeForNativeStatus } from '../../src/bindings/run.js';
-import { parseExecutionMetadata } from '../../src/bindings/native-error.js';
+import { nativeStatusError, parseExecutionMetadata } from '../../src/bindings/native-error.js';
 import { MxcError } from '../../src/v1/errors.js';
 import type { CaptureDenialsResult, CaptureDenialsError, ExecutionMetadata } from '../../src/v1/index.js';
 
@@ -57,6 +57,24 @@ describe('native execution metadata decoding', () => {
 });
 
 describe('native run binding', () => {
+  it('preserves creation-policy text after native message storage is released', () => {
+    const message = [
+      'CreateProcessSecurityEnvironment failed (HRESULT = 0x800704EC)',
+      'Returned constraints: 2 (non-exhaustive).',
+      'Resource 1: "C:\\\\work"',
+      'Resource 2: "C:\\\\\u65e5\u672c"',
+      'required=18446744073709551615.',
+    ].join('\n');
+    const storage = Buffer.from(`${message}\0`, 'utf8');
+    const error = nativeStatusError(12, { message: storage });
+    storage.fill(0);
+    assert.strictEqual(error.code, 'backend_error');
+    assert.strictEqual(error.message, message);
+    assert.deepStrictEqual(error.details, { ffiStatus: 12 });
+    assert.strictEqual(error.operation, undefined);
+    assert.strictEqual(error.nativeCode, undefined);
+  });
+
   it('maps SDK status codes', () => {
     assert.strictEqual(_errorCodeForNativeStatus(1), 'malformed_request');
     assert.strictEqual(_errorCodeForNativeStatus(2), 'unsupported_containment');
