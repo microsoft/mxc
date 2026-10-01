@@ -489,24 +489,30 @@ pub struct Wslc {
 }
 
 /// Per-phase WSLc **provision** normalization input, constructed from the exact
-/// `wslc.provision` contract. Carries only what the amortized daemon session
-/// honors: the container image (or a local tarball to import).
+/// `wslc.provision` contract. Carries what the amortized daemon session honors:
+/// the container image (or a local tarball to import) and the container's own
+/// host → container port forwards.
 ///
 /// Filesystem mounts and network mode derive from the top-level `policy`
-/// section (readwrite / readonly paths, network), not from here. The
-/// one-shot-only sizing knobs (`cpuCount` / `memoryMb` / `gpu` / `storagePath`
-/// / `portMappings`) are deliberately absent: the daemon shares a single session
-/// across sandboxes and does not apply per-sandbox sizing. start / exec / stop /
-/// deprovision carry no backend-specific config (the exec command flows through
-/// the top-level `process` section), so they have no phase struct.
+/// section (readwrite / readonly paths, network), not from here. The session
+/// sizing knobs (`cpuCount` / `memoryMb` / `gpu` / `storagePath`) are
+/// deliberately absent: the daemon shares a single session across sandboxes, so
+/// they cannot be set per sandbox. `portMappings` is container-scoped and so is
+/// honored here. start / exec / stop / deprovision carry no backend-specific
+/// config (the exec command flows through the top-level `process` section), so
+/// they have no phase struct.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WslcProvisionPhase {
     /// Container image reference (e.g. `alpine:latest`). Defaults to
     /// `alpine:latest` when omitted.
     pub image: Option<String>,
+
     /// Path to a local image tarball to import instead of pulling.
     pub image_tar_path: Option<String>,
+
+    /// Host → container TCP forwards applied to this sandbox's container.
+    pub port_mappings: Option<Vec<PortMapping>>,
 }
 
 /// A single host → container port forward retained in normalized WSLC settings.

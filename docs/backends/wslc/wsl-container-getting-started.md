@@ -314,6 +314,44 @@ WSLC-specific settings go under `wslc` in the JSON config:
 | `gpu` | boolean | `false` | Enable GPU passthrough |
 | `storagePath` | string | System default | Host path for container storage (VHD) |
 | `imageTarPath` | string | — | Path to a local tar file to import as the image |
+| `portMappings` | array | `[]` | Host→container TCP forwards; each entry takes `windowsPort` and `containerPort` |
+
+### Port mappings
+
+```json
+"wslc": {
+    "portMappings": [
+        { "windowsPort": 8080, "containerPort": 80 }
+    ]
+}
+```
+
+TCP only — the WSLC SDK runtime returns `E_NOTIMPL` for UDP, so a `"udp"`
+protocol is rejected. Two entries claiming the same `windowsPort` are also
+rejected.
+
+The state-aware lifecycle takes the same list under
+`wslc.provision.portMappings`, which requires schema `1.1.0-alpha`:
+
+```json
+{
+    "version": "1.1.0-alpha",
+    "phase": "provision",
+    "containment": "wslc",
+    "wslc": {
+        "provision": {
+            "portMappings": [
+                { "windowsPort": 8080, "containerPort": 80 }
+            ]
+        }
+    }
+}
+```
+
+The state-aware daemon creates one container per sandbox, so a forward belongs
+to the sandbox that declared it. The session-wide `cpuCount` / `memoryMb` /
+`gpu` / `storagePath` settings stay one-shot-only, because that daemon shares a
+single WSL session across every sandbox.
 
 ### Image sources
 
@@ -441,7 +479,8 @@ dispatch. In supported contracts, `network.enforcementMode`,
 `network.allowLocalNetwork`, host lists, and `network.proxy` are unknown fields
 and fail structural parsing; there is no legacy `"capabilities"` selector.
 Use the directional all-allow or all-deny posture above. Inbound reachability
-requires explicit host-to-container forwards through `wslc.portMappings`;
+requires explicit host-to-container forwards through `wslc.portMappings`
+(one-shot) or `wslc.provision.portMappings` (state-aware);
 `ingress.default: "allow"` alone does not create them.
 
 **Caveats**

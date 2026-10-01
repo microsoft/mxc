@@ -409,7 +409,7 @@ interface ProvisionStateAwareRequest {
     provision?: { appId?: string };
   };
   wslc?: {
-    provision?: { image?: string; imageTarPath?: string };
+    provision?: { image?: string; imageTarPath?: string; portMappings?: PortMapping[] };
   };
 }
 
@@ -502,10 +502,20 @@ interface StateAwareBackendSections {
     // backend-specific config for those phases.
   };
   wslc?: {
-    provision?: { image?: string; imageTarPath?: string };
+    provision?: { image?: string; imageTarPath?: string; portMappings?: PortMapping[] };
   };
 }
+
+interface PortMapping {
+  windowsPort: number;    // 1-65535
+  containerPort: number;  // 1-65535
+  protocol?: 'tcp';       // TCP is the only protocol the WSLC runtime implements
+}
 ```
+
+`wslc.provision.portMappings` requires schema `1.1.0-alpha`; the published
+`0.9.0-alpha` WSLC contract does not declare it. Two entries claiming the same
+`windowsPort` are rejected.
 
 | Layer | Wire shape | Constraint |
 |---|---|---|

@@ -128,7 +128,7 @@ if (-not $SkipSetup) {
     $SetupScript = Join-Path $RepoRoot "scripts\setup-wslc.ps1"
     if (Test-Path $SetupScript) {
         Write-Host "Pre-pulling WSLc images (pass -SkipSetup to skip)..." -ForegroundColor Cyan
-        & $SetupScript -WxcExecPath $WxcExec -Image @("alpine:latest") -Force
+        & $SetupScript -WxcExecPath $WxcExec -Image @("alpine:latest", "python:3.12-alpine") -Force
         if ($LASTEXITCODE -ne 0) {
             Write-Host "WARN: setup-wslc.ps1 reported failures; continuing anyway." -ForegroundColor Yellow
         }
@@ -821,8 +821,59 @@ try {
     }
 }
 
-# ---------------- Lifecycle D: validation rejections ----------------
+# ---------------- Lifecycle CP: provision-time port mappings ----------------
 
+# `wslc.provision.portMappings` is container-scoped, so the daemon applies it to
+# the container this sandbox owns. Mirrors the one-shot port-mapping tests: the
+# container binding the mapped port is the observable signal that the forward
+# was configured rather than dropped. Requires schema 1.1.0-alpha, which is the
+# only contract declaring the field.
+$script:portSandboxId = $null
+$portDeprovisionedOk = $false
+try {
+    $portProvisionedOk = Run-StateAwareTest "CP: provision (port mappings)" {
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_port_mappings.json'
+        $envObj = Assert-ResultEnvelope $r "port-mapping provision"
+        if ($envObj) { $script:portSandboxId = [string]$envObj.result.sandboxId }
+    }
+
+    $portStartedOk = $false
+    if ($portProvisionedOk) {
+        $portStartedOk = Run-StateAwareTest "CP: start" {
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $script:portSandboxId
+            $null = Assert-ResultEnvelope $r "port-mapping start"
+        }
+    }
+
+    if ($portStartedOk) {
+        Run-StateAwareTest "CP: exec binds the mapped container port" {
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_exec_port_bind.json' -SandboxId $script:portSandboxId
+            Assert-True ($r.ExitCode -eq 0) "exit code = 0"
+            Assert-True ($r.Stdout -match 'STATE_AWARE_PORT_MAPPING_OK') `
+                "container bound the mapped port ($($r.Stdout.Trim()))"
+        } | Out-Null
+    }
+
+    if ($portProvisionedOk) {
+        Run-StateAwareTest "CP: stop" {
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_stop.json' -SandboxId $script:portSandboxId
+            $null = Assert-ResultEnvelope $r "port-mapping stop"
+        } | Out-Null
+        $portDeprovPassed = Run-StateAwareTest "CP: deprovision" {
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:portSandboxId
+            $null = Assert-ResultEnvelope $r "port-mapping deprovision"
+        }
+        if ($portDeprovPassed) { $portDeprovisionedOk = $true }
+    }
+} finally {
+    if ($null -ne $script:portSandboxId -and -not $portDeprovisionedOk) {
+        Write-Host ""
+        Write-Host "[cleanup] best-effort deprovision of $script:portSandboxId" -ForegroundColor DarkGray
+        try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:portSandboxId } catch { }
+    }
+}
+
+# ---------------- Lifecycle D: validation rejections ----------------
 # Validation runs before any daemon call, so these never provision a real
 # sandbox and need no cleanup. They cover the provision-phase honor-matrix
 # rejection cells.

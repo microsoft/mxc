@@ -132,7 +132,10 @@ reasons:
   are not registered and are rejected. A missing declaration is rejected too.
   Raw SDK entry points enforce the same exact set. High-level v1 one-shot and
   state-aware APIs select stable `1.0.0` internally and expose only the
-  backends supported by that contract. The compatibility constants in
+  backends supported by that contract. Capabilities the published contract does
+  not declare — Windows Sandbox state-aware, and
+  `wslc.provision.portMappings` — are reachable through the raw `1.1.0-alpha`
+  path only. The compatibility constants in
   `schemas/schema-version.json` do not authorize other versions within their
   minimum/maximum range.
 - **Product version** tracks the shipped artifacts and moves independently of the

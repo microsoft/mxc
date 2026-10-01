@@ -443,7 +443,8 @@ phase is being driven against an existing provisioned sandbox.
 State-aware envelopes use an exact backend-specific contract:
 
 - IsolationSession uses published `0.9.0-alpha`.
-- WSLC uses published `0.9.0-alpha`; Windows Sandbox uses development
+- WSLC uses published `0.9.0-alpha`, or development `1.1.0-alpha` for
+  `wslc.provision.portMappings`; Windows Sandbox uses development
   `1.1.0-alpha`.
 
 Contracts before `0.9.0-alpha` are retired. The supported published
@@ -483,6 +484,32 @@ Phase / sandboxId / containment validation:
 State-aware-capable backends today are `isolation_session`, `windows_sandbox`,
 and `wslc` (all Windows-only). IsolationSession does not require runtime
 experimental authorization; Windows Sandbox does.
+
+WSLC `provision` accepts `wslc.provision.portMappings`, the same
+`windowsPort` / `containerPort` / `protocol` entries as the one-shot
+`wslc.portMappings` list, applied to the sandbox's own container:
+
+```json
+{
+    "$schema": "./schemas/dev/mxc-config.schema.1.1.0-alpha.json",
+    "version": "1.1.0-alpha",
+    "phase": "provision",
+    "containment": "wslc",
+    "wslc": {
+        "provision": {
+            "image": "alpine:latest",
+            "portMappings": [
+                { "windowsPort": 8080, "containerPort": 80 }
+            ]
+        }
+    }
+}
+```
+
+Two entries claiming the same `windowsPort` are rejected on both surfaces. The
+session sizing knobs (`cpuCount` / `memoryMb` / `gpu` / `storagePath`) stay
+one-shot-only, because the state-aware daemon shares one WSL session across
+every sandbox and cannot size them individually.
 
 Full lifecycle API: [container lifecycle](container-lifecycle.md).
 

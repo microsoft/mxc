@@ -1,0 +1,10 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+    "version": "1.0.0",
+    "phase": "exec",
+    "sandboxId": "wslc:{{SANDBOX_ID}}",
+    "process": {
+        "commandLine": "python3 -c 'import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind((\"0.0.0.0\",8080)); s.close(); print(\"STATE_AWARE_PORT_MAPPING_OK\")'",
+        "timeout": 30000
+    }
+}
