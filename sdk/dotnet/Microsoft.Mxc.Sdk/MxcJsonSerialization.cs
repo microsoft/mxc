@@ -13,9 +13,6 @@ namespace Microsoft.Mxc.Sdk;
 /// camelCase, matching the wire format the native layer expects. The generic
 /// converter is Native AOT and trimming safe; the non-generic
 /// <see cref="JsonStringEnumConverter"/> is not.
-/// 
-/// We need this custom converter so we don't have to specify JsonNamingPolicy
-/// in [JsonConverter(typeof())] statements.
 /// </summary>
 internal sealed class CamelCaseJsonStringEnumConverter<TEnum>
     : JsonStringEnumConverter<TEnum>
@@ -96,12 +93,9 @@ internal static class MxcJson
 {
     /// <summary>
     /// The default options: the source-generated resolver plus camelCase naming
-    /// and null-omission carried from <see cref="MxcJsonContext"/>. Property-level
-    /// <c>[JsonConverter]</c> attributes supply the non-null network section
-    /// converters.
+    /// and null-omission carried from <see cref="MxcJsonContext"/>.
     /// </summary>
-    internal static readonly JsonSerializerOptions Options =
-        new(MxcJsonContext.Default.Options);
+    internal static readonly JsonSerializerOptions Options = CreateOptions();
 
     /// <summary>
     /// Options for deserializing the native request probe output. Built from the
@@ -109,11 +103,59 @@ internal static class MxcJson
     /// unmapped-member handling, so an unexpected field from the native layer is
     /// rejected rather than silently ignored.
     /// </summary>
-    internal static readonly JsonSerializerOptions ProbeOptions =
-        new(MxcJsonContext.Default.Options)
+    internal static readonly JsonSerializerOptions ProbeOptions = CreateProbeOptions();
+
+    private static JsonSerializerOptions CreateOptions()
+    {
+        var options = new JsonSerializerOptions(MxcJsonContext.Default.Options);
+        AddEnumConverters(options);
+        AddNetworkSectionConverters(options);
+        return options;
+    }
+
+    private static JsonSerializerOptions CreateProbeOptions()
+    {
+        var options = CreateOptions();
+        options.UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow;
+        return options;
+    }
+
+    /// <summary>
+    /// Registers the camelCase enum converters on <paramref name="options"/>.
+    /// </summary>
+    private static void AddEnumConverters(JsonSerializerOptions options)
+    {
+        options.Converters.Add(new CamelCaseJsonStringEnumConverter<CaptureDenialsMode>());
+        options.Converters.Add(new CamelCaseJsonStringEnumConverter<NetworkAction>());
+        options.Converters.Add(new CamelCaseJsonStringEnumConverter<NetworkProtocol>());
+        options.Converters.Add(new CamelCaseJsonStringEnumConverter<ClipboardPolicy>());
+        options.Converters.Add(new CamelCaseJsonStringEnumConverter<ProcessContainerUiIsolation>());
+        options.Converters.Add(new CamelCaseJsonStringEnumConverter<ProcessContainerSystemSettings>());
+        options.Converters.Add(new CamelCaseJsonStringEnumConverter<StateAwareNetworkDefault>());
+    }
+
+    /// <summary>
+    /// Applies the non-null network section converter to the directional
+    /// <c>egress</c>/<c>ingress</c> properties via a resolver modifier on the
+    /// SDK's own options.
+    /// </summary>
+    private static void AddNetworkSectionConverters(JsonSerializerOptions options)
+    {
+        options.TypeInfoResolver = options.TypeInfoResolver!.WithAddedModifier(static typeInfo =>
         {
-            UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
-        };
+            foreach (var property in typeInfo.Properties)
+            {
+                if (property.PropertyType == typeof(NetworkEgressPolicy))
+                {
+                    property.CustomConverter = new NonNullNetworkSectionJsonConverter<NetworkEgressPolicy>();
+                }
+                else if (property.PropertyType == typeof(NetworkIngressPolicy))
+                {
+                    property.CustomConverter = new NonNullNetworkSectionJsonConverter<NetworkIngressPolicy>();
+                }
+            }
+        });
+    }
 
     /// <summary>
     /// Resolve the generated <see cref="JsonTypeInfo{T}"/> for <typeparamref name="T"/>

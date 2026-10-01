@@ -180,7 +180,6 @@ public sealed class ProcessContainerFilesystemPolicy
 }
 
 /// <summary>ProcessContainer desktop-resource isolation level.</summary>
-[JsonConverter(typeof(CamelCaseJsonStringEnumConverter<ProcessContainerUiIsolation>))]
 public enum ProcessContainerUiIsolation
 {
     /// <summary>Isolate the desktop.</summary>
@@ -197,7 +196,6 @@ public enum ProcessContainerUiIsolation
 }
 
 /// <summary>ProcessContainer system-settings access level.</summary>
-[JsonConverter(typeof(CamelCaseJsonStringEnumConverter<ProcessContainerSystemSettings>))]
 public enum ProcessContainerSystemSettings
 {
     /// <summary>Allow parameter and display-setting changes.</summary>

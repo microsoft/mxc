@@ -36,7 +36,8 @@ public class V1SandboxPolicyTests
     {
         var error = Assert.Throws<JsonException>(() =>
             JsonSerializer.Deserialize<SandboxPolicy>(
-                $$$"""{"network":{"{{{field}}}":null}}"""));
+                $$$"""{"network":{"{{{field}}}":null}}""",
+                MxcJson.Options));
         Assert.Contains("cannot be null", error.Message);
     }
 

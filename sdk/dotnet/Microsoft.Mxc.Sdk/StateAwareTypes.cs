@@ -19,7 +19,6 @@ public enum StateAwareContainment
 }
 
 /// <summary>The default action for traffic with no matching rule.</summary>
-[JsonConverter(typeof(CamelCaseJsonStringEnumConverter<StateAwareNetworkDefault>))]
 public enum StateAwareNetworkDefault
 {
     /// <summary>Deny traffic by default.</summary>
@@ -38,11 +37,9 @@ public enum StateAwareNetworkDefault
 public sealed class StateAwareNetworkPolicy
 {
     /// <summary>Directional outbound posture for WSLC provision.</summary>
-    [JsonConverter(typeof(NonNullNetworkSectionJsonConverter<NetworkEgressPolicy>))]
     public NetworkEgressPolicy? Egress { get; set; }
 
     /// <summary>Directional inbound and host-loopback posture for WSLC provision.</summary>
-    [JsonConverter(typeof(NonNullNetworkSectionJsonConverter<NetworkIngressPolicy>))]
     public NetworkIngressPolicy? Ingress { get; set; }
 }
 

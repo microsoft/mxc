@@ -45,9 +45,9 @@ public class V1LifecycleTests
     public void StateAwareOptions_RejectExplicitNullNetworkSections(string field)
     {
         var error = Assert.Throws<JsonException>(() =>
-            JsonSerializer.Deserialize<WslcProvisionOptions>(
-                $$$"""{"network":{"{{{field}}}":null}}""",
-                JsonOptions));
+            JsonSerializer.Deserialize<StateAwareNetworkPolicy>(
+                $$$"""{"{{{field}}}":null}""",
+                MxcJson.Options));
         Assert.Contains("cannot be null", error.Message);
     }
 
