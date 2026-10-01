@@ -114,7 +114,7 @@ Current platforms:
 |-------------|--------|----------|------------|--------------------------|------------|
 | `windows-prerelease-process-container` | windows | `1es-mxc-windows-prerelease-t1-x64` | `1es-mxc-windows-prerelease-t1-arm64` | process-t1, isolation-session, wslc, windows-sandbox, microvm | process-t1, isolation-session |
 | `windows-prerelease-isolation-session` | windows | `1es-mxc-e2e-win-prerelease-isolationsesh-x64` | `1es-mxc-e2e-win-prerelease-isolationsesh-arm64` | same as above | same as above |
-| `windows-prerelease-26h1` | windows | `1es-mxc-windows-prerelease-26h1-x64` | `1es-mxc-windows-prerelease-26h1-arm64` | process-t1, wslc, windows-sandbox, microvm | process-t1 |
+| `windows-prerelease-26h1` | windows | `1es-mxc-windows-prerelease-26h1-x64` | `1es-mxc-windows-prerelease-26h1-arm64` | process-t1, isolation-session, wslc, windows-sandbox, microvm | process-t1, isolation-session |
 | `windows-25h2` | windows | `1es-mxc-e2e-windows-25h2-pro-x64` | `1es-mxc-e2e-windows-25h2-pro-arm64` | process-t1, wslc, windows-sandbox, microvm | process-t1, isolation-session |
 | `windows-24h2` | windows | `1es-mxc-e2e-windows-24h2-pro-x64` | `1es-mxc-e2e-windows-24h2-pro-arm64` | process-t1, wslc, windows-sandbox, microvm | process-t1, isolation-session |
 | `windows-23h2` | windows | `1es-mxc-e2e-windows-23h2-enterprise-x64` | *(dormant)* | process-t3, wslc, windows-sandbox, microvm | — |
@@ -276,9 +276,11 @@ a process-container job selects follows from that build.
   (apt/dnf/yum/microdnf), verifies their required commands, and relaxes
   `kernel.apparmor_restrict_unprivileged_userns` (ephemeral CI hosts only).
 - `lxc` — installs the LXC stack, reloads the AppArmor profile, starts and waits
-  for `lxcbr0`, enables bridge netfilter, and makes sure the bridge's NAT rule
-  is in place. On RHEL-likes it needs EPEL first, because Red Hat dropped LXC
-  after RHEL 7 and ships no replacement.
+  for `lxcbr0`, and moves the bridge into firewalld's trusted zone on a host
+  running firewalld. On RHEL-likes it needs EPEL first, because Red Hat dropped
+  LXC after RHEL 7 and ships no replacement. Without the zone assignment the
+  default zone rejects the container's IPv4 DHCP, and a container holding only
+  an IPv6 address fails every network test.
 - `microvm` — asserts the NanVix payload exists.
 
 Every install above goes through two shared helpers rather than its own

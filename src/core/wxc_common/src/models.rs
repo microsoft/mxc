@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
 use crate::error::WxcError;
+use crate::mxc_error::MxcErrorCode;
 
 /// Selects which containment backend to use for script execution.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1070,9 +1071,10 @@ pub struct ExecutionRequest {
     ///   [`ExecutionRequest::inherit_default_env`].
     ///
     /// The Windows process container honors the distinction at every schema
-    /// version; LXC, Bubblewrap, Seatbelt, and WSLc honor it from 0.9. Below
-    /// 0.9 on those four, and on IsolationSession at every version, `None` and
-    /// `Some(vec![])` are treated alike.
+    /// version; LXC, Bubblewrap, Seatbelt, and WSLc honor it from 0.9, and
+    /// below 0.9 treat `None` and `Some(vec![])` alike. IsolationSession starts
+    /// every process from the agent user's default environment, so it rejects
+    /// `Some` without [`ExecutionRequest::inherit_default_env`].
     pub env: Option<Vec<String>>,
 
     /// Layer [`ExecutionRequest::env`] on top of the backend's default
@@ -1231,12 +1233,13 @@ impl ExecutionRequest {
     /// empty" flattened to the same empty slice.
     ///
     /// Only for backends that have no default environment to distinguish them
-    /// against — IsolationSession, plus every backend below schema 0.9. A
-    /// backend with a default block must match on [`ExecutionRequest::env`]
-    /// directly, since `None` means "give the child the default" and
-    /// `Some(vec![])` means "give the child nothing". WSLc's default is the
-    /// container image's `ENV`, which MXC cannot enumerate, so it takes the
-    /// state from `env` and the entries from here.
+    /// against — every backend below schema 0.9. A backend with a default block
+    /// must match on [`ExecutionRequest::env`] directly, since `None` means
+    /// "give the child the default" and `Some(vec![])` means "give the child
+    /// nothing". A backend whose default MXC cannot enumerate takes the state
+    /// from `env` and the entries from here: WSLc, whose default is the
+    /// container image's `ENV`, and IsolationSession, which starts every
+    /// process from the agent user's default environment.
     pub fn env_entries(&self) -> &[String] {
         self.env.as_deref().unwrap_or(&[])
     }
@@ -1325,6 +1328,21 @@ pub enum FailurePhase {
     /// [`LaunchFailed`] so callers can fall back to a lower tier rather than
     /// hard-fail.
     BackendUnavailable,
+}
+
+impl FailurePhase {
+    /// The wire error code a failure in this phase is reported as.
+    ///
+    /// [`Rejected`](FailurePhase::Rejected) is the one phase a caller can act on
+    /// by changing the request, so it is the only one that earns a code of its
+    /// own; every other failure is an infrastructure problem the caller cannot
+    /// distinguish usefully and stays `backend_error`.
+    pub fn error_code(&self) -> MxcErrorCode {
+        match self {
+            FailurePhase::Rejected => MxcErrorCode::PolicyValidation,
+            _ => MxcErrorCode::BackendError,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1418,11 +1436,64 @@ impl ScriptResponse {
             ..Default::default()
         }
     }
+
+    /// Create a response for a request the backend refuses.
+    ///
+    /// Exits 1 and reports `policy_validation`, matching a parser-side
+    /// rejection, so a caller can tell a refused policy from a crash, a launch
+    /// failure, or a timeout — all of which exit -1.
+    ///
+    /// Unlike [`ScriptResponse::error`] the message is not also copied into
+    /// `standard_err`: nothing ran, so there is no workload output to relay, and
+    /// copying it would print the message bare and then again inside the JSON
+    /// envelope.
+    pub fn rejected(msg: &str) -> Self {
+        ScriptResponse {
+            exit_code: 1,
+            error_message: msg.to_string(),
+            failure_phase: FailurePhase::Rejected,
+            ..Default::default()
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_rejection_earns_a_caller_actionable_error_code() {
+        assert_eq!(
+            FailurePhase::Rejected.error_code(),
+            MxcErrorCode::PolicyValidation
+        );
+        for phase in [
+            FailurePhase::None,
+            FailurePhase::LaunchFailed,
+            FailurePhase::PostLaunchFailed,
+            FailurePhase::ProcessExited,
+            FailurePhase::Timeout,
+            FailurePhase::BackendUnavailable,
+        ] {
+            assert_eq!(
+                phase.error_code(),
+                MxcErrorCode::BackendError,
+                "phase {phase:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejection_exits_one_and_leaves_stderr_to_the_envelope() {
+        let rejected = ScriptResponse::rejected("policy not supported");
+
+        assert_eq!(rejected.exit_code, 1);
+        assert_eq!(rejected.failure_phase, FailurePhase::Rejected);
+        assert_eq!(rejected.error_message, "policy not supported");
+        // The envelope carries the message; duplicating it into standard_err
+        // would print it twice, unseparated, ahead of the JSON.
+        assert!(rejected.standard_err.is_empty());
+    }
 
     #[test]
     fn sandbox_paths_normalize_against_the_root() {

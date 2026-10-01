@@ -93,10 +93,12 @@ pub struct NetworkEgress {
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NetworkIngress {
-    /// Optional default action for private-network inbound traffic.
+    /// Optional default action for private-network inbound traffic. Denies
+    /// when omitted.
     #[serde(default)]
     pub default: OptionalField<NetworkAction>,
-    /// Optional bidirectional host-loopback connectivity action.
+    /// Optional bidirectional host-loopback connectivity action. Denies when
+    /// omitted, independently of `default`.
     #[serde(default)]
     pub host_loopback: OptionalField<NetworkAction>,
 }

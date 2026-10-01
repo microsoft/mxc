@@ -1,0 +1,19 @@
+{
+  "version": "1.0.0",
+  "containment": "isolation_session",
+  "process": {
+    "commandLine": "echo"
+  },
+  "network": {
+    "egress": {
+      "default": "allow"
+    },
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "allow"
+    }
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://proxy.example:8080"
+  }
+}

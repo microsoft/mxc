@@ -61,7 +61,11 @@ requiring root privileges or a container runtime.
   > launched without `--enable-ipv6`, so the sandbox namespace has no IPv6
   > connectivity at all and the v6 rules exist to keep the unmatched family
   > closed. An IPv6 destination is unreachable even when a rule allows it
-  > (see #955).
+  > (see #955). On a kernel without IPv6 (built without `CONFIG_IPV6`, or
+  > booted with `ipv6.disable=1`) the sandbox cannot open an IPv6 socket, so
+  > the runner returns a warning that it is skipping the v6 rules and installs
+  > only the IPv4 chains. The `ip6tables` tools are still probed there,
+  > because they ship in the same package as `iptables`.
   ```bash
   # Debian/Ubuntu
   sudo apt install slirp4netns util-linux iptables
@@ -530,9 +534,9 @@ for the cost of a slirp hop.
 
 A consequence worth knowing: on 0.8, a config with **no `network` section at
 all** selects the directional shape with a synthesized default-deny. It renders
-identically to the legacy default only because `NetworkPolicy::default()` and
-`NetworkAction::default()` both mean deny — a coincidence the tests pin rather
-than rely on silently.
+identically to the legacy default because the contract resolves an omitted
+ingress control to `deny` — the same posture `NetworkPolicy::default()`
+carries. The tests pin that agreement rather than rely on it silently.
 
 **What the backend refuses.** Bubblewrap declares support for
 `egress.default`, `egress` rules, `ingress.default`, `ingress.hostLoopback`,
@@ -685,7 +689,8 @@ request fails if its private namespace cannot be configured.
    through slirp's `10.0.2.2` host gateway. Once slirp is up, the supervisor
    programs a default-DROP `MXC_EGRESS` chain into that namespace via
    `nsenter`, permitting only loopback and the proxy endpoint (IPv6 gets a
-   DROP-only chain), plus a default-DROP `MXC_INGRESS` chain on `INPUT`
+   DROP-only chain, or no chain when the kernel has no IPv6 to carry), plus a
+   default-DROP `MXC_INGRESS` chain on `INPUT`
    (see [Inbound](#inbound-is-closed-by-the-namespace-and-by-a-chain)).
    Each family's whole table — both chains, their rules in
    order, the terminal verdicts and the `OUTPUT` / `INPUT` hooks — is applied

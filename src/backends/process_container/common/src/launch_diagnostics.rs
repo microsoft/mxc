@@ -16,7 +16,7 @@
 
 use std::path::Path;
 
-use wxc_common::models::{ExecutionRequest, FailurePhase, ScriptResponse};
+use wxc_common::models::{ExecutionRequest, ScriptResponse};
 
 /// A structured diagnostic describing *why* a sandboxed process launch failed
 /// and what the user can do about it.
@@ -103,10 +103,7 @@ pub fn validate_required_child_env(request: &ExecutionRequest) -> Result<(), Scr
         return Ok(());
     };
 
-    Err(ScriptResponse {
-        failure_phase: FailurePhase::Rejected,
-        ..ScriptResponse::error(&diagnostic.message)
-    })
+    Err(ScriptResponse::rejected(&diagnostic.message))
 }
 
 /// Diagnose `ERROR_ENVVAR_NOT_FOUND` from a contained-process launch.
@@ -400,6 +397,7 @@ fn drive_root(exe_path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wxc_common::models::FailurePhase;
 
     // -- diagnose_missing_required_env tests --
 

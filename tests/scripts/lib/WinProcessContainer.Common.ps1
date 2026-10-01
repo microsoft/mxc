@@ -462,16 +462,13 @@ function Record-UiTelemetryResult {
     Record-Result -Phase $Phase -Name $Name -Pass ($actual -eq $Expected) -Detail $Detail
 }
 
-# Default schema version for generated configs. Everything the 0.8 stable
-# schema can express is authored at 0.8; the legacy network fields stay at 0.7
-# (the legacy area builds those via -RawNetwork + -SchemaVersion), because 0.8
-# is where the directional egress/ingress shape became the documented way to
-# express network intent and no doc describes mixing the two in one config.
-$Script:SchemaVersion       = '0.8.0-alpha'
+# Default schema version for generated configs. Everything the current stable
+# schema can express is authored there; the legacy network fields stay at 0.7
+# (the legacy area builds those via -RawNetwork + -SchemaVersion), because the
+# directional egress/ingress shape is the documented way to express network
+# intent and no doc describes mixing the two in one config.
+$Script:SchemaVersion       = '1.0.0'
 $Script:LegacySchemaVersion = '0.7.0-alpha'
-# processContainer.filesystem.enumeratePaths landed at 0.9; the 0.8 contract is
-# closed, so authoring it at the suite default is itself a rejection case.
-$Script:EnumerateSchemaVersion = '0.9.0-alpha'
 
 # Write a config object verbatim. Used by the rejection phase for shapes the
 # typed generator deliberately cannot produce (an explicitly empty `to: []`,
@@ -554,15 +551,14 @@ function New-Config {
         [Nullable[bool]]$LeastPrivilege     = $null,
         [Nullable[bool]]$LearningMode       = $null,
         # processContainer.filesystem.enumeratePaths — enumeration-only access
-        # (FindFirstFile/FindNextFile) without content read. Supplying it
-        # defaults the schema version to 0.9, where the field was introduced.
+        # (FindFirstFile/FindNextFile) without content read.
         [string[]]$EnumeratePaths           = @(),
         # processContainer.captureDenials.*
         [ValidateSet('block', 'allow')] [string]$CaptureDenialsMode = $null,
         [string]$CaptureDenialsOutputPath   = $null,
         [Nullable[bool]]$CaptureDenialsRetainEtl = $null,
 
-        # --- schema 0.8 directional network (network.egress / network.ingress)
+        # --- directional network (network.egress / network.ingress)
         # Supplying ANY of these emits a `network` block. Leave them all unset
         # for the "no network key at all" model-3 form.
         [ValidateSet('allow', 'deny')] [string]$EgressDefault  = $null,
@@ -582,13 +578,11 @@ function New-Config {
         [System.Collections.Specialized.OrderedDictionary]$RawNetwork = $null
     )
 
-    $hasEnumerate = ($null -ne $EnumeratePaths -and $EnumeratePaths.Count -gt 0)
-    $defaultVersion = if ($hasEnumerate) { $Script:EnumerateSchemaVersion } else { $Script:SchemaVersion }
     $obj = [ordered]@{
-        version     = $(if ($SchemaVersion) { $SchemaVersion } else { $defaultVersion })
+        version     = $(if ($SchemaVersion) { $SchemaVersion } else { $Script:SchemaVersion })
         containerId = "MxcWinPC-$Name"
-        # `appcontainer` is not in the stable containment enum at 0.7 or 0.8;
-        # `processcontainer` is the concrete Windows backend on both.
+        # `appcontainer` is not in the stable containment enum; `processcontainer`
+        # is the concrete Windows backend.
         containment = $Containment
         process     = [ordered]@{
             commandLine = $CommandLine
@@ -660,7 +654,9 @@ function New-Config {
     if ($PSBoundParameters.ContainsKey('Capabilities')) { $pc['capabilities'] = @($Capabilities) }
     if ($null -ne $LeastPrivilege)  { $pc['leastPrivilege'] = [bool]$LeastPrivilege }
     if ($null -ne $LearningMode)    { $pc['learningMode']   = [bool]$LearningMode }
-    if ($hasEnumerate) { $pc['filesystem'] = [ordered]@{ enumeratePaths = @($EnumeratePaths) } }
+    if ($null -ne $EnumeratePaths -and $EnumeratePaths.Count -gt 0) {
+        $pc['filesystem'] = [ordered]@{ enumeratePaths = @($EnumeratePaths) }
+    }
     if ($CaptureDenialsMode -or $CaptureDenialsOutputPath -or $null -ne $CaptureDenialsRetainEtl) {
         $cd = [ordered]@{}
         if ($CaptureDenialsMode)       { $cd['mode']       = $CaptureDenialsMode }
@@ -799,7 +795,7 @@ function Assert-RequiredTier {
 # Network test infrastructure
 
 # Documented in docs/process-container/networking.md §2: PSEC is the only
-# ProcessContainer path that receives schema 0.8 egress filters, proxy peer
+# ProcessContainer path that receives directional egress filters, proxy peer
 # identity, or host-loopback configuration. The probe does not name the
 # process-creation contract, so the tier stands in for it — `base-container`
 # is the only tier that can be on PSEC.
@@ -1063,7 +1059,7 @@ function Get-LoopbackFetchCommand {
 }
 
 
-# Phase 8 — schema 0.8 directional network policy.
+# Phase 8 — directional network policy.
 #
 # Asserts the documented contract (docs/process-container/networking.md and
 # docs/sandbox-policy/0.8.0/networking/networking.md), not the current code, so

@@ -9,7 +9,7 @@ use std::path::Path;
 use learning_mode_core::{
     verbose_logging_sibling_path, VerboseLoggingDocument, VerboseLoggingProvider,
 };
-use sha2::{Digest, Sha256};
+use wxc_common::hashing::sha256_hex;
 use wxc_common::models::{ContainmentBackend, ScriptResponse};
 use wxc_common::telemetry::{self, VerboseEvent};
 
@@ -128,7 +128,7 @@ fn prepare_document(path: &Path) -> Result<PreparedVerboseDocument, String> {
         .map_err(|_| "could not compact the verbose artifact".to_string())?;
     let document_bytes = u64::try_from(compact.len())
         .map_err(|_| "verbose artifact byte count exceeded u64".to_string())?;
-    let document_sha256 = format!("{:x}", Sha256::digest(&compact));
+    let document_sha256 = sha256_hex(&compact);
     let summary = serde_json::to_string(&document.summary)
         .map_err(|_| "could not serialize the verbose artifact summary".to_string())?;
     let chunks = chunk_signatures(&document)?;
@@ -328,10 +328,7 @@ mod tests {
         let compact = serde_json::to_vec(&reconstructed).unwrap();
 
         assert_eq!(compact.len() as u64, prepared.document_bytes);
-        assert_eq!(
-            format!("{:x}", Sha256::digest(&compact)),
-            prepared.document_sha256
-        );
+        assert_eq!(sha256_hex(&compact), prepared.document_sha256);
         assert_eq!(reconstructed, project_for_telemetry(doc));
         assert!(reconstructed
             .signatures

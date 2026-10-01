@@ -8,6 +8,8 @@ use mxc_sdk::{
     available_tools_policy, build_request, platform_support, temporary_files_policy,
     user_profile_policy, SandboxPolicy,
 };
+#[cfg(target_os = "windows")]
+use mxc_sdk::{build_request_with_containment, Containment, ErrorCode, WslcSection};
 
 #[cfg(target_os = "macos")]
 use mxc_sdk::{spawn_sandbox, WaitOutcome};
@@ -365,6 +367,48 @@ fn platform_support_windows_omits_wslc_when_not_compiled_in() {
         "wslc must not be advertised without the feature: {:?}",
         support.available_methods
     );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn request_probe_accepts_default_and_typed_requests() {
+    let policy = SandboxPolicy {
+        version: "0.9.0-alpha".to_string(),
+        filesystem: None,
+        network: None,
+        ui: None,
+        timeout_ms: None,
+    };
+    let request = build_request(&policy, "cmd /c exit 0", None)
+        .expect("default ProcessContainer request should build");
+
+    for request in [None, Some(&request)] {
+        let output = mxc_sdk::probe(request).expect("ProcessContainer request should probe");
+        assert!(!output.warnings.iter().any(String::is_empty));
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn request_probe_rejects_non_process_container_requests() {
+    let policy = SandboxPolicy {
+        version: "0.9.0-alpha".to_string(),
+        filesystem: None,
+        network: None,
+        ui: None,
+        timeout_ms: None,
+    };
+    let request = build_request_with_containment(
+        &policy,
+        &Containment::Wslc(WslcSection::default()),
+        "echo hi",
+        None,
+    )
+    .expect("WSLC request should build");
+
+    let error = mxc_sdk::probe(Some(&request))
+        .expect_err("request probe should reject non-ProcessContainer containment");
+    assert_eq!(error.code, ErrorCode::UnsupportedContainment);
 }
 
 #[test]

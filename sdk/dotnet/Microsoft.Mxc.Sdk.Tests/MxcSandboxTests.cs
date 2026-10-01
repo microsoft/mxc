@@ -2,14 +2,370 @@
 // Licensed under the MIT License.
 
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using System.Runtime.InteropServices;
 using Microsoft.Mxc.Sdk;
+using Microsoft.Mxc.Sdk.Native;
 using Xunit;
 
 namespace Microsoft.Mxc.Sdk.Tests;
 
 public class MxcSandboxTests
 {
+    private const string CompleteProbeJson = """
+        {
+          "tier": "appcontainer-dacl",
+          "needsDaclAugmentation": true,
+          "warnings": ["fell through"],
+          "probes": {
+            "baseContainerApiPresent": true,
+            "nativeCaptureAvailable": false,
+            "guardedCaptureAvailable": true,
+            "bfscfgPresent": false,
+            "bfsCompiledIn": false,
+            "baseContainerSupportsDenyPaths": true,
+            "baseContainerSupportsEnumeratePaths": false,
+            "baseContainerSupportsIngressHostLoopbackAllow": true,
+            "isolationSessionAvailable": true,
+            "hyperlightAvailable": false,
+            "uiCapabilities": {
+              "canBlockClipboardRead": true,
+              "canBlockClipboardWrite": false,
+              "canBlockInputInjection": true,
+              "canBlockInputMethodChanges": false,
+              "canBlockExternalUiObjects": true,
+              "canBlockGlobalUiNamespace": false,
+              "canBlockDesktopSwitching": true,
+              "canBlockLogoffOrShutdown": false,
+              "canBlockSystemParameterChanges": true,
+              "canBlockDisplaySettingsChanges": false
+            }
+          }
+        }
+        """;
+
+    private static JsonObject CreateCompleteProbeJson() =>
+        JsonNode.Parse(CompleteProbeJson)!.AsObject();
+
+    private static void AssertProbeJsonRejected(Action<JsonObject> mutate)
+    {
+        var json = CreateCompleteProbeJson();
+        mutate(json);
+        Assert.Throws<JsonException>(() => MxcSandbox.ParseProbeOutput(json.ToJsonString()));
+    }
+
+    private static void AssertNoExplicitNulls(JsonElement element, string path = "$")
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in element.EnumerateObject())
+            {
+                var propertyPath = $"{path}.{property.Name}";
+                Assert.True(
+                    property.Value.ValueKind != JsonValueKind.Null,
+                    $"Generated probe config contains explicit null at {propertyPath}.");
+                AssertNoExplicitNulls(property.Value, propertyPath);
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            var index = 0;
+            foreach (var item in element.EnumerateArray())
+            {
+                var itemPath = $"{path}[{index}]";
+                Assert.True(
+                    item.ValueKind != JsonValueKind.Null,
+                    $"Generated probe config contains explicit null at {itemPath}.");
+                AssertNoExplicitNulls(item, itemPath);
+                index++;
+            }
+        }
+    }
+
+    [Fact]
+    public void Probe_UsesCanonicalRequestJsonAndFreesNativeResults()
+    {
+        using var native = new FakeRequestProbeInterop
+        {
+            OutputJson = CompleteProbeJson,
+        };
+        var previous = MxcSandbox.RequestProbeInterop;
+        MxcSandbox.RequestProbeInterop = native;
+
+        try
+        {
+            var request = new SandboxRequest(
+                new SandboxPolicy { Version = "0.9.0-alpha" },
+                "cmd /c exit 0");
+            var output = MxcSandbox.Probe(request);
+
+            Assert.Equal(IsolationTier.AppContainerDacl, output.Tier);
+            Assert.True(output.Probes.BaseContainerApiPresent);
+            Assert.Equal(MxcSandbox.SerializeRequest(request), native.RequestJson);
+            using var document = JsonDocument.Parse(native.RequestJson!);
+            Assert.Equal(
+                "process",
+                document.RootElement
+                    .GetProperty("containment")
+                    .GetProperty("type")
+                    .GetString());
+            Assert.Equal(
+                "cmd /c exit 0",
+                document.RootElement.GetProperty("command").GetString());
+            Assert.Equal(
+                "0.9.0-alpha",
+                document.RootElement.GetProperty("policy").GetProperty("version").GetString());
+            AssertNoExplicitNulls(document.RootElement);
+            Assert.True(native.OutputFreed);
+            Assert.True(native.ErrorFreed);
+        }
+        finally
+        {
+            MxcSandbox.RequestProbeInterop = previous;
+        }
+    }
+
+    [Fact]
+    public void Probe_WithoutRequestPassesNullToNative()
+    {
+        using var native = new FakeRequestProbeInterop
+        {
+            OutputJson = CompleteProbeJson,
+        };
+        var previous = MxcSandbox.RequestProbeInterop;
+        MxcSandbox.RequestProbeInterop = native;
+
+        try
+        {
+            var output = MxcSandbox.Probe();
+
+            Assert.Equal(IsolationTier.AppContainerDacl, output.Tier);
+            Assert.Null(native.RequestJson);
+            Assert.True(native.OutputFreed);
+            Assert.True(native.ErrorFreed);
+        }
+        finally
+        {
+            MxcSandbox.RequestProbeInterop = previous;
+        }
+    }
+
+    [Theory]
+    [InlineData(ErrorCode.MalformedRequest)]
+    [InlineData(ErrorCode.UnsupportedContainment)]
+    [InlineData(ErrorCode.BackendError)]
+    public void Probe_MapsStructuredNativeFailure(ErrorCode code)
+    {
+        using var native = new FakeRequestProbeInterop
+        {
+            Status = (int)code,
+            ErrorMessage = "probe exploded",
+            ErrorOperation = "ProcessModel.Probe",
+            ErrorNativeCode = "0x80070005",
+            ErrorRemediation = "check policy",
+        };
+        var previous = MxcSandbox.RequestProbeInterop;
+        MxcSandbox.RequestProbeInterop = native;
+
+        try
+        {
+            var error = Assert.Throws<MxcException>(() => MxcSandbox.Probe(
+                new SandboxRequest(
+                    new SandboxPolicy { Version = "0.9.0-alpha" },
+                    "cmd /c exit 0")));
+            Assert.Equal(code, error.Code);
+            Assert.Contains("probe exploded", error.Message);
+            Assert.Equal("ProcessModel.Probe", error.Operation);
+            Assert.Equal("0x80070005", error.NativeCode);
+            Assert.Equal("check policy", error.Remediation);
+            Assert.True(native.ErrorFreed);
+        }
+        finally
+        {
+            MxcSandbox.RequestProbeInterop = previous;
+        }
+    }
+
+    [Fact]
+    public void Probe_SurfacesMalformedOutput()
+    {
+        using var native = new FakeRequestProbeInterop { OutputJson = "not json" };
+        var previous = MxcSandbox.RequestProbeInterop;
+        MxcSandbox.RequestProbeInterop = native;
+
+        try
+        {
+            Assert.Throws<JsonException>(() => MxcSandbox.Probe(
+                new SandboxRequest(
+                    new SandboxPolicy { Version = "0.9.0-alpha" },
+                    "cmd /c exit 0")));
+            Assert.True(native.OutputFreed);
+            Assert.True(native.ErrorFreed);
+        }
+        finally
+        {
+            MxcSandbox.RequestProbeInterop = previous;
+        }
+    }
+
+    [Fact]
+    public void Probe_WhenInteropReportsUnsupportedPlatform_ThrowsBeforeNativeCall()
+    {
+        using var native = new FakeRequestProbeInterop
+        {
+            IsSupportedOnCurrentPlatform = false,
+            OutputJson = CompleteProbeJson,
+        };
+        var previous = MxcSandbox.RequestProbeInterop;
+        MxcSandbox.RequestProbeInterop = native;
+
+        try
+        {
+            var error = Assert.Throws<MxcException>(() => MxcSandbox.Probe());
+            Assert.Equal(ErrorCode.UnsupportedContainment, error.Code);
+            Assert.Equal(0, native.ProbeCalls);
+        }
+        finally
+        {
+            MxcSandbox.RequestProbeInterop = previous;
+        }
+    }
+
+    [Fact]
+    public void ProbeParser_RejectsCompleteFactsWithoutTierOrError()
+    {
+        AssertProbeJsonRejected(json =>
+        {
+            json.Remove("tier");
+            json.Remove("needsDaclAugmentation");
+        });
+    }
+
+    [Fact]
+    public void ProbeParser_RejectsMissingWarnings()
+    {
+        AssertProbeJsonRejected(json => json.Remove("warnings"));
+    }
+
+    [Fact]
+    public void ProbeParser_RejectsUnknownEnvelopeField()
+    {
+        AssertProbeJsonRejected(json => json["unknownEnvelopeField"] = true);
+    }
+
+    [Fact]
+    public void ProbeParser_RejectsUnknownProbeFactsField()
+    {
+        AssertProbeJsonRejected(json =>
+            json["probes"]!["unknownProbeField"] = true);
+    }
+
+    [Fact]
+    public void ProbeParser_RejectsUnknownUiCapabilityField()
+    {
+        AssertProbeJsonRejected(json =>
+            json["probes"]!["uiCapabilities"]!["unknownUiField"] = true);
+    }
+
+    [Fact]
+    public void ProbeParser_RejectsMissingRequiredProbeBoolean()
+    {
+        AssertProbeJsonRejected(json =>
+            json["probes"]!.AsObject().Remove("bfscfgPresent"));
+    }
+
+    [Fact]
+    public void ProbeParser_RejectsMissingRequiredUiBoolean()
+    {
+        AssertProbeJsonRejected(json =>
+            json["probes"]!["uiCapabilities"]!.AsObject()
+                .Remove("canBlockClipboardRead"));
+    }
+
+    [Theory]
+    [InlineData("unknown-tier")]
+    [InlineData("baseContainer")]
+    public void ProbeParser_RejectsUnknownTier(string tier)
+    {
+        AssertProbeJsonRejected(json => json["tier"] = tier);
+    }
+
+    [Fact]
+    public void ProbeParser_RejectsNonStringTier()
+    {
+        AssertProbeJsonRejected(json => json["tier"] = 1);
+    }
+
+    [Fact]
+    public void ProbeParser_RejectsSuccessWithoutDaclAugmentationState()
+    {
+        AssertProbeJsonRejected(json => json.Remove("needsDaclAugmentation"));
+    }
+
+    [Fact]
+    public void ProbeParser_AcceptsErrorWithoutTierSelectionFields()
+    {
+        var json = CreateCompleteProbeJson();
+        json.Remove("tier");
+        json.Remove("needsDaclAugmentation");
+        json["error"] = "tier detection failed";
+
+        var output = MxcSandbox.ParseProbeOutput(json.ToJsonString());
+
+        Assert.Null(output.Tier);
+        Assert.Null(output.NeedsDaclAugmentation);
+        Assert.Equal("tier detection failed", output.Error);
+    }
+
+    [Fact]
+    public void ProbeParser_RejectsDaclAugmentationStateWithError()
+    {
+        AssertProbeJsonRejected(json =>
+        {
+            json.Remove("tier");
+            json["error"] = "tier detection failed";
+        });
+    }
+
+    [Fact]
+    public void Probe_RejectsNonProcessContainerRequest()
+    {
+        using var native = new FakeRequestProbeInterop
+        {
+            Status = (int)ErrorCode.UnsupportedContainment,
+            ErrorMessage = "request-aware probe supports ProcessContainer only; got wslc",
+        };
+        var previous = MxcSandbox.RequestProbeInterop;
+        MxcSandbox.RequestProbeInterop = native;
+        var request = new SandboxRequest(
+            new SandboxPolicy { Version = "0.9.0-alpha" },
+            "echo hi")
+        {
+            Containment = new WslcContainment(),
+        };
+
+        try
+        {
+            var error = Assert.Throws<MxcException>(() => MxcSandbox.Probe(request));
+            Assert.Equal(ErrorCode.UnsupportedContainment, error.Code);
+            Assert.Contains("got wslc", error.Message);
+            Assert.Equal(1, native.ProbeCalls);
+            using var document = JsonDocument.Parse(native.RequestJson!);
+            Assert.Equal(
+                "wslc",
+                document.RootElement
+                    .GetProperty("containment")
+                    .GetProperty("type")
+                    .GetString());
+            Assert.True(native.ErrorFreed);
+        }
+        finally
+        {
+            MxcSandbox.RequestProbeInterop = previous;
+        }
+    }
+
     [Theory]
     [InlineData("allowOutbound")]
     [InlineData("allowLocalNetwork")]
@@ -1402,6 +1758,94 @@ public class MxcSandboxTests
                 .GetProperty("enabled")
                 .GetBoolean());
         Assert.False(root.GetProperty("policy").TryGetProperty("captureDenials", out _));
+    }
+
+    private sealed unsafe class FakeRequestProbeInterop : IRequestProbeInterop, IDisposable
+    {
+        private readonly HashSet<nint> allocations = [];
+        private byte* outputPointer;
+
+        internal int Status { get; init; }
+        internal string? OutputJson { get; init; }
+        internal string? ErrorMessage { get; init; }
+        internal string? ErrorOperation { get; init; }
+        internal string? ErrorNativeCode { get; init; }
+        internal string? ErrorRemediation { get; init; }
+        internal string? RequestJson { get; private set; }
+        internal bool OutputFreed { get; private set; }
+        internal bool ErrorFreed { get; private set; }
+        internal int ProbeCalls { get; private set; }
+
+        public bool IsSupportedOnCurrentPlatform { get; init; } = true;
+
+        public int Probe(
+            byte* requestJsonUtf8,
+            byte** outputJsonUtf8,
+            MxcErrorDetail* error)
+        {
+            ProbeCalls++;
+            RequestJson = requestJsonUtf8 is null
+                ? null
+                : Marshal.PtrToStringUTF8((IntPtr)requestJsonUtf8);
+            outputPointer = Allocate(OutputJson);
+            *outputJsonUtf8 = outputPointer;
+            error->message_utf8 = Allocate(ErrorMessage);
+            error->operation_utf8 = Allocate(ErrorOperation);
+            error->native_code_utf8 = Allocate(ErrorNativeCode);
+            error->remediation_utf8 = Allocate(ErrorRemediation);
+            return Status;
+        }
+
+        public void FreeString(byte* value)
+        {
+            OutputFreed = value == outputPointer;
+            Free(value);
+        }
+
+        public void FreeError(MxcErrorDetail* error)
+        {
+            Free(error->message_utf8);
+            Free(error->operation_utf8);
+            Free(error->native_code_utf8);
+            Free(error->remediation_utf8);
+            *error = default;
+            ErrorFreed = true;
+        }
+
+        public void Dispose()
+        {
+            foreach (var allocation in allocations)
+            {
+                Marshal.FreeCoTaskMem(allocation);
+            }
+            allocations.Clear();
+        }
+
+        private byte* Allocate(string? value)
+        {
+            if (value is null)
+            {
+                return null;
+            }
+
+            var allocation = Marshal.StringToCoTaskMemUTF8(value);
+            allocations.Add(allocation);
+            return (byte*)allocation;
+        }
+
+        private void Free(byte* value)
+        {
+            if (value is null)
+            {
+                return;
+            }
+
+            var allocation = (nint)value;
+            if (allocations.Remove(allocation))
+            {
+                Marshal.FreeCoTaskMem(allocation);
+            }
+        }
     }
 
     private static SandboxPolicy CreateLegacyCaptureDenialsPolicy(

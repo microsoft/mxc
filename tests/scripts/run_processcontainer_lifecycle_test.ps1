@@ -113,8 +113,16 @@ function Phase-InheritDefaultEnv {
     )
     foreach ($case in $versionCases) {
         $slug = $(if ($case.Inherit) { 'true' } else { 'false' })
+        # A verbatim environment still has to carry the variables Windows needs
+        # to launch a container; these cases are about whether the schema
+        # accepts the field, so don't let an unrelated env check decide them.
+        $envList = $(if ($case.Inherit) {
+            @('MXC_LC_MINE=yes')
+        } else {
+            Get-MinimalEnv -Extra @('MXC_LC_MINE=yes')
+        })
         $cfg = New-Config -Name "lc-inherit-0900-$slug" -CommandLine $cmd -ReadWrite @($rw) `
-            -Env @('MXC_LC_MINE=yes') -InheritDefaultEnv $case.Inherit -SchemaVersion '0.9.0-alpha'
+            -Env $envList -InheritDefaultEnv $case.Inherit -SchemaVersion '0.9.0-alpha'
         $log = Join-Path $ScratchRoot "logs\lc-inherit-0900-$slug.log"
         $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log -TimeoutSec 30
         $rejected = Test-WasRejected -Run $r -Log (Read-Log $log)
@@ -126,7 +134,7 @@ function Phase-InheritDefaultEnv {
     # backend default are both present. Only meaningful once a container can
     # actually start, so it reports what it saw either way.
     $cfg = New-Config -Name 'lc-inherit-layered' -CommandLine $cmd -ReadWrite @($rw) `
-        -Env @('MXC_LC_MINE=yes') -InheritDefaultEnv $true -SchemaVersion '0.9.0-alpha'
+        -Env @('MXC_LC_MINE=yes') -InheritDefaultEnv $true
     $log = Join-Path $ScratchRoot 'logs\lc-inherit-layered.log'
     $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log -TimeoutSec 30
     $out = "$($r.Stdout)"
@@ -251,16 +259,19 @@ function Phase-IntentTelemetryVersion {
         -Pass ((Test-WasRejected -Run $r -Log $logText) -and $gated) `
         -Detail "exit=$($r.ExitCode); errorNamesTelemetry=$gated"
 
-    # The supported range is 0.6.0-alpha through 0.9.0-alpha inclusive
-    # (schemas/schema-version.json). Both ends must be accepted and both
-    # neighbours rejected, or the range is not actually a range.
+    # Every exact registered version in schemas/schema-version.json must be
+    # accepted. Versions outside that closed set must be rejected, including
+    # neighbors below the minimum and above the development contract.
     $versions = @(
         @{ V = '0.6.0-alpha'; Accept = $true;  Why = 'min supported' }
-        @{ V = '0.7.0-alpha'; Accept = $true;  Why = 'in range' }
-        @{ V = '0.8.0-alpha'; Accept = $true;  Why = 'in range, latest stable' }
-        @{ V = '0.9.0-alpha'; Accept = $true;  Why = 'maxSupported' }
+        @{ V = '0.7.0-alpha'; Accept = $true;  Why = 'registered stable' }
+        @{ V = '0.8.0-alpha'; Accept = $true;  Why = 'registered stable' }
+        @{ V = '0.9.0-alpha'; Accept = $true;  Why = 'registered stable' }
+        @{ V = '0.10.0-alpha'; Accept = $false; Why = 'retired development contract' }
+        @{ V = '1.0.0';       Accept = $true;  Why = 'latest stable' }
+        @{ V = '1.1.0-alpha'; Accept = $true;  Why = 'development contract' }
         @{ V = '0.5.0-alpha'; Accept = $false; Why = 'below min supported' }
-        @{ V = '1.0.0';       Accept = $false; Why = 'above maxSupported' }
+        @{ V = '1.2.0-alpha'; Accept = $false; Why = 'above development contract' }
         @{ V = 'not-a-version'; Accept = $false; Why = 'unparseable' }
     )
     foreach ($case in $versions) {

@@ -16,6 +16,7 @@ pub mod filesystem_access;
 pub mod filesystem_canonical;
 pub mod filesystem_object;
 pub mod filesystem_resolve;
+pub mod hashing;
 pub mod id;
 pub mod log_symbols;
 pub mod logger;

@@ -108,17 +108,25 @@ flowchart LR
     ffi["mxc_ffi"]
     sdk["mxc-sdk"]
     engine["mxc_engine"]
+    common["wxc_common<br/>exact contract parser"]
 
     typescript --> executor
+    typescript -. request probe .-> ffi
     cli --> executor
     csharp --> ffi --> sdk
+    ffi -. exact config decoding .-> common
+    ffi -. exact request probe .-> engine
     rust --> sdk
     executor --> engine
     sdk --> engine
 ```
 
 `mxc_ffi` is the C ABI used by the C# SDK. Its generated C# P/Invoke file is
-created during the C# build. Generated TypeScript wire types come from the
+created during the C# build. Boundary-specific adapters remain in `mxc_ffi`:
+binding request JSON is converted through its co-versioned request model, while
+exact config JSON is decoded through the shared `wxc_common` contract parser
+before the typed engine operation runs. The public Rust SDK exposes only the
+typed `SandboxRequest` probe API. Generated TypeScript wire types come from the
 schema tooling.
 
 ## Tests

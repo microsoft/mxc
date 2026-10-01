@@ -167,7 +167,7 @@ function ConvertTo-StateAwareInvocation {
     } elseif ($Request) {
         $requestObject = $Request.Clone()
         if (-not $Request.ContainsKey('version')) {
-            $requestObject['version'] = '0.9.0-alpha'
+            $requestObject['version'] = '1.0.0'
         }
     } else {
         throw "State-aware invocation requires either -Request or -ConfigFile"
@@ -342,6 +342,14 @@ function Parse-Envelope {
     param([string]$Stdout)
     if ([string]::IsNullOrWhiteSpace($Stdout)) { return $null }
     try { $Stdout | ConvertFrom-Json } catch { $null }
+}
+
+# The executor writes the exec error envelope after any warnings and the
+# diagnostic buffer, so it is the last non-empty line on stderr.
+function Parse-StderrEnvelope {
+    param([string]$Stderr)
+    $last = ($Stderr -split '\r?\n' | Where-Object { $_.Trim() } | Select-Object -Last 1)
+    Parse-Envelope -Stdout $last
 }
 
 # Which arm of the envelope is present.
@@ -1082,7 +1090,7 @@ try {
             $req = @{ phase = 'exec'; sandboxId = $script:edgeSandboxId; process = @{ commandLine = 'echo should-not-run'; timeout = 30000 } }
             $r = Invoke-StateAware -Request $req
             Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (exec before start rejected)"
-            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $envObj = Parse-StderrEnvelope -Stderr $r.Stderr
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
             Assert-True ($code -eq 'not_started') "error.code is 'not_started' (got '$code')"
         } | Out-Null
@@ -1104,7 +1112,7 @@ try {
             $slow = @{ phase = 'exec'; sandboxId = $script:edgeSandboxId; process = @{ commandLine = 'sleep 30'; timeout = 3000 } }
             $r = Invoke-StateAware -Request $slow
             Assert-True ($r.ExitCode -ne 0) "timed-out exec exits non-zero"
-            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $envObj = Parse-StderrEnvelope -Stderr $r.Stderr
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
             Assert-True ($code -eq 'backend_error') "timeout maps to 'backend_error' (got '$code')"
 
@@ -1112,6 +1120,38 @@ try {
             $r2 = Invoke-StateAware -Request $after
             Assert-True ($r2.ExitCode -eq 0) "next exec after a timeout succeeds (container stayed warm)"
             Assert-True ($r2.Stdout -match 'survived-timeout') "warm container still executes commands"
+        } | Out-Null
+    }
+
+    # F2b: the command emits output before its timeout fires, which is the case
+    # where an envelope on stdout would corrupt the script's output.
+    if ($edgeStartedOk) {
+        Run-StateAwareTest "F: post-admission exec failure keeps stdout clean" {
+            $req = @{ phase = 'exec'; sandboxId = $script:edgeSandboxId; process = @{ commandLine = "sh -c 'echo PRE_FAILURE_MARKER; sleep 30'"; timeout = 5000 } }
+            $r = Invoke-StateAware -Request $req
+            Assert-True ($r.ExitCode -ne 0) "post-admission failure exits non-zero"
+            Assert-True ($r.Stdout -match 'PRE_FAILURE_MARKER') `
+                "stdout carries the script's output ($($r.Stdout.Trim()))"
+            Assert-True ($r.Stdout -notmatch '"error"') `
+                "stdout carries no envelope fragment ($($r.Stdout.Trim()))"
+            $envObj = Parse-StderrEnvelope -Stderr $r.Stderr
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'backend_error') "error.code is 'backend_error' on stderr (got '$code')"
+        } | Out-Null
+    }
+
+    # F2c: printf, not echo, so the script's stderr ends without a newline.
+    if ($edgeStartedOk) {
+        Run-StateAwareTest "F: exec error envelope survives unterminated script stderr" {
+            $req = @{ phase = 'exec'; sandboxId = $script:edgeSandboxId; process = @{ commandLine = "sh -c 'printf SCRIPT_STDERR_NO_NEWLINE >&2; sleep 30'"; timeout = 5000 } }
+            $r = Invoke-StateAware -Request $req
+            Assert-True ($r.ExitCode -ne 0) "post-admission failure exits non-zero"
+            Assert-True ($r.Stderr -match 'SCRIPT_STDERR_NO_NEWLINE') `
+                "stderr carries the script's unterminated output"
+            $envObj = Parse-StderrEnvelope -Stderr $r.Stderr
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'backend_error') `
+                "the envelope is still parseable on its own line (got '$code')"
         } | Out-Null
     }
 

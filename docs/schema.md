@@ -2,9 +2,9 @@
 ## Configuration Schema
 
 MXC uses a JSON configuration file. The current stable schema is at
-[`schemas/stable/mxc-config.schema.0.9.0-alpha.json`](../schemas/stable/mxc-config.schema.0.9.0-alpha.json).
+[`schemas/stable/mxc-config.schema.1.0.0.json`](../schemas/stable/mxc-config.schema.1.0.0.json).
 For development, the exact schema at
-[`schemas/dev/mxc-config.schema.0.10.0-alpha.json`](../schemas/dev/mxc-config.schema.0.10.0-alpha.json)
+[`schemas/dev/mxc-config.schema.1.1.0-alpha.json`](../schemas/dev/mxc-config.schema.1.1.0-alpha.json)
 includes experimental features and may change without notice.
 
 Editors that support JSON Schema will provide autocomplete and validation when
@@ -13,10 +13,10 @@ production configs and the dev schema when working on experimental features:
 
 ```json
 // Production
-"$schema": "./schemas/stable/mxc-config.schema.0.9.0-alpha.json"
+"$schema": "./schemas/stable/mxc-config.schema.1.0.0.json"
 
 // Development (experimental features)
-"$schema": "./schemas/dev/mxc-config.schema.0.10.0-alpha.json"
+"$schema": "./schemas/dev/mxc-config.schema.1.1.0-alpha.json"
 ```
 
 ### Schema 0.8 networking
@@ -44,13 +44,15 @@ endpoint into runtime configuration:
 ```
 
 Direct egress rules and `runtimeConfig.networkProxy` select different
-connectivity models and cannot be combined. A ProcessContainer proxy requires
-`ingress.default: "allow"`. Identity-scoped proxies set `allowedProxyPeer` and
-keep `hostLoopback: "deny"`; identity-less host proxies omit
-`allowedProxyPeer` and require `hostLoopback: "allow"`. The identity-less route
-is a weaker development/testing compatibility deployment because it opens both
-host-loopback directions; it is not the strict proxy-endpoint exception
-defined by the shared model-2 policy.
+connectivity models and cannot be combined. Both ingress controls deny when
+omitted, and `hostLoopback` resolves independently of `ingress.default` rather
+than inheriting it, so host-loopback access must be requested explicitly.
+A ProcessContainer proxy requires `ingress.default: "allow"`. Identity-scoped
+proxies set a non-blank `allowedProxyPeer` and keep `hostLoopback: "deny"`;
+identity-less host proxies omit `allowedProxyPeer` and require
+`hostLoopback: "allow"`. The identity-less route is a weaker development/testing
+compatibility deployment because it opens both host-loopback directions; it is
+not the strict proxy-endpoint exception defined by the shared model-2 policy.
 
 ```json
 {
@@ -137,7 +139,7 @@ that can be executed independently.
 
 ```json
 {
-    "version": "0.9.0-alpha",              // Exact schema version. Minimum supported: "0.6.0-alpha"; current stable: "0.9.0-alpha".
+    "version": "1.0.0",                    // Exact schema version. Minimum supported: "0.6.0-alpha"; current stable: "1.0.0".
     "containerId": "my-container",         // Externally assigned container ID
     "containment": "processcontainer",     // Backend (see table below)
 
@@ -240,6 +242,8 @@ that can be executed independently.
                                            // Native PSEC/V2 capture cannot combine with leastPrivilege
                                            // or network.proxy. Hosts without that complete native set
                                            // retain an eligible legacy containment tier and use guarded WPR.
+                                           // If guarded-WPR prerequisites are unavailable, the request
+                                           // fails before MXC creates the sandbox.
     },
 
     "lxc": {                               // LXC-specific
@@ -310,6 +314,13 @@ use:
 Policy entries that are blank, name a file, or do not exist yet are skipped:
 a process cannot be launched in any of them.
 
+WSL Container one-shot runs accept an explicit `process.cwd` only as a local
+Windows drive path, which is mapped under `/mnt/<drive>` (for example
+`C:\work` becomes `/mnt/c/work`); any other value is rejected before the
+container is created. WSL Container state-aware `exec` takes an absolute
+in-container path instead. See
+[`docs/wsl/wsl-container-getting-started.md`](wsl/wsl-container-getting-started.md).
+
 ### Environment
 
 `process.env` and `process.inheritDefaultEnv` combine as follows from
@@ -330,9 +341,10 @@ none of them asks for the default itself — the same environment an omitted
 Two backends depart from the table. The Windows process container requires
 `SYSTEMROOT` and `LOCALAPPDATA` to be present, so a caller-owned block that
 omits them — including `[]` — is rejected before launch rather than used; the
-rejection names the missing variables. IsolationSession does not yet
-distinguish an omitted `process.env` from `[]`, and treats both as the session's
-default environment.
+rejection names the missing variables. IsolationSession starts every process
+from the agent user's default environment and cannot replace or empty it, so
+`process.env` without `inheritDefaultEnv` — including `[]` — is rejected before
+launch.
 
 What the default block contains is backend-specific; see the backend's guide.
 On the WSL Container backend it is the container image's own `ENV`, which MXC
@@ -470,7 +482,7 @@ State-aware envelopes use an exact backend-specific contract:
 
 - IsolationSession uses published `0.9.0-alpha`.
 - WSLC uses published `0.9.0-alpha`; Windows Sandbox uses development
-  `0.10.0-alpha`.
+  `1.1.0-alpha`.
 
 The published `0.6.0-alpha`, `0.7.0-alpha`, and `0.8.0-alpha` contracts contain
 only one-shot request roots. This Windows Sandbox example therefore uses the
@@ -478,8 +490,8 @@ exact development schema:
 
 ```json
 {
-    "$schema": "./schemas/dev/mxc-config.schema.0.10.0-alpha.json",
-    "version": "0.10.0-alpha",
+    "$schema": "./schemas/dev/mxc-config.schema.1.1.0-alpha.json",
+    "version": "1.1.0-alpha",
     "phase": "exec",                       // One of: provision | start | exec | stop | deprovision
     "sandboxId": "wsb:abcd1234",           // Required for non-provision phases.
                                            // Prefix routes to the backend (wsb: -> windows_sandbox,
@@ -518,9 +530,9 @@ contract. Version spelling, including patch and prerelease, is significant;
 there is no range, latest-version, or missing-version fallback.
 
 Versions with a pre-release suffix (e.g., `-alpha`) indicate the schema is not
-yet stable — breaking changes may occur in any release. Once the schema is
-stable, version `1.0.0` (no suffix) will be released. After `1.0.0`, breaking
-changes require a major version bump per semver.
+yet stable — breaking changes may occur before publication. Version `1.0.0`
+is the first stable contract. After `1.0.0`, breaking changes require a major
+version bump per semver.
 
 Registered contracts:
 
@@ -529,11 +541,12 @@ Registered contracts:
 | `"0.6.0-alpha"` | Published; minimum supported |
 | `"0.7.0-alpha"` | Published |
 | `"0.8.0-alpha"` | Published |
-| `"0.9.0-alpha"` | Published; current stable |
-| `"0.10.0-alpha"` | Mutable development contract |
+| `"0.9.0-alpha"` | Published |
+| `"1.0.0"` | Published; current stable |
+| `"1.1.0-alpha"` | Mutable development contract |
 
 An absent version, a retired version, or any unregistered spelling such as
-`0.6.1-alpha`, `0.10.0`, or `1.0.0` is rejected.
+`0.6.1-alpha`, `0.10.0-alpha`, or `1.0.1` is rejected.
 
 #### When to bump
 

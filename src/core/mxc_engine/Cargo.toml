@@ -36,7 +36,6 @@ plm = { workspace = true }
 # boundary; process_container_common and plm already depend on this crate.
 learning_mode_core = { workspace = true }
 getrandom.workspace = true
-sha2.workspace = true
 windows.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

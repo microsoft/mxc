@@ -450,6 +450,18 @@ Paths in `filesystem.readwritePaths` and `filesystem.readonlyPaths` are mounted
 into the container. Host path `C:\workspace` becomes `/mnt/c/workspace` inside
 the container.
 
+### Working directory (`process.cwd`)
+
+One-shot runs take `process.cwd` as a local Windows drive path and map it the
+same way: `C:\workspace` starts the process in `/mnt/c/workspace`. Grant the
+directory in `filesystem` so it is mounted. A value that cannot be mapped —
+a relative, drive-relative (`C:work`), UNC, or in-container path such as
+`/workspace` — is **rejected** before the container is created. An omitted or
+blank `cwd` leaves the container's default working directory in place.
+
+State-aware `exec` takes the opposite form: an absolute in-container path such
+as `/work`.
+
 ### Environment
 
 From schema `0.9.0-alpha` `process.env` and `process.inheritDefaultEnv` combine

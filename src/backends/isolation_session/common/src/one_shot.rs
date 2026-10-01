@@ -14,7 +14,7 @@ use wxc_common::script_runner::ScriptRunner;
 use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
 use super::manager::{log_sandbox_torn_down, IsolationSessionManager, TeardownOutcome};
-use super::policy::validate_provision_policy;
+use super::policy::{reject_unhonorable_environment, validate_provision_policy};
 use super::process_options::build_process_options;
 use super::IsolationSessionRunner;
 
@@ -64,6 +64,7 @@ impl ScriptRunner for IsolationSessionRunner {
                 | NetworkPolicySupport::INGRESS_DEFAULT
                 | NetworkPolicySupport::HOST_LOOPBACK,
         )?;
+        reject_unhonorable_environment(request).map_err(ScriptResponse::from)?;
         Ok(())
     }
 
@@ -271,6 +272,65 @@ mod tests {
         let resp = runner.validate_runner(&req).unwrap_err();
         assert!(
             resp.error_message.contains("UI policy is not supported"),
+            "got {}",
+            resp.error_message
+        );
+    }
+
+    // ====== process.env ======
+
+    const ENV_REFUSAL: &str = "process.env without process.inheritDefaultEnv=true is not supported";
+
+    #[test]
+    fn validate_runner_one_shot_rejects_env_without_inherit_default_env() {
+        let runner = IsolationSessionRunner::new();
+        let req = ExecutionRequest {
+            env: Some(vec!["FOO=bar".to_string()]),
+            ..canonical_request()
+        };
+        let resp = runner.validate_runner(&req).unwrap_err();
+        assert!(
+            resp.error_message.contains(ENV_REFUSAL),
+            "got {}",
+            resp.error_message
+        );
+    }
+
+    #[test]
+    fn validate_runner_one_shot_accepts_env_with_inherit_default_env() {
+        let runner = IsolationSessionRunner::new();
+        let req = ExecutionRequest {
+            env: Some(vec!["FOO=bar".to_string()]),
+            inherit_default_env: true,
+            ..canonical_request()
+        };
+        runner.validate_runner(&req).unwrap();
+    }
+
+    #[test]
+    fn validate_runner_one_shot_reports_other_refusals_before_the_environment() {
+        let runner = IsolationSessionRunner::new();
+        let env = Some(vec!["FOO=bar".to_string()]);
+
+        let mut with_ui = ExecutionRequest {
+            env: env.clone(),
+            ..canonical_request()
+        };
+        with_ui.policy.ui_specified = true;
+        let resp = runner.validate_runner(&with_ui).unwrap_err();
+        assert!(
+            resp.error_message.contains("UI policy is not supported"),
+            "got {}",
+            resp.error_message
+        );
+
+        let with_default_network = ExecutionRequest {
+            env,
+            ..Default::default()
+        };
+        let resp = runner.validate_runner(&with_default_network).unwrap_err();
+        assert!(
+            resp.error_message.contains("the network is unrestricted"),
             "got {}",
             resp.error_message
         );

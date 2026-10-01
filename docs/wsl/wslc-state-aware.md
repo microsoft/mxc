@@ -83,10 +83,12 @@ as `--sandbox-id`; the dispatcher derives the backend from the `wslc:` prefix (l
 For attached execution, a **successful** `exec` relays the script's raw stdout/stderr live from
 daemon frames and exits with the script's own exit code — it does **not** wrap the result in an
 envelope. Piped execution writes those same live frames into separate anonymous stdout/stderr
-pipes returned to the in-process SDK caller; no stdin pipe is returned. Callers discriminate
-attached dispatch failures via the exit code + whether stdout parses as an envelope. A timeout
-on the attached relay surfaces as a backend error because that path cannot return a typed timeout;
-the piped path reports it through its wait result.
+pipes returned to the in-process SDK caller; no stdin pipe is returned. An attached dispatch
+**failure** writes its `{error}` envelope to stderr, because the script's output may already own
+stdout by the time the failure is known — so stdout carries the script's output either way, and a
+caller reads the typed error from stderr. A timeout on the attached relay surfaces as a backend
+error because that path cannot return a typed timeout; the piped path reports it through its wait
+result.
 
 ### exec admission, cancellation, and failure containment
 
@@ -105,8 +107,14 @@ without creating the process.
 
 Live output uses bounded queues in both the daemon and the in-process native
 pipe bridge. If a caller does not drain stdout/stderr quickly enough, excess
-output is dropped and completion becomes an explicit backend error reporting
-truncation; incomplete output is never reported as successful.
+output is dropped and the run is reported as truncated; incomplete output is
+never reported as successful. A run that would otherwise have exited cleanly
+becomes an explicit backend error carrying the process's exit code in
+`details.exitCode`. A run that timed out or was cancelled keeps that outcome —
+truncation is reported alongside it rather than replacing it. For an in-process
+piped caller that pairing is only available on a clean exit: `ExecOutcome` has no
+field for a modifier, so a piped run that both timed out and truncated reports
+only the timeout.
 
 If process termination cannot be positively confirmed after creation, the
 container is quarantined and cannot be started or used for another exec. The

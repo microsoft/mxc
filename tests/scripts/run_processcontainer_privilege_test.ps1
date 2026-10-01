@@ -173,7 +173,7 @@ function Phase-LegacyProxyShapes {
     # quietly dropped -- a dropped proxy runs unproxied, which is the failure
     # a caller would not notice.
     $raw = [ordered]@{
-        version     = $Script:SchemaVersion
+        version     = '0.8.0-alpha'
         containerId = 'MxcWinPC-priv-legacy-on-08'
         containment = 'processcontainer'
         process     = [ordered]@{ commandLine = $Script:PrivCmd; timeout = 30000 }

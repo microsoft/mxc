@@ -193,7 +193,7 @@ function ConvertTo-StateAwareInvocation {
     } elseif ($Request) {
         $requestObject = $Request.Clone()
         if (-not $Request.ContainsKey('version')) {
-            $requestObject['version'] = '0.9.0-alpha'
+            $requestObject['version'] = '1.0.0'
         }
     } else {
         throw "State-aware invocation requires either -Request or -ConfigFile"
@@ -309,6 +309,14 @@ function Parse-Envelope {
     param([string]$Stdout)
     if ([string]::IsNullOrWhiteSpace($Stdout)) { return $null }
     try { $Stdout | ConvertFrom-Json } catch { $null }
+}
+
+# The executor writes the exec error envelope after any warnings and the
+# diagnostic buffer, so it is the last non-empty line on stderr.
+function Parse-StderrEnvelope {
+    param([string]$Stderr)
+    $last = ($Stderr -split '\r?\n' | Where-Object { $_.Trim() } | Select-Object -Last 1)
+    Parse-Envelope -Stdout $last
 }
 
 # Decodes the `iso:<base64url-nopad(JSON)>` sandbox id payload. Returns $null
@@ -565,7 +573,11 @@ try {
 
             $r = Invoke-StateAware -Request $req
             Assert-True ($r.ExitCode -ne 0) "$phase (real): exit code is non-zero"
-            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $envObj = if ($phase -eq 'exec') {
+                Parse-StderrEnvelope -Stderr $r.Stderr
+            } else {
+                Parse-Envelope -Stdout $r.Stdout
+            }
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
             Assert-True ($code -eq 'malformed_id') "$phase (real): error.code is 'malformed_id' (got '$code')"
 
@@ -927,12 +939,33 @@ try {
             }
             $r = Invoke-StateAware -Request $req
             Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
-            $envObj = Parse-Envelope -Stdout $r.Stdout
+            $envObj = Parse-StderrEnvelope -Stderr $r.Stderr
             $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
             Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
             $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
             Assert-True ($msg -match 'network policy is fixed at provision') `
                 "error.message identifies the immutable post-provision network policy (got '$msg')"
+        } | Out-Null
+    }
+
+    # Test 3d: exec rejects a process.env supplied without inheritDefaultEnv, and
+    # the command does not run.
+    if ($execedOk) {
+        Run-StateAwareTest "exec (process.env without inheritDefaultEnv rejected)" {
+            $req = @{
+                phase     = 'exec'
+                sandboxId = $script:sandboxId
+                process   = @{ commandLine = 'echo MUST_NOT_RUN'; env = @('FOO=bar') }
+            }
+            $r = Invoke-StateAware -Request $req
+            Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+            $envObj = Parse-StderrEnvelope -Stderr $r.Stderr
+            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+            $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+            Assert-True ($msg -match 'process\.env without process\.inheritDefaultEnv=true is not supported') `
+                "error.message identifies the unsupported environment (got '$msg')"
+            Assert-True ($r.Stdout -notmatch 'MUST_NOT_RUN') "the command did not run"
         } | Out-Null
     }
 

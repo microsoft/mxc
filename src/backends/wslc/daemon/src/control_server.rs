@@ -509,7 +509,7 @@ async fn write_exec_result<S: AsyncWrite + Unpin>(
     // output; the sink's sender also drops as the run returns, so `output` may
     // instead close first — the `None` arm handles that and awaits the exit code.
     let mut done = done;
-    let terminal = loop {
+    let (notice, terminal) = loop {
         tokio::select! {
             biased;
             result = &mut done => {
@@ -517,7 +517,7 @@ async fn write_exec_result<S: AsyncWrite + Unpin>(
                 while let Ok(chunk) = output.try_recv() {
                     write_frame(pipe, &output_frame(chunk)).await?;
                 }
-                break terminal_frame(result, &overflowed);
+                break terminal_frames(result, &overflowed);
             }
             chunk = output.recv() => match chunk {
                 Some(chunk) => {
@@ -525,10 +525,13 @@ async fn write_exec_result<S: AsyncWrite + Unpin>(
                 }
                 // Senders dropped before `done` fired (normal path): the run has
                 // completed and every chunk is flushed. Await the exit code.
-                None => break terminal_frame(done.await, &overflowed),
+                None => break terminal_frames(done.await, &overflowed),
             },
         }
     };
+    if let Some(notice) = notice {
+        write_frame(pipe, &notice).await?;
+    }
     write_frame(pipe, &terminal).await?;
     Ok(())
 }
@@ -541,24 +544,21 @@ fn output_frame((kind, data): (OutStream, Vec<u8>)) -> StreamFrame {
     }
 }
 
-/// Choose the exec's terminal [`StreamFrame`]. A latched `overflowed` means the
-/// sink had to drop live output because the client did not drain the daemon's
-/// bounded queue fast enough, so a would-be clean [`StreamFrame::Exit`] is
-/// reported as a truncation [`StreamFrame::Error`] instead — the client must not
-/// treat a short stream as a successful, complete run. A genuine run failure
-/// (already an `Error`) is strictly more informative and passes through
-/// unchanged.
-fn terminal_frame(
+/// Choose the exec's terminal [`StreamFrame`], and the notice that precedes it
+/// when the sink had to drop live output.
+///
+/// Truncation travels ahead of the terminal rather than replacing it: every
+/// terminal carries something the client cannot reconstruct — an exit code, or
+/// why the run ended.
+fn terminal_frames(
     result: Result<Result<ExecTerminal, WorkerError>, oneshot::error::RecvError>,
     overflowed: &AtomicBool,
-) -> StreamFrame {
-    match exit_terminal(result) {
-        StreamFrame::Exit { .. } if overflowed.load(Ordering::Relaxed) => StreamFrame::Error {
-            message: "WSLc: live output was truncated — the client did not read the exec stream \
-                      fast enough and the daemon's bounded output queue overflowed"
-                .to_string(),
-        },
-        other => other,
+) -> (Option<StreamFrame>, StreamFrame) {
+    let terminal = exit_terminal(result);
+    if overflowed.load(Ordering::Relaxed) {
+        (Some(StreamFrame::Truncated), terminal)
+    } else {
+        (None, terminal)
     }
 }
 
@@ -1079,12 +1079,10 @@ mod tests {
         assert!(saw_exit, "the stream must end with an Exit terminal");
     }
 
-    /// Overflow regression: when the sink latched `overflowed` (it dropped live
-    /// output because the client did not drain fast enough), the terminal frame
-    /// must be a truncation `Error` — never a clean `Exit` the client would
-    /// mistake for a complete run.
+    /// Overflow regression: the client must be told, and must still receive the
+    /// exit code the process produced.
     #[tokio::test]
-    async fn overflow_yields_truncation_error_terminal() {
+    async fn overflow_precedes_a_clean_exit_without_replacing_it() {
         let (mut server, mut client) = duplex(64 * 1024);
         let (done_tx, done_rx) = oneshot::channel::<Result<ExecTerminal, WorkerError>>();
         let (out_tx, output) = mpsc::channel(16);
@@ -1120,12 +1118,85 @@ mod tests {
             }
         );
         let terminal: StreamFrame = read_frame(&mut client).await.unwrap();
-        match terminal {
-            StreamFrame::Error { message } => {
-                assert!(message.contains("truncated"), "message was {message:?}");
-            }
-            other => panic!("expected a truncation Error terminal, got {other:?}"),
-        }
+        assert_eq!(terminal, StreamFrame::Truncated);
+        assert_eq!(
+            read_frame::<_, StreamFrame>(&mut client).await.unwrap(),
+            StreamFrame::Exit { code: 0 }
+        );
         assert!(read_frame::<_, StreamFrame>(&mut client).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn overflow_precedes_a_timeout_terminal_without_replacing_it() {
+        assert_eq!(
+            overflowed_frames(ExecTerminal::TimedOut).await,
+            (Some(StreamFrame::Truncated), StreamFrame::TimedOut)
+        );
+    }
+
+    #[tokio::test]
+    async fn overflow_precedes_a_cancellation_terminal_without_replacing_it() {
+        assert_eq!(
+            overflowed_frames(ExecTerminal::Cancelled).await,
+            (Some(StreamFrame::Truncated), StreamFrame::Cancelled)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_clean_run_emits_no_truncation_notice() {
+        let (mut server, mut client) = duplex(64 * 1024);
+        let (done_tx, done_rx) = oneshot::channel::<Result<ExecTerminal, WorkerError>>();
+        let (out_tx, output) = mpsc::channel(16);
+        done_tx.send(Ok(ExecTerminal::TimedOut)).unwrap();
+        drop(out_tx);
+
+        write_exec_result(
+            &mut server,
+            Ok(ExecStream {
+                done: done_rx,
+                output,
+                overflowed: Arc::new(AtomicBool::new(false)),
+                registration: test_registration(),
+            }),
+        )
+        .await
+        .unwrap();
+        drop(server);
+
+        let admit: DaemonResponse = read_frame(&mut client).await.unwrap();
+        assert_eq!(admit, DaemonResponse::Ok);
+        assert_eq!(
+            read_frame::<_, StreamFrame>(&mut client).await.unwrap(),
+            StreamFrame::TimedOut
+        );
+        assert!(read_frame::<_, StreamFrame>(&mut client).await.is_err());
+    }
+
+    async fn overflowed_frames(terminal: ExecTerminal) -> (Option<StreamFrame>, StreamFrame) {
+        let (mut server, mut client) = duplex(64 * 1024);
+        let (done_tx, done_rx) = oneshot::channel::<Result<ExecTerminal, WorkerError>>();
+        let (out_tx, output) = mpsc::channel(16);
+        done_tx.send(Ok(terminal)).unwrap();
+        drop(out_tx);
+
+        write_exec_result(
+            &mut server,
+            Ok(ExecStream {
+                done: done_rx,
+                output,
+                overflowed: Arc::new(AtomicBool::new(true)),
+                registration: test_registration(),
+            }),
+        )
+        .await
+        .unwrap();
+        drop(server);
+
+        let admit: DaemonResponse = read_frame(&mut client).await.unwrap();
+        assert_eq!(admit, DaemonResponse::Ok);
+        let first: StreamFrame = read_frame(&mut client).await.unwrap();
+        let second: StreamFrame = read_frame(&mut client).await.unwrap();
+        assert!(read_frame::<_, StreamFrame>(&mut client).await.is_err());
+        (Some(first), second)
     }
 }

@@ -9,6 +9,9 @@
     <RootNamespace>Microsoft.Mxc.Sdk</RootNamespace>
     <AssemblyName>Microsoft.Mxc.Sdk</AssemblyName>
     <Version>0.9.0</Version>
+    <!-- Do not inherit an ambient Visual Studio Platform (for example x64)
+         into the managed SDK. Native assets are selected by RID at runtime. -->
+    <PlatformTarget>AnyCPU</PlatformTarget>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <Description>C# SDK for MXC (Microsoft eXecution Container), binding the native mxc_ffi library.</Description>

@@ -155,6 +155,85 @@ fn confine_network_capabilities(command: &mut std::process::Command) {
     }
 }
 
+/// A `/etc/hosts` helper emits one `mxc:` diagnostic line, so this is far above
+/// any legitimate output.
+#[cfg(target_os = "linux")]
+const MAX_CAPTURED_BYTES: u64 = 8 * 1024;
+
+#[cfg(target_os = "linux")]
+fn read_to_end_on_thread(
+    reader: Option<wxc_common::interruptible_reader::InterruptibleReader>,
+) -> Option<std::thread::JoinHandle<String>> {
+    reader.map(|reader| {
+        std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let mut capped = std::io::Read::take(reader, MAX_CAPTURED_BYTES);
+            let _ = std::io::Read::read_to_end(&mut capped, &mut buffer);
+
+            // Drained past the cap so the child sees its pipe emptied and exits
+            // on its own rather than blocking on a full one.
+            let mut reader = capped.into_inner();
+            let _ = std::io::copy(&mut reader, &mut std::io::sink());
+
+            String::from_utf8_lossy(&buffer).into_owned()
+        })
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn joined_capture(handle: Option<std::thread::JoinHandle<String>>) -> String {
+    handle
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default()
+}
+
+/// A reaped child's pipes are closed, so a reader still running past this grace
+/// is waiting on a descendant that inherited one.
+#[cfg(target_os = "linux")]
+const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Cancelling a read abandons whatever the pipe still held, so a child whose
+/// output has not been read yet would lose it to a prompt cancel.
+#[cfg(target_os = "linux")]
+fn wait_for_drain(
+    stdout: &Option<std::thread::JoinHandle<String>>,
+    stderr: &Option<std::thread::JoinHandle<String>>,
+) {
+    let drained = |handle: &Option<std::thread::JoinHandle<String>>| {
+        handle.as_ref().is_none_or(|handle| handle.is_finished())
+    };
+    let deadline = std::time::Instant::now() + DRAIN_GRACE;
+
+    while !(drained(stdout) && drained(stderr)) {
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+/// Unblock the signals `lxc-exec` holds for its sigwait watchdog, so the child
+/// does not inherit a mask that makes it ignore Ctrl-C and termination.
+#[cfg(target_os = "linux")]
+fn unblock_fatal_signals(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+
+    // SAFETY: `pre_exec` runs between fork and exec, where only
+    // async-signal-safe work is permitted. `pthread_sigmask`, which nix's
+    // `thread_unblock` wraps, is async-signal-safe, and this closure allocates
+    // nothing and captures nothing.
+    unsafe {
+        command.pre_exec(|| {
+            let mut mask = nix::sys::signal::SigSet::empty();
+            mask.add(nix::sys::signal::Signal::SIGHUP);
+            mask.add(nix::sys::signal::Signal::SIGTERM);
+            mask.add(nix::sys::signal::Signal::SIGINT);
+            mask.thread_unblock().map_err(std::io::Error::from)?;
+            Ok(())
+        });
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartNetwork {
     FromContainerConfig,
@@ -224,6 +303,80 @@ impl LxcContainer {
             ));
         }
         Ok(())
+    }
+
+    /// Run a tool that releases the container, under a deadline.
+    ///
+    /// `lxc-stop` and `lxc-destroy` do not return until the container is fully
+    /// gone, which a task wedged in uninterruptible sleep can hold open.
+    #[cfg(target_os = "linux")]
+    fn run_release_tool(mut cmd: std::process::Command) -> Result<(), String> {
+        use std::process::Stdio;
+        use wxc_common::interruptible_reader::wrap_pipe;
+        use wxc_common::sandbox_process::{wait_with_timeout, StreamCloser, WaitError};
+
+        // Generous enough to delete a large rootfs on slow storage.
+        const RELEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+        let tool = cmd.get_program().to_string_lossy().into_owned();
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed to run {}: {}", tool, e))?;
+
+        let (stderr, stderr_canceller) = match wrap_pipe(child.stderr.take()) {
+            Ok(pipe) => pipe,
+
+            // Without this the tool keeps running, unreaped, after this call
+            // has reported failure.
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("Failed to wrap the {} stderr pipe: {}", tool, e));
+            }
+        };
+        let stderr = read_to_end_on_thread(stderr);
+
+        let outcome = wait_with_timeout(&mut child, Some(RELEASE_TIMEOUT));
+        if outcome.is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+        } else {
+            wait_for_drain(&None, &stderr);
+        }
+
+        // A descendant holding the pipe open would park the join below
+        // indefinitely.
+        if let Some(canceller) = stderr_canceller {
+            canceller.close();
+        }
+        let captured = joined_capture(stderr);
+
+        let status = match outcome {
+            Ok(status) => status,
+            Err(WaitError::Timeout) => {
+                return Err(format!(
+                    "{} did not finish within {}s",
+                    tool,
+                    RELEASE_TIMEOUT.as_secs()
+                ));
+            }
+            Err(WaitError::Io(e)) => return Err(format!("Failed to wait for {}: {}", tool, e)),
+        };
+
+        if !status.success() {
+            return Err(format!("{} failed: {}", tool, captured.trim()));
+        }
+        Ok(())
+    }
+
+    /// Stub for the workspace-wide clippy lane that runs on Windows.
+    #[cfg(not(target_os = "linux"))]
+    fn run_release_tool(cmd: std::process::Command) -> Result<(), String> {
+        Self::run_tool(cmd)
     }
 
     pub fn is_defined(&self) -> bool {
@@ -443,9 +596,156 @@ impl LxcContainer {
         Err("LxcContainer::attach_run is only supported on Linux".to_string())
     }
 
+    /// Run a command in the container and return its output, with no pty and no
+    /// path from that output to this process's own stdio.
+    #[cfg(target_os = "linux")]
+    pub fn attach_capture(
+        &self,
+        command: &str,
+        working_directory: &str,
+        env: &[String],
+        force_clear_env: bool,
+        timeout: Option<std::time::Duration>,
+        firewall: ContainerFirewall,
+    ) -> Result<(i32, String, String), String> {
+        use std::process::Stdio;
+        use wxc_common::interruptible_reader::wrap_pipe;
+        use wxc_common::sandbox_process::{wait_with_timeout, StreamCloser, WaitError};
+
+        let mut cmd = self.lxc_command("lxc-attach");
+        cmd.args(build_attach_args_with_env_control(
+            env,
+            working_directory,
+            command,
+            force_clear_env,
+        ));
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        unblock_fatal_signals(&mut cmd);
+
+        if firewall == ContainerFirewall::Installed {
+            confine_network_capabilities(&mut cmd);
+        }
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed to run lxc-attach: {}", e))?;
+
+        let wrapped = wrap_pipe(child.stdout.take())
+            .and_then(|out| wrap_pipe(child.stderr.take()).map(|err| (out, err)));
+        let ((stdout, stdout_canceller), (stderr, stderr_canceller)) = match wrapped {
+            Ok(pipes) => pipes,
+
+            // Without this the helper keeps running, and can still rewrite
+            // `/etc/hosts` after this call has reported failure.
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("Failed to wrap an lxc-attach pipe: {}", e));
+            }
+        };
+        let stdout = read_to_end_on_thread(stdout);
+        let stderr = read_to_end_on_thread(stderr);
+
+        let outcome = wait_with_timeout(&mut child, timeout);
+        if outcome.is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+        } else {
+            wait_for_drain(&stdout, &stderr);
+        }
+
+        // A descendant holding either pipe open would park the joins below
+        // indefinitely.
+        for canceller in [stdout_canceller, stderr_canceller].into_iter().flatten() {
+            canceller.close();
+        }
+        let captured_out = joined_capture(stdout);
+        let captured_err = joined_capture(stderr);
+
+        let status = match outcome {
+            Ok(status) => status,
+            Err(WaitError::Timeout) => {
+                let ms = timeout.map(|d| d.as_millis()).unwrap_or(0);
+                return Err(format!("lxc-attach timed out after {}ms", ms));
+            }
+            Err(WaitError::Io(e)) => {
+                return Err(format!("Failed to wait for lxc-attach: {}", e));
+            }
+        };
+
+        Ok((status.code().unwrap_or(-1), captured_out, captured_err))
+    }
+
+    /// Stub for the workspace-wide clippy lane that runs on Windows.
+    #[cfg(not(target_os = "linux"))]
+    pub fn attach_capture(
+        &self,
+        _command: &str,
+        _working_directory: &str,
+        _env: &[String],
+        _force_clear_env: bool,
+        _timeout: Option<std::time::Duration>,
+        _firewall: ContainerFirewall,
+    ) -> Result<(i32, String, String), String> {
+        Err("LxcContainer::attach_capture is only supported on Linux".to_string())
+    }
+
+    /// Launch a command in the container on pipes the caller owns, and hand
+    /// back the handle without waiting for it.
+    ///
+    /// The child's signal mask is left alone: in a host application it belongs
+    /// to the application, not to `lxc-exec`'s watchdog.
+    #[cfg(target_os = "linux")]
+    pub fn attach_spawn(
+        &self,
+        command: &str,
+        working_directory: &str,
+        env: &[String],
+        force_clear_env: bool,
+        firewall: ContainerFirewall,
+    ) -> Result<std::process::Child, String> {
+        use std::process::Stdio;
+
+        let mut cmd = self.lxc_command("lxc-attach");
+        cmd.args(build_attach_args_with_env_control(
+            env,
+            working_directory,
+            command,
+            force_clear_env,
+        ));
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        // The drop needs CAP_SETPCAP, which an unprivileged caller lacks, and a
+        // run with no chains has nothing to protect anyway.
+        if firewall == ContainerFirewall::Installed {
+            confine_network_capabilities(&mut cmd);
+        }
+
+        cmd.spawn()
+            .map_err(|e| format!("Failed to run lxc-attach: {}", e))
+    }
+
+    /// Stub for the workspace-wide clippy lane that runs on Windows.
+    #[cfg(not(target_os = "linux"))]
+    pub fn attach_spawn(
+        &self,
+        _command: &str,
+        _working_directory: &str,
+        _env: &[String],
+        _force_clear_env: bool,
+        _firewall: ContainerFirewall,
+    ) -> Result<std::process::Child, String> {
+        Err("LxcContainer::attach_spawn is only supported on Linux".to_string())
+    }
+
     /// Stop the container by killing it, not by asking it to exit.
     pub fn stop(&self) -> Result<(), String> {
-        Self::run_tool(self.stop_command())
+        Self::run_release_tool(self.stop_command())
     }
 
     fn stop_command(&self) -> std::process::Command {
@@ -462,7 +762,7 @@ impl LxcContainer {
         let mut cmd = self.lxc_command("lxc-destroy");
 
         cmd.arg("-f");
-        Self::run_tool(cmd)
+        Self::run_release_tool(cmd)
     }
 
     fn config_file_path(&self) -> String {
@@ -717,21 +1017,20 @@ mod tests {
         assert_eq!(c.config_file_path(), "/var/lib/lxc/box/config");
     }
 
-    fn container_with_config(body: &str) -> (LxcContainer, std::path::PathBuf) {
-        let base = std::env::temp_dir().join(format!(
-            "mxc-lxc-cfg-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let dir = base.join("box");
+    fn container_with_config(body: &str) -> (tempfile::TempDir, LxcContainer, std::path::PathBuf) {
+        let base = tempfile::Builder::new()
+            .prefix("mxc-lxc-cfg-")
+            .tempdir()
+            .expect("create temp LXC directory");
+        let dir = base.path().join("box");
         std::fs::create_dir_all(&dir).expect("temp container dir");
         let config = dir.join("config");
         std::fs::write(&config, body).expect("seed config");
-        let container = LxcContainer::new("box", Some(base.to_str().unwrap()));
-        (container, config)
+        let container = LxcContainer::new(
+            "box",
+            Some(base.path().to_str().expect("temp path must be UTF-8")),
+        );
+        (base, container, config)
     }
 
     const TEMPLATE_CONFIG: &str = "# Template used to create this container\n\
@@ -741,7 +1040,7 @@ mod tests {
 
     #[test]
     fn a_reused_container_does_not_inherit_an_earlier_runs_mounts() {
-        let (container, config) = container_with_config(TEMPLATE_CONFIG);
+        let (_temp_dir, container, config) = container_with_config(TEMPLATE_CONFIG);
 
         container
             .set_filesystem_access_points(&[
@@ -766,7 +1065,7 @@ mod tests {
 
     #[test]
     fn rewriting_mounts_preserves_every_line_the_backend_does_not_own() {
-        let (container, config) = container_with_config(TEMPLATE_CONFIG);
+        let (_temp_dir, container, config) = container_with_config(TEMPLATE_CONFIG);
 
         container
             .set_filesystem_access_points(&["/data data none bind,create=dir 0 0".into()])
@@ -797,7 +1096,7 @@ mod tests {
         // a stale grant on a container MXC has not rewritten since.
         let unmarked = "lxc.rootfs.path = dir:/var/lib/lxc/box/rootfs\n\
                         lxc.mount.entry = /srv/mydata srv/mydata none bind,create=dir 0 0\n";
-        let (container, config) = container_with_config(unmarked);
+        let (_temp_dir, container, config) = container_with_config(unmarked);
 
         container
             .set_filesystem_access_points(&[])
@@ -816,7 +1115,7 @@ mod tests {
 
     #[test]
     fn repeated_runs_do_not_accumulate_managed_blocks() {
-        let (container, config) = container_with_config(TEMPLATE_CONFIG);
+        let (_temp_dir, container, config) = container_with_config(TEMPLATE_CONFIG);
 
         for _ in 0..3 {
             container
@@ -843,7 +1142,7 @@ mod tests {
             "lxc.rootfs.path = dir:/var/lib/lxc/box/rootfs\n{}\nlxc.mount.entry = /tmp/secret tmp/secret none bind 0 0\n",
             MANAGED_MOUNTS_BEGIN
         );
-        let (container, config) = container_with_config(&truncated);
+        let (_temp_dir, container, config) = container_with_config(&truncated);
 
         container
             .set_filesystem_access_points(&[])
@@ -862,7 +1161,7 @@ mod tests {
 
     #[test]
     fn a_failed_rewrite_leaves_no_temporary_file_behind() {
-        let (container, config) = container_with_config(TEMPLATE_CONFIG);
+        let (_temp_dir, container, config) = container_with_config(TEMPLATE_CONFIG);
         let err = LxcContainer::new("ghost", Some("/nonexistent-mxc-base"))
             .set_filesystem_access_points(&[])
             .expect_err("a missing config must fail loudly");
@@ -1110,8 +1409,8 @@ mod tests {
         );
     }
 
-    // The conditional in `attach_run` exists because of this: the drop is a
-    // privileged operation, so applying it to every run costs an unprivileged
+    // The attach paths drop this capability only when chains are installed: the
+    // drop is privileged, so applying it to every run costs an unprivileged
     // caller the whole execution.
     #[cfg(target_os = "linux")]
     #[test]
@@ -1137,6 +1436,54 @@ mod tests {
         assert!(
             unconfined.status().is_ok(),
             "a run with no chains to protect must spawn without any privilege"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_failed_release_carries_the_tools_own_diagnosis() {
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg("printf 'mxc: container is not running\\n' >&2; exit 3");
+
+        let failure = LxcContainer::run_release_tool(cmd)
+            .expect_err("a tool exiting non-zero must be reported as a failure");
+
+        assert!(
+            failure.contains("container is not running"),
+            "the tool's stderr is the only account of why the release failed, so it has to \
+             reach the caller; got {failure:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_release_that_succeeds_is_not_reported_as_a_failure() {
+        let mut cmd = std::process::Command::new("/bin/sh");
+        cmd.arg("-c").arg("printf 'noise\\n'; exit 0");
+
+        assert!(
+            LxcContainer::run_release_tool(cmd).is_ok(),
+            "a tool that exited cleanly released the container"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_release_waits_for_stderr_a_descendant_writes_after_the_tool_exits() {
+        let mut cmd = std::process::Command::new("/bin/sh");
+
+        // The subshell holds the stderr pipe open past the tool's own exit and
+        // writes only after it, which is the ordering a prompt cancel drops.
+        cmd.arg("-c")
+            .arg("( sleep 0.2; printf 'late diagnosis\\n' >&2 ) & exit 3");
+
+        let failure = LxcContainer::run_release_tool(cmd)
+            .expect_err("a tool exiting non-zero must be reported as a failure");
+
+        assert!(
+            failure.contains("late diagnosis"),
+            "stderr that lands after the tool exits still explains the failure; got {failure:?}"
         );
     }
 }

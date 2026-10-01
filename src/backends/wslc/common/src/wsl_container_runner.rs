@@ -662,6 +662,8 @@ impl ScriptRunner for WSLContainerRunner {
     /// instead of late in `execute` on the broken in-container iptables path.
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         reject_unsupported_lifecycle(request)?;
+        policy_mapping::container_working_directory(&request.working_directory)
+            .map_err(|msg| WslcError::Rejected(msg).into_response())?;
         policy::reject_ui_policy(request).map_err(as_wslc_rejection)?;
         if request.policy.needs_host_filtering() {
             return Err(WslcError::Rejected(
@@ -1482,11 +1484,11 @@ impl WSLContainerRunner {
             &request.script_code,
         )?;
 
+        // `validate_runner` has already rejected an unmappable cwd; the `Err`
+        // arm keeps this direct entry point fail-closed as well.
         let _cwd_cstr;
-        if !request.working_directory.is_empty() {
-            if let Some(container_cwd) =
-                policy_mapping::windows_path_to_container_path(&request.working_directory)
-            {
+        match policy_mapping::container_working_directory(&request.working_directory) {
+            Ok(Some(container_cwd)) => {
                 _cwd_cstr = format!("{}\0", container_cwd);
                 let hr = sdk.WslcSetProcessSettingsWorkingDirectory(
                     &mut process_settings,
@@ -1500,6 +1502,8 @@ impl WSLContainerRunner {
                     ));
                 }
             }
+            Ok(None) => {}
+            Err(msg) => return Err(WslcError::Rejected(msg).into_response()),
         }
 
         // -- Container settings --
@@ -2644,6 +2648,49 @@ mod tests {
             wxc_common::models::FailurePhase::Rejected,
             "a policy refusal is a rejection, not a runtime failure"
         );
+    }
+
+    fn request_with_cwd(cwd: &str) -> ExecutionRequest {
+        ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            script_code: "pwd".to_string(),
+            working_directory: cwd.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Regression for #902: a cwd that cannot be mapped under `/mnt/<drive>`
+    /// used to be dropped silently, running the workload in the container's
+    /// default directory. It must now fail the launch and name the value.
+    #[test]
+    fn validate_runner_rejects_unmappable_working_directory() {
+        let runner = WSLContainerRunner::new(&WslcConfig::default());
+        for cwd in ["/workspace", "sub", "C:work", r"\\server\share"] {
+            let err = runner
+                .validate_runner(&request_with_cwd(cwd))
+                .expect_err("an unmappable cwd must be rejected");
+            assert_eq!(
+                err.failure_phase,
+                wxc_common::models::FailurePhase::Rejected,
+                "cwd {cwd:?}"
+            );
+            assert!(
+                err.error_message.contains(&format!("{cwd:?}")),
+                "the error must name the value {cwd:?}: {}",
+                err.error_message
+            );
+        }
+    }
+
+    #[test]
+    fn validate_runner_accepts_mappable_or_omitted_working_directory() {
+        let runner = WSLContainerRunner::new(&WslcConfig::default());
+        for cwd in [r"C:\work", "C:/work", "", "   "] {
+            assert!(
+                runner.validate_runner(&request_with_cwd(cwd)).is_ok(),
+                "cwd {cwd:?} must be accepted"
+            );
+        }
     }
 
     // -- Host-stdio forwarding (`StdioMode::Inherit`) --------------------

@@ -167,10 +167,10 @@ MXC also sets the standard proxy environment variables for libraries that use co
 traffic that bypasses the proxy is blocked. On an enforcing BaseContainer path, per-container WFP permits egress only to
 the configured loopback proxy address and port and blocks direct public and private destinations.
 
-Model 2 requires `egress.default: "deny"` and `ingress.default: "allow"`. When `allowedProxyPeer` names a package or
-AppContainer profile, MXC authorizes only that peer and `ingress.hostLoopback` remains denied. An identity-less host
-proxy omits `allowedProxyPeer` and requires `ingress.hostLoopback: "allow"`. Direct egress allow and deny rules do not
-apply when `runtimeConfig.networkProxy` is present.
+Model 2 requires `egress.default: "deny"` and `ingress.default: "allow"`. When a non-blank `allowedProxyPeer` names a
+package or AppContainer profile, MXC authorizes only that peer and `ingress.hostLoopback` remains denied. An
+identity-less host proxy omits `allowedProxyPeer` and requires `ingress.hostLoopback: "allow"`. Direct egress allow and
+deny rules do not apply when `runtimeConfig.networkProxy` is present.
 
 The proxy endpoint is runtime metadata, not shared network policy. MXC configures the per-container WinHTTP proxy,
 applies WFP endpoint scoping, and grants the private-network capability selected by `ingress.default`.

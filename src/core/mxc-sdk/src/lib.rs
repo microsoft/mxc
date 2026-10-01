@@ -172,6 +172,8 @@ pub use mxc_engine::{
     SandboxId, SandboxPolicy, SandboxRequest, StateAwareExecBackendOptions, StateAwareProvision,
     ValidationResult, WslcSection,
 };
+#[cfg(target_os = "windows")]
+pub use mxc_engine::{probe, ProbeFacts, ProbeOutput, UiCapabilitySupport};
 
 pub use sandbox::{
     CaptureDenialsErrorOutput, CaptureDenialsOutput, Output, Sandbox, SandboxOutputMetadata,

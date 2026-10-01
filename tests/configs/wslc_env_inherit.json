@@ -1,0 +1,18 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "wslc-Env-inherit",
+  "containment": "wslc",
+  "process": {
+    "commandLine": "echo \"PYVER=[$PYTHON_VERSION]\"; echo \"FOO=[$FOO]\"; echo \"LANG=[$LANG]\"; echo \"LANGCOUNT=[$(env | grep -c '^LANG=')]\"; echo ENV_PROBE_DONE",
+    "timeout": 30000,
+    "env": ["FOO=bar", "LANG=C.OVERRIDDEN"],
+    "inheritDefaultEnv": true
+  },
+  "network": {
+    "egress": { "default": "deny" }
+  },
+  "wslc": {
+    "image": "python:3.12-alpine"
+  }
+}

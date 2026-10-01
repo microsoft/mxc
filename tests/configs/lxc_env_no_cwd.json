@@ -1,0 +1,14 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
+  "containerId": "CLI-lxc-Env-no_cwd",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "echo \"PATH=[$PATH]\"; echo \"HOME=[$HOME]\"; echo \"TERM=[$TERM]\"; echo \"LEAK=[$MXC_LEAK_PROBE]\"; echo ENV_PROBE_DONE",
+    "timeout": 20000
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  }
+}

@@ -1,5 +1,6 @@
 {
-  "version": "0.8.0-alpha",
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
   "containerId": "CLI-LXC-GA-Egress-Icmp-Allowed",
   "containment": "lxc",
   "process": {

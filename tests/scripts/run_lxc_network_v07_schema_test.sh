@@ -10,6 +10,10 @@
 # the same intent expressed in 0.8 does not.
 # Run this alongside run_lxc_network_ga_egress_test.sh, whose dns-denied case
 # is the other half of the pair.
+#
+# The query goes to a resolver this script stands up in its own routed
+# namespace, so the case turns on the port 53 accept rather than on whether the
+# host is allowed to reach a public resolver.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,6 +35,8 @@ skip() {
 command -v iptables >/dev/null 2>&1 || skip "iptables is not installed."
 command -v ip6tables >/dev/null 2>&1 || skip "ip6tables is not installed."
 command -v lxc-create >/dev/null 2>&1 || skip "LXC (lxc-create) is not installed."
+command -v ip >/dev/null 2>&1 || skip "iproute2 (ip) is not installed."
+command -v python3 >/dev/null 2>&1 || skip "python3 is not installed; the DNS case needs it to host a resolver."
 [ -f "$LXC_EXEC" ] || skip "lxc-exec binary not built; run build.sh first."
 
 DNS_CONFIG="$REPO_DIR/tests/configs/lxc_network_v07_dns_exemption.json"
@@ -50,16 +56,75 @@ restore_ip_forward() {
         sysctl -w net.ipv4.ip_forward="$IP_FORWARD_WAS" >/dev/null 2>&1 || true
     fi
 }
-trap restore_ip_forward EXIT
 
-# Without this the container's DNS query stops at the host and never leaves the
-# box, and the dns case below reads that as a missing port 53 accept.
+# shellcheck source=lib/chain_name.sh
+. "$SCRIPT_DIR/lib/chain_name.sh"
+# shellcheck source=lib/lxc_peer_listener.sh
+. "$SCRIPT_DIR/lib/lxc_peer_listener.sh"
+# shellcheck source=lib/lxc_dns_peer.sh
+. "$SCRIPT_DIR/lib/lxc_dns_peer.sh"
+
+# The resolver lives in its own network namespace behind a veth, reached only
+# through the FORWARD hook the chain filters on.  An RFC 2544 benchmarking range
+# keeps it clear of every other suite's peer, which the host would otherwise
+# route to by longest matching prefix.
+PEER_NETNS="mxc-v07-dns-peer"
+PEER_HOST_VETH="mxcv07h0"
+PEER_VETH="mxcv07p0"
+PEER_HOST_IP="198.18.0.1"
+PEER_DNS_IP="198.18.0.53"
+PEER_DNS_ANSWER="198.18.0.99"
+
+PEER_DNS_LISTENER_LOG="$(mktemp)"
+teardown_peer() {
+    stop_dns_peer
+    ip netns del "$PEER_NETNS" >/dev/null 2>&1 || true
+    ip link del "$PEER_HOST_VETH" >/dev/null 2>&1 || true
+    restore_ip_forward
+}
+teardown_run() {
+    teardown_peer
+    rm -f "$PEER_DNS_LISTENER_LOG"
+}
+trap teardown_run EXIT
+
+# Clear anything an aborted earlier run left behind, then build the resolver.
+teardown_peer
+ip netns add "$PEER_NETNS" || fail "could not create the resolver namespace."
+ip link add "$PEER_HOST_VETH" type veth peer name "$PEER_VETH" \
+    || fail "could not create the resolver veth pair."
+ip link set "$PEER_VETH" netns "$PEER_NETNS" \
+    || fail "could not move the resolver interface into its namespace."
+ip addr add "$PEER_HOST_IP/24" dev "$PEER_HOST_VETH" \
+    || fail "could not address the host side of the resolver veth."
+ip link set "$PEER_HOST_VETH" up || fail "could not bring up the resolver veth."
+ip netns exec "$PEER_NETNS" ip addr add "$PEER_DNS_IP/24" dev "$PEER_VETH" \
+    || fail "could not address the resolver."
+ip netns exec "$PEER_NETNS" ip link set "$PEER_VETH" up \
+    || fail "could not bring up the resolver interface."
+ip netns exec "$PEER_NETNS" ip link set lo up \
+    || fail "could not bring up the resolver loopback."
+ip netns exec "$PEER_NETNS" ip route add default via "$PEER_HOST_IP" \
+    || fail "could not route the resolver back to the container."
+
+# Without this the container's DNS query stops at the host and never reaches the
+# resolver, and the dns case below reads that as a missing port 53 accept.
 IP_FORWARD_WAS="$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || true)"
 sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 \
     || skip "could not enable IPv4 forwarding."
 
-# shellcheck source=lib/chain_name.sh
-. "$SCRIPT_DIR/lib/chain_name.sh"
+# A resolver that never bound has to fail here as harness breakage, rather than
+# below as a chain that dropped its port 53 accept.
+start_dns_peer "$PEER_NETNS" "$PEER_DNS_LISTENER_LOG" "$PEER_DNS_ANSWER" "$PEER_DNS_IP"
+if ! PEER_PROBE_ERROR="$(await_peer_dns "$PEER_DNS_IP")"; then
+    fail_unreachable_peer "the 0.7 DNS case resolver" "$PEER_DNS_IP:53" \
+        "$PEER_PROBE_ERROR" "$PEER_DNS_LISTENER_LOG"
+fi
+
+# Drift guard: the fixture must query the resolver above, or the case would
+# probe a stale address and prove nothing.
+grep -Fq "$PEER_DNS_IP" "$DNS_CONFIG" \
+    || fail "fixture ${DNS_CONFIG##*/} no longer queries the resolver $PEER_DNS_IP; script and fixture drifted."
 
 # The snapshot keeps chains left behind by an earlier failed run from being
 # blamed on this one.

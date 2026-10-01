@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# Verifies BaseContainer network default actions using stable schema 0.7.0-alpha.
+# Verifies BaseContainer network default actions using stable schema 0.8.0-alpha.
 #
 # Usage:
 #   .\run_base_container_network_tests.ps1          # prefer debug, fall back to release

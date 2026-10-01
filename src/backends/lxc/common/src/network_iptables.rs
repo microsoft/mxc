@@ -4,7 +4,7 @@
 use std::net::{IpAddr, Ipv6Addr, ToSocketAddrs};
 use std::process::Command;
 
-use sha2::{Digest, Sha256};
+use wxc_common::hashing::sha256;
 use wxc_common::logger::Logger;
 use wxc_common::models::{
     ContainerPolicy, NetworkAction, NetworkCidr, NetworkEgressPolicy, NetworkPeer, NetworkPolicy,
@@ -324,7 +324,7 @@ pub fn ingress_chain_name_for(container_name: &str) -> String {
 }
 
 fn chain_name_with_prefix(prefix: &str, slug_len: usize, container_name: &str) -> String {
-    let digest = Sha256::digest(container_name.as_bytes());
+    let digest = sha256(container_name.as_bytes());
     let hash = base32_lower(&digest[..CHAIN_HASH_BYTES]);
 
     let slug: String = container_name
@@ -366,6 +366,13 @@ impl NetworkIptablesManager {
 
     pub fn set_preserve_policy(&mut self, preserve: bool) {
         self.preserve_policy = preserve;
+    }
+
+    /// Discard the record of what was installed, so no later removal is
+    /// attempted.
+    pub fn forget(&mut self) {
+        self.created = CreatedResources::default();
+        self.rules_applied = false;
     }
 
     // The hosts-file pin a proxied container needs before it runs.
@@ -1904,6 +1911,39 @@ mod tests {
             result.is_ok(),
             "a caller with no namespace to enforce in must not be failed closed, got {:?}",
             result
+        );
+    }
+
+    #[test]
+    fn a_forgotten_manager_issues_no_removal_when_it_goes_away() {
+        let fake = super::test_firewall::install();
+        let mut manager =
+            NetworkIptablesManager::new("lxc-forget", EgressHookPoint::ContainerNetns(4242));
+        let policy = policy_requesting_mode(NetworkEnforcementMode::Firewall);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        manager
+            .apply_firewall_rules(&policy, &mut logger)
+            .expect("the fake firewall accepts every command");
+        assert!(
+            manager.rules_applied(),
+            "precondition: the manager owns installed state"
+        );
+
+        manager.forget();
+
+        assert!(
+            !manager.rules_applied(),
+            "a forgotten manager must own no installed state"
+        );
+
+        fake.forget_issued();
+        drop(manager);
+
+        assert!(
+            fake.issued().is_empty(),
+            "the netns holding the chain is gone, so its dead pid must not be nsentered; got {:?}",
+            fake.issued()
         );
     }
 

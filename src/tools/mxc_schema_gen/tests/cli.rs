@@ -9,13 +9,7 @@ fn writes_schema_to_bare_filename() {
     let directory = tempfile::tempdir().expect("create temporary directory");
     let output = Command::new(env!("CARGO_BIN_EXE_mxc_schema_gen"))
         .current_dir(directory.path())
-        .args([
-            "schema",
-            "--version",
-            "0.10.0-alpha",
-            "--out",
-            "schema.json",
-        ])
+        .args(["schema", "--version", "1.1.0-alpha", "--out", "schema.json"])
         .output()
         .expect("run schema generator");
 

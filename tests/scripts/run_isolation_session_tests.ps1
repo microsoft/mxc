@@ -390,7 +390,7 @@ $legacyNetworkFields = [ordered]@{
 }
 foreach ($field in $legacyNetworkFields.Keys) {
     $request = @{
-        version = '0.9.0-alpha'
+        version = '1.0.0'
         containment = 'isolation_session'
         process = @{ commandLine = 'echo LEGACY_NETWORK_MUST_NOT_RUN' }
         network = @{ $field = $legacyNetworkFields[$field] }
@@ -401,7 +401,7 @@ foreach ($field in $legacyNetworkFields.Keys) {
 }
 
 $legacyNetworkRequest = @{
-    version = '0.9.0-alpha'
+    version = '1.0.0'
     containment = 'isolation_session'
     process = @{ commandLine = 'echo LEGACY_NETWORK_MUST_NOT_RUN' }
     network = [ordered]@{ defaultPolicy = 'allow'; allowLocalNetwork = $true }
@@ -427,6 +427,10 @@ $null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_ui_re
 $null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_lifecycle_rejected.json" `
     -ExpectedExit -1 `
     -OutputContains @("lifecycle.destroyOnExit=false")))
+
+$null = $results.Add((Run-IsolationSessionTest "isolation_session_one_shot_env_rejected.json" `
+    -ExpectedExit -1 `
+    -OutputContains @("process.env without process.inheritDefaultEnv=true is not supported")))
 
 # ---------------- Concurrent one-shot test ----------------
 #

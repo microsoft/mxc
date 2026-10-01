@@ -190,38 +190,33 @@ start_lxc_bridge() {
     ip addr show "$bridge" || true
 }
 
-# Outbound container traffic leaves the bridge subnet with a private source
-# address, so it needs a MASQUERADE rule to reach anything off-host. lxc-net
-# normally installs one, but it skips its firewall setup when it believes
-# another manager owns the ruleset, leaving a bridge that hands out leases the
-# container cannot use. The symptom is a name-resolution failure inside the
-# guest, which reads like a policy problem and is not one.
-ensure_bridge_nat() {
+# firewalld treats a container bridge as just another untrusted interface: the
+# default zone permits DHCPv6 and router advertisement but rejects IPv4 DHCP, so
+# the container comes up with an IPv6 address and no lease, which surfaces much
+# later as an unreachable IPv4 destination. lxc-net's own accept rules do not
+# rescue it. Under nftables every base chain at a hook is evaluated, so a reject
+# in firewalld's table still applies however lxc-net spelled its rules. The
+# interface has to be moved into a zone that permits the traffic instead.
+ensure_bridge_firewall_zone() {
     local bridge="${LXC_BRIDGE:-lxcbr0}"
-    local subnet
 
-    subnet="$(ip -4 -o addr show "$bridge" 2>/dev/null | awk '{print $4}' | head -n 1)"
-    if [[ -z "$subnet" ]]; then
-        echo "WARNING: $bridge has no IPv4 subnet; skipping NAT setup." >&2
+    if ! command -v firewall-cmd >/dev/null 2>&1; then
+        return 0
+    fi
+    if ! sudo firewall-cmd --state >/dev/null 2>&1; then
+        echo "firewalld is not running; $bridge needs no zone assignment."
         return 0
     fi
 
-    # Match on the source subnet rather than the rule text: lxc-net's own rule
-    # and ours are equivalent however they are spelled.
-    if sudo iptables -t nat -S POSTROUTING 2>/dev/null |
-        grep -q -- "-s ${subnet%%/*}"; then
-        echo "NAT for $subnet is already present."
-        return 0
-    fi
-
-    if sudo iptables -t nat -A POSTROUTING -s "$subnet" ! -d "$subnet" -j MASQUERADE; then
-        echo "Installed MASQUERADE for $subnet."
+    # Runtime only. A permanent change takes a reload to apply, and a reload
+    # discards the rules a suite installs while it runs; these hosts are
+    # ephemeral, so the assignment only has to outlive the job.
+    if sudo firewall-cmd --zone=trusted --change-interface="$bridge" >/dev/null 2>&1; then
+        echo "Moved $bridge into firewalld's trusted zone."
     else
-        echo "WARNING: could not install MASQUERADE for $subnet; containers will not reach off-host destinations." >&2
+        echo "WARNING: could not move $bridge into firewalld's trusted zone; containers will not receive an IPv4 lease." >&2
     fi
 }
-
-
 
 # Verifies the interpreters test suites drive inside the sandbox and reports
 # what the image actually provides, so a tool the image was built without stays
@@ -314,7 +309,7 @@ case "$backend" in
             sudo apparmor_parser -rT /etc/apparmor.d/lxc* 2>/dev/null || true
         fi
         start_lxc_bridge
-        ensure_bridge_nat
+        ensure_bridge_firewall_zone
         ;;
     microvm)
         for file in nanvixd.elf nanvix_rootfs.img python3.initrd bin/kernel.elf; do

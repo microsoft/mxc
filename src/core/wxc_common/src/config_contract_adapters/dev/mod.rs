@@ -43,7 +43,7 @@ mod tests {
     #[test]
     fn one_shot_request_adapts_to_one_shot() {
         let request = contract::parse_request(
-            r#"{"version":"0.10.0-alpha","process":{"commandLine":"echo hello"}}"#,
+            r#"{"version":"1.1.0-alpha","process":{"commandLine":"echo hello"}}"#,
         )
         .unwrap();
         let AdaptedConfigRequest::OneShot(common) = adapt_request(request).unwrap() else {
@@ -51,7 +51,7 @@ mod tests {
         };
         assert_eq!(
             common.source_contract,
-            mxc_config_contract::ContractVersion::V0_10_0Alpha
+            mxc_config_contract::ContractVersion::V1_1_0Alpha
         );
         let process = common.process.unwrap();
         assert_eq!(process.command_line.as_deref(), Some("echo hello"));
@@ -64,7 +64,7 @@ mod tests {
     fn one_shot_preserves_process_container_enumerate_paths() {
         let request = contract::parse_request(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../mxc_config_contract/tests/v0_10_0_alpha/fixtures/one_shot/valid/complete.json"
+            "/../mxc_config_contract/tests/v1_1_0_alpha/fixtures/one_shot/valid/complete.json"
         )))
         .unwrap();
         let AdaptedConfigRequest::OneShot(common) = adapt_request(request).unwrap() else {

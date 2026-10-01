@@ -34,6 +34,14 @@ public static class MxcSandbox
         },
     };
 
+    private static readonly JsonSerializerOptions ProbeJsonOptions = new(JsonOptions)
+    {
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+    };
+
+    internal static IRequestProbeInterop RequestProbeInterop { get; set; } =
+        PInvokeRequestProbeInterop.Instance;
+
     private static readonly JsonSerializerOptions PublishedPolicyJsonOptions = new(JsonOptions)
     {
         Converters = { new NetworkPolicyJsonConverter(includeLegacyDefaults: true) },
@@ -113,6 +121,178 @@ public static class MxcSandbox
                 AvailableMethods = support.AvailableMethods.Select(ParseBackend).ToArray(),
             };
         }
+    }
+
+    /// <summary>
+    /// Probe which Windows ProcessContainer tier can serve a request.
+    /// </summary>
+    /// <remarks>
+    /// This diagnostic does not create a sandbox. It calls the packaged
+    /// <c>mxc_ffi</c> library in process. It is intentionally not part of
+    /// <see cref="ISandboxRunner"/>, preserving compatibility for existing
+    /// interface implementations.
+    /// </remarks>
+    public static ProbeOutput Probe(SandboxRequest? request = null)
+    {
+        var requestJson = request is null ? null : SerializeRequest(request);
+        if (!RequestProbeInterop.IsSupportedOnCurrentPlatform)
+        {
+            throw new MxcException(
+                ErrorCode.UnsupportedContainment,
+                "the request-aware probe is available only for Windows ProcessContainer");
+        }
+
+        return ParseProbeOutput(ProbeNative(requestJson));
+    }
+
+    private static unsafe string ProbeNative(string? configJson)
+    {
+        if (configJson is null)
+        {
+            return InvokeNativeProbe(null);
+        }
+
+        var requestBuffer = ToNullTerminatedUtf8(configJson);
+        fixed (byte* requestPtr = requestBuffer)
+        {
+            return InvokeNativeProbe(requestPtr);
+        }
+    }
+
+    private static unsafe string InvokeNativeProbe(byte* requestPtr)
+    {
+        byte* output = null;
+        MxcErrorDetail error = default;
+        var callCompleted = false;
+        try
+        {
+            var status = RequestProbeInterop.Probe(requestPtr, &output, &error);
+            callCompleted = true;
+            if (status != (int)ErrorCode.Success)
+            {
+                throw NativeError.ToException(
+                    status,
+                    error,
+                    "native request probe failed");
+            }
+            if (output is null)
+            {
+                throw new MxcException(
+                    ErrorCode.BackendError,
+                    "native request probe returned no output");
+            }
+
+            return Marshal.PtrToStringUTF8((IntPtr)output)
+                ?? throw new MxcException(
+                    ErrorCode.BackendError,
+                    "native request probe returned invalid JSON");
+        }
+        finally
+        {
+            if (callCompleted)
+            {
+                if (output is not null)
+                {
+                    RequestProbeInterop.FreeString(output);
+                }
+                RequestProbeInterop.FreeError(&error);
+            }
+        }
+    }
+
+    internal static ProbeOutput ParseProbeOutput(string json)
+    {
+        var output = JsonSerializer.Deserialize<NativeProbeOutput>(json, ProbeJsonOptions)
+            ?? throw new JsonException("native request probe returned null JSON.");
+        var warnings = output.Warnings
+            ?? throw new JsonException("native request probe returned null warnings.");
+        if (warnings.Any(static warning => warning is null))
+        {
+            throw new JsonException(
+                "native request probe returned a non-string warning.");
+        }
+
+        var probes = output.Probes
+            ?? throw new JsonException("native request probe omitted probes.");
+        var ui = probes.UiCapabilities
+            ?? throw new JsonException("native request probe omitted UI capabilities.");
+
+        IsolationTier? tier;
+        if (!output.HasTier)
+        {
+            if (!output.HasError)
+            {
+                throw new JsonException(
+                    "native request probe omitted both tier and error.");
+            }
+            if (output.Error is null)
+            {
+                throw new JsonException(
+                    "native request probe returned a null error.");
+            }
+            if (output.HasNeedsDaclAugmentation)
+            {
+                throw new JsonException(
+                    "native request probe returned DACL augmentation with an error.");
+            }
+            tier = null;
+        }
+        else
+        {
+            if (output.Tier is null)
+            {
+                throw new JsonException(
+                    "native request probe returned a null tier.");
+            }
+            if (output.HasError)
+            {
+                throw new JsonException(
+                    "native request probe returned both tier and error.");
+            }
+            if (!output.HasNeedsDaclAugmentation
+                || output.NeedsDaclAugmentation is null)
+            {
+                throw new JsonException(
+                    "native request probe omitted DACL augmentation for a selected tier.");
+            }
+            tier = ParseProbeIsolationTier(output.Tier);
+        }
+
+        return new ProbeOutput
+        {
+            Tier = tier,
+            NeedsDaclAugmentation = output.NeedsDaclAugmentation,
+            Warnings = warnings.Select(static warning => warning!).ToArray(),
+            Error = output.Error,
+            Probes = new ProbeFacts
+            {
+                BaseContainerApiPresent = probes.BaseContainerApiPresent,
+                NativeCaptureAvailable = probes.NativeCaptureAvailable,
+                GuardedCaptureAvailable = probes.GuardedCaptureAvailable,
+                BfscfgPresent = probes.BfscfgPresent,
+                BfsCompiledIn = probes.BfsCompiledIn,
+                BaseContainerSupportsDenyPaths = probes.BaseContainerSupportsDenyPaths,
+                BaseContainerSupportsEnumeratePaths =
+                    probes.BaseContainerSupportsEnumeratePaths,
+                BaseContainerSupportsIngressHostLoopbackAllow =
+                    probes.BaseContainerSupportsIngressHostLoopbackAllow,
+                IsolationSessionAvailable = probes.IsolationSessionAvailable,
+                HyperlightAvailable = probes.HyperlightAvailable,
+                UiCapabilities = new UiCapabilitySupport
+                {
+                    CanBlockClipboardRead = ui.CanBlockClipboardRead,
+                    CanBlockClipboardWrite = ui.CanBlockClipboardWrite,
+                    CanBlockInputInjection = ui.CanBlockInputInjection,
+                    CanBlockInputMethodChanges = ui.CanBlockInputMethodChanges,
+                    CanBlockExternalUiObjects = ui.CanBlockExternalUiObjects,
+                    CanBlockGlobalUiNamespace = ui.CanBlockGlobalUiNamespace,
+                    CanBlockDesktopSwitching = ui.CanBlockDesktopSwitching,
+                    CanBlockLogoffOrShutdown = ui.CanBlockLogoffOrShutdown,
+                    CanBlockSystemParameterChanges = ui.CanBlockSystemParameterChanges,
+                    CanBlockDisplaySettingsChanges = ui.CanBlockDisplaySettingsChanges,
+                },
+            },
+        };
     }
 
     /// <summary>
@@ -288,7 +468,7 @@ public static class MxcSandbox
                 nameof(policy));
         }
 
-        if (policy.Version is "0.9.0-alpha" or "0.10.0-alpha")
+        if (!SchemaVersions.UsesLegacyNetworkDefaults(policy.Version))
         {
             throw new ArgumentException(
                 $"Schema {policy.Version} no longer supports authored network.{field}, including null. Legacy network authoring "
@@ -407,6 +587,16 @@ public static class MxcSandbox
             "appcontainer-bfs" => IsolationTier.AppContainerBfs,
             "appcontainer-dacl" => IsolationTier.AppContainerDacl,
             _ => IsolationTier.Unknown,
+        };
+
+    private static IsolationTier ParseProbeIsolationTier(string value) =>
+        value switch
+        {
+            "base-container" => IsolationTier.BaseContainer,
+            "appcontainer-bfs" => IsolationTier.AppContainerBfs,
+            "appcontainer-dacl" => IsolationTier.AppContainerDacl,
+            _ => throw new JsonException(
+                $"native request probe returned unknown tier '{value}'."),
         };
 
     internal static BackendCapability ParseBackendCapability(string value) =>

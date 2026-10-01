@@ -33,7 +33,7 @@ use wxc_common::state_aware_backend::{
 use wxc_common::validator::validate_state_aware_network_policy_support;
 
 use crate::container_steps::OutStream;
-use crate::daemon_client::{DaemonClient, DaemonError, DaemonExecOutcome};
+use crate::daemon_client::{truncation_suffix, DaemonClient, DaemonError, DaemonExecOutcome};
 use crate::daemon_protocol::{
     DeprovisionConfig, ErrKind, ExecConfig, NetworkMode, ProvisionConfig, StartConfig, StopConfig,
     VolumeMount,
@@ -251,7 +251,7 @@ fn exec_relayed(client: DaemonClient, config: ExecConfig) -> Result<ExecHandle, 
     // Best-effort: a failed local write must not mask the container's exit code.
     let stdout = std::io::stdout();
     let stderr = std::io::stderr();
-    let exit_code = {
+    let completion = {
         let mut out = stdout.lock();
         let mut err = stderr.lock();
         let result = client.exec_streaming(config, |stream, bytes| match stream {
@@ -276,17 +276,22 @@ fn exec_relayed(client: DaemonClient, config: ExecConfig) -> Result<ExecHandle, 
         result.map_err(map_daemon_error)?
     };
 
-    let exit_code = match exit_code {
+    let exit_code = match completion.outcome {
+        DaemonExecOutcome::Exited(code) if completion.truncated => {
+            return Err(truncated_run_error(code))
+        }
         DaemonExecOutcome::Exited(code) => code,
         DaemonExecOutcome::TimedOut => {
             return Err(MxcError::backend_error(format!(
-                "WSLc exec timed out after {timeout_ms}ms"
+                "WSLc exec timed out after {timeout_ms}ms{}",
+                truncation_suffix(completion.truncated)
             )))
         }
         DaemonExecOutcome::Cancelled => {
-            return Err(MxcError::backend_error(
-                "WSLc relayed exec was cancelled unexpectedly",
-            ))
+            return Err(MxcError::backend_error(format!(
+                "WSLc relayed exec was cancelled unexpectedly{}",
+                truncation_suffix(completion.truncated)
+            )))
         }
     };
 
@@ -349,25 +354,24 @@ fn exec_piped(
                         OutStream::Stderr => stderr_writer.write(bytes),
                     })
                 })
-                .map(|outcome| match outcome {
-                    DaemonExecOutcome::Exited(code) => ExecOutcome::Exited(code),
-                    DaemonExecOutcome::TimedOut => ExecOutcome::TimedOut,
-                    // `SandboxProcess::kill` is a request followed by reaping;
-                    // there is no distinct cancelled variant in `ExecOutcome`.
-                    DaemonExecOutcome::Cancelled => ExecOutcome::Exited(-1),
-                })
-                .map_err(map_daemon_error);
-            let result = match result {
-                Ok(ExecOutcome::Exited(_))
-                    if stdout_overflow.has_overflowed() || stderr_overflow.has_overflowed() =>
-                {
-                    Err(MxcError::backend_error(
-                        "WSLc live output was truncated because the caller did not drain the \
-                         synthesized stdout/stderr pipes fast enough",
-                    ))
-                }
-                other => other,
-            };
+                .map_err(map_daemon_error)
+                .and_then(|completion| {
+                    // Either end of the bridge can drop output: the daemon's
+                    // queue on the way out, or these pipes if the caller is slow.
+                    let truncated = completion.truncated
+                        || stdout_overflow.has_overflowed()
+                        || stderr_overflow.has_overflowed();
+                    match completion.outcome {
+                        DaemonExecOutcome::Exited(code) if truncated => {
+                            Err(truncated_run_error(code))
+                        }
+                        DaemonExecOutcome::Exited(code) => Ok(ExecOutcome::Exited(code)),
+                        DaemonExecOutcome::TimedOut => Ok(ExecOutcome::TimedOut),
+                        // `SandboxProcess::kill` is a request followed by reaping;
+                        // there is no distinct cancelled variant in `ExecOutcome`.
+                        DaemonExecOutcome::Cancelled => Ok(ExecOutcome::Exited(-1)),
+                    }
+                });
             stdout_writer.close();
             stderr_writer.close();
             let _ = done_tx.send(result);
@@ -456,6 +460,18 @@ fn connect_daemon() -> Result<DaemonClient, MxcError> {
     DaemonClient::connect().map_err(|e| {
         MxcError::backend_unavailable(format!("failed to reach the WSLc daemon: {e:#}"))
     })
+}
+
+/// The process finished, but the caller's copy of its output is incomplete.
+///
+/// Reported as a failure so a short capture is never mistaken for a whole one,
+/// with `details.exitCode` keeping the code the process produced.
+fn truncated_run_error(exit_code: i32) -> MxcError {
+    MxcError::backend_error(
+        "WSLc live output was truncated: it was not drained fast enough and a bounded output \
+         queue overflowed",
+    )
+    .with_details(serde_json::json!({ "exitCode": exit_code }))
 }
 
 /// Map a typed [`DaemonError`] onto the matching wire-format [`MxcError`] code.
@@ -610,6 +626,27 @@ mod tests {
         ContainerPolicy, DefaultEnvCompatibility, NetworkAction, NetworkEgressPolicy,
         NetworkIngressPolicy, ProxyAddress, ProxyConfig,
     };
+
+    /// The exit code is unrecoverable once dropped, so failing the call must not
+    /// discard it.
+    #[test]
+    fn a_truncated_run_reports_the_exit_code_it_produced() {
+        let error = truncated_run_error(3);
+        assert_eq!(
+            error.code,
+            wxc_common::mxc_error::MxcErrorCode::BackendError
+        );
+        assert_eq!(
+            error.details.as_ref().and_then(|d| d.get("exitCode")),
+            Some(&serde_json::json!(3))
+        );
+    }
+
+    #[test]
+    fn an_untruncated_run_adds_no_suffix() {
+        assert_eq!(truncation_suffix(false), "");
+        assert!(truncation_suffix(true).contains("truncated"));
+    }
 
     #[test]
     fn backend_key_matches_wire_format() {

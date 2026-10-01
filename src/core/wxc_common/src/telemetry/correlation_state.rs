@@ -160,15 +160,7 @@ fn store_dir_from_local_app_data(base: Option<PathBuf>) -> Option<PathBuf> {
 /// directory-listable plaintext name. This hash is a local lookup key only —
 /// it never appears in emitted telemetry.
 fn record_key(sandbox_id: &str) -> String {
-    use sha2::{Digest, Sha256};
-
-    let digest = Sha256::digest(sandbox_id.as_bytes());
-    let mut encoded = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(&mut encoded, "{byte:02x}");
-    }
-    encoded
+    crate::hashing::sha256_hex(sandbox_id.as_bytes())
 }
 
 fn prune_stale_records(protected_sandbox_id: Option<&str>) {

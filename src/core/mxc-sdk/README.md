@@ -278,6 +278,27 @@ And a backend appearing in `available_backends()` is a host-capability signal,
 **not** a guarantee this SDK can launch it — cross-check [`platform_support`]
 for that.
 
+For request-specific Windows ProcessContainer machine facts, call
+`probe(Some(&request))`, or `probe(None)` for the default request. The public
+API stays typed; exact-config and binding-request JSON adapters remain in
+`mxc_ffi`.
+
+```rust,no_run
+use mxc_sdk::{build_request, probe, SandboxPolicy};
+
+let policy = SandboxPolicy {
+    version: "0.9.0-alpha".to_string(),
+    filesystem: None,
+    network: None,
+    ui: None,
+    timeout_ms: None,
+};
+let request = build_request(&policy, "cmd /c exit 0", None)?;
+let result = probe(Some(&request))?;
+println!("{:?}", result.tier);
+# Ok::<(), mxc_sdk::Error>(())
+```
+
 On Linux, [`platform_support`] additionally reports `bubblewrap_network`: whether
 this host can enforce **proxy-only egress** (schema `0.8.0-alpha`+ proxy mode,
 which runs the sandbox in a private network namespace). That mode has no

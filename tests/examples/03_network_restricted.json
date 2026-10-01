@@ -1,5 +1,6 @@
 {
-  "version": "0.6.0-alpha",
+  "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
+  "version": "0.8.0-alpha",
   "containerId": "CLI-Network-Test",
   "containment": "processcontainer",
   "process": {

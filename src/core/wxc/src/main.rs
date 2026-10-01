@@ -507,9 +507,10 @@ fn sandbox_id_for_identity_record(
 /// Drives the state-aware dispatch flow. On envelope success, writes the
 /// JSON to stdout and exits 0. On exec success, exits with the script's
 /// exit code (output already streamed). On failure, writes a JSON error
-/// envelope to stdout and exits 1. Diagnostic logger output goes to stderr
-/// regardless of mode (per design §7.3 stream protocol — stdout reserved
-/// for the response envelope).
+/// envelope and exits 1 — to stderr for a live exec, whose stdout belongs
+/// to the script, and to stdout otherwise. Diagnostic logger output goes to
+/// stderr regardless of mode (per design §7.3 stream protocol — stdout
+/// reserved for the response envelope).
 fn run_state_aware_main(
     parsed: ParsedStateAwareRequest,
     dry_run: bool,
@@ -673,10 +674,9 @@ fn run_state_aware_main(
         elapsed,
     );
 
-    // On dispatch failure, route the error to the auxiliary diagnostic sinks
-    // only (log file / diagnostic pipe) — never the primary buffer/stderr — so
-    // the stdout error envelope written below stays the single client-facing
-    // channel and is not shadowed by a duplicate on stderr.
+    // Route dispatch failures to the auxiliary diagnostic sinks only (log file
+    // / diagnostic pipe), so the envelope written below is the single
+    // client-facing copy of the error.
     if let Err(error) = &outcome {
         log_state_aware_dispatch_error(logger, error);
     }
@@ -689,7 +689,7 @@ fn run_state_aware_main(
     if !buffered.is_empty() {
         eprint!("{}", buffered);
     }
-    match finalize_state_aware_outcome(outcome) {
+    match finalize_state_aware_outcome(outcome, phase, dry_run) {
         StateAwareExit::Envelope(json) => {
             println!("{}", json);
             process::exit(0);
@@ -697,6 +697,12 @@ fn run_state_aware_main(
         StateAwareExit::ExecCode(exit_code) => process::exit(exit_code),
         StateAwareExit::Error(json) => {
             println!("{}", json);
+            process::exit(1);
+        }
+        StateAwareExit::ExecError(json) => {
+            // The script's own stderr may not end in a newline, and gluing the
+            // envelope onto those bytes would leave it unparseable.
+            eprintln!("\n{}", json);
             process::exit(1);
         }
     }
@@ -713,16 +719,33 @@ enum StateAwareExit {
     ExecCode(i32),
     /// Print this JSON error envelope to stdout, then exit 1.
     Error(String),
+    /// Print this JSON error envelope to stderr, then exit 1.
+    ExecError(String),
 }
 
 /// Map a dispatch outcome to its terminal exit action. Pure — it neither prints
 /// nor exits — so [`run_state_aware_main`]'s final branch can be exercised in a
-/// unit test. The `-> !` caller performs the actual stdout write + exit.
-fn finalize_state_aware_outcome(outcome: Result<DispatchOutcome, MxcError>) -> StateAwareExit {
+/// unit test. The `-> !` caller performs the actual write + exit.
+fn finalize_state_aware_outcome(
+    outcome: Result<DispatchOutcome, MxcError>,
+    phase: &str,
+    dry_run: bool,
+) -> StateAwareExit {
     match outcome {
         Ok(DispatchOutcome::Envelope(value)) => StateAwareExit::Envelope(value.to_string()),
         Ok(DispatchOutcome::ExecCompleted { exit_code }) => StateAwareExit::ExecCode(exit_code),
-        Err(e) => StateAwareExit::Error(error_envelope_string(&e)),
+        Err(e) => {
+            let json = error_envelope_string(&e);
+
+            // A failed exec has already streamed the script's output to stdout,
+            // so an envelope appended there would corrupt both. A dry run
+            // streams nothing and keeps its envelope on stdout.
+            if phase == "exec" && !dry_run {
+                StateAwareExit::ExecError(json)
+            } else {
+                StateAwareExit::Error(json)
+            }
+        }
     }
 }
 
@@ -1103,26 +1126,12 @@ fn main() {
         } else {
             wxc_common::models::ExecutionRequest::default()
         };
-        let output = process_container_common::probe::run_probe(
-            &request,
-            mxc_engine::guarded_capture_available(),
-        );
-        // process_container_common has no dependency on the isolation-session
-        // backend, so it reports `isolationSessionAvailable` as `false`. When
-        // the backend is compiled in, override it with a read-only activation
-        // probe of the in-proc service.
-        #[cfg(all(target_os = "windows", feature = "isolation_session"))]
-        let output = {
-            let mut output = output;
-            output.probes.isolation_session_available = mxc_engine::isolation_session_available();
-            output
-        };
-        // WHP is delay-loaded; check before setup boots a VM.
-        #[cfg(all(target_os = "windows", feature = "hyperlight", target_arch = "x86_64"))]
-        let output = {
-            let mut output = output;
-            output.probes.hyperlight_available = hyperlight_common::is_whp_available();
-            output
+        let output = match mxc_engine::probe_execution_request(Some(&request)) {
+            Ok(output) => output,
+            Err(error) => {
+                eprintln!("Error: {}", error.message);
+                process::exit(1);
+            }
         };
         match process_container_common::probe::to_json_pretty(&output) {
             Ok(s) => println!("{s}"),
@@ -2834,7 +2843,7 @@ mod tests {
     #[test]
     fn cli_command_quoting_for_command_processor_in_resolved_request() {
         let policy = r#"{
-            "version": "0.10.0-alpha",
+            "version": "1.1.0-alpha",
             "containment": "windows_sandbox",
             "process": {}
         }"#;
@@ -3155,7 +3164,7 @@ mod tests {
     fn finalize_maps_envelope_to_stdout_exit_zero() {
         let outcome: Result<DispatchOutcome, MxcError> =
             Ok(DispatchOutcome::Envelope(serde_json::json!({ "ok": true })));
-        match finalize_state_aware_outcome(outcome) {
+        match finalize_state_aware_outcome(outcome, "provision", false) {
             StateAwareExit::Envelope(json) => {
                 assert_eq!(json, r#"{"ok":true}"#);
             }
@@ -3168,7 +3177,7 @@ mod tests {
         let outcome: Result<DispatchOutcome, MxcError> =
             Ok(DispatchOutcome::ExecCompleted { exit_code: 7 });
         assert!(matches!(
-            finalize_state_aware_outcome(outcome),
+            finalize_state_aware_outcome(outcome, "exec", false),
             StateAwareExit::ExecCode(7)
         ));
     }
@@ -3177,7 +3186,7 @@ mod tests {
     fn finalize_maps_error_to_serialised_envelope() {
         let outcome: Result<DispatchOutcome, MxcError> =
             Err(MxcError::malformed_request("boom".to_string()));
-        match finalize_state_aware_outcome(outcome) {
+        match finalize_state_aware_outcome(outcome, "provision", false) {
             StateAwareExit::Error(json) => {
                 // Must be a parseable envelope carrying the error code so consumers
                 // that key off `error.code` still work.
@@ -3186,5 +3195,29 @@ mod tests {
             }
             other => panic!("expected Error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn finalize_routes_a_failed_exec_to_stderr() {
+        let outcome: Result<DispatchOutcome, MxcError> =
+            Err(MxcError::backend_error("output was truncated".to_string()));
+        match finalize_state_aware_outcome(outcome, "exec", false) {
+            StateAwareExit::ExecError(json) => {
+                // Still a parseable envelope; only the stream it lands on changes.
+                let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+                assert!(parsed["error"]["code"].is_string(), "{json}");
+            }
+            other => panic!("expected ExecError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finalize_keeps_a_failed_exec_dry_run_on_stdout() {
+        let outcome: Result<DispatchOutcome, MxcError> =
+            Err(MxcError::malformed_request("boom".to_string()));
+        assert!(matches!(
+            finalize_state_aware_outcome(outcome, "exec", true),
+            StateAwareExit::Error(_)
+        ));
     }
 }

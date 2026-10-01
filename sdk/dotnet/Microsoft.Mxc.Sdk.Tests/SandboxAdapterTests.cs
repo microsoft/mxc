@@ -31,6 +31,14 @@ public class SandboxAdapterTests
     }
 
     [Fact]
+    public void ExistingRunnerImplementationsRemainSourceCompatible()
+    {
+        ISandboxRunner runner = new ExistingRunnerFake();
+
+        Assert.Equal("fake", runner.NativeVersion);
+    }
+
+    [Fact]
     public void LifecycleAdapterDelegatesStaticValidation()
     {
         ISandboxLifecycle lifecycle = new MxcSandboxLifecycle();
@@ -51,7 +59,8 @@ public class SandboxAdapterTests
         var contractMethods = contract.GetMethods();
         foreach (var facadeMethod in staticFacade
             .GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly)
-            .Where(method => !method.IsSpecialName))
+            .Where(method => !method.IsSpecialName)
+            .Where(method => staticFacade != typeof(MxcSandbox) || method.Name != nameof(MxcSandbox.Probe)))
         {
             var parameterTypes = facadeMethod.GetParameters()
                 .Select(parameter => parameter.ParameterType)
@@ -107,6 +116,38 @@ public class SandboxAdapterTests
             BindingFlags.Public | BindingFlags.Instance);
 
         Assert.Null(method);
+    }
+
+    private sealed class ExistingRunnerFake : ISandboxRunner
+    {
+        public string NativeVersion => "fake";
+
+        public IReadOnlyList<AvailableBackend> GetAvailableBackends() => [];
+
+        public PlatformSupport GetPlatformSupport() => new();
+
+        public RunResult Run(SandboxPolicy policy, string command) =>
+            throw new NotSupportedException();
+
+        public RunResult Run(SandboxRequest request) =>
+            throw new NotSupportedException();
+
+        public Task<RunResult> RunAsync(
+            SandboxPolicy policy,
+            string command,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task<RunResult> RunAsync(
+            SandboxRequest request,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public ISandboxProcess Spawn(SandboxPolicy policy, string command) =>
+            throw new NotSupportedException();
+
+        public ISandboxProcess Spawn(SandboxRequest request) =>
+            throw new NotSupportedException();
     }
 
     private sealed class FakeSandboxProcess(string output) : ISandboxProcess

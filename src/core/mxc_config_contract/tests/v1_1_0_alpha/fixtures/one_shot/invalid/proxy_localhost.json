@@ -1,0 +1,11 @@
+{
+  "version": "1.1.0-alpha",
+  "process": {
+    "commandLine": "echo proxy"
+  },
+  "network": {
+    "proxy": {
+      "localhost": 8080
+    }
+  }
+}

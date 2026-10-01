@@ -63,6 +63,8 @@ export {
   RuntimeConfig,
   PlatformSupport,
   UiCapabilitySupport,
+  ProbeOutput,
+  ProbeFacts,
   BubblewrapNetworkSupport,
 } from './types.js';
 
@@ -70,6 +72,10 @@ export {
 export {
   getPlatformSupport,
 } from './platform.js';
+
+export {
+  probeSandboxSupport,
+} from './probe.js';
 
 // Export sandbox spawning functions
 export {

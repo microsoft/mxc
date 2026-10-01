@@ -1,5 +1,6 @@
 {
-  "version": "0.9.0-alpha",
+  "$schema": "../../schemas/stable/mxc-config.schema.1.0.0.json",
+  "version": "1.0.0",
   "containerId": "isolation-session-one-shot-network-rejected-hosts",
   "containment": "isolation_session",
   "_comment": "IsolationSession cannot enforce per-destination rules. Use a documentation CIDR to test that refusal without translating a hostname through transient DNS.",

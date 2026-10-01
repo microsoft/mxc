@@ -81,6 +81,11 @@ pub fn handle_dry_run_exit(response: &ScriptResponse, logger: &mut Logger) -> ! 
 ///
 /// In non-debug mode the diagnostic `Logger` is buffered and never flushed, so
 /// this envelope is the only place the error surfaces to the caller.
+///
+/// The `code` comes from the response's
+/// [`FailurePhase`](crate::models::FailurePhase), so a refused policy is
+/// reported as `policy_validation` rather than being flattened into the generic
+/// `backend_error` every other failure uses.
 pub fn emit_backend_error_envelope(response: &ScriptResponse) {
     if response.exit_code == 0 || response.error_message.is_empty() {
         return;
@@ -88,7 +93,7 @@ pub fn emit_backend_error_envelope(response: &ScriptResponse) {
 
     let mut envelope = serde_json::json!({
         "error": {
-            "code": "backend_error",
+            "code": response.failure_phase.error_code().as_str(),
             "message": response.error_message,
         }
     });

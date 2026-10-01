@@ -40,9 +40,9 @@ function Phase-NetworkRejections {
 
     # Shapes the typed generator deliberately cannot produce, authored raw.
     $rawBase = {
-        param($id, $network, $extra)
+        param($id, $network, $extra, $version)
         $o = [ordered]@{
-            version     = $Script:SchemaVersion
+            version     = $(if ($version) { $version } else { $Script:SchemaVersion })
             containerId = "MxcWinPC-$id"
             containment = 'processcontainer'
             process     = [ordered]@{ commandLine = $cmd; timeout = 20000 }
@@ -96,8 +96,8 @@ function Phase-NetworkRejections {
             Config = (New-RawConfig -Name 'rej-mixed-shapes' -Object (& $rawBase 'rej-mixed-shapes' ([ordered]@{
                         defaultPolicy = 'block'
                         egress        = [ordered]@{ default = 'allow' }
-                     }) $null))
-            Why    = 'the legacy and directional shapes are alternatives; combining them has no defined meaning'
+                     }) $null '0.8.0-alpha'))
+            Why    = 'pinned at 0.8, the one version carrying both shapes: they are alternatives, and combining them has no defined meaning'
         }
     )
 
