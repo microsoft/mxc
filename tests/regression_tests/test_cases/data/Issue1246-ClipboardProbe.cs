@@ -113,11 +113,23 @@ internal static class ClipboardProbe
         if (memory == IntPtr.Zero)
         {
             int error = Marshal.GetLastWin32Error();
-            Console.Error.WriteLine("GetClipboardData failed: {0}", error);
-            Thread.Sleep(100);
             CloseClipboard();
             DestroyWindow(owner);
-            return error == ErrorAccessDenied ? ProbeResult.Blocked : ProbeResult.Inconclusive;
+            if (error == ErrorAccessDenied)
+            {
+                Console.Error.WriteLine("GetClipboardData was denied: {0}", error);
+                Thread.Sleep(100);
+                return ProbeResult.Blocked;
+            }
+
+            if (error == 0)
+            {
+                return ProbeResult.Allowed;
+            }
+
+            Console.Error.WriteLine("GetClipboardData failed: {0}", error);
+            Thread.Sleep(100);
+            return ProbeResult.Inconclusive;
         }
 
         IntPtr text = GlobalLock(memory);
@@ -222,7 +234,7 @@ internal static class ClipboardProbe
         {
             string value;
             ProbeResult result = ProbeReadText(out value);
-            if (result == ProbeResult.Inconclusive)
+            if (result != ProbeResult.Allowed)
             {
                 return 2;
             }
