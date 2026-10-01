@@ -207,7 +207,7 @@ internal sealed class NativeProbeOutput
     public string? Tier
     {
         get => tier;
-        init
+        set
         {
             tier = value;
             HasTier = true;
@@ -218,7 +218,7 @@ internal sealed class NativeProbeOutput
     public bool? NeedsDaclAugmentation
     {
         get => needsDaclAugmentation;
-        init
+        set
         {
             needsDaclAugmentation = value;
             HasNeedsDaclAugmentation = true;
@@ -227,17 +227,17 @@ internal sealed class NativeProbeOutput
 
     [JsonRequired]
     [JsonPropertyName("warnings")]
-    public string?[]? Warnings { get; init; }
+    public string?[]? Warnings { get; set; }
 
     [JsonRequired]
     [JsonPropertyName("probes")]
-    public NativeProbeFacts? Probes { get; init; }
+    public NativeProbeFacts? Probes { get; set; }
 
     [JsonPropertyName("error")]
     public string? Error
     {
         get => error;
-        init
+        set
         {
             error = value;
             HasError = true;

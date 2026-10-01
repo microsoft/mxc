@@ -4,7 +4,6 @@
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using Microsoft.Mxc.Sdk.Native;
 using NativeSandbox = Microsoft.Mxc.Sdk.Native.MxcSandbox;
 
@@ -23,20 +22,6 @@ public static class MxcSandbox
     {
         NativeLibraryResolver.Initialize();
     }
-
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-        Converters =
-        {
-            new JsonStringEnumConverter(JsonNamingPolicy.CamelCase),
-        },
-    };
-
-    private static readonly JsonSerializerOptions ProbeJsonOptions = new(JsonOptions)
-    {
-        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
-    };
 
     internal static IRequestProbeInterop RequestProbeInterop { get; set; } =
         PInvokeRequestProbeInterop.Instance;
@@ -199,7 +184,7 @@ public static class MxcSandbox
 
     internal static ProbeOutput ParseProbeOutput(string json)
     {
-        var output = JsonSerializer.Deserialize<NativeProbeOutput>(json, ProbeJsonOptions)
+        var output = MxcJson.Deserialize<NativeProbeOutput>(json, MxcJson.ProbeOptions)
             ?? throw new JsonException("native request probe returned null JSON.");
         var warnings = output.Warnings
             ?? throw new JsonException("native request probe returned null warnings.");

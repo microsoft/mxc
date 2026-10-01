@@ -70,6 +70,7 @@ internal sealed class CamelCaseJsonStringEnumConverter<TEnum>
 // Native discovery, output, and provision metadata.
 [JsonSerializable(typeof(NativeAvailableBackend[]))]
 [JsonSerializable(typeof(NativePlatformSupport))]
+[JsonSerializable(typeof(NativeProbeOutput))]
 [JsonSerializable(typeof(SandboxOutputMetadata))]
 [JsonSerializable(typeof(CaptureDenialsOutput))]
 [JsonSerializable(typeof(CaptureDenialsErrorOutput))]
@@ -108,6 +109,18 @@ internal static class MxcJson
     /// </summary>
     internal static readonly JsonSerializerOptions PublishedPolicyOptions =
         CreatePublishedPolicyOptions();
+
+    /// <summary>
+    /// Options for deserializing the native request probe output. Built from the
+    /// source-generated resolver (so it stays reflection-free) with strict
+    /// unmapped-member handling, so an unexpected field from the native layer is
+    /// rejected rather than silently ignored.
+    /// </summary>
+    internal static readonly JsonSerializerOptions ProbeOptions =
+        new(MxcJsonContext.Default.Options)
+        {
+            UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+        };
 
     private static JsonSerializerOptions CreatePublishedPolicyOptions()
     {
