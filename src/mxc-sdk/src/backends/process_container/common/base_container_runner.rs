@@ -65,7 +65,7 @@ use crate::process_container_common::capture_output::{
 use crate::process_container_common::job_object::UiJobObject;
 use crate::process_container_common::launch_diagnostics::{
     diagnose_create_process_failure, diagnose_missing_required_env, diagnose_process_exit,
-    validate_required_child_env,
+    security_environment_failure_message, validate_required_child_env,
 };
 use crate::process_container_common::native_capture::CaptureSession;
 use crate::process_container_common::proxy_coordinator::ProxyCoordinator;
@@ -798,8 +798,7 @@ impl BaseContainerRunner {
                         capture_session = Some(session);
                     }
                     Err(e) => {
-                        let msg =
-                            format!("captureDenials: failed to start learning-mode capture: {e}");
+                        let msg = security_environment_failure_message(&e, true);
                         let _ = writeln!(logger, "Error: {msg}");
                         log_base_network_policy_audit(
                             request,
@@ -833,8 +832,7 @@ impl BaseContainerRunner {
                         security_environment = Some(environment);
                     }
                     Err(error) => {
-                        let msg =
-                            format!("failed to create the process security environment: {error}");
+                        let msg = security_environment_failure_message(&error, false);
                         let _ = writeln!(logger, "Error: {msg}");
                         log_base_network_policy_audit(
                             request,

@@ -39,6 +39,20 @@ The PSEC FlatBuffer is the contract between MXC and the OS process security
 environment. New features must flow from the versioned config contract into the
 runtime model and then into that FlatBuffer.
 
+## Policy-denied creation diagnostics
+
+If security-environment creation returns `ERROR_ACCESS_DISABLED_BY_POLICY`
+(`HRESULT 0x800704EC`, Win32 error 1260), MXC explains that an IT-managed
+policy blocked the requested sandbox and recommends reviewing its requested
+permissions or contacting the system administrator. This guidance is automatic
+for ordinary creation and creation used by denial capture. It does not require
+experimental authorization, alter the request, or retry creation.
+
+The native operation/status and existing failure category are preserved.
+Ordinary access-denied errors (`0x80070005`) and failures from capture-trace
+APIs are not reclassified as sandbox-creation policy refusals. Existing
+process-launch policy guidance remains applicable if the later launch fails.
+
 ## Step-by-step
 
 ### 1. Update the OS PSEC schema and implementation

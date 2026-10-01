@@ -16,6 +16,7 @@
 
 use std::path::Path;
 
+use crate::learning_mode_windows::LearningModeError;
 use crate::mxc_common::models::{ExecutionRequest, ScriptResponse};
 
 /// A structured diagnostic describing *why* a sandboxed process launch failed
@@ -167,6 +168,32 @@ pub fn diagnose_create_process_failure(
             "CreateProcessW failed with error code {win32_error} (0x{win32_error:08X})."
         ),
     }
+}
+
+pub(crate) fn security_environment_failure_message(
+    error: &LearningModeError,
+    capture: bool,
+) -> String {
+    let prefix = if capture {
+        "captureDenials: failed to start learning-mode capture"
+    } else {
+        "failed to create the process security environment"
+    };
+    let mut message = format!("{prefix}: {error}");
+    if matches!(
+        error,
+        LearningModeError::HResultCall {
+            function: "CreateProcessSecurityEnvironment",
+            code,
+        } if *code == ERROR_ACCESS_DISABLED_BY_POLICY.to_hresult().0
+    ) {
+        message.push_str(
+            ". Windows blocked creation of the requested sandbox because of an IT-managed \
+             policy rule (ERROR_ACCESS_DISABLED_BY_POLICY, 1260). Review the requested sandbox \
+             permissions or contact your system administrator.",
+        );
+    }
+    message
 }
 
 /// Diagnose a process that launched successfully but exited with a non-zero
@@ -548,6 +575,52 @@ mod tests {
         assert!(diag.message.contains("1260"));
         assert!(diag.message.contains("system administrator"));
         assert!(!diag.message.contains("readonlyPaths"));
+    }
+
+    #[test]
+    fn policy_block_at_environment_creation_has_automatic_guidance() {
+        let function = "CreateProcessSecurityEnvironment";
+        for capture in [false, true] {
+            let error = LearningModeError::HResultCall {
+                function,
+                code: ERROR_ACCESS_DISABLED_BY_POLICY.to_hresult().0,
+            };
+            let message = security_environment_failure_message(&error, capture);
+            assert!(message.contains("IT-managed policy rule"));
+            assert!(message.contains("requested sandbox permissions"));
+            assert!(message.contains("system administrator"));
+            assert!(message.contains("1260"));
+            assert!(message.contains("0x800704EC"));
+            assert!(message.contains(function));
+            assert_eq!(message.starts_with("captureDenials:"), capture);
+            assert!(!message.contains("target executable"));
+        }
+    }
+
+    #[test]
+    fn unrelated_environment_and_trace_errors_keep_their_message() {
+        for (function, code) in [
+            ("CreateProcessSecurityEnvironment", 0x80070005_u32 as i32),
+            ("CreateProcessSecurityEnvironment", E_NOTIMPL.0),
+            ("CreateProcessSecurityEnvironment", 1260),
+            (
+                "StartLearningModeTrace",
+                ERROR_ACCESS_DISABLED_BY_POLICY.to_hresult().0,
+            ),
+        ] {
+            let error = LearningModeError::HResultCall { function, code };
+            for capture in [false, true] {
+                let prefix = if capture {
+                    "captureDenials: failed to start learning-mode capture"
+                } else {
+                    "failed to create the process security environment"
+                };
+                assert_eq!(
+                    security_environment_failure_message(&error, capture),
+                    format!("{prefix}: {error}")
+                );
+            }
+        }
     }
 
     #[test]
