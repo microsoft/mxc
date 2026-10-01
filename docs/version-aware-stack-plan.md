@@ -5,7 +5,16 @@ complete. Phase 13c, which completes the missing direct typed Rust SDK path,
 must land before Phase 14 starts. Phase 14 establishes the v1 SDK line and the
 v1.0 exact contract.
 
-Updated: September 26, 2026.
+Phase snapshot: September 26, 2026. Addendum: October 1, 2026.
+
+**Subsequent decisions (October 1, 2026):** this is the historical phase plan.
+[`ffi-json-ingress-plan.md`](ffi-json-ingress-plan.md) is authoritative for
+the current SDK stable-target rule, JSON-only language boundary, public
+Container/run/spawn/PTY API alignment, raw JSON counterparts, and release
+closeout. Its sections 3, 7, and 8 supersede conflicting SDK target, transport,
+or surface statements here. In particular, opening development does not
+advance a typed SDK target; only a published stable contract within that SDK
+major does.
 
 ## 1. Stack status
 

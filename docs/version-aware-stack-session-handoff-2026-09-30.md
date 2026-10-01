@@ -8,20 +8,24 @@ new Copilot session. It supersedes
 [`version-aware-stack-session-handoff-2026-09-26.md`](version-aware-stack-session-handoff-2026-09-26.md).
 
 The canonical design is [`ffi-json-ingress-plan.md`](ffi-json-ingress-plan.md).
+Its October 1 additions record the accepted public SDK API alignment in
+section 7 and release-work ownership/exit criteria in section 8. These are
+planned changes, not an assertion that all SDKs already expose the target API.
 [`version-aware-stack-plan.md`](version-aware-stack-plan.md) describes the
 earlier phases; its typed-FFI follow-up (§9.3, §9.5, Phase 14 exit criterion
 16) is superseded by the JSON-only ingress plan.
 
 ## 1. Pull requests
 
-`main` was `0dd2ed756` when this document was updated. #1270 has merged.
+October 1 afternoon snapshot: `main` is `46ce71d0d`. #1270, #1348, and #1271
+have merged. The tips below are GitHub PR head tips, not merge commits.
 
 | PR | Title | Branch | Base | Tip | State |
 | --- | --- | --- | --- | --- | --- |
-| #1348 | Reject a blank ProcessContainer proxy peer | `user/gudge/reject-blank-proxy-peer` | `main` | `76eb8cc02` | Approved; conflicts with `main` |
-| #1271 | Make the v1 SDKs own their contract version | `user/gudge/rust-sdk-phase14c` | `main` | `439419111` | Review required; conflicts with `main` |
-| #1355 | Move contract-mapped v1 SDK types into V1 namespaces | `user/gudge/sdk-v1-namespaces` | #1271 | `463a33cee` | Review required |
-| #1349 (A) | Make exact versioned JSON the only FFI configuration ingress | `user/gudge/rust_ffi_json_ingress` | #1355 | `347738317` | Review required |
+| #1348 | Reject a blank ProcessContainer proxy peer | `user/gudge/reject-blank-proxy-peer` | `main` | `ca559ebbc` | Merged October 1; merge `74ecd71fc` |
+| #1271 | Make the v1 SDKs own their contract version | `user/gudge/rust-sdk-phase14c` | `main` | `73196bae7` | Merged October 1; merge `46ce71d0d` |
+| #1355 | Move contract-mapped v1 SDK types into V1 namespaces | `user/gudge/sdk-v1-namespaces` | `main` | `ab229c28d` | Rebased/pushed; CI green; review required |
+| #1349 (A) | Make exact versioned JSON the only FFI configuration ingress | `user/gudge/rust_ffi_json_ingress` | #1355 | `347738317` | Review required; conflicts with current #1355 |
 | #1350 (B) | Switch Node to exact JSON FFI ingress | `user/gudge/node-json-ffi` | A | `aba5e0dc0` | Review required |
 | #1351 (C) | Switch .NET to exact JSON FFI ingress | `user/gudge/dotnet-json-ffi` | B | `885b720dd` | Review required |
 | #1352 (D) | Remove the binding request FFI exports | `user/gudge/remove-binding-json-ffi` | C | `1ee00e482` | Review required |
@@ -31,9 +35,8 @@ earlier phases; its typed-FFI follow-up (§9.3, §9.5, Phase 14 exit criterion
 GitHub stack #1257, which held #1271 and its closed successors, is unstacked.
 None of #1349–#1353 is a draft.
 
-Merge order: #1348, #1271, #1355, A, B, C, D, E0. #1348 should land before
-#1271 because #1271's reply on the Node blank `allowedProxyPeer` thread relies
-on it.
+Remaining merge order: #1355, A, B, C, D, E0. #1348 landed before #1271,
+satisfying the blank `allowedProxyPeer` review dependency.
 
 Commit shape:
 
@@ -46,11 +49,16 @@ Commit shape:
 - Commit messages and pull-request descriptions do not mention other pull
   requests in the stack or closed pull requests.
 
-`main` has moved since the stack was rebased (`8505c7900`). #1271 conflicts in
-`sdk/dotnet/Microsoft.Mxc.Sdk/MxcSandbox.cs`,
-`sdk/dotnet/Microsoft.Mxc.Sdk.Tests/MxcSandboxTests.cs`, and
-`sdk/node/package.json`, mostly from #1276 (Node and .NET request probe APIs).
-#1348 conflicts in `docs/schema.md`.
+#1271 was rebased and merged; #1355 is now based on that merge. A through E0
+still need restacking onto the updated lower stack. Main's #1276 request-probe
+APIs add a private .NET probe-ingress path that C, D, and E0 must include in
+their migration; see the canonical plan's release item 1.
+
+Local #1355 was rebased from `81ac3c7c9` to `8978cff6c` without conflicts and
+with an unchanged patch. Its subsequently published tip is `ab229c28d`, with
+the same tree as `8978cff6c`. A's local cyan tip is `64c537ca9`, distinct from
+its published `347738317`; inspect local work before restacking or replacing
+it.
 
 Local backup branches (not pushed):
 
@@ -79,18 +87,18 @@ Other branches:
 | Worktree | Branch | Notes |
 | --- | --- | --- |
 | `mxc.root` | `main` | Behind `origin/main` |
-| `mxc.green` | #1348 | |
-| `mxc.scarlet` | #1271 | |
+| `mxc.green` | detached | Reusable; `74ecd71fc` |
+| `mxc.scarlet` | detached | Reusable; `46ce71d0d`; merged local #1271 branch deleted |
 | `mxc.magenta` | #1355 | |
-| `mxc.cyan` | A (#1349) | |
+| `mxc.cyan` | A (#1349) | Local `64c537ca9` differs from remote |
 | `mxc.red` | B (#1350) | |
 | `mxc.tan` | C (#1351) | |
 | `mxc.maroon` | D (#1352) | |
 | `mxc.crimson` | E0 (#1353) | |
 | `mxc.yellow` | plan branch | |
 | `mxc.orange` | `user/gudge/remove-schema-0-6-to-0-8` | |
-| `mxc.blue` | detached | Reusable |
-| `mxc.skyblue` | detached | Reusable |
+| `mxc.blue` | detached | Reusable; `74ecd71fc` |
+| `mxc.skyblue` | detached | Reusable; `74ecd71fc` |
 
 Confirm `git branch --show-current` before resetting or rewriting a worktree;
 a detached worktree once caused a stale branch to be pushed.
@@ -108,7 +116,8 @@ a detached worktree once caused a stale branch to be pushed.
    `mxc_run_state_aware_json`, `mxc_exec_state_aware_json`,
    `mxc_exec_state_aware_attached_json`). Non-configuration controls are
    typed `i32` arguments, never JSON fields. D removes `mxc_run_request`,
-   `mxc_spawn_request`, and the private binding request.
+   `mxc_spawn_request`, the private binding-request probe export, and the
+   private binding request.
 3. **V1 namespaces (#1355).** Contract-mapped SDK types live in
    `Microsoft.Mxc.Sdk.V1`, `mxc_sdk::v1`, and `@microsoft/mxc-sdk/v1`, and
    evolve additively across published 1.x contracts; a future v2 adds V2
@@ -140,10 +149,31 @@ a detached worktree once caused a stale branch to be pushed.
    `unsupported_containment` in every SDK. Windows Sandbox remains reachable
    through raw `1.1.0-alpha` JSON with the experimental opt-in; typed access
    returns in the experimental surfaces planned as PRs E and F.
+10. **Public SDK alignment.** Use Container terminology across Rust, .NET,
+    and Node, distinguish persistent `ContainerId` from live `MxcProcess` and
+    `MxcPty`, and expose run/spawn/spawn-with-PTY for both one-shot and
+    existing-container exec. Prefer `spawnInContainerWithPty`. The canonical
+    plan section 7 records type names, asynchronous conventions, byte-output
+    direction, PTY versus attached execution, ownership, and pending details.
+11. **Public raw counterparts.** Every SDK needs the same capture/pipe/PTY
+    family for complete caller-authored exact JSON, plus raw lifecycle phases.
+    Keep these at package roots and do not route development documents through
+    the stable mapper. Experimental authorization remains independent of
+    contract version. Native JSON exports do not alone satisfy SDK access.
+12. **PR scope.** #1355 owns namespace spelling/export boundaries, including
+    `v1::container` if retaining the lifecycle module. Bulk API/type renames
+    use a focused alignment follow-up after E0 where practical. The co-worker's
+    Rust `MxcPty` and missing execution/output capabilities need coordinated
+    functional follow-ups. E/F are not prerequisites for raw development use.
 
 ## 4. Review status
 
-CI is green on every pull request in the stack and on #1348.
+At the October 1 afternoon check, the latest head runs are green on #1355 and
+A through E0; the merged #1348/#1271 heads also passed. A's conflict and the
+older upper-stack runs mean this is not validation of a restacked composition.
+
+The thread counts below are the earlier October 1 pre-restack snapshot; they
+have not been re-counted for this planning update.
 
 | PR | Threads | Unresolved |
 | --- | --- | --- |
@@ -156,8 +186,9 @@ CI is green on every pull request in the stack and on #1348.
 | #1352 (D) | 3 | 3 Copilot |
 | #1353 (E0) | 5 | 4 Copilot |
 
-The unresolved threads on A–E0 are new since the previous update and have not
-been triaged.
+The earlier unresolved threads on A through E0 have been analyzed for
+release-work ownership in canonical plan section 8. That allocation does not
+mean fixes or GitHub review replies have been completed.
 
 #1271 history:
 
@@ -183,12 +214,11 @@ CI fixes pushed on October 1:
 
 ## 5. Open items
 
-1. **Blank proxy peer follow-up.** After #1348 merges, rebase the stack onto
-   `main`, remove the Rust builder's duplicate `allowedProxyPeer` check
+1. **Blank proxy peer follow-up.** #1348 has merged. Restack the remaining
+   work, remove the Rust builder's duplicate `allowedProxyPeer` check
    (`validate_common` in the builder), point its two tests at the shared
    parser error, and add `tests/policy/sdk-v1/invalid/blank-proxy-peer.json`.
-   #1348 (`76eb8cc02`) is approved and needs a rebase to resolve a
-   `docs/schema.md` conflict before it can merge.
+   Put the builder/fixture correction in A and carry it into E0's move.
 2. **Misplaced `mxc-sdk` tests.** Tests in `mxc-sdk` that parse 0.7.0-alpha or
    development-contract documents (`policy.rs` and
    `configs/process_container.rs`) test `wxc_common`'s parser and should move
@@ -214,19 +244,33 @@ CI fixes pushed on October 1:
 7. **Schema 0.6–0.8 removal.** `user/gudge/remove-schema-0-6-to-0-8` needs
    rebasing onto the current E0, dropping its line-ending commit `2bd1c86f4`
    (made redundant by #1334), before deciding whether to open a pull request.
-8. **Linux unused import in #1271.** `src/core/mxc-sdk/tests/sandbox.rs`
+8. **Inherited platform lint failures.** `src/core/mxc-sdk/tests/sandbox.rs`
    imports `build_request` and `SandboxPolicy` unconditionally, but only the
-   macOS and Windows tests use them, so the file warns on Linux. CI does not
-   compile it on Linux with warnings denied. Fixing it means gating the import
-   with `cfg(any(target_os = "macos", target_os = "windows"))` in #1271 and
-   restacking every pull request above it; awaiting a decision.
-9. **Rebase onto `main`.** #1271 conflicts with `main` (see §1). Rebase it
-   with `-X renormalize` if older commits predate #1334's LF normalization,
-   then restack #1355 and A–E0.
+   macOS and Windows tests use them; Linux all-target checks with warnings
+   denied fail. macOS SDK all-target clippy also finds `let_and_return` in
+   `tests/streaming.rs`. Both are present on merged main and the tree published
+   as #1355. Resolve in a scoped cleanup rather than rewriting merged #1271.
+   Windows affected-crate checks/lint, Node build/unit/typecheck, focused .NET
+   contracts, parity/codegen, Rust docs, and prescribed macOS backend clippy
+   passed during the local namespace rebase; this does not erase the two
+   broader cross-check failures or cover real-host backend suites.
+9. **Restack onto the published namespace tip.** #1271 has merged and #1355's
+   rebase is published. Restack A through E0 after inspecting existing local
+   work and include the request-probe migration. Revalidate rewritten tips
+   before pushing; do not reuse old upper-stack CI as proof of the composition.
 10. **Review threads.** Triage the unresolved threads on A–E0 (§4).
 11. **Mechanical documentation checks.** Discussed but not designed: extract
     TypeScript, Rust, and C# snippets from the documentation and READMEs and
     type-check them, so stale examples like those found on #1271 fail CI.
+12. **Release closeout items 1-6.** The numbered review work and PR allocation
+    are in canonical plan section 8, with lower-case substep labels. These
+    numbers are independent of this older handoff's open-item numbering.
+13. **API alignment and PTY work.** Implement canonical plan section 7's
+    cross-language names, six typed and six raw execution operations per SDK,
+    raw lifecycle phases, and consistent output/ownership contracts. Coordinate
+    the Rust `MxcPty` work; settle the listed facade, cancellation, byte-output,
+    and capability details before API freeze. Namespace/ingress merges alone
+    do not complete this additional stable v1 work.
 
 ## 6. Working notes
 
