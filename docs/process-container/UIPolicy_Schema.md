@@ -133,8 +133,12 @@ The `"ui"` section is a sibling of `"processContainer"`, `"filesystem"`, `"netwo
 |---|---|
 | **Type** | `boolean` |
 | **Default** | `false` |
-| **Description** | Controls whether the process can perform desktop management operations (create/switch desktops) and initiate session shutdown/logoff/restart. |
+| **Description** | Controls whether MXC explicitly denies desktop management and session-ending operations through Job Object UI limits. |
 | **Enforcement** | `JOB_OBJECT_UILIMIT_DESKTOP` (0x0040), `JOB_OBJECT_UILIMIT_EXITWINDOWS` (0x0080) |
+
+**When `true`:**
+- MXC does not set `JOB_OBJECT_UILIMIT_DESKTOP` or `JOB_OBJECT_UILIMIT_EXITWINDOWS`.
+- This does not explicitly enable desktop control or session-ending operations. Other parts of the process-container security environment may still deny them.
 
 **When `false`:**
 - `JOB_OBJECT_UILIMIT_DESKTOP` — Blocks [`CreateDesktop`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-createdesktopa) and [`SwitchDesktop`](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-switchdesktop) (returns `ERROR_ACCESS_DENIED`)
@@ -285,6 +289,7 @@ This section is an implementation reference for runner developers. The JSON fiel
 | `isolation` | `"handles"` | `JOB_OBJECT_UILIMIT_HANDLES` |
 | `isolation` | `"atoms"` | `JOB_OBJECT_UILIMIT_GLOBALATOMS` |
 | `isolation` | `"desktop"` | *(no flags)* |
+| `desktopSystemControl` | `true` | *(no flags; does not explicitly enable the operations)* |
 | `desktopSystemControl` | `false` | `JOB_OBJECT_UILIMIT_DESKTOP` + `JOB_OBJECT_UILIMIT_EXITWINDOWS` |
 | `systemSettings` | `"none"` | `JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS` + `JOB_OBJECT_UILIMIT_DISPLAYSETTINGS` |
 | `systemSettings` | `"parameters"` | `JOB_OBJECT_UILIMIT_DISPLAYSETTINGS` |

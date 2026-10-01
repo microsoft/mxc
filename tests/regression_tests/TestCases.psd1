@@ -130,8 +130,8 @@
         Destructive = $false
     }
     "1245" = @{
-        FriendlyName = "Permissive UI Policy"
-        Script = "test_cases\Invoke-Issue1245-PermissiveUiPolicy.ps1"
+        FriendlyName = "desktopSystemControl Policy"
+        Script = "test_cases\Invoke-Issue1245-desktopSystemControl.ps1"
         ExpectedTierSupport = @("base-container-psec")
         Prerequisites = @("wxc-exec", "PSEC BaseContainer-capable host", "interactive desktop")
         CapabilityPreflight = $true

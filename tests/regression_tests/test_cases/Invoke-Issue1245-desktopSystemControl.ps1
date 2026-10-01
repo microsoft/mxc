@@ -15,8 +15,8 @@ $ErrorActionPreference = "Stop"
 $WxcExec = Resolve-RegressionExecutable $WxcExec "wxc-exec.exe"
 New-Item -ItemType Directory -Force -Path $WorkDirectory | Out-Null
 
-$probeSourcePath = Join-Path $WorkDirectory "issue-1245-create-desktop.cs"
-$probeExe = Join-Path $WorkDirectory "issue-1245-create-desktop.exe"
+$probeSourcePath = Join-Path $WorkDirectory "issue-1245-desktop-system-control.cs"
+$probeExe = Join-Path $WorkDirectory "issue-1245-desktop-system-control.exe"
 if (Test-Path -LiteralPath $probeExe) {
     Remove-Item -LiteralPath $probeExe -Force
 }
@@ -30,6 +30,9 @@ using System.Runtime.InteropServices;
 internal static class Program
 {
     private const uint DesktopCreateWindow = 0x0002;
+    private const int ErrorAccessDenied = 5;
+    private const uint EwxForceIfHung = 0x0010;
+    private const uint EwxLogoff = 0x0000;
     private const uint GenericAll = 0x10000000;
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -43,6 +46,9 @@ internal static class Program
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool CloseDesktop(IntPtr desktop);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool ExitWindowsEx(uint flags, uint reason);
 
     public static int Main()
     {
@@ -59,12 +65,31 @@ internal static class Program
         {
             int error = Marshal.GetLastWin32Error();
             Console.WriteLine("CREATE_DESKTOP=blocked win32Error=" + error + " message=" + new Win32Exception(error).Message);
+            if (error != ErrorAccessDenied)
+            {
+                return 1;
+            }
+        }
+        else
+        {
+            CloseDesktop(desktop);
+            Console.WriteLine("CREATE_DESKTOP=allowed");
+            Console.WriteLine("EXIT_WINDOWS=not-attempted safety=CreateDesktopW-was-allowed");
+            return 2;
+        }
+
+        // Only attempt logoff after CreateDesktopW has already demonstrated
+        // that this environment is denying desktop-system-control operations.
+        bool logoffAccepted = ExitWindowsEx(EwxLogoff | EwxForceIfHung, 0);
+        int logoffError = Marshal.GetLastWin32Error();
+        if (logoffAccepted)
+        {
+            Console.WriteLine("EXIT_WINDOWS=allowed");
             return 1;
         }
 
-        CloseDesktop(desktop);
-        Console.WriteLine("CREATE_DESKTOP=allowed");
-        return 0;
+        Console.WriteLine("EXIT_WINDOWS=blocked win32Error=" + logoffError + " message=" + new Win32Exception(logoffError).Message);
+        return logoffError == ErrorAccessDenied ? 0 : 1;
     }
 }
 '@
@@ -81,15 +106,14 @@ if ($compilerExitCode -ne 0 -or -not (Test-Path -LiteralPath $probeExe -PathType
 }
 
 $controlOutput = @(& $probeExe 2>&1)
-$controlExitCode = $LASTEXITCODE
 $controlText = $controlOutput | Out-String
 $controlText | Write-Host
-if ($controlExitCode -ne 0 -or -not $controlText.Contains("CREATE_DESKTOP=allowed")) {
+if (-not $controlText.Contains("CREATE_DESKTOP=allowed")) {
     if ($CheckPrerequisites) {
         Write-Host "SKIPPED: The uncontained CreateDesktopW control is blocked in this session." -ForegroundColor Yellow
         exit 77
     }
-    Complete-RegressionTest -Passed $false -SuccessMessage "Unused" -FailureMessage "The uncontained CreateDesktopW control failed, so Tier 1 behavior cannot be isolated: $($controlText.Trim())" -FailureExitCode $controlExitCode
+    Complete-RegressionTest -Passed $false -SuccessMessage "Unused" -FailureMessage "The uncontained CreateDesktopW control failed, so Tier 1 behavior cannot be isolated: $($controlText.Trim())"
 }
 
 $configJson = @"
@@ -122,7 +146,7 @@ $configJson = @"
 $json = Add-RegressionCommandLine $configJson "`"$probeExe`""
 $base64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
 
-Write-Host "Issue #1245: permissive UI policy on the Tier 1 BaseContainer path." -ForegroundColor Cyan
+Write-Host "Issue #1245: desktopSystemControl=true on the Tier 1 BaseContainer path." -ForegroundColor Cyan
 $probeOutput = @(& $WxcExec --probe --config-base64 $base64 2>&1)
 $probeExitCode = $LASTEXITCODE
 $probeText = $probeOutput | Out-String
@@ -155,14 +179,11 @@ $exitCode = $LASTEXITCODE
 $outputText = $output | Out-String
 $outputText | Write-Host
 
-$desktopWasAllowed = $exitCode -eq 0 -and $outputText.Contains("CREATE_DESKTOP=allowed")
-$failureDetail = if ($outputText -match "CREATE_DESKTOP=blocked[^\r\n]*") {
-    $matches[0]
-} else {
-    "CreateDesktopW produced no blocked diagnostic"
-}
+$desktopBlocked = $outputText -match "CREATE_DESKTOP=blocked win32Error=5\b"
+$exitWindowsBlocked = $outputText -match "EXIT_WINDOWS=blocked win32Error=5\b"
+$passed = $exitCode -eq 0 -and $desktopBlocked -and $exitWindowsBlocked
 
-Complete-RegressionTest -Passed $desktopWasAllowed `
-    -SuccessMessage "Tier 1 honored desktopSystemControl=true and allowed CreateDesktopW." `
-    -FailureMessage "Tier 1 did not grant the documented desktop capability: $failureDetail; executor exit code was $exitCode." `
+Complete-RegressionTest -Passed $passed `
+    -SuccessMessage "Tier 1 left CreateDesktopW and ExitWindowsEx(EWX_LOGOFF) denied when desktopSystemControl=true." `
+    -FailureMessage "Expected both operations to remain denied with ERROR_ACCESS_DENIED; CreateDesktopW blocked was $desktopBlocked, ExitWindowsEx blocked was $exitWindowsBlocked, executor exit code was $exitCode." `
     -FailureExitCode $exitCode
