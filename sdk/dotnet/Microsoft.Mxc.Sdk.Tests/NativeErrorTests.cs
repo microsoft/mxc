@@ -67,6 +67,31 @@ public unsafe class NativeErrorTests
     }
 
     [Fact]
+    public void CreationPolicyTextSurvivesNativeStorageWithoutNewErrorFields()
+    {
+        const string message = "CreateProcessSecurityEnvironment failed (HRESULT = 0x800704EC)\n" +
+            "Returned constraints: 2 (non-exhaustive).\n" +
+            "Resource 1: \"C:\\\\work\"\nResource 2: \"C:\\\\\u65e5\u672c\"\n" +
+            "required=18446744073709551615.";
+        var detail = Detail(message);
+        MxcException error;
+        try
+        {
+            error = NativeError.ToException((int)ErrorCode.BackendError, detail, "unused fallback");
+        }
+        finally
+        {
+            Free(detail);
+        }
+        Assert.Equal(ErrorCode.BackendError, error.Code);
+        Assert.Equal(message, error.Message);
+        Assert.Null(error.Operation);
+        Assert.Null(error.NativeCode);
+        Assert.Null(error.Remediation);
+        Assert.Equal(4 * IntPtr.Size, Marshal.SizeOf<MxcErrorDetail>());
+    }
+
+    [Fact]
     public void EachNativeFieldLandsOnItsOwnProperty()
     {
         var detail = Detail(

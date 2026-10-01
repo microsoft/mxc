@@ -4,6 +4,8 @@
 import assert from 'node:assert';
 import { PassThrough, type Readable, type Writable } from 'node:stream';
 import { describe, it } from 'node:test';
+import { MxcError } from '../../src/v1/errors.js';
+import type { AbiErrorDetail } from '../../src/bindings/native-error.js';
 import {
   createStateAwareStreamingDriver,
   createStateAwareStreamingDriverAsync,
@@ -32,6 +34,7 @@ class FakeNative implements StreamingNativeFacade {
     outHandle: unknown[];
     completion: (error: Error | null, status: number) => void;
   }> = [];
+  spawnMessage: Buffer | undefined;
   takeStatus = 0;
   killCount = 0;
   timeoutKillCount = 0;
@@ -60,9 +63,10 @@ class FakeNative implements StreamingNativeFacade {
     _request: string,
     _experimental: number,
     outHandle: unknown[],
-    _error: unknown,
+    error: AbiErrorDetail,
   ): number {
-    outHandle[0] = this.handle;
+    outHandle[0] = this.spawnStatus === 0 ? this.handle : null;
+    if (this.spawnMessage) error.message = this.spawnMessage;
     return this.spawnStatus;
   }
 
@@ -70,7 +74,7 @@ class FakeNative implements StreamingNativeFacade {
     request: string,
     experimental: number,
     outHandle: unknown[],
-    _error: unknown,
+    error: AbiErrorDetail,
     completion: (error: Error | null, status: number) => void,
   ): void {
     this.spawnRequest = request;
@@ -87,7 +91,8 @@ class FakeNative implements StreamingNativeFacade {
       return;
     }
     queueMicrotask(() => {
-      outHandle[0] = this.handle;
+      outHandle[0] = this.spawnStatus === 0 ? this.handle : null;
+      if (this.spawnMessage) error.message = this.spawnMessage;
       completion(null, this.spawnStatus);
     });
   }
@@ -115,7 +120,7 @@ class FakeNative implements StreamingNativeFacade {
     request: string,
     experimental: number,
     outHandle: unknown[],
-    error: unknown,
+    error: AbiErrorDetail,
     completion: (error: Error | null, status: number) => void,
   ): void {
     this.stateAwareRequest = request;
@@ -127,12 +132,11 @@ class FakeNative implements StreamingNativeFacade {
     request: string,
     experimental: number,
     outHandle: unknown[],
-    _error: unknown,
+    error: AbiErrorDetail,
   ): number {
     this.stateAwareRequest = request;
     this.stateAwareExperimental = experimental;
-    outHandle[0] = this.handle;
-    return this.spawnStatus;
+    return this.spawnSync(request, experimental, outHandle, error);
   }
 
   stateAwareExecWithStdinAsync(
@@ -234,6 +238,7 @@ class FakeNative implements StreamingNativeFacade {
 
   freeError(): void {
     this.freeErrorCount += 1;
+    this.spawnMessage?.fill(0);
   }
 
   freeString(value: unknown): void {
@@ -372,6 +377,40 @@ describe('native streaming binding ownership', () => {
     assert.strictEqual(native.spawnExperimental, 0);
     await driver.free();
   });
+
+  for (const route of ['spawn', 'state-aware exec', 'async state-aware exec'] as const) {
+    it(`owns populated native failure text from ${route}`, async () => {
+      const native = new FakeNative();
+      const message = 'CreateProcessSecurityEnvironment failed (HRESULT = 0x800704EC)\n'
+        + 'Resource 1: "C:\\\\\u65e5\u672c"\n'
+        + 'required=18446744073709551615.';
+      native.spawnStatus = 12;
+      native.spawnMessage = Buffer.from(`${message}\0`, 'utf8');
+      let captured: MxcError | undefined;
+      const matches = (error: unknown) => {
+        if (!(error instanceof MxcError)) return false;
+        captured = error;
+        return error.code === 'backend_error' && error.message === message;
+      };
+      if (route === 'state-aware exec') {
+        assert.throws(
+          () => createStateAwareStreamingDriver('{"phase":"exec"}', false, native, new FakeStreams()),
+          matches,
+        );
+      } else {
+        await assert.rejects(
+          () => route === 'spawn'
+            ? createStreamingDriver({} as never, native, new FakeStreams())
+            : createStateAwareStreamingDriverAsync('{"phase":"exec"}', false, native, new FakeStreams()),
+          matches,
+        );
+      }
+      assert.strictEqual(native.freeErrorCount, 1);
+      assert.strictEqual(native.freeCount, 0);
+      assert.strictEqual(native.spawnMessage.every(byte => byte === 0), true);
+      assert.strictEqual(captured?.message, message);
+    });
+  }
 
   it('dispatches state-aware exec through the native entry point', async () => {
     const native = new FakeNative();
