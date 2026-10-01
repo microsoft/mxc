@@ -17,7 +17,8 @@ use crate::process_security_environment_spec::process_security_environment_layou
 };
 
 use crate::process_container_common::network_policy_helpers::{
-    add_default_network_capabilities, ensure_capability, INTERNET_CLIENT_CAPABILITY,
+    add_default_network_capabilities, capture_requests_internet_capability, ensure_capability,
+    INTERNET_CLIENT_CAPABILITY,
 };
 use crate::process_container_common::secenv::SecurityEnvironmentVersion;
 
@@ -79,11 +80,7 @@ fn effective_capabilities(
         .cloned()
         .collect();
     add_default_network_capabilities(policy, &mut capabilities);
-    if policy.capture_denials.is_some()
-        && capture_network_decisions
-        && policy.network_egress.is_some()
-        && !policy.network_proxy.is_enabled()
-    {
+    if capture_requests_internet_capability(policy, capture_network_decisions) {
         // Let outbound attempts pass the capability gate so Tessera's egress
         // policy makes and records the decision. Proxy mode must remain direct-
         // egress denied and therefore deliberately omits internetClient.

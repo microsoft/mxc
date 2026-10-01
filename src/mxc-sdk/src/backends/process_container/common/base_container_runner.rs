@@ -40,8 +40,8 @@ use crate::mxc_common::error::WxcError;
 use crate::mxc_common::log_symbols::EMOJI_SECTION;
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{
-    CaptureDenialsErrorOutput, CaptureDenialsOutput, ContainmentBackend, ExecutionRequest,
-    FailurePhase, SandboxOutputMetadata, ScriptResponse,
+    CaptureDenialsErrorOutput, CaptureDenialsOutput, ContainerPolicy, ContainmentBackend,
+    ExecutionRequest, FailurePhase, SandboxOutputMetadata, ScriptResponse,
 };
 use crate::mxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
@@ -71,8 +71,8 @@ use crate::process_container_common::launch_diagnostics::{
 use crate::process_container_common::native_capture::CaptureSession;
 use crate::process_container_common::proxy_coordinator::ProxyCoordinator;
 use crate::process_container_common::secenv::{
-    self, ProcessSecurityEnvironment, SecurityEnvironmentStartupInfo, SecurityEnvironmentSupport,
-    SecurityEnvironmentVersion, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+    self, CreationError, ProcessSecurityEnvironment, SecurityEnvironmentStartupInfo,
+    SecurityEnvironmentSupport, SecurityEnvironmentVersion, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
     SECURITY_ENVIRONMENT_API_SET,
 };
 
@@ -222,7 +222,9 @@ trait CaptureSessionFactory: Send + Sync {
         &self,
         sandbox_specification: &[u8],
         flags: u32,
-    ) -> Result<Box<dyn CaptureSessionOps>, crate::learning_mode_windows::LearningModeError>;
+        policy: &ContainerPolicy,
+        capture_network_decisions: bool,
+    ) -> Result<Box<dyn CaptureSessionOps>, CreationError>;
 }
 
 struct RealCaptureSessionFactory;
@@ -238,9 +240,18 @@ impl CaptureSessionFactory for RealCaptureSessionFactory {
         &self,
         sandbox_specification: &[u8],
         flags: u32,
-    ) -> Result<Box<dyn CaptureSessionOps>, crate::learning_mode_windows::LearningModeError> {
-        CaptureSession::begin(sandbox_specification, flags)
+        policy: &ContainerPolicy,
+        capture_network_decisions: bool,
+    ) -> Result<Box<dyn CaptureSessionOps>, CreationError> {
+        let environment = secenv::create_with_diagnostics(
+            sandbox_specification,
+            flags,
+            Some(policy),
+            capture_network_decisions,
+        )?;
+        CaptureSession::begin_with_environment(environment)
             .map(|session| Box::new(session) as Box<dyn CaptureSessionOps>)
+            .map_err(Into::into)
     }
 }
 
@@ -309,7 +320,7 @@ impl BaseContainerRunner {
         &self,
         request: &ExecutionRequest,
         version: SecurityEnvironmentVersion,
-    ) -> Result<Vec<u8>, ScriptResponse> {
+    ) -> Result<(Vec<u8>, bool), ScriptResponse> {
         let capture_network_decisions = match request.policy.capture_denials.as_ref() {
             Some(_) => self
                 .capture_factory
@@ -322,9 +333,8 @@ impl BaseContainerRunner {
                 .includes_network(),
             None => false,
         };
-        Ok(build_psec_v1_security_environment_spec(
-            request,
-            version,
+        Ok((
+            build_psec_v1_security_environment_spec(request, version, capture_network_decisions),
             capture_network_decisions,
         ))
     }
@@ -512,7 +522,7 @@ impl BaseContainerRunner {
             let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: captureDenials");
         }
 
-        let process_security_environment_spec =
+        let (process_security_environment_spec, capture_network_decisions) =
             self.build_capture_aware_security_environment_spec(request, psec_version)?;
         let _ = writeln!(
             logger,
@@ -747,10 +757,12 @@ impl BaseContainerRunner {
         {
             let psec_spec = process_security_environment_spec.as_slice();
             if capture_denials.is_some() {
-                match self
-                    .capture_factory
-                    .begin(psec_spec, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE)
-                {
+                match self.capture_factory.begin(
+                    psec_spec,
+                    PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+                    &request.policy,
+                    capture_network_decisions,
+                ) {
                     Ok(session) => {
                         let _ = writeln!(
                             logger,
@@ -759,8 +771,7 @@ impl BaseContainerRunner {
                         capture_session = Some(session);
                     }
                     Err(e) => {
-                        let msg =
-                            format!("captureDenials: failed to start learning-mode capture: {e}");
+                        let msg = e.message(true);
                         let _ = writeln!(logger, "Error: {msg}");
                         log_base_network_policy_audit(
                             request,
@@ -784,7 +795,12 @@ impl BaseContainerRunner {
                     }
                 }
             } else {
-                let result = secenv::create(psec_spec, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE);
+                let result = secenv::create_with_diagnostics(
+                    psec_spec,
+                    PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+                    Some(&request.policy),
+                    capture_network_decisions,
+                );
                 match result {
                     Ok(environment) => {
                         let _ = writeln!(
@@ -794,8 +810,7 @@ impl BaseContainerRunner {
                         security_environment = Some(environment);
                     }
                     Err(error) => {
-                        let msg =
-                            format!("failed to create the process security environment: {error}");
+                        let msg = error.message(false);
                         let _ = writeln!(logger, "Error: {msg}");
                         log_base_network_policy_audit(
                             request,
@@ -2224,12 +2239,14 @@ mod tests {
             &self,
             _sandbox_specification: &[u8],
             _flags: u32,
-        ) -> Result<Box<dyn CaptureSessionOps>, crate::learning_mode_windows::LearningModeError>
-        {
+            _policy: &ContainerPolicy,
+            _capture_network_decisions: bool,
+        ) -> Result<Box<dyn CaptureSessionOps>, CreationError> {
             self.begin_calls.fetch_add(1, Ordering::SeqCst);
             if let Some((function, code)) = self.begin_error {
                 return Err(
-                    crate::learning_mode_windows::LearningModeError::HResultCall { function, code },
+                    crate::learning_mode_windows::LearningModeError::HResultCall { function, code }
+                        .into(),
                 );
             }
             Ok(Box::new(FakeCaptureSession {
@@ -2255,6 +2272,7 @@ mod tests {
             Self::with_capture_factory(fake_capture_factory())
                 .build_capture_aware_security_environment_spec(request, version)
                 .unwrap()
+                .0
         }
     }
 
@@ -2652,10 +2670,12 @@ mod tests {
         });
         let runner = BaseContainerRunner::with_capture_factory(factory.clone());
 
-        let error = match runner
-            .capture_factory
-            .begin(&[], PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE)
-        {
+        let error = match runner.capture_factory.begin(
+            &[],
+            PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+            &ContainerPolicy::default(),
+            false,
+        ) {
             Ok(_) => panic!("fake begin must fail"),
             Err(error) => error,
         };
@@ -2680,7 +2700,12 @@ mod tests {
         let runner = BaseContainerRunner::with_capture_factory(factory.clone());
         let session = runner
             .capture_factory
-            .begin(&[], PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE)
+            .begin(
+                &[],
+                PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+                &ContainerPolicy::default(),
+                false,
+            )
             .expect("fake begin");
 
         let error = session.finish(None).expect_err("fake finish must fail");
@@ -2955,7 +2980,7 @@ mod tests {
                 finish_calls: Arc::new(AtomicUsize::new(0)),
             });
             let runner = BaseContainerRunner::with_capture_factory(factory);
-            let bytes = runner
+            let (bytes, capture_network_decisions) = runner
                 .build_capture_aware_security_environment_spec(
                     &request,
                     SecurityEnvironmentVersion::V1_0,
@@ -2964,6 +2989,10 @@ mod tests {
             let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
 
             assert_eq!(spec.capabilities(), expected_capabilities);
+            assert_eq!(
+                capture_network_decisions,
+                capture_enabled && trace_sources.includes_network()
+            );
             let egress = spec.network_policy().unwrap().egress().unwrap();
             assert_eq!(egress.default_action(), psec_layout::FilterAction::deny);
             assert!(egress.allow().is_none());

@@ -32,3 +32,14 @@ fully honor the request.
 Internal validation found no native capture support on build `26657.1002` and
 the complete option-aware contract on build `26663.1000`. These are validation
 points, not public support boundaries; runtime probing remains authoritative.
+
+## Creation-policy diagnostics
+
+On the selected BaseContainer path, CPSE is the creation entrypoint on every
+host. After its policy-denied HRESULT, MXC retrieves the calling thread's cached
+refusal through the optional `GetLastProcessSecurityEnvironmentPolicyResult`
+export. `PSE_SUPPORT_POLICY_RESULT` advertises that getter, not whether policy
+governs the caller. This adds no release-floor requirement or tier-selection
+change; unavailable diagnostics never replace the original creation result.
+See [detailed policy errors](../../development/guides/process-container-adding-os-features.md#detailed-policy-errors)
+for the diagnostic contract and retrieval-failure handling.
