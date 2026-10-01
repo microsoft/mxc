@@ -15,7 +15,7 @@ internal sealed class NonNullNetworkSectionJsonConverter<T> : JsonConverter<T>
         ref Utf8JsonReader reader,
         Type typeToConvert,
         JsonSerializerOptions options) =>
-        JsonSerializer.Deserialize<T>(ref reader, options)
+        JsonSerializer.Deserialize(ref reader, MxcJson.TypeInfo<T>(options))
             ?? throw new JsonException(
                 "Network sections cannot be null. Omit the property instead.");
 
@@ -23,5 +23,5 @@ internal sealed class NonNullNetworkSectionJsonConverter<T> : JsonConverter<T>
         Utf8JsonWriter writer,
         T value,
         JsonSerializerOptions options) =>
-        JsonSerializer.Serialize(writer, value, options);
+        JsonSerializer.Serialize(writer, value, MxcJson.TypeInfo<T>(options));
 }

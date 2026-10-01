@@ -26,8 +26,10 @@ static void Check(bool condition, string what)
 // Reflection-free serialization must be in force, or this test proves nothing.
 Check(!JsonSerializer.IsReflectionEnabledByDefault, "reflection fallback is disabled");
 
-// 1. Serialize a development-version (0.9.0-alpha) policy: directional network,
+// 1. Serialize a directional high-level policy: directional network,
 //    filesystem, and UI sections, exercising the camelCase enum converters.
+//    The v1 high-level SDK is version-free (it owns its contract internally),
+//    so no "version" field is emitted.
 var devPolicy = new SandboxPolicy
 {
     Version = "0.9.0-alpha",
@@ -50,7 +52,7 @@ var devPolicy = new SandboxPolicy
 using (var doc = JsonDocument.Parse(MxcSandbox.SerializePolicy(devPolicy)))
 {
     var root = doc.RootElement;
-    Check(root.GetProperty("version").GetString() == "0.9.0-alpha", "dev policy version");
+    Check(!root.TryGetProperty("version", out _), "policy is version-free");
     var network = root.GetProperty("network");
     Check(network.GetProperty("egress").GetProperty("default").GetString() == "deny", "egress default enum");
     Check(network.GetProperty("runtimeConfig").GetProperty("networkProxy").GetString()
@@ -58,20 +60,7 @@ using (var doc = JsonDocument.Parse(MxcSandbox.SerializePolicy(devPolicy)))
     Check(root.GetProperty("ui").GetProperty("clipboard").GetString() == "read", "clipboard enum");
 }
 
-// 2. Serialize a published-version (0.8.0-alpha) policy: exercises the legacy
-//    network converter path (PublishedPolicyOptions).
-var publishedPolicy = new SandboxPolicy
-{
-    Version = "0.8.0-alpha",
-    Network = new NetworkPolicy(),
-};
-using (var doc = JsonDocument.Parse(MxcSandbox.SerializePolicy(publishedPolicy)))
-{
-    var network = doc.RootElement.GetProperty("network");
-    Check(network.TryGetProperty("allowOutbound", out _), "legacy network default fields emitted");
-}
-
-// 3. Serialize a full request with a polymorphic ProcessContainer containment.
+// 2. Serialize a full request with a polymorphic ProcessContainer containment.
 var request = new SandboxRequest(devPolicy, "echo hello")
 {
     Containment = new ProcessContainerContainment
@@ -82,17 +71,19 @@ var request = new SandboxRequest(devPolicy, "echo hello")
 };
 using (var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(request)))
 {
-    Check(doc.RootElement.GetProperty("policy").GetProperty("version").GetString() == "0.9.0-alpha",
+    var policy = doc.RootElement.GetProperty("policy");
+    Check(!policy.TryGetProperty("version", out _), "request policy is version-free");
+    Check(policy.GetProperty("network").GetProperty("egress").GetProperty("default").GetString() == "deny",
         "request carries policy");
     // The "type" tag that picks the concrete subtype, plus a field that only
     // exists on that subtype, are the parts whose loss would leave the request
-    // unusable while `policy.version` still passes.
+    // unusable.
     var containment = doc.RootElement.GetProperty("containment");
     Check(containment.GetProperty("type").GetString() == "processContainer", "containment type tag");
     Check(containment.GetProperty("leastPrivilege").GetBoolean(), "containment subtype field (leastPrivilege)");
 }
 
-// 4. Deserialize a native backend probe array - including an entry that omits
+// 3. Deserialize a native backend probe array - including an entry that omits
 //    the (empty) capabilities/warnings arrays, guarding the source-gen
 //    initializer regression fixed alongside this test.
 const string backendsJson = """
@@ -107,13 +98,13 @@ Check(backends![0].Capabilities.Length == 1, "first backend capability parsed");
 Check(backends[1].Capabilities.Length == 0, "omitted capabilities default to empty, not null");
 Check(backends[1].Warnings.Length == 0, "omitted warnings default to empty, not null");
 
-// 5. Deserialize platform support.
+// 4. Deserialize platform support.
 const string supportJson = """{"isSupported":true,"availableMethods":["processcontainer"]}""";
 var support = MxcJson.Deserialize<NativePlatformSupport>(supportJson);
 Check(support is { IsSupported: true }, "platform support parsed");
 Check(support!.AvailableMethods.Length == 1, "available methods parsed");
 
-// 6. Deserialize structured output metadata: both the nested captureDenials
+// 5. Deserialize structured output metadata: both the nested captureDenials
 //    success object and the captureDenialsError failure object, so both output
 //    roots are exercised.
 const string metadataJson = """
@@ -125,18 +116,19 @@ Check(metadata!.CaptureDenials!.TotalDenials == 3, "denial count parsed");
 Check(metadata.CaptureDenialsError?.Message == "finalize failed", "capture denials error parsed");
 Check(metadata.CaptureDenialsError!.EtlPath == "C:\\trace.etl", "capture denials error etl path parsed");
 
-// 7. Deserialize a warnings array (string[]).
+// 6. Deserialize a warnings array (string[]).
 var warnings = MxcJson.Deserialize<string[]>("""["a","b"]""");
 Check(warnings is { Length: 2 }, "warnings array parsed");
 
-// 8. Round-trip a state-aware network policy: exercises the state-aware network
-//    converter and the StateAwareNetworkDefault enum.
-var stateNetwork = MxcJson.Deserialize<StateAwareNetworkPolicy>("""{"defaultPolicy":"allow"}""");
-Check(stateNetwork is not null, "state-aware network parsed");
+// 7. Round-trip a state-aware network policy: exercises the non-null section
+//    converter on the state-aware directional model.
+var stateNetwork = MxcJson.Deserialize<StateAwareNetworkPolicy>(
+    """{"egress":{"default":"allow"},"ingress":{"default":"deny"}}""");
+Check(stateNetwork?.Egress?.Default == NetworkAction.Allow, "state-aware network parsed");
 JsonNode? stateNode = MxcJson.SerializeToNode(stateNetwork!, MxcJson.Options);
-Check(stateNode?["defaultPolicy"]?.GetValue<string>() == "allow", "state-aware network round-trips");
+Check(stateNode?["egress"]?["default"]?.GetValue<string>() == "allow", "state-aware network round-trips");
 
-// 9. Build the state-aware lifecycle envelopes through the real MxcLifecycle
+// 8. Build the state-aware lifecycle envelopes through the real MxcLifecycle
 //    builders. These are native-free (the P/Invoke lives in a separate step),
 //    so publishing them here exercises the provision/exec serialization call
 //    sites - filesystem, telemetry, directional network, environment, and
@@ -190,7 +182,7 @@ Check(startEnvelope["phase"]?.GetValue<string>() == "start", "start phase");
 Check(startEnvelope["sandboxId"]?.GetValue<string>() == "iso:smoke-test", "start sandbox id");
 Check(startEnvelope["telemetry"]?["enabled"]?.GetValue<bool>() == true, "start telemetry serialized");
 
-// 10. Deserialize IsolationSession provision metadata - the remaining native
+// 9. Deserialize IsolationSession provision metadata - the remaining native
 //     provision-output root.
 const string provisionMetadataJson =
     """{"agentUserName":"sandbox-agent","agentUserSid":"S-1-5-21","ephemeralWorkspacePath":"C:\\ws"}""";
@@ -198,7 +190,7 @@ var provisionMetadata = MxcJson.Deserialize<IsolationSessionProvisionMetadata>(p
 Check(provisionMetadata?.AgentUserName == "sandbox-agent", "provision metadata agent user parsed");
 Check(provisionMetadata!.EphemeralWorkspacePath == "C:\\ws", "provision metadata workspace parsed");
 
-// 11. Parse a native request-probe output. This exercises the NativeProbeOutput
+// 10. Parse a native request-probe output. This exercises the NativeProbeOutput
 //     root and MxcJson.ProbeOptions (strict unmapped-member handling), the
 //     deserialize path added with the request-aware probe.
 const string probeJson = """

@@ -56,8 +56,8 @@ internal sealed class CamelCaseJsonStringEnumConverter<TEnum>
 [JsonSerializable(typeof(UiPolicy))]
 [JsonSerializable(typeof(CaptureDenialsPolicy))]
 [JsonSerializable(typeof(TelemetrySettings))]
-// Network sub-objects serialized through the custom network converters.
-[JsonSerializable(typeof(NetworkProxyPolicy))]
+// Directional network sub-objects (egress/ingress resolved through the
+// non-null section converter).
 [JsonSerializable(typeof(NetworkEgressPolicy))]
 [JsonSerializable(typeof(NetworkIngressPolicy))]
 [JsonSerializable(typeof(NetworkRuntimeConfig))]
@@ -96,19 +96,12 @@ internal static class MxcJson
 {
     /// <summary>
     /// The default options: the source-generated resolver plus camelCase naming
-    /// and null-omission carried from <see cref="MxcJsonContext"/>. Type-level
-    /// <c>[JsonConverter]</c> attributes supply the custom network converters.
+    /// and null-omission carried from <see cref="MxcJsonContext"/>. Property-level
+    /// <c>[JsonConverter]</c> attributes supply the non-null network section
+    /// converters.
     /// </summary>
     internal static readonly JsonSerializerOptions Options =
         new(MxcJsonContext.Default.Options);
-
-    /// <summary>
-    /// Options for serializing published (0.6–0.8) policies, which emit the
-    /// legacy network default fields. The options-level converter overrides the
-    /// type-level attribute for <see cref="NetworkPolicy"/>.
-    /// </summary>
-    internal static readonly JsonSerializerOptions PublishedPolicyOptions =
-        CreatePublishedPolicyOptions();
 
     /// <summary>
     /// Options for deserializing the native request probe output. Built from the
@@ -121,13 +114,6 @@ internal static class MxcJson
         {
             UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
         };
-
-    private static JsonSerializerOptions CreatePublishedPolicyOptions()
-    {
-        var options = new JsonSerializerOptions(MxcJsonContext.Default.Options);
-        options.Converters.Add(new NetworkPolicyJsonConverter(includeLegacyDefaults: true));
-        return options;
-    }
 
     /// <summary>
     /// Resolve the generated <see cref="JsonTypeInfo{T}"/> for <typeparamref name="T"/>
