@@ -10,8 +10,8 @@
 //! never reads it.
 
 use crate::mxc_common::models::{
-    ContainmentBackend, IsolationSessionProvisionConfig, MicroVmProvisionConfig,
-    WslcProvisionConfig, WslcProvisionSessionConfig,
+    ContainmentBackend, IsolationSessionProvisionConfig, IsolationSessionStartConfig,
+    MicroVmProvisionConfig, WslcProvisionConfig, WslcProvisionSessionConfig,
 };
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::state_aware_request::Phase;
@@ -41,6 +41,18 @@ impl StateAwareProvision {
     }
 }
 
+/// Backend-specific start input, before backend-owned validation.
+///
+/// Start routes by sandbox ID, so a supplied configuration names the backend it
+/// belongs to and binding rejects one addressed to a different backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StateAwareStart {
+    /// No backend-specific start configuration was supplied.
+    Absent,
+    /// IsolationSession start configuration.
+    IsolationSession(IsolationSessionStartConfig),
+}
+
 /// A lifecycle operation with exactly the routing and configuration it needs.
 ///
 /// Execution process settings, policy, and telemetry belong to the common
@@ -53,11 +65,22 @@ impl StateAwareProvision {
 pub enum StateAwareOperation {
     ProvisionSession(Option<WslcProvisionSessionConfig>),
     Provision(StateAwareProvision),
-    Start { sandbox_id: String },
-    Exec { sandbox_id: String },
-    Stop { sandbox_id: String },
-    Deprovision { sandbox_id: String },
-    DeprovisionSession { session_id: String },
+    Start {
+        sandbox_id: String,
+        config: StateAwareStart,
+    },
+    Exec {
+        sandbox_id: String,
+    },
+    Stop {
+        sandbox_id: String,
+    },
+    Deprovision {
+        sandbox_id: String,
+    },
+    DeprovisionSession {
+        session_id: String,
+    },
 }
 
 impl StateAwareOperation {
@@ -96,7 +119,7 @@ impl StateAwareOperation {
             Self::ProvisionSession(_) | Self::Provision(_) | Self::DeprovisionSession { .. } => {
                 None
             }
-            Self::Start { sandbox_id }
+            Self::Start { sandbox_id, .. }
             | Self::Exec { sandbox_id }
             | Self::Stop { sandbox_id }
             | Self::Deprovision { sandbox_id } => Some(sandbox_id),
@@ -216,6 +239,7 @@ mod tests {
             (
                 StateAwareOperation::Start {
                     sandbox_id: id.into(),
+                    config: StateAwareStart::Absent,
                 },
                 Phase::Start,
             ),
@@ -314,10 +338,12 @@ mod tests {
         let absent = StateAwareProvision::IsolationSession(None);
         let empty = StateAwareProvision::IsolationSession(Some(IsolationSessionProvisionConfig {
             app_id: None,
+            user: None,
         }));
         let empty_app_id =
             StateAwareProvision::IsolationSession(Some(IsolationSessionProvisionConfig {
                 app_id: Some(String::new()),
+                user: None,
             }));
         assert_ne!(absent, empty);
         assert_ne!(empty, empty_app_id);
@@ -328,6 +354,14 @@ mod tests {
         assert_ne!(
             StateAwareProvision::MicroVm(None),
             StateAwareProvision::MicroVm(Some(MicroVmProvisionConfig::default()))
+        );
+    }
+
+    #[test]
+    fn start_presence_is_distinct_from_an_empty_configuration() {
+        assert_ne!(
+            StateAwareStart::Absent,
+            StateAwareStart::IsolationSession(IsolationSessionStartConfig::default())
         );
     }
 }

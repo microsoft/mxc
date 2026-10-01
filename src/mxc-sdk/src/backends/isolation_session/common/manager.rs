@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use crate::mxc_common::audit::{AuditEvent, AuditEventName, KillMethod, TeardownStatus};
 use crate::mxc_common::logger::Logger;
+use crate::mxc_common::models::IsolationSessionUser;
 use crate::mxc_common::process_util::{OwnedHandle, PipeReadCanceller};
 use crate::mxc_common::sandbox_process::StreamCloser;
 use crate::mxc_common::state_aware_backend::{ExecHandle, ExecOutcome};
@@ -39,6 +40,7 @@ use super::owned_thread::{self, Impersonation};
 use super::pipe_relay::{
     create_relay_thread, create_relay_thread_with_stop, duplicate_handle, PipeRelayWithStopParams,
 };
+use super::policy::{user_superseded_by_deduction, UserField};
 use super::process_options::{
     build_iso_process_options, with_service_timeout_grace, ProcessOptions,
 };
@@ -166,6 +168,61 @@ fn feature_supported_from(level: windows_core::Result<i32>) -> bool {
 
 const ZERO_WINDOW_ID: WindowId = WindowId { Value: 0 };
 
+/// The provisioning overload for this host and request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddUserCall {
+    /// `AddUserAsync3`: the host deduces the enterprise agent user.
+    Deduced,
+    /// `AddUserAsync2`: registers the agent user to an app.
+    AppScoped,
+    /// `AddUserAsync`.
+    Legacy,
+}
+
+/// Chooses the provisioning overload, preferring the newest the host
+/// advertises. Explicit credentials are refused where the host deduces the
+/// enterprise agent user.
+fn select_add_user_call(
+    deduces_enterprise_user: bool,
+    app_scoped_registration: bool,
+    has_credentials: bool,
+) -> Result<AddUserCall, IsolationSessionError> {
+    match (deduces_enterprise_user, has_credentials) {
+        (true, true) => Err(user_superseded_by_deduction(UserField::Provision)),
+        (true, false) => Ok(AddUserCall::Deduced),
+        (false, _) if app_scoped_registration => Ok(AddUserCall::AppScoped),
+        (false, _) => Ok(AddUserCall::Legacy),
+    }
+}
+
+/// The session-start overload for this host and request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartSessionCall {
+    /// `StartSessionAsync2`: the host deduces the enterprise agent user.
+    Deduced,
+    /// `StartSessionAsync`, which takes an optional WAM token.
+    WithToken,
+}
+
+/// Chooses the session-start overload. Explicit credentials are refused where
+/// the host deduces the enterprise agent user.
+fn select_start_session_call(
+    deduces_enterprise_user: bool,
+    has_credentials: bool,
+) -> Result<StartSessionCall, IsolationSessionError> {
+    match (deduces_enterprise_user, has_credentials) {
+        (true, true) => Err(user_superseded_by_deduction(UserField::Start)),
+        (true, false) => Ok(StartSessionCall::Deduced),
+        (false, _) => Ok(StartSessionCall::WithToken),
+    }
+}
+
+/// The account name and token the OS receives. The UPN is trimmed to match
+/// validation; the token is opaque and passed verbatim.
+fn os_credentials(user: Option<&IsolationSessionUser>) -> (&str, &str) {
+    user.map_or(("", ""), |user| (user.upn.trim(), user.wam_token.as_str()))
+}
+
 /// The provision-time facts the OS assigns to a freshly-created agent user,
 /// read from `IsoSessionUserResult` at `add_user`. The addressing key for
 /// every later lifecycle op remains `agent_user_name`; the other two fields
@@ -259,35 +316,42 @@ impl IsolationSessionManager {
     /// parser rejects the whole `lifecycle` section.
     pub(super) fn add_user(
         app_id: Option<&str>,
+        user: Option<&IsolationSessionUser>,
     ) -> Result<(ProvisionedUser, Self), IsolationSessionError> {
         let impersonation = Impersonation::of_this_thread()?;
         owned_thread::call(&impersonation, || {
             let mta = MtaReference::acquire()?;
             let ops = check_service_available_and_activate()?;
-            // Prefer the newest overload the host advertises.
-            let (op_add_user, started) = if feature_supported_from(
+            let deduces_enterprise_user = feature_supported_from(
                 ops.GetFeatureLevel(IsoSessionFeature::DeducedEnterpriseAgentUser),
-            ) {
-                (
+            );
+            let app_scoped_registration = !deduces_enterprise_user
+                && feature_supported_from(
+                    ops.GetFeatureLevel(IsoSessionFeature::AppScopedRegistration),
+                );
+            let call = select_add_user_call(
+                deduces_enterprise_user,
+                app_scoped_registration,
+                user.is_some(),
+            )?;
+            let (account_name, wam_token) = os_credentials(user);
+            let (op_add_user, started) = match call {
+                AddUserCall::Deduced => (
                     op::ADD_USER_DEDUCED,
                     ops.AddUserAsync3(&HSTRING::from(app_id.unwrap_or_default()), ZERO_WINDOW_ID),
-                )
-            } else if feature_supported_from(
-                ops.GetFeatureLevel(IsoSessionFeature::AppScopedRegistration),
-            ) {
-                (
+                ),
+                AddUserCall::AppScoped => (
                     op::ADD_USER,
                     ops.AddUserAsync2(
                         &HSTRING::from(app_id.unwrap_or_default()),
-                        &HSTRING::new(),
-                        &HSTRING::new(),
+                        &HSTRING::from(account_name),
+                        &HSTRING::from(wam_token),
                     ),
-                )
-            } else {
-                (
+                ),
+                AddUserCall::Legacy => (
                     op::ADD_USER_LEGACY,
-                    ops.AddUserAsync(&HSTRING::new(), &HSTRING::new()),
-                )
+                    ops.AddUserAsync(&HSTRING::from(account_name), &HSTRING::from(wam_token)),
+                ),
             };
             let user_result: IsoSessionUserResult = owned_thread::wait_for(op_add_user, started)?;
 
@@ -367,25 +431,32 @@ impl IsolationSessionManager {
         })
     }
 
-    /// Step 2: Start the isolation session for the pegged agent user.
-    pub(super) fn start_session(&self) -> Result<(), IsolationSessionError> {
+    /// Step 2: Start the isolation session for the pegged agent user. `user`
+    /// re-supplies the Entra credentials of an enterprise agent user.
+    pub(super) fn start_session(
+        &self,
+        user: Option<&IsolationSessionUser>,
+    ) -> Result<(), IsolationSessionError> {
         owned_thread::call(&self.impersonation, || {
-            // Prefer the newest overload the host advertises.
-            let (op_start_session, started) = if feature_supported_from(
-                self.ops
-                    .GetFeatureLevel(IsoSessionFeature::DeducedEnterpriseAgentUser),
-            ) {
-                (
+            let call = select_start_session_call(
+                feature_supported_from(
+                    self.ops
+                        .GetFeatureLevel(IsoSessionFeature::DeducedEnterpriseAgentUser),
+                ),
+                user.is_some(),
+            )?;
+            let (_, wam_token) = os_credentials(user);
+            let (op_start_session, started) = match call {
+                StartSessionCall::Deduced => (
                     op::START_SESSION_DEDUCED,
                     self.ops
                         .StartSessionAsync2(&self.agent_user_name, ZERO_WINDOW_ID),
-                )
-            } else {
-                (
+                ),
+                StartSessionCall::WithToken => (
                     op::START_SESSION,
                     self.ops
-                        .StartSessionAsync(&self.agent_user_name, &HSTRING::new()),
-                )
+                        .StartSessionAsync(&self.agent_user_name, &HSTRING::from(wam_token)),
+                ),
             };
             let result = owned_thread::wait_for(op_start_session, started)?;
             check_result(&result, op_start_session, StalePromotion::Eligible)
@@ -1416,6 +1487,65 @@ fn wait_with_graceful_shutdown(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_deduction_refusal(result: Result<impl std::fmt::Debug, IsolationSessionError>) {
+        match result {
+            Err(IsolationSessionError::Policy(message)) => assert!(
+                message.contains("not accepted on a host that deduces the enterprise agent user"),
+                "{message}"
+            ),
+            other => panic!("expected the deduction refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_user_call_follows_host_support_and_refuses_credentials_where_deduced() {
+        for app_scoped in [false, true] {
+            assert_deduction_refusal(select_add_user_call(true, app_scoped, true));
+            assert_eq!(
+                select_add_user_call(true, app_scoped, false).unwrap(),
+                AddUserCall::Deduced
+            );
+        }
+        for has_credentials in [false, true] {
+            assert_eq!(
+                select_add_user_call(false, true, has_credentials).unwrap(),
+                AddUserCall::AppScoped
+            );
+            assert_eq!(
+                select_add_user_call(false, false, has_credentials).unwrap(),
+                AddUserCall::Legacy
+            );
+        }
+    }
+
+    #[test]
+    fn start_session_call_follows_host_support_and_refuses_credentials_where_deduced() {
+        assert_deduction_refusal(select_start_session_call(true, true));
+        assert_eq!(
+            select_start_session_call(true, false).unwrap(),
+            StartSessionCall::Deduced
+        );
+        for has_credentials in [false, true] {
+            assert_eq!(
+                select_start_session_call(false, has_credentials).unwrap(),
+                StartSessionCall::WithToken
+            );
+        }
+    }
+
+    #[test]
+    fn os_credentials_trim_the_upn_and_pass_the_token_verbatim() {
+        assert_eq!(os_credentials(None), ("", ""));
+        let user = IsolationSessionUser {
+            upn: " a b@contoso.com\t".to_string(),
+            wam_token: "  tok-with-edges  ".to_string(),
+        };
+        assert_eq!(
+            os_credentials(Some(&user)),
+            ("a b@contoso.com", "  tok-with-edges  ")
+        );
+    }
 
     fn read_stdin_test_payload(handle: HANDLE, size: usize) -> Vec<u8> {
         use std::time::{Duration, Instant};

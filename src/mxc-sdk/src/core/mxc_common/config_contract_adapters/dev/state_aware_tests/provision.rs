@@ -63,6 +63,36 @@ fn isolation_session_configuration_presence_matches_explicit_values() {
 }
 
 #[test]
+fn isolation_session_user_maps_verbatim() {
+    for (fields, expected) in [
+        (r#","isolationSession":{"provision":{}}"#, None),
+        (
+            r#","isolationSession":{"provision":{"user":{"upn":"alice@contoso.com","wamToken":"tok"}}}"#,
+            Some(("alice@contoso.com", "tok")),
+        ),
+        (
+            r#","isolationSession":{"provision":{"appId":"Contoso.App","user":{"upn":" alice@contoso.com ","wamToken":" tok "}}}"#,
+            Some((" alice@contoso.com ", " tok ")),
+        ),
+    ] {
+        let (_, operation) = adapt(&source("isolation_session", fields));
+        let StateAwareOperation::Provision(StateAwareProvision::IsolationSession(Some(config))) =
+            operation
+        else {
+            panic!("wrong operation: {fields}");
+        };
+        assert_eq!(
+            config
+                .user
+                .as_ref()
+                .map(|user| (user.upn.as_str(), user.wam_token.as_str())),
+            expected,
+            "{fields}"
+        );
+    }
+}
+
+#[test]
 fn isolation_session_unrestricted_network_forms_map_without_loss() {
     let directional = r#""network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}"#;
     let request = |fields: &str| {

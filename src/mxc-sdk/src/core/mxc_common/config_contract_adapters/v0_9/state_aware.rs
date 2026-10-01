@@ -7,7 +7,9 @@ use crate::mxc_common::config_contract_adapters::v0_9::common::{
 use crate::mxc_common::error::WxcError;
 use crate::mxc_common::models::{IsolationSessionProvisionConfig, WslcProvisionConfig};
 use crate::mxc_common::state_aware_input::StateAwareInput;
-use crate::mxc_common::state_aware_operation::{StateAwareOperation, StateAwareProvision};
+use crate::mxc_common::state_aware_operation::{
+    StateAwareOperation, StateAwareProvision, StateAwareStart,
+};
 use crate::mxc_common::wire;
 use crate::mxc_contract::published::v0_9_0_alpha as contract;
 
@@ -26,6 +28,7 @@ fn convert_isolation_session_provision(
     let contract::IsolationSessionProvision { app_id } = value;
     IsolationSessionProvisionConfig {
         app_id: app_id.into_option(),
+        user: None,
     }
 }
 
@@ -172,7 +175,13 @@ pub(super) fn start_into_input(
         telemetry,
     } = request;
     let common = state_aware_common(schema, comment, version, telemetry);
-    StateAwareInput::new(common, StateAwareOperation::Start { sandbox_id })
+    StateAwareInput::new(
+        common,
+        StateAwareOperation::Start {
+            sandbox_id,
+            config: StateAwareStart::Absent,
+        },
+    )
 }
 
 pub(super) fn exec_into_input(request: contract::ExecRequest) -> Result<StateAwareInput, WxcError> {

@@ -11,7 +11,9 @@ use std::io::IsTerminal;
 use serde::Serialize;
 
 use crate::mxc_common::logger::Logger;
-use crate::mxc_common::models::{ExecutionRequest, IsolationSessionProvisionConfig};
+use crate::mxc_common::models::{
+    ExecutionRequest, IsolationSessionProvisionConfig, IsolationSessionStartConfig,
+};
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::sandbox_process::{PtySize, SandboxProcess};
 use crate::mxc_common::state_aware_backend::{
@@ -29,7 +31,8 @@ use super::manager::{
     log_sandbox_torn_down, IsolationSessionManager, TeardownOutcome, WAIT_FOR_EXIT_TIMEOUT,
 };
 use super::policy::{
-    reject_unhonorable_environment, validate_post_provision_policy, validate_provision_policy,
+    reject_unhonorable_environment, validate_isolation_session_user,
+    validate_post_provision_policy, validate_provision_policy, UserField,
 };
 use super::process_options::{build_process_options, with_service_timeout_grace};
 use super::sandbox::spawn_existing_session_pty;
@@ -89,7 +92,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
     const BACKEND_KEY: &'static str = "isolation_session";
 
     type ProvisionConfig = IsolationSessionProvisionConfig;
-    type StartConfig = ();
+    type StartConfig = IsolationSessionStartConfig;
     type ExecConfig = ();
     type StopConfig = ();
     type DeprovisionConfig = ();
@@ -113,8 +116,9 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         // isolation-session client resolves the default (an empty or absent id)
         // to the calling process's PFN itself, so MXC does no PFN detection of
         // its own; a non-empty id is used as-is.
-        let (provisioned, _manager) = IsolationSessionManager::add_user(config.app_id.as_deref())
-            .map_err(map_lifecycle_error)?;
+        let (provisioned, _manager) =
+            IsolationSessionManager::add_user(config.app_id.as_deref(), config.user.as_ref())
+                .map_err(map_lifecycle_error)?;
 
         // `appId` rides inside the id so later phases can recover exactly what
         // the caller supplied at provision. Metadata deliberately does not echo
@@ -138,12 +142,15 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         &mut self,
         sandbox_id: &str,
         _request: &ExecutionRequest,
-        _config: Option<()>,
+        config: Option<IsolationSessionStartConfig>,
     ) -> Result<StartResult<()>, MxcError> {
         let agent_user_name = extract_agent_user_name(sandbox_id)?;
         let manager =
             IsolationSessionManager::new(&agent_user_name).map_err(map_lifecycle_error)?;
-        manager.start_session().map_err(map_lifecycle_error)?;
+        let user = config.and_then(|config| config.user);
+        manager
+            .start_session(user.as_ref())
+            .map_err(map_lifecycle_error)?;
         Ok(StartResult { metadata: None })
     }
 
@@ -217,6 +224,10 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         if let Some(app_id) = config.and_then(|c| c.app_id.as_deref()) {
             sandbox_id::validate_app_id(app_id)?;
         }
+        if let Some(user) = config.and_then(|c| c.user.as_ref()) {
+            validate_isolation_session_user(request, UserField::Provision, user)
+                .map_err(map_lifecycle_error)?;
+        }
         validate_provision_policy(request).map_err(map_lifecycle_error)
     }
 
@@ -224,10 +235,14 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         &self,
         sandbox_id: &str,
         request: &ExecutionRequest,
-        _config: Option<&()>,
+        config: Option<&IsolationSessionStartConfig>,
     ) -> Result<(), MxcError> {
         // Decode to reject a malformed id before any OS call.
         extract_agent_user_name(sandbox_id)?;
+        if let Some(user) = config.and_then(|c| c.user.as_ref()) {
+            validate_isolation_session_user(request, UserField::Start, user)
+                .map_err(map_lifecycle_error)?;
+        }
         validate_post_provision_policy(request).map_err(map_lifecycle_error)
     }
 
@@ -478,20 +493,14 @@ mod tests {
 
     #[test]
     fn phases_without_a_config_reject_a_payload() {
-        type StartConfig = <IsolationSessionRunner as StatefulSandboxBackend>::StartConfig;
         type StopConfig = <IsolationSessionRunner as StatefulSandboxBackend>::StopConfig;
         type DeprovisionConfig =
             <IsolationSessionRunner as StatefulSandboxBackend>::DeprovisionConfig;
         type ExecConfig = <IsolationSessionRunner as StatefulSandboxBackend>::ExecConfig;
 
         // These are `()`, which deserializes only from null, so any object in
-        // the slot is a hard error at dispatch. `start` belongs to this group:
-        // it takes no per-phase config at all.
+        // the slot is a hard error at dispatch.
         let payload = serde_json::json!({ "anything": true });
-        assert!(
-            serde_json::from_value::<StartConfig>(payload.clone()).is_err(),
-            "start accepted a config payload"
-        );
         assert!(
             serde_json::from_value::<StopConfig>(payload.clone()).is_err(),
             "stop accepted a config payload"
@@ -512,6 +521,7 @@ mod tests {
 
         let provision = ProvisionConfig {
             app_id: Some("PFN:Contoso.App_8wekyb3d8bbwe".to_string()),
+            user: None,
         };
         assert_eq!(
             provision.app_id.as_deref(),
@@ -897,6 +907,7 @@ mod tests {
     fn provision_config_with_app_id(app_id: &str) -> IsolationSessionProvisionConfig {
         IsolationSessionProvisionConfig {
             app_id: Some(app_id.to_string()),
+            user: None,
         }
     }
 
@@ -969,5 +980,91 @@ mod tests {
         runner
             .validate_start(&valid_sandbox_id(), &ExecutionRequest::default(), None)
             .unwrap();
+    }
+
+    // ====== Entra credentials at the validation hooks ======
+
+    fn entra_user(upn: &str) -> crate::mxc_common::models::IsolationSessionUser {
+        crate::mxc_common::models::IsolationSessionUser {
+            upn: upn.to_string(),
+            wam_token: "tok".to_string(),
+        }
+    }
+
+    fn with_experimental(mut request: ExecutionRequest, enabled: bool) -> ExecutionRequest {
+        request.experimental_enabled = enabled;
+        request
+    }
+
+    #[test]
+    fn validate_provision_gates_and_checks_the_user_before_touching_the_os() {
+        let runner = IsolationSessionRunner::new();
+        let config = |upn: &str| IsolationSessionProvisionConfig {
+            app_id: None,
+            user: Some(entra_user(upn)),
+        };
+        runner
+            .validate_provision(
+                &with_experimental(request_with_canonical_network(), true),
+                Some(&config("alice@contoso.com")),
+            )
+            .unwrap();
+        for (experimental, upn, expected) in [
+            (
+                false,
+                "alice@contoso.com",
+                "isolationSession.provision.user is an experimental feature",
+            ),
+            (true, "alice", "isolationSession.provision.user.upn"),
+        ] {
+            let err = runner
+                .validate_provision(
+                    &with_experimental(request_with_canonical_network(), experimental),
+                    Some(&config(upn)),
+                )
+                .unwrap_err();
+            assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+            assert!(err.message.contains(expected), "got {}", err.message);
+        }
+    }
+
+    #[test]
+    fn validate_start_gates_and_checks_the_user_before_touching_the_os() {
+        let runner = IsolationSessionRunner::new();
+        let config = |upn: &str| IsolationSessionStartConfig {
+            user: Some(entra_user(upn)),
+        };
+        runner
+            .validate_start(
+                &valid_sandbox_id(),
+                &with_experimental(ExecutionRequest::default(), true),
+                Some(&config("alice@contoso.com")),
+            )
+            .unwrap();
+        runner
+            .validate_start(
+                &valid_sandbox_id(),
+                &ExecutionRequest::default(),
+                Some(&IsolationSessionStartConfig::default()),
+            )
+            .unwrap();
+        for (experimental, upn, expected) in [
+            (
+                false,
+                "alice@contoso.com",
+                "isolationSession.start.user is an experimental feature",
+            ),
+            (true, "@contoso.com", "isolationSession.start.user.upn"),
+        ] {
+            let err = runner
+                .validate_start(
+                    &valid_sandbox_id(),
+                    &with_experimental(ExecutionRequest::default(), experimental),
+                    Some(&config(upn)),
+                )
+                .unwrap_err();
+            assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+            assert!(err.message.contains(expected), "got {}", err.message);
+        }
     }
 }

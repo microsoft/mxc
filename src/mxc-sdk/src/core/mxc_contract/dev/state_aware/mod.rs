@@ -72,7 +72,7 @@ pub use provision::{probe_containment, Containment, ContainmentProbeError};
 pub use provision::{
     IsolationSessionContainment, IsolationSessionNetwork, IsolationSessionNetworkAllow,
     IsolationSessionNetworkEgress, IsolationSessionNetworkIngress, IsolationSessionProvision,
-    IsolationSessionProvisionRequest, MicroVmContainment, MicroVmProvision,
+    IsolationSessionProvisionRequest, IsolationSessionUser, MicroVmContainment, MicroVmProvision,
     MicroVmProvisionRequest, StateAwareIsolationSession, StateAwareMicroVm,
 };
 pub use provision::{ProvisionPhase, ProvisionRequest};
@@ -81,5 +81,5 @@ pub use provision::{WindowsSandboxContainment, WindowsSandboxProvisionRequest};
 pub use provision_session::{
     ProvisionSessionPhase, StateAwareWslcSession, WslcProvisionSession, WslcProvisionSessionRequest,
 };
-pub use start::{StartPhase, StartRequest};
+pub use start::{IsolationSessionStart, StartIsolationSession, StartPhase, StartRequest};
 pub use stop::{StopPhase, StopRequest};

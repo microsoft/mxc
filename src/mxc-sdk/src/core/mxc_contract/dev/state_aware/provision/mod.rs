@@ -29,7 +29,7 @@ pub use containment::{probe_containment, Containment, ContainmentProbeError};
 pub use isolation_session::{
     IsolationSessionContainment, IsolationSessionNetwork, IsolationSessionNetworkAllow,
     IsolationSessionNetworkEgress, IsolationSessionNetworkIngress, IsolationSessionProvision,
-    IsolationSessionProvisionRequest, StateAwareIsolationSession,
+    IsolationSessionProvisionRequest, IsolationSessionUser, StateAwareIsolationSession,
 };
 pub use microvm::{
     MicroVmContainment, MicroVmProvision, MicroVmProvisionRequest, StateAwareMicroVm,

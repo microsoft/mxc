@@ -122,11 +122,14 @@ impl From<crate::mxc_common::wire::Phase> for Phase {
 ///
 /// ```compile_fail,E0624
 /// use mxc_sdk::mxc_common::models::ExecutionRequest;
-/// use mxc_sdk::mxc_common::state_aware_operation::StateAwareOperation;
+/// use mxc_sdk::mxc_common::state_aware_operation::{StateAwareOperation, StateAwareStart};
 /// use mxc_sdk::mxc_common::state_aware_request::ParsedStateAwareRequest;
 /// let _ = ParsedStateAwareRequest::new(
 ///     ExecutionRequest::default(),
-///     StateAwareOperation::Start { sandbox_id: "iso:example".into() },
+///     StateAwareOperation::Start {
+///         sandbox_id: "iso:example".into(),
+///         config: StateAwareStart::Absent,
+///     },
 /// );
 /// ```
 ///
@@ -134,12 +137,15 @@ impl From<crate::mxc_common::wire::Phase> for Phase {
 ///
 /// ```compile_fail,E0560
 /// use mxc_sdk::mxc_common::models::ExecutionRequest;
-/// use mxc_sdk::mxc_common::state_aware_operation::StateAwareOperation;
+/// use mxc_sdk::mxc_common::state_aware_operation::{StateAwareOperation, StateAwareStart};
 /// use mxc_sdk::mxc_common::state_aware_request::{ParsedStateAwareRequest, Phase};
 /// let _ = ParsedStateAwareRequest {
 ///     request: ExecutionRequest::default(),
 ///     phase: Phase::Exec,
-///     operation: StateAwareOperation::Start { sandbox_id: "iso:example".into() },
+///     operation: StateAwareOperation::Start {
+///         sandbox_id: "iso:example".into(),
+///         config: StateAwareStart::Absent,
+///     },
 /// };
 /// ```
 #[derive(Debug, Clone)]

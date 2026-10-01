@@ -42,6 +42,7 @@ impl ProvisionContainment {
                 RuntimeProvision::IsolationSession(app_id.clone().map(|app_id| {
                     crate::mxc_common::models::IsolationSessionProvisionConfig {
                         app_id: Some(app_id),
+                        user: None,
                     }
                 }))
             }
@@ -537,7 +538,10 @@ mod tests {
 
     fn lifecycle_phases() -> [LifecyclePhase; 3] {
         [
-            ("start", |sandbox_id| RuntimeOperation::Start { sandbox_id }),
+            ("start", |sandbox_id| RuntimeOperation::Start {
+                sandbox_id,
+                config: crate::mxc_common::state_aware_operation::StateAwareStart::Absent,
+            }),
             ("stop", |sandbox_id| RuntimeOperation::Stop { sandbox_id }),
             ("deprovision", |sandbox_id| RuntimeOperation::Deprovision {
                 sandbox_id,

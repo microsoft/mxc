@@ -192,6 +192,10 @@ export interface IsolationSessionProvision {
    * Optional application identifier carried by the sandbox identity.
    */
   appId?: string;
+  /**
+   * Optional Entra credentials.
+   */
+  user?: IsolationSessionUser;
 }
 
 /**
@@ -232,6 +236,30 @@ export interface IsolationSessionProvisionRequest {
    * Exact development contract version.
    */
   version: Version;
+}
+
+/**
+ * IsolationSession settings accepted at start.
+ */
+export interface IsolationSessionStart {
+  /**
+   * Optional Entra credentials for a sandbox provisioned with `user`.
+   */
+  user?: IsolationSessionUser;
+}
+
+/**
+ * Entra credentials for an enterprise agent user.
+ */
+export interface IsolationSessionUser {
+  /**
+   * User principal name of the Entra account.
+   */
+  upn: string;
+  /**
+   * Web Account Manager token for the account.
+   */
+  wamToken: string;
 }
 
 /**
@@ -728,6 +756,16 @@ export interface Seatbelt {
   profileOverride?: string;
 }
 
+/**
+ * IsolationSession settings accepted by a start request.
+ */
+export interface StartIsolationSession {
+  /**
+   * Optional start-phase settings.
+   */
+  start?: IsolationSessionStart;
+}
+
 export type StartPhase = "start";
 
 /**
@@ -742,6 +780,10 @@ export interface StartRequest {
    * Optional human-readable annotation ignored by the runtime.
    */
   _comment?: unknown;
+  /**
+   * Optional IsolationSession start settings.
+   */
+  isolationSession?: StartIsolationSession;
   /**
    * Exact `start` phase marker.
    */

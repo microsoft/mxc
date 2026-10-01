@@ -1,0 +1,8 @@
+{
+  "version": "1.1.0-alpha",
+  "phase": "start",
+  "sandboxId": "iso:example",
+  "isolationSession": {
+    "provision": { "appId": "Contoso.App" }
+  }
+}

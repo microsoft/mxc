@@ -27,7 +27,7 @@
 //! therefore refused wherever a process is launched: one-shot and exec.
 
 use crate::mxc_common::default_env::EnvResolution;
-use crate::mxc_common::models::{ExecutionRequest, NetworkAction};
+use crate::mxc_common::models::{ExecutionRequest, IsolationSessionUser, NetworkAction};
 
 use super::error::IsolationSessionError;
 
@@ -102,6 +102,56 @@ pub(super) fn reject_unhonorable_environment(
         )),
         EnvResolution::Default | EnvResolution::Overlay => Ok(()),
     }
+}
+
+/// The request field carrying Entra credentials for a phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UserField {
+    Provision,
+    Start,
+}
+
+impl UserField {
+    fn path(self) -> &'static str {
+        match self {
+            Self::Provision => "isolationSession.provision.user",
+            Self::Start => "isolationSession.start.user",
+        }
+    }
+}
+
+/// Validates an Entra credential bundle before any OS call.
+pub(super) fn validate_isolation_session_user(
+    request: &ExecutionRequest,
+    field: UserField,
+    user: &IsolationSessionUser,
+) -> Result<(), IsolationSessionError> {
+    let path = field.path();
+    if !request.experimental_enabled {
+        return Err(IsolationSessionError::Policy(format!(
+            "{path} is an experimental feature; enable experimental features to use it"
+        )));
+    }
+    let upn = user.upn.trim();
+    if !upn.contains('@') || upn.starts_with('@') || upn.ends_with('@') {
+        return Err(IsolationSessionError::Policy(format!(
+            "{path}.upn must be a user principal name containing '@'"
+        )));
+    }
+    if user.wam_token.is_empty() {
+        return Err(IsolationSessionError::Policy(format!(
+            "{path}.wamToken must not be empty"
+        )));
+    }
+    Ok(())
+}
+
+/// Refuses Entra credentials on a host that deduces the enterprise agent user.
+pub(super) fn user_superseded_by_deduction(field: UserField) -> IsolationSessionError {
+    IsolationSessionError::Policy(format!(
+        "{} is not accepted on a host that deduces the enterprise agent user; omit user",
+        field.path()
+    ))
 }
 
 /// Rejects any filesystem policy field. Shared by the provision and
@@ -643,6 +693,96 @@ mod tests {
                 (Err(err), false) => assert_policy_err_contains(err, ERR_ENVIRONMENT_POLICY),
                 (result, _) => panic!("{state}: expected accepted={accepted}, got {result:?}"),
             }
+        }
+    }
+
+    // ====== Entra credential bundle ======
+
+    fn user(upn: &str, wam_token: &str) -> IsolationSessionUser {
+        IsolationSessionUser {
+            upn: upn.to_string(),
+            wam_token: wam_token.to_string(),
+        }
+    }
+
+    fn experimental_request() -> ExecutionRequest {
+        ExecutionRequest {
+            experimental_enabled: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn user_accepts_a_well_formed_bundle_for_each_phase() {
+        for field in [UserField::Provision, UserField::Start] {
+            for upn in ["alice@contoso.com", "  alice@contoso.com\t"] {
+                validate_isolation_session_user(&experimental_request(), field, &user(upn, "tok"))
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn user_requires_the_experimental_opt_in_before_any_shape_check() {
+        for field in [UserField::Provision, UserField::Start] {
+            for user in [user("alice@contoso.com", "tok"), user("alice", "")] {
+                assert_policy_err_contains(
+                    validate_isolation_session_user(&ExecutionRequest::default(), field, &user)
+                        .unwrap_err(),
+                    &format!(
+                        "{} is an experimental feature; enable experimental features",
+                        field.path()
+                    ),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn user_rejects_a_upn_without_an_interior_at_sign_without_echoing_it() {
+        for upn in ["", "   ", "alice", "@contoso.com", "alice@", " alice@ "] {
+            let err = validate_isolation_session_user(
+                &experimental_request(),
+                UserField::Provision,
+                &user(upn, "tok"),
+            )
+            .unwrap_err();
+            let IsolationSessionError::Policy(message) = err else {
+                panic!("expected Policy variant for {upn:?}");
+            };
+            assert!(
+                message.contains("isolationSession.provision.user.upn must be"),
+                "{upn:?}: {message}"
+            );
+            if !upn.trim().is_empty() {
+                assert!(!message.contains(upn.trim()), "{upn:?}: {message}");
+            }
+        }
+    }
+
+    #[test]
+    fn user_rejects_an_empty_wam_token() {
+        assert_policy_err_contains(
+            validate_isolation_session_user(
+                &experimental_request(),
+                UserField::Start,
+                &user("alice@contoso.com", ""),
+            )
+            .unwrap_err(),
+            "isolationSession.start.user.wamToken must not be empty",
+        );
+    }
+
+    #[test]
+    fn deduction_refusal_names_the_phase_field() {
+        for (field, path) in [
+            (UserField::Provision, "isolationSession.provision.user"),
+            (UserField::Start, "isolationSession.start.user"),
+        ] {
+            assert_policy_err_contains(
+                user_superseded_by_deduction(field),
+                &format!("{path} is not accepted on a host that deduces the enterprise agent user"),
+            );
         }
     }
 }

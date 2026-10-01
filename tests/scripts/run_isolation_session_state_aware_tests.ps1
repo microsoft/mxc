@@ -42,6 +42,11 @@
     Uses the development contract for the second telemetry lifecycle and
     records each request's contract for descriptor-keyword assertions.
 
+.PARAMETER HostDeducesEnterpriseUser
+    Declares that the host deduces the enterprise agent user, which enables
+    the tests asserting that explicit Entra credentials are refused there.
+    Without it those tests are reported as skipped.
+
 .EXAMPLE
     .\run_isolation_session_state_aware_tests.ps1
     .\run_isolation_session_state_aware_tests.ps1 -WxcExePath C:\test\wxc-exec.exe -ConfigDir C:\test\tests\configs
@@ -51,7 +56,8 @@ param(
     [string]$WxcExePath,
     [string]$ConfigDir,
     [string]$TelemetryResultsPath,
-    [switch]$TelemetryKeywords
+    [switch]$TelemetryKeywords,
+    [switch]$HostDeducesEnterpriseUser
 )
 
 $ErrorActionPreference = "Stop"
@@ -287,7 +293,9 @@ function Invoke-StateAware {
         # (e.g. a malformed sandboxId) fire identically whether or not the phase
         # would really run -- the dry-run/execution agreement.
         [switch]$DryRun,
-        [int]$TimeoutSeconds = 120
+        [int]$TimeoutSeconds = 120,
+        # Adds --experimental, the opt-in for development features.
+        [switch]$Experimental
     )
 
     $invocation = ConvertTo-StateAwareInvocation `
@@ -298,6 +306,7 @@ function Invoke-StateAware {
         $argList += @('--container-id', $invocation.SandboxId)
     }
     if ($DryRun.IsPresent) { $argList += '--dry-run' }
+    if ($Experimental.IsPresent) { $argList += '--experimental' }
     $argList += @('--config-base64', $invocation.ConfigBase64)
 
     $stdoutFile = [System.IO.Path]::GetTempFileName()
@@ -1522,6 +1531,110 @@ Run-StateAwareTest "filesystem: provision rejected structurally" {
     $hasNativeCode = if ($envObj) { $null -ne $envObj.error.PSObject.Properties['nativeCode'] } else { $true }
     Assert-True (-not $hasNativeCode) "error.nativeCode is absent on an MXC-side rejection"
 } | Out-Null
+
+
+
+# ---------------- Lifecycle D: Entra credentials ----------------
+#
+# The `user` bundle needs schema 1.1.0-alpha and the experimental opt-in.
+# Validation refuses a bundle before any OS call; these cases run as dry runs
+# so their synthetic credentials never reach the OS even if validation regresses.
+
+$EntraValidationSandboxId = 'iso:' + [Convert]::ToBase64String(
+    [Text.Encoding]::UTF8.GetBytes('{"version":1,"agentUserName":"a"}')
+).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+
+function New-EntraStartRequest {
+    param([hashtable]$User, [string]$SandboxId)
+    @{
+        version          = '1.1.0-alpha'
+        phase            = 'start'
+        sandboxId        = $SandboxId
+        isolationSession = @{ start = @{ user = $User } }
+    }
+}
+
+function Assert-PolicyRefusal {
+    param($Result, [string]$MessageFragment)
+    Assert-True ($Result.ExitCode -ne 0) "exit code is non-zero (refused)"
+    $envObj = Parse-Envelope -Stdout $Result.Stdout
+    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+    Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+    $msg = if ($envObj) { [string]$envObj.error.message } else { '' }
+    Assert-True ($msg.Contains($MessageFragment)) "error.message contains '$MessageFragment' (got '$msg')"
+}
+
+$WellFormedEntraUser = @{ upn = 'alice@contoso.com'; wamToken = 'synthetic-wam-token' }
+
+Run-StateAwareTest "provision (well-formed user passes validation with the opt-in)" {
+    $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_user.json' -DryRun -Experimental
+    Assert-True ($r.ExitCode -eq 0) "exit code = 0 (dry run, got $($r.ExitCode))"
+    $envObj = Parse-Envelope -Stdout $r.Stdout
+    Assert-True ((Envelope-Arm $envObj) -eq 'result') "dry run returned a result envelope"
+} | Out-Null
+
+Run-StateAwareTest "provision (user requires the experimental opt-in)" {
+    $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_user.json' -DryRun
+    Assert-PolicyRefusal $r 'isolationSession.provision.user is an experimental feature'
+} | Out-Null
+
+Run-StateAwareTest "provision (user.upn malformed)" {
+    $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_user_malformed_upn.json' -DryRun -Experimental
+    Assert-PolicyRefusal $r 'isolationSession.provision.user.upn'
+} | Out-Null
+
+Run-StateAwareTest "provision (user.wamToken empty)" {
+    $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_user_empty_wamtoken.json' -DryRun -Experimental
+    Assert-PolicyRefusal $r 'isolationSession.provision.user.wamToken'
+} | Out-Null
+
+Run-StateAwareTest "start (user requires the experimental opt-in)" {
+    $request = New-EntraStartRequest -User $WellFormedEntraUser -SandboxId $EntraValidationSandboxId
+    $r = Invoke-StateAware -Request $request -DryRun
+    Assert-PolicyRefusal $r 'isolationSession.start.user is an experimental feature'
+} | Out-Null
+
+Run-StateAwareTest "start (user.upn malformed)" {
+    $request = New-EntraStartRequest -User @{ upn = 'alice'; wamToken = 'synthetic-wam-token' } -SandboxId $EntraValidationSandboxId
+    $r = Invoke-StateAware -Request $request -DryRun -Experimental
+    Assert-PolicyRefusal $r 'isolationSession.start.user.upn'
+} | Out-Null
+
+# A host that deduces the enterprise agent user refuses explicit credentials at
+# the provisioning and session-start calls, after the host is queried, so these
+# cases run for real. Any sandbox a regression creates is torn down.
+if ($HostDeducesEnterpriseUser) {
+    Run-StateAwareTest "provision (user refused where the host deduces the enterprise agent user)" {
+        $r = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision_user.json' -Experimental
+        $envObj = Parse-Envelope -Stdout $r.Stdout
+        if ((Envelope-Arm $envObj) -eq 'result') {
+            $null = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $envObj.result.sandboxId
+        }
+        Assert-PolicyRefusal $r 'isolationSession.provision.user is not accepted on a host that deduces'
+        $hasOperation = if ($envObj) { $null -ne $envObj.error.PSObject.Properties['operation'] } else { $true }
+        Assert-True (-not $hasOperation) "refused before any provisioning call (no error.operation)"
+    } | Out-Null
+
+    Run-StateAwareTest "start (user refused where the host deduces the enterprise agent user)" {
+        $p = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_provision.json'
+        $pEnv = Parse-Envelope -Stdout $p.Stdout
+        Assert-True ((Envelope-Arm $pEnv) -eq 'result') "sandbox provisioned without user"
+        if ((Envelope-Arm $pEnv) -eq 'result') {
+            $id = $pEnv.result.sandboxId
+            try {
+                $r = Invoke-StateAware -Request (New-EntraStartRequest -User $WellFormedEntraUser -SandboxId $id) -Experimental
+                Assert-PolicyRefusal $r 'isolationSession.start.user is not accepted on a host that deduces'
+            } finally {
+                $null = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_stop.json' -SandboxId $id
+                $cleanup = Invoke-StateAware -ConfigFile 'isolation_session_state_aware_deprovision.json' -SandboxId $id
+                Assert-True ($cleanup.ExitCode -eq 0) "cleanup deprovision succeeded (exit $($cleanup.ExitCode)) -- a silent failure here leaks an agent user"
+            }
+        }
+    } | Out-Null
+} else {
+    Write-Host ""
+    Write-Host "  SKIP: Entra credential refusal on a host that deduces the enterprise agent user; pass -HostDeducesEnterpriseUser on such a host to run it" -ForegroundColor DarkYellow
+}
 
 
 

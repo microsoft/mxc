@@ -1,0 +1,23 @@
+{
+  "$schema": "../../schemas/dev/mxc-config.schema.1.1.0-alpha.json",
+  "version": "1.1.0-alpha",
+  "phase": "provision",
+  "containment": "isolation_session",
+  "isolationSession": {
+    "provision": {
+      "user": {
+        "upn": "alice@contoso.com",
+        "wamToken": "synthetic-wam-token"
+      }
+    }
+  },
+  "network": {
+    "egress": {
+      "default": "allow"
+    },
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "allow"
+    }
+  }
+}

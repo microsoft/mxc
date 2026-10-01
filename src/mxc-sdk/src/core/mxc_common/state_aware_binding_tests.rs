@@ -23,15 +23,18 @@ enum Config {
     Absent,
     Unit,
     Isolation(Option<String>),
+    IsolationStart(Option<(String, String)>),
     Wslc(Option<String>, Option<String>, Option<Vec<PortMapping>>),
     WslcSession(Option<u32>, Option<u64>, Option<bool>),
 }
 
 trait Case: Sized {
     type ProvisionConfig;
+    type StartConfig;
     const BACKEND: &'static str;
     const PREFIX: &'static str;
     fn observe(config: Option<&Self::ProvisionConfig>) -> Config;
+    fn observe_start(config: Option<&Self::StartConfig>) -> Config;
     fn bind(
         parsed: ParsedStateAwareRequest,
     ) -> Result<BoundStateAwareRequest<Recording<Self>>, MxcError>;
@@ -44,10 +47,14 @@ struct MicroVm;
 
 impl Case for MicroVm {
     type ProvisionConfig = MicroVmProvisionConfig;
+    type StartConfig = ();
     const BACKEND: &'static str = "microvm";
     const PREFIX: &'static str = "microvm";
     fn observe(config: Option<&Self::ProvisionConfig>) -> Config {
         config.map_or(Config::Absent, |_| Config::Unit)
+    }
+    fn observe_start(config: Option<&Self::StartConfig>) -> Config {
+        unit(config)
     }
     fn bind(
         parsed: ParsedStateAwareRequest,
@@ -58,11 +65,22 @@ impl Case for MicroVm {
 
 impl Case for Isolation {
     type ProvisionConfig = IsolationSessionProvisionConfig;
+    type StartConfig = IsolationSessionStartConfig;
     const BACKEND: &'static str = "isolation_session";
     const PREFIX: &'static str = "iso";
     fn observe(config: Option<&Self::ProvisionConfig>) -> Config {
         config.map_or(Config::Absent, |config| {
             Config::Isolation(config.app_id.clone())
+        })
+    }
+    fn observe_start(config: Option<&Self::StartConfig>) -> Config {
+        config.map_or(Config::Absent, |config| {
+            Config::IsolationStart(
+                config
+                    .user
+                    .as_ref()
+                    .map(|user| (user.upn.clone(), user.wam_token.clone())),
+            )
         })
     }
     fn bind(
@@ -74,10 +92,14 @@ impl Case for Isolation {
 
 impl Case for WindowsSandbox {
     type ProvisionConfig = ();
+    type StartConfig = ();
     const BACKEND: &'static str = "windows_sandbox";
     const PREFIX: &'static str = "wsb";
     fn observe(config: Option<&Self::ProvisionConfig>) -> Config {
         config.map_or(Config::Absent, |_| Config::Unit)
+    }
+    fn observe_start(config: Option<&Self::StartConfig>) -> Config {
+        unit(config)
     }
     fn bind(
         parsed: ParsedStateAwareRequest,
@@ -88,6 +110,7 @@ impl Case for WindowsSandbox {
 
 impl Case for Wslc {
     type ProvisionConfig = WslcProvisionConfig;
+    type StartConfig = ();
     const BACKEND: &'static str = "wslc";
     const PREFIX: &'static str = "wslc";
     fn observe(config: Option<&Self::ProvisionConfig>) -> Config {
@@ -98,6 +121,9 @@ impl Case for Wslc {
                 config.port_mappings.clone(),
             )
         })
+    }
+    fn observe_start(config: Option<&Self::StartConfig>) -> Config {
+        unit(config)
     }
     fn bind(
         parsed: ParsedStateAwareRequest,
@@ -174,7 +200,7 @@ impl<C: Case> StatefulSandboxBackend for Recording<C> {
     const ID_PREFIX: &'static str = C::PREFIX;
     const BACKEND_KEY: &'static str = C::BACKEND;
     type ProvisionConfig = C::ProvisionConfig;
-    type StartConfig = ();
+    type StartConfig = C::StartConfig;
     type ExecConfig = ();
     type StopConfig = ();
     type DeprovisionConfig = ();
@@ -229,9 +255,16 @@ impl<C: Case> StatefulSandboxBackend for Recording<C> {
         &self,
         id: &str,
         request: &ExecutionRequest,
-        config: Option<&()>,
+        config: Option<&Self::StartConfig>,
     ) -> Result<(), MxcError> {
-        self.observe(true, Phase::Start, Some(id), request, unit(config), None)
+        self.observe(
+            true,
+            Phase::Start,
+            Some(id),
+            request,
+            C::observe_start(config),
+            None,
+        )
     }
     fn validate_exec(
         &self,
@@ -319,14 +352,14 @@ impl<C: Case> StatefulSandboxBackend for Recording<C> {
         &mut self,
         id: &str,
         request: &ExecutionRequest,
-        config: Option<()>,
+        config: Option<Self::StartConfig>,
     ) -> Result<StartResult<()>, MxcError> {
         self.observe(
             false,
             Phase::Start,
             Some(id),
             request,
-            unit(config.as_ref()),
+            C::observe_start(config.as_ref()),
             None,
         )?;
         Ok(StartResult { metadata: None })
@@ -629,6 +662,45 @@ fn isolation_provision_preserves_each_backend_observable_configuration() {
         value["isolationSession"] = json!({"provision": config});
         assert_dispatch::<Isolation>(&value, expected);
     }
+}
+
+#[test]
+fn isolation_start_preserves_each_backend_observable_configuration() {
+    let mut value = input::<Isolation>(Phase::Start);
+    value["version"] = json!("1.1.0-alpha");
+    value["isolationSession"] = json!({});
+    assert_dispatch::<Isolation>(&value, Config::Absent);
+    for (config, expected) in [
+        (json!({}), Config::IsolationStart(None)),
+        (
+            json!({"user": {"upn": "alice@contoso.com", "wamToken": "tok"}}),
+            Config::IsolationStart(Some(("alice@contoso.com".into(), "tok".into()))),
+        ),
+    ] {
+        value["isolationSession"] = json!({"start": config});
+        assert_dispatch::<Isolation>(&value, expected);
+    }
+}
+
+fn foreign_start_configuration<C: Case>() {
+    let mut value = input::<C>(Phase::Start);
+    value["version"] = json!("1.1.0-alpha");
+    for config in [
+        json!({}),
+        json!({"user": {"upn": "alice@contoso.com", "wamToken": "tok"}}),
+    ] {
+        value["isolationSession"] = json!({"start": config});
+        let error = C::bind(parse(&value)).unwrap_err();
+        assert_eq!(error.code, MxcErrorCode::MalformedRequest);
+        assert!(error.message.contains("incompatible"), "{}", error.message);
+    }
+}
+
+#[test]
+fn isolation_start_configuration_never_binds_to_another_backend() {
+    foreign_start_configuration::<WindowsSandbox>();
+    foreign_start_configuration::<Wslc>();
+    foreign_start_configuration::<MicroVm>();
 }
 
 #[test]

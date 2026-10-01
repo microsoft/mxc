@@ -139,12 +139,12 @@ pub fn spawn_one_shot_pty(
     ScriptRunner::validate_runner(&IsolationSessionRunner::new(), request)
         .map_err(OneShotSpawnFailure::Refused)?;
 
-    let (_provisioned, manager) = IsolationSessionManager::add_user(None)
+    let (_provisioned, manager) = IsolationSessionManager::add_user(None, None)
         .map_err(super::error::map_lifecycle_error)
         .map_err(OneShotSpawnFailure::Launch)?;
     let _ = writeln!(logger, "Isolation Session: agent user provisioned");
     let mut session = OwnedSession::new(manager);
-    if let Err(error) = session.manager.start_session() {
+    if let Err(error) = session.manager.start_session(None) {
         session.reclaim("start");
         return Err(OneShotSpawnFailure::Launch(
             super::error::map_lifecycle_error(with_cleanup_failures(error, &session.warnings)),
@@ -300,14 +300,14 @@ fn spawn_piped(
 
     // The manager comes from `add_user` rather than a separate `new()` — see
     // its doc for why a second activation can strand the account it just minted.
-    let (_provisioned, manager) = IsolationSessionManager::add_user(None)?;
+    let (_provisioned, manager) = IsolationSessionManager::add_user(None, None)?;
     let _ = writeln!(logger, "Isolation Session: agent user provisioned");
 
     // From here the account exists, so every failure reclaims it rather than
     // abandoning it.
     let mut session = OwnedSession::new(manager);
 
-    if let Err(e) = session.manager.start_session() {
+    if let Err(e) = session.manager.start_session(None) {
         session.reclaim("start");
         return Err(with_cleanup_failures(e, &session.warnings));
     }

@@ -2527,6 +2527,7 @@ mod tests {
             &StateAwareOperation::Provision(StateAwareProvision::IsolationSession(Some(
                 crate::mxc_common::models::IsolationSessionProvisionConfig {
                     app_id: Some("Contoso.App".into()),
+                    user: None,
                 },
             )))
         );
@@ -2873,8 +2874,6 @@ mod tests {
                 assert!(message.contains(escaped), "{message}");
             }
 
-            // No credential field is currently accepted here, but the shared
-            // renderer must still recognize a secret-bearing error path.
             value["telemetry"] = serde_json::json!({"apiToken": "do-not-log"});
             let message = parse_exact_for_test(&serde_json::to_string(&value).unwrap())
                 .unwrap_err()
@@ -2882,6 +2881,36 @@ mod tests {
             assert!(message.contains("`telemetry.apiToken`"), "{message}");
             assert!(message.contains("invalid secret value"), "{message}");
             assert!(!message.contains("do-not-log"), "{message}");
+        }
+    }
+
+    #[test]
+    fn exact_development_parser_redacts_isolation_session_credentials() {
+        let network = r#""network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}"#;
+        let provision = |user: &str| {
+            format!(
+                r#"{{"version":"1.1.0-alpha","phase":"provision","containment":"isolation_session",{network},"isolationSession":{{"provision":{{"user":{user}}}}}}}"#
+            )
+        };
+        for (json, path) in [
+            (
+                provision(r#"{"upn":"alice@contoso.com","wamToken":424242424242}"#),
+                "isolationSession.provision.user.wamToken",
+            ),
+            (
+                provision(r#""424242424242""#),
+                "isolationSession.provision.user",
+            ),
+            (
+                r#"{"version":"1.1.0-alpha","phase":"start","sandboxId":"iso:example","isolationSession":{"start":{"user":{"upn":424242424242,"wamToken":"tok"}}}}"#
+                    .to_string(),
+                "isolationSession.start.user.upn",
+            ),
+        ] {
+            let message = parse_exact_for_test(&json).unwrap_err().message();
+            assert!(message.contains(&format!("`{path}`")), "{message}");
+            assert!(message.contains("invalid secret value"), "{message}");
+            assert!(!message.contains("424242424242"), "{message}");
         }
     }
 
@@ -3202,6 +3231,7 @@ mod tests {
                 StateAwareProvision::IsolationSession(Some(
                     crate::mxc_common::models::IsolationSessionProvisionConfig {
                         app_id: Some("PFN:Contoso.App_8wekyb3d8bbwe".into()),
+                        user: None,
                     },
                 )),
             ),
@@ -3210,6 +3240,7 @@ mod tests {
                 StateAwareProvision::IsolationSession(Some(
                     crate::mxc_common::models::IsolationSessionProvisionConfig {
                         app_id: Some(String::new()),
+                        user: None,
                     },
                 )),
             ),

@@ -6,11 +6,13 @@ use crate::mxc_common::config_contract_adapters::dev::common::{
 };
 use crate::mxc_common::error::WxcError;
 use crate::mxc_common::models::{
-    IsolationSessionProvisionConfig, MicroVmProvisionConfig, WslcProvisionConfig,
-    WslcProvisionSessionConfig,
+    IsolationSessionProvisionConfig, IsolationSessionStartConfig, IsolationSessionUser,
+    MicroVmProvisionConfig, WslcProvisionConfig, WslcProvisionSessionConfig,
 };
 use crate::mxc_common::state_aware_input::StateAwareInput;
-use crate::mxc_common::state_aware_operation::{StateAwareOperation, StateAwareProvision};
+use crate::mxc_common::state_aware_operation::{
+    StateAwareOperation, StateAwareProvision, StateAwareStart,
+};
 use crate::mxc_common::wire;
 use crate::mxc_contract::dev as contract;
 
@@ -23,13 +25,31 @@ fn convert_state_aware_isolation_session(
         .map(convert_isolation_session_provision)
 }
 
+fn convert_isolation_session_user(value: contract::IsolationSessionUser) -> IsolationSessionUser {
+    let contract::IsolationSessionUser { upn, wam_token } = value;
+    IsolationSessionUser { upn, wam_token }
+}
+
 fn convert_isolation_session_provision(
     value: contract::IsolationSessionProvision,
 ) -> IsolationSessionProvisionConfig {
-    let contract::IsolationSessionProvision { app_id } = value;
+    let contract::IsolationSessionProvision { app_id, user } = value;
     IsolationSessionProvisionConfig {
         app_id: app_id.into_option(),
+        user: user.into_option().map(convert_isolation_session_user),
     }
+}
+
+fn convert_start_isolation_session(value: contract::StartIsolationSession) -> StateAwareStart {
+    let contract::StartIsolationSession { start } = value;
+    start
+        .into_option()
+        .map_or(StateAwareStart::Absent, |start| {
+            let contract::IsolationSessionStart { user } = start;
+            StateAwareStart::IsolationSession(IsolationSessionStartConfig {
+                user: user.into_option().map(convert_isolation_session_user),
+            })
+        })
 }
 
 fn convert_isolation_session_network(value: contract::IsolationSessionNetwork) -> wire::Network {
@@ -300,9 +320,13 @@ pub(super) fn start_into_input(
         phase: contract::StartPhase,
         sandbox_id,
         telemetry,
+        isolation_session,
     } = request;
+    let config = isolation_session
+        .into_option()
+        .map_or(StateAwareStart::Absent, convert_start_isolation_session);
     let common = state_aware_common(schema, comment, version, telemetry);
-    StateAwareInput::new(common, StateAwareOperation::Start { sandbox_id })
+    StateAwareInput::new(common, StateAwareOperation::Start { sandbox_id, config })
 }
 
 pub(super) fn exec_into_input(request: contract::ExecRequest) -> Result<StateAwareInput, WxcError> {

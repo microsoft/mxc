@@ -1034,8 +1034,7 @@ pub fn exec_typed_state_aware_attached_request(
 /// or [`exec_state_aware_json`] to drive the pipes yourself.
 ///
 /// `experimental` opts in to Windows Sandbox; without it that backend is
-/// refused with `backend_unavailable` before any work is done. WSLC and
-/// IsolationSession do not require the runtime opt-in.
+/// refused with `backend_unavailable` before any work is done.
 pub fn run_state_aware_json(
     request_json: &str,
     dry_run: bool,
@@ -1089,7 +1088,7 @@ mod tests {
         SdkNetworkRuleInput, SdkProcessInput, SdkRuntimeConfigInput, SdkStateAwareInput,
     };
     use crate::mxc_common::state_aware_operation::{
-        StateAwareOperation, StateAwareProvision as RuntimeProvision,
+        StateAwareOperation, StateAwareProvision as RuntimeProvision, StateAwareStart,
     };
     use crate::mxc_common::state_aware_request::Phase;
     use crate::mxc_common::telemetry::correlation_state::test_support::StoreDirGuard;
@@ -1129,6 +1128,7 @@ mod tests {
             app_id.map(
                 |app_id| crate::mxc_common::models::IsolationSessionProvisionConfig {
                     app_id: Some(app_id),
+                    user: None,
                 },
             );
         let mut input = sdk_input(StateAwareOperation::Provision(
@@ -1222,7 +1222,10 @@ mod tests {
             let inputs = [
                 wslc_provision(None, None, telemetry_opt_in),
                 lifecycle_input("wslc:abc", telemetry_opt_in, |sandbox_id| {
-                    StateAwareOperation::Start { sandbox_id }
+                    StateAwareOperation::Start {
+                        sandbox_id,
+                        config: StateAwareStart::Absent,
+                    }
                 }),
                 lifecycle_input("wslc:abc", telemetry_opt_in, |sandbox_id| {
                     StateAwareOperation::Stop { sandbox_id }
@@ -1352,6 +1355,7 @@ mod tests {
                 r#"{"version":"1.0.0","phase":"start","sandboxId":"iso:abc"}"#,
                 lifecycle_input("iso:abc", None, |sandbox_id| StateAwareOperation::Start {
                     sandbox_id,
+                    config: StateAwareStart::Absent,
                 }),
             ),
             (
@@ -2074,7 +2078,10 @@ mod tests {
                         .unwrap(),
                         Phase::Provision => wslc_provision(None, None, Some(true)),
                         Phase::Start => lifecycle_input(id, Some(true), |sandbox_id| {
-                            StateAwareOperation::Start { sandbox_id }
+                            StateAwareOperation::Start {
+                                sandbox_id,
+                                config: StateAwareStart::Absent,
+                            }
                         }),
                         Phase::Exec => exec_input(id, "echo synthetic", Some(true)),
                         Phase::Stop => lifecycle_input(id, Some(true), |sandbox_id| {

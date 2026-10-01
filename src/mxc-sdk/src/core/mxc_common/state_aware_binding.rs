@@ -7,13 +7,16 @@
 //! Binding neither parses configuration nor supplies backend defaults.
 
 use crate::mxc_common::models::{
-    ContainmentBackend, ExecutionRequest, IsolationSessionProvisionConfig, MicroVmProvisionConfig,
-    WslcProvisionConfig, WslcProvisionSessionConfig,
+    ContainmentBackend, ExecutionRequest, IsolationSessionProvisionConfig,
+    IsolationSessionStartConfig, MicroVmProvisionConfig, WslcProvisionConfig,
+    WslcProvisionSessionConfig,
 };
 use crate::mxc_common::mxc_error::MxcError;
 use crate::mxc_common::state_aware_backend::StatefulSandboxBackend;
 use crate::mxc_common::state_aware_dispatch::resolve_backend;
-use crate::mxc_common::state_aware_operation::{StateAwareOperation, StateAwareProvision};
+use crate::mxc_common::state_aware_operation::{
+    StateAwareOperation, StateAwareProvision, StateAwareStart,
+};
 use crate::mxc_common::state_aware_request::{ParsedStateAwareRequest, Phase};
 
 /// Backend-typed operation. Construction is restricted to checked binding.
@@ -121,18 +124,14 @@ impl<B: StatefulSandboxBackend> BoundStateAwareRequest<B> {
 
 impl<B> BoundStateAwareRequest<B>
 where
-    B: StatefulSandboxBackend<
-        StartConfig = (),
-        ExecConfig = (),
-        StopConfig = (),
-        DeprovisionConfig = (),
-    >,
+    B: StatefulSandboxBackend<ExecConfig = (), StopConfig = (), DeprovisionConfig = ()>,
 {
     fn bind(
         parsed: ParsedStateAwareRequest,
         expected: ContainmentBackend,
         id_prefix: &str,
         provision: impl FnOnce(StateAwareProvision) -> Result<Option<B::ProvisionConfig>, MxcError>,
+        start: impl FnOnce(StateAwareStart) -> Result<Option<B::StartConfig>, MxcError>,
     ) -> Result<Self, MxcError> {
         let actual = resolve_backend(&parsed)?;
         if actual != expected || B::BACKEND_KEY != expected.wire_name() || B::ID_PREFIX != id_prefix
@@ -147,9 +146,9 @@ where
             StateAwareOperation::Provision(config) => {
                 BoundStateAwareOperation::Provision(provision(config)?)
             }
-            StateAwareOperation::Start { sandbox_id } => BoundStateAwareOperation::Start {
+            StateAwareOperation::Start { sandbox_id, config } => BoundStateAwareOperation::Start {
                 sandbox_id,
-                config: None,
+                config: start(config)?,
             },
             StateAwareOperation::Exec { sandbox_id } => BoundStateAwareOperation::Exec {
                 sandbox_id,
@@ -179,6 +178,17 @@ fn incompatible_payload(actual: &ContainmentBackend, backend: &str) -> MxcError 
     ))
 }
 
+/// Start binding for a backend that declares no start configuration.
+fn no_start_config(start: StateAwareStart, backend: &str) -> Result<Option<()>, MxcError> {
+    match start {
+        StateAwareStart::Absent => Ok(None),
+        StateAwareStart::IsolationSession(_) => Err(incompatible_payload(
+            &ContainmentBackend::IsolationSession,
+            backend,
+        )),
+    }
+}
+
 /// Bind an IsolationSession operation without changing configuration presence.
 pub fn bind_isolation_session<B>(
     parsed: ParsedStateAwareRequest,
@@ -186,7 +196,7 @@ pub fn bind_isolation_session<B>(
 where
     B: StatefulSandboxBackend<
         ProvisionConfig = IsolationSessionProvisionConfig,
-        StartConfig = (),
+        StartConfig = IsolationSessionStartConfig,
         ExecConfig = (),
         StopConfig = (),
         DeprovisionConfig = (),
@@ -199,6 +209,10 @@ where
         |provision| match provision {
             StateAwareProvision::IsolationSession(config) => Ok(config),
             other => Err(incompatible_payload(&other.containment(), B::BACKEND_KEY)),
+        },
+        |start| match start {
+            StateAwareStart::Absent => Ok(None),
+            StateAwareStart::IsolationSession(config) => Ok(Some(config)),
         },
     )
 }
@@ -224,6 +238,7 @@ where
             StateAwareProvision::WindowsSandbox => Ok(None),
             other => Err(incompatible_payload(&other.containment(), B::BACKEND_KEY)),
         },
+        |start| no_start_config(start, B::BACKEND_KEY),
     )
 }
 
@@ -262,6 +277,7 @@ where
             StateAwareProvision::MicroVm(config) => Ok(config),
             other => Err(incompatible_payload(&other.containment(), B::BACKEND_KEY)),
         },
+        |start| no_start_config(start, B::BACKEND_KEY),
     )
 }
 
@@ -276,12 +292,16 @@ where
         DeprovisionConfig = (),
     >,
 {
-    BoundStateAwareRequest::bind(parsed, ContainmentBackend::Wslc, "wslc", |provision| {
-        match provision {
+    BoundStateAwareRequest::bind(
+        parsed,
+        ContainmentBackend::Wslc,
+        "wslc",
+        |provision| match provision {
             StateAwareProvision::Wslc(config) => Ok(config),
             other => Err(incompatible_payload(&other.containment(), B::BACKEND_KEY)),
-        }
-    })
+        },
+        |start| no_start_config(start, B::BACKEND_KEY),
+    )
 }
 
 #[cfg(test)]

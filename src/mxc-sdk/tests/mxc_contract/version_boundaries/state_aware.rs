@@ -138,3 +138,57 @@ fn state_aware_roots_are_registered_in_v09() {
         );
     }
 }
+
+#[test]
+fn isolation_session_user_is_introduced_in_v11() {
+    const NETWORK: &str = r#""network": {
+        "egress": {"default": "allow"},
+        "ingress": {"default": "allow", "hostLoopback": "allow"}
+    }"#;
+    const USER: &str = r#""user": {"upn": "alice@contoso.com", "wamToken": "tok"}"#;
+    let cases = [
+        (
+            "provision",
+            format!(
+                r#"{{
+                    "version": "VERSION",
+                    "phase": "provision",
+                    "containment": "isolation_session",
+                    {NETWORK},
+                    "isolationSession": {{"provision": {{{USER}}}}}
+                }}"#
+            ),
+        ),
+        (
+            "start",
+            format!(
+                r#"{{
+                    "version": "VERSION",
+                    "phase": "start",
+                    "sandboxId": "iso:1234abcd",
+                    "isolationSession": {{"start": {{{USER}}}}}
+                }}"#
+            ),
+        ),
+    ];
+
+    for (name, template) in cases {
+        let v09_json = template.replace("VERSION", "0.9.0-alpha");
+        let v10_json = template.replace("VERSION", "1.0.0");
+        let v11_json = template.replace("VERSION", "1.1.0-alpha");
+        serde_json::from_str::<serde_json::Value>(&v11_json)
+            .unwrap_or_else(|error| panic!("{name} used malformed JSON: {error}"));
+
+        assert!(
+            parse_request(&v09_json).is_err(),
+            "published 0.9 accepted the {name} user bundle"
+        );
+        assert!(
+            mxc_sdk::mxc_contract::published::v1_0_0::parse_request(&v10_json).is_err(),
+            "published 1.0 accepted the {name} user bundle"
+        );
+        mxc_sdk::mxc_contract::dev::parse_request(&v11_json).unwrap_or_else(|error| {
+            panic!("development 1.1 rejected the {name} user bundle: {error}")
+        });
+    }
+}

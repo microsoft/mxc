@@ -673,7 +673,9 @@ mod tests {
     use crate::mxc_common::models::ExecutionRequest;
     use crate::mxc_common::models::WslcProvisionSessionConfig;
     use crate::mxc_common::mxc_error::MxcErrorCode;
-    use crate::mxc_common::state_aware_operation::{StateAwareOperation, StateAwareProvision};
+    use crate::mxc_common::state_aware_operation::{
+        StateAwareOperation, StateAwareProvision, StateAwareStart,
+    };
     use crate::mxc_common::state_aware_request::Phase;
     use serde_json::json;
     use std::cell::Cell;
@@ -1470,6 +1472,7 @@ mod tests {
             ExecutionRequest::default(),
             StateAwareOperation::Start {
                 sandbox_id: id.into(),
+                config: StateAwareStart::Absent,
             },
         )
     }

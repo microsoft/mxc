@@ -235,8 +235,9 @@ commands and independent drift/history gates.
 
 Exact development requests adapt directly to a `StateAwareOperation` and
 cross-cutting `ExecutionRequest`. The operation determines its phase:
-provision retains a backend tag and optional runtime configuration, while
-start, exec, stop, and deprovision carry their required sandbox ID.
+provision retains a backend tag; start, exec, stop, and deprovision carry
+their required sandbox ID; and a phase with backend configuration retains it as
+optional runtime configuration.
 `ParsedStateAwareRequest` exposes read-only accessors, not independently
 writable phase, containment, or payload fields. Successful production requests
 retain neither raw backend JSON nor source text.

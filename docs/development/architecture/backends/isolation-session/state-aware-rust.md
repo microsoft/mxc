@@ -79,7 +79,7 @@ without metadata use `()`.
 | Phase | `*Config` | `*Metadata` |
 |---|---|---|
 | provision | `IsolationSessionProvisionConfig` | `IsolationSessionProvisionMetadata` |
-| start | `()` | `()` |
+| start | `IsolationSessionStartConfig` | `()` |
 | exec | `()` | (n/a — exec returns an exit code, not metadata) |
 | stop | `()` | `()` |
 | deprovision | `()` | `()` |
@@ -91,6 +91,11 @@ without metadata use `()`.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `appId` | string \| absent | absent | Optional identifier for the calling application, associating the provisioned agent user with its owning app. **A packaged application must supply its Package Family Name in the form `PFN:<packageFamilyName>`** (for example `PFN:Contoso.App_8wekyb3d8bbwe`). An unpackaged application may pass any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it. Validated **structurally only** (no control characters; at most 256 characters) — MXC does not judge what a valid application identity looks like. Whitespace and case are preserved. An explicitly supplied empty string remains distinct from omission; exact JSON input rejects `null`. Backend semantic rejections surface as `policy_validation` before any OS call. The wire path is `isolationSession.provision.appId`. |
+| `user` | object \| absent | absent | Optional Entra credentials for an enterprise agent user, `{ upn, wamToken }`, both required. Requires the experimental opt-in. `upn` must contain `@` with text on both sides, and is trimmed of surrounding whitespace for both the check and the OS call. `wamToken` must not be empty and is passed to the OS verbatim. A host that deduces the enterprise agent user refuses explicit credentials; omit `user` there. Rejections surface as `policy_validation` before any provisioning call. The wire path is `isolationSession.provision.user`. |
+
+Only raw exact `1.1.0-alpha` requests carry `user`; the high-level SDK lifecycle
+APIs target `1.0.0` and do not expose it.
+
 The top-level `network` field is required and must use the standard directional
 all-allow posture.
 
@@ -183,10 +188,16 @@ the executable.
 
 ### Start
 
-**Config (none).** Start takes only the `sandboxId`; it accepts no per-phase
-payload or repeated network posture. The one-shot surface uses the top-level
-`network` section, not a state-aware phase object or `appId`; those
-wrong-nesting cases are rejected as `malformed_request`.
+**Config (`IsolationSessionStartConfig`):**
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `user` | object \| absent | absent | Supply the Entra credentials for a sandbox provisioned with `user`. Same shape, opt-in and validation as at provision. A host that deduces the enterprise agent user refuses explicit credentials. The wire path is `isolationSession.start.user`. |
+
+Start otherwise takes only the `sandboxId`; it accepts no repeated network
+posture. The one-shot surface uses the top-level `network` section, not a
+state-aware phase object or `appId`; those wrong-nesting cases are rejected as
+`malformed_request`.
 
 **Metadata (none).** Start returns an empty `result: {}` envelope on success.
 
@@ -276,8 +287,9 @@ nothing is exposed to acknowledge. Absence is also not a caller statement of
 intent; refusing it would fail every request that omits the section, which is
 ceremony rather than a control.
 
-The only caller-supplied knob the backend accepts beyond the network posture is
-the optional `appId`, at provision.
+The caller-supplied knobs the backend accepts beyond the network posture are
+the optional `appId`, at provision, and the optional Entra `user`, at provision
+and start.
 
 The matrix covers the full surface a caller can express, on both the one-shot
 and state-aware paths. Dispositions come from the closed set in §10.3 of the
@@ -300,6 +312,8 @@ meaning for this backend.
 | `process.{cwd,timeout}` | **honored** | rejected | rejected | **honored** | rejected | rejected |
 | `process.env` | **honored** with `inheritDefaultEnv: true`; rejected without it | rejected | rejected | **honored** with `inheritDefaultEnv: true`; rejected without it | rejected | rejected |
 | `isolationSession.provision.appId` | rejected | **honored** | n/a | n/a | n/a | n/a |
+| `isolationSession.provision.user` | rejected | **honored** with the experimental opt-in | n/a | n/a | n/a | n/a |
+| `isolationSession.start.user` | rejected | n/a | **honored** with the experimental opt-in | n/a | n/a | n/a |
 | `isolationSession.<another phase>.*` | rejected | rejected | rejected | rejected | rejected | rejected |
 | `processContainer` / `lxc` / `seatbelt` (stable sections) | rejected | rejected | rejected | rejected | rejected | rejected |
 | another backend's top-level backend section | rejected | rejected | rejected | rejected | rejected | rejected |
@@ -381,11 +395,14 @@ remove `phase` and `sandboxId` from the JSON payload and pass them as
 
 - `phase` — the discriminator. Required for state-aware; absent for one-shot.
 - `sandboxId` — required for non-provision phases.
-- `isolationSession.provision` — optional provision configuration;
-  `start` / `exec` / `stop` / `deprovision` carry no backend config.
+- `isolationSession.provision` and `isolationSession.start` — optional provision
+  and start configuration; `exec` / `stop` / `deprovision` carry no backend
+  config.
 - `isolationSession.provision.appId` — the calling application's
   identifier. Honoured here and not accepted by the one-shot surface;
   supplying it there is rejected as `malformed_request`.
+- `isolationSession.{provision,start}.user` — Entra credentials, carried only by
+  raw exact `1.1.0-alpha` requests. Not accepted by the one-shot surface.
 
 ## Idempotence per phase
 
@@ -434,7 +451,7 @@ wire-format `MxcError` codes via `map_lifecycle_error`:
 
 | `IsolationSessionError` variant | Wire `error.code` | Trigger |
 |---|---|---|
-| `Policy(...)` | `policy_validation` | A structurally representable request violates a backend semantic invariant — see the honor matrix above. Rejected by `validate_<phase>` hooks (state-aware) or `validate_runner` (one-shot); fields excluded by an exact request root fail earlier as `malformed_request`. |
+| `Policy(...)` | `policy_validation` | A structurally representable request violates a backend semantic invariant — see the honor matrix above. Rejected by `validate_<phase>` hooks (state-aware), `validate_runner` (one-shot), or a host-capability check; fields excluded by an exact request root fail earlier as `malformed_request`. |
 | `ServiceUnavailable(...)` | `backend_unavailable` | Activation failure of the in-proc IsolationSession runtime API: it is unavailable on this OS build (not registered, or the OS feature gate is off). HRESULTs `CLASS_E_CLASSNOTAVAILABLE` (`0x80040111`) or `REGDB_E_CLASSNOTREG` (`0x80040154`). |
 | `Stale(...)` | `stale_id` | The OS service reports `HRESULT_FROM_WIN32(ERROR_NOT_FOUND)` (`0x80070490`) — the agent user is unknown to it. After `deprovision`, every non-provision op against the dead `sandboxId` triggers this. |
 | `Lifecycle(...)` | `backend_error` | Any other failure of a lifecycle op, whether the API reported it semantically or the call itself could not be completed. |

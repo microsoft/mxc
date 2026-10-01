@@ -604,8 +604,8 @@ containment instead of being routed by their target. Any containment other than
 session that sandboxes are placed into.
 
 Backends supporting container lifecycle operations today are `isolation_session`, `windows_sandbox`,
-and `wslc` (all Windows-only). IsolationSession does not require runtime
-experimental authorization; Windows Sandbox does.
+and `wslc` (all Windows-only). Windows Sandbox requires runtime experimental
+authorization.
 
 WSLC `provision` accepts `wslc.provision.portMappings`, the same
 `windowsPort` / `containerPort` / `protocol` entries as the create-and-run

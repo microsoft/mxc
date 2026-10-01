@@ -46,6 +46,27 @@ pub struct IsolationSessionNetwork {
     pub ingress: IsolationSessionNetworkIngress,
 }
 
+/// Entra credentials for an enterprise agent user.
+#[derive(Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IsolationSessionUser {
+    /// User principal name of the Entra account.
+    pub upn: String,
+    /// Web Account Manager token for the account.
+    pub wam_token: String,
+}
+
+impl std::fmt::Debug for IsolationSessionUser {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IsolationSessionUser")
+            .field("upn", &self.upn)
+            .field("wam_token", &"<redacted>")
+            .finish()
+    }
+}
+
 /// IsolationSession settings accepted during provisioning.
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
@@ -54,6 +75,9 @@ pub struct IsolationSessionProvision {
     /// Optional application identifier carried by the sandbox identity.
     #[serde(default)]
     pub app_id: OptionalField<String>,
+    /// Optional Entra credentials.
+    #[serde(default)]
+    pub user: OptionalField<IsolationSessionUser>,
 }
 
 /// State-aware IsolationSession settings.
@@ -178,6 +202,52 @@ mod tests {
                 .map(String::as_str),
             Some("Contoso.App")
         );
+    }
+
+    fn provision_with_user(user: &str) -> String {
+        format!(r#",{DIRECTIONAL_NETWORK},"isolationSession":{{"provision":{{"user":{user}}}}}"#)
+    }
+
+    #[test]
+    fn user_carries_both_credentials() {
+        let request = parse(&provision_with_user(
+            r#"{"upn":"alice@contoso.com","wamToken":"tok"}"#,
+        ))
+        .unwrap();
+        let user = request
+            .isolation_session
+            .as_ref()
+            .and_then(|isolation_session| isolation_session.provision.as_ref())
+            .and_then(|provision| provision.user.as_ref())
+            .expect("user bundle");
+        assert_eq!(user.upn, "alice@contoso.com");
+        assert_eq!(user.wam_token, "tok");
+    }
+
+    #[test]
+    fn user_requires_both_credentials_and_rejects_other_members() {
+        for user in [
+            r#"{"upn":"alice@contoso.com"}"#,
+            r#"{"wamToken":"tok"}"#,
+            r#"{}"#,
+            r#"{"upn":"alice@contoso.com","wamToken":"tok","tenant":"contoso"}"#,
+            r#"{"upn":"alice@contoso.com","wamToken":null}"#,
+            r#""alice@contoso.com""#,
+            r#"null"#,
+        ] {
+            assert!(parse(&provision_with_user(user)).is_err(), "{user}");
+        }
+    }
+
+    #[test]
+    fn user_debug_omits_the_token() {
+        let user = IsolationSessionUser {
+            upn: "alice@contoso.com".to_string(),
+            wam_token: "secret-token".to_string(),
+        };
+        let rendered = format!("{user:?}");
+        assert!(rendered.contains("alice@contoso.com"), "{rendered}");
+        assert!(!rendered.contains("secret-token"), "{rendered}");
     }
 
     #[cfg(feature = "schema-gen")]

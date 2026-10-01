@@ -18,7 +18,7 @@ use crate::mxc_common::sandbox_process::{
     NativeStdio, SandboxProcess, StreamCloser as InnerCloser,
 };
 use crate::mxc_common::state_aware_backend::ExecOutcome;
-use crate::mxc_common::state_aware_operation::StateAwareOperation;
+use crate::mxc_common::state_aware_operation::{StateAwareOperation, StateAwareStart};
 use crate::options::{
     DeprovisionOptions, ProvisionOptions, SpawnInContainerOptions, SpawnInContainerWithPtyOptions,
     StartOptions, StopOptions,
@@ -66,7 +66,10 @@ pub fn validate_provision(
 /// Start an existing container.
 pub fn start(container_id: &ContainerId, options: StartOptions) -> Result<LifecycleResult, Error> {
     let input = lifecycle_sdk_input(container_id, options.telemetry, |sandbox_id| {
-        StateAwareOperation::Start { sandbox_id }
+        StateAwareOperation::Start {
+            sandbox_id,
+            config: StateAwareStart::Absent,
+        }
     })
     .map_err(Error::from)?;
     run_typed_state_aware(input, false)?
@@ -80,7 +83,10 @@ pub fn validate_start(
     options: StartOptions,
 ) -> Result<ValidationResult, Error> {
     let input = lifecycle_sdk_input(container_id, options.telemetry, |sandbox_id| {
-        StateAwareOperation::Start { sandbox_id }
+        StateAwareOperation::Start {
+            sandbox_id,
+            config: StateAwareStart::Absent,
+        }
     })
     .map_err(Error::from)?;
     run_typed_state_aware(input, true)?

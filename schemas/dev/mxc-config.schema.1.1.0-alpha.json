@@ -599,6 +599,10 @@
         "appId": {
           "description": "Optional application identifier carried by the sandbox identity.",
           "type": "string"
+        },
+        "user": {
+          "$ref": "#/definitions/IsolationSessionUser",
+          "description": "Optional Entra credentials."
         }
       },
       "type": "object"
@@ -644,6 +648,36 @@
         "network",
         "phase",
         "version"
+      ],
+      "type": "object"
+    },
+    "IsolationSessionStart": {
+      "additionalProperties": false,
+      "description": "IsolationSession settings accepted at start.",
+      "properties": {
+        "user": {
+          "$ref": "#/definitions/IsolationSessionUser",
+          "description": "Optional Entra credentials for a sandbox provisioned with `user`."
+        }
+      },
+      "type": "object"
+    },
+    "IsolationSessionUser": {
+      "additionalProperties": false,
+      "description": "Entra credentials for an enterprise agent user.",
+      "properties": {
+        "upn": {
+          "description": "User principal name of the Entra account.",
+          "type": "string"
+        },
+        "wamToken": {
+          "description": "Web Account Manager token for the account.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "upn",
+        "wamToken"
       ],
       "type": "object"
     },
@@ -1459,6 +1493,17 @@
       },
       "type": "object"
     },
+    "StartIsolationSession": {
+      "additionalProperties": false,
+      "description": "IsolationSession settings accepted by a start request.",
+      "properties": {
+        "start": {
+          "$ref": "#/definitions/IsolationSessionStart",
+          "description": "Optional start-phase settings."
+        }
+      },
+      "type": "object"
+    },
     "StartPhase": {
       "enum": [
         "start"
@@ -1475,6 +1520,10 @@
         },
         "_comment": {
           "description": "Optional human-readable annotation ignored by the runtime."
+        },
+        "isolationSession": {
+          "$ref": "#/definitions/StartIsolationSession",
+          "description": "Optional IsolationSession start settings."
         },
         "phase": {
           "$ref": "#/definitions/StartPhase",

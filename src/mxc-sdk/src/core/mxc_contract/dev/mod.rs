@@ -256,14 +256,14 @@ pub use state_aware::{ExecPhase, ExecRequest};
 pub use state_aware::{
     IsolationSessionContainment, IsolationSessionNetwork, IsolationSessionNetworkAllow,
     IsolationSessionNetworkEgress, IsolationSessionNetworkIngress, IsolationSessionProvision,
-    IsolationSessionProvisionRequest, MicroVmContainment, MicroVmProvision,
+    IsolationSessionProvisionRequest, IsolationSessionUser, MicroVmContainment, MicroVmProvision,
     MicroVmProvisionRequest, StateAwareIsolationSession, StateAwareMicroVm,
 };
+pub use state_aware::{IsolationSessionStart, StartIsolationSession, StartPhase, StartRequest};
 pub use state_aware::{ProvisionPhase, ProvisionRequest};
 pub use state_aware::{
     ProvisionSessionPhase, StateAwareWslcSession, WslcProvisionSession, WslcProvisionSessionRequest,
 };
-pub use state_aware::{StartPhase, StartRequest};
 pub use state_aware::{StateAwareWslc, WslcContainment, WslcProvision, WslcProvisionRequest};
 pub use state_aware::{StopPhase, StopRequest};
 pub use state_aware::{WindowsSandboxContainment, WindowsSandboxProvisionRequest};

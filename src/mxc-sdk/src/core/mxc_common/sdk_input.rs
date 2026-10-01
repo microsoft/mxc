@@ -287,6 +287,7 @@ mod tests {
         for operation in [
             StateAwareOperation::Start {
                 sandbox_id: "wsb:abcd1234".to_string(),
+                config: crate::mxc_common::state_aware_operation::StateAwareStart::Absent,
             },
             StateAwareOperation::Exec {
                 sandbox_id: "wsb:abcd1234".to_string(),

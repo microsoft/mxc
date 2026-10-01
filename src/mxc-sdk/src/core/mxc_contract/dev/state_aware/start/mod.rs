@@ -4,6 +4,10 @@
 use crate::mxc_contract::dev::{OptionalField, Telemetry, Version};
 use serde::Deserialize;
 
+mod isolation_session;
+
+pub use isolation_session::{IsolationSessionStart, StartIsolationSession};
+
 string_marker! {
     /// The `start` phase of the state-aware configuration contract.
     pub struct StartPhase => "start";
@@ -30,4 +34,8 @@ pub struct StartRequest {
     /// Optional telemetry configuration.
     #[serde(default)]
     pub telemetry: OptionalField<Telemetry>,
+
+    /// Optional IsolationSession start settings.
+    #[serde(default)]
+    pub isolation_session: OptionalField<StartIsolationSession>,
 }

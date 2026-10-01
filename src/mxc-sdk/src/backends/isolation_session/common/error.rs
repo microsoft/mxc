@@ -175,8 +175,8 @@ pub(super) enum LifecycleFailure {
 #[derive(Debug)]
 pub(super) enum IsolationSessionError {
     /// Caller-supplied container policy carries a field this backend does
-    /// not support (filesystem rules, network rules, proxy). Raised by MXC
-    /// before any API call, so it carries no structured components.
+    /// not support (filesystem rules, network rules, proxy). Raised by MXC,
+    /// not by the API, so it carries no structured components.
     Policy(String),
     /// The in-proc IsolationSession runtime API is not available on this
     /// host (not registered, or the OS feature gate is off). This is a real
