@@ -55,6 +55,7 @@ function Measure-UiReachable {
         -UiDisable $false -Clipboard 'all' -BpUiSystemSettings 'all' -BpUiDesktopControl $true `
         -BpUiIsolation 'desktop'
     $log = Join-Path $ScratchRoot 'logs\ui-policy-baseline.log'
+    Set-UiProbeClipboardSeed
     $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log
 
     $verdicts = @([regex]::Matches($r.Stdout, '(?m)^[A-Z][A-Z0-9_]*=(?:PASS|FAIL|INCONCLUSIVE)\s*$'))
@@ -110,6 +111,9 @@ function Invoke-UiPolicyCase {
 
     $cfg = New-Config @cfgArgs
     $log = Join-Path $ScratchRoot "logs\ui-policy-$($Case.Name).log"
+    if ($tags -contains 'READCLIPBOARD') {
+        Set-UiProbeClipboardSeed
+    }
     $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log
 
     $matrix = @{}

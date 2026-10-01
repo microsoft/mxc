@@ -1,8 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use std::collections::HashSet;
 use std::fmt::Write;
 use std::net::Ipv4Addr;
+use std::sync::{LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -134,6 +136,46 @@ impl ContainerRelease {
     }
 }
 
+/// The container names this process holds a live sandbox on; another process,
+/// including an `lxc-exec` run, can still take the same one.
+static LIVE_CONTAINER_NAMES: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+const GENERATED_NAME_ATTEMPTS: usize = 8;
+
+fn lock_live_container_names() -> std::sync::MutexGuard<'static, HashSet<String>> {
+    LIVE_CONTAINER_NAMES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+}
+
+#[derive(Debug)]
+struct ContainerNameClaim {
+    name: String,
+}
+
+impl ContainerNameClaim {
+    fn acquire(name: &str) -> Option<Self> {
+        let mut live = lock_live_container_names();
+        if !live.insert(name.to_owned()) {
+            return None;
+        }
+        Some(Self {
+            name: name.to_owned(),
+        })
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl Drop for ContainerNameClaim {
+    fn drop(&mut self) {
+        lock_live_container_names().remove(&self.name);
+    }
+}
+
 pub struct LxcScriptRunner {
     config: LxcConfig,
     container_id: String,
@@ -157,6 +199,36 @@ impl LxcScriptRunner {
         } else {
             self.container_id.clone()
         }
+    }
+
+    fn claim_container_name(&self) -> Result<ContainerNameClaim, ScriptResponse> {
+        if self.container_id.is_empty() {
+            return self.claim_generated_name();
+        }
+        ContainerNameClaim::acquire(&self.container_id).ok_or_else(|| {
+            ScriptResponse::error(&format!(
+                "LXC: container '{}' is already in use by a run in this process. LXC reads a \
+                 run's network section only when the container starts, so a second run would \
+                 stop the first one's workload to restart it under its own policy. Let the \
+                 first run finish, or give this one its own containerId.",
+                self.container_id
+            ))
+        })
+    }
+
+    fn claim_generated_name(&self) -> Result<ContainerNameClaim, ScriptResponse> {
+        // A generated name carries the low 32 bits of the clock, and two runs
+        // starting together can read the same value.
+        for _ in 0..GENERATED_NAME_ATTEMPTS {
+            if let Some(claim) = ContainerNameClaim::acquire(&self.resolve_container_name()) {
+                return Ok(claim);
+            }
+        }
+        Err(ScriptResponse::error(
+            "LXC: could not find a free container name for this run; every generated name was \
+             already in use by another run in this process. Retry, or set containerId to a name \
+             of your own.",
+        ))
     }
 
     fn wait_for_network(container_name: &str, timeout: Duration, logger: &mut Logger) -> bool {
@@ -414,7 +486,8 @@ impl LxcScriptRunner {
             ));
         }
 
-        let container_name = self.resolve_container_name();
+        let name_claim = self.claim_container_name()?;
+        let container_name = name_claim.name().to_owned();
 
         // A process's argv is world-readable through /proc/<pid>/cmdline.
         // Refuse credential-bearing proxy URLs before they become lxc-attach
@@ -701,6 +774,7 @@ impl LxcScriptRunner {
             start_directory: start_directory(request).unwrap_or_default(),
             exec_env,
             timeout,
+            _name_claim: name_claim,
         })
     }
 
@@ -817,6 +891,10 @@ struct PreparedSandbox {
     start_directory: String,
     exec_env: Vec<String>,
     timeout: Option<Duration>,
+
+    /// Keeps this sandbox's container out of reach of a second one in this
+    /// process.
+    _name_claim: ContainerNameClaim,
 }
 
 impl PreparedSandbox {
@@ -1944,6 +2022,8 @@ mod tests {
             start_directory: String::new(),
             exec_env: Vec::new(),
             timeout: None,
+            _name_claim: ContainerNameClaim::acquire(&name)
+                .expect("the fixture builds a name no other sandbox can be holding"),
         }
     }
 
@@ -2252,6 +2332,138 @@ mod tests {
         assert!(name.starts_with("mxc-"));
     }
 
+    fn runner_named(container_id: &str) -> LxcScriptRunner {
+        LxcScriptRunner::new(
+            &LxcConfig::default(),
+            container_id,
+            &LifecycleConfig::default(),
+        )
+    }
+
+    #[test]
+    fn a_container_a_live_sandbox_is_using_is_refused_to_the_next_one() {
+        let runner = runner_named("mxc-identity-collision-test");
+
+        let held = runner
+            .claim_container_name()
+            .expect("the first sandbox takes a container no other one is using");
+        let refusal = runner
+            .claim_container_name()
+            .expect_err("a second sandbox on the same container must be refused");
+
+        assert!(
+            refusal
+                .error_message
+                .contains("mxc-identity-collision-test"),
+            "the refusal must name the container the caller asked for, got: {}",
+            refusal.error_message
+        );
+        assert!(
+            refusal.error_message.contains("containerId"),
+            "the refusal must name the field the caller can change, got: {}",
+            refusal.error_message
+        );
+
+        drop(held);
+        runner
+            .claim_container_name()
+            .expect("the container is free again once the first sandbox is gone");
+    }
+
+    #[test]
+    fn prepare_refuses_a_container_another_live_sandbox_is_using() {
+        let config = LxcConfig {
+            distribution: "alpine".to_string(),
+            release: "3.23".to_string(),
+        };
+        let lifecycle = LifecycleConfig::default();
+        let first = LxcScriptRunner::new(&config, "mxc-prepare-collision-test", &lifecycle);
+        let second = LxcScriptRunner::new(&config, "mxc-prepare-collision-test", &lifecycle);
+
+        let _held = first
+            .claim_container_name()
+            .expect("the first sandbox takes a container no other one is using");
+
+        let mut logger = Logger::new(Mode::Buffer);
+        let refusal = second
+            .prepare(&streamable_request(), &mut logger)
+            .err()
+            .expect("a second sandbox on a live container must be refused");
+
+        assert!(
+            refusal.error_message.contains("mxc-prepare-collision-test"),
+            "the refusal must name the container the caller asked for, got: {}",
+            refusal.error_message
+        );
+
+        let log = logger.get_buffer();
+        assert!(
+            !log.contains("Container name:"),
+            "the refusal must land before any container work, or this run stops the \
+             live sandbox's container to apply its own network policy"
+        );
+        assert!(
+            !log.contains("Creating LXC container"),
+            "the refusal must land before container creation"
+        );
+    }
+
+    #[test]
+    fn concurrent_sandboxes_that_name_no_container_get_different_ones() {
+        let runner = runner_named("");
+
+        let first = runner.claim_container_name().expect("a generated name");
+        let second = runner.claim_container_name().expect("a generated name");
+
+        assert_ne!(
+            first.name(),
+            second.name(),
+            "two live sandboxes cannot share a container, so the generator must not \
+             hand the same name to both"
+        );
+    }
+
+    #[test]
+    fn a_sandbox_that_never_launched_leaves_its_container_free() {
+        let runner = LxcScriptRunner::new(
+            &LxcConfig {
+                distribution: "alpine".to_string(),
+                release: "3.23".to_string(),
+            },
+            "mxc-identity-release-test",
+            &LifecycleConfig::default(),
+        );
+        let request = request_with_proxy_url("******proxy.example.com:8080");
+        let mut logger = Logger::new(Mode::Buffer);
+
+        runner
+            .prepare(&request, &mut logger)
+            .err()
+            .expect("a proxy URL carrying a password must not become an lxc-attach argument");
+
+        runner
+            .claim_container_name()
+            .expect("a refused prepare must not go on holding the container");
+    }
+
+    /// The streaming handle owns the prepared sandbox, so this is also what
+    /// frees the container for a caller who drops a sandbox without waiting.
+    #[test]
+    fn a_prepared_sandbox_gives_its_container_back_when_it_drops() {
+        let _fake = crate::network_iptables::test_firewall::install();
+        let prepared = prepared_with_applied_rules("identity-drop");
+        let runner = runner_named(prepared._name_claim.name());
+
+        runner
+            .claim_container_name()
+            .expect_err("the prepared sandbox is still holding its container");
+
+        drop(prepared);
+        runner
+            .claim_container_name()
+            .expect("a finished sandbox must give its container back");
+    }
+
     #[test]
     fn the_hosts_pin_command_writes_the_requested_mapping() {
         let command = LxcScriptRunner::build_hosts_pin_command("10.0.0.5 proxy.example.com");
@@ -2458,12 +2670,18 @@ mod tests {
         request
     }
 
-    fn runner_for_guard_tests() -> LxcScriptRunner {
+    /// A runner named for the test that uses it, because a container name two
+    /// live sandboxes share is refused.
+    fn runner_for_guard_tests(tag: &str) -> LxcScriptRunner {
         let config = LxcConfig {
             distribution: "alpine".to_string(),
             release: "3.23".to_string(),
         };
-        LxcScriptRunner::new(&config, "mxc-guard-test", &LifecycleConfig::default())
+        LxcScriptRunner::new(
+            &config,
+            &format!("mxc-guard-test-{tag}"),
+            &LifecycleConfig::default(),
+        )
     }
 
     fn runner_for_network_readiness_tests(destroy_on_exit: bool) -> LxcScriptRunner {
@@ -2524,7 +2742,7 @@ mod tests {
 
     #[test]
     fn an_egress_only_directional_config_passes_validation() {
-        let runner = runner_for_guard_tests();
+        let runner = runner_for_guard_tests("directional-egress");
 
         assert!(
             runner
@@ -2561,7 +2779,7 @@ mod tests {
 
     #[test]
     fn a_runtime_proxy_request_is_refused_before_any_container_work() {
-        let runner = runner_for_guard_tests();
+        let runner = runner_for_guard_tests("runtime-proxy");
         let mut request = egress_only_directional_request();
         request.policy.runtime_network_proxy_specified = true;
 
@@ -2587,7 +2805,7 @@ mod tests {
 
     #[test]
     fn a_directly_built_request_with_proxy_credentials_is_refused() {
-        let runner = runner_for_guard_tests();
+        let runner = runner_for_guard_tests("credentials-refused");
         let request = request_with_proxy_url("http://alice:hunter2@proxy.example.com:8080");
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
 
@@ -2605,7 +2823,7 @@ mod tests {
 
     #[test]
     fn the_runner_refusal_does_not_echo_the_password() {
-        let runner = runner_for_guard_tests();
+        let runner = runner_for_guard_tests("password-not-echoed");
         let request = request_with_proxy_url("http://alice:hunter2@proxy.example.com:8080");
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
 
@@ -2629,7 +2847,7 @@ mod tests {
 
     #[test]
     fn a_credential_free_proxy_url_is_not_refused_by_the_credential_guard() {
-        let runner = runner_for_guard_tests();
+        let runner = runner_for_guard_tests("credential-free");
         let request = request_with_proxy_url("http://proxy.example.com:8080");
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
 
@@ -2646,7 +2864,7 @@ mod tests {
 
     #[test]
     fn the_credential_refusal_happens_before_any_container_work() {
-        let runner = runner_for_guard_tests();
+        let runner = runner_for_guard_tests("refusal-ordering");
         let request = request_with_proxy_url("http://alice:hunter2@proxy.example.com:8080");
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
 
@@ -2863,8 +3081,8 @@ mod tests {
     fn an_egress_policy_that_cannot_be_lowered_is_refused_before_a_container_exists() {
         let mut logger = Logger::new(Mode::Buffer);
 
-        let response =
-            runner_for_guard_tests().run_internal(&request_with_unlowerable_egress(), &mut logger);
+        let response = runner_for_guard_tests("unlowerable-egress")
+            .run_internal(&request_with_unlowerable_egress(), &mut logger);
 
         assert_ne!(
             response.exit_code, 0,

@@ -491,20 +491,31 @@ impl HyperlightScriptRunner {
 
         // Denied paths: block early if any appears in the allow lists.
         for denied in &request.policy.denied_paths {
-            if request
+            for allowed in request
                 .policy
                 .readwrite_paths
                 .iter()
-                .any(|p| same_path(p, denied))
-                || request
-                    .policy
-                    .readonly_paths
-                    .iter()
-                    .any(|p| same_path(p, denied))
+                .chain(request.policy.readonly_paths.iter())
             {
-                return Err(RunnerError::Preflight(format!(
-                    "path {denied:?} appears in both deniedPaths and an allow list"
-                )));
+                match path_relationship(allowed, denied) {
+                    PathRelationship::Overlaps => {
+                        return Err(RunnerError::Preflight(format!(
+                            "deniedPaths entry {denied:?} overlaps allow list path {allowed:?}; \
+                             Hyperlight cannot safely expose overlapping allowed and denied \
+                             host paths"
+                        )));
+                    }
+                    PathRelationship::Separate => {}
+                    PathRelationship::Indeterminate => {
+                        return Err(RunnerError::Preflight(format!(
+                            "Hyperlight: cannot verify deniedPaths against allow lists because \
+                             {allowed:?} or {denied:?} could not be resolved to a canonical \
+                             location. With deniedPaths present, MXC fails closed rather than \
+                             risk an unenforced deny. Ensure both paths are accessible, or remove \
+                             the deniedPaths entry."
+                        )));
+                    }
+                }
             }
         }
 
@@ -1330,11 +1341,272 @@ fn stamp_matches(home: &Path, runtime: HyperlightRuntime) -> bool {
     }
 }
 
-/// Paths equal after canonicalization (best-effort).
-fn same_path(a: &str, b: &str) -> bool {
-    let ap = std::fs::canonicalize(a).unwrap_or_else(|_| PathBuf::from(a));
-    let bp = std::fs::canonicalize(b).unwrap_or_else(|_| PathBuf::from(b));
-    ap == bp
+/// Whether an allowed host path overlaps a denied path after canonicalization,
+/// with a platform-aware lexical fallback for paths that do not exist yet.
+fn path_relationship(allowed: &str, denied: &str) -> PathRelationship {
+    let Ok(allowed) = anchor_policy_path(allowed) else {
+        return PathRelationship::Indeterminate;
+    };
+    let Ok(denied) = anchor_policy_path(denied) else {
+        return PathRelationship::Indeterminate;
+    };
+    match (
+        std::fs::canonicalize(&allowed),
+        std::fs::canonicalize(&denied),
+    ) {
+        (Ok(allowed), Ok(denied)) => PathRelationship::from_overlaps(
+            denied.starts_with(&allowed) || allowed.starts_with(&denied),
+        ),
+        _ => path_relationship_fallback(&allowed.to_string_lossy(), &denied.to_string_lossy()),
+    }
+}
+
+fn anchor_policy_path(path: &str) -> Result<PathBuf, std::io::Error> {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PathRelationship {
+    Overlaps,
+    Separate,
+    Indeterminate,
+}
+
+impl PathRelationship {
+    fn from_overlaps(overlaps: bool) -> Self {
+        if overlaps {
+            Self::Overlaps
+        } else {
+            Self::Separate
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn path_relationship_fallback(allowed: &str, denied: &str) -> PathRelationship {
+    use wxc_common::filesystem_canonical::canonicalize_allowing_absent_tail;
+
+    path_relationship_fallback_with(allowed, denied, canonicalize_allowing_absent_tail)
+}
+
+#[cfg(target_os = "windows")]
+fn path_relationship_fallback_with(
+    allowed: &str,
+    denied: &str,
+    resolve: impl Fn(&str) -> wxc_common::filesystem_canonical::PathCanonical,
+) -> PathRelationship {
+    use wxc_common::filesystem_canonical::PathCanonical;
+
+    match (resolve(allowed), resolve(denied)) {
+        (PathCanonical::Canonical(allowed_resolved), PathCanonical::Canonical(denied_resolved)) => {
+            let Some(allowed_norm) =
+                WindowsFallbackPath::parse_canonical(allowed, &allowed_resolved)
+            else {
+                return PathRelationship::Indeterminate;
+            };
+            let Some(denied_norm) = WindowsFallbackPath::parse_canonical(denied, &denied_resolved)
+            else {
+                return PathRelationship::Indeterminate;
+            };
+            return PathRelationship::from_overlaps(allowed_norm.overlaps(&denied_norm));
+        }
+        (PathCanonical::Unknown, _) | (_, PathCanonical::Unknown) => {
+            return PathRelationship::Indeterminate;
+        }
+        _ => {}
+    }
+
+    PathRelationship::from_overlaps(
+        WindowsFallbackPath::parse(allowed).overlaps(&WindowsFallbackPath::parse(denied)),
+    )
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Debug, PartialEq, Eq)]
+struct WindowsFallbackPath {
+    drive: Option<String>,
+    rooted: bool,
+    components: Vec<String>,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsFallbackPath {
+    fn parse(path: &str) -> Self {
+        Self::parse_with_trailing_policy(path, has_verbatim_trim_sensitive_component(path))
+    }
+
+    fn parse_canonical(source: &str, resolved: &str) -> Option<Self> {
+        // Canonical components name actual objects and must retain the spelling
+        // returned by the OS. The shared resolver can also append an absent
+        // tail, but does not expose where that tail starts. An ordinary source
+        // containing a trim-sensitive name is therefore ambiguous when that
+        // name survives in the result: trimming it could corrupt the resolved
+        // prefix, while preserving it could corrupt the replayed tail.
+        if has_trim_sensitive_component(source)
+            && !has_verbatim_trim_sensitive_component(source)
+            && has_trim_sensitive_component(resolved)
+        {
+            return None;
+        }
+
+        Some(Self::parse_with_trailing_policy(resolved, true))
+    }
+
+    fn parse_with_trailing_policy(path: &str, preserve_trailing_dots_and_spaces: bool) -> Self {
+        let (folded, verbatim) = normalize_windows_verbatim_prefix(&path.to_lowercase());
+        let bytes = folded.as_bytes();
+        let (drive, rest) =
+            if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+                (Some(folded[..2].to_string()), &folded[2..])
+            } else {
+                (None, folded.as_str())
+            };
+
+        let rooted = rest.starts_with(['\\', '/']);
+        let mut components = Vec::new();
+        for segment in rest.split(['\\', '/']).filter(|s| !s.is_empty()) {
+            match segment {
+                "." => {}
+                ".." => {
+                    if components.last().is_some_and(|last| last != "..") {
+                        components.pop();
+                    } else if !rooted {
+                        components.push("..".to_string());
+                    }
+                }
+                _ => {
+                    let component = if verbatim || preserve_trailing_dots_and_spaces {
+                        segment
+                    } else {
+                        segment.trim_end_matches(['.', ' '])
+                    };
+                    if !component.is_empty() {
+                        components.push(component.to_string());
+                    }
+                }
+            }
+        }
+
+        Self {
+            drive,
+            rooted,
+            components,
+        }
+    }
+
+    fn overlaps(&self, denied: &Self) -> bool {
+        self.drive == denied.drive
+            && self.rooted == denied.rooted
+            && (denied.components.starts_with(&self.components)
+                || self.components.starts_with(&denied.components))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn normalize_windows_verbatim_prefix(path: &str) -> (String, bool) {
+    if let Some(rest) = path.strip_prefix(r"\\?\unc\") {
+        (format!(r"\\{rest}"), true)
+    } else if let Some(rest) = path.strip_prefix(r"\\?\") {
+        (rest.to_string(), true)
+    } else {
+        (path.to_string(), false)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn has_verbatim_trim_sensitive_component(path: &str) -> bool {
+    normalize_windows_verbatim_prefix(&path.to_lowercase()).1 && has_trim_sensitive_component(path)
+}
+
+#[cfg(target_os = "windows")]
+fn has_trim_sensitive_component(path: &str) -> bool {
+    let folded = path.to_lowercase();
+    let (normalized, _) = normalize_windows_verbatim_prefix(&folded);
+    normalized
+        .split(['\\', '/'])
+        .any(|segment| segment.ends_with(['.', ' ']))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn path_relationship_fallback(allowed: &str, denied: &str) -> PathRelationship {
+    let Ok(allowed) = resolve_non_windows_fallback_path(Path::new(allowed)) else {
+        return PathRelationship::Indeterminate;
+    };
+    let Ok(denied) = resolve_non_windows_fallback_path(Path::new(denied)) else {
+        return PathRelationship::Indeterminate;
+    };
+    PathRelationship::from_overlaps(denied.starts_with(&allowed) || allowed.starts_with(&denied))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn resolve_non_windows_fallback_path(path: &Path) -> Result<PathBuf, std::io::Error> {
+    use std::io::ErrorKind;
+    use std::path::Component;
+
+    let mut tail: Vec<Component<'_>> = Vec::new();
+    let mut current = path;
+
+    loop {
+        match std::fs::canonicalize(current) {
+            Ok(resolved) => return Ok(append_non_windows_tail(resolved, &tail)),
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                let Some(parent) = current.parent() else {
+                    return Ok(normalize_non_windows_fallback_path(path));
+                };
+                if let Some(component) = current.components().next_back() {
+                    tail.push(component);
+                }
+                current = parent;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn append_non_windows_tail(base: PathBuf, tail: &[std::path::Component<'_>]) -> PathBuf {
+    use std::path::Component;
+
+    let mut path = base;
+    for component in tail.iter().rev() {
+        match component {
+            Component::Normal(name) => path.push(name),
+            Component::ParentDir => {
+                path.pop();
+            }
+            Component::CurDir => {}
+            Component::RootDir => {}
+            Component::Prefix(_) => {
+                unreachable!("non-Windows paths cannot contain a Windows prefix")
+            }
+        }
+    }
+    path
+}
+
+#[cfg(not(target_os = "windows"))]
+fn normalize_non_windows_fallback_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut normalized = PathBuf::new();
+    let is_absolute = path.is_absolute();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() && !is_absolute {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 fn mounts_equal(a: &[Mount], b: &[Mount]) -> bool {
@@ -1393,6 +1665,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         tmp
+    }
+
+    fn assert_denied_overlap_message(message: &str) {
+        assert!(message.contains("deniedPaths"), "got: {message}");
+        assert!(
+            message.contains("overlapping allowed and denied host paths"),
+            "got: {message}"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    fn assert_denied_resolution_message(message: &str) {
+        assert!(
+            message.contains("cannot verify deniedPaths against allow lists"),
+            "got: {message}"
+        );
+        assert!(
+            message.contains("fails closed rather than risk an unenforced deny"),
+            "got: {message}"
+        );
     }
 
     #[test]
@@ -1619,7 +1911,262 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
         let resp = r.run(&request, &mut logger);
         assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
-        assert!(resp.error_message.contains("deniedPaths"));
+        assert_denied_overlap_message(&resp.error_message);
+    }
+
+    #[test]
+    fn policy_rejects_denied_descendant_of_allowed_mount() {
+        let request = ExecutionRequest {
+            script_code: "print('x')".to_string(),
+            policy: ContainerPolicy {
+                readwrite_paths: vec!["/tmp/hyperlight-allowed".to_string()],
+                denied_paths: vec!["/tmp/hyperlight-allowed/secret".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = HyperlightScriptRunner::validate_policies(&request).unwrap_err();
+        assert_denied_overlap_message(&err.to_string());
+    }
+
+    #[test]
+    fn policy_rejects_allowed_mount_inside_denied_parent() {
+        let request = ExecutionRequest {
+            script_code: "print('x')".to_string(),
+            policy: ContainerPolicy {
+                readwrite_paths: vec!["/tmp/hyperlight-denied-parent/child".to_string()],
+                denied_paths: vec!["/tmp/hyperlight-denied-parent".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = HyperlightScriptRunner::validate_policies(&request).unwrap_err();
+        assert_denied_overlap_message(&err.to_string());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn policy_rejects_denied_overlap_when_allow_is_symlink_alias() {
+        let tmp = fresh_tmp("deny-symlink-alias");
+        let real = tmp.join("real");
+        let link = tmp.join("link");
+        std::fs::create_dir_all(&real).unwrap();
+        match std::os::unix::fs::symlink(&real, &link) {
+            Ok(()) => {}
+            Err(e)
+                if e.kind() == std::io::ErrorKind::Unsupported
+                    || e.kind() == std::io::ErrorKind::PermissionDenied =>
+            {
+                let _ = std::fs::remove_dir_all(&tmp);
+                return;
+            }
+            Err(e) => panic!("create symlink {link:?} -> {real:?}: {e}"),
+        }
+
+        let request = ExecutionRequest {
+            script_code: "print('x')".to_string(),
+            policy: ContainerPolicy {
+                readwrite_paths: vec![link.to_string_lossy().to_string()],
+                denied_paths: vec![real.join("secret").to_string_lossy().to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = HyperlightScriptRunner::validate_policies(&request).unwrap_err();
+        assert_denied_overlap_message(&err.to_string());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn policy_rejects_denied_absolute_descendant_of_missing_relative_mount() {
+        let relative_mount = format!("hyperlight-relative-{}", std::process::id());
+        let denied = std::env::current_dir()
+            .unwrap()
+            .join(&relative_mount)
+            .join("secret");
+        let request = ExecutionRequest {
+            script_code: "print('x')".to_string(),
+            policy: ContainerPolicy {
+                readwrite_paths: vec![relative_mount],
+                denied_paths: vec![denied.to_string_lossy().to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = HyperlightScriptRunner::validate_policies(&request).unwrap_err();
+        assert_denied_overlap_message(&err.to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn policy_rejects_denied_missing_windows_case_variant_allow_overlap() {
+        let mut r = runner();
+        let request = ExecutionRequest {
+            script_code: "print('x')".to_string(),
+            policy: ContainerPolicy {
+                readwrite_paths: vec![
+                    "C:\\MXC\\HyperlightMissingCase\\temp\\..\\PRIVATECACHE\\\\".to_string()
+                ],
+                denied_paths: vec!["c:/mxc//hyperlightmissingcase/./privatecache".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+        let resp = r.run(&request, &mut logger);
+        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
+        assert_denied_overlap_message(&resp.error_message);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn policy_rejects_denied_missing_windows_verbatim_allow_overlap() {
+        let mut r = runner();
+        let request = ExecutionRequest {
+            script_code: "print('x')".to_string(),
+            policy: ContainerPolicy {
+                readwrite_paths: vec![
+                    "\\\\?\\C:\\MXC\\HyperlightVerbatim\\temp\\..\\PRIVATECACHE\\".to_string(),
+                ],
+                denied_paths: vec!["c:/mxc/hyperlightverbatim/privatecache".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+        let resp = r.run(&request, &mut logger);
+        assert_eq!(resp.exit_code, ERROR_EXIT_CODE);
+        assert_denied_overlap_message(&resp.error_message);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn policy_rejects_denied_missing_windows_trailing_dot_allow_overlap() {
+        let request = ExecutionRequest {
+            script_code: "print('x')".to_string(),
+            policy: ContainerPolicy {
+                readwrite_paths: vec![
+                    "C:\\MXC\\HyperlightTrailingDot\\temp\\..\\PRIVATECACHE.\\".to_string()
+                ],
+                denied_paths: vec!["c:/mxc/hyperlighttrailingdot/privatecache".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = HyperlightScriptRunner::validate_policies(&request).unwrap_err();
+        assert_denied_resolution_message(&err.to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn policy_keeps_verbatim_windows_trailing_dot_distinct() {
+        let request = ExecutionRequest {
+            script_code: "print('x')".to_string(),
+            policy: ContainerPolicy {
+                readwrite_paths: vec![
+                    "\\\\?\\C:\\MXC\\HyperlightVerbatimDot\\PRIVATECACHE.".to_string()
+                ],
+                denied_paths: vec!["c:/mxc/hyperlightverbatimdot/privatecache".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        HyperlightScriptRunner::validate_policies(&request).unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn fallback_reports_indeterminate_for_unresolved_windows_paths() {
+        use wxc_common::filesystem_canonical::PathCanonical;
+
+        assert_eq!(
+            path_relationship_fallback_with(
+                "C:\\MXC\\HyperlightUnknown\\allow",
+                "C:\\MXC\\HyperlightUnknown\\deny",
+                |_| PathCanonical::Unknown,
+            ),
+            PathRelationship::Indeterminate
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn fallback_canonicalizes_verbatim_trailing_dot_alias_ancestors() {
+        use wxc_common::filesystem_canonical::PathCanonical;
+
+        assert_eq!(
+            path_relationship_fallback_with(
+                "\\\\?\\C:\\link\\cache.",
+                "\\\\?\\C:\\real\\cache.",
+                |path| match path {
+                    "\\\\?\\C:\\link\\cache." => {
+                        PathCanonical::Canonical("C:\\real\\cache.".to_string())
+                    }
+                    "\\\\?\\C:\\real\\cache." => {
+                        PathCanonical::Canonical("C:\\real\\cache.".to_string())
+                    }
+                    _ => PathCanonical::Absent,
+                },
+            ),
+            PathRelationship::Overlaps
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn fallback_never_separates_mixed_spelling_of_same_dotted_canonical_tree() {
+        use wxc_common::filesystem_canonical::PathCanonical;
+
+        let relationship =
+            path_relationship_fallback_with("C:\\link\\child", "\\\\?\\C:\\real.\\child", |path| {
+                match path {
+                    "C:\\link\\child" | "\\\\?\\C:\\real.\\child" => {
+                        PathCanonical::Canonical("C:\\real.\\child".to_string())
+                    }
+                    _ => PathCanonical::Absent,
+                }
+            });
+
+        assert!(
+            matches!(
+                relationship,
+                PathRelationship::Overlaps | PathRelationship::Indeterminate
+            ),
+            "same resolved tree must overlap or fail closed, got {relationship:?}"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn fallback_fails_closed_when_dotted_canonical_component_provenance_is_ambiguous() {
+        use wxc_common::filesystem_canonical::PathCanonical;
+
+        assert_eq!(
+            path_relationship_fallback_with(
+                "C:\\link.\\child",
+                "\\\\?\\C:\\real.\\child",
+                |path| match path {
+                    "C:\\link.\\child" | "\\\\?\\C:\\real.\\child" => {
+                        PathCanonical::Canonical("C:\\real.\\child".to_string())
+                    }
+                    _ => PathCanonical::Absent,
+                },
+            ),
+            PathRelationship::Indeterminate
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn fallback_path_comparison_stays_case_sensitive_off_windows() {
+        assert_eq!(
+            path_relationship("/tmp/mxc-missing-case", "/tmp/mxc-missing-case"),
+            PathRelationship::Overlaps
+        );
+        assert_eq!(
+            path_relationship("/tmp/MXC-MISSING-CASE", "/tmp/mxc-missing-case"),
+            PathRelationship::Separate
+        );
     }
 
     #[test]

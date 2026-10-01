@@ -24,12 +24,11 @@ const tools = getAvailableToolsPolicy(process.env);
 const temp  = getTemporaryFilesPolicy();
 
 const config = createConfigFromPolicy({
-  version: '0.6.0-alpha',
   filesystem: {
     readonlyPaths:  tools.readonlyPaths,    // PATH, PYTHONPATH, JAVA_HOME, …
     readwritePaths: temp.readwritePaths,    // %TEMP% / $TMPDIR
   },
-  network: { allowOutbound: false },
+  network: { egress: { default: 'deny' } },
   timeoutMs: 30_000,
 });
 config.process!.commandLine = 'python -c "print(\'hello from sandbox\')"';
@@ -47,7 +46,7 @@ child.on('close', (code) => console.log('exit:', code));
   Keep this section in sync with:
     - sdk/node/src/sandbox.ts          (SUPPORTED_VERSION / MIN_VERSION)
     - sdk/node/src/platform.ts         (availableMethods per platform)
-    - schemas/{stable,dev}/*.json (supported policy.version values)
+    - schemas/{stable,dev}/*.json (supported raw config versions)
   When a new schema graduates or a new backend ships, update only this block.
 -->
 
@@ -56,7 +55,12 @@ child.on('close', (code) => console.log('exit:', code));
 for the `windowsHandle` option used by `fs.ReadStream` and `fs.WriteStream`.
 Node.js 26.8.0 or later is recommended.
 
-**Policy / config schema versions:**
+**High-level policy target:** The v1 `SandboxPolicy` API has no caller-supplied
+schema version. This SDK emits exact contract `1.0.0` when building a config.
+Use `ContainerConfig` when a caller must select a raw historical or development
+contract.
+
+**Raw config schema versions:**
 
 | Version | Status | Schema file |
 | --- | --- | --- |
@@ -69,9 +73,10 @@ Node.js 26.8.0 or later is recommended.
 | `1.0.0` | Stable (canonical pre-v1 aliases removed) | [`schemas/stable/mxc-config.schema.1.0.0.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.1.0.0.json) |
 | `1.1.0-alpha` | Dev (remaining experimental backends and development fields) | [`schemas/dev/mxc-config.schema.1.1.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/dev/mxc-config.schema.1.1.0-alpha.json) |
 
-Pick `1.0.0` for new code using current stable backends. Windows Sandbox,
-MicroVM, and Hyperlight require `1.1.0-alpha`; Seatbelt requires `0.7.0-alpha`
-or later.
+The high-level v1 API selects `1.0.0` automatically. For new raw configs using
+current stable backends, choose `1.0.0`. Windows Sandbox, MicroVM, and
+Hyperlight require `1.1.0-alpha`; historical Seatbelt configs require
+`0.7.0-alpha` or later.
 
 > **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `microvm`, `hyperlight`) and their permanent backend sections are defined by the mutable development contract. IsolationSession and WSLC, including their state-aware lifecycles, are part of exact v0.9 and do not require `--experimental`. Production executors dispatch through the exact contract selected by the declared version, whose adapter normalizes it into the private runtime input.
 
@@ -82,25 +87,19 @@ or later.
 
 <a id="schema-080-networking"></a>
 
-**Schema 0.8 directional networking:** `createConfigFromPolicy` accepts
+**Directional networking:** `createConfigFromPolicy` accepts
 `network.egress` / `network.ingress`, `runtimeConfig.networkProxy`, and
-`processContainer.network.allowedProxyPeer`. Do not mix those fields with the
-legacy `network.allowOutbound`, `network.allowLocalNetwork`,
-`network.allowedHosts`, `network.blockedHosts`, or `network.proxy` fields.
-`createConfigFromPolicy` authors either shape according to the supplied policy
-version and fields. Schema 0.6 and 0.7 policies continue to produce the legacy
-wire shape. With schema 0.8, omitting all network fields leaves the
+`processContainer.network.allowedProxyPeer`. Legacy network authoring is not
+part of the v1 high-level API; use a raw `ContainerConfig` only when replaying
+an immutable historical contract. Omitting all network fields leaves the
 `network` block out of the generated config; the native parser interprets that
 as directional default-deny for egress, ingress, and host loopback. See the
 [Sandbox Policy 0.8.0 specification](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.8.0/policy.md)
 for the complete cross-platform authoring shape.
 
-For legacy `SandboxPolicy` authoring, a non-empty `allowedHosts` list selects a
-block default even when `allowOutbound` is true, so the list narrows outbound
-access rather than forming the invalid `allow` + allowlist wire combination.
-With no allowlist, `allowOutbound: true` selects an allow default and
-`blockedHosts` expresses allow-all-except-these. A blocklist without either an
-allowlist or `allowOutbound` is rejected.
+Legacy network members such as `allowOutbound`, `allowedHosts`, and
+`blockedHosts` are available only through a raw `ContainerConfig` targeting an
+immutable historical contract.
 
 Model 1 permits direct connections selected by IP/CIDR, protocol, and port
 rules; it does not configure an application-layer proxy. Model 2 denies direct
@@ -116,7 +115,6 @@ import {
 } from '@microsoft/mxc-sdk';
 
 const directConfig = createConfigFromPolicy({
-  version: '0.8.0-alpha',
   network: {
     egress: {
       default: 'deny',
@@ -136,7 +134,6 @@ spawnSandboxFromConfig(directConfig);
 
 ```typescript
 const proxyConfig = createConfigFromPolicy({
-  version: '0.8.0-alpha',
   network: {
     egress: { default: 'deny' },
     ingress: { default: 'deny', hostLoopback: 'deny' },
@@ -194,7 +191,6 @@ import {
 } from '@microsoft/mxc-sdk';
 
 const policy: SandboxPolicy = {
-  version: '0.9.0-alpha',
   filesystem: {
     readonlyPaths: ['C:\\Program Files\\MyTool'],
   },
@@ -234,15 +230,14 @@ const temp  = getTemporaryFilesPolicy();
 
 const config = createConfigFromPolicy(
   {
-    version: '0.6.0-alpha',
     filesystem: {
       readonlyPaths:  tools.readonlyPaths,
       readwritePaths: temp.readwritePaths,
     },
-    network: { allowOutbound: true },
+    network: { egress: { default: 'allow' } },
     timeoutMs: 30_000,
   },
-  'process', // intent: "process" | "vm" | "microvm"
+  'process',
 );
 
 // Add the script and any backend-specific runtime settings on the returned config.
@@ -274,7 +269,6 @@ const tools = getAvailableToolsPolicy(process.env);
 const temp  = getTemporaryFilesPolicy();
 
 const pty = spawnSandbox('python script.py', {
-  version: '0.9.0-alpha',
   filesystem: {
     readonlyPaths:  tools.readonlyPaths,
     readwritePaths: temp.readwritePaths,
@@ -315,7 +309,6 @@ const temp  = getTemporaryFilesPolicy();
 const result = await spawnSandboxAsync(
   'python -c "import sys; print(sys.version)"',
   {
-    version: '0.6.0-alpha',
     filesystem: {
       readonlyPaths:  tools.readonlyPaths,
       readwritePaths: temp.readwritePaths,
@@ -335,47 +328,58 @@ console.log(result.stdout);
 <details>
 <summary>Table of all backends and links to per-backend guides — click to expand.</summary>
 
-`SandboxPolicy` is cross-platform. The backend is selected by the second argument to `createConfigFromPolicy(policy, containment)`. Pass an **abstract intent** (`"process"`, `"vm"`, `"microvm"`) whenever possible — the SDK and native binary resolve it to the right concrete backend for the host. Pass a **concrete backend name** when you need a specific runner.
+The high-level v1 `SandboxPolicy` is cross-platform and does not take a schema
+version; `createConfigFromPolicy` emits exact `1.0.0`. Its second argument,
+`containment`, accepts the v1
+`SandboxContainment` set: `process`, `processcontainer`, `bubblewrap`, `lxc`,
+`seatbelt`, `wslc`, and `isolation_session`. Development-only containments such
+as `windows_sandbox`, `microvm`, and `hyperlight`, plus the `vm` and `microvm`
+intents, require a raw exact `ContainerConfig`.
 
-| Backend | Intent | Platforms | Minimum schema | Stable? | Guide |
+| Backend | High-level selector | Platforms | Minimum raw schema | Stable? | Guide |
 | --- | --- | --- | --- | --- | --- |
 | `processcontainer` | `process` | Windows | `0.6.0-alpha` | ✅ | [`docs/process-container/guide.md`](https://github.com/microsoft/mxc/blob/main/docs/process-container/guide.md) |
 | `bubblewrap` | `process` | Linux | `0.6.0-alpha` | ✅ | [`docs/bwrap-support/bubblewrap-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/bwrap-support/bubblewrap-backend.md) |
 | `lxc` | (concrete only) | Linux | `0.6.0-alpha` | ✅ | [`docs/lxc-support/lxc-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/lxc-support/lxc-backend.md) |
 | `seatbelt` | `process` | macOS | `0.7.0-alpha` | ✅ | [`docs/seatbelt/seatbelt-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/seatbelt/seatbelt-backend.md) |
-| `windows_sandbox` | `vm` | Windows | `1.1.0-alpha` | Experimental | [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) |
-| `microvm` | `microvm` | Windows | `1.1.0-alpha` | Experimental | [`docs/nanvix-microvm/nanvix.md`](https://github.com/microsoft/mxc/blob/main/docs/nanvix-microvm/nanvix.md) — MicroVM via NanVix on Windows Hypervisor Platform |
-| `hyperlight` | (concrete only) | Windows x64 / Linux x64 | `1.1.0-alpha` | Experimental | [`docs/hyperlight/hyperlight-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/hyperlight/hyperlight-backend.md) — Hyperlight + Unikraft micro-VM on KVM / WHP; `hyperlight.runtime` selects the guest image: `agent` (default), `python`, `python-shell`, `node`, `bash` or `dotnet-jit` |
+| `windows_sandbox` | Raw config only | Windows | `1.1.0-alpha` | Experimental | [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) |
+| `microvm` | Raw config only | Windows | `1.1.0-alpha` | Experimental | [`docs/nanvix-microvm/nanvix.md`](https://github.com/microsoft/mxc/blob/main/docs/nanvix-microvm/nanvix.md) — MicroVM via NanVix on Windows Hypervisor Platform |
+| `hyperlight` | Raw config only | Windows x64 / Linux x64 | `1.1.0-alpha` | Experimental | [`docs/hyperlight/hyperlight-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/hyperlight/hyperlight-backend.md) — Hyperlight + Unikraft micro-VM on KVM / WHP; `hyperlight.runtime` selects the guest image: `agent` (default), `python`, `python-shell`, `node`, `bash` or `dotnet-jit` |
 | `wslc` | (concrete only) | Windows | `0.9.0-alpha` | Stable | [`docs/wsl/wsl-container-getting-started.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wsl-container-getting-started.md) |
 | `isolation_session` | (concrete only) | Windows | `0.9.0-alpha` | Stable | [`docs/isolation-session/oneshot.md`](https://github.com/microsoft/mxc/blob/main/docs/isolation-session/oneshot.md) |
 
-The abstract `process` intent therefore requires `0.7.0-alpha` on macOS,
-where it resolves to Seatbelt, but retains the `0.6.0-alpha` floor on Windows
-and Linux. The abstract `vm` intent requires `1.1.0-alpha`.
+For historical raw configs, the abstract `process` intent requires
+`0.7.0-alpha` on macOS, where it resolves to Seatbelt, but retains the
+`0.6.0-alpha` floor on Windows and Linux. The high-level v1 API always emits
+`1.0.0` on every platform.
 
 Experimental backends require `{ experimental: true }` in `SandboxSpawnOptions`:
 
 ```typescript
-const config = createConfigFromPolicy(policy, 'vm'); // → windows_sandbox on Windows
-config.process!.commandLine = 'cmd /c whoami';
+const config: ContainerConfig = {
+  version: '1.1.0-alpha',
+  containment: 'windows_sandbox',
+  process: { commandLine: 'cmd /c whoami' },
+};
 const pty = spawnSandboxFromConfig(config, { experimental: true });
 ```
 
-IsolationSession one-shot execution uses the explicit configuration path and
-requires the standard directional all-allow network posture:
+IsolationSession one-shot execution uses the high-level v1 policy, which emits
+exact `1.0.0`, and requires the standard directional all-allow network posture:
 
 ```typescript
-import { ContainerConfig, spawnSandboxFromConfig } from '@microsoft/mxc-sdk';
+import {
+  createConfigFromPolicy,
+  spawnSandboxFromConfig,
+} from '@microsoft/mxc-sdk';
 
-const config: ContainerConfig = {
-  version: '0.9.0-alpha',
-  containment: 'isolation_session',
-  process: { commandLine: 'cmd /c whoami' },
+const config = createConfigFromPolicy({
   network: {
     egress: { default: 'allow' },
     ingress: { default: 'allow', hostLoopback: 'allow' },
   },
-};
+}, 'isolation_session');
+config.process!.commandLine = 'cmd /c whoami';
 
 const pty = spawnSandboxFromConfig(config);
 ```
@@ -388,7 +392,9 @@ Backend-specific tuning lives on the returned `ContainerConfig`. The full set of
 - Stable backends: [`schemas/stable/`](https://github.com/microsoft/mxc/tree/main/schemas/stable/)
 - Experimental backends: [`schemas/dev/`](https://github.com/microsoft/mxc/tree/main/schemas/dev/)
 
-Open the schema file matching your `policy.version` (e.g. `mxc-config.schema.0.6.0-alpha.json`) and look up `processContainer`, `lxc`, `wslc`, `windowsSandbox`, etc.
+For raw configuration, open the schema file matching `config.version` and look
+up `processContainer`, `lxc`, `wslc`, `windowsSandbox`, or the other
+backend-specific sections.
 
 For Windows ProcessContainer configs, `processContainer.learningMode: true`
 enables deny-and-record learning mode: failed accesses are logged but remain
@@ -405,7 +411,14 @@ capability names are reserved and must not be added directly to
 
 For long-lived sandboxes where you provision once, exec many times, and tear down at the end (e.g. agentic loops), use the state-aware lifecycle.
 
-> **Backend support:** the state-aware lifecycle is currently implemented for `isolation_session`, `windows_sandbox`, and `wslc` (all Windows-only). Node exposes live, buffered, and dry-run exec only for backends that support native piped execution: IsolationSession and WSLC. Windows Sandbox supports provision, start, stop, and deprovision through Node, but its exec APIs are unavailable because the backend cannot return native pipes. IsolationSession and WSLC do not require an experimental opt-in; Windows Sandbox does. The one-shot spawn APIs (`spawnSandbox` / `spawnSandboxFromConfig`) are the supported execution path for every other backend.
+> **Backend support:** the typed Node state-aware lifecycle exposes
+> `isolation_session` and `wslc` (both Windows-only). These APIs are
+> have no caller-supplied schema version and emit exact `1.0.0`. Windows
+> Sandbox lifecycle remains available only through raw exact
+> `1.1.0-alpha` configuration/FFI paths; it is not part of the Node high-level
+> lifecycle surface. The one-shot spawn APIs (`spawnSandbox` /
+> `spawnSandboxFromConfig`) remain the supported execution path for other
+> backends.
 
 ```typescript
 import {
@@ -445,14 +458,6 @@ all-allow shape shown above; legacy fields are rejected. Rules,
 proxies, mixed postures, and omission are rejected. The other lifecycle phases
 remain available for every state-aware backend.
 
-`windows_sandbox` follows the same provision/start/stop/deprovision shape
-(substitute the containment string and provide `filesystem.readwritePaths` /
-`readonlyPaths` at provision if needed). Node does not expose its exec phase,
-including dry-run, because the backend cannot execute through the native piped
-contract used by `execInSandbox` and `execInSandboxAsync`. See
-[`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md)
-for the per-phase config matrix.
-
 `wslc` needs no provision config (it defaults to an `alpine:latest`
 container with no network). A bridged container uses the directional all-allow
 posture:
@@ -468,12 +473,14 @@ const provisioned = await provisionSandbox('wslc', {
 
 Provision may also supply `filesystem.readwritePaths` / `readonlyPaths`
 (mounted for the sandbox's lifetime) and a backend-specific `image` /
-`imageTarPath`. Node live and buffered WSLC exec support stdout/stderr streaming,
+`imageTarPath`. The image store is consulted first; a miss pulls `image` from
+its registry unless `imageTarPath` supplies it, or the request declares no
+egress, which refuses the pull. Node live and buffered WSLC exec support stdout/stderr streaming,
 timeouts, and cancellation. WSLC does not currently expose process stdin.
 
-IsolationSession state-aware requests default to published `0.9.0-alpha`.
-Windows Sandbox requests default to development `1.1.0-alpha`; WSLC requests
-default to stable `0.9.0-alpha`. See
+The typed IsolationSession and WSLC lifecycle APIs do not accept a version;
+the v1 Node SDK emits stable exact `1.0.0`. Raw exact lifecycle requests remain
+explicitly versioned. See
 [`docs/wsl/wslc-state-aware.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wslc-state-aware.md)
 for the per-phase config matrix.
 
@@ -522,12 +529,11 @@ const profile = getUserProfilePolicy();               // %LOCALAPPDATA%\Programs
 const tmp     = getTemporaryFilesPolicy();            // %TEMP% / $TMPDIR
 
 const policy = {
-  version: '0.6.0-alpha',
   filesystem: {
     readonlyPaths: [...tools.readonlyPaths, ...profile.readonlyPaths],
     readwritePaths: tmp.readwritePaths,
   },
-  network: { allowOutbound: false },
+  network: { egress: { default: 'deny' } },
 };
 ```
 
@@ -547,7 +553,6 @@ The `policy.ui` block is enforced on all supported schema versions, and `policy.
 import { spawnSandboxFromConfig, createConfigFromPolicy } from '@microsoft/mxc-sdk';
 
 const config = createConfigFromPolicy({
-  version: '0.6.0-alpha',
   ui: { allowWindows: true },     // ← required for powershell.exe to start
 });
 config.process!.commandLine = 'powershell.exe -NoProfile -Command "Get-Date"';
@@ -587,13 +592,13 @@ granting file content reads. It requires a BaseContainer host with PSEC 1.1
 | --- | --- | --- |
 | `MXC is not supported on this platform` | `getPlatformSupport()` returned `isSupported: false`. On Linux, neither LXC nor a usable Bubblewrap 0.5.0+ installation is available. On macOS, the Seatbelt platform probe could not find `/usr/bin/sandbox-exec`. | Inspect `support.reason`. On Linux, also inspect `support.unavailableReasons` and install LXC or Bubblewrap 0.5.0+. On macOS, verify that `/usr/bin/sandbox-exec` exists; its absence indicates an incomplete or unsupported macOS installation. |
 | `wxc-exec.exe not found` / `lxc-exec not found` | The SDK couldn't locate the native binary. | Set `MXC_BIN_DIR=<dir>` so `<dir>/<arch>/wxc-exec.exe` (or `lxc-exec`) exists, or pass `options.executablePath` explicitly. |
-| `Invalid containment value '<x>'` | `containment` field doesn't match the parser's accepted values. | Use one of the abstract intents (`process`, `vm`, `microvm`) or a concrete backend listed in [Choosing a Backend](#choosing-a-backend). |
+| `Invalid containment value '<x>'` | `containment` field doesn't match the parser's accepted values. | For `createConfigFromPolicy`, use a `SandboxContainment` value. Use raw exact `ContainerConfig` for development-only backends and intents. |
 | `'<x>' containment requires experimental mode` | A `windows_sandbox` / `microvm` / `hyperlight` backend was selected without the flag. | Pass `{ experimental: true }` in `SandboxSpawnOptions`. |
 | `process.commandLine starts with an unquoted Windows path containing a space` | `wxc-exec` rejects unquoted paths with spaces at parse time. | Quote the executable: `'"C:\\Program Files\\…\\foo.exe" args'`. |
 | `CreateProcessW(PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT) failed: ...` | The process security environment launch returned an OS-level error. Backend-unavailable failures automatically fall through to an AppContainer tier during selection. | Check the Windows build requirements for the backend you selected. |
 | Process exits `-1` / `4294967295` with no stdout | Native binary terminated abnormally. | Re-run with `options.debug: true` (or `options.logDir: '<dir>'`) to capture diagnostic logs. |
 | `Policy version '<x>' is older than supported` / `newer than supported` | Version is outside the supported version lines. | Use an exact registered version: `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, `0.9.0-alpha`, `1.0.0`, or `1.1.0-alpha`. See [Compatibility](#compatibility). |
-| `Policy version '<x>' is not a registered schema contract` / `Unsupported contract version` | The declaration is not registered, even if it falls between supported versions (for example, `0.6.1-alpha`). | Use an exact version from [Compatibility](#compatibility); IsolationSession and WSLC state-aware requests use `0.9.0-alpha`, while Windows Sandbox uses `1.1.0-alpha`. |
+| `Policy version '<x>' is not a registered schema contract` / `Unsupported contract version` | A raw exact declaration is not registered, even if it falls between supported versions (for example, `0.6.1-alpha`). | Use an exact version from [Compatibility](#compatibility). High-level one-shot and typed lifecycle APIs do not accept a version and emit stable `1.0.0`; raw Windows Sandbox lifecycle requests use `1.1.0-alpha`. |
 | `Schema <x> does not support containment '<backend>'` | The selected backend was introduced after the declared schema version. | Use the backend's minimum version from [Choosing a Backend](#choosing-a-backend). Seatbelt requires `0.7.0-alpha`; IsolationSession and WSLC require `0.9.0-alpha`; Windows Sandbox, MicroVM, and Hyperlight require `1.1.0-alpha`. |
 
 For backend-specific errors, see the per-backend guide linked from the [Choosing a Backend](#choosing-a-backend) table.
@@ -616,10 +621,10 @@ spawnSandboxFromConfig(config, options?, workingDirectory?, env?) → IPty | Chi
 spawnSandbox(script, policy, options?, workingDirectory?, containerName?, env?) → IPty
 spawnSandboxAsync(script, policy, ...) → Promise<{ stdout, stderr, exitCode }>
 
-// State-aware lifecycle (currently `isolation_session`, `windows_sandbox`, and `wslc` — all Windows-only)
+// Typed state-aware lifecycle (`isolation_session` and `wslc` — both Windows-only)
 // `config` on provisionSandbox is required for backends whose provision config
 // has a required member (isolation_session: unrestricted network) and
-// optional otherwise (windows_sandbox, wslc).
+// optional otherwise (wslc). The v1 API emits exact 1.0.0 without a caller version.
 provisionSandbox(containment, config, options?)  → Promise<ProvisionResult>
 startSandbox(sandboxId, config?, options?)       → Promise<StartResult>
 execInSandbox(sandboxId, config, options?)        → MxcSandboxProcess // streaming

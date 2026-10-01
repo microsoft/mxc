@@ -74,7 +74,15 @@ const READY_TIMEOUT_ENV: &str = "MXC_WSLC_DAEMON_READY_TIMEOUT_SECS";
 const SPAWN_LOCK_TIMEOUT_ENV: &str = "MXC_WSLC_DAEMON_SPAWN_LOCK_TIMEOUT_SECS";
 
 /// Env override (positive whole seconds) for [`CALL_TIMEOUT`].
-const CALL_TIMEOUT_ENV: &str = "MXC_WSLC_DAEMON_CALL_TIMEOUT_SECS";
+pub const CALL_TIMEOUT_ENV: &str = "MXC_WSLC_DAEMON_CALL_TIMEOUT_SECS";
+
+/// How long to wait for a cancelled reader to unwind and drop the pipe; it only
+/// covers the return of an already-aborted read.
+const READER_CANCEL_GRACE: Duration = Duration::from_secs(5);
+
+/// How long to wait for a reply the reader produced just as the deadline
+/// expired; it only covers handing over a value that already exists.
+const READER_RECOVERY_GRACE: Duration = Duration::from_millis(250);
 
 /// Resolve a `Duration` from an environment variable holding a positive whole
 /// number of seconds, falling back to `default` when the variable is unset,
@@ -106,7 +114,11 @@ fn spawn_lock_timeout() -> Duration {
 }
 
 /// The overall per-request response deadline, honoring [`CALL_TIMEOUT_ENV`].
-fn call_timeout() -> Duration {
+/// The overall per-request response deadline, honoring [`CALL_TIMEOUT_ENV`].
+///
+/// Public so a pull can bound itself against the deadline its caller is
+/// waiting on.
+pub fn call_timeout() -> Duration {
     duration_from_env(CALL_TIMEOUT_ENV, CALL_TIMEOUT)
 }
 
@@ -468,9 +480,8 @@ impl DaemonClient {
     /// The response read is bounded by [`call_timeout`]: the daemon services
     /// every lifecycle op on one apartment-affine worker, so a hung SDK call
     /// would otherwise block this phase process (and thus later teardown)
-    /// forever. On deadline we return an actionable timeout instead of blocking
-    /// indefinitely; the abandoned reader thread unblocks when the pipe finally
-    /// responds or closes (at latest when this short-lived phase process exits).
+    /// forever. On deadline we cancel the read — closing the pipe, so the daemon
+    /// can release an undelivered sandbox — and return an actionable timeout.
     fn call(&self, request: &DaemonRequest) -> DaemonResult<DaemonResponse> {
         let mut pipe = self.open_pipe()?;
         write_frame(&mut pipe, request)?;
@@ -720,10 +731,9 @@ fn read_frame<T: DeserializeOwned>(pipe: &mut File) -> Result<T> {
 ///
 /// A Windows named pipe opened as a synchronous `File` has no per-read timeout,
 /// so the read runs on a spawned thread and we wait on an [`mpsc`] channel with
-/// [`Receiver::recv_timeout`]. On timeout we return an actionable transport
-/// error rather than blocking forever behind a wedged daemon; the reader thread
-/// is abandoned (it unblocks when the pipe responds or closes — at latest when
-/// this short-lived phase process exits).
+/// [`Receiver::recv_timeout`]. On timeout we cancel that blocked read and return
+/// an actionable transport error rather than blocking forever behind a wedged
+/// daemon.
 ///
 /// [`mpsc`]: std::sync::mpsc
 /// [`Receiver::recv_timeout`]: std::sync::mpsc::Receiver::recv_timeout
@@ -735,21 +745,62 @@ where
     use std::sync::mpsc::{channel, RecvTimeoutError};
 
     let (tx, rx) = channel();
-    std::thread::spawn(move || {
+    let reader = std::thread::spawn(move || {
         // The receiver may already be gone (we timed out); ignore the send error.
         let _ = tx.send(read());
     });
 
     match rx.recv_timeout(timeout) {
         Ok(result) => result.map_err(DaemonError::Transport),
-        Err(RecvTimeoutError::Timeout) => Err(DaemonError::transport(format!(
-            "timed out after {timeout:?} waiting for the wslc daemon to respond; it may be wedged \
-             on a prior operation (override with {CALL_TIMEOUT_ENV})"
-        ))),
+        Err(RecvTimeoutError::Timeout) => match recover_or_cancel_read(reader, &rx) {
+            Some(result) => result.map_err(DaemonError::Transport),
+            None => Err(DaemonError::transport(format!(
+                "timed out after {timeout:?} waiting for the wslc daemon to respond; it may be \
+                 wedged on a prior operation (override with {CALL_TIMEOUT_ENV})"
+            ))),
+        },
         Err(RecvTimeoutError::Disconnected) => Err(DaemonError::transport(
             "wslc daemon reader thread ended without a response",
         )),
     }
+}
+
+/// Take the reply of a read that beat the deadline, or cancel one that did not.
+///
+/// The daemon releases an undelivered sandbox only when its response write
+/// fails, which cannot happen while a parked reader holds this end open.
+#[cfg(windows)]
+fn recover_or_cancel_read<T>(
+    reader: std::thread::JoinHandle<()>,
+    rx: &std::sync::mpsc::Receiver<Result<T>>,
+) -> Option<Result<T>> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::IO::CancelSynchronousIo;
+
+    // SAFETY: `reader` owns the thread handle and keeps it alive across the call.
+    let cancelled = unsafe { CancelSynchronousIo(HANDLE(reader.as_raw_handle())) }.is_ok();
+
+    // Nothing was pending, so the read completed in the gap between the
+    // deadline expiring and this call. The daemon recorded that reply as
+    // delivered, so reporting a timeout would strand the sandbox it names.
+    if !cancelled {
+        return rx.recv_timeout(READER_RECOVERY_GRACE).ok();
+    }
+
+    // Hold here until the pipe is closed, so the daemon sees the disconnect
+    // while the caller is still inside this call.
+    let _ = rx.recv_timeout(READER_CANCEL_GRACE);
+    None
+}
+
+/// No daemon transport exists off Windows, so nothing can be holding a pipe open.
+#[cfg(not(windows))]
+fn recover_or_cancel_read<T>(
+    _reader: std::thread::JoinHandle<()>,
+    _rx: &std::sync::mpsc::Receiver<Result<T>>,
+) -> Option<Result<T>> {
+    None
 }
 
 #[cfg(test)]
@@ -854,6 +905,127 @@ mod tests {
         );
         // The whole call must return promptly on deadline, not after the read.
         assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    /// The sleeping reader above leaves no pending I/O for `CancelSynchronousIo`
+    /// to find, so it never reaches the cancellation path. This blocks a real
+    /// synchronous pipe read instead, and checks the server observes the close
+    /// — which is what lets the daemon release an undelivered sandbox.
+    #[cfg(windows)]
+    #[test]
+    fn a_timed_out_pipe_read_is_cancelled_so_the_server_sees_the_close() {
+        use std::io::Read;
+        use std::sync::mpsc::channel;
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+        use windows::Win32::System::Pipes::{
+            ConnectNamedPipe, CreateNamedPipeW, PIPE_TYPE_BYTE, PIPE_WAIT,
+        };
+
+        let name = format!(
+            r"\\.\pipe\mxc-wslc-cancel-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        );
+        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+
+        // SAFETY: a single-instance byte pipe; the handle is closed below.
+        let server = unsafe {
+            CreateNamedPipeW(
+                PCWSTR(wide.as_ptr()),
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_BYTE | PIPE_WAIT,
+                1,
+                4096,
+                4096,
+                0,
+                None,
+            )
+        };
+        assert!(!server.is_invalid(), "could not create the test pipe");
+
+        let (connected_tx, connected_rx) = channel();
+        let (write_tx, write_rx) = channel();
+        let server_raw = server.0 as isize;
+        let server_thread = std::thread::spawn(move || {
+            let handle = HANDLE(server_raw as *mut _);
+            // SAFETY: this thread owns the handle until it closes it below.
+            unsafe {
+                let _ = ConnectNamedPipe(handle, None);
+                let _ = connected_tx.send(());
+
+                // The client is blocked in a read that its deadline will cancel.
+                // Once it does, this write has nobody to deliver to.
+                std::thread::sleep(Duration::from_millis(600));
+                let mut written = 0u32;
+                let wrote = windows::Win32::Storage::FileSystem::WriteFile(
+                    handle,
+                    Some(b"frame"),
+                    Some(&mut written),
+                    None,
+                );
+                let _ = write_tx.send(wrote.is_ok());
+                let _ = CloseHandle(handle);
+            }
+        });
+
+        let mut client = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&name)
+            .expect("open the test pipe");
+        connected_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("server accepted the connection");
+
+        // Nothing is ever written before the deadline, so this read blocks in
+        // the kernel rather than returning.
+        let start = Instant::now();
+        let outcome: DaemonResult<usize> = read_frame_with_deadline(
+            move || {
+                let mut buf = [0u8; 8];
+                let n = client.read(&mut buf)?;
+                Ok(n)
+            },
+            Duration::from_millis(150),
+        );
+
+        let err = outcome.unwrap_err();
+        assert!(matches!(err, DaemonError::Transport(_)));
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "the deadline must return promptly, not wait out the read"
+        );
+
+        let server_wrote = write_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("server reported its write");
+        assert!(
+            !server_wrote,
+            "the client's end must be closed, so the server's reply cannot land"
+        );
+
+        server_thread.join().expect("server thread");
+    }
+
+    /// Reporting a timeout for a reply the daemon already delivered would
+    /// strand the sandbox that reply names.
+    #[cfg(windows)]
+    #[test]
+    fn a_read_that_beat_the_deadline_is_reported_rather_than_discarded() {
+        let outcome: DaemonResult<u32> = read_frame_with_deadline(
+            || {
+                std::thread::sleep(Duration::from_millis(120));
+                Ok(7u32)
+            },
+            Duration::from_millis(100),
+        );
+
+        assert_eq!(
+            outcome.expect("a completed read must not be reported as a timeout"),
+            7
+        );
     }
 
     #[test]

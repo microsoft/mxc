@@ -6,11 +6,12 @@
     Pre-pull WSLC container images into the local cache.
 
 .DESCRIPTION
-    MXC is an execution layer and does not pull container images at run time.
-    Instead, operators populate the WSLC SDK image cache out of band — this
-    script is the canonical entry point. Each image is pulled via
-    `wxc-exec.exe --setup-wslc --image <name>`, which opens a minimal WSLC
-    session against the configured `storage_path` and invokes
+    Warms the WSLC SDK image cache ahead of time. A run pulls on a cache miss
+    by itself, so this is an optimisation rather than a prerequisite — it moves
+    the download off the critical path of a later run, and it is how you
+    populate a cache for a host that cannot reach a registry. Each image is
+    pulled via `wxc-exec.exe --setup-wslc --image <name>`, which opens a minimal
+    WSLC session against the configured `storage_path` and invokes
     `WslcPullSessionImage`. The pulled images persist in that storage path
     and become visible to subsequent runtime executions.
 

@@ -306,13 +306,7 @@ mod tests {
     use wxc_common::mxc_error::MxcErrorCode;
 
     fn minimal_policy() -> SandboxPolicy {
-        SandboxPolicy {
-            version: "0.7.0-alpha".to_string(),
-            filesystem: None,
-            network: None,
-            ui: None,
-            timeout_ms: None,
-        }
+        SandboxPolicy::default()
     }
 
     fn spawn_failure(
@@ -403,7 +397,6 @@ mod tests {
         // A windowed (guiAccess) app needs inherited stdio, so it can't stream
         // over pipes — the backend must reject it rather than drop the GUI cap.
         let policy = SandboxPolicy {
-            version: "0.7.0-alpha".to_string(),
             filesystem: Some(crate::policy::FilesystemSection {
                 readwrite_paths: vec!["/tmp".to_string()],
                 readonly_paths: vec![],
@@ -452,7 +445,6 @@ mod tests {
         use crate::policy::{Containment, UiSection, WslcSection};
 
         let policy = SandboxPolicy {
-            version: "0.9.0-alpha".to_string(),
             ui: Some(UiSection::default()),
             ..minimal_policy()
         };

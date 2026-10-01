@@ -6,7 +6,7 @@ import assert from 'node:assert';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import type { SandboxPolicy } from '@microsoft/mxc-sdk';
+import type { ContainerConfig, SandboxPolicy } from '@microsoft/mxc-sdk';
 import {
   sdk,
   supportedVersions,
@@ -68,7 +68,7 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
   it('should execute hello world in LXC container', async () => {
     const result = await runLxc(
       "echo 'Hello from LXC via CLI'",
-      { version: schemaVersion.raw },
+      {},
       `lxc-hello-${schemaVersion}`,
     );
     assert.strictEqual(result.exitCode, 0, `[${schemaVersion}] Expected exit 0: ${result.stderr}`);
@@ -78,7 +78,7 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
   it('should propagate exit code', async () => {
     const result = await runLxc(
       "echo 'about to exit' && exit 0",
-      { version: schemaVersion.raw },
+      {},
       `lxc-exit-${schemaVersion}`,
     );
     assert.strictEqual(result.exitCode, 0, `[${schemaVersion}] Expected exit 0: ${result.stderr}`);
@@ -88,7 +88,7 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
   it('should report system info', async () => {
     const result = await runLxc(
       "uname -a && echo 'System info test passed'",
-      { version: schemaVersion.raw },
+      {},
       `lxc-sysinfo-${schemaVersion}`,
     );
     assert.strictEqual(result.exitCode, 0, `[${schemaVersion}] Expected exit 0: ${result.stderr}`);
@@ -107,7 +107,7 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
       "echo 'OK: not under Bubblewrap'";
     const result = await runLxc(
       probe,
-      { version: schemaVersion.raw },
+      {},
       `lxc-probe-${schemaVersion}`,
     );
     assert.strictEqual(result.exitCode, 0, `[${schemaVersion}] LXC backend probe failed: ${result.stdout}`);
@@ -115,7 +115,7 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
   });
 
   it('should allow outbound network access', { skip: lxcNetworkSkipReason }, async () => {
-    const policy = { version: schemaVersion.raw, network: outboundNetwork(schemaVersion) };
+    const policy = { network: outboundNetwork(schemaVersion) };
     const result = await runLxc(
       `wget -q -T 10 -O /dev/null '${NETWORK_TEST_URL}' && echo 'Network accessible'`,
       policy,
@@ -128,7 +128,7 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
   it('should mount readwrite filesystem path', async () => {
     tempDir = createTempDir('mxc-lxc-test');
     fs.writeFileSync(path.join(tempDir, 'test.txt'), 'original');
-    const policy = { version: schemaVersion.raw, filesystem: { readwritePaths: [tempDir] } };
+    const policy = { filesystem: { readwritePaths: [tempDir] } };
     const script = `cat ${tempDir}/test.txt && echo 'overwritten' > ${tempDir}/test.txt && cat ${tempDir}/test.txt`;
     const result = await runLxc(script, policy, `lxc-rw-${schemaVersion}`);
     assert.strictEqual(result.exitCode, 0, `[${schemaVersion}] Expected exit 0: ${result.stderr}`);
@@ -138,7 +138,7 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
   it('should mount readonly filesystem path', async () => {
     tempDir = createTempDir('mxc-lxc-test');
     fs.writeFileSync(path.join(tempDir, 'data.txt'), 'readonly content');
-    const policy = { version: schemaVersion.raw, filesystem: { readonlyPaths: [tempDir] } };
+    const policy = { filesystem: { readonlyPaths: [tempDir] } };
     const result = await runLxc(
       `cat ${tempDir}/data.txt && echo 'Read succeeded'`,
       policy,
@@ -151,7 +151,6 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
   it('should download file to writable mount', { skip: lxcNetworkSkipReason }, async () => {
     tempDir = createTempDir('mxc-lxc-test');
     const policy = {
-      version: schemaVersion.raw,
       filesystem: { readwritePaths: [tempDir] },
       network: outboundNetwork(schemaVersion),
     };
@@ -164,7 +163,7 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
   });
 
   it('should access HTTPS endpoint', { skip: lxcNetworkSkipReason }, async () => {
-    const policy = { version: schemaVersion.raw, network: outboundNetwork(schemaVersion) };
+    const policy = { network: outboundNetwork(schemaVersion) };
     const result = await runLxc(
       `wget -q -T 10 -O /dev/null '${NETWORK_TEST_URL}' && echo 'HTTPS endpoint accessible'`,
       policy,
@@ -178,7 +177,7 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
     const script = "echo 'step 1' && ls / && echo 'step 2' && whoami && echo 'Multi-command passed'";
     const result = await runLxc(
       script,
-      { version: schemaVersion.raw },
+      {},
       `lxc-pipeline-${schemaVersion}`,
     );
     assert.strictEqual(result.exitCode, 0, `[${schemaVersion}] Expected exit 0: ${result.stderr}`);
@@ -199,7 +198,14 @@ describe('Linux LXC Container default-deny network posture', {
     const probe =
       "echo \"ifaces=[$(awk 'NR>2 {sub(/:.*/, \"\", $1); print $1}' /proc/net/dev | sort | tr '\\n' ' ')]\"; " +
       "ip -4 addr show lo 2>/dev/null | grep -q '127.0.0.1' && echo 'loopback=up' || echo 'loopback=down'";
-    const result = await runLxc(probe, { version: '0.8.0-alpha' }, 'lxc-deny-080');
+    const config: ContainerConfig = {
+      version: '0.8.0-alpha',
+      containment: 'lxc',
+      containerId: 'lxc-deny-080',
+      process: { commandLine: probe },
+      lxc: { distribution: 'alpine', release: '3.23' },
+    };
+    const result = await spawnFromConfigAsync(config, debugSpawnOptions);
 
     assert.strictEqual(result.exitCode, 0, `Expected the container to run: ${result.stderr}`);
     assert.ok(

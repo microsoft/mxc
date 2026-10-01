@@ -112,18 +112,8 @@ mod tests {
 
     #[test]
     fn public_request_probe_uses_the_sdk_request_model() {
-        let request = crate::build_request(
-            &crate::SandboxPolicy {
-                version: "0.9.0-alpha".to_string(),
-                filesystem: None,
-                network: None,
-                ui: None,
-                timeout_ms: None,
-            },
-            "cmd /c exit 0",
-            None,
-        )
-        .expect("default Windows policy builds");
+        let request = crate::build_request(&crate::SandboxPolicy::default(), "cmd /c exit 0", None)
+            .expect("default Windows policy builds");
 
         let output = probe(Some(&request)).expect("default request probes");
         assert!(output.error.is_some() || output.tier.is_some());

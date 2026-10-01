@@ -35,9 +35,11 @@ use wxc_common::validator::validate_network_policy_support;
 
 use crate::container_steps::{self, sdk_error};
 use crate::error::WslcError;
+use crate::image;
 use crate::policy;
 use crate::policy_mapping;
 use crate::process_env;
+use crate::sdk_init;
 use crate::stream_buffer::{stream_pair, StreamReader, StreamWriter};
 use crate::wslc_bindings::*;
 
@@ -161,6 +163,9 @@ const EXIT_CALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// wait, see [`wait_timeout_ms`]). A short `scriptTimeout` must not be able to
 /// abort a cold VM boot.
 const SESSION_BOOT_TIMEOUT_MS: u32 = 180_000;
+
+/// How long to wait for an abandoned pull before giving up on its session.
+const PULL_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Lock a mutex, tolerating poisoning: every mutex here guards plain output
 /// state with no invariant a panicking writer could break.
@@ -412,247 +417,6 @@ impl WSLContainerRunner {
             config: config.clone(),
         }
     }
-
-    /// Detect the format of a tar file by scanning its entries in a single pass.
-    ///
-    /// - `manifest.json` present → Docker image archive (`docker save`)
-    /// - Top-level Linux directories (`bin`, `etc`, `usr`, etc.) → rootfs (`docker export`)
-    /// - Neither found after a successful scan → `TarFormat::Unknown`
-    /// - Open/read/parse failures → propagated as `std::io::Error`
-    fn detect_tar_format(path: &str) -> std::io::Result<TarFormat> {
-        let file = std::fs::File::open(path)?;
-        let mut archive = tar::Archive::new(file);
-        let entries = archive.entries()?;
-
-        const ROOTFS_MARKERS: &[&str] = &["bin", "etc", "usr", "lib", "sbin", "var"];
-        let mut has_rootfs_dirs = false;
-
-        for entry in entries {
-            let entry = entry?;
-            let entry_path = entry.path().map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("failed to read tar entry path: {}", e),
-                )
-            })?;
-
-            // Docker-save archives have `manifest.json` at the top level.
-            // Match only the root entry — not nested `manifest.json` files
-            // (e.g., from NPM packages). Handles both `manifest.json` and
-            // `./manifest.json` (common tar prefix).
-            let normalized: std::path::PathBuf = entry_path
-                .components()
-                .filter(|c| !matches!(c, std::path::Component::CurDir))
-                .collect();
-            if normalized.as_os_str() == "manifest.json" {
-                return Ok(TarFormat::DockerSave);
-            }
-
-            if !has_rootfs_dirs {
-                // Skip a leading `.` component that is commonly present
-                // in tar archives (e.g., `./bin/...`).
-                let first_component =
-                    entry_path
-                        .components()
-                        .find_map(|component| match component {
-                            std::path::Component::CurDir => None,
-                            other => Some(other),
-                        });
-
-                if let Some(first) = first_component {
-                    let first_str = first.as_os_str().to_string_lossy();
-                    if ROOTFS_MARKERS
-                        .iter()
-                        .any(|marker| *marker == first_str.as_ref())
-                    {
-                        has_rootfs_dirs = true;
-                    }
-                }
-            }
-        }
-
-        if has_rootfs_dirs {
-            Ok(TarFormat::Rootfs)
-        } else {
-            Ok(TarFormat::Unknown)
-        }
-    }
-
-    /// Import a container image from a local tar file.
-    ///
-    /// Supports both rootfs tars (`docker export`) and Docker image archives
-    /// (`docker save`). The format is auto-detected via `detect_tar_format`.
-    /// Returns `Ok(())` on success or `Err(ScriptResponse)` on failure.
-    pub(crate) unsafe fn import_image_from_tar(
-        sdk: &WslcSdk,
-        session: WslcSession,
-        image_name: &str,
-        tar_path: &str,
-        logger: &mut Logger,
-    ) -> Result<(), ScriptResponse> {
-        let path = std::path::Path::new(tar_path);
-        if !path.exists() {
-            return Err(WslcError::Rejected(format!(
-                "Image tar file not found: '{}'. Provide a valid rootfs tar \
-                 (via 'docker export') or Docker image archive (via 'docker save').",
-                tar_path
-            ))
-            .into_response());
-        }
-
-        // Resolve to absolute path, following symlinks. Fall back to the
-        // original path if canonicalization fails (e.g., permissions).
-        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        let tar_path = canonical.to_string_lossy();
-
-        let tar_format = match Self::detect_tar_format(&tar_path) {
-            Ok(fmt) => fmt,
-            Err(e) => {
-                return Err(WslcError::Rejected(format!(
-                    "Failed to read tar file '{}': {}",
-                    tar_path, e
-                ))
-                .into_response());
-            }
-        };
-        let wide_path: Vec<u16> = to_wide(&tar_path);
-
-        match tar_format {
-            TarFormat::DockerSave => {
-                let _ = writeln!(
-                    logger,
-                    "[WSLC] Loading Docker image archive from tar: {}",
-                    tar_path
-                );
-                let load_opts = WslcLoadImageOptions {
-                    progressCallback: None,
-                    progressCallbackContext: ptr::null_mut(),
-                };
-                let mut err_msg = CoTaskMemPWSTR::null();
-                let hr = sdk.WslcLoadSessionImageFromFile(
-                    session,
-                    wide_path.as_ptr() as PCWSTR,
-                    &load_opts,
-                    err_msg.as_mut_ptr(),
-                );
-                if hr != S_OK {
-                    let msg = err_msg.to_string_lossy();
-                    return Err(sdk_error(
-                        &format!("Failed to load Docker image archive from '{}'", tar_path),
-                        hr,
-                        &msg,
-                    ));
-                }
-                let _ = writeln!(
-                    logger,
-                    "[WSLC] Docker image archive loaded successfully from tar"
-                );
-                let _ = writeln!(
-                    logger,
-                    "[WSLC] Note: container will use image '{}' — ensure this \
-                     matches the tag inside the Docker archive",
-                    image_name
-                );
-            }
-            TarFormat::Rootfs => {
-                let _ = writeln!(
-                    logger,
-                    "[WSLC] Importing rootfs image '{}' from tar: {}",
-                    image_name, tar_path
-                );
-                let name_cstr = format!("{}\0", image_name);
-                let import_opts = WslcImportImageOptions {
-                    progressCallback: None,
-                    progressCallbackContext: ptr::null_mut(),
-                };
-                let mut err_msg = CoTaskMemPWSTR::null();
-                let hr = sdk.WslcImportSessionImageFromFile(
-                    session,
-                    name_cstr.as_bytes().as_ptr() as PCSTR,
-                    wide_path.as_ptr() as PCWSTR,
-                    &import_opts,
-                    err_msg.as_mut_ptr(),
-                );
-                if hr != S_OK {
-                    let msg = err_msg.to_string_lossy();
-                    return Err(sdk_error(
-                        &format!("Failed to import image '{}' from tar", image_name),
-                        hr,
-                        &msg,
-                    ));
-                }
-                let _ = writeln!(
-                    logger,
-                    "[WSLC] Image '{}' imported successfully from tar",
-                    image_name
-                );
-            }
-            TarFormat::Unknown => {
-                return Err(WslcError::Rejected(format!(
-                    "Unrecognized tar format: '{}'. Provide a rootfs tar \
-                     (via 'docker export') or a Docker image archive (via 'docker save').",
-                    tar_path
-                ))
-                .into_response());
-            }
-        }
-
-        Ok(())
-    }
-}
-
-/// Detected tar file format for image import.
-enum TarFormat {
-    /// Docker image archive from `docker save` (contains `manifest.json`).
-    DockerSave,
-    /// Rootfs filesystem tar from `docker export` (contains Linux root directories).
-    Rootfs,
-    /// Unrecognized format — not a valid tar or missing expected entries.
-    Unknown,
-}
-
-/// Builds a user-facing prerequisite error for the components `WslcGetMissingComponents`
-/// reports as missing. `missing` may combine multiple bits, and the guidance is branched
-/// per-component so a user missing only `VirtualMachinePlatform` isn't told to update WSL
-/// (which doesn't enable that Windows optional feature), and vice versa. `SdkNeedsUpdate`
-/// points at MXC rather than WSL, since it means MXC's SDK is the stale side.
-pub(crate) fn wslc_prerequisite_error(missing: WslcComponentFlags) -> String {
-    let needs_vmp =
-        missing.0 & WslcComponentFlags::WSLC_COMPONENT_FLAG_VIRTUAL_MACHINE_PLATFORM.0 != 0;
-    let needs_wsl_package = missing.0 & WslcComponentFlags::WSLC_COMPONENT_FLAG_WSL_PACKAGE.0 != 0;
-    let needs_sdk_update =
-        missing.0 & WslcComponentFlags::WSLC_COMPONENT_FLAG_SDK_NEEDS_UPDATE.0 != 0;
-
-    let mut guidance = Vec::new();
-    if needs_vmp {
-        guidance.push(
-            "enable the \"Virtual Machine Platform\" Windows optional feature (Settings > \
-             Apps > Optional features > More Windows features, or run `dism.exe /online \
-             /enable-feature /featurename:VirtualMachinePlatform /all`) and restart"
-                .to_string(),
-        );
-    }
-    if needs_wsl_package {
-        guidance
-            .push("install WSL 2.9.9 or newer and run `wsl --update --pre-release`".to_string());
-    }
-    if needs_sdk_update {
-        // MXC's vendored SDK is behind the installed WSL, so the fix is on MXC's
-        // side — telling the user to install WSL would send them the wrong way.
-        guidance.push(
-            "update MXC — the WSLc SDK it ships is too old for your installed version of WSL"
-                .to_string(),
-        );
-    }
-    if guidance.is_empty() {
-        guidance.push("ensure WSL2 and the WSLC SDK are installed".to_string());
-    }
-
-    format!(
-        "WSLC runtime unavailable. Missing components: {}. Please {}.",
-        missing,
-        guidance.join("; "),
-    )
 }
 
 impl ScriptRunner for WSLContainerRunner {
@@ -743,53 +507,6 @@ fn reject_unsupported_lifecycle(request: &ExecutionRequest) -> Result<(), Script
 }
 
 impl WSLContainerRunner {
-    /// Initialize COM and load the WSLC SDK at runtime.
-    ///
-    /// # Safety
-    /// Must be called once per process before any other WSLC SDK functions.
-    /// The returned `WslcSdk` holds raw function pointers loaded from `wslcsdk.dll`;
-    /// callers must keep it alive for the duration of all SDK use.
-    unsafe fn init_and_load_sdk(logger: &mut Logger) -> Result<&'static WslcSdk, ScriptResponse> {
-        // Accept exactly what `ComApartment` accepts, so a probe and a spawn on
-        // the same thread can never disagree: an STA caller
-        // (`RPC_E_CHANGED_MODE`) reuses its existing apartment rather than
-        // being refused here after `platform_support()` advertised WSLC.
-        //
-        // The initialization is deliberately *not* balanced. The SDK, its
-        // objects, and its callback threads stay live for as long as the
-        // returned handle, so releasing the apartment when this function
-        // returns could tear the MTA down under a running container. Balancing
-        // it means tying the apartment to `StartedContainer`'s lifetime, which
-        // is cross-thread — see the ownership follow-up noted on the PR.
-        match ComApartment::enter() {
-            Ok(com) => std::mem::forget(com),
-            Err(e) => {
-                return Err(
-                    WslcError::Host(format!("COM initialization failed: {e}")).into_response()
-                )
-            }
-        }
-        let _ = writeln!(logger, "[WSLC] COM initialized");
-
-        let sdk = match WslcSdk::shared() {
-            Ok(s) => s,
-            Err(e) => return Err(WslcError::Unavailable(e).into_response()),
-        };
-
-        // Prerequisites check
-        let mut missing = WslcComponentFlags::WSLC_COMPONENT_FLAG_NONE;
-        let hr = sdk.WslcGetMissingComponents(&mut missing);
-        if hr != S_OK {
-            return Err(sdk_error("WslcGetMissingComponents failed", hr, ""));
-        }
-        if missing.any_missing() {
-            return Err(WslcError::Unavailable(wslc_prerequisite_error(missing)).into_response());
-        }
-        let _ = writeln!(logger, "[WSLC] Runtime check passed");
-
-        Ok(sdk)
-    }
-
     /// Configure session settings and create the session.
     /// Returns the session guard (RAII).
     /// Keeps owned string data alive through session creation.
@@ -878,177 +595,6 @@ impl WSLContainerRunner {
             sdk.terminate_session_fn(),
             sdk.release_session_fn(),
         ))
-    }
-
-    /// Check if image exists, import from tar, or pull from registry.
-    ///
-    /// # Safety
-    /// `sdk` must contain valid function pointers and `session` must be a
-    /// live session handle obtained from `WslcCreateSession`.
-    unsafe fn resolve_image(
-        &self,
-        sdk: &'static WslcSdk,
-        session: WslcSession,
-        logger: &mut Logger,
-    ) -> Result<(), ScriptResponse> {
-        let mut images: *mut WslcImageInfo = ptr::null_mut();
-        let mut image_count: u32 = 0;
-        let hr = sdk.WslcListSessionImages(session, &mut images, &mut image_count);
-        if hr != S_OK {
-            return Err(sdk_error("WslcListSessionImages failed", hr, ""));
-        }
-
-        let image_name = &self.config.image;
-        let mut image_found = false;
-        if !images.is_null() {
-            let images_slice = std::slice::from_raw_parts(images, image_count as usize);
-            for info in images_slice {
-                // `info.name` is a fixed-size, possibly-unterminated C buffer;
-                // read up to the first NUL (or the whole buffer if there is
-                // none) without allocating, matching the SDK's own truncation.
-                let name_bytes =
-                    std::slice::from_raw_parts(info.name.as_ptr().cast::<u8>(), info.name.len());
-                let end = name_bytes
-                    .iter()
-                    .position(|&b| b == 0)
-                    .unwrap_or(name_bytes.len());
-                if let Ok(name) = std::str::from_utf8(&name_bytes[..end]) {
-                    if name == image_name.as_str() {
-                        image_found = true;
-                        break;
-                    }
-                }
-            }
-            windows::Win32::System::Com::CoTaskMemFree(Some(images as *const c_void));
-        }
-
-        if image_found {
-            if self.config.image_tar_path.is_some() {
-                let _ = writeln!(
-                    logger,
-                    "[WSLC] Image '{}' already cached, skipping tar import",
-                    image_name
-                );
-            } else {
-                let _ = writeln!(logger, "[WSLC] Image '{}' found", image_name);
-            }
-        } else if let Some(tar_path) = &self.config.image_tar_path {
-            Self::import_image_from_tar(sdk, session, image_name, tar_path, logger)?;
-        } else {
-            // MXC is an execution layer; image management is out of band. The
-            // setup script `scripts\setup-wslc.ps1` (or `wxc-exec.exe
-            // --setup-wslc --image <name>`) pre-pulls images into the same
-            // WSLC storage_path the runner uses. When the config overrides
-            // `wslc.storagePath`, include it in the suggested
-            // commands so the operator's first copy-paste lands the image in
-            // the cache the next run will actually read.
-            let (storage_arg_wxc, storage_arg_ps) = match &self.config.storage_path {
-                Some(sp) => (
-                    format!(" --storage-path \"{}\"", sp),
-                    format!(" -StoragePath \"{}\"", sp),
-                ),
-                None => (String::new(), String::new()),
-            };
-            return Err(WslcError::Rejected(format!(
-                "WSLC image '{}' not found locally. Pre-pull it with: \
-                 wxc-exec.exe --setup-wslc --image {}{} \
-                 (or scripts\\setup-wslc.ps1 -Image {}{}). \
-                 MXC does not pull images at run time; \
-                 see docs/wsl/wsl-container-getting-started.md.",
-                image_name, image_name, storage_arg_wxc, image_name, storage_arg_ps,
-            ))
-            .into_response());
-        }
-
-        Ok(())
-    }
-
-    /// Pre-pull a WSLC image into the SDK's local image cache.
-    ///
-    /// Loads the SDK, opens a minimal session against `storage_path` (or the
-    /// runner default), pulls `image_name`, then releases the session. The
-    /// image persists in the storage path's cache for subsequent runner
-    /// invocations that pass the same `storage_path`.
-    ///
-    /// # Safety
-    /// Must be called once per process before any other WSLC SDK functions
-    /// (it initialises COM via `init_and_load_sdk`).
-    pub unsafe fn setup_pull_image(
-        image_name: &str,
-        storage_path: Option<&str>,
-        logger: &mut Logger,
-    ) -> Result<(), String> {
-        let sdk = match Self::init_and_load_sdk(logger) {
-            Ok(s) => s,
-            Err(resp) => return Err(resp.error_message),
-        };
-
-        let storage_path_str = storage_path.map(|s| s.to_string()).unwrap_or_else(|| {
-            std::env::temp_dir()
-                .join("mxc-wslc-sessions")
-                .to_string_lossy()
-                .to_string()
-        });
-        let session_name: Vec<u16> = to_wide("mxc-setup-wslc");
-        let storage_path_wide: Vec<u16> = to_wide(&storage_path_str);
-
-        let mut settings = std::mem::zeroed::<WslcSessionSettings>();
-        let hr = sdk.WslcInitSessionSettings(
-            session_name.as_ptr(),
-            storage_path_wide.as_ptr(),
-            &mut settings,
-        );
-        if hr != S_OK {
-            return Err(format!(
-                "WslcInitSessionSettings failed (HRESULT 0x{:08X})",
-                hr as u32
-            ));
-        }
-
-        let mut session: WslcSession = ptr::null_mut();
-        let mut create_err = CoTaskMemPWSTR::null();
-        let hr = sdk.WslcCreateSession(&mut settings, &mut session, create_err.as_mut_ptr());
-        if hr != S_OK {
-            return Err(format!(
-                "WslcCreateSession failed (HRESULT 0x{:08X}): {}",
-                hr as u32,
-                create_err.to_string_lossy()
-            ));
-        }
-        let _session_guard = WslcSessionGuard::from_raw(
-            session,
-            sdk.terminate_session_fn(),
-            sdk.release_session_fn(),
-        );
-
-        let _ = writeln!(
-            logger,
-            "[WSLC setup] Pulling image '{}' into {}",
-            image_name, storage_path_str
-        );
-        let uri_cstr = format!("{}\0", image_name);
-        let pull_opts = WslcPullImageOptions {
-            uri: uri_cstr.as_bytes().as_ptr() as PCSTR,
-            progressCallback: None,
-            progressCallbackContext: ptr::null_mut(),
-            registryAuth: ptr::null(),
-        };
-        let mut pull_err = CoTaskMemPWSTR::null();
-        let hr = sdk.WslcPullSessionImage(session, &pull_opts, pull_err.as_mut_ptr());
-        if hr != S_OK {
-            return Err(format!(
-                "WslcPullSessionImage('{}') failed (HRESULT 0x{:08X}): {}",
-                image_name,
-                hr as u32,
-                pull_err.to_string_lossy()
-            ));
-        }
-        let _ = writeln!(
-            logger,
-            "[WSLC setup] Image '{}' pulled successfully",
-            image_name
-        );
-        Ok(())
     }
 
     /// Apply iptables rules inside a running container for host filtering.
@@ -1394,13 +940,37 @@ impl WSLContainerRunner {
         };
 
         // -- Init: COM + SDK + preflight --
-        let sdk = Self::init_and_load_sdk(logger)?;
+        let sdk = sdk_init::init_and_load_sdk(logger)?;
 
         // -- Session (configure + create in one step to keep string data alive) --
         let session_guard = self.create_session(sdk, request, logger)?;
 
         // -- Image resolution --
-        self.resolve_image(sdk, session_guard.as_raw(), logger)?;
+        // An isolated sandbox gets no registry fetch on its behalf; the pull
+        // would run on the host's network before the container exists.
+        let registry = if policy::network_is_isolated(request) {
+            image::RegistryAccess::Denied
+        } else {
+            image::RegistryAccess::Allowed
+        };
+        let resolved = image::resolve_image(
+            sdk,
+            session_guard.as_raw(),
+            &self.config.image,
+            self.config.image_tar_path.as_deref(),
+            self.config.storage_path.as_deref(),
+            registry,
+            "[WSLC]",
+            logger,
+        );
+        if let Err(e) = resolved {
+            // An abandoned pull is still using this session, so releasing it
+            // here would free memory the SDK holds.
+            if !image::wait_for_pulls_in_flight(PULL_DRAIN_TIMEOUT) {
+                std::mem::forget(session_guard);
+            }
+            return Err(e);
+        }
 
         // -- Process settings --
         // String data (script_cstr, env_cstrings, _cwd_cstr) must stay alive
@@ -2157,87 +1727,6 @@ impl StartedContainer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-
-    /// Create a temporary tar file from in-memory entries and return its path.
-    fn build_test_tar(entries: &[(&str, &[u8])]) -> tempfile::NamedTempFile {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        let mut ar = tar::Builder::new(file.as_file());
-        for (path, data) in entries {
-            let mut header = tar::Header::new_gnu();
-            header.set_size(data.len() as u64);
-            header.set_cksum();
-            ar.append_data(&mut header, path, *data).unwrap();
-        }
-        ar.into_inner().unwrap().flush().unwrap();
-        file
-    }
-
-    #[test]
-    fn detect_docker_save_tar() {
-        let file = build_test_tar(&[("manifest.json", b"{}")]);
-        let result = WSLContainerRunner::detect_tar_format(file.path().to_str().unwrap());
-        assert!(matches!(result, Ok(TarFormat::DockerSave)));
-    }
-
-    #[test]
-    fn detect_docker_save_tar_with_dot_prefix() {
-        let file = build_test_tar(&[("./manifest.json", b"{}")]);
-        let result = WSLContainerRunner::detect_tar_format(file.path().to_str().unwrap());
-        assert!(matches!(result, Ok(TarFormat::DockerSave)));
-    }
-
-    #[test]
-    fn detect_rootfs_tar() {
-        let file = build_test_tar(&[("bin/sh", b""), ("etc/passwd", b"")]);
-        let result = WSLContainerRunner::detect_tar_format(file.path().to_str().unwrap());
-        assert!(matches!(result, Ok(TarFormat::Rootfs)));
-    }
-
-    #[test]
-    fn detect_rootfs_tar_with_dot_prefix() {
-        let file = build_test_tar(&[("./bin/sh", b""), ("./etc/passwd", b"")]);
-        let result = WSLContainerRunner::detect_tar_format(file.path().to_str().unwrap());
-        assert!(matches!(result, Ok(TarFormat::Rootfs)));
-    }
-
-    #[test]
-    fn detect_unknown_tar() {
-        let file = build_test_tar(&[("random/file.txt", b"hello")]);
-        let result = WSLContainerRunner::detect_tar_format(file.path().to_str().unwrap());
-        assert!(matches!(result, Ok(TarFormat::Unknown)));
-    }
-
-    #[test]
-    fn detect_empty_tar() {
-        let file = build_test_tar(&[]);
-        let result = WSLContainerRunner::detect_tar_format(file.path().to_str().unwrap());
-        assert!(matches!(result, Ok(TarFormat::Unknown)));
-    }
-
-    #[test]
-    fn nested_manifest_json_is_not_docker_save() {
-        let file = build_test_tar(&[("app/manifest.json", b"{}")]);
-        let result = WSLContainerRunner::detect_tar_format(file.path().to_str().unwrap());
-        assert!(!matches!(result, Ok(TarFormat::DockerSave)));
-    }
-
-    #[test]
-    fn docker_save_takes_priority_over_rootfs_markers() {
-        let file = build_test_tar(&[
-            ("bin/sh", b""),
-            ("etc/passwd", b""),
-            ("manifest.json", b"{}"),
-        ]);
-        let result = WSLContainerRunner::detect_tar_format(file.path().to_str().unwrap());
-        assert!(matches!(result, Ok(TarFormat::DockerSave)));
-    }
-
-    #[test]
-    fn nonexistent_file_returns_error() {
-        let result = WSLContainerRunner::detect_tar_format("/nonexistent/path.tar");
-        assert!(result.is_err());
-    }
 
     #[test]
     fn run_rejects_denied_path_overlap_before_sdk_load() {
@@ -2870,7 +2359,8 @@ mod tests {
 
     #[test]
     fn prerequisite_error_for_wsl_package_missing() {
-        let message = wslc_prerequisite_error(WslcComponentFlags::WSLC_COMPONENT_FLAG_WSL_PACKAGE);
+        let message =
+            sdk_init::prerequisite_error(WslcComponentFlags::WSLC_COMPONENT_FLAG_WSL_PACKAGE);
 
         assert!(message.contains("WslPackage"));
         assert!(message.contains("2.9.9"));
@@ -2880,7 +2370,7 @@ mod tests {
 
     #[test]
     fn prerequisite_error_for_virtual_machine_platform_missing() {
-        let message = wslc_prerequisite_error(
+        let message = sdk_init::prerequisite_error(
             WslcComponentFlags::WSLC_COMPONENT_FLAG_VIRTUAL_MACHINE_PLATFORM,
         );
 
@@ -2893,7 +2383,7 @@ mod tests {
     fn prerequisite_error_for_combined_missing_components() {
         let combined = WslcComponentFlags::WSLC_COMPONENT_FLAG_VIRTUAL_MACHINE_PLATFORM
             | WslcComponentFlags::WSLC_COMPONENT_FLAG_WSL_PACKAGE;
-        let message = wslc_prerequisite_error(combined);
+        let message = sdk_init::prerequisite_error(combined);
 
         assert!(message.contains("VirtualMachinePlatform"));
         assert!(message.contains("WslPackage"));
@@ -2904,7 +2394,7 @@ mod tests {
     #[test]
     fn prerequisite_error_for_sdk_needs_update() {
         let message =
-            wslc_prerequisite_error(WslcComponentFlags::WSLC_COMPONENT_FLAG_SDK_NEEDS_UPDATE);
+            sdk_init::prerequisite_error(WslcComponentFlags::WSLC_COMPONENT_FLAG_SDK_NEEDS_UPDATE);
 
         assert_eq!(
             message,
@@ -2924,7 +2414,7 @@ mod tests {
     fn prerequisite_error_for_sdk_update_combined_with_another_component() {
         let combined = WslcComponentFlags::WSLC_COMPONENT_FLAG_SDK_NEEDS_UPDATE
             | WslcComponentFlags::WSLC_COMPONENT_FLAG_VIRTUAL_MACHINE_PLATFORM;
-        let message = wslc_prerequisite_error(combined);
+        let message = sdk_init::prerequisite_error(combined);
 
         assert!(message.contains("update MXC"));
         assert!(message.contains("Virtual Machine Platform"));
@@ -2934,7 +2424,7 @@ mod tests {
     #[test]
     fn prerequisite_error_falls_back_for_unrecognized_components() {
         // An unknown future bit still has to produce actionable text.
-        let message = wslc_prerequisite_error(WslcComponentFlags(0x8000));
+        let message = sdk_init::prerequisite_error(WslcComponentFlags(0x8000));
 
         assert!(message.contains("ensure WSL2 and the WSLC SDK are installed"));
     }

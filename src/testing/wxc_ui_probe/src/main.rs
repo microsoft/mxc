@@ -147,7 +147,8 @@ struct WndClassExW {
     h_icon_sm: *mut c_void,
 }
 
-const CF_TEXT: u32 = 1;
+const CF_UNICODETEXT: u32 = 13;
+const GMEM_MOVEABLE: u32 = 0x0002;
 const SPI_SETMOUSESPEED: u32 = 0x0071;
 const SPIF_SENDCHANGE: u32 = 0x0002;
 const EWX_LOGOFF: u32 = 0x00000000;
@@ -176,7 +177,12 @@ extern "system" {
     fn GlobalAddAtomW(name: LpcWstr) -> Atom;
     fn GlobalFindAtomW(name: LpcWstr) -> Atom;
     fn GlobalDeleteAtom(atom: Atom) -> Atom;
+    fn GlobalAlloc(flags: u32, bytes: usize) -> Hglobal;
+    fn GlobalLock(memory: Hglobal) -> LpVoid;
+    fn GlobalUnlock(memory: Hglobal) -> Bool;
+    fn GlobalFree(memory: Hglobal) -> Hglobal;
     fn GetLastError() -> Dword;
+    fn SetLastError(error: Dword);
     fn GetModuleHandleW(name: LpcWstr) -> Hmodule;
     fn GetCurrentProcessId() -> Dword;
 }
@@ -386,25 +392,43 @@ fn probe_readclipboard(user32: Hmodule) {
         }
     };
 
+    unsafe {
+        SetLastError(0);
+    }
     let opened = unsafe { open(std::ptr::null_mut()) };
+    let open_error = unsafe { GetLastError() };
     if opened == 0 {
-        emit_pass("READCLIPBOARD");
+        emit_diag(
+            "READCLIPBOARD",
+            &format!("OpenClipboard failed gle={open_error}"),
+        );
+        emit_inconclusive("READCLIPBOARD");
         return;
     }
-    let data = unsafe { get_data(CF_TEXT) };
+    unsafe {
+        SetLastError(0);
+    }
+    let data = unsafe { get_data(CF_UNICODETEXT) };
+    let error = unsafe { GetLastError() };
     if let Some(close) = close {
         unsafe {
             let _ = close();
         }
     }
-    // If OpenClipboard succeeded, the read path is open. Empty-clipboard
-    // returning NULL from GetClipboardData is not a restriction signal.
-    let _ = data;
-    emit_diag(
-        "READCLIPBOARD",
-        "OpenClipboard succeeded; read path not blocked",
-    );
-    emit_fail("READCLIPBOARD");
+    if !data.is_null() {
+        emit_diag("READCLIPBOARD", "GetClipboardData returned clipboard text");
+        emit_fail("READCLIPBOARD");
+    } else if error == ERROR_ACCESS_DENIED {
+        emit_pass("READCLIPBOARD");
+    } else {
+        emit_diag(
+            "READCLIPBOARD",
+            &format!(
+                "GetClipboardData returned NULL with gle={error}; seed Unicode text before probing"
+            ),
+        );
+        emit_inconclusive("READCLIPBOARD");
+    }
 }
 
 fn probe_writeclipboard(user32: Hmodule) {
@@ -412,6 +436,22 @@ fn probe_writeclipboard(user32: Hmodule) {
     type CloseClipboardFn = unsafe extern "system" fn() -> Bool;
     type EmptyClipboardFn = unsafe extern "system" fn() -> Bool;
     type SetClipboardDataFn = unsafe extern "system" fn(u32, Hglobal) -> Hglobal;
+    #[allow(clippy::type_complexity)]
+    type CreateWindowExWFn = unsafe extern "system" fn(
+        u32,
+        *const u16,
+        *const u16,
+        u32,
+        i32,
+        i32,
+        i32,
+        i32,
+        Hwnd,
+        *mut c_void,
+        Hmodule,
+        *mut c_void,
+    ) -> Hwnd;
+    type DestroyWindowFn = unsafe extern "system" fn(Hwnd) -> Bool;
 
     let open = match get_proc(user32, "OpenClipboard") {
         Some(p) => unsafe { std::mem::transmute::<FarProc, OpenClipboardFn>(p) },
@@ -439,23 +479,158 @@ fn probe_writeclipboard(user32: Hmodule) {
     };
     let close = get_proc(user32, "CloseClipboard")
         .map(|p| unsafe { std::mem::transmute::<FarProc, CloseClipboardFn>(p) });
+    let create_window = match get_proc(user32, "CreateWindowExW") {
+        Some(p) => unsafe { std::mem::transmute::<FarProc, CreateWindowExWFn>(p) },
+        None => {
+            emit_diag("WRITECLIPBOARD", "CreateWindowExW not resolvable");
+            emit_inconclusive("WRITECLIPBOARD");
+            return;
+        }
+    };
+    let destroy_window = match get_proc(user32, "DestroyWindow") {
+        Some(p) => unsafe { std::mem::transmute::<FarProc, DestroyWindowFn>(p) },
+        None => {
+            emit_diag("WRITECLIPBOARD", "DestroyWindow not resolvable");
+            emit_inconclusive("WRITECLIPBOARD");
+            return;
+        }
+    };
 
-    let opened = unsafe { open(std::ptr::null_mut()) };
-    if opened == 0 {
-        emit_pass("WRITECLIPBOARD");
+    let class_name = to_wide("STATIC");
+    let window_name = to_wide("MxcUiClipboardProbe");
+    let owner = unsafe {
+        create_window(
+            0,
+            class_name.as_ptr(),
+            window_name.as_ptr(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            -3isize as Hwnd,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if owner.is_null() {
+        emit_diag(
+            "WRITECLIPBOARD",
+            &format!("CreateWindowExW failed gle={}", unsafe { GetLastError() }),
+        );
+        emit_inconclusive("WRITECLIPBOARD");
         return;
     }
+
+    unsafe {
+        SetLastError(0);
+    }
+    let opened = unsafe { open(owner) };
+    let open_error = unsafe { GetLastError() };
+    if opened == 0 {
+        unsafe {
+            let _ = destroy_window(owner);
+        }
+        emit_diag(
+            "WRITECLIPBOARD",
+            &format!("OpenClipboard failed gle={open_error}"),
+        );
+        emit_inconclusive("WRITECLIPBOARD");
+        return;
+    }
+
+    let text = to_wide("MXC_UI_PROBE_WRITE");
+    let byte_count = text.len() * std::mem::size_of::<u16>();
+    let memory = unsafe { GlobalAlloc(GMEM_MOVEABLE, byte_count) };
+    if memory.is_null() {
+        let error = unsafe { GetLastError() };
+        if let Some(close) = close {
+            unsafe {
+                let _ = close();
+            }
+        }
+        unsafe {
+            let _ = destroy_window(owner);
+        }
+        emit_diag("WRITECLIPBOARD", &format!("GlobalAlloc failed gle={error}"));
+        emit_inconclusive("WRITECLIPBOARD");
+        return;
+    }
+    let buffer = unsafe { GlobalLock(memory) };
+    if buffer.is_null() {
+        let error = unsafe { GetLastError() };
+        if let Some(close) = close {
+            unsafe {
+                let _ = close();
+            }
+        }
+        unsafe {
+            let _ = GlobalFree(memory);
+            let _ = destroy_window(owner);
+        }
+        emit_diag("WRITECLIPBOARD", &format!("GlobalLock failed gle={error}"));
+        emit_inconclusive("WRITECLIPBOARD");
+        return;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(text.as_ptr() as *const u8, buffer as *mut u8, byte_count);
+        let _ = GlobalUnlock(memory);
+    }
+
     let emptied = unsafe { empty() };
-    let set_ok = unsafe { set_data(CF_TEXT, std::ptr::null_mut()) };
+    if emptied == 0 {
+        let error = unsafe { GetLastError() };
+        if let Some(close) = close {
+            unsafe {
+                let _ = close();
+            }
+        }
+        unsafe {
+            let _ = GlobalFree(memory);
+            let _ = destroy_window(owner);
+        }
+        if error == ERROR_ACCESS_DENIED {
+            emit_pass("WRITECLIPBOARD");
+        } else {
+            emit_diag(
+                "WRITECLIPBOARD",
+                &format!("EmptyClipboard failed gle={error}"),
+            );
+            emit_inconclusive("WRITECLIPBOARD");
+        }
+        return;
+    }
+
+    unsafe {
+        SetLastError(0);
+    }
+    let set_ok = unsafe { set_data(CF_UNICODETEXT, memory) };
+    let error = unsafe { GetLastError() };
     if let Some(close) = close {
         unsafe {
             let _ = close();
         }
     }
-    if emptied == 0 && set_ok.is_null() {
+    unsafe {
+        let _ = destroy_window(owner);
+    }
+    if !set_ok.is_null() {
+        emit_fail("WRITECLIPBOARD");
+    } else if error == ERROR_ACCESS_DENIED {
+        unsafe {
+            let _ = GlobalFree(memory);
+        }
         emit_pass("WRITECLIPBOARD");
     } else {
-        emit_fail("WRITECLIPBOARD");
+        unsafe {
+            let _ = GlobalFree(memory);
+        }
+        emit_diag(
+            "WRITECLIPBOARD",
+            &format!("SetClipboardData failed gle={error}"),
+        );
+        emit_inconclusive("WRITECLIPBOARD");
     }
 }
 

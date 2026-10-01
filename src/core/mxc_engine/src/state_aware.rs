@@ -36,7 +36,7 @@ use crate::state_aware_sdk::IsolationSessionProvisionMetadata;
 #[cfg(target_os = "windows")]
 use crate::state_aware_sdk::ProvisionMetadata;
 use crate::state_aware_sdk::{
-    ExecRequest, LifecycleRequest, LifecycleResult, OperationOptions, ProvisionRequest,
+    lifecycle_sdk_input, ExecRequest, LifecycleResult, OperationOptions, ProvisionRequest,
     ProvisionResult, SandboxId, StateAwareResult, ValidationResult,
 };
 use crate::{wrap_state_aware_telemetry_process_with_kind, TelemetryRegistration};
@@ -793,12 +793,12 @@ pub fn validate_provision(
 /// Start a provisioned state-aware sandbox from typed Rust SDK data.
 pub fn start_sandbox(
     sandbox_id: &SandboxId,
-    request: LifecycleRequest,
     options: OperationOptions,
 ) -> Result<LifecycleResult, Error> {
-    let input = request
-        .into_start_input(sandbox_id, options.telemetry_opt_in)
-        .map_err(Error::from)?;
+    let input = lifecycle_sdk_input(sandbox_id, options.telemetry_opt_in, |sandbox_id| {
+        wxc_common::state_aware_operation::StateAwareOperation::Start { sandbox_id }
+    })
+    .map_err(Error::from)?;
     run_typed_state_aware(input, options, false)?
         .into_lifecycle()
         .map_err(Error::from)
@@ -807,12 +807,12 @@ pub fn start_sandbox(
 /// Validate a typed start request without starting the sandbox.
 pub fn validate_start(
     sandbox_id: &SandboxId,
-    request: LifecycleRequest,
     options: OperationOptions,
 ) -> Result<ValidationResult, Error> {
-    let input = request
-        .into_start_input(sandbox_id, options.telemetry_opt_in)
-        .map_err(Error::from)?;
+    let input = lifecycle_sdk_input(sandbox_id, options.telemetry_opt_in, |sandbox_id| {
+        wxc_common::state_aware_operation::StateAwareOperation::Start { sandbox_id }
+    })
+    .map_err(Error::from)?;
     run_typed_state_aware(input, options, true)?
         .into_validation()
         .map_err(Error::from)
@@ -821,12 +821,12 @@ pub fn validate_start(
 /// Stop a state-aware sandbox from typed Rust SDK data.
 pub fn stop_sandbox(
     sandbox_id: &SandboxId,
-    request: LifecycleRequest,
     options: OperationOptions,
 ) -> Result<LifecycleResult, Error> {
-    let input = request
-        .into_stop_input(sandbox_id, options.telemetry_opt_in)
-        .map_err(Error::from)?;
+    let input = lifecycle_sdk_input(sandbox_id, options.telemetry_opt_in, |sandbox_id| {
+        wxc_common::state_aware_operation::StateAwareOperation::Stop { sandbox_id }
+    })
+    .map_err(Error::from)?;
     run_typed_state_aware(input, options, false)?
         .into_lifecycle()
         .map_err(Error::from)
@@ -835,12 +835,12 @@ pub fn stop_sandbox(
 /// Validate a typed stop request without stopping the sandbox.
 pub fn validate_stop(
     sandbox_id: &SandboxId,
-    request: LifecycleRequest,
     options: OperationOptions,
 ) -> Result<ValidationResult, Error> {
-    let input = request
-        .into_stop_input(sandbox_id, options.telemetry_opt_in)
-        .map_err(Error::from)?;
+    let input = lifecycle_sdk_input(sandbox_id, options.telemetry_opt_in, |sandbox_id| {
+        wxc_common::state_aware_operation::StateAwareOperation::Stop { sandbox_id }
+    })
+    .map_err(Error::from)?;
     run_typed_state_aware(input, options, true)?
         .into_validation()
         .map_err(Error::from)
@@ -849,12 +849,12 @@ pub fn validate_stop(
 /// Deprovision a state-aware sandbox from typed Rust SDK data.
 pub fn deprovision_sandbox(
     sandbox_id: &SandboxId,
-    request: LifecycleRequest,
     options: OperationOptions,
 ) -> Result<LifecycleResult, Error> {
-    let input = request
-        .into_deprovision_input(sandbox_id, options.telemetry_opt_in)
-        .map_err(Error::from)?;
+    let input = lifecycle_sdk_input(sandbox_id, options.telemetry_opt_in, |sandbox_id| {
+        wxc_common::state_aware_operation::StateAwareOperation::Deprovision { sandbox_id }
+    })
+    .map_err(Error::from)?;
     run_typed_state_aware(input, options, false)?
         .into_lifecycle()
         .map_err(Error::from)
@@ -863,12 +863,12 @@ pub fn deprovision_sandbox(
 /// Validate a typed deprovision request without deprovisioning the sandbox.
 pub fn validate_deprovision(
     sandbox_id: &SandboxId,
-    request: LifecycleRequest,
     options: OperationOptions,
 ) -> Result<ValidationResult, Error> {
-    let input = request
-        .into_deprovision_input(sandbox_id, options.telemetry_opt_in)
-        .map_err(Error::from)?;
+    let input = lifecycle_sdk_input(sandbox_id, options.telemetry_opt_in, |sandbox_id| {
+        wxc_common::state_aware_operation::StateAwareOperation::Deprovision { sandbox_id }
+    })
+    .map_err(Error::from)?;
     run_typed_state_aware(input, options, true)?
         .into_validation()
         .map_err(Error::from)
@@ -970,7 +970,7 @@ mod tests {
         NetworkPortSection, NetworkProtocol, NetworkRuleSection, NetworkSection,
     };
     use crate::state_aware_sdk::{
-        ExecRequest, LifecycleRequest, ProvisionRequest, SandboxId, StateAwareExecBackendOptions,
+        lifecycle_sdk_input, ExecRequest, ProvisionRequest, SandboxId, StateAwareExecBackendOptions,
     };
     use wxc_common::mxc_error::MxcErrorCode;
     use wxc_common::sdk_input::SdkStateAwareInput;
@@ -1021,19 +1021,24 @@ mod tests {
             let options = OperationOptions::default().with_telemetry_opt_in(enabled);
             let telemetry_opt_in = options.telemetry_opt_in;
             let inputs = [
-                ProvisionRequest::wslc("0.9.0-alpha", None, None)
+                ProvisionRequest::wslc(None, None)
                     .into_sdk_input(telemetry_opt_in)
                     .unwrap(),
-                LifecycleRequest::new("0.9.0-alpha")
-                    .into_start_input(&sandbox_id, telemetry_opt_in)
-                    .unwrap(),
-                LifecycleRequest::new("0.9.0-alpha")
-                    .into_stop_input(&sandbox_id, telemetry_opt_in)
-                    .unwrap(),
-                LifecycleRequest::new("0.9.0-alpha")
-                    .into_deprovision_input(&sandbox_id, telemetry_opt_in)
-                    .unwrap(),
-                ExecRequest::new("0.9.0-alpha", "echo hello")
+                lifecycle_sdk_input(&sandbox_id, telemetry_opt_in, |sandbox_id| {
+                    wxc_common::state_aware_operation::StateAwareOperation::Start { sandbox_id }
+                })
+                .unwrap(),
+                lifecycle_sdk_input(&sandbox_id, telemetry_opt_in, |sandbox_id| {
+                    wxc_common::state_aware_operation::StateAwareOperation::Stop { sandbox_id }
+                })
+                .unwrap(),
+                lifecycle_sdk_input(&sandbox_id, telemetry_opt_in, |sandbox_id| {
+                    wxc_common::state_aware_operation::StateAwareOperation::Deprovision {
+                        sandbox_id,
+                    }
+                })
+                .unwrap(),
+                ExecRequest::new("echo hello")
                     .into_sdk_input(&sandbox_id, telemetry_opt_in)
                     .unwrap(),
             ];
@@ -1047,7 +1052,7 @@ mod tests {
     fn typed_requests_match_exact_json_without_source_attribution() {
         assert_typed_matches_exact(
             r#"{
-                "version":"0.9.0-alpha",
+                "version":"1.0.0",
                 "phase":"provision",
                 "containment":"isolation_session",
                 "network":{
@@ -1056,14 +1061,14 @@ mod tests {
                 },
                 "isolationSession":{"provision":{"appId":"example"}}
             }"#,
-            ProvisionRequest::isolation_session("0.9.0-alpha", Some("example".to_string()))
+            ProvisionRequest::isolation_session(Some("example".to_string()))
                 .into_sdk_input(None)
                 .unwrap(),
         );
 
         assert_typed_matches_exact(
             r#"{
-                "version":"0.9.0-alpha",
+                "version":"1.0.0",
                 "phase":"provision",
                 "containment":"isolation_session",
                 "network":{
@@ -1071,14 +1076,14 @@ mod tests {
                     "ingress":{"default":"allow","hostLoopback":"allow"}
                 }
             }"#,
-            ProvisionRequest::isolation_session("0.9.0-alpha", None)
+            ProvisionRequest::isolation_session(None)
                 .into_sdk_input(None)
                 .unwrap(),
         );
 
         assert_typed_matches_exact(
             r#"{
-                "version":"0.9.0-alpha",
+                "version":"1.0.0",
                 "phase":"provision",
                 "containment":"isolation_session",
                 "network":{
@@ -1087,20 +1092,19 @@ mod tests {
                 },
                 "isolationSession":{"provision":{"appId":""}}
             }"#,
-            ProvisionRequest::isolation_session("0.9.0-alpha", Some(String::new()))
+            ProvisionRequest::isolation_session(Some(String::new()))
                 .into_sdk_input(None)
                 .unwrap(),
         );
 
         assert_typed_matches_exact(
             r#"{
-                "version":"0.9.0-alpha",
+                "version":"1.0.0",
                 "phase":"provision",
                 "containment":"wslc",
                 "wslc":{"provision":{"image":"python:3.12","imageTarPath":"image.tar"}}
             }"#,
             ProvisionRequest::wslc(
-                "0.9.0-alpha",
                 Some("python:3.12".to_string()),
                 Some("image.tar".to_string()),
             )
@@ -1110,29 +1114,29 @@ mod tests {
 
         assert_typed_matches_exact(
             r#"{
-                "version":"0.9.0-alpha",
+                "version":"1.0.0",
                 "phase":"provision",
                 "containment":"wslc"
             }"#,
-            ProvisionRequest::wslc("0.9.0-alpha", None, None)
+            ProvisionRequest::wslc(None, None)
                 .into_sdk_input(None)
                 .unwrap(),
         );
 
         assert_typed_matches_exact(
             r#"{
-                "version":"0.9.0-alpha",
+                "version":"1.0.0",
                 "phase":"provision",
                 "containment":"wslc",
                 "wslc":{"provision":{"image":"","imageTarPath":""}}
             }"#,
-            ProvisionRequest::wslc("0.9.0-alpha", Some(String::new()), Some(String::new()))
+            ProvisionRequest::wslc(Some(String::new()), Some(String::new()))
                 .into_sdk_input(None)
                 .unwrap(),
         );
 
         let mut filesystem_provision =
-            ProvisionRequest::wslc("0.9.0-alpha", Some("python:3.12".to_string()), None);
+            ProvisionRequest::wslc(Some("python:3.12".to_string()), None);
         filesystem_provision.set_filesystem(FilesystemSection {
             readwrite_paths: vec!["/tmp/readwrite".to_string()],
             readonly_paths: vec!["/tmp/readonly".to_string()],
@@ -1141,7 +1145,7 @@ mod tests {
         });
         assert_typed_matches_exact(
             r#"{
-                "version":"0.9.0-alpha",
+                "version":"1.0.0",
                 "phase":"provision",
                 "containment":"wslc",
                 "wslc":{"provision":{"image":"python:3.12"}},
@@ -1155,10 +1159,10 @@ mod tests {
         );
 
         for enabled in [true, false] {
-            let telemetry_provision = ProvisionRequest::wslc("0.9.0-alpha", None, None);
+            let telemetry_provision = ProvisionRequest::wslc(None, None);
             let json = format!(
                 r#"{{
-                    "version":"0.9.0-alpha",
+                    "version":"1.0.0",
                     "phase":"provision",
                     "containment":"wslc",
                     "telemetry":{{"enabled":{enabled}}}
@@ -1170,48 +1174,42 @@ mod tests {
             );
         }
 
-        assert_typed_matches_exact(
-            r#"{
-                "version":"1.1.0-alpha",
-                "phase":"provision",
-                "containment":"windows_sandbox"
-            }"#,
-            ProvisionRequest::windows_sandbox("1.1.0-alpha")
-                .into_sdk_input(None)
-                .unwrap(),
-        );
-
         for (json, input) in [
             (
-                r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"iso:abc"}"#,
-                LifecycleRequest::new("0.9.0-alpha")
-                    .into_start_input(&SandboxId::parse("iso:abc").unwrap(), None)
-                    .unwrap(),
+                r#"{"version":"1.0.0","phase":"start","sandboxId":"iso:abc"}"#,
+                lifecycle_sdk_input(&SandboxId::parse("iso:abc").unwrap(), None, |sandbox_id| {
+                    wxc_common::state_aware_operation::StateAwareOperation::Start { sandbox_id }
+                })
+                .unwrap(),
             ),
             (
-                r#"{"version":"0.9.0-alpha","phase":"stop","sandboxId":"iso:abc"}"#,
-                LifecycleRequest::new("0.9.0-alpha")
-                    .into_stop_input(&SandboxId::parse("iso:abc").unwrap(), None)
-                    .unwrap(),
+                r#"{"version":"1.0.0","phase":"stop","sandboxId":"iso:abc"}"#,
+                lifecycle_sdk_input(&SandboxId::parse("iso:abc").unwrap(), None, |sandbox_id| {
+                    wxc_common::state_aware_operation::StateAwareOperation::Stop { sandbox_id }
+                })
+                .unwrap(),
             ),
             (
-                r#"{"version":"0.9.0-alpha","phase":"deprovision","sandboxId":"iso:abc"}"#,
-                LifecycleRequest::new("0.9.0-alpha")
-                    .into_deprovision_input(&SandboxId::parse("iso:abc").unwrap(), None)
-                    .unwrap(),
+                r#"{"version":"1.0.0","phase":"deprovision","sandboxId":"iso:abc"}"#,
+                lifecycle_sdk_input(&SandboxId::parse("iso:abc").unwrap(), None, |sandbox_id| {
+                    wxc_common::state_aware_operation::StateAwareOperation::Deprovision {
+                        sandbox_id,
+                    }
+                })
+                .unwrap(),
             ),
         ] {
             assert_typed_matches_exact(json, input);
         }
 
-        let mut exec = ExecRequest::new("0.9.0-alpha", "echo configured");
+        let mut exec = ExecRequest::new("echo configured");
         exec.set_working_directory("C:\\work")
             .set_environment([("A", "one"), ("B", "two")])
             .inherit_default_env(false)
             .set_timeout(1234);
         assert_typed_matches_exact(
             r#"{
-                "version":"0.9.0-alpha",
+                "version":"1.0.0",
                 "phase":"exec",
                 "sandboxId":"iso:abc",
                 "process":{
@@ -1243,12 +1241,11 @@ mod tests {
             }),
             ..Default::default()
         };
-        let mut network_provision =
-            ProvisionRequest::wslc("0.9.0-alpha", Some("python:3.12".to_string()), None);
+        let mut network_provision = ProvisionRequest::wslc(Some("python:3.12".to_string()), None);
         network_provision.set_network(network);
         assert_typed_matches_exact(
             r#"{
-                "version":"0.9.0-alpha",
+                "version":"1.0.0",
                 "phase":"provision",
                 "containment":"wslc",
                 "wslc":{"provision":{"image":"python:3.12"}},
@@ -1273,11 +1270,11 @@ mod tests {
         );
 
         let mut empty_network_provision =
-            ProvisionRequest::wslc("0.9.0-alpha", Some("python:3.12".to_string()), None);
+            ProvisionRequest::wslc(Some("python:3.12".to_string()), None);
         empty_network_provision.set_network(NetworkSection::default());
         assert_typed_matches_exact(
             r#"{
-                "version":"0.9.0-alpha",
+                "version":"1.0.0",
                 "phase":"provision",
                 "containment":"wslc",
                 "wslc":{"provision":{"image":"python:3.12"}},
@@ -1286,13 +1283,13 @@ mod tests {
             empty_network_provision.into_sdk_input(None).unwrap(),
         );
 
-        let mut proxy_exec = ExecRequest::new("0.9.0-alpha", "echo proxied");
+        let mut proxy_exec = ExecRequest::new("echo proxied");
         proxy_exec.set_backend_options(StateAwareExecBackendOptions::Wslc {
             network_proxy: "http://127.0.0.1:8080".to_string(),
         });
         assert_typed_matches_exact(
             r#"{
-                "version":"0.9.0-alpha",
+                "version":"1.0.0",
                 "phase":"exec",
                 "sandboxId":"wslc:abc",
                 "process":{"commandLine":"echo proxied"},
@@ -1307,7 +1304,7 @@ mod tests {
     #[test]
     fn typed_provision_rejects_clear_policy_on_exit() {
         for enabled in [true, false] {
-            let mut request = ProvisionRequest::wslc("0.9.0-alpha", None, None);
+            let mut request = ProvisionRequest::wslc(None, None);
             request.set_filesystem(FilesystemSection {
                 clear_policy_on_exit: Some(enabled),
                 ..Default::default()

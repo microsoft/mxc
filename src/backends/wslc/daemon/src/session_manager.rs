@@ -17,8 +17,9 @@
 //! elapses.
 //!
 //! Each phase drives the real WSLc SDK via the reusable steps in
-//! [`wslc_common::container_steps`]: `provision` ensures the session + resolves
-//! the image + creates a container with a keepalive init process; `start` boots
+//! [`wslc_common::container_steps`] and [`wslc_common::image`]: `provision`
+//! ensures the session + resolves the image + creates a container with a
+//! keepalive init process; `start` boots
 //! it; `exec` runs a fresh `WslcCreateContainerProcess` to completion, streaming
 //! its stdout/stderr live to the pipe handler via an [`OutputSink`]; `stop` /
 //! `deprovision` stop + delete. The completion reply carries the exit code;
@@ -27,6 +28,7 @@
 use std::collections::{hash_map::Entry, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 use anyhow::Result;
 use tokio::sync::mpsc::error::TrySendError;
@@ -37,6 +39,7 @@ use wslc_common::daemon_protocol::{
     DeprovisionConfig, ErrKind, ExecConfig, ExecTerminal, NetworkMode, ProvisionConfig,
     StartConfig, StopConfig,
 };
+use wslc_common::image;
 use wslc_common::policy_mapping;
 use wslc_common::process_env::EnvScope;
 use wslc_common::wslc_bindings::{
@@ -48,8 +51,11 @@ use wxc_common::models::{FailurePhase, ScriptResponse};
 /// Fixed name of the single WSL2 utility-VM session the daemon owns.
 const SESSION_NAME: &str = "mxc-wslc-daemon";
 
+/// How long teardown waits for an abandoned pull before giving up on it.
+const PULL_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Default on-disk WSLc image/session store. Matches the one-shot runner's
-/// default so images pre-pulled via `setup-wslc.ps1` are found by the daemon.
+/// default so both surfaces read and fill the same cache.
 fn default_storage_path() -> String {
     std::env::temp_dir()
         .join("mxc-wslc-sessions")
@@ -158,6 +164,16 @@ pub enum WorkerCommand {
     Deprovision {
         config: DeprovisionConfig,
         reply: oneshot::Sender<Result<(), WorkerError>>,
+    },
+    /// Report a parked provision's pull, from the pull thread or its deadline.
+    PullFinished {
+        token: u64,
+        outcome: Result<(), ScriptResponse>,
+    },
+    /// Give up on a sandbox whose provision reply never reached a client.
+    Retire {
+        sandbox_id: String,
+        reply: oneshot::Sender<()>,
     },
     /// Report the current live-container count (drives the idle watchdog).
     ContainerCount { reply: oneshot::Sender<usize> },
@@ -416,6 +432,14 @@ impl SessionHandle {
         rx.await.map_err(worker_gone)
     }
 
+    /// Stop counting a sandbox that no client can reach, so the idle watchdog
+    /// can shut the daemon down.
+    pub async fn retire(&self, sandbox_id: String) -> Result<(), WorkerError> {
+        let (reply, rx) = oneshot::channel();
+        self.send(WorkerCommand::Retire { sandbox_id, reply })?;
+        rx.await.map_err(worker_gone)
+    }
+
     /// Ask the worker to release everything and stop. Awaits confirmation.
     pub async fn shutdown(&self) -> Result<(), WorkerError> {
         let (reply, rx) = oneshot::channel();
@@ -441,7 +465,23 @@ fn worker_gone(_e: oneshot::error::RecvError) -> WorkerError {
 struct ContainerEntry {
     started: bool,
     quarantined: bool,
+
+    /// Set when a sandbox's provision reply never reached a client, so nobody
+    /// can deprovision it.
+    ///
+    /// Kept in the map rather than dropped so [`Worker::shutdown`] still stops
+    /// and deletes the container.
+    retired: bool,
     container: WslcContainerGuard,
+}
+
+/// A provision waiting on its image to arrive from a registry.
+struct PendingProvision {
+    config: ProvisionConfig,
+    reply: oneshot::Sender<Result<String, WorkerError>>,
+
+    /// Held only so dropping this entry retires the deadline thread.
+    _retire_deadline: std::sync::mpsc::Sender<()>,
 }
 
 /// The single-threaded WSLc session owner. Constructed and run entirely on the
@@ -455,6 +495,8 @@ struct Worker {
     // hold handles whose Drop calls into the SDK, so they must drop before `sdk`
     // unloads `wslcsdk.dll`.
     containers: HashMap<String, ContainerEntry>,
+    pending: HashMap<u64, PendingProvision>,
+    next_pull_token: u64,
     session: Option<WslcSessionGuard>,
     sdk: Option<WslcSdk>,
 }
@@ -466,6 +508,8 @@ impl Worker {
             sdk: None,
             session: None,
             containers: HashMap::new(),
+            pending: HashMap::new(),
+            next_pull_token: 0,
         }
     }
 
@@ -495,9 +539,164 @@ impl Worker {
         Ok(())
     }
 
-    fn provision(&mut self, config: ProvisionConfig) -> Result<String, WorkerError> {
-        self.ensure_session()?;
+    /// Start a provision, parking it if the image has to be pulled.
+    ///
+    /// Returning without replying is what keeps this thread free: the pull runs
+    /// elsewhere and posts [`WorkerCommand::PullFinished`] when it lands, so
+    /// every other sandbox keeps being served while a registry is slow.
+    fn begin_provision(
+        &mut self,
+        config: ProvisionConfig,
+        reply: oneshot::Sender<Result<String, WorkerError>>,
+        worker: &mpsc::UnboundedSender<WorkerCommand>,
+    ) {
+        if let Err(e) = self.ensure_session() {
+            let _ = reply.send(Err(e));
+            return;
+        }
 
+        let sdk = self.sdk.as_ref().expect("session ensured");
+        let session = self.session.as_ref().expect("session ensured").as_raw();
+
+        // SAFETY: `sdk`/`session` are valid.
+        let step = unsafe {
+            image::begin_resolve(
+                sdk,
+                session,
+                &config.image,
+                config.image_tar_path.as_deref(),
+                None,
+                match config.network {
+                    NetworkMode::None => image::RegistryAccess::Denied,
+                    NetworkMode::Bridged => image::RegistryAccess::Allowed,
+                },
+                "[WSLC][daemon]",
+                &mut self.logger,
+            )
+        };
+        let step = match step {
+            Ok(step) => step,
+            Err(e) => {
+                let _ = reply.send(Err(sr_err(e)));
+                return;
+            }
+        };
+
+        match step {
+            image::ImageStep::Ready => {
+                let _ = reply.send(self.create_provisioned_container(&config));
+            }
+            image::ImageStep::Pull => {
+                let token = self.next_pull_token;
+                self.next_pull_token += 1;
+
+                let done = worker.clone();
+                let started = unsafe {
+                    image::start_pull(
+                        sdk,
+                        session,
+                        &config.image,
+                        None,
+                        "[WSLC][daemon]",
+                        move |outcome| {
+                            let _ = done.send(WorkerCommand::PullFinished { token, outcome });
+                        },
+                    )
+                };
+                if let Err(e) = started {
+                    let _ = reply.send(Err(sr_err(e)));
+                    return;
+                }
+
+                // Nothing can stop a stalled pull from outside, so the deadline
+                // is enforced by giving up on it rather than by ending it.
+                let budget = image::daemon_pull_budget();
+                let image_name = config.image.clone();
+                let expired = worker.clone();
+                let (retire_deadline, retired) = std::sync::mpsc::channel::<()>();
+                let armed = std::thread::Builder::new()
+                    .name("wslc-pull-deadline".to_string())
+                    .spawn(move || {
+                        // A pull that lands first drops the sender, so this
+                        // returns rather than sleeping out the budget.
+                        if retired.recv_timeout(budget)
+                            != Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                        {
+                            return;
+                        }
+                        let _ = expired.send(WorkerCommand::PullFinished {
+                            token,
+                            outcome: Err(image::pull_deadline_expired(&image_name, budget)),
+                        });
+                    });
+
+                if armed.is_err() {
+                    // Parking without a deadline is how a provision waits
+                    // forever, so refuse instead. The pull carries on and warms
+                    // the cache for a retry.
+                    let _ = reply.send(Err(WorkerError::Backend(anyhow::anyhow!(
+                        "could not arm the pull deadline for image '{}'",
+                        config.image
+                    ))));
+                    return;
+                }
+
+                self.pending.insert(
+                    token,
+                    PendingProvision {
+                        config,
+                        reply,
+                        _retire_deadline: retire_deadline,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Resume a parked provision once its pull reported, or its deadline did.
+    ///
+    /// An unknown token is the loser of that race, and has nothing left to do.
+    fn finish_provision(&mut self, token: u64, outcome: Result<(), ScriptResponse>) {
+        let Some(PendingProvision {
+            config,
+            reply,
+            _retire_deadline: _,
+        }) = self.pending.remove(&token)
+        else {
+            return;
+        };
+
+        if let Err(e) = outcome {
+            let _ = reply.send(Err(sr_err(e)));
+            return;
+        }
+
+        let sdk = self.sdk.as_ref().expect("session ensured");
+        let session = self.session.as_ref().expect("session ensured").as_raw();
+
+        // SAFETY: `sdk`/`session` are valid.
+        if let Err(e) = unsafe {
+            image::report_pulled_digest(
+                sdk,
+                session,
+                &config.image,
+                "[WSLC][daemon]",
+                &mut self.logger,
+            )
+        } {
+            let _ = reply.send(Err(sr_err(e)));
+            return;
+        }
+
+        let _ = reply.send(self.create_provisioned_container(&config));
+    }
+
+    /// Everything after the image is in the store: create the container and
+    /// register it under a fresh sandbox id.
+    fn create_provisioned_container(
+        &mut self,
+        config: &ProvisionConfig,
+    ) -> Result<String, WorkerError> {
         let sdk = self.sdk.as_ref().expect("session ensured");
         let session = self.session.as_ref().expect("session ensured").as_raw();
 
@@ -520,16 +719,6 @@ impl Worker {
         // SAFETY: `sdk`/`session` are valid; every buffer the SDK stores pointers
         // into is owned by a stationary local (`keepalive`) until create returns.
         let container = unsafe {
-            container_steps::resolve_image(
-                sdk,
-                session,
-                &config.image,
-                config.image_tar_path.as_deref(),
-                None,
-                &mut self.logger,
-            )
-            .map_err(sr_err)?;
-
             // Merge keeps the keepalive out of `env -i`, so a container whose
             // execs never replace an environment does not need `/usr/bin/env`
             // in its image.
@@ -560,6 +749,7 @@ impl Worker {
             ContainerEntry {
                 started: false,
                 quarantined: false,
+                retired: false,
                 container,
             },
         );
@@ -727,6 +917,22 @@ impl Worker {
         Ok(())
     }
 
+    /// Stop counting a sandbox that no client can reach.
+    fn retire(&mut self, sandbox_id: &str) {
+        if let Some(entry) = self.containers.get_mut(sandbox_id) {
+            entry.retired = true;
+        }
+    }
+
+    /// Containers a client could still act on.
+    ///
+    /// Drives the idle watchdog, which shuts the daemon down only at zero. A
+    /// parked provision has no container yet, so counting it keeps the daemon
+    /// alive for the client still waiting on its pull.
+    fn live_container_count(&self) -> usize {
+        self.containers.values().filter(|e| !e.retired).count() + self.pending.len()
+    }
+
     fn deprovision(&mut self, config: DeprovisionConfig) -> Result<(), WorkerError> {
         let container_raw = match self.containers.get(&config.sandbox_id) {
             Some(e) => e.container.as_raw(),
@@ -752,7 +958,18 @@ impl Worker {
         Ok(())
     }
 
+    /// Release every container and the session.
+    ///
+    /// A parked provision is answered rather than dropped, since a dropped
+    /// reply reaches its client as a bare "worker gone".
     fn shutdown(&mut self) {
+        for (_, pending) in self.pending.drain() {
+            let _ = pending.reply.send(Err(WorkerError::Backend(anyhow::anyhow!(
+                "the WSLc daemon shut down while pulling image '{}'",
+                pending.config.image
+            ))));
+        }
+
         if let Some(sdk) = self.sdk.as_ref() {
             for (_, entry) in self.containers.drain() {
                 // SAFETY: `sdk` is valid and `entry.container` is a live handle.
@@ -775,6 +992,20 @@ impl Worker {
         } else {
             self.containers.clear();
         }
+
+        // An abandoned pull is still using this session, so releasing it now
+        // would free memory the SDK holds. The leaked handles cost one
+        // process's worth of memory until it exits.
+        if !image::wait_for_pulls_in_flight(PULL_DRAIN_TIMEOUT) {
+            self.logger.log_line(
+                "a WSLC image pull is still running; leaking the session rather than \
+                 releasing a handle it is using",
+            );
+            std::mem::forget(self.session.take());
+            std::mem::forget(self.sdk.take());
+            return;
+        }
+
         // Session guard drops before the SDK unloads the DLL.
         self.session = None;
         self.sdk = None;
@@ -789,6 +1020,9 @@ impl Worker {
 pub fn spawn() -> Result<SessionHandle> {
     let (tx, mut rx) = mpsc::unbounded_channel::<WorkerCommand>();
     let active_execs = Arc::new(Mutex::new(HashMap::new()));
+
+    // A parked provision resumes by posting back into this queue.
+    let worker_tx = tx.clone();
 
     std::thread::Builder::new()
         .name("wslc-session-worker".to_string())
@@ -806,7 +1040,10 @@ pub fn spawn() -> Result<SessionHandle> {
             while let Some(cmd) = rx.blocking_recv() {
                 match cmd {
                     WorkerCommand::Provision { config, reply } => {
-                        let _ = reply.send(worker.provision(config));
+                        worker.begin_provision(config, reply, &worker_tx);
+                    }
+                    WorkerCommand::PullFinished { token, outcome } => {
+                        worker.finish_provision(token, outcome);
                     }
                     WorkerCommand::Start { config, reply } => {
                         let _ = reply.send(worker.start(config));
@@ -858,8 +1095,12 @@ pub fn spawn() -> Result<SessionHandle> {
                     WorkerCommand::Deprovision { config, reply } => {
                         let _ = reply.send(worker.deprovision(config));
                     }
+                    WorkerCommand::Retire { sandbox_id, reply } => {
+                        worker.retire(&sandbox_id);
+                        let _ = reply.send(());
+                    }
                     WorkerCommand::ContainerCount { reply } => {
-                        let _ = reply.send(worker.containers.len());
+                        let _ = reply.send(worker.live_container_count());
                     }
                     WorkerCommand::Shutdown { reply } => {
                         worker.shutdown();
@@ -913,6 +1154,150 @@ mod tests {
     }
 
     // ---- No-WSL unit tests (run everywhere, never touch the SDK) ----
+
+    /// Build a worker entry around a handle that is never dereferenced.
+    fn test_entry(retired: bool) -> ContainerEntry {
+        unsafe extern "C" fn release_noop(_: wslc_common::wslc_bindings::WslcContainer) -> i32 {
+            0
+        }
+
+        // Non-null only because the guard rejects null; the value is never used
+        // as a pointer.
+        let sentinel = std::ptr::dangling_mut();
+        ContainerEntry {
+            started: false,
+            quarantined: false,
+            retired,
+            // SAFETY: `release_noop` never dereferences the handle, so the guard
+            // owns a value it can release without touching memory.
+            container: unsafe { WslcContainerGuard::from_raw(sentinel, release_noop) },
+        }
+    }
+
+    /// A parked provision has no container yet, so the watchdog would retire
+    /// the daemon out from under the client still waiting on its pull.
+    /// A timer that outlived its pull would sit for the rest of the budget, so
+    /// sequential cache misses would pile up sleeping threads.
+    #[test]
+    fn a_pull_that_lands_first_retires_its_deadline_thread() {
+        let (retire_deadline, retired) = std::sync::mpsc::channel::<()>();
+        let woke = std::thread::spawn(move || {
+            retired.recv_timeout(Duration::from_secs(30))
+                == Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        });
+
+        drop(retire_deadline);
+
+        assert!(
+            woke.join().expect("timer thread"),
+            "dropping the parked provision must wake its deadline immediately"
+        );
+    }
+
+    #[test]
+    fn a_pending_pull_keeps_the_daemon_alive() {
+        let mut worker = Worker::new();
+        assert_eq!(worker.live_container_count(), 0);
+
+        let (reply, _rx) = oneshot::channel();
+        worker.pending.insert(
+            7,
+            PendingProvision {
+                config: ProvisionConfig {
+                    image: "alpine:latest".to_string(),
+                    image_tar_path: None,
+                    volumes: Vec::new(),
+                    network: Default::default(),
+                },
+                reply,
+                _retire_deadline: std::sync::mpsc::channel().0,
+            },
+        );
+
+        assert_eq!(
+            worker.live_container_count(),
+            1,
+            "a provision still waiting on its image must hold the daemon open"
+        );
+    }
+
+    /// The pull and its deadline race, and both report.
+    #[test]
+    fn only_the_first_report_of_a_pull_answers_the_client() {
+        let mut worker = Worker::new();
+        let (reply, mut rx) = oneshot::channel();
+        worker.pending.insert(
+            3,
+            PendingProvision {
+                config: ProvisionConfig {
+                    image: "alpine:latest".to_string(),
+                    image_tar_path: None,
+                    volumes: Vec::new(),
+                    network: Default::default(),
+                },
+                reply,
+                _retire_deadline: std::sync::mpsc::channel().0,
+            },
+        );
+
+        worker.finish_provision(
+            3,
+            Err(image::pull_deadline_expired(
+                "alpine:latest",
+                PULL_DRAIN_TIMEOUT,
+            )),
+        );
+        assert!(rx.try_recv().is_ok(), "the first report answers the client");
+
+        // The loser of the race: nothing left to answer, and no panic.
+        worker.finish_provision(3, Ok(()));
+        assert_eq!(worker.live_container_count(), 0);
+    }
+
+    #[test]
+    fn a_retired_sandbox_stops_holding_the_daemon_open() {
+        let mut worker = Worker::new();
+        worker
+            .containers
+            .insert("wslc:orphan".to_string(), test_entry(false));
+        assert_eq!(worker.live_container_count(), 1);
+
+        worker.retire("wslc:orphan");
+
+        assert_eq!(
+            worker.live_container_count(),
+            0,
+            "a retired sandbox must not keep the daemon alive"
+        );
+        assert!(
+            worker.containers.contains_key("wslc:orphan"),
+            "the handle stays so shutdown can still delete the container"
+        );
+    }
+
+    #[test]
+    fn retiring_one_sandbox_leaves_the_others_counted() {
+        let mut worker = Worker::new();
+        worker
+            .containers
+            .insert("wslc:orphan".to_string(), test_entry(false));
+        worker
+            .containers
+            .insert("wslc:live".to_string(), test_entry(false));
+
+        worker.retire("wslc:orphan");
+
+        assert_eq!(worker.live_container_count(), 1);
+    }
+
+    /// Retirement is driven by a failed release, which can name a sandbox that
+    /// is already gone.
+    #[test]
+    fn retiring_an_unknown_sandbox_is_a_no_op() {
+        let mut worker = Worker::new();
+        worker.retire("wslc:never-existed");
+        assert_eq!(worker.live_container_count(), 0);
+    }
 
     #[test]
     fn sr_err_carries_the_step_failure_phase() {
@@ -1198,12 +1583,12 @@ mod tests {
     //
     // Exercises the real SDK path end to end: provision (boot VM + create
     // container) → start → exec → stop → deprovision → refcount back to 0. It
-    // needs a WSL2 host with `alpine:latest` pre-pulled into the daemon session
-    // cache (`%TEMP%\mxc-wslc-sessions`, e.g. via `scripts\setup-wslc.ps1
-    // -Image alpine:latest`), so it is `#[ignore]`d and run explicitly with
+    // provisions with the default isolated posture, which refuses a registry
+    // pull, so `alpine:latest` has to be in the daemon session cache already
+    // (`%TEMP%\mxc-wslc-sessions`). It is `#[ignore]`d and run explicitly with
     // `cargo test -p wxc_wslc_daemon -- --ignored`.
     #[tokio::test]
-    #[ignore = "requires a WSL2 host with alpine:latest pre-pulled into the daemon session cache"]
+    #[ignore = "requires a WSL2 host with alpine:latest already in the daemon session cache"]
     async fn full_lifecycle_on_wsl_host() {
         let handle = spawn().unwrap();
         assert_eq!(count(&handle).await, 0);
@@ -1267,7 +1652,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires a WSL2 host with alpine:latest pre-pulled into the daemon session cache"]
+    #[ignore = "requires a WSL2 host with alpine:latest already in the daemon session cache"]
     async fn cancelled_queued_exec_never_starts_process() {
         let handle = spawn().unwrap();
         let id = handle
