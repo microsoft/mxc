@@ -18,6 +18,8 @@ use mxc_ffi::{
     mxc_error_detail_free, mxc_probe_request_json, mxc_probe_request_json_with_error,
     mxc_probe_sandbox_request_json_with_error, MxcErrorDetail,
 };
+#[cfg(target_os = "linux")]
+use mxc_ffi::{mxc_error_detail_free, mxc_spawn_request, MxcErrorDetail, MxcSandbox};
 
 /// An empty, all-null result to hand to `mxc_run_request`.
 fn zeroed_result() -> MxcRunResult {
@@ -313,17 +315,17 @@ fn extern_run_executes_command() {
     unsafe { mxc_run_result_free(&mut out) };
 }
 
-/// Pins that the C ABI routes an LXC request into the LXC backend rather than
-/// refusing the containment. The empty distribution is a backstop: whichever of
-/// LXC's own refusals fires first, all are reached only through that arm and
-/// all come before a container is created, so the answer is the same on every
-/// Linux host and nothing is left behind.
+/// Pins that `mxc_spawn_request` reaches the LXC backend rather than refusing
+/// the containment.
+///
+/// The empty distribution makes LXC refuse before creating a container, so the
+/// result is the same on every Linux host.
 #[cfg(target_os = "linux")]
 #[test]
 fn extern_spawn_request_reaches_the_lxc_backend() {
     let request = CString::new(
         r#"{
-            "policy": { "version": "0.7.0-alpha" },
+            "policy": {},
             "command": "echo hello-lxc",
             "containment": { "type": "lxc", "distribution": "", "release": "" }
         }"#,

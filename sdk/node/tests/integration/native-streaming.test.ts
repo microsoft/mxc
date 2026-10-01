@@ -236,7 +236,6 @@ describe(`Internal native streaming over LXC (schema ${schemaVersion})`, {
     // to `enforcementMode: 'capabilities'`, which LXC refuses outright.
     const config = sdk.createConfigFromPolicy(
       {
-        version: schemaVersion.raw,
         network: {
           egress: { default: 'deny' },
           ingress: { default: 'deny', hostLoopback: 'deny' },

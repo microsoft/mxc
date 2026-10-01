@@ -161,22 +161,15 @@ fn lxc_request_with_network(
     timeout_ms: u32,
     network: NetworkSection,
 ) -> mxc_sdk::SandboxRequest {
-    let policy = SandboxPolicy {
-        version: "0.8.0-alpha".to_string(),
-        filesystem: Some(FilesystemSection {
-            readwrite_paths: vec!["/tmp".to_string()],
-            readonly_paths: vec![],
-            denied_paths: vec![],
-            clear_policy_on_exit: None,
-        }),
-        network: Some(network),
-        ui: None,
-        timeout_ms: if timeout_ms == 0 {
-            None
-        } else {
-            Some(timeout_ms)
-        },
-    };
+    let mut policy = SandboxPolicy::default();
+    policy.filesystem = Some(FilesystemSection {
+        readwrite_paths: vec!["/tmp".to_string()],
+        readonly_paths: vec![],
+        denied_paths: vec![],
+        clear_policy_on_exit: None,
+    });
+    policy.network = Some(network);
+    policy.timeout_ms = (timeout_ms != 0).then_some(timeout_ms);
     build_request_with_containment(
         &policy,
         &Containment::Lxc(mxc_sdk::configs::Lxc::default()),

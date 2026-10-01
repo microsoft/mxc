@@ -329,9 +329,6 @@ impl LxcContainer {
 
         let (stderr, stderr_canceller) = match wrap_pipe(child.stderr.take()) {
             Ok(pipe) => pipe,
-
-            // Without this the tool keeps running, unreaped, after this call
-            // has reported failure.
             Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -558,8 +555,6 @@ impl LxcContainer {
             force_clear_env,
         ));
 
-        // The drop needs CAP_SETPCAP, which an unprivileged caller lacks, and a
-        // run with no chains has nothing to protect anyway.
         if firewall == ContainerFirewall::Installed {
             confine_network_capabilities(&mut cmd);
         }
@@ -720,8 +715,6 @@ impl LxcContainer {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        // The drop needs CAP_SETPCAP, which an unprivileged caller lacks, and a
-        // run with no chains has nothing to protect anyway.
         if firewall == ContainerFirewall::Installed {
             confine_network_capabilities(&mut cmd);
         }

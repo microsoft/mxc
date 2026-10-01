@@ -13,23 +13,12 @@ namespace Microsoft.Mxc.Sdk.Tests;
 /// <remarks>
 /// The engine's own suite covers the backend; these establish that the managed
 /// type, the request envelope, the C ABI and the native library agree, which is
-/// the part no Rust test can see. LXC reaches the binding with no C# production
-/// code of its own, so without these the path is unverified.
+/// the part no Rust test can see.
 /// </remarks>
 [Collection("MxcLiveHost")]
 public class MxcSandboxLxcE2ETests
 {
-    // `lxc-attach` runs the command through `/bin/sh -c`, so these are bare
-    // shell lines.
-    //
-    // The network policy is stated in the schema 0.8 directional form and
-    // permits nothing, so the container starts with no interface and skips the
-    // DHCP wait. A legacy policy naming no network would default to
-    // `enforcementMode: 'capabilities'`, which LXC refuses outright.
-    //
-    // The timeout bounds the backend's own wait: with none, a wedged attach
-    // would hang this suite until the CI job's cap. A healthy workload here
-    // finishes in well under a second, so it only ever fires on a failure.
+    // A healthy run finishes in under a second, so this only trips on a wedged attach.
     private const int WaitBoundMs = 180_000;
 
     private static SandboxRequest Request(string command, string containerName) =>
@@ -38,6 +27,9 @@ public class MxcSandboxLxcE2ETests
             {
                 Version = "0.9.0-alpha",
                 TimeoutMs = WaitBoundMs,
+
+                // A policy naming no network defaults to `enforcementMode:
+                // 'capabilities'`, which LXC refuses outright.
                 Network = new NetworkPolicy
                 {
                     Egress = new NetworkEgressPolicy { Default = NetworkAction.Deny },
@@ -73,8 +65,7 @@ public class MxcSandboxLxcE2ETests
         LxcHost.Require();
 
         // Blocking on stdin: the workload cannot reach its exit until this test
-        // lets it, so reading the first line proves the output was streamed
-        // rather than buffered until completion.
+        // lets it.
         using var proc = MxcSandbox.Spawn(
             Request(
                 "printf 'mxc_lxc_stream_ok\\n'; IFS= read -r _; printf 'mxc_lxc_done\\n'",
@@ -104,7 +95,7 @@ public class MxcSandboxLxcE2ETests
 
     /// <summary>
     /// Reads one line on a worker thread, so a stream that never delivers fails
-    /// here rather than hanging the job until its workflow timeout.
+    /// here rather than hanging the job.
     /// </summary>
     private static string ReadLineWithin(StreamReader reader, TimeSpan deadline)
     {
