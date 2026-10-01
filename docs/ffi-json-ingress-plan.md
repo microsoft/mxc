@@ -1,13 +1,14 @@
 # FFI JSON-Only Ingress Plan
 
-Status: adopted and implemented as draft pull requests #1349–#1353, stacked
-on #1271. It replaces the typed-structure ingress in #1301, #1302, and #1303,
-which are closed. §9.3, §9.5, and Phase 14 exit criterion 16 of
+Status: adopted and implemented as pull requests #1349–#1353, stacked in a
+straight line on #1355 and #1271. It replaces the typed-structure ingress in
+#1301, #1302, and #1303, which are closed. §9.3, §9.5, and Phase 14 exit
+criterion 16 of
 [`version-aware-stack-plan.md`](version-aware-stack-plan.md) are superseded by
 this plan. The current state of each pull request is recorded in
 [`version-aware-stack-session-handoff-2026-09-30.md`](version-aware-stack-session-handoff-2026-09-30.md).
 
-Updated: September 30, 2026.
+Updated: October 1, 2026.
 
 ## 1. Decision
 
@@ -122,24 +123,25 @@ available only through raw JSON APIs.
 
 ## 4. Pull-request stack
 
-The stack is built on #1271, which also places the contract-mapped SDK types
-in per-major V1 namespaces (§6, decision 4). #1301, #1302, and #1303 are closed.
+The stack is built on #1271, which makes the v1 SDKs own their contract
+version, and #1355, which places the contract-mapped SDK types in per-major V1
+namespaces (§6, decision 4). #1301, #1302, and #1303 are closed.
 
 | PR | Branch | Base | Replaces |
 | --- | --- | --- | --- |
-| A — FFI JSON ingress (#1349) | `user/gudge/rust_ffi_json_ingress` | #1271 | #1301 |
+| V1 namespaces (#1355) | `user/gudge/sdk-v1-namespaces` | #1271 | — |
+| A — FFI JSON ingress (#1349) | `user/gudge/rust_ffi_json_ingress` | #1355 | #1301 |
 | B — Node (#1350) | `user/gudge/node-json-ffi` | A | #1302 |
-| C — .NET (#1351) | `user/gudge/dotnet-json-ffi` | A | #1303 |
-| D — Cleanup (#1352) | `user/gudge/remove-binding-json-ffi` | A, and contains B and C | — |
+| C — .NET (#1351) | `user/gudge/dotnet-json-ffi` | B | #1303 |
+| D — Cleanup (#1352) | `user/gudge/remove-binding-json-ffi` | C | — |
 | E0 — SDK types into `mxc-sdk` (#1353) | `user/gudge/move-sdk-policy-types` | D | — |
 | E — Node experimental API | not started | After B merges | — |
 | F — .NET experimental API | not started | After C merges | — |
 
-A lands first. B and C proceed in parallel, as do E and F. GitHub allows one
-base branch, so D targets A and carries the B and C commits; only its last
-commit is new. A and C are each a single squashed commit. When A changes, B,
-C, D, and E0 are rebased onto it, and each pull request's diff is confirmed
-to contain only its own commits before review.
+The stack is a straight line, and each pull request is a single commit, so
+each one's diff contains only its own change. B and C are independent in
+content but are stacked so D can build on both. When a lower pull request
+changes, every pull request above it is rebased in order.
 
 ### 4.1 A — FFI JSON ingress
 
