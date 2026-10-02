@@ -225,8 +225,7 @@ the discovery API is in
 
 The policy-plus-command overloads select the host's native process-isolation
 backend. Use `SandboxRequest` when the request also needs explicit containment,
-a container name, working directory, environment variables, or experimental
-opt-in:
+a container name, working directory, or environment variables:
 
 ```csharp
 var request = new SandboxRequest(
@@ -255,12 +254,22 @@ By default, a non-null `Environment` dictionary replaces the child's
 environment, including when the dictionary is explicitly empty. Leave it null
 to use the backend default. Set `InheritDefaultEnvironment` to layer a non-null
 dictionary on the backend default instead; on Windows process containers, that
-default is the user profile environment block.
+default is the user profile environment block. Environment entries are emitted
+in dictionary enumeration order, including case-distinct keys when the
+dictionary's comparer permits them. Empty values are preserved; empty keys and
+keys containing `=` are rejected before calling native code. A null
+`ContainerName` mints an ID; supplied empty or whitespace names are passed
+through for backend validation rather than replaced.
 
 `MxcSandbox.Run(request)` and `MxcSandbox.Spawn(request)` pass this complete
-request through the co-versioned native FFI contract. The existing
-`Run(policy, command)` and `Spawn(policy, command)` overloads remain
-compatibility shims.
+request through the exact `1.0.0` native JSON contract. `MxcSandbox.Probe(request)`
+uses the same writer. `SandboxRequest.Experimental` is obsolete: setting it to
+`true` on the stable typed API throws `ArgumentException` before Run, Spawn,
+or Probe calls native code. These calls always pass `experimental = 0`;
+development-only features require a raw exact development-contract request
+through an executor with explicit experimental authorization, not the stable
+typed SDK. The existing `Run(policy, command)` and `Spawn(policy, command)`
+overloads remain compatibility shims.
 
 `SandboxPolicy.CaptureDenials` is obsolete. Migrate existing code to
 `ProcessContainerContainment.CaptureDenials`, as shown below. For compatibility,

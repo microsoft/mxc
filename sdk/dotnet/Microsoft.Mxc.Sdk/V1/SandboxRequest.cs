@@ -32,7 +32,10 @@ public sealed class SandboxRequest
     [JsonPropertyName("containment")]
     public SandboxContainment Containment { get; set; } = new ProcessContainment();
 
-    /// <summary>An optional caller-selected container name.</summary>
+    /// <summary>
+    /// An optional caller-selected container name. Only null mints a name;
+    /// empty or whitespace names are forwarded for backend validation.
+    /// </summary>
     [JsonPropertyName("containerName")]
     public string? ContainerName { get; set; }
 
@@ -51,6 +54,8 @@ public sealed class SandboxRequest
     /// top of the default environment instead. Leave this property null to
     /// give the child the backend's default environment (on Windows, the
     /// user's profile block).
+    /// Entries retain dictionary enumeration order. Keys must be nonempty
+    /// and cannot contain '='; values may be empty.
     /// </remarks>
     [JsonPropertyName("environment")]
     public Dictionary<string, string>? Environment { get; set; }
@@ -70,7 +75,15 @@ public sealed class SandboxRequest
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool InheritDefaultEnvironment { get; set; }
 
-    /// <summary>Opt in to experimental containment backends and features.</summary>
+    /// <summary>
+    /// Obsolete opt-in unsupported by the stable V1 typed request. Setting this
+    /// to true causes Run, Spawn, and Probe to reject the request before calling
+    /// native code. Use a raw exact development-contract request with explicit
+    /// experimental authorization for development-only features.
+    /// </summary>
+    [Obsolete(
+        "Stable V1 typed requests do not support experimental opt-in; use a raw exact development-contract request.",
+        DiagnosticId = "MXC0001")]
     [JsonPropertyName("experimental")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool Experimental { get; set; }

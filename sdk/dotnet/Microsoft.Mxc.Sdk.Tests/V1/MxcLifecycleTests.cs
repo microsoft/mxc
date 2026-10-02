@@ -55,20 +55,44 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void ExecInSandbox_PassesTheExperimentalOptIn()
+    public void ExecInSandbox_RejectsWindowsSandboxIds()
     {
-        // The streaming entry point carries the opt-in on its own path: it and the
-        // envelope phases reach the same gate by different routes, so hardcoding
-        // the flag in one would leave the other green. A `wsb:` id resolves to an
-        // experimental backend without a host, a compiled-in isolation_session
-        // feature, or a provisioned sandbox.
         var ex = Assert.Throws<MxcException>(
             () => MxcLifecycle.ExecInSandbox(new SandboxId("wsb:0a1b2c3d"), "echo hi"));
 
-        Assert.False(
-            ex.Code == ErrorCode.BackendUnavailable
-                && ex.Message.Contains("experimental", StringComparison.OrdinalIgnoreCase),
-            $"the experimental opt-in did not reach the engine: {ex.Code}: {ex.Message}");
+        Assert.Equal(ErrorCode.UnsupportedContainment, ex.Code);
+        Assert.Contains("raw exact 1.1.0-alpha state-aware executor route", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("explicit experimental authorization", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("'wsb:'", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StartSandbox_RejectsWindowsSandboxIds()
+    {
+        var ex = Assert.Throws<MxcException>(
+            () => MxcLifecycle.StartSandbox(new SandboxId("wsb:0a1b2c3d")));
+
+        Assert.Equal(ErrorCode.UnsupportedContainment, ex.Code);
+        Assert.Contains("raw exact 1.1.0-alpha state-aware executor route", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("explicit experimental authorization", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("'wsb:'", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void OtherIdPhases_RejectWindowsSandboxIdsWithRawExactRoute()
+    {
+        var id = new SandboxId("wsb:0a1b2c3d");
+        foreach (var action in new Action[]
+                 {
+                     () => MxcLifecycle.StopSandbox(id),
+                     () => MxcLifecycle.DeprovisionSandbox(id),
+                     () => MxcLifecycle.DryRunExecInSandbox(id, "echo hi"),
+                 })
+        {
+            var ex = Assert.Throws<MxcException>(action);
+            Assert.Equal(ErrorCode.UnsupportedContainment, ex.Code);
+            Assert.Contains("raw exact 1.1.0-alpha", ex.Message, StringComparison.Ordinal);
+        }
     }
 
     [Fact]

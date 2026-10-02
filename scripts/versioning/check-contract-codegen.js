@@ -287,6 +287,8 @@ function contractsWithGeneratedArtifacts(registry) {
     const hasTypeScriptPath =
       typeof contract.typescriptPath === "string" &&
       contract.typescriptPath.length > 0;
+    const hasCsharpPath =
+      typeof contract.csharpPath === "string" && contract.csharpPath.length > 0;
     if (contract.generatesArtifacts && !hasTypeScriptPath) {
       fail(
         `renderable exact contract ${contract.version} has no TypeScript oracle path`
@@ -295,6 +297,16 @@ function contractsWithGeneratedArtifacts(registry) {
     if (!contract.generatesArtifacts && contract.typescriptPath !== null) {
       fail(
         `non-renderable exact contract ${contract.version} has a TypeScript oracle path`
+      );
+    }
+    if (!contract.generatesArtifacts && contract.csharpPath !== null) {
+      fail(
+        `non-renderable exact contract ${contract.version} has a C# wire-types path`
+      );
+    }
+    if (hasCsharpPath && contract.status !== "published") {
+      fail(
+        `C# SDK wire types must target a published contract, but ${contract.version} is ${contract.status}`
       );
     }
     if (contract.generatesArtifacts) {
@@ -415,6 +427,7 @@ function main() {
     for (const contract of exactContracts) {
       const schemaOut = join(temporary, `${contract.version}.schema.json`);
       const typesOut = join(temporary, `${contract.version}.wire.ts`);
+      const csharpOut = join(temporary, `${contract.version}.wire.cs`);
       runGenerator([
         "schema",
         "--version",
@@ -429,6 +442,15 @@ function main() {
         "--out",
         typesOut,
       ]);
+      if (contract.csharpPath) {
+        runGenerator([
+          "csharp",
+          "--version",
+          contract.version,
+          "--out",
+          csharpOut,
+        ]);
+      }
 
       const schemaCommand =
         `cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- ` +
@@ -446,6 +468,16 @@ function main() {
         typesOut,
         typesCommand
       );
+      if (contract.csharpPath) {
+        const csharpCommand =
+          `cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- ` +
+          `csharp --version ${contract.version} --out ${contract.csharpPath}`;
+        compareArtifact(
+          join(repoRoot, contract.csharpPath),
+          csharpOut,
+          csharpCommand
+        );
+      }
 
       const schema = JSON.parse(readFileSync(schemaOut, "utf8"));
       const requestRoots = validateDispatchRoots(schema, contract);

@@ -49,6 +49,7 @@ pub struct ContractDescriptor {
     schema_id: &'static str,
     schema_path: &'static str,
     typescript_path: Option<&'static str>,
+    csharp_path: Option<&'static str>,
     generates_artifacts: bool,
     request_roots: &'static [ContractRequestRoot],
 }
@@ -83,6 +84,12 @@ impl ContractDescriptor {
     /// oracle when one is registered.
     pub const fn typescript_path(&self) -> Option<&'static str> {
         self.typescript_path
+    }
+
+    /// Returns the repository-relative path of this contract's C# wire types
+    /// when one is registered for an SDK target.
+    pub const fn csharp_path(&self) -> Option<&'static str> {
+        self.csharp_path
     }
 
     /// Returns whether this contract has a renderable exact Rust model whose
@@ -177,6 +184,7 @@ pub const CONTRACTS: &[ContractDescriptor] = &[
             "https://github.com/microsoft/mxc/schemas/stable/mxc-config.schema.0.6.0-alpha.json",
         schema_path: "schemas/stable/mxc-config.schema.0.6.0-alpha.json",
         typescript_path: None,
+        csharp_path: None,
         generates_artifacts: false,
         request_roots: NO_GENERATED_ROOTS,
     },
@@ -187,6 +195,7 @@ pub const CONTRACTS: &[ContractDescriptor] = &[
             "https://github.com/microsoft/mxc/schemas/stable/mxc-config.schema.0.7.0-alpha.json",
         schema_path: "schemas/stable/mxc-config.schema.0.7.0-alpha.json",
         typescript_path: None,
+        csharp_path: None,
         generates_artifacts: false,
         request_roots: NO_GENERATED_ROOTS,
     },
@@ -197,6 +206,7 @@ pub const CONTRACTS: &[ContractDescriptor] = &[
             "https://github.com/microsoft/mxc/schemas/stable/mxc-config.schema.0.8.0-alpha.json",
         schema_path: "schemas/stable/mxc-config.schema.0.8.0-alpha.json",
         typescript_path: None,
+        csharp_path: None,
         generates_artifacts: false,
         request_roots: NO_GENERATED_ROOTS,
     },
@@ -207,6 +217,7 @@ pub const CONTRACTS: &[ContractDescriptor] = &[
             "https://github.com/microsoft/mxc/schemas/stable/mxc-config.schema.0.9.0-alpha.json",
         schema_path: "schemas/stable/mxc-config.schema.0.9.0-alpha.json",
         typescript_path: Some("sdk/node/src/generated/v0_9_0_alpha/wire.ts"),
+        csharp_path: None,
         generates_artifacts: true,
         request_roots: V0_9_ROOTS,
     },
@@ -216,6 +227,7 @@ pub const CONTRACTS: &[ContractDescriptor] = &[
         schema_id: "https://github.com/microsoft/mxc/schemas/stable/mxc-config.schema.1.0.0.json",
         schema_path: "schemas/stable/mxc-config.schema.1.0.0.json",
         typescript_path: Some("sdk/node/src/generated/v1_0_0/wire.ts"),
+        csharp_path: Some("sdk/dotnet/Microsoft.Mxc.Sdk/Generated/MxcConfigV1_0_0.g.cs"),
         generates_artifacts: true,
         request_roots: V0_9_ROOTS,
     },
@@ -226,6 +238,7 @@ pub const CONTRACTS: &[ContractDescriptor] = &[
             "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.1.1.0-alpha.json",
         schema_path: "schemas/dev/mxc-config.schema.1.1.0-alpha.json",
         typescript_path: Some("sdk/node/src/generated/v1_1_0_alpha/wire.ts"),
+        csharp_path: None,
         generates_artifacts: true,
         request_roots: V1_1_ROOTS,
     },
@@ -284,6 +297,7 @@ mod tests {
             assert_eq!(desc.schema_id(), round_trip_desc.schema_id());
             assert_eq!(desc.schema_path(), round_trip_desc.schema_path());
             assert_eq!(desc.typescript_path(), round_trip_desc.typescript_path());
+            assert_eq!(desc.csharp_path(), round_trip_desc.csharp_path());
             assert_eq!(
                 desc.generates_artifacts(),
                 round_trip_desc.generates_artifacts()
@@ -306,6 +320,7 @@ mod tests {
         assert!(descriptor
             .typescript_path()
             .is_some_and(|path| path.contains("v1_1_0_alpha")));
+        assert_eq!(descriptor.csharp_path(), None);
         assert!(descriptor.generates_artifacts());
         assert!(descriptor
             .request_roots()
@@ -324,5 +339,15 @@ mod tests {
             assert!(!descriptor.generates_artifacts());
             assert!(descriptor.request_roots().is_empty(), "{version:?}");
         }
+    }
+
+    #[test]
+    fn sdk_target_advertises_dotnet_wire_types() {
+        let descriptor = descriptor(ContractVersion::V1_0_0);
+
+        assert_eq!(
+            descriptor.csharp_path(),
+            Some("sdk/dotnet/Microsoft.Mxc.Sdk/Generated/MxcConfigV1_0_0.g.cs")
+        );
     }
 }

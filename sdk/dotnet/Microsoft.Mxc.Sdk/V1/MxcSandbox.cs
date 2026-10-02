@@ -17,7 +17,7 @@ namespace Microsoft.Mxc.Sdk.V1;
 /// </summary>
 public static class MxcSandbox
 {
-    private const string LegacyCaptureDenialsName = "CaptureDenials";
+    private const int NoExperimentalOptIn = 0;
 
     static MxcSandbox()
     {
@@ -227,7 +227,10 @@ public static class MxcSandbox
             fixed (byte* requestPtr = requestBuf)
             {
                 MxcRunResult result = default;
-                var status = NativeMethods.mxc_run_request(requestPtr, &result);
+                var status = NativeMethods.mxc_run_json(
+                    requestPtr,
+                    NoExperimentalOptIn,
+                    &result);
                 try
                 {
                     if (status != (int)ErrorCode.Success)
@@ -305,7 +308,11 @@ public static class MxcSandbox
             {
                 NativeSandbox* handle = null;
                 MxcErrorDetail error = default;
-                var status = NativeMethods.mxc_spawn_request(requestPtr, &handle, &error);
+                var status = NativeMethods.mxc_spawn_json(
+                    requestPtr,
+                    NoExperimentalOptIn,
+                    &handle,
+                    &error);
                 if (status != (int)ErrorCode.Success)
                 {
                     // `finally`, not a straight-line free: marshalling the strings or
@@ -351,86 +358,8 @@ public static class MxcSandbox
     internal static string SerializeRequest(SandboxRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-        return MxcJson.Serialize(PrepareRequest(request), MxcJson.Options);
+        return ExactOneShotRequestWriter.Serialize(request);
     }
-
-    private static SandboxRequest PrepareRequest(SandboxRequest request)
-    {
-#pragma warning disable MXC0001 // Compatibility migration for the obsolete policy field.
-        var legacyCaptureDenials = request.Policy.CaptureDenials;
-#pragma warning restore MXC0001
-        if (legacyCaptureDenials is null)
-        {
-            return request;
-        }
-
-        var containment = request.Containment switch
-        {
-            ProcessContainment => new ProcessContainerContainment
-            {
-                CaptureDenials = legacyCaptureDenials,
-            },
-            ProcessContainerContainment processContainer =>
-                CloneProcessContainer(processContainer, legacyCaptureDenials),
-            _ => throw new ArgumentException(
-                $"{nameof(SandboxPolicy)}.{LegacyCaptureDenialsName} "
-                    + $"cannot be used with {request.Containment.GetType().Name}; set "
-                    + $"{nameof(ProcessContainerContainment)}."
-                    + $"{nameof(ProcessContainerContainment.CaptureDenials)} instead.",
-                nameof(request)),
-        };
-
-        return new SandboxRequest(ClonePolicyWithoutCaptureDenials(request.Policy), request.Command)
-        {
-            Containment = containment,
-            ContainerName = request.ContainerName,
-            WorkingDirectory = request.WorkingDirectory,
-            Environment = request.Environment is null
-                ? null
-                : new Dictionary<string, string>(request.Environment),
-            InheritDefaultEnvironment = request.InheritDefaultEnvironment,
-            Experimental = request.Experimental,
-        };
-    }
-
-    private static ProcessContainerContainment CloneProcessContainer(
-        ProcessContainerContainment containment,
-        CaptureDenialsPolicy legacyCaptureDenials)
-    {
-        if (containment.CaptureDenials is not null
-            && !CaptureDenialsEqual(containment.CaptureDenials, legacyCaptureDenials))
-        {
-            throw new ArgumentException(
-                $"{nameof(SandboxPolicy)}.{LegacyCaptureDenialsName} conflicts "
-                    + $"with {nameof(ProcessContainerContainment)}."
-                    + $"{nameof(ProcessContainerContainment.CaptureDenials)}.",
-                "request");
-        }
-
-        return new ProcessContainerContainment
-        {
-            LeastPrivilege = containment.LeastPrivilege,
-            LearningMode = containment.LearningMode,
-            Capabilities = new List<string>(containment.Capabilities),
-            CaptureDenials = containment.CaptureDenials ?? legacyCaptureDenials,
-            Ui = containment.Ui,
-            Filesystem = containment.Filesystem,
-            Network = containment.Network,
-        };
-    }
-
-    // Keep in sync with SandboxPolicy's properties: every property except the
-    // obsolete CaptureDenials must be copied, or it is silently dropped from
-    // any request that carries the legacy field.
-    private static SandboxPolicy ClonePolicyWithoutCaptureDenials(SandboxPolicy policy) =>
-        policy.WithoutLegacyCaptureDenials();
-
-    private static bool CaptureDenialsEqual(
-        CaptureDenialsPolicy left,
-        CaptureDenialsPolicy right) =>
-        left.Mode == right.Mode
-            && string.Equals(left.OutputPath, right.OutputPath, StringComparison.Ordinal)
-            && left.RetainEtl == right.RetainEtl;
 
     private static IsolationTier ParseProbeIsolationTier(string value) =>
         value switch

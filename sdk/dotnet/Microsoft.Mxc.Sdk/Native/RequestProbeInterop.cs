@@ -28,7 +28,7 @@ internal sealed unsafe class PInvokeRequestProbeInterop : IRequestProbeInterop
         byte* requestJsonUtf8,
         byte** outputJsonUtf8,
         MxcErrorDetail* error) =>
-        NativeMethods.mxc_probe_sandbox_request_json_with_error(
+        NativeMethods.mxc_probe_request_json_with_error(
             requestJsonUtf8,
             outputJsonUtf8,
             error);

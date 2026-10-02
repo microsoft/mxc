@@ -57,7 +57,7 @@ if (managedEntryPoints.length === 0) {
   process.exit(1);
 }
 // Exported entry points that no managed call site consumes yet.
-const ABI_ONLY_ENTRY_POINTS = ["mxc_run_json", "mxc_spawn_json"];
+const ABI_ONLY_ENTRY_POINTS = [];
 const REQUIRED_ENTRY_POINTS = [
   ...new Set([...managedEntryPoints, ...ABI_ONLY_ENTRY_POINTS]),
 ].sort();

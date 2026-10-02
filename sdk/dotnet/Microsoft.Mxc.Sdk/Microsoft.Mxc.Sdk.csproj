@@ -18,10 +18,10 @@
     <!-- Run the Native AOT, trimming, and single-file analyzers so the JSON
          paths stay reflection-free. See MxcJsonSerialization.cs. -->
     <IsAotCompatible>true</IsAotCompatible>
-    <!-- The source-generated MxcJsonContext must read/write the compatibility
-         obsolete SandboxPolicy.CaptureDenials property so legacy policy JSON
-         round-trips; the generated accessors trip its custom MXC0001 diagnostic,
-         which the STJ generator's CS0618 suppression does not cover. Suppressed
+    <!-- The source-generated MxcJsonContext must read/write the obsolete
+         SandboxPolicy.CaptureDenials and SandboxRequest.Experimental properties
+         for compatibility; the generated accessors trip their MXC0001
+         diagnostic, which STJ's CS0618 suppression does not cover. Suppressed
          only for the SDK's own compilation - consumers still get MXC0001. -->
     <NoWarn>$(NoWarn);MXC0001</NoWarn>
   </PropertyGroup>

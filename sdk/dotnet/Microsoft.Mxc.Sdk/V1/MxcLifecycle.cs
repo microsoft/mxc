@@ -549,6 +549,12 @@ public static class MxcLifecycle
         {
             "iso" => StateAwareContainment.IsolationSession,
             "wslc" => StateAwareContainment.Wslc,
+            "wsb" => throw new MxcException(
+                ErrorCode.UnsupportedContainment,
+                "Windows Sandbox sandbox ids with the 'wsb:' prefix require "
+                    + "the raw exact 1.1.0-alpha state-aware executor route "
+                    + "with explicit experimental authorization; stable MxcLifecycle "
+                    + "accepts only 'iso:' and 'wslc:' ids."),
             _ => throw new MxcException(
                 ErrorCode.UnsupportedContainment,
                 $"no state-aware backend is registered for sandbox id '{id.Value}'"),

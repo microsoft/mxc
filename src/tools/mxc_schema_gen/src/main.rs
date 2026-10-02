@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Version-aware JSON Schema and TypeScript wire-oracle generator.
+//! Version-aware JSON Schema and SDK wire-type generator.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -23,6 +23,8 @@ enum Command {
     Schema(GenerateArgs),
     /// Generate a TypeScript wire oracle.
     Types(GenerateArgs),
+    /// Generate C# wire types.
+    Csharp(GenerateArgs),
     /// List registered contract versions and artifact metadata.
     Versions {
         /// Emit machine-readable JSON.
@@ -94,6 +96,14 @@ fn types_content(version: ContractVersion) -> Result<String, String> {
     ))
 }
 
+fn csharp_content(version: ContractVersion) -> Result<String, String> {
+    let (schema, _) = exact_schema(version)?;
+    Ok(mxc_schema_support::emit_contract_cs(
+        &schema,
+        version.as_str(),
+    ))
+}
+
 fn write_artifact(content: &str, path: Option<&Path>, label: &str) -> Result<(), String> {
     match path {
         Some(path) => {
@@ -130,6 +140,7 @@ fn versions_json() -> Value {
                     "schemaId": descriptor.schema_id(),
                     "schemaPath": descriptor.schema_path(),
                     "typescriptPath": descriptor.typescript_path(),
+                    "csharpPath": descriptor.csharp_path(),
                     "generatesArtifacts": descriptor.generates_artifacts(),
                     "requestRoots": descriptor.request_roots().iter().map(|root| json!({
                         "fixtureDirectory": root.fixture_directory(),
@@ -170,6 +181,10 @@ fn run() -> Result<(), String> {
             let content = types_content(target(&args)?)?;
             write_artifact(&content, args.out.as_deref(), "TypeScript wire types")
         }
+        Command::Csharp(args) => {
+            let content = csharp_content(target(&args)?)?;
+            write_artifact(&content, args.out.as_deref(), "C# wire types")
+        }
         Command::Versions { json } => print_versions(json),
     }
 }
@@ -207,6 +222,7 @@ mod tests {
             development["typescriptPath"],
             "sdk/node/src/generated/v1_1_0_alpha/wire.ts"
         );
+        assert_eq!(development["csharpPath"], serde_json::Value::Null);
         assert_eq!(development["generatesArtifacts"], true);
         assert!(development["requestRoots"]
             .as_array()
@@ -244,6 +260,9 @@ mod tests {
         let types = types_content(ContractVersion::V1_0_0).unwrap();
         assert!(types.contains("Emitted from the exact MXC 1.0.0 contract"));
         assert!(types.contains("export interface OneShotRequest"));
+        let csharp = csharp_content(ContractVersion::V1_0_0).unwrap();
+        assert!(csharp.contains("Emitted from the exact MXC 1.0.0 contract"));
+        assert!(csharp.contains("internal sealed class OneShotRequest"));
     }
 
     #[test]

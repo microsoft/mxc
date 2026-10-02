@@ -35,6 +35,7 @@ internal sealed class CamelCaseJsonStringEnumConverter<TEnum>
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 // Public request/policy surface.
+[JsonSerializable(typeof(Generated.OneShotRequest))]
 [JsonSerializable(typeof(SandboxRequest))]
 [JsonSerializable(typeof(SandboxPolicy))]
 [JsonSerializable(typeof(SandboxContainment))]

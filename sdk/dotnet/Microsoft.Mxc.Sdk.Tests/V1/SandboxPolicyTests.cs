@@ -167,17 +167,17 @@ public class SandboxPolicyTests
     }
 
     [Fact]
-    public void SandboxRequest_UsesVersionFreePrivateBindingPolicy()
+    public void SandboxRequest_UsesExactSdkContract()
     {
         var request = new SandboxRequest(
             new SandboxPolicy { TimeoutMs = 5000 },
             "echo test");
 
         using var document = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
-        var policy = document.RootElement.GetProperty("policy");
-        Assert.False(policy.TryGetProperty("version", out _));
-        Assert.Equal(5000, policy.GetProperty("timeoutMs").GetInt32());
-        Assert.Equal("echo test", document.RootElement.GetProperty("command").GetString());
+        var root = document.RootElement;
+        Assert.Equal(SchemaVersions.SdkContract, root.GetProperty("version").GetString());
+        Assert.Equal("echo test", root.GetProperty("process").GetProperty("commandLine").GetString());
+        Assert.Equal(5000, root.GetProperty("process").GetProperty("timeout").GetInt32());
     }
 
     [Fact]
@@ -236,17 +236,16 @@ public class SandboxPolicyTests
 
         using var document = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
         var root = document.RootElement;
-        Assert.Equal("sample", root.GetProperty("containerName").GetString());
+        Assert.Equal("sample", root.GetProperty("containerId").GetString());
         Assert.Equal(
             @"C:\tools",
-            root.GetProperty("containment")
+            root.GetProperty("processContainer")
                 .GetProperty("filesystem")
                 .GetProperty("enumeratePaths")[0]
                 .GetString());
         Assert.Equal(
             "allow",
-            root.GetProperty("policy")
-                .GetProperty("network")
+            root.GetProperty("network")
                 .GetProperty("ingress")
                 .GetProperty("hostLoopback")
                 .GetString());
@@ -268,11 +267,10 @@ public class SandboxPolicyTests
 
         using var document = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
         Assert.True(
-            document.RootElement.GetProperty("containment")
+            document.RootElement.GetProperty("processContainer")
                 .TryGetProperty("captureDenials", out _));
         Assert.False(
-            document.RootElement.GetProperty("policy")
-                .TryGetProperty("captureDenials", out _));
+            document.RootElement.TryGetProperty("captureDenials", out _));
     }
 
     [Fact]

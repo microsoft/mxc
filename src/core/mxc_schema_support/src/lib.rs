@@ -1,9 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Dependency-light rendering and TypeScript emission shared by MXC schema
+//! Dependency-light rendering and SDK wire-type emission shared by MXC schema
 //! generators.
 
+mod cs_emit;
 mod ts_emit;
 
 use serde_json::{Map, Value};
@@ -57,6 +58,11 @@ pub fn render_root_ordered(map: &Map<String, Value>) -> String {
 /// Emits the versioned contract TypeScript wire oracle.
 pub fn emit_contract_ts(schema: &Value, version: &str) -> String {
     ts_emit::emit_contract_ts(schema, version)
+}
+
+/// Emits the versioned contract C# wire types.
+pub fn emit_contract_cs(schema: &Value, version: &str) -> String {
+    cs_emit::emit_contract_cs(schema, version)
 }
 
 fn normalize_integer_formats(value: &mut Value) {

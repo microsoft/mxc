@@ -60,7 +60,7 @@ using (var doc = JsonDocument.Parse(MxcSandbox.SerializePolicy(devPolicy)))
     Check(root.GetProperty("ui").GetProperty("clipboard").GetString() == "read", "clipboard enum");
 }
 
-// 2. Serialize a full request with a polymorphic ProcessContainer containment.
+// 2. Serialize a full exact request with ProcessContainer-specific policy.
 var request = new SandboxRequest(devPolicy, "echo hello")
 {
     Containment = new ProcessContainerContainment
@@ -71,16 +71,45 @@ var request = new SandboxRequest(devPolicy, "echo hello")
 };
 using (var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(request)))
 {
-    var policy = doc.RootElement.GetProperty("policy");
-    Check(!policy.TryGetProperty("version", out _), "request policy is version-free");
-    Check(policy.GetProperty("network").GetProperty("egress").GetProperty("default").GetString() == "deny",
-        "request carries policy");
-    // The "type" tag that picks the concrete subtype, plus a field that only
-    // exists on that subtype, are the parts whose loss would leave the request
-    // unusable.
-    var containment = doc.RootElement.GetProperty("containment");
-    Check(containment.GetProperty("type").GetString() == "processContainer", "containment type tag");
-    Check(containment.GetProperty("leastPrivilege").GetBoolean(), "containment subtype field (leastPrivilege)");
+    var root = doc.RootElement;
+    Check(root.GetProperty("version").GetString() == "1.0.0", "SDK-owned exact request version");
+    Check(!root.TryGetProperty("policy", out _), "private policy envelope is absent");
+    Check(root.GetProperty("process").GetProperty("commandLine").GetString() == "echo hello",
+        "exact request command line");
+    Check(root.GetProperty("network").GetProperty("egress").GetProperty("default").GetString() == "deny",
+        "exact request carries directional policy");
+    Check(root.GetProperty("runtimeConfig").GetProperty("networkProxy").GetString()
+        == "http://127.0.0.1:8080", "exact runtime proxy");
+    Check(root.GetProperty("containment").GetString() == "processcontainer", "exact containment discriminator");
+    Check(root.GetProperty("processContainer").GetProperty("leastPrivilege").GetBoolean(),
+        "exact backend policy");
+}
+
+// The generated exact wire type must preserve the full unsigned WSLC bound.
+var wslcRequest = new SandboxRequest(new SandboxPolicy(), "echo memory")
+{
+    Containment = new WslcContainment { MemoryMb = ulong.MaxValue },
+};
+using (var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(wslcRequest)))
+{
+    Check(doc.RootElement.GetProperty("wslc").GetProperty("memoryMb").GetUInt64()
+        == ulong.MaxValue, "full unsigned WSLC memory bound");
+}
+
+#pragma warning disable MXC0001
+var experimentalRequest = new SandboxRequest(new SandboxPolicy(), "echo unsupported")
+{
+    Experimental = true,
+};
+#pragma warning restore MXC0001
+try
+{
+    _ = MxcSandbox.SerializeRequest(experimentalRequest);
+    throw new InvalidOperationException("Stable experimental opt-in was silently accepted.");
+}
+catch (ArgumentException ex) when (ex.ParamName == "request")
+{
+    // Expected: stable typed requests cannot authorize development features.
 }
 
 // 3. Deserialize a native backend probe array - including an entry that omits

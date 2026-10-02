@@ -51,6 +51,7 @@ function contract(version, requestRoots, overrides = {}) {
     status: version === "1.1.0-alpha" ? "development" : "published",
     schemaPath: `${version}.schema.json`,
     typescriptPath: `${version}.wire.ts`,
+    csharpPath: null,
     generatesArtifacts: true,
     requestRoots: requestRoots.map((schemaDefinition) => ({
       fixtureDirectory: schemaDefinition
@@ -88,6 +89,31 @@ test("exact versions dispatch precisely their expected request roots", () => {
   assert.throws(
     () => validateDispatchRoots(unexpected, v0_9),
     /unexpected dispatched roots: UnknownRequest/
+  );
+});
+
+test("registry restricts C# wire types to renderable published contracts", () => {
+  assert.deepEqual(
+    contractsWithGeneratedArtifacts([
+      contract("1.0.0", v0_9Roots, { csharpPath: "MxcConfigV1_0_0.g.cs" }),
+    ]).map(contract => contract.version),
+    ["1.0.0"]
+  );
+  assert.throws(
+    () => contractsWithGeneratedArtifacts([
+      contract("0.8.0-alpha", [], {
+        typescriptPath: null,
+        csharpPath: "MxcConfigV0_8_0_alpha.g.cs",
+        generatesArtifacts: false,
+      }),
+    ]),
+    /non-renderable exact contract 0\.8\.0-alpha has a C# wire-types path/
+  );
+  assert.throws(
+    () => contractsWithGeneratedArtifacts([
+      contract("1.1.0-alpha", roots, { csharpPath: "MxcConfigV1_1_0_alpha.g.cs" }),
+    ]),
+    /C# SDK wire types must target a published contract, but 1\.1\.0-alpha is development/
   );
 });
 

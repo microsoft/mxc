@@ -8,24 +8,12 @@ namespace Microsoft.Mxc.Sdk.Tests;
 
 internal static class JsonAssert
 {
-    internal static void MatchesGolden(string actualJson, string fixtureName)
+    internal static void MatchesJson(string actualJson, string expectedJson, string name)
     {
-        var expectedJson = ReadGolden(fixtureName);
         using var expected = JsonDocument.Parse(expectedJson);
         using var actual = JsonDocument.Parse(actualJson);
 
-        Equivalent(expected.RootElement, actual.RootElement, fixtureName);
-    }
-
-    internal static string ReadGolden(string fixtureName)
-    {
-        var assembly = typeof(JsonAssert).Assembly;
-        var resourceName = assembly.GetManifestResourceNames()
-            .Single(name => name.EndsWith(fixtureName, StringComparison.Ordinal));
-        using var stream = assembly.GetManifestResourceStream(resourceName)
-            ?? throw new InvalidOperationException($"Missing embedded fixture {resourceName}.");
-        using var reader = new StreamReader(stream);
-        return reader.ReadToEnd();
+        Equivalent(expected.RootElement, actual.RootElement, name);
     }
 
     private static void Equivalent(JsonElement expected, JsonElement actual, string path)

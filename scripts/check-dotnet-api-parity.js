@@ -2,9 +2,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// Static drift gate for the Rust surfaces represented by closed managed enums
-// and tagged request types. Runtime parsers remain fail-closed; this check makes
-// newly added Rust variants fail CI before a host happens to emit one.
+// Static drift gate for the Rust/exact-contract surfaces represented by closed
+// managed enums and tagged request types. Runtime parsers remain fail-closed;
+// this check makes newly added exact-contract fields or Rust variants fail CI
+// before a host happens to emit one.
 
 const { readFileSync } = require("fs");
 const { join } = require("path");
@@ -12,80 +13,14 @@ const { join } = require("path");
 const root = join(__dirname, "..");
 const errors = [];
 const read = (...parts) => readFileSync(join(root, ...parts), "utf8");
-
-function enumBody(source, enumName, language) {
-  const pattern =
-    language === "rust"
-      ? new RegExp(`\\b(?:pub\\s+)?enum\\s+${enumName}\\s*\\{`)
-      : new RegExp(`\\b(?:public|internal)\\s+enum\\s+${enumName}\\s*\\{`);
-  const match = pattern.exec(source);
-  if (!match) throw new Error(`could not find ${language} enum ${enumName}`);
-  let depth = 1;
-  let cursor = match.index + match[0].length;
-  for (; cursor < source.length && depth > 0; cursor++) {
-    if (source[cursor] === "{") depth++;
-    if (source[cursor] === "}") depth--;
-  }
-  if (depth !== 0) throw new Error(`unterminated ${language} enum ${enumName}`);
-  return source.slice(match.index + match[0].length, cursor - 1);
-}
-
-function enumMembers(source, enumName, language) {
-  const body = enumBody(source, enumName, language)
-    .replace(/\/\/\/.*$/gm, "")
-    .replace(/\/\/.*$/gm, "");
-  const segments = [];
-  let start = 0;
-  let depth = 0;
-  for (let index = 0; index <= body.length; index++) {
-    const character = body[index];
-    if (character === "(" || character === "{" || character === "[") depth++;
-    if (character === ")" || character === "}" || character === "]") depth--;
-    if ((character === "," && depth === 0) || index === body.length) {
-      const segment = body.slice(start, index).trim();
-      if (segment) segments.push(segment);
-      start = index + 1;
-    }
-  }
-
-  return segments
-    .filter(
-      (original) =>
-        language !== "rust" ||
-        !/#\[\s*cfg\s*\(\s*test\s*\)\s*\]/.test(original)
-    )
-    .map((original) => {
-    const segment = original.replace(/#\[[\s\S]*?\]\s*/g, "").trim();
-    const match = /^(\w+)(?:\s*=\s*[\s\S]+|\s*\([\s\S]*\)|\s*\{[\s\S]*\})?$/.exec(
-      segment
-    );
-    if (!match) {
-      throw new Error(
-        `could not parse ${language} enum ${enumName} member: ${original}`
-      );
-    }
-    return { name: match[1], source: original };
-    });
-}
-
-function enumVariants(source, enumName, language) {
-  return enumMembers(source, enumName, language).map((member) => member.name);
-}
-
-function managedDerivedTypes(source, baseType) {
-  return [
-    ...source.matchAll(
-      new RegExp(`public\\s+sealed\\s+class\\s+(\\w+)\\s*:\\s*${baseType}\\b`, "g")
-    ),
-  ].map((match) => match[1]);
-}
+const camelCase = (value) => value[0].toLowerCase() + value.slice(1);
 
 function compare(label, actual, expected) {
   const actualSorted = [...new Set(actual)].sort();
   const expectedSorted = [...new Set(expected)].sort();
   if (JSON.stringify(actualSorted) !== JSON.stringify(expectedSorted)) {
     errors.push(
-      `${label}: managed [${actualSorted.join(", ")}], Rust [${expectedSorted.join(", ")}]`
+      `${label}: managed [${actualSorted.join(", ")}], expected [${expectedSorted.join(", ")}]`
     );
   }
 }
@@ -102,9 +37,6 @@ function namedBody(source, kind, name) {
   if (depth !== 0) throw new Error(`unterminated ${kind} ${name}`);
   return source.slice(match.index + match[0].length, cursor - 1);
 }
-
-const snakeToCamel = (value) =>
-  value.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
 
 function skipWhitespace(source, cursor) {
   while (cursor < source.length && /\s/.test(source[cursor])) cursor++;
@@ -163,49 +95,78 @@ function attributedDeclarations(body, marker, declarationPattern) {
       });
       cursor = declarationPattern.lastIndex;
     } else {
-      // Advance unconditionally, including when attributes were just consumed
-      // (a non-public attributed member reaches here). Every path through this
-      // loop must move the cursor, or the gate would spin instead of failing.
       cursor++;
     }
   }
   return declarations;
 }
 
-function rustFieldsFromBody(body) {
-  return attributedDeclarations(
-    body,
-    "#[",
-    /(?:pub(?:\([^)]*\))?\s+)?(\w+)\s*:/y
-  )
+function enumBody(source, enumName, language) {
+  const pattern =
+    language === "rust"
+      ? new RegExp(`\\b(?:pub\\s+)?enum\\s+${enumName}\\s*\\{`)
+      : new RegExp(`\\b(?:public|internal)\\s+enum\\s+${enumName}\\s*\\{`);
+  const match = pattern.exec(source);
+  if (!match) throw new Error(`could not find ${language} enum ${enumName}`);
+  let depth = 1;
+  let cursor = match.index + match[0].length;
+  for (; cursor < source.length && depth > 0; cursor++) {
+    if (source[cursor] === "{") depth++;
+    if (source[cursor] === "}") depth--;
+  }
+  if (depth !== 0) throw new Error(`unterminated ${language} enum ${enumName}`);
+  return source.slice(match.index + match[0].length, cursor - 1);
+}
+
+function enumMembers(source, enumName, language) {
+  const body = enumBody(source, enumName, language)
+    .replace(/\/\/\/.*$/gm, "")
+    .replace(/\/\/.*$/gm, "");
+  const segments = [];
+  let start = 0;
+  let depth = 0;
+  for (let index = 0; index <= body.length; index++) {
+    const character = body[index];
+    if (character === "(" || character === "{" || character === "[") depth++;
+    if (character === ")" || character === "}" || character === "]") depth--;
+    if ((character === "," && depth === 0) || index === body.length) {
+      const segment = body.slice(start, index).trim();
+      if (segment) segments.push(segment);
+      start = index + 1;
+    }
+  }
+
+  return segments
     .filter(
-      ({ attributes }) =>
-        !/#\[\s*cfg\s*\(\s*test\s*\)\s*\]/.test(attributes)
+      (original) =>
+        language !== "rust" ||
+        !/#\[\s*cfg\s*\(\s*test\s*\)\s*\]/.test(original)
     )
-    .map(({ attributes, name }) => {
-      const renamed = /\brename\s*=\s*"([^"]+)"/.exec(attributes);
-      return renamed?.[1] ?? snakeToCamel(name);
+    .map((original) => {
+      const segment = original.replace(/#\[[\s\S]*?\]\s*/g, "").trim();
+      const match =
+        /^(\w+)(?:\s*=\s*[\s\S]+|\s*\([\s\S]*\)|\s*\{[\s\S]*\})?$/.exec(
+          segment
+        );
+      if (!match) {
+        throw new Error(
+          `could not parse ${language} enum ${enumName} member: ${original}`
+        );
+      }
+      return { name: match[1], source: original };
     });
 }
 
-function rustStructFields(source, name) {
-  return rustFieldsFromBody(namedBody(source, "struct", name));
+function enumVariants(source, enumName, language) {
+  return enumMembers(source, enumName, language).map((member) => member.name);
 }
 
-function rustVariantFields(source, enumName, variantName) {
-  const body = enumBody(source, enumName, "rust");
-  const match = new RegExp(`\\b${variantName}\\s*\\{`).exec(body);
-  if (!match) throw new Error(`could not find ${enumName}::${variantName}`);
-  let depth = 1;
-  let cursor = match.index + match[0].length;
-  for (; cursor < body.length && depth > 0; cursor++) {
-    if (body[cursor] === "{") depth++;
-    if (body[cursor] === "}") depth--;
-  }
-  if (depth !== 0) throw new Error(`unterminated ${enumName}::${variantName}`);
-  return rustFieldsFromBody(
-    body.slice(match.index + match[0].length, cursor - 1)
-  );
+function managedDerivedTypes(source, baseType) {
+  return [
+    ...source.matchAll(
+      new RegExp(`public\\s+sealed\\s+class\\s+(\\w+)\\s*:\\s*${baseType}\\b`, "g")
+    ),
+  ].map((match) => match[1]);
 }
 
 function managedJsonFields(source, className) {
@@ -215,59 +176,64 @@ function managedJsonFields(source, className) {
     "[",
     /public\s+(?:required\s+)?[\w<>,?.\[\]\s]+\s+(\w+)\s*\{/y
   )
-    .filter(
-      ({ attributes }) => {
-        const ignored = /\[\s*JsonIgnore(?:Attribute)?\s*(?:\(\s*([^)]*)\s*\))?\s*\]/.exec(
-          attributes
-        );
-        if (!ignored) return true;
-
-        const arguments = ignored[1]?.trim();
-        return (
-          arguments !== undefined &&
-          arguments !== "" &&
-          !/\bCondition\s*=\s*JsonIgnoreCondition\.Always\b/.test(arguments)
-        );
-      }
-    )
+    .filter(({ attributes }) => {
+      const ignored = /\[\s*JsonIgnore(?:Attribute)?\s*(?:\(\s*([^)]*)\s*\))?\s*\]/.exec(
+        attributes
+      );
+      if (!ignored) return true;
+      const arguments = ignored[1]?.trim();
+      return (
+        arguments !== undefined &&
+        arguments !== "" &&
+        !/\bCondition\s*=\s*JsonIgnoreCondition\.Always\b/.test(arguments)
+      );
+    })
     .map(({ attributes, name }) => {
       const renamed = /JsonPropertyName\("([^"]+)"\)/.exec(attributes);
       return renamed?.[1] ?? camelCase(name);
     });
 }
 
-function compareStructFields(
-  label,
-  rustSource,
-  rustName,
-  managedSource,
-  managedName,
-  ignoredRustFields = []
-) {
-  const ignored = new Set(ignoredRustFields);
-  compare(
-    `${label} fields`,
-    managedJsonFields(managedSource, managedName),
-    rustStructFields(rustSource, rustName).filter((field) => !ignored.has(field))
-  );
+compare(
+  "managed JSON field extractor",
+  managedJsonFields(
+    `class Example {
+      [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+      [JsonPropertyName("before")]
+      public string? Before { get; set; }
+      [JsonPropertyName("after")]
+      [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+      public string? After { get; set; }
+      [JsonIgnore(Condition = JsonIgnoreCondition.Always)]
+      [JsonPropertyName("excluded")]
+      public string Excluded { get; set; }
+      public string DefaultName { get; set; }
+    }`,
+    "Example"
+  ),
+  ["before", "after", "defaultName"]
+);
+
+function schemaDefinition(schema, name) {
+  const definition = schema.definitions?.[name];
+  if (!definition) throw new Error(`could not find schema definition ${name}`);
+  return definition;
 }
 
-const rustPolicy = read("src", "core", "mxc_engine", "src", "policy.rs");
-const rustRequest = read("src", "ffi", "mxc_ffi", "src", "request.rs");
-const rustWire = read(
-  "src",
-  "core",
-  "wxc_common",
-  "src",
-  "wire.rs"
-);
-const rustNetworkPolicy = read(
-  "src",
-  "core",
-  "mxc_engine",
-  "src",
-  "policy",
-  "network.rs"
+function schemaProperties(schema, name) {
+  return Object.keys(schemaDefinition(schema, name).properties ?? {});
+}
+
+function schemaEnumStrings(schema, name) {
+  const definition = schemaDefinition(schema, name);
+  if (Array.isArray(definition.oneOf)) {
+    return definition.oneOf.flatMap((branch) => branch.enum ?? []);
+  }
+  return definition.enum ?? [];
+}
+
+const exactV1 = JSON.parse(
+  read("schemas", "stable", "mxc-config.schema.1.0.0.json")
 );
 const managedRequest = read(
   "sdk",
@@ -283,119 +249,108 @@ const managedPolicy = read(
   "V1",
   "SandboxPolicy.cs"
 );
-const rustOneShot = enumVariants(rustPolicy, "Containment", "rust");
+const generatedWire = read(
+  "sdk",
+  "dotnet",
+  "Microsoft.Mxc.Sdk",
+  "Generated",
+  "MxcConfigV1_0_0.g.cs"
+);
+
+const managedContainmentWire = new Map([
+  ["Process", "process"],
+  ["ProcessContainer", "processcontainer"],
+  ["Lxc", "lxc"],
+  ["Bubblewrap", "bubblewrap"],
+  ["Seatbelt", "seatbelt"],
+  ["IsolationSession", "isolation_session"],
+  ["Wslc", "wslc"],
+]);
+const managedOneShotContainments = managedDerivedTypes(
+  managedRequest,
+  "SandboxContainment"
+).map((name) => {
+  const managedName = name.replace(/Containment$/, "");
+  const wire = managedContainmentWire.get(managedName);
+  if (!wire) {
+    errors.push(`managed containment ${managedName} has no exact v1 wire mapping`);
+  }
+  return wire;
+});
 compare(
-  "Rust SDK vs managed containment variants",
-  managedDerivedTypes(managedRequest, "SandboxContainment").map((name) =>
-    name.replace(/Containment$/, "")
-  ),
-  rustOneShot
-);
-compareStructFields(
-  "process-container canonical fields",
-  rustWire,
-  "ProcessContainer",
-  managedRequest,
-  "ProcessContainerContainment"
-);
-compareStructFields(
-  "process-container UI canonical fields",
-  rustWire,
-  "BaseProcessUi",
-  managedRequest,
-  "ProcessContainerUiPolicy"
-);
-compareStructFields(
-  "process-container network canonical fields",
-  rustWire,
-  "ProcessContainerNetwork",
-  managedRequest,
-  "ProcessContainerNetworkPolicy"
-);
-compareStructFields(
-  "capture-denials canonical fields",
-  rustWire,
-  "CaptureDenials",
-  managedPolicy,
-  "CaptureDenialsPolicy"
+  "exact v1 one-shot containment values",
+  managedOneShotContainments.filter(Boolean),
+  schemaEnumStrings(exactV1, "OneShotContainment")
 );
 compare(
-  "WSLC one-shot canonical fields",
+  "generated exact one-shot request fields",
+  managedJsonFields(generatedWire, "OneShotRequest"),
+  schemaProperties(exactV1, "OneShotRequest")
+);
+compare(
+  "process-container exact fields",
+  managedJsonFields(managedRequest, "ProcessContainerContainment"),
+  schemaProperties(exactV1, "ProcessContainer")
+);
+compare(
+  "process-container UI exact fields",
+  managedJsonFields(managedRequest, "ProcessContainerUiPolicy"),
+  schemaProperties(exactV1, "ProcessContainerUi")
+);
+compare(
+  "process-container filesystem exact fields",
+  managedJsonFields(managedRequest, "ProcessContainerFilesystemPolicy"),
+  schemaProperties(exactV1, "ProcessContainerFilesystem")
+);
+compare(
+  "process-container network exact fields",
+  managedJsonFields(managedRequest, "ProcessContainerNetworkPolicy"),
+  schemaProperties(exactV1, "ProcessContainerNetwork")
+);
+compare(
+  "capture-denials exact fields",
+  managedJsonFields(managedPolicy, "CaptureDenialsPolicy"),
+  schemaProperties(exactV1, "CaptureDenials")
+);
+compare(
+  "WSLC one-shot exact fields",
   managedJsonFields(managedRequest, "WslcContainment"),
-  rustStructFields(rustWire, "Wslc").filter(
-    (field) => field !== "targetOs" && field !== "provision"
-  )
+  schemaProperties(exactV1, "OneShotWslc").filter((field) => field !== "targetOs")
 );
 compare(
-  "WSLC port-mapping canonical fields",
-  [...managedJsonFields(managedRequest, "WslcPortMapping"), "protocol"],
-  rustStructFields(rustWire, "PortMapping")
+  "WSLC port-mapping exact fields",
+  managedJsonFields(managedRequest, "WslcPortMapping"),
+  schemaProperties(exactV1, "PortMapping").filter((field) => field !== "protocol")
 );
-
-const managedSandboxPolicyFields = managedJsonFields(
-  managedPolicy,
-  "SandboxPolicy"
-);
-
-// `captureDenials` is the one existing managed compatibility alias (MXC0001,
-// removed in 1.0). MxcSandbox.PrepareRequest migrates it to
-// processContainer.captureDenials and strips it before native serialization.
+compare("LXC exact fields", managedJsonFields(managedRequest, "LxcContainment"), schemaProperties(exactV1, "Lxc"));
+compare("Seatbelt exact fields", managedJsonFields(managedRequest, "SeatbeltContainment"), schemaProperties(exactV1, "Seatbelt"));
 compare(
-  "sandbox policy compatibility aliases",
-  managedSandboxPolicyFields.filter((field) => field === "captureDenials"),
-  ["captureDenials"]
+  "sandbox policy fields handled by exact writer",
+  managedJsonFields(managedPolicy, "SandboxPolicy"),
+  ["filesystem", "network", "ui", "captureDenials", "timeoutMs", "telemetry"]
 );
 compare(
-  "sandbox policy fields",
-  managedSandboxPolicyFields.filter(
-    (field) => field !== "captureDenials" && field !== "telemetry"
-  ),
-  rustStructFields(rustPolicy, "SandboxPolicy")
+  "filesystem policy exact fields plus lifecycle compatibility",
+  managedJsonFields(managedPolicy, "FilesystemPolicy"),
+  [...schemaProperties(exactV1, "Filesystem"), "clearPolicyOnExit"]
 );
-
-// Telemetry is execution metadata, not a containment restriction. The FFI
-// RequestSpec adapter removes it from the binding policy before constructing
-// the Rust SandboxPolicy, then applies it to SandboxRequest explicitly.
 compare(
-  "sandbox policy binding telemetry field",
-  managedSandboxPolicyFields.filter((field) => field === "telemetry"),
-  ["telemetry"]
+  "network policy exact fields plus runtime config authoring",
+  managedJsonFields(managedPolicy, "NetworkPolicy"),
+  [...schemaProperties(exactV1, "Network"), "runtimeConfig"]
 );
-compareStructFields(
-  "telemetry settings",
-  rustRequest,
-  "TelemetrySpec",
-  managedPolicy,
-  "TelemetrySettings"
+compare("network peer exact fields", managedJsonFields(managedPolicy, "NetworkPeerPolicy"), schemaProperties(exactV1, "NetworkPeer"));
+compare("network port exact fields", managedJsonFields(managedPolicy, "NetworkPortPolicy"), schemaProperties(exactV1, "NetworkPort"));
+compare("network rule exact fields", managedJsonFields(managedPolicy, "NetworkRulePolicy"), schemaProperties(exactV1, "NetworkRule"));
+compare("network egress exact fields", managedJsonFields(managedPolicy, "NetworkEgressPolicy"), schemaProperties(exactV1, "NetworkEgress"));
+compare("network ingress exact fields", managedJsonFields(managedPolicy, "NetworkIngressPolicy"), schemaProperties(exactV1, "NetworkIngress"));
+compare("network runtime config exact fields", managedJsonFields(managedPolicy, "NetworkRuntimeConfig"), schemaProperties(exactV1, "RuntimeConfig"));
+compare("telemetry settings exact fields", managedJsonFields(managedPolicy, "TelemetrySettings"), schemaProperties(exactV1, "Telemetry"));
+compare(
+  "UI policy exact writer source fields",
+  managedJsonFields(managedPolicy, "UiPolicy"),
+  ["allowWindows", "clipboard", "allowInputInjection"]
 );
-
-for (const [label, rustSource, rustName, managedName, ignoredRustFields] of [
-  ["filesystem policy", rustPolicy, "FilesystemSection", "FilesystemPolicy"],
-  ["UI policy", rustPolicy, "UiSection", "UiPolicy"],
-  [
-    "network policy",
-    rustNetworkPolicy,
-    "NetworkSection",
-    "NetworkPolicy",
-    ["legacyFieldsSpecified"],
-  ],
-  ["network peer", rustNetworkPolicy, "NetworkPeerSection", "NetworkPeerPolicy"],
-  ["network port", rustNetworkPolicy, "NetworkPortSection", "NetworkPortPolicy"],
-  ["network rule", rustNetworkPolicy, "NetworkRuleSection", "NetworkRulePolicy"],
-  ["network egress", rustNetworkPolicy, "NetworkEgressSection", "NetworkEgressPolicy"],
-  ["network ingress", rustNetworkPolicy, "NetworkIngressSection", "NetworkIngressPolicy"],
-  ["network runtime config", rustNetworkPolicy, "RuntimeConfigSection", "NetworkRuntimeConfig"],
-]) {
-  compareStructFields(
-    label,
-    rustSource,
-    rustName,
-    managedPolicy,
-    managedName,
-    ignoredRustFields
-  );
-}
-const camelCase = (value) => value[0].toLowerCase() + value.slice(1);
 
 const rustProbeFull = read("src", "core", "mxc_engine", "src", "probe.rs");
 const rustProbe = rustProbeFull.split("#[cfg(test)]")[0];
@@ -531,15 +486,32 @@ const managedLifecycle = read(
   "MxcLifecycle.cs"
 );
 const rustPrefixBody = namedBody(rustDispatch, "fn", "backend_from_prefix");
-const managedPrefixBody = namedBody(managedLifecycle, "StateAwareContainment", "ContainmentForId");
 const rustPrefixes = [
   ...rustPrefixBody.matchAll(/"([^"]+)"\s*=>\s*Ok\(ContainmentBackend::(\w+)\)/g),
 ]
   .filter((match) => match[2] !== "WindowsSandbox")
   .map((match) => `${match[1]}:${match[2]}`);
-const managedPrefixes = [
-  ...managedPrefixBody.matchAll(/"([^"]+)"\s*=>\s*StateAwareContainment\.(\w+)/g),
-].map((match) => `${match[1]}:${match[2]}`);
+function managedIdPrefixes(source) {
+  return [
+    ...namedBody(source, "StateAwareContainment", "ContainmentForId")
+      .matchAll(/"([^"]+)"\s*=>\s*StateAwareContainment\.(\w+)/g),
+  ].map((match) => `${match[1]}:${match[2]}`);
+}
+compare(
+  "state-aware sandbox-id prefix extractor",
+  managedIdPrefixes(
+    `class Example {
+      static StateAwareContainment ContainmentForId(string id) {
+        return id switch { "iso" => StateAwareContainment.IsolationSession };
+      }
+      static StateAwareContainment Other(string id) {
+        return id switch { "unrelated" => StateAwareContainment.Wslc };
+      }
+    }`
+  ),
+  ["iso:IsolationSession"]
+);
+const managedPrefixes = managedIdPrefixes(managedLifecycle);
 compare("state-aware sandbox-id prefixes", managedPrefixes, rustPrefixes);
 
 if (errors.length > 0) {
@@ -549,8 +521,8 @@ if (errors.length > 0) {
 }
 
 console.log(
-  `C# API parity OK: request/policy fields, sandbox-id prefixes, ` +
-    `${rustOneShot.length} one-shot backends, ` +
+  `C# API parity OK: exact v1 request/policy fields, sandbox-id prefixes, ` +
+    `${schemaEnumStrings(exactV1, "OneShotContainment").length} one-shot backends, ` +
     `${new Set(discoveredRustBackends).size} discovery backends, ` +
     `${rustCapabilities.length} capabilities`
 );

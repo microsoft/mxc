@@ -5,7 +5,7 @@ MXC generates artifacts from exact registered configuration contracts:
 | Artifact family | Rust source | Purpose |
 | --- | --- | --- |
 | Exact `0.9.0-alpha` | `src/core/mxc_config_contract/src/published/v0_9_0_alpha/` | Authoritative closed published contract and versioned TypeScript oracle |
-| Exact `1.0.0` | `src/core/mxc_config_contract/src/published/v1_0_0/` | Authoritative closed published contract and versioned TypeScript oracle |
+| Exact `1.0.0` | `src/core/mxc_config_contract/src/published/v1_0_0/` | Authoritative closed published SDK target and generated TypeScript / C# wire types |
 | Exact `1.1.0-alpha` | `src/core/mxc_config_contract/src/dev/` | Authoritative closed development contract and versioned TypeScript oracle |
 
 Published schemas under `schemas/stable/` are immutable release artifacts.
@@ -36,8 +36,8 @@ v1.0 also remains renderable for verification without making the stable
 artifact mutable.
 
 `mxc_schema_support` owns shared integer normalization, deterministic root
-rendering, and TypeScript emission. `mxc_schema_gen` uses those helpers for
-every renderable exact contract.
+rendering, TypeScript emission, and C# wire-type emission. `mxc_schema_gen`
+uses those helpers for every renderable exact contract.
 
 `wxc_common::common_request_ir::CommonRequestIR` is the internal whole-request
 normalization boundary that replaced the former deserializable
@@ -61,6 +61,12 @@ cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0
 cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- types --version 0.9.0-alpha --out <temporary-types>
 cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 1.0.0 --out <temporary-schema>
 cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- types --version 1.0.0 --out <temporary-types>
+```
+
+.NET SDK target-contract wire types:
+
+```text
+cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- csharp --version 1.0.0 --out sdk/dotnet/Microsoft.Mxc.Sdk/Generated/MxcConfigV1_0_0.g.cs
 ```
 
 `mxc_schema_gen versions --json` emits registry-driven lifecycle and artifact
@@ -121,9 +127,10 @@ contract-valid, and no relaxed schema twin is generated.
 ## CI gates
 
 - `check-contract-codegen.js` discovers renderable exact artifacts through
-  `mxc_schema_gen versions --json`, regenerates v0.9, v1.0, and v1.1 schema and
-  TypeScript outputs, validates each version's expected roots and fixture
-  corpus, and protects stable schema history and published registry identities.
+  `mxc_schema_gen versions --json`, regenerates v0.9, v1.0, and v1.1 schema,
+  TypeScript outputs, and registered C# SDK wire types, validates each
+  version's expected roots and fixture corpus, and protects stable schema
+  history and published registry identities.
 - `validate-configs.js` validates the repository config corpus against exact
   registered schemas discovered from the same registry command.
 - `wire-conformance.test.ts` checks the Node one-shot public-to-raw v1.1
@@ -136,4 +143,8 @@ contract-valid, and no relaxed schema twin is generated.
   registry; generated schemas are not the authority for that mapping.
 
 The generated TypeScript files are drift oracles, not public SDK exports. The
-public SDK types remain hand-written and are checked at TypeScript compile time.
+generated C# files are internal .NET SDK wire records for the exact SDK target
+contract. Integral schema bounds, including `0.0`, select the appropriate
+unsigned C# wire type for nonnegative minimums; a nonnegative bound without
+a small maximum uses `ulong`. Public SDK types remain hand-written and are
+checked at compile time.
