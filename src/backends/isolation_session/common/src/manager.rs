@@ -30,7 +30,7 @@ use windows_core::{HSTRING, PCWSTR};
 use super::console_mode::{get_local_console_size, ConsoleModeRestorer, CtrlHandlerGuard};
 use super::console_relay::{create_console_relay_thread, ConsoleRelayParams};
 #[cfg(feature = "lifted_msi")]
-use super::error::lifted_payload_missing;
+use super::error::{framework_unavailable, lifted_payload_missing};
 use super::error::{
     activation_error, check_result, format_iso_error, lifecycle_err, op, transport_err,
     IsolationSessionError, StalePromotion,
@@ -89,6 +89,9 @@ unsafe impl Sync for MtaReference {}
 /// error rather than silently binding the inbox `System32` runtime.
 #[cfg(feature = "lifted_msi")]
 fn check_service_available_and_activate() -> Result<IsoSessionOps, IsolationSessionError> {
+    // Refuse before touching the runtime if the framework is not verified.
+    super::regfree::verify_framework().map_err(framework_unavailable)?;
+
     match super::regfree::activate_from_adjacent_shim::<IsoSessionOps>() {
         Some(Ok(ops)) => Ok(ops),
         // The HRESULT→error mapping lives in `activation_error` so it stays

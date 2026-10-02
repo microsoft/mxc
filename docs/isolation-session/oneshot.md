@@ -188,6 +188,13 @@ machine-wide registration or private classic-COM classes.
   the MSI and the SDK nuget from the same OS commit).
 - **`Some(Ok(factory))`** — the coresident factory is used.
 
+### Framework verification
+
+Before any session work, MXC asks the co-located `IsoSessionApp.dll` whether the
+matching IsolationSession runtime is actually installed and loadable on this
+machine. MXC refuses to continue on any failure result, and raises
+`error::framework_unavailable`.
+
 ### Runtime folder resolution
 
 Runtime-folder resolution is owned entirely by `IsoSessionApp.dll` (C++,

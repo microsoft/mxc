@@ -431,7 +431,7 @@ wire-format `MxcError` codes via `map_lifecycle_error`:
 | `IsolationSessionError` variant | Wire `error.code` | Trigger |
 |---|---|---|
 | `Policy(...)` | `policy_validation` | A structurally representable request violates a backend semantic invariant — see the honor matrix above. Rejected by `validate_<phase>` hooks (state-aware) or `validate_runner` (one-shot); fields excluded by an exact request root fail earlier as `malformed_request`. |
-| `ServiceUnavailable(...)` | `backend_unavailable` | Activation failure of the in-proc IsolationSession runtime API: it is unavailable on this OS build (not registered, or the OS feature gate is off). HRESULTs `CLASS_E_CLASSNOTAVAILABLE` (`0x80040111`) or `REGDB_E_CLASSNOTREG` (`0x80040154`). |
+| `ServiceUnavailable(...)` | `backend_unavailable` | Activation failure of the in-proc IsolationSession runtime API: it is unavailable on this OS build (not registered, or the OS feature gate is off). HRESULTs `CLASS_E_CLASSNOTAVAILABLE` (`0x80040111`) or `REGDB_E_CLASSNOTREG` (`0x80040154`). Also raised when the pre-activation framework check refuses — see [Framework verification](#framework-verification) below. |
 | `Stale(...)` | `stale_id` | The OS service reports `HRESULT_FROM_WIN32(ERROR_NOT_FOUND)` (`0x80070490`) — the agent user is unknown to it. After `deprovision`, every non-provision op against the dead `sandboxId` triggers this. |
 | `Lifecycle(...)` | `backend_error` | Any other failure of a lifecycle op, whether the API reported it semantically or the call itself could not be completed. |
 
@@ -489,6 +489,15 @@ semantic error channel, and **only** for non-provision operations.
   dead", and destroy a healthy sandbox.
 - *Non-provision only:* provision mints the agent user. There is no `sandboxId` yet, so
   reporting a stale one would be incoherent.
+
+### Framework verification
+
+Before activating the runtime, the state-aware path runs the same pre-activation
+framework check the one-shot path uses (`regfree::verify_framework`, gated behind
+the lifted build). It asks the co-located `IsoSessionApp.dll` — via its exported
+`VerifyIsoSessionFramework` — whether the matching IsolationSession runtime is
+installed and loadable. Only `S_OK` proceeds; **any** other outcome (including an
+older shim replying that it cannot verify) is fail-closed and refuses.
 
 ## Cancellation
 

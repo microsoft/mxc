@@ -45,6 +45,11 @@ pub(super) mod op {
     pub(crate) const OPTIONS_REDIRECT_STDERR: &str =
         "IsoSessionProcessOptions.SetRedirectStandardError";
     pub(crate) const OPTIONS_ENVIRONMENT: &str = "IsoSessionProcessOptions.Environment";
+
+    /// The staged shim's runtime-verification export, called before any session
+    /// work to confirm the IsolationSession framework is installed.
+    #[cfg(feature = "lifted_msi")]
+    pub(crate) const VERIFY_FRAMEWORK: &str = "IsoSessionApp.VerifyIsoSessionFramework";
 }
 
 /// `HRESULT_FROM_WIN32(ERROR_NOT_FOUND)`. Every non-provision lifecycle op
@@ -375,6 +380,25 @@ pub(super) fn lifted_payload_missing(operation: &str) -> IsolationSessionError {
              and install the matching runtime MSI (`winget install Microsoft.AI.IsolationSession`)."
                 .to_string(),
         ),
+    ))
+}
+
+/// The staged shim reports that the IsolationSession framework runtime is not
+/// installed (or could not confirm it is), so no session work may proceed.
+///
+/// The refusal's concise problem statement becomes the failure `message` (so it
+/// surfaces in the one-shot `ScriptResponse` string and as the state-aware
+/// `MxcError` message), and the shim's ready-to-display fix text, when present,
+/// becomes the `remediation`.
+#[cfg(feature = "lifted_msi")]
+pub(super) fn framework_unavailable(
+    refusal: super::regfree::FrameworkRefusal,
+) -> IsolationSessionError {
+    IsolationSessionError::ServiceUnavailable(IsoApiFailure::new(
+        op::VERIFY_FRAMEWORK,
+        None,
+        Some(refusal.message),
+        refusal.remediation,
     ))
 }
 
