@@ -84,24 +84,6 @@ impl ContainmentBackend {
             | ContainmentBackend::Vm => None,
         }
     }
-
-    /// Whether selecting this backend requires the caller's experimental
-    /// opt-in. Every variant is classified explicitly so a new backend must
-    /// choose production or experimental when it is added.
-    pub fn is_experimental(&self) -> bool {
-        match self {
-            ContainmentBackend::MicroVm
-            | ContainmentBackend::Hyperlight
-            | ContainmentBackend::WindowsSandbox => true,
-            ContainmentBackend::ProcessContainer
-            | ContainmentBackend::Wslc
-            | ContainmentBackend::Lxc
-            | ContainmentBackend::Vm
-            | ContainmentBackend::IsolationSession
-            | ContainmentBackend::Seatbelt
-            | ContainmentBackend::Bubblewrap => false,
-        }
-    }
 }
 
 impl From<crate::wire::Containment> for ContainmentBackend {

@@ -61,6 +61,13 @@ logic. Backends with additional processes use several crates:
 Shared parsing and normalization live in `wxc_common`; backend-specific policy
 validation and enforcement live with each backend.
 
+`mxc_engine/src/backend_registry.rs` owns backend registration metadata,
+including experimental classification, keyed by the shared `ContainmentBackend`
+enum. Runtime authorization consults that registry. Exact-contract publication,
+build-feature availability, and host-capability probing remain separate; the
+registry neither dispatches workloads nor adds backend dependencies to
+`wxc_common`.
+
 ## Request flow
 
 ```mermaid

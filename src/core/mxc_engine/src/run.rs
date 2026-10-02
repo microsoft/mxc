@@ -77,8 +77,7 @@ impl ResolvedRunner {
 /// logging the selected isolation tier and any tier-selection warnings to
 /// `logger`, and surfacing the DACL guard in the returned [`ResolvedRunner`].
 ///
-/// Experimental backends (see
-/// [`ContainmentBackend::is_experimental`]) require
+/// Experimental backends, classified by the engine's backend registry, require
 /// `request.experimental_enabled`; without it they return a
 /// [`backend_unavailable`](MxcError::backend_unavailable) error before any
 /// host-specific resolution. Backends that are not available on this host /

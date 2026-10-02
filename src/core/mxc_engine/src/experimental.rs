@@ -3,8 +3,8 @@
 
 //! Runtime authorization for experimental backends.
 //!
-//! Backends are either production or experimental
-//! ([`ContainmentBackend::is_experimental`]). The caller's experimental opt-in
+//! The engine's [`backend_registry`](crate::backend_registry) classifies each
+//! backend as production or experimental. The caller's experimental opt-in
 //! only permits selecting an experimental backend: it is ignored for
 //! production backends and is independent of the contract version. One-shot
 //! runner resolution and state-aware dispatch both call
@@ -14,16 +14,19 @@
 use wxc_common::models::ContainmentBackend;
 use wxc_common::mxc_error::MxcError;
 
+use crate::backend_registry::registration;
+
 /// Reject `backend` with `backend_unavailable` when it is experimental and the
 /// caller has not opted in.
 pub(crate) fn require_experimental_optin(
     backend: &ContainmentBackend,
     experimental_enabled: bool,
 ) -> Result<(), MxcError> {
-    if backend.is_experimental() && !experimental_enabled {
+    let metadata = registration(backend);
+    if metadata.experimental && !experimental_enabled {
         return Err(MxcError::backend_unavailable(format!(
             "the '{}' backend is experimental; enable experimental features to use it",
-            backend.wire_name()
+            metadata.backend.wire_name()
         )));
     }
     Ok(())

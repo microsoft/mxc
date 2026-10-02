@@ -29,6 +29,7 @@
 //! - [`Error`] / [`ErrorCode`] — the crate-owned error facade over
 //!   `wxc_common`'s internal error type.
 
+mod backend_registry;
 pub mod configs;
 mod dispatch;
 mod error;

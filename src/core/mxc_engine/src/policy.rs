@@ -14,7 +14,7 @@
 mod exact;
 pub(crate) mod network;
 #[cfg(test)]
-mod sdk_v1_goldens;
+mod sdk_v1_conformance;
 
 use std::borrow::Cow;
 use std::collections::HashSet;
