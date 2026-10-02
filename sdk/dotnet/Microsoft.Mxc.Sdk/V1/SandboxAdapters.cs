@@ -42,6 +42,21 @@ public interface ISandboxRunner
 
     /// <summary>Spawn a complete request with live standard streams.</summary>
     ISandboxProcess Spawn(SandboxRequest request);
+
+    /// <summary>Spawn a policy and command with a caller-owned pseudo-terminal.</summary>
+    MxcPty SpawnWithPty(
+        SandboxPolicy policy,
+        string command,
+        MxcPtySize? size = null) =>
+        throw new NotSupportedException(
+            "This sandbox runner does not implement PTY spawning.");
+
+    /// <summary>Spawn a complete request with a caller-owned pseudo-terminal.</summary>
+    MxcPty SpawnWithPty(
+        SandboxRequest request,
+        MxcPtySize? size = null) =>
+        throw new NotSupportedException(
+            "This sandbox runner does not implement PTY spawning.");
 }
 
 /// <summary>
@@ -91,6 +106,19 @@ public sealed class MxcSandboxRunner : ISandboxRunner
     /// <inheritdoc/>
     public ISandboxProcess Spawn(SandboxRequest request) =>
         MxcSandbox.Spawn(request);
+
+    /// <inheritdoc/>
+    public MxcPty SpawnWithPty(
+        SandboxPolicy policy,
+        string command,
+        MxcPtySize? size = null) =>
+        MxcSandbox.SpawnWithPty(policy, command, size);
+
+    /// <inheritdoc/>
+    public MxcPty SpawnWithPty(
+        SandboxRequest request,
+        MxcPtySize? size = null) =>
+        MxcSandbox.SpawnWithPty(request, size);
 }
 
 /// <summary>
