@@ -3,13 +3,16 @@
 
 //! Co-versioned JSON request contract used by language bindings.
 //!
-//! **Deprecated.** This private binding request backs only the deprecated
+//! **Deprecated.** This private binding request backs the deprecated
 //! [`mxc_run_request`](crate::mxc_run_request) and
-//! [`mxc_spawn_request`](crate::streaming::mxc_spawn_request) exports. Bindings
-//! send exact-version configuration documents to
+//! [`mxc_spawn_request`](crate::streaming::mxc_spawn_request) exports and the
+//! temporary .NET binding-request probe. Node and .NET one-shot bindings still
+//! use this request until their migrations switch to
 //! [`mxc_run_json`](crate::mxc_run_json) and
 //! [`mxc_spawn_json`](crate::streaming::mxc_spawn_json) instead; this module is
-//! removed with those exports.
+//! removed with the private execution and probe exports. This transitional
+//! format still reads experimental authorization from its own JSON; exact
+//! configuration entry points accept authorization only as typed arguments.
 
 use std::collections::BTreeMap;
 

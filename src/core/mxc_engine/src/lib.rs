@@ -20,7 +20,7 @@
 //!   port of the SDK's `createConfigFromPolicy`), for the host's native
 //!   containment or an explicitly selected [`Containment`] backend.
 //! - [`spawn`] — spawn a streaming [`SandboxProcess`] handle for a request.
-//! - [`run`] / [`resolve_runner`] (Windows) — run-to-completion backend
+//! - [`run()`] / [`resolve_runner`] (Windows) — run-to-completion backend
 //!   selection and execution.
 //! - [`run_state_aware`] — state-aware lifecycle backend resolution + dispatch.
 //! - [`platform_support`] / [`PlatformSupport`] — host support detection.
@@ -108,7 +108,7 @@ use wxc_common::telemetry;
 /// callbacks into this module's code, so **the library must remain loaded
 /// until every spawned handle produced by this function has been dropped**
 /// (which releases the corresponding provider reference through
-/// [`telemetry::shutdown`] via the [`TelemetryProcess`] `Drop` impl below).
+/// [`telemetry::shutdown`] via the internal `TelemetryProcess` `Drop` impl below).
 /// Callers that dlclose / `FreeLibrary` while a spawned handle is still live
 /// would leave ETW with dangling callbacks into unmapped memory.
 ///

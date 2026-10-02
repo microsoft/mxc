@@ -295,7 +295,7 @@ descriptors.
 
 ### Native ingress
 
-Language bindings pass configuration to the native library only as exact
+The completed binding migration passes configuration to native only as exact
 versioned JSON. A high-level SDK maps its policy types to the contract named
 by its `sdkMajorTargets` entry, stamps that `version`, and calls
 `mxc_run_json`, `mxc_spawn_json`, or the state-aware JSON exports; raw JSON
@@ -303,8 +303,15 @@ APIs pass caller-authored documents through unchanged. The native side
 parses each document with its declared contract, so every surface shares one
 parser and one normalization path. Controls that are not configuration, such
 as the experimental opt-in, are typed FFI arguments and never JSON fields.
-The shared fixtures in `tests/policy/sdk-v1/` pin the document each SDK emits
-for a given high-level policy.
+The shared fixtures in `tests/policy/sdk-v1/` define the document each SDK must
+emit for a given high-level policy. Rust builder/schema coverage is present;
+Node and .NET emitted-document checks accompany their respective migrations.
+
+During the transition, Node and .NET one-shot bindings still use deprecated
+`mxc_run_request` / `mxc_spawn_request`, and the .NET probe still uses the
+temporary private binding-request probe. Those formats can carry an embedded
+experimental switch. The exact-config exports follow the rule above; the
+private exceptions are removed after the consumers migrate.
 
 ### Experimental Flag
 
@@ -318,19 +325,16 @@ lxc-exec config.json --experimental
 wxc-exec.exe --experimental config.json
 ```
 
-The parser **always** parses fields defined by the selected exact contract
-regardless of the flag; parsing is flag-independent. The `--experimental` flag only sets
-`request.experimental_enabled`:
-- When set, the runners apply the parsed experimental features alongside the
-  stable features
-- When unset, `experimental_enabled` is false and the runners **ignore** the
-  parsed features that still require authorization — no error, those features
-  are just not applied
-
-Selecting an experimental backend (MicroVM, Hyperlight, or Windows Sandbox) is
-the exception: without the flag, the engine refuses the request with
+The parser **always** parses fields defined by the selected exact contract;
+parsing is flag-independent. The flag authorizes selecting an experimental
+backend (MicroVM, Hyperlight, or Windows Sandbox). Without it, native refuses
+the request with
 `backend_unavailable` on every one-shot and state-aware entry point. The flag
-has no effect on the choice of a production backend.
+is ignored for production backends, including production-backend fields in a
+development contract; unsupported policy still fails closed rather than being
+silently ignored. Contract version and backend authorization are separate.
+The authorization switch is excluded from policy identity because it does not
+change the selected backend's enforcement.
 
 **2. SDK:** policy APIs come from `@microsoft/mxc-sdk/v1`; raw config
 spawning comes from `@microsoft/mxc-sdk`.

@@ -4,9 +4,11 @@ This directory holds two fixture families:
 
 - `sdk-v1/` — the exact 1.0.0 documents every v1 SDK must emit for a shared
   set of high-level policy invocations. See [SDK v1 goldens](#sdk-v1-goldens).
-- The top-level `*.json` files — the private binding request accepted by the
+- The top-level `request-*.json` files — the private binding request accepted by the
   deprecated `mxc_run_request` / `mxc_spawn_request` exports. They are removed
   with those exports.
+- The top-level `state-aware-*.json` files are exact lifecycle envelopes and
+  remain independent of the private binding-request cleanup.
 
 ## SDK v1 goldens
 
@@ -30,8 +32,10 @@ reject, with the expected `errorCode` and a `messageContains` fragment.
   invalid document is rejected for the recorded reason.
 - **Schema** — `scripts/versioning/validate-configs.js` validates every
   expected document against the registered 1.0.0 schema.
-- **Node and .NET** — each SDK maps the input through its own high-level API
-  and asserts the emitted JSON equals the expected document.
+- **Node and .NET (planned migration coverage)** — their JSON-ingress
+  follow-ups map inputs through the high-level API and assert emitted JSON
+  equals the expected document. Their current one-shot paths still use the
+  private binding request.
 
 ### Mapping rules
 
@@ -115,9 +119,14 @@ let both test suites confirm the change is what you meant.
 
 ### Not config files
 
-These are **binding request** documents (`{ policy, command, containment, … }`),
+The `request-*.json` files are **binding request** documents
+(`{ policy, command, containment, ... }`),
 not exact configuration documents. They are deliberately outside
 `tests/configs/` and `tests/examples/`, where
 `scripts/versioning/validate-configs.js` selects each document's exact
 registered schema from its `version`; these would fail because they describe a
 different contract.
+
+The `state-aware-*.json` files instead carry exact lifecycle envelopes with a
+`version`. They are consumed by lifecycle tests and are not removed with the
+private one-shot binding-request fixtures.

@@ -8,6 +8,8 @@
 use std::ffi::{CStr, CString};
 use std::ptr;
 
+#[cfg(target_os = "linux")]
+use mxc_ffi::mxc_spawn_request;
 use mxc_ffi::{
     mxc_available_backends_json, mxc_error_detail_free, mxc_platform_support_json, mxc_run_json,
     mxc_run_request, mxc_run_result_free, mxc_sandbox_stderr_closer, mxc_sandbox_stdout_closer,
@@ -19,8 +21,6 @@ use mxc_ffi::{
     mxc_probe_request_json, mxc_probe_request_json_with_error,
     mxc_probe_sandbox_request_json_with_error,
 };
-#[cfg(target_os = "linux")]
-use mxc_ffi::{mxc_error_detail_free, mxc_spawn_request, MxcErrorDetail, MxcSandbox};
 
 /// An empty, all-null result to hand to `mxc_run_request`.
 fn zeroed_result() -> MxcRunResult {

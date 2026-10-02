@@ -1,0 +1,17 @@
+{
+  "description": "A supplied ProcessContainer proxy peer must not be blank.",
+  "errorCode": "malformed_request",
+  "messageContains": "processContainer.network.allowedProxyPeer must not be blank",
+  "document": {
+    "version": "1.0.0",
+    "containment": "processcontainer",
+    "process": {
+      "commandLine": "echo golden"
+    },
+    "processContainer": {
+      "network": {
+        "allowedProxyPeer": " \t\r\n"
+      }
+    }
+  }
+}

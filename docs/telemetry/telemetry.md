@@ -634,6 +634,7 @@ Excluded, and why:
 | `telemetry`, internal `test` feature | No enforcement effect. |
 | proxy `original_url` | Can embed `user:password@`. The host and port *are* hashed. |
 | `dry_run`, `testing_features_enabled` | Invocation modes, not policy. |
+| `experimental_enabled` | Authorizes selecting an experimental backend, not enforcement; changing it leaves policy identity unchanged. |
 
 `network_enforcement_compatibility` is included because it changes how the
 normalized network policy is interpreted and enforced.

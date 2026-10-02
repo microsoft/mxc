@@ -37,22 +37,6 @@ fn non_empty_port(value: u16, field: &str) -> Result<NonZeroU16, MxcError> {
     NonZeroU16::new(value).ok_or_else(|| error(format!("{field} must be non-zero")))
 }
 
-fn validate_common(containment: &Containment) -> Result<(), MxcError> {
-    if let Containment::ProcessContainer(process_container) = containment {
-        if process_container
-            .network
-            .as_ref()
-            .and_then(|network| network.allowed_proxy_peer.as_deref())
-            .is_some_and(|peer| peer.trim().is_empty())
-        {
-            return Err(error(
-                "processContainer.network.allowedProxyPeer must not be empty",
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn selected_process_container(containment: &Containment) -> Option<ProcessContainer> {
     match containment {
         Containment::ProcessContainer(process_container) => Some(process_container.clone()),
@@ -89,7 +73,6 @@ pub(super) fn build_request(
     if script.is_empty() {
         return Err(error("script parameter is required").into());
     }
-    validate_common(containment)?;
     let prepared = PreparedInput {
         policy,
         containment,
@@ -128,36 +111,38 @@ mod tests {
         })
     }
 
-    #[test]
-    fn rejects_empty_allowed_proxy_peer() {
-        let error = build_request(
-            &SandboxPolicy::default(),
-            &process_container_with_proxy_peer(""),
-            "echo hello",
-            None,
-        )
-        .unwrap_err();
+    fn assert_blank_proxy_peer_uses_shared_validation(peer: &str) {
+        let policy = SandboxPolicy::default();
+        let containment = process_container_with_proxy_peer(peer);
+        let prepared = PreparedInput {
+            policy: &policy,
+            containment: &containment,
+            script: "echo hello",
+            container_id: "proxy-validation".to_string(),
+        };
+        let contract = ExactOneShotContract::V1_0(Box::new(v1_0::build(&prepared).unwrap()));
+        let mut logger = Logger::new(Mode::Buffer);
+        let shared_error = load_one_shot_request_from_contract(contract, &mut logger).unwrap_err();
+        assert!(shared_error
+            .to_string()
+            .contains("processContainer.network.allowedProxyPeer must not be blank"));
 
+        let error = build_request(&policy, &containment, "echo hello", None).unwrap_err();
+        assert_eq!(error.code, crate::ErrorCode::MalformedRequest);
         assert_eq!(
             error.message,
-            "processContainer.network.allowedProxyPeer must not be empty"
+            format!("failed to build request: {shared_error}")
         );
     }
 
     #[test]
-    fn rejects_whitespace_only_allowed_proxy_peer() {
-        let error = build_request(
-            &SandboxPolicy::default(),
-            &process_container_with_proxy_peer(" \t\r\n"),
-            "echo hello",
-            None,
-        )
-        .unwrap_err();
+    fn rejects_empty_allowed_proxy_peer() {
+        assert_blank_proxy_peer_uses_shared_validation("");
+    }
 
-        assert_eq!(
-            error.message,
-            "processContainer.network.allowedProxyPeer must not be empty"
-        );
+    #[test]
+    fn rejects_whitespace_only_allowed_proxy_peer() {
+        assert_blank_proxy_peer_uses_shared_validation(" \t\r\n");
     }
 
     #[test]

@@ -14,7 +14,7 @@
 //!   to this process's stdio** — what an embedding console application needs
 //!   for an interactive terminal. It blocks and reports an [`MxcExecOutcome`].
 //! - [`mxc_exec_state_aware_json`] drives the **exec phase as a live streaming**
-//!   process, returning the same opaque [`MxcSandbox`](crate::MxcSandbox) handle
+//!   process, returning the same opaque [`crate::MxcSandbox`] handle
 //!   as [`mxc_spawn_request`](crate::mxc_spawn_request) — so the caller reuses the
 //!   `mxc_stream_*` / `mxc_sandbox_*` externs to read/write/wait/kill.
 //!
@@ -113,7 +113,8 @@ impl MxcStateAwareResult {
 /// # Safety
 /// - `request_json_utf8` must be null or a valid NUL-terminated UTF-8 C string.
 /// - `out` must be null or point to writable [`MxcStateAwareResult`]-sized storage.
-/// - On success the caller must release `*out` with [`mxc_state_aware_result_free`].
+/// - The caller must release `*out` with [`mxc_state_aware_result_free`] after
+///   every call that populated it, including failures.
 #[no_mangle]
 pub unsafe extern "C" fn mxc_run_state_aware_json(
     request_json_utf8: *const c_char,
@@ -193,7 +194,7 @@ pub unsafe extern "C" fn mxc_state_aware_result_free(r: *mut MxcStateAwareResult
 ///
 /// Parses `request_json_utf8` (an `exec`-phase request with a `sandboxId`),
 /// spawns the process, and on success writes an opaque
-/// [`MxcSandbox`](crate::MxcSandbox) handle to `*out_handle` (drive it with the
+/// [`crate::MxcSandbox`] handle to `*out_handle` (drive it with the
 /// `mxc_stream_*` / `mxc_sandbox_*` externs, free it with `mxc_sandbox_free`).
 /// On failure returns the status code and, if `out_error` is non-null, fills it
 /// with the message plus the failing API call when there was one (release it
@@ -459,7 +460,14 @@ mod tests {
             );
         }
 
-        result.error.free_strings();
+        // SAFETY: the result owns only allocations produced by this library.
+        unsafe { mxc_state_aware_result_free(&mut result) };
+        assert_eq!(result.status, crate::MXC_STATUS_STALE_ID);
+        assert!(result.response_json_utf8.is_null());
+        assert!(result.error.message_utf8.is_null());
+        assert!(result.error.operation_utf8.is_null());
+        assert!(result.error.native_code_utf8.is_null());
+        assert!(result.error.remediation_utf8.is_null());
     }
 
     #[test]

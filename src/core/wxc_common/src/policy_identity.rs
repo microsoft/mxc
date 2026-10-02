@@ -12,7 +12,7 @@
 //! * **sensitive** to every enforcement-relevant field, so changing one
 //!   `readwritePaths` entry changes it;
 //! * **insensitive** to things that do not change enforcement (telemetry
-//!   settings, dry-run, testing flags);
+//!   settings, backend authorization, dry-run, testing flags);
 //! * **free of credential material**, so it cannot be used as a confirmation
 //!   oracle against a secret embedded in a config.
 //!
@@ -41,6 +41,7 @@
 //! | `network_proxy.original_url` | A proxy URL can embed `user:password@`. The host and port *are* hashed. |
 //! | `capture_denials.output_path` | Only decides where the diagnostic JSON deliverable is written; not enforcement. `capture_denials.mode` remains hashed. |
 //! | `dry_run`, `testing_features_enabled` | Invocation modes, not policy. |
+//! | `experimental_enabled` | Authorizes selecting an experimental backend; it does not change the selected backend's enforcement. |
 //! | `source_contract` | External JSON provenance used only for diagnostics and telemetry. Normalized network compatibility is hashed separately. |
 //! | `default_env_compatibility` | Decides whether a default environment block is supplied, which is process launch behavior rather than enforcement. |
 //!
@@ -207,7 +208,8 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
         telemetry: _excluded_telemetry,
         // A placeholder feature with no enforcement effect.
         test_feature: _excluded_test_feature,
-        experimental_enabled,
+        // Backend selection authorization is not an enforcement decision.
+        experimental_enabled: _excluded_experimental_authorization,
         // --- deliberately excluded; see the module docs ---
         // The command line is what runs, not the policy it runs under, and it
         // routinely embeds credentials.
@@ -240,10 +242,6 @@ fn policy_projection(request: &ExecutionRequest) -> Value {
     root.insert(
         "scriptTimeout".into(),
         Value::Number((*script_timeout).into()),
-    );
-    root.insert(
-        "experimentalEnabled".into(),
-        Value::Bool(*experimental_enabled),
     );
     root.insert(
         "lifecycle".into(),
@@ -530,7 +528,6 @@ mod tests {
             std::collections::BTreeSet::from([
                 "containerId",
                 "containment",
-                "experimentalEnabled",
                 "lifecycle",
                 "lxc",
                 "networkEnforcementCompatibility",
@@ -732,7 +729,38 @@ mod tests {
         let mut changed = request();
         changed.dry_run = true;
         changed.testing_features_enabled = true;
+        changed.experimental_enabled = true;
         assert_eq!(baseline, policy_hash(&changed));
+    }
+
+    #[test]
+    fn backend_authorization_does_not_change_the_policy_hash() {
+        for backend in [
+            ContainmentBackend::ProcessContainer,
+            ContainmentBackend::Wslc,
+            ContainmentBackend::Lxc,
+            ContainmentBackend::Vm,
+            ContainmentBackend::MicroVm,
+            ContainmentBackend::Hyperlight,
+            ContainmentBackend::WindowsSandbox,
+            ContainmentBackend::IsolationSession,
+            ContainmentBackend::Seatbelt,
+            ContainmentBackend::Bubblewrap,
+        ] {
+            let mut changed = request();
+            changed.containment = backend;
+            let baseline = policy_hash(&changed);
+            changed.experimental_enabled = true;
+            assert_eq!(
+                baseline,
+                policy_hash(&changed),
+                "backend authorization must not change {} policy identity",
+                changed.containment.wire_name()
+            );
+            assert!(policy_projection(&changed)
+                .get("experimentalEnabled")
+                .is_none());
+        }
     }
 
     #[test]
@@ -847,6 +875,20 @@ mod tests {
     fn parsed_state_aware_hash(json: &str, backend: &str) -> String {
         let parsed = parse_state_aware(json);
         state_aware_policy_hash(parsed.request(), backend, parsed.operation())
+    }
+
+    #[test]
+    fn state_aware_backend_authorization_does_not_change_the_policy_hash() {
+        for backend in ["isolation_session", "wslc", "windows_sandbox"] {
+            let mut parsed = parse_state_aware(&provision_json(backend, ""));
+            let baseline = state_aware_policy_hash(parsed.request(), backend, parsed.operation());
+            parsed.set_experimental_enabled(true);
+            assert_eq!(
+                baseline,
+                state_aware_policy_hash(parsed.request(), backend, parsed.operation()),
+                "state-aware authorization must not change {backend} policy identity"
+            );
+        }
     }
 
     fn provision_json(backend: &str, extra_fields: &str) -> String {

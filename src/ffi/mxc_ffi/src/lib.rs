@@ -21,19 +21,25 @@
 //!   start / stop / deprovision), and [`mxc_exec_state_aware_json`] runs the
 //!   exec phase as a live streaming handle (reusing the streaming externs).
 //! - **Deprecated** — [`mxc_run_request`] and [`mxc_spawn_request`] accept the
-//!   private binding request. They remain only until every binding moves to
-//!   the JSON entry points, and will be removed without an alias.
+//!   private binding request. Node and .NET one-shot bindings still use them
+//!   until their migrations land. The .NET request probe also temporarily uses
+//!   `mxc_probe_sandbox_request_json_with_error`. These private paths are
+//!   removed after their consumers move to the exact-JSON exports.
 //!
 //! ## Ingress rule
 //!
-//! Sandbox policy and configuration cross this boundary **only** as exact
+//! In the completed migration, policy and configuration cross this boundary
+//! **only** as exact
 //! versioned JSON: a public MXC configuration or state-aware envelope whose
 //! `version` names a registered contract. The native side parses it with that
 //! contract and rejects unknown fields and unregistered versions. Controls
 //! that are not configuration, such as the experimental opt-in and dry-run,
 //! are typed `i32` arguments (nonzero is true) and are never read from the
 //! JSON, so a document cannot grant itself experimental access. New entry
-//! points follow this rule rather than adding typed policy structs.
+//! points follow this rule rather than adding typed policy structs. The
+//! deprecated binding-request execution and temporary probe paths are the
+//! transitional exceptions: they still accept private JSON and its embedded
+//! experimental switch until consumer migration and cleanup are complete.
 //!
 //! ## Contract
 //!
@@ -335,7 +341,7 @@ pub(crate) fn alloc_cstring(bytes: &[u8]) -> *mut c_char {
     }
 }
 
-/// Free a `CString` previously produced by [`alloc_cstring`] / [`into_raw`],
+/// Free a `CString` previously produced by [`alloc_cstring`] / [`CString::into_raw`],
 /// resetting the pointer to null.
 pub(crate) fn free_cstr(p: &mut *mut c_char) {
     if !p.is_null() {
