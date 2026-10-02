@@ -11,8 +11,8 @@ undefined behavior**.
 
 | File | Role |
 |---|---|
-| `src/backends/wslc/common/src/wslcsdk_sys.rs` | **Generated** by bindgen. The single source of ABI truth: opaque settings structs + size consts, handle types, enums, data structs, callback typedefs, and the runtime-loaded `WslcSdk` function table with compile-time size/offset asserts. **Do not hand-edit.** |
-| `src/backends/wslc/common/src/wslc_bindings.rs` | Thin ergonomic **facade** over the generated module. Re-exports the generated surface (`pub use crate::wslcsdk_sys::*;`) and adds only what bindgen cannot generate: the `S_OK` COM sentinel, `WslcSdk::load()` (anti-hijack DLL loading from the executable's own directory), the RAII guards (`WslcSessionGuard` / `WslcContainerGuard` / `WslcProcessGuard`), `check_hresult`, and `WslcComponentFlags::any_missing`. |
+| `src/mxc-sdk/src/backends/wslc/common/wslcsdk_sys.rs` | **Generated** by bindgen. The single source of ABI truth: opaque settings structs + size consts, handle types, enums, data structs, callback typedefs, and the runtime-loaded `WslcSdk` function table with compile-time size/offset asserts. **Do not hand-edit.** |
+| `src/mxc-sdk/src/backends/wslc/common/wslc_bindings.rs` | Thin ergonomic **facade** over the generated module. Re-exports the generated surface (`pub use crate::wslcsdk_sys::*;`) and adds only what bindgen cannot generate: the `S_OK` COM sentinel, `WslcSdk::load()` (anti-hijack DLL loading from the executable's own directory), the RAII guards (`WslcSessionGuard` / `WslcContainerGuard` / `WslcProcessGuard`), `check_hresult`, and `WslcComponentFlags::any_missing`. |
 | `scripts/generate-wslc-bindings.ps1` | Regenerates `wslcsdk_sys.rs` from the header vendored in the SDK `.nupkg`. Run this on every WSLC SDK version bump. |
 
 The generated file is **committed** to the repo. Normal builds (including CI and
@@ -54,7 +54,7 @@ Do all of the following in a **single commit** so the checked-in bindings always
 match the pinned SDK.
 
 1. **Bump the pinned version.** Update `WSLC_SDK_VERSION` in
-   `src/backends/wslc/common/build.rs`.
+   `src/mxc-sdk/build/build_wslc_common.rs`.
 
 2. **Pin the new package hash.** Add a match arm for the new version in
    `expected_sha256()` in `build.rs` with the new `.nupkg`'s lowercase-hex
@@ -63,7 +63,7 @@ match the pinned SDK.
    `WSLC_SDK_SHA256` via env to discover the hash, but the final commit must
    pin it in `expected_sha256()`.
 
-3. **Refresh the vendored package** *(only while the `external/wslc-sdk/`
+3. **Refresh the vendored package** *(only while the `src/mxc-sdk/build/wslc_common/`
    fallback is still in use)* — replace the vendored `.nupkg` with the new
    version so offline/fallback builds match.
 
@@ -74,7 +74,7 @@ match the pinned SDK.
    ```
 
    This extracts `include/wslcsdk.h` from the new `.nupkg` and rewrites
-   `src/backends/wslc/common/src/wslcsdk_sys.rs`.
+   `src/mxc-sdk/src/backends/wslc/common/wslcsdk_sys.rs`.
 
 5. **Build — this is where drift surfaces.**
 

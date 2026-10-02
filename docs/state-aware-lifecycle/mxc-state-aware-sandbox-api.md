@@ -192,7 +192,7 @@ unrecognised prefix, and this is by design:
 | ----------------------- | ------------------------------------------------ |
 | SDK (TypeScript)        | Throws `MxcError { code: 'malformed_id' }` before invoking `mxc_run_state_aware_json` or `mxc_exec_state_aware_json`. The SDK matches the prefix against the closed `StateAwareContainmentBackend` union it was compiled with; an unknown prefix is treated as a malformed id. See `sdk/node/src/state-aware-helper.ts`. |
 | SDK (Rust)              | `SandboxId::parse` accepts a syntactically valid opaque id without interpreting its prefix. Dispatch returns `MxcError { code: 'unsupported_containment' }` when that prefix is not registered. Empty ids, ids without prefix structure, and ids containing NUL are `malformed_id`. |
-| Native FFI entry points | Return `MxcError { code: 'unsupported_containment' }`. The Rust dispatcher parses the prefix successfully but the prefix-to-backend lookup table has no entry for it. See `src/core/wxc_common/src/state_aware_dispatch.rs`. |
+| Native FFI entry points | Return `MxcError { code: 'unsupported_containment' }`. The Rust dispatcher parses the prefix successfully but the prefix-to-backend lookup table has no entry for it. See `src/mxc-sdk/src/tools/wxc_common/state_aware_dispatch.rs`. |
 
 A recognised prefix with a malformed body is `malformed_id` from both sources
 (§8). The same prefix is exposed on the `StatefulSandboxBackend` trait as
@@ -926,7 +926,7 @@ implements one trait, the other, or both, depending on its declared participatio
 
 ### 9.1 Exact request contracts and the shared execution model
 
-`src/core/wxc_common/src/config_deserialize.rs` performs path-aware JSON
+`src/mxc-sdk/src/tools/wxc_common/config_deserialize.rs` performs path-aware JSON
 deserialization into the exact contract selected by version, phase, and
 provision containment. Published v0.9 and v1.0 plus development v1.1 select
 one-shot, `provision`, `start`, `exec`, `stop`, or `deprovision`; provision

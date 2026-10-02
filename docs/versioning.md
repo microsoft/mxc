@@ -421,7 +421,7 @@ step-by-step guide, see [Authoring a New Feature](authoring-a-new-feature.md).
 truth):**
 
 Add the field to the applicable closed request type under
-`src/core/mxc_config_contract/src/dev/`, including the backend and phase roots
+`src/mxc-sdk/src/core/mxc_config_contract/dev/`, including the backend and phase roots
 that admit it.
 
 **In the exact adapter and common request IR:**
@@ -433,7 +433,7 @@ pub(crate) struct CommonRequestIR {
 ```
 
 Edit the authoritative closed mutable contract under
-`src/core/mxc_config_contract/src/dev/`, then adapt the exact field into
+`src/mxc-sdk/src/core/mxc_config_contract/dev/`, then adapt the exact field into
 `CommonRequestIR`. Regenerate the exact schema:
 
 ```text

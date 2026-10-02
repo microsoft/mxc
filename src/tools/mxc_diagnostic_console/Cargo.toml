@@ -14,7 +14,8 @@ windows-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 clap.workspace = true
-wxc_common.workspace = true
+mxc-sdk.workspace = true
 
-[build-dependencies]
-mxc_build_common.workspace = true
+[target.'cfg(windows)'.build-dependencies]
+cc = "1"
+winresource.workspace = true

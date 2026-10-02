@@ -46,7 +46,7 @@ jobs:
 
       - name: Test exact contracts with all features
         working-directory: src
-        run: cargo test --locked -p mxc_config_contract --all-features
+        run: cargo test --locked -p mxc-sdk --features schema-gen --test mxc_config_contract_v0_6_0_alpha --test mxc_config_contract_v0_7_0_alpha --test mxc_config_contract_v0_8_0_alpha --test mxc_config_contract_v0_9_0_alpha --test mxc_config_contract_v0_10_0_alpha --test mxc_config_contract_version_boundaries
 
       - name: Check schema version sync
         run: node scripts/versioning/check-schema-versions.js

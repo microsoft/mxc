@@ -118,7 +118,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 # Linux Rust (from src/; matches build.sh's platform-compatible crate set)
 
-cargo clippy -p lxc -p lxc_common -p wxc_common -p bwrap_common -p unix_test_proxy --all-targets -- -D warnings
+cargo clippy -p lxc -p mxc-sdk -p unix_test_proxy --all-targets -- -D warnings
 
 # macOS Rust (from src/)
 
@@ -130,8 +130,8 @@ cargo clippy -p mxc_darwin -p seatbelt_common --all-targets -- -D warnings
 ```bash
 # Rust unit tests (from src/)
 cargo test --workspace
-cargo test -p wxc_common                      # Single crate
-cargo test -p wxc_common -- config_parser     # Filter by test name
+cargo test -p mxc-sdk --lib                   # Consolidated library unit tests
+cargo test -p mxc-sdk --lib -- config_parser  # Filter by test name
 
 # SDK (from sdk/node/)
 npm test                     # Unit tests

@@ -77,6 +77,7 @@ use mxc_sdk::v1::{available_backends, platform_support, Error, ErrorCode};
 #[cfg(target_os = "windows")]
 use mxc_sdk::v1::{probe, ProbeOutput};
 use mxc_sdk::v1::{ExecutionResult, WaitResult};
+use mxc_sdk::{mxc_engine, wxc_common};
 
 mod error_detail;
 mod pty;

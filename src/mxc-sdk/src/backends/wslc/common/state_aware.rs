@@ -1,0 +1,1323 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! `StatefulSandboxBackend` impl for the state-aware WSLc lifecycle.
+//!
+//! Each lifecycle phase (`provision` / `start` / `exec` / `stop` /
+//! `deprovision`) runs as a separate short-lived `wxc-exec` process. Because the
+//! WSLc SDK has no cross-process re-attach, this backend does **not** touch the
+//! SDK directly: it translates runtime-owned phase configuration plus
+//! the cross-cutting `policy` section into [`daemon_protocol`] frames and drives
+//! the long-lived `wxc-wslc-daemon` (which owns the live session/container
+//! handles) over an owner-only named pipe via [`DaemonClient`].
+//!
+//! Windows-only: the daemon and its pipe transport are a Windows feature.
+
+use std::io::Write;
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+#[cfg(windows)]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(windows)]
+use std::sync::Arc;
+
+use crate::wxc_common::logger::{Logger, Mode};
+#[cfg(test)]
+use crate::wxc_common::models::NetworkPolicy;
+use crate::wxc_common::models::{ContainerPolicy, ExecutionRequest, WslcProvisionConfig};
+use crate::wxc_common::mxc_error::MxcError;
+use crate::wxc_common::state_aware_backend::{
+    null_pipe_handle, DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult,
+    StartResult, StatefulSandboxBackend, StopResult,
+};
+use crate::wxc_common::validator::validate_state_aware_network_policy_support;
+
+use crate::wslc_common::container_steps::OutStream;
+use crate::wslc_common::daemon_client::{
+    truncation_suffix, DaemonClient, DaemonError, DaemonExecOutcome,
+};
+use crate::wslc_common::daemon_protocol::{
+    DeprovisionConfig, ErrKind, ExecConfig, NetworkMode, ProvisionConfig, StartConfig, StopConfig,
+    VolumeMount,
+};
+use crate::wslc_common::policy::{
+    exec_proxy_url, validate_exec_policy, validate_post_provision_policy, validate_provision_policy,
+};
+use crate::wslc_common::process_env::EnvScope;
+#[cfg(windows)]
+use crate::wslc_common::sandbox::prepare_native_output;
+#[cfg(windows)]
+use crate::wslc_common::stream_buffer::bounded_stream_pair;
+
+/// Default image when a provision request omits `wslc.provision.image`.
+const DEFAULT_IMAGE: &str = "alpine:latest";
+
+/// Per-stream ceiling between daemon frames and the synthesized native pipe.
+///
+/// The relay must keep consuming until the terminal frame, so it cannot block
+/// when a caller leaves its native pipe unread. Crossing this ceiling drops the
+/// remaining output and turns an otherwise successful exit into an error.
+#[cfg(windows)]
+const PIPE_BRIDGE_MAX_BUFFERED_BYTES: usize = 8 * 1024 * 1024;
+
+/// State-aware WSLc backend. Zero-sized: every phase opens a fresh
+/// [`DaemonClient`] connection (the daemon holds all persistent state).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WslcStateAwareRunner;
+
+impl WslcStateAwareRunner {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl StatefulSandboxBackend for WslcStateAwareRunner {
+    const ID_PREFIX: &'static str = "wslc";
+    const BACKEND_KEY: &'static str = "wslc";
+
+    type ProvisionConfig = WslcProvisionConfig;
+    type StartConfig = ();
+    type ExecConfig = ();
+    type StopConfig = ();
+    type DeprovisionConfig = ();
+    type ProvisionMetadata = ();
+    type StartMetadata = ();
+    type StopMetadata = ();
+    type DeprovisionMetadata = ();
+
+    fn provision(
+        &mut self,
+        request: &ExecutionRequest,
+        config: Option<WslcProvisionConfig>,
+    ) -> Result<ProvisionResult<()>, MxcError> {
+        let provision_config = build_provision_config(request, config)?;
+
+        let client = connect_daemon()?;
+        let sandbox_id = client
+            .provision(provision_config)
+            .map_err(map_daemon_error)?;
+
+        // The daemon mints a fully `wslc:`-prefixed id; return it verbatim so
+        // later phases present the daemon's own map key.
+        Ok(ProvisionResult {
+            sandbox_id,
+            metadata: None,
+        })
+    }
+
+    fn start(
+        &mut self,
+        sandbox_id: &str,
+        _request: &ExecutionRequest,
+        _config: Option<()>,
+    ) -> Result<StartResult<()>, MxcError> {
+        let client = connect_daemon()?;
+        client
+            .start(StartConfig {
+                sandbox_id: sandbox_id.to_string(),
+            })
+            .map_err(map_daemon_error)?;
+        Ok(StartResult { metadata: None })
+    }
+
+    fn stop(
+        &mut self,
+        sandbox_id: &str,
+        _request: &ExecutionRequest,
+        _config: Option<()>,
+    ) -> Result<StopResult<()>, MxcError> {
+        let client = connect_daemon()?;
+        client
+            .stop(StopConfig {
+                sandbox_id: sandbox_id.to_string(),
+            })
+            .map_err(map_daemon_error)?;
+        Ok(StopResult { metadata: None })
+    }
+
+    fn deprovision(
+        &mut self,
+        sandbox_id: &str,
+        _request: &ExecutionRequest,
+        _config: Option<()>,
+    ) -> Result<DeprovisionResult<()>, MxcError> {
+        let client = connect_daemon()?;
+        client
+            .deprovision(DeprovisionConfig {
+                sandbox_id: sandbox_id.to_string(),
+            })
+            .map_err(map_daemon_error)?;
+        Ok(DeprovisionResult { metadata: None })
+    }
+
+    /// Runs one command in the warm container. Relayed callers receive live
+    /// output on this process's stdout/stderr; piped callers receive synthesized
+    /// native stdout/stderr pipes fed from the same daemon stream.
+    fn exec(
+        &mut self,
+        sandbox_id: &str,
+        request: &ExecutionRequest,
+        _config: Option<()>,
+        stdio: ExecStdio,
+    ) -> Result<ExecHandle, MxcError> {
+        let client = connect_daemon()?;
+        let exec_id = uuid::Uuid::new_v4().simple().to_string();
+        let run_token = uuid::Uuid::new_v4().simple().to_string();
+        let config = exec_config(sandbox_id, request, exec_id.clone(), run_token.clone());
+
+        match stdio {
+            ExecStdio::Relayed => exec_relayed(client, config),
+            ExecStdio::Piped => exec_piped(client, config, exec_id, run_token),
+        }
+    }
+
+    fn validate_provision(
+        &self,
+        request: &ExecutionRequest,
+        _config: Option<&WslcProvisionConfig>,
+    ) -> Result<(), MxcError> {
+        validate_state_aware_network_policy_support(
+            request,
+            crate::wslc_common::policy::network_policy_support(),
+        )?;
+        validate_provision_policy(request)
+    }
+
+    fn validate_start(
+        &self,
+        sandbox_id: &str,
+        request: &ExecutionRequest,
+        _config: Option<&()>,
+    ) -> Result<(), MxcError> {
+        validate_sandbox_id(sandbox_id)?;
+        validate_state_aware_network_policy_support(
+            request,
+            crate::wslc_common::policy::network_policy_support(),
+        )?;
+        validate_post_provision_policy(request)
+    }
+
+    fn validate_exec(
+        &self,
+        sandbox_id: &str,
+        request: &ExecutionRequest,
+        _config: Option<&()>,
+    ) -> Result<(), MxcError> {
+        validate_sandbox_id(sandbox_id)?;
+        validate_state_aware_network_policy_support(
+            request,
+            crate::wslc_common::policy::network_policy_support(),
+        )?;
+        validate_exec_policy(request)
+    }
+
+    fn validate_stop(
+        &self,
+        sandbox_id: &str,
+        request: &ExecutionRequest,
+        _config: Option<&()>,
+    ) -> Result<(), MxcError> {
+        validate_sandbox_id(sandbox_id)?;
+        validate_state_aware_network_policy_support(
+            request,
+            crate::wslc_common::policy::network_policy_support(),
+        )?;
+        validate_post_provision_policy(request)
+    }
+
+    fn validate_deprovision(
+        &self,
+        sandbox_id: &str,
+        request: &ExecutionRequest,
+        _config: Option<&()>,
+    ) -> Result<(), MxcError> {
+        validate_sandbox_id(sandbox_id)?;
+        validate_state_aware_network_policy_support(
+            request,
+            crate::wslc_common::policy::network_policy_support(),
+        )?;
+        validate_post_provision_policy(request)
+    }
+}
+
+fn exec_relayed(client: DaemonClient, config: ExecConfig) -> Result<ExecHandle, MxcError> {
+    let timeout_ms = config.timeout_ms;
+
+    // Relay each chunk to our own stdio as it arrives. Hold the stdout/stderr
+    // locks for the whole relay so we don't reacquire the handle per chunk,
+    // and coalesce flushes: `std::io::Stdout`/`Stderr` are line-buffered, so
+    // newline-terminated output already reaches the consumer promptly; we only
+    // force a flush for a chunk that does *not* end in a newline (progress
+    // output — prompts, spinners) so it isn't stranded in the line buffer.
+    // This avoids a flush syscall per bulk chunk while preserving low latency.
+    // Best-effort: a failed local write must not mask the container's exit code.
+    let stdout = std::io::stdout();
+    let stderr = std::io::stderr();
+    let completion = {
+        let mut out = stdout.lock();
+        let mut err = stderr.lock();
+        let result = client.exec_streaming(config, |stream, bytes| match stream {
+            OutStream::Stdout => {
+                let _ = out.write_all(bytes);
+                if bytes.last() != Some(&b'\n') {
+                    let _ = out.flush();
+                }
+            }
+            OutStream::Stderr => {
+                let _ = err.write_all(bytes);
+                if bytes.last() != Some(&b'\n') {
+                    let _ = err.flush();
+                }
+            }
+        });
+        let _ = out.flush();
+        let _ = err.flush();
+        // Drop the locks before mapping the error so error conversion never
+        // contends with the writers we just held.
+        drop((out, err));
+        result.map_err(map_daemon_error)?
+    };
+
+    let exit_code = match completion.outcome {
+        DaemonExecOutcome::Exited(code) if completion.truncated => {
+            return Err(truncated_run_error(code))
+        }
+        DaemonExecOutcome::Exited(code) => code,
+        DaemonExecOutcome::TimedOut => {
+            return Err(MxcError::backend_error(format!(
+                "WSLc exec timed out after {timeout_ms}ms{}",
+                truncation_suffix(completion.truncated)
+            )))
+        }
+        DaemonExecOutcome::Cancelled => {
+            return Err(MxcError::backend_error(format!(
+                "WSLc relayed exec was cancelled unexpectedly{}",
+                truncation_suffix(completion.truncated)
+            )))
+        }
+    };
+
+    Ok(ExecHandle {
+        stdout: null_pipe_handle(),
+        stderr: null_pipe_handle(),
+        stdin: null_pipe_handle(),
+        stdin_closer: None,
+        // Relayed execution has already completed before this handle is
+        // returned; timeouts were surfaced above as an error because the
+        // relay adapter has no typed timeout result.
+        waiter: Box::new(move || Ok(ExecOutcome::Exited(exit_code))),
+        // Nothing to terminate: the workload is already gone. `Ok(())` is
+        // the truthful answer here, not a placeholder.
+        terminator: Box::new(|| Ok(())),
+    })
+}
+
+#[cfg(windows)]
+fn exec_piped(
+    client: DaemonClient,
+    config: ExecConfig,
+    exec_id: String,
+    run_token: String,
+) -> Result<ExecHandle, MxcError> {
+    let stdout_pipe = prepare_native_output()
+        .map_err(|error| MxcError::backend_error(format!("create WSLC stdout pipe: {error}")))?;
+    let stderr_pipe = prepare_native_output()
+        .map_err(|error| MxcError::backend_error(format!("create WSLC stderr pipe: {error}")))?;
+    let (stdout_writer, stdout_source, stdout_overflow) =
+        bounded_stream_pair(PIPE_BRIDGE_MAX_BUFFERED_BYTES);
+    let (stderr_writer, stderr_source, stderr_overflow) =
+        bounded_stream_pair(PIPE_BRIDGE_MAX_BUFFERED_BYTES);
+    let (stdout_reader, stdout_pump) = stdout_pipe
+        .activate(stdout_source)
+        .map_err(|error| MxcError::backend_error(format!("start WSLC stdout pump: {error}")))?;
+    let (stderr_reader, stderr_pump) = stderr_pipe
+        .activate(stderr_source)
+        .map_err(|error| MxcError::backend_error(format!("start WSLC stderr pump: {error}")))?;
+    let stdout = windows::Win32::Foundation::HANDLE(stdout_reader.as_raw_handle());
+    let stderr = windows::Win32::Foundation::HANDLE(stderr_reader.as_raw_handle());
+    let terminator_client = client.clone();
+    let relay_exec_id = exec_id.clone();
+    let relay_run_token = run_token.clone();
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let relay_cancellation = Arc::clone(&cancellation);
+    let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+
+    std::thread::Builder::new()
+        .name("wslc-state-aware-exec".to_string())
+        .spawn(move || {
+            let result = client
+                .admit_exec(config)
+                .and_then(|exec| {
+                    if relay_cancellation.load(Ordering::Acquire) {
+                        client.cancel_exec(relay_exec_id, relay_run_token)?;
+                    }
+                    exec.read_to_completion(|stream, bytes| match stream {
+                        OutStream::Stdout => stdout_writer.write(bytes),
+                        OutStream::Stderr => stderr_writer.write(bytes),
+                    })
+                })
+                .map_err(map_daemon_error)
+                .and_then(|completion| {
+                    // Either end of the bridge can drop output: the daemon's
+                    // queue on the way out, or these pipes if the caller is slow.
+                    let truncated = completion.truncated
+                        || stdout_overflow.has_overflowed()
+                        || stderr_overflow.has_overflowed();
+                    match completion.outcome {
+                        DaemonExecOutcome::Exited(code) if truncated => {
+                            Err(truncated_run_error(code))
+                        }
+                        DaemonExecOutcome::Exited(code) => Ok(ExecOutcome::Exited(code)),
+                        DaemonExecOutcome::TimedOut => Ok(ExecOutcome::TimedOut),
+                        // `SandboxProcess::kill` is a request followed by reaping;
+                        // there is no distinct cancelled variant in `ExecOutcome`.
+                        DaemonExecOutcome::Cancelled => Ok(ExecOutcome::Exited(-1)),
+                    }
+                });
+            stdout_writer.close();
+            stderr_writer.close();
+            let _ = done_tx.send(result);
+            // Caller-owned pipes can remain full when the caller uses
+            // `try_wait` or drops without draining. Joining the pumps here
+            // would then block terminal completion and create a Drop cycle.
+            // Dropping a JoinHandle detaches the pump; closing the read end
+            // during ExecHandle teardown lets the blocked write unwind.
+            drop(stdout_pump);
+            drop(stderr_pump);
+        })
+        .map_err(|error| {
+            MxcError::backend_error(format!("start WSLC exec stream thread: {error}"))
+        })?;
+
+    Ok(ExecHandle {
+        stdout,
+        stderr,
+        stdin: null_pipe_handle(),
+        stdin_closer: None,
+        waiter: Box::new(move || {
+            // Keep the original read handles alive until the generic adapter has
+            // duplicated them and the daemon stream reaches a terminal frame.
+            let _readers = (stdout_reader, stderr_reader);
+            done_rx.recv().map_err(|_| {
+                MxcError::backend_error(
+                    "WSLc exec stream thread ended without reporting an outcome",
+                )
+            })?
+        }),
+        terminator: Box::new(move || {
+            cancellation.store(true, Ordering::Release);
+            terminator_client
+                .cancel_exec(exec_id, run_token)
+                .map_err(map_daemon_error)
+        }),
+    })
+}
+
+#[cfg(not(windows))]
+fn exec_piped(
+    _client: DaemonClient,
+    _config: ExecConfig,
+    _exec_id: String,
+    _run_token: String,
+) -> Result<ExecHandle, MxcError> {
+    Err(MxcError::backend_unavailable(
+        "WSLc piped execution is available only on Windows",
+    ))
+}
+
+/// The daemon's inputs for one exec, with the cooperative proxy applied.
+fn exec_config(
+    sandbox_id: &str,
+    request: &ExecutionRequest,
+    exec_id: String,
+    run_token: String,
+) -> ExecConfig {
+    // `exec_proxy_url` yields the routable URL only when the proxy is enabled
+    // *and* in the required `url` form — `validate_exec` has already rejected
+    // the non-`url` form before we get here, so a `None` here means the proxy
+    // is disabled, not malformed.
+    let env = match exec_proxy_url(request) {
+        Some(proxy_url) => split_env(&crate::wxc_common::proxy_env::apply_cooperative_proxy_env(
+            request.env_entries(),
+            proxy_url,
+        )),
+        None => split_env(request.env_entries()),
+    };
+
+    ExecConfig {
+        exec_id,
+        run_token,
+        sandbox_id: sandbox_id.to_string(),
+        script_code: request.script_code.clone(),
+        working_directory: request.working_directory.clone(),
+        env,
+        env_scope: EnvScope::of(request),
+        timeout_ms: request.script_timeout,
+    }
+}
+
+/// Discover (or spawn) the daemon. A discovery/spawn failure is a
+/// `backend_unavailable` — the backend cannot service any phase without it.
+fn connect_daemon() -> Result<DaemonClient, MxcError> {
+    DaemonClient::connect().map_err(|e| {
+        MxcError::backend_unavailable(format!("failed to reach the WSLc daemon: {e:#}"))
+    })
+}
+
+/// The process finished, but the caller's copy of its output is incomplete.
+///
+/// Reported as a failure so a short capture is never mistaken for a whole one,
+/// with `details.exitCode` keeping the code the process produced.
+fn truncated_run_error(exit_code: i32) -> MxcError {
+    MxcError::backend_error(
+        "WSLc live output was truncated: it was not drained fast enough and a bounded output \
+         queue overflowed",
+    )
+    .with_details(serde_json::json!({ "exitCode": exit_code }))
+}
+
+/// Map a typed [`DaemonError`] onto the matching wire-format [`MxcError`] code.
+fn map_daemon_error(err: DaemonError) -> MxcError {
+    match err {
+        DaemonError::Daemon { kind, message } => match kind {
+            ErrKind::NotProvisioned => MxcError::not_provisioned(message),
+            ErrKind::NotStarted => MxcError::not_started(message),
+            ErrKind::Unavailable => MxcError::backend_unavailable(message),
+            ErrKind::Rejected => MxcError::policy_validation(message),
+            ErrKind::Busy
+            | ErrKind::NotReady
+            | ErrKind::Protocol
+            | ErrKind::Backend
+            | ErrKind::Unknown => MxcError::backend_error(message),
+        },
+        DaemonError::Transport(e) => MxcError::backend_error(format!("{e:#}")),
+    }
+}
+
+/// Validate the `wslc:<32 lowercase hex>` shape. The dispatcher already routes
+/// by prefix; this is defence in depth so a malformed id surfaces as
+/// `malformed_id` rather than a confusing daemon-side `not_provisioned`. The
+/// grammar mirrors the daemon-minted id (`wslc:` + a UUID simple form).
+fn validate_sandbox_id(sandbox_id: &str) -> Result<(), MxcError> {
+    let malformed = || {
+        MxcError::malformed_id(format!(
+            "expected wslc:<32 lowercase hex>, got {sandbox_id:?}"
+        ))
+    };
+    let (prefix, rest) = sandbox_id.split_once(':').ok_or_else(malformed)?;
+    let is_lower_hex = rest.len() == 32
+        && rest
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if prefix == <WslcStateAwareRunner as StatefulSandboxBackend>::ID_PREFIX && is_lower_hex {
+        Ok(())
+    } else {
+        Err(malformed())
+    }
+}
+
+/// Build the daemon `ProvisionConfig` from the request + phase config without
+/// contacting the daemon. Runs the same normalization/delegation + volume/network
+/// mapping as `provision`, so the forwarded config (image, imageTarPath, volumes,
+/// network) can be observed directly by a host-independent test — catching a
+/// serialization/forwarding regression that an E2E run would only surface on a
+/// live WSL host.
+fn build_provision_config(
+    request: &ExecutionRequest,
+    config: Option<WslcProvisionConfig>,
+) -> Result<ProvisionConfig, MxcError> {
+    let image = config
+        .as_ref()
+        .and_then(|c| c.image.clone())
+        .unwrap_or_else(|| DEFAULT_IMAGE.to_string());
+    let image_tar_path = config.and_then(|c| c.image_tar_path);
+
+    // WSLc provision-time filesystem-policy gate (D6 normalization → D3
+    // delegation → denied-path overlap), shared verbatim with the one-shot
+    // runner via `policy_mapping::apply_provision_policy_gate`. The daemon must
+    // mount the tightened policy, so a writable alias of a readonly object never
+    // leaks and a persistent daemon never mounts a path the phase caller could
+    // not delegate.
+    let normalized = normalize_and_check_delegation(request)?;
+    let normalized_request;
+    let request = match normalized {
+        Some(policy) => {
+            normalized_request = ExecutionRequest {
+                policy,
+                ..request.clone()
+            };
+            &normalized_request
+        }
+        None => request,
+    };
+
+    let volumes = build_daemon_volumes(request)?;
+    let network = map_network(request);
+    Ok(ProvisionConfig {
+        image,
+        image_tar_path,
+        volumes,
+        network,
+    })
+}
+
+/// State-aware adapter over the shared WSLc provision policy gate
+/// ([`crate::wslc_common::policy_mapping::apply_provision_policy_gate`]): runs the full
+/// three-step gate (D6 normalization → D3 delegation → denied-path overlap),
+/// buffering normalization diagnostics and surfacing them on stderr (stdout
+/// carries the phase envelope), and maps the gate's `String` error to a
+/// `policy_validation` [`MxcError`]. Returns the tightened policy when
+/// normalization changed something, else `None`.
+fn normalize_and_check_delegation(
+    request: &ExecutionRequest,
+) -> Result<Option<ContainerPolicy>, MxcError> {
+    let mut logger = Logger::new(Mode::Buffer);
+    let result =
+        crate::wslc_common::policy_mapping::apply_provision_policy_gate(request, &mut logger);
+    // Surface any normalization notes (policy tightening / unresolved paths) on
+    // stderr even when the gate then fails, rather than dropping the buffer.
+    let notes = logger.get_buffer();
+    if !notes.is_empty() {
+        eprint!("{notes}");
+    }
+    result.map_err(MxcError::policy_validation)
+}
+
+/// Build daemon volume mounts from the request's filesystem policy. Overlapping
+/// denied paths are rejected earlier in `validate_provision`; an invalid mount
+/// path (e.g. a UNC share) surfaces here as `policy_validation`.
+fn build_daemon_volumes(request: &ExecutionRequest) -> Result<Vec<VolumeMount>, MxcError> {
+    let mounts = crate::wslc_common::policy_mapping::build_volume_mounts(
+        &request.policy.readwrite_paths,
+        &request.policy.readonly_paths,
+    )
+    .map_err(MxcError::policy_validation)?;
+    Ok(mounts
+        .into_iter()
+        .map(|m| VolumeMount {
+            host: m.windows_path,
+            container: m.container_path,
+            read_only: m.read_only,
+        })
+        .collect())
+}
+
+/// Map the request's default network policy to the daemon's binary network
+/// mode. Per-host filtering is rejected in validation, so only the default
+/// policy participates: `Block` → isolated, `Allow` → bridged NAT.
+fn map_network(request: &ExecutionRequest) -> NetworkMode {
+    if crate::wslc_common::policy::network_is_isolated(request) {
+        NetworkMode::None
+    } else {
+        NetworkMode::Bridged
+    }
+}
+
+/// Split `"KEY=VALUE"` env entries into `(name, value)` pairs (the daemon's
+/// `ExecConfig.env` shape). An entry naming no variable is dropped.
+fn split_env(env: &[String]) -> Vec<(String, String)> {
+    crate::wxc_common::default_env::env_pairs(env)
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wxc_common::models::{
+        ContainerPolicy, DefaultEnvCompatibility, NetworkAction, NetworkEgressPolicy,
+        NetworkIngressPolicy, ProxyAddress, ProxyConfig,
+    };
+
+    /// The exit code is unrecoverable once dropped, so failing the call must not
+    /// discard it.
+    #[test]
+    fn a_truncated_run_reports_the_exit_code_it_produced() {
+        let error = truncated_run_error(3);
+        assert_eq!(
+            error.code,
+            crate::wxc_common::mxc_error::MxcErrorCode::BackendError
+        );
+        assert_eq!(
+            error.details.as_ref().and_then(|d| d.get("exitCode")),
+            Some(&serde_json::json!(3))
+        );
+    }
+
+    #[test]
+    fn an_untruncated_run_adds_no_suffix() {
+        assert_eq!(truncation_suffix(false), "");
+        assert!(truncation_suffix(true).contains("truncated"));
+    }
+
+    #[test]
+    fn backend_key_matches_wire_format() {
+        assert_eq!(
+            <WslcStateAwareRunner as StatefulSandboxBackend>::BACKEND_KEY,
+            "wslc"
+        );
+    }
+
+    #[test]
+    fn id_prefix_matches_wire_format() {
+        assert_eq!(
+            <WslcStateAwareRunner as StatefulSandboxBackend>::ID_PREFIX,
+            "wslc"
+        );
+    }
+
+    #[test]
+    fn validate_sandbox_id_accepts_prefixed_id() {
+        validate_sandbox_id("wslc:0123456789abcdef0123456789abcdef").unwrap();
+    }
+
+    #[test]
+    fn validate_sandbox_id_rejects_wrong_prefix() {
+        let err = validate_sandbox_id("iso:0123456789abcdef0123456789abcdef").unwrap_err();
+        assert_eq!(
+            err.code,
+            crate::wxc_common::mxc_error::MxcErrorCode::MalformedId
+        );
+    }
+
+    #[test]
+    fn validate_sandbox_id_rejects_empty_tail() {
+        assert!(validate_sandbox_id("wslc:").is_err());
+    }
+
+    #[test]
+    fn validate_sandbox_id_rejects_bare_token() {
+        assert!(validate_sandbox_id("abc123").is_err());
+    }
+
+    #[test]
+    fn validate_sandbox_id_rejects_non_hex_tail() {
+        // Nonempty but not the 32-hex grammar: reaches the daemon today and is
+        // misreported as not_provisioned rather than malformed_id.
+        assert!(validate_sandbox_id("wslc:not-a-uuid").is_err());
+    }
+
+    #[test]
+    fn validate_sandbox_id_rejects_wrong_length() {
+        assert!(validate_sandbox_id("wslc:abc123").is_err());
+        assert!(validate_sandbox_id("wslc:0123456789abcdef0123456789abcdef0").is_err());
+    }
+
+    #[test]
+    fn validate_sandbox_id_rejects_uppercase_hex() {
+        assert!(validate_sandbox_id("wslc:0123456789ABCDEF0123456789abcdef").is_err());
+    }
+
+    #[test]
+    fn post_provision_hooks_reject_raw_directional_network_fields() {
+        let runner = WslcStateAwareRunner::new();
+        let request = ExecutionRequest {
+            policy: ContainerPolicy {
+                network_egress: Some(NetworkEgressPolicy::default()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let id = "wslc:0123456789abcdef0123456789abcdef";
+
+        assert!(runner.validate_start(id, &request, None).is_err());
+        assert!(runner.validate_exec(id, &request, None).is_err());
+        assert!(runner.validate_stop(id, &request, None).is_err());
+        assert!(runner.validate_deprovision(id, &request, None).is_err());
+    }
+
+    /// Enumerating all five hooks (rather than testing the shared validator) is
+    /// what catches a hook that forgets to call its validator at all.
+    #[test]
+    fn every_validate_hook_rejects_supplied_ui() {
+        let runner = WslcStateAwareRunner::new();
+        let request = ExecutionRequest {
+            policy: ContainerPolicy {
+                ui_specified: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let id = "wslc:0123456789abcdef0123456789abcdef";
+
+        let results = [
+            ("provision", runner.validate_provision(&request, None)),
+            ("start", runner.validate_start(id, &request, None)),
+            ("exec", runner.validate_exec(id, &request, None)),
+            ("stop", runner.validate_stop(id, &request, None)),
+            (
+                "deprovision",
+                runner.validate_deprovision(id, &request, None),
+            ),
+        ];
+        for (phase, result) in results {
+            let err = result.expect_err(&format!("{phase} must reject a supplied ui"));
+            assert_eq!(
+                err.code,
+                crate::wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+            );
+            assert!(
+                err.message.contains("ui section is not supported"),
+                "{phase}: {}",
+                err.message
+            );
+        }
+    }
+
+    /// Refused at provision, the only phase where the network posture is
+    /// settable — so neither can be silently dropped into the daemon's
+    /// `ProvisionConfig`, which carries only the binary [`NetworkMode`].
+    #[test]
+    fn validate_provision_rejects_unimplementable_network_posture() {
+        let runner = WslcStateAwareRunner::new();
+        for (policy, needle) in [
+            (
+                ContainerPolicy {
+                    allow_local_network: true,
+                    ..Default::default()
+                },
+                "allowLocalNetwork",
+            ),
+            (
+                ContainerPolicy {
+                    network_enforcement_mode:
+                        crate::wxc_common::models::NetworkEnforcementMode::Firewall,
+                    ..Default::default()
+                },
+                "enforcementMode",
+            ),
+        ] {
+            let request = ExecutionRequest {
+                policy,
+                ..Default::default()
+            };
+            let err = runner
+                .validate_provision(&request, None)
+                .expect_err(&format!("provision must reject {needle}"));
+            assert_eq!(
+                err.code,
+                crate::wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+            );
+            assert!(err.message.contains(needle), "got: {}", err.message);
+        }
+    }
+
+    /// Guards against over-rejection. Each value is the near-miss of a rejected
+    /// one, so a gate that flipped between value- and presence-based would fail
+    /// here only.
+    #[test]
+    fn validate_provision_accepts_the_postures_wslc_can_honour() {
+        let runner = WslcStateAwareRunner::new();
+        for (label, policy) in [
+            (
+                "explicit capabilities enforcement mode",
+                ContainerPolicy {
+                    network_enforcement_mode:
+                        crate::wxc_common::models::NetworkEnforcementMode::Capabilities,
+                    ..Default::default()
+                },
+            ),
+            (
+                "explicit allowLocalNetwork=false",
+                ContainerPolicy {
+                    allow_local_network: false,
+                    ..Default::default()
+                },
+            ),
+            (
+                "absent ui",
+                ContainerPolicy {
+                    ui_specified: false,
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let request = ExecutionRequest {
+                policy,
+                ..Default::default()
+            };
+            assert!(
+                runner.validate_provision(&request, None).is_ok(),
+                "{label} is honoured by WSLc and must not be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn map_network_maps_block_to_none() {
+        let req = ExecutionRequest {
+            policy: ContainerPolicy {
+                default_network_policy: NetworkPolicy::Block,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(map_network(&req), NetworkMode::None);
+    }
+
+    #[test]
+    fn map_network_maps_allow_to_bridged() {
+        let req = ExecutionRequest {
+            policy: ContainerPolicy {
+                default_network_policy: NetworkPolicy::Allow,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(map_network(&req), NetworkMode::Bridged);
+    }
+
+    #[test]
+    fn build_provision_config_maps_directional_postures_to_daemon_modes() {
+        for (action, expected) in [
+            (NetworkAction::Deny, NetworkMode::None),
+            (NetworkAction::Allow, NetworkMode::Bridged),
+        ] {
+            let request = ExecutionRequest {
+                policy: ContainerPolicy {
+                    network_egress: Some(NetworkEgressPolicy {
+                        default: action,
+                        ..Default::default()
+                    }),
+                    network_ingress: Some(NetworkIngressPolicy {
+                        default: action,
+                        host_loopback: action,
+                    }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            let config = build_provision_config(&request, None).unwrap();
+            assert_eq!(config.network, expected);
+        }
+    }
+
+    #[test]
+    fn build_provision_config_forwards_image_and_tar_path() {
+        let phase = WslcProvisionConfig {
+            image: Some("custom/image:tag".to_string()),
+            image_tar_path: Some("C:\\images\\custom.tar".to_string()),
+        };
+        let cfg = build_provision_config(&ExecutionRequest::default(), Some(phase)).unwrap();
+        assert_eq!(cfg.image, "custom/image:tag");
+        assert_eq!(
+            cfg.image_tar_path.as_deref(),
+            Some("C:\\images\\custom.tar")
+        );
+    }
+
+    #[test]
+    fn build_provision_config_defaults_image_and_omits_tar_when_absent() {
+        for phase in [None, Some(WslcProvisionConfig::default())] {
+            let cfg = build_provision_config(&ExecutionRequest::default(), phase).unwrap();
+            assert_eq!(cfg.image, "alpine:latest");
+            assert!(cfg.image_tar_path.is_none());
+        }
+    }
+
+    #[test]
+    fn build_provision_config_preserves_each_field_and_empty_strings() {
+        for (phase, expected_image, expected_tar_path) in [
+            (
+                WslcProvisionConfig {
+                    image: Some("custom/image:tag".to_string()),
+                    image_tar_path: None,
+                },
+                "custom/image:tag",
+                None,
+            ),
+            (
+                WslcProvisionConfig {
+                    image: None,
+                    image_tar_path: Some("C:\\images\\custom.tar".to_string()),
+                },
+                "alpine:latest",
+                Some("C:\\images\\custom.tar"),
+            ),
+            (
+                WslcProvisionConfig {
+                    image: Some(String::new()),
+                    image_tar_path: Some(String::new()),
+                },
+                "",
+                Some(""),
+            ),
+        ] {
+            let cfg = build_provision_config(&ExecutionRequest::default(), Some(phase)).unwrap();
+            assert_eq!(cfg.image, expected_image);
+            assert_eq!(cfg.image_tar_path.as_deref(), expected_tar_path);
+        }
+    }
+
+    #[test]
+    fn build_provision_config_rejects_denied_overlap_after_normalization() {
+        // Guard: `build_provision_config` must re-run the denied-path overlap
+        // check on the (post-normalization) lists, mirroring the one-shot
+        // runner. A `deniedPaths` entry nested under a mounted parent has no
+        // masking primitive on WSLc's flat mount surface, so it must be
+        // rejected here even though the surrounding dispatcher also validates.
+        let req = ExecutionRequest {
+            policy: ContainerPolicy {
+                readwrite_paths: vec!["C:\\parent".to_string()],
+                denied_paths: vec!["C:\\parent\\secret".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = build_provision_config(&req, None).unwrap_err();
+        assert_eq!(
+            err.code,
+            crate::wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+        );
+        assert!(err.message.contains("deniedPaths"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn build_daemon_volumes_maps_rw_and_ro() {
+        let req = ExecutionRequest {
+            policy: ContainerPolicy {
+                readwrite_paths: vec!["C:\\src".to_string()],
+                readonly_paths: vec!["D:\\data".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let volumes = build_daemon_volumes(&req).unwrap();
+        assert_eq!(volumes.len(), 2);
+        assert_eq!(volumes[0].host, "C:\\src");
+        assert_eq!(volumes[0].container, "/mnt/c/src");
+        assert!(!volumes[0].read_only);
+        assert_eq!(volumes[1].container, "/mnt/d/data");
+        assert!(volumes[1].read_only);
+    }
+
+    #[test]
+    fn build_daemon_volumes_rejects_unc_path() {
+        let req = ExecutionRequest {
+            policy: ContainerPolicy {
+                readwrite_paths: vec!["\\\\server\\share".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = build_daemon_volumes(&req).unwrap_err();
+        assert_eq!(
+            err.code,
+            crate::wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+        );
+    }
+
+    #[test]
+    fn normalize_and_check_delegation_empty_policy_is_none() {
+        let req = ExecutionRequest::default();
+        assert!(normalize_and_check_delegation(&req).unwrap().is_none());
+    }
+
+    #[test]
+    fn normalize_and_check_delegation_tightens_rw_alias_of_ro() {
+        // The same host object listed both readwrite and readonly must be
+        // tightened to readonly (D6) before the daemon mounts it, so a writable
+        // alias of a readonly object never leaks.
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().to_str().unwrap().to_string();
+        let req = ExecutionRequest {
+            policy: ContainerPolicy {
+                readwrite_paths: vec![d.clone()],
+                readonly_paths: vec![d.clone()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let tightened = normalize_and_check_delegation(&req)
+            .unwrap()
+            .expect("aliasing conflict should tighten the policy");
+        assert!(tightened.readwrite_paths.is_empty());
+        assert_eq!(tightened.readonly_paths, vec![d]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn provision_delegation_tightens_rw_alias_of_denied_and_drops_mount() {
+        // A writable path that resolves to the same object as a `denied` entry
+        // (here a case-variant string on case-insensitive NTFS) must tighten to
+        // denied, and the daemon volumes must be built from that tightened policy
+        // — otherwise the writable alias would still be mounted, granting access
+        // the deny was meant to block.
+        let dir = tempfile::tempdir().unwrap();
+        let denied = dir.path().to_str().unwrap().to_string();
+        let rw_alias = denied.to_uppercase();
+        let raw = ExecutionRequest {
+            policy: ContainerPolicy {
+                readwrite_paths: vec![rw_alias],
+                denied_paths: vec![denied],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // Pre-fix behaviour the bug relied on: the raw request WOULD mount the
+        // alias writable.
+        let raw_mounts = build_daemon_volumes(&raw).unwrap();
+        assert_eq!(raw_mounts.len(), 1);
+        assert!(!raw_mounts[0].read_only);
+
+        let tightened = normalize_and_check_delegation(&raw)
+            .unwrap()
+            .expect("rw alias of a denied object should tighten");
+        assert!(tightened.readwrite_paths.is_empty());
+        assert!(!tightened.denied_paths.is_empty());
+        let tightened_req = ExecutionRequest {
+            policy: tightened,
+            ..raw.clone()
+        };
+        assert!(build_daemon_volumes(&tightened_req).unwrap().is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn provision_delegation_rejects_inaccessible_path() {
+        // A delegated path the invoking user cannot access must fail closed
+        // before provisioning mounts anything. `C:\mxc_invalid<name` is an
+        // illegal name → ERROR_INVALID_NAME → not-accessible (not merely
+        // missing), so delegation rejects it.
+        let req = ExecutionRequest {
+            policy: ContainerPolicy {
+                readonly_paths: vec!["C:\\mxc_invalid<name".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = normalize_and_check_delegation(&req).unwrap_err();
+        assert_eq!(
+            err.code,
+            crate::wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+        );
+    }
+
+    #[test]
+    fn split_env_splits_pairs_and_drops_bare_keys() {
+        let env = vec![
+            "PATH=/usr/bin".to_string(),
+            "EMPTY=".to_string(),
+            "BARE".to_string(),
+            "URL=http://a=b".to_string(),
+        ];
+        let pairs = split_env(&env);
+        assert_eq!(pairs[0], ("PATH".to_string(), "/usr/bin".to_string()));
+        assert_eq!(pairs[1], ("EMPTY".to_string(), String::new()));
+        // Only the first '=' splits; the value keeps the rest verbatim.
+        assert_eq!(pairs[2], ("URL".to_string(), "http://a=b".to_string()));
+        assert_eq!(pairs.len(), 3);
+    }
+
+    #[test]
+    fn the_exec_config_carries_the_scope_each_state_of_process_env_selects() {
+        struct Case {
+            label: &'static str,
+            compatibility: DefaultEnvCompatibility,
+            env: Option<Vec<&'static str>>,
+            inherit_default_env: bool,
+            scope: EnvScope,
+            entries: &'static [(&'static str, &'static str)],
+        }
+
+        let cases = [
+            Case {
+                label: "omitted takes the image environment",
+                compatibility: DefaultEnvCompatibility::DefaultBlock,
+                env: None,
+                inherit_default_env: false,
+                scope: EnvScope::Merge,
+                entries: &[],
+            },
+            Case {
+                label: "explicitly empty leaves the child nothing",
+                compatibility: DefaultEnvCompatibility::DefaultBlock,
+                env: Some(vec![]),
+                inherit_default_env: false,
+                scope: EnvScope::Replace,
+                entries: &[],
+            },
+            Case {
+                label: "explicitly empty plus inheritDefaultEnv takes the image environment",
+                compatibility: DefaultEnvCompatibility::DefaultBlock,
+                env: Some(vec![]),
+                inherit_default_env: true,
+                scope: EnvScope::Merge,
+                entries: &[],
+            },
+            Case {
+                label: "supplied is used verbatim",
+                compatibility: DefaultEnvCompatibility::DefaultBlock,
+                env: Some(vec!["FOO=bar"]),
+                inherit_default_env: false,
+                scope: EnvScope::Replace,
+                entries: &[("FOO", "bar")],
+            },
+            Case {
+                label: "supplied plus inheritDefaultEnv layers over the image environment",
+                compatibility: DefaultEnvCompatibility::DefaultBlock,
+                env: Some(vec!["FOO=bar"]),
+                inherit_default_env: true,
+                scope: EnvScope::Merge,
+                entries: &[("FOO", "bar")],
+            },
+            Case {
+                label: "a legacy contract keeps the image environment",
+                compatibility: DefaultEnvCompatibility::LegacyCompatible,
+                env: Some(vec!["FOO=bar"]),
+                inherit_default_env: false,
+                scope: EnvScope::Merge,
+                entries: &[("FOO", "bar")],
+            },
+        ];
+
+        for case in cases {
+            let request = ExecutionRequest {
+                default_env_compatibility: case.compatibility,
+                env: case.env.map(|e| e.into_iter().map(String::from).collect()),
+                inherit_default_env: case.inherit_default_env,
+                script_code: "echo hi".to_string(),
+                ..Default::default()
+            };
+
+            let config = exec_config(
+                "wslc:abc",
+                &request,
+                "exec-1".to_string(),
+                "run-1".to_string(),
+            );
+
+            assert_eq!(config.env_scope, case.scope, "scope for {}", case.label);
+            let expected: Vec<(String, String)> = case
+                .entries
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            assert_eq!(config.env, expected, "entries for {}", case.label);
+            assert_eq!(config.sandbox_id, "wslc:abc");
+            assert_eq!(config.script_code, "echo hi");
+        }
+    }
+
+    #[test]
+    fn the_exec_config_keeps_the_cooperative_proxy_out_of_the_callers_reach() {
+        let request = ExecutionRequest {
+            default_env_compatibility: DefaultEnvCompatibility::DefaultBlock,
+            env: Some(vec![
+                "FOO=bar".to_string(),
+                "HTTP_PROXY=http://attacker.invalid:1".to_string(),
+            ]),
+            policy: ContainerPolicy {
+                network_proxy: ProxyConfig {
+                    address: Some(ProxyAddress::from_url(
+                        "http://127.0.0.1:8888",
+                        "127.0.0.1".to_string(),
+                        8888,
+                    )),
+                    builtin_test_server: false,
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let config = exec_config(
+            "wslc:abc",
+            &request,
+            "exec-1".to_string(),
+            "run-1".to_string(),
+        );
+
+        // Replacement still applies, so the proxy variables must survive into
+        // the entries argv carries rather than being left to the SDK's setter.
+        assert_eq!(config.env_scope, EnvScope::Replace);
+        let value = |name: &str| {
+            config
+                .env
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(value("FOO").as_deref(), Some("bar"));
+        assert_eq!(
+            value("HTTP_PROXY").as_deref(),
+            Some("http://127.0.0.1:8888")
+        );
+        assert_eq!(value("NO_PROXY").as_deref(), Some(""));
+        assert!(!config.env.iter().any(|(_, v)| v.contains("attacker")));
+    }
+
+    #[test]
+    fn map_daemon_error_preserves_not_provisioned() {
+        let err = map_daemon_error(DaemonError::Daemon {
+            kind: ErrKind::NotProvisioned,
+            message: "unknown sandbox".to_string(),
+        });
+        assert_eq!(
+            err.code,
+            crate::wxc_common::mxc_error::MxcErrorCode::NotProvisioned
+        );
+    }
+
+    #[test]
+    fn map_daemon_error_preserves_not_started() {
+        let err = map_daemon_error(DaemonError::Daemon {
+            kind: ErrKind::NotStarted,
+            message: "not started".to_string(),
+        });
+        assert_eq!(
+            err.code,
+            crate::wxc_common::mxc_error::MxcErrorCode::NotStarted
+        );
+    }
+
+    #[test]
+    fn map_daemon_error_collapses_busy_to_backend_error() {
+        let err = map_daemon_error(DaemonError::Daemon {
+            kind: ErrKind::Busy,
+            message: "busy".to_string(),
+        });
+        assert_eq!(
+            err.code,
+            crate::wxc_common::mxc_error::MxcErrorCode::BackendError
+        );
+    }
+
+    #[test]
+    fn map_daemon_error_preserves_unavailable() {
+        let err = map_daemon_error(DaemonError::Daemon {
+            kind: ErrKind::Unavailable,
+            message: "WSLc components are missing".to_string(),
+        });
+        assert_eq!(
+            err.code,
+            crate::wxc_common::mxc_error::MxcErrorCode::BackendUnavailable
+        );
+    }
+
+    #[test]
+    fn map_daemon_error_preserves_rejected() {
+        let err = map_daemon_error(DaemonError::Daemon {
+            kind: ErrKind::Rejected,
+            message: "network.allowLocalNetwork=true is not supported".to_string(),
+        });
+        assert_eq!(
+            err.code,
+            crate::wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+        );
+    }
+
+    #[test]
+    fn map_daemon_error_degrades_unknown_to_backend_error() {
+        let err = map_daemon_error(DaemonError::Daemon {
+            kind: ErrKind::Unknown,
+            message: "from a newer daemon".to_string(),
+        });
+        assert_eq!(
+            err.code,
+            crate::wxc_common::mxc_error::MxcErrorCode::BackendError
+        );
+    }
+}

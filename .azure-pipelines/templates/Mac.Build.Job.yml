@@ -78,7 +78,7 @@ jobs:
 
     - script: |
         set -euo pipefail
-        cargo test --locked --release --target $(targetTriple) -p mxc_engine -p mxc_ffi --lib state_aware
+        cargo test --locked --release --target $(targetTriple) -p mxc-sdk -p mxc_ffi --lib state_aware
         cargo test --locked --release --target $(targetTriple) -p mxc-sdk --test state_aware
       displayName: Test state-aware SDK boundaries
       workingDirectory: $(workingDirectory)

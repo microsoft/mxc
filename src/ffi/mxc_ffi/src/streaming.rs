@@ -67,8 +67,8 @@ use std::ptr;
 
 use mxc_sdk::__ffi::spawn_container_json;
 use mxc_sdk::v1::{MxcProcess, MxcPtyProcess, MxcPtySize, StreamCloser, WaitResult};
-use wxc_common::models::SandboxOutputMetadata;
-use wxc_common::sandbox_process::NativeStdio;
+use mxc_sdk::wxc_common::models::SandboxOutputMetadata;
+use mxc_sdk::wxc_common::sandbox_process::NativeStdio;
 
 use crate::{
     alloc_cstring, cstr_to_str, status_from_error_code, MxcErrorDetail, MXC_STATUS_BACKEND_ERROR,

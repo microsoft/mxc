@@ -16,12 +16,12 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use wxc_common::config_parser::load_mxc_request;
-use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::ContainmentBackend;
-use wxc_common::script_runner::ScriptRunner;
-use wxc_common::state_aware_request::MxcRequest;
-use wxc_common::validator::validate_common;
+use mxc_sdk::wxc_common::config_parser::load_mxc_request;
+use mxc_sdk::wxc_common::logger::{Logger, Mode};
+use mxc_sdk::wxc_common::models::ContainmentBackend;
+use mxc_sdk::wxc_common::script_runner::ScriptRunner;
+use mxc_sdk::wxc_common::state_aware_request::MxcRequest;
+use mxc_sdk::wxc_common::validator::validate_common;
 
 fuzz_target!(|data: &[u8]| {
     let Ok(s) = std::str::from_utf8(data) else {
@@ -36,17 +36,17 @@ fuzz_target!(|data: &[u8]| {
         match req.containment {
             #[cfg(feature = "microvm")]
             ContainmentBackend::MicroVm => {
-                let runner = nanvix_runner::NanVixScriptRunner::new();
+                let runner = mxc_sdk::nanvix_runner::NanVixScriptRunner::new();
                 let _ = runner.validate_runner(&req);
             }
             #[cfg(feature = "hyperlight")]
             ContainmentBackend::Hyperlight => {
-                let runner = hyperlight_common::HyperlightScriptRunner::new();
+                let runner = mxc_sdk::hyperlight_common::HyperlightScriptRunner::new();
                 let _ = runner.validate_runner(&req);
             }
             #[cfg(feature = "isolation_session")]
             ContainmentBackend::IsolationSession => {
-                let runner = isolation_session_common::IsolationSessionRunner::new();
+                let runner = mxc_sdk::isolation_session_common::IsolationSessionRunner::new();
                 let _ = runner.validate_runner(&req);
             }
             _ => {}

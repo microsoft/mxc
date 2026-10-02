@@ -7,6 +7,9 @@
 //! add a `requireAdministrator` manifest here: parsing ETLs and touching
 //! caller-selected output/configuration paths must stay under the caller token.
 
+#[path = "../../mxc-sdk/build/build_mxc_build_common.rs"]
+mod mxc_build_common;
+
 fn main() {
     mxc_build_common::embed_version_info("MXC permissive learning mode", "plm.exe");
 }

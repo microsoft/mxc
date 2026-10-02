@@ -9,7 +9,7 @@
 #   12 = MXC_TEST_FOO env not honored (or value with spaces lost)
 #   13 = MXC_TEST_EQ env not honored (or embedded `=` lost)
 #
-# `lxc-exec` propagates the inner exit code (see `core/lxc/src/main.rs`
+# `lxc-exec` propagates the inner exit code (see `tools/lxc/src/main.rs`
 # line 294), so `set -e` here catches any regression. Guards against the
 # silent-drop bug pattern fixed in `fix/lxc-cwd-env` — without that fix
 # this test exits 11 (cwd) on the first assertion.

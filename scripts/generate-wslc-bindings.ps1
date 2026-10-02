@@ -12,7 +12,7 @@
     The generated file is COMMITTED to the repository. Normal builds simply `mod`
     it and require NO libclang or bindgen. This script only needs to run when the
     pinned WSLC SDK version changes (see `WSLC_SDK_VERSION` in
-    `src/backends/wslc/common/build.rs`).
+    `src/mxc-sdk/build/build_wslc_common.rs`).
 
 .PREREQUISITES
     - LLVM / libclang   (winget install LLVM.LLVM)  — provides libclang for bindgen
@@ -20,8 +20,8 @@
     - Visual Studio 2022 with the MSVC toolchain + a Windows 10/11 SDK
 
 .NOTES
-    The header is extracted from the vendored NuGet package checked into
-    `external/wslc-sdk/` so the generated bindings always match the pinned SDK
+    The header is extracted from the vendored NuGet package shipped in
+    `src/mxc-sdk/build/wslc_common/` so the generated bindings always match the pinned SDK
     version, independent of any local build cache.
 #>
 [CmdletBinding()]
@@ -42,9 +42,9 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $repoRoot   = Split-Path -Parent $PSScriptRoot
-$wslcCommon = Join-Path $repoRoot "src\backends\wslc\common"
+$wslcCommon = Join-Path $repoRoot "src\mxc-sdk\src\backends\wslc\common"
 $outFile    = Join-Path $wslcCommon "src\wslcsdk_sys.rs"
-$vendorDir  = Join-Path $repoRoot "external\wslc-sdk"
+$vendorDir  = Join-Path $repoRoot "src\mxc-sdk\build\wslc_common"
 
 function Fail($msg) { Write-Error $msg; exit 1 }
 

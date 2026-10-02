@@ -185,14 +185,14 @@ fn main() {
     };
 
     // Compute the per-user pipe name (includes current user's SID).
-    if wxc_common::diagnostic::diagnostic_pipe_token().is_none() {
+    if mxc_sdk::wxc_common::diagnostic::diagnostic_pipe_token().is_none() {
         eprintln!(
             "[error] Set MXC_DIAG_PIPE_TOKEN to a high-entropy token in the \
              environment shared with wxc-exec before starting the diagnostic console."
         );
         std::process::exit(1);
     }
-    let pipe_name = wxc_common::diagnostic::diagnostic_pipe_name();
+    let pipe_name = mxc_sdk::wxc_common::diagnostic::diagnostic_pipe_name();
 
     // Enable ANSI escape codes on Windows console.
     enable_virtual_terminal();
@@ -371,7 +371,7 @@ fn create_pipe_instance(pipe_name: &str, first: bool) -> Result<HANDLE, String> 
     let name_wide: Vec<u16> = pipe_name.encode_utf16().chain(std::iter::once(0)).collect();
     use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
 
-    let sid = wxc_common::diagnostic::current_user_sid()
+    let sid = mxc_sdk::wxc_common::diagnostic::current_user_sid()
         .ok_or_else(|| "could not determine current user SID".to_string())?;
     let sddl = format!("D:(A;;GA;;;{sid})S:(ML;;NW;;;LW)");
     let sddl_wide: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();

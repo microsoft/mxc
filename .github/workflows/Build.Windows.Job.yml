@@ -68,8 +68,8 @@ jobs:
 
       - name: Test telemetry consent and policy in release mode
         run: |
-          cargo test --locked --release --target ${{ matrix.target }} -p wxc_common telemetry::consent
-          cargo test --locked --release --target ${{ matrix.target }} -p wxc_common telemetry::policy
+          cargo test --locked --release --target ${{ matrix.target }} -p mxc-sdk --lib wxc_common::telemetry::consent
+          cargo test --locked --release --target ${{ matrix.target }} -p mxc-sdk --lib wxc_common::telemetry::policy
 
       - name: Test
         run: cargo test --locked --release --target ${{ matrix.target }}

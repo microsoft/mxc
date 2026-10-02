@@ -124,8 +124,8 @@ mxc/src/
 │       ├── script_runner.rs          # UNCHANGED
 │       └── ...                       # All other modules UNCHANGED
 ├── wxc_test_driver/                  # UNCHANGED
-├── wxc_windows_sandbox_guest/        # UNCHANGED
-└── wxc_windows_sandbox_daemon/       # UNCHANGED
+├── mxc-sdk/src/bin/windows_sandbox_guest/   # UNCHANGED
+└── mxc-sdk/src/bin/windows_sandbox_daemon/  # UNCHANGED
 
 mxc/docs/nanvix-microvm/
 └── nanvix-integration-plan.md        # NEW — this document

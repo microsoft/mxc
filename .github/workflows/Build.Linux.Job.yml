@@ -21,7 +21,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
-        working-directory: src/core/lxc
+        working-directory: src/tools/lxc
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -47,7 +47,7 @@ jobs:
         with:
           workspaces: |
             src -> target
-            src/core/lxc -> target
+            src/tools/lxc -> target
           key: ${{ matrix.target }}-v2
           cache-on-failure: false
 
@@ -99,7 +99,7 @@ jobs:
           # sandbox can start (no-op on kernels without this knob).
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
-      # The job defaults working-directory to src/core/lxc, so the `Test lxc`
+      # The job defaults working-directory to src/tools/lxc, so the `Test lxc`
       # step above covers only the lxc package. This streaming suite must follow
       # the install: these skip when bwrap is absent, so running them earlier
       # would silently exercise nothing.
@@ -113,9 +113,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked --release --target "${{ matrix.target }}" -p wxc_common --lib
-          cargo test --locked --release --target "${{ matrix.target }}" -p wxc_common --doc
-          cargo test --locked --release --target "${{ matrix.target }}" -p mxc_engine -p mxc_ffi --lib state_aware
+          cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk --lib wxc_common::
+          cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk --doc
+          cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk -p mxc_ffi --lib state_aware
           cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk --test state_aware
 
       # These need no LXC installed: the engine tests inject their probes, and

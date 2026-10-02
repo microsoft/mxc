@@ -32,7 +32,8 @@ or `deprovision` in a different process.
 > evaluated; the daemon remains the supported design.
 
 To keep the session (VM) and container **warm** across phases, WSLc uses a **persistent per-user
-daemon** (`wxc-wslc-daemon.exe`, crate `wxc_wslc_daemon` at `src/backends/wslc/daemon/`) that owns
+daemon** (`wxc-wslc-daemon.exe`, an `mxc-sdk` binary target at
+`src/mxc-sdk/src/bin/wslc_daemon/`) that owns
 the live SDK handles. Each phase process is a thin client that contacts the daemon over a named
 pipe; the daemon performs the actual SDK calls and streams stdio back. This mirrors the Windows
 Sandbox daemon pattern.
@@ -46,12 +47,12 @@ against different sandboxes are serialized — correct, just not concurrent. See
 
 | Component | Location | Role |
 |-----------|----------|------|
-| State-aware backend | `src/backends/wslc/common/src/state_aware.rs` (`WslcStateAwareRunner`) | Translates runtime `WslcProvisionConfig` and cross-cutting policy into daemon protocol frames; implements `StatefulSandboxBackend` (`ID_PREFIX`/`BACKEND_KEY` = `wslc`). |
-| Policy honor matrix | `src/backends/wslc/common/src/policy.rs` | Per-phase validation of which policy fields are honored vs rejected. |
-| Daemon client | `src/backends/wslc/common/src/daemon_client.rs` | Discovers / spawns the daemon, connects the control pipe, sends `DaemonRequest` frames, reads responses; typed `DaemonError`. |
-| Daemon | `src/backends/wslc/daemon/` (`wxc-wslc-daemon.exe`) | Long-lived host process holding `WslcSession` / `WslcContainer`; worker thread drives the SDK; idle-timeout watchdog tears the session down when unused. |
-| Engine arm | `src/core/mxc_engine/src/state_aware.rs` | Dispatches the WSLc state-aware backend (Windows + `wslc` feature). |
-| Prefix registration | `src/core/wxc_common/src/state_aware_dispatch.rs` (`backend_from_prefix`) | Maps the `wslc:` id prefix back to the WSLc backend for post-provision phases. |
+| State-aware backend | `src/mxc-sdk/src/backends/wslc/common/state_aware.rs` (`WslcStateAwareRunner`) | Translates runtime `WslcProvisionConfig` and cross-cutting policy into daemon protocol frames; implements `StatefulSandboxBackend` (`ID_PREFIX`/`BACKEND_KEY` = `wslc`). |
+| Policy honor matrix | `src/mxc-sdk/src/backends/wslc/common/policy.rs` | Per-phase validation of which policy fields are honored vs rejected. |
+| Daemon client | `src/mxc-sdk/src/backends/wslc/common/daemon_client.rs` | Discovers / spawns the daemon, connects the control pipe, sends `DaemonRequest` frames, reads responses; typed `DaemonError`. |
+| Daemon | `src/mxc-sdk/src/bin/wslc_daemon/` (`wxc-wslc-daemon.exe`) | Long-lived host process holding `WslcSession` / `WslcContainer`; worker thread drives the SDK; idle-timeout watchdog tears the session down when unused. |
+| Engine arm | `src/mxc-sdk/src/core/mxc_engine/state_aware.rs` | Dispatches the WSLc state-aware backend (Windows + `wslc` feature). |
+| Prefix registration | `src/mxc-sdk/src/tools/wxc_common/state_aware_dispatch.rs` (`backend_from_prefix`) | Maps the `wslc:` id prefix back to the WSLc backend for post-provision phases. |
 
 Exact adapters construct `wxc_common::models::WslcProvisionConfig` directly from
 `wslc.provision`. Engine-side checked binding preserves an absent

@@ -1,0 +1,791 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! Pipe relay primitives used by the IsolationSession backend to bridge
+//! wxc-exec's stdio with the agent process's pipe handles across the
+//! desktop-session boundary.
+//!
+//! Two relay variants:
+//! - [`create_relay_thread`] — cancellable; used for stdout / stderr. Ends at
+//!   EOF or when its [`PipeReadCanceller`] fires.
+//! - [`create_relay_thread_with_stop`] — stop-event-aware; used for stdin
+//!   in TTY (ConPTY) mode where the agent can exit while the local stdin
+//!   handle remains open.
+
+use std::io::Read;
+
+use crate::wxc_common::error::WxcError;
+use crate::wxc_common::process_util::{InterruptiblePipeReader, OwnedHandle, PipeReadCanceller};
+
+use windows::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE, WAIT_OBJECT_0};
+use windows::Win32::Storage::FileSystem::{FlushFileBuffers, ReadFile, WriteFile};
+use windows::Win32::System::Threading::{
+    CreateThread, GetCurrentProcess, WaitForMultipleObjects, THREAD_CREATION_FLAGS,
+};
+
+const BUFFER_SIZE: u32 = 4096;
+
+pub(super) fn duplicate_handle(handle: HANDLE) -> Result<OwnedHandle, WxcError> {
+    let mut duplicated = HANDLE::default();
+    unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            handle,
+            GetCurrentProcess(),
+            &mut duplicated,
+            0,
+            false,
+            DUPLICATE_SAME_ACCESS,
+        )
+    }
+    .map_err(|e| WxcError::Process(format!("DuplicateHandle for pipe relay failed: {}", e)))?;
+    Ok(OwnedHandle::new(duplicated))
+}
+
+/// Parameters for a pipe relay thread. The thread reads `reader` and writes
+/// every chunk to `h_write`, flushing after each write.
+///
+/// # Ownership
+/// Ownership of this struct transfers to the relay thread, which frees it on
+/// exit. The caller must **not** keep or free it. Both handles are owned.
+struct PipeRelayParams {
+    reader: InterruptiblePipeReader,
+    h_write: OwnedHandle,
+}
+
+/// Thread procedure for relaying data between two handles.
+///
+/// # Safety
+/// `param` must be the `Box::into_raw` pointer produced by
+/// [`create_relay_thread`], passed exactly once.
+unsafe extern "system" fn pipe_relay_thread_proc(param: *mut core::ffi::c_void) -> u32 {
+    // Reclaim ownership at entry so every exit path below frees exactly once,
+    // and so the params outlive the thread's use of them regardless of what
+    // the spawning frame does. This is what makes an unjoined thread sound.
+    let mut params = unsafe { Box::from_raw(param as *mut PipeRelayParams) };
+    let mut buffer = [0u8; BUFFER_SIZE as usize];
+
+    loop {
+        let bytes_read = match params.reader.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+
+        let mut bytes_written = 0u32;
+        if WriteFile(
+            params.h_write.get(),
+            Some(&buffer[..bytes_read]),
+            Some(&mut bytes_written),
+            None,
+        )
+        .is_err()
+            || bytes_written as usize != bytes_read
+        {
+            break;
+        }
+
+        let _ = FlushFileBuffers(params.h_write.get());
+    }
+
+    0
+}
+
+/// Create a relay thread via `CreateThread`. Returns the thread HANDLE wrapped
+/// in `OwnedHandle`, plus a canceller that ends the relay's read on demand.
+///
+/// The thread reads a **duplicate** of `h_read` and writes a **duplicate** of
+/// `h_write`, so releasing either source handle cannot invalidate it, and
+/// joining is not required for memory safety — an abandoned relay thread reads
+/// memory and handles it owns.
+pub(super) unsafe fn create_relay_thread(
+    h_read: HANDLE,
+    h_write: HANDLE,
+) -> Result<(OwnedHandle, PipeReadCanceller), WxcError> {
+    let reader = InterruptiblePipeReader::new(duplicate_handle(h_read)?);
+    let canceller = reader.canceller();
+    let raw = Box::into_raw(Box::new(PipeRelayParams {
+        reader,
+        h_write: duplicate_handle(h_write)?,
+    }));
+    match unsafe {
+        CreateThread(
+            None,
+            0,
+            Some(pipe_relay_thread_proc),
+            Some(raw as *const core::ffi::c_void),
+            THREAD_CREATION_FLAGS(0),
+            None,
+        )
+    } {
+        Ok(handle) => Ok((OwnedHandle::new(handle), canceller)),
+        Err(e) => {
+            // The thread never started, so nothing will run the proc that
+            // frees the box. Reclaim it here or it leaks.
+            drop(unsafe { Box::from_raw(raw) });
+            Err(WxcError::Process(format!(
+                "CreateThread for pipe relay failed: {}",
+                e
+            )))
+        }
+    }
+}
+
+// ── Stop-event-aware pipe relay ────────────────────────────────────────────
+//
+// Used for the IsolationSession stdin relay in TTY (ConPTY) mode, where the
+// agent process can exit naturally while wxc-exec's stdin remains open (held
+// by the parent: node-pty, shell, etc.). Without an external signal the relay
+// sits in `ReadFile` forever.
+//
+// `CancelSynchronousIo` is the obvious alternative but has documented edge
+// cases on console handles, and wxc-exec's stdin is a console handle in the
+// dominant `spawnSandbox` (node-pty) and direct-cmd cases. The output relays
+// read anonymous pipes, where that objection does not apply, and use
+// [`PipeReadCanceller`] instead.
+//
+// `h_read` MUST be a waitable handle whose signal state correctly reflects
+// "input available" (a console input handle is the canonical case; events
+// also work). Anonymous pipe handles are NOT supported: they appear "always
+// signalled when open", so the wait returns immediately, the relay enters
+// `ReadFile`, and from there the stop event cannot interrupt it. For
+// pipe-backed stdin (the non-TTY case), use the simpler EOF-driven
+// `create_relay_thread` and rely on natural EOF or process exit for cleanup.
+
+/// Parameters for a stop-event-aware relay thread. The thread loops
+/// `WaitForMultipleObjects({h_stop_event, h_read})`; copies a chunk when
+/// `h_read` is ready; exits when `h_stop_event` is signalled, on read EOF,
+/// on read error, on write error, or on `WaitForMultipleObjects` failure.
+///
+/// `h_stop_event` should be a manual-reset event so the relay observes it
+/// even if signalled before the next loop iteration.
+///
+/// `h_read` must be a waitable handle (console input, event). Anonymous
+/// pipes are not supported — see module-level comment above.
+///
+/// # Ownership
+/// Ownership of this struct transfers to the relay thread, which frees it on
+/// exit. The caller must **not** keep or free it. `h_write` and `h_stop_event`
+/// are owned duplicates; `h_read` is borrowed — see the safety contract on
+/// [`create_relay_thread_with_stop`].
+pub(super) struct PipeRelayWithStopParams {
+    pub h_read: HANDLE,
+    pub h_write: OwnedHandle,
+    pub h_stop_event: OwnedHandle,
+}
+
+/// Thread procedure for a stop-event-aware relay.
+///
+/// # Safety
+/// `param` must be the `Box::into_raw` pointer produced by
+/// [`create_relay_thread_with_stop`], passed exactly once.
+unsafe extern "system" fn pipe_relay_with_stop_thread_proc(param: *mut core::ffi::c_void) -> u32 {
+    // Reclaim ownership at entry — see `pipe_relay_thread_proc`.
+    let params = unsafe { Box::from_raw(param as *mut PipeRelayWithStopParams) };
+    let mut buffer = [0u8; BUFFER_SIZE as usize];
+    let wait_handles = [params.h_stop_event.get(), params.h_read];
+
+    loop {
+        let wait_result = WaitForMultipleObjects(&wait_handles, false, u32::MAX);
+        // `WAIT_OBJECT_0 + 1` means `h_read` signalled (data available or EOF).
+        // Anything else (stop event = `WAIT_OBJECT_0`, `WAIT_FAILED`, etc.) → exit.
+        if wait_result.0 != WAIT_OBJECT_0.0 + 1 {
+            break;
+        }
+
+        let mut bytes_read = 0u32;
+        if ReadFile(
+            params.h_read,
+            Some(&mut buffer),
+            Some(&mut bytes_read),
+            None,
+        )
+        .is_err()
+            || bytes_read == 0
+        {
+            break;
+        }
+
+        let mut bytes_written = 0u32;
+        if WriteFile(
+            params.h_write.get(),
+            Some(&buffer[..bytes_read as usize]),
+            Some(&mut bytes_written),
+            None,
+        )
+        .is_err()
+            || bytes_written != bytes_read
+        {
+            break;
+        }
+
+        let _ = FlushFileBuffers(params.h_write.get());
+    }
+
+    0
+}
+
+/// Create a stop-event-aware relay thread via `CreateThread`. Returns the
+/// thread HANDLE wrapped in `OwnedHandle`.
+///
+/// Takes `params` by value and moves it to the heap for the thread to own and
+/// free — see [`create_relay_thread`].
+///
+/// # Safety
+/// `h_read` is borrowed and must remain valid until the thread exits.
+pub(super) unsafe fn create_relay_thread_with_stop(
+    params: PipeRelayWithStopParams,
+) -> Result<OwnedHandle, WxcError> {
+    let raw = Box::into_raw(Box::new(params));
+    match unsafe {
+        CreateThread(
+            None,
+            0,
+            Some(pipe_relay_with_stop_thread_proc),
+            Some(raw as *const core::ffi::c_void),
+            THREAD_CREATION_FLAGS(0),
+            None,
+        )
+    } {
+        Ok(handle) => Ok(OwnedHandle::new(handle)),
+        Err(e) => {
+            drop(unsafe { Box::from_raw(raw) });
+            Err(WxcError::Process(format!(
+                "CreateThread for stop-aware pipe relay failed: {}",
+                e
+            )))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wxc_common::process_util::{create_std_pipes, read_from_pipe, SendOwnedHandle};
+    use crate::wxc_common::sandbox_process::StreamCloser;
+    use crate::wxc_common::string_util;
+    use windows::Win32::Foundation::WAIT_TIMEOUT;
+    use windows::Win32::System::Pipes::CreatePipe;
+    use windows::Win32::System::Threading::{
+        CreateEventW, CreateProcessW, SetEvent, WaitForSingleObject, CREATE_NO_WINDOW,
+        PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOW,
+    };
+    use windows_core::{PCWSTR, PWSTR};
+
+    /// Creates a non-inheritable pipe pair for use in tests. Unlike
+    /// `create_std_pipes`, neither end is marked inheritable, which prevents
+    /// handles from leaking into child processes spawned by other tests
+    /// running concurrently (cargo test runs in parallel). Leaked write-ends
+    /// would keep pipes open and cause `read_from_pipe` to block.
+    fn create_test_pipes() -> (OwnedHandle, OwnedHandle) {
+        let mut h_read = HANDLE::default();
+        let mut h_write = HANDLE::default();
+        unsafe {
+            CreatePipe(&mut h_read, &mut h_write, None, 0).unwrap();
+        }
+        (OwnedHandle::new(h_read), OwnedHandle::new(h_write))
+    }
+
+    /// Helper: create a manual-reset, initially-unsignalled event for tests.
+    fn create_test_stop_event() -> OwnedHandle {
+        unsafe {
+            let h = CreateEventW(None, true, false, PCWSTR::null()).unwrap();
+            OwnedHandle::new(h)
+        }
+    }
+
+    /// Helper: spawn a child process with specified std handles.
+    /// Returns (process_handle, thread_handle).
+    fn spawn_child(
+        cmd: &str,
+        stdin: Option<HANDLE>,
+        stdout: Option<HANDLE>,
+        stderr: Option<HANDLE>,
+    ) -> (OwnedHandle, OwnedHandle) {
+        let si = STARTUPINFOW {
+            cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+            dwFlags: STARTF_USESTDHANDLES,
+            hStdInput: stdin.unwrap_or_default(),
+            hStdOutput: stdout.unwrap_or_default(),
+            hStdError: stderr.unwrap_or_default(),
+            ..Default::default()
+        };
+        let mut pi = PROCESS_INFORMATION::default();
+        let mut cmd_wide = string_util::to_wide(cmd);
+
+        unsafe {
+            CreateProcessW(
+                PCWSTR::null(),
+                Some(PWSTR(cmd_wide.as_mut_ptr())),
+                None,
+                None,
+                true,
+                CREATE_NO_WINDOW,
+                None,
+                PCWSTR::null(),
+                &si,
+                &mut pi,
+            )
+            .unwrap();
+        }
+        (OwnedHandle::new(pi.hProcess), OwnedHandle::new(pi.hThread))
+    }
+
+    #[test]
+    fn test_pipe_relay_copies_data() {
+        // Create two pipe pairs: source and destination.
+        // Relay thread reads from source_read and writes to dest_write.
+        // We write to source_write and read from dest_read to verify the relay.
+        let (source_read, source_write) = create_test_pipes();
+        let (mut dest_read, dest_write) = create_test_pipes();
+
+        let (relay_thread, _canceller) =
+            unsafe { create_relay_thread(source_read.get(), dest_write.get()).unwrap() };
+
+        // Read from dest concurrently — the relay calls FlushFileBuffers after
+        // each write, which blocks until the reader drains the pipe buffer.
+        // Without a concurrent reader the relay and main thread deadlock.
+        let dest_send = SendOwnedHandle::take(&mut dest_read);
+        let reader = std::thread::spawn(move || read_from_pipe(dest_send.get()));
+
+        // Write test data to the source pipe
+        let test_data = b"Hello from relay test!";
+        let mut bytes_written = 0u32;
+        unsafe {
+            WriteFile(
+                source_write.get(),
+                Some(test_data),
+                Some(&mut bytes_written),
+                None,
+            )
+            .unwrap();
+        }
+
+        // Close the source write end to signal EOF to the relay thread.
+        // drop() calls CloseHandle via OwnedHandle::Drop.
+        drop(source_write);
+
+        // Wait for relay thread to finish
+        unsafe {
+            WaitForSingleObject(relay_thread.get(), 5000);
+        }
+
+        // Close the dest write end so the reader sees EOF
+        drop(dest_write);
+
+        let output = reader.join().unwrap();
+        assert_eq!(output, "Hello from relay test!");
+    }
+
+    /// The write end stays open, so the relay's `ReadFile` never reaches EOF.
+    /// Cancelling it must still end the thread.
+    ///
+    /// This is the case a descendant that inherited the agent's write ends
+    /// produces: the workload exits, the descendant holds the pipe, and a join
+    /// waiting for EOF waits for the descendant's whole lifetime.
+    #[test]
+    fn a_cancelled_relay_exits_while_the_write_end_is_still_open() {
+        let (source_read, _source_write) = create_test_pipes();
+        let (_dest_read, dest_write) = create_test_pipes();
+
+        let (relay_thread, canceller) =
+            unsafe { create_relay_thread(source_read.get(), dest_write.get()).unwrap() };
+
+        // Parked in `ReadFile`: nothing was written and `_source_write` keeps
+        // the pipe from reporting EOF.
+        assert_eq!(
+            unsafe { WaitForSingleObject(relay_thread.get(), 250) },
+            WAIT_TIMEOUT,
+            "the relay should still be blocked before the cancel"
+        );
+
+        canceller.close();
+
+        assert_eq!(
+            unsafe { WaitForSingleObject(relay_thread.get(), 5000) },
+            WAIT_OBJECT_0,
+            "the cancelled relay should exit without EOF"
+        );
+    }
+
+    /// Closing the source handle the relay was built from does not disturb it:
+    /// it reads a duplicate. This is what lets `IsoSessionProcess::Close` run
+    /// unconditionally.
+    #[test]
+    fn the_relay_reads_a_duplicate_of_the_source_handle() {
+        let (source_read, source_write) = create_test_pipes();
+        let (mut dest_read, dest_write) = create_test_pipes();
+
+        let (relay_thread, _canceller) =
+            unsafe { create_relay_thread(source_read.get(), dest_write.get()).unwrap() };
+
+        drop(source_read);
+
+        let dest_send = SendOwnedHandle::take(&mut dest_read);
+        let reader = std::thread::spawn(move || read_from_pipe(dest_send.get()));
+
+        let payload = b"still relayed";
+        let mut written = 0u32;
+        unsafe {
+            WriteFile(source_write.get(), Some(payload), Some(&mut written), None).unwrap();
+        }
+        drop(source_write);
+
+        assert_eq!(
+            unsafe { WaitForSingleObject(relay_thread.get(), 5000) },
+            WAIT_OBJECT_0,
+            "the relay should reach EOF on its own duplicate"
+        );
+        drop(dest_write);
+
+        assert_eq!(reader.join().unwrap(), "still relayed");
+    }
+
+    #[test]
+    fn test_pipe_relay_handles_large_data() {
+        let (source_read, mut source_write) = create_test_pipes();
+        let (mut dest_read, dest_write) = create_test_pipes();
+
+        let (relay_thread, _canceller) =
+            unsafe { create_relay_thread(source_read.get(), dest_write.get()).unwrap() };
+
+        // Write data larger than the pipe buffer (4096 bytes default).
+        // Use ASCII to avoid from_utf8_lossy expansion of invalid bytes.
+        let test_data: Vec<u8> = (0..10000).map(|i| b'A' + (i % 26) as u8).collect();
+        let write_data = test_data.clone();
+        let expected_len = test_data.len();
+
+        // Read from dest in a concurrent thread to prevent deadlock —
+        // the relay's WriteFile would block if the dest pipe buffer fills.
+        let dest_send = SendOwnedHandle::take(&mut dest_read);
+        let reader = std::thread::spawn(move || read_from_pipe(dest_send.get()));
+
+        // Write in a separate thread (pipe buffer can fill between write and relay).
+        let send_write = SendOwnedHandle::take(&mut source_write);
+        let writer = std::thread::spawn(move || {
+            let mut bytes_written = 0u32;
+            unsafe {
+                let _ = WriteFile(
+                    send_write.get(),
+                    Some(&write_data),
+                    Some(&mut bytes_written),
+                    None,
+                );
+            }
+            // SendOwnedHandle::Drop closes the handle, signaling EOF.
+            drop(send_write);
+        });
+
+        writer.join().unwrap();
+        // Wait for relay thread to finish (source EOF propagated)
+        unsafe {
+            WaitForSingleObject(relay_thread.get(), 5000);
+        }
+        // Close the dest write end so the reader sees EOF
+        drop(dest_write);
+
+        let output = reader.join().unwrap();
+        assert_eq!(output.len(), expected_len);
+    }
+
+    /// Tests the production pattern: relay a child process's stdout to the
+    /// parent. Mirrors the wxc-exec scenario where Process B writes output
+    /// and the relay copies it for Process A to read.
+    #[test]
+    fn test_pipe_relay_child_stdout() {
+        // child_stdout: inheritable write end (child writes here)
+        let (child_stdout_read, child_stdout_write) = create_std_pipes(true).unwrap();
+        // dest: non-inheritable (only the test reads here)
+        let (mut dest_read, dest_write) = create_test_pipes();
+
+        let (relay_thread, _canceller) =
+            unsafe { create_relay_thread(child_stdout_read.get(), dest_write.get()).unwrap() };
+
+        // Concurrent reader to avoid FlushFileBuffers deadlock
+        let dest_send = SendOwnedHandle::take(&mut dest_read);
+        let reader = std::thread::spawn(move || read_from_pipe(dest_send.get()));
+
+        let (child, _child_thread) = spawn_child(
+            "cmd.exe /c echo hello from child process",
+            None,
+            Some(child_stdout_write.get()),
+            None,
+        );
+
+        // Close parent's copy — child and relay still have theirs
+        drop(child_stdout_write);
+
+        // Child exits → last write-end closes → relay sees EOF → relay exits
+        unsafe {
+            WaitForSingleObject(child.get(), 10000);
+            WaitForSingleObject(relay_thread.get(), 5000);
+        }
+
+        // Close relay's dest write so reader sees EOF
+        drop(dest_write);
+
+        let output = reader.join().unwrap();
+        assert!(
+            output.trim().contains("hello from child process"),
+            "Expected child output relayed to dest, got: {:?}",
+            output
+        );
+    }
+
+    /// Tests the production pattern: relay data from the parent into a
+    /// child process's stdin. Mirrors the wxc-exec scenario where Process A
+    /// sends input that the relay copies to Process B's stdin.
+    #[test]
+    fn test_pipe_relay_child_stdin() {
+        // source: non-inheritable (test writes here)
+        let (source_read, source_write) = create_test_pipes();
+        // child_stdin: inheritable read end (child reads from here)
+        let (child_stdin_read, child_stdin_write) = create_std_pipes(false).unwrap();
+        // child_stdout: inheritable write end (to capture child output)
+        let (mut child_stdout_read, child_stdout_write) = create_std_pipes(true).unwrap();
+
+        // Relay: test input → child stdin
+        let (relay_thread, _canceller) =
+            unsafe { create_relay_thread(source_read.get(), child_stdin_write.get()).unwrap() };
+
+        // findstr /R "." echoes all non-empty lines from stdin to stdout
+        let (child, _child_thread) = spawn_child(
+            "cmd.exe /c findstr /R \".\"",
+            Some(child_stdin_read.get()),
+            Some(child_stdout_write.get()),
+            None,
+        );
+
+        // Close parent copies of child-side handles
+        drop(child_stdin_read);
+        drop(child_stdout_write);
+
+        // Read child stdout concurrently
+        let stdout_send = SendOwnedHandle::take(&mut child_stdout_read);
+        let reader = std::thread::spawn(move || read_from_pipe(stdout_send.get()));
+
+        // Write data through: test → source → relay → child stdin
+        let mut bw = 0u32;
+        unsafe {
+            WriteFile(
+                source_write.get(),
+                Some(b"relayed to child\r\n"),
+                Some(&mut bw),
+                None,
+            )
+            .unwrap();
+        }
+        // Close source → relay sees EOF → relay exits
+        drop(source_write);
+
+        unsafe {
+            WaitForSingleObject(relay_thread.get(), 5000);
+        }
+
+        // Close child_stdin_write → child sees EOF → child exits
+        drop(child_stdin_write);
+
+        unsafe {
+            WaitForSingleObject(child.get(), 10000);
+        }
+
+        let output = reader.join().unwrap();
+        assert!(
+            output.contains("relayed to child"),
+            "Expected relayed input in child output, got: {:?}",
+            output
+        );
+    }
+
+    // ── Tests for `create_relay_thread_with_stop` ──────────────────────────
+    //
+    // These exercise the stop-event-aware relay variant. Cancellation (test #1)
+    // is the load-bearing case: it's the reason this primitive exists and
+    // distinguishes it from the EOF-driven `create_relay_thread`.
+
+    #[test]
+    fn test_pipe_relay_with_stop_exits_on_stop_event() {
+        // Core cancellation case: relay is blocked in WaitForMultipleObjects
+        // (no data on h_read, h_read not closed). Signal the stop event;
+        // verify the relay exits within a short timeout.
+        let (source_read, _source_write) = create_test_pipes();
+        let (mut dest_read, dest_write) = create_test_pipes();
+        let stop_event = create_test_stop_event();
+
+        let params = PipeRelayWithStopParams {
+            h_read: source_read.get(),
+            h_write: duplicate_handle(dest_write.get()).unwrap(),
+            h_stop_event: duplicate_handle(stop_event.get()).unwrap(),
+        };
+        let relay_thread = unsafe { create_relay_thread_with_stop(params).unwrap() };
+
+        // Source has no data and is not closed → relay sits in
+        // WaitForMultipleObjects. Without the stop event it would hang.
+        unsafe {
+            SetEvent(stop_event.get()).unwrap();
+        }
+
+        let wait_result = unsafe { WaitForSingleObject(relay_thread.get(), 5000) };
+        assert_eq!(
+            wait_result, WAIT_OBJECT_0,
+            "Relay did not exit within 5s of stop event"
+        );
+
+        // Drain the dest pipe so its handles can drop cleanly.
+        drop(dest_write);
+        let dest_send = SendOwnedHandle::take(&mut dest_read);
+        let _ = std::thread::spawn(move || read_from_pipe(dest_send.get())).join();
+    }
+
+    #[test]
+    fn test_pipe_relay_with_stop_exits_on_read_eof() {
+        // Stop event never signalled; source closed → read EOF → relay exits.
+        let (source_read, source_write) = create_test_pipes();
+        let (mut dest_read, dest_write) = create_test_pipes();
+        let stop_event = create_test_stop_event();
+
+        let params = PipeRelayWithStopParams {
+            h_read: source_read.get(),
+            h_write: duplicate_handle(dest_write.get()).unwrap(),
+            h_stop_event: duplicate_handle(stop_event.get()).unwrap(),
+        };
+        let relay_thread = unsafe { create_relay_thread_with_stop(params).unwrap() };
+
+        // Concurrent reader (no-op here, but defensive in case data flows on
+        // any FlushFileBuffers iteration; avoids any pipe-buffer deadlock).
+        let dest_send = SendOwnedHandle::take(&mut dest_read);
+        let reader = std::thread::spawn(move || read_from_pipe(dest_send.get()));
+
+        // Close source write end → relay's read returns EOF → break.
+        drop(source_write);
+
+        let wait_result = unsafe { WaitForSingleObject(relay_thread.get(), 5000) };
+        assert_eq!(wait_result, WAIT_OBJECT_0, "Relay did not exit on read EOF");
+
+        drop(dest_write);
+        let _ = reader.join();
+    }
+
+    #[test]
+    fn test_pipe_relay_with_stop_copies_data_before_exit() {
+        // Stop event never signalled; data is written; verify it is copied.
+        let (source_read, source_write) = create_test_pipes();
+        let (mut dest_read, dest_write) = create_test_pipes();
+        let stop_event = create_test_stop_event();
+
+        let params = PipeRelayWithStopParams {
+            h_read: source_read.get(),
+            h_write: duplicate_handle(dest_write.get()).unwrap(),
+            h_stop_event: duplicate_handle(stop_event.get()).unwrap(),
+        };
+        let relay_thread = unsafe { create_relay_thread_with_stop(params).unwrap() };
+
+        // Concurrent reader to avoid FlushFileBuffers deadlock.
+        let dest_send = SendOwnedHandle::take(&mut dest_read);
+        let reader = std::thread::spawn(move || read_from_pipe(dest_send.get()));
+
+        let test_data = b"hello via stop-aware relay";
+        let mut bytes_written = 0u32;
+        unsafe {
+            WriteFile(
+                source_write.get(),
+                Some(test_data),
+                Some(&mut bytes_written),
+                None,
+            )
+            .unwrap();
+        }
+        drop(source_write); // EOF → relay exits.
+
+        let wait_result = unsafe { WaitForSingleObject(relay_thread.get(), 5000) };
+        assert_eq!(wait_result, WAIT_OBJECT_0);
+
+        drop(dest_write);
+        let output = reader.join().unwrap();
+        assert_eq!(output, "hello via stop-aware relay");
+    }
+
+    /// The relay writes to its own duplicate, so releasing the caller's
+    /// destination handle mid-relay does not break the copy.
+    ///
+    /// `RelayScope` closes the session process's pipe handles unconditionally,
+    /// including the stdin end this relay writes to, while this relay may still
+    /// be running. Borrowing that handle would leave the relay writing to a
+    /// closed — and possibly reissued — value.
+    #[test]
+    fn the_stop_relay_writes_to_a_duplicate_of_the_destination_handle() {
+        let (source_read, source_write) = create_test_pipes();
+        let (mut dest_read, dest_write) = create_test_pipes();
+        let stop_event = create_test_stop_event();
+
+        let params = PipeRelayWithStopParams {
+            h_read: source_read.get(),
+            h_write: duplicate_handle(dest_write.get()).unwrap(),
+            h_stop_event: duplicate_handle(stop_event.get()).unwrap(),
+        };
+        let relay_thread = unsafe { create_relay_thread_with_stop(params).unwrap() };
+
+        // What `process.Close()` does to the agent's stdin end while the relay
+        // is live. The relay's duplicate is now the only write handle, so its
+        // own exit is what closes the pipe.
+        drop(dest_write);
+
+        let dest_send = SendOwnedHandle::take(&mut dest_read);
+        let reader = std::thread::spawn(move || read_from_pipe(dest_send.get()));
+
+        let test_data = b"written after the caller's handle closed";
+        let mut bytes_written = 0u32;
+        unsafe {
+            WriteFile(
+                source_write.get(),
+                Some(test_data),
+                Some(&mut bytes_written),
+                None,
+            )
+            .unwrap();
+        }
+        drop(source_write); // EOF → relay exits, freeing its duplicate.
+
+        assert_eq!(
+            unsafe { WaitForSingleObject(relay_thread.get(), 5000) },
+            WAIT_OBJECT_0,
+            "the relay should exit on source EOF"
+        );
+
+        assert_eq!(
+            reader.join().unwrap(),
+            "written after the caller's handle closed"
+        );
+    }
+
+    // Note: a "signal-stop-mid-data" test using anonymous pipes is not viable —
+    // anonymous pipe handles appear always-signalled to WaitForMultipleObjects,
+    // so once the relay returns from the wait into ReadFile, the stop event
+    // cannot interrupt the blocked read. The intended production usage is with
+    // a console input handle (or other waitable handle) where signal state
+    // accurately reflects data-available. The "stop-event-only" path
+    // (test_pipe_relay_with_stop_exits_on_stop_event) and the "EOF-after-data"
+    // path (test_pipe_relay_with_stop_copies_data_before_exit) together cover
+    // the invariants that matter for the production case.
+
+    #[test]
+    fn test_pipe_relay_with_stop_exits_on_invalid_handle() {
+        // Defensive path: pass a default (invalid) HANDLE for h_read.
+        // WaitForMultipleObjects returns WAIT_FAILED → relay loop breaks →
+        // thread exits cleanly. No panic, no hang.
+        let (_, dest_write) = create_test_pipes();
+        let stop_event = create_test_stop_event();
+
+        let params = PipeRelayWithStopParams {
+            h_read: HANDLE::default(), // invalid — not a kernel handle
+            h_write: duplicate_handle(dest_write.get()).unwrap(),
+            h_stop_event: duplicate_handle(stop_event.get()).unwrap(),
+        };
+        let relay_thread = unsafe { create_relay_thread_with_stop(params).unwrap() };
+
+        let wait_result = unsafe { WaitForSingleObject(relay_thread.get(), 5000) };
+        assert_eq!(
+            wait_result, WAIT_OBJECT_0,
+            "Relay did not exit on invalid h_read"
+        );
+    }
+}

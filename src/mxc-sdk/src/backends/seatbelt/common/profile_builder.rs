@@ -1,0 +1,2148 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! Pure builder that converts an [`ExecutionRequest`] into a TinyScheme sandbox
+//! profile string suitable for `/usr/bin/sandbox-exec -p <profile>`.
+//!
+//! This module is platform-agnostic — it is just string generation — so it
+//! is unit-tested on every host (Windows / Linux / macOS) in CI.
+//!
+//! # Profile shape
+//!
+//! The generated profile follows a deny-by-default baseline with explicit
+//! allow rules layered on top, then explicit deny rules at the end so that
+//! `deniedPaths` overrides any broader `readonly`/`readwrite` allow:
+//!
+//! ```text
+//! (version 1)
+//! (deny default)
+//! ;; baseline allow rules required for any process to start ...
+//! ;; policy-derived allow rules (filesystem readonly/readwrite, network) ...
+//! ;; policy-derived deny rules (deniedPaths) ...
+//! ```
+//!
+//! Apple's Seatbelt sandbox evaluates rules with last-match-wins semantics (within a given
+//! operation), so trailing deny rules take precedence over earlier allow
+//! rules — the behavior callers expect from MXC's `denied_paths`.
+
+use std::fmt::Write as _;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use crate::seatbelt_common::seatbelt_policy;
+use crate::wxc_common::filesystem_resolve::{resolve_path_plan, FsIntent};
+use crate::wxc_common::host_is_canonical_loopback;
+use crate::wxc_common::models::{ClipboardPolicy, ContainerPolicy, ExecutionRequest, ProxyAddress};
+
+/// Build a complete Seatbelt sandbox profile, scoping cooperative proxy
+/// reachability to the resolved address supplied by the runner.
+///
+/// `pub` (not `pub(crate)`) so it stays a reachable API root: `profile_builder`
+/// is compiled and unit-tested on every host, but its only in-crate caller
+/// (`seatbelt_runner`) is `cfg(target_os = "macos")`, so on other targets a
+/// narrower visibility would make the whole profile-building chain dead code.
+pub fn build_profile_with_proxy(
+    request: &ExecutionRequest,
+    proxy_address: Option<&ProxyAddress>,
+) -> Result<String, String> {
+    if let Some(override_profile) = request
+        .seatbelt
+        .as_ref()
+        .and_then(|c| c.profile_override.as_ref())
+    {
+        return Ok(override_profile.clone());
+    }
+
+    let mut out = String::with_capacity(2048);
+
+    // Header — Apple's Seatbelt requires `(version 1)` and we baseline with deny-default.
+    out.push_str("(version 1)\n");
+    out.push_str("(deny default)\n");
+
+    // Minimum allow rules so a child process can actually run. These are
+    // the same things Apple's own built-in profiles (e.g. no-internet)
+    // include: dyld + system libraries, mach-lookup of the basic agents,
+    // sysctl reads, and signaling processes in the same sandbox.
+    out.push_str(BASELINE_ALLOW);
+
+    // Filesystem — read-only system paths every process needs.
+    out.push_str(SYSTEM_READ_ALLOW);
+    write_developer_dir_rule(&mut out);
+
+    // Pseudo-terminal access — when the executor binary runs under a pty
+    // the sandboxed shell inherits that TTY, so it sees a real terminal
+    // and calls `isatty()` / `tcgetattr()` / `ttyname()` against it.
+    // Without these rules, those calls fail with EPERM because the
+    // kernel calls block on the secondary fd.
+    out.push_str(TTY_ALLOW);
+
+    // Policy-derived allow rules.
+    let resolved = ResolvedPaths::from_policy(&request.policy)?;
+    write_filesystem_allow(&mut out, &resolved);
+    write_network_rules(&mut out, request, proxy_address);
+    write_nested_pty_rules(&mut out, request);
+    write_keychain_rules(&mut out, request)?;
+    write_extra_seatbelt_rules(&mut out, request);
+    write_ui_rules(&mut out, request);
+
+    // Policy-derived deny rules go LAST so they win on conflict.
+    write_filesystem_deny(&mut out, &resolved);
+
+    Ok(out)
+}
+
+/// Baseline allow rules required for any sandboxed process to start.
+const BASELINE_ALLOW: &str = "\
+;; --- baseline (required for any process to start) ---
+(allow process-fork)
+(allow process-exec)
+(allow signal (target same-sandbox))
+(allow sysctl-read)
+(allow file-read-metadata)
+(allow mach-lookup
+    (global-name \"com.apple.system.notification_center\")
+    (global-name \"com.apple.system.logger\")
+    (global-name \"com.apple.distributed_notifications@Uv3\")
+    (global-name \"com.apple.CoreServices.coreservicesd\")
+    (global-name \"com.apple.FSEvents\"))
+";
+
+/// Read-only access to system paths required by virtually every binary
+/// (dynamic linker, system libraries, time-zone data, etc.).
+const SYSTEM_READ_ALLOW: &str = "\
+;; --- read-only access to system locations ---
+;; `/` itself must be readable as data so the shell / loader can resolve
+;; path lookups; without this the kernel kills the child during exec.
+(allow file-read-data (literal \"/\"))
+(allow file-read*
+    (subpath \"/bin\")
+    (subpath \"/sbin\")
+    (subpath \"/usr/bin\")
+    (subpath \"/usr/sbin\")
+    (subpath \"/usr/lib\")
+    (subpath \"/usr/libexec\")
+    (subpath \"/usr/share\")
+    (subpath \"/System\")
+    (subpath \"/Library\")
+    (subpath \"/private/var/db/timezone\")
+    (subpath \"/private/var/db/dyld\")
+    (subpath \"/private/var/select\")
+    (subpath \"/private/etc\"))
+;; Standard bit-bucket / entropy devices — read+write because shell
+;; redirections (`>/dev/null`, `</dev/urandom`) need both directions.
+;; Writes to /dev/null and /dev/zero are discarded; /dev/random and
+;; /dev/urandom write to the entropy pool, which is harmless.
+(allow file-read* file-write*
+    (literal \"/dev/null\")
+    (literal \"/dev/zero\")
+    (literal \"/dev/random\")
+    (literal \"/dev/urandom\"))
+";
+
+/// Where `xcode-select` records the active developer directory. The second
+/// entry is the older path some releases still populate.
+const DEVELOPER_DIR_LINKS: [&str; 2] = [
+    "/private/var/db/xcode_select_link",
+    "/private/var/select/developer_dir",
+];
+
+/// Resolve the active Xcode / Command Line Tools developer directory.
+///
+/// The `/usr/bin` stubs (`python3`, `git`) are `xcrun` shims that `dlopen`
+/// `libxcrun.dylib` from here, so they cannot start unless it is readable.
+/// `SYSTEM_READ_ALLOW` reaches a Command Line Tools install through its
+/// `/Library` grant, but an Xcode-selected host puts it under `/Applications`.
+///
+/// `DEVELOPER_DIR` is ignored because any caller can set it. An untrusted link
+/// is skipped, so resolution continues to the legacy one.
+fn active_developer_dir() -> Option<PathBuf> {
+    DEVELOPER_DIR_LINKS
+        .iter()
+        .map(Path::new)
+        .filter(|link| link_is_root_controlled(link))
+        .filter_map(|link| fs::read_link(link).ok())
+        .find(|target| target.is_absolute() && target.is_dir())
+}
+
+/// Whether root alone decides what `link` resolves to.
+///
+/// Requires both a root-owned symlink and root-owned, non-group/world-writable
+/// directories above it: replacing a symlink is a directory operation, so the
+/// link's own ownership settles nothing by itself.
+#[cfg(unix)]
+fn link_is_root_controlled(link: &Path) -> bool {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let Ok(link_meta) = fs::symlink_metadata(link) else {
+        return false;
+    };
+    if !link_meta.file_type().is_symlink() || link_meta.uid() != 0 {
+        return false;
+    }
+    // `ancestors()` starts at the link itself; the directories follow.
+    link.ancestors().skip(1).all(|dir| {
+        fs::metadata(dir)
+            .is_ok_and(|meta| dir_is_root_controlled(meta.uid(), meta.permissions().mode()))
+    })
+}
+
+/// Windows only: this module compiles everywhere but `std::os::unix` does not.
+/// There is no `xcode-select` there, so nothing to trust.
+#[cfg(not(unix))]
+fn link_is_root_controlled(_link: &Path) -> bool {
+    false
+}
+
+/// Pure so the rule is testable without a root-owned fixture. Sticky
+/// world-writable directories are rejected too — none of the real
+/// `xcode-select` locations are sticky, so refusing costs nothing.
+#[cfg(unix)]
+fn dir_is_root_controlled(uid: u32, mode: u32) -> bool {
+    const NON_OWNER_WRITE: u32 = 0o022;
+
+    uid == 0 && mode & NON_OWNER_WRITE == 0
+}
+
+/// Emit the read-only grant for the active developer directory.
+fn write_developer_dir_rule(out: &mut String) {
+    if let Some(dir) = active_developer_dir() {
+        push_developer_dir_rule(out, &developer_dir_grant_root(&dir));
+    }
+}
+
+/// Widen a developer directory to the `.app` bundle containing it, if any.
+///
+/// The tools `xcrun` dispatches load frameworks from
+/// `<Xcode.app>/Contents/SharedFrameworks`, outside `Contents/Developer`, so
+/// the bundle root is the smallest subtree that lets them run. A Command Line
+/// Tools install has no `.app` ancestor and is returned as-is.
+fn developer_dir_grant_root(dir: &Path) -> PathBuf {
+    enclosing_app_bundle(dir).map_or_else(|| dir.to_path_buf(), Path::to_path_buf)
+}
+
+/// The bundle for which `dir` is exactly `<bundle>.app/Contents/Developer`.
+fn enclosing_app_bundle(dir: &Path) -> Option<&Path> {
+    if dir.file_name()? != "Developer" {
+        return None;
+    }
+    let contents = dir.parent()?;
+    if contents.file_name()? != "Contents" {
+        return None;
+    }
+    let bundle = contents.parent()?;
+    bundle
+        .extension()?
+        .eq_ignore_ascii_case("app")
+        .then_some(bundle)
+}
+
+/// Emit the grant for an already-resolved path. Split out so it can be tested
+/// independently of what is installed on the test host.
+fn push_developer_dir_rule(out: &mut String, dir: &Path) {
+    let Some(path) = dir.to_str() else {
+        return;
+    };
+    out.push_str(";; --- active developer directory (xcrun shims in /usr/bin) ---\n");
+    let _ = writeln!(out, "(allow file-read* (subpath {}))", quote_scheme(path));
+}
+
+/// Pseudo-terminal device access required by the inner shell when the
+/// runner attaches it to a pty. The secondary fd we hand the child as
+/// stdin/stdout/stderr lives at `/dev/ttysNNN`, and the shell calls
+/// `isatty()` (→ `tcgetattr` → ioctl) plus `ttyname()` against it. We
+/// also need read access to `/dev/tty` because most shells re-open it
+/// at startup, and read access to `/dev/fd` for the `/dev/stdout` etc.
+/// indirection some tools use.
+const TTY_ALLOW: &str = "\
+;; --- pseudo-terminal access (inherited TTY when run under a pty) ---
+(allow file-read* file-write* file-ioctl
+    (literal \"/dev/tty\")
+    (regex #\"^/dev/ttys[0-9]+$\"))
+(allow file-read* (subpath \"/dev/fd\"))
+";
+
+/// The policy path lists resolved into the form Seatbelt matches, with the
+/// most-restrictive-wins precedence (`deny` > `readonly` > `readwrite`)
+/// re-applied.
+///
+/// The shared parser applies that precedence to the *raw* strings, which is not
+/// enough once paths are resolved: two spellings of the same path
+/// (`readonlyPaths: ["/private/tmp/x"]` and `readwritePaths: ["/tmp/x"]`)
+/// differ as strings, so both survive the parser, then resolve to the same
+/// filter here. Seatbelt is last-match-wins and the read-write rule is emitted
+/// after the read-only one, so without this the *weaker* grant would win and
+/// silently make a read-only path writable.
+struct ResolvedPaths {
+    readonly: Vec<String>,
+    readwrite: Vec<String>,
+    denied: Vec<String>,
+}
+
+impl ResolvedPaths {
+    fn from_policy(policy: &ContainerPolicy) -> Result<Self, String> {
+        let denied = resolve_all(&policy.denied_paths)?;
+        let readonly = resolve_all(&policy.readonly_paths)?;
+        let mut readwrite = resolve_all(&policy.readwrite_paths)?;
+
+        // `denied` is emitted last and would override either allow anyway, but
+        // dropping the path keeps the emitted profile an honest description of
+        // the effective policy.
+        let mut readonly: Vec<String> = readonly;
+        readonly.retain(|p| !denied.contains(p));
+        readwrite.retain(|p| !denied.contains(p) && !readonly.contains(p));
+
+        Ok(Self {
+            readonly,
+            readwrite,
+            denied,
+        })
+    }
+}
+
+fn resolve_all(paths: &[String]) -> Result<Vec<String>, String> {
+    paths.iter().map(|p| resolve_policy_path(p)).collect()
+}
+
+fn write_filesystem_allow(out: &mut String, paths: &ResolvedPaths) {
+    if paths.readonly.is_empty() && paths.readwrite.is_empty() {
+        return;
+    }
+
+    // Emit shallow-to-deep, one rule per path, using the same ordering the
+    // Linux backends apply (`crate::wxc_common::filesystem_resolve`). Seatbelt is
+    // last-match-wins between rules that carry a filter, so ordering by depth
+    // makes the *deepest* intent win at every path — a `readonlyPaths` entry
+    // nested inside a broader `readwritePaths` subtree stays read-only rather
+    // than inheriting the parent's write grant. `deniedPaths` is deliberately
+    // not part of this plan: it is emitted last so it outranks these filtered
+    // allows regardless of depth.
+    out.push_str(";; --- policy.readonlyPaths / policy.readwritePaths (shallow-to-deep) ---\n");
+    for mount in resolve_path_plan(&paths.readwrite, &paths.readonly, &[]) {
+        let subpath = [mount.path.clone()];
+        match mount.intent {
+            FsIntent::ReadWrite => {
+                // `network-bind` / `network-outbound` under a *path* filter
+                // match only AF_UNIX sockets — Seatbelt matches IP sockets with
+                // `(local ip)` / `(remote ip)` — so this widens nothing on the
+                // IP side. Both halves are needed: Node toolchains (tsx, vite,
+                // esbuild, jest) bind an IPC pipe and then connect to it.
+                write_path_rule(
+                    out,
+                    "allow file-read* file-write* network-bind network-outbound",
+                    &subpath,
+                );
+            }
+            FsIntent::ReadOnly => {
+                write_path_rule(out, "allow file-read*", &subpath);
+                // The read allow names only `file-read*`, so it says nothing
+                // about write or socket ops and cannot displace a shallower
+                // read-write grant — the removal has to be explicit.
+                //
+                // This deny survives the unfiltered `(allow network-outbound)`
+                // that `write_network_rules` emits below under
+                // `defaultPolicy: "allow"`: last-match-wins applies between
+                // rules that carry a filter, and an unfiltered rule does not
+                // override a path-filtered one. Pinned by
+                // `readonly_socket_strip_survives_a_default_allow_outbound`.
+                write_path_rule(
+                    out,
+                    "deny file-write* network-bind network-outbound",
+                    &subpath,
+                );
+            }
+            FsIntent::Denied => unreachable!("denied paths are not part of this plan"),
+        }
+    }
+}
+
+fn write_filesystem_deny(out: &mut String, paths: &ResolvedPaths) {
+    if !paths.denied.is_empty() {
+        // `network-outbound` is denied here for two reasons. A denied path can
+        // sit inside a broader `readwritePaths` subtree, whose allow covers it;
+        // and `write_outbound_allow_rules` emits an *unfiltered* `(allow
+        // network-outbound)` under `defaultPolicy: "allow"` and the
+        // remote-proxy fallback. Either would otherwise let the sandbox
+        // `connect()` to a UNIX socket inside a denied subtree and talk to
+        // whatever listens there. A Docker / ssh-agent / gpg-agent socket is a
+        // control plane, so that would be an escape.
+        out.push_str(";; --- policy.deniedPaths (override broader allow rules) ---\n");
+        write_path_rule(
+            out,
+            "deny file-read* file-write* network-bind network-outbound",
+            &paths.denied,
+        );
+    }
+}
+
+/// Emit a single `(<ops> (subpath …)…)` rule over already-resolved paths.
+fn write_path_rule(out: &mut String, ops: &str, paths: &[String]) {
+    let _ = writeln!(out, "({ops}");
+    for p in paths {
+        let _ = writeln!(out, "    (subpath {})", quote_scheme(p));
+    }
+    out.push_str(")\n");
+}
+
+fn write_network_rules(
+    out: &mut String,
+    request: &ExecutionRequest,
+    proxy_address: Option<&ProxyAddress>,
+) {
+    let policy = &request.policy;
+    let allow_outbound = seatbelt_policy::egress_allowed(policy);
+    let has_allowed_hosts = !policy.allowed_hosts.is_empty();
+
+    // blocked_hosts is rejected at the runner level before reaching the
+    // profile builder, so it isn't handled here.
+    match (allow_outbound, has_allowed_hosts) {
+        (false, false) => {
+            // Pure deny — implicit from `(deny default)`.
+            out.push_str(";; --- network: default-deny (no allow-network rules emitted) ---\n");
+        }
+        (false, true) => {
+            // An allowlist under deny must never widen to allow-all. This is
+            // reached only with builtinTestServer — the one proxy MXC hands the
+            // host list to — so the profile keeps the deny baseline plus
+            // port-scoped proxy reachability, making the proxy the only way out.
+            out.push_str(";; --- network: default-deny; allowedHosts enforced by the MXC-run\n");
+            out.push_str(";;     builtin test proxy, not the profile (Seatbelt cannot filter\n");
+            out.push_str(";;     by host) ---\n");
+        }
+        (true, false) => {
+            out.push_str(";; --- network: outbound allowed (any host) ---\n");
+            write_outbound_allow_rules(out);
+        }
+        (true, true) => {
+            // Seatbelt only accepts `*` or `localhost` in `(remote ...)` filters —
+            // per-hostname filtering isn't possible. The default is already
+            // allow-all here, so the allowlist is a no-op superset rather than a
+            // weakening, and allow-all remains the honest rendering.
+            out.push_str(
+                ";; --- network: allowedHosts requested but Seatbelt cannot filter by host;\n",
+            );
+            out.push_str(";;     default is already allow, so all outbound stays allowed ---\n");
+            write_outbound_allow_rules(out);
+        }
+    }
+
+    write_host_loopback_rules(out, policy, allow_outbound);
+
+    // Emitted last on purpose: among rules whose filters both match, Seatbelt
+    // takes the *last* one. Nothing here denies `localhost` today — the deny
+    // arm needs an open egress default, which skips the proxy entirely — so
+    // going last keeps the port-scoped allow safe if that ever changes.
+    if !allow_outbound {
+        if let Some(address) = proxy_address {
+            write_proxy_reachability_rules(out, address);
+        }
+    }
+
+    write_local_network_rules(out, seatbelt_policy::local_network_allowed(policy));
+}
+
+/// Apply `network.ingress.hostLoopback` to the container-to-host direction.
+///
+/// The posture is bidirectional per the 0.8 contract, but Seatbelt can only
+/// enforce the outbound half: an inbound filter scoped to loopback is either a
+/// no-op (`remote ip`) or kills `bind()` outright (`local ip`). The backend's
+/// `validate` therefore refuses `hostLoopback: "allow"` under
+/// `ingress.default: "deny"` — an inbound promise the profile cannot keep —
+/// while permitting `hostLoopback: "deny"` under `ingress.default: "allow"`,
+/// where this rule enforces the container-to-host half and the blanket
+/// `network-inbound` grant over-permits the host-to-container half.
+///
+/// Only the two combinations that actually change the profile emit anything;
+/// deny-under-deny is already covered by `(deny default)`, and allow-under-allow
+/// is already covered by the blanket outbound allow.
+fn write_host_loopback_rules(out: &mut String, policy: &ContainerPolicy, allow_outbound: bool) {
+    // The legacy shape has no hostLoopback concept — leave 0.6/0.7 untouched.
+    let Some(loopback_allowed) = seatbelt_policy::host_loopback_allowed(policy) else {
+        return;
+    };
+
+    match (loopback_allowed, allow_outbound) {
+        (false, true) => {
+            // `localhost` matches this machine on any of its addresses, so this
+            // also closes the "reach the host via its LAN IP" path.
+            out.push_str(";; --- network: ingress.hostLoopback=deny — close host loopback,\n");
+            out.push_str(";;     including this host's own non-loopback addresses ---\n");
+            out.push_str("(deny network-outbound (remote ip \"localhost:*\"))\n");
+        }
+        (true, false) => {
+            // Same breadth in reverse: this opens every address bound to this
+            // host, not just 127.0.0.1. Other machines stay blocked —
+            // `localhost` means "this machine", not "this network" — and there
+            // is no narrower primitive, since a literal `127.0.0.1` is a
+            // profile syntax error ("host must be * or localhost").
+            out.push_str(";; --- network: ingress.hostLoopback=allow — open host loopback\n");
+            out.push_str(";;     under an otherwise-deny egress default. Covers every\n");
+            out.push_str(";;     address bound to this host; other machines stay denied ---\n");
+            out.push_str("(allow network-outbound (remote ip \"localhost:*\"))\n");
+        }
+        _ => {}
+    }
+}
+
+fn write_outbound_allow_rules(out: &mut String) {
+    out.push_str("(allow network-outbound)\n");
+    out.push_str("(allow network-bind (local ip))\n");
+    out.push_str("(allow system-socket)\n");
+}
+
+/// Emit the outbound rules that let the sandbox reach the proxy while the
+/// default policy stays deny.
+///
+/// Only called from the default-deny arms of [`write_network_rules`], so
+/// everything here sits under a `(deny default)` baseline.
+///
+/// A loopback proxy is scoped to its exact `localhost:<port>`, so clients that
+/// ignore `HTTP_PROXY` can't reach any other port or machine. Note the scoping
+/// is by port, not by address: `localhost` means "this machine", so the rule
+/// also covers the host's non-loopback addresses on that same port. A
+/// non-loopback proxy can't be expressed at all — Seatbelt's `(remote ip ...)`
+/// matches neither DNS names nor specific addresses — so it fails closed. The
+/// backend validator rejects that combination before profile construction;
+/// failing closed here keeps any future disagreement about what counts as
+/// loopback from silently opening up egress.
+fn write_proxy_reachability_rules(out: &mut String, proxy_address: &ProxyAddress) {
+    if host_is_canonical_loopback(proxy_address.host()) {
+        let _ = writeln!(
+            out,
+            ";; --- network: proxy configured — allow reaching the loopback proxy on port {} ---",
+            proxy_address.port()
+        );
+        let _ = writeln!(
+            out,
+            "(allow network-outbound (remote ip \"localhost:{}\"))",
+            proxy_address.port()
+        );
+    } else {
+        out.push_str(";; --- network: non-loopback proxy cannot be expressed as a Seatbelt\n");
+        out.push_str(";;     reachability rule; no outbound allow emitted (fail closed) ---\n");
+    }
+}
+
+/// Emit the `network-inbound` rule that lets the sandboxed process accept
+/// incoming connections on its own listeners. Required for `server.listen()`
+/// on macOS — the `network-bind` rule alone is not enough; the kernel rejects
+/// `listen()` with EPERM without `network-inbound`. Scoped to `(local ip)` so
+/// it only covers IP sockets, never UNIX-domain or Mach sockets.
+fn write_local_network_rules(out: &mut String, allow_local_network: bool) {
+    if !allow_local_network {
+        return;
+    }
+    out.push_str(";; --- network: allowLocalNetwork — accept inbound on local IPs ---\n");
+    out.push_str("(allow network-inbound (local ip))\n");
+}
+
+fn write_ui_rules(out: &mut String, request: &ExecutionRequest) {
+    let ui = &request.policy.ui;
+    let gui_access = seatbelt_policy::gui_access_effective(request);
+
+    // The baseline profile uses `(deny default)`, so services are blocked
+    // unless explicitly allowed. When UI is enabled, we allow the mach
+    // services that gate window creation and launch services. When UI is
+    // disabled we omit those allows (and add explicit denies for clarity).
+    if !ui.disable {
+        out.push_str(";; --- ui enabled: allow WindowServer + LaunchServices ---\n");
+        out.push_str("(allow mach-lookup\n");
+        out.push_str("    (global-name \"com.apple.windowserver.active\")\n");
+        out.push_str("    (global-name \"com.apple.windowserver.session\")\n");
+        out.push_str("    (global-name \"com.apple.coreservices.launchservicesd\"))\n");
+
+        if gui_access {
+            // GUI apps need a broad set of Mach services to draw windows —
+            // WindowServer, CoreAnimation, fonts, Dock, accessibility,
+            // preferences, and many XPC helpers that vary across macOS
+            // versions. Rather than maintaining a fragile allowlist, we
+            // permit all mach-lookup when guiAccess is on. Filesystem and
+            // network policies still apply.
+            out.push_str(";; --- guiAccess: allow all Mach IPC for GUI applications ---\n");
+            out.push_str("(allow mach-lookup)\n");
+            // GUI apps must register their own Mach services (XPC listeners)
+            // to receive callbacks from WindowServer and other system agents.
+            out.push_str("(allow mach-register)\n");
+
+            // IOKit user-client access for GPU / Metal rendering
+            out.push_str(";; --- guiAccess: allow IOKit for GPU rendering ---\n");
+            out.push_str("(allow iokit-open)\n");
+
+            // Needed for app temp files, caches, GPU shader caches
+            out.push_str(";; --- guiAccess: allow writing to per-user temp/cache ---\n");
+            out.push_str("(allow file-read* file-write*\n");
+            out.push_str("    (subpath \"/private/tmp\")\n");
+            out.push_str("    (subpath \"/private/var/folders\"))\n");
+
+            // Pseudo-TTY support — Terminal.app and other GUI apps that
+            // spawn shell sessions need to open, grant, and use PTY devices.
+            out.push_str(";; --- guiAccess: allow pseudo-TTY for shell sessions ---\n");
+            out.push_str("(allow pseudo-tty)\n");
+            out.push_str("(allow file-read* file-write* file-ioctl\n");
+            out.push_str("    (regex #\"/dev/ttys[0-9]+\")\n");
+            out.push_str("    (regex #\"/dev/ptmx\"))\n");
+
+            // POSIX shared memory and IPC — required by Terminal.app and
+            // other apps that use notification center or shared memory.
+            out.push_str(";; --- guiAccess: allow POSIX IPC for GUI apps ---\n");
+            out.push_str("(allow ipc-posix-shm-read-data ipc-posix-shm-write-data ipc-posix-shm-write-create)\n");
+        }
+    } else {
+        out.push_str(";; --- ui.disable: deny WindowServer + related ---\n");
+        out.push_str("(deny mach-lookup\n");
+        out.push_str("    (global-name \"com.apple.windowserver.active\")\n");
+        out.push_str("    (global-name \"com.apple.windowserver.session\")\n");
+        out.push_str("    (global-name \"com.apple.coreservices.launchservicesd\"))\n");
+    }
+
+    // Clipboard: allow pasteboard mach service when clipboard is read,
+    // write, or all. The explicit deny when clipboard=none is redundant
+    // with `(deny default)` but documents intent.
+    let clipboard_allowed = !matches!(ui.clipboard, ClipboardPolicy::None);
+    if clipboard_allowed {
+        out.push_str(";; --- clipboard enabled: allow pasteboard ---\n");
+        out.push_str("(allow mach-lookup (global-name \"com.apple.pasteboard.1\"))\n");
+    } else {
+        out.push_str(";; --- ui.clipboard=none: deny pasteboard ---\n");
+        out.push_str("(deny mach-lookup (global-name \"com.apple.pasteboard.1\"))\n");
+    }
+
+    if !ui.injection {
+        out.push_str(";; --- ui.injection=false: deny HID iokit access ---\n");
+        out.push_str("(deny iokit-open (iokit-user-client-class \"IOHIDLibUserClient\"))\n");
+    }
+}
+
+/// Emit rules so the inner process can call `posix_openpt()` and allocate
+/// its own pty. Skipped when `gui_access` (with UI enabled) already emits
+/// a strict superset.
+fn write_nested_pty_rules(out: &mut String, request: &ExecutionRequest) {
+    let sb = request.seatbelt.as_ref();
+    let enabled = sb.is_none_or(|c| c.nested_pty);
+    let gui_block_emitted = seatbelt_policy::gui_access_effective(request);
+    if !enabled || gui_block_emitted {
+        return;
+    }
+    out.push_str(";; --- nestedPty: allow inner process to allocate its own pty ---\n");
+    out.push_str("(allow pseudo-tty)\n");
+    // /dev/ptmx is the primary multiplexer; opening it is what posix_openpt
+    // does under the hood. The TTY_ALLOW baseline already grants access to
+    // /dev/ttysNNN (the secondary side).
+    out.push_str("(allow file-read* file-write* file-ioctl\n");
+    out.push_str("    (literal \"/dev/ptmx\"))\n");
+}
+
+/// Emit rules so `Security.framework` / `keytar` can reach `securityd`
+/// and read/write the user's Keychain. Off by default — opt in via
+/// `seatbelt.keychainAccess: true`.
+///
+/// Real-world Keychain access fans out across several daemons. At
+/// minimum we need:
+///
+/// * `securityd` / `SecurityServer` — the actual Keychain server.
+/// * `trustd` / `ocspd` — TLS trust evaluation; without them every
+///   handshake logs "failed to copy trust settings".
+/// * `cfprefsd.daemon` — `Security.framework` reads preferences for
+///   trust settings, ACL prompts, etc.
+/// * `xpcd` + `lsd.*` — XPC bootstrapper and LaunchServices, used to
+///   resolve helper bundles when the keychain is unlocked.
+///
+/// On the filesystem side, the user's keychain DB lives under
+/// `~/Library/Keychains` (read+write — keytar creates new entries),
+/// `/private/var/db/mds` is Spotlight/MDS metadata that
+/// `Security.framework` consults (read-only), and per-user XPC caches
+/// live under `/private/var/folders` (read+write). The system keychain
+/// stores under `/Library/Keychains` and `/System/Library/Keychains`
+/// are already covered by the baseline `/Library` and `/System`
+/// read-only allows, so we don't re-add them here.
+fn write_keychain_rules(out: &mut String, request: &ExecutionRequest) -> Result<(), String> {
+    let enabled = request.seatbelt.as_ref().is_some_and(|c| c.keychain_access);
+    if !enabled {
+        return Ok(());
+    }
+    // Seatbelt only applies on macOS. On other hosts the option is a
+    // no-op so workspace clippy / cross-platform tests don't have to
+    // care about `$HOME` (Windows CI doesn't set it).
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+
+    out.push_str(";; --- keychainAccess: Mach IPC for Keychain (securityd, prefs, XPC, LS) ---\n");
+    out.push_str("(allow mach-lookup\n");
+    out.push_str("    (global-name \"com.apple.SecurityServer\")\n");
+    out.push_str("    (global-name \"com.apple.securityd\")\n");
+    // trustd handles SecTrustSettingsCopyTrustSettings; without it Security
+    // logs "failed to copy trust settings of system certificate-N" for every
+    // cert in the system root store on every TLS handshake.
+    out.push_str("    (global-name \"com.apple.trustd\")\n");
+    out.push_str("    (global-name \"com.apple.trustd.agent\")\n");
+    out.push_str("    (global-name \"com.apple.ocspd\")\n");
+    out.push_str("    (global-name \"com.apple.cfprefsd.daemon\")\n");
+    out.push_str("    (global-name \"com.apple.cfprefsd.agent\")\n");
+    out.push_str("    (global-name \"com.apple.xpcd\")\n");
+    // Seatbelt has no glob in (global-name); use regex for the lsd.* family
+    // (lsd.modifydb, lsd.mapdb, lsd.openurl, …). Anchored to
+    // `com.apple.lsd.` so we don't accidentally match unrelated services.
+    out.push_str("    (global-name-regex #\"^com\\.apple\\.lsd\\.\"))\n");
+
+    out.push_str(";; --- keychainAccess: MDS keychain metadata + trustd protected store ---\n");
+    out.push_str("(allow file-read*\n");
+    // trustd's protected store of trust settings + revocation data.
+    out.push_str("    (subpath \"/private/var/protected/trustd\")\n");
+    out.push_str("    (subpath \"/private/var/db/mds\"))\n");
+
+    let home = std::env::var("HOME").map_err(|_| {
+        "HOME environment variable not set; cannot expand '~/Library/Keychains' for keychainAccess"
+            .to_string()
+    })?;
+    let user_keychains = format!("{home}/Library/Keychains");
+    out.push_str(";; --- keychainAccess: user keychain DB + XPC/folder caches (read+write) ---\n");
+    out.push_str("(allow file-read* file-write*\n");
+    let _ = writeln!(out, "    (subpath {})", quote_scheme(&user_keychains));
+    out.push_str("    (subpath \"/private/var/folders\"))\n");
+    Ok(())
+}
+
+/// Emit caller-provided `extraMachLookups` rules: additional Mach service
+/// global-names the inner process may resolve. No-op when the list is empty.
+fn write_extra_seatbelt_rules(out: &mut String, request: &ExecutionRequest) {
+    let Some(sb) = request.seatbelt.as_ref() else {
+        return;
+    };
+    if sb.extra_mach_lookups.is_empty() {
+        return;
+    }
+
+    out.push_str(";; --- extraMachLookups: caller-provided Mach services ---\n");
+    out.push_str("(allow mach-lookup\n");
+    for name in &sb.extra_mach_lookups {
+        let _ = writeln!(out, "    (global-name {})", quote_scheme(name));
+    }
+    out.push_str(")\n");
+}
+
+/// Resolve a caller-supplied policy path into the form Seatbelt matches:
+/// expand a leading `~`, normalize redundant lexical segments, then rewrite the
+/// symlinked macOS root directories.
+///
+/// All three steps are required. See [`expand_tilde`], [`normalize_lexical`]
+/// and [`resolve_macos_root_symlinks`].
+pub(crate) fn resolve_policy_path(path: &str) -> Result<String, String> {
+    let expanded = expand_tilde(path)?;
+    Ok(resolve_macos_root_symlinks(&normalize_lexical(&expanded)?))
+}
+
+/// Collapse the lexical spellings of a path that leave a Seatbelt rule dead:
+/// repeated separators (`//tmp`), `.` segments (`/./tmp`), and a trailing `/`.
+///
+/// The kernel canonicalizes an accessed path before matching it against a
+/// profile filter, but it does not canonicalize the filter, so `(subpath
+/// "//tmp/secret")` never matches anything. For `deniedPaths` that fails
+/// **open**, so these spellings have to be folded away rather than passed
+/// through.
+///
+/// A `..` segment is rejected instead of being resolved. macOS resolves `..`
+/// *physically* — after following symlinks — so resolving it lexically can move
+/// the rule somewhere else entirely: `/tmp/..` is `/private`, not `/`. Silently
+/// widening an allow rule to `/` would be worse than the dead rule, and leaving
+/// it in place keeps the deny fail-open, so an unresolvable path is a config
+/// error the caller must fix by passing the resolved path.
+fn normalize_lexical(path: &str) -> Result<String, String> {
+    if path.split('/').any(|seg| seg == "..") {
+        return Err(format!(
+            "Filesystem path '{path}' contains a '..' segment. macOS resolves '..' after \
+             following symlinks, so the generated sandbox rule could not be matched \
+             reliably; specify the fully resolved path instead."
+        ));
+    }
+
+    let joined = path
+        .split('/')
+        .filter(|seg| !seg.is_empty() && *seg != ".")
+        .collect::<Vec<_>>()
+        .join("/");
+
+    Ok(if path.starts_with('/') {
+        format!("/{joined}")
+    } else {
+        joined
+    })
+}
+
+/// The macOS root directories that are symlinks, and their targets.
+///
+/// `/etc`, `/tmp`, and `/var` point into `/private`; `/home` points at the
+/// data volume. `/Users` is deliberately absent — it is a *firmlink*, not a
+/// symlink, so `/Users/...` is already the canonical path the kernel matches.
+const MACOS_SYMLINKED_ROOTS: [(&str, &str); 4] = [
+    ("/etc", "/private/etc"),
+    ("/tmp", "/private/tmp"),
+    ("/var", "/private/var"),
+    ("/home", "/System/Volumes/Data/home"),
+];
+
+/// Rewrite a leading symlinked macOS root directory to its real target.
+///
+/// The kernel resolves a path fully before matching it against a profile's
+/// `subpath` / `literal` filters, so a rule written against the unresolved
+/// path is dead: `(subpath "/tmp/work")` never matches, because the kernel
+/// only ever sees `/private/tmp/work`. That silently voided every policy path
+/// under these roots — including the automatic `$TMPDIR` grant, which resolves
+/// to `/var/folders/...` on macOS.
+///
+/// Only a whole leading path segment is rewritten, so `/variable` is left
+/// alone. Paths already written against the real target pass through
+/// unchanged, because none of the targets is itself under a symlinked root.
+fn resolve_macos_root_symlinks(path: &str) -> String {
+    for (root, target) in MACOS_SYMLINKED_ROOTS {
+        let Some(rest) = path.strip_prefix(root) else {
+            continue;
+        };
+        if rest.is_empty() || rest.starts_with('/') {
+            return format!("{target}{rest}");
+        }
+    }
+    path.to_string()
+}
+
+/// Expand a leading `~` or `~/` to the current user's home directory.
+/// Returns an error if `HOME` is not set and the path requires expansion.
+pub(crate) fn expand_tilde(path: &str) -> Result<String, String> {
+    if path == "~" || path.starts_with("~/") {
+        let home = std::env::var("HOME").map_err(|_| {
+            format!("HOME environment variable not set; cannot expand '{path}' in seatbelt profile")
+        })?;
+        if path == "~" {
+            Ok(home)
+        } else {
+            Ok(format!("{home}/{}", &path[2..]))
+        }
+    } else {
+        Ok(path.to_string())
+    }
+}
+
+/// Quote a string for use as a TinyScheme string literal, escaping
+/// embedded backslashes and double-quotes.
+fn quote_scheme(s: &str) -> String {
+    let mut q = String::with_capacity(s.len() + 2);
+    q.push('"');
+    q.push_str(&escape_for_quotes(s));
+    q.push('"');
+    q
+}
+
+fn escape_for_quotes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wxc_common::models::{NetworkAction, NetworkPolicy, SeatbeltConfig, UiPolicy};
+
+    fn build_profile(request: &ExecutionRequest) -> Result<String, String> {
+        build_profile_with_proxy(request, request.policy.network_proxy.address.as_ref())
+    }
+
+    fn req() -> ExecutionRequest {
+        ExecutionRequest {
+            script_code: "echo hi".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn baseline_profile_has_deny_default_and_baseline_allows() {
+        let p = build_profile(&req()).unwrap();
+        assert!(p.contains("(version 1)"));
+        assert!(p.contains("(deny default)"));
+        assert!(p.contains("(allow process-fork)"));
+        assert!(p.contains("(allow process-exec)"));
+        assert!(p.contains("(allow signal (target same-sandbox))"));
+        assert!(p.contains("/usr/lib"));
+        assert!(p.contains("/System"));
+        assert!(p.contains("(subpath \"/bin\")"));
+        assert!(p.contains("(subpath \"/usr/bin\")"));
+        assert!(p.contains("(allow file-read-data (literal \"/\"))"));
+    }
+
+    #[test]
+    fn readonly_paths_emit_subpath_allows() {
+        let mut r = req();
+        r.policy.readonly_paths = vec!["/opt/tools".into(), "/var/data".into()];
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("policy.readonlyPaths"));
+        assert!(p.contains("(allow file-read*"));
+        assert!(p.contains("(subpath \"/opt/tools\")"));
+        assert!(p.contains("(subpath \"/private/var/data\")"));
+        assert!(!p.contains("file-write* (subpath \"/opt/tools\")"));
+    }
+
+    #[test]
+    fn readwrite_paths_emit_read_and_write_allows() {
+        let mut r = req();
+        r.policy.readwrite_paths = vec!["/tmp/output".into()];
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("(allow file-read* file-write*"));
+        assert!(p.contains("(subpath \"/private/tmp/output\")"));
+    }
+
+    #[test]
+    fn denied_paths_appear_after_allows_to_override() {
+        let mut r = req();
+        r.policy.readwrite_paths = vec!["/tmp".into()];
+        r.policy.denied_paths = vec!["/tmp/secret".into()];
+        let p = build_profile(&r).unwrap();
+        let allow_idx = p.find("(allow file-read* file-write*").unwrap();
+        let deny_idx = p.find("(deny file-read* file-write*").unwrap();
+        assert!(
+            deny_idx > allow_idx,
+            "deny rules must come after allow rules so they win on last-match"
+        );
+        assert!(p.contains("(subpath \"/private/tmp/secret\")"));
+    }
+
+    #[test]
+    fn default_deny_network_emits_no_allow_network() {
+        let mut r = req();
+        // Default policy is Allow per NetworkPolicy::default(); flip it.
+        r.policy.default_network_policy = NetworkPolicy::Block;
+        let p = build_profile(&r).unwrap();
+        assert!(!p.contains("(allow network-outbound"));
+        assert!(p.contains("network: default-deny"));
+    }
+
+    #[test]
+    fn block_with_allowed_hosts_never_widens_to_allow_all() {
+        // `allowedHosts` under a deny default must not flip the profile to
+        // allow-all outbound — that would be the inverse of the requested
+        // policy. `config_parser` rejects this combination except with the
+        // MXC-run builtin test proxy, which is the only proxy actually given
+        // the host list, so the profile keeps its deny baseline.
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Block;
+        r.policy.allowed_hosts = vec!["api.github.com".into(), "registry.npmjs.org".into()];
+        let p = build_profile(&r).unwrap();
+        assert!(!p.contains("(allow network-outbound)"));
+        assert!(p.contains("enforced by the MXC-run"));
+        // Should NOT have per-host remote rules.
+        assert!(!p.contains("(remote"));
+    }
+
+    #[test]
+    fn block_with_allowed_hosts_and_proxy_keeps_deny_plus_proxy_reachability() {
+        // The builtin-test-proxy case: the proxy filters the host list, so the
+        // profile must stay deny-all except port-scoped proxy reachability.
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Block;
+        r.policy.allowed_hosts = vec!["api.github.com".into()];
+        let address = ProxyAddress::new("127.0.0.1".into(), 8080);
+        let p = build_profile_with_proxy(&r, Some(&address)).unwrap();
+        assert!(!p.contains("(allow network-outbound)"));
+        assert!(p.contains("8080"));
+    }
+
+    /// Regression test for the bracketed-IPv6 form, which the profile builder
+    /// used to miss — it then fell through to the remote-proxy branch and
+    /// emitted a bare `(allow network-outbound)` under a deny policy.
+    #[test]
+    fn every_loopback_proxy_spelling_stays_port_scoped_under_deny() {
+        for host in [
+            "127.0.0.1",
+            "::1",
+            "[::1]",
+            "0:0:0:0:0:0:0:1",
+            "[0:0:0:0:0:0:0:1]",
+            "localhost",
+            "LOCALHOST",
+            "LocalHost",
+        ] {
+            let mut r = req();
+            r.policy.default_network_policy = NetworkPolicy::Block;
+            let address = ProxyAddress::new(host.into(), 8080);
+            let p = build_profile_with_proxy(&r, Some(&address)).unwrap();
+
+            assert!(
+                !p.contains("(allow network-outbound)"),
+                "proxy host {host:?} widened egress to allow-all under default-deny; \
+                 profile:\n{p}"
+            );
+            assert!(
+                p.contains("(allow network-outbound (remote ip \"localhost:8080\"))"),
+                "proxy host {host:?} did not emit port-scoped proxy reachability; \
+                 profile:\n{p}"
+            );
+        }
+    }
+
+    /// Unreachable via real config (both upstream layers reject it), but if a
+    /// loopback check ever diverges this must fail closed, not open.
+    #[test]
+    fn remote_proxy_under_deny_fails_closed() {
+        for host in ["proxy.corp.example", "10.0.0.5", "[2001:db8::1]"] {
+            let mut r = req();
+            r.policy.default_network_policy = NetworkPolicy::Block;
+            let address = ProxyAddress::new(host.into(), 8080);
+            let p = build_profile_with_proxy(&r, Some(&address)).unwrap();
+            assert!(
+                !p.contains("(allow network-outbound"),
+                "remote proxy host {host:?} must not emit any outbound allow under \
+                 default-deny; profile:\n{p}"
+            );
+        }
+    }
+
+    #[test]
+    fn allow_outbound_no_hosts_emits_open_network_outbound() {
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("(allow network-outbound)"));
+    }
+
+    #[test]
+    fn allow_outbound_with_hosts_emits_per_host_remote_rules() {
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        r.policy.allowed_hosts = vec!["api.github.com".into(), "1.2.3.4".into()];
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("Seatbelt cannot filter by host"));
+        assert!(p.contains("(allow network-outbound)"));
+        assert!(!p.contains("(remote"));
+    }
+
+    #[test]
+    fn blocked_hosts_not_emitted_in_profile() {
+        // blocked_hosts is rejected at the runner level, but verify the
+        // profile builder doesn't crash if called with them anyway.
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        r.policy.blocked_hosts = vec!["evil.example.com".into()];
+        let p = build_profile(&r).unwrap();
+        assert!(!p.contains("(deny network-outbound"));
+    }
+
+    #[test]
+    fn loopback_proxy_under_default_deny_scopes_outbound_to_proxy_port() {
+        // A cooperative loopback proxy must be reachable even though outbound
+        // is default-deny — but only the proxy's exact port, not all of
+        // loopback and not the whole network.
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Block;
+        let addr = ProxyAddress::new("127.0.0.1".into(), 8080);
+        let p = build_profile_with_proxy(&r, Some(&addr)).unwrap();
+        assert!(p.contains("(allow network-outbound (remote ip \"localhost:8080\"))"));
+        // Must NOT open outbound to all loopback ports or the whole network.
+        assert!(!p.contains("localhost:*"));
+        assert!(!p.contains("(allow network-outbound)\n"));
+    }
+
+    #[test]
+    fn builtin_test_proxy_under_default_deny_scopes_outbound_to_proxy_port() {
+        // builtinTestServer binds a loopback port at runtime; the runner passes
+        // that *resolved* address here, so the rule is scoped to the real port
+        // just like an explicit loopback proxy.
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Block;
+        let addr = ProxyAddress::new("127.0.0.1".into(), 54321);
+        let p = build_profile_with_proxy(&r, Some(&addr)).unwrap();
+        assert!(p.contains("(allow network-outbound (remote ip \"localhost:54321\"))"));
+        assert!(!p.contains("localhost:*"));
+        assert!(!p.contains("(allow network-outbound)\n"));
+    }
+
+    #[test]
+    fn remote_proxy_under_default_deny_emits_no_outbound_allow() {
+        // A remote proxy can't be expressed as a reachability rule, so it fails
+        // closed. Rejected upstream, so this only pins the fallback behavior.
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Block;
+        let addr = ProxyAddress::from_url(
+            "http://proxy.example.com:8080",
+            "proxy.example.com".into(),
+            8080,
+        );
+        let p = build_profile_with_proxy(&r, Some(&addr)).unwrap();
+        assert!(p.contains("fail closed"));
+        assert!(!p.contains("(allow network-outbound"));
+    }
+
+    #[test]
+    fn proxy_under_default_allow_does_not_add_scoped_rule() {
+        // When outbound is already open (defaultPolicy allow), the proxy
+        // reachability rule is redundant and must not be emitted.
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        let addr = ProxyAddress::new("127.0.0.1".into(), 8080);
+        let p = build_profile_with_proxy(&r, Some(&addr)).unwrap();
+        assert!(p.contains("(allow network-outbound)\n"));
+        assert!(!p.contains("localhost:"));
+    }
+
+    #[test]
+    fn build_profile_wrapper_scopes_static_localhost_proxy() {
+        // The convenience `build_profile` wrapper must honor a statically
+        // configured proxy address (localhost:<port>), scoping the reachability
+        // rule to that exact port under default-deny — not silently dropping it.
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Block;
+        r.policy.network_proxy = crate::wxc_common::models::ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".into(), 9091)),
+            builtin_test_server: false,
+        };
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("(allow network-outbound (remote ip \"localhost:9091\"))"));
+        assert!(!p.contains("localhost:*"));
+    }
+
+    #[test]
+    fn allow_local_network_emits_inbound_rule() {
+        // server.listen() on macOS is governed by `network-inbound`, not
+        // `network-bind` — with only `network-bind (local ip)` the bind()
+        // succeeds and the kernel then rejects listen() with EPERM.
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        r.policy.allow_local_network = true;
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("(allow network-inbound (local ip))"));
+        assert!(p.contains("allowLocalNetwork"));
+    }
+
+    #[test]
+    fn allow_local_network_default_omits_inbound_rule() {
+        // Default (allow_local_network=false) must not emit any inbound rule.
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        let p = build_profile(&r).unwrap();
+        assert!(!p.contains("network-inbound"));
+    }
+
+    #[test]
+    fn allow_local_network_works_with_default_deny_outbound() {
+        // allow_local_network is independent of outbound: a process can be
+        // a pure server (no client traffic) and still accept local inbound.
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Block;
+        r.policy.allow_local_network = true;
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("(allow network-inbound (local ip))"));
+        assert!(!p.contains("(allow network-outbound)"));
+    }
+
+    #[test]
+    fn directional_egress_deny_emits_no_allow_network() {
+        // Schema-0.8 directional shape: network_egress.default is consulted
+        // instead of the legacy default_network_policy field (which stays at
+        // its Block default under this shape and must not be read directly).
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Allow; // must be ignored
+        r.policy.network_egress = Some(crate::wxc_common::models::NetworkEgressPolicy {
+            default: NetworkAction::Deny,
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        assert!(!p.contains("(allow network-outbound"));
+        assert!(p.contains("network: default-deny"));
+    }
+
+    #[test]
+    fn directional_egress_allow_emits_open_network_outbound() {
+        let mut r = req();
+        r.policy.network_egress = Some(crate::wxc_common::models::NetworkEgressPolicy {
+            default: NetworkAction::Allow,
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("(allow network-outbound)"));
+    }
+
+    #[test]
+    fn directional_ingress_default_allow_emits_inbound_rule() {
+        // Seatbelt maps ingress.default (not hostLoopback) to the existing
+        // allowLocalNetwork behavior — see network_parser and validate().
+        let mut r = req();
+        r.policy.allow_local_network = false; // must be ignored
+        r.policy.network_ingress = Some(crate::wxc_common::models::NetworkIngressPolicy {
+            default: NetworkAction::Allow,
+            host_loopback: NetworkAction::Allow,
+        });
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("(allow network-inbound (local ip))"));
+    }
+
+    #[test]
+    fn directional_ingress_default_deny_omits_inbound_rule() {
+        let mut r = req();
+        r.policy.allow_local_network = true; // must be ignored
+        r.policy.network_ingress = Some(crate::wxc_common::models::NetworkIngressPolicy {
+            default: NetworkAction::Deny,
+            host_loopback: NetworkAction::Deny,
+        });
+        let p = build_profile(&r).unwrap();
+        assert!(!p.contains("network-inbound"));
+    }
+
+    #[test]
+    fn ingress_allow_with_host_loopback_deny_grants_inbound_without_loopback_egress() {
+        let mut r = req();
+        r.policy.network_ingress = Some(crate::wxc_common::models::NetworkIngressPolicy {
+            default: NetworkAction::Allow,
+            host_loopback: NetworkAction::Deny,
+        });
+        let addr = ProxyAddress::new("127.0.0.1".into(), 9091);
+        let p = build_profile_with_proxy(&r, Some(&addr)).unwrap();
+        assert!(p.contains("(allow network-inbound (local ip))"));
+        assert!(p.contains("(allow network-outbound (remote ip \"localhost:9091\"))"));
+        // The bypass this posture exists to avoid: every other host port.
+        assert!(!p.contains("(allow network-outbound (remote ip \"localhost:*\"))"));
+        assert!(!p.contains("(allow network-outbound)"));
+    }
+
+    #[test]
+    fn ingress_allow_with_host_loopback_deny_still_closes_loopback_under_egress_allow() {
+        let mut r = req();
+        r.policy.network_egress = Some(crate::wxc_common::models::NetworkEgressPolicy {
+            default: NetworkAction::Allow,
+            ..Default::default()
+        });
+        r.policy.network_ingress = Some(crate::wxc_common::models::NetworkIngressPolicy {
+            default: NetworkAction::Allow,
+            host_loopback: NetworkAction::Deny,
+        });
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("(allow network-inbound (local ip))"));
+        assert!(p.contains("(allow network-outbound)"));
+        assert!(
+            p.find("(deny network-outbound (remote ip \"localhost:*\"))")
+                > p.find("(allow network-outbound)"),
+            "the localhost deny must follow the broad allow; profile:\n{p}"
+        );
+    }
+
+    // --- network.ingress.hostLoopback -------------------------
+    //
+    // The posture only changes the profile in the two cells where it disagrees
+    // with the egress default; the other two are already covered by the
+    // baseline or by the blanket allow.
+
+    fn ingress(action: NetworkAction) -> crate::wxc_common::models::NetworkIngressPolicy {
+        crate::wxc_common::models::NetworkIngressPolicy {
+            default: action,
+            host_loopback: action,
+        }
+    }
+
+    fn egress(action: NetworkAction) -> crate::wxc_common::models::NetworkEgressPolicy {
+        crate::wxc_common::models::NetworkEgressPolicy {
+            default: action,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn host_loopback_deny_closes_loopback_under_open_egress() {
+        let mut r = req();
+        r.policy.network_egress = Some(egress(NetworkAction::Allow));
+        r.policy.network_ingress = Some(ingress(NetworkAction::Deny));
+        let p = build_profile(&r).unwrap();
+
+        assert!(p.contains("(allow network-outbound)"));
+        assert!(p.contains("(deny network-outbound (remote ip \"localhost:*\"))"));
+        // Between two rules that both match, Seatbelt takes the last one.
+        assert!(
+            p.find("(deny network-outbound (remote ip \"localhost:*\"))")
+                > p.find("(allow network-outbound)"),
+            "the loopback deny must follow the blanket allow to take effect"
+        );
+    }
+
+    #[test]
+    fn host_loopback_allow_keeps_loopback_open_under_open_egress() {
+        let mut r = req();
+        r.policy.network_egress = Some(egress(NetworkAction::Allow));
+        r.policy.network_ingress = Some(ingress(NetworkAction::Allow));
+        let p = build_profile(&r).unwrap();
+
+        assert!(p.contains("(allow network-outbound)"));
+        assert!(!p.contains("localhost:*"));
+    }
+
+    #[test]
+    fn host_loopback_allow_opens_loopback_under_deny_egress() {
+        let mut r = req();
+        r.policy.network_egress = Some(egress(NetworkAction::Deny));
+        r.policy.network_ingress = Some(ingress(NetworkAction::Allow));
+        let p = build_profile(&r).unwrap();
+
+        assert!(p.contains("(allow network-outbound (remote ip \"localhost:*\"))"));
+        assert!(!p.contains("(allow network-outbound)\n"));
+    }
+
+    #[test]
+    fn host_loopback_deny_under_deny_egress_needs_no_rule() {
+        let mut r = req();
+        r.policy.network_egress = Some(egress(NetworkAction::Deny));
+        r.policy.network_ingress = Some(ingress(NetworkAction::Deny));
+        let p = build_profile(&r).unwrap();
+
+        // `(deny default)` already covers it.
+        assert!(!p.contains("localhost:*"));
+        assert!(!p.contains("(allow network-outbound"));
+    }
+
+    #[test]
+    fn legacy_shape_emits_no_host_loopback_rule() {
+        // 0.6/0.7 configs have no hostLoopback concept and must be untouched.
+        for allow_local in [false, true] {
+            let mut r = req();
+            r.policy.default_network_policy = NetworkPolicy::Allow;
+            r.policy.allow_local_network = allow_local;
+            let p = build_profile(&r).unwrap();
+            assert!(
+                !p.contains("localhost:*"),
+                "legacy shape must not gain a host-loopback rule"
+            );
+        }
+    }
+
+    #[test]
+    fn no_host_loopback_deny_can_swallow_the_proxy_allow() {
+        // A proxy is only reachable under a deny egress default, and that arm
+        // emits no `localhost:*` deny. Pin it: a deny reaching the profile
+        // alongside the proxy allow would silently fail closed.
+        for loopback in [NetworkAction::Allow, NetworkAction::Deny] {
+            let mut r = req();
+            r.policy.network_egress = Some(egress(NetworkAction::Deny));
+            r.policy.network_ingress = Some(ingress(loopback));
+            let addr = ProxyAddress::new("127.0.0.1".into(), 44444);
+            let p = build_profile_with_proxy(&r, Some(&addr)).unwrap();
+
+            assert!(
+                p.contains("(allow network-outbound (remote ip \"localhost:44444\"))"),
+                "hostLoopback={loopback:?}: the proxy allow must be emitted"
+            );
+            assert!(
+                !p.contains("(deny network-outbound (remote ip \"localhost:*\"))"),
+                "hostLoopback={loopback:?}: a loopback deny would swallow the proxy allow"
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_allow_is_emitted_after_the_host_loopback_allow() {
+        // The only case where two `localhost` rules coexist. Both permit, so
+        // order is harmless today — assert it anyway to keep the proxy
+        // exception last if either rule ever becomes a deny.
+        let mut r = req();
+        r.policy.network_egress = Some(egress(NetworkAction::Deny));
+        r.policy.network_ingress = Some(ingress(NetworkAction::Allow));
+        let addr = ProxyAddress::new("127.0.0.1".into(), 44444);
+        let p = build_profile_with_proxy(&r, Some(&addr)).unwrap();
+
+        let loopback = p
+            .find("(allow network-outbound (remote ip \"localhost:*\"))")
+            .expect("hostLoopback=allow must emit the loopback allow");
+        let proxy = p
+            .find("(allow network-outbound (remote ip \"localhost:44444\"))")
+            .expect("a loopback proxy must emit the port-scoped allow");
+        assert!(proxy > loopback, "the proxy allow must be emitted last");
+    }
+
+    #[test]
+    fn directional_deny_with_loopback_proxy_scopes_outbound_to_proxy_port() {
+        // Same proxy-reachability behavior as the legacy shape must be
+        // preserved when the directional shape selects deny + loopback proxy
+        // (the only combination the GA schema allows with a runtime proxy).
+        let mut r = req();
+        r.policy.network_egress = Some(crate::wxc_common::models::NetworkEgressPolicy {
+            default: NetworkAction::Deny,
+            ..Default::default()
+        });
+        let addr = ProxyAddress::new("127.0.0.1".into(), 56159);
+        let p = build_profile_with_proxy(&r, Some(&addr)).unwrap();
+        assert!(p.contains("(allow network-outbound (remote ip \"localhost:56159\"))"));
+        assert!(!p.contains("(allow network-outbound)\n"));
+    }
+
+    #[test]
+    fn ui_disabled_blocks_windowserver() {
+        let r = req();
+        // Default UiPolicy has disable=true.
+        assert!(r.policy.ui.disable);
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("(deny mach-lookup"));
+        assert!(p.contains("com.apple.windowserver.active"));
+    }
+
+    #[test]
+    fn ui_enabled_allows_windowserver_and_clipboard() {
+        let mut r = req();
+        r.policy.ui = UiPolicy {
+            disable: false,
+            clipboard: ClipboardPolicy::All,
+            injection: true,
+        };
+        let p = build_profile(&r).unwrap();
+        // UI enabled → allow WindowServer
+        assert!(p.contains("(allow mach-lookup"));
+        assert!(p.contains("com.apple.windowserver.active"));
+        // Clipboard=all → allow pasteboard
+        assert!(p.contains("com.apple.pasteboard.1"));
+        assert!(!p.contains("IOHIDLibUserClient"));
+    }
+
+    #[test]
+    fn clipboard_none_blocks_pasteboard() {
+        let r = req();
+        // Default clipboard is None.
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("com.apple.pasteboard.1"));
+    }
+
+    #[test]
+    fn injection_false_blocks_hid_iokit() {
+        let r = req();
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("IOHIDLibUserClient"));
+    }
+
+    #[test]
+    fn profile_override_takes_precedence() {
+        let mut r = req();
+        r.policy.readonly_paths = vec!["/should/be/ignored".into()];
+        r.seatbelt = Some(SeatbeltConfig {
+            profile_override: Some("(version 1)(allow default)".into()),
+            gui_access: false,
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        assert_eq!(p, "(version 1)(allow default)");
+    }
+
+    #[test]
+    fn paths_with_quotes_and_backslashes_are_escaped() {
+        let mut r = req();
+        // Hypothetical adversarial input — we never want a path to break out
+        // of the quoted string and inject Scheme.
+        r.policy.readonly_paths = vec!["/tmp/a\"b\\c".into()];
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("(subpath \"/private/tmp/a\\\"b\\\\c\")"));
+    }
+
+    const FS_SECTION: &str =
+        ";; --- policy.readonlyPaths / policy.readwritePaths (shallow-to-deep) ---";
+    const RO_STRIP: &str = "(deny file-write* network-bind network-outbound\n";
+
+    /// The policy-derived filesystem section, excluding the always-emitted
+    /// baseline rules that also start with `(allow file-read*`.
+    fn fs_section(profile: &str) -> &str {
+        profile
+            .find(FS_SECTION)
+            .map(|i| &profile[i..])
+            .unwrap_or("")
+    }
+    const RW_RULE: &str = "(allow file-read* file-write* network-bind network-outbound\n";
+    const DENY_RULE: &str = "(deny file-read* file-write* network-bind network-outbound\n";
+
+    #[test]
+    fn readwrite_paths_emit_unix_socket_ops() {
+        let mut r = req();
+        r.policy.readwrite_paths = vec!["/tmp/output".into()];
+        let p = build_profile(&r).unwrap();
+        let idx = p.find(RW_RULE).expect("readwrite rule");
+        assert!(p[idx..].contains("(subpath \"/private/tmp/output\")"));
+    }
+
+    #[test]
+    fn readwrite_unix_socket_ops_are_independent_of_network_policy() {
+        // AF_UNIX bind/connect follow the filesystem policy, so a default-deny
+        // network policy with allowLocalNetwork off must still permit them.
+        let mut r = req();
+        r.policy.readwrite_paths = vec!["/tmp/output".into()];
+        r.policy.default_network_policy = NetworkPolicy::Block;
+        r.policy.allow_local_network = false;
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains(RW_RULE));
+        assert!(!p.contains("network-inbound"));
+        assert!(!p.contains("(allow network-outbound)"));
+    }
+
+    #[test]
+    fn denied_paths_deny_outbound_under_default_allow() {
+        // `defaultPolicy: allow` emits a bare `(allow network-outbound)`, which
+        // on its own grants AF_UNIX `connect()`. A denied subtree must still
+        // deny it. Position relative to that unfiltered allow is deliberately
+        // not asserted: an unfiltered rule cannot override a path-filtered one
+        // in either direction, so pinning the order would encode a constraint
+        // that does not exist. The orderings that *do* matter — deny after the
+        // filtered read-write allows — are covered by
+        // `denied_paths_appear_after_allows_to_override` and
+        // `denied_paths_deny_unix_socket_ops_after_allows`.
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        r.policy.denied_paths = vec!["/tmp/secret".into()];
+        let p = build_profile(&r).unwrap();
+        let deny_idx = p.find(DENY_RULE).expect("deny must cover network-outbound");
+        assert!(p[deny_idx..].contains("(subpath \"/private/tmp/secret\")"));
+    }
+
+    #[test]
+    fn readonly_paths_do_not_get_unix_socket_ops() {
+        let mut r = req();
+        r.policy.readonly_paths = vec!["/tmp/input".into()];
+        let p = build_profile(&r).unwrap();
+        assert!(!p.contains(RW_RULE));
+        // The only socket mention for a read-only path is the explicit removal.
+        assert!(!p.contains("allow network-bind"));
+        assert!(fs_section(&p).contains(RO_STRIP));
+    }
+
+    #[test]
+    fn denied_paths_deny_unix_socket_ops_after_allows() {
+        let mut r = req();
+        r.policy.readwrite_paths = vec!["/tmp".into()];
+        r.policy.denied_paths = vec!["/tmp/secret".into()];
+        let p = build_profile(&r).unwrap();
+        let deny_idx = p.find(DENY_RULE).expect("deny must cover socket ops");
+        let allow_idx = p.find(RW_RULE).expect("allow rule");
+        assert!(
+            deny_idx > allow_idx,
+            "deny must follow allow so last-match-wins re-denies the socket path"
+        );
+        assert!(p[deny_idx..].contains("(subpath \"/private/tmp/secret\")"));
+    }
+
+    #[test]
+    fn lexical_spellings_normalize_to_the_same_rule() {
+        // Each of these accesses `/private/tmp/secret` at the kernel level, so
+        // each must produce the same filter — otherwise a deny written with a
+        // redundant spelling is dead and fails open.
+        for spelling in [
+            "/tmp/secret",
+            "//tmp/secret",
+            "/./tmp/secret",
+            "/tmp//secret",
+            "/tmp/./secret/",
+            "///tmp/secret//",
+        ] {
+            assert_eq!(
+                resolve_policy_path(spelling).unwrap(),
+                "/private/tmp/secret",
+                "spelling {spelling} must normalize"
+            );
+        }
+    }
+
+    #[test]
+    fn lexical_normalization_is_idempotent_and_preserves_root() {
+        assert_eq!(resolve_policy_path("/").unwrap(), "/");
+        assert_eq!(resolve_policy_path("//").unwrap(), "/");
+        let once = resolve_policy_path("//tmp/./secret/").unwrap();
+        assert_eq!(resolve_policy_path(&once).unwrap(), once);
+    }
+
+    #[test]
+    fn parent_segments_are_rejected_rather_than_resolved() {
+        // `/tmp/..` is `/private` on macOS, not `/`, so resolving lexically
+        // would silently widen an allow and leave a deny dead.
+        for path in ["/private/var/../tmp", "/tmp/..", "/..", "/a/b/../c"] {
+            let err = resolve_policy_path(path).unwrap_err();
+            assert!(err.contains(".."), "{path} must be rejected, got {err}");
+        }
+        // A path merely *containing* dots in a segment name is fine.
+        assert_eq!(
+            resolve_policy_path("/tmp/..secret").unwrap(),
+            "/private/tmp/..secret"
+        );
+    }
+
+    #[test]
+    fn denied_path_with_redundant_spelling_still_denies() {
+        let mut r = req();
+        r.policy.readwrite_paths = vec!["/tmp".into()];
+        r.policy.denied_paths = vec!["//tmp/./secret/".into()];
+        let p = build_profile(&r).unwrap();
+        let deny_idx = p.find(DENY_RULE).expect("deny rule");
+        assert!(p[deny_idx..].contains("(subpath \"/private/tmp/secret\")"));
+    }
+
+    #[test]
+    fn nested_readonly_keeps_write_away_from_broader_readwrite() {
+        // `/tmp` resolves to `/private/tmp`, which is an ancestor of the
+        // read-only entry. The read-only `allow` names only `file-read*`, so
+        // it says nothing about write or socket ops and cannot displace the
+        // broader grant on its own — hence the explicit removal, emitted
+        // *after* the read-write allow.
+        let mut r = req();
+        r.policy.readwrite_paths = vec!["/tmp".into()];
+        r.policy.readonly_paths = vec!["/private/tmp/secret".into()];
+        let p = build_profile(&r).unwrap();
+
+        let rw_idx = p.find(RW_RULE).expect("readwrite rule");
+        let strip_idx = p.find(RO_STRIP).expect("read-only must strip write");
+        assert!(
+            strip_idx > rw_idx,
+            "deepest intent must be emitted last, profile:\n{p}"
+        );
+        assert!(p[strip_idx..].contains("(subpath \"/private/tmp/secret\")"));
+    }
+
+    #[test]
+    fn nested_readwrite_still_wins_inside_broader_readonly() {
+        // The mirror case: the deeper read-write entry must survive, otherwise
+        // depth ordering would have simply inverted the bug.
+        let mut r = req();
+        r.policy.readonly_paths = vec!["/tmp".into()];
+        r.policy.readwrite_paths = vec!["/private/tmp/build".into()];
+        let p = build_profile(&r).unwrap();
+
+        let strip_idx = p.find(RO_STRIP).expect("read-only strip");
+        let rw_idx = p.find(RW_RULE).expect("readwrite rule");
+        assert!(
+            rw_idx > strip_idx,
+            "deeper readwrite must win, profile:\n{p}"
+        );
+        assert!(p[rw_idx..].contains("(subpath \"/private/tmp/build\")"));
+    }
+
+    #[test]
+    fn readonly_socket_strip_survives_a_default_allow_outbound() {
+        // `defaultPolicy: "allow"` emits an unfiltered `(allow
+        // network-outbound)`. The read-only strip still governs AF_UNIX
+        // `connect()` under that subtree, because an unfiltered rule does not
+        // override a path-filtered one. Verified end-to-end against
+        // `mxc-exec-mac` with a listener created outside the sandbox: this
+        // policy denies `connect()` with EPERM, while the same policy with the
+        // path moved to `readwrite_paths` connects.
+        //
+        // Emission order relative to the unfiltered allow is deliberately not
+        // asserted — it has no bearing on the outcome.
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        r.policy.readonly_paths = vec!["/tmp/ro".into()];
+        let p = build_profile(&r).unwrap();
+
+        let strip_idx = p.find(RO_STRIP).expect("read-only strip");
+        assert!(p[strip_idx..].contains("(subpath \"/private/tmp/ro\")"));
+    }
+
+    #[test]
+    fn readonly_wins_over_readwrite_for_aliased_spellings() {
+        // The parser's most-restrictive-wins pass compares raw strings, so
+        // these two spellings both survive it and only collide once resolved.
+        // Seatbelt is last-match-wins and readwrite is emitted second, so
+        // without resolved-path precedence the read-only intent would be lost.
+        let mut r = req();
+        r.policy.readonly_paths = vec!["/private/tmp/x".into()];
+        r.policy.readwrite_paths = vec!["/tmp/x".into()];
+        let p = build_profile(&r).unwrap();
+
+        assert!(fs_section(&p).contains("(subpath \"/private/tmp/x\")"));
+        assert!(
+            !p.contains(RW_RULE),
+            "aliased readwrite entry must be dropped, profile was:\n{p}"
+        );
+    }
+
+    #[test]
+    fn denied_wins_over_aliased_readonly_and_readwrite() {
+        let mut r = req();
+        r.policy.denied_paths = vec!["/private/tmp/x".into()];
+        r.policy.readonly_paths = vec!["/tmp/x".into()];
+        r.policy.readwrite_paths = vec!["//tmp/./x".into()];
+        let p = build_profile(&r).unwrap();
+
+        assert!(!p.contains(FS_SECTION), "profile:\n{p}");
+        assert!(!p.contains(RW_RULE), "profile:\n{p}");
+        let deny_idx = p.find(DENY_RULE).expect("deny rule");
+        assert!(p[deny_idx..].contains("(subpath \"/private/tmp/x\")"));
+    }
+
+    #[test]
+    fn distinct_paths_survive_resolved_precedence() {
+        let mut r = req();
+        r.policy.readonly_paths = vec!["/tmp/ro".into()];
+        r.policy.readwrite_paths = vec!["/tmp/rw".into()];
+        let p = build_profile(&r).unwrap();
+
+        assert!(fs_section(&p).contains("(subpath \"/private/tmp/ro\")"));
+        let rw_idx = p.find(RW_RULE).expect("readwrite rule");
+        assert!(p[rw_idx..].contains("(subpath \"/private/tmp/rw\")"));
+    }
+
+    #[test]
+    fn macos_root_symlinks_are_resolved() {
+        assert_eq!(resolve_macos_root_symlinks("/tmp"), "/private/tmp");
+        assert_eq!(resolve_macos_root_symlinks("/var"), "/private/var");
+        assert_eq!(resolve_macos_root_symlinks("/etc"), "/private/etc");
+        assert_eq!(
+            resolve_macos_root_symlinks("/var/folders/qj/T"),
+            "/private/var/folders/qj/T"
+        );
+        assert_eq!(
+            resolve_macos_root_symlinks("/home/me"),
+            "/System/Volumes/Data/home/me"
+        );
+    }
+
+    #[test]
+    fn macos_root_resolution_only_matches_whole_segments() {
+        // A prefix that merely starts with the same letters is not a match.
+        assert_eq!(resolve_macos_root_symlinks("/variable"), "/variable");
+        assert_eq!(resolve_macos_root_symlinks("/tmpfs/x"), "/tmpfs/x");
+        assert_eq!(resolve_macos_root_symlinks("/etcd"), "/etcd");
+        assert_eq!(resolve_macos_root_symlinks("/homebrew"), "/homebrew");
+        // Already-resolved and unrelated paths pass through untouched.
+        assert_eq!(
+            resolve_macos_root_symlinks("/private/tmp/x"),
+            "/private/tmp/x"
+        );
+        assert_eq!(resolve_macos_root_symlinks("/Users/me/w"), "/Users/me/w");
+        assert_eq!(resolve_macos_root_symlinks(""), "");
+    }
+
+    #[test]
+    fn macos_root_resolution_is_idempotent() {
+        // Re-resolving a resolved path must be a no-op — no target is itself
+        // under a symlinked root.
+        for (_, target) in MACOS_SYMLINKED_ROOTS {
+            assert_eq!(resolve_macos_root_symlinks(target), target);
+        }
+    }
+
+    #[test]
+    fn empty_policy_still_compiles_to_valid_profile() {
+        let r = req();
+        let p = build_profile(&r).unwrap();
+        // Profile must always start with `(version 1)` and contain `(deny default)`.
+        assert!(p.starts_with("(version 1)"));
+        assert!(p.contains("(deny default)"));
+        // No empty `(allow file-read*\n)` block — that would be invalid Scheme.
+        assert!(!p.contains("(allow file-read*\n)\n"));
+    }
+
+    #[test]
+    fn gui_access_adds_mach_services_for_gui_apps() {
+        let mut r = req();
+        r.policy.ui = UiPolicy {
+            disable: false,
+            clipboard: ClipboardPolicy::None,
+            injection: true,
+        };
+        r.seatbelt = Some(SeatbeltConfig {
+            profile_override: None,
+            gui_access: true,
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        // Wildcard mach-lookup and mach-register for GUI apps
+        assert!(
+            p.contains("(allow mach-lookup)"),
+            "missing wildcard mach-lookup"
+        );
+        assert!(p.contains("(allow mach-register)"), "missing mach-register");
+        // IOKit for GPU
+        assert!(p.contains("(allow iokit-open)"), "missing iokit-open");
+        // Temp/cache write access
+        assert!(p.contains("/private/tmp"), "missing /private/tmp");
+        assert!(
+            p.contains("/private/var/folders"),
+            "missing /private/var/folders"
+        );
+    }
+
+    #[test]
+    fn gui_access_false_omits_gui_services() {
+        let mut r = req();
+        r.policy.ui = UiPolicy {
+            disable: false,
+            clipboard: ClipboardPolicy::None,
+            injection: true,
+        };
+        r.seatbelt = Some(SeatbeltConfig {
+            profile_override: None,
+            gui_access: false,
+            // Pin nested_pty off so this test stays focused on
+            // gui_access semantics (otherwise it emits iokit-open).
+            nested_pty: false,
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        // Basic UI services should be present
+        assert!(p.contains("com.apple.windowserver.active"));
+        // GUI-specific wildcard should NOT be present
+        assert!(!p.contains("(allow mach-lookup)\n"));
+        assert!(!p.contains("(allow iokit-open)"));
+    }
+
+    #[test]
+    fn gui_access_requires_ui_enabled() {
+        let mut r = req();
+        // ui.disable = true (default) but gui_access = true
+        r.seatbelt = Some(SeatbeltConfig {
+            profile_override: None,
+            gui_access: true,
+            // Pin nested_pty off so this test isolates the
+            // gui_access + ui.disable interaction.
+            nested_pty: false,
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        // Should NOT emit GUI services when UI is disabled
+        assert!(!p.contains("com.apple.CARenderServer"));
+        assert!(!p.contains("(allow iokit-open)"));
+        // Should have the deny block instead
+        assert!(p.contains("ui.disable: deny WindowServer"));
+    }
+
+    #[test]
+    fn nested_pty_default_on_emits_pty_rules() {
+        // When seatbelt is absent the builder should still
+        // emit nested_pty rules — that's the documented default behavior.
+        let r = req();
+        assert!(r.seatbelt.is_none());
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("nestedPty"), "nestedPty comment missing");
+        assert!(p.contains("(allow pseudo-tty)"));
+        assert!(p.contains("(literal \"/dev/ptmx\")"));
+    }
+
+    #[test]
+    fn nested_pty_explicit_true_emits_pty_rules() {
+        let mut r = req();
+        r.seatbelt = Some(SeatbeltConfig {
+            nested_pty: true,
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("(allow pseudo-tty)"));
+        assert!(p.contains("(literal \"/dev/ptmx\")"));
+    }
+
+    #[test]
+    fn nested_pty_false_omits_pty_rules() {
+        let mut r = req();
+        r.seatbelt = Some(SeatbeltConfig {
+            nested_pty: false,
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        assert!(!p.contains("nestedPty"));
+        assert!(!p.contains("/dev/ptmx"));
+        // pseudo-tty allow should also not be present.
+        assert!(!p.contains("(allow pseudo-tty)"));
+    }
+
+    #[test]
+    fn nested_pty_skipped_when_gui_block_emitted() {
+        // gui_access + ui enabled emits a strict superset of nested_pty
+        // rules. Verify we don't double-emit.
+        let mut r = req();
+        r.policy.ui = UiPolicy {
+            disable: false,
+            clipboard: ClipboardPolicy::None,
+            injection: true,
+        };
+        r.seatbelt = Some(SeatbeltConfig {
+            gui_access: true,
+            nested_pty: true,
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        // No nestedPty comment block — gui_access block carries the rules.
+        assert!(!p.contains("nestedPty"));
+        // GUI block's broader rules should still be there.
+        assert!(p.contains("(allow iokit-open)"));
+        assert!(p.contains("(allow pseudo-tty)"));
+    }
+
+    #[test]
+    fn nested_pty_emits_when_gui_access_set_but_ui_disabled() {
+        // gui_access=true with ui.disable=true means write_ui_rules
+        // suppresses the GUI block — so nested_pty must NOT skip itself.
+        let mut r = req();
+        assert!(
+            r.policy.ui.disable,
+            "default ui.disable expected to be true"
+        );
+        r.seatbelt = Some(SeatbeltConfig {
+            gui_access: true,
+            nested_pty: true,
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("nestedPty"));
+        assert!(p.contains("(allow pseudo-tty)"));
+        assert!(p.contains("/dev/ptmx"));
+    }
+
+    #[test]
+    fn keychain_access_default_off_omits_security_services() {
+        let r = req();
+        let p = build_profile(&r).unwrap();
+        assert!(!p.contains("keychainAccess"));
+        assert!(!p.contains("com.apple.SecurityServer"));
+        assert!(!p.contains("com.apple.securityd"));
+        assert!(!p.contains("com.apple.cfprefsd.daemon"));
+        assert!(!p.contains("com.apple.lsd"));
+        assert!(!p.contains("/Library/Keychains"));
+        assert!(!p.contains("/private/var/db/mds"));
+    }
+
+    // Keychain rules expand `~/Library/Keychains` from $HOME at build
+    // time, so the tests that exercise `keychain_access: true` are gated
+    // to macOS (the only OS where this code path is actually used and
+    // where $HOME is reliably set in CI).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keychain_access_true_allows_securityd_mach_services() {
+        let mut r = req();
+        r.seatbelt = Some(SeatbeltConfig {
+            keychain_access: true,
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("keychainAccess"));
+        // Mach surface
+        assert!(p.contains("com.apple.SecurityServer"));
+        assert!(p.contains("com.apple.securityd"));
+        assert!(p.contains("com.apple.cfprefsd.daemon"));
+        assert!(p.contains("com.apple.xpcd"));
+        assert!(p.contains("(global-name-regex #\"^com\\.apple\\.lsd\\.\")"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keychain_access_true_allows_filesystem_paths() {
+        let mut r = req();
+        r.seatbelt = Some(SeatbeltConfig {
+            keychain_access: true,
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        // /Library/Keychains and /System/Library/Keychains are read via
+        // the baseline /Library and /System read-only allows; we don't
+        // re-emit them here.
+        assert!(p.contains("(subpath \"/private/var/db/mds\")"));
+        // Read+write surfaces
+        let home = std::env::var("HOME").expect("HOME must be set in test env");
+        let user_keychains = format!("{home}/Library/Keychains");
+        assert!(
+            p.contains(&format!("(subpath \"{user_keychains}\")")),
+            "missing user keychain subpath"
+        );
+        assert!(p.contains("(subpath \"/private/var/folders\")"));
+    }
+
+    #[test]
+    fn extra_mach_lookups_emits_grouped_allow_form() {
+        let mut r = req();
+        r.seatbelt = Some(SeatbeltConfig {
+            extra_mach_lookups: vec![
+                "com.apple.example.one".to_string(),
+                "com.apple.example.two".to_string(),
+            ],
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains(";; --- extraMachLookups"));
+        assert!(p.contains("(allow mach-lookup\n    (global-name \"com.apple.example.one\")\n    (global-name \"com.apple.example.two\")\n)"));
+    }
+
+    #[test]
+    fn extra_mach_lookups_omitted_when_empty() {
+        let mut r = req();
+        r.seatbelt = Some(SeatbeltConfig::default());
+        let p = build_profile(&r).unwrap();
+        assert!(!p.contains("extraMachLookups"));
+    }
+
+    #[test]
+    fn extra_mach_lookups_escape_embedded_quotes() {
+        let mut r = req();
+        r.seatbelt = Some(SeatbeltConfig {
+            extra_mach_lookups: vec!["weird\"name".to_string()],
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("(global-name \"weird\\\"name\")"));
+    }
+
+    #[test]
+    fn developer_dir_rule_grants_read_only_subpath() {
+        let mut out = String::new();
+        push_developer_dir_rule(
+            &mut out,
+            Path::new("/Applications/Xcode.app/Contents/Developer"),
+        );
+        assert!(out.contains(
+            "(allow file-read* (subpath \"/Applications/Xcode.app/Contents/Developer\"))"
+        ));
+        // The xcrun shims only need to read it; a write grant would widen the
+        // sandbox for no benefit.
+        assert!(!out.contains("file-write"));
+    }
+
+    #[test]
+    fn developer_dir_rule_escapes_embedded_quotes() {
+        let mut out = String::new();
+        push_developer_dir_rule(&mut out, Path::new("/tmp/we\"ird/Developer"));
+        assert!(out.contains("(subpath \"/tmp/we\\\"ird/Developer\")"));
+    }
+
+    #[test]
+    fn xcode_developer_dir_widens_to_the_app_bundle() {
+        let root =
+            developer_dir_grant_root(Path::new("/Applications/Xcode_26.6.app/Contents/Developer"));
+        assert_eq!(root, Path::new("/Applications/Xcode_26.6.app"));
+    }
+
+    #[test]
+    fn command_line_tools_dir_is_not_widened() {
+        let dir = Path::new("/Library/Developer/CommandLineTools");
+        assert_eq!(developer_dir_grant_root(dir), dir);
+    }
+
+    #[test]
+    fn developer_dir_widening_is_case_insensitive_on_the_extension() {
+        let root =
+            developer_dir_grant_root(Path::new("/Applications/Xcode.APP/Contents/Developer"));
+        assert_eq!(root, Path::new("/Applications/Xcode.APP"));
+    }
+
+    #[test]
+    fn widening_accepts_any_bundle_name_and_install_location() {
+        // xcode-select fixes the Contents/Developer suffix, never the prefix.
+        for (dir, want) in [
+            (
+                "/Applications/Xcode-beta.app/Contents/Developer",
+                "/Applications/Xcode-beta.app",
+            ),
+            (
+                "/Applications/Xcode_26.6.app/Contents/Developer",
+                "/Applications/Xcode_26.6.app",
+            ),
+            (
+                "/Volumes/Build/Xcode.app/Contents/Developer",
+                "/Volumes/Build/Xcode.app",
+            ),
+        ] {
+            assert_eq!(developer_dir_grant_root(Path::new(dir)), Path::new(want));
+        }
+    }
+
+    #[test]
+    fn a_dir_deeper_inside_a_bundle_is_not_widened_to_it() {
+        // Only the exact Contents/Developer layout widens.
+        for dir in [
+            "/Applications/Evil.app/Contents/Developer/usr/bin",
+            "/Applications/Evil.app/a/b/Developer",
+            "/Applications/Evil.app/Contents/Developer2",
+        ] {
+            assert_eq!(developer_dir_grant_root(Path::new(dir)), Path::new(dir));
+        }
+    }
+
+    #[test]
+    fn widening_handles_non_normalized_paths_without_overreaching() {
+        // These all normalize to the same directory, so they still widen.
+        for dir in [
+            "/Applications/Xcode.app/Contents/Developer/",
+            "/Applications/Xcode.app/Contents//Developer",
+            "/Applications/Xcode.app/Contents/./Developer",
+        ] {
+            assert_eq!(
+                developer_dir_grant_root(Path::new(dir)),
+                Path::new("/Applications/Xcode.app")
+            );
+        }
+        // `..` is not normalized away, so it fails the layout match.
+        let parent_ref = "/Applications/Xcode.app/Contents/Developer/..";
+        assert_eq!(
+            developer_dir_grant_root(Path::new(parent_ref)),
+            Path::new(parent_ref)
+        );
+    }
+
+    #[test]
+    fn developer_dir_absent_emits_nothing() {
+        let mut out = String::new();
+        if active_developer_dir().is_none() {
+            write_developer_dir_rule(&mut out);
+            assert!(out.is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_root_owned_unwritable_dir_is_trusted() {
+        assert!(dir_is_root_controlled(0, 0o755));
+        assert!(dir_is_root_controlled(0, 0o700));
+        for mode in [0o775, 0o757, 0o777, 0o1777] {
+            assert!(!dir_is_root_controlled(0, mode), "mode {mode:o}");
+        }
+        for uid in [1, 501, 1000] {
+            assert!(!dir_is_root_controlled(uid, 0o755), "uid {uid}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_the_caller_controls_is_not_trusted() {
+        use std::os::unix::fs::{symlink, MetadataExt as _};
+
+        let dir = std::env::temp_dir().join(format!("mxc-devdir-trust-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("target")).expect("fixture dir");
+
+        let link = dir.join("link");
+        symlink(dir.join("target"), &link).expect("fixture symlink");
+        // Only decisive when the test user is not root.
+        if fs::metadata(&dir).expect("fixture metadata").uid() != 0 {
+            assert!(!link_is_root_controlled(&link));
+        }
+
+        // True for any user: `xcode-select` writes a symlink, nothing else.
+        let plain = dir.join("plain");
+        fs::write(&plain, "").expect("fixture file");
+        assert!(!link_is_root_controlled(&plain));
+        assert!(!link_is_root_controlled(&dir.join("missing")));
+
+        fs::remove_dir_all(&dir).expect("fixture cleanup");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_real_xcode_select_links_are_trusted_when_present() {
+        // The check must accept a stock host, or the grant silently vanishes.
+        for link in DEVELOPER_DIR_LINKS.iter().map(Path::new) {
+            if fs::symlink_metadata(link).is_ok() {
+                assert!(
+                    link_is_root_controlled(link),
+                    "rejected a stock link: {}",
+                    link.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn baseline_profile_grants_the_active_developer_dir() {
+        // The documented baseline promise is that standard tools work, and
+        // the /usr/bin xcrun shims cannot start without this directory.
+        let Some(dir) = active_developer_dir() else {
+            return;
+        };
+        let granted = developer_dir_grant_root(&dir);
+        let p = build_profile(&req()).unwrap();
+        assert!(p.contains(&format!("(subpath \"{}\")", granted.display())));
+    }
+}
