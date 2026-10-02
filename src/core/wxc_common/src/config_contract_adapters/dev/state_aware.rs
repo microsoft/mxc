@@ -57,14 +57,36 @@ fn convert_isolation_session_network(value: contract::IsolationSessionNetwork) -
     }
 }
 
+fn convert_wslc_port_mapping(value: contract::PortMapping) -> crate::models::PortMapping {
+    let contract::PortMapping {
+        windows_port,
+        container_port,
+        protocol,
+    } = value;
+    crate::models::PortMapping {
+        windows_port: windows_port.get(),
+        container_port: container_port.get(),
+        protocol: match protocol.into_option() {
+            Some(contract::TransportProtocol::Tcp) | None => "tcp".to_string(),
+        },
+    }
+}
+
 fn convert_wslc_provision(value: contract::WslcProvision) -> WslcProvisionConfig {
     let contract::WslcProvision {
         image,
         image_tar_path,
+        port_mappings,
     } = value;
     WslcProvisionConfig {
         image: image.into_option(),
         image_tar_path: image_tar_path.into_option(),
+        port_mappings: port_mappings.into_option().map(|mappings| {
+            mappings
+                .into_iter()
+                .map(convert_wslc_port_mapping)
+                .collect()
+        }),
     }
 }
 

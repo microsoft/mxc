@@ -1844,42 +1844,18 @@ fn normalize_common_request_ir(
         }
         config.storage_path = cc.storage_path;
         if let Some(mappings) = cc.port_mappings {
-            let mut converted = Vec::with_capacity(mappings.len());
-            for (idx, m) in mappings.into_iter().enumerate() {
-                if m.windows_port == 0 {
-                    let msg = format!("wslc.portMappings[{idx}]: 'windowsPort' must be > 0");
-                    return Err(WxcError::ConfigParse(msg));
-                }
-                if m.container_port == 0 {
-                    let msg = format!("wslc.portMappings[{idx}]: 'containerPort' must be > 0");
-                    return Err(WxcError::ConfigParse(msg));
-                }
-                // Only TCP is representable in the wire model
-                // (TransportProtocol is tcp-only); a `udp` value is rejected
-                // at deserialize. The WSLC SDK runtime returns E_NOTIMPL for
-                // UDP, so only TCP is currently supported.
-                converted.push(PortMapping {
+            // Only TCP is representable in the wire model (TransportProtocol is
+            // tcp-only); a `udp` value is rejected at deserialize. The WSLC SDK
+            // runtime returns E_NOTIMPL for UDP.
+            let converted: Vec<PortMapping> = mappings
+                .into_iter()
+                .map(|m| PortMapping {
                     windows_port: m.windows_port,
                     container_port: m.container_port,
                     protocol: "tcp".to_string(),
-                });
-            }
-            // Reject duplicate (windowsPort, protocol) entries. Same host
-            // port on TCP+UDP would in principle be legal, but UDP is
-            // rejected at deserialize (the wire model is tcp-only); the
-            // second protocol dimension is retained in the dedupe key in
-            // case UDP support is enabled later.
-            let mut seen: std::collections::HashSet<(u16, &str)> = std::collections::HashSet::new();
-            for pm in &converted {
-                if !seen.insert((pm.windows_port, pm.protocol.as_str())) {
-                    let msg = format!(
-                        "wslc.portMappings: duplicate windowsPort {} \
-                         for protocol '{}'",
-                        pm.windows_port, pm.protocol
-                    );
-                    return Err(WxcError::ConfigParse(msg));
-                }
-            }
+                })
+                .collect();
+            crate::validator::validate_port_mappings("wslc.portMappings", &converted)?;
             config.port_mappings = converted;
         }
         Some(config)
@@ -3422,6 +3398,19 @@ mod tests {
                 StateAwareProvision::Wslc(Some(crate::models::WslcProvisionConfig {
                     image: Some("alpine:latest".into()),
                     image_tar_path: None,
+                    port_mappings: None,
+                })),
+            ),
+            (
+                "wslc_state_aware_provision_port_mappings.json",
+                StateAwareProvision::Wslc(Some(crate::models::WslcProvisionConfig {
+                    image: Some("python:3.12-alpine".into()),
+                    image_tar_path: None,
+                    port_mappings: Some(vec![crate::models::PortMapping {
+                        windows_port: 18081,
+                        container_port: 8080,
+                        protocol: "tcp".into(),
+                    }]),
                 })),
             ),
         ] {

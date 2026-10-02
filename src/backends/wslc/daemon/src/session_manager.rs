@@ -715,6 +715,15 @@ impl Worker {
                 WslcContainerNetworkingMode::WSLC_CONTAINER_NETWORKING_MODE_BRIDGED
             }
         };
+        let port_mappings: Vec<wxc_common::models::PortMapping> = config
+            .port_mappings
+            .iter()
+            .map(|p| wxc_common::models::PortMapping {
+                windows_port: p.windows_port,
+                container_port: p.container_port,
+                protocol: "tcp".to_string(),
+            })
+            .collect();
 
         // SAFETY: `sdk`/`session` are valid; every buffer the SDK stores pointers
         // into is owned by a stationary local (`keepalive`) until create returns.
@@ -736,6 +745,7 @@ impl Worker {
                 session,
                 &config.image,
                 &mounts,
+                &port_mappings,
                 net_mode,
                 &mut keepalive,
                 &mut self.logger,
@@ -1208,6 +1218,7 @@ mod tests {
                     image_tar_path: None,
                     volumes: Vec::new(),
                     network: Default::default(),
+                    port_mappings: Vec::new(),
                 },
                 reply,
                 _retire_deadline: std::sync::mpsc::channel().0,
@@ -1234,6 +1245,7 @@ mod tests {
                     image_tar_path: None,
                     volumes: Vec::new(),
                     network: Default::default(),
+                    port_mappings: Vec::new(),
                 },
                 reply,
                 _retire_deadline: std::sync::mpsc::channel().0,
@@ -1599,6 +1611,7 @@ mod tests {
                 image_tar_path: None,
                 volumes: Vec::new(),
                 network: Default::default(),
+                port_mappings: Vec::new(),
             })
             .await
             .unwrap();
@@ -1661,6 +1674,7 @@ mod tests {
                 image_tar_path: None,
                 volumes: Vec::new(),
                 network: Default::default(),
+                port_mappings: Vec::new(),
             })
             .await
             .unwrap();

@@ -55,11 +55,41 @@ against different sandboxes are serialized — correct, just not concurrent. See
 
 Exact adapters construct `wxc_common::models::WslcProvisionConfig` directly from
 `wslc.provision`. Engine-side checked binding preserves an absent
-config, a present empty config, and supplied `image`/`imageTarPath` values
-without reparsing JSON. An omitted image remains `None` until the backend
-chooses its default. The exact contract type is converted once by its adapter;
-the backend's provision associated type is the runtime-owned model, not a wire
-deserialization DTO.
+config, a present empty config, and supplied
+`image`/`imageTarPath`/`portMappings` values without reparsing JSON. An omitted
+image remains `None` until the backend chooses its default. The exact contract
+type is converted once by its adapter; the backend's provision associated type
+is the runtime-owned model, not a wire deserialization DTO.
+
+### Port mappings
+
+`wslc.provision.portMappings` forwards host ports into the sandbox's container,
+using the same entry shape as the one-shot `wslc.portMappings` list:
+
+```json
+{
+    "version": "1.1.0-alpha",
+    "phase": "provision",
+    "containment": "wslc",
+    "wslc": {
+        "provision": {
+            "portMappings": [
+                { "windowsPort": 8080, "containerPort": 80 }
+            ]
+        }
+    }
+}
+```
+
+The field requires development contract `1.1.0-alpha`; the published
+`0.9.0-alpha` WSLC contract does not declare it. The daemon creates one
+container per sandbox, so a mapping applies only to the sandbox that declared
+it, unlike the session-wide `cpuCount` / `memoryMb` / `gpu` / `storagePath`
+knobs that remain one-shot-only.
+
+Both surfaces run the same duplicate check, so two entries claiming the same
+`windowsPort` are rejected identically. Zero ports and non-TCP protocols are
+rejected when the exact contract deserializes.
 
 ## Sandbox IDs
 
@@ -260,3 +290,9 @@ fixtures **through the harness**, not by pointing `wxc-exec --config` at them di
   fix splits `exec` into an on-worker `ExecStart` (extract the thread-agnostic Win32 exit-event
   handle) + an off-thread wait + an on-worker `ExecReap`, with a per-container `in_flight` slot. This
   is tracked as follow-up work.
+
+- **Port mappings are Rust-only for now.** `schemas/schema-version.json` pins
+  `stateAwareWslc` to `0.9.0-alpha`, and the Node helper refuses a version other
+  than that default, so `wslc.provision.portMappings` is reachable today through
+  the typed Rust SDK and raw `1.1.0-alpha` JSON only. Node and .NET support
+  follows when the pin moves.

@@ -139,6 +139,7 @@ fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
         StateAwareOperation::Provision(StateAwareProvision::Wslc(Some(WslcProvisionConfig {
             image,
             image_tar_path,
+            port_mappings,
         }))) => {
             let mut config = Map::new();
             if let Some(image) = image {
@@ -146,6 +147,21 @@ fn state_aware_config_projection(operation: &StateAwareOperation) -> Value {
             }
             if let Some(image_tar_path) = image_tar_path {
                 config.insert("imageTarPath".into(), Value::String(image_tar_path.clone()));
+            }
+
+            // A forwarded host port is policy, so it belongs in the identity.
+            if let Some(port_mappings) = port_mappings {
+                let mappings = port_mappings
+                    .iter()
+                    .map(|mapping| {
+                        let mut entry = Map::new();
+                        entry.insert("windowsPort".into(), Value::from(mapping.windows_port));
+                        entry.insert("containerPort".into(), Value::from(mapping.container_port));
+                        entry.insert("protocol".into(), Value::String(mapping.protocol.clone()));
+                        Value::Object(entry)
+                    })
+                    .collect();
+                config.insert("portMappings".into(), Value::Array(mappings));
             }
             Value::Object(config)
         }

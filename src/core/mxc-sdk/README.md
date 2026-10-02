@@ -492,6 +492,51 @@ IsolationSession and WSLc serve typed attached exec through
 drops terminal input pending PTY support. IsolationSession also forwards stdin
 through a pseudo-console, while WSLc has no process-input API.
 
+### WSLc host → container port forwarding
+
+`wslc.provision.portMappings` exposes a container port on the Windows host. The
+daemon creates one container per sandbox, so a forward belongs to the sandbox
+that declared it — unlike the session-wide `cpuCount` / `memoryMb` / `gpu` /
+`storagePath` settings, which stay one-shot-only.
+
+The field exists only in schema `1.1.0-alpha`, which the high-level typed API
+does not target, so it is reachable through `run_state_aware_json` — the same
+raw path Windows Sandbox lifecycle calls use. Two mappings claiming the same
+`windowsPort`, or a zero port, are rejected.
+
+```rust,no_run
+use mxc_sdk::run_state_aware_json;
+use std::error::Error;
+
+fn main() -> Result<(), Box<dyn Error>> {
+let provisioned = run_state_aware_json(
+    r#"{
+        "version": "1.1.0-alpha",
+        "phase": "provision",
+        "containment": "wslc",
+        "network": {
+            "egress": { "default": "allow" },
+            "ingress": { "default": "allow", "hostLoopback": "allow" }
+        },
+        "wslc": {
+            "provision": {
+                "image": "alpine:latest",
+                "portMappings": [{ "windowsPort": 8080, "containerPort": 80 }]
+            }
+        }
+    }"#,
+    false,
+    false,
+)?;
+let _ = provisioned;
+Ok(())
+}
+```
+
+Needs this crate's `wslc` feature and a Windows 11 host with WSL2 and the WSLC
+SDK runtime. The Node and .NET SDKs pin the WSLc state-aware contract to
+`0.9.0-alpha`, which does not declare the field.
+
 What an unavailable backend returns differs, so branch on the code rather than
 assuming one: a build without the `wslc` or `isolation_session` feature answers
 `ErrorCode::BackendUnavailable` for that backend, while a backend with no

@@ -172,6 +172,83 @@ fn wslc_configuration_matches_explicit_values_without_wire_conversion() {
 }
 
 #[test]
+fn wslc_port_mappings_convert_without_wire_conversion() {
+    for (fields, expected) in [
+        (r#","wslc":{"provision":{}}"#, None),
+        (r#","wslc":{"provision":{"portMappings":[]}}"#, Some(vec![])),
+        (
+            r#","wslc":{"provision":{"portMappings":[{"windowsPort":8080,"containerPort":80}]}}"#,
+            Some(vec![(8080, 80)]),
+        ),
+        (
+            r#","wslc":{"provision":{"portMappings":[{"windowsPort":8080,"containerPort":80,"protocol":"tcp"}]}}"#,
+            Some(vec![(8080, 80)]),
+        ),
+        (
+            r#","wslc":{"provision":{"portMappings":[{"windowsPort":8080,"containerPort":80},{"windowsPort":8443,"containerPort":443}]}}"#,
+            Some(vec![(8080, 80), (8443, 443)]),
+        ),
+    ] {
+        let json = source("wslc", fields);
+        let (_, operation) = adapt(&json);
+        let StateAwareOperation::Provision(StateAwareProvision::Wslc(config)) = operation else {
+            panic!("wrong operation");
+        };
+        let config = config.expect("provision config");
+        let observed = config.port_mappings.as_ref().map(|mappings| {
+            mappings
+                .iter()
+                .map(|mapping| (mapping.windows_port, mapping.container_port))
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(observed, expected, "{json}");
+
+        // An omitted protocol normalizes to the only one WSLC implements.
+        for mapping in config.port_mappings.iter().flatten() {
+            assert_eq!(mapping.protocol, "tcp");
+        }
+    }
+}
+
+#[test]
+fn wslc_port_mappings_do_not_leak_into_the_one_shot_wslc_section() {
+    let json = source(
+        "wslc",
+        r#","wslc":{"provision":{"portMappings":[{"windowsPort":8080,"containerPort":80}]}}"#,
+    );
+    let (common, _) = adapt(&json);
+    assert_clean_common(&common);
+}
+
+#[test]
+fn wslc_rejects_duplicate_windows_ports() {
+    let json = source(
+        "wslc",
+        r#","wslc":{"provision":{"portMappings":[{"windowsPort":8080,"containerPort":80},{"windowsPort":8080,"containerPort":81}]}}"#,
+    );
+    let request = contract::parse_request(&json).expect("exact contract accepts the shape");
+    let Err(error) = crate::config_contract_adapters::dev::adapt_request(request) else {
+        panic!("duplicate windowsPort must be rejected");
+    };
+    let message = error.to_string();
+    assert!(message.contains("duplicate windowsPort 8080"), "{message}");
+    assert!(message.contains("wslc.provision.portMappings"), "{message}");
+}
+
+#[test]
+fn wslc_accepts_the_same_container_port_behind_distinct_host_ports() {
+    let json = source(
+        "wslc",
+        r#","wslc":{"provision":{"portMappings":[{"windowsPort":8080,"containerPort":80},{"windowsPort":8081,"containerPort":80}]}}"#,
+    );
+    let (_, operation) = adapt(&json);
+    let StateAwareOperation::Provision(StateAwareProvision::Wslc(Some(config))) = operation else {
+        panic!("wrong operation");
+    };
+    assert_eq!(config.port_mappings.expect("port mappings").len(), 2);
+}
+
+#[test]
 fn provision_common_fields_are_independent_of_backend_payload() {
     for backend in ["isolation_session", "windows_sandbox", "wslc"] {
         for fields in [

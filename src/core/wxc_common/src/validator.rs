@@ -1,8 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::models::{ExecutionRequest, NetworkAction, NetworkPolicy, ScriptResponse};
+use crate::error::WxcError;
+use crate::models::{ExecutionRequest, NetworkAction, NetworkPolicy, PortMapping, ScriptResponse};
 use crate::mxc_error::MxcError;
+use std::collections::HashSet;
 
 /// Declares which optional network policy features a backend enforces.
 ///
@@ -250,6 +252,40 @@ pub fn validate_exec_common(request: &ExecutionRequest) -> Result<(), MxcError> 
     Ok(())
 }
 
+/// Reject WSLC port mappings the WSLC runtime cannot apply.
+///
+/// The exact JSON contract rejects a zero port structurally, but the typed
+/// SDKs hand over plain `u16`, so the check has to live here too.
+///
+/// The same host port on TCP and UDP would in principle be legal, so the
+/// protocol stays in the duplicate key for when the WSLC runtime stops
+/// returning `E_NOTIMPL` for UDP.
+pub fn validate_port_mappings(field_path: &str, mappings: &[PortMapping]) -> Result<(), WxcError> {
+    for (index, mapping) in mappings.iter().enumerate() {
+        for (name, port) in [
+            ("windowsPort", mapping.windows_port),
+            ("containerPort", mapping.container_port),
+        ] {
+            if port == 0 {
+                return Err(WxcError::ConfigParse(format!(
+                    "{field_path}[{index}]: '{name}' must be > 0"
+                )));
+            }
+        }
+    }
+
+    let mut seen: HashSet<(u16, &str)> = HashSet::with_capacity(mappings.len());
+    for mapping in mappings {
+        if !seen.insert((mapping.windows_port, mapping.protocol.as_str())) {
+            return Err(WxcError::ConfigParse(format!(
+                "{field_path}: duplicate windowsPort {} for protocol '{}'",
+                mapping.windows_port, mapping.protocol
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +302,64 @@ mod tests {
             ..Default::default()
         };
         assert!(validate_common(&req).is_err());
+    }
+
+    fn port_mapping(windows_port: u16, container_port: u16) -> PortMapping {
+        PortMapping {
+            windows_port,
+            container_port,
+            protocol: "tcp".to_string(),
+        }
+    }
+
+    #[test]
+    fn port_mapping_messages_name_the_caller_supplied_field_path() {
+        for field_path in ["wslc.portMappings", "wslc.provision.portMappings"] {
+            let zero = validate_port_mappings(field_path, &[port_mapping(0, 80)]).unwrap_err();
+            assert!(
+                zero.to_string()
+                    .ends_with(&format!("{field_path}[0]: 'windowsPort' must be > 0")),
+                "{zero}"
+            );
+
+            let duplicate =
+                validate_port_mappings(field_path, &[port_mapping(80, 8080), port_mapping(80, 81)])
+                    .unwrap_err();
+            assert!(
+                duplicate.to_string().ends_with(&format!(
+                    "{field_path}: duplicate windowsPort 80 for protocol 'tcp'"
+                )),
+                "{duplicate}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_zero_port_outranks_an_earlier_duplicate() {
+        // Both surfaces share this helper, so changing the order would reword a
+        // user-facing rejection on each of them.
+        let mappings = [
+            port_mapping(8080, 80),
+            port_mapping(8080, 81),
+            port_mapping(0, 82),
+        ];
+        let error = validate_port_mappings("wslc.portMappings", &mappings).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .ends_with("wslc.portMappings[2]: 'windowsPort' must be > 0"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn distinct_host_ports_and_an_empty_list_are_accepted() {
+        assert!(validate_port_mappings("wslc.portMappings", &[]).is_ok());
+        assert!(validate_port_mappings(
+            "wslc.portMappings",
+            &[port_mapping(8080, 80), port_mapping(8081, 80)]
+        )
+        .is_ok());
     }
 
     #[test]

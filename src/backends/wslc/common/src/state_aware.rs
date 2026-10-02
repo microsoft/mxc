@@ -35,8 +35,8 @@ use wxc_common::validator::validate_state_aware_network_policy_support;
 use crate::container_steps::OutStream;
 use crate::daemon_client::{truncation_suffix, DaemonClient, DaemonError, DaemonExecOutcome};
 use crate::daemon_protocol::{
-    DeprovisionConfig, ErrKind, ExecConfig, NetworkMode, ProvisionConfig, StartConfig, StopConfig,
-    VolumeMount,
+    DeprovisionConfig, ErrKind, ExecConfig, NetworkMode, PortMapping as DaemonPortMapping,
+    ProvisionConfig, StartConfig, StopConfig, VolumeMount,
 };
 use crate::policy::{
     exec_proxy_url, validate_exec_policy, validate_post_provision_policy, validate_provision_policy,
@@ -528,6 +528,19 @@ fn build_provision_config(
         .as_ref()
         .and_then(|c| c.image.clone())
         .unwrap_or_else(|| DEFAULT_IMAGE.to_string());
+    let port_mappings = config
+        .as_ref()
+        .and_then(|c| c.port_mappings.as_ref())
+        .map(|mappings| {
+            mappings
+                .iter()
+                .map(|mapping| DaemonPortMapping {
+                    windows_port: mapping.windows_port,
+                    container_port: mapping.container_port,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let image_tar_path = config.and_then(|c| c.image_tar_path);
 
     // WSLc provision-time filesystem-policy gate (D6 normalization → D3
@@ -556,6 +569,7 @@ fn build_provision_config(
         image_tar_path,
         volumes,
         network,
+        port_mappings,
     })
 }
 
@@ -892,6 +906,7 @@ mod tests {
         let phase = WslcProvisionConfig {
             image: Some("custom/image:tag".to_string()),
             image_tar_path: Some("C:\\images\\custom.tar".to_string()),
+            port_mappings: None,
         };
         let cfg = build_provision_config(&ExecutionRequest::default(), Some(phase)).unwrap();
         assert_eq!(cfg.image, "custom/image:tag");
@@ -907,6 +922,52 @@ mod tests {
             let cfg = build_provision_config(&ExecutionRequest::default(), phase).unwrap();
             assert_eq!(cfg.image, "alpine:latest");
             assert!(cfg.image_tar_path.is_none());
+            assert!(cfg.port_mappings.is_empty());
+        }
+    }
+
+    #[test]
+    fn build_provision_config_forwards_port_mappings_to_the_daemon() {
+        let phase = WslcProvisionConfig {
+            port_mappings: Some(vec![
+                wxc_common::models::PortMapping {
+                    windows_port: 8080,
+                    container_port: 80,
+                    protocol: "tcp".to_string(),
+                },
+                wxc_common::models::PortMapping {
+                    windows_port: 8443,
+                    container_port: 443,
+                    protocol: "tcp".to_string(),
+                },
+            ]),
+            ..Default::default()
+        };
+        let cfg = build_provision_config(&ExecutionRequest::default(), Some(phase)).unwrap();
+        assert_eq!(
+            cfg.port_mappings,
+            vec![
+                DaemonPortMapping {
+                    windows_port: 8080,
+                    container_port: 80,
+                },
+                DaemonPortMapping {
+                    windows_port: 8443,
+                    container_port: 443,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn build_provision_config_distinguishes_absent_from_empty_port_mappings() {
+        for mappings in [None, Some(Vec::new())] {
+            let phase = WslcProvisionConfig {
+                port_mappings: mappings,
+                ..Default::default()
+            };
+            let cfg = build_provision_config(&ExecutionRequest::default(), Some(phase)).unwrap();
+            assert!(cfg.port_mappings.is_empty());
         }
     }
 
@@ -917,6 +978,7 @@ mod tests {
                 WslcProvisionConfig {
                     image: Some("custom/image:tag".to_string()),
                     image_tar_path: None,
+                    port_mappings: None,
                 },
                 "custom/image:tag",
                 None,
@@ -925,6 +987,7 @@ mod tests {
                 WslcProvisionConfig {
                     image: None,
                     image_tar_path: Some("C:\\images\\custom.tar".to_string()),
+                    port_mappings: None,
                 },
                 "alpine:latest",
                 Some("C:\\images\\custom.tar"),
@@ -933,6 +996,7 @@ mod tests {
                 WslcProvisionConfig {
                     image: Some(String::new()),
                     image_tar_path: Some(String::new()),
+                    port_mappings: None,
                 },
                 "",
                 Some(""),

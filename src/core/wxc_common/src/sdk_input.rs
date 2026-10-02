@@ -132,6 +132,14 @@ impl SdkStateAwareInput {
                     .to_string(),
             ));
         }
+        if wslc_port_mappings_requested(&operation) && version != ContractVersion::V1_1_0Alpha {
+            return Err(WxcError::ConfigParse(format!(
+                "WSLC state-aware provision port mappings require schema version \
+                 1.1.0-alpha, got {}",
+                version.as_str()
+            )));
+        }
+        operation.validate()?;
         Ok(Self {
             version,
             operation,
@@ -186,6 +194,16 @@ impl SdkStateAwareInput {
         };
         StateAwareInput::new(common, self.operation)
     }
+}
+
+/// WSLC port mappings exist only in the `1.1.0-alpha` exact contract.
+fn wslc_port_mappings_requested(operation: &StateAwareOperation) -> bool {
+    matches!(
+        operation,
+        StateAwareOperation::Provision(crate::state_aware_operation::StateAwareProvision::Wslc(
+            Some(config)
+        )) if config.port_mappings.is_some()
+    )
 }
 
 fn map_network(network: SdkNetworkInput) -> wire::Network {

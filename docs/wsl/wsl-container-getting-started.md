@@ -318,6 +318,44 @@ WSLC-specific settings go under `wslc` in the JSON config:
 | `gpu` | boolean | `false` | Enable GPU passthrough |
 | `storagePath` | string | System default | Host path for container storage (VHD) |
 | `imageTarPath` | string | — | Path to a local tar file to import as the image |
+| `portMappings` | array | `[]` | Host→container TCP forwards; each entry takes `windowsPort` and `containerPort` |
+
+### Port mappings
+
+```json
+"wslc": {
+    "portMappings": [
+        { "windowsPort": 8080, "containerPort": 80 }
+    ]
+}
+```
+
+TCP only — the WSLC SDK runtime returns `E_NOTIMPL` for UDP, so a `"udp"`
+protocol is rejected. Two entries claiming the same `windowsPort` are also
+rejected.
+
+The state-aware lifecycle takes the same list under
+`wslc.provision.portMappings`, which requires schema `1.1.0-alpha`:
+
+```json
+{
+    "version": "1.1.0-alpha",
+    "phase": "provision",
+    "containment": "wslc",
+    "wslc": {
+        "provision": {
+            "portMappings": [
+                { "windowsPort": 8080, "containerPort": 80 }
+            ]
+        }
+    }
+}
+```
+
+The state-aware daemon creates one container per sandbox, so a forward belongs
+to the sandbox that declared it. The session-wide `cpuCount` / `memoryMb` /
+`gpu` / `storagePath` settings stay one-shot-only, because that daemon shares a
+single WSL session across every sandbox.
 
 ### Image sources
 
@@ -456,7 +494,8 @@ rather than refused merely for being present.
 inbound connections) is **rejected at config-parse time** for WSLC. A WSLC
 container runs in the NAT'd WSL2 VM and MXC does not honor a blanket
 inbound-listen grant — only explicit host→container forwards via
-`wslc` `portMappings` have any inbound effect, so accepting the
+`wslc` `portMappings` (one-shot) or `wslc.provision.portMappings`
+(state-aware) have any inbound effect, so accepting the
 flag would silently promise reachability the backend never delivers. Expose
 specific ports with `portMappings` instead. (`allowLocalNetwork: false`, the
 default, is a no-op and is accepted.)

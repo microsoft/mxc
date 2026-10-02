@@ -840,6 +840,7 @@ mod tests {
                 image_tar_path: None,
                 volumes: Vec::new(),
                 network: Default::default(),
+                port_mappings: Vec::new(),
             }),
         )
         .await

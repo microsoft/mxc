@@ -180,7 +180,7 @@ interface ProvisionStateAwareRequest {
     provision?: { appId?: string };
   };
   wslc?: {
-    provision?: { image?: string; imageTarPath?: string };
+    provision?: { image?: string; imageTarPath?: string; portMappings?: PortMapping[] };
   };
 }
 

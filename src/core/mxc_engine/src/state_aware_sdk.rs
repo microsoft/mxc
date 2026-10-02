@@ -55,6 +55,7 @@ impl StateAwareProvision {
                     Some(wxc_common::models::WslcProvisionConfig {
                         image: image.clone(),
                         image_tar_path: image_tar_path.clone(),
+                        port_mappings: None,
                     })
                 };
                 RuntimeProvision::Wslc(config)

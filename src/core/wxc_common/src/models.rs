@@ -287,8 +287,12 @@ pub struct IsolationSessionProvisionConfig {
 pub struct WslcProvisionConfig {
     /// Container image reference. The backend selects its default when absent.
     pub image: Option<String>,
+
     /// Local image tarball to import instead of pulling an image.
     pub image_tar_path: Option<String>,
+
+    /// Host-to-container TCP forwards applied to the sandbox's own container.
+    pub port_mappings: Option<Vec<PortMapping>>,
 }
 
 /// Configuration specific to the LXC container backend.
@@ -866,7 +870,7 @@ pub enum CaptureDenialsMode {
 }
 
 /// Port mapping for host↔container port forwarding.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PortMapping {
     /// Port on the Windows host.
     pub windows_port: u16,

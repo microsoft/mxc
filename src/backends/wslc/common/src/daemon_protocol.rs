@@ -50,7 +50,7 @@ pub const MAX_EXEC_ID_BYTES: usize = 128;
 /// A new optional field counts: these structs do not deny unknown fields, so a
 /// daemon predating one drops it and acts on a request it only partly
 /// understood.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 fn deserialize_exec_id<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
@@ -98,6 +98,16 @@ pub enum NetworkMode {
     Bridged,
 }
 
+/// A host → container TCP forward applied to one sandbox's container.
+///
+/// TCP-only: the WSLC runtime returns `E_NOTIMPL` for UDP, and the exact
+/// contract admits no other protocol, so none is carried on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortMapping {
+    pub windows_port: u16,
+    pub container_port: u16,
+}
+
 /// Inputs to `provision`: ensure the shared session (booting the WSL2 utility VM
 /// on first provision), resolve the image, and create the container. Mirrors the
 /// session/container-level fields of the one-shot `WslcConfig` plus the
@@ -115,6 +125,9 @@ pub struct ProvisionConfig {
     /// Container network mode.
     #[serde(default)]
     pub network: NetworkMode,
+    /// Host → container TCP forwards for this sandbox's container.
+    #[serde(default)]
+    pub port_mappings: Vec<PortMapping>,
 }
 
 /// Inputs to `start`: the container was created at provision; start boots it.
@@ -419,6 +432,10 @@ mod tests {
                 read_only: true,
             }],
             network: NetworkMode::Bridged,
+            port_mappings: vec![PortMapping {
+                windows_port: 8080,
+                container_port: 80,
+            }],
         }));
     }
 
