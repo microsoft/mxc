@@ -394,8 +394,8 @@ access, after which `egress` rules apply to both public and private outbound des
 
 This capability coupling is a backend mapping, not a change to the shared
 meaning of `ingress.default`. The ProcessContainer section identifies which
-proxy deployments retain strict endpoint scoping and which compatibility
-deployment additionally requires general host-loopback access.
+proxy deployments provide peer identity binding and which compatibility
+deployment relies on endpoint scoping without that identity.
 
 ### D8: Delegation from the invoking user
 
@@ -414,8 +414,9 @@ already implemented.
 
 The strict host-loopback guarantee applies to the identity-scoped
 ProcessContainer path with OS-scoped proxy enforcement. The identity-less host
-proxy path requires broader host-loopback access and is an explicitly documented
-PSEC compatibility behavior rather than strict model-2 enforcement. The
+proxy path lacks peer identity binding and is an explicitly documented
+PSEC compatibility behavior rather than strict model-2 enforcement. It accepts
+either host-loopback setting; it does not require general host-loopback access. The
 AppContainer fallback rejects schema 0.8 runtime proxy requests because
 they cannot preserve either posture.
 
@@ -426,8 +427,11 @@ they cannot preserve either posture.
   AppContainer proxy uses its profile name. Windows requires `ingress.default: "allow"` to grant the bidirectional
   `privateNetworkClientServer` capability. With `allowedProxyPeer`, proxy reachability remains scoped to that peer and
   endpoint and `ingress.hostLoopback` stays `"deny"`. An identity-less host proxy cannot use peer scoping and is the
-  documented development/testing compatibility path that requires `ingress.hostLoopback: "allow"`; it does not
-  provide the strict host-loopback-closure guarantee.
+  documented development/testing compatibility path; it does not provide the strict host-loopback-closure guarantee.
+  Its `ingress.hostLoopback` accepts either setting: `"allow"` requests bidirectional access and requires PSEC 1.1
+  with ingress support, while `"deny"` removes that prerequisite. Another feature can still require PSEC 1.1.
+  Both settings serialize the same proxy capability and peer and omit native ingress, so `"deny"` does not remove
+  a separately encoded grant. The backend guide records the current host-to-container limitation.
 - **Model 1:** Grants `internetClient`, allowing direct internet egress under WFP IP/CIDR/port/protocol rules.
   Private-network outbound also requires `ingress.default: "allow"` and remains subject to the same `egress` rules.
 - **Model 3:** Grants no `internetClient`, private-network capability, or loopback exemptions.
@@ -440,7 +444,7 @@ they cannot preserve either posture.
 | Port filtering | Port filtering via WFP | Port ranges supported. |
 | Protocol filtering | Protocol filtering via WFP | Schema values are `tcp`, `udp`, `icmp`, and `any`; WFP maps ICMP by address family. |
 | Default-deny | PSEC WFP block-all baseline filter at lower precedence than explicit allows. | A non-empty allow list grants `internetClient` only as the capability prerequisite; WFP still limits egress to explicit allows. With no allows, `internetClient` is absent. |
-| Proxy (HTTP/S only) | PSEC per-AppContainer WinHTTP configuration, endpoint filtering, and optional scoped peer access | Identity-scoped proxies keep `hostLoopback: "deny"`; the identity-less development/testing compatibility path requires `"allow"`; schema 0.8 proxy requests do not fall back to AppContainer |
+| Proxy (HTTP/S only) | PSEC per-AppContainer WinHTTP configuration, endpoint filtering, and optional scoped peer access | Identity-scoped proxies keep `hostLoopback: "deny"`; the identity-less development/testing compatibility path accepts either setting. `"allow"` requires PSEC 1.1 ingress support; `"deny"` removes that prerequisite. Schema 0.8 proxy requests do not fall back to AppContainer |
 | Per-sandbox scoping | AppContainer SID, unique per sandbox instance | |
 | Private network | `privateNetworkClientServer` via `ingress.default` | Capability gate; `egress` filters outbound |
 | Inbound | Capabilities and loopback rules | Private network uses `ingress.default`; loopback is separate |

@@ -36,10 +36,11 @@ pub(super) fn build_psec_v1_security_environment_spec(
     );
     let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
     let mut capabilities = effective_capabilities(&request.policy);
-    if request.policy.network_proxy.is_enabled()
-        && unrestricted_host_loopback_allowed(&request.policy)
-    {
-        // Proxy mode cannot carry the native ingress table that grants loopback.
+    if identity_less_proxy(&request.policy) {
+        // Proxy mode cannot carry the native ingress table that grants
+        // loopback, so an identity-less proxy needs this capability to reach
+        // its endpoint. WFP still limits client egress to the configured proxy
+        // address and port, so this does not open general host loopback.
         ensure_capability(&mut capabilities, "networkLoopback");
     }
     let ui_restrictions = crate::job_object::to_job_object_uilimit_mask(
@@ -154,8 +155,21 @@ pub(super) fn unrestricted_host_loopback_allowed(policy: &ContainerPolicy) -> bo
         .is_some_and(|ingress| ingress.host_loopback == NetworkAction::Allow)
 }
 
+/// An identity-less proxy: the caller supplied an endpoint but no
+/// `allowedProxyPeer`, so MXC knows which address and port to authorize but not
+/// which host process owns them. Such a request gets the reserved peer and the
+/// loopback capability in place of an identity-scoped peer rule.
+///
+/// Independent of `ingress.hostLoopback`. A proxy policy never carries the
+/// native ingress table, but requesting `allow` still requires PSEC 1.1 ingress
+/// support. Keying the capability on the proxy identity instead permits PSEC
+/// 1.0 when no other requested feature requires a newer contract.
+fn identity_less_proxy(policy: &ContainerPolicy) -> bool {
+    policy.network_proxy.is_enabled() && policy.allowed_proxy_peer.is_none()
+}
+
 fn allowed_appcontainer_peer(policy: &ContainerPolicy) -> Option<String> {
-    if unrestricted_host_loopback_allowed(policy) {
+    if unrestricted_host_loopback_allowed(policy) || identity_less_proxy(policy) {
         Some(LOOPBACK_NETWORK_PEER.to_string())
     } else {
         policy.allowed_proxy_peer.clone()

@@ -27,8 +27,8 @@ Initialize-WpcContext @PSBoundParameters
 #
 # Per docs/process-container/networking.md: HTTP(S)_PROXY (both cases) point
 # at the loopback endpoint, NO_PROXY must not carry it, direct egress is
-# blocked, egress rules do not apply, identity-less proxy requires
-# hostLoopback allow, and no fallback to an AppContainer tier.
+# blocked, egress rules do not apply, identity-less proxies accept either
+# hostLoopback setting, and no fallback to an AppContainer tier.
 #
 # The workload prints its own environment: an MXC log line saying a proxy was
 # configured does not prove the child received it. A host-side listener stands
@@ -76,7 +76,10 @@ function Invoke-NetworkProxyAssertions {
     $proxyUrl = "http://127.0.0.1:$port"
 
     # Identity-less deployment: no allowedProxyPeer, so the doc requires
-    # ingress.default=allow AND hostLoopback=allow. Workload dumps its env.
+    # ingress.default=allow. hostLoopback=allow additionally requests the
+    # bidirectional contract, which needs PSEC 1.1 ingress support; the
+    # hostLoopback=deny shape below is the one a PSEC 1.0 host uses.
+    # Workload dumps its env.
     $envDump = "$env:SystemRoot\System32\cmd.exe /c set"
     $cfgEnv = New-Config -Name 'net-proxy-envvars' -CommandLine $envDump `
         -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
@@ -197,17 +200,23 @@ function Invoke-NetworkProxyAssertions {
         return
     }
 
-    # Identity-less proxy WITHOUT hostLoopback=allow. The doc says this
-    # deployment requires it, so the configuration is incomplete and must be
-    # refused rather than run with a proxy the container cannot reach.
-    $cfgNoLoopback = New-Config -Name 'net-proxy-identityless-no-loopback' -CommandLine $envDump `
+    # Identity-less proxy WITHOUT hostLoopback=allow. This is the posture a
+    # host whose PSEC contract is older than 1.1 must use, so it is a valid
+    # shape rather than an incomplete one: MXC grants the same networkLoopback
+    # capability and MXC-Loopback peer, and WFP applies the same endpoint
+    # scoping. The proof is that the workload reaches the proxy, not merely
+    # that the config was accepted. The target host is deliberately
+    # unresolvable, so REACHED is attributable to the proxy endpoint alone.
+    $cfgNoLoopback = New-Config -Name 'net-proxy-identityless-no-loopback' `
+        -CommandLine (Get-AnchorFetchCommand -Url 'http://mxc-proxy-probe.invalid/') `
         -ReadWrite $fs.ReadWrite -ReadOnly $fs.ReadOnly `
         -EgressDefault 'deny' -IngressDefault 'allow' -HostLoopback 'deny' `
         -NetworkProxy $proxyUrl -TimeoutMs 25000
     $noLoopback = Invoke-NetRun -Name 'net-proxy-identityless-no-loopback' -ConfigPath $cfgNoLoopback
-    Record-Result -Phase 'P8e' -Name 'identity-less proxy without hostLoopback=allow is rejected' `
-        -Pass (Test-WasRejected $noLoopback) `
-        -Detail "exit=$($noLoopback.Result.ExitCode); timedOut=$($noLoopback.Result.TimedOut); doc requires hostLoopback=allow when allowedProxyPeer is omitted"
+    Record-Result -Phase 'P8e' -Name 'identity-less proxy with hostLoopback=deny reaches the proxy endpoint' `
+        -Pass ($noLoopback.Verdict -eq 'REACHED') `
+        -Detail ("verdict=$($noLoopback.Verdict); endpoint=127.0.0.1:$port; " +
+                 'this shape carries the proxy on a host without PSEC 1.1 ingress support')
 
     # Model 2 requires ingress.default=allow. Without it the client container
     # never gets privateNetworkClientServer and cannot reach a loopback proxy.
@@ -223,4 +232,3 @@ function Invoke-NetworkProxyAssertions {
 
 Invoke-WpcPhase -Key 'NetworkProxy' -Body { Phase-NetworkProxy }
 Complete-WpcChild
-

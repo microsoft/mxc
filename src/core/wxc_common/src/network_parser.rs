@@ -598,19 +598,21 @@ fn validate_process_container_proxy_policy(
         ));
     }
 
-    match (policy.allowed_proxy_peer.is_some(), ingress.host_loopback) {
-        (true, NetworkAction::Allow) => Err(WxcError::ConfigParse(
+    // An identity-scoped proxy reaches its peer through that identity, so a
+    // host-loopback grant on top of it would widen the policy for nothing.
+    //
+    // An identity-less proxy accepts either host-loopback setting. `allow` asks
+    // for the bidirectional contract and requires PSEC 1.1 ingress support.
+    // `deny` removes that prerequisite without changing the proxy capability
+    // or peer. Other requested features can still require PSEC 1.1.
+    if policy.allowed_proxy_peer.is_some() && ingress.host_loopback == NetworkAction::Allow {
+        return Err(WxcError::ConfigParse(
             "an identity-scoped ProcessContainer proxy requires \
              network.ingress.hostLoopback='deny'"
                 .to_string(),
-        )),
-        (false, NetworkAction::Deny) => Err(WxcError::ConfigParse(
-            "a ProcessContainer proxy without allowedProxyPeer requires \
-             network.ingress.hostLoopback='allow'"
-                .to_string(),
-        )),
-        _ => Ok(()),
+        ));
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -706,6 +708,55 @@ mod proxy_policy_tests {
             ),
             other => panic!("expected config error, got {other:?}"),
         }
+    }
+
+    fn proxy_policy(peer: Option<&str>, host_loopback: NetworkAction) -> ContainerPolicy {
+        ContainerPolicy {
+            allowed_proxy_peer: peer.map(str::to_owned),
+            network_ingress: Some(NetworkIngressPolicy {
+                default: NetworkAction::Allow,
+                host_loopback,
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// `hostLoopback` controls the PSEC 1.1 ingress prerequisite for an
+    /// identity-less ProcessContainer proxy, not whether it is allowed to
+    /// exist. Rejecting `deny` left a host without PSEC 1.1 ingress support
+    /// with no usable proxy at all.
+    #[test]
+    fn an_identity_less_proxy_accepts_either_host_loopback_setting() {
+        for host_loopback in [NetworkAction::Allow, NetworkAction::Deny] {
+            let policy = proxy_policy(None, host_loopback);
+            validate_process_container_proxy_policy(&policy, true)
+                .unwrap_or_else(|error| panic!("{host_loopback:?} must be accepted: {error}"));
+        }
+    }
+
+    /// An identity-scoped proxy reaches its peer through that identity, so a
+    /// host-loopback grant beside it would widen the policy for nothing.
+    #[test]
+    fn an_identity_scoped_proxy_still_requires_a_denied_host_loopback() {
+        let policy = proxy_policy(Some("Contoso.Proxy_123"), NetworkAction::Allow);
+        let error = validate_process_container_proxy_policy(&policy, true).unwrap_err();
+        assert!(error.to_string().contains("hostLoopback='deny'"), "{error}");
+
+        let policy = proxy_policy(Some("Contoso.Proxy_123"), NetworkAction::Deny);
+        validate_process_container_proxy_policy(&policy, true).unwrap();
+    }
+
+    /// The allowed ingress default is untouched: MXC maps it to
+    /// `privateNetworkClientServer`, which every proxy posture needs.
+    #[test]
+    fn a_proxy_still_requires_an_allowed_ingress_default() {
+        let mut policy = proxy_policy(None, NetworkAction::Deny);
+        policy.network_ingress.as_mut().unwrap().default = NetworkAction::Deny;
+        let error = validate_process_container_proxy_policy(&policy, true).unwrap_err();
+        assert!(
+            error.to_string().contains("ingress.default='allow'"),
+            "{error}"
+        );
     }
 }
 

@@ -4617,11 +4617,6 @@ mod tests {
                 r#"{"default": "allow", "hostLoopback": "allow"}"#,
                 "identity-scoped ProcessContainer proxy",
             ),
-            (
-                "",
-                r#"{"default": "allow", "hostLoopback": "deny"}"#,
-                "without allowedProxyPeer",
-            ),
         ] {
             let process_container = if peer.is_empty() {
                 String::new()
@@ -4647,6 +4642,34 @@ mod tests {
             };
             assert!(error.contains(expected), "got: {error}");
         }
+    }
+
+    /// A denied host loopback is the posture an identity-less proxy must use on
+    /// a host without PSEC 1.1 ingress support, so the parser accepts it.
+    #[test]
+    fn schema_v08_accepts_an_identity_less_proxy_with_a_denied_host_loopback() {
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "containment": "processcontainer",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "egress": {"default": "deny"},
+                "ingress": {"default": "allow", "hostLoopback": "deny"}
+            },
+            "runtimeConfig": {"networkProxy": "http://127.0.0.1:8080"}
+        }"#;
+        let MxcRequest::OneShot(request) =
+            load_mxc(json).expect("a denied host loopback must be accepted")
+        else {
+            panic!("expected a one-shot request");
+        };
+        let policy = &request.policy;
+        assert!(policy.network_proxy.is_enabled());
+        assert!(policy.allowed_proxy_peer.is_none());
+        assert_eq!(
+            policy.network_ingress.as_ref().unwrap().host_loopback,
+            NetworkAction::Deny
+        );
     }
 
     #[test]
