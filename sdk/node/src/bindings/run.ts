@@ -8,7 +8,7 @@
 import koffi from 'koffi';
 import { MxcError } from '../errors.js';
 import { loadMxcFfi } from '../native-library.js';
-import type { RequestSpec } from './request.js';
+import type { OneShotRequest } from '../generated/v1_0_0/wire.js';
 import { bindNativeFunction } from './native-function.js';
 import {
   AbiErrorDetailType,
@@ -31,7 +31,11 @@ interface AbiRunResult {
   warnings: unknown | null;
 }
 
-type RunFunction = (request: string, result: AbiRunResult) => number;
+type RunFunction = (
+  request: string,
+  experimental: number,
+  result: AbiRunResult,
+) => number;
 type FreeFunction = (result: AbiRunResult) => void;
 
 export interface BindingRunResult {
@@ -62,10 +66,11 @@ function bindRunFunctions(
 } {
   return {
     run: bindNativeFunction<RunFunction>(native.handle, {
-      symbol: 'mxc_run_request',
+      symbol: 'mxc_run_json',
       result: 'int32_t',
       parameters: [
         'const char *',
+        'int32_t',
         koffi.out(koffi.pointer(AbiRunResultType)),
       ],
     }),
@@ -92,14 +97,14 @@ function decodeRunResult(status: number, result: AbiRunResult): BindingRunResult
   };
 }
 
-export function runBindingRequest(request: RequestSpec): BindingRunResult {
+export function runOneShotJson(request: OneShotRequest): BindingRunResult {
   const native = loadMxcFfi();
   try {
     const { run, free } = bindRunFunctions(native);
     const result = {} as AbiRunResult;
     let filled = false;
     try {
-      const status = run(JSON.stringify(request), result);
+      const status = run(JSON.stringify(request), 0, result);
       filled = true;
       return decodeRunResult(status, result);
     } finally {
@@ -110,8 +115,8 @@ export function runBindingRequest(request: RequestSpec): BindingRunResult {
   }
 }
 
-async function runBindingRequestAsyncNative(
-  request: RequestSpec,
+async function runOneShotJsonAsyncNative(
+  request: OneShotRequest,
 ): Promise<BindingRunResult> {
   const native = loadMxcFfi();
   try {
@@ -121,7 +126,7 @@ async function runBindingRequestAsyncNative(
     try {
       const requestJson = JSON.stringify(request);
       const status = await new Promise<number>((resolve, reject) => {
-        run.async(requestJson, result, (error, nativeStatus) => {
+        run.async(requestJson, 0, result, (error, nativeStatus) => {
           if (error !== null) {
             reject(error);
             return;
@@ -140,20 +145,20 @@ async function runBindingRequestAsyncNative(
 }
 
 type AsyncRunImplementation = (
-  request: RequestSpec,
+  request: OneShotRequest,
 ) => Promise<BindingRunResult>;
 
-let asyncRunImplementation = runBindingRequestAsyncNative;
+let asyncRunImplementation = runOneShotJsonAsyncNative;
 
 /** @internal Replaces the async native call for one process's unit tests. */
 export function _setBindingRunAsyncImplementation(
   implementation?: AsyncRunImplementation,
 ): void {
-  asyncRunImplementation = implementation ?? runBindingRequestAsyncNative;
+  asyncRunImplementation = implementation ?? runOneShotJsonAsyncNative;
 }
 
-export function runBindingRequestAsync(
-  request: RequestSpec,
+export function runOneShotJsonAsync(
+  request: OneShotRequest,
 ): Promise<BindingRunResult> {
   return asyncRunImplementation(request).catch((error: unknown) => {
     if (error instanceof MxcError) throw error;

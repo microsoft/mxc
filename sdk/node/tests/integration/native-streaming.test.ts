@@ -29,10 +29,9 @@ interface NativeSandbox {
   dispose(): void;
 }
 
-interface RequestModule {
-  prepareRequestSpec(
+interface OneShotModule {
+  prepareOneShotRequest(
     config: ContainerConfig,
-    options?: { experimental?: boolean },
   ): unknown;
 }
 
@@ -98,9 +97,9 @@ if (lxcExecutionRequired && lxcSkipReason) {
 describe(`Internal native streaming (schema ${schemaVersion})`, { skip: skipReason }, () => {
   it('delivers output before the sandbox exits', { timeout: 30000 }, async () => {
     const packageRoot = getSdkPackageRoot();
-    const requestModule = await import(pathToFileURL(
-      path.join(packageRoot, 'dist', 'bindings', 'request.js'),
-    ).href) as RequestModule;
+    const oneShotModule = await import(pathToFileURL(
+      path.join(packageRoot, 'dist', 'bindings', 'one-shot.js'),
+    ).href) as OneShotModule;
     const streamingModule = await import(pathToFileURL(
       path.join(packageRoot, 'dist', 'bindings', 'streaming.js'),
     ).href) as StreamingModule;
@@ -116,9 +115,7 @@ describe(`Internal native streaming (schema ${schemaVersion})`, { skip: skipReas
     };
     const config = sdk.createConfigFromPolicy(policy);
     config.process!.commandLine = command;
-    const request = requestModule.prepareRequestSpec(config, {
-      experimental: debugSpawnOptions.experimental,
-    });
+    const request = oneShotModule.prepareOneShotRequest(config);
     const sandbox = await streamingModule.spawnBindingSandboxProcess(request);
     const standardInput = sandbox.standardInput;
     const standardOutput = sandbox.standardOutput;
@@ -164,9 +161,9 @@ describe(`Internal native streaming (schema ${schemaVersion})`, { skip: skipReas
 
   it('drains untaken native output without blocking completion', { timeout: 30000 }, async () => {
     const packageRoot = getSdkPackageRoot();
-    const requestModule = await import(pathToFileURL(
-      path.join(packageRoot, 'dist', 'bindings', 'request.js'),
-    ).href) as RequestModule;
+    const oneShotModule = await import(pathToFileURL(
+      path.join(packageRoot, 'dist', 'bindings', 'one-shot.js'),
+    ).href) as OneShotModule;
     const streamingModule = await import(pathToFileURL(
       path.join(packageRoot, 'dist', 'bindings', 'streaming.js'),
     ).href) as StreamingModule;
@@ -181,9 +178,7 @@ describe(`Internal native streaming (schema ${schemaVersion})`, { skip: skipReas
     };
     const config = sdk.createConfigFromPolicy(policy);
     config.process!.commandLine = command;
-    const request = requestModule.prepareRequestSpec(config, {
-      experimental: debugSpawnOptions.experimental,
-    });
+    const request = oneShotModule.prepareOneShotRequest(config);
     const sandbox = await streamingModule.spawnBindingSandboxProcess(request);
 
     const result = await sandbox.waitAsync();
@@ -219,9 +214,9 @@ describe(`Internal native streaming over LXC (schema ${schemaVersion})`, {
 
   it('delivers output before the sandbox exits', { timeout: LXC_TEST_TIMEOUT }, async () => {
     const packageRoot = getSdkPackageRoot();
-    const requestModule = await import(pathToFileURL(
-      path.join(packageRoot, 'dist', 'bindings', 'request.js'),
-    ).href) as RequestModule;
+    const oneShotModule = await import(pathToFileURL(
+      path.join(packageRoot, 'dist', 'bindings', 'one-shot.js'),
+    ).href) as OneShotModule;
     const streamingModule = await import(pathToFileURL(
       path.join(packageRoot, 'dist', 'bindings', 'streaming.js'),
     ).href) as StreamingModule;
@@ -245,9 +240,7 @@ describe(`Internal native streaming over LXC (schema ${schemaVersion})`, {
       `mxc-node-stream-${process.pid}`,
     );
     config.process!.commandLine = command;
-    const request = requestModule.prepareRequestSpec(config, {
-      experimental: debugSpawnOptions.experimental,
-    });
+    const request = oneShotModule.prepareOneShotRequest(config);
     const sandbox = await streamingModule.spawnBindingSandboxProcess(request);
     // The workload blocks on stdin, so a failed assertion below would abandon a
     // running root-owned container whose per-PID name no later run can find.

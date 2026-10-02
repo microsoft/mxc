@@ -24,6 +24,7 @@ export const CROSS_CUTTING_FIELDS = ['filesystem', 'network', 'runtimeConfig', '
 // declares its own `<BACKEND>_ID_PREFIX` const here.
 export const ISOLATION_SESSION_ID_PREFIX = 'iso';
 export const WSLC_ID_PREFIX = 'wslc';
+export const WINDOWS_SANDBOX_ID_PREFIX = 'wsb';
 
 // Exhaustive backend→prefix map. Typed `Record<StateAwareContainmentBackend,
 // string>` so adding a backend to the union without registering a prefix here
@@ -48,7 +49,8 @@ export const PREFIX_TO_BACKEND: Record<string, StateAwareContainmentBackend> = O
 /**
  * Resolves the wire-format backend key for a sandbox id by reading its
  * leading prefix segment. Throws an `MxcError` with `code: 'malformed_id'`
- * when the id has no recognised prefix.
+ * when the id has no recognised prefix, and `code: 'unsupported_containment'`
+ * for a Windows Sandbox (`wsb:`) id, which the stable API does not accept.
  */
 export function backendForSandboxId(sandboxId: string): StateAwareContainmentBackend {
   const colon = sandboxId.indexOf(':');
@@ -56,6 +58,14 @@ export function backendForSandboxId(sandboxId: string): StateAwareContainmentBac
     throw mxcErrorFromCode('malformed_id', `sandboxId must carry a backend prefix: ${sandboxId}`);
   }
   const prefix = sandboxId.slice(0, colon);
+  if (prefix === WINDOWS_SANDBOX_ID_PREFIX) {
+    throw mxcErrorFromCode(
+      'unsupported_containment',
+      'Windows Sandbox identities are experimental and are not accepted by ' +
+      'the stable high-level lifecycle API; use raw JSON with experimental ' +
+      'authorization.',
+    );
+  }
   const backend = PREFIX_TO_BACKEND[prefix];
   if (!backend) {
     throw mxcErrorFromCode('malformed_id', `sandboxId prefix '${prefix}' does not match a known state-aware backend`);

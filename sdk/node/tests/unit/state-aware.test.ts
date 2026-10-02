@@ -585,6 +585,16 @@ describe('startSandbox', () => {
     assert.strictEqual(requestEnvelope(request()).correlationVector, undefined);
   });
 
+  it('rejects Windows Sandbox identities in the stable lifecycle API', async () => {
+    await assert.rejects(
+      () => startSandbox('wsb:prov-1' as SandboxId<'isolation_session'>),
+      (err: unknown) =>
+        err instanceof MxcError &&
+        err.code === 'unsupported_containment' &&
+        err.message.includes('Windows Sandbox identities are experimental'),
+    );
+  });
+
   it('relays stable telemetry from phase config onto the start envelope', async () => {
     const request = installStateAwareReply('{"result":{}}');
     const id = 'iso:reg-abc:prov-1' as SandboxId<'isolation_session'>;
@@ -698,7 +708,7 @@ describe('execInSandboxAsync', () => {
       () => execInSandboxAsync(
         id,
         { process: { commandLine: 'echo' } },
-        { experimental: true },
+        {},
       ),
       (err: unknown) => err instanceof MxcError && err.code === 'stale_id',
     );
@@ -878,20 +888,18 @@ describe('execInSandbox', () => {
     }
   });
 
-  it('forwards experimental authorization for experimental backends', () => {
-    const exec = installStateAwareExecBinding(
-      () => new FakeStateAwareExecBinding(23, '', '', Number.MAX_SAFE_INTEGER),
+  it('rejects experimental authorization on the stable high-level API', () => {
+    assert.throws(
+      () => execInSandbox(
+        'iso:abc' as SandboxId<'isolation_session'>,
+        { process: { commandLine: 'echo live' } },
+        { experimental: true },
+      ),
+      (err: unknown) =>
+        err instanceof MxcError &&
+        err.code === 'malformed_request' &&
+        err.message.includes("does not support option 'experimental'"),
     );
-    const proc = execInSandbox(
-      'iso:abc' as SandboxId<'isolation_session'>,
-      { process: { commandLine: 'echo live' } },
-      { experimental: true },
-    );
-    try {
-      assert.strictEqual(exec.experimental(), true);
-    } finally {
-      proc.dispose();
-    }
   });
 
   it('rejects dryRun because no live process exists', () => {

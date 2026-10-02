@@ -85,9 +85,7 @@ describe('createConfigFromPolicy', () => {
     assert.deepStrictEqual(config.filesystem!.readwritePaths, []);
     assert.deepStrictEqual(config.filesystem!.readonlyPaths, []);
     assert.deepStrictEqual(config.filesystem!.deniedPaths, []);
-    assert.strictEqual(config.ui!.disable, true);
-    assert.strictEqual(config.ui!.clipboard, 'none');
-    assert.strictEqual(config.ui!.injection, false);
+    assert.strictEqual(config.ui, undefined);
     assert.strictEqual(config.process!.timeout, 0);
     assert.strictEqual(config.process!.commandLine, '');
     assert.strictEqual(config.lifecycle!.destroyOnExit, true);
@@ -108,14 +106,34 @@ describe('createConfigFromPolicy', () => {
       }
     };
 
-    it('should set processContainer with UI defaults for process containment', () => {
+    it('should keep process containment abstract', () => {
       mockWindows();
       try {
         const config = createConfigFromPolicy(defaultPolicy, 'process');
-        assert.ok(config.processContainer);
-        assert.deepStrictEqual(config.processContainer!.capabilities, []);
-        assert.strictEqual(config.processContainer!.ui!.isolation, 'container');
-        assert.strictEqual(config.processContainer!.ui!.desktopSystemControl, false);
+        assert.strictEqual(config.containment, 'process');
+        assert.strictEqual(config.processContainer, undefined);
+      } finally {
+        restore();
+      }
+    });
+
+    it('should set required ProcessContainer defaults for explicit processcontainer', () => {
+      mockWindows();
+      try {
+        const config = createConfigFromPolicy(defaultPolicy, 'processcontainer');
+        assert.strictEqual(config.containment, 'processcontainer');
+        assert.deepStrictEqual(config.processContainer, {
+          leastPrivilege: false,
+          capabilities: [],
+          ui: {
+            isolation: 'container',
+            desktopSystemControl: false,
+            systemSettings: 'none',
+            ime: false,
+          },
+          filesystem: undefined,
+          network: undefined,
+        });
       } finally {
         restore();
       }

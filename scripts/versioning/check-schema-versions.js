@@ -110,15 +110,22 @@ for (const [label, version, requiredRoot] of [
   }
 }
 
-// -- SDK (sandbox.ts, state-aware-types.ts, state-aware-helper.ts) --
-const sandboxTs = read("sdk", "node", "src", "sandbox.ts");
+// -- SDK (shared V1 target, high-level builder, state-aware types) --
+const contractVersionTs = read("sdk", "node", "src", "contract-version.ts");
 expectConst(
-  "sandbox.ts",
-  sandboxTs,
+  "contract-version.ts",
+  contractVersionTs,
   "SDK_CONTRACT_VERSION",
   /const SDK_CONTRACT_VERSION\s*=\s*'([^']+)'/,
   sdkV1Target
 );
+const sandboxTs = read("sdk", "node", "src", "sandbox.ts");
+if (
+  !/import\s*\{\s*SDK_CONTRACT_VERSION\s*\}\s*from\s*['"]\.\/contract-version\.js['"]/.test(sandboxTs) ||
+  !/export\s*\{\s*SDK_CONTRACT_VERSION\s*\}/.test(sandboxTs)
+) {
+  errors.push("sandbox.ts: SDK_CONTRACT_VERSION must import and re-export the shared contract-version.ts target");
+}
 const stateAwareTs = read("sdk", "node", "src", "state-aware-types.ts");
 expectConst(
   "state-aware-types.ts",

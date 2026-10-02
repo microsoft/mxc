@@ -99,8 +99,12 @@ as directional default-deny for egress, ingress, and host loopback. See the
 for the complete cross-platform authoring shape.
 
 Legacy network members such as `allowOutbound`, `allowedHosts`, and
-`blockedHosts` are available only through a raw `ContainerConfig` targeting an
-immutable historical contract.
+`removeRulesOnExit` are available only through the executor-backed raw
+`ContainerConfig` API targeting an immutable historical contract. The stable
+in-process mapper rejects these fields instead of silently dropping them.
+It also rejects retired containment and section spellings and backend-local
+names such as `processContainer.name` and `lxc.containerName`; use canonical
+containment names and top-level `containerId` instead.
 
 Model 1 permits direct connections selected by IP/CIDR, protocol, and port
 rules; it does not configure an application-layer proxy. Model 2 denies direct
@@ -159,7 +163,7 @@ for all three connectivity modes and backend-specific support.
 | Linux x64 / ARM64 | `bubblewrap` | `lxc` | — |
 | macOS ARM64 (schema `0.7.0-alpha`+) | `seatbelt` | — | — |
 
-The default `processcontainer`, `bubblewrap`, `lxc`, `seatbelt`, `wslc`, and `isolation_session` backends work without an experimental opt-in. **Experimental backends** (`windows_sandbox`, `microvm`, `hyperlight`) require `{ experimental: true }` in `SandboxSpawnOptions` when you spawn — see [Choosing a Backend](#choosing-a-backend).
+The default `processcontainer`, `bubblewrap`, `lxc`, `seatbelt`, `wslc`, and `isolation_session` backends work without an experimental opt-in. **Experimental backends** (`windows_sandbox`, `microvm`, `hyperlight`) require a raw exact development `ContainerConfig` plus `{ experimental: true }` in `SandboxSpawnOptions` when you spawn — see [Choosing a Backend](#choosing-a-backend).
 
 > **Hyperlight** is an opt-in build flavor (Linux x64 and Windows x64) gated by the `--with-hyperlight` cargo feature. Default shipped binaries do not include it; build from source with `build.bat --with-hyperlight` (Windows) or the equivalent cargo invocation on Linux.
 
@@ -198,7 +202,7 @@ const policy: SandboxPolicy = {
     readonlyPaths: ['C:\\Program Files\\MyTool'],
   },
 };
-const config = createConfigFromPolicy(policy, 'process');
+const config = createConfigFromPolicy(policy, 'processcontainer');
 config.process!.commandLine = 'cmd /c exit 0';
 const result = probeSandboxSupport(config);
 console.log(result.tier, result.warnings, result.probes.uiCapabilities);
@@ -297,13 +301,18 @@ on Windows process containers, that default is the user profile environment
 block. This option requires schema version `0.9.0-alpha` or later. The SDK never
 implicitly copies `process.env` into the child.
 
+The stable in-process one-shot mapper requires `process.env` entries in
+`NAME=value` form (`NAME=` for an empty value). It rejects bare names instead
+of silently dropping them. Executor-backed raw historical configs retain
+their existing behavior.
+
 ### 3. `spawnSandboxAsync(script, policy, ...)` — promise-style
 
 The `await`-friendly API runs the abstract `process` containment intent and
-resolves with `{ stdout, stderr, exitCode }`. That intent maps to the native
-process backend for each host and selects Windows ProcessContainer when the
-policy contains ProcessContainer-specific settings. Requests execute through
-`mxc_ffi` and return separate stdout and stderr.
+resolves with `{ stdout, stderr, exitCode }`. The SDK emits the owned exact
+`1.0.0` JSON request and calls the native `mxc_ffi` JSON entry point with
+stable authorization (`experimental = 0`), so development-only backends are
+not reachable through this high-level helper.
 
 ```typescript
 import {
@@ -362,7 +371,8 @@ For historical raw configs, the abstract `process` intent requires
 `0.6.0-alpha` floor on Windows and Linux. The high-level v1 API always emits
 `1.0.0` on every platform.
 
-Experimental backends require `{ experimental: true }` in `SandboxSpawnOptions`:
+Experimental backends are available only through raw exact `ContainerConfig`
+spawns today and require `{ experimental: true }` in `SandboxSpawnOptions`:
 
 ```typescript
 const config: ContainerConfig = {
@@ -604,6 +614,8 @@ granting file content reads. It requires a BaseContainer host with PSEC 1.1
 | `wxc-exec.exe not found` / `lxc-exec not found` | The SDK couldn't locate the native binary. | Set `MXC_BIN_DIR=<dir>` so `<dir>/<arch>/wxc-exec.exe` (or `lxc-exec`) exists, or pass `options.executablePath` explicitly. |
 | `Invalid containment value '<x>'` | `containment` field doesn't match the parser's accepted values. | For `createConfigFromPolicy`, use a `SandboxContainment` value. Use raw exact `ContainerConfig` for development-only backends and intents. |
 | `'<x>' containment requires experimental mode` | A `windows_sandbox` / `microvm` / `hyperlight` backend was selected without the flag. | Pass `{ experimental: true }` in `SandboxSpawnOptions`. |
+| `spawnSandboxAsync does not support executor-only option 'experimental'` | The stable buffered high-level API always emits exact `1.0.0` JSON and passes `experimental = 0` to the FFI. | Use `spawnSandboxFromConfig` with a raw exact development config for experimental backends. |
+| `Windows Sandbox identities are experimental and are not accepted by the stable high-level lifecycle API` | A `wsb:` sandbox id was passed to the typed stable lifecycle helpers. | Use raw exact JSON with experimental authorization until the experimental lifecycle API is available. |
 | `process.commandLine starts with an unquoted Windows path containing a space` | `wxc-exec` rejects unquoted paths with spaces at parse time. | Quote the executable: `'"C:\\Program Files\\…\\foo.exe" args'`. |
 | `CreateProcessW(PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT) failed: ...` | The process security environment launch returned an OS-level error. Backend-unavailable failures automatically fall through to an AppContainer tier during selection. | Check the Windows build requirements for the backend you selected. |
 | Process exits `-1` / `4294967295` with no stdout | Native binary terminated abnormally. | Re-run with `options.debug: true` (or `options.logDir: '<dir>'`) to capture diagnostic logs. |
@@ -663,6 +675,10 @@ ProbeOutput, ProbeFacts, UiCapabilitySupport, BubblewrapNetworkSupport
 ErrorCode, MxcError, MxcErrorFields
 mxcErrorFromCode(code, message, details?)   → MxcError
 ```
+
+Stable V1 state-aware streaming rejects `experimental: true`. For an
+experimental backend, author a raw exact development request and use the
+executor until the experimental typed lifecycle API is available.
 
 Full TypeScript definitions ship with the package (`dist/index.d.ts`). All exports are named exports from `@microsoft/mxc-sdk`.
 

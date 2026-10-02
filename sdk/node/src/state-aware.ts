@@ -43,7 +43,9 @@ export type ProvisionArgs<C extends StateAwareContainmentBackend> =
 
 /** Options for live state-aware streaming. */
 export interface StateAwareStreamingOptions {
-  /** Authorizes a backend that is experimental in the selected contract. */
+  /** Retained for compatibility; stable V1 state-aware streaming rejects `true`.
+   * For experimental backends, use a raw exact development request through
+   * the executor until a typed experimental lifecycle API is available. */
   experimental?: boolean;
 }
 
@@ -57,7 +59,7 @@ type StateAwareOptionSupport = 'supported' | 'unsupported-when-true' | 'unsuppor
 
 const STATE_AWARE_OPTION_SUPPORT = {
   debug: 'unsupported-when-true',
-  experimental: 'supported',
+  experimental: 'unsupported-when-true',
   allowTestingFeatures: 'unsupported-when-true',
   inheritDefaultEnv: 'unsupported-when-defined',
   executablePath: 'unsupported-when-defined',
@@ -156,7 +158,7 @@ async function runStateAwareEnvelopeRequest(
     throw abortReason(signal);
   }
 
-  const experimental = options.experimental === true;
+  const experimental = false;
   const request = runBindingStateAwareRequestAsync({
     requestJson: JSON.stringify(envelope),
     dryRun: options.dryRun === true,
@@ -228,7 +230,7 @@ function spawnStateAwareExecProcess<C extends StateAwareContainmentBackend>(
   assertPipedExecBackend(apiName, sandboxId);
   return spawnStateAwareBindingSandboxProcess(
     JSON.stringify(buildExecEnvelope(sandboxId, config)),
-    options.experimental === true,
+    false,
     config.process.timeout,
   );
 }

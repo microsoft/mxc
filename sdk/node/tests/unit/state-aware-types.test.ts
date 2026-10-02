@@ -62,7 +62,10 @@ describe('StateAwareContainmentBackend', () => {
 
     assert.ok(unsupported);
     assert.ok(provision);
-    assert.throws(() => backendForSandboxId('wsb:prov-1'), /does not match a known/);
+    assert.throws(
+      () => backendForSandboxId('wsb:prov-1'),
+      /Windows Sandbox identities are experimental/,
+    );
   });
 });
 

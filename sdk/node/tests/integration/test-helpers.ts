@@ -189,11 +189,39 @@ export const lxcNetworkSkipReason = skipLxcNetworkTests
 
 // State-aware lifecycle helpers
 
+export function stateAwareRuntimeUnavailable(error: unknown): boolean {
+  return error instanceof MxcError &&
+    (nativeFeatureAbsent(error) || addUserFeatureUnavailable(error));
+}
+
+function nativeFeatureAbsent(error: MxcError): boolean {
+  return error.operation === undefined &&
+    (error.code === 'backend_unavailable' || error.code === 'unsupported_phase');
+}
+
+function addUserFeatureUnavailable(error: MxcError): boolean {
+  return error.code === 'backend_error' &&
+    error.operation === 'IsoSessionOps.AddUserAsync2' &&
+    String(error.remediation ?? '').includes('Feature_AgentSessionsBaseSupport');
+}
+
+/** Classify only failures that prevent feature-probe policy validation. */
+export function isolationSessionFeatureSkipReason(error: unknown): string | undefined {
+  if (!(error instanceof MxcError)) return undefined;
+  if (addUserFeatureUnavailable(error)) {
+    return 'isolation_session runtime unavailable on this host';
+  }
+  if (nativeFeatureAbsent(error)) {
+    return 'mxc_ffi lacks the isolation_session feature; rebuild with `--features isolation_session` (or `build.bat --with-isolation-session`) to run this test';
+  }
+  return undefined;
+}
+
 /**
  * Wraps a state-aware SDK call, skipping the test (rather than failing) when
- * the native runtime reports `backend_unavailable` or `unsupported_phase` — either
- * indicates this environment cannot exercise the lifecycle. Other errors
- * propagate.
+ * the native runtime reports a pre-API `backend_unavailable` or
+ * `unsupported_phase`, or the known AddUser feature-gate failure. API-backed
+ * failures with other causes propagate.
  */
 export async function runOrSkipIfBackendUnavailable<T>(
   t: TestContext,
@@ -203,16 +231,8 @@ export async function runOrSkipIfBackendUnavailable<T>(
   try {
     return await fn();
   } catch (err) {
-    if (err instanceof MxcError && err.code === 'backend_unavailable') {
+    if (stateAwareRuntimeUnavailable(err)) {
       t.skip(`${label}: state-aware backend runtime unavailable on this host`);
-      return undefined;
-    }
-    if (err instanceof MxcError && err.code === 'unsupported_phase') {
-      // mxc_ffi was built without the backend's feature flag, so the
-      // state-aware dispatch path is compiled out. Same outcome from the
-      // test's perspective as a host without the runtime: cannot exercise
-      // the lifecycle, skip rather than fail.
-      t.skip(`${label}: mxc_ffi lacks the backend feature; rebuild with the feature flag to run this test`);
       return undefined;
     }
     throw err;
@@ -224,10 +244,7 @@ export async function safeDeprovision<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
 ): Promise<void> {
   try {
-    const options = String(sandboxId).startsWith('wsb:')
-      ? { experimental: true }
-      : undefined;
-    await deprovisionSandbox(sandboxId, undefined, options);
+    await deprovisionSandbox(sandboxId);
   } catch (err) {
     console.error(`Cleanup deprovision failed for ${sandboxId}: ${err}`);
   }
@@ -236,9 +253,9 @@ export async function safeDeprovision<C extends StateAwareContainmentBackend>(
 /**
  * Probes a state-aware backend's runtime by attempting a provision /
  * deprovision cycle. Returns a skip-reason string when the runtime is
- * unavailable (`backend_unavailable` or `unsupported_phase`), `undefined`
- * when the backend can be exercised. Other errors propagate so genuine
- * failures aren't masked as "skipped." Intended for one-shot probing at
+ * unavailable before an API call (or the known AddUser feature-gate failure),
+ * `undefined` when the backend can be exercised. Other errors propagate so
+ * genuine failures aren't masked as "skipped." Intended for one-shot probing at
  * module load — pair the result with `describe`'s `{ skip }` option.
  */
 export async function probeStateAwareRuntime<C extends StateAwareContainmentBackend>(
@@ -276,7 +293,6 @@ export async function probeStateAwareRuntime<C extends StateAwareContainmentBack
           const result = await provisionSandbox(
             'isolation_session',
             { network: isolationSessionNetwork },
-            { experimental: true },
           );
           return result.sandboxId;
         }
@@ -293,11 +309,8 @@ export async function probeStateAwareRuntime<C extends StateAwareContainmentBack
     await safeDeprovision(sandboxId);
     return undefined;
   } catch (err) {
-    if (err instanceof MxcError && err.code === 'backend_unavailable') {
+    if (stateAwareRuntimeUnavailable(err)) {
       return `${containment} runtime unavailable on this host`;
-    }
-    if (err instanceof MxcError && err.code === 'unsupported_phase') {
-      return `mxc_ffi lacks the ${containment} feature; rebuild with --features ${containment} to run this test`;
     }
     throw err;
   }
@@ -336,17 +349,11 @@ export async function probeIsolationSessionFeature(): Promise<string | undefined
         network: isolationSessionNetwork,
         appId: 'x'.repeat(257),
       },
-      { experimental: true },
     );
     provisioned = result.sandboxId;
   } catch (err) {
-    if (
-      err instanceof MxcError &&
-      (err.code === 'unsupported_phase' ||
-        (err.code === 'backend_unavailable' && err.operation === undefined))
-    ) {
-      return 'mxc_ffi lacks the isolation_session feature; rebuild with `--features isolation_session` (or `build.bat --with-isolation-session`) to run this test';
-    }
+    const skipReason = isolationSessionFeatureSkipReason(err);
+    if (skipReason !== undefined) return skipReason;
 
     if (err instanceof MxcError && err.code === 'policy_validation') {
       return undefined;

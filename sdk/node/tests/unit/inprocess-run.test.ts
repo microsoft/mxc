@@ -6,7 +6,7 @@ import { afterEach, describe, it } from 'node:test';
 import * as rootSdk from '../../src/index.js';
 import * as v1Sdk from '../../src/v1.js';
 import { _setBindingRunAsyncImplementation } from '../../src/bindings/run.js';
-import type { RequestSpec } from '../../src/bindings/request.js';
+import type { OneShotRequest } from '../../src/generated/v1_0_0/wire.js';
 
 const { MxcError } = rootSdk;
 const { spawnSandboxAsync } = v1Sdk;
@@ -50,8 +50,8 @@ describe('public SDK namespace exports', () => {
 });
 
 describe('in-process async run routing', () => {
-  it('uses the V1 binding policy without caller-supplied schema version', async () => {
-    let bindingRequest: RequestSpec | undefined;
+  it('uses the SDK-owned exact v1 one-shot request', async () => {
+    let bindingRequest: OneShotRequest | undefined;
     _setBindingRunAsyncImplementation(async (request) => {
       bindingRequest = request;
       return {
@@ -66,18 +66,17 @@ describe('in-process async run routing', () => {
     const result = await spawnSandboxAsync(
       'echo hello',
       {},
-      { experimental: true, inheritDefaultEnv: true },
+      { inheritDefaultEnv: true },
       'C:\\work',
       'sample',
     );
 
     assert.deepStrictEqual(result, { stdout: 'out', stderr: 'err', exitCode: 7 });
-    assert.ok(!('version' in bindingRequest!.policy));
-    assert.strictEqual(bindingRequest?.command, 'echo hello');
-    assert.strictEqual(bindingRequest?.containerName, 'sample');
-    assert.strictEqual(bindingRequest?.workingDirectory, 'C:\\work');
-    assert.deepStrictEqual(bindingRequest?.environment, {});
-    assert.strictEqual(bindingRequest?.inheritDefaultEnv, true);
+    assert.strictEqual(bindingRequest?.version, '1.0.0');
+    assert.strictEqual(bindingRequest?.process.commandLine, 'echo hello');
+    assert.strictEqual(bindingRequest?.containerId, 'sample');
+    assert.strictEqual(bindingRequest?.process.cwd, 'C:\\work');
+    assert.strictEqual(bindingRequest?.process.inheritDefaultEnv, true);
   });
 
   it('rejects executor-only options instead of falling back', async () => {
@@ -87,6 +86,7 @@ describe('in-process async run routing', () => {
       { skipPlatformCheck: true },
       { executablePath: 'wxc-exec.exe' },
       { signal: new AbortController().signal },
+      { experimental: true },
     ]) {
       await assert.rejects(
         spawnSandboxAsync('echo hello', {}, options),

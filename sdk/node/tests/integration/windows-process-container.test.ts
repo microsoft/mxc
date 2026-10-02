@@ -22,6 +22,11 @@ import {
   spawnFromConfigAsync,
 } from './test-helpers.js';
 
+const proxySkipReason = sandboxSkipReason ??
+  (process.env.MXC_ENABLE_PROCESSCONTAINER_PROXY_TESTS === '1'
+    ? undefined
+    : 'ProcessContainer proxy tests require an interactive/elevated WinHTTP proxy shim; set MXC_ENABLE_PROCESSCONTAINER_PROXY_TESTS=1 to run them');
+
 for (const schemaVersion of supportedVersions) {
 describe(`Windows Process Container (schema ${schemaVersion})`, {
   skip: os.platform() !== 'win32' ? 'Windows Process Container tests can only be ran on Windows' : undefined,
@@ -123,7 +128,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     assert.ok(result.stdout.includes('version ok'));
   });
 
-  describe('proxy end-to-end', { skip: sandboxSkipReason }, () => {
+  describe('proxy end-to-end', { skip: proxySkipReason }, () => {
     let proxyProcess: ChildProcess | null = null;
     let originalMaxListeners: number;
 
@@ -152,8 +157,8 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
         `proxy-builtin-${schemaVersion}`,
       );
       config.version = '0.8.0-alpha';
+      config.processContainer!.capabilities = ['internetClient'];
       config.network = {
-        allowOutbound: true,
         proxy: { builtinTestServer: true },
       } as unknown as ContainerConfig['network'];
       const script =
@@ -193,8 +198,8 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
         `proxy-ext-${schemaVersion}`,
       );
       config.version = '0.8.0-alpha';
+      config.processContainer!.capabilities = ['internetClient'];
       config.network = {
-        allowOutbound: true,
         proxy: { localhost: port },
       } as unknown as ContainerConfig['network'];
       const script =

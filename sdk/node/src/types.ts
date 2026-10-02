@@ -103,6 +103,18 @@ export const LegacyContainmentAliases: Readonly<Partial<Record<string, Containme
   macos_sandbox: 'seatbelt',
 };
 
+/** @internal Network fields the stable V1 mapper must reject rather than omit. */
+export const UnsupportedV1NetworkFields = [
+  'allowOutbound',
+  'defaultPolicy',
+  'enforcementMode',
+  'allowLocalNetwork',
+  'allowedHosts',
+  'blockedHosts',
+  'proxy',
+  'removeRulesOnExit',
+] as const;
+
 const LegacyConfigAliasVersions: Readonly<Record<string, readonly string[]>> = {
   appcontainer: ['0.6.0-alpha', '0.7.0-alpha', '0.8.0-alpha', '0.9.0-alpha'],
   appContainer: ['0.6.0-alpha', '0.7.0-alpha', '0.8.0-alpha', '0.9.0-alpha'],

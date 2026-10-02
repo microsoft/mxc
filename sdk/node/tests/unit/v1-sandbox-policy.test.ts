@@ -6,13 +6,18 @@ import { describe, it } from 'node:test';
 import {
   buildSandboxPayload,
   createConfigFromPolicy,
+  SDK_CONTRACT_VERSION as factoryContractVersion,
 } from '../../src/sandbox.js';
+import { prepareOneShotRequest } from '../../src/bindings/one-shot.js';
+import { SDK_CONTRACT_VERSION } from '../../src/contract-version.js';
 import type { SandboxPolicy } from '../../src/types.js';
 
 describe('v1 high-level policy', () => {
   it('owns exact contract 1.0.0', () => {
     const config = createConfigFromPolicy({});
-    assert.strictEqual(config.version, '1.0.0');
+    assert.strictEqual(factoryContractVersion, SDK_CONTRACT_VERSION);
+    assert.strictEqual(config.version, SDK_CONTRACT_VERSION);
+    assert.match(config.containerId!, /^[0-9a-f]{32}$/);
     assert.strictEqual(config.network, undefined);
   });
 
@@ -31,6 +36,7 @@ describe('v1 high-level policy', () => {
     'allowedHosts',
     'blockedHosts',
     'proxy',
+    'removeRulesOnExit',
   ]) {
     it(`rejects legacy network.${field}`, () => {
       assert.throws(
@@ -60,7 +66,7 @@ describe('v1 high-level policy', () => {
     });
   });
 
-  it('maps directional posture to ProcessContainer capabilities', () => {
+  it('does not derive ProcessContainer capabilities from directional posture', () => {
     const original = Object.getOwnPropertyDescriptor(process, 'platform');
     Object.defineProperty(process, 'platform', { value: 'win32' });
     try {
@@ -69,12 +75,17 @@ describe('v1 high-level policy', () => {
           egress: { default: 'allow' },
           ingress: { default: 'allow' },
         },
-      });
-      assert.ok(config.processContainer?.capabilities?.includes('internetClient'));
-      assert.ok(
-        config.processContainer?.capabilities?.includes(
-          'privateNetworkClientServer',
-        ),
+      }, 'processcontainer');
+      assert.deepStrictEqual(config.processContainer?.capabilities, [
+        'internetClient',
+        'privateNetworkClientServer',
+      ]);
+      assert.deepStrictEqual(
+        prepareOneShotRequest({
+          ...config,
+          process: { commandLine: 'echo hello' },
+        }).processContainer?.capabilities,
+        [],
       );
     } finally {
       if (original) Object.defineProperty(process, 'platform', original);

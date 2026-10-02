@@ -22,6 +22,8 @@ class FakeNative implements StreamingNativeFacade {
   readonly freedStrings: unknown[] = [];
   closeFailureHandle: number | bigint | undefined;
   spawnStatus = 0;
+  spawnRequest: string | undefined;
+  spawnExperimental: number | undefined;
   spawnCount = 0;
   deferSpawn = false;
   spawnFailure: Error | undefined;
@@ -52,11 +54,14 @@ class FakeNative implements StreamingNativeFacade {
   stateAwareExperimental: number | undefined;
 
   spawn(
-    _request: string,
+    request: string,
+    experimental: number,
     outHandle: unknown[],
     _error: unknown,
     completion: (error: Error | null, status: number) => void,
   ): void {
+    this.spawnRequest = request;
+    this.spawnExperimental = experimental;
     this.spawnCount += 1;
     if (this.spawnFailure !== undefined) {
       const failure = this.spawnFailure;
@@ -219,6 +224,27 @@ class FakeStreams implements NativeStreamFactory {
 }
 
 describe('native streaming binding ownership', () => {
+  it('passes exact one-shot JSON to asynchronous native spawn', async () => {
+    const native = new FakeNative();
+    const request = {
+      version: '1.0.0' as const,
+      containment: 'process' as const,
+      sandboxId: 'node-exact-spawn',
+      process: { commandLine: 'echo exact-json' },
+    };
+
+    const driver = await createStreamingDriver(
+      request,
+      native,
+      new FakeStreams(),
+    );
+
+    assert.strictEqual(native.spawnRequest, JSON.stringify(request));
+    assert.strictEqual(native.spawnExperimental, 0);
+    assert.strictEqual(native.spawnCount, 1);
+    await driver.free();
+  });
+
   it('dispatches state-aware exec through the native entry point', async () => {
     const native = new FakeNative();
     const streams = new FakeStreams();

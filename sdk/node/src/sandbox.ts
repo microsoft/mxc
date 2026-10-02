@@ -9,26 +9,19 @@ import {
     SandboxPolicy,
     ContainerConfig,
     SandboxContainment,
+    UnsupportedV1NetworkFields,
 } from './types.js';
 import { prepareSpawn, diagLogVersion, applyLinuxNetworkPolicy } from './helper.js';
 import { diagLog } from './diagnostic.js';
 import { MxcError } from './errors.js';
-import { prepareRequestSpec } from './bindings/request.js';
+import { prepareOneShotRequest } from './bindings/one-shot.js';
 import {
-  runBindingRequestAsync,
+  runOneShotJsonAsync,
   type BindingRunResult,
 } from './bindings/run.js';
+import { SDK_CONTRACT_VERSION } from './contract-version.js';
 
-const SDK_CONTRACT_VERSION = '1.0.0';
-const LEGACY_POLICY_NETWORK_FIELDS = [
-    'allowOutbound',
-    'defaultPolicy',
-    'enforcementMode',
-    'allowLocalNetwork',
-    'allowedHosts',
-    'blockedHosts',
-    'proxy',
-] as const;
+export { SDK_CONTRACT_VERSION };
 const V1_CONTAINMENTS = new Set<SandboxContainment>([
     'process',
     'processcontainer',
@@ -39,11 +32,9 @@ const V1_CONTAINMENTS = new Set<SandboxContainment>([
     'bubblewrap',
 ]);
 
-/**
- * Generates a random 8-character alphanumeric string for the app container name.
- */
+/** Generates a 128-bit random container identifier as 32 hexadecimal characters. */
 function generateRandomContainerName(): string {
-    return randomBytes(4).toString("hex");
+    return randomBytes(16).toString("hex");
 }
 
 function validateV1Policy(policy: SandboxPolicy, containment: SandboxContainment): void {
@@ -61,7 +52,7 @@ function validateV1Policy(policy: SandboxPolicy, containment: SandboxContainment
         );
     }
     if (policy.network !== undefined) {
-        for (const field of LEGACY_POLICY_NETWORK_FIELDS) {
+        for (const field of UnsupportedV1NetworkFields) {
             if (field in policy.network) {
                 throw new Error(
                     `SandboxPolicy.network.${field} is not part of the v1 API; `
@@ -72,12 +63,6 @@ function validateV1Policy(policy: SandboxPolicy, containment: SandboxContainment
         }
     }
 }
-
-function hasProcessContainerPolicy(policy: SandboxPolicy): boolean {
-    return Boolean(policy.processContainer?.filesystem?.enumeratePaths?.length) ||
-        policy.processContainer?.network?.allowedProxyPeer !== undefined;
-}
-
 
 /**
  * Builds the WSLC (WSL Container) portion of a ContainerConfig.
@@ -94,6 +79,7 @@ function buildWslcContainerConfig(
 
     config.wslc = {
         image: 'alpine:latest',
+        gpu: false,
     };
 
     // WSLC uses its own networking mode (None/Bridged) derived from
@@ -157,7 +143,8 @@ function buildProcessBaseContainerConfig(
     const capabilities: string[] = [];
     const allowsInternet =
         policy.network?.egress?.default === 'allow' ||
-        Boolean(policy.network?.egress?.allow?.length);
+        Boolean(policy.network?.egress?.allow?.length) ||
+        (policy.network as { allowOutbound?: boolean } | undefined)?.allowOutbound === true;
     if (allowsInternet) {
         capabilities.push("internetClient");
     }
@@ -208,8 +195,8 @@ function buildProcessBaseContainerConfig(
  * const config = createConfigFromPolicy(policy);
  *
  * // Advanced: tweak backend-specific settings
- * const config = createConfigFromPolicy(policy, "process");
- * config.processContainer!.ui!.isolation = "atoms";
+ * const processContainerConfig = createConfigFromPolicy(policy, "processcontainer");
+ * processContainerConfig.processContainer!.ui!.isolation = "atoms";
  * ```
  */
 export function createConfigFromPolicy(
@@ -241,7 +228,7 @@ export function createConfigFromPolicy(
 
     if (enumeratePaths?.length) {
         const targetsWindowsProcessContainer =
-            platform === 'win32' && (containment === 'process' || containment === 'processcontainer');
+            platform === 'win32' && containment === 'processcontainer';
         if (!targetsWindowsProcessContainer) {
             throw new Error(
                 'processContainer.filesystem.enumeratePaths is supported only by the Windows ' +
@@ -263,14 +250,15 @@ export function createConfigFromPolicy(
         };
     }
 
-    // SandboxPolicy defaults are fail-closed, so omission still emits lockdown.
-    config.ui = {
-        disable: !(policy.ui?.allowWindows ?? false),
-        clipboard: policy.ui?.clipboard ?? "none",
-        injection: policy.ui?.allowInputInjection ?? false,
-    };
+    if (policy.ui !== undefined) {
+        config.ui = {
+            disable: !(policy.ui.allowWindows ?? false),
+            clipboard: policy.ui.clipboard ?? "none",
+            injection: policy.ui.allowInputInjection ?? false,
+        };
+    }
 
-    if (policy.network !== undefined) {
+    if (policy.network?.egress !== undefined || policy.network?.ingress !== undefined) {
         config.network = {
             egress: policy.network.egress,
             ingress: policy.network.ingress,
@@ -326,31 +314,8 @@ export function createConfigFromPolicy(
 
     if (containment === 'process') {
         config.containment = 'process';
-        if (platform === 'linux') {
-            // Abstract `'process'` on Linux is resolved to Bubblewrap by the
-            // native binary (see `wxc_common::config_parser`). The wire-format
-            // payload intentionally omits any backend-specific block so the
-            // config reflects the abstract intent. Callers who explicitly want
-            // LXC must pass `containment: 'lxc'`.
-            //
-            // Network enforcement still needs the same iptables firewall mode
-            // as explicit `'bubblewrap'` when host filtering is in play.
-            applyLinuxNetworkPolicy(config);
-            diagLog(`createConfigFromPolicy: containment=process (linux, resolves to bubblewrap), id=${containerId}`);
-            return config;
-        }
-        if (platform === 'darwin') {
-            // The seatbelt backend has no container abstraction
-            // (per-process fork+exec sandbox), so containerId is intentionally
-            // not threaded through.
-            return buildDarwinProcessConfig(config);
-        }
-        diagLog(`createConfigFromPolicy: containment=process (BaseContainer), id=${containerId}`);
-        const processConfig = buildProcessBaseContainerConfig(config, policy);
-        if (hasProcessContainerPolicy(policy)) {
-            processConfig.containment = 'processcontainer';
-        }
-        return processConfig;
+        diagLog(`createConfigFromPolicy: containment=process, id=${containerId}`);
+        return config;
     }
 
     throw new Error(`Containment type '${containment}' is not yet supported.`);
@@ -390,7 +355,9 @@ export interface SandboxSpawnOptions {
   debug?: boolean;
 
   /**
-   * Enable experimental features
+   * Authorize experimental backends when using the raw executor-backed
+   * `spawnSandboxFromConfig` API. Stable V1 in-process and state-aware
+   * operations reject `true`.
    */
   experimental?: boolean;
 
@@ -483,6 +450,7 @@ function unsupportedInProcessRunOption(options: SandboxSpawnOptions): string | u
   if (options.dryRun === true) return 'dryRun';
   if (options.logDir !== undefined) return 'logDir';
   if (options.usePty === true) return 'usePty';
+  if (options.experimental === true) return 'experimental';
   if (options.signal !== undefined) return 'signal';
   return undefined;
 }
@@ -651,7 +619,7 @@ export function spawnSandbox(
  *
  * @example
  * ```typescript
- * const config = createConfigFromPolicy(policy, "process");
+ * const config = createConfigFromPolicy(policy, "processcontainer");
  * config.process!.commandLine = 'echo hello';
  * config.processContainer!.ui!.isolation = "atoms";
  *
@@ -754,11 +722,10 @@ export async function spawnSandboxAsync(
     );
   }
   const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
-  const request = prepareRequestSpec(config, {
+  const request = prepareOneShotRequest(config, {
     inheritDefaultEnv: options.inheritDefaultEnv,
-    experimental: options.experimental,
   });
-  const result = await runBindingRequestAsync(request);
+  const result = await runOneShotJsonAsync(request);
   if (result.timedOut) {
     throw new MxcError('backend_error', 'sandbox execution timed out', {
       timedOut: true,
