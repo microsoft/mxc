@@ -89,7 +89,6 @@ nanvix_runner = { path = "backends/nanvix/runner" }
 nix = { version = "0.29", features = ["fs", "mount", "sched", "signal", "net", "process", "user", "term"] }
 process_security_environment_spec = { path = "core/generated/process_security_environment_specification" }
 plm = { path = "host/plm" }
-portable-pty = "0.9"
 quick-xml = "0.41"
 seatbelt_common = { path = "backends/seatbelt/common" }
 same-file = "1"

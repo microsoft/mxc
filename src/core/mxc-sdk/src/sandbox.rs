@@ -9,8 +9,6 @@ use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use portable_pty::{MasterPty, PtySize as PortablePtySize};
-
 use crate::state_aware_sdk::{
     lifecycle_sdk_input, ExecRequest, LifecycleResult, OperationOptions, ProvisionRequest,
     ProvisionResult, SandboxId, StateAwareResult, ValidationResult,
@@ -243,13 +241,10 @@ pub struct Sandbox {
 
 /// A live sandboxed process attached to an MXC-owned pseudo-terminal.
 ///
-/// The terminal I/O contract is backed by a private
-/// [`portable_pty::MasterPty`] implementation. The public wrapper keeps MXC's
-/// process-tree lifecycle and backend details out of the dependency's public
-/// types, so the implementation can change without changing this API.
+/// The public wrapper keeps MXC's process-tree lifecycle and backend details
+/// behind a stable terminal-oriented API.
 pub struct MxcPty {
     process: SharedPtyProcess,
-    master: Box<dyn MasterPty + Send>,
     reader_taken: Arc<AtomicBool>,
     writer_taken: Arc<AtomicBool>,
 }
@@ -276,14 +271,8 @@ impl MxcPty {
         let process = Arc::new(Mutex::new(process));
         let reader_taken = Arc::new(AtomicBool::new(false));
         let writer_taken = Arc::new(AtomicBool::new(false));
-        let master = Box::new(BackendMasterPty {
-            process: Arc::clone(&process),
-            reader_taken: Arc::clone(&reader_taken),
-            writer_taken: Arc::clone(&writer_taken),
-        });
         Ok(Self {
             process,
-            master,
             reader_taken,
             writer_taken,
         })
@@ -322,15 +311,12 @@ impl MxcPty {
     /// Wait for the sandboxed process to exit.
     pub fn wait(&mut self) -> std::io::Result<WaitOutcome> {
         if !self.writer_taken.load(Ordering::Acquire) {
-            drop(self.master.take_writer().map_err(std::io::Error::other)?);
+            drop(self.take_writer()?);
         }
         let output_drain = if self.reader_taken.load(Ordering::Acquire) {
             None
         } else {
-            let mut reader = self
-                .master
-                .try_clone_reader()
-                .map_err(std::io::Error::other)?;
+            let mut reader = self.try_clone_reader()?;
             Some(std::thread::spawn(move || {
                 let _ = std::io::copy(&mut reader, &mut std::io::sink());
             }))
@@ -348,29 +334,26 @@ impl MxcPty {
 
     /// Clone a reader for the PTY's merged output stream.
     pub fn try_clone_reader(&self) -> std::io::Result<Box<dyn Read + Send>> {
-        self.master
-            .try_clone_reader()
-            .map_err(std::io::Error::other)
+        let reader = self.lock_process().pty_clone_reader()?;
+        self.reader_taken.store(true, Ordering::Release);
+        Ok(reader)
     }
 
     /// Take the PTY input writer. This may succeed only once.
     pub fn take_writer(&self) -> std::io::Result<Box<dyn Write + Send>> {
-        self.master.take_writer().map_err(std::io::Error::other)
+        let writer = self.lock_process().pty_take_writer()?;
+        self.writer_taken.store(true, Ordering::Release);
+        Ok(writer)
     }
 
     /// Resize the PTY.
     pub fn resize(&self, size: MxcPtySize) -> std::io::Result<()> {
-        self.master
-            .resize(size.into())
-            .map_err(std::io::Error::other)
+        self.lock_process().pty_resize(size.into())
     }
 
     /// Return the current PTY dimensions.
     pub fn size(&self) -> std::io::Result<MxcPtySize> {
-        self.master
-            .get_size()
-            .map(Into::into)
-            .map_err(std::io::Error::other)
+        self.lock_process().pty_size().map(Into::into)
     }
 
     /// Transfer native PTY input/output endpoints when the backend supports it.
@@ -398,69 +381,6 @@ impl MxcPty {
     }
 }
 
-struct BackendMasterPty {
-    process: SharedPtyProcess,
-    reader_taken: Arc<AtomicBool>,
-    writer_taken: Arc<AtomicBool>,
-}
-
-impl BackendMasterPty {
-    fn lock_process(&self) -> std::sync::MutexGuard<'_, Box<dyn SandboxProcess>> {
-        self.process
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-}
-
-impl MasterPty for BackendMasterPty {
-    fn resize(&self, size: PortablePtySize) -> anyhow::Result<()> {
-        self.lock_process()
-            .pty_resize(MxcPtySize::from(size).into())
-            .map_err(Into::into)
-    }
-
-    fn get_size(&self) -> anyhow::Result<PortablePtySize> {
-        self.lock_process()
-            .pty_size()
-            .map(MxcPtySize::from)
-            .map(PortablePtySize::from)
-            .map_err(Into::into)
-    }
-
-    fn try_clone_reader(&self) -> anyhow::Result<Box<dyn Read + Send>> {
-        let reader = self
-            .lock_process()
-            .pty_clone_reader()
-            .map_err(anyhow::Error::from)?;
-        self.reader_taken.store(true, Ordering::Release);
-        Ok(reader)
-    }
-
-    fn take_writer(&self) -> anyhow::Result<Box<dyn Write + Send>> {
-        let writer = self
-            .lock_process()
-            .pty_take_writer()
-            .map_err(anyhow::Error::from)?;
-        self.writer_taken.store(true, Ordering::Release);
-        Ok(writer)
-    }
-
-    #[cfg(unix)]
-    fn process_group_leader(&self) -> Option<libc::pid_t> {
-        None
-    }
-
-    #[cfg(unix)]
-    fn as_raw_fd(&self) -> Option<std::os::fd::RawFd> {
-        None
-    }
-
-    #[cfg(unix)]
-    fn tty_name(&self) -> Option<std::path::PathBuf> {
-        None
-    }
-}
-
 /// Dimensions of an [`MxcPty`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MxcPtySize {
@@ -483,28 +403,6 @@ impl Default for MxcPtySize {
 
 impl From<MxcPtySize> for wxc_common::sandbox_process::PtySize {
     fn from(size: MxcPtySize) -> Self {
-        Self {
-            rows: size.rows,
-            cols: size.cols,
-            pixel_width: size.pixel_width,
-            pixel_height: size.pixel_height,
-        }
-    }
-}
-
-impl From<MxcPtySize> for PortablePtySize {
-    fn from(size: MxcPtySize) -> Self {
-        Self {
-            rows: size.rows,
-            cols: size.cols,
-            pixel_width: size.pixel_width,
-            pixel_height: size.pixel_height,
-        }
-    }
-}
-
-impl From<PortablePtySize> for MxcPtySize {
-    fn from(size: PortablePtySize) -> Self {
         Self {
             rows: size.rows,
             cols: size.cols,
