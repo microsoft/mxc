@@ -255,6 +255,25 @@ public class MxcLifecycleTests
     }
 
     [Fact]
+    public void SpawnInContainerWithPty_NullCommand_Throws()
+    {
+        var id = new SandboxId("iso:12345");
+        Assert.Throws<ArgumentNullException>(
+            () => MxcLifecycle.SpawnInContainerWithPty(id, null!));
+    }
+
+    [Fact]
+    public void SpawnInContainerWithPty_RejectsZeroDimensionsBeforeNativeCall()
+    {
+        var id = new SandboxId("iso:12345");
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => MxcLifecycle.SpawnInContainerWithPty(
+                id,
+                "cmd.exe",
+                new MxcPtySize(0, 80)));
+    }
+
+    [Fact]
     public void ExecInSandboxAttached_NullCommand_Throws()
     {
         var id = new SandboxId("iso:12345");

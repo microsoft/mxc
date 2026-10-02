@@ -277,6 +277,11 @@ fn spawn_exec(
                 .stdout(Stdio::inherit())
                 .stderr(Stdio::inherit());
         }
+        StdioMode::Pty(_) => {
+            return Err(error_response(
+                "Seatbelt does not yet support in-process PTY spawning".to_string(),
+            ));
+        }
     }
 
     let mut child = command
@@ -286,6 +291,7 @@ fn spawn_exec(
     let (stdin, stdout, stderr) = match stdio {
         StdioMode::Pipes => (child.stdin.take(), child.stdout.take(), child.stderr.take()),
         StdioMode::Inherit => (None, None, None),
+        StdioMode::Pty(_) => unreachable!("PTY mode was rejected before spawn"),
     };
 
     // Wrap the pipe reads so the caller can abandon a stream a backgrounded

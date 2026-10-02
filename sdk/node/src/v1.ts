@@ -37,9 +37,16 @@ export {
 export {
   createConfigFromPolicy,
   spawnSandbox,
+  spawnWithPty,
   spawnSandboxAsync,
   buildSandboxPayload,
+  type MxcPtySpawnOptions,
 } from './sandbox.js';
+
+export {
+  MxcPty,
+  type MxcPtySize,
+} from './mxc-pty.js';
 
 export {
   getAvailableToolsPolicy,
@@ -89,6 +96,7 @@ export {
   provisionSandbox,
   startSandbox,
   execInSandbox,
+  spawnInContainerWithPty,
   execInSandboxAsync,
   stopSandbox,
   deprovisionSandbox,

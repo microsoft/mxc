@@ -132,6 +132,22 @@ pub struct IsolationSessionManager {
 }
 
 impl IsolationSessionManager {
+    /// Start an interactive process whose ConPTY handles remain caller-driven.
+    pub(super) fn pty_process(
+        &self,
+        options: &ProcessOptions,
+        logger: Option<&Logger>,
+    ) -> Result<Arc<ClosingProcess>, IsolationSessionError> {
+        owned_thread::call(&self.impersonation, || {
+            let mta = MtaReference::acquire()?;
+            Ok(Arc::new(ClosingProcess::new(
+                self.start_process(options, logger)?,
+                self.impersonation.clone(),
+                mta,
+            )))
+        })
+    }
+
     /// Pegs a manager to an existing OS-assigned agent user name (the value
     /// returned by `add_user`). Activates the service factory once and
     /// reuses it for the manager's lifetime.
@@ -1120,6 +1136,37 @@ impl ClosingProcess {
             impersonation,
             _mta: mta,
         }
+    }
+
+    pub(super) fn resize_console(
+        &self,
+        columns: u16,
+        rows: u16,
+    ) -> Result<(), IsolationSessionError> {
+        owned_thread::call(&self.impersonation, || {
+            self.process
+                .ResizeConsole(columns, rows)
+                .map_err(|error| lifecycle_err(format!("ResizeConsole failed: {error}")))
+        })
+    }
+
+    pub(super) fn close_standard_input(&self) -> Result<(), IsolationSessionError> {
+        owned_thread::call(&self.impersonation, || {
+            self.process
+                .CloseStandardInput()
+                .map_err(|error| lifecycle_err(format!("CloseStandardInput failed: {error}")))
+        })
+    }
+
+    pub(super) fn wait_for_exit(
+        &self,
+        timeout_ms: u32,
+    ) -> Result<ExecOutcome, IsolationSessionError> {
+        owned_thread::call(&self.impersonation, || self.wait(timeout_ms))
+    }
+
+    pub(super) fn terminate_process(&self) -> Result<(), IsolationSessionError> {
+        owned_thread::call(&self.impersonation, || self.terminate())
     }
 }
 

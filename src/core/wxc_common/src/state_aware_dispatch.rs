@@ -25,6 +25,7 @@ use crate::exec_stream::wrap_read_checked;
 use crate::id::parse_sandbox_id_prefix;
 use crate::models::ContainmentBackend;
 use crate::mxc_error::{MxcError, ResponseEnvelope};
+use crate::sandbox_process::{PtySize, SandboxProcess};
 use crate::state_aware_backend::{
     DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult, StartResult,
     StatefulSandboxBackend, StopResult,
@@ -110,6 +111,24 @@ pub fn dispatch_state_aware_exec<B: StatefulSandboxBackend>(
     // The caller drives the returned streams itself, so the backend must
     // surface real pipes and leave this process's console alone.
     backend.exec(&sandbox_id, &request, config, ExecStdio::Piped)
+}
+
+/// Caller-owned PTY counterpart of [`dispatch_state_aware_exec`].
+pub fn dispatch_state_aware_exec_pty<B: StatefulSandboxBackend>(
+    backend: &mut B,
+    bound: BoundStateAwareRequest<B>,
+    size: PtySize,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    let phase = bound.phase();
+    let (request, operation) = bound.into_parts();
+    let BoundStateAwareOperation::Exec { sandbox_id, config } = operation else {
+        return Err(MxcError::malformed_request(format!(
+            "spawning a process with a PTY in an existing container requires the exec phase, got {phase}"
+        )));
+    };
+    validate_exec_common(&request)?;
+    backend.validate_exec(&sandbox_id, &request, config.as_ref())?;
+    backend.exec_pty(&sandbox_id, &request, config, size)
 }
 
 /// Per-backend phase router. The `run_state_aware` arm for a participating

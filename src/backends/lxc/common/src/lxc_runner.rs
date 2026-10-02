@@ -1174,8 +1174,16 @@ impl LxcScriptRunner {
         logger: &mut Logger,
         stdio: StdioMode,
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
-        if stdio == StdioMode::Inherit {
-            return Err(ScriptResponse::error(LXC_INHERIT_STDIO_UNSUPPORTED));
+        match stdio {
+            StdioMode::Inherit => {
+                return Err(ScriptResponse::error(LXC_INHERIT_STDIO_UNSUPPORTED));
+            }
+            StdioMode::Pty(_) => {
+                return Err(ScriptResponse::rejected(
+                    "LXC does not support caller-owned PTY spawning",
+                ));
+            }
+            StdioMode::Pipes => {}
         }
         validate_common(request)?;
         SandboxBackend::validate(self, request)?;

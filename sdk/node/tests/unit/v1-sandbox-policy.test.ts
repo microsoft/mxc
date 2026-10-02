@@ -147,6 +147,18 @@ describe('v1 high-level policy', () => {
     }
   });
 
+  it('omits unsupported IsolationSession UI policy', () => {
+    const config = createConfigFromPolicy({}, 'isolation_session');
+    assert.strictEqual(config.ui, undefined);
+    assert.throws(
+      () => createConfigFromPolicy(
+        { ui: { allowWindows: false } },
+        'isolation_session',
+      ),
+      /IsolationSession does not enforce UI policy/,
+    );
+  });
+
   it('limits enumeratePaths to Windows ProcessContainer', () => {
     const policy: SandboxPolicy = {
       processContainer: {

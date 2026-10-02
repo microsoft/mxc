@@ -179,6 +179,57 @@ public static class MxcLifecycle
     }
 
     /// <summary>
+    /// Spawn a process in a started container with a caller-owned PTY.
+    /// </summary>
+    public static MxcPty SpawnInContainerWithPty(
+        SandboxId id,
+        string command,
+        MxcPtySize? size = null,
+        StateAwareExecOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        var terminalSize = size ?? MxcPtySize.Default;
+        if (terminalSize.Rows == 0 || terminalSize.Columns == 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(size),
+                "PTY rows and columns must be non-zero.");
+        }
+
+        var requestJson = BuildExecEnvelope(id, command, options).ToJsonString();
+        var requestBuf = ToNullTerminatedUtf8(requestJson);
+        unsafe
+        {
+            fixed (byte* requestPtr = requestBuf)
+            {
+                NativeSandbox* handle = null;
+                MxcErrorDetail error = default;
+                var status = NativeMethods.mxc_state_aware_exec_pty(
+                    requestPtr,
+                    ExperimentalOptInFor(id),
+                    terminalSize.Rows,
+                    terminalSize.Columns,
+                    &handle,
+                    &error);
+                if (status != (int)ErrorCode.Success)
+                {
+                    try
+                    {
+                        throw NativeError.ToException(status, error, "unknown error");
+                    }
+                    finally
+                    {
+                        NativeMethods.mxc_error_detail_free(&error);
+                    }
+                }
+                return new MxcPty(
+                    MxcSandboxHandle.FromRaw(handle),
+                    MxcSandboxProcess.NormalizeTimeout(options?.TimeoutMs));
+            }
+        }
+    }
+
+    /// <summary>
     /// Run a command attached to this process's terminal and wait for it.
     /// </summary>
     public static SandboxWaitResult ExecInSandboxAttached(

@@ -24,7 +24,7 @@
 use wxc_common::logger::Logger;
 use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use wxc_common::mxc_error::MxcError;
-use wxc_common::sandbox_process::SandboxProcess;
+use wxc_common::sandbox_process::{PtySize, SandboxProcess};
 
 /// `Err` when the host OS has no MXC sandbox backend. Checked before backend
 /// selection so an unsupported platform reports a clear message rather than a
@@ -65,6 +65,7 @@ pub fn spawn_runner(
             "dry_run is not supported for streaming spawns",
         ));
     }
+
     // Anchor the run to its policy identity before any backend is engaged, so
     // the streaming surface produces the same `mxc.PolicyHash` record as the
     // run-to-completion one.
@@ -78,6 +79,28 @@ pub fn spawn_runner(
         ContainmentBackend::IsolationSession => spawn_isolation_session(request, logger),
         other => Err(MxcError::unsupported_containment(format!(
             "the mxc engine does not yet support streaming for the '{}' backend",
+            other.wire_name()
+        ))),
+    }
+}
+
+/// Spawn a caller-driven pseudo-terminal for `request`.
+pub fn spawn_pty_runner(
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+    size: PtySize,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    ensure_host_supported()?;
+    if request.dry_run {
+        return Err(MxcError::malformed_request(
+            "dry_run is not supported for PTY spawns",
+        ));
+    }
+    crate::run::log_policy_hash(request, logger);
+    match &request.containment {
+        ContainmentBackend::IsolationSession => spawn_isolation_session_pty(request, logger, size),
+        other => Err(MxcError::unsupported_containment(format!(
+            "the mxc engine does not yet support PTY spawning for the '{}' backend",
             other.wire_name()
         ))),
     }
@@ -307,6 +330,20 @@ fn spawn_isolation_session(
     })
 }
 
+#[cfg(all(target_os = "windows", feature = "isolation_session"))]
+fn spawn_isolation_session_pty(
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+    size: PtySize,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    use isolation_session_common::OneShotSpawnFailure;
+
+    isolation_session_common::spawn_one_shot_pty(request, logger, size).map_err(|e| match e {
+        OneShotSpawnFailure::Refused(resp) => map_spawn_error(resp),
+        OneShotSpawnFailure::Launch(err) => err,
+    })
+}
+
 #[cfg(not(all(target_os = "windows", feature = "isolation_session")))]
 fn spawn_isolation_session(
     _request: &ExecutionRequest,
@@ -326,12 +363,33 @@ fn spawn_isolation_session(
     }
 }
 
+#[cfg(not(all(target_os = "windows", feature = "isolation_session")))]
+fn spawn_isolation_session_pty(
+    _request: &ExecutionRequest,
+    _logger: &mut Logger,
+    _size: PtySize,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    #[cfg(target_os = "windows")]
+    {
+        Err(MxcError::unsupported_containment(
+            "IsolationSession backend not compiled. Rebuild with --features isolation_session.",
+        ))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err(MxcError::unsupported_containment(
+            "IsolationSession is only available on Windows",
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ensure_host_supported, map_spawn_error, spawn_runner};
+    use super::{ensure_host_supported, map_spawn_error, spawn_pty_runner, spawn_runner};
     use wxc_common::logger::{Logger, Mode};
     use wxc_common::models::{ContainmentBackend, ExecutionRequest};
     use wxc_common::mxc_error::MxcErrorCode;
+    use wxc_common::sandbox_process::PtySize;
 
     fn minimal_request() -> ExecutionRequest {
         ExecutionRequest {
@@ -407,6 +465,28 @@ mod tests {
         };
         assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
         assert!(err.message.contains("vm"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn pty_spawn_rejects_unsupported_containment_before_launch() {
+        let mut request = minimal_request();
+        request.containment = ContainmentBackend::Lxc;
+        let mut logger = Logger::new(Mode::Buffer);
+        let err = match spawn_pty_runner(
+            &request,
+            &mut logger,
+            PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+        ) {
+            Ok(_) => panic!("LXC PTY spawn must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
+        assert!(err.message.contains("lxc"), "got: {}", err.message);
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]

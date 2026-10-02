@@ -20,6 +20,8 @@ import {
   type BindingRunResult,
 } from './bindings/run.js';
 import { SDK_CONTRACT_VERSION } from './contract-version.js';
+import { spawnBindingSandboxWithPty } from './bindings/pty.js';
+import { MxcPty } from './mxc-pty.js';
 
 export { SDK_CONTRACT_VERSION };
 const V1_CONTAINMENTS = new Set<SandboxContainment>([
@@ -49,6 +51,12 @@ function validateV1Policy(policy: SandboxPolicy, containment: SandboxContainment
         throw new Error(
             `Containment '${String(containment)}' is not available in the v1.0 high-level SDK. `
             + 'Use an exact-version ContainerConfig for development-only containment.',
+        );
+    }
+    if (containment === 'isolation_session' && policy.ui !== undefined) {
+        throw new Error(
+            'IsolationSession does not enforce UI policy; omit policy.ui or '
+            + 'use a backend that enforces the requested UI restrictions.',
         );
     }
     if (policy.network !== undefined) {
@@ -441,6 +449,15 @@ export interface SandboxSpawnOptions {
   signal?: AbortSignal;
 }
 
+/** Options for an MXC-owned pseudo-terminal spawn. */
+export interface MxcPtySpawnOptions extends SandboxSpawnOptions {
+  /** Initial terminal row count. Defaults to 24. */
+  rows?: number;
+
+  /** Initial terminal column count. Defaults to 80. */
+  columns?: number;
+}
+
 function unsupportedInProcessRunOption(options: SandboxSpawnOptions): string | undefined {
   if (options.debug === true) return 'debug';
   if (options.allowTestingFeatures === true) return 'allowTestingFeatures';
@@ -603,6 +620,52 @@ export function spawnSandbox(
 ): pty.IPty {
   const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
   return spawnWithConfig(config, options, workingDirectory, env);
+}
+
+/**
+ * Spawn a sandboxed process attached to an MXC-owned pseudo-terminal.
+ *
+ * Unlike {@link spawnSandbox}, this creates the PTY inside the native MXC
+ * runtime and returns an {@link MxcPty} with reliable lifecycle, resize, and
+ * process-tree kill operations. Terminal stderr is merged into the output
+ * stream.
+ */
+export async function spawnWithPty(
+  config: ContainerConfig,
+  options: MxcPtySpawnOptions = {},
+  workingDirectory?: string,
+  env?: { [key: string]: string | undefined },
+): Promise<MxcPty> {
+  const unsupportedOption = unsupportedInProcessRunOption(options);
+  if (unsupportedOption !== undefined) {
+    throw new MxcError(
+      'malformed_request',
+      `spawnWithPty does not support executor-only option '${unsupportedOption}'`,
+    );
+  }
+  const rows = options.rows ?? 24;
+  const columns = options.columns ?? 80;
+  if (
+    !Number.isInteger(rows) ||
+    !Number.isInteger(columns) ||
+    rows < 1 ||
+    rows > 32767 ||
+    columns < 1 ||
+    columns > 32767
+  ) {
+    throw new MxcError(
+      'malformed_request',
+      'PTY rows and columns must be integers between 1 and 32767',
+    );
+  }
+
+  const request = prepareRequestSpec(config, {
+    workingDirectory,
+    env,
+    inheritDefaultEnv: options.inheritDefaultEnv,
+    experimental: options.experimental,
+  });
+  return spawnBindingSandboxWithPty(request, rows, columns);
 }
 
 /**

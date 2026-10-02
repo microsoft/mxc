@@ -122,6 +122,13 @@ public interface ISandboxLifecycle
         string command,
         StateAwareExecOptions? options = null);
 
+    /// <summary>Spawn a process in the container with a caller-owned pseudo-terminal.</summary>
+    MxcPty SpawnInContainerWithPty(
+        SandboxId id,
+        string command,
+        MxcPtySize? size = null,
+        StateAwareExecOptions? options = null);
+
     /// <summary>Execute attached to this process's terminal.</summary>
     SandboxWaitResult ExecInSandboxAttached(
         SandboxId id,
@@ -197,6 +204,14 @@ public sealed class MxcSandboxLifecycle : ISandboxLifecycle
         string command,
         StateAwareExecOptions? options = null) =>
         MxcLifecycle.ExecInSandbox(id, command, options);
+
+    /// <inheritdoc/>
+    public MxcPty SpawnInContainerWithPty(
+        SandboxId id,
+        string command,
+        MxcPtySize? size = null,
+        StateAwareExecOptions? options = null) =>
+        MxcLifecycle.SpawnInContainerWithPty(id, command, size, options);
 
     /// <inheritdoc/>
     public SandboxWaitResult ExecInSandboxAttached(

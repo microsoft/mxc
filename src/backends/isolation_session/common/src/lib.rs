@@ -40,7 +40,7 @@ mod process_options;
 #[cfg(target_os = "windows")]
 mod sandbox;
 #[cfg(target_os = "windows")]
-pub use sandbox::{spawn_one_shot, OneShotSpawnFailure};
+pub use sandbox::{spawn_one_shot, spawn_one_shot_pty, OneShotSpawnFailure};
 #[cfg(target_os = "windows")]
 mod sandbox_id;
 #[cfg(target_os = "windows")]

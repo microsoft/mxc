@@ -61,7 +61,8 @@ pub use run::resolve_runner_for_audit;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 pub use run::{log_policy_hash, resolve_runner, run, ResolvedRunner};
 pub use state_aware::{
-    exec_state_aware_attached, exec_state_aware_json, exec_typed_state_aware_attached_request,
+    exec_state_aware_attached, exec_state_aware_json, exec_state_aware_pty_json,
+    exec_typed_state_aware_attached_request, exec_typed_state_aware_pty_request,
     exec_typed_state_aware_request, run_state_aware, run_state_aware_json,
     run_typed_state_aware_request, EngineProvisionMetadata, EngineStateAwareResult,
 };
@@ -71,7 +72,7 @@ pub use verbose_telemetry::emit_verbose_telemetry;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainmentBackend, ExecutionRequest, FailurePhase, ScriptResponse};
 use wxc_common::mxc_error::MxcError;
-use wxc_common::sandbox_process::{NativeStdio, SandboxProcess, StreamCloser};
+use wxc_common::sandbox_process::{NativeStdio, PtySize, SandboxProcess, StreamCloser};
 use wxc_common::state_aware_request::MxcRequest;
 use wxc_common::telemetry;
 
@@ -180,6 +181,15 @@ fn spawn_execution_request_with_logger(
     } else {
         Ok(process)
     }
+}
+
+/// Spawn a sandbox attached to an MXC-owned pseudo-terminal.
+pub fn spawn_with_pty(
+    request: &SandboxRequest,
+    size: wxc_common::sandbox_process::PtySize,
+) -> Result<Box<dyn SandboxProcess>, Error> {
+    let mut logger = Logger::new(Mode::Buffer);
+    dispatch::spawn_pty_runner(&request.inner, &mut logger, size).map_err(Error::from)
 }
 
 pub(crate) struct TelemetryRegistration {
@@ -566,6 +576,26 @@ impl SandboxProcess for TelemetryProcess {
         self.inner.take_native_stdio()
     }
 
+    fn is_pty(&self) -> bool {
+        self.inner.is_pty()
+    }
+
+    fn pty_clone_reader(&self) -> std::io::Result<Box<dyn std::io::Read + Send>> {
+        self.inner.pty_clone_reader()
+    }
+
+    fn pty_take_writer(&self) -> std::io::Result<Box<dyn std::io::Write + Send>> {
+        self.inner.pty_take_writer()
+    }
+
+    fn pty_resize(&self, size: PtySize) -> std::io::Result<()> {
+        self.inner.pty_resize(size)
+    }
+
+    fn pty_size(&self) -> std::io::Result<PtySize> {
+        self.inner.pty_size()
+    }
+
     fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
         self.inner.take_stdout()
     }
@@ -702,6 +732,26 @@ impl SandboxProcess for ProcessWithWarnings {
 
     fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
         self.inner.take_native_stdio()
+    }
+
+    fn is_pty(&self) -> bool {
+        self.inner.is_pty()
+    }
+
+    fn pty_clone_reader(&self) -> std::io::Result<Box<dyn std::io::Read + Send>> {
+        self.inner.pty_clone_reader()
+    }
+
+    fn pty_take_writer(&self) -> std::io::Result<Box<dyn std::io::Write + Send>> {
+        self.inner.pty_take_writer()
+    }
+
+    fn pty_resize(&self, size: PtySize) -> std::io::Result<()> {
+        self.inner.pty_resize(size)
+    }
+
+    fn pty_size(&self) -> std::io::Result<PtySize> {
+        self.inner.pty_size()
     }
 
     fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {

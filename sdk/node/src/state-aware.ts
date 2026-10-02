@@ -7,6 +7,7 @@ import { diagLog } from './diagnostic.js';
 import { MxcError } from './errors.js';
 import { runBindingStateAwareRequestAsync } from './bindings/state-aware.js';
 import { spawnStateAwareBindingSandboxProcess } from './bindings/streaming.js';
+import { execStateAwareBindingSandboxWithPty } from './bindings/pty.js';
 import {
   DeprovisionConfigFor,
   DeprovisionResult,
@@ -24,6 +25,7 @@ import {
   StopResult,
 } from './state-aware-types.js';
 import type { MxcSandboxProcess } from './sandbox-process.js';
+import type { MxcPty, MxcPtySize } from './mxc-pty.js';
 import {
   backendForSandboxId,
   buildStateAwareEnvelope,
@@ -354,17 +356,58 @@ export function execInSandbox<C extends PipedExecBackend>(
       'execInSandbox does not support dryRun; use execInSandboxAsync to validate exec requests.',
     );
   }
+
   if (uncheckedOptions.signal !== undefined) {
     throw new MxcError(
       'malformed_request',
       'execInSandbox does not support AbortSignal; call kill() on the returned MxcSandboxProcess.',
     );
   }
+
   return spawnStateAwareExecProcess(
     sandboxId,
     config,
     uncheckedOptions,
     'execInSandbox',
+  );
+}
+
+/**
+ * Spawns a process inside an existing container with a caller-owned PTY.
+ */
+export function spawnInContainerWithPty<C extends StateAwareContainmentBackend>(
+  sandboxId: SandboxId<C>,
+  config: ExecConfigFor<C>,
+  size: MxcPtySize = { rows: 24, columns: 80 },
+  options: StateAwareStreamingOptions = {},
+): Promise<MxcPty> {
+  const uncheckedOptions = options as SandboxSpawnOptions;
+  if (uncheckedOptions.dryRun === true || uncheckedOptions.signal !== undefined) {
+    throw new MxcError(
+      'malformed_request',
+      'spawnInContainerWithPty does not support dryRun or AbortSignal; dispose or kill the returned MxcPty.',
+    );
+  }
+  if (
+    !Number.isInteger(size.rows) ||
+    !Number.isInteger(size.columns) ||
+    size.rows < 1 ||
+    size.rows > 32767 ||
+    size.columns < 1 ||
+    size.columns > 32767
+  ) {
+    throw new MxcError(
+      'malformed_request',
+      'PTY rows and columns must be integers between 1 and 32767',
+    );
+  }
+  assertStateAwareOptions('spawnInContainerWithPty', uncheckedOptions);
+  return execStateAwareBindingSandboxWithPty(
+    JSON.stringify(buildExecEnvelope(sandboxId, config)),
+    options.experimental === true,
+    size.rows,
+    size.columns,
+    config.process.timeout,
   );
 }
 

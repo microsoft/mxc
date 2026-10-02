@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::mxc_error::MxcError;
-use wxc_common::sandbox_process::SandboxProcess;
+use wxc_common::sandbox_process::{PtySize, SandboxProcess};
 use wxc_common::sdk_input::SdkStateAwareInput;
 use wxc_common::state_aware_backend::ExecOutcome;
 #[cfg(target_os = "windows")]
@@ -334,6 +334,7 @@ pub fn exec_state_aware(
                 wxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)?,
             ))
         }
+
         #[cfg(all(target_os = "windows", feature = "isolation_session"))]
         wxc_common::models::ContainmentBackend::IsolationSession => {
             let bound = wxc_common::state_aware_binding::bind_isolation_session(parsed)?;
@@ -362,6 +363,38 @@ pub fn exec_state_aware(
         }
         _ => Err(MxcError::unsupported_phase(format!(
             "backend {:?} does not implement the state-aware lifecycle",
+            backend
+        ))),
+    }
+}
+
+/// Resolve `parsed`'s backend and run the `exec` phase with a caller-controlled PTY.
+pub fn exec_state_aware_pty(
+    parsed: ParsedStateAwareRequest,
+    _size: PtySize,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    let backend = resolve_backend(&parsed)?;
+    crate::experimental::require_experimental_optin(
+        &backend,
+        parsed.request().experimental_enabled,
+    )?;
+    match backend {
+        #[cfg(all(target_os = "windows", feature = "isolation_session"))]
+        wxc_common::models::ContainmentBackend::IsolationSession => {
+            let bound = wxc_common::state_aware_binding::bind_isolation_session(parsed)?;
+            let mut runner = isolation_session_common::IsolationSessionRunner::new();
+            wxc_common::state_aware_dispatch::dispatch_state_aware_exec_pty(
+                &mut runner,
+                bound,
+                _size,
+            )
+        }
+        #[cfg(not(all(target_os = "windows", feature = "isolation_session")))]
+        wxc_common::models::ContainmentBackend::IsolationSession => {
+            Err(isolation_session_unavailable())
+        }
+        _ => Err(MxcError::unsupported_phase(format!(
+            "backend {:?} does not support state-aware PTY exec",
             backend
         ))),
     }
@@ -655,9 +688,25 @@ fn exec_state_aware_parsed(
     parsed: ParsedStateAwareRequest,
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
+    exec_state_aware_process_parsed(parsed, logger, exec_state_aware)
+}
+
+fn exec_state_aware_pty_parsed(
+    parsed: ParsedStateAwareRequest,
+    logger: &mut Logger,
+    size: PtySize,
+) -> Result<Box<dyn SandboxProcess>, Error> {
+    exec_state_aware_process_parsed(parsed, logger, |parsed| exec_state_aware_pty(parsed, size))
+}
+
+fn exec_state_aware_process_parsed(
+    parsed: ParsedStateAwareRequest,
+    logger: &mut Logger,
+    start: impl FnOnce(ParsedStateAwareRequest) -> Result<Box<dyn SandboxProcess>, MxcError>,
+) -> Result<Box<dyn SandboxProcess>, Error> {
     if !matches!(parsed.phase(), Phase::Exec) {
         return Err(Error::from(MxcError::malformed_request(format!(
-            "streaming exec requires the exec phase, got {}",
+            "live exec requires the exec phase, got {}",
             parsed.phase()
         ))));
     }
@@ -681,7 +730,7 @@ fn exec_state_aware_parsed(
     let correlation = phase_correlation(telemetry_active, phase, sandbox_id.as_deref());
     let init_warnings = logger.take_warnings();
     let started = std::time::Instant::now();
-    match exec_state_aware(parsed) {
+    match start(parsed) {
         Ok(process) => {
             let process = crate::ProcessWithWarnings::wrap(process, init_warnings);
             Ok(wrap_state_aware_telemetry_process_with_kind(
@@ -798,6 +847,18 @@ pub fn exec_typed_state_aware_request(
 }
 
 /// Run a typed SDK exec request already converted to the shared SDK input
+/// model with a caller-controlled PTY.
+pub fn exec_typed_state_aware_pty_request(
+    input: SdkStateAwareInput,
+    experimental: bool,
+    size: PtySize,
+) -> Result<Box<dyn SandboxProcess>, Error> {
+    let mut logger = Logger::new(Mode::Buffer);
+    let parsed = normalize_sdk_state_aware(input, experimental, &mut logger)?;
+    exec_state_aware_pty_parsed(parsed, &mut logger, size)
+}
+
+/// Run a typed SDK exec request already converted to the shared SDK input
 /// model attached to this process's stdio.
 pub fn exec_typed_state_aware_attached_request(
     input: SdkStateAwareInput,
@@ -852,6 +913,17 @@ pub fn exec_state_aware_json(
     let mut logger = Logger::new(Mode::Buffer);
     let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
     exec_state_aware_parsed(parsed, &mut logger)
+}
+
+/// Run a raw state-aware exec request with a caller-owned PTY.
+pub fn exec_state_aware_pty_json(
+    request_json: &str,
+    experimental: bool,
+    size: PtySize,
+) -> Result<Box<dyn SandboxProcess>, Error> {
+    let mut logger = Logger::new(Mode::Buffer);
+    let parsed = parse_state_aware(request_json, experimental, &mut logger)?;
+    exec_state_aware_pty_parsed(parsed, &mut logger, size)
 }
 
 #[cfg(test)]

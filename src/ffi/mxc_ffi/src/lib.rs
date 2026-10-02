@@ -79,9 +79,11 @@ use mxc_sdk::{
 use mxc_sdk::{v1::probe, ProbeOutput};
 
 mod error_detail;
+mod pty;
 mod state_aware;
 mod streaming;
 pub use error_detail::*;
+pub use pty::*;
 pub use state_aware::*;
 pub use streaming::*;
 

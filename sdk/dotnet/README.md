@@ -653,6 +653,59 @@ failure, `MxcSandboxProcess.OutputMetadata` exposes the same structured feature
 outputs as `RunResult.OutputMetadata`. Disposing without waiting deletes an
 internal ETL even when retention was requested.
 
+### Pseudo-terminal
+
+`MxcSandbox.SpawnWithPty(policy, command, size)` creates the terminal inside MXC
+and returns an `MxcPty` with merged output, resize, timeout-aware waiting, and
+process-tree kill semantics:
+
+```csharp
+var request = new SandboxRequest(
+    new SandboxPolicy
+    {
+        Network = new NetworkPolicy
+        {
+            Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
+            Ingress = new NetworkIngressPolicy
+            {
+                Default = NetworkAction.Allow,
+                HostLoopback = NetworkAction.Allow,
+            },
+        },
+    },
+    "cmd.exe")
+{
+    Containment = new IsolationSessionContainment(),
+};
+using var terminal = MxcSandbox.SpawnWithPty(
+    request,
+    new MxcPtySize(Rows: 30, Columns: 100));
+
+using var writer = new StreamWriter(terminal.Input) { AutoFlush = true };
+using var reader = new StreamReader(terminal.Output);
+
+await writer.WriteAsync("echo hello\r\n");
+terminal.Resize(new MxcPtySize(Rows: 40, Columns: 120));
+terminal.Input.WriteByte(0x03); // Ctrl-C; any terminal input bytes are accepted.
+
+SandboxWaitResult result = await terminal.WaitAsync();
+Console.WriteLine($"exit={result.ExitCode} timedOut={result.TimedOut}");
+```
+
+PTY stderr is merged into `Output`; there is no separate error stream. Closing
+`Input` sends EOF. Write control characters and escape sequences to `Input`
+like any other terminal bytes. IsolationSession supports this API; unsupported
+backends are rejected before sandbox creation.
+
+For an already-started container, use the same terminal type:
+
+```csharp
+using MxcPty terminal = MxcLifecycle.SpawnInContainerWithPty(
+    sandboxId,
+    "powershell.exe",
+    new MxcPtySize(Rows: 30, Columns: 100));
+```
+
 ## Telemetry consent
 
 MXC telemetry is Windows-only and remains off until both of these are true:
@@ -932,6 +985,18 @@ state-aware exec (currently IsolationSession and WSLC), their wait results repor
 `StateAwareExecOptions.TimeoutMs` expirations through `TimedOut`, matching
 one-shot execution. WSLC exposes stdout and stderr but no stdin because the
 WSLC SDK provides no process-input API.
+
+`SpawnInContainerWithPty` returns a caller-owned terminal with merged output,
+writable input, resize, waiting, timeout, and termination. Backend support is
+determined by native dispatch:
+
+```csharp
+using MxcPty terminal =
+    MxcLifecycle.SpawnInContainerWithPty(id, "powershell.exe");
+terminal.Resize(new MxcPtySize(Rows: 40, Columns: 120));
+await terminal.Input.WriteAsync(new byte[] { 0x03 }); // Ctrl-C
+SandboxWaitResult outcome = await terminal.WaitAsync();
+```
 
 `ExecInSandboxAttached` relays the workload onto this process's stdio instead,
 returning no handle or captured output. For IsolationSession it allocates a

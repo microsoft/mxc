@@ -8,6 +8,7 @@ import {
   deprovisionSandbox,
   execInSandbox,
   execInSandboxAsync,
+  spawnInContainerWithPty,
   provisionSandbox,
   type StateAwareStreamingOptions,
   startSandbox,
@@ -886,6 +887,23 @@ describe('execInSandbox', () => {
     } finally {
       proc.dispose();
     }
+  });
+
+  describe('spawnInContainerWithPty', () => {
+    const config = { process: { commandLine: 'powershell.exe' } };
+
+    it('rejects invalid terminal dimensions before loading native bindings', () => {
+      assert.throws(
+        () => spawnInContainerWithPty(
+          'iso:abc' as SandboxId<'isolation_session'>,
+          config,
+          { rows: 0, columns: 80 },
+        ),
+        (error: unknown) => error instanceof MxcError
+          && error.code === 'malformed_request'
+          && /rows and columns/.test(error.message),
+      );
+    });
   });
 
   it('rejects experimental authorization on the stable high-level API', () => {

@@ -234,6 +234,9 @@ impl IoContext {
                     },
                 )
             }
+            OutputMode::Stream(StdioMode::Pty(_)) => {
+                unreachable!("PTY mode is rejected before WSLC I/O setup")
+            }
         };
         (
             Self {

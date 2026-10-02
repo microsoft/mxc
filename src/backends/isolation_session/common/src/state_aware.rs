@@ -13,6 +13,7 @@ use serde::Serialize;
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, IsolationSessionProvisionConfig};
 use wxc_common::mxc_error::MxcError;
+use wxc_common::sandbox_process::{PtySize, SandboxProcess};
 use wxc_common::state_aware_backend::{
     DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult, StartResult,
     StatefulSandboxBackend, StopResult,
@@ -27,6 +28,7 @@ use super::policy::{
     reject_unhonorable_environment, validate_post_provision_policy, validate_provision_policy,
 };
 use super::process_options::{build_process_options, with_service_timeout_grace};
+use super::sandbox::spawn_existing_session_pty;
 use super::sandbox_id::{self, SandboxIdPayload};
 use super::IsolationSessionRunner;
 
@@ -349,6 +351,19 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
                     .map_err(map_lifecycle_error)
             }
         }
+    }
+
+    fn exec_pty(
+        &mut self,
+        sandbox_id: &str,
+        request: &ExecutionRequest,
+        _config: Option<()>,
+        size: PtySize,
+    ) -> Result<Box<dyn SandboxProcess>, MxcError> {
+        let agent_user_name = extract_agent_user_name(sandbox_id)?;
+        let manager =
+            IsolationSessionManager::new(&agent_user_name).map_err(map_lifecycle_error)?;
+        spawn_existing_session_pty(manager, request, size)
     }
 }
 

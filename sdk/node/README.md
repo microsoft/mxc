@@ -306,7 +306,70 @@ The stable in-process one-shot mapper requires `process.env` entries in
 of silently dropping them. Executor-backed raw historical configs retain
 their existing behavior.
 
-### 3. `spawnSandboxAsync(script, policy, ...)` — promise-style
+### 3. `spawnWithPty(config, ...)` — native PTY handle
+
+This API creates the pseudo-terminal inside MXC and returns an `MxcPty` with
+native input/output streams, resize, reliable exit status, timeout handling,
+and process-tree kill semantics. Unlike `spawnSandbox`, it does not wrap the
+executor binary in `node-pty`. The `ContainerConfig` selects the backend and
+contains the command and policy.
+
+```typescript
+import {
+  createConfigFromPolicy,
+  spawnWithPty,
+} from '@microsoft/mxc-sdk/v1';
+
+const config = createConfigFromPolicy(
+  {
+    timeoutMs: 30_000,
+    network: {
+      egress: { default: 'allow' },
+      ingress: { default: 'allow', hostLoopback: 'allow' },
+    },
+  },
+  'isolation_session',
+);
+config.process!.commandLine = 'cmd.exe';
+
+const terminal = await spawnWithPty(
+  config,
+  {
+    rows: 30,
+    columns: 100,
+    inheritDefaultEnv: true,
+  },
+);
+
+terminal.output.pipe(process.stdout);
+terminal.input.write('echo hello\r\n');
+terminal.resize({ rows: 40, columns: 120 });
+terminal.input.write(Buffer.from([0x03])); // Ctrl-C; any input bytes are accepted.
+
+const result = await terminal.waitAsync();
+console.log(`exit=${result.exitCode} timedOut=${result.timedOut}`);
+terminal.dispose();
+```
+
+Terminal output is merged; `standardError` is `null`. Closing `input` sends
+EOF. Write control characters and escape sequences to `input` like any other
+terminal bytes. IsolationSession supports this API; unsupported backends are
+rejected before sandbox creation.
+
+Use `spawnInContainerWithPty` to attach the same `MxcPty` abstraction to a command
+inside an already-started container:
+
+```typescript
+import { spawnInContainerWithPty } from '@microsoft/mxc-sdk/v1';
+
+const terminal = await spawnInContainerWithPty(
+  sandboxId,
+  { process: { commandLine: 'powershell.exe' } },
+  { rows: 30, columns: 100 },
+);
+```
+
+### 4. `spawnSandboxAsync(script, policy, ...)` — promise-style
 
 The `await`-friendly API runs the abstract `process` containment intent and
 resolves with `{ stdout, stderr, exitCode }`. The SDK emits the owned exact
@@ -442,6 +505,7 @@ For long-lived sandboxes where you provision once, exec many times, and tear dow
 ```typescript
 import {
   provisionSandbox, startSandbox, execInSandbox, execInSandboxAsync,
+  spawnInContainerWithPty,
   stopSandbox, deprovisionSandbox,
 } from '@microsoft/mxc-sdk/v1';
 
@@ -468,6 +532,15 @@ const sandboxProcess = execInSandbox(
 sandboxProcess.standardOutput?.on('data', (chunk) => process.stdout.write(chunk));
 await sandboxProcess.waitAsync();
 
+const terminal = await spawnInContainerWithPty(
+  sandboxId,
+  { process: { commandLine: 'powershell.exe' } },
+);
+terminal.output.on('data', (chunk) => process.stdout.write(chunk));
+terminal.input.write(Buffer.from([0x03])); // Ctrl-C
+terminal.resize({ rows: 40, columns: 120 });
+await terminal.waitAsync();
+
 await stopSandbox(sandboxId);
 await deprovisionSandbox(sandboxId);
 ```
@@ -476,6 +549,11 @@ await deprovisionSandbox(sandboxId);
 all-allow shape shown above; legacy fields are rejected. Rules,
 proxies, mixed postures, and omission are rejected. The other lifecycle phases
 remain available for every state-aware backend.
+
+`spawnInContainerWithPty` is the caller-owned interactive terminal API for an
+existing container. It exposes merged terminal output, writable input, resize,
+waiting, timeout, and termination. Backend support is determined by native
+dispatch.
 
 `wslc` needs no provision config (it defaults to an `alpine:latest`
 container with no network). A bridged container uses the directional all-allow
@@ -584,6 +662,11 @@ const child = spawnSandboxFromConfig(config, { usePty: false });
 
 `spawnSandboxAsync` returns separate `stdout` and `stderr` strings.
 
+### PTY output is merged
+
+`spawnWithPty` returns one terminal output stream. stderr is part of that
+stream, matching normal terminal behavior.
+
 ### `createConfigFromPolicy` leaves `commandLine` empty
 
 You must set `config.process!.commandLine = '…'` before calling `spawnSandboxFromConfig`.
@@ -638,6 +721,7 @@ For backend-specific errors, see the per-backend guide linked from the [Choosing
 // Spawn — config-based (recommended)
 createConfigFromPolicy(policy, containment?, containerName?) → ContainerConfig
 spawnSandboxFromConfig(config, options?, workingDirectory?, env?) → IPty | ChildProcess
+spawnWithPty(config, options?, workingDirectory?, env?) → Promise<MxcPty>
 
 // Spawn — convenience (process containment only)
 spawnSandbox(script, policy, options?, workingDirectory?, containerName?, env?) → IPty

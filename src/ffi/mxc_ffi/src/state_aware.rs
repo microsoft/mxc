@@ -3,7 +3,7 @@
 
 //! State-aware lifecycle C ABI over the MXC public Rust SDK.
 //!
-//! Three entry points mirror the SDK's [`mxc_sdk::run_state_aware_json`],
+//! Four entry points mirror the SDK's [`mxc_sdk::run_state_aware_json`],
 //! [`mxc_sdk::exec_attached`] and [`mxc_sdk::exec_sandbox`]:
 //!
 //! - [`mxc_run_state_aware_json`] drives the **envelope phases** (`provision` /
@@ -17,10 +17,12 @@
 //!   process, returning the same opaque [`crate::MxcSandbox`] handle
 //!   as [`mxc_spawn_json`](crate::mxc_spawn_json) — so the caller reuses the
 //!   `mxc_stream_*` / `mxc_sandbox_*` externs to read/write/wait/kill.
+//! - [`mxc_state_aware_exec_pty`] returns that same lifecycle handle with merged
+//!   PTY output and caller-driven input and resize.
 //!
-//! The two exec entry points take the **same** request JSON and differ only in
-//! where the workload's stdio goes: relayed onto this process's console, or
-//! handed back as pipes.
+//! The exec entry points take the **same** request JSON and differ only in
+//! where the workload's stdio goes: relayed onto this process's console,
+//! handed back as ordinary pipes, or handed back as a caller-owned PTY.
 //!
 //! As elsewhere in this crate, every entry point is [`catch_unwind`]-wrapped,
 //! strings in/out are UTF-8 NUL-terminated, and owned out-pointers must be
@@ -30,9 +32,12 @@ use std::ffi::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
-use mxc_sdk::{exec_attached, exec_sandbox, run_state_aware_json, WaitOutcome};
+use mxc_sdk::{
+    exec_attached, exec_sandbox, run_state_aware_json, spawn_in_container_with_pty_json,
+    MxcPtySize, WaitOutcome,
+};
 
-use crate::streaming::MxcSandbox;
+use crate::streaming::{finish_handle, MxcSandbox};
 use crate::{
     alloc_cstring, cstr_to_str, free_cstr, status_from_error_code, MxcErrorDetail,
     MXC_STATUS_INVALID_UTF8, MXC_STATUS_NULL_ARGUMENT, MXC_STATUS_PANIC, MXC_STATUS_SUCCESS,
@@ -272,6 +277,81 @@ pub unsafe extern "C" fn mxc_exec_state_aware_json(
 
     // SAFETY: `out_handle` non-null (checked), `out_error` null or writable.
     unsafe { crate::streaming::finish_spawn(outcome, out_handle, out_error) }
+}
+
+/// Run a state-aware exec request with a caller-owned pseudo-terminal.
+///
+/// # Safety
+/// The pointer and ownership requirements are identical to
+/// [`mxc_state_aware_exec`].
+#[no_mangle]
+pub unsafe extern "C" fn mxc_state_aware_exec_pty(
+    request_json_utf8: *const c_char,
+    experimental: i32,
+    rows: u16,
+    cols: u16,
+    out_handle: *mut *mut MxcSandbox,
+    out_error: *mut MxcErrorDetail,
+) -> i32 {
+    if !out_handle.is_null() {
+        unsafe { *out_handle = ptr::null_mut() };
+    }
+    if !out_error.is_null() {
+        unsafe { ptr::write(out_error, MxcErrorDetail::none()) };
+    }
+    if out_handle.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        if rows == 0 || cols == 0 {
+            return Err((
+                crate::MXC_STATUS_MALFORMED_REQUEST,
+                MxcErrorDetail::from_message("PTY rows and columns must be non-zero"),
+            ));
+        }
+        let request_json = match unsafe { cstr_to_str(request_json_utf8) } {
+            Some(value) => value,
+            None if request_json_utf8.is_null() => {
+                return Err((
+                    MXC_STATUS_NULL_ARGUMENT,
+                    MxcErrorDetail::from_message("request JSON pointer is null"),
+                ))
+            }
+            None => {
+                return Err((
+                    MXC_STATUS_INVALID_UTF8,
+                    MxcErrorDetail::from_message("request JSON is not UTF-8"),
+                ))
+            }
+        };
+        spawn_in_container_with_pty_json(
+            request_json,
+            MxcPtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            experimental != 0,
+        )
+        .map(MxcSandbox::new_pty)
+        .map_err(|error| {
+            (
+                status_from_error_code(error.code),
+                MxcErrorDetail::from_error(&error),
+            )
+        })
+    }))
+    .unwrap_or_else(|panic| {
+        crate::report_panic("mxc_state_aware_exec_pty", &*panic);
+        Err((
+            MXC_STATUS_PANIC,
+            MxcErrorDetail::from_message("the mxc engine panicked"),
+        ))
+    });
+
+    unsafe { finish_handle(outcome, out_handle, out_error) }
 }
 
 /// How an attached exec finished, filled by

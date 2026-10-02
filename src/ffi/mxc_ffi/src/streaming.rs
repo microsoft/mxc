@@ -65,7 +65,11 @@ use std::io::{Read, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
-use mxc_sdk::{spawn_sandbox_json, Sandbox, StreamCloser, WaitOutcome};
+use mxc_sdk::{
+    spawn_sandbox_json, MxcPty, MxcPtySize, Sandbox, SandboxOutputMetadata, StreamCloser,
+    WaitOutcome,
+};
+use wxc_common::sandbox_process::NativeStdio;
 
 use crate::{
     alloc_cstring, cstr_to_str, status_from_error_code, MxcErrorDetail, MXC_STATUS_BACKEND_ERROR,
@@ -82,7 +86,7 @@ use crate::{
 /// [`mxc_exec_state_aware_json`](crate::mxc_exec_state_aware_json), destroyed by
 /// [`mxc_sandbox_free`].
 pub struct MxcSandbox {
-    inner: Sandbox,
+    inner: Box<dyn LiveSandbox>,
 }
 
 impl MxcSandbox {
@@ -90,21 +94,167 @@ impl MxcSandbox {
     /// one-shot spawn path ([`mxc_spawn_json`]) and the state-aware streaming exec
     /// path (`mxc_exec_state_aware_json`).
     pub(crate) fn new(inner: Sandbox) -> Self {
-        Self { inner }
+        Self {
+            inner: Box::new(inner),
+        }
+    }
+
+    pub(crate) fn new_pty(inner: MxcPty) -> Self {
+        Self {
+            inner: Box::new(inner),
+        }
+    }
+
+    pub(crate) fn resize_pty(&self, size: MxcPtySize) -> std::io::Result<()> {
+        self.inner.resize_pty(size)
+    }
+}
+
+trait LiveSandbox: Send {
+    fn warnings(&self) -> Vec<String>;
+    fn output_metadata(&self) -> Option<SandboxOutputMetadata>;
+    fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>>;
+    fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>>;
+    fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>>;
+    fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>>;
+    fn stdout_closer(&self) -> Option<StreamCloser>;
+    fn stderr_closer(&self) -> Option<StreamCloser>;
+    fn try_wait(&mut self) -> std::io::Result<Option<i32>>;
+    fn id(&self) -> u32;
+    fn kill(&mut self) -> std::io::Result<()>;
+    fn kill_for_timeout(&mut self) -> std::io::Result<()>;
+    fn wait(&mut self) -> std::io::Result<WaitOutcome>;
+    fn resize_pty(&self, _size: MxcPtySize) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "this sandbox process is not attached to a pseudo-terminal",
+        ))
+    }
+}
+
+impl LiveSandbox for Sandbox {
+    fn warnings(&self) -> Vec<String> {
+        self.warnings()
+    }
+
+    fn output_metadata(&self) -> Option<SandboxOutputMetadata> {
+        self.output_metadata().cloned()
+    }
+
+    fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+        self.take_native_stdio()
+    }
+
+    fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
+        self.take_stdin()
+    }
+
+    fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
+        self.take_stdout()
+    }
+
+    fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
+        self.take_stderr()
+    }
+
+    fn stdout_closer(&self) -> Option<StreamCloser> {
+        self.stdout_closer()
+    }
+
+    fn stderr_closer(&self) -> Option<StreamCloser> {
+        self.stderr_closer()
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+        self.try_wait()
+    }
+
+    fn id(&self) -> u32 {
+        self.id()
+    }
+
+    fn kill(&mut self) -> std::io::Result<()> {
+        self.kill()
+    }
+
+    fn kill_for_timeout(&mut self) -> std::io::Result<()> {
+        self.kill_for_timeout()
+    }
+
+    fn wait(&mut self) -> std::io::Result<WaitOutcome> {
+        self.wait()
+    }
+}
+
+impl LiveSandbox for MxcPty {
+    fn warnings(&self) -> Vec<String> {
+        self.warnings()
+    }
+
+    fn output_metadata(&self) -> Option<SandboxOutputMetadata> {
+        self.output_metadata()
+    }
+
+    fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+        self.take_native_stdio()
+    }
+
+    fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
+        self.take_writer().ok()
+    }
+
+    fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
+        self.try_clone_reader().ok()
+    }
+
+    fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
+        None
+    }
+
+    fn stdout_closer(&self) -> Option<StreamCloser> {
+        None
+    }
+
+    fn stderr_closer(&self) -> Option<StreamCloser> {
+        None
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+        self.try_wait()
+    }
+
+    fn id(&self) -> u32 {
+        self.id()
+    }
+
+    fn kill(&mut self) -> std::io::Result<()> {
+        self.kill()
+    }
+
+    fn kill_for_timeout(&mut self) -> std::io::Result<()> {
+        self.kill_for_timeout()
+    }
+
+    fn wait(&mut self) -> std::io::Result<WaitOutcome> {
+        self.wait()
+    }
+
+    fn resize_pty(&self, size: MxcPtySize) -> std::io::Result<()> {
+        self.resize(size)
     }
 }
 
 /// Opaque readable stream (a child's stdout or stderr), handed out by
 /// [`mxc_sandbox_take_stdout`] / [`mxc_sandbox_take_stderr`].
 pub struct MxcReadStream {
-    inner: Box<dyn Read + Send>,
+    pub(crate) inner: Box<dyn Read + Send>,
 }
 
 /// Opaque writable stream (a child's stdin), handed out by
 /// [`mxc_sandbox_take_stdin`]. Freeing it closes stdin, signalling EOF to the
 /// child.
 pub struct MxcWriteStream {
-    inner: Box<dyn Write + Send>,
+    pub(crate) inner: Box<dyn Write + Send>,
 }
 
 /// Opaque closer for a child's stdout or stderr stream.
@@ -124,7 +274,7 @@ pub struct MxcNativeStdio {
 }
 
 impl MxcNativeStdio {
-    const fn invalid() -> Self {
+    pub(crate) const fn invalid() -> Self {
         #[cfg(target_os = "windows")]
         const INVALID: isize = 0;
         #[cfg(not(target_os = "windows"))]
@@ -227,9 +377,17 @@ pub(crate) unsafe fn finish_spawn(
     out_handle: *mut *mut MxcSandbox,
     out_error: *mut MxcErrorDetail,
 ) -> i32 {
+    unsafe { finish_handle(outcome.map(MxcSandbox::new), out_handle, out_error) }
+}
+
+pub(crate) unsafe fn finish_handle(
+    outcome: Result<MxcSandbox, (i32, MxcErrorDetail)>,
+    out_handle: *mut *mut MxcSandbox,
+    out_error: *mut MxcErrorDetail,
+) -> i32 {
     match outcome {
         Ok(sandbox) => {
-            let boxed = Box::new(MxcSandbox::new(sandbox));
+            let boxed = Box::new(sandbox);
             // SAFETY: `out_handle` non-null and writable per the caller contract.
             unsafe { *out_handle = Box::into_raw(boxed) };
             MXC_STATUS_SUCCESS
@@ -253,7 +411,7 @@ pub(crate) unsafe fn finish_spawn(
 
 /// Map an SDK error onto the status + detail pair the spawn chain carries, so
 /// the failing API call survives instead of being flattened to a message.
-fn sdk_error_detail(error: mxc_sdk::Error) -> (i32, MxcErrorDetail) {
+pub(crate) fn sdk_error_detail(error: mxc_sdk::Error) -> (i32, MxcErrorDetail) {
     (
         status_from_error_code(error.code),
         MxcErrorDetail::from_error(&error),
@@ -696,7 +854,7 @@ pub unsafe extern "C" fn mxc_sandbox_output_metadata_json(
         let Some(metadata) = sandbox.inner.output_metadata() else {
             return MXC_STATUS_SUCCESS;
         };
-        let json = match serde_json::to_vec(metadata) {
+        let json = match serde_json::to_vec(&metadata) {
             Ok(json) => json,
             Err(_) => return MXC_STATUS_BACKEND_ERROR,
         };

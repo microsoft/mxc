@@ -6,6 +6,10 @@
 //! foundation crate's traits.
 
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+use portable_pty::{MasterPty, PtySize as PortablePtySize};
 
 use crate::state_aware_sdk::{
     lifecycle_sdk_input, ExecRequest, LifecycleResult, OperationOptions, ProvisionRequest,
@@ -235,6 +239,290 @@ pub struct Output {
 pub struct Sandbox {
     inner: Box<dyn SandboxProcess>,
     stdio_access: StdioAccess,
+}
+
+/// A live sandboxed process attached to an MXC-owned pseudo-terminal.
+///
+/// The terminal I/O contract is backed by a private
+/// [`portable_pty::MasterPty`] implementation. The public wrapper keeps MXC's
+/// process-tree lifecycle and backend details out of the dependency's public
+/// types, so the implementation can change without changing this API.
+pub struct MxcPty {
+    process: SharedPtyProcess,
+    master: Box<dyn MasterPty + Send>,
+    reader_taken: Arc<AtomicBool>,
+    writer_taken: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for MxcPty {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MxcPty")
+            .field("id", &self.id())
+            .finish_non_exhaustive()
+    }
+}
+
+type SharedPtyProcess = Arc<Mutex<Box<dyn SandboxProcess>>>;
+
+impl MxcPty {
+    pub(crate) fn new(process: Box<dyn SandboxProcess>) -> Result<Self, Error> {
+        if !process.is_pty() {
+            return Err(Error::new(
+                crate::ErrorCode::BackendError,
+                "the selected backend returned a non-PTY process for a PTY spawn",
+            ));
+        }
+        let process = Arc::new(Mutex::new(process));
+        let reader_taken = Arc::new(AtomicBool::new(false));
+        let writer_taken = Arc::new(AtomicBool::new(false));
+        let master = Box::new(BackendMasterPty {
+            process: Arc::clone(&process),
+            reader_taken: Arc::clone(&reader_taken),
+            writer_taken: Arc::clone(&writer_taken),
+        });
+        Ok(Self {
+            process,
+            master,
+            reader_taken,
+            writer_taken,
+        })
+    }
+
+    /// The OS process id, or `0` when the backend exposes no host process id.
+    pub fn id(&self) -> u32 {
+        self.lock_process().id()
+    }
+
+    /// Warnings collected during spawn and teardown.
+    pub fn warnings(&self) -> Vec<String> {
+        self.lock_process().warnings()
+    }
+
+    /// Structured output available after terminal teardown completes.
+    pub fn output_metadata(&self) -> Option<SandboxOutputMetadata> {
+        self.lock_process().output_metadata().cloned()
+    }
+
+    /// Non-blocking exit check.
+    pub fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+        self.lock_process().try_wait()
+    }
+
+    /// Kill the sandboxed process tree.
+    pub fn kill(&mut self) -> std::io::Result<()> {
+        self.lock_process().kill()
+    }
+
+    /// Mark the process timed out and kill it using the backend's timeout path.
+    pub fn kill_for_timeout(&mut self) -> std::io::Result<()> {
+        self.lock_process().kill_for_timeout()
+    }
+
+    /// Wait for the sandboxed process to exit.
+    pub fn wait(&mut self) -> std::io::Result<WaitOutcome> {
+        if !self.writer_taken.load(Ordering::Acquire) {
+            drop(self.master.take_writer().map_err(std::io::Error::other)?);
+        }
+        let output_drain = if self.reader_taken.load(Ordering::Acquire) {
+            None
+        } else {
+            let mut reader = self
+                .master
+                .try_clone_reader()
+                .map_err(std::io::Error::other)?;
+            Some(std::thread::spawn(move || {
+                let _ = std::io::copy(&mut reader, &mut std::io::sink());
+            }))
+        };
+        let result = match self.lock_process().wait() {
+            Ok(code) => Ok(WaitOutcome::Exited(code)),
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => Ok(WaitOutcome::TimedOut),
+            Err(error) => Err(error),
+        };
+        if let Some(drain) = output_drain {
+            let _ = drain.join();
+        }
+        result
+    }
+
+    /// Clone a reader for the PTY's merged output stream.
+    pub fn try_clone_reader(&self) -> std::io::Result<Box<dyn Read + Send>> {
+        self.master
+            .try_clone_reader()
+            .map_err(std::io::Error::other)
+    }
+
+    /// Take the PTY input writer. This may succeed only once.
+    pub fn take_writer(&self) -> std::io::Result<Box<dyn Write + Send>> {
+        self.master.take_writer().map_err(std::io::Error::other)
+    }
+
+    /// Resize the PTY.
+    pub fn resize(&self, size: MxcPtySize) -> std::io::Result<()> {
+        self.master
+            .resize(size.into())
+            .map_err(std::io::Error::other)
+    }
+
+    /// Return the current PTY dimensions.
+    pub fn size(&self) -> std::io::Result<MxcPtySize> {
+        self.master
+            .get_size()
+            .map(Into::into)
+            .map_err(std::io::Error::other)
+    }
+
+    /// Transfer native PTY input/output endpoints when the backend supports it.
+    ///
+    /// `stdin` is the PTY input writer and `stdout` is its merged output reader;
+    /// `stderr` is always absent.
+    #[doc(hidden)]
+    pub fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+        let stdio = self.lock_process().take_native_stdio()?;
+        if let Some(stdio) = &stdio {
+            if stdio.stdin.is_some() {
+                self.writer_taken.store(true, Ordering::Release);
+            }
+            if stdio.stdout.is_some() {
+                self.reader_taken.store(true, Ordering::Release);
+            }
+        }
+        Ok(stdio)
+    }
+
+    fn lock_process(&self) -> std::sync::MutexGuard<'_, Box<dyn SandboxProcess>> {
+        self.process
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+struct BackendMasterPty {
+    process: SharedPtyProcess,
+    reader_taken: Arc<AtomicBool>,
+    writer_taken: Arc<AtomicBool>,
+}
+
+impl BackendMasterPty {
+    fn lock_process(&self) -> std::sync::MutexGuard<'_, Box<dyn SandboxProcess>> {
+        self.process
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl MasterPty for BackendMasterPty {
+    fn resize(&self, size: PortablePtySize) -> anyhow::Result<()> {
+        self.lock_process()
+            .pty_resize(MxcPtySize::from(size).into())
+            .map_err(Into::into)
+    }
+
+    fn get_size(&self) -> anyhow::Result<PortablePtySize> {
+        self.lock_process()
+            .pty_size()
+            .map(MxcPtySize::from)
+            .map(PortablePtySize::from)
+            .map_err(Into::into)
+    }
+
+    fn try_clone_reader(&self) -> anyhow::Result<Box<dyn Read + Send>> {
+        let reader = self
+            .lock_process()
+            .pty_clone_reader()
+            .map_err(anyhow::Error::from)?;
+        self.reader_taken.store(true, Ordering::Release);
+        Ok(reader)
+    }
+
+    fn take_writer(&self) -> anyhow::Result<Box<dyn Write + Send>> {
+        let writer = self
+            .lock_process()
+            .pty_take_writer()
+            .map_err(anyhow::Error::from)?;
+        self.writer_taken.store(true, Ordering::Release);
+        Ok(writer)
+    }
+
+    #[cfg(unix)]
+    fn process_group_leader(&self) -> Option<libc::pid_t> {
+        None
+    }
+
+    #[cfg(unix)]
+    fn as_raw_fd(&self) -> Option<std::os::fd::RawFd> {
+        None
+    }
+
+    #[cfg(unix)]
+    fn tty_name(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+}
+
+/// Dimensions of an [`MxcPty`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MxcPtySize {
+    pub rows: u16,
+    pub cols: u16,
+    pub pixel_width: u16,
+    pub pixel_height: u16,
+}
+
+impl Default for MxcPtySize {
+    fn default() -> Self {
+        Self {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        }
+    }
+}
+
+impl From<MxcPtySize> for wxc_common::sandbox_process::PtySize {
+    fn from(size: MxcPtySize) -> Self {
+        Self {
+            rows: size.rows,
+            cols: size.cols,
+            pixel_width: size.pixel_width,
+            pixel_height: size.pixel_height,
+        }
+    }
+}
+
+impl From<MxcPtySize> for PortablePtySize {
+    fn from(size: MxcPtySize) -> Self {
+        Self {
+            rows: size.rows,
+            cols: size.cols,
+            pixel_width: size.pixel_width,
+            pixel_height: size.pixel_height,
+        }
+    }
+}
+
+impl From<PortablePtySize> for MxcPtySize {
+    fn from(size: PortablePtySize) -> Self {
+        Self {
+            rows: size.rows,
+            cols: size.cols,
+            pixel_width: size.pixel_width,
+            pixel_height: size.pixel_height,
+        }
+    }
+}
+
+impl From<wxc_common::sandbox_process::PtySize> for MxcPtySize {
+    fn from(size: wxc_common::sandbox_process::PtySize) -> Self {
+        Self {
+            rows: size.rows,
+            cols: size.cols,
+            pixel_width: size.pixel_width,
+            pixel_height: size.pixel_height,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

@@ -5,13 +5,18 @@ import assert from 'node:assert';
 import { afterEach, describe, it } from 'node:test';
 import * as rootSdk from '../../src/index.js';
 import * as v1Sdk from '../../src/v1.js';
+import { _setSpawnBindingSandboxWithPtyImplementation } from '../../src/bindings/pty.js';
 import { _setBindingRunAsyncImplementation } from '../../src/bindings/run.js';
 import type { OneShotRequest } from '../../src/generated/v1_0_0/wire.js';
+import type { MxcPty } from '../../src/mxc-pty.js';
 
 const { MxcError } = rootSdk;
-const { spawnSandboxAsync } = v1Sdk;
+const { spawnSandboxAsync, spawnWithPty } = v1Sdk;
 
-afterEach(() => _setBindingRunAsyncImplementation());
+afterEach(() => {
+  _setBindingRunAsyncImplementation();
+  _setSpawnBindingSandboxWithPtyImplementation();
+});
 
 describe('public SDK namespace exports', () => {
   it('keeps typed authoring and lifecycle functions in V1', () => {
@@ -50,6 +55,29 @@ describe('public SDK namespace exports', () => {
 });
 
 describe('in-process async run routing', () => {
+  it('routes PTY containment through the SDK-owned exact request', async () => {
+    let bindingRequest: OneShotRequest | undefined;
+    let bindingRows = 0;
+    let bindingColumns = 0;
+    _setSpawnBindingSandboxWithPtyImplementation(
+      async (request, rows, columns) => {
+        bindingRequest = request;
+        bindingRows = rows;
+        bindingColumns = columns;
+        return {} as MxcPty;
+      },
+    );
+
+    const config = v1Sdk.createConfigFromPolicy({}, 'isolation_session');
+    config.process!.commandLine = 'cmd.exe';
+    await spawnWithPty(config, { rows: 30, columns: 100 });
+
+    assert.strictEqual(bindingRequest?.containment, 'isolation_session');
+    assert.strictEqual(bindingRequest?.ui, undefined);
+    assert.strictEqual(bindingRows, 30);
+    assert.strictEqual(bindingColumns, 100);
+  });
+
   it('uses the SDK-owned exact v1 one-shot request', async () => {
     let bindingRequest: OneShotRequest | undefined;
     _setBindingRunAsyncImplementation(async (request) => {

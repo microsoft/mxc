@@ -61,6 +61,11 @@ impl SandboxBackend for WSLContainerRunner {
         logger: &mut Logger,
         stdio: StdioMode,
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+        if matches!(stdio, StdioMode::Pty(_)) {
+            return Err(ScriptResponse::rejected(
+                "WSLC does not support caller-owned PTY spawning",
+            ));
+        }
         // The run-to-completion path gets these through `ScriptRunner::run`;
         // the streaming path bypasses that, so — like every other
         // `SandboxBackend` — apply them here. Beyond rejecting an empty

@@ -162,6 +162,43 @@ pub trait SandboxProcess: Send {
         Ok(None)
     }
 
+    /// Whether this process is attached to a caller-driven pseudo-terminal.
+    fn is_pty(&self) -> bool {
+        false
+    }
+
+    /// Clone a reader for the pseudo-terminal's merged output stream.
+    fn pty_clone_reader(&self) -> std::io::Result<Box<dyn Read + Send>> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "this sandbox process is not attached to a pseudo-terminal",
+        ))
+    }
+
+    /// Take the pseudo-terminal input writer. This may succeed only once.
+    fn pty_take_writer(&self) -> std::io::Result<Box<dyn Write + Send>> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "this sandbox process is not attached to a pseudo-terminal",
+        ))
+    }
+
+    /// Resize the pseudo-terminal.
+    fn pty_resize(&self, _size: PtySize) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "this sandbox process is not attached to a pseudo-terminal",
+        ))
+    }
+
+    /// Return the current pseudo-terminal dimensions.
+    fn pty_size(&self) -> std::io::Result<PtySize> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "this sandbox process is not attached to a pseudo-terminal",
+        ))
+    }
+
     /// Take ownership of the child's stdin so the caller can write to it.
     /// Returns `None` if already taken. Drop the writer to send EOF.
     fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>>;
@@ -441,6 +478,25 @@ pub fn wait_with_timeout(
 
 /// How a [`SandboxBackend`] wires the sandboxed child's standard streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PtySize {
+    pub rows: u16,
+    pub cols: u16,
+    pub pixel_width: u16,
+    pub pixel_height: u16,
+}
+
+impl Default for PtySize {
+    fn default() -> Self {
+        Self {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StdioMode {
     /// stdin/stdout/stderr are fresh pipes the caller drives via the handle's
     /// `take_*` accessors (the `mxc` library / streaming path). The child sees
@@ -451,6 +507,10 @@ pub enum StdioMode {
     /// the child sees a TTY exactly when the binary does. The returned handle's
     /// `take_*` all return `None`; [`wait`](SandboxProcess::wait) just waits.
     Inherit,
+    /// The backend allocates a pseudo-terminal, attaches the sandboxed process
+    /// to its secondary side, and retains the primary side for the returned
+    /// handle. Output is a single merged stream.
+    Pty(PtySize),
 }
 
 /// A containment backend that spawns a sandboxed process and hands back a

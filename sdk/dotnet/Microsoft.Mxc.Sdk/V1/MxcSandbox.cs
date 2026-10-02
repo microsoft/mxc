@@ -328,7 +328,70 @@ public static class MxcSandbox
                         NativeMethods.mxc_error_detail_free(&error);
                     }
                 }
+
                 return new MxcSandboxProcess(
+                    MxcSandboxHandle.FromRaw(handle),
+                    request.Policy.TimeoutMs);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Spawn <paramref name="command"/> attached to an MXC-owned
+    /// pseudo-terminal.
+    /// </summary>
+    public static MxcPty SpawnWithPty(
+        SandboxPolicy policy,
+        string command,
+        MxcPtySize? size = null)
+    {
+        ArgumentNullException.ThrowIfNull(policy);
+        ArgumentNullException.ThrowIfNull(command);
+        return SpawnWithPty(CreateCompatibilityRequest(policy, command), size);
+    }
+
+    /// <summary>Spawn a complete request attached to an MXC-owned PTY.</summary>
+    public static MxcPty SpawnWithPty(
+        SandboxRequest request,
+        MxcPtySize? size = null)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var terminalSize = size ?? MxcPtySize.Default;
+        if (terminalSize.Rows == 0 || terminalSize.Columns == 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(size),
+                "PTY rows and columns must be non-zero.");
+        }
+
+        var requestBuf = ToNullTerminatedUtf8(SerializeRequest(request));
+        unsafe
+        {
+            fixed (byte* requestPtr = requestBuf)
+            {
+                NativeSandbox* handle = null;
+                MxcErrorDetail error = default;
+                var status = NativeMethods.mxc_spawn_pty_request(
+                    requestPtr,
+                    terminalSize.Rows,
+                    terminalSize.Columns,
+                    &handle,
+                    &error);
+                if (status != (int)ErrorCode.Success)
+                {
+                    try
+                    {
+                        throw NativeError.ToException(
+                            status,
+                            error,
+                            "spawning sandbox PTY failed");
+                    }
+                    finally
+                    {
+                        NativeMethods.mxc_error_detail_free(&error);
+                    }
+                }
+                return new MxcPty(
                     MxcSandboxHandle.FromRaw(handle),
                     request.Policy.TimeoutMs);
             }

@@ -605,6 +605,11 @@ impl BubblewrapScriptRunner {
                     .stdout(Stdio::inherit())
                     .stderr(Stdio::inherit());
             }
+            StdioMode::Pty(_) => {
+                return Err(ScriptResponse::rejected(
+                    "Bubblewrap does not yet support in-process PTY spawning",
+                ));
+            }
         }
         // Pipes mode: put bwrap in its own process group so a timeout / `kill()`
         // can tree-kill it with a single `killpg` without touching the host's
@@ -664,6 +669,7 @@ impl BubblewrapScriptRunner {
         let (stdin, stdout, stderr) = match stdio {
             StdioMode::Pipes => (child.stdin.take(), child.stdout.take(), child.stderr.take()),
             StdioMode::Inherit => (None, None, None),
+            StdioMode::Pty(_) => unreachable!("PTY mode was rejected before spawn"),
         };
         // Wrap the pipe reads so the caller can abandon a stream a backgrounded
         // descendant is holding open (see `SandboxProcess::stdout_closer`)

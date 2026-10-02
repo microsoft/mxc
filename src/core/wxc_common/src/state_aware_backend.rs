@@ -24,6 +24,7 @@ use serde::Serialize;
 use crate::id::mint_random_token;
 use crate::models::ExecutionRequest;
 use crate::mxc_error::MxcError;
+use crate::sandbox_process::{PtySize, SandboxProcess};
 
 /// Platform pipe-handle wrapper used by `ExecHandle`. On Windows this is a
 /// kernel `HANDLE`; on Unix-like targets it is a raw file descriptor.
@@ -302,6 +303,20 @@ pub trait StatefulSandboxBackend {
         config: Option<Self::ExecConfig>,
         stdio: ExecStdio,
     ) -> Result<ExecHandle, MxcError>;
+
+    /// Optional caller-owned PTY form of `exec`.
+    fn exec_pty(
+        &mut self,
+        _sandbox_id: &str,
+        _request: &ExecutionRequest,
+        _config: Option<Self::ExecConfig>,
+        _size: PtySize,
+    ) -> Result<Box<dyn SandboxProcess>, MxcError> {
+        Err(MxcError::unsupported_phase(format!(
+            "the {} backend does not support spawning a process with a PTY in an existing container",
+            Self::BACKEND_KEY
+        )))
+    }
 
     /// Optional. Default returns success with no metadata.
     fn stop(
