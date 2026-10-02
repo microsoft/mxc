@@ -112,14 +112,15 @@ jobs:
       - name: AOT publish gate (SDK JSON layer)
         shell: pwsh
         run: |
+          $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
           if ($IsLinux) {
             sudo apt-get update
             sudo apt-get install -y clang zlib1g-dev
             if ($LASTEXITCODE -ne 0) { throw 'Failed to install Native AOT prerequisites (clang, zlib1g-dev).' }
-            $rid = 'linux-x64'; $exeName = 'Microsoft.Mxc.Sdk.AotSmokeTest'
+            $rid = "linux-$arch"; $exeName = 'Microsoft.Mxc.Sdk.AotSmokeTest'
           }
-          elseif ($IsMacOS) { $rid = 'osx-arm64'; $exeName = 'Microsoft.Mxc.Sdk.AotSmokeTest' }
-          else { $rid = 'win-x64'; $exeName = 'Microsoft.Mxc.Sdk.AotSmokeTest.exe' }
+          elseif ($IsMacOS) { $rid = "osx-$arch"; $exeName = 'Microsoft.Mxc.Sdk.AotSmokeTest' }
+          else { $rid = "win-$arch"; $exeName = 'Microsoft.Mxc.Sdk.AotSmokeTest.exe' }
           $log = Join-Path $env:RUNNER_TEMP 'dotnet-aot-publish.log'
           $pub = Join-Path $env:RUNNER_TEMP 'aot-smoke-publish'
           dotnet publish Microsoft.Mxc.Sdk.AotSmokeTest -c Release -r $rid -o $pub --nologo 2>&1 | Tee-Object -FilePath $log
