@@ -253,8 +253,8 @@ for that.
 
 For request-specific Windows ProcessContainer machine facts, call
 `v1::probe(Some(&request))`, or `v1::probe(None)` for the default request. The public
-API stays typed; exact-config and binding-request JSON adapters remain in
-`mxc_ffi`.
+API stays typed; the `mxc_ffi` request-probe export accepts exact configuration
+JSON through the shared version-specific parser.
 
 ```rust,no_run
 use mxc_sdk::v1;

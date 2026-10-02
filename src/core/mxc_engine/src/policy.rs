@@ -428,8 +428,7 @@ pub fn temporary_files_policy(env: Option<&[(String, String)]>) -> FilesystemPol
 
 /// Clipboard access level, mirroring the SDK `ClipboardPolicy`
 /// (`"none" | "read" | "write" | "all"`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ClipboardPolicy {
     /// No clipboard access.
     #[default]
@@ -443,8 +442,7 @@ pub enum ClipboardPolicy {
 }
 
 /// Filesystem section of a [`SandboxPolicy`].
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[derive(Debug, Clone, Default)]
 pub struct FilesystemSection {
     pub readwrite_paths: Vec<String>,
     pub readonly_paths: Vec<String>,
@@ -454,8 +452,7 @@ pub struct FilesystemSection {
 }
 
 /// UI section of a [`SandboxPolicy`]. All flags default to denied.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[derive(Debug, Clone, Default)]
 pub struct UiSection {
     pub allow_windows: bool,
     pub clipboard: ClipboardPolicy,
@@ -573,18 +570,24 @@ impl Default for WslcSection {
 /// instrumentation rather than a sandbox restriction, matching the global
 /// sandbox-policy design. Build the request first, then use
 /// [`SandboxRequest::set_telemetry_opt_in`] to opt that invocation in.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+///
+/// This is an authoring type, not a JSON contract. SDK builders construct exact
+/// contract values; raw JSON APIs parse documents under their declared version.
+///
+/// ```compile_fail
+/// let _: mxc_engine::policy::SandboxPolicy = serde_json::from_str("{}").unwrap();
+/// ```
+///
+/// ```compile_fail
+/// serde_json::to_string(&mxc_engine::policy::SandboxPolicy::default()).unwrap();
+/// ```
+#[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct SandboxPolicy {
-    #[serde(default)]
     pub filesystem: Option<FilesystemSection>,
-    #[serde(default)]
     pub network: Option<NetworkSection>,
-    #[serde(default)]
     pub ui: Option<UiSection>,
     /// Execution timeout in milliseconds (`None` = no timeout).
-    #[serde(default)]
     pub timeout_ms: Option<u32>,
 }
 

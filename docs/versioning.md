@@ -360,16 +360,14 @@ the registered contract parser and take non-configuration controls, including
 experimental authorization, as typed FFI arguments rather than JSON fields.
 The [SDK conformance fixtures](../tests/policy/README.md#sdk-v1-conformance-fixtures)
 pair high-level invocations with independently hand-authored expected exact
-documents to check mapping intent across SDKs.
+documents to check mapping intent across Rust, Node, and .NET.
 
-**Migration status:** Node/.NET one-shot execution and the .NET request probe
-still use deprecated private binding ingress, including its legacy JSON
-experimental switch. [Node migration](https://github.com/microsoft/mxc/pull/1350)
-and [.NET migration](https://github.com/microsoft/mxc/pull/1351) move those
-callers to exact JSON; [cleanup](https://github.com/microsoft/mxc/pull/1352)
-then removes the private parser/exports and remaining SDK serde support.
-Their detailed rollout is tracked in those migration changes, not by a
-second configuration contract in this versioning design.
+The .NET request probe uses the same exact request writer as execution and
+calls `mxc_probe_request_json_with_error`. The private execution and probe
+exports and their request parser are removed. Rust SDK policy authoring types
+no longer derive serde traits; they build exact contract values rather than
+forming another deserializable JSON contract. Exact contract types and
+test-only fixture types retain their serialization support.
 
 ### Experimental Flag
 

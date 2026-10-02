@@ -231,7 +231,7 @@ pty.onExit((e) => console.log('Exit:', e.exitCode));
 ## Streaming
 
 LXC implements `SandboxBackend`, so `mxc_sdk::v1::spawn_sandbox`, `mxc_sdk::v1::run`,
-and every SDK built on `mxc_spawn_request` / `mxc_run_request` reach it
+and every SDK built on `mxc_spawn_json` / `mxc_run_json` reach it
 in-process. The handle serves live stdin, stdout, and stderr, plus `wait` and
 `kill`.
 

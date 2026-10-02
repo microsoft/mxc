@@ -8,21 +8,16 @@
 use std::ffi::{CStr, CString};
 use std::ptr;
 
-#[cfg(target_os = "linux")]
-use mxc_ffi::mxc_spawn_request;
 use mxc_ffi::{
     mxc_available_backends_json, mxc_error_detail_free, mxc_platform_support_json, mxc_run_json,
-    mxc_run_request, mxc_run_result_free, mxc_sandbox_stderr_closer, mxc_sandbox_stdout_closer,
+    mxc_run_result_free, mxc_sandbox_stderr_closer, mxc_sandbox_stdout_closer,
     mxc_sandbox_warnings_json, mxc_spawn_json, mxc_stream_closer_close, mxc_stream_closer_free,
     mxc_string_free, mxc_version, MxcErrorDetail, MxcRunResult, MxcSandbox,
 };
 #[cfg(target_os = "windows")]
-use mxc_ffi::{
-    mxc_probe_request_json, mxc_probe_request_json_with_error,
-    mxc_probe_sandbox_request_json_with_error,
-};
+use mxc_ffi::{mxc_probe_request_json, mxc_probe_request_json_with_error};
 
-/// An empty, all-null result to hand to `mxc_run_request`.
+/// An empty, all-null result to hand to `mxc_run_json`.
 fn zeroed_result() -> MxcRunResult {
     // SAFETY: `MxcRunResult` is `repr(C)` of `i32`s and nullable pointers, so an
     // all-zero value is valid (null pointers, zero status).
@@ -30,23 +25,23 @@ fn zeroed_result() -> MxcRunResult {
 }
 
 #[test]
-fn extern_run_rejects_malformed_request() {
+fn extern_run_json_rejects_malformed_request() {
     let request = CString::new("not json").unwrap();
     let mut out = zeroed_result();
     // SAFETY: valid C string and a valid out pointer.
-    let status = unsafe { mxc_run_request(request.as_ptr(), &mut out) };
+    let status = unsafe { mxc_run_json(request.as_ptr(), 0, &mut out) };
 
     assert_eq!(status, mxc_ffi::MXC_STATUS_MALFORMED_REQUEST);
     assert_eq!(out.status, status);
     assert!(!out.error.message_utf8.is_null());
-    // SAFETY: the message is a valid C string filled by `mxc_run_request`.
+    // SAFETY: the message is a valid C string filled by `mxc_run_json`.
     let msg = unsafe { CStr::from_ptr(out.error.message_utf8) }
         .to_str()
         .unwrap();
-    assert!(msg.contains("request"), "unexpected message: {msg}");
+    assert!(!msg.is_empty(), "unexpected message: {msg}");
     assert!(out.stdout_utf8.is_null());
 
-    // SAFETY: `out` was filled by `mxc_run_request`; frees its owned strings.
+    // SAFETY: `out` was filled by `mxc_run_json`; frees its owned strings.
     unsafe { mxc_run_result_free(&mut out) };
     assert!(out.error.message_utf8.is_null());
 }
@@ -193,7 +188,7 @@ fn extern_request_probe_rejects_malformed_and_unsupported_requests() {
 
 #[cfg(target_os = "windows")]
 #[test]
-fn extern_binding_request_probe_uses_the_canonical_interchange() {
+fn extern_request_probe_rejects_the_removed_private_interchange() {
     let request = CString::new(
         r#"{
             "policy": {},
@@ -207,31 +202,25 @@ fn extern_binding_request_probe_uses_the_canonical_interchange() {
     let mut error: MxcErrorDetail = unsafe { std::mem::zeroed() };
 
     // SAFETY: the request is a valid C string and both out-parameters are writable.
-    let status = unsafe {
-        mxc_probe_sandbox_request_json_with_error(request.as_ptr(), &mut output, &mut error)
-    };
+    let status =
+        unsafe { mxc_probe_request_json_with_error(request.as_ptr(), &mut output, &mut error) };
 
-    assert_eq!(status, mxc_ffi::MXC_STATUS_SUCCESS);
-    assert!(!output.is_null());
-    assert!(error.message_utf8.is_null());
-    // SAFETY: both values were initialized by the FFI call.
-    unsafe {
-        mxc_string_free(output);
-        mxc_error_detail_free(&mut error);
-    }
+    assert_eq!(status, mxc_ffi::MXC_STATUS_MALFORMED_REQUEST);
+    assert!(output.is_null());
+    assert!(!error.message_utf8.is_null());
+    // SAFETY: the detailed probe initialized this owned error detail.
+    unsafe { mxc_error_detail_free(&mut error) };
 }
 
 #[cfg(target_os = "windows")]
 #[test]
-fn extern_binding_request_probe_rejects_non_process_container() {
+fn extern_v1_request_probe_rejects_non_process_container() {
     let request = CString::new(
         r#"{
-            "policy": {},
-            "command": "echo hi",
-            "containment": {
-                "type": "wslc",
-                "image": "python:3.12"
-            }
+            "version": "1.0.0",
+            "containment": "wslc",
+            "process": { "commandLine": "echo hi" },
+            "wslc": { "image": "python:3.12" }
         }"#,
     )
     .unwrap();
@@ -240,9 +229,8 @@ fn extern_binding_request_probe_rejects_non_process_container() {
     let mut error: MxcErrorDetail = unsafe { std::mem::zeroed() };
 
     // SAFETY: the request is a valid C string and both out-parameters are writable.
-    let status = unsafe {
-        mxc_probe_sandbox_request_json_with_error(request.as_ptr(), &mut output, &mut error)
-    };
+    let status =
+        unsafe { mxc_probe_request_json_with_error(request.as_ptr(), &mut output, &mut error) };
 
     assert_eq!(status, mxc_ffi::MXC_STATUS_UNSUPPORTED_CONTAINMENT);
     assert!(output.is_null());
@@ -273,17 +261,6 @@ fn extern_streaming_warning_and_closer_preconditions_are_safe() {
         );
         mxc_stream_closer_free(ptr::null_mut());
     }
-}
-
-#[test]
-fn extern_run_request_rejects_null_result_before_parsing() {
-    // Invalid UTF-8 would win if the request were parsed before the mandatory
-    // result pointer was checked.
-    let invalid_utf8 = [0xff_u8, 0];
-    // SAFETY: the byte buffer is NUL-terminated and the result pointer is null.
-    let status = unsafe { mxc_run_request(invalid_utf8.as_ptr().cast(), ptr::null_mut()) };
-
-    assert_eq!(status, mxc_ffi::MXC_STATUS_NULL_ARGUMENT);
 }
 
 /// Run a raw JSON request that is expected to fail, returning its status and
@@ -401,18 +378,27 @@ fn extern_spawn_json_failure_returns_no_handle_and_an_owned_error() {
 #[test]
 #[ignore = "requires an elevated, host-prepped Windows host (see docs/host-prep.md)"]
 fn extern_run_executes_command() {
+    let container_id = format!(
+        "ffi-json-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
     let request = CString::new(
-        r#"{
-            "policy":{
-                "filesystem":{"readwritePaths":["C:\\Windows\\Temp"]}
-            },
-            "command":"cmd /c echo hello-ffi"
-        }"#,
+        serde_json::json!({
+            "version": "1.0.0",
+            "containerId": container_id,
+            "process": { "commandLine": "cmd /c echo hello-ffi" },
+            "filesystem": { "readwritePaths": ["C:\\Windows\\Temp"] },
+        })
+        .to_string(),
     )
     .unwrap();
     let mut out = zeroed_result();
     // SAFETY: valid C string and a valid out pointer.
-    let status = unsafe { mxc_run_request(request.as_ptr(), &mut out) };
+    let status = unsafe { mxc_run_json(request.as_ptr(), 0, &mut out) };
 
     assert_eq!(status, mxc_ffi::MXC_STATUS_SUCCESS, "status={status}");
     assert_eq!(out.exit_code, 0);
@@ -421,23 +407,28 @@ fn extern_run_executes_command() {
     let stdout = unsafe { CStr::from_ptr(out.stdout_utf8) }.to_str().unwrap();
     assert!(stdout.contains("hello-ffi"), "stdout={stdout}");
 
-    // SAFETY: `out` was filled by `mxc_run_request`.
+    // SAFETY: `out` was filled by `mxc_run_json`.
     unsafe { mxc_run_result_free(&mut out) };
 }
 
-/// Pins that `mxc_spawn_request` reaches the LXC backend rather than refusing
+/// Pins that `mxc_spawn_json` reaches the LXC backend rather than refusing
 /// the containment.
 ///
 /// The empty distribution makes LXC refuse before creating a container, so the
 /// result is the same on every Linux host.
 #[cfg(target_os = "linux")]
 #[test]
-fn extern_spawn_request_reaches_the_lxc_backend() {
+fn extern_spawn_json_reaches_the_lxc_backend() {
     let request = CString::new(
         r#"{
-            "policy": {},
-            "command": "echo hello-lxc",
-            "containment": { "type": "lxc", "distribution": "", "release": "" }
+            "version": "1.0.0",
+            "containment": "lxc",
+            "process": { "commandLine": "echo hello-lxc" },
+            "network": {
+                "egress": { "default": "deny" },
+                "ingress": { "default": "deny", "hostLoopback": "deny" }
+            },
+            "lxc": { "distribution": "", "release": "" }
         }"#,
     )
     .unwrap();
@@ -445,7 +436,7 @@ fn extern_spawn_request_reaches_the_lxc_backend() {
     // SAFETY: `MxcErrorDetail` contains integers and nullable pointers.
     let mut error: MxcErrorDetail = unsafe { std::mem::zeroed() };
     // SAFETY: valid request and writable fresh out-parameters.
-    let status = unsafe { mxc_spawn_request(request.as_ptr(), &mut handle, &mut error) };
+    let status = unsafe { mxc_spawn_json(request.as_ptr(), 0, &mut handle, &mut error) };
 
     assert_ne!(
         status,
@@ -453,13 +444,13 @@ fn extern_spawn_request_reaches_the_lxc_backend() {
         "the engine must route LXC to a real backend arm on Linux"
     );
     assert!(handle.is_null());
-    // SAFETY: the message is a valid C string filled by `mxc_spawn_request`.
+    // SAFETY: the message is a valid C string filled by `mxc_spawn_json`.
     let message = unsafe { CStr::from_ptr(error.message_utf8) }
         .to_str()
         .unwrap();
     // Only the LXC backend produces a message opening with `LXC`.
     assert!(message.starts_with("LXC"), "unexpected message: {message}");
 
-    // SAFETY: `error` was filled by `mxc_spawn_request`.
+    // SAFETY: `error` was filled by `mxc_spawn_json`.
     unsafe { mxc_error_detail_free(&mut error) };
 }

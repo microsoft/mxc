@@ -5,11 +5,8 @@ This directory holds shared policy fixture families:
 - `sdk-v1/` — the exact 1.0.0 documents every v1 SDK must emit for a shared
   set of high-level policy invocations. See
   [SDK v1 conformance fixtures](#sdk-v1-conformance-fixtures).
-- The top-level `request-*.json` files — the private binding request accepted by the
-  deprecated `mxc_run_request` / `mxc_spawn_request` exports. They are removed
-  with those exports.
-- The top-level `state-aware-*.json` files are exact lifecycle envelopes and
-  remain independent of the private binding-request cleanup.
+- The top-level `state-aware-*.json` files — exact state-aware envelopes used
+  by native lifecycle tests.
 
 ## SDK v1 conformance fixtures
 
@@ -52,10 +49,8 @@ an unintended mapping change could update both sides and hide a regression.
   invalid document is rejected for the recorded reason.
 - **Schema** — `scripts/versioning/validate-configs.js` validates every
   expected document against the registered 1.0.0 schema.
-- **Node and .NET (planned migration coverage)** — their JSON-ingress
-  follow-ups map inputs through the high-level API and assert emitted JSON
-  equals the expected document. Their current one-shot paths still use the
-  private binding request.
+- **Node and .NET** — each SDK maps the input through its own high-level API
+  and asserts the emitted JSON equals the expected document.
 
 The Rust policy module includes its conformance module only under
 `#[cfg(test)]`, so it is not part of the production library. It lives under
@@ -104,54 +99,10 @@ Write both files by hand. Run
 `node scripts/versioning/validate-configs.js`, then update each SDK's conformance
 test so it covers the new input.
 
-## Binding request fixtures
+## State-aware exact fixtures
 
-Hand-authored JSON request fixtures asserted against by **both** language
-bindings. They pin the co-versioned binding request contract — the
-`RequestSpec` / `SandboxRequest` wire shape — so the Rust and C# models cannot
-drift apart silently.
-
-| Fixture | Contract |
-|---------|----------|
-| `request-process-container.json` | One-shot process-container request |
-| `request-directional-network.json` | One-shot request using the schema 0.8 directional network shape |
-| `request-wslc.json` | One-shot WSLC request |
-| `state-aware-wslc-provision.json` | State-aware WSLC `provision` envelope |
-| `state-aware-wslc-exec.json` | State-aware WSLC `exec` envelope |
-
-### Consumers
-
-- **Rust** — `src/ffi/mxc_ffi/src/request.rs` and `src/ffi/mxc_ffi/src/state_aware.rs`
-  pull each file in with `include_str!` and assert the native contract accepts it.
-- **C#** — `sdk/dotnet/Microsoft.Mxc.Sdk.Tests` embeds `*.json` from this
-  directory (see its `.csproj`) and compares serializer output via
-  `JsonAssert.MatchesGolden`.
-
-They live here rather than under either SDK because neither owns them: a Rust
-crate reaching into `sdk/dotnet/` for test data inverts the dependency, and
-reorganizing one SDK would break the other's tests.
-
-### These are written by hand, on purpose
-
-Do **not** generate them from the Rust structs or the C# POCOs. Their value is
-that they are an *independent* statement of the expected wire shape. Deriving
-them from either model under test would make the assertion tautological — a
-field renamed in the model would silently rename itself in the fixture and the
-test would still pass.
-
-When the request contract changes intentionally, edit these files by hand and
-let both test suites confirm the change is what you meant.
-
-### Not config files
-
-The `request-*.json` files are **binding request** documents
-(`{ policy, command, containment, ... }`),
-not exact configuration documents. They are deliberately outside
-`tests/configs/` and `tests/examples/`, where
-`scripts/versioning/validate-configs.js` selects each document's exact
-registered schema from its `version`; these would fail because they describe a
-different contract.
-
-The `state-aware-*.json` files instead carry exact lifecycle envelopes with a
-`version`. They are consumed by lifecycle tests and are not removed with the
-private one-shot binding-request fixtures.
+The top-level `state-aware-wslc-provision.json` and
+`state-aware-wslc-exec.json` files are exact state-aware envelopes consumed by
+`src/ffi/mxc_ffi/src/state_aware.rs`. They stay outside `sdk-v1/` because they
+exercise raw lifecycle parsing rather than high-level SDK one-shot policy
+mapping.

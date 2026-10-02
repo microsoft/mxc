@@ -87,6 +87,19 @@ if (!existsSync(generated)) {
 }
 
 const content = readFileSync(generated, "utf8");
+const removedPrivateEntryPoints = [
+  "mxc_run_request",
+  "mxc_spawn_request",
+  "mxc_probe_sandbox_request_json_with_error",
+].filter((name) => content.includes(`EntryPoint = "${name}"`));
+if (removedPrivateEntryPoints.length > 0) {
+  console.error(
+    "ERROR: generated C# bindings still expose removed private entry point(s): " +
+      removedPrivateEntryPoints.join(", ")
+  );
+  process.exit(1);
+}
+
 const missing = REQUIRED_ENTRY_POINTS.filter(
   (name) => !content.includes(`EntryPoint = "${name}"`)
 );
@@ -99,8 +112,6 @@ if (missing.length > 0) {
 }
 
 const requiredSignatures = [
-  "mxc_run_request(byte* request_json_utf8, MxcRunResult* @out)",
-  "mxc_spawn_request(byte* request_json_utf8, MxcSandbox** out_handle, MxcErrorDetail* out_error)",
   "mxc_run_json(byte* request_json_utf8, int experimental, MxcRunResult* @out)",
   "mxc_spawn_json(byte* request_json_utf8, int experimental, MxcSandbox** out_handle, MxcErrorDetail* out_error)",
 ];

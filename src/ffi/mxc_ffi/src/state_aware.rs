@@ -15,7 +15,7 @@
 //!   for an interactive terminal. It blocks and reports an [`MxcExecOutcome`].
 //! - [`mxc_exec_state_aware_json`] drives the **exec phase as a live streaming**
 //!   process, returning the same opaque [`crate::MxcSandbox`] handle
-//!   as [`mxc_spawn_request`](crate::mxc_spawn_request) — so the caller reuses the
+//!   as [`mxc_spawn_json`](crate::mxc_spawn_json) — so the caller reuses the
 //!   `mxc_stream_*` / `mxc_sandbox_*` externs to read/write/wait/kill.
 //!
 //! The two exec entry points take the **same** request JSON and differ only in
@@ -229,7 +229,7 @@ pub unsafe extern "C" fn mxc_exec_state_aware_json(
         unsafe { *out_handle = ptr::null_mut() };
     }
     if !out_error.is_null() {
-        // `write` rather than assignment, for the reason given on `mxc_spawn_request`:
+        // `write` rather than assignment, for the reason given on `mxc_spawn_json`:
         // the storage may be uninitialised, and nothing here is dropped.
         // SAFETY: caller-guaranteed writable storage for one detail.
         unsafe { ptr::write(out_error, MxcErrorDetail::none()) };
