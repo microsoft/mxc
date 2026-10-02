@@ -1,6 +1,6 @@
 # Version-aware SDK stack session handoff
 
-Date: September 30, 2026. Updated: October 1, 2026.
+Date: September 30, 2026. Updated: October 2, 2026.
 
 This document records the state of the v1 SDK and JSON-only FFI ingress
 pull-request stack, the decisions behind it, and the remaining work, for a
@@ -139,7 +139,11 @@ a detached worktree once caused a stale branch to be pushed.
 7. **Builder normalization.** The Rust builder no longer writes host-specific
    sections for abstract `process` containment or adds network capabilities;
    the engine and ProcessContainer backend own both.
-8. **Plain SDK types.** The Rust SDK policy types have no serde derives. E0
+8. **Plain SDK types and staging.** The October 2 decision keeps the existing
+   SDK serde derives through A/B/C so the legacy binding parser can continue
+   using those types without new mirror policy models. D deletes all private
+   execution/probe consumers and `request.rs`, then removes those derives.
+   Exact-contract and test-only fixture types retain serde. E0
    moves the policy, containment, request, builder, and typed lifecycle types
    from `mxc_engine` into `mxc-sdk` (exposed only under `mxc_sdk::v1`); the
    engine exposes `spawn_execution_request(&ExecutionRequest)`. `mxc-sdk` now

@@ -13,7 +13,7 @@ over conflicting historical SDK statements in that earlier phase plan.
 The current state of each pull request is recorded in
 [`version-aware-stack-session-handoff-2026-09-30.md`](version-aware-stack-session-handoff-2026-09-30.md).
 
-Updated: October 1, 2026.
+Updated: October 2, 2026.
 
 ## 1. Decision
 
@@ -201,8 +201,11 @@ changes, every pull request above it is rebased in order.
 8. Correct the result-ownership documentation: callers free a result after
    every call that populated it, including failures.
 9. Mark `mxc_run_request`, `mxc_spawn_request`, and `request.rs` deprecated.
-10. Remove `Deserialize` and `Serialize` from the Rust SDK policy types. The
-    deprecated binding request owns private copies until D removes it.
+10. Retain the existing SDK serde derives needed by the deprecated binding
+    parser. Reuse its existing SDK policy/config types rather than introducing
+    parallel `FilesystemSpec`, `NetworkSpec`, or UI models and conversions.
+    Removing SDK serde support is deferred to D, after B/C migrate every
+    private-parser consumer.
 11. Document the ingress rule in the `mxc_ffi` crate documentation and a short
     paragraph in an existing SDK or versioning document. Do not add a separate
     FFI document.
@@ -272,6 +275,18 @@ binding-request golden fixtures, and update generated binding inventories.
 Keep the exact-config probe. Give migrated real-host tests fresh container
 identifiers and document both one-shot and lifecycle producers of shared
 process handles, as detailed in section 8.
+
+Only after removing those consumers and the private parser, remove
+`Deserialize`/`Serialize` and serde attributes from SDK authoring types.
+Versioned exact-contract types and test-only fixture input types keep their
+serde support. A/B/C temporarily retain the existing authoring derives; they
+do not define a new supported SDK JSON contract or require new mirror models.
+The released stable SDK still has plain Rust authoring types.
+
+This staging deliberately avoids removing a trait used by an existing call
+path in A and then recreating its decoder with duplicate policy types. Existing
+private adapters whose wire shapes differ from SDK types remain until the
+parser is deleted; do not indiscriminately remove those earlier adapters.
 
 ### 4.4.1 E0 — SDK authoring types into `mxc-sdk`
 
@@ -370,7 +385,8 @@ Platform paths that cannot run locally are identified in each pull request.
 5. The SDK v1 goldens in `tests/policy/sdk-v1` are the cross-language
    contract: every SDK must emit each expected document for its input.
 6. The Rust SDK's authoring types belong to `mxc-sdk`, not `mxc_engine`
-   (E0).
+   (E0). They retain legacy-parser serde support through A/B/C; D removes it
+   after deleting private ingress, so E0 moves plain authoring types.
 7. Public generic SDK names use `Container`, not `Sandbox`. Distinguish a
    container identity from its running processes and terminal connections;
    retain actual backend product names such as Windows Sandbox.
@@ -627,6 +643,12 @@ PRs:
   semantics and do not publish aliases that misleadingly imply equivalence.
 
 ## 8. Release closeout and PR ownership
+
+**October 2 staging update:** A adds exact ingress without removing the SDK
+serde traits required by its still-active legacy callers. B/C migrate those
+callers; D removes the private parser/exports and then SDK serde support.
+This replaces A's earlier temporary mirror-policy model sequence. The end-state
+JSON-only boundary, plain SDK types, and release criteria are unchanged.
 
 The following numbered items retain the October 1 review's item numbers.
 Lower-case suffixes identify substeps rather than new overall release items.
