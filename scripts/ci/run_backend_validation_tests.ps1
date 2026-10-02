@@ -247,6 +247,21 @@ function Get-NodeSuiteFailure {
     $failures -join '; '
 }
 
+function Get-XunitSuiteFailure {
+    param(
+        [Parameter(Mandatory)][string]$ResultXml,
+        [Parameter(Mandatory)][string[]]$Classes
+    )
+
+    $tests = @(([xml](Get-Content -LiteralPath $ResultXml -Raw)).SelectNodes("//test[@result='Pass' or @result='Fail']"))
+    $failures = foreach ($class in $Classes) {
+        if (@($tests | Where-Object { $_.type -like "*.$class" }).Count -eq 0) {
+            "'$class' executed no tests"
+        }
+    }
+    $failures -join '; '
+}
+
 function Invoke-IsolationSessionSuites {
     $bundle = Join-Path $binaryDirectoryPath 'isolation-session-bundle'
     $inProcTests = Join-Path $bundle 'inproc\mxc-sdk-isolation-session-tests.exe'
@@ -295,17 +310,12 @@ function Invoke-IsolationSessionSuites {
             Get-LibtestFailure (Invoke-LoggedNative -FilePath $helperTests -ArgumentList '--test-threads=1' -LogName 'isolation-session-rust-helpers.log')
         }
         'C#' = {
+            $classes = 'MxcSandboxIsolationSessionE2ETests', 'MxcLifecycleE2ETests'
             $resultXml = Join-Path $env:TEMP 'isolation-session-dotnet.xml'
             $run = Invoke-LoggedNative -FilePath $dotnetTests -LogName 'isolation-session-dotnet.log' -ArgumentList @(
-                '-class', 'Microsoft.Mxc.Sdk.Tests.MxcSandboxIsolationSessionE2ETests',
-                '-class', 'Microsoft.Mxc.Sdk.Tests.MxcLifecycleE2ETests',
+                $classes | ForEach-Object { '-class', "*.$_" }
                 '-result-xml', $resultXml)
-            if ($run.ExitCode -ne 0) {
-                "exited $($run.ExitCode)"
-            }
-            elseif (@(([xml](Get-Content -LiteralPath $resultXml -Raw)).SelectNodes("//test[@result='Pass' or @result='Fail']")).Count -eq 0) {
-                'executed no tests'
-            }
+            if ($run.ExitCode -ne 0) { "exited $($run.ExitCode)" } else { Get-XunitSuiteFailure -ResultXml $resultXml -Classes $classes }
         }
         'apartment probe' = {
             $modes = [ordered]@{
