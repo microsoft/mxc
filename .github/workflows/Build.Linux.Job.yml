@@ -118,29 +118,21 @@ jobs:
           cargo test --locked --release --target "${{ matrix.target }}" -p mxc_engine -p mxc_ffi --lib state_aware
           cargo test --locked --release --target "${{ matrix.target }}" -p mxc-sdk --test state_aware
 
-      # The LXC streaming arm and the discovery matrix it feeds are Linux-only
-      # code that no other lane compiles, let alone runs. None of these need LXC
-      # installed: the engine tests inject their probes, and the dispatch and
-      # FFI pins are refused inside LXC's own preparation before a container is
-      # created. The live suite that does need LXC runs in lxc-e2e.yml.
-      #
-      # Each run is checked for a non-zero pass count because `cargo test` with
-      # a name filter that matches nothing also exits 0, so a renamed test would
-      # otherwise turn this gate into a no-op.
+      # These need no LXC installed: the engine tests inject their probes, and
+      # the dispatch and FFI pins are refused before a container is created.
       - name: Test LXC dispatch and discovery
         working-directory: src
         shell: bash
         run: |
-          # No `-e`: the pipeline's status is checked explicitly below so a
-          # failure reports which pinned run failed, rather than aborting mute.
+          # No `-e`: each run's status is checked below so a failure names it.
           set -uo pipefail
           run_pinned() {
             local label="$1"; shift
             local log status
             log="$(mktemp)"
             cargo test --locked --release --target "${{ matrix.target }}" "$@" 2>&1 | tee "$log"
-            # `tee` succeeds even when cargo does not, so read cargo's own
-            # status before trusting the summary below.
+
+            # `tee` succeeds even when cargo does not.
             status=${PIPESTATUS[0]}
             if [ "$status" -ne 0 ]; then
               echo "::error::$label failed (cargo exited $status)."

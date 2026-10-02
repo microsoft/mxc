@@ -114,14 +114,9 @@ jobs:
           MXC_LXC_TESTS_REQUIRE_EXECUTION: "1"
         run: sudo --preserve-env=MXC_LXC_TESTS_REQUIRE_EXECUTION,PATH,HOME "$(command -v cargo)" test -p wxc_e2e_tests --test e2e_lxc_network_capability
 
-      # `lxc-exec` routes through `mxc_engine::run` and never reaches
-      # `spawn_sandbox`, so no shell script can drive the streaming handle.
-      # This lane already has LXC installed, and these cases need root to
-      # create and start a container.
-      #
-      # `sdk_helpers` runs here too: this is the only lane where
-      # `platform_support()` sees a host with LXC, so it is the only one that
-      # exercises the LXC side of the discovery contract.
+      # These create and start a container, so they need this lane's root and
+      # its LXC install. `sdk_helpers` rides along because this is the only lane
+      # where `platform_support()` sees a host with LXC.
       - name: Run LXC streaming SDK tests
         working-directory: src
         env:

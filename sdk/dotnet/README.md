@@ -377,12 +377,6 @@ request.Containment = new LxcContainment
 };
 ```
 
-`Run`, `RunAsync`, and `Spawn` all serve LXC in-process on Linux. It needs
-root, and its stdio is pipes rather than a pty, so the workload sees no
-terminal — unlike the standalone `lxc-exec` binary, which allocates one. Two
-live sandboxes in one process cannot share a `ContainerName`; the second is
-refused.
-
 #### WSL Container options
 
 `WslcContainment` selects the WSLC backend and carries its image,

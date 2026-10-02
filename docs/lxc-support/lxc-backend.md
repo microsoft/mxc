@@ -237,43 +237,25 @@ and every SDK built on `mxc_spawn_request` / `mxc_run_request` reach it
 in-process. The handle serves live stdin, stdout, and stderr, plus `wait` and
 `kill`.
 
-**Pipes, not a pty.** The streaming path wires the workload to ordinary pipes,
-so `isatty()` is false inside the container. The `lxc-exec` binary is
-unchanged: it allocates a pty and bridges it to the host's stdio, which is why
-an interactive shell still renders under it and not here.
+**Pipes, not a pty.** `isatty()` is false inside the container, and
+`StdioMode::Inherit` is refused. Run `lxc-exec` for a terminal.
 
-**`StdioMode::Inherit` is refused.** Handing the workload the host's own stdio
-means `mxc_pty`, which runs to completion and cannot return a handle. It also
-reads the host's stdin and installs a process-wide window-size handler, neither
-of which a library may do to its caller. Stream over pipes, or run `lxc-exec`.
-
-**`kill()` stops the container.** The workload runs in the container's PID
-namespace under container init, so nothing aimed at the host `lxc-attach`
-process or its process group reaches it — including a descendant the workload
-backgrounded. `lxc-stop -k` is what reaches them, and it takes the network
-namespace down with the workload rather than after it. It stops the container
-rather than releasing it; the release happens when the run reaches a terminal
-path below.
+**`kill()` stops the container,** not just the workload: the workload runs under
+container init, where nothing aimed at the host `lxc-attach` process reaches it.
 
 **One live sandbox per container name, per process.** A second sandbox naming a
 `containerId` this process already holds is refused rather than queued, because
-LXC reads a run's network section only when the container starts — serving the
-second would mean stopping the first one's workload to restart it under a
-different policy. Omit `containerId` to get a generated name instead. The claim
-is process-local and released when the handle drops, so another process,
-including an `lxc-exec` run, can still take the same container.
+LXC reads a run's network section only when the container starts. Omit
+`containerId` for a generated name. The claim is released when the handle drops.
 
-**Teardown is owed on every terminal path.** Completing, timing out, and being
-dropped without a `wait` all remove the `/etc/hosts` proxy pin, the egress and
-ingress chains, and the container itself. A teardown step that fails after a
-`wait` is reported through `Sandbox::warnings`; after a bare drop there is no
-handle left to report through, so a caller that wants to see those failures has
-to wait.
+**Teardown is owed on every terminal path,** including a drop without `wait`:
+the proxy pin and the network chains come down, and the container is released.
+A teardown failure is reported through `Sandbox::warnings`, which a bare drop
+leaves no handle to read.
 
-**The streaming path holds root for as long as the handle lives.** `lxc-exec`
-is a short-lived process; an SDK host streaming a sandbox keeps a
-root-privileged container open for the length of the session. Weigh that
-against the threat model before embedding it in a long-lived service.
+**The container stays up for as long as the handle lives.** `lxc-exec` is
+short-lived by comparison. Weigh that against the threat model before embedding
+streaming in a long-lived service.
 
 ## Building
 
