@@ -257,7 +257,7 @@ child.on('close', (code) => console.log('exit:', code));
 
 ### 2. `spawnSandbox(script, policy, ...)` — convenience
 
-Quick path for **process-isolation only** (`processcontainer` on Windows, `lxc` on Linux, `seatbelt` on macOS). Returns a `node-pty` `IPty` with merged stdout/stderr.
+Quick path for **process isolation only**. The abstract `process` intent lands on ProcessContainer on Windows, Bubblewrap on Linux, and Seatbelt on macOS. Returns a `node-pty` `IPty` with merged stdout/stderr.
 
 ```typescript
 import {

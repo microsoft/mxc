@@ -37,7 +37,7 @@ interface RequestModule {
 }
 
 interface StreamingModule {
-  spawnBindingSandboxProcess(request: unknown): NativeSandbox;
+  spawnBindingSandboxProcess(request: unknown): Promise<NativeSandbox>;
 }
 
 const platformSupport = sdk.getPlatformSupport();
@@ -119,7 +119,7 @@ describe(`Internal native streaming (schema ${schemaVersion})`, { skip: skipReas
     const request = requestModule.prepareRequestSpec(config, {
       experimental: debugSpawnOptions.experimental,
     });
-    const sandbox = streamingModule.spawnBindingSandboxProcess(request);
+    const sandbox = await streamingModule.spawnBindingSandboxProcess(request);
     const standardInput = sandbox.standardInput;
     const standardOutput = sandbox.standardOutput;
     const standardError = sandbox.standardError;
@@ -184,7 +184,7 @@ describe(`Internal native streaming (schema ${schemaVersion})`, { skip: skipReas
     const request = requestModule.prepareRequestSpec(config, {
       experimental: debugSpawnOptions.experimental,
     });
-    const sandbox = streamingModule.spawnBindingSandboxProcess(request);
+    const sandbox = await streamingModule.spawnBindingSandboxProcess(request);
 
     const result = await sandbox.waitAsync();
     assert.strictEqual(result.exitCode, 0);

@@ -35,6 +35,7 @@ import {
 type Pointer = unknown;
 type NativeLibraryHandle = MxcNativeLibrary['handle'];
 type NativeFreeCompletion = (error: Error | null) => void;
+type NativeSpawnCompletion = (error: Error | null, status: number) => void;
 type NativeWaitCompletion = (error: Error | null, status: number) => void;
 
 const AbiSandbox = koffi.opaque('MxcSandbox');
@@ -49,7 +50,8 @@ export interface StreamingNativeFacade {
     request: string,
     outHandle: Pointer[],
     error: AbiErrorDetail,
-  ): number;
+    completion: NativeSpawnCompletion,
+  ): void;
   stateAwareExec(
     request: string,
     experimental: number,
@@ -86,7 +88,8 @@ function bindStreamingNativeFacade(
   const sandboxPointer = koffi.pointer(AbiSandbox);
 
   // Koffi exposes asynchronous invocation on the bound function object, so
-  // wait and free keep their raw bindings behind callback-shaped facade methods.
+  // spawn, wait and free keep their raw bindings behind callback-shaped facade
+  // methods.
   const freeAsyncBinding = bindNativeFunction<
     KoffiFunc<(sandbox: Pointer) => void>
   >(
@@ -97,6 +100,22 @@ function bindStreamingNativeFacade(
       parameters: [sandboxPointer],
     },
   );
+
+  // LXC preparation downloads an image and waits for a DHCP lease, so a
+  // synchronous call here would stall the event loop for tens of seconds.
+  const spawnAsyncBinding = bindNativeFunction<KoffiFunc<(
+    request: string,
+    outHandle: Pointer[],
+    error: AbiErrorDetail,
+  ) => number>>(handle, {
+    symbol: 'mxc_spawn_request',
+    result: 'int32_t',
+    parameters: [
+      'const char *',
+      koffi.out(koffi.pointer(AbiSandbox, 2)),
+      koffi.out(koffi.pointer(AbiErrorDetailType)),
+    ],
+  });
 
   const waitAsyncBinding = bindNativeFunction<KoffiFunc<(
     sandbox: Pointer,
@@ -113,15 +132,9 @@ function bindStreamingNativeFacade(
   });
 
   const native: StreamingNativeFacade = {
-    spawn: bindNativeFunction(handle, {
-      symbol: 'mxc_spawn_request',
-      result: 'int32_t',
-      parameters: [
-        'const char *',
-        koffi.out(koffi.pointer(AbiSandbox, 2)),
-        koffi.out(koffi.pointer(AbiErrorDetailType)),
-      ],
-    }),
+    spawn(request, outHandle, error, completion) {
+      spawnAsyncBinding.async(request, outHandle, error, completion);
+    },
 
     stateAwareExec: bindNativeFunction(handle, {
       symbol: 'mxc_state_aware_exec',
@@ -364,15 +377,12 @@ function beginFailedSpawnCleanup(
   void freeSandboxAsync(native, handle).catch(() => {});
 }
 
-/** Internal constructor with injectable native and stream dependencies. */
-function createStreamingDriverFromSpawn(
+function takeSpawnedHandle(
   native: StreamingNativeFacade,
-  factory: NativeStreamFactory,
-  spawn: (outHandle: Pointer[], error: AbiErrorDetail) => number,
-): NativeLifecycleDriver {
-  const outHandle: Pointer[] = [null];
-  const error = {} as AbiErrorDetail;
-  const status = spawn(outHandle, error);
+  outHandle: Pointer[],
+  error: AbiErrorDetail,
+  status: number,
+): Pointer {
   if (status !== 0) {
     try {
       throw nativeStatusError(status, error);
@@ -388,7 +398,14 @@ function createStreamingDriverFromSpawn(
       'native runtime returned a null lifecycle handle',
     );
   }
+  return handle;
+}
 
+function adoptSpawnedHandle(
+  native: StreamingNativeFacade,
+  factory: NativeStreamFactory,
+  handle: Pointer,
+): NativeLifecycleDriver {
   let streams: NativeStdioStreams | undefined;
   try {
     const stdio = {} as NativeStdioHandles;
@@ -419,19 +436,24 @@ function createStreamingDriverFromSpawn(
 }
 
 /** Internal constructor with injectable native and stream dependencies. */
-export function createStreamingDriver(
+export async function createStreamingDriver(
   request: RequestSpec,
   native: StreamingNativeFacade,
   factory: NativeStreamFactory,
-): NativeLifecycleDriver {
-  return createStreamingDriverFromSpawn(
+): Promise<NativeLifecycleDriver> {
+  const outHandle: Pointer[] = [null];
+  const error = {} as AbiErrorDetail;
+  const requestJson = JSON.stringify(request);
+  const status = await new Promise<number>((resolve, reject) => {
+    native.spawn(requestJson, outHandle, error, (failure, nativeStatus) => {
+      if (failure !== null) reject(failure);
+      else resolve(nativeStatus);
+    });
+  });
+  return adoptSpawnedHandle(
     native,
     factory,
-    (outHandle, error) => native.spawn(
-      JSON.stringify(request),
-      outHandle,
-      error,
-    ),
+    takeSpawnedHandle(native, outHandle, error, status),
   );
 }
 
@@ -453,15 +475,15 @@ function ensureSupportedNodeVersion(): void {
   });
 }
 
-function spawnDriver(request: RequestSpec): NativeLifecycleDriver {
+function spawnDriver(request: RequestSpec): Promise<NativeLifecycleDriver> {
   ensureSupportedNodeVersion();
   return createStreamingDriver(request, getNative(), nodeStreamFactory);
 }
 
-export function spawnBindingSandboxProcess(
+export async function spawnBindingSandboxProcess(
   request: RequestSpec,
-): MxcSandboxProcess {
-  const driver = spawnDriver(request);
+): Promise<MxcSandboxProcess> {
+  const driver = await spawnDriver(request);
   return createSandboxProcess(driver, request.policy.timeoutMs);
 }
 
@@ -472,15 +494,18 @@ export function createStateAwareStreamingDriver(
   native: StreamingNativeFacade,
   factory: NativeStreamFactory,
 ): NativeLifecycleDriver {
-  return createStreamingDriverFromSpawn(
+  const outHandle: Pointer[] = [null];
+  const error = {} as AbiErrorDetail;
+  const status = native.stateAwareExec(
+    requestJson,
+    experimental ? 1 : 0,
+    outHandle,
+    error,
+  );
+  return adoptSpawnedHandle(
     native,
     factory,
-    (outHandle, error) => native.stateAwareExec(
-      requestJson,
-      experimental ? 1 : 0,
-      outHandle,
-      error,
-    ),
+    takeSpawnedHandle(native, outHandle, error, status),
   );
 }
 
