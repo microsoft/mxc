@@ -7,19 +7,24 @@
 ///
 /// The v1 high-level SDK exposes directional policy only. Exact legacy
 /// configuration remains available through the raw configuration parser.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[non_exhaustive]
 pub struct NetworkSection {
     /// Outbound network policy.
+    #[serde(default)]
     pub egress: Option<NetworkEgressSection>,
     /// Inbound and host-loopback network policy.
+    #[serde(default)]
     pub ingress: Option<NetworkIngressSection>,
     /// Runtime values supplied separately from sandbox policy.
+    #[serde(default)]
     pub runtime_config: Option<RuntimeConfigSection>,
 }
 
 /// Allow or deny a network action.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum NetworkAction {
     Allow,
@@ -28,7 +33,8 @@ pub enum NetworkAction {
 }
 
 /// Transport protocol selector.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum NetworkProtocol {
     Tcp,
@@ -38,10 +44,12 @@ pub enum NetworkProtocol {
 }
 
 /// CIDR network peer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct NetworkPeerSection {
     pub cidr: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub except: Option<Vec<String>>,
 }
 
@@ -56,45 +64,61 @@ impl NetworkPeerSection {
 }
 
 /// Protocol and destination-port selector.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct NetworkPortSection {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub protocol: Option<NetworkProtocol>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub end_port: Option<u16>,
 }
 
 /// Outbound network rule.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct NetworkRuleSection {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<Vec<NetworkPeerSection>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ports: Option<Vec<NetworkPortSection>>,
 }
 
 /// Outbound network policy.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct NetworkEgressSection {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<NetworkAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub allow: Option<Vec<NetworkRuleSection>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub deny: Option<Vec<NetworkRuleSection>>,
 }
 
 /// Inbound and host-loopback network policy.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct NetworkIngressSection {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<NetworkAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub host_loopback: Option<NetworkAction>,
 }
 
 /// Runtime values supplied separately from sandbox policy.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct RuntimeConfigSection {
     /// HTTP/S proxy URL. Host-process backends require localhost; WSLc requires
     /// a container-routable endpoint and does not filter egress through it.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub network_proxy: Option<String>,
 }
 

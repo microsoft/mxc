@@ -428,7 +428,8 @@ pub fn temporary_files_policy(env: Option<&[(String, String)]>) -> FilesystemPol
 
 /// Clipboard access level, mirroring the SDK `ClipboardPolicy`
 /// (`"none" | "read" | "write" | "all"`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub enum ClipboardPolicy {
     /// No clipboard access.
     #[default]
@@ -442,7 +443,8 @@ pub enum ClipboardPolicy {
 }
 
 /// Filesystem section of a [`SandboxPolicy`].
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct FilesystemSection {
     pub readwrite_paths: Vec<String>,
     pub readonly_paths: Vec<String>,
@@ -452,7 +454,8 @@ pub struct FilesystemSection {
 }
 
 /// UI section of a [`SandboxPolicy`]. All flags default to denied.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct UiSection {
     pub allow_windows: bool,
     pub clipboard: ClipboardPolicy,
@@ -570,13 +573,18 @@ impl Default for WslcSection {
 /// instrumentation rather than a sandbox restriction, matching the global
 /// sandbox-policy design. Build the request first, then use
 /// [`SandboxRequest::set_telemetry_opt_in`] to opt that invocation in.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[non_exhaustive]
 pub struct SandboxPolicy {
+    #[serde(default)]
     pub filesystem: Option<FilesystemSection>,
+    #[serde(default)]
     pub network: Option<NetworkSection>,
+    #[serde(default)]
     pub ui: Option<UiSection>,
     /// Execution timeout in milliseconds (`None` = no timeout).
+    #[serde(default)]
     pub timeout_ms: Option<u32>,
 }
 

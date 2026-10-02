@@ -4,7 +4,8 @@
 //! ProcessContainer-specific configuration types and wire mapping.
 
 /// How denial capture handles ungranted access checks.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum CaptureDenialsMode {
     /// Keep the access denied and record the denial.
@@ -20,7 +21,8 @@ pub enum CaptureDenialsMode {
 /// ungranted access attempts and writes a JSON denials document, reported
 /// through
 /// [`SandboxOutputMetadata::capture_denials`](wxc_common::models::SandboxOutputMetadata).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 #[non_exhaustive]
 pub struct CaptureDenials {
     /// How each ungranted access check is handled while it is recorded.
