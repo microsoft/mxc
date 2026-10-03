@@ -10,8 +10,17 @@ use mxc_sdk::{spawn_with_pty_json, MxcPtySize};
 use crate::streaming::{finish_handle, sdk_error_detail, MxcSandbox};
 use crate::{
     cstr_to_str, MxcErrorDetail, MXC_STATUS_BACKEND_ERROR, MXC_STATUS_INVALID_UTF8,
-    MXC_STATUS_NULL_ARGUMENT, MXC_STATUS_PANIC, MXC_STATUS_SUCCESS,
+    MXC_STATUS_MALFORMED_REQUEST, MXC_STATUS_NULL_ARGUMENT, MXC_STATUS_PANIC, MXC_STATUS_SUCCESS,
 };
+
+const INVALID_PTY_DIMENSIONS: &str = "PTY rows and columns must be between 1 and 32767";
+
+fn validate_pty_dimensions(rows: u16, cols: u16) -> Result<(), i32> {
+    if rows == 0 || cols == 0 || rows > i16::MAX as u16 || cols > i16::MAX as u16 {
+        return Err(MXC_STATUS_MALFORMED_REQUEST);
+    }
+    Ok(())
+}
 
 /// Spawn an exact-version one-shot JSON request attached to an MXC-owned PTY.
 ///
@@ -42,11 +51,8 @@ pub unsafe extern "C" fn mxc_spawn_pty_json(
     }
 
     let outcome = catch_unwind(AssertUnwindSafe(|| {
-        if rows == 0 || cols == 0 {
-            return Err((
-                crate::MXC_STATUS_MALFORMED_REQUEST,
-                MxcErrorDetail::from_message("PTY rows and columns must be non-zero"),
-            ));
+        if let Err(status) = validate_pty_dimensions(rows, cols) {
+            return Err((status, MxcErrorDetail::from_message(INVALID_PTY_DIMENSIONS)));
         }
         let request_json = match unsafe { cstr_to_str(request_json_utf8) } {
             Some(value) => value,
@@ -100,6 +106,9 @@ pub unsafe extern "C" fn mxc_sandbox_pty_resize(
     if handle.is_null() {
         return MXC_STATUS_NULL_ARGUMENT;
     }
+    if let Err(status) = validate_pty_dimensions(rows, cols) {
+        return status;
+    }
 
     catch_unwind(AssertUnwindSafe(|| {
         let sandbox = unsafe { &*handle };
@@ -117,4 +126,21 @@ pub unsafe extern "C" fn mxc_sandbox_pty_resize(
         crate::report_panic("mxc_sandbox_pty_resize", &*panic);
         MXC_STATUS_PANIC
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pty_dimensions_map_invalid_values_to_malformed_request() {
+        for (rows, cols) in [(0, 80), (24, 0), (32768, 80), (24, 32768)] {
+            assert_eq!(
+                validate_pty_dimensions(rows, cols),
+                Err(MXC_STATUS_MALFORMED_REQUEST)
+            );
+        }
+        assert_eq!(validate_pty_dimensions(1, 1), Ok(()));
+        assert_eq!(validate_pty_dimensions(32767, 32767), Ok(()));
+    }
 }

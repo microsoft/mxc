@@ -217,6 +217,14 @@ export class MxcSandboxProcess {
     this.killRequested = true;
   }
 
+  protected runWhileActive(operation: () => void): void {
+    this.throwIfDisposed();
+    if (this.phase !== 'active') {
+      throw new Error('sandbox process is no longer active');
+    }
+    operation();
+  }
+
   dispose(): void {
     if (this.isDisposed()) return;
     const previousPhase = this.phase;

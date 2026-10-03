@@ -146,6 +146,12 @@ class ManualScheduler implements LifecycleScheduler {
   }
 }
 
+class ActiveOperationProcess extends MxcSandboxProcess {
+  runActiveOperation(operation: () => void): void {
+    this.runWhileActive(operation);
+  }
+}
+
 describe('native sandbox process', () => {
   it('exposes the transferred Node streams directly', async () => {
     const driver = new FakeDriver();
@@ -397,6 +403,27 @@ describe('native sandbox process', () => {
     proc.kill();
 
     assert.strictEqual(driver.killCount, 0);
+    driver.resolveWait(5, false);
+    assert.deepStrictEqual(await wait, { exitCode: 5, timedOut: false });
+  });
+
+  it('rejects active-only operations after terminal wait starts', async () => {
+    const driver = new FakeDriver();
+    driver.deferWait = true;
+    const scheduler = new ManualScheduler();
+    const proc = new ActiveOperationProcess(driver, undefined, scheduler);
+    const wait = proc.waitAsync();
+    driver.complete(5);
+
+    scheduler.advance(100);
+    assert.strictEqual(driver.waitCount, 1);
+    assert.throws(
+      () => proc.runActiveOperation(() => {
+        throw new Error('operation must not run');
+      }),
+      /no longer active/,
+    );
+
     driver.resolveWait(5, false);
     assert.deepStrictEqual(await wait, { exitCode: 5, timedOut: false });
   });

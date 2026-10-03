@@ -164,6 +164,12 @@ describe('PTY native binding', () => {
     assert.strictEqual(native.resizedColumns, 120);
 
     terminal.dispose();
+    assert.throws(
+      () => terminal.resize({ rows: 50, columns: 130 }),
+      /disposed/,
+    );
+    assert.strictEqual(native.resizedRows, 40);
+    assert.strictEqual(native.resizedColumns, 120);
     await new Promise((resolve) => setImmediate(resolve));
     assert.strictEqual(native.killed, true);
     assert.strictEqual(native.freed, true);

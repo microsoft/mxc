@@ -66,6 +66,6 @@ export class MxcPtyProcess extends MxcSandboxProcess {
         'PTY rows and columns must be integers between 1 and 32767',
       );
     }
-    this.resizePty(size);
+    this.runWhileActive(() => this.resizePty(size));
   }
 }
