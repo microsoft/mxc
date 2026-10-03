@@ -32,7 +32,6 @@ use std::time::Duration;
 use wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, LaunchMethod, ProxyAddress, ScriptResponse};
-use wxc_common::mxc_error::MxcError;
 use wxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, group_kill,
     spawn_discard, take_boxed_read, take_boxed_write, wait_with_timeout, NativeStdio,
@@ -149,9 +148,9 @@ impl SandboxBackend for SeatbeltScriptRunner {
         validate_common(request)?;
         self.validate(request)?;
         if matches!(stdio, StdioMode::Pty(_)) {
-            return Err(ScriptResponse::rejected(MxcError::unsupported_policy(
-                "Seatbelt does not support PTY execution",
-            )));
+            return Err(ScriptResponse::rejected(
+                "Seatbelt does not support caller-controlled PTY spawning",
+            ));
         }
 
         // Start the cooperative network proxy (if configured) before building
