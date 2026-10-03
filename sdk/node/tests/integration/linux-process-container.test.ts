@@ -47,10 +47,8 @@ async function runLxc(
   return spawnFromConfigAsync(config, debugSpawnOptions);
 }
 
-function outboundNetwork(version: (typeof supportedVersions)[number]) {
-  return version.compare('0.8.0-alpha') >= 0
-    ? { egress: { default: 'allow' as const } }
-    : { allowOutbound: true };
+function outboundNetwork() {
+  return { egress: { default: 'allow' as const } };
 }
 
 for (const schemaVersion of supportedVersions) {
@@ -116,7 +114,7 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
   });
 
   it('should allow outbound network access', { skip: lxcNetworkSkipReason }, async () => {
-    const policy = { network: outboundNetwork(schemaVersion) };
+    const policy = { network: outboundNetwork() };
     const result = await runLxc(
       `wget -q -T 10 -O /dev/null '${NETWORK_TEST_URL}' && echo 'Network accessible'`,
       policy,
@@ -153,7 +151,7 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
     tempDir = createTempDir('mxc-lxc-test');
     const policy = {
       filesystem: { readwritePaths: [tempDir] },
-      network: outboundNetwork(schemaVersion),
+      network: outboundNetwork(),
     };
     const script =
       `wget -q -T 10 -O ${tempDir}/download.json '${NETWORK_TEST_URL}'` +
@@ -164,7 +162,7 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
   });
 
   it('should access HTTPS endpoint', { skip: lxcNetworkSkipReason }, async () => {
-    const policy = { network: outboundNetwork(schemaVersion) };
+    const policy = { network: outboundNetwork() };
     const result = await runLxc(
       `wget -q -T 10 -O /dev/null '${NETWORK_TEST_URL}' && echo 'HTTPS endpoint accessible'`,
       policy,
@@ -190,7 +188,7 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
 describe('Linux LXC Container default-deny network posture', {
   skip: lxcSkipReason,
 }, () => {
-  it('should give schema 0.8 no network interface when the policy names no network fields', async () => {
+  it('should give schema 0.9 no network interface when the policy names no network fields', async () => {
     // `awk` takes the interface names out of /proc/net/dev and strips the
     // trailing colon; the `ip` call reports whether loopback carries
     // 127.0.0.1.  The container prints two lines:
@@ -200,9 +198,9 @@ describe('Linux LXC Container default-deny network posture', {
       "echo \"ifaces=[$(awk 'NR>2 {sub(/:.*/, \"\", $1); print $1}' /proc/net/dev | sort | tr '\\n' ' ')]\"; " +
       "ip -4 addr show lo 2>/dev/null | grep -q '127.0.0.1' && echo 'loopback=up' || echo 'loopback=down'";
     const config: ContainerConfig = {
-      version: '0.8.0-alpha',
+      version: '0.9.0-alpha',
       containment: 'lxc',
-      containerId: 'lxc-deny-080',
+      containerId: 'lxc-deny-090',
       process: { commandLine: probe },
       lxc: { distribution: 'alpine', release: '3.23' },
     };
@@ -211,8 +209,8 @@ describe('Linux LXC Container default-deny network posture', {
     assert.strictEqual(result.exitCode, 0, `Expected the container to run: ${result.stderr}`);
     assert.ok(
       result.stdout.includes('ifaces=[lo ]'),
-      `Schema 0.8 promises no network access when the policy names no network fields` +
-        ` (docs/sandbox-policy/0.8.0/policy.md), but the container was given more than` +
+      `Schema 0.9 promises no network access when the policy names no network fields` +
+        ` (docs/lxc-support/lxc-backend.md), but the container was given more than` +
         ` loopback: ${result.stdout}`,
     );
     // Taking the network away must not take localhost with it.

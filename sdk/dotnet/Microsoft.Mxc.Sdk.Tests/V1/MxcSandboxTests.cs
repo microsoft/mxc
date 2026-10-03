@@ -586,7 +586,7 @@ public class MxcSandboxTests
     [Fact]
     public void Run_NullCommand_Throws()
     {
-        var policy = new SandboxPolicy { Version = "0.7.0-alpha" };
+        var policy = new SandboxPolicy { Version = "0.9.0-alpha" };
         Assert.Throws<ArgumentNullException>(() => MxcSandbox.Run(policy, null!));
     }
 
@@ -623,7 +623,7 @@ public class MxcSandboxTests
     public void SandboxRequest_NestsCaptureDenialsUnderProcessContainer()
     {
         var request = new SandboxRequest(
-            new SandboxPolicy { Version = "0.8.0-alpha" },
+            new SandboxPolicy { Version = "0.9.0-alpha" },
             "echo hi")
         {
             Containment = new ProcessContainerContainment
@@ -748,7 +748,7 @@ public class MxcSandboxTests
     public void SandboxRequest_SerializesExecutionSettings()
     {
         var request = new SandboxRequest(
-            new SandboxPolicy { Version = "0.8.0-alpha" },
+            new SandboxPolicy { Version = "0.9.0-alpha" },
             "echo hi")
         {
             ContainerName = "test-container",
@@ -779,14 +779,14 @@ public class MxcSandboxTests
     public void SandboxRequest_DistinguishesOmittedAndExplicitlyEmptyEnvironment()
     {
         var omitted = new SandboxRequest(
-            new SandboxPolicy { Version = "0.8.0-alpha" },
+            new SandboxPolicy { Version = "0.9.0-alpha" },
             "echo hi");
         using var omittedDoc = JsonDocument.Parse(MxcSandbox.SerializeRequest(omitted));
         Assert.False(omittedDoc.RootElement.GetProperty("process").TryGetProperty("env", out _));
         Assert.False(omittedDoc.RootElement.GetProperty("process").TryGetProperty("inheritDefaultEnv", out _));
 
         var explicitlyEmpty = new SandboxRequest(
-            new SandboxPolicy { Version = "0.8.0-alpha" },
+            new SandboxPolicy { Version = "0.9.0-alpha" },
             "echo hi")
         {
             Environment = new(),
@@ -802,7 +802,7 @@ public class MxcSandboxTests
     public void SandboxRequest_SerializesCompleteProcessContainerOptions()
     {
         var request = new SandboxRequest(
-            new SandboxPolicy { Version = "0.8.0-alpha" },
+            new SandboxPolicy { Version = "0.9.0-alpha" },
             "echo hi")
         {
             Containment = new ProcessContainerContainment
@@ -849,7 +849,7 @@ public class MxcSandboxTests
     public void SandboxRequest_SerializesWslcOptions()
     {
         var request = new SandboxRequest(
-            new SandboxPolicy { Version = "0.8.0-alpha" },
+            new SandboxPolicy { Version = "0.9.0-alpha" },
             "python3 -c 'print(42)'")
         {
             Containment = new WslcContainment
@@ -882,7 +882,7 @@ public class MxcSandboxTests
     public void SandboxRequest_SerializesSeatbeltOptions()
     {
         var request = new SandboxRequest(
-            new SandboxPolicy { Version = "0.8.0-alpha" },
+            new SandboxPolicy { Version = "0.9.0-alpha" },
             "echo hi")
         {
             Containment = new SeatbeltContainment
@@ -912,7 +912,7 @@ public class MxcSandboxTests
     public void SandboxRequest_SerializesLxcOptions()
     {
         var request = new SandboxRequest(
-            new SandboxPolicy { Version = "0.8.0-alpha" },
+            new SandboxPolicy { Version = "0.9.0-alpha" },
             "echo hi")
         {
             Containment = new LxcContainment
@@ -934,7 +934,7 @@ public class MxcSandboxTests
     public void SandboxRequest_SerializesBubblewrapContainment()
     {
         var request = new SandboxRequest(
-            new SandboxPolicy { Version = "0.8.0-alpha" },
+            new SandboxPolicy { Version = "0.9.0-alpha" },
             "echo hi")
         {
             Containment = new BubblewrapContainment(),
@@ -988,7 +988,7 @@ public class MxcSandboxTests
     {
         var policy = new SandboxPolicy
         {
-            Version = "0.8.0-alpha",
+            Version = "0.9.0-alpha",
             Network = new NetworkPolicy
             {
                 Egress = new NetworkEgressPolicy
@@ -1045,7 +1045,7 @@ public class MxcSandboxTests
     [Fact]
     public void SandboxPolicy_OmitsCaptureDenialsWhenNotConfigured()
     {
-        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        var policy = new SandboxPolicy { Version = "0.9.0-alpha" };
         using var doc = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
 
         Assert.False(doc.RootElement.TryGetProperty("captureDenials", out _));
@@ -1077,7 +1077,7 @@ public class MxcSandboxTests
     [Fact]
     public void SandboxPolicy_OmittedTelemetrySerializesNoTelemetryField()
     {
-        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        var policy = new SandboxPolicy { Version = "0.9.0-alpha" };
 
         using var document = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
         var root = document.RootElement;
@@ -1329,7 +1329,7 @@ public class MxcSandboxTests
 
     private static SandboxPolicy CreateLegacyCaptureDenialsPolicy(
         CaptureDenialsPolicy captureDenials,
-        string version = "0.8.0-alpha")
+        string version = "0.9.0-alpha")
     {
         var policy = new SandboxPolicy { Version = version };
 #pragma warning disable MXC0001 // Exercises compatibility migration.

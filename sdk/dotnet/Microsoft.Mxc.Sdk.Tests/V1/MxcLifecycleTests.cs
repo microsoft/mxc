@@ -126,7 +126,7 @@ public class MxcLifecycleTests
     public void StopSandbox_MalformedIdWithVersionOverride_ThrowsMalformedId()
     {
         var id = new SandboxId("no-prefix");
-        var options = new StateAwarePhaseOptions { Version = "0.8.0-alpha" };
+        var options = new StateAwarePhaseOptions { Version = "0.9.0-alpha" };
 
         var ex = Assert.Throws<MxcException>(
             () => MxcLifecycle.StopSandbox(id, options));

@@ -311,7 +311,7 @@ pub fn directional_network_rejection(request: &ExecutionRequest) -> Option<&'sta
 
 /// Rejection text for a directional section on a pre-0.8 schema.
 pub const BWRAP_DIRECTIONAL_PRE_0_8: &str =
-    "Bubblewrap: network.egress/network.ingress require schema 0.8.0-alpha or later. \
+    "Bubblewrap: network.egress/network.ingress require schema 0.9.0-alpha or later. \
      Earlier schemas run the sandbox in the host network namespace, where the \
      directional posture would be accepted and then never programmed. Raise the \
      config's version field, or express the policy with defaultPolicy, \
@@ -772,7 +772,6 @@ pub(crate) fn build_args_classified_with_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::logger::{Logger, Mode};
     use wxc_common::models::ContainerPolicy;
 
     fn base_request() -> ExecutionRequest {
@@ -799,18 +798,6 @@ mod tests {
             entries
                 .iter()
                 .find_map(|kv| kv.strip_prefix(&format!("{key}=")))
-        }
-
-        #[test]
-        fn below_0_9_nothing_is_supplied() {
-            // The pre-0.9 behavior this backend shipped: --clearenv and no
-            // PATH, so command resolution fell through to the shell default.
-            let mut r = request(DefaultEnvCompatibility::LegacyCompatible);
-            r.env = None;
-            assert!(resolved_env(&r).is_empty());
-
-            r.env = Some(vec!["FOO=bar".into()]);
-            assert_eq!(resolved_env(&r), vec!["FOO=bar".to_string()]);
         }
 
         /// A direct typed SDK request that named no contract takes the current
@@ -963,21 +950,6 @@ mod tests {
         }
 
         #[test]
-        fn below_0_9_a_relative_start_directory_reaches_chdir_untouched() {
-            for cwd in ["work", "./work", "a/../b"] {
-                let mut r = request(DefaultEnvCompatibility::LegacyCompatible);
-                r.working_directory = cwd.into();
-                let args = build_args(&r, None);
-
-                let chdir = args
-                    .windows(2)
-                    .find(|w| w[0] == "--chdir")
-                    .map(|w| w[1].clone());
-                assert_eq!(chdir.as_deref(), Some(cwd), "cwd {cwd:?}");
-            }
-        }
-
-        #[test]
         fn the_default_block_reaches_the_argument_list() {
             let mut r = base_request();
             r.default_env_compatibility = DefaultEnvCompatibility::DefaultBlock;
@@ -992,72 +964,6 @@ mod tests {
             assert!(
                 pos.unwrap() > clearenv,
                 "--setenv must follow --clearenv, else it is wiped"
-            );
-        }
-    }
-
-    #[test]
-    fn the_schema_gate_selects_the_private_namespace_only_from_0_8_onward() {
-        // The gate decides whether a proxy run gets the 0.8 private namespace
-        // or keeps the legacy shared-host-network behavior GHCP depends on, so
-        // its boundaries are pinned explicitly.
-        let cases = [
-            (
-                NetworkEnforcementCompatibility::LegacyCompatible,
-                ResolvedNetworkMode::LegacyProxy,
-            ),
-            (
-                NetworkEnforcementCompatibility::Strict,
-                ResolvedNetworkMode::ProxyOnly,
-            ),
-        ];
-
-        for (compatibility, expected) in cases {
-            let request = ExecutionRequest {
-                network_enforcement_compatibility: compatibility,
-                ..base_request()
-            };
-            assert_eq!(
-                ResolvedNetworkMode::from_request(&request, true),
-                expected,
-                "{compatibility:?} resolved to the wrong network mode"
-            );
-        }
-    }
-
-    #[test]
-    fn the_schema_gate_selects_in_netns_firewall_rules_only_from_0_8_onward() {
-        // The same gate governs the firewall path. Pre-0.8 callers keep
-        // FirewallFiltered — which filters nothing, because its rules land on
-        // a host chain the sandbox never traverses — because that is the
-        // behavior they already run under; only 0.8+ opts into rules that
-        // actually apply, and into the IP/CIDR-only rule addresses that come
-        // with them.
-        let cases = [
-            (
-                NetworkEnforcementCompatibility::LegacyCompatible,
-                ResolvedNetworkMode::FirewallFiltered,
-            ),
-            (
-                NetworkEnforcementCompatibility::Strict,
-                ResolvedNetworkMode::FirewallEnforced,
-            ),
-        ];
-
-        for (compatibility, expected) in cases {
-            let request = ExecutionRequest {
-                network_enforcement_compatibility: compatibility,
-                policy: ContainerPolicy {
-                    network_enforcement_mode: NetworkEnforcementMode::Firewall,
-                    allowed_hosts: vec!["203.0.113.7".into()],
-                    ..Default::default()
-                },
-                ..base_request()
-            };
-            assert_eq!(
-                ResolvedNetworkMode::from_request(&request, false),
-                expected,
-                "{compatibility:?} resolved to the wrong firewall mode"
             );
         }
     }
@@ -1140,14 +1046,14 @@ mod tests {
                 expected: ResolvedNetworkMode::FirewallEnforced,
             },
             NetworkPlanCase {
-                name: "firewall allow rules keep the legacy host chain pre-0.8",
-                compatibility: NetworkEnforcementCompatibility::LegacyCompatible,
+                name: "firewall allow rules are enforced for host rules",
+                compatibility: NetworkEnforcementCompatibility::Strict,
                 default_policy: NetworkPolicy::Block,
                 enforcement_mode: NetworkEnforcementMode::Firewall,
                 allowed_hosts: &["example.com"],
                 blocked_hosts: &[],
                 proxy_active: false,
-                expected: ResolvedNetworkMode::FirewallFiltered,
+                expected: ResolvedNetworkMode::FirewallEnforced,
             },
             NetworkPlanCase {
                 name: "combined enforcement block rules are enforced at 0.8",
@@ -1160,14 +1066,14 @@ mod tests {
                 expected: ResolvedNetworkMode::FirewallEnforced,
             },
             NetworkPlanCase {
-                name: "combined enforcement block rules keep the host chain pre-0.8",
-                compatibility: NetworkEnforcementCompatibility::LegacyCompatible,
+                name: "combined enforcement block rules are enforced for host rules",
+                compatibility: NetworkEnforcementCompatibility::Strict,
                 default_policy: NetworkPolicy::Allow,
                 enforcement_mode: NetworkEnforcementMode::Both,
                 allowed_hosts: &[],
                 blocked_hosts: &["example.com"],
                 proxy_active: false,
-                expected: ResolvedNetworkMode::FirewallFiltered,
+                expected: ResolvedNetworkMode::FirewallEnforced,
             },
             NetworkPlanCase {
                 name: "capabilities mode with host rules stays shared",
@@ -1299,14 +1205,6 @@ mod tests {
     }
 
     #[test]
-    fn local_network_denied_with_legacy_proxy_warns() {
-        let mut r = base_request();
-        r.network_enforcement_compatibility = NetworkEnforcementCompatibility::LegacyCompatible;
-        let addr = ProxyAddress::new("127.0.0.1".into(), 8080);
-        assert!(local_network_diagnostic(&r, Some(&addr)).is_some());
-    }
-
-    #[test]
     fn local_network_denied_with_0_8_proxy_is_not_warned() {
         let mut r = base_request();
         r.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
@@ -1331,18 +1229,6 @@ mod tests {
     }
 
     // ------- allowLocalNetwork rejection (schema 0.8+) ------------------
-
-    #[test]
-    fn local_network_mismatch_is_not_rejected_before_0_8() {
-        // A 0.7 proxy config shares the host netns and leaves allowLocalNetwork
-        // at its default false. That combination must keep warning rather than
-        // start failing, or every existing 0.6/0.7 proxy caller breaks.
-        let mut r = base_request();
-        r.network_enforcement_compatibility = NetworkEnforcementCompatibility::LegacyCompatible;
-        r.policy.network_proxy.address = Some(ProxyAddress::new("127.0.0.1".into(), 8080));
-        assert!(local_network_diagnostic(&r, r.policy.network_proxy.address.as_ref()).is_some());
-        assert!(local_network_rejection(&r).is_none());
-    }
 
     #[test]
     fn local_network_mismatch_is_rejected_at_0_8() {
@@ -1474,43 +1360,6 @@ mod tests {
         r.policy.network_enforcement_mode = NetworkEnforcementMode::Firewall;
         r.policy.network_proxy.address = None;
         assert!(proxy_with_firewall_rejection(&r).is_none());
-    }
-
-    /// The runner's copy of the message must stay identical to the parser's.
-    ///
-    /// [`BWRAP_PROXY_WITH_FIREWALL`] is hand-duplicated from a string literal
-    /// inside `config_parser`, so nothing at the type level keeps the two in
-    /// step. Rather than compare against a second hardcoded copy -- which would
-    /// just move the drift -- this drives the real parser and asserts its
-    /// emitted message *is* the constant, so editing either side alone fails
-    /// here.
-    #[test]
-    fn the_parser_and_the_runner_reject_with_the_same_message() {
-        let json = r#"{
-            "version": "0.6.0-alpha",
-            "containment": "bubblewrap",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "proxy": {"builtinTestServer": true},
-                "enforcementMode": "firewall",
-                "allowedHosts": ["example.com"]
-            }
-        }"#;
-        let mut logger = Logger::new(Mode::Buffer);
-        let error = wxc_common::config_parser::load_mxc_request_from_json(json, &mut logger)
-            .expect_err("the parser refuses proxy + firewall enforcement");
-        // Assert on the variant too: a message match would otherwise still pass
-        // if the config started failing for an unrelated reason.
-        let wxc_common::config_parser::ParseError::OneShot(inner) = &error else {
-            panic!("expected a one-shot conversion failure, got: {error:?}");
-        };
-        let message = format!("{inner}");
-
-        assert!(
-            message.contains(BWRAP_PROXY_WITH_FIREWALL),
-            "the parser's message has drifted from BWRAP_PROXY_WITH_FIREWALL.\n\
-             parser: {message}\n runner: {BWRAP_PROXY_WITH_FIREWALL}"
-        );
     }
 
     /// A directional runtime proxy must not trip the legacy host-list guard.
@@ -1702,22 +1551,6 @@ mod tests {
         }
     }
 
-    /// Off the 0.8 contract there is no namespace to program, so the mode
-    /// reports the unfiltered truth instead of claiming a filtering it cannot
-    /// perform. `validate` refuses the combination; this pins that the mode
-    /// never silently promotes a pre-0.8 request into the private namespace.
-    #[test]
-    fn a_directional_rule_off_the_0_8_contract_is_not_claimed_as_filtered() {
-        let request = directional_egress_request(
-            NetworkEnforcementCompatibility::LegacyCompatible,
-            NetworkAction::Deny,
-            true,
-        );
-        let mode = ResolvedNetworkMode::from_request(&request, false);
-        assert_eq!(mode, ResolvedNetworkMode::Shared);
-        assert!(!mode.uses_private_netns());
-    }
-
     /// A proxy run is classified by the proxy arm before the directional one,
     /// so a directional section must not divert it out of `ProxyOnly` — that
     /// mode derives its chain from the resolved proxy endpoint.
@@ -1862,22 +1695,6 @@ mod tests {
         );
     }
 
-    /// A directional section is a 0.8 construct. On an earlier schema the mode
-    /// resolver reports `Shared`, so accepting it would program nothing --
-    /// hence a rejection that is deliberately not schema-gated.
-    #[test]
-    fn a_directional_section_before_0_8_is_refused() {
-        let request = directional_request(
-            NetworkEnforcementCompatibility::LegacyCompatible,
-            NetworkAction::Deny,
-            NetworkAction::Deny,
-        );
-        assert_eq!(
-            directional_network_rejection(&request),
-            Some(BWRAP_DIRECTIONAL_PRE_0_8)
-        );
-    }
-
     /// Positive control: the honorable posture must pass, or the gate above is
     /// just refusing every directional config.
     #[test]
@@ -1890,10 +1707,10 @@ mod tests {
         assert_eq!(directional_network_rejection(&request), None);
     }
 
-    /// The gate must not fire on the legacy shape, which has no directional
-    /// sections at all -- that path is what GHCP runs on.
+    /// A programmatic request with no directional sections does not reach
+    /// the directional gate. Exact v0.9 JSON cannot supply these legacy fields.
     #[test]
-    fn a_legacy_request_is_untouched_by_the_directional_gate() {
+    fn a_programmatic_request_without_directional_fields_bypasses_the_directional_gate() {
         let mut request = base_request();
         request.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
         request.policy.default_network_policy = NetworkPolicy::Allow;
@@ -1901,58 +1718,47 @@ mod tests {
         assert_eq!(directional_network_rejection(&request), None);
     }
 
-    /// `ResolvedNetworkMode` is now the only implementation of the namespace
-    /// choice — the parser's re-derived twin is gone — so the mode matrix is
-    /// pinned against explicit expectations rather than against a second copy
-    /// that could drift with it.
+    /// Pin the strict mode resolver's namespace choice against explicit
+    /// expectations. These are programmatic policies, not v0.9 JSON: the
+    /// runner separately rejects combinations it cannot enforce.
     #[test]
-    fn the_resolved_mode_matches_the_namespace_it_claims_across_the_matrix() {
-        for compatibility in [
-            NetworkEnforcementCompatibility::LegacyCompatible,
-            NetworkEnforcementCompatibility::Strict,
-        ] {
-            let strict = compatibility == NetworkEnforcementCompatibility::Strict;
-            for proxy in [false, true] {
-                for mode in [
-                    NetworkEnforcementMode::Capabilities,
-                    NetworkEnforcementMode::Firewall,
-                    NetworkEnforcementMode::Both,
-                ] {
-                    for policy in [NetworkPolicy::Allow, NetworkPolicy::Block] {
-                        for hosts in [false, true] {
-                            let mut r = base_request();
-                            r.network_enforcement_compatibility = compatibility;
-                            r.policy.network_proxy.builtin_test_server = proxy;
-                            r.policy.network_enforcement_mode = mode.clone();
-                            r.policy.default_network_policy = policy.clone();
-                            r.policy.allowed_hosts = if hosts {
-                                vec!["10.0.0.1".into()]
-                            } else {
-                                vec![]
-                            };
+    fn strict_programmatic_network_modes_use_the_expected_namespace_across_the_matrix() {
+        for proxy in [false, true] {
+            for mode in [
+                NetworkEnforcementMode::Capabilities,
+                NetworkEnforcementMode::Firewall,
+                NetworkEnforcementMode::Both,
+            ] {
+                for policy in [NetworkPolicy::Allow, NetworkPolicy::Block] {
+                    for hosts in [false, true] {
+                        let mut r = base_request();
+                        r.network_enforcement_compatibility =
+                            NetworkEnforcementCompatibility::Strict;
+                        r.policy.network_proxy.builtin_test_server = proxy;
+                        r.policy.network_enforcement_mode = mode.clone();
+                        r.policy.default_network_policy = policy.clone();
+                        r.policy.allowed_hosts = if hosts {
+                            vec!["10.0.0.1".into()]
+                        } else {
+                            vec![]
+                        };
 
-                            // Private namespaces: proxy-only and firewall-
-                            // enforced are both 0.8-only, so either shape is
-                            // private exactly when the schema is strict. Plus
-                            // Isolated, the only pre-0.8 mode that unshares.
-                            let uses_firewall = matches!(
-                                mode,
-                                NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
-                            );
-                            let expected = if proxy || (uses_firewall && hosts) {
-                                strict
-                            } else {
-                                policy == NetworkPolicy::Block && !hosts
-                            };
+                        // A proxy or enforceable firewall rule needs a private
+                        // namespace; ruleless block is isolated without slirp.
+                        let uses_firewall = matches!(
+                            mode,
+                            NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
+                        );
+                        let expected = proxy
+                            || (uses_firewall && hosts)
+                            || (policy == NetworkPolicy::Block && !hosts);
 
-                            let resolved = ResolvedNetworkMode::from_request(&r, proxy);
-                            assert_eq!(
-                                resolved.uses_private_netns(),
-                                expected,
-                                "compatibility={compatibility:?} proxy={proxy} mode={mode:?} \
-                                 policy={policy:?} hosts={hosts}"
-                            );
-                        }
+                        let resolved = ResolvedNetworkMode::from_request(&r, proxy);
+                        assert_eq!(
+                            resolved.uses_private_netns(),
+                            expected,
+                            "proxy={proxy} mode={mode:?} policy={policy:?} hosts={hosts}"
+                        );
                     }
                 }
             }
@@ -2234,24 +2040,6 @@ mod tests {
         assert!(
             !args.contains(&"--unshare-user".to_string()),
             "the runner supplies proxy mode's pre-created user namespace"
-        );
-    }
-
-    #[test]
-    fn pre_0_8_proxy_keeps_existing_shared_network_behavior() {
-        let mut request = base_request();
-        request.network_enforcement_compatibility =
-            NetworkEnforcementCompatibility::LegacyCompatible;
-        let address = ProxyAddress::new("127.0.0.1".into(), 12345);
-        let args = build_args(&request, Some(&address));
-
-        assert!(
-            args.contains(&"--unshare-user".to_string()),
-            "compatibility mode should retain Bubblewrap's existing user namespace setup"
-        );
-        assert!(
-            !args.contains(&"--unshare-net".to_string()),
-            "compatibility mode should retain shared-network proxy behavior"
         );
     }
 

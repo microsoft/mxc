@@ -68,12 +68,6 @@ fn renderable_exact_schema(version: ContractVersion) -> Result<Value, String> {
         }
         ContractVersion::V1_0_0 => Ok(mxc_config_contract::published::v1_0_0::published_schema()),
         ContractVersion::V1_1_0Alpha => Ok(mxc_config_contract::dev::development_schema()),
-        ContractVersion::V0_6_0Alpha
-        | ContractVersion::V0_7_0Alpha
-        | ContractVersion::V0_8_0Alpha => Err(format!(
-            "contract registry marks {} as renderable, but no exact model is available",
-            version.as_str()
-        )),
     }
 }
 
@@ -263,25 +257,5 @@ mod tests {
         let csharp = csharp_content(ContractVersion::V1_0_0).unwrap();
         assert!(csharp.contains("Emitted from the exact MXC 1.0.0 contract"));
         assert!(csharp.contains("internal sealed class OneShotRequest"));
-    }
-
-    #[test]
-    fn older_non_renderable_published_generation_is_rejected() {
-        let error = exact_schema(ContractVersion::V0_8_0Alpha).unwrap_err();
-        assert!(
-            error.contains("published contract 0.8.0-alpha has no renderable exact model"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn inconsistent_renderable_registry_metadata_is_rejected() {
-        let error = renderable_exact_schema(ContractVersion::V0_8_0Alpha).unwrap_err();
-        assert!(
-            error.contains(
-                "contract registry marks 0.8.0-alpha as renderable, but no exact model is available"
-            ),
-            "{error}"
-        );
     }
 }

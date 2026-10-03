@@ -362,17 +362,6 @@ export interface SandboxSpawnOptions {
   experimental?: boolean;
 
   /**
-   * Allow testing-only, deliberately-permissive features that must never run
-   * in production — currently `network.proxy.builtinTestServer` (a bundled
-   * test HTTP proxy with no auth, no body limits, minimal hop-by-hop header
-   * handling). This is a distinct axis from {@link experimental}: a policy
-   * that requests such a feature is rejected unless this is explicitly set,
-   * keeping the gate fail-closed at the SDK boundary (it maps to the native
-   * `--allow-testing-features` flag).
-   */
-  allowTestingFeatures?: boolean;
-
-  /**
    * Start from the backend's default environment and layer the supplied
    * environment variables on top of it, rather than replacing it
    * (default false).
@@ -443,7 +432,6 @@ export interface SandboxSpawnOptions {
 
 function unsupportedInProcessRunOption(options: SandboxSpawnOptions): string | undefined {
   if (options.debug === true) return 'debug';
-  if (options.allowTestingFeatures === true) return 'allowTestingFeatures';
   if (options.skipPlatformCheck === true) return 'skipPlatformCheck';
   if (options.executablePath !== undefined) return 'executablePath';
   if (options.ptyOptions !== undefined) return 'ptyOptions';

@@ -31,7 +31,7 @@ fn workload_cannot_reconfigure_the_network() {
 
     // The drop only happens when chains exist, so this policy asks for a firewall.
     let config = json!({
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "containerId": "lxc-network-capability",
         "containment": "lxc",
         "process": { "commandLine": "sh -c \"cat /proc/self/status\"" },

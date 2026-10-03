@@ -23,7 +23,7 @@ const platformSupport = sdk.getPlatformSupport();
 
 // The exact 0.6 contract predates Seatbelt, which is the native macOS backend.
 const platformVersions = os.platform() === 'darwin'
-  ? supportedVersions.filter((version) => version.compare('0.7.0-alpha') >= 0)
+  ? supportedVersions.filter((version) => version.compare('0.9.0-alpha') >= 0)
   : supportedVersions;
 
 for (const schemaVersion of platformVersions) {

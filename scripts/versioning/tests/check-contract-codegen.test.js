@@ -121,6 +121,7 @@ test("registry selects exact contracts with generated artifacts", () => {
   const selected = contractsWithGeneratedArtifacts([
     contract("0.8.0-alpha", [], {
       typescriptPath: null,
+      csharpPath: null,
       generatesArtifacts: false,
     }),
     contract("0.9.0-alpha", v0_9Roots),
@@ -155,6 +156,7 @@ test("registry selects exact contracts with generated artifacts", () => {
     () => contractsWithGeneratedArtifacts([
       contract("0.8.0-alpha", ["OneShotRequest"], {
         typescriptPath: null,
+        csharpPath: null,
         generatesArtifacts: false,
       }),
     ]),

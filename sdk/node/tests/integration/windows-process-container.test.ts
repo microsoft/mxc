@@ -8,7 +8,6 @@ import { EventEmitter } from 'events';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import type { ContainerConfig } from '@microsoft/mxc-sdk';
 import type { SandboxPolicy } from '@microsoft/mxc-sdk/v1';
 import {
   sdk,
@@ -149,44 +148,6 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
       }
     });
 
-    it('should route traffic through built-in proxy', async () => {
-      tempDir = createTempDir('mxc-proxy-test');
-      const config = sdk.createConfigFromPolicy(
-        withToolPaths({ ui: { allowWindows: true } }) as SandboxPolicy,
-        'processcontainer',
-        `proxy-builtin-${schemaVersion}`,
-      );
-      config.version = '0.8.0-alpha';
-      config.processContainer!.capabilities = ['internetClient'];
-      config.network = {
-        proxy: { builtinTestServer: true },
-      } as unknown as ContainerConfig['network'];
-      const script =
-        `powershell.exe -NoProfile -Command "` +
-        `$h = New-Object -ComObject WinHttp.WinHttpRequest.5.1; ` +
-        `$h.Open('GET','https://api.github.com/zen',$false); ` +
-        `$h.Send(); ` +
-        `Write-Output ('PROXY_RESPONSE: ' + $h.ResponseText)"`;
-      const result = await new Promise<{ stdout: string; stderr: string; exitCode: number }>(
-        (resolve) => {
-          config.process!.commandLine = script;
-          const sandboxProcess = sdk.spawnSandboxFromConfig(
-            config,
-            { debug: true, allowTestingFeatures: true },
-          );
-          let stdout = '';
-          sandboxProcess.onData((data: string) => { stdout += data; });
-          sandboxProcess.onExit(({ exitCode }: { exitCode: number }) => {
-            resolve({ stdout, stderr: '', exitCode });
-          });
-        },
-      );
-
-      assert.strictEqual(result.exitCode, 0, `[${schemaVersion}] Expected exit 0: ${result.stderr}`);
-      assert.ok(result.stdout.includes('PROXY_RESPONSE:'));
-      assert.ok(result.stdout.includes('Proxy policy active'));
-    });
-
     it('should route traffic through external proxy', async () => {
       tempDir = createTempDir('mxc-proxy-test');
       const { port, proxyProcess: proc } = startTestProxy(tempDir);
@@ -197,11 +158,16 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
         'processcontainer',
         `proxy-ext-${schemaVersion}`,
       );
-      config.version = '0.8.0-alpha';
+      config.version = schemaVersion.version;
       config.processContainer!.capabilities = ['internetClient'];
       config.network = {
-        proxy: { localhost: port },
-      } as unknown as ContainerConfig['network'];
+        egress: { default: 'deny' },
+        ingress: { default: 'allow', hostLoopback: 'allow' },
+      };
+      config.runtimeConfig = {
+        ...config.runtimeConfig,
+        networkProxy: `http://127.0.0.1:${port}`,
+      };
       const script =
         `powershell.exe -NoProfile -Command "` +
         `$h = New-Object -ComObject WinHttp.WinHttpRequest.5.1; ` +

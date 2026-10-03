@@ -596,7 +596,7 @@ mod tests {
             }
         });
 
-        let ts = emit_contract_ts(&schema, "0.8.0-alpha");
+        let ts = emit_contract_ts(&schema, "0.9.0-alpha");
 
         assert!(ts.contains("export type True = true;"), "{ts}");
         assert!(
@@ -613,7 +613,7 @@ mod tests {
             "properties": {}
         });
 
-        let ts = emit_contract_ts(&schema, "0.8.0-alpha");
+        let ts = emit_contract_ts(&schema, "0.9.0-alpha");
 
         assert!(ts.ends_with('\n'));
         assert!(!ts.ends_with("\n\n"));

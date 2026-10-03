@@ -75,7 +75,7 @@ fn sandbox_id_rejects_values_that_cannot_cross_the_ffi_boundary() {
 
 #[test]
 fn explicit_raw_exec_alias_preserves_existing_behavior() {
-    let json = r#"{"version":"0.8.0-alpha","process":{"commandLine":"echo hi"}}"#;
+    let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"}}"#;
     let legacy = match exec_sandbox(json, false) {
         Ok(_) => panic!("one-shot must be rejected"),
         Err(error) => error,
@@ -91,7 +91,7 @@ fn explicit_raw_exec_alias_preserves_existing_behavior() {
 #[test]
 fn run_state_aware_json_rejects_one_shot_config() {
     // No `phase` field => one-shot config, not a lifecycle request.
-    let json = r#"{"version":"0.8.0-alpha","process":{"commandLine":"echo hi"}}"#;
+    let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"}}"#;
     let err = run_state_aware_json(json, false, false).expect_err("one-shot must be rejected");
     assert_eq!(err.code, ErrorCode::MalformedRequest);
 }
@@ -190,7 +190,7 @@ fn exec_sandbox_rejects_non_exec_phase() {
 
 #[test]
 fn exec_sandbox_rejects_one_shot_config() {
-    let json = r#"{"version":"0.8.0-alpha","process":{"commandLine":"echo hi"}}"#;
+    let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"}}"#;
     match exec_sandbox(json, false) {
         Ok(_) => panic!("one-shot must be rejected"),
         Err(err) => assert_eq!(err.code, ErrorCode::MalformedRequest),

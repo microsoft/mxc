@@ -18,7 +18,7 @@ import {
 const seatbeltSpawnOptions = { ...debugSpawnOptions, experimental: true };
 
 // Seatbelt first appears in the exact 0.7 contract.
-const schemaVersion = '0.7.0-alpha';
+const schemaVersion = '0.9.0-alpha';
 
 // Clipboard tests require a running pasteboard service. Probe once at
 // module load and skip clipboard tests when the service is unavailable

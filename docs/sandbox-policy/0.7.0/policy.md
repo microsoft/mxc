@@ -1,5 +1,9 @@
 # MXC Sandbox Policy Spec v0.7.0
 
+> Historical design reference: pre-v0.9 contracts are no longer accepted.
+> These examples describe the original policy design, not current authoring.
+> See [the supported schema and migration guide](../../schema.md).
+
 ---
 
 ## Table of Contents

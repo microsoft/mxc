@@ -1593,21 +1593,27 @@ mod tests {
 
     #[test]
     fn validate_does_not_locally_gate_builtin_test_server() {
+        use wxc_common::models::NetworkEgressPolicy;
+
         // The builtinTestServer gate moved to `wxc_common::validator::validate_common`
         // (enforced centrally for every backend). The bwrap runner must therefore no
-        // longer reject it locally — otherwise the gate would be applied twice with
-        // diverging messages.
+        // longer reject it locally. Reaching the injected environment probe
+        // proves this without depending on private-network tools on the host.
         let mut req = base_request();
+        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
+        req.policy.network_egress = Some(NetworkEgressPolicy::default());
         req.policy.network_proxy = ProxyConfig {
             address: None,
             builtin_test_server: true,
         };
         req.testing_features_enabled = false;
 
-        let runner = BubblewrapScriptRunner::new();
-        assert!(runner
-            .validate_prepared_with_probe(&req, || Ok(bwrap_version::MIN_BWRAP_VERSION))
-            .is_ok());
+        let unavailable = bwrap_version::BwrapUnavailable::NotFound;
+        let expected = unavailable.to_string();
+        let err = BubblewrapScriptRunner::new()
+            .validate_prepared_with_probe(&req, || Err(unavailable))
+            .unwrap_err();
+        assert_eq!(err.error_message, expected);
     }
 
     /// Proxy-only mode rewrites the endpoint to slirp's gateway and opens
@@ -1615,18 +1621,22 @@ mod tests {
     /// refused at policy time -- before a proxy is started.
     #[test]
     fn validate_rejects_an_ipv6_loopback_proxy_endpoint_before_the_environment_probe() {
+        use wxc_common::models::NetworkEgressPolicy;
+
         let mut req = base_request();
         req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
-        // An external proxy with the default 'block' would be refused earlier,
-        // by the host-policy gate; this test is about the endpoint itself.
-        req.policy.default_network_policy = wxc_common::models::NetworkPolicy::Allow;
+        req.policy.network_egress = Some(NetworkEgressPolicy::default());
         req.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("[::1]".into(), 3128)),
             builtin_test_server: false,
         };
 
         let runner = BubblewrapScriptRunner::new();
-        let err = runner.validate(&req).unwrap_err();
+        let err = runner
+            .validate_prepared_with_probe(&req, || {
+                panic!("an invalid endpoint must be rejected before probing bwrap")
+            })
+            .unwrap_err();
 
         assert!(
             err.error_message.contains("IPv6 loopback"),
@@ -1698,60 +1708,39 @@ mod tests {
             builtin_test_server: false,
         };
 
-        if let Err(err) = BubblewrapScriptRunner::new().validate(&req) {
-            assert_ne!(
-                err.error_message,
-                bwrap_command::BWRAP_PROXY_DIRECTIONAL_EGRESS,
-                "deny-with-no-rules is proxy-only egress and must pass this gate"
-            );
-        }
+        let unavailable = bwrap_version::BwrapUnavailable::NotFound;
+        let expected = unavailable.to_string();
+        let err = BubblewrapScriptRunner::new()
+            .validate_prepared_with_probe(&req, || Err(unavailable))
+            .unwrap_err();
+        assert_eq!(err.error_message, expected);
     }
 
     #[test]
     fn validate_rejects_a_routable_ipv6_proxy_endpoint_before_the_environment_probe() {
+        use wxc_common::models::NetworkEgressPolicy;
+
         // The egress rules are IPv4-only, so this endpoint could never be
         // opened -- `run` would discover that only after starting slirp.
         let mut req = base_request();
         req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
+        req.policy.network_egress = Some(NetworkEgressPolicy::default());
         req.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("2001:db8::1".into(), 3128)),
             builtin_test_server: false,
         };
 
         let runner = BubblewrapScriptRunner::new();
-        let err = runner.validate(&req).unwrap_err();
+        let err = runner
+            .validate_prepared_with_probe(&req, || {
+                panic!("an invalid endpoint must be rejected before probing bwrap")
+            })
+            .unwrap_err();
 
         assert!(
-            !err.error_message.contains("bwrap"),
-            "the endpoint check must run ahead of the environment probe: {}",
+            err.error_message.contains("IPv4 proxy endpoint"),
+            "the endpoint check must explain the unsupported IPv6 address: {}",
             err.error_message
-        );
-    }
-
-    /// The check is scoped to the private-namespace mode. A legacy-schema
-    /// request shares the host's network, never translates the endpoint and
-    /// installs no rules, so the same address must stay acceptable there --
-    /// tightening it would break callers already on 0.6/0.7.
-    #[test]
-    fn validate_leaves_a_legacy_schema_proxy_endpoint_untouched() {
-        let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::LegacyCompatible;
-        req.policy.network_proxy = ProxyConfig {
-            address: Some(ProxyAddress::new("[::1]".into(), 3128)),
-            builtin_test_server: false,
-        };
-
-        let runner = BubblewrapScriptRunner::new();
-        let message = runner
-            .validate(&req)
-            .err()
-            .map(|err| err.error_message)
-            .unwrap_or_default();
-
-        assert!(
-            !message.contains("IPv6 loopback"),
-            "legacy proxy mode does not translate the endpoint, so it must not \
-             inherit the private-namespace rejection: {message}"
         );
     }
 
@@ -1787,9 +1776,11 @@ mod tests {
     /// refuse the combination rather than silently hand the file back.
     #[test]
     fn validate_rejects_a_hostname_proxy_that_would_defeat_a_denied_hosts_file() {
+        use wxc_common::models::NetworkEgressPolicy;
+
         let mut req = base_request();
         req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
-        req.policy.default_network_policy = wxc_common::models::NetworkPolicy::Allow;
+        req.policy.network_egress = Some(NetworkEgressPolicy::default());
         req.policy.denied_paths = vec!["/etc/hosts".into()];
         req.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("proxy.example.com".into(), 3128)),
@@ -1797,7 +1788,11 @@ mod tests {
         };
 
         let runner = BubblewrapScriptRunner::new();
-        let err = runner.validate(&req).unwrap_err();
+        let err = runner
+            .validate_prepared_with_probe(&req, || {
+                panic!("a denied hosts file must be rejected before probing bwrap")
+            })
+            .unwrap_err();
 
         assert!(
             err.error_message.contains("deniedPaths"),
@@ -1840,25 +1835,23 @@ mod tests {
     /// stays compatible -- and that is the escape hatch the message offers.
     #[test]
     fn validate_accepts_an_ip_proxy_endpoint_alongside_a_denied_hosts_file() {
+        use wxc_common::models::NetworkEgressPolicy;
+
         let mut req = base_request();
         req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
+        req.policy.network_egress = Some(NetworkEgressPolicy::default());
         req.policy.denied_paths = vec!["/etc/hosts".into()];
         req.policy.network_proxy = ProxyConfig {
-            address: Some(ProxyAddress::new("10.1.2.3".into(), 3128)),
+            address: Some(ProxyAddress::new("127.0.0.1".into(), 3128)),
             builtin_test_server: false,
         };
 
-        let runner = BubblewrapScriptRunner::new();
-        let message = runner
-            .validate(&req)
-            .err()
-            .map(|err| err.error_message)
-            .unwrap_or_default();
-
-        assert!(
-            !message.contains("deniedPaths"),
-            "an endpoint that needs no pin must not inherit the rejection: {message}"
-        );
+        let unavailable = bwrap_version::BwrapUnavailable::NotFound;
+        let expected = unavailable.to_string();
+        let err = BubblewrapScriptRunner::new()
+            .validate_prepared_with_probe(&req, || Err(unavailable))
+            .unwrap_err();
+        assert_eq!(err.error_message, expected);
     }
 
     /// A rule address the backend cannot enforce must be refused, not silently
@@ -1866,18 +1859,18 @@ mod tests {
     /// because it runs ahead of every spawn, including the programmatic
     /// `mxc_engine` path that never sees the parser.
     #[test]
-    fn validate_rejects_a_hostname_rule_address_at_0_8() {
+    fn validate_rejects_a_programmatic_hostname_firewall_rule_under_strict_policy() {
         let mut req = base_request();
         req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
         req.policy.network_enforcement_mode = wxc_common::models::NetworkEnforcementMode::Firewall;
         req.policy.allowed_hosts = vec!["api.github.com".into()];
 
-        let runner = BubblewrapScriptRunner::new();
-        let message = runner
-            .validate(&req)
-            .err()
-            .map(|err| err.error_message)
-            .expect("a hostname rule address must be rejected");
+        let message = BubblewrapScriptRunner::new()
+            .validate_prepared_with_probe(&req, || {
+                panic!("a hostname firewall rule must be rejected before probing bwrap")
+            })
+            .unwrap_err()
+            .error_message;
 
         assert!(
             message.contains("api.github.com") && message.contains("not an IP address or CIDR"),
@@ -1886,79 +1879,23 @@ mod tests {
     }
 
     #[test]
-    fn validate_accepts_literal_and_cidr_rule_addresses_at_0_8() {
+    fn validate_accepts_programmatic_literal_and_cidr_firewall_rules() {
         let mut req = base_request();
         req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
         req.policy.network_enforcement_mode = wxc_common::models::NetworkEnforcementMode::Firewall;
         req.policy.allowed_hosts = vec!["203.0.113.7".into(), "10.0.0.0/8".into()];
         req.policy.blocked_hosts = vec!["2001:db8::/32".into()];
 
-        let runner = BubblewrapScriptRunner::new();
-        let message = runner
-            .validate(&req)
-            .err()
-            .map(|err| err.error_message)
-            .unwrap_or_default();
-
-        assert!(
-            !message.contains("not an IP address or CIDR"),
-            "literals and CIDRs must be accepted: {message}"
-        );
-    }
-
-    /// The 0.8 gate must not reach back to callers already running on 0.6/0.7,
-    /// whose host lists are hostnames by construction. Their runs still enforce
-    /// nothing -- that is the pre-existing behavior this change deliberately
-    /// leaves alone rather than the behavior it introduces.
-    #[test]
-    fn validate_leaves_a_pre_0_8_hostname_rule_address_untouched() {
-        let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::LegacyCompatible;
-        req.policy.network_enforcement_mode = wxc_common::models::NetworkEnforcementMode::Firewall;
-        req.policy.allowed_hosts = vec!["api.github.com".into()];
-
-        let runner = BubblewrapScriptRunner::new();
-        let message = runner
-            .validate(&req)
-            .err()
-            .map(|err| err.error_message)
-            .unwrap_or_default();
-
-        assert!(
-            !message.contains("not an IP address or CIDR"),
-            "compatibility mode must keep accepting hostname rule addresses: {message}"
-        );
-    }
-
-    /// Legacy proxy mode shares the host's network, never translates the
-    /// endpoint and never pins a name, so the same policy has to stay
-    /// acceptable there -- rejecting it would break callers already on 0.6/0.7.
-    #[test]
-    fn validate_leaves_a_legacy_schema_hosts_denial_untouched() {
-        let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::LegacyCompatible;
-        req.policy.denied_paths = vec!["/etc/hosts".into()];
-        req.policy.network_proxy = ProxyConfig {
-            address: Some(ProxyAddress::new("proxy.example.com".into(), 3128)),
-            builtin_test_server: false,
-        };
-
-        let runner = BubblewrapScriptRunner::new();
-        let message = runner
-            .validate(&req)
-            .err()
-            .map(|err| err.error_message)
-            .unwrap_or_default();
-
-        assert!(
-            !message.contains("deniedPaths"),
-            "legacy proxy mode pins nothing, so it must not inherit the \
-             private-namespace rejection: {message}"
-        );
+        let unavailable = bwrap_version::BwrapUnavailable::NotFound;
+        let expected = unavailable.to_string();
+        let err = BubblewrapScriptRunner::new()
+            .validate_prepared_with_probe(&req, || Err(unavailable))
+            .unwrap_err();
+        assert_eq!(err.error_message, expected);
     }
 
     #[test]
-    fn validate_rejects_an_unhonorable_local_network_request_at_0_8() {
+    fn validate_rejects_an_unhonorable_local_network_request_under_strict_policy() {
         // defaultPolicy='allow' shares the host netns, so allowLocalNetwork
         // =false cannot be honored. Runs ahead of the bwrap probe, so this
         // holds on hosts without bwrap installed. Host lists are no longer a
@@ -1977,7 +1914,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_local_network_under_a_private_netns_at_0_8() {
+    fn validate_rejects_local_network_under_a_private_netns_with_strict_policy() {
         // The other half of the local-network contract, and the one the
         // ingress chain depends on: IngressPlan maps allowLocalNetwork=true to
         // an inbound NEW ACCEPT, which is only unreachable because validate
@@ -1998,63 +1935,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_accepts_the_same_request_before_0_8() {
-        // Pre-0.8 warns at run time instead of failing, so existing callers are
-        // unaffected. Tolerant of a host without bwrap: it only rules out the
-        // local-network rejection.
-        let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::LegacyCompatible;
-        req.policy.default_network_policy = wxc_common::models::NetworkPolicy::Allow;
-
-        if let Err(err) = BubblewrapScriptRunner::new().validate(&req) {
-            assert!(
-                !err.error_message.contains("allowLocalNetwork"),
-                "0.7 must not be rejected for allowLocalNetwork: {}",
-                err.error_message
-            );
-        }
-    }
-
-    #[test]
-    fn validate_accepts_firewall_enforced_host_rules_at_0_8() {
-        // Firewall mode is the enforcement mechanism at 0.8, so the
-        // unenforced-host-rules gate must not fire for it.
-        let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
-        req.policy.network_enforcement_mode = NetworkEnforcementMode::Firewall;
-        req.policy.allowed_hosts = vec!["10.0.2.2/32".into()];
-        req.policy.allow_local_network = true;
-
-        if let Err(err) = BubblewrapScriptRunner::new().validate(&req) {
-            assert!(
-                !err.error_message
-                    .contains("require an enforcement mechanism"),
-                "firewall mode enforces the lists: {}",
-                err.error_message
-            );
-        }
-    }
-
-    #[test]
-    fn validate_accepts_a_firewall_mode_request_before_0_8() {
-        // GHCP consumes Bubblewrap on 0.6/0.7; the gate must not reach them.
-        let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::LegacyCompatible;
-        req.policy.network_enforcement_mode = NetworkEnforcementMode::Firewall;
-        req.policy.allowed_hosts = vec!["api.github.com".into()];
-        req.policy.allow_local_network = true;
-
-        if let Err(err) = BubblewrapScriptRunner::new().validate(&req) {
-            assert!(
-                !err.error_message.contains("enforcementMode"),
-                "0.7 must not be rejected for enforcementMode: {}",
-                err.error_message
-            );
-        }
-    }
-
-    #[test]
-    fn validate_rejects_host_rules_no_mechanism_will_enforce_at_0_8() {
+    fn validate_rejects_host_rules_no_mechanism_will_enforce_under_strict_policy() {
         // The gap this closes: host lists suppress --unshare-net, but under
         // 'capabilities' with no proxy nothing applies them, so a default-deny
         // policy ran with fully open egress on the host's namespace.
@@ -2064,34 +1945,15 @@ mod tests {
         req.policy.allowed_hosts = vec!["api.github.com".into()];
         req.policy.allow_local_network = true;
 
-        let err = BubblewrapScriptRunner::new().validate(&req).unwrap_err();
-        assert!(
-            err.error_message
-                .contains("require an enforcement mechanism"),
-            "unexpected error: {}",
-            err.error_message
-        );
-    }
-
-    #[test]
-    fn validate_accepts_host_rules_when_a_proxy_enforces_them_at_0_8() {
-        // The proxy is the mechanism, so a valid allow-default blocklist
-        // reaches the environmental probe instead of failing policy validation.
-        let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
-        req.policy.default_network_policy = wxc_common::models::NetworkPolicy::Allow;
-        req.policy.blocked_hosts = vec!["evil.example.com".into()];
-        req.policy.network_proxy = ProxyConfig {
-            address: Some(ProxyAddress::new("127.0.0.1".into(), 3128)),
-            builtin_test_server: false,
-        };
-
-        let unavailable = bwrap_version::BwrapUnavailable::NotFound;
-        let expected = unavailable.to_string();
-        let error = BubblewrapScriptRunner::new()
-            .validate_prepared_with_probe(&req, || Err(unavailable))
+        let err = BubblewrapScriptRunner::new()
+            .validate_prepared_with_probe(&req, || {
+                panic!("unenforced host rules must be rejected before probing bwrap")
+            })
             .unwrap_err();
-        assert_eq!(error.error_message, expected);
+        assert_eq!(
+            err.error_message,
+            bwrap_command::BWRAP_UNENFORCED_HOST_RULES
+        );
     }
 
     #[test]
@@ -2114,22 +1976,6 @@ mod tests {
             error.error_message,
             "blockedHosts requires allowedHosts when network.defaultPolicy='block'"
         );
-    }
-
-    #[test]
-    fn validate_accepts_host_rules_without_a_mechanism_before_0_8() {
-        // GHCP consumes Bubblewrap on 0.6/0.7 with exactly this shape.
-        let mut req = base_request();
-        req.network_enforcement_compatibility = NetworkEnforcementCompatibility::LegacyCompatible;
-        req.policy.default_network_policy = wxc_common::models::NetworkPolicy::Block;
-        req.policy.allowed_hosts = vec!["api.github.com".into()];
-
-        let unavailable = bwrap_version::BwrapUnavailable::NotFound;
-        let expected = unavailable.to_string();
-        let error = BubblewrapScriptRunner::new()
-            .validate_prepared_with_probe(&req, || Err(unavailable))
-            .unwrap_err();
-        assert_eq!(error.error_message, expected);
     }
 
     #[test]

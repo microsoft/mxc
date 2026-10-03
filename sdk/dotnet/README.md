@@ -186,9 +186,10 @@ for existing adapter implementations.
 
 #### Bubblewrap proxy-only egress (Linux)
 
-Schema `0.8.0-alpha`+ `network.proxy` needs host tooling and kernel permissions
-that not every Linux host grants. Bubblewrap reports whether this host can
-enforce it as the `ProxyEnforcement` capability, and names what is missing in
+`runtimeConfig.networkProxy` under supported exact contracts needs host tooling
+and kernel permissions that not every Linux host grants. Bubblewrap reports
+whether this host can enforce it as the `ProxyEnforcement` capability, and names
+what is missing in
 `Warnings` when it cannot. The TypeScript and Rust SDKs surface the same answer
 as a `bubblewrapNetwork` field; the C# SDK reports it through the backend array:
 
@@ -202,7 +203,7 @@ if (bubblewrap is null)
 }
 else if (bubblewrap.Capabilities.Contains(BackendCapability.ProxyEnforcement))
 {
-    // Safe to send a 0.8 network.proxy policy.
+    // Safe to send a proxy-only directional policy with runtimeConfig.networkProxy.
 }
 else
 {
@@ -352,7 +353,7 @@ hosts fail rather than broadening the policy.
 
 Capability names and backend combinations are validated by the native SDK.
 `LearningMode`, denial capture, and ProcessContainer directional networking
-require schema `0.8.0-alpha` or later.
+require schema `0.9.0-alpha` or later.
 
 #### Seatbelt options
 
@@ -474,15 +475,18 @@ The native unit must be built with isolation-session support or execution return
 
 ### Network proxy
 
-The V1 `SandboxPolicy` in `Microsoft.Mxc.Sdk.V1` does not expose legacy one-shot proxy
-settings. Consumers that need an older exact proxy contract must use the raw
-executor configuration path. WSLC state-aware exec exposes its supported
-proxy-only runtime override through `WslcExecOptions.RuntimeConfig`.
+The V1 `SandboxPolicy` uses directional `Network.Egress` / `Network.Ingress`
+and `Network.RuntimeConfig.NetworkProxy` for supported one-shot proxy requests.
+Use deny-by-default egress and the backend-specific ingress posture shown
+below; retired `network.proxy` fields are not accepted by raw configuration
+either. WSLC state-aware exec exposes its supported proxy-only runtime
+override through `WslcExecOptions.RuntimeConfig`.
 
-### Directional networking (schema 0.8)
+### Directional networking (supported schema 0.9+)
 
-Schema `0.8.0-alpha` adds directional egress, ingress/host-loopback, CIDR,
-protocol, and port rules, plus a runtime proxy value:
+Supported exact contracts from `0.9.0-alpha` include directional egress,
+ingress/host-loopback, CIDR, protocol, and port rules, plus a runtime proxy
+value:
 
 ```csharp
 var policy = new SandboxPolicy

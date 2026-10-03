@@ -42,7 +42,7 @@ use wxc_e2e_tests::{
     has_platform_exec, host_prepped_optin, run_platform_config_value, CommandResult,
 };
 
-const SCHEMA_VERSION: &str = "0.7.0-alpha";
+const SCHEMA_VERSION: &str = "0.9.0-alpha";
 
 /// Whether the ProcessContainer characterization prerequisites are present.
 fn ready() -> bool {

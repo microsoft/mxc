@@ -423,7 +423,7 @@ mod tests {
     const RICH_POLICY: &str = r#"{
         "$schema": "https://example.com/mxc-config.schema.json",
         "_comment": null,
-        "version": "0.6.0-alpha",
+        "version": "0.9.0-alpha",
         "containerId": "test-container",
         "containment": "processcontainer",
         "lifecycle": { "destroyOnExit": false, "preservePolicy": true },

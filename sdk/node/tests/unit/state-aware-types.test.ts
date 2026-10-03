@@ -83,7 +83,7 @@ describe('IsolationSessionProvisionConfig', () => {
 
     const oldVersion: IsolationSessionProvisionConfig = {
       // @ts-expect-error — high-level lifecycle configs are V1 contract-mapped.
-      version: '0.8.0-alpha',
+      version: '0.9.0-alpha',
       network: directionalNetwork,
     };
     assert.ok(oldVersion);

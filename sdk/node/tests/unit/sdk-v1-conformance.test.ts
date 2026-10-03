@@ -229,7 +229,9 @@ describe('SDK v1 shared conformance fixtures', () => {
         (error: unknown) =>
           error instanceof MxcError &&
           error.code === 'malformed_request' &&
-          error.message.includes(`network.${field}`),
+          error.message.includes(`network.${field}`) &&
+          error.message.includes('not supported by any registered exact contract') &&
+          error.message.includes('network.egress/network.ingress'),
       );
     }
   });

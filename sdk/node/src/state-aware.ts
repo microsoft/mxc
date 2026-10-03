@@ -60,7 +60,6 @@ type StateAwareOptionSupport = 'supported' | 'unsupported-when-true' | 'unsuppor
 const STATE_AWARE_OPTION_SUPPORT = {
   debug: 'unsupported-when-true',
   experimental: 'unsupported-when-true',
-  allowTestingFeatures: 'unsupported-when-true',
   inheritDefaultEnv: 'unsupported-when-defined',
   executablePath: 'unsupported-when-defined',
   skipPlatformCheck: 'unsupported-when-true',

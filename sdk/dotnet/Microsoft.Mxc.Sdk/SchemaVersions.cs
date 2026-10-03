@@ -11,11 +11,8 @@ namespace Microsoft.Mxc.Sdk;
 /// </remarks>
 public static class SchemaVersions
 {
-    private const string V0_7_0Alpha = "0.7.0-alpha";
-    private const string V0_9_0Alpha = "0.9.0-alpha";
-
     /// <summary>Oldest accepted schema version.</summary>
-    public const string Minimum = "0.6.0-alpha";
+    public const string Minimum = "0.9.0-alpha";
 
     /// <summary>Newest accepted schema version, including development contracts.</summary>
     public const string MaximumSupported = "1.1.0-alpha";
@@ -34,7 +31,7 @@ public static class SchemaVersions
     internal const string StateAware = SdkContract;
 
     internal static bool IsPublished(string version) =>
-        version is Minimum or V0_7_0Alpha or "0.8.0-alpha" or V0_9_0Alpha or LatestStable;
+        version is Minimum or LatestStable;
 
     internal static bool IsSupported(string version) =>
         IsPublished(version) || version == MaximumSupported;

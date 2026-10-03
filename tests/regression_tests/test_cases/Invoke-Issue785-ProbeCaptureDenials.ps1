@@ -20,7 +20,7 @@ Copy-Item -LiteralPath $WxcExec -Destination $isolatedWxc -Force
 # Config
 $configJson = @"
 {
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "containment": "processcontainer",
     "process": {
         "timeout": 30000

@@ -1,32 +1,11 @@
 #!/bin/bash
-# Bubblewrap network.allowLocalNetwork honesty tests (schema 0.8+), and the
-# pre-0.8 twin.
+# Bubblewrap ingress honesty tests for the supported directional policy.
 #
-# No root, no slirp4netns and no outbound connectivity required: two of the
-# three cases are validate-time outcomes and the third is a plain shared-
-# namespace sandbox. That independence is the reason this lives in its own file
-# rather than inside run_bwrap_firewall_test.sh, which exits early when
-# slirp4netns is absent and skips when the internet is unreachable -- behind
-# those gates these cases would go untested on exactly the hosts where they are
-# cheapest to run.
+# No root, slirp4netns or outbound connectivity required: unsupported inbound
+# allow values are rejected before sandbox setup, while a ruleless deny runs in
+# an isolated namespace. Firewall enforcement tests can skip without suppressing
+# these checks.
 #
-# What is being asserted:
-#
-# Bubblewrap has no inbound-only primitive. The sandbox either shares the host
-# network namespace or gets a private one, and neither can be narrowed further:
-# unprivileged bwrap has no veth for iptables to match on, and seccomp cannot
-# dereference the sockaddr passed to bind(), so an AF_INET-only filter is not
-# expressible. allowLocalNetwork is therefore honorable only when it already
-# agrees with the namespace the resolved mode picks. Both disagreeing
-# combinations are rejected from 0.8; both must still be accepted before it.
-#
-# Not asserted here: the pre-0.8 warning text. Logger warnings are deliberately
-# never written to the process's streams (wxc_common is linked into libraries
-# whose host owns the terminal -- see logger.rs
-# `warning_line_writes_nothing_to_stderr`), so an end-to-end run cannot observe
-# them. The warning is covered by the bwrap_common unit tests
-# `local_network_denied_on_shared_netns_warns` and
-# `local_network_allowed_under_private_netns_warns`.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -81,84 +60,38 @@ assert_rejected() {
     echo "PASS: $label"
 }
 
-# defaultPolicy=allow with no host rules and no proxy resolves to Shared, which
-# keeps the host namespace -- so allowLocalNetwork=false cannot be delivered.
-assert_rejected "allowLocalNetwork=false on a shared namespace" \
-    "bubblewrap_network_localnet_shared_rejected.json" \
-    "is not enforced while the sandbox shares the host network namespace"
+assert_rejected "ingress.default=allow is refused" \
+    "bubblewrap_network_localnet_ingress_allow_rejected.json" \
+    "network.ingress.default='allow' is not supported"
 
-# The mirror image: defaultPolicy=block with no host rules resolves to Isolated,
-# which applies --unshare-net, so a listener is reachable only from inside the
-# sandbox and allowLocalNetwork=true overstates what the caller gets. Covered
-# because the two arms are separate branches; a fix to one can silently drop
-# the other.
-assert_rejected "allowLocalNetwork=true under a private namespace" \
-    "bubblewrap_network_localnet_private_rejected.json" \
-    "is confined to the sandbox's own network namespace"
+assert_rejected "ingress.hostLoopback=allow is refused" \
+    "bubblewrap_network_localnet_hostloopback_allow_rejected.json" \
+    "network.ingress.hostLoopback='allow' is not supported"
 
-# The same rejection with the field omitted. `false` is the schema default *and*
-# a deny, so silence still asks for inbound denial. Separate from the explicit
-# case because a presence check would pass that one and fail this one.
-assert_rejected "an omitted allowLocalNetwork on a shared namespace" \
-    "bubblewrap_network_localnet_omitted_rejected.json" \
-    "is not enforced while the sandbox shares the host network namespace"
+# An omitted ingress section still defaults to deny. A ruleless egress deny
+# requires no slirp or firewall tools, and must put the workload in its own
+# network namespace rather than accidentally sharing the host's.
+echo "Running Bubblewrap localnet test: omitted ingress defaults to deny..."
+IMPLICIT_RC=0
+IMPLICIT_OUT=$("$LXC_EXEC" --experimental --allow-testing-features \
+    "$REPO_DIR/tests/configs/bubblewrap_network_localnet_implicit_deny.json" 2>&1) \
+    || IMPLICIT_RC=$?
+if [ "$IMPLICIT_RC" -ne 0 ]; then
+    echo "$IMPLICIT_OUT"
+    echo "FAIL: implicit ingress deny (sandbox exited $IMPLICIT_RC)"
+    exit 1
+fi
+if ! grep -qF "LOCALNET_IMPLICIT_DENY_OK" <<<"$IMPLICIT_OUT"; then
+    echo "$IMPLICIT_OUT"
+    echo "FAIL: implicit ingress deny (workload never ran)"
+    exit 1
+fi
+IMPLICIT_NETNS="$(sed -n 's/^SANDBOX_NETNS=//p' <<<"$IMPLICIT_OUT" | tail -n 1)"
+if [ -z "$IMPLICIT_NETNS" ] || [ "$IMPLICIT_NETNS" = "$HOST_NETNS" ]; then
+    echo "$IMPLICIT_OUT"
+    echo "FAIL: implicit ingress deny (expected a private network namespace, got '$IMPLICIT_NETNS')"
+    exit 1
+fi
+echo "PASS: omitted ingress denies in a private network namespace"
 
-# The escape hatch from both cases above. Pinned because "reject the deny" is
-# also satisfiable by rejecting every shared-namespace request, which would
-# leave these callers with no expressible policy.
-echo "Running Bubblewrap localnet test: acknowledged exposure is accepted..."
-ACK_RC=0
-ACK_OUT=$("$LXC_EXEC" --experimental --allow-testing-features \
-    "$REPO_DIR/tests/configs/bubblewrap_network_localnet_acknowledged.json" 2>&1) \
-    || ACK_RC=$?
-if [ "$ACK_RC" != 0 ]; then
-    echo "$ACK_OUT"
-    echo "FAIL: acknowledged localnet (exited $ACK_RC; the acknowledgment is not honored)"
-    exit 1
-fi
-if ! grep -q LOCALNET_ACK_OK <<<"$ACK_OUT"; then
-    echo "$ACK_OUT"
-    echo "FAIL: acknowledged localnet (succeeded without running the workload)"
-    exit 1
-fi
-ACK_NETNS="$(sed -n 's/^SANDBOX_NETNS=//p' <<<"$ACK_OUT" | tail -n 1)"
-if [ "$ACK_NETNS" != "$HOST_NETNS" ]; then
-    echo "$ACK_OUT"
-    echo "FAIL: acknowledged localnet (expected the host netns $HOST_NETNS, got $ACK_NETNS)"
-    exit 1
-fi
-echo "PASS: acknowledged exposure is accepted"
-
-# The pre-0.8 twin of the first case. GHCP consumes Bubblewrap proxy mode on
-# 0.6/0.7, so the rejection above must be invisible there.
-#
-# The namespace assertion is what makes this a behavior pin rather than a parse
-# check. Exit code alone would still pass if a future change routed pre-0.8
-# configs down the private-namespace path -- the run would succeed and silently
-# hand legacy callers a sandbox with different connectivity. Three distinct
-# regressions fail here: the gate leaking (nonzero exit), the workload being
-# skipped (missing sentinel), and the namespace changing.
-echo "Running Bubblewrap localnet test: pre-0.8 is unchanged..."
-LEGACY_RC=0
-LEGACY_OUT=$("$LXC_EXEC" --experimental --allow-testing-features \
-    "$REPO_DIR/tests/configs/bubblewrap_network_localnet_legacy.json" 2>&1) \
-    || LEGACY_RC=$?
-if [ "$LEGACY_RC" != 0 ]; then
-    echo "$LEGACY_OUT"
-    echo "FAIL: pre-0.8 localnet (exited $LEGACY_RC; the 0.8 rejection leaked)"
-    exit 1
-fi
-if ! grep -q LEGACY_LOCALNET_OK <<<"$LEGACY_OUT"; then
-    echo "$LEGACY_OUT"
-    echo "FAIL: pre-0.8 localnet (succeeded without running the workload)"
-    exit 1
-fi
-LEGACY_NETNS="$(sed -n 's/^SANDBOX_NETNS=//p' <<<"$LEGACY_OUT" | tail -n 1)"
-if [ "$LEGACY_NETNS" != "$HOST_NETNS" ]; then
-    echo "$LEGACY_OUT"
-    echo "FAIL: pre-0.8 localnet (expected the host namespace $HOST_NETNS, got $LEGACY_NETNS)"
-    exit 1
-fi
-echo "PASS: pre-0.8 localnet is unchanged"
-
-echo "Bubblewrap allowLocalNetwork tests complete."
+echo "Bubblewrap ingress tests complete."

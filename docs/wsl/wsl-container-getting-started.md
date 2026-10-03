@@ -366,8 +366,7 @@ no separate `--setup-wslc` step is required.
 > **No per-host filtering primitive exists.** The container lacks
 > `CAP_NET_ADMIN`; MXC refuses unsupported rules rather than running them
 > unenforced. The removed legacy `allowOutbound` authoring and wire host-list
-> vocabulary must not be used for v0.9. Published-version compatibility is
-> separate from these new directional declarations.
+> vocabulary is not accepted by any supported exact contract.
 
 ### Network proxy (cooperative, unprivileged)
 
@@ -393,10 +392,11 @@ variables that well-behaved clients honor.
 2. Cooperative tools (curl, wget, Python `requests`, Node `https`, etc.) honor
    the env vars and their traffic flows through the proxy.
 
-**The runtime field contains a URL string.** A WSLC container runs in its own network
-namespace (a separate WSL system VM), so a host- or distro-loopback proxy is
-**not reachable** from inside the container. The proxy must be a routable
-address the container can reach:
+**The runtime field contains a URL string.** A WSLC container runs in its own
+network namespace (a separate WSL system VM). Its own `127.0.0.1` loopback is
+valid for a proxy running inside that container, as in the test fixture below;
+a proxy on the host's or WSL distro's loopback is **not reachable**. An external
+proxy must have an address routable from the container:
 
 ```json
 {
@@ -439,27 +439,15 @@ deny/deny/deny or unrestricted allow/allow/allow across egress, ingress, and
 host-loopback. Mixed directions are rejected because no independent restriction
 primitive exists.
 
-### Legacy enforcement and inbound fields (published contracts only)
+### Retired enforcement and inbound fields
 
-The following compatibility rules apply to legacy published contracts, not
-v0.9, which structurally rejects `enforcementMode` and `allowLocalNetwork`.
-`network.enforcementMode: "firewall"` (or `"both"`) is **rejected** for the same
-reason as per-host filtering: both ask for per-rule firewall enforcement inside a
-container that has no `CAP_NET_ADMIN` to apply it with. The default
-`"capabilities"` is accepted — it is an honest description of WSLC's
-all-or-nothing network, so an explicitly supplied `"capabilities"` is accepted
-rather than refused merely for being present.
-
-#### Legacy inbound: `allowLocalNetwork` is not supported
-
-`network.allowLocalNetwork: true` (a blanket grant to bind/listen and accept
-inbound connections) is **rejected at config-parse time** for WSLC. A WSLC
-container runs in the NAT'd WSL2 VM and MXC does not honor a blanket
-inbound-listen grant — only explicit host→container forwards via
-`wslc` `portMappings` have any inbound effect, so accepting the
-flag would silently promise reachability the backend never delivers. Expose
-specific ports with `portMappings` instead. (`allowLocalNetwork: false`, the
-default, is a no-op and is accepted.)
+Pre-v0.9 published contracts are immutable history but fail at exact-version
+dispatch. In supported contracts, `network.enforcementMode`,
+`network.allowLocalNetwork`, host lists, and `network.proxy` are unknown fields
+and fail structural parsing; there is no legacy `"capabilities"` selector.
+Use the directional all-allow or all-deny posture above. Inbound reachability
+requires explicit host-to-container forwards through `wslc.portMappings`;
+`ingress.default: "allow"` alone does not create them.
 
 **Caveats**
 
@@ -624,7 +612,7 @@ images — cannot be used.
 
 - [`tests/examples/wslc_hello_world.json`](../../tests/examples/wslc_hello_world.json) — Hello world with Alpine
 - [`tests/configs/wslc_network_isolated.json`](../../tests/configs/wslc_network_isolated.json) — Network isolation
-- [`tests/configs/wslc_network_proxy.json`](../../tests/configs/wslc_network_proxy.json) — Cooperative HTTP proxy (`network.proxy.url`)
+- [`tests/configs/wslc_network_proxy.json`](../../tests/configs/wslc_network_proxy.json) — In-container cooperative HTTP proxy (`runtimeConfig.networkProxy` at the container's `127.0.0.1`)
 - [`tests/configs/wslc_custom_registry_ghcr.json`](../../tests/configs/wslc_custom_registry_ghcr.json) — Pull from GitHub Container Registry
 - [`tests/configs/wslc_custom_registry_quay.json`](../../tests/configs/wslc_custom_registry_quay.json) — Pull from Quay.io
 - [`tests/configs/wslc_tar_import_rootfs.json`](../../tests/configs/wslc_tar_import_rootfs.json) — Import rootfs tar

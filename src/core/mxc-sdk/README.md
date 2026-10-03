@@ -50,7 +50,7 @@ Configure a Windows ProcessContainer with
 `Containment::ProcessContainer(ProcessContainer::default())`.
 `ProcessContainer` controls learning mode, capabilities,
 BaseProcessContainer UI isolation, proxy peer identity, and denial capture.
-Schema 0.8 directional networking is available through
+Supported schema 0.9+ directional networking is available through
 `NetworkSection::{egress, ingress, runtime_config}`.
 
 The new ProcessContainer and directional-network configuration types are
@@ -267,7 +267,7 @@ println!("{:?}", result.tier);
 ```
 
 On Linux, [`platform_support`] additionally reports `bubblewrap_network`: whether
-this host can enforce **proxy-only egress** (schema `0.8.0-alpha`+ proxy mode,
+this host can enforce **proxy-only egress** (schema `0.9.0-alpha`+ proxy mode,
 which runs the sandbox in a private network namespace). That mode has no
 fallback, so check it before building a proxy request:
 

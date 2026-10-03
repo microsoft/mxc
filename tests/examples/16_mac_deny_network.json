@@ -1,17 +1,19 @@
 {
-    "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
-    "version": "0.8.0-alpha",
-    "containment": "seatbelt",
-    "process": {
-        "commandLine": "curl -s --max-time 5 https://example.com && echo NETWORK_ALLOWED || echo NETWORK_BLOCKED",
-        "timeout": 10000
-    },
-    "filesystem": {
-        "readwritePaths": [
-            "/tmp"
-        ]
-    },
-    "network": {
-        "defaultPolicy": "block"
+  "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
+  "version": "0.9.0-alpha",
+  "containment": "seatbelt",
+  "process": {
+    "commandLine": "curl -s --max-time 5 https://example.com && echo NETWORK_ALLOWED || echo NETWORK_BLOCKED",
+    "timeout": 10000
+  },
+  "filesystem": {
+    "readwritePaths": [
+      "/tmp"
+    ]
+  },
+  "network": {
+    "egress": {
+      "default": "deny"
     }
+  }
 }
