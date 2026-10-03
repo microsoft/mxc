@@ -1,13 +1,16 @@
 ## Examples
 
-For a more comprehensive list of examples, look in the examples\ directory.
+For a more comprehensive list of examples, see
+[`tests/examples/`](../tests/examples/).
 
 ### Basic Hello World
 ```json
 {
-  "script": "python -c \"import sys; print('Hello from MXC!'); print(f'Python version: {sys.version}');\"",
-  "processContainer": {
-    "name": "CLI-HelloWorld"
+  "version": "1.0.0",
+  "containerId": "CLI-HelloWorld",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "python -c \"import sys; print('Hello from MXC!'); print(sys.version)\""
   }
 }
 ```
@@ -15,9 +18,11 @@ For a more comprehensive list of examples, look in the examples\ directory.
 ### Filesystem Access Control
 ```json
 {
-  "script": "python -c \"open('C:\\\\temp\\\\output.txt', 'w').write('test')\"",
-  "processContainer": {
-    "name": "CLI-Filesystem-Test"
+  "version": "1.0.0",
+  "containerId": "CLI-Filesystem-Test",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "python -c \"open('C:\\\\temp\\\\output.txt', 'w').write('test')\""
   },
   "filesystem": {
     "readwritePaths": [
@@ -25,23 +30,44 @@ For a more comprehensive list of examples, look in the examples\ directory.
     ],
     "deniedPaths": [
       "C:\\Windows\\System32"
-    ],
-    "clearPolicyOnExit": true
+    ]
   }
 }
 ```
 
+Create `C:\temp` before running this example, or replace it with an existing
+writable directory.
+
 ### Network Restricted Execution
 ```json
 {
-  "script": "import urllib.request\nurllib.request.urlopen('https://api.github.com')",
+  "version": "1.0.0",
+  "containerId": "CLI-Network-Test",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "python -c \"import socket; socket.create_connection(('140.82.114.6', 443), timeout=5).close(); print('Allowed destination reached')\"",
+    "timeout": 30000
+  },
+  "processContainer": {
+    "capabilities": ["internetClient"]
+  },
   "network": {
-    "defaultPolicy": "block",
-    "enforcementMode": "firewall",
-    "allowedHosts": ["api.github.com"]
+    "egress": {
+      "default": "deny",
+      "allow": [{
+        "to": [{ "cidr": "140.82.114.6/32" }],
+        "ports": [{ "protocol": "tcp", "port": 443 }]
+      }]
+    },
+    "ingress": { "default": "deny", "hostLoopback": "deny" }
   }
 }
 ```
+
+The destination is numeric because directional rules accept IP/CIDR, not
+hostnames. It must be reachable from the host to demonstrate the allow rule;
+see the [ProcessContainer networking guide](process-container/networking.md)
+for host requirements and enforcement limits.
 
 ### Directional Network Policy (schema 0.9+)
 
@@ -51,9 +77,9 @@ separate ingress defaults:
 ```json
 {
   "version": "0.9.0-alpha",
-  "containment": "process",
+  "containment": "processcontainer",
   "process": {
-    "commandLine": "echo directional network example"
+    "commandLine": "cmd.exe /c echo directional network example"
   },
   "network": {
     "egress": {
@@ -77,7 +103,8 @@ See
 [`tests/examples/30_network_0_8_directional.json`](../tests/examples/30_network_0_8_directional.json)
 for the complete config and
 [`sandbox-policy/0.8.0/networking/networking.md`](sandbox-policy/0.8.0/networking/networking.md)
-for network modes and backend support.
+for the historical GA design; use the
+[supported schema guide](schema.md) for current backend authoring.
 
 ### Network Proxy
 
