@@ -36,7 +36,9 @@ use super::error::{lifecycle_err, IsolationSessionError};
 use super::manager::{
     log_sandbox_torn_down, ClosingProcess, IsolationSessionManager, TeardownOutcome,
 };
-use super::process_options::{build_process_options, with_service_timeout_grace};
+use super::process_options::{
+    build_process_options, build_pty_process_options, with_service_timeout_grace,
+};
 use super::IsolationSessionRunner;
 use windows::Win32::Foundation::HANDLE;
 
@@ -221,7 +223,7 @@ fn start_pty_process(
     size: PtySize,
     cleanup: PtySetupFailureCleanup,
 ) -> Result<StartedPtyProcess, MxcError> {
-    let options = build_process_options(request, true);
+    let options = build_pty_process_options(request);
     let timeout_ms = options.timeout_ms;
     let options = with_service_timeout_grace(options);
     let process = manager

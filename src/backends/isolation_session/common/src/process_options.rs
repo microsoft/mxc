@@ -79,20 +79,7 @@ pub(super) fn build_process_options(
     let system_drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
     let process_path = format!(r"{}\Windows\System32\cmd.exe", system_drive);
 
-    let arguments = if interactive {
-        // Hold the caller's command behind one line of stdin. The PTY spawn
-        // path resizes the service-owned ConPTY, then writes that line before
-        // returning the handle, so user code cannot observe the service's
-        // default dimensions or run after a failed initial resize. `ver`
-        // restores a successful ERRORLEVEL after the intentionally blank
-        // `set /p` input without producing output.
-        format!(
-            r#"/d /q /c set /p "__mxc_pty_start_gate=" & ver >nul & {}"#,
-            request.script_code
-        )
-    } else {
-        format!("/c {}", request.script_code)
-    };
+    let arguments = format!("/c {}", request.script_code);
 
     ProcessOptions {
         process_path,
@@ -103,6 +90,22 @@ pub(super) fn build_process_options(
         redirect_flags: compute_redirect_flags(interactive),
         interactive,
     }
+}
+
+/// Builds caller-controlled PTY options whose command remains blocked until
+/// MXC applies the requested initial terminal dimensions.
+pub(super) fn build_pty_process_options(request: &ExecutionRequest) -> ProcessOptions {
+    let mut options = build_process_options(request, true);
+    // Hold the caller's command behind one line of stdin. The PTY spawn path
+    // resizes the service-owned ConPTY, then writes that line before returning
+    // the handle, so user code cannot observe the default dimensions or run
+    // after a failed initial resize. `ver` restores a successful ERRORLEVEL
+    // after the intentionally blank `set /p` input without producing output.
+    options.arguments = format!(
+        r#"/d /q /c set /p "__mxc_pty_start_gate=" & ver >nul & {}"#,
+        request.script_code
+    );
+    options
 }
 
 /// How much longer than the caller's deadline the **service-side** timer is
@@ -234,12 +237,23 @@ mod tests {
     }
 
     #[test]
-    fn interactive_options_gate_the_command_until_the_initial_resize() {
+    fn interactive_options_do_not_gate_existing_console_paths() {
         let request = ExecutionRequest {
             script_code: "echo hello".to_string(),
             ..Default::default()
         };
         let opts = build_process_options(&request, true);
+
+        assert_eq!(opts.arguments, "/c echo hello");
+    }
+
+    #[test]
+    fn pty_options_gate_the_command_until_the_initial_resize() {
+        let request = ExecutionRequest {
+            script_code: "echo hello".to_string(),
+            ..Default::default()
+        };
+        let opts = build_pty_process_options(&request);
 
         assert_eq!(
             opts.arguments,
