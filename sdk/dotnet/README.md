@@ -998,11 +998,13 @@ using MxcPtyProcess terminal =
     MxcLifecycle.SpawnInContainerWithPty(id, "powershell.exe");
 using var writer = new StreamWriter(terminal.Input) { AutoFlush = true };
 using var reader = new StreamReader(terminal.Output);
+using var outputCloser = terminal.StandardOutputCloser;
 Task<string> outputTask = reader.ReadToEndAsync();
 terminal.Resize(new MxcPtySize(Rows: 40, Columns: 120));
 terminal.Input.WriteByte(0x03); // Ctrl-C
 await writer.WriteAsync("exit\r\n");
 SandboxWaitResult outcome = await terminal.WaitAsync();
+outputCloser?.Close();
 Console.Write(await outputTask);
 ```
 

@@ -283,7 +283,7 @@ pub unsafe extern "C" fn mxc_exec_state_aware_json(
 ///
 /// # Safety
 /// The pointer and ownership requirements are identical to
-/// [`mxc_state_aware_exec`].
+/// [`mxc_exec_state_aware_json`].
 #[no_mangle]
 pub unsafe extern "C" fn mxc_state_aware_exec_pty(
     request_json_utf8: *const c_char,

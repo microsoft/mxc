@@ -451,7 +451,7 @@ function spawnInContainerWithPty(
   config: IsolationSessionExecConfig,
   size?: MxcPtySize,
   options?: StateAwareStreamingOptions,
-): MxcPtyProcess;
+): Promise<MxcPtyProcess>;
 
 function stopSandbox<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,

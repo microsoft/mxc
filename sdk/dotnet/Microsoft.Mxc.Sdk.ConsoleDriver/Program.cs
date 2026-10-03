@@ -172,13 +172,16 @@ internal static class Program
         using var consoleMode = ConsoleModeScope.EnterRaw();
         using var cancellation = new CancellationTokenSource();
         using var input = terminal.Input;
-        var outputTask = terminal.Output.CopyToAsync(Console.OpenStandardOutput());
+        var output = terminal.Output;
+        using var outputCloser = terminal.StandardOutputCloser;
+        var outputTask = output.CopyToAsync(Console.OpenStandardOutput());
         var inputTask = Console.OpenStandardInput().CopyToAsync(input, cancellation.Token);
         var resizeTask = TrackConsoleSizeAsync(terminal, cancellation.Token);
 
         try
         {
             var outcome = terminal.Wait();
+            outputCloser?.Close();
             outputTask.GetAwaiter().GetResult();
             return outcome;
         }

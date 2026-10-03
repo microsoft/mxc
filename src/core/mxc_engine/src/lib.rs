@@ -72,7 +72,9 @@ pub use verbose_telemetry::emit_verbose_telemetry;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainmentBackend, ExecutionRequest, FailurePhase, ScriptResponse};
 use wxc_common::mxc_error::MxcError;
-use wxc_common::sandbox_process::{NativeStdio, PtySize, SandboxProcess, StreamCloser};
+use wxc_common::sandbox_process::{
+    NativeStdio, PtyReaderWithCloser, PtySize, SandboxProcess, StreamCloser,
+};
 use wxc_common::state_aware_request::MxcRequest;
 use wxc_common::telemetry;
 
@@ -617,6 +619,10 @@ impl SandboxProcess for TelemetryProcess {
         self.inner.pty_clone_reader()
     }
 
+    fn pty_clone_reader_with_closer(&self) -> std::io::Result<PtyReaderWithCloser> {
+        self.inner.pty_clone_reader_with_closer()
+    }
+
     fn pty_take_writer(&self) -> std::io::Result<Box<dyn std::io::Write + Send>> {
         self.inner.pty_take_writer()
     }
@@ -775,6 +781,10 @@ impl SandboxProcess for ProcessWithWarnings {
         self.inner.pty_clone_reader()
     }
 
+    fn pty_clone_reader_with_closer(&self) -> std::io::Result<PtyReaderWithCloser> {
+        self.inner.pty_clone_reader_with_closer()
+    }
+
     fn pty_take_writer(&self) -> std::io::Result<Box<dyn std::io::Write + Send>> {
         self.inner.pty_take_writer()
     }
@@ -849,7 +859,19 @@ mod telemetry_process_tests {
     struct NativeStdioProbe {
         calls: Arc<AtomicUsize>,
         stdin_closer_calls: Arc<AtomicUsize>,
+        pty_reader_calls: Arc<AtomicUsize>,
+        pty_closer_calls: Arc<AtomicUsize>,
         timeout_kill_calls: Arc<AtomicUsize>,
+    }
+
+    struct CountingCloser {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl StreamCloser for CountingCloser {
+        fn close(&self) {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     impl SandboxProcess for NativeStdioProbe {
@@ -865,6 +887,16 @@ mod telemetry_process_tests {
         fn stdin_closer(&self) -> Option<Box<dyn StreamCloser>> {
             self.stdin_closer_calls.fetch_add(1, Ordering::SeqCst);
             None
+        }
+
+        fn pty_clone_reader_with_closer(&self) -> std::io::Result<PtyReaderWithCloser> {
+            self.pty_reader_calls.fetch_add(1, Ordering::SeqCst);
+            Ok((
+                Box::new(std::io::empty()),
+                Some(Box::new(CountingCloser {
+                    calls: Arc::clone(&self.pty_closer_calls),
+                })),
+            ))
         }
 
         fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
@@ -985,14 +1017,18 @@ mod telemetry_process_tests {
     }
 
     #[test]
-    fn process_wrappers_forward_native_stdio_transfer() {
+    fn process_wrappers_forward_stream_lifecycle_operations() {
         let telemetry_calls = Arc::new(AtomicUsize::new(0));
         let telemetry_closer_calls = Arc::new(AtomicUsize::new(0));
+        let telemetry_pty_reader_calls = Arc::new(AtomicUsize::new(0));
+        let telemetry_pty_closer_calls = Arc::new(AtomicUsize::new(0));
         let telemetry_timeout_calls = Arc::new(AtomicUsize::new(0));
         let mut telemetry = TelemetryProcess::new(
             Box::new(NativeStdioProbe {
                 calls: Arc::clone(&telemetry_calls),
                 stdin_closer_calls: Arc::clone(&telemetry_closer_calls),
+                pty_reader_calls: Arc::clone(&telemetry_pty_reader_calls),
+                pty_closer_calls: Arc::clone(&telemetry_pty_closer_calls),
                 timeout_kill_calls: Arc::clone(&telemetry_timeout_calls),
             }),
             true,
@@ -1006,27 +1042,39 @@ mod telemetry_process_tests {
         );
         assert!(telemetry.take_native_stdio().unwrap().is_none());
         assert!(telemetry.stdin_closer().is_none());
+        let (_, telemetry_pty_closer) = telemetry.pty_clone_reader_with_closer().unwrap();
+        telemetry_pty_closer.unwrap().close();
         telemetry.kill_for_timeout().unwrap();
         assert_eq!(telemetry_calls.load(Ordering::SeqCst), 1);
         assert_eq!(telemetry_closer_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(telemetry_pty_reader_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(telemetry_pty_closer_calls.load(Ordering::SeqCst), 1);
         assert_eq!(telemetry_timeout_calls.load(Ordering::SeqCst), 1);
 
         let warning_calls = Arc::new(AtomicUsize::new(0));
         let warning_closer_calls = Arc::new(AtomicUsize::new(0));
+        let warning_pty_reader_calls = Arc::new(AtomicUsize::new(0));
+        let warning_pty_closer_calls = Arc::new(AtomicUsize::new(0));
         let warning_timeout_calls = Arc::new(AtomicUsize::new(0));
         let mut with_warnings = ProcessWithWarnings::wrap(
             Box::new(NativeStdioProbe {
                 calls: Arc::clone(&warning_calls),
                 stdin_closer_calls: Arc::clone(&warning_closer_calls),
+                pty_reader_calls: Arc::clone(&warning_pty_reader_calls),
+                pty_closer_calls: Arc::clone(&warning_pty_closer_calls),
                 timeout_kill_calls: Arc::clone(&warning_timeout_calls),
             }),
             vec!["test warning".to_string()],
         );
         assert!(with_warnings.take_native_stdio().unwrap().is_none());
         assert!(with_warnings.stdin_closer().is_none());
+        let (_, warning_pty_closer) = with_warnings.pty_clone_reader_with_closer().unwrap();
+        warning_pty_closer.unwrap().close();
         with_warnings.kill_for_timeout().unwrap();
         assert_eq!(warning_calls.load(Ordering::SeqCst), 1);
         assert_eq!(warning_closer_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(warning_pty_reader_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(warning_pty_closer_calls.load(Ordering::SeqCst), 1);
         assert_eq!(warning_timeout_calls.load(Ordering::SeqCst), 1);
     }
 
