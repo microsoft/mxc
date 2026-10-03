@@ -37,8 +37,7 @@ internal sealed class CamelCaseJsonStringEnumConverter<TEnum>
 // Public request/policy surface.
 [JsonSerializable(typeof(Generated.OneShotRequest))]
 [JsonSerializable(typeof(ContainerRequest))]
-[JsonSerializable(typeof(ContainerPolicy))]
-[JsonSerializable(typeof(SandboxContainment))]
+[JsonSerializable(typeof(IContainerBackendConfig))]
 [JsonSerializable(typeof(ProcessContainment))]
 [JsonSerializable(typeof(ProcessContainerContainment))]
 [JsonSerializable(typeof(SeatbeltContainment))]

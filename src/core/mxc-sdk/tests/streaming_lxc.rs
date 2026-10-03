@@ -19,12 +19,9 @@ use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use mxc_sdk::v1::policy::{Containment, FilesystemSection, NetworkSection};
 use mxc_sdk::v1::WaitOutcome;
-use mxc_sdk::v1::{
-    build_request_with_containment, spawn, ContainerPolicy, NetworkAction, NetworkEgressSection,
-    NetworkIngressSection,
-};
+use mxc_sdk::v1::{spawn, NetworkAction, NetworkEgressSection, NetworkIngressSection};
+use mxc_sdk::v1::{ContainerRequest, Containment, FilesystemSection, NetworkSection};
 
 /// The bound on a read or wait that should already have finished. Long enough
 /// to create a container, start it, and destroy it again on a loaded CI runner.
@@ -162,22 +159,20 @@ fn lxc_request_with_network(
     timeout_ms: u32,
     network: NetworkSection,
 ) -> mxc_sdk::v1::ContainerRequest {
-    let mut policy = ContainerPolicy::default();
-    policy.filesystem = Some(FilesystemSection {
+    let mut request = ContainerRequest::new(command);
+    request.set_filesystem(FilesystemSection {
         readwrite_paths: vec!["/tmp".to_string()],
         readonly_paths: vec![],
         denied_paths: vec![],
         clear_policy_on_exit: None,
     });
-    policy.network = Some(network);
-    policy.timeout_ms = (timeout_ms != 0).then_some(timeout_ms);
-    build_request_with_containment(
-        &policy,
-        &Containment::Lxc(mxc_sdk::v1::configs::Lxc::default()),
-        command,
-        Some(name),
-    )
-    .expect("build_request_with_containment should succeed")
+    request.set_network(network);
+    request.set_containment(Containment::Lxc(mxc_sdk::v1::configs::Lxc::default()));
+    request.set_container_name(name);
+    if timeout_ms != 0 {
+        request.set_timeout_ms(timeout_ms);
+    }
+    request
 }
 
 /// Reads `stream` to EOF on its own thread, so a stream a killed workload

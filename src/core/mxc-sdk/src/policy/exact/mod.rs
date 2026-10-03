@@ -9,7 +9,7 @@ use wxc_common::mxc_error::MxcError;
 
 use crate::configs::{Lxc, ProcessContainer, Seatbelt};
 
-use super::{ContainerPolicy, ContainerRequest, Containment};
+use super::{ContainerPolicy, Containment, PreparedContainerRequest};
 
 macro_rules! optional {
     ($module:ident, $value:expr) => {
@@ -69,7 +69,7 @@ pub(super) fn build_request(
     containment: &Containment,
     script: &str,
     container_name: Option<&str>,
-) -> Result<ContainerRequest, crate::Error> {
+) -> Result<PreparedContainerRequest, crate::Error> {
     if script.is_empty() {
         return Err(error("script parameter is required").into());
     }
@@ -86,8 +86,9 @@ pub(super) fn build_request(
             MxcError::malformed_request(format!("failed to build request: {error}"))
         })?;
     inner.source_contract = None;
-    Ok(ContainerRequest {
+    Ok(PreparedContainerRequest {
         inner,
+        #[cfg(test)]
         requested_sandbox_kind: containment.telemetry_kind(),
     })
 }

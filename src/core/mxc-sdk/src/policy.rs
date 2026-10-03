@@ -583,7 +583,7 @@ impl Default for WslcSection {
 /// ```
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
-pub struct ContainerPolicy {
+pub(crate) struct ContainerPolicy {
     pub filesystem: Option<FilesystemSection>,
     pub network: Option<NetworkSection>,
     pub ui: Option<UiSection>,
@@ -591,21 +591,172 @@ pub struct ContainerPolicy {
     pub timeout_ms: Option<u32>,
 }
 
-/// A spawnable sandbox request, built from a [`ContainerPolicy`] and a command by
-/// [`build_request`]. Optionally adjust the working directory or environment,
-/// then hand it to [`spawn`](crate::v1::spawn).
-///
-/// This is the SDK's own request type; the internal execution model it maps to
-/// is an implementation detail callers don't depend on.
+/// A complete one-shot request with shared restrictions and backend settings.
 #[derive(Debug, Clone)]
 pub struct ContainerRequest {
-    /// The internal execution model. `pub(crate)` so the SDK's own modules and
-    /// unit tests can map/inspect it, while it stays out of the public API.
-    pub(crate) inner: ExecutionRequest,
-    requested_sandbox_kind: &'static str,
+    command: String,
+    filesystem: Option<FilesystemSection>,
+    network: Option<NetworkSection>,
+    ui: Option<UiSection>,
+    timeout_ms: Option<u32>,
+    containment: Containment,
+    container_name: Option<String>,
+    working_directory: Option<String>,
+    env: Option<Vec<String>>,
+    inherit_default_env: bool,
+    experimental_enabled: bool,
+    telemetry_opt_in: Option<bool>,
 }
 
 impl ContainerRequest {
+    /// Create a one-shot request for `command`.
+    pub fn new(command: impl Into<String>) -> Self {
+        Self {
+            command: command.into(),
+            filesystem: None,
+            network: None,
+            ui: None,
+            timeout_ms: None,
+            containment: Containment::Process,
+            container_name: None,
+            working_directory: None,
+            env: None,
+            inherit_default_env: false,
+            experimental_enabled: false,
+            telemetry_opt_in: None,
+        }
+    }
+
+    /// Set shared filesystem restrictions.
+    pub fn set_filesystem(&mut self, filesystem: FilesystemSection) -> &mut Self {
+        self.filesystem = Some(filesystem);
+        self
+    }
+
+    /// Set shared directional network restrictions.
+    pub fn set_network(&mut self, network: NetworkSection) -> &mut Self {
+        self.network = Some(network);
+        self
+    }
+
+    /// Set shared UI restrictions.
+    pub fn set_ui(&mut self, ui: UiSection) -> &mut Self {
+        self.ui = Some(ui);
+        self
+    }
+
+    /// Set the execution timeout in milliseconds.
+    pub fn set_timeout_ms(&mut self, timeout_ms: u32) -> &mut Self {
+        self.timeout_ms = Some(timeout_ms);
+        self
+    }
+
+    /// Select a backend and its backend-specific configuration.
+    pub fn set_containment(&mut self, containment: Containment) -> &mut Self {
+        self.containment = containment;
+        self
+    }
+
+    /// Set the container identifier to use instead of minting one.
+    pub fn set_container_name(&mut self, container_name: impl Into<String>) -> &mut Self {
+        self.container_name = Some(container_name.into());
+        self
+    }
+
+    /// Override the working directory the sandboxed child starts in.
+    pub fn set_working_directory(&mut self, working_directory: impl Into<String>) -> &mut Self {
+        self.working_directory = Some(working_directory.into());
+        self
+    }
+
+    /// Set the child's environment from `(key, value)` pairs.
+    pub fn set_env<K, V>(&mut self, env: impl IntoIterator<Item = (K, V)>) -> &mut Self
+    where
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.inherit_default_env = false;
+        self.env = Some(
+            env.into_iter()
+                .map(|(key, value)| {
+                    let (key, value): (String, String) = (key.into(), value.into());
+                    format!("{key}={value}")
+                })
+                .collect(),
+        );
+        self
+    }
+
+    /// Return the child's environment entries, if explicitly configured.
+    pub fn env(&self) -> Option<&[String]> {
+        self.env.as_deref()
+    }
+
+    /// Use the backend default environment instead of an explicitly set one.
+    pub fn clear_env(&mut self) -> &mut Self {
+        self.env = None;
+        self.inherit_default_env = false;
+        self
+    }
+
+    /// Layer the supplied values over the backend's default environment.
+    pub fn inherit_default_env<K, V>(
+        &mut self,
+        extra: impl IntoIterator<Item = (K, V)>,
+    ) -> &mut Self
+    where
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.set_env(extra);
+        self.inherit_default_env = true;
+        self
+    }
+
+    /// Layer the supplied values over the calling process environment.
+    pub fn inherit_process_env<K, V>(
+        &mut self,
+        extra: impl IntoIterator<Item = (K, V)>,
+    ) -> &mut Self
+    where
+        K: Into<String>,
+        V: Into<String>,
+    {
+        let mut entries: Vec<(String, String)> = std::env::vars().collect();
+        apply_environment_overrides(&mut entries, extra);
+        self.set_env(entries)
+    }
+
+    /// Enable runtime-gated experimental behavior for this request.
+    pub fn set_experimental(&mut self, enabled: bool) -> &mut Self {
+        self.experimental_enabled = enabled;
+        self
+    }
+
+    /// Enable or disable telemetry for this invocation.
+    pub fn set_telemetry_opt_in(&mut self, enabled: bool) -> &mut Self {
+        self.telemetry_opt_in = Some(enabled);
+        self
+    }
+
+    /// Return the explicit per-request telemetry switch.
+    pub fn telemetry_enabled(&self) -> Option<bool> {
+        self.telemetry_opt_in
+    }
+}
+
+/// Internal normalized request consumed by the execution engine.
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedContainerRequest {
+    /// The internal execution model. `pub(crate)` so the SDK's own modules and
+    /// unit tests can map/inspect it, while it stays out of the public API.
+    pub(crate) inner: ExecutionRequest,
+    #[cfg(test)]
+    requested_sandbox_kind: &'static str,
+}
+
+#[cfg(test)]
+impl PreparedContainerRequest {
     /// Override the working directory the sandboxed child starts in. Left unset,
     /// it defaults to the policy's resolution.
     pub fn set_working_directory(&mut self, working_directory: impl Into<String>) -> &mut Self {
@@ -650,13 +801,6 @@ impl ContainerRequest {
         self
     }
 
-    /// The child's environment as `KEY=VALUE` entries, or `None` when none has
-    /// been set (in which case the backend supplies its default — on Windows,
-    /// the user's profile block).
-    pub fn env(&self) -> Option<&[String]> {
-        self.inner.env.as_deref()
-    }
-
     /// Drop any environment set on this request, returning it to the backend
     /// default.
     ///
@@ -694,64 +838,6 @@ impl ContainerRequest {
         self
     }
 
-    /// Start from the *calling process's* environment and append `extra` on top.
-    ///
-    /// Note this is a different, generally larger and leakier set than
-    /// [`Self::inherit_default_env`]: it is whatever your process happens to be
-    /// running with, so anything you inherited — including secrets in the
-    /// ambient environment — is handed to the sandboxed child. Prefer
-    /// `inherit_default_env` unless you specifically need your own variables.
-    /// The environment is set with [`Self::set_env`], which IsolationSession
-    /// refuses.
-    pub fn inherit_process_env<K, V>(
-        &mut self,
-        extra: impl IntoIterator<Item = (K, V)>,
-    ) -> &mut Self
-    where
-        K: Into<String>,
-        V: Into<String>,
-    {
-        let mut entries: Vec<(String, String)> = std::env::vars().collect();
-        apply_environment_overrides(&mut entries, extra);
-        self.set_env(entries)
-    }
-
-    /// The Seatbelt (macOS) extra Mach service names the sandbox profile lets the
-    /// child look up. Empty when the request carries no Seatbelt config (i.e. a
-    /// non-Seatbelt backend). Read these — e.g. to union with your own — before
-    /// [`set_seatbelt_extra_mach_lookups`](Self::set_seatbelt_extra_mach_lookups).
-    pub fn seatbelt_extra_mach_lookups(&self) -> &[String] {
-        self.inner
-            .seatbelt
-            .as_ref()
-            .map_or(&[], |s| s.extra_mach_lookups.as_slice())
-    }
-
-    /// Set the Seatbelt (macOS) extra Mach service names the child may look up.
-    /// Creates a default Seatbelt config if the request carries none.
-    pub fn set_seatbelt_extra_mach_lookups(&mut self, lookups: Vec<String>) -> &mut Self {
-        self.inner
-            .seatbelt
-            .get_or_insert_default()
-            .extra_mach_lookups = lookups;
-        self
-    }
-
-    /// Allow (or deny) the Seatbelt-sandboxed (macOS) child access to the system
-    /// keychain. Creates a default Seatbelt config if the request carries none.
-    pub fn set_seatbelt_keychain_access(&mut self, allow: bool) -> &mut Self {
-        self.inner.seatbelt.get_or_insert_default().keychain_access = allow;
-        self
-    }
-
-    /// Enable (or disable) experimental features for this request — the
-    /// analogue of the SDK's `SandboxSpawnOptions.experimental` and the
-    /// executor's `--experimental` flag.
-    pub fn set_experimental(&mut self, enabled: bool) -> &mut Self {
-        self.inner.experimental_enabled = enabled;
-        self
-    }
-
     /// Enable or disable telemetry for this invocation.
     ///
     /// Enabling this per-request switch is necessary but not sufficient:
@@ -786,11 +872,12 @@ impl ContainerRequest {
 ///
 /// Targets the host's native process containment; use
 /// [`build_request_with_containment`] to select a specific backend.
-pub fn build_request(
+#[cfg(test)]
+pub(crate) fn build_request(
     policy: &ContainerPolicy,
     script: &str,
     container_name: Option<&str>,
-) -> Result<ContainerRequest, crate::Error> {
+) -> Result<PreparedContainerRequest, crate::Error> {
     build_request_with_containment(policy, &Containment::Process, script, container_name)
 }
 
@@ -810,13 +897,41 @@ pub fn build_request(
 /// let request = build_request_with_containment(&policy, &Containment::Wslc(wslc), "python3 -c 'print(1)'", None)?;
 /// # Ok::<(), mxc_sdk::Error>(())
 /// ```
-pub fn build_request_with_containment(
+pub(crate) fn build_request_with_containment(
     policy: &ContainerPolicy,
     containment: &Containment,
     script: &str,
     container_name: Option<&str>,
-) -> Result<ContainerRequest, crate::Error> {
+) -> Result<PreparedContainerRequest, crate::Error> {
     exact::build_request(policy, containment, script, container_name)
+}
+
+pub(crate) fn prepare_request(
+    request: &ContainerRequest,
+) -> Result<PreparedContainerRequest, crate::Error> {
+    let policy = ContainerPolicy {
+        filesystem: request.filesystem.clone(),
+        network: request.network.clone(),
+        ui: request.ui.clone(),
+        timeout_ms: request.timeout_ms,
+    };
+    let mut prepared = build_request_with_containment(
+        &policy,
+        &request.containment,
+        &request.command,
+        request.container_name.as_deref(),
+    )?;
+    prepared.inner.working_directory = request.working_directory.clone().unwrap_or_default();
+    prepared.inner.env = request.env.clone();
+    prepared.inner.inherit_default_env = request.inherit_default_env;
+    prepared.inner.experimental_enabled = request.experimental_enabled;
+    if let Some(enabled) = request.telemetry_opt_in {
+        prepared.inner.telemetry = Some(TelemetryConfig {
+            enabled: Some(enabled),
+            requested_sandbox_kind: Some(request.containment.telemetry_kind()),
+        });
+    }
+    Ok(prepared)
 }
 
 #[cfg(test)]
@@ -1015,7 +1130,8 @@ mod tests {
 
     use super::{
         build_request, CaptureDenials, CaptureDenialsMode, ContainerPolicy, NetworkAction,
-        NetworkEgressSection, NetworkIngressSection, NetworkSection, RuntimeConfigSection,
+        NetworkEgressSection, NetworkIngressSection, NetworkSection, PreparedContainerRequest,
+        RuntimeConfigSection,
     };
 
     #[test]
@@ -1089,8 +1205,8 @@ mod tests {
 
     /// The request's environment as an owned value, so tests can compare it
     /// against a literal without borrowing a temporary.
-    fn env_of(request: &super::ContainerRequest) -> Option<Vec<String>> {
-        request.env().map(<[String]>::to_vec)
+    fn env_of(request: &PreparedContainerRequest) -> Option<Vec<String>> {
+        request.inner.env.clone()
     }
 
     #[test]

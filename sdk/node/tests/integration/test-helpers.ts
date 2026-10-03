@@ -14,7 +14,7 @@ import * as sdkV1Namespace from '@microsoft/mxc-sdk/v1';
 import type { OneShotRequest } from '../../dist/generated/v1_0_0/wire.js';
 import { runOneShotJsonAsync } from '../../dist/bindings/run.js';
 import { prepareOneShotRequest } from '../../dist/bindings/one-shot.js';
-import { createConfigFromPolicy } from '../../dist/sandbox.js';
+import { createConfigFromRequest } from '../../dist/sandbox.js';
 import type { ContainerConfig } from '../../dist/types.js';
 import {
   MxcError,
@@ -24,9 +24,13 @@ import {
   provisionSandbox,
   runAsync,
   type ContainerId,
-  type ContainerPolicy,
+  type ContainerBackendConfig,
+  type ContainerRequest,
   type StateAwareContainmentBackend,
 } from '@microsoft/mxc-sdk/v1';
+
+export type ContainerRequestTestSettings =
+  Omit<ContainerRequest, 'command'> & { command?: string };
 
 export const isolationSessionNetwork = {
   egress: { default: 'allow' },
@@ -45,23 +49,28 @@ export function runConfigForTest(
 }
 
 export function createConfigForTest(
-  policy: ContainerPolicy,
-  containment?: Parameters<typeof createConfigFromPolicy>[1],
+  request: ContainerRequestTestSettings,
+  containment?: ContainerBackendConfig['type'],
   containerName?: string,
 ): ContainerConfig {
-  return createConfigFromPolicy(policy, containment, containerName);
+  return createConfigFromRequest({
+    ...request,
+    command: request.command ?? '',
+    ...(containment === undefined ? {} : { containment: { type: containment } }),
+    ...(containerName === undefined ? {} : { containerName }),
+  });
 }
 
-/** Exercise the public V1 buffered API for stable-policy integration tests. */
-export function runPolicyForTest(
+/** Exercise the public V1 buffered API for stable-request integration tests. */
+export function runRequestForTest(
   command: string,
-  policy: ContainerPolicy,
+  request: ContainerRequestTestSettings,
   _options: Record<string, never> = {},
   workingDirectory?: string,
   containerName?: string,
 ) {
   return runAsync({
-    policy,
+    ...request,
     command,
     ...(workingDirectory === undefined ? {} : { workingDirectory }),
     ...(containerName === undefined ? {} : { containerName }),
@@ -72,7 +81,7 @@ export const sdk = {
   ...sdkNamespace,
   ...sdkV1Namespace,
   createConfigForTest,
-  runPolicyForTest,
+  runRequestForTest,
 };
 
 // Schema versions
@@ -436,10 +445,12 @@ export const pythonSkipReason: string | undefined = _python.command ? undefined 
  * Merge host tool paths into a policy so the container can find installed tools.
  * Adds the Python prefix as a readwrite path when needed for DLL loading.
  */
-export function withToolPaths(policy: ContainerPolicy): ContainerPolicy {
+export function withToolPaths(
+  request: ContainerRequestTestSettings,
+): ContainerRequestTestSettings {
   const toolsPolicy = sdk.getAvailableToolsPolicy(process.env);
-  const filesystem = { ...policy.filesystem };
-  const merged: ContainerPolicy = { ...policy, filesystem };
+  const filesystem = { ...request.filesystem };
+  const merged: ContainerRequestTestSettings = { ...request, filesystem };
 
   const extraReadwrite: string[] = [];
   if (_python.prefix) {

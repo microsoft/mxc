@@ -2,20 +2,24 @@
 
 `mxc-sdk` is the Rust library for authoring MXC container requests and executing
 them in-process through the native engine. The versioned public API is under
-`mxc_sdk::v1`. All request and policy types in this API use the owned V1
-contract rather than exposing the wire-version selector.
+`mxc_sdk::v1`. `ContainerRequest` owns the command and shared filesystem,
+network, and UI restrictions; its typed containment value selects and
+configures the backend.
 
 ## One-shot execution
 
-Build a request from a `ContainerPolicy` and command, then choose captured
-output with `run` or live pipes with `spawn`:
+Build a `ContainerRequest` directly, then choose captured output with `run` or
+live pipes with `spawn`:
 
 ```rust,no_run
-use mxc_sdk::v1::{self, ContainerPolicy, WaitOutcome};
+use mxc_sdk::v1::{self, ContainerRequest, FilesystemSection, WaitOutcome};
 
-let mut policy = ContainerPolicy::default();
-policy.timeout_ms = Some(10_000);
-let request = v1::build_request(&policy, "echo hello", None)?;
+let mut request = ContainerRequest::new("echo hello");
+request.set_timeout_ms(10_000);
+request.set_filesystem(FilesystemSection {
+    readonly_paths: vec!["/usr".into()],
+    ..Default::default()
+});
 
 let output = v1::run(request)?;
 assert_eq!(output.outcome, WaitOutcome::Exited(0));
@@ -28,11 +32,10 @@ termination methods. `run` captures stdout and stderr and returns an `Output`
 with its `WaitOutcome`, warnings, and optional output metadata. Both use the
 same in-process native engine; neither launches an MXC executor binary.
 
-Use `build_request_with_containment` when a specific backend is required.
-Policy, backend configuration, and request types are documented in the
-[`v1` API](src/lib.rs) and the [container policy guide](../../../docs/schema.md).
-The request includes the command; its working directory and environment can be
-adjusted before execution.
+Set the request's typed `Containment` when a specific backend is required.
+Shared restrictions remain on `ContainerRequest`; backend-specific settings
+are carried by the selected containment variant. These types are documented in
+the [`v1` API](src/lib.rs) and the [schema reference](../../../docs/schema.md).
 
 ## Existing containers
 
@@ -64,9 +67,11 @@ v1::container::deprovision_sandbox(&id, options)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Use `spawn_in_container` or `exec_in_sandbox` for live piped exec. Lifecycle
-operations and state-aware exec are synchronous in Rust. Backend support and
-phase-specific requirements are described in the
+Use `spawn_in_container` or `exec_in_sandbox` for live piped exec.
+`container::exec_in_attached` synchronously relays state-aware exec through the
+host terminal and returns its `WaitOutcome`; the host stdin and stdout must
+both be terminals. Lifecycle operations and state-aware exec are synchronous
+in Rust. Backend support and phase-specific requirements are described in the
 [IsolationSession](../../../docs/isolation-session/state-aware-rust.md) and
 [WSLC](../../../docs/wsl/wslc-state-aware.md) guides.
 
@@ -74,8 +79,7 @@ phase-specific requirements are described in the
 
 | Purpose | Rust type |
 | --- | --- |
-| Container restrictions | `v1::ContainerPolicy` |
-| One-shot workload | `v1::ContainerRequest` |
+| One-shot workload and cross-backend restrictions | `v1::ContainerRequest` |
 | Persistent container identity | `v1::ContainerId` |
 | Existing-container workload | `v1::ExecRequest` |
 | Live process with standard pipes | `v1::MxcProcess` |

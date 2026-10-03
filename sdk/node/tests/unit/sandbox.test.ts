@@ -3,19 +3,19 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { buildSandboxPayload, createConfigFromPolicy } from '../../src/sandbox.js';
+import { createConfigFromRequest } from '../../src/sandbox.js';
 import { resolveExecutableAndArgs } from '../../src/helper.js';
 import {
   _resetPlatformSupportCache,
   _setBwrapVersionRunner,
   _setLxcAvailabilityProbe,
 } from '../../src/platform.js';
-import { ContainerConfig, ContainerPolicy, SandboxingMethod } from '../../src/types.js';
+import { ContainerConfig, ContainerRequest, SandboxingMethod } from '../../src/types.js';
 import { MxcError } from '../../src/errors.js';
 import { platformSkip } from './test-helpers.js';
 
-describe('buildSandboxPayload', () => {
-  const defaultPolicy: ContainerPolicy = {};
+describe('ContainerRequest config mapping', () => {
+  const defaultRequest: ContainerRequest = { command: '' };
 
   describe('Windows', () => {
     let originalPlatform: PropertyDescriptor | undefined;
@@ -36,7 +36,7 @@ describe('buildSandboxPayload', () => {
     it('should set process.commandLine from script parameter', () => {
       mockWindows();
       try {
-        const payload = buildSandboxPayload('echo hello', defaultPolicy);
+        const payload = createConfigFromRequest({ ...defaultRequest, command: 'echo hello' });
         assert.strictEqual(payload.process!.commandLine, 'echo hello');
       } finally {
         restore();
@@ -62,7 +62,7 @@ describe('buildSandboxPayload', () => {
     it('should default to process containment on Linux (resolved by binary to bubblewrap)', () => {
       mockLinux();
       try {
-        const payload = buildSandboxPayload('echo hi', defaultPolicy);
+        const payload = createConfigFromRequest({ ...defaultRequest, command: 'echo hi' });
         assert.strictEqual(payload.containment, 'process');
         // Abstract 'process' on Linux resolves to Bubblewrap at runtime;
         // the wire-format payload must NOT carry an LXC-specific block.
@@ -76,11 +76,11 @@ describe('buildSandboxPayload', () => {
 
 });
 
-describe('createConfigFromPolicy', () => {
-  const defaultPolicy: ContainerPolicy = {};
+describe('createConfigFromRequest', () => {
+  const defaultRequest: ContainerRequest = { command: '' };
 
-  it('should produce a locked-down v1 config for an empty policy', () => {
-    const config = createConfigFromPolicy(defaultPolicy);
+  it('should produce a locked-down v1 config for an empty request', () => {
+    const config = createConfigFromRequest(defaultRequest);
     assert.strictEqual(config.version, '1.0.0');
     assert.deepStrictEqual(config.filesystem!.readwritePaths, []);
     assert.deepStrictEqual(config.filesystem!.readonlyPaths, []);
@@ -109,7 +109,10 @@ describe('createConfigFromPolicy', () => {
     it('should keep process containment abstract', () => {
       mockWindows();
       try {
-        const config = createConfigFromPolicy(defaultPolicy, 'process');
+        const config = createConfigFromRequest({
+          ...defaultRequest,
+          containment: { type: 'process' },
+        });
         assert.strictEqual(config.containment, 'process');
         assert.strictEqual(config.processContainer, undefined);
       } finally {
@@ -120,7 +123,10 @@ describe('createConfigFromPolicy', () => {
     it('should set required ProcessContainer defaults for explicit processcontainer', () => {
       mockWindows();
       try {
-        const config = createConfigFromPolicy(defaultPolicy, 'processcontainer');
+        const config = createConfigFromRequest({
+          ...defaultRequest,
+          containment: { type: 'processcontainer' },
+        });
         assert.strictEqual(config.containment, 'processcontainer');
         assert.deepStrictEqual(config.processContainer, {
           leastPrivilege: false,
@@ -158,7 +164,7 @@ describe('createConfigFromPolicy', () => {
     it('should default to process containment (resolved by binary to bubblewrap on Linux)', () => {
       mockLinux();
       try {
-        const config = createConfigFromPolicy(defaultPolicy);
+        const config = createConfigFromRequest(defaultRequest);
         assert.strictEqual(config.containment, 'process');
         // Abstract 'process' on Linux resolves to Bubblewrap at runtime;
         // the wire-format config must NOT carry an LXC-specific block.
@@ -273,7 +279,7 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
   }
 
   it('should accept the abstract intent "process" without throwing', () => {
-    // Regression guard: createConfigFromPolicy() defaults to "process" and
+    // Regression guard: ContainerRequest defaults to "process" and
     // the SDK no longer pre-resolves it to a concrete backend. The validator
     // must accept abstract intents and let the native binary resolve them.
     assert.doesNotThrow(() =>

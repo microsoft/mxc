@@ -24,25 +24,21 @@ public class MxcSandboxLxcE2ETests
     private const int WaitBoundMs = 180_000;
 
     private static ContainerRequest Request(string command, string containerName) =>
-        new(
-            new ContainerPolicy
-            {
-                TimeoutMs = WaitBoundMs,
+        new(command)
+        {
+            TimeoutMs = WaitBoundMs,
 
-                // A policy naming no network defaults to `enforcementMode:
-                // 'capabilities'`, which LXC refuses outright.
-                Network = new NetworkPolicy
+            // LXC requires an explicit directional posture rather than its
+            // default capabilities-based network mode.
+            Network = new NetworkPolicy
+            {
+                Egress = new NetworkEgressPolicy { Default = NetworkAction.Deny },
+                Ingress = new NetworkIngressPolicy
                 {
-                    Egress = new NetworkEgressPolicy { Default = NetworkAction.Deny },
-                    Ingress = new NetworkIngressPolicy
-                    {
-                        Default = NetworkAction.Deny,
-                        HostLoopback = NetworkAction.Deny,
-                    },
+                    Default = NetworkAction.Deny,
+                    HostLoopback = NetworkAction.Deny,
                 },
             },
-            command)
-        {
             ContainerName = containerName,
             Containment = new LxcContainment(),
         };

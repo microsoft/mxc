@@ -286,7 +286,7 @@ public static class MxcSandbox
                 }
                 return new MxcProcess(
                     MxcSandboxHandle.FromRaw(handle),
-                    request.Policy.TimeoutMs);
+                    request.TimeoutMs);
             }
         }
     }
@@ -298,12 +298,6 @@ public static class MxcSandbox
         Encoding.UTF8.GetBytes(value, 0, value.Length, buffer, 0);
         buffer[byteCount] = 0;
         return buffer;
-    }
-
-    internal static string SerializePolicy(ContainerPolicy policy)
-    {
-        ArgumentNullException.ThrowIfNull(policy);
-        return MxcJson.Serialize(policy, MxcJson.Options);
     }
 
     internal static string SerializeRequest(ContainerRequest request)

@@ -4,28 +4,29 @@
 //! Streaming (handle-based) API tests: live stdio, kill, and wait.
 //! Seatbelt-specific cases run only on macOS.
 //!
-//! These drive the real consumer path: build a [`ContainerRequest`] from a
-//! [`mxc_sdk::v1::ContainerPolicy`] via `mxc_sdk::v1::build_request`, fill in
-//! the command, then `mxc_sdk::v1::spawn`.
+//! These drive the real consumer path by constructing a [`ContainerRequest`]
+//! and passing it to `mxc_sdk::v1::spawn`.
 
 #![cfg(target_os = "macos")]
 
 use mxc_sdk::v1::WaitOutcome;
-use mxc_sdk::v1::{build_request, spawn, ContainerPolicy, ContainerRequest};
+use mxc_sdk::v1::{spawn, ContainerRequest, FilesystemSection};
 
 /// A Seatbelt streaming request (`/tmp` read-write) with the given command and
 /// timeout (ms; `0` == run until exit, required for interactive/long cases).
 #[cfg(target_os = "macos")]
 fn seatbelt_request(command: &str, timeout_ms: u32) -> ContainerRequest {
-    let mut policy = ContainerPolicy::default();
-    policy.filesystem = Some(mxc_sdk::v1::policy::FilesystemSection {
+    let mut request = ContainerRequest::new(command);
+    request.set_filesystem(FilesystemSection {
         readwrite_paths: vec!["/tmp".to_string()],
         readonly_paths: vec![],
         denied_paths: vec![],
         clear_policy_on_exit: None,
     });
-    policy.timeout_ms = (timeout_ms != 0).then_some(timeout_ms);
-    build_request(&policy, command, None).expect("build_request should succeed")
+    if timeout_ms != 0 {
+        request.set_timeout_ms(timeout_ms);
+    }
+    request
 }
 
 #[cfg(target_os = "macos")]

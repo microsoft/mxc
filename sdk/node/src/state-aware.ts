@@ -4,7 +4,10 @@
 import { Readable } from 'node:stream';
 import { diagLog } from './diagnostic.js';
 import { MxcError } from './errors.js';
-import { runBindingStateAwareRequestAsync } from './bindings/state-aware.js';
+import {
+  runBindingStateAwareAttachedRequest,
+  runBindingStateAwareRequestAsync,
+} from './bindings/state-aware.js';
 import { spawnStateAwareBindingSandboxProcess } from './bindings/streaming.js';
 import {
   DeprovisionConfigFor,
@@ -23,17 +26,16 @@ import {
   StopConfigFor,
   StopResult,
 } from './state-aware-types.js';
-import type { MxcSandboxProcess } from './sandbox-process.js';
+import type { MxcOptions } from './types.js';
+import type {
+  MxcSandboxProcess,
+  SandboxWaitResult as WaitOutcome,
+} from './sandbox-process.js';
 import {
   backendForSandboxId,
   buildStateAwareEnvelope,
   parseNonExecResponse,
 } from './state-aware-helper.js';
-
-interface StateAwareRequestOptions {
-  dryRun?: boolean;
-  signal?: AbortSignal;
-}
 
 /**
  * Trailing parameters of {@link provisionSandbox}: the config is required
@@ -43,16 +45,8 @@ interface StateAwareRequestOptions {
  */
 export type ProvisionArgs<C extends StateAwareContainmentBackend> =
   EveryBackendConfigIsOptional<C> extends true
-    ? [config?: ProvisionConfigFor<C>, options?: StateAwareRequestOptions]
-    : [config: ProvisionConfigFor<C>, options?: StateAwareRequestOptions];
-
-/** Options for live state-aware streaming. */
-export interface StateAwareStreamingOptions {
-  /** Retained for compatibility; stable V1 state-aware streaming rejects `true`.
-   * For experimental backends, use a raw exact development request through
-   * the executor until a typed experimental lifecycle API is available. */
-  experimental?: boolean;
-}
+    ? [config?: ProvisionConfigFor<C>, options?: MxcOptions]
+    : [config: ProvisionConfigFor<C>, options?: MxcOptions];
 
 const PIPED_EXEC_BACKENDS = [
   'isolation_session',
@@ -60,37 +54,26 @@ const PIPED_EXEC_BACKENDS = [
 ] as const satisfies readonly StateAwareContainmentBackend[];
 type PipedExecBackend = typeof PIPED_EXEC_BACKENDS[number];
 
-type StateAwareOptionSupport = 'supported' | 'unsupported-when-true' | 'unsupported-when-defined';
-
-const STATE_AWARE_OPTION_SUPPORT = {
-  debug: 'unsupported-when-true',
-  experimental: 'unsupported-when-true',
-  allowTestingFeatures: 'unsupported-when-true',
-  inheritDefaultEnv: 'unsupported-when-defined',
-  executablePath: 'unsupported-when-defined',
-  skipPlatformCheck: 'unsupported-when-true',
-  ptyOptions: 'unsupported-when-defined',
-  dryRun: 'supported',
-  logDir: 'unsupported-when-defined',
-  usePty: 'unsupported-when-true',
-  signal: 'supported',
-} satisfies Record<string, StateAwareOptionSupport>;
-
 function assertStateAwareOptions(
   apiName: string,
-  options: StateAwareRequestOptions | StateAwareStreamingOptions,
+  options: MxcOptions,
 ): void {
-  const values = options as Record<string, unknown>;
-  for (const [key, support] of Object.entries(STATE_AWARE_OPTION_SUPPORT)) {
-    const value = values[key];
-    const unsupported = support === 'unsupported-when-true'
-      ? value === true
-      : support === 'unsupported-when-defined' && value !== undefined;
-    if (!unsupported) continue;
-    throw new MxcError(
-      'malformed_request',
-      `${apiName} does not support option '${key}'`,
-    );
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+    throw new MxcError('malformed_request', `${apiName} options must be an object`);
+  }
+  for (const [key, value] of Object.entries(options)) {
+    if (key !== 'experimental' && key !== 'dryRun') {
+      throw new MxcError(
+        'malformed_request',
+        `${apiName} does not support option '${key}'`,
+      );
+    }
+    if (value !== undefined && typeof value !== 'boolean') {
+      throw new MxcError(
+        'malformed_request',
+        `${apiName} option '${key}' must be a boolean`,
+      );
+    }
   }
 }
 
@@ -108,107 +91,28 @@ function assertPipedExecBackend(
   }
 }
 
-function abortReason(signal: AbortSignal): unknown {
-  return signal.reason ?? new Error('Aborted');
-}
-
 function logBackgroundFailure(operation: string, error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
   diagLog(`state-aware: ${operation} failed: ${message}`);
 }
 
-function scheduleAbortedProvisionCleanup(
-  responseJson: string,
-  envelope: Record<string, unknown>,
-  experimental: boolean,
-): void {
-  if (envelope.phase !== 'provision' || envelope.containment === undefined) {
-    return;
-  }
-  try {
-    const sandboxId = parseNonExecResponse<{ sandboxId?: string }>(responseJson).sandboxId;
-    if (!sandboxId) return;
-    const cleanup = buildStateAwareEnvelope({
-      phase: 'deprovision',
-      backendKey: backendForSandboxId(sandboxId),
-      sandboxId,
-    });
-    if (typeof envelope.version === 'string') {
-      cleanup.version = envelope.version;
-    }
-    void runBindingStateAwareRequestAsync({
-      requestJson: JSON.stringify(cleanup),
-      dryRun: false,
-      experimental,
-    }).catch((error: unknown) => {
-      logBackgroundFailure(
-        `aborted provision cleanup for sandbox '${sandboxId}'`,
-        error,
-      );
-    });
-  } catch (error) {
-    logBackgroundFailure('preparing aborted provision cleanup', error);
-  }
-}
-
 async function runStateAwareEnvelopeRequest(
   apiName: string,
   envelope: Record<string, unknown>,
-  options: StateAwareRequestOptions,
+  options: MxcOptions,
 ): Promise<string> {
   assertStateAwareOptions(apiName, options);
-
-  const signal = options.signal;
-  if (signal?.aborted) {
-    throw abortReason(signal);
-  }
-
-  const experimental = false;
-  const request = runBindingStateAwareRequestAsync({
+  return runBindingStateAwareRequestAsync({
     requestJson: JSON.stringify(envelope),
     dryRun: options.dryRun === true,
-    experimental,
-  });
-
-  if (!signal) {
-    return request;
-  }
-
-  return new Promise<string>((resolve, reject) => {
-    let settled = false;
-    let aborted = false;
-    const finish = (action: () => void) => {
-      if (settled) return;
-      settled = true;
-      signal.removeEventListener('abort', onAbort);
-      action();
-    };
-    const onAbort = () => {
-      aborted = true;
-      finish(() => reject(abortReason(signal)));
-    };
-
-    signal.addEventListener('abort', onAbort, { once: true });
-    void request.then((responseJson) => {
-      if (aborted) {
-        scheduleAbortedProvisionCleanup(responseJson, envelope, experimental);
-        return;
-      }
-      finish(() => resolve(responseJson));
-    }, (error) => {
-      if (aborted) {
-        logBackgroundFailure(`${apiName} after cancellation`, error);
-        return;
-      }
-      finish(() => reject(error));
-    });
+    experimental: options.experimental === true,
   });
 }
 
 async function nonExecBindingCall<T>(
   apiName: string,
   envelope: Record<string, unknown>,
-  options: StateAwareRequestOptions,
+  options: MxcOptions,
 ): Promise<T> {
   return parseNonExecResponse<T>(await runStateAwareEnvelopeRequest(apiName, envelope, options));
 }
@@ -228,34 +132,27 @@ function buildExecEnvelope<C extends StateAwareContainmentBackend>(
 function spawnStateAwareExecProcess<C extends StateAwareContainmentBackend>(
   sandboxId: ContainerId<C>,
   config: ExecConfigFor<C>,
-  options: StateAwareRequestOptions,
+  options: MxcOptions,
   apiName: string,
 ): MxcSandboxProcess {
   assertStateAwareOptions(apiName, options);
   assertPipedExecBackend(apiName, sandboxId);
   return spawnStateAwareBindingSandboxProcess(
     JSON.stringify(buildExecEnvelope(sandboxId, config)),
-    false,
+    options.experimental === true,
     config.process.timeout,
   );
 }
 
 function assertStateAwareStreamingOptions(
   apiName: string,
-  options: StateAwareStreamingOptions,
+  options: MxcOptions,
 ): void {
   assertStateAwareOptions(apiName, options);
-  const requestOptions = options as StateAwareRequestOptions;
-  if (requestOptions.dryRun === true) {
+  if (options.dryRun === true) {
     throw new MxcError(
       'malformed_request',
       `${apiName} does not support dryRun because it returns a live process`,
-    );
-  }
-  if (requestOptions.signal !== undefined) {
-    throw new MxcError(
-      'malformed_request',
-      `${apiName} does not support AbortSignal; call kill() on the returned process to stop it`,
     );
   }
 }
@@ -272,39 +169,6 @@ function collectStream(stream: Readable | null): Promise<string> {
     stream.once('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
     stream.once('error', reject);
   });
-}
-
-function createAbortPromise(
-  proc: MxcSandboxProcess,
-  signal: AbortSignal | undefined,
-): { promise?: Promise<never>; cleanup: () => void } {
-  if (!signal) {
-    return { cleanup: () => {} };
-  }
-  let onAbort: (() => void) | undefined;
-  const promise = new Promise<never>((_, reject) => {
-    onAbort = () => {
-      try {
-        proc.kill();
-      } catch (error) {
-        logBackgroundFailure('cancelling buffered exec', error);
-      }
-      reject(abortReason(signal));
-    };
-    if (signal.aborted) {
-      onAbort();
-      return;
-    }
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
-  return {
-    promise,
-    cleanup: () => {
-      if (onAbort) {
-        signal.removeEventListener('abort', onAbort);
-      }
-    },
-  };
 }
 
 /**
@@ -325,7 +189,7 @@ export async function provisionSandbox<C extends StateAwareContainmentBackend>(
 ): Promise<ProvisionResult<C>> {
   const [config, options = {}] = rest as [
     ProvisionConfigFor<C> | undefined,
-    StateAwareRequestOptions | undefined,
+    MxcOptions | undefined,
   ];
   const envelope = buildStateAwareEnvelope({
     phase: 'provision',
@@ -350,7 +214,7 @@ export async function provisionSandbox<C extends StateAwareContainmentBackend>(
 export async function startSandbox<C extends StateAwareContainmentBackend>(
   sandboxId: ContainerId<C>,
   config?: StartConfigFor<C>,
-  options: StateAwareRequestOptions = {},
+  options: MxcOptions = {},
 ): Promise<StartResult<C>> {
   const backendKey = backendForSandboxId(sandboxId) as C;
   const envelope = buildStateAwareEnvelope({
@@ -370,14 +234,38 @@ export async function startSandbox<C extends StateAwareContainmentBackend>(
 export function execInSandbox<C extends PipedExecBackend>(
   sandboxId: ContainerId<C>,
   config: ExecConfigFor<C>,
-  options: StateAwareStreamingOptions = {},
+  options: MxcOptions = {},
 ): MxcSandboxProcess {
   assertStateAwareStreamingOptions('execInSandbox', options);
   return spawnStateAwareExecProcess(
     sandboxId,
     config,
-    {},
+    options,
     'execInSandbox',
+  );
+}
+
+/**
+ * Run an exec request attached to this process's standard streams.
+ *
+ * The host process's stdin and stdout must both be terminals. The backend
+ * relays the workload through those handles and blocks until it exits.
+ */
+export function execInSandboxAttached<C extends StateAwareContainmentBackend>(
+  sandboxId: ContainerId<C>,
+  config: ExecConfigFor<C>,
+  options: MxcOptions = {},
+): WaitOutcome {
+  assertStateAwareOptions('execInSandboxAttached', options);
+  if (options.dryRun === true) {
+    throw new MxcError(
+      'malformed_request',
+      'execInSandboxAttached does not support dryRun because it runs an attached workload',
+    );
+  }
+  return runBindingStateAwareAttachedRequest(
+    JSON.stringify(buildExecEnvelope(sandboxId, config)),
+    options.experimental === true,
   );
 }
 
@@ -389,13 +277,14 @@ export function execInSandbox<C extends PipedExecBackend>(
 export async function execInSandboxAsync<C extends PipedExecBackend>(
   sandboxId: ContainerId<C>,
   config: ExecConfigFor<C>,
-  options?: StateAwareRequestOptions,
+  options?: MxcOptions,
 ): Promise<ExecResult>;
 export async function execInSandboxAsync<C extends PipedExecBackend>(
   sandboxId: ContainerId<C>,
   config: ExecConfigFor<C>,
-  options: StateAwareRequestOptions = {},
+  options: MxcOptions = {},
 ): Promise<ExecResult> {
+  assertStateAwareOptions('execInSandboxAsync', options);
   assertPipedExecBackend('execInSandboxAsync', sandboxId);
   const envelope = buildExecEnvelope(sandboxId, config);
   if (options.dryRun === true) {
@@ -414,26 +303,13 @@ export async function execInSandboxAsync<C extends PipedExecBackend>(
     };
   }
 
-  if (options.signal?.aborted) {
-    throw abortReason(options.signal);
-  }
-
-  const proc = spawnStateAwareExecProcess(
-    sandboxId,
-    config,
-    { ...options, signal: undefined },
-    'execInSandboxAsync',
-  );
+  const proc = spawnStateAwareExecProcess(sandboxId, config, options, 'execInSandboxAsync');
   const stdoutPromise = collectStream(proc.standardOutput);
   const stderrPromise = collectStream(proc.standardError);
   const waitPromise = Promise.all([proc.waitAsync(), stdoutPromise, stderrPromise]);
-  const abort = createAbortPromise(proc, options.signal);
-
   let failed = false;
   try {
-    const [result, stdout, stderr] = abort.promise
-      ? await Promise.race([waitPromise, abort.promise])
-      : await waitPromise;
+    const [result, stdout, stderr] = await waitPromise;
     return {
       stdout,
       stderr,
@@ -448,7 +324,6 @@ export async function execInSandboxAsync<C extends PipedExecBackend>(
     failed = true;
     throw error;
   } finally {
-    abort.cleanup();
     try {
       proc.dispose();
     } catch (error) {
@@ -462,7 +337,7 @@ export async function execInSandboxAsync<C extends PipedExecBackend>(
 export function spawnInContainer<C extends PipedExecBackend>(
   containerId: ContainerId<C>,
   request: ExecRequest<C>,
-  options: StateAwareStreamingOptions = {},
+  options: MxcOptions = {},
 ): MxcSandboxProcess {
   return execInSandbox(containerId, request, options);
 }
@@ -471,7 +346,7 @@ export function spawnInContainer<C extends PipedExecBackend>(
 export function runInContainer<C extends PipedExecBackend>(
   containerId: ContainerId<C>,
   request: ExecRequest<C>,
-  options?: StateAwareRequestOptions,
+  options?: MxcOptions,
 ): Promise<ExecResult> {
   return execInSandboxAsync(containerId, request, options);
 }
@@ -483,7 +358,7 @@ export function runInContainer<C extends PipedExecBackend>(
 export async function stopSandbox<C extends StateAwareContainmentBackend>(
   sandboxId: ContainerId<C>,
   config?: StopConfigFor<C>,
-  options: StateAwareRequestOptions = {},
+  options: MxcOptions = {},
 ): Promise<StopResult<C>> {
   const backendKey = backendForSandboxId(sandboxId) as C;
   const envelope = buildStateAwareEnvelope({
@@ -502,7 +377,7 @@ export async function stopSandbox<C extends StateAwareContainmentBackend>(
 export async function deprovisionSandbox<C extends StateAwareContainmentBackend>(
   sandboxId: ContainerId<C>,
   config?: DeprovisionConfigFor<C>,
-  options: StateAwareRequestOptions = {},
+  options: MxcOptions = {},
 ): Promise<DeprovisionResult<C>> {
   const backendKey = backendForSandboxId(sandboxId) as C;
   const envelope = buildStateAwareEnvelope({

@@ -5,42 +5,46 @@
 //!
 //! Seatbelt-specific cases run only on macOS. The library exposes only the
 //! streaming API, so "run to completion" here means build a request via
-//! [`mxc_sdk::v1::build_request`], `mxc_sdk::v1::spawn`, read the (untaken)
+//! [`mxc_sdk::v1::ContainerRequest`], `mxc_sdk::v1::spawn`, read the (untaken)
 //! stdout/stderr, then [`wait`](mxc_sdk::v1::MxcProcess::wait) for the exit code —
 //! the same path the consumer drives.
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use mxc_sdk::v1::WaitOutcome;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-use mxc_sdk::v1::{build_request, spawn, ContainerPolicy, ContainerRequest};
+use mxc_sdk::v1::{spawn, ContainerRequest, FilesystemSection};
 
 /// A Seatbelt request exposing `/tmp` read-write, with the given command and
 /// timeout (ms; `0` == run until exit).
 #[cfg(target_os = "macos")]
 fn seatbelt_request(command: &str, timeout_ms: u32) -> ContainerRequest {
-    let mut policy = ContainerPolicy::default();
-    policy.filesystem = Some(mxc_sdk::v1::policy::FilesystemSection {
+    let mut request = ContainerRequest::new(command);
+    request.set_filesystem(FilesystemSection {
         readwrite_paths: vec!["/tmp".to_string()],
         readonly_paths: vec![],
         denied_paths: vec![],
         clear_policy_on_exit: None,
     });
-    policy.timeout_ms = (timeout_ms != 0).then_some(timeout_ms);
-    build_request(&policy, command, None).expect("build_request should succeed")
+    if timeout_ms != 0 {
+        request.set_timeout_ms(timeout_ms);
+    }
+    request
 }
 
 /// A Windows ProcessContainer request exposing `C:\Windows\Temp` read-write.
 #[cfg(target_os = "windows")]
 fn process_container_request(command: &str, timeout_ms: u32) -> ContainerRequest {
-    let mut policy = ContainerPolicy::default();
-    policy.filesystem = Some(mxc_sdk::v1::policy::FilesystemSection {
+    let mut request = ContainerRequest::new(command);
+    request.set_filesystem(FilesystemSection {
         readwrite_paths: vec!["C:\\Windows\\Temp".to_string()],
         readonly_paths: vec![],
         denied_paths: vec![],
         clear_policy_on_exit: None,
     });
-    policy.timeout_ms = (timeout_ms != 0).then_some(timeout_ms);
-    build_request(&policy, command, None).expect("build_request should succeed")
+    if timeout_ms != 0 {
+        request.set_timeout_ms(timeout_ms);
+    }
+    request
 }
 
 /// Outcome of running a sandbox to completion via the streaming API.

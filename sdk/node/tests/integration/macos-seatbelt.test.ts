@@ -52,7 +52,7 @@ describe('macOS Seatbelt Container', {
   });
 
   it('should execute hello world in seatbelt sandbox', async () => {
-    const result = await sdk.runPolicyForTest(
+    const result = await sdk.runRequestForTest(
       "echo 'Hello from seatbelt'",
       {},
       {},
@@ -64,7 +64,7 @@ describe('macOS Seatbelt Container', {
   });
 
   it('should propagate exit code', async () => {
-    const result = await sdk.runPolicyForTest(
+    const result = await sdk.runRequestForTest(
       'exit 42',
       {},
       {},
@@ -87,7 +87,7 @@ describe('macOS Seatbelt Container', {
       'trap - 0',
       'test "$status" -eq 143',
     ].join('\n');
-    const result = await sdk.runPolicyForTest(
+    const result = await sdk.runRequestForTest(
       script,
       {},
       {},
@@ -100,7 +100,7 @@ describe('macOS Seatbelt Container', {
 
   it('should deny filesystem access by default', async () => {
     // The default seatbelt profile denies access to /Users.
-    const result = await sdk.runPolicyForTest(
+    const result = await sdk.runRequestForTest(
       'ls /Users 2>&1 || true',
       {},
       {},
@@ -119,7 +119,7 @@ describe('macOS Seatbelt Container', {
     const policy = {
       network: { egress: { default: 'deny' as const } },
     };
-    const result = await sdk.runPolicyForTest(
+    const result = await sdk.runRequestForTest(
       "curl --max-time 5 --fail --silent --show-error https://example.com 2>&1; echo CURL_EXIT=$?",
       policy,
       {},
@@ -137,7 +137,7 @@ describe('macOS Seatbelt Container', {
     const policy = {
       network: { egress: { default: 'allow' as const } },
     };
-    const result = await sdk.runPolicyForTest(
+    const result = await sdk.runRequestForTest(
       `RESULT=$(curl --max-time 10 --fail --silent '${NETWORK_TEST_URL}') && echo 'NETWORK_OK'`,
       policy,
       {},
@@ -152,7 +152,7 @@ describe('macOS Seatbelt Container', {
     const policy = {
       ui: { clipboard: 'none' as const },
     };
-    const result = await sdk.runPolicyForTest(
+    const result = await sdk.runRequestForTest(
       "echo test_clip | pbcopy 2>&1 && pbpaste 2>&1",
       policy,
       {},
@@ -168,7 +168,7 @@ describe('macOS Seatbelt Container', {
     const policy = {
       ui: { clipboard: 'all' as const },
     };
-    const result = await sdk.runPolicyForTest(
+    const result = await sdk.runRequestForTest(
       `echo '${uniqueToken}' | pbcopy && pbpaste`,
       policy,
       {},
@@ -180,7 +180,7 @@ describe('macOS Seatbelt Container', {
   });
 
   it('should run multi-command pipeline', async () => {
-    const result = await sdk.runPolicyForTest(
+    const result = await sdk.runRequestForTest(
       "echo 'step 1' && uname -s && echo 'step 2' && whoami && echo 'Pipeline complete'",
       {},
       {},
@@ -199,7 +199,7 @@ describe('macOS Seatbelt Container', {
     // On timeout the runner emits a structured `backend_error` envelope.
     await assert.rejects(
       () =>
-        sdk.runPolicyForTest(
+        sdk.runRequestForTest(
           'sleep 30',
           policy,
           {},
@@ -220,7 +220,6 @@ describe('macOS Seatbelt Container', {
 
   it('should apply profile override from seatbelt config', { timeout: 30_000 }, async () => {
     const process = sdk.spawn({
-      policy: {},
       command: "echo 'profile override works'",
       containment: {
         type: 'seatbelt',

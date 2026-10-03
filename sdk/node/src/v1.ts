@@ -13,9 +13,9 @@
  */
 
 export {
-  ContainerPolicy,
+  ContainerBackendConfig,
   ContainerRequest,
-  ContainerContainment,
+  MxcOptions,
   ProcessContainerConfig,
   NetworkAction,
   NetworkProtocol,
@@ -90,11 +90,11 @@ export {
 } from './state-aware-types.js';
 
 export {
-  type StateAwareStreamingOptions,
   spawnInContainer,
   runInContainer,
   provisionSandbox,
   startSandbox,
+  execInSandboxAttached,
   execInSandbox,
   execInSandboxAsync,
   stopSandbox,

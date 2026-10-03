@@ -39,7 +39,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
   });
 
   it('should execute cmd.exe in process container', { skip: sandboxSkipReason }, async () => {
-    const result = await sdk.runPolicyForTest(
+    const result = await sdk.runRequestForTest(
       'cmd.exe /c echo Container test successful',
       {},
       {},
@@ -51,7 +51,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
   });
 
   it('should execute powershell 5.1 in process container', { skip: sandboxSkipReason }, async () => {
-    const result = await sdk.runPolicyForTest(
+    const result = await sdk.runRequestForTest(
       "powershell.exe -NoProfile -Command Write-Output 'PowerShell test successful'",
       { ui: { allowWindows: true } },
       {},
@@ -64,7 +64,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
 
   it('should execute python in process container', { skip: sandboxSkipReason ?? pythonSkipReason }, async () => {
     const policy = withToolPaths({ ui: { allowWindows: true } });
-    const result = await sdk.runPolicyForTest(
+    const result = await sdk.runRequestForTest(
       `${pythonCommand} -c "print('Python test successful')"`,
       policy,
       {},
@@ -84,7 +84,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
       ui: { allowWindows: true },
       filesystem: { readwritePaths: [tempDir] },
     });
-    const result = await sdk.runPolicyForTest(
+    const result = await sdk.runRequestForTest(
       `${pythonCommand} ${scriptFile}`,
       policy,
       {},
@@ -103,7 +103,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
     const policy = withToolPaths({
       filesystem: { readonlyPaths: [tempDir] },
     });
-    const result = await sdk.runPolicyForTest(
+    const result = await sdk.runRequestForTest(
       `cmd.exe /c type ${inputFile}`,
       policy,
       {},
@@ -115,7 +115,7 @@ describe(`Windows Process Container (schema ${schemaVersion})`, {
   });
 
   it('should launch basic process container with valid version', { skip: sandboxSkipReason }, async () => {
-    const result = await sdk.runPolicyForTest(
+    const result = await sdk.runRequestForTest(
       'cmd.exe /c echo version ok',
       {},
       {},

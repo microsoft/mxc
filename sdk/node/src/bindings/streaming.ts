@@ -248,10 +248,10 @@ let stateAwareSandboxProcessFactory:
     ) => MxcSandboxProcess)
   | undefined;
 let oneShotSyncProcessFactory:
-  | ((request: OneShotRequest) => MxcSandboxProcess)
+  | ((request: OneShotRequest, experimental: boolean) => MxcSandboxProcess)
   | undefined;
 let oneShotAsyncProcessFactory:
-  | ((request: OneShotRequest) => Promise<MxcSandboxProcess>)
+  | ((request: OneShotRequest, experimental: boolean) => Promise<MxcSandboxProcess>)
   | undefined;
 
 function getNative(): StreamingNativeFacade {
@@ -459,15 +459,22 @@ export async function createStreamingDriver(
   request: OneShotRequest,
   native: StreamingNativeFacade,
   factory: NativeStreamFactory,
+  experimental = false,
 ): Promise<NativeLifecycleDriver> {
   const outHandle: Pointer[] = [null];
   const error = {} as AbiErrorDetail;
   const requestJson = JSON.stringify(request);
   const status = await new Promise<number>((resolve, reject) => {
-    native.spawn(requestJson, 0, outHandle, error, (failure, nativeStatus) => {
-      if (failure !== null) reject(failure);
-      else resolve(nativeStatus);
-    });
+    native.spawn(
+      requestJson,
+      experimental ? 1 : 0,
+      outHandle,
+      error,
+      (failure, nativeStatus) => {
+        if (failure !== null) reject(failure);
+        else resolve(nativeStatus);
+      },
+    );
   });
   return adoptSpawnedHandle(
     native,
@@ -481,12 +488,13 @@ export function createStreamingDriverSync(
   request: OneShotRequest,
   native: StreamingNativeFacade,
   factory: NativeStreamFactory,
+  experimental = false,
 ): NativeLifecycleDriver {
   const outHandle: Pointer[] = [null];
   const error = {} as AbiErrorDetail;
   const status = native.spawnSync(
     JSON.stringify(request),
-    0,
+    experimental ? 1 : 0,
     outHandle,
     error,
   );
@@ -515,36 +523,57 @@ function ensureSupportedNodeVersion(): void {
   });
 }
 
-function spawnDriver(request: OneShotRequest): Promise<NativeLifecycleDriver> {
+function spawnDriver(
+  request: OneShotRequest,
+  experimental: boolean,
+): Promise<NativeLifecycleDriver> {
   ensureSupportedNodeVersion();
-  return createStreamingDriver(request, getNative(), nodeStreamFactory);
+  return createStreamingDriver(
+    request,
+    getNative(),
+    nodeStreamFactory,
+    experimental,
+  );
 }
 
 export async function spawnBindingSandboxProcess(
   request: OneShotRequest,
+  experimental = false,
 ): Promise<MxcSandboxProcess> {
   if (oneShotAsyncProcessFactory !== undefined) {
-    return oneShotAsyncProcessFactory(request);
+    return oneShotAsyncProcessFactory(request, experimental);
   }
-  const driver = await spawnDriver(request);
+  const driver = await spawnDriver(request, experimental);
   return createSandboxProcess(driver, request.process.timeout);
 }
 
 export function spawnBindingSandboxProcessSync(
   request: OneShotRequest,
+  experimental = false,
 ): MxcSandboxProcess {
   if (oneShotSyncProcessFactory !== undefined) {
-    return oneShotSyncProcessFactory(request);
+    return oneShotSyncProcessFactory(request, experimental);
   }
   ensureSupportedNodeVersion();
-  const driver = createStreamingDriverSync(request, getNative(), nodeStreamFactory);
+  const driver = createStreamingDriverSync(
+    request,
+    getNative(),
+    nodeStreamFactory,
+    experimental,
+  );
   return createSandboxProcess(driver, request.process.timeout);
 }
 
 /** @internal Replaces one-shot process creation for unit tests. */
 export function _setBindingSandboxProcessFactories(
-  syncFactory?: (request: OneShotRequest) => MxcSandboxProcess,
-  asyncFactory?: (request: OneShotRequest) => Promise<MxcSandboxProcess>,
+  syncFactory?: (
+    request: OneShotRequest,
+    experimental: boolean,
+  ) => MxcSandboxProcess,
+  asyncFactory?: (
+    request: OneShotRequest,
+    experimental: boolean,
+  ) => Promise<MxcSandboxProcess>,
 ): void {
   oneShotSyncProcessFactory = syncFactory;
   oneShotAsyncProcessFactory = asyncFactory;

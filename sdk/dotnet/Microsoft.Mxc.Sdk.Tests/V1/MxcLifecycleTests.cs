@@ -230,6 +230,18 @@ public class MxcLifecycleTests
     }
 
     [Fact]
+    public void ExecInSandboxAttached_IsExposedAsATerminalOutcomeOperation()
+    {
+        var method = typeof(MxcLifecycle).GetMethod(nameof(MxcLifecycle.ExecInSandboxAttached));
+
+        Assert.NotNull(method);
+        Assert.Equal(typeof(WaitOutcome), method.ReturnType);
+        Assert.Equal(
+            new[] { typeof(ContainerId), typeof(ExecRequest) },
+            method.GetParameters().Select(parameter => parameter.ParameterType).ToArray());
+    }
+
+    [Fact]
     public void SandboxId_RoundTripsAndCompares()
     {
         var a = new ContainerId("iso:abc");

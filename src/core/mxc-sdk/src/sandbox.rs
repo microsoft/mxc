@@ -16,6 +16,7 @@ pub use wxc_common::models::{
     CaptureDenialsErrorOutput, CaptureDenialsOutput, SandboxOutputMetadata,
 };
 use wxc_common::sandbox_process::{NativeStdio, SandboxProcess, StreamCloser as InnerCloser};
+use wxc_common::state_aware_backend::ExecOutcome;
 use wxc_common::state_aware_operation::StateAwareOperation;
 
 fn run_typed_state_aware(
@@ -158,6 +159,23 @@ pub fn validate_exec(
     run_typed_state_aware(input, options, true)?
         .into_validation()
         .map_err(Error::from)
+}
+
+/// Run a state-aware exec request attached to this process's standard streams.
+pub fn exec_in_attached(
+    container_id: &ContainerId,
+    request: ExecRequest,
+    options: OperationOptions,
+) -> Result<WaitOutcome, Error> {
+    let input = request
+        .into_sdk_input(container_id, options.telemetry_opt_in)
+        .map_err(Error::from)?;
+    mxc_engine::exec_typed_state_aware_attached_request(input, options.experimental).map(
+        |outcome| match outcome {
+            ExecOutcome::Exited(code) => WaitOutcome::Exited(code),
+            ExecOutcome::TimedOut => WaitOutcome::TimedOut,
+        },
+    )
 }
 
 /// The outcome of waiting on a [`MxcProcess`] (see [`MxcProcess::wait`]).

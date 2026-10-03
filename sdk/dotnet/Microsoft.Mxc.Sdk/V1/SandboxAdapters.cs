@@ -107,6 +107,9 @@ public interface ISandboxLifecycle
     /// <summary>Run state-aware exec with live standard streams.</summary>
     IMxcProcess ExecInSandbox(ContainerId id, ExecRequest request);
 
+    /// <summary>Run state-aware exec attached to this process's terminal.</summary>
+    WaitOutcome ExecInSandboxAttached(ContainerId id, ExecRequest request);
+
     /// <summary>Run state-aware exec asynchronously and capture output.</summary>
     Task<Output> ExecInSandboxAsync(
         ContainerId id,
@@ -179,6 +182,10 @@ public sealed class MxcSandboxLifecycle : ISandboxLifecycle
     /// <inheritdoc/>
     public IMxcProcess ExecInSandbox(ContainerId id, ExecRequest request) =>
         MxcLifecycle.ExecInSandbox(id, request);
+
+    /// <inheritdoc/>
+    public WaitOutcome ExecInSandboxAttached(ContainerId id, ExecRequest request) =>
+        MxcLifecycle.ExecInSandboxAttached(id, request);
 
     /// <inheritdoc/>
     public Task<Output> ExecInSandboxAsync(

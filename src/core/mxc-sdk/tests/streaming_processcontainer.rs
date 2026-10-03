@@ -9,23 +9,24 @@
 
 #![cfg(target_os = "windows")]
 
+use mxc_sdk::v1::configs::ProcessContainer;
 use mxc_sdk::v1::WaitOutcome;
-use mxc_sdk::v1::{build_request, spawn, ContainerPolicy};
+use mxc_sdk::v1::{spawn, ContainerRequest, Containment, FilesystemSection};
 
 #[test]
 #[ignore = "requires an elevated, host-prepped Windows host (see docs/host-prep.md)"]
 fn streaming_processcontainer_bidirectional_stdio() {
     use std::io::{Read, Write};
 
-    let mut policy = ContainerPolicy::default();
-    policy.filesystem = Some(mxc_sdk::v1::policy::FilesystemSection {
+    let mut request = ContainerRequest::new("cmd /c more");
+    request.set_filesystem(FilesystemSection {
         readwrite_paths: vec!["C:\\Windows\\Temp".to_string()],
         readonly_paths: vec![],
         denied_paths: vec![],
         clear_policy_on_exit: None,
     });
+    request.set_containment(Containment::ProcessContainer(ProcessContainer::default()));
     // `cmd /c more` echoes stdin to stdout until EOF, then exits.
-    let request = build_request(&policy, "cmd /c more", None).expect("build_request");
     let mut proc = spawn(request).expect("spawn");
 
     let mut stdin = proc.take_stdin().expect("stdin available");

@@ -12,7 +12,7 @@ public readonly struct WaitOutcome
     public int ExitCode { get; init; }
 
     /// <summary>
-    /// True if the run hit its <see cref="ContainerPolicy.TimeoutMs"/> and the
+    /// True if the run hit its <see cref="ContainerRequest.TimeoutMs"/> and the
     /// process (and its tree) were killed before exiting normally.
     /// </summary>
     public bool TimedOut { get; init; }

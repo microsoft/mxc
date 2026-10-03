@@ -47,7 +47,7 @@ describe('public SDK namespace exports', () => {
 
   it('does not expose replaced one-shot APIs or process wrappers', () => {
     for (const name of [
-      'createConfigFromPolicy',
+      'createConfigFromRequest',
       'spawnSandbox',
       'spawnSandboxAsync',
       'spawnSandboxFromConfig',
@@ -67,8 +67,10 @@ describe('public SDK namespace exports', () => {
 describe('in-process asynchronous run routing', () => {
   it('uses the SDK-owned exact v1 one-shot request synchronously', () => {
     let bindingRequest: OneShotRequest | undefined;
-    _setBindingRunImplementation((request) => {
+    let bindingExperimental = false;
+    _setBindingRunImplementation((request, experimental) => {
       bindingRequest = request;
+      bindingExperimental = experimental;
       return {
         stdout: 'sync output',
         stderr: '',
@@ -79,21 +81,23 @@ describe('in-process asynchronous run routing', () => {
     });
 
     const result = run({
-      policy: {},
       command: 'echo sync',
       containerName: 'sync-sample',
-    });
+    }, { experimental: true });
 
     assert.strictEqual(result.stdout, 'sync output');
     assert.strictEqual(bindingRequest?.version, '1.0.0');
     assert.strictEqual(bindingRequest?.process.commandLine, 'echo sync');
     assert.strictEqual(bindingRequest?.containerId, 'sync-sample');
+    assert.strictEqual(bindingExperimental, true);
   });
 
   it('uses the SDK-owned exact v1 one-shot request', async () => {
     let bindingRequest: OneShotRequest | undefined;
-    _setBindingRunAsyncImplementation(async (request) => {
+    let bindingExperimental = false;
+    _setBindingRunAsyncImplementation(async (request, experimental) => {
       bindingRequest = request;
+      bindingExperimental = experimental;
       return {
         stdout: 'out',
         stderr: 'err',
@@ -103,56 +107,13 @@ describe('in-process asynchronous run routing', () => {
       };
     });
 
-    it('routes spawn and spawnAsync through the native process bindings', async () => {
-      let syncRequest: OneShotRequest | undefined;
-      let asyncRequest: OneShotRequest | undefined;
-      const createProcess = () => {
-        const driver: NativeLifecycleDriver = {
-          id: 17,
-          standardInput: null,
-          standardOutput: null,
-          standardError: null,
-          poll: () => ({ exitCode: 0, running: false, timedOut: false }),
-          wait: async () => ({ exitCode: 0, timedOut: false }),
-          warnings: () => [],
-          outputMetadata: () => undefined,
-          kill: () => {},
-          killForTimeout: () => {},
-          free: async () => {},
-        };
-        return new MxcSandboxProcess(driver);
-      };
-      _setBindingSandboxProcessFactories(
-        (request) => {
-          syncRequest = request;
-          return createProcess();
-        },
-        async (request) => {
-          asyncRequest = request;
-          return createProcess();
-        },
-      );
-
-      const syncProcess = spawn({ policy: {}, command: 'echo sync spawn' });
-      const asyncProcess = await spawnAsync({ policy: {}, command: 'echo async spawn' });
-
-      assert.ok(syncProcess instanceof v1Sdk.MxcProcess);
-      assert.ok(asyncProcess instanceof v1Sdk.MxcProcess);
-      assert.strictEqual(syncRequest?.process.commandLine, 'echo sync spawn');
-      assert.strictEqual(syncRequest?.version, '1.0.0');
-      assert.strictEqual(asyncRequest?.process.commandLine, 'echo async spawn');
-      assert.strictEqual(asyncRequest?.version, '1.0.0');
-      await Promise.all([syncProcess.waitAsync(), asyncProcess.waitAsync()]);
-    });
-
     const result = await runAsync({
-      policy: {},
       command: 'echo hello',
       workingDirectory: 'C:\\work',
       environment: { SAMPLE: 'value' },
       inheritDefaultEnvironment: true,
       containerName: 'sample',
-    });
+    }, { experimental: true });
 
     assert.deepStrictEqual(result, {
       stdout: 'out',
@@ -167,16 +128,71 @@ describe('in-process asynchronous run routing', () => {
     assert.strictEqual(bindingRequest?.process.cwd, 'C:\\work');
     assert.deepStrictEqual(bindingRequest?.process.env, ['SAMPLE=value']);
     assert.strictEqual(bindingRequest?.process.inheritDefaultEnv, true);
+    assert.strictEqual(bindingExperimental, true);
+  });
+
+  it('routes spawn and spawnAsync through native process bindings with options', async () => {
+    let syncRequest: OneShotRequest | undefined;
+    let asyncRequest: OneShotRequest | undefined;
+    let syncExperimental = false;
+    let asyncExperimental = false;
+    const createProcess = () => {
+      const driver: NativeLifecycleDriver = {
+        id: 17,
+        standardInput: null,
+        standardOutput: null,
+        standardError: null,
+        poll: () => ({ exitCode: 0, running: false, timedOut: false }),
+        wait: async () => ({ exitCode: 0, timedOut: false }),
+        warnings: () => [],
+        outputMetadata: () => undefined,
+        kill: () => {},
+        killForTimeout: () => {},
+        free: async () => {},
+      };
+      return new MxcSandboxProcess(driver);
+    };
+    _setBindingSandboxProcessFactories(
+      (request, experimental) => {
+        syncRequest = request;
+        syncExperimental = experimental;
+        return createProcess();
+      },
+      async (request, experimental) => {
+        asyncRequest = request;
+        asyncExperimental = experimental;
+        return createProcess();
+      },
+    );
+
+    const syncProcess = spawn(
+      { command: 'echo sync spawn' },
+      { experimental: true },
+    );
+    const asyncProcess = await spawnAsync(
+      { command: 'echo async spawn' },
+      { experimental: true },
+    );
+
+    assert.ok(syncProcess instanceof v1Sdk.MxcProcess);
+    assert.ok(asyncProcess instanceof v1Sdk.MxcProcess);
+    assert.strictEqual(syncRequest?.process.commandLine, 'echo sync spawn');
+    assert.strictEqual(syncRequest?.version, '1.0.0');
+    assert.strictEqual(asyncRequest?.process.commandLine, 'echo async spawn');
+    assert.strictEqual(asyncRequest?.version, '1.0.0');
+    assert.strictEqual(syncExperimental, true);
+    assert.strictEqual(asyncExperimental, true);
+    await Promise.all([syncProcess.waitAsync(), asyncProcess.waitAsync()]);
   });
 
   it('rejects invalid requests at the SDK boundary', async () => {
     await assert.rejects(
-      runAsync({ policy: {}, command: '' }),
+      runAsync({ command: '' }),
       /command must be a non-empty string/,
     );
     await assert.rejects(
-      runAsync({ policy: null as never, command: 'echo hello' }),
-      /policy must be an object/,
+      runAsync({ command: null as never }),
+      /command must be a non-empty string/,
     );
   });
 
@@ -192,7 +208,7 @@ describe('in-process asynchronous run routing', () => {
       },
     }));
 
-    const result = await runAsync({ policy: {}, command: 'echo hello' });
+    const result = await runAsync({ command: 'echo hello' });
     assert.match(result.stderr, /native stderr/);
     assert.deepStrictEqual(result.warnings, ['policy was relaxed']);
     assert.deepStrictEqual(result.outputMetadata, {
@@ -209,7 +225,7 @@ describe('in-process asynchronous run routing', () => {
       warnings: [],
     }));
 
-    const timedOut = await runAsync({ policy: {}, command: 'echo hello' });
+    const timedOut = await runAsync({ command: 'echo hello' });
     assert.strictEqual(timedOut.timedOut, true);
     assert.strictEqual(timedOut.exitCode, -1);
 
@@ -218,7 +234,7 @@ describe('in-process asynchronous run routing', () => {
     });
 
     await assert.rejects(
-      runAsync({ policy: {}, command: 'echo hello' }),
+      runAsync({ command: 'echo hello' }),
       (error: unknown) =>
         error instanceof MxcError
         && error.code === 'unsupported_containment'
@@ -232,7 +248,7 @@ describe('in-process asynchronous run routing', () => {
     });
 
     await assert.rejects(
-      runAsync({ policy: {}, command: 'echo hello' }),
+      runAsync({ command: 'echo hello' }),
       (error: unknown) =>
         error instanceof MxcError
         && error.code === 'backend_error'

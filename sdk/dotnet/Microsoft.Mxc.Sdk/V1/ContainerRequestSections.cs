@@ -5,77 +5,7 @@ using System.Text.Json.Serialization;
 
 namespace Microsoft.Mxc.Sdk.V1;
 
-/// <summary>
-/// A cross-platform container policy — describes <em>what</em> to restrict.
-/// Omitted sections are most-restrictive (default-deny). Serializes to the
-/// camelCase JSON the native layer expects.
-/// </summary>
-[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
-public sealed class ContainerPolicy
-{
-    [JsonIgnore]
-    internal string Version { get; set; } = string.Empty;
-
-    /// <summary>Filesystem access policy.</summary>
-    [JsonPropertyName("filesystem")]
-    public FilesystemPolicy? Filesystem { get; set; }
-
-    /// <summary>Network access policy.</summary>
-    [JsonPropertyName("network")]
-    public NetworkPolicy? Network { get; set; }
-
-    /// <summary>UI access policy.</summary>
-    [JsonPropertyName("ui")]
-    public UiPolicy? Ui { get; set; }
-
-    /// <summary>
-    /// Windows ProcessContainer denial capture used by the compatibility
-    /// <see cref="ProcessContainerContainment.CaptureDenials"/> setting.
-    /// Configure it on the request containment when possible; request
-    /// serialization migrates this legacy policy value when compatible.
-    /// New code should set
-    /// <see cref="ProcessContainerContainment.CaptureDenials"/> explicitly.
-    /// </summary>
-    /// <remarks>
-    /// Request-based execution migrates this value to ProcessContainer
-    /// containment. It rejects incompatible containment and conflicting
-    /// <see cref="ProcessContainerContainment.CaptureDenials"/> values.
-    /// <para>
-    /// This property stays serializable so legacy policy JSON round-trips
-    /// without silently losing the value. It is stripped from the clone sent
-    /// natively once it has been migrated onto the containment, so the native
-    /// layer never sees the deprecated shape.
-    /// </para>
-    /// </remarks>
-    [Obsolete(
-        "Set ProcessContainerContainment.CaptureDenials instead. Removed in 1.0.",
-        DiagnosticId = "MXC0001",
-        UrlFormat = "https://github.com/microsoft/mxc/blob/main/sdk/dotnet/README.md#{0}")]
-    [JsonPropertyName("captureDenials")]
-    public CaptureDenialsPolicy? CaptureDenials { get; set; }
-
-    /// <summary>Execution timeout in milliseconds (<c>null</c> = no timeout).</summary>
-    [JsonPropertyName("timeoutMs")]
-    public uint? TimeoutMs { get; set; }
-
-    /// <summary>
-    /// Per-invocation telemetry settings serialized in the binding policy as
-    /// <c>{"telemetry":{"enabled":...}}</c>.
-    /// </summary>
-    [JsonPropertyName("telemetry")]
-    public TelemetrySettings? Telemetry { get; set; }
-
-    internal ContainerPolicy WithoutLegacyCaptureDenials()
-    {
-        var clone = (ContainerPolicy)MemberwiseClone();
-#pragma warning disable MXC0001 // Clears the compatibility alias on the clone only.
-        clone.CaptureDenials = null;
-#pragma warning restore MXC0001
-        return clone;
-    }
-}
-
-/// <summary>Telemetry section of a <see cref="ContainerPolicy"/>.</summary>
+/// <summary>Telemetry settings carried directly by a <see cref="ContainerRequest"/>.</summary>
 public sealed class TelemetrySettings
 {
     /// <summary>
@@ -134,7 +64,7 @@ public sealed class CaptureDenialsPolicy
     public bool RetainEtl { get; set; }
 }
 
-/// <summary>Filesystem section of a <see cref="ContainerPolicy"/>.</summary>
+/// <summary>Filesystem settings carried directly by a <see cref="ContainerRequest"/>.</summary>
 public sealed class FilesystemPolicy
 {
     /// <summary>Paths granted read-write access inside the sandbox.</summary>
@@ -302,7 +232,7 @@ public enum ClipboardPolicy
     All,
 }
 
-/// <summary>UI section of a <see cref="ContainerPolicy"/>. All flags default to denied.</summary>
+/// <summary>UI settings carried directly by a <see cref="ContainerRequest"/>.</summary>
 public sealed class UiPolicy
 {
     /// <summary>Allow the sandboxed process to create windows.</summary>

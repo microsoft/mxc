@@ -15,7 +15,7 @@ import {
   lxcNetworkSkipReason,
   runConfigForTest,
 } from './test-helpers.js';
-import type { ContainerPolicy } from '@microsoft/mxc-sdk/v1';
+import type { ContainerRequest } from '@microsoft/mxc-sdk/v1';
 
 // MXC_SKIP_LXC_TESTS=1 skips the entire LXC describe block. Provided as
 // an escape hatch for local dev or for CI hosts that genuinely lack the
@@ -37,10 +37,10 @@ const lxcSkipReason = !isLinuxRoot
 // (Bubblewrap). The LXC backend is covered by an explicit opt-in only.
 async function runLxc(
   script: string,
-  policy: ContainerPolicy,
+  request: Omit<ContainerRequest, 'command'>,
   containerId: string,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const config = sdk.createConfigForTest(policy, 'lxc', containerId);
+  const config = sdk.createConfigForTest(request, 'lxc', containerId);
   config.process!.commandLine = script;
   return runConfigForTest(config);
 }

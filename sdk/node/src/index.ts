@@ -12,7 +12,7 @@
  * On Linux, `getPlatformSupport()` reports failures for individual backends
  * through `PlatformSupport.unavailableReasons`, including when none is usable.
  *
- * V1 policy APIs live in `@microsoft/mxc-sdk/v1` and use directional
+ * V1 request APIs live in `@microsoft/mxc-sdk/v1` and use directional
  * `network.egress` / `network.ingress`; explicit legacy network inputs produce
  * migration errors. The versioned V1 request and execution APIs are available
  * from `@microsoft/mxc-sdk/v1`.
@@ -23,15 +23,11 @@
  * @example
  * ```typescript
  * import { getPlatformSupport } from '@microsoft/mxc-sdk';
- * import { ContainerPolicy, runAsync } from '@microsoft/mxc-sdk/v1';
+ * import { runAsync } from '@microsoft/mxc-sdk/v1';
  *
  * if (getPlatformSupport().isSupported) {
- *   const policy: ContainerPolicy = {
- *     network: { egress: { default: 'allow' } },
- *   };
- *
  *   const output = await runAsync({
- *     policy,
+ *     network: { egress: { default: 'allow' } },
  *     command: 'python -c "print(\'Hello from sandbox\')"',
  *   });
  *   console.log('Output:', output.stdout);

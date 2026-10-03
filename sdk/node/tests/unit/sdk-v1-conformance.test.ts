@@ -7,21 +7,21 @@ import path from 'node:path';
 import { describe, it } from 'node:test';
 import { prepareOneShotRequest } from '../../src/bindings/one-shot.js';
 import { MxcError } from '../../src/errors.js';
-import { createConfigFromPolicy } from '../../src/sandbox.js';
+import { createConfigFromRequest } from '../../src/sandbox.js';
 import type {
-  ContainerConfig,
-  SandboxContainment,
-  ContainerPolicy,
+  ContainerBackendConfig,
+  ContainerRequest,
+  RuntimeConfig,
 } from '../../src/types.js';
 
-type FixturePolicy = ContainerPolicy & {
-  network?: ContainerPolicy['network'] & {
-    runtimeConfig?: ContainerPolicy['runtimeConfig'];
+type FixtureRequestSections = Omit<ContainerRequest, 'command' | 'containment'> & {
+  network?: ContainerRequest['network'] & {
+    runtimeConfig?: RuntimeConfig;
   };
 };
 
 interface SdkV1Fixture {
-  policy?: FixturePolicy;
+  policy?: FixtureRequestSections;
   containment: {
     kind: string;
     distribution?: string;
@@ -55,86 +55,97 @@ function readJson<T>(file: string): T {
   return JSON.parse(readFileSync(file, 'utf8')) as T;
 }
 
-function clonePolicy(policy: FixturePolicy | undefined): ContainerPolicy {
-  const cloned = JSON.parse(JSON.stringify(policy ?? {})) as FixturePolicy;
+function cloneRequestSections(
+  sections: FixtureRequestSections | undefined,
+): FixtureRequestSections {
+  const cloned = JSON.parse(JSON.stringify(sections ?? {})) as FixtureRequestSections;
   if (cloned.network?.runtimeConfig !== undefined) {
-    cloned.runtimeConfig = cloned.network.runtimeConfig;
-    delete cloned.network.runtimeConfig;
+    const network = cloned.network as NonNullable<FixtureRequestSections['network']>;
+    cloned.runtimeConfig = network.runtimeConfig;
+    delete (network as typeof network & { runtimeConfig?: RuntimeConfig }).runtimeConfig;
   }
   return cloned;
 }
 
-function containment(kind: string): SandboxContainment {
-  if (kind === 'processContainer') return 'processcontainer';
-  if (kind === 'isolationSession') return 'isolation_session';
-  return kind as SandboxContainment;
+function containment(fixture: SdkV1Fixture['containment']): ContainerBackendConfig {
+  switch (fixture.kind) {
+    case 'processContainer':
+      return {
+        type: 'processcontainer',
+        config: {
+          leastPrivilege: fixture.leastPrivilege,
+          learningMode: fixture.learningMode,
+          capabilities: fixture.capabilities,
+          network: fixture.allowedProxyPeer === undefined
+            ? undefined
+            : { allowedProxyPeer: fixture.allowedProxyPeer },
+        },
+      };
+    case 'lxc':
+      return {
+        type: 'lxc',
+        config: {
+          distribution: fixture.distribution,
+          release: fixture.release,
+        },
+      };
+    case 'seatbelt':
+      return {
+        type: 'seatbelt',
+        config: {
+          guiAccess: fixture.guiAccess,
+          nestedPty: fixture.nestedPty,
+          keychainAccess: fixture.keychainAccess,
+          extraMachLookups: fixture.extraMachLookups,
+        },
+      };
+    case 'wslc':
+      return {
+        type: 'wslc',
+        config: {
+          image: fixture.image,
+          cpuCount: fixture.cpuCount,
+          memoryMb: fixture.memoryMb,
+          gpu: fixture.gpu,
+          portMappings: fixture.portMappings?.map(([windowsPort, containerPort]) => ({
+            windowsPort,
+            containerPort,
+            protocol: 'tcp',
+          })),
+        },
+      };
+    case 'isolationSession':
+      return { type: 'isolation_session' };
+    case 'bubblewrap':
+      return { type: 'bubblewrap' };
+    case 'process':
+    default:
+      return { type: 'process' };
+  }
 }
 
-function configFromFixture(fixture: SdkV1Fixture): ContainerConfig {
-  const policy = clonePolicy(fixture.policy);
+function configFromFixture(fixture: SdkV1Fixture) {
+  const sections = cloneRequestSections(fixture.policy);
   if (fixture.telemetry !== undefined) {
-    policy.telemetry = { enabled: fixture.telemetry };
+    sections.telemetry = { enabled: fixture.telemetry };
   }
-  const config = createConfigFromPolicy(
-    policy,
-    containment(fixture.containment.kind),
-    fixture.containerName,
+  const request: ContainerRequest = {
+    ...sections,
+    command: fixture.command,
+    containment: containment(fixture.containment),
+    containerName: fixture.containerName,
+    workingDirectory: fixture.workingDirectory,
+    environment: fixture.environment,
+    inheritDefaultEnvironment: fixture.inheritDefaultEnv,
+  };
+  return prepareOneShotRequest(
+    createConfigFromRequest(request),
+    {
+      workingDirectory: request.workingDirectory,
+      env: request.environment,
+      inheritDefaultEnv: request.inheritDefaultEnvironment,
+    },
   );
-  config.process!.commandLine = fixture.command;
-  if (fixture.workingDirectory !== undefined) {
-    config.process!.cwd = fixture.workingDirectory;
-  }
-  if (fixture.environment !== undefined) {
-    config.process!.env = Object.entries(fixture.environment).map(
-      ([key, value]) => `${key}=${value}`,
-    );
-  }
-  if (fixture.inheritDefaultEnv === true) {
-    config.process!.inheritDefaultEnv = true;
-  }
-
-  const c = fixture.containment;
-  if (c.kind === 'processContainer') {
-    config.processContainer = {
-      ...config.processContainer,
-      leastPrivilege: c.leastPrivilege ?? false,
-      capabilities: [...(c.capabilities ?? [])],
-      ...(c.learningMode === true ? { learningMode: true } : {}),
-      ...(c.allowedProxyPeer === undefined
-        ? {}
-        : { network: { allowedProxyPeer: c.allowedProxyPeer } }),
-    };
-  }
-  if (c.kind === 'lxc') {
-    config.lxc = {
-      ...config.lxc,
-      distribution: c.distribution ?? 'alpine',
-      release: c.release ?? '3.23',
-    };
-  }
-  if (c.kind === 'seatbelt') {
-    config.seatbelt = {
-      guiAccess: c.guiAccess,
-      nestedPty: c.nestedPty,
-      keychainAccess: c.keychainAccess,
-      extraMachLookups: c.extraMachLookups,
-    };
-  }
-  if (c.kind === 'wslc') {
-    config.wslc = {
-      ...config.wslc,
-      image: c.image ?? config.wslc?.image,
-      cpuCount: c.cpuCount,
-      memoryMb: c.memoryMb,
-      gpu: c.gpu ?? config.wslc?.gpu,
-      portMappings: c.portMappings?.map(([windowsPort, containerPort]) => ({
-        windowsPort,
-        containerPort,
-        protocol: 'tcp',
-      })),
-    };
-  }
-  return config;
 }
 
 function assertMalformed(action: () => unknown): void {
@@ -161,7 +172,7 @@ describe('SDK v1 shared conformance fixtures', () => {
       );
 
       assert.deepStrictEqual(
-        prepareOneShotRequest(configFromFixture(input)),
+        configFromFixture(input),
         expected,
       );
     });

@@ -13,7 +13,7 @@
 #![cfg(target_os = "linux")]
 
 use mxc_sdk::v1::WaitOutcome;
-use mxc_sdk::v1::{build_request, spawn, ContainerPolicy, ContainerRequest};
+use mxc_sdk::v1::{spawn, ContainerRequest, FilesystemSection};
 
 /// Whether `bwrap` is usable. Reuses the backend's own probe so this gate
 /// cannot drift from the real version check.
@@ -30,15 +30,17 @@ fn bwrap_available() -> bool {
 /// A Bubblewrap streaming request (`/tmp` read-write) with the given command
 /// and timeout (ms; `0` == run until exit).
 fn bwrap_request(command: &str, timeout_ms: u32) -> ContainerRequest {
-    let mut policy = ContainerPolicy::default();
-    policy.filesystem = Some(mxc_sdk::v1::policy::FilesystemSection {
+    let mut request = ContainerRequest::new(command);
+    request.set_filesystem(FilesystemSection {
         readwrite_paths: vec!["/tmp".to_string()],
         readonly_paths: vec![],
         denied_paths: vec![],
         clear_policy_on_exit: None,
     });
-    policy.timeout_ms = (timeout_ms != 0).then_some(timeout_ms);
-    build_request(&policy, command, None).expect("build_request should succeed")
+    if timeout_ms != 0 {
+        request.set_timeout_ms(timeout_ms);
+    }
+    request
 }
 
 /// Whether `pid` still has a `/proc` entry. An exited child stays a zombie --

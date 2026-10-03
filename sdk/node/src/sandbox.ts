@@ -4,12 +4,11 @@
 import * as os from 'os';
 import { randomBytes } from 'node:crypto';
 import {
-    ContainerContainment,
-    ContainerPolicy,
     ContainerRequest,
     ContainerConfig,
     SandboxContainment,
     Output,
+    type MxcOptions,
     UnsupportedV1NetworkFields,
 } from './types.js';
 import { applyLinuxNetworkPolicy } from './helper.js';
@@ -43,14 +42,15 @@ function generateRandomContainerName(): string {
     return randomBytes(16).toString("hex");
 }
 
-function validateV1Policy(policy: ContainerPolicy, containment: SandboxContainment): void {
-    if ('version' in policy) {
-          throw new MxcError(
-              'malformed_request',
-              'ContainerPolicy no longer accepts a caller-selected version; '
-              + 'the v1 SDK targets exact contract 1.0.0. '
-              + 'The v1 API selects its exact wire contract.',
-          );
+function validateV1Request(
+  request: ContainerRequest,
+  containment: SandboxContainment,
+): void {
+    if ('version' in request) {
+        throw new MxcError(
+            'malformed_request',
+            'ContainerRequest does not accept a caller-selected version; use the raw-config API.',
+        );
     }
     if (!V1_CONTAINMENTS.has(containment)) {
         throw new MxcError(
@@ -59,12 +59,12 @@ function validateV1Policy(policy: ContainerPolicy, containment: SandboxContainme
             + 'Use a supported V1 containment.',
         );
     }
-    if (policy.network !== undefined) {
+    if (request.network !== undefined) {
         for (const field of UnsupportedV1NetworkFields) {
-            if (field in policy.network) {
+            if (field in request.network) {
                 throw new MxcError(
                     'malformed_request',
-                    `ContainerPolicy.network.${field} is not part of the v1 API; `
+                    `ContainerRequest.network.${field} is not part of the v1 API; `
                     + 'use directional network.egress/network.ingress and '
                     + 'runtimeConfig.networkProxy.',
                 );
@@ -80,7 +80,6 @@ function validateV1Policy(policy: ContainerPolicy, containment: SandboxContainme
  */
 function buildWslcContainerConfig(
     config: ContainerConfig,
-    policy: ContainerPolicy,
     containerId: string,
 ): ContainerConfig {
     config.containment = 'wslc';
@@ -147,17 +146,16 @@ function buildDarwinProcessConfig(
  */
 function buildProcessBaseContainerConfig(
     config: ContainerConfig,
-    policy: ContainerPolicy,
+    request: ContainerRequest,
 ): ContainerConfig {
-    const capabilities: string[] = [];
-    const allowsInternet =
-        policy.network?.egress?.default === 'allow' ||
-        Boolean(policy.network?.egress?.allow?.length) ||
-        (policy.network as { allowOutbound?: boolean } | undefined)?.allowOutbound === true;
+      const capabilities: string[] = [];
+      const allowsInternet =
+          request.network?.egress?.default === 'allow' ||
+          Boolean(request.network?.egress?.allow?.length);
     if (allowsInternet) {
         capabilities.push("internetClient");
     }
-    if (policy.network?.ingress?.default === 'allow') {
+    if (request.network?.ingress?.default === 'allow') {
         capabilities.push("privateNetworkClientServer");
     }
 
@@ -170,40 +168,29 @@ function buildProcessBaseContainerConfig(
             systemSettings: "none",
             ime: false,
         },
-        filesystem: policy.processContainer?.filesystem?.enumeratePaths?.length
-            ? { enumeratePaths: [...policy.processContainer.filesystem.enumeratePaths] }
-            : undefined,
-        network: policy.processContainer?.network?.allowedProxyPeer !== undefined
-            ? { allowedProxyPeer: policy.processContainer.network.allowedProxyPeer }
-            : undefined,
+        filesystem: undefined,
+        network: undefined,
     };
 
     return config;
 }
 
 /**
- * Builds the internal request config from a V1 policy and containment type.
+ * Builds the internal request config from a V1 container request.
  *
  * This adapter translates user-facing security intent into the exact request
  * consumed by the in-process binding.
  *
- * @param policy - The sandbox policy expressing security intent
- * @param containment - Containment backend type (default: "process")
- * @param containerName - Optional container name; auto-generated if omitted
+ * @param request - Cross-backend request and selected backend configuration
  * @returns An internal config consumed by the exact-contract adapter.
  */
-function createContainerConfig(
-    policy: ContainerPolicy,
-    containment: SandboxContainment = "process",
-    containerName?: string,
-): ContainerConfig {
-    validateV1Policy(policy, containment);
+function createContainerConfig(request: ContainerRequest): ContainerConfig {
+    const selected = request.containment ?? { type: 'process' as const };
+    validateV1Request(request, selected.type);
     const platform = os.platform();
-    const enumeratePaths = policy.processContainer?.filesystem?.enumeratePaths;
+    const containerId = request.containerName ?? generateRandomContainerName();
 
-    const containerId = containerName ?? generateRandomContainerName();
-
-    const clearPolicy = policy.filesystem?.clearPolicyOnExit ?? true;
+    const clearPolicy = request.filesystem?.clearPolicyOnExit ?? true;
     const config: ContainerConfig = {
         version: SDK_CONTRACT_VERSION,
         containerId,
@@ -212,132 +199,111 @@ function createContainerConfig(
             preservePolicy: !clearPolicy,
         },
         process: {
-            commandLine: '',
-            timeout: policy.timeoutMs ?? 0,
+            commandLine: request.command,
+            timeout: request.timeoutMs ?? 0,
         },
-        telemetry: policy.telemetry === undefined ? undefined : { ...policy.telemetry },
+        telemetry: request.telemetry === undefined ? undefined : { ...request.telemetry },
     };
 
+    const enumeratePaths = selected.type === 'processcontainer'
+        ? selected.config?.filesystem?.enumeratePaths
+        : undefined;
     if (enumeratePaths?.length) {
         const targetsWindowsProcessContainer =
-            platform === 'win32' && containment === 'processcontainer';
+            platform === 'win32' && selected.type === 'processcontainer';
         if (!targetsWindowsProcessContainer) {
             throw new Error(
-                'processContainer.filesystem.enumeratePaths is supported only by the Windows ' +
-                'ProcessContainer backend.'
+                'containment.config.filesystem.enumeratePaths is supported only by the ' +
+                'Windows ProcessContainer backend.',
             );
         }
     }
 
     config.filesystem = {
-        readwritePaths: [...(policy.filesystem?.readwritePaths ?? [])],
-        readonlyPaths: [...(policy.filesystem?.readonlyPaths ?? [])],
-        deniedPaths: [...(policy.filesystem?.deniedPaths ?? [])],
+        readwritePaths: [...(request.filesystem?.readwritePaths ?? [])],
+        readonlyPaths: [...(request.filesystem?.readonlyPaths ?? [])],
+        deniedPaths: [...(request.filesystem?.deniedPaths ?? [])],
     };
-    if (enumeratePaths?.length) {
-        config.processContainer = {
-            filesystem: {
-                enumeratePaths: [...enumeratePaths],
-            },
-        };
-    }
 
-    if (policy.ui !== undefined) {
+    if (request.ui !== undefined) {
         config.ui = {
-            disable: !(policy.ui.allowWindows ?? false),
-            clipboard: policy.ui.clipboard ?? "none",
-            injection: policy.ui.allowInputInjection ?? false,
+            disable: !(request.ui.allowWindows ?? false),
+            clipboard: request.ui.clipboard ?? "none",
+            injection: request.ui.allowInputInjection ?? false,
         };
     }
 
-    if (policy.network?.egress !== undefined || policy.network?.ingress !== undefined) {
+    if (request.network?.egress !== undefined || request.network?.ingress !== undefined) {
         config.network = {
-            egress: policy.network.egress,
-            ingress: policy.network.ingress,
+            egress: request.network.egress,
+            ingress: request.network.ingress,
         };
     }
-    if (policy.runtimeConfig?.networkProxy !== undefined) {
+    if (request.runtimeConfig?.networkProxy !== undefined) {
         config.runtimeConfig = {
-            networkProxy: policy.runtimeConfig.networkProxy,
-        };
-    }
-    if (policy.processContainer?.network?.allowedProxyPeer !== undefined) {
-        config.processContainer = {
-            ...config.processContainer,
-            network: {
-                allowedProxyPeer: policy.processContainer.network.allowedProxyPeer,
-            },
+            networkProxy: request.runtimeConfig.networkProxy,
         };
     }
 
     // Backend-specific config based on containment type
-    if (containment === 'wslc') {
-        return buildWslcContainerConfig(config, policy, containerId);
+    if (selected.type === 'wslc') {
+        const base = buildWslcContainerConfig(config, containerId);
+        base.wslc = { ...base.wslc, ...selected.config };
+        return base;
     }
 
-    if (containment === 'isolation_session') {
+    if (selected.type === 'isolation_session') {
         config.containment = 'isolation_session';
-        diagLog(`createConfigFromPolicy: containment=isolation_session, id=${containerId}`);
+        diagLog(`createConfigFromRequest: containment=isolation_session, id=${containerId}`);
         return config;
     }
 
-    if (containment === 'bubblewrap') {
-        diagLog(`createConfigFromPolicy: containment=bubblewrap, id=${containerId}`);
+    if (selected.type === 'bubblewrap') {
+        diagLog(`createConfigFromRequest: containment=bubblewrap, id=${containerId}`);
         return buildBubblewrapConfig(config);
     }
 
-    if (containment === 'lxc') {
-        diagLog(`createConfigFromPolicy: containment=lxc, id=${containerId}`);
+    if (selected.type === 'lxc') {
+        diagLog(`createConfigFromRequest: containment=lxc, id=${containerId}`);
         config.containment = 'lxc';
-        return buildLinuxProcessConfig(config);
+        const base = buildLinuxProcessConfig(config);
+        base.lxc = { ...base.lxc, ...selected.config };
+        return base;
     }
 
-    if (containment === 'seatbelt') {
+    if (selected.type === 'seatbelt') {
         config.containment = 'seatbelt';
-        diagLog(`createConfigFromPolicy: containment=seatbelt, id=${containerId}`);
-        return buildDarwinProcessConfig(config);
+        diagLog(`createConfigFromRequest: containment=seatbelt, id=${containerId}`);
+        const base = buildDarwinProcessConfig(config);
+        base.seatbelt = { ...base.seatbelt, ...selected.config };
+        return base;
     }
 
-    if (containment === 'processcontainer') {
+    if (selected.type === 'processcontainer') {
         config.containment = 'processcontainer';
-        diagLog(`createConfigFromPolicy: containment=processcontainer, id=${containerId}`);
-        return buildProcessBaseContainerConfig(config, policy);
+        diagLog(`createConfigFromRequest: containment=processcontainer, id=${containerId}`);
+        const base = buildProcessBaseContainerConfig(config, request);
+        base.processContainer = {
+          ...base.processContainer,
+          ...selected.config,
+        };
+        return base;
     }
 
-    if (containment === 'process') {
+    if (selected.type === 'process') {
         config.containment = 'process';
-        diagLog(`createConfigFromPolicy: containment=process, id=${containerId}`);
+        diagLog(`createConfigFromRequest: containment=process, id=${containerId}`);
         return config;
     }
 
-    throw new Error(`Containment type '${containment}' is not yet supported.`);
+    const unreachable: never = selected;
+    throw new MxcError(
+      'malformed_request',
+      `unsupported containment '${String(unreachable)}'`,
+    );
 }
 
-export const createConfigFromPolicy = createContainerConfig;
-
-/**
- * Builds a sandbox payload JSON object from the sandbox policy.
- * @param script The command line script to execute
- * @param policy The sandbox policy configuration
- * @param workingDirectory Optional working directory path
- * @param containerName Optional container name; if not provided, a random name will be generated
- * @param containment Optional containment backend type
- * @returns The sandbox payload object
- */
-export function buildSandboxPayload(
-    script: string,
-    policy: ContainerPolicy,
-    workingDirectory?: string,
-    containerName?: string,
-    containment: SandboxContainment = "process",
-): ContainerConfig {
-    const config = createContainerConfig(policy, containment, containerName);
-
-    config.process!.commandLine = script;
-    config.process!.cwd = workingDirectory;
-
-    return config;
-}
+export const createConfigFromRequest = createContainerConfig;
 
 function appendDiagnosticLine(output: string, line: string): string {
   const prefix = output.length === 0 || output.endsWith('\n') ? output : `${output}\n`;
@@ -370,44 +336,7 @@ function containerConfig(request: ContainerRequest): ContainerConfig {
   if (typeof request.command !== 'string' || request.command.length === 0) {
     throw new MxcError('malformed_request', 'container request command must be a non-empty string');
   }
-  if (request.policy === null || typeof request.policy !== 'object') {
-    throw new MxcError('malformed_request', 'container request policy must be an object');
-  }
-
-  const selected = request.containment ?? { type: 'process' as const };
-  const config = createContainerConfig(
-    request.policy,
-    selected.type,
-    request.containerName,
-  );
-  config.process!.commandLine = request.command;
-
-  switch (selected.type) {
-    case 'process':
-    case 'isolation_session':
-    case 'bubblewrap':
-      break;
-    case 'processcontainer':
-      config.processContainer = { ...config.processContainer, ...selected.config };
-      break;
-    case 'wslc':
-      config.wslc = { ...config.wslc, ...selected.config };
-      break;
-    case 'lxc':
-      config.lxc = { ...config.lxc, ...selected.config };
-      break;
-    case 'seatbelt':
-      config.seatbelt = { ...config.seatbelt, ...selected.config };
-      break;
-    default: {
-      const unreachable: never = selected;
-      throw new MxcError(
-        'malformed_request',
-        `unsupported containment '${String(unreachable)}'`,
-      );
-    }
-  }
-  return config;
+  return createContainerConfig(request);
 }
 
 function oneShotRequest(request: ContainerRequest) {
@@ -417,6 +346,36 @@ function oneShotRequest(request: ContainerRequest) {
     env: request.environment,
     inheritDefaultEnv: request.inheritDefaultEnvironment,
   });
+}
+
+function validateOperationOptions(
+  apiName: string,
+  options: MxcOptions,
+  supportsDryRun: boolean,
+): void {
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+    throw new MxcError('malformed_request', `${apiName} options must be an object`);
+  }
+  for (const [key, value] of Object.entries(options)) {
+    if (key !== 'experimental' && key !== 'dryRun') {
+      throw new MxcError(
+        'malformed_request',
+        `${apiName} does not support option '${key}'`,
+      );
+    }
+    if (value !== undefined && typeof value !== 'boolean') {
+      throw new MxcError(
+        'malformed_request',
+        `${apiName} option '${key}' must be a boolean`,
+      );
+    }
+  }
+  if (!supportsDryRun && options.dryRun === true) {
+    throw new MxcError(
+      'malformed_request',
+      `${apiName} does not support dryRun because it performs a one-shot operation`,
+    );
+  }
 }
 
 function toOutput(result: BindingRunResult): Output {
@@ -434,21 +393,46 @@ function toOutput(result: BindingRunResult): Output {
 }
 
 /** Spawn a one-shot request and return its live pipe-backed process. */
-export function spawn(request: ContainerRequest) {
-  return spawnBindingSandboxProcessSync(oneShotRequest(request));
+export function spawn(request: ContainerRequest, options: MxcOptions = {}) {
+  validateOperationOptions('spawn', options, false);
+  return spawnBindingSandboxProcessSync(
+    oneShotRequest(request),
+    options.experimental === true,
+  );
 }
 
 /** Asynchronously spawn a one-shot request and return its live process. */
-export async function spawnAsync(request: ContainerRequest) {
-  return spawnBindingSandboxProcess(oneShotRequest(request));
+export async function spawnAsync(
+  request: ContainerRequest,
+  options: MxcOptions = {},
+) {
+  validateOperationOptions('spawnAsync', options, false);
+  return spawnBindingSandboxProcess(
+    oneShotRequest(request),
+    options.experimental === true,
+  );
 }
 
 /** Run a one-shot request synchronously and capture its output. */
-export function run(request: ContainerRequest): Output {
-  return toOutput(runOneShotJson(oneShotRequest(request)));
+export function run(
+  request: ContainerRequest,
+  options: MxcOptions = {},
+): Output {
+  validateOperationOptions('run', options, false);
+  return toOutput(runOneShotJson(
+    oneShotRequest(request),
+    options.experimental === true,
+  ));
 }
 
 /** Run a one-shot request asynchronously and capture its output. */
-export async function runAsync(request: ContainerRequest): Promise<Output> {
-  return toOutput(await runOneShotJsonAsync(oneShotRequest(request)));
+export async function runAsync(
+  request: ContainerRequest,
+  options: MxcOptions = {},
+): Promise<Output> {
+  validateOperationOptions('runAsync', options, false);
+  return toOutput(await runOneShotJsonAsync(
+    oneShotRequest(request),
+    options.experimental === true,
+  ));
 }

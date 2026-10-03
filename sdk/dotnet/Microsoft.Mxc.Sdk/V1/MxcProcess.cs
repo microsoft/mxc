@@ -139,7 +139,7 @@ public sealed class MxcProcess : IMxcProcess
 
     // The policy timeout (if any) and a monotonic start stamp. The polling wait
     // path enforces this deadline itself: mxc_sandbox_try_wait never kills, and
-    // spawn starts no native watchdog, so without this ContainerPolicy.TimeoutMs
+    // spawn starts no native watchdog, so without this ContainerRequest.TimeoutMs
     // would be silently ignored on Wait()/WaitAsync().
     private readonly uint? _timeoutMs;
     private readonly long _startTimestamp = Stopwatch.GetTimestamp();
@@ -391,7 +391,7 @@ public sealed class MxcProcess : IMxcProcess
 
     /// <summary>
     /// Block until the child exits (honouring
-    /// <see cref="V1.ContainerPolicy.TimeoutMs"/> or
+    /// <see cref="V1.ContainerRequest.TimeoutMs"/> or
     /// <see cref="ExecRequest.TimeoutMs"/>), draining any standard
     /// stream you did not take so the child cannot block on a full pipe.
     /// </summary>

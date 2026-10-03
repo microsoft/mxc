@@ -19,32 +19,30 @@ internal static class ExactOneShotRequestWriter
     internal static Wire.OneShotRequest ToWire(ContainerRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-        var normalized = NormalizeCompatibilityAliases(request);
-        var policy = normalized.Policy;
 
         var wire = new Wire.OneShotRequest
         {
             Version = Wire.Version._100,
-            ContainerId = normalized.ContainerName is null
+            ContainerId = request.ContainerName is null
                 ? MintContainerId()
-                : normalized.ContainerName,
-            Containment = Containment(normalized.Containment),
+                : request.ContainerName,
+            Containment = Containment(request.Containment),
             Lifecycle = new Wire.Lifecycle
             {
                 DestroyOnExit = true,
-                PreservePolicy = policy.Filesystem?.ClearPolicyOnExit == false,
+                PreservePolicy = request.Filesystem?.ClearPolicyOnExit == false,
             },
-            Process = Process(normalized),
-            Filesystem = Filesystem(policy.Filesystem),
-            Network = Network(policy.Network),
-            RuntimeConfig = RuntimeConfig(policy.Network?.RuntimeConfig),
-            Ui = Ui(policy.Ui),
-            Telemetry = policy.Telemetry is null
+            Process = Process(request),
+            Filesystem = Filesystem(request.Filesystem),
+            Network = Network(request.Network),
+            RuntimeConfig = RuntimeConfig(request.Network?.RuntimeConfig),
+            Ui = Ui(request.Ui),
+            Telemetry = request.Telemetry is null
                 ? null
-                : new Wire.Telemetry { Enabled = policy.Telemetry.Enabled },
+                : new Wire.Telemetry { Enabled = request.Telemetry.Enabled },
         };
 
-        switch (normalized.Containment)
+        switch (request.Containment)
         {
             case ProcessContainment:
             case BubblewrapContainment:
@@ -68,7 +66,7 @@ internal static class ExactOneShotRequestWriter
                 break;
             default:
                 throw new ArgumentException(
-                    $"unsupported containment type '{normalized.Containment.GetType().Name}'",
+                    $"unsupported containment type '{request.Containment.GetType().Name}'",
                     nameof(request));
         }
 
@@ -98,7 +96,7 @@ internal static class ExactOneShotRequestWriter
                         return $"{pair.Key}={pair.Value}";
                     })
                     .ToList(),
-            Timeout = request.Policy.TimeoutMs ?? 0,
+            Timeout = request.TimeoutMs ?? 0,
         };
         if (request.Environment is not null && request.InheritDefaultEnvironment)
         {
@@ -315,7 +313,7 @@ internal static class ExactOneShotRequestWriter
             }).ToList(),
     };
 
-    private static string Containment(SandboxContainment containment) => containment switch
+    private static string Containment(IContainerBackendConfig containment) => containment switch
     {
         ProcessContainment => Wire.OneShotContainment.Process,
         ProcessContainerContainment => Wire.OneShotContainment.Processcontainer,
@@ -418,75 +416,4 @@ internal static class ExactOneShotRequestWriter
         where TEnum : struct, Enum =>
         new(path, value, $"{typeof(TEnum).Name} value '{Convert.ToInt64(value)}' is not supported.");
 
-    private static ContainerRequest NormalizeCompatibilityAliases(ContainerRequest request)
-    {
-#pragma warning disable MXC0001 // Compatibility migration for the obsolete policy field.
-        var legacyCaptureDenials = request.Policy.CaptureDenials;
-#pragma warning restore MXC0001
-        if (legacyCaptureDenials is null)
-        {
-            return request;
-        }
-
-        var containment = request.Containment switch
-        {
-            ProcessContainment => new ProcessContainerContainment
-            {
-                CaptureDenials = legacyCaptureDenials,
-            },
-            ProcessContainerContainment processContainer =>
-                CloneProcessContainer(processContainer, legacyCaptureDenials),
-            _ => throw new ArgumentException(
-                $"{nameof(ContainerPolicy)}.CaptureDenials cannot be used with "
-                    + $"{request.Containment.GetType().Name}; set "
-                    + $"{nameof(ProcessContainerContainment)}."
-                    + $"{nameof(ProcessContainerContainment.CaptureDenials)} instead.",
-                nameof(request)),
-        };
-
-        return new ContainerRequest(request.Policy.WithoutLegacyCaptureDenials(), request.Command)
-        {
-            Containment = containment,
-            ContainerName = request.ContainerName,
-            WorkingDirectory = request.WorkingDirectory,
-            Environment = request.Environment is null
-                ? null
-                : new Dictionary<string, string>(
-                    request.Environment, request.Environment.Comparer),
-            InheritDefaultEnvironment = request.InheritDefaultEnvironment,
-        };
-    }
-
-    private static ProcessContainerContainment CloneProcessContainer(
-        ProcessContainerContainment containment,
-        CaptureDenialsPolicy legacyCaptureDenials)
-    {
-        if (containment.CaptureDenials is not null
-            && !CaptureDenialsEqual(containment.CaptureDenials, legacyCaptureDenials))
-        {
-            throw new ArgumentException(
-                $"{nameof(ContainerPolicy)}.CaptureDenials conflicts with "
-                    + $"{nameof(ProcessContainerContainment)}."
-                    + $"{nameof(ProcessContainerContainment.CaptureDenials)}.",
-                "request");
-        }
-
-        return new ProcessContainerContainment
-        {
-            LeastPrivilege = containment.LeastPrivilege,
-            LearningMode = containment.LearningMode,
-            Capabilities = new List<string>(containment.Capabilities),
-            CaptureDenials = containment.CaptureDenials ?? legacyCaptureDenials,
-            Ui = containment.Ui,
-            Filesystem = containment.Filesystem,
-            Network = containment.Network,
-        };
-    }
-
-    private static bool CaptureDenialsEqual(
-        CaptureDenialsPolicy left,
-        CaptureDenialsPolicy right) =>
-        left.Mode == right.Mode
-            && string.Equals(left.OutputPath, right.OutputPath, StringComparison.Ordinal)
-            && left.RetainEtl == right.RetainEtl;
 }

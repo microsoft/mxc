@@ -25,24 +25,20 @@ public class MxcSandboxIsolationSessionE2ETests
     // shell commands. Adding another wrapper nests two shells and the outer one
     // consumes the `&`, which silently changes what runs.
     private static ContainerRequest Request(string command) =>
-        new(
-            new ContainerPolicy
+        new(command)
+        {
+            // The backend cannot restrict the container's network, so it
+            // requires the explicit directional all-allow posture and refuses
+            // an absent policy, whose default is a deny it could not enforce.
+            Network = new NetworkPolicy
             {
-                // The backend cannot restrict the container's network, so it
-                // requires the explicit directional all-allow posture and refuses
-                // an absent policy, whose default is a deny it could not enforce.
-                Network = new NetworkPolicy
+                Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
+                Ingress = new NetworkIngressPolicy
                 {
-                    Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
-                    Ingress = new NetworkIngressPolicy
-                    {
-                        Default = NetworkAction.Allow,
-                        HostLoopback = NetworkAction.Allow,
-                    },
+                    Default = NetworkAction.Allow,
+                    HostLoopback = NetworkAction.Allow,
                 },
             },
-            command)
-        {
             Containment = new IsolationSessionContainment(),
         };
 

@@ -4,9 +4,9 @@
 using Microsoft.Mxc.Sdk;
 using Microsoft.Mxc.Sdk.V1;
 
-// A minimal end-to-end sample: build a policy, run a command in a sandbox, and
-// print what it produced. The command defaults to a simple echo; pass your own
-// as arguments (joined into a single command line).
+// A minimal end-to-end sample: build a request, run a command in a sandbox,
+// and print what it produced. The command defaults to a simple echo; pass your
+// own as arguments (joined into a single command line).
 //
 // Note: actually running a sandbox requires a working host backend
 // (e.g. an elevated, host-prepped Windows host — see docs/host-prep.md). The
@@ -18,7 +18,7 @@ var command = args.Length > 0
     ? string.Join(' ', args)
     : (OperatingSystem.IsWindows() ? "cmd /c echo hello from MXC" : "echo hello from MXC");
 
-var policy = new ContainerPolicy
+var request = new ContainerRequest(command)
 {
     Filesystem = new FilesystemPolicy
     {
@@ -26,7 +26,7 @@ var policy = new ContainerPolicy
     },
     TimeoutMs = 30_000,
 };
-SandboxContainment containment = new ProcessContainment();
+request.Containment = new ProcessContainment();
 
 // Set MXC_SAMPLE_CAPTURE_DENIALS=1 to opt into Windows denial capture without
 // changing the sample's default host requirements or generating traces by default.
@@ -36,7 +36,7 @@ if (OperatingSystem.IsWindows()
         "1",
         StringComparison.Ordinal))
 {
-    containment = new ProcessContainerContainment
+    request.Containment = new ProcessContainerContainment
     {
         CaptureDenials = new CaptureDenialsPolicy
         {
@@ -47,7 +47,6 @@ if (OperatingSystem.IsWindows()
 }
 
 Console.WriteLine($"Running: {command}");
-var request = new ContainerRequest(policy, command) { Containment = containment };
 
 try
 {

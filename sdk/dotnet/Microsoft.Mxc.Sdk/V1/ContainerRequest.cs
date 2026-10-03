@@ -11,26 +11,40 @@ namespace Microsoft.Mxc.Sdk.V1;
 /// </summary>
 public sealed class ContainerRequest
 {
-    /// <summary>Create a request for <paramref name="command"/> under <paramref name="policy"/>.</summary>
-    public ContainerRequest(ContainerPolicy policy, string command)
+    /// <summary>Create a request for <paramref name="command"/>.</summary>
+    public ContainerRequest(string command)
     {
-        ArgumentNullException.ThrowIfNull(policy);
         ArgumentNullException.ThrowIfNull(command);
-        Policy = policy;
         Command = command;
     }
-
-    /// <summary>The cross-platform restrictions applied to the sandbox.</summary>
-    [JsonPropertyName("policy")]
-    public ContainerPolicy Policy { get; }
 
     /// <summary>The command line to run.</summary>
     [JsonPropertyName("command")]
     public string Command { get; }
 
-    /// <summary>The containment backend and its backend-specific configuration.</summary>
+    /// <summary>Cross-backend filesystem access restrictions.</summary>
+    [JsonPropertyName("filesystem")]
+    public FilesystemPolicy? Filesystem { get; set; }
+
+    /// <summary>Cross-backend directional network restrictions.</summary>
+    [JsonPropertyName("network")]
+    public NetworkPolicy? Network { get; set; }
+
+    /// <summary>Cross-backend UI access restrictions.</summary>
+    [JsonPropertyName("ui")]
+    public UiPolicy? Ui { get; set; }
+
+    /// <summary>Execution timeout in milliseconds; null means no timeout.</summary>
+    [JsonPropertyName("timeoutMs")]
+    public uint? TimeoutMs { get; set; }
+
+    /// <summary>Per-invocation telemetry opt-in, subject to consent and policy.</summary>
+    [JsonPropertyName("telemetry")]
+    public TelemetrySettings? Telemetry { get; set; }
+
+    /// <summary>The selected backend and its backend-specific configuration.</summary>
     [JsonPropertyName("containment")]
-    public SandboxContainment Containment { get; set; } = new ProcessContainment();
+    public IContainerBackendConfig Containment { get; set; } = new ProcessContainment();
 
     /// <summary>
     /// An optional caller-selected container name. Only null mints a name;
@@ -77,7 +91,7 @@ public sealed class ContainerRequest
 
 }
 
-/// <summary>A containment backend selected by a <see cref="ContainerRequest"/>.</summary>
+/// <summary>Configuration implemented by a selected container backend.</summary>
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "type")]
 [JsonDerivedType(typeof(ProcessContainment), "process")]
 [JsonDerivedType(typeof(ProcessContainerContainment), "processContainer")]
@@ -86,23 +100,23 @@ public sealed class ContainerRequest
 [JsonDerivedType(typeof(BubblewrapContainment), "bubblewrap")]
 [JsonDerivedType(typeof(WslcContainment), "wslc")]
 [JsonDerivedType(typeof(IsolationSessionContainment), "isolationSession")]
-public abstract class SandboxContainment;
+public interface IContainerBackendConfig;
 
 /// <summary>
 /// The host's native process-isolation backend: ProcessContainer on Windows,
 /// Bubblewrap on Linux, and Seatbelt on macOS.
 /// </summary>
-public sealed class ProcessContainment : SandboxContainment;
+public sealed class ProcessContainment : IContainerBackendConfig;
 
 /// <summary>
 /// Windows IsolationSession backend, which runs the workload under
 /// an isolated agent user account.
 /// </summary>
 /// <remarks>The native library must be built with IsolationSession support.</remarks>
-public sealed class IsolationSessionContainment : SandboxContainment;
+public sealed class IsolationSessionContainment : IContainerBackendConfig;
 
 /// <summary>Explicit macOS Seatbelt configuration.</summary>
-public sealed class SeatbeltContainment : SandboxContainment
+public sealed class SeatbeltContainment : IContainerBackendConfig
 {
     /// <summary>Replace the generated sandbox profile entirely.</summary>
     [JsonPropertyName("profileOverride")]
@@ -126,7 +140,7 @@ public sealed class SeatbeltContainment : SandboxContainment
 }
 
 /// <summary>Explicit Linux LXC configuration.</summary>
-public sealed class LxcContainment : SandboxContainment
+public sealed class LxcContainment : IContainerBackendConfig
 {
     /// <summary>Linux distribution for the container root filesystem.</summary>
     [JsonPropertyName("distribution")]
@@ -138,10 +152,10 @@ public sealed class LxcContainment : SandboxContainment
 }
 
 /// <summary>Explicit Linux Bubblewrap configuration.</summary>
-public sealed class BubblewrapContainment : SandboxContainment;
+public sealed class BubblewrapContainment : IContainerBackendConfig;
 
 /// <summary>Explicit Windows ProcessContainer configuration.</summary>
-public sealed class ProcessContainerContainment : SandboxContainment
+public sealed class ProcessContainerContainment : IContainerBackendConfig
 {
     /// <summary>Enable least-privilege process creation.</summary>
     [JsonPropertyName("leastPrivilege")]
@@ -246,7 +260,7 @@ public sealed class ProcessContainerNetworkPolicy
 }
 
 /// <summary>WSL Container backend configuration.</summary>
-public sealed class WslcContainment : SandboxContainment
+public sealed class WslcContainment : IContainerBackendConfig
 {
     /// <summary>Container image reference.</summary>
     [JsonPropertyName("image")]

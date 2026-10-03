@@ -28,23 +28,25 @@ use mxc_sdk::{exec_sandbox, exec_sandbox_json, run_state_aware_json, Error, Erro
 #[test]
 fn typed_lifecycle_api_is_operation_specific() {
     let _: fn(ProvisionRequest, OperationOptions) -> Result<ProvisionResult, Error> =
-        container::provision;
+        container::provision_sandbox;
     let _: fn(ProvisionRequest, OperationOptions) -> Result<ValidationResult, Error> =
         container::validate_provision;
-    let _: fn(&ContainerId, OperationOptions) -> Result<LifecycleResult, Error> = container::start;
+    let _: fn(&ContainerId, OperationOptions) -> Result<LifecycleResult, Error> =
+        container::start_sandbox;
     let _: fn(&ContainerId, OperationOptions) -> Result<ValidationResult, Error> =
         container::validate_start;
-    let _: fn(&ContainerId, OperationOptions) -> Result<LifecycleResult, Error> = container::stop;
+    let _: fn(&ContainerId, OperationOptions) -> Result<LifecycleResult, Error> =
+        container::stop_sandbox;
     let _: fn(&ContainerId, OperationOptions) -> Result<ValidationResult, Error> =
         container::validate_stop;
     let _: fn(&ContainerId, OperationOptions) -> Result<LifecycleResult, Error> =
-        container::deprovision;
+        container::deprovision_sandbox;
     let _: fn(&ContainerId, OperationOptions) -> Result<ValidationResult, Error> =
         container::validate_deprovision;
     let _: fn(&ContainerId, ExecRequest, OperationOptions) -> Result<MxcProcess, Error> =
         spawn_in_container;
     let _: fn(&ContainerId, ExecRequest, OperationOptions) -> Result<WaitOutcome, Error> =
-        container::exec_attached;
+        container::exec_in_attached;
     let _: fn(&ContainerId, ExecRequest, OperationOptions) -> Result<ValidationResult, Error> =
         container::validate_exec;
 }

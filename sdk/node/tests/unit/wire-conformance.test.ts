@@ -44,13 +44,13 @@
 import { test } from 'node:test';
 
 import type {
-  ContainerPolicy as V1ContainerPolicy,
+  ContainerBackendConfig as V1ContainerBackendConfig,
   ContainerId as V1ContainerId,
   ContainerRequest,
   Output,
 } from '../../src/v1.js';
 import type {
-  ContainerPolicy as InternalContainerPolicy,
+  ContainerBackendConfig as InternalContainerBackendConfig,
 } from '../../src/types.js';
 import type {
   ContainerId as InternalContainerId,
@@ -131,15 +131,23 @@ import type {
 
 // --- enum / union conformance ---------------------------------------------
 
-type _V1PolicyExport = AssertTrue<Equivalent<V1ContainerPolicy, InternalContainerPolicy>>;
+type _V1BackendConfigExport = AssertTrue<
+  Equivalent<V1ContainerBackendConfig, InternalContainerBackendConfig>
+>;
 type _V1IdExport = AssertTrue<
   Equivalent<
     V1ContainerId<'isolation_session' | 'wslc'>,
     InternalContainerId<'isolation_session' | 'wslc'>
   >
 >;
-type _ContainerRequestPolicy = AssertTrue<
-  Assignable<ContainerRequest['policy'], V1ContainerPolicy>
+type _ContainerRequestFilesystem = AssertTrue<
+  Assignable<ContainerRequest['filesystem'], FilesystemConfig | undefined>
+>;
+type _ContainerRequestNetwork = AssertTrue<
+  Assignable<ContainerRequest['network'], DirectionalNetworkConfig | undefined>
+>;
+type _ContainerRequestContainment = AssertTrue<
+  Assignable<ContainerRequest['containment'], V1ContainerBackendConfig | undefined>
 >;
 type _OutputExitCode = AssertTrue<Assignable<Output['exitCode'], number>>;
 
@@ -315,7 +323,8 @@ type _RootWireKeys = AssertTrue<
 
 // Reference the assertion aliases so they read as intentionally load-bearing.
 export type WireConformanceAssertions = [
-  _V1PolicyExport, _V1IdExport,
+  _V1BackendConfigExport, _V1IdExport,
+  _ContainerRequestFilesystem, _ContainerRequestNetwork, _ContainerRequestContainment,
   _Clipboard, _Containment,
   _NetworkEgressDefault, _NetworkIngressDefault, _NetworkIngressHostLoopback,
   _NetworkPortProtocol, _BaseProcessUiIsolation, _PortProtocol,

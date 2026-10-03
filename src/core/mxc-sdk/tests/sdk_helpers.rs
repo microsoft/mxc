@@ -1,16 +1,14 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Tests for the ported SDK helpers: policy discovery, platform support, and
-//! the ContainerPolicy -> ContainerRequest builder.
+//! Tests for SDK helpers and V1 request authoring.
 
 use mxc_sdk::platform_support;
 use mxc_sdk::v1::{
-    available_tools_policy, build_request, temporary_files_policy, user_profile_policy,
-    ContainerPolicy,
+    available_tools_policy, temporary_files_policy, user_profile_policy, ContainerRequest,
 };
 #[cfg(target_os = "windows")]
-use mxc_sdk::v1::{build_request_with_containment, Containment, WslcSection};
+use mxc_sdk::v1::{Containment, WslcSection};
 #[cfg(target_os = "windows")]
 use mxc_sdk::ErrorCode;
 
@@ -125,80 +123,17 @@ fn user_profile_policy_does_not_panic() {
     assert!(result.readwrite_paths.is_empty());
 }
 
-#[test]
-fn rust_sdk_builds_directional_networking() {
-    use mxc_sdk::v1::policy::{
-        NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkSection,
-    };
-
-    let mut egress = NetworkEgressSection::default();
-    egress.default = Some(NetworkAction::Deny);
-    let mut ingress = NetworkIngressSection::default();
-    ingress.default = Some(NetworkAction::Deny);
-    ingress.host_loopback = Some(NetworkAction::Deny);
-    let mut network = NetworkSection::default();
-    network.egress = Some(egress);
-    network.ingress = Some(ingress);
-
-    let mut policy = ContainerPolicy::default();
-    policy.network = Some(network);
-
-    build_request(&policy, "echo hello", None)
-        .expect("the Rust SDK should build directional networking");
-}
-
-#[test]
-fn rust_sdk_builds_directional_process_container_networking_and_capture() {
-    use mxc_sdk::v1::configs::{CaptureDenials, ProcessContainer, ProcessContainerNetwork};
-    use mxc_sdk::v1::policy::{
-        NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkSection,
-        RuntimeConfigSection,
-    };
-    use mxc_sdk::v1::{build_request_with_containment, Containment};
-
-    let mut egress = NetworkEgressSection::default();
-    egress.default = Some(NetworkAction::Deny);
-    let mut ingress = NetworkIngressSection::default();
-    ingress.default = Some(NetworkAction::Allow);
-    ingress.host_loopback = Some(NetworkAction::Deny);
-    let mut runtime_config = RuntimeConfigSection::default();
-    runtime_config.network_proxy = Some("http://127.0.0.1:8080".to_string());
-    let mut network = NetworkSection::default();
-    network.egress = Some(egress);
-    network.ingress = Some(ingress);
-    network.runtime_config = Some(runtime_config);
-
-    let mut policy = ContainerPolicy::default();
-    policy.network = Some(network);
-    let mut process_network = ProcessContainerNetwork::default();
-    process_network.allowed_proxy_peer = Some("Contoso.Proxy_123".to_string());
-    let mut process_container = ProcessContainer::default();
-    process_container.capture_denials = Some(CaptureDenials::default());
-    process_container.network = Some(process_network);
-
-    build_request_with_containment(
-        &policy,
-        &Containment::ProcessContainer(process_container),
-        "echo hello",
-        None,
-    )
-    .expect("public re-exports should build a schema 0.8 ProcessContainer request");
-}
-
 #[cfg(target_os = "macos")]
 #[test]
 fn build_request_then_run_seatbelt() {
-    let mut policy = ContainerPolicy::default();
-    policy.filesystem = Some(mxc_sdk::v1::policy::FilesystemSection {
+    let mut request = ContainerRequest::new("echo built-from-request");
+    request.set_filesystem(mxc_sdk::v1::FilesystemSection {
         readwrite_paths: vec!["/tmp".to_string()],
         readonly_paths: vec![],
         denied_paths: vec![],
         clear_policy_on_exit: None,
     });
-    policy.timeout_ms = Some(10000);
-
-    let request = build_request(&policy, "echo built-from-policy", None)
-        .expect("build_request should succeed");
+    request.set_timeout_ms(10000);
 
     let mut proc = spawn(request).expect("spawn should succeed");
     let mut out = String::new();
@@ -207,7 +142,7 @@ fn build_request_then_run_seatbelt() {
     }
     let outcome = proc.wait().expect("wait should succeed");
     assert_eq!(outcome, WaitOutcome::Exited(0));
-    assert!(out.contains("built-from-policy"), "got: {out:?}");
+    assert!(out.contains("built-from-request"), "got: {out:?}");
 }
 
 #[cfg(target_os = "linux")]
@@ -304,9 +239,10 @@ fn request_probe_accepts_default_and_typed_requests() {
         Option<&mxc_sdk::v1::ContainerRequest>,
     ) -> Result<mxc_sdk::ProbeOutput, mxc_sdk::Error> = mxc_sdk::v1::probe;
 
-    let policy = ContainerPolicy::default();
-    let request = build_request(&policy, "cmd /c exit 0", None)
-        .expect("default ProcessContainer request should build");
+    let mut request = ContainerRequest::new("cmd /c exit 0");
+    request.set_containment(Containment::ProcessContainer(
+        mxc_sdk::v1::configs::ProcessContainer::default(),
+    ));
 
     for request in [None, Some(&request)] {
         let output = mxc_sdk::v1::probe(request).expect("ProcessContainer request should probe");
@@ -319,14 +255,8 @@ fn request_probe_accepts_default_and_typed_requests() {
 #[cfg(target_os = "windows")]
 #[test]
 fn request_probe_rejects_non_process_container_requests() {
-    let policy = ContainerPolicy::default();
-    let request = build_request_with_containment(
-        &policy,
-        &Containment::Wslc(WslcSection::default()),
-        "echo hi",
-        None,
-    )
-    .expect("WSLC request should build");
+    let mut request = ContainerRequest::new("echo hi");
+    request.set_containment(Containment::Wslc(WslcSection::default()));
 
     let error = mxc_sdk::v1::probe(Some(&request))
         .expect_err("request probe should reject non-ProcessContainer containment");

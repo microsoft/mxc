@@ -11,16 +11,14 @@ selector.
 ```csharp
 using Microsoft.Mxc.Sdk.V1;
 
-var request = new ContainerRequest(
-    new ContainerPolicy
+var request = new ContainerRequest("cmd /c echo hello")
+{
+    Filesystem = new FilesystemPolicy
     {
-        Filesystem = new FilesystemPolicy
-        {
-            ReadwritePaths = { @"C:\work" },
-        },
-        TimeoutMs = 30_000,
+        ReadwritePaths = { @"C:\work" },
     },
-    "cmd /c echo hello");
+    TimeoutMs = 30_000,
+};
 
 Output output = await MxcSandbox.RunAsync(request);
 Console.WriteLine($"exit={output.ExitCode} stdout={output.Stdout}");
@@ -28,9 +26,10 @@ Console.WriteLine($"exit={output.ExitCode} stdout={output.Stdout}");
 
 Use `MxcSandbox.Run` / `RunAsync` for captured output or `Spawn` for a live
 `MxcProcess` with separate stdin, stdout, and stderr streams. `MxcProcess`
-provides wait, termination, and disposal operations. One-shot requests are
-built from `ContainerPolicy` and `ContainerRequest`; they do not accept a
-caller-selected schema version.
+provides wait, termination, and disposal operations. Shared filesystem,
+network, and UI restrictions are authored directly on `ContainerRequest`,
+alongside the selected backend configuration. The SDK owns the exact wire
+contract; requests do not accept a caller-selected schema version.
 
 ## Existing containers
 
@@ -55,7 +54,9 @@ MxcLifecycle.StopSandbox(id);
 MxcLifecycle.DeprovisionSandbox(id);
 ```
 
-Use `ExecInSandbox` or `SpawnInContainer` for live piped execution. The
+Use `ExecInSandbox` or `SpawnInContainer` for live piped execution.
+`ExecInSandboxAttached` runs synchronously on the host's terminal and returns
+a `WaitOutcome`; both host stdin and stdout must be terminals. The
 asynchronous methods are convenience wrappers over native operations and
 support cancellation. Backend and phase-specific policy requirements are
 described in the
@@ -66,8 +67,7 @@ described in the
 
 | Purpose | .NET type |
 | --- | --- |
-| Container restrictions | `ContainerPolicy` |
-| One-shot workload | `ContainerRequest` |
+| One-shot workload and cross-backend restrictions | `ContainerRequest` |
 | Persistent container identity | `ContainerId` |
 | Existing-container workload | `ExecRequest` |
 | Live process with standard pipes | `MxcProcess` |

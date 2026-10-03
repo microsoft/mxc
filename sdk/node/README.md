@@ -19,19 +19,16 @@ or later.
 ```typescript
 import { getPlatformSupport } from '@microsoft/mxc-sdk';
 import { runAsync, spawn } from '@microsoft/mxc-sdk/v1';
-import type { ContainerPolicy, ContainerRequest } from '@microsoft/mxc-sdk/v1';
+import type { ContainerRequest } from '@microsoft/mxc-sdk/v1';
 
 if (!getPlatformSupport().isSupported) {
   throw new Error('MXC is not available on this host');
 }
 
-const policy: ContainerPolicy = {
+const request: ContainerRequest = {
   filesystem: { readonlyPaths: [process.cwd()] },
   network: { egress: { default: 'deny' } },
   timeoutMs: 30_000,
-};
-const request: ContainerRequest = {
-  policy,
   command: 'node -e "console.log(\\'hello from sandbox\\')"',
 };
 
@@ -48,12 +45,15 @@ processHandle.dispose();
 `spawnAsync` return an `MxcProcess` with standard pipes, wait, termination, and
 disposal operations. Access output streams before awaiting completion; any
 untaken streams are drained internally to avoid pipe-buffer deadlocks.
+Each operation accepts an optional `MxcOptions` argument containing
+`experimental` and `dryRun` booleans. `experimental` is forwarded to the native
+runtime. `dryRun: true` is supported by state-aware operations that return a
+completed response, but rejected by one-shot and live-process operations.
 
-`ContainerRequest` contains a `ContainerPolicy`, command, and optional
-containment, container name, working directory, and environment settings. The
-SDK selects its exact V1 contract; callers do not provide a schema version or
-raw executor configuration. Use the typed `Containment` options to select a
-supported backend explicitly.
+`ContainerRequest` holds the command, cross-backend filesystem, network, and UI
+settings, and the selected backend's typed configuration. The SDK selects its
+exact V1 contract; callers do not provide a schema version or raw executor
+configuration.
 
 ## Existing containers
 
@@ -82,11 +82,13 @@ await stopSandbox(containerId);
 await deprovisionSandbox(containerId);
 ```
 
-`execInSandbox` returns a live pipe-backed `MxcProcess`; `execInSandboxAsync`
-captures output. `spawnInContainer` and `runInContainer` are the corresponding
-existing-container operation names. IsolationSession provision requires an
-explicit unrestricted directional network posture; WSLC network posture is
-fixed at provision. See the
+`execInSandbox` returns a live pipe-backed `MxcProcess`;
+`execInSandboxAsync` captures output. `execInSandboxAttached` synchronously
+relays execution through the host terminal and returns a `WaitOutcome`; both
+host stdin and stdout must be terminals. `spawnInContainer` and
+`runInContainer` are the corresponding existing-container operation names.
+IsolationSession provision requires an explicit unrestricted directional
+network posture; WSLC network posture is fixed at provision. See the
 [IsolationSession](../../docs/isolation-session/state-aware-typescript.md) and
 [WSLC](../../docs/wsl/wslc-state-aware.md) guides for backend and phase
 requirements.
@@ -95,8 +97,7 @@ requirements.
 
 | Purpose | TypeScript type |
 | --- | --- |
-| Container restrictions | `ContainerPolicy` |
-| One-shot workload | `ContainerRequest` |
+| One-shot request and cross-backend restrictions | `ContainerRequest` |
 | Persistent container identity | `ContainerId` |
 | Existing-container workload | `ExecRequest` |
 | Live process with standard pipes | `MxcProcess` |

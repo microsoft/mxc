@@ -27,11 +27,9 @@ static void Check(bool condition, string what)
 // Reflection-free serialization must be in force, or this test proves nothing.
 Check(!JsonSerializer.IsReflectionEnabledByDefault, "reflection fallback is disabled");
 
-// 1. Serialize a directional high-level policy: directional network,
-//    filesystem, and UI sections, exercising the camelCase enum converters.
-//    The v1 high-level SDK is version-free (it owns its contract internally),
-//    so no "version" field is emitted.
-var devPolicy = new ContainerPolicy
+// 1. Serialize a complete request with directional network, filesystem, and UI
+//    sections, exercising the camelCase enum converters and exact V1 contract.
+var request = new ContainerRequest("echo hello")
 {
     TimeoutMs = 5000,
     Filesystem = new FilesystemPolicy
@@ -47,22 +45,6 @@ var devPolicy = new ContainerPolicy
         RuntimeConfig = new NetworkRuntimeConfig { NetworkProxy = "http://127.0.0.1:8080" },
     },
     Ui = new UiPolicy { AllowWindows = true, Clipboard = ClipboardPolicy.Read },
-};
-
-using (var doc = JsonDocument.Parse(MxcSandbox.SerializePolicy(devPolicy)))
-{
-    var root = doc.RootElement;
-    Check(!root.TryGetProperty("version", out _), "policy is version-free");
-    var network = root.GetProperty("network");
-    Check(network.GetProperty("egress").GetProperty("default").GetString() == "deny", "egress default enum");
-    Check(network.GetProperty("runtimeConfig").GetProperty("networkProxy").GetString()
-        == "http://127.0.0.1:8080", "runtime proxy");
-    Check(root.GetProperty("ui").GetProperty("clipboard").GetString() == "read", "clipboard enum");
-}
-
-// 2. Serialize a full exact request with ProcessContainer-specific policy.
-var request = new ContainerRequest(devPolicy, "echo hello")
-{
     Containment = new ProcessContainerContainment
     {
         LeastPrivilege = true,
@@ -73,20 +55,22 @@ using (var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(request)))
 {
     var root = doc.RootElement;
     Check(root.GetProperty("version").GetString() == "1.0.0", "SDK-owned exact request version");
-    Check(!root.TryGetProperty("policy", out _), "private policy envelope is absent");
     Check(root.GetProperty("process").GetProperty("commandLine").GetString() == "echo hello",
         "exact request command line");
     Check(root.GetProperty("network").GetProperty("egress").GetProperty("default").GetString() == "deny",
         "exact request carries directional policy");
     Check(root.GetProperty("runtimeConfig").GetProperty("networkProxy").GetString()
         == "http://127.0.0.1:8080", "exact runtime proxy");
+    Check(root.GetProperty("ui").GetProperty("clipboard").GetString() == "read", "clipboard enum");
+    Check(root.GetProperty("process").GetProperty("timeout").GetUInt32() == 5000,
+        "request timeout");
     Check(root.GetProperty("containment").GetString() == "processcontainer", "exact containment discriminator");
     Check(root.GetProperty("processContainer").GetProperty("leastPrivilege").GetBoolean(),
         "exact backend policy");
 }
 
 // The generated exact wire type must preserve the full unsigned WSLC bound.
-var wslcRequest = new ContainerRequest(new ContainerPolicy(), "echo memory")
+var wslcRequest = new ContainerRequest("echo memory")
 {
     Containment = new WslcContainment { MemoryMb = ulong.MaxValue },
 };

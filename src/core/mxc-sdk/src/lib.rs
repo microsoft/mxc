@@ -3,8 +3,7 @@
 
 //! `mxc-sdk` — an importable library for starting MXC sandboxes in-process.
 //!
-//! Build a [`v1::ContainerRequest`] from a [`v1::ContainerPolicy`] with
-//! [`v1::build_request`], then either:
+//! Create a [`v1::ContainerRequest`] with its command and restrictions, then either:
 //!
 //! - hand it to [`v1::run`] to run the sandboxed process **to completion** and get
 //!   its captured stdout/stderr and exit outcome in one call, or
@@ -17,9 +16,7 @@
 //! ```no_run
 //! use mxc_sdk::v1::{self, WaitOutcome};
 //!
-//! // Turn a policy into a request, fill in the command, and run it.
-//! let policy = v1::ContainerPolicy::default();
-//! let request = v1::build_request(&policy, "echo hi", None)?;
+//! let request = v1::ContainerRequest::new("echo hi");
 //! let output = v1::run(request)?;
 //! match output.outcome {
 //!     WaitOutcome::Exited(code) => println!("exit={code}"),
@@ -31,10 +28,8 @@
 //!
 //! ## Backend support
 //!
-//! The selected backend is driven by the `containment` field in the request:
-//! [`v1::build_request`] resolves the host's native one, and
-//! [`v1::build_request_with_containment`] takes an explicit
-//! [`v1::Containment`].
+//! The selected backend is driven by the request's [`v1::Containment`].
+//! Requests default to the host's native process backend.
 //!
 //! | Backend | Host | Selected by |
 //! |---------|------|-------------|
@@ -90,10 +85,10 @@
 //! ```no_run
 //! use mxc_sdk::v1;
 //!
-//! # let policy = v1::ContainerPolicy::default();
 //! // Run a command inside a WSL container (Windows, --features wslc).
 //! let wslc = v1::WslcSection { image: "python:3.12".to_string(), ..Default::default() };
-//! let request = v1::build_request_with_containment(&policy, &v1::Containment::Wslc(wslc), "python3 -c 'print(42)'", None)?;
+//! let mut request = v1::ContainerRequest::new("python3 -c 'print(42)'");
+//! request.set_containment(v1::Containment::Wslc(wslc));
 //! let output = v1::run(request)?;
 //! # Ok::<(), mxc_sdk::Error>(())
 //! ```
@@ -147,7 +142,7 @@ pub use mxc_engine::{ProbeFacts, ProbeOutput, UiCapabilitySupport};
 
 use sandbox::{MxcProcess, Output, WaitOutcome};
 
-/// V1 contract-mapped policy, request, and typed lifecycle APIs.
+/// V1 contract-mapped request and typed lifecycle APIs.
 ///
 /// These types and entry points target the latest published v1 exact contract
 /// owned by this SDK. Callers do not supply a schema version on this path; use
@@ -171,24 +166,30 @@ pub mod v1 {
 
     /// V1 policy authoring types.
     pub mod policy {
-        pub use crate::policy::*;
+        pub use crate::policy::{
+            available_tools_policy, temporary_files_policy, user_profile_policy, ClipboardPolicy,
+            Containment, FilesystemPolicyResult, FilesystemSection, NetworkAction,
+            NetworkEgressSection, NetworkIngressSection, NetworkPeerSection, NetworkPortSection,
+            NetworkProtocol, NetworkRuleSection, NetworkSection, RuntimeConfigSection, UiSection,
+            WslcSection,
+        };
     }
 
     /// V1 typed state-aware lifecycle entry points.
     pub mod container {
         pub use crate::sandbox::{
-            deprovision as deprovision_sandbox, provision as provision_sandbox,
+            deprovision as deprovision_sandbox, exec_in_attached, provision as provision_sandbox,
             start as start_sandbox, stop as stop_sandbox, validate_deprovision, validate_exec,
             validate_provision, validate_start, validate_stop,
         };
     }
 
     pub use crate::policy::{
-        available_tools_policy, build_request, build_request_with_containment,
-        temporary_files_policy, user_profile_policy, ContainerPolicy, ContainerRequest,
-        Containment, FilesystemPolicyResult, NetworkAction, NetworkEgressSection,
-        NetworkIngressSection, NetworkPeerSection, NetworkPortSection, NetworkProtocol,
-        NetworkRuleSection, RuntimeConfigSection, WslcSection,
+        available_tools_policy, temporary_files_policy, user_profile_policy, ClipboardPolicy,
+        ContainerRequest, Containment, FilesystemPolicyResult, FilesystemSection, NetworkAction,
+        NetworkEgressSection, NetworkIngressSection, NetworkPeerSection, NetworkPortSection,
+        NetworkProtocol, NetworkRuleSection, NetworkSection, RuntimeConfigSection, UiSection,
+        WslcSection,
     };
     pub use crate::sandbox::{
         CaptureDenialsErrorOutput, CaptureDenialsOutput, MxcProcess, Output, SandboxOutputMetadata,
@@ -208,7 +209,8 @@ pub mod v1 {
     /// launch-time validation because this result describes ProcessContainer tiers.
     #[cfg(target_os = "windows")]
     pub fn probe(request: Option<&ContainerRequest>) -> Result<crate::ProbeOutput, Error> {
-        mxc_engine::probe_execution_request(request.map(|request| &request.inner))
+        let prepared = request.map(crate::policy::prepare_request).transpose()?;
+        mxc_engine::probe_execution_request(prepared.as_ref().map(|request| &request.inner))
     }
 
     /// Spawn a one-shot [`ContainerRequest`] and return its live process.
@@ -217,7 +219,8 @@ pub mod v1 {
     /// no pty is allocated. Any stdout/stderr stream the caller does not
     /// `take_*` is drained and discarded by [`wait`](MxcProcess::wait).
     pub fn spawn(request: ContainerRequest) -> Result<MxcProcess, Error> {
-        mxc_engine::spawn_execution_request(&request.inner).map(MxcProcess::new)
+        let prepared = crate::policy::prepare_request(&request)?;
+        mxc_engine::spawn_execution_request(&prepared.inner).map(MxcProcess::new)
     }
 
     /// Run a one-shot [`ContainerRequest`] to completion and capture its output.
@@ -270,8 +273,7 @@ pub mod v1 {
 
         #[test]
         fn public_request_probe_uses_sdk_request_model() {
-            let request = build_request(&ContainerPolicy::default(), "cmd /c exit 0", None)
-                .expect("default Windows policy builds");
+            let request = ContainerRequest::new("cmd /c exit 0");
             let output = probe(Some(&request)).expect("default request probes");
             assert!(output.error.is_some() || output.tier.is_some());
         }

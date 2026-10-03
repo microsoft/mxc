@@ -6,11 +6,11 @@ import assert from 'node:assert';
 import { PassThrough } from 'node:stream';
 import {
   deprovisionSandbox,
+  execInSandboxAttached,
   execInSandbox,
   execInSandboxAsync,
   spawnInContainerWithPty,
   provisionSandbox,
-  type StateAwareStreamingOptions,
   startSandbox,
   stopSandbox,
 } from '../../src/state-aware.js';
@@ -20,6 +20,7 @@ import {
 } from '../../src/state-aware-helper.js';
 import {
   _setBindingStateAwareAsyncImplementation,
+  _setBindingStateAwareAttachedImplementation,
   type BindingStateAwareRequest,
 } from '../../src/bindings/state-aware.js';
 import { _setStateAwareBindingSandboxProcessFactory } from '../../src/bindings/streaming.js';
@@ -172,6 +173,7 @@ function readStreamText(stream: NodeJS.ReadableStream | null): Promise<string> {
 }
 
 afterEach(() => _setBindingStateAwareAsyncImplementation());
+afterEach(() => _setBindingStateAwareAttachedImplementation());
 afterEach(() => _setStateAwareBindingSandboxProcessFactory());
 
 describe('buildStateAwareEnvelope', () => {
@@ -536,31 +538,14 @@ describe('provisionSandbox', () => {
     );
   });
 
-  it('rejects on abort and deprovisions a late provision result', async () => {
-    const ac = new AbortController();
-    const requests: BindingStateAwareRequest[] = [];
-    let completeProvision!: (responseJson: string) => void;
-    _setBindingStateAwareAsyncImplementation((request) => {
-      requests.push(request);
-      if (requests.length === 1) {
-        return new Promise((resolve) => {
-          completeProvision = resolve;
-        });
-      }
-      return Promise.resolve('{"result":{}}');
+  it('forwards experimental and dryRun flags to the native binding', async () => {
+    const request = installStateAwareReply('{"result":{}}');
+    await provisionSandbox('isolation_session', ACK, {
+      experimental: true,
+      dryRun: true,
     });
-    const promise = provisionSandbox(
-      'isolation_session',
-      ACK,
-      { signal: ac.signal },
-    );
-    ac.abort();
-    await assert.rejects(promise);
-    completeProvision('{"result":{"sandboxId":"iso:cleanup-me"}}');
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.strictEqual(requests.length, 2);
-    assert.strictEqual(requestEnvelope(requests[1]!).phase, 'deprovision');
-    assert.strictEqual(requestEnvelope(requests[1]!).sandboxId, 'iso:cleanup-me');
+    assert.strictEqual(request().experimental, true);
+    assert.strictEqual(request().dryRun, true);
   });
 });
 
@@ -696,6 +681,19 @@ describe('execInSandboxAsync', () => {
     assert.strictEqual(exec.binding().freed, true);
   });
 
+  it('forwards experimental authorization to state-aware streaming exec', async () => {
+    const exec = installStateAwareExecBinding(
+      () => new FakeStateAwareExecBinding(17, '', ''),
+    );
+    const result = await execInSandboxAsync(
+      'iso:abc' as SandboxId<'isolation_session'>,
+      { process: { commandLine: 'echo experimental' } },
+      { experimental: true },
+    );
+    assert.strictEqual(result.exitCode, 0);
+    assert.strictEqual(exec.experimental(), true);
+  });
+
   it('returns ExecResult on script exit != 0 when stdout is plain script output (not an error envelope)', async () => {
     installStateAwareExecBinding(
       () => new FakeStateAwareExecBinding(18, 'oops\n', 'err\n', 0, { exitCode: 7, timedOut: false }),
@@ -768,104 +766,13 @@ describe('execInSandboxAsync', () => {
     );
   });
 
-  it('does not dispatch when AbortSignal is already aborted', async () => {
-    const ac = new AbortController();
-    ac.abort(new Error('cancelled before dispatch'));
-    let dispatchCount = 0;
-    _setStateAwareBindingSandboxProcessFactory(() => {
-      dispatchCount += 1;
-      throw new Error('must not dispatch');
-    });
-    const id = 'iso:abc' as SandboxId<'isolation_session'>;
-
-    await assert.rejects(
-      () => execInSandboxAsync(
-        id,
-        { process: { commandLine: 'echo hi' } },
-        { signal: ac.signal },
-      ),
-      /cancelled before dispatch/,
-    );
-    assert.strictEqual(dispatchCount, 0);
-  });
-
-  it('kills and disposes the live process when AbortSignal fires', async () => {
-    const ac = new AbortController();
-    const reason = new Error('cancelled by caller');
-    const exec = installStateAwareExecBinding(
-      () => new FakeStateAwareExecBinding(19, '', '', Number.MAX_SAFE_INTEGER),
-    );
-    const id = 'iso:abc' as SandboxId<'isolation_session'>;
-    const promise = execInSandboxAsync(
-      id,
-      { process: { commandLine: 'echo hi' } },
-      { signal: ac.signal },
-    );
-    ac.abort(reason);
-    await assert.rejects(promise, (error: unknown) => error === reason);
-    assert.strictEqual(exec.binding().killed, true);
-    assert.strictEqual(exec.binding().killCount, 1);
-    assert.strictEqual(exec.binding().freed, true);
-  });
-
-  it('cancels while stdout and stderr are still active', async () => {
-    const ac = new AbortController();
-    const exec = installStateAwareExecBinding(
-      () => new FakeStateAwareExecBinding(
-        20,
-        '',
-        '',
-        Number.MAX_SAFE_INTEGER,
-        { exitCode: 0, timedOut: false },
-        [],
-        false,
-      ),
-    );
-    const id = 'iso:abc' as SandboxId<'isolation_session'>;
-    const promise = execInSandboxAsync(
-      id,
-      { process: { commandLine: 'echo hi' } },
-      { signal: ac.signal },
-    );
-
-    ac.abort();
-    await assert.rejects(promise);
-    assert.strictEqual(exec.binding().standardOutput.destroyed, true);
-    assert.strictEqual(exec.binding().standardError.destroyed, true);
-    assert.strictEqual(exec.binding().killed, true);
-    assert.strictEqual(exec.binding().freed, true);
-  });
-
-  it('preserves the abort reason when native cancellation cleanup fails', async () => {
-    const ac = new AbortController();
-    const reason = new Error('cancelled by caller');
-    const binding = new FakeStateAwareExecBinding(
-      21,
-      '',
-      '',
-      Number.MAX_SAFE_INTEGER,
-    );
-    binding.killError = new Error('native kill failed');
-    const exec = installStateAwareExecBinding(() => binding);
-    const promise = execInSandboxAsync(
-      'iso:abc' as SandboxId<'isolation_session'>,
-      { process: { commandLine: 'echo hi' } },
-      { signal: ac.signal },
-    );
-
-    ac.abort(reason);
-    await assert.rejects(promise, (error: unknown) => error === reason);
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.strictEqual(exec.binding().killCount, 2);
-    assert.strictEqual(exec.binding().freed, true);
-  });
-
   it('rejects unsupported options', async () => {
     const id = 'iso:abc' as SandboxId<'isolation_session'>;
     for (const [option, value] of [
       ['executablePath', 'wxc-exec.exe'],
       ['skipPlatformCheck', true],
       ['inheritDefaultEnv', true],
+      ['signal', new AbortController().signal],
     ] as const) {
       await assert.rejects(
         () => execInSandboxAsync(
@@ -922,45 +829,82 @@ describe('execInSandbox', () => {
     });
   });
 
-  it('rejects experimental authorization on the stable high-level API', () => {
-    assert.throws(
-      () => execInSandbox(
-        'iso:abc' as SandboxId<'isolation_session'>,
-        { process: { commandLine: 'echo live' } },
-        { experimental: true },
-      ),
-      (err: unknown) =>
-        err instanceof MxcError &&
-        err.code === 'malformed_request' &&
-        err.message.includes("does not support option 'experimental'"),
+  it('forwards experimental authorization for live exec', async () => {
+    const exec = installStateAwareExecBinding(
+      () => new FakeStateAwareExecBinding(22, '', ''),
+>>>>>>> 958643653 (Complete V1 SDK request and lifecycle API migration)
     );
+    const proc = execInSandbox(
+      'iso:abc' as SandboxId<'isolation_session'>,
+      { process: { commandLine: 'echo live' } },
+      { experimental: true },
+    );
+    assert.strictEqual(exec.experimental(), true);
+    proc.dispose();
   });
-
   it('rejects dryRun because no live process exists', () => {
     const id = 'iso:abc' as SandboxId<'isolation_session'>;
     assert.throws(
       () => execInSandbox(
         id,
         { process: { commandLine: 'echo live' } },
-        { dryRun: true } as StateAwareStreamingOptions,
+        { dryRun: true },
       ),
       (err: unknown) => err instanceof MxcError && err.code === 'malformed_request' && /does not support dryRun/.test(err.message),
     );
   });
 
-  it('rejects AbortSignal because callers own the live process', () => {
-    const controller = new AbortController();
+  it('rejects options other than experimental and dryRun', () => {
     assert.throws(
       () => execInSandbox(
         'iso:abc' as SandboxId<'isolation_session'>,
         { process: { commandLine: 'echo done' } },
-        {
-          signal: controller.signal,
-        } as StateAwareStreamingOptions,
+        { signal: new AbortController().signal } as never,
       ),
       (err: unknown) => err instanceof MxcError
         && err.code === 'malformed_request'
-        && /call kill\(\)/.test(err.message),
+        && /does not support option 'signal'/.test(err.message),
+    );
+  });
+});
+
+describe('execInSandboxAttached', () => {
+  it('sends a typed exec envelope and returns the attached outcome', () => {
+    let actualRequest = '';
+    let actualExperimental = false;
+    _setBindingStateAwareAttachedImplementation((requestJson, experimental) => {
+      actualRequest = requestJson;
+      actualExperimental = experimental;
+      return { exitCode: 42, timedOut: false };
+    });
+
+    const outcome = execInSandboxAttached(
+      'iso:abc' as SandboxId<'isolation_session'>,
+      { process: { commandLine: 'cmd.exe /c exit 42' } },
+      { experimental: true },
+    );
+
+    assert.deepStrictEqual(outcome, { exitCode: 42, timedOut: false });
+    assert.strictEqual(actualExperimental, true);
+    assert.deepStrictEqual(JSON.parse(actualRequest), {
+      version: '1.0.0',
+      phase: 'exec',
+      sandboxId: 'iso:abc',
+      process: { commandLine: 'cmd.exe /c exit 42' },
+    });
+  });
+
+  it('rejects dryRun before dispatching an attached workload', () => {
+    assert.throws(
+      () => execInSandboxAttached(
+        'iso:abc' as SandboxId<'isolation_session'>,
+        { process: { commandLine: 'echo never runs' } },
+        { dryRun: true },
+      ),
+      (error: unknown) =>
+        error instanceof MxcError &&
+        error.code === 'malformed_request' &&
+        error.message.includes('does not support dryRun'),
     );
   });
 });

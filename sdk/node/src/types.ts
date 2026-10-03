@@ -165,7 +165,7 @@ export type ClipboardPolicy = "none" | "read" | "write" | "all";
 
 /**
  * Cross-platform UI configuration in ContainerConfig.
- * Mapped from ContainerPolicy.ui by the V1 request adapter.
+ * Mapped from ContainerRequest.ui by the V1 request adapter.
  */
 export interface UiConfig {
   /** Whether UI is disabled (no visible windows). Maps from !policy.ui.allowWindows. */
@@ -512,47 +512,16 @@ export function legacyConfigAliasUnsupportedReason(config: ContainerConfig): str
   return undefined;
 }
 
-/**
- * Cross-platform restrictions applied by a V1 container request.
- *
- * Policy describes what the caller wants restricted. Omitted fields use the
- * backend's default-deny posture where supported.
- */
-export type ContainerPolicy = {
-  /** Filesystem access restrictions */
-  filesystem?: {
-      /** Paths that are granted read and write access */
-      readwritePaths?: string[];
-      /** Paths that are granted read-only access */
-      readonlyPaths?: string[];
-      /** Paths that are explicitly denied all access */
-      deniedPaths?: string[];
-      /** Whether to clear the filesystem policy when the shell exits. (default: true) */
-      clearPolicyOnExit?: boolean;
-  };
-  /** Directional network access restrictions. */
-  network?: DirectionalNetworkConfig;
-  /** Runtime values supplied separately from sandbox policy. */
-  runtimeConfig?: RuntimeConfig;
-  /** Per-invocation telemetry opt-in, subject to consent and policy. */
-  telemetry?: TelemetryConfig;
-  /** ProcessContainer-specific policy fields honored by policy conversion. */
-  processContainer?: Pick<ProcessContainerConfig, 'filesystem' | 'network'>;
-  /** UI access restrictions. All flags default to denied. */
-  ui?: {
-      /** Whether the sandbox may create visible windows. (default: false) */
-      allowWindows?: boolean;
-      /** Clipboard access level. (default: "none") */
-      clipboard?: ClipboardPolicy;
-      /** Whether the sandbox may inject keyboard/mouse input. (default: false) */
-      allowInputInjection?: boolean;
-  };
-  /** Execution timeout in milliseconds. Omitted = no timeout. */
-  timeoutMs?: number;
+/** Per-operation controls for the V1 in-process APIs. */
+export interface MxcOptions {
+  /** Enable runtime-gated experimental behavior where supported. */
+  experimental?: boolean;
+  /** Validate a state-aware request without performing the operation. */
+  dryRun?: boolean;
 }
 
-/** Backend-specific settings carried by a V1 container request. */
-export type ContainerContainment =
+/** Backend-specific configuration selected by a V1 container request. */
+export type ContainerBackendConfig =
   | { type: 'process' }
   | { type: 'processcontainer'; config?: ProcessContainerConfig }
   | { type: 'wslc'; config?: WslcConfig }
@@ -563,15 +532,35 @@ export type ContainerContainment =
 
 /**
  * Complete one-shot request. The SDK selects its exact wire contract; callers
- * provide policy and workload intent rather than a raw versioned config.
+ * provide cross-backend restrictions and backend configuration rather than a
+ * raw versioned config.
  */
 export interface ContainerRequest {
-  /** Restrictions applied to the workload. */
-  policy: ContainerPolicy;
   /** Command line to execute. */
   command: string;
-  /** Backend intent, defaulting to the host's native process containment. */
-  containment?: ContainerContainment;
+  /** Filesystem access restrictions. Omitted paths remain restricted. */
+  filesystem?: {
+    readwritePaths?: string[];
+    readonlyPaths?: string[];
+    deniedPaths?: string[];
+    clearPolicyOnExit?: boolean;
+  };
+  /** Directional network access restrictions. */
+  network?: DirectionalNetworkConfig;
+  /** UI access restrictions. Omitted access remains denied. */
+  ui?: {
+    allowWindows?: boolean;
+    clipboard?: ClipboardPolicy;
+    allowInputInjection?: boolean;
+  };
+  /** Runtime values supplied separately from sandbox restrictions. */
+  runtimeConfig?: RuntimeConfig;
+  /** Per-invocation telemetry opt-in, subject to consent and policy. */
+  telemetry?: TelemetryConfig;
+  /** Execution timeout in milliseconds. Omitted = no timeout. */
+  timeoutMs?: number;
+  /** Backend configuration; defaults to the host's native process backend. */
+  containment?: ContainerBackendConfig;
   /** Optional caller-selected container name. */
   containerName?: string;
   /** Optional working directory inside the sandbox. */

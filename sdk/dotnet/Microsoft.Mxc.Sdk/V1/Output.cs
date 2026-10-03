@@ -14,7 +14,7 @@ public sealed class Output
     /// <summary>The process exit code (valid when <see cref="TimedOut"/> is false).</summary>
     public int ExitCode { get; init; }
 
-    /// <summary>True if the run hit its <see cref="ContainerPolicy.TimeoutMs"/> and was killed.</summary>
+    /// <summary>True if the run hit its <see cref="ContainerRequest.TimeoutMs"/> and was killed.</summary>
     public bool TimedOut { get; init; }
 
     /// <summary>Everything the sandboxed process wrote to stdout.</summary>

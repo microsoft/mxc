@@ -8,23 +8,15 @@
 
 #![cfg(all(target_os = "windows", feature = "isolation_session"))]
 
-use mxc_sdk::v1::policy::{ContainerPolicy, FilesystemSection, NetworkSection};
 use mxc_sdk::v1::{
-    build_request_with_containment, Containment, NetworkAction, NetworkEgressSection,
-    NetworkIngressSection,
+    ContainerRequest, Containment, FilesystemSection, NetworkAction, NetworkEgressSection,
+    NetworkIngressSection, NetworkSection,
 };
 use mxc_sdk::ErrorCode;
 
 /// The public one-shot API reaches IsolationSession with its required
 /// directional all-allow network posture.
-fn iso_policy() -> ContainerPolicy {
-    iso_policy_with_deadline(None)
-}
-
-/// The same policy with a workload deadline, for a test whose workload waits on
-/// the harness: if the handshake never lands, the deadline is what ends the run
-/// instead of the test waiting on a process that will not exit.
-fn iso_policy_with_deadline(timeout_ms: Option<u32>) -> ContainerPolicy {
+fn iso_request(command: &str, timeout_ms: Option<u32>) -> ContainerRequest {
     let mut egress = NetworkEgressSection::default();
     egress.default = Some(NetworkAction::Allow);
     let mut ingress = NetworkIngressSection::default();
@@ -34,10 +26,13 @@ fn iso_policy_with_deadline(timeout_ms: Option<u32>) -> ContainerPolicy {
     network.egress = Some(egress);
     network.ingress = Some(ingress);
 
-    let mut policy = ContainerPolicy::default();
-    policy.network = Some(network);
-    policy.timeout_ms = timeout_ms;
-    policy
+    let mut request = ContainerRequest::new(command);
+    request.set_network(network);
+    request.set_containment(Containment::IsolationSession);
+    if let Some(timeout_ms) = timeout_ms {
+        request.set_timeout_ms(timeout_ms);
+    }
+    request
 }
 
 fn host_supports_isolation_session() -> bool {
@@ -151,20 +146,13 @@ fn a_single_threaded_apartment_drives_the_full_lifecycle() {
 /// caller-fixable refusal into an opaque backend error.
 #[test]
 fn one_shot_refuses_an_unhonorable_policy_as_policy_validation() {
-    let mut policy = iso_policy();
-    policy.filesystem = Some(FilesystemSection {
+    let mut request = iso_request("echo unreachable", None);
+    request.set_filesystem(FilesystemSection {
         readwrite_paths: vec!["C:\\Windows\\Temp".to_string()],
         readonly_paths: vec![],
         denied_paths: vec![],
         clear_policy_on_exit: None,
     });
-    let request = build_request_with_containment(
-        &policy,
-        &Containment::IsolationSession,
-        "echo unreachable",
-        None,
-    )
-    .expect("building the request must succeed");
 
     let err = match mxc_sdk::v1::spawn(request) {
         Ok(_) => panic!("the policy must be refused"),
@@ -179,13 +167,7 @@ fn one_shot_refuses_an_unhonorable_policy_as_policy_validation() {
 
 #[test]
 fn one_shot_refuses_an_environment_it_cannot_launch_as_policy_validation() {
-    let mut request = build_request_with_containment(
-        &iso_policy(),
-        &Containment::IsolationSession,
-        "echo unreachable",
-        None,
-    )
-    .expect("building the request must succeed");
+    let mut request = iso_request("echo unreachable", None);
     request.set_env([("FOO", "bar")]);
 
     let err = match mxc_sdk::v1::spawn(request) {
@@ -203,13 +185,7 @@ fn one_shot_refuses_an_environment_it_cannot_launch_as_policy_validation() {
 #[test]
 fn one_shot_run_captures_output() {
     skip_unless_supported!();
-    let request = build_request_with_containment(
-        &iso_policy(),
-        &Containment::IsolationSession,
-        "echo marker-oneshot",
-        None,
-    )
-    .expect("building the request must succeed");
+    let request = iso_request("echo marker-oneshot", None);
 
     let output = mxc_sdk::v1::run(request).expect("one-shot run must reach the backend");
     assert_eq!(output.outcome, mxc_sdk::v1::WaitOutcome::Exited(0));
@@ -225,13 +201,7 @@ fn one_shot_run_captures_output() {
 #[test]
 fn one_shot_run_propagates_a_nonzero_exit() {
     skip_unless_supported!();
-    let request = build_request_with_containment(
-        &iso_policy(),
-        &Containment::IsolationSession,
-        "exit 7",
-        None,
-    )
-    .expect("building the request must succeed");
+    let request = iso_request("exit 7", None);
 
     let output = mxc_sdk::v1::run(request).expect("one-shot run must reach the backend");
     assert_eq!(output.outcome, mxc_sdk::v1::WaitOutcome::Exited(7));
@@ -316,13 +286,7 @@ fn concurrent_one_shot_runs_stay_isolated() {
                          & whoami & echo {marker}"
                     )
                 };
-                let request = build_request_with_containment(
-                    &iso_policy_with_deadline(Some(WORKLOAD_DEADLINE_MS)),
-                    &Containment::IsolationSession,
-                    &script,
-                    None,
-                )
-                .expect("building the request must succeed");
+                let request = iso_request(&script, Some(WORKLOAD_DEADLINE_MS));
 
                 let mut sandbox =
                     mxc_sdk::v1::spawn(request).expect("spawn must reach the backend");
@@ -529,13 +493,7 @@ fn concurrent_one_shot_runs_stay_isolated() {
 #[test]
 fn one_shot_finished_on_an_sta_thread_still_tears_down() {
     skip_unless_supported!();
-    let request = build_request_with_containment(
-        &iso_policy(),
-        &Containment::IsolationSession,
-        "ping -n 300 127.0.0.1",
-        None,
-    )
-    .expect("building the request must succeed");
+    let request = iso_request("ping -n 300 127.0.0.1", None);
 
     let mut sandbox = mxc_sdk::v1::spawn(request).expect("spawn must reach the backend");
 
@@ -555,13 +513,7 @@ fn one_shot_finished_on_an_sta_thread_still_tears_down() {
 #[test]
 fn one_shot_killed_on_an_sta_thread_impersonating_at_identification_level_stops_its_session() {
     skip_unless_supported!();
-    let request = build_request_with_containment(
-        &iso_policy(),
-        &Containment::IsolationSession,
-        "ping -n 300 127.0.0.1",
-        None,
-    )
-    .expect("building the request must succeed");
+    let request = iso_request("ping -n 300 127.0.0.1", None);
 
     let mut sandbox = mxc_sdk::v1::spawn(request).expect("spawn must reach the backend");
 
@@ -587,13 +539,7 @@ fn one_shot_killed_on_an_sta_thread_impersonating_at_identification_level_stops_
 #[test]
 fn an_abandoned_one_shot_handle_completes_teardown() {
     skip_unless_supported!();
-    let request = build_request_with_containment(
-        &iso_policy(),
-        &Containment::IsolationSession,
-        "ping -n 300 127.0.0.1",
-        None,
-    )
-    .expect("building the request must succeed");
+    let request = iso_request("ping -n 300 127.0.0.1", None);
 
     let sandbox = mxc_sdk::v1::spawn(request).expect("spawn must reach the backend");
 
@@ -618,13 +564,10 @@ fn one_shot_kill_stops_the_workload() {
     skip_unless_supported!();
     // Long enough that a prompt EOF proves the kill worked, rather than racing
     // a workload that was about to exit anyway.
-    let request = build_request_with_containment(
-        &iso_policy(),
-        &Containment::IsolationSession,
+    let request = iso_request(
         "for /l %i in (1,1,300) do (echo beat & ping -n 2 127.0.0.1 >nul)",
         None,
-    )
-    .expect("building the request must succeed");
+    );
 
     let mut sandbox = mxc_sdk::v1::spawn(request).expect("spawn must reach the backend");
     let stdout = sandbox.take_stdout().expect("stdout must be available");

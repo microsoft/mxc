@@ -176,6 +176,47 @@ public static class MxcLifecycle
     }
 
     /// <summary>
+    /// Run an exec request attached to this process's standard streams.
+    /// Both stdin and stdout must be terminals.
+    /// </summary>
+    public static WaitOutcome ExecInSandboxAttached(ContainerId id, ExecRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var requestBuf = ToNullTerminatedUtf8(BuildExecEnvelope(id, request).ToJsonString());
+
+        unsafe
+        {
+            fixed (byte* requestPtr = requestBuf)
+            {
+                MxcExecOutcome outcome = default;
+                MxcErrorDetail error = default;
+                var status = NativeMethods.mxc_exec_state_aware_attached_json(
+                    requestPtr,
+                    ExperimentalOptInFor(id),
+                    &outcome,
+                    &error);
+                try
+                {
+                    if (status != (int)ErrorCode.Success)
+                    {
+                        throw NativeError.ToException(status, error, "unknown error");
+                    }
+
+                    return new WaitOutcome
+                    {
+                        ExitCode = outcome.exit_code,
+                        TimedOut = outcome.timed_out != 0,
+                    };
+                }
+                finally
+                {
+                    NativeMethods.mxc_error_detail_free(&error);
+                }
+            }
+        }
+    }
+
+    /// <summary>
     /// Validate an exec request without starting a process.
     /// </summary>
     public static void DryRunExecInContainer(
