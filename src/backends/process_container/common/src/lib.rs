@@ -56,6 +56,19 @@ pub use secenv::{
     SecurityEnvironmentExportReport, SecurityEnvironmentStartupInfo,
     PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
 };
+
+#[cfg(target_os = "windows")]
+pub(crate) fn validate_process_container_stdio(
+    stdio: wxc_common::sandbox_process::StdioMode,
+) -> Result<(), wxc_common::models::ScriptResponse> {
+    if matches!(stdio, wxc_common::sandbox_process::StdioMode::Pty(_)) {
+        return Err(wxc_common::models::ScriptResponse::rejected(
+            "ProcessContainer does not support caller-controlled PTY spawning",
+        ));
+    }
+    Ok(())
+}
+
 /// Working-directory resolution for both Windows launch paths. Deliberately
 /// **not** `cfg`-gated: the mapping is pure, and keeping it portable means its
 /// regression tests (notably "never resolve to a `NULL` cwd") run on every CI
@@ -69,3 +82,17 @@ pub mod working_directory;
 /// binary).
 #[cfg(all(test, target_os = "windows"))]
 pub(crate) mod test_env;
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use wxc_common::sandbox_process::{PtySize, StdioMode};
+
+    #[test]
+    fn process_container_rejects_pty_stdio() {
+        assert!(
+            super::validate_process_container_stdio(StdioMode::Pty(PtySize::default())).is_err()
+        );
+        assert!(super::validate_process_container_stdio(StdioMode::Pipes).is_ok());
+        assert!(super::validate_process_container_stdio(StdioMode::Inherit).is_ok());
+    }
+}

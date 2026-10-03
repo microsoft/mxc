@@ -592,7 +592,7 @@ impl IsolationPtyProcess {
                 .push(format!("terminating the PTY workload was refused: {error}"));
         }
         let outcome = session.reclaim("kill");
-        if termination.is_ok() && outcome.session_stopped == Some(true) {
+        if outcome.session_stopped == Some(true) {
             return Ok(());
         }
         termination?;

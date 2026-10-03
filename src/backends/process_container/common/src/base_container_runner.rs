@@ -1193,6 +1193,7 @@ impl SandboxBackend for BaseContainerRunner {
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
         use wxc_common::validator::validate_common;
 
+        crate::validate_process_container_stdio(stdio)?;
         validate_common(request)?;
         self.validate(request)?;
 
