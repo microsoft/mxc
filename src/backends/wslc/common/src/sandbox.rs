@@ -63,7 +63,7 @@ impl SandboxBackend for WSLContainerRunner {
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
         if matches!(stdio, StdioMode::Pty(_)) {
             return Err(ScriptResponse::rejected(
-                "WSLC does not support caller-owned PTY spawning",
+                "WSLC does not support caller-controlled PTY spawning",
             ));
         }
         // The run-to-completion path gets these through `ScriptRunner::run`;

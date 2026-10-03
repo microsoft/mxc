@@ -43,7 +43,7 @@ public interface ISandboxRunner
     /// <summary>Spawn a complete request with live standard streams.</summary>
     ISandboxProcess Spawn(SandboxRequest request);
 
-    /// <summary>Spawn a policy and command with a caller-owned pseudo-terminal.</summary>
+    /// <summary>Spawn a policy and command with a caller-controlled pseudo-terminal.</summary>
     MxcPty SpawnWithPty(
         SandboxPolicy policy,
         string command,
@@ -51,7 +51,7 @@ public interface ISandboxRunner
         throw new NotSupportedException(
             "This sandbox runner does not implement PTY spawning.");
 
-    /// <summary>Spawn a complete request with a caller-owned pseudo-terminal.</summary>
+    /// <summary>Spawn a complete request with a caller-controlled pseudo-terminal.</summary>
     MxcPty SpawnWithPty(
         SandboxRequest request,
         MxcPtySize? size = null) =>
@@ -150,7 +150,7 @@ public interface ISandboxLifecycle
         string command,
         StateAwareExecOptions? options = null);
 
-    /// <summary>Spawn a process in the container with a caller-owned pseudo-terminal.</summary>
+    /// <summary>Spawn a process in the container with a caller-controlled pseudo-terminal.</summary>
     MxcPty SpawnInContainerWithPty(
         SandboxId id,
         string command,

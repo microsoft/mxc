@@ -16,7 +16,7 @@ import {
   nodeStreamFactory,
   type NativeStreamFactory,
 } from './native-stdio.js';
-import type { RequestSpec } from './request.js';
+import type { OneShotRequest } from '../generated/v1_0_0/wire.js';
 import {
   createNativeLifecycleDriver,
   getStreamingNative,
@@ -32,6 +32,7 @@ const AbiPtySandbox = koffi.opaque('MxcPtySandbox');
 export interface PtyNativeFacade {
   spawnPty(
     request: string,
+    experimental: number,
     rows: number,
     columns: number,
     outHandle: Pointer[],
@@ -54,15 +55,17 @@ function bindPtyNativeFacade(handle: NativeLibraryHandle): PtyNativeFacade {
   const sandboxPointer = koffi.pointer(AbiPtySandbox);
   const spawn = bindNativeFunction<KoffiFunc<(
     request: string,
+    experimental: number,
     rows: number,
     columns: number,
     outHandle: Pointer[],
     error: AbiErrorDetail,
   ) => number>>(handle, {
-    symbol: 'mxc_spawn_pty_request',
+    symbol: 'mxc_spawn_pty_json',
     result: 'int32_t',
     parameters: [
       'const char *',
+      'int32_t',
       'uint16_t',
       'uint16_t',
       koffi.out(koffi.pointer(AbiPtySandbox, 2)),
@@ -89,8 +92,8 @@ function bindPtyNativeFacade(handle: NativeLibraryHandle): PtyNativeFacade {
     ],
   });
   return {
-    spawnPty(request, rows, columns, outHandle, error, completion) {
-      spawn.async(request, rows, columns, outHandle, error, completion);
+    spawnPty(request, experimental, rows, columns, outHandle, error, completion) {
+      spawn.async(request, experimental, rows, columns, outHandle, error, completion);
     },
     execPty(
       request,
@@ -131,7 +134,8 @@ function throwIfFailed(status: number, message: string): void {
 
 /** Internal constructor with injectable native and stream dependencies. */
 export async function createPty(
-  request: RequestSpec,
+  request: OneShotRequest,
+  experimental: boolean,
   rows: number,
   columns: number,
   ptyNative: PtyNativeFacade,
@@ -140,11 +144,12 @@ export async function createPty(
 ): Promise<MxcPty> {
   const requestJson = JSON.stringify(request);
   return createPtyFromJson(
-    request.policy.timeoutMs,
+    request.process.timeout,
     rows,
     columns,
     (outHandle, error, completion) => ptyNative.spawnPty(
       requestJson,
+      experimental ? 1 : 0,
       rows,
       columns,
       outHandle,
@@ -251,12 +256,14 @@ export function execStateAwareBindingSandboxWithPty(
 }
 
 function spawnBindingSandboxWithPtyNative(
-  request: RequestSpec,
+  request: OneShotRequest,
+  experimental: boolean,
   rows: number,
   columns: number,
 ): Promise<MxcPty> {
   return createPty(
     request,
+    experimental,
     rows,
     columns,
     getPtyNative(),
@@ -266,7 +273,8 @@ function spawnBindingSandboxWithPtyNative(
 }
 
 type SpawnPtyImplementation = (
-  request: RequestSpec,
+  request: OneShotRequest,
+  experimental: boolean,
   rows: number,
   columns: number,
 ) => Promise<MxcPty>;
@@ -281,9 +289,10 @@ export function _setSpawnBindingSandboxWithPtyImplementation(
 }
 
 export function spawnBindingSandboxWithPty(
-  request: RequestSpec,
+  request: OneShotRequest,
+  experimental: boolean,
   rows: number,
   columns: number,
 ): Promise<MxcPty> {
-  return spawnPtyImplementation(request, rows, columns);
+  return spawnPtyImplementation(request, experimental, rows, columns);
 }

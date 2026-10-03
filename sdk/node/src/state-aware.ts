@@ -373,7 +373,7 @@ export function execInSandbox<C extends PipedExecBackend>(
 }
 
 /**
- * Spawns a process inside an existing container with a caller-owned PTY.
+ * Spawns a process inside an existing container with a caller-controlled PTY.
  */
 export function spawnInContainerWithPty<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,

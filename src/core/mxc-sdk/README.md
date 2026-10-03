@@ -412,7 +412,7 @@ state-aware container lifecycle under `mxc_sdk::v1::container`:
 - `v1::container::start`, `v1::container::stop`, and `v1::container::deprovision` return a
   `LifecycleResult`;
 - `v1::container::exec` returns a live streaming `Sandbox`;
-- `v1::container::spawn_in_container_with_pty` returns a caller-owned `MxcPty`;
+- `v1::container::spawn_in_container_with_pty` returns a caller-controlled `MxcPty`;
 - `v1::container::exec_attached` attaches the workload to this process's stdio and
   returns a `WaitOutcome`;
 - `v1::container::validate_*` validates the matching operation without executing it.

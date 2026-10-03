@@ -26,6 +26,7 @@ class FakePtyNative implements PtyNativeFacade, LifecycleNativeFacade {
 
   spawnPty(
     _request: string,
+    _experimental: number,
     rows: number,
     columns: number,
     outHandle: unknown[],
@@ -47,7 +48,7 @@ class FakePtyNative implements PtyNativeFacade, LifecycleNativeFacade {
     _error: unknown,
     completion: (error: Error | null, status: number) => void,
   ): void {
-    this.spawnPty('', rows, columns, outHandle, _error, completion);
+    this.spawnPty('', 0, rows, columns, outHandle, _error, completion);
   }
 
   id(): number {
@@ -139,12 +140,11 @@ describe('PTY native binding', () => {
     const streams = new FakeStreams();
     const terminal = await createPty(
       {
-        policy: {},
-        command: 'cmd',
-        containment: { type: 'process' },
-        inheritDefaultEnv: false,
-        experimental: false,
+        version: '1.0.0',
+        process: { commandLine: 'cmd' },
+        containment: 'process',
       },
+      false,
       30,
       100,
       native,

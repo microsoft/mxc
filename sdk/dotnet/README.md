@@ -986,7 +986,7 @@ state-aware exec (currently IsolationSession and WSLC), their wait results repor
 one-shot execution. WSLC exposes stdout and stderr but no stdin because the
 WSLC SDK provides no process-input API.
 
-`SpawnInContainerWithPty` returns a caller-owned terminal with merged output,
+`SpawnInContainerWithPty` returns a caller-controlled terminal with merged output,
 writable input, resize, waiting, timeout, and termination. Backend support is
 determined by native dispatch:
 

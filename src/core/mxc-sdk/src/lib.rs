@@ -210,17 +210,20 @@ pub mod v1 {
             validate_exec, validate_provision, validate_start, validate_stop,
         };
 
+        use crate::state_aware_sdk::{ExecRequest, OperationOptions, SandboxId};
         use crate::{Error, MxcPty, MxcPtySize};
-        use mxc_engine::{ExecRequest, OperationOptions, SandboxId};
 
-        /// Spawn a process in an existing container with a caller-owned PTY.
+        /// Spawn a process in an existing container with a caller-controlled PTY.
         pub fn spawn_in_container_with_pty(
             sandbox_id: &SandboxId,
             request: ExecRequest,
             size: MxcPtySize,
             options: OperationOptions,
         ) -> Result<MxcPty, Error> {
-            mxc_engine::exec_pty_request(sandbox_id, request, size.into(), options)
+            let input = request
+                .into_sdk_input(sandbox_id, options.telemetry_opt_in)
+                .map_err(Error::from)?;
+            mxc_engine::exec_typed_state_aware_pty_request(input, options.experimental, size.into())
                 .and_then(MxcPty::new)
         }
     }
@@ -238,7 +241,7 @@ pub mod v1 {
         StateAwareExecBackendOptions, StateAwareProvision, ValidationResult,
     };
 
-    use crate::{Error, ErrorCode, MxcPty, MxcPtySize, Output, Sandbox};
+    use crate::{Error, MxcPty, MxcPtySize, Output, Sandbox};
 
     /// Probe an optional ProcessContainer request without creating a sandbox.
     ///
@@ -261,7 +264,7 @@ pub mod v1 {
 
     /// Spawn a sandboxed process attached to an MXC-owned pseudo-terminal.
     pub fn spawn_with_pty(request: SandboxRequest, size: MxcPtySize) -> Result<MxcPty, Error> {
-        mxc_engine::spawn_with_pty(&request, size.into()).and_then(MxcPty::new)
+        mxc_engine::spawn_with_pty(&request.inner, size.into()).and_then(MxcPty::new)
     }
 
     /// Run a sandbox from a [`SandboxRequest`] **to completion**, capturing its
@@ -306,6 +309,18 @@ pub mod v1 {
 /// is never read from the JSON.
 pub fn spawn_sandbox_json(request_json: &str, experimental: bool) -> Result<Sandbox, Error> {
     mxc_engine::spawn_one_shot_json(request_json, experimental).map(Sandbox::new)
+}
+
+/// Spawn a raw exact-version one-shot JSON request attached to an MXC-owned PTY.
+///
+/// The JSON and `experimental` rules match [`spawn_sandbox_json`].
+pub fn spawn_with_pty_json(
+    request_json: &str,
+    experimental: bool,
+    size: MxcPtySize,
+) -> Result<MxcPty, Error> {
+    mxc_engine::spawn_one_shot_pty_json(request_json, experimental, size.into())
+        .and_then(MxcPty::new)
 }
 
 /// Run a raw exact-version one-shot JSON request to completion, capturing its
@@ -376,7 +391,7 @@ pub fn exec_sandbox_json(request_json: &str, experimental: bool) -> Result<Sandb
     mxc_engine::exec_state_aware_json(request_json, experimental).map(Sandbox::new)
 }
 
-/// Run a raw exact-JSON state-aware exec request with a caller-owned PTY.
+/// Run a raw exact-JSON state-aware exec request with a caller-controlled PTY.
 pub fn spawn_in_container_with_pty_json(
     request_json: &str,
     size: MxcPtySize,

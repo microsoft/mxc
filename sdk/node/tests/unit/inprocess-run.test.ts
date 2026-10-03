@@ -60,7 +60,7 @@ describe('in-process async run routing', () => {
     let bindingRows = 0;
     let bindingColumns = 0;
     _setSpawnBindingSandboxWithPtyImplementation(
-      async (request, rows, columns) => {
+      async (request, _experimental, rows, columns) => {
         bindingRequest = request;
         bindingRows = rows;
         bindingColumns = columns;

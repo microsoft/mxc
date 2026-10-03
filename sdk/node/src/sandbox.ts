@@ -659,13 +659,12 @@ export async function spawnWithPty(
     );
   }
 
-  const request = prepareRequestSpec(config, {
+  const request = prepareOneShotRequest(config, {
     workingDirectory,
     env,
     inheritDefaultEnv: options.inheritDefaultEnv,
-    experimental: options.experimental,
   });
-  return spawnBindingSandboxWithPty(request, rows, columns);
+  return spawnBindingSandboxWithPty(request, options.experimental ?? false, rows, columns);
 }
 
 /**

@@ -165,7 +165,7 @@ internal static class Program
         }
     }
 
-    // Attach the caller-owned PTY to this process's console by relaying its
+    // Attach the caller-controlled PTY to this process's console by relaying its
     // streams and forwarding console input, control characters, and resize events.
     private static SandboxWaitResult AttachToCurrentConsole(MxcPty terminal)
     {

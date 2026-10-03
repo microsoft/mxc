@@ -304,7 +304,7 @@ pub trait StatefulSandboxBackend {
         stdio: ExecStdio,
     ) -> Result<ExecHandle, MxcError>;
 
-    /// Optional caller-owned PTY form of `exec`.
+    /// Optional caller-controlled PTY form of `exec`.
     fn exec_pty(
         &mut self,
         _sandbox_id: &str,

@@ -550,7 +550,7 @@ all-allow shape shown above; legacy fields are rejected. Rules,
 proxies, mixed postures, and omission are rejected. The other lifecycle phases
 remain available for every state-aware backend.
 
-`spawnInContainerWithPty` is the caller-owned interactive terminal API for an
+`spawnInContainerWithPty` is the caller-controlled interactive terminal API for an
 existing container. It exposes merged terminal output, writable input, resize,
 waiting, timeout, and termination. Backend support is determined by native
 dispatch.

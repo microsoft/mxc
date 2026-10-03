@@ -115,9 +115,18 @@ pub fn spawn_one_shot_json(
     experimental: bool,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
+    let request = parse_one_shot_json(request_json, experimental, &mut logger)?;
+    spawn_execution_request_with_logger(&request, logger)
+}
+
+fn parse_one_shot_json(
+    request_json: &str,
+    experimental: bool,
+    logger: &mut Logger,
+) -> Result<ExecutionRequest, Error> {
     let mut request = match wxc_common::config_parser::load_mxc_request_from_json(
         request_json,
-        &mut logger,
+        logger,
     )
     .map_err(state_aware::parse_error_to_mxc)
     .map_err(Error::from)?
@@ -130,7 +139,7 @@ pub fn spawn_one_shot_json(
         }
     };
     request.experimental_enabled = experimental;
-    spawn_execution_request_with_logger(&request, logger)
+    Ok(request)
 }
 
 fn spawn_execution_request_with_logger(
@@ -185,11 +194,22 @@ fn spawn_execution_request_with_logger(
 
 /// Spawn a sandbox attached to an MXC-owned pseudo-terminal.
 pub fn spawn_with_pty(
-    request: &SandboxRequest,
+    request: &ExecutionRequest,
     size: wxc_common::sandbox_process::PtySize,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
-    dispatch::spawn_pty_runner(&request.inner, &mut logger, size).map_err(Error::from)
+    dispatch::spawn_pty_runner(request, &mut logger, size).map_err(Error::from)
+}
+
+/// Spawn a raw exact-version one-shot JSON request attached to an MXC-owned PTY.
+pub fn spawn_one_shot_pty_json(
+    request_json: &str,
+    experimental: bool,
+    size: wxc_common::sandbox_process::PtySize,
+) -> Result<Box<dyn SandboxProcess>, Error> {
+    let mut logger = Logger::new(Mode::Buffer);
+    let request = parse_one_shot_json(request_json, experimental, &mut logger)?;
+    dispatch::spawn_pty_runner(&request, &mut logger, size).map_err(Error::from)
 }
 
 pub(crate) struct TelemetryRegistration {

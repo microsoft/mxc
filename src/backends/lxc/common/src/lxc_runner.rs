@@ -1180,7 +1180,7 @@ impl LxcScriptRunner {
             }
             StdioMode::Pty(_) => {
                 return Err(ScriptResponse::rejected(
-                    "LXC does not support caller-owned PTY spawning",
+                    "LXC does not support caller-controlled PTY spawning",
                 ));
             }
             StdioMode::Pipes => {}

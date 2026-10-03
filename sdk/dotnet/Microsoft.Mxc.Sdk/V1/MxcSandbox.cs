@@ -371,8 +371,9 @@ public static class MxcSandbox
             {
                 NativeSandbox* handle = null;
                 MxcErrorDetail error = default;
-                var status = NativeMethods.mxc_spawn_pty_request(
+                var status = NativeMethods.mxc_spawn_pty_json(
                     requestPtr,
+                    NoExperimentalOptIn,
                     terminalSize.Rows,
                     terminalSize.Columns,
                     &handle,

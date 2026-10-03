@@ -22,7 +22,7 @@
 //!
 //! The exec entry points take the **same** request JSON and differ only in
 //! where the workload's stdio goes: relayed onto this process's console,
-//! handed back as ordinary pipes, or handed back as a caller-owned PTY.
+//! handed back as ordinary pipes, or handed back as a caller-controlled PTY.
 //!
 //! As elsewhere in this crate, every entry point is [`catch_unwind`]-wrapped,
 //! strings in/out are UTF-8 NUL-terminated, and owned out-pointers must be
@@ -279,7 +279,7 @@ pub unsafe extern "C" fn mxc_exec_state_aware_json(
     unsafe { crate::streaming::finish_spawn(outcome, out_handle, out_error) }
 }
 
-/// Run a state-aware exec request with a caller-owned pseudo-terminal.
+/// Run a state-aware exec request with a caller-controlled pseudo-terminal.
 ///
 /// # Safety
 /// The pointer and ownership requirements are identical to

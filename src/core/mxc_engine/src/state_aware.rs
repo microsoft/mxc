@@ -915,7 +915,7 @@ pub fn exec_state_aware_json(
     exec_state_aware_parsed(parsed, &mut logger)
 }
 
-/// Run a raw state-aware exec request with a caller-owned PTY.
+/// Run a raw state-aware exec request with a caller-controlled PTY.
 pub fn exec_state_aware_pty_json(
     request_json: &str,
     experimental: bool,

@@ -179,7 +179,7 @@ public static class MxcLifecycle
     }
 
     /// <summary>
-    /// Spawn a process in a started container with a caller-owned PTY.
+    /// Spawn a process in a started container with a caller-controlled PTY.
     /// </summary>
     public static MxcPty SpawnInContainerWithPty(
         SandboxId id,
@@ -215,7 +215,10 @@ public static class MxcLifecycle
                 {
                     try
                     {
-                        throw NativeError.ToException(status, error, "unknown error");
+                        throw NativeError.ToException(
+                            status,
+                            error,
+                            "spawning process with PTY failed");
                     }
                     finally
                     {
