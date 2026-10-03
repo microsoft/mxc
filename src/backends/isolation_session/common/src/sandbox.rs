@@ -15,13 +15,16 @@
 
 use std::fmt::Write as _;
 use std::io::{Read, Write};
-use std::os::windows::io::{BorrowedHandle, RawHandle};
+use std::os::windows::io::{BorrowedHandle, IntoRawHandle, RawHandle};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, FailurePhase, ScriptResponse};
 use wxc_common::mxc_error::MxcError;
+use wxc_common::process_util::{
+    InterruptiblePipeReader, OwnedHandle as ProcessOwnedHandle, PipeReadCanceller,
+};
 use wxc_common::sandbox_process::{
     NativeStdio, OwnedPipe, PtySize, SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
 };
@@ -35,6 +38,7 @@ use super::manager::{
 };
 use super::process_options::{build_process_options, with_service_timeout_grace};
 use super::IsolationSessionRunner;
+use windows::Win32::Foundation::HANDLE;
 
 /// Why a one-shot launch failed, with the two classes kept apart so a caller
 /// maps each without parsing prose.
@@ -230,6 +234,9 @@ fn start_pty_process(
             cleanup,
         ));
     }
+    if let Err(error) = release_pty_start_gate(&process) {
+        return Err(with_pty_setup_cleanup(error, &process, cleanup));
+    }
 
     let waiter_process = Arc::clone(&process);
     let waiter = std::thread::Builder::new()
@@ -249,6 +256,20 @@ fn start_pty_process(
             )
         })?;
     Ok((process, waiter))
+}
+
+fn release_pty_start_gate(process: &ClosingProcess) -> Result<(), MxcError> {
+    let input = IsolationPtyProcess::duplicate_pipe(process.stdin, "input")
+        .map_err(|error| MxcError::backend_error(error.to_string()))?;
+    let mut input = std::fs::File::from(input);
+    input
+        .write_all(b"\r\n")
+        .and_then(|()| input.flush())
+        .map_err(|error| {
+            MxcError::backend_error(format!(
+                "failed to release the IsolationSession PTY start gate: {error}"
+            ))
+        })
 }
 
 fn with_pty_setup_cleanup(
@@ -585,6 +606,14 @@ impl IsolationPtyProcess {
         Ok(input)
     }
 
+    fn clone_output_reader(&self) -> std::io::Result<(InterruptiblePipeReader, PipeReadCanceller)> {
+        let output = Self::duplicate_pipe(self.process.stdout, "output")?;
+        let raw = output.into_raw_handle();
+        let reader = InterruptiblePipeReader::new(ProcessOwnedHandle::new(HANDLE(raw)));
+        let closer = reader.canceller();
+        Ok((reader, closer))
+    }
+
     fn join_waiter(&mut self) -> std::io::Result<ExecOutcome> {
         if let Some(outcome) = self.outcome {
             return Ok(outcome);
@@ -682,8 +711,15 @@ impl SandboxProcess for IsolationPtyProcess {
     }
 
     fn pty_clone_reader(&self) -> std::io::Result<Box<dyn Read + Send>> {
-        let output = Self::duplicate_pipe(self.process.stdout, "output")?;
-        Ok(Box::new(std::fs::File::from(output)))
+        let (reader, _) = self.clone_output_reader()?;
+        Ok(Box::new(reader))
+    }
+
+    fn pty_clone_reader_with_closer(
+        &self,
+    ) -> std::io::Result<(Box<dyn Read + Send>, Option<Box<dyn StreamCloser>>)> {
+        let (reader, closer) = self.clone_output_reader()?;
+        Ok((Box::new(reader), Some(Box::new(closer))))
     }
 
     fn pty_take_writer(&self) -> std::io::Result<Box<dyn Write + Send>> {

@@ -679,9 +679,16 @@ It never fails: any unreadable or unrecognized value reads back as
 
 ## Pty allocation
 
-Every entry point except `exec_attached` wires the child's stdio to ordinary
-pipes and allocates no pty; output the caller does not take is drained and
-discarded by `wait()`.
+`v1::spawn_with_pty` and `v1::container::spawn_in_container_with_pty` allocate
+a backend-owned pseudo-terminal and return a caller-controlled
+`MxcPtyProcess`. IsolationSession is currently the only supporting backend.
+Untaken terminal input is closed by `wait()`, and untaken merged output is
+drained and discarded without waiting indefinitely for descendants that keep
+the terminal open.
+
+Other streaming entry points wire the child's stdio to ordinary pipes and
+allocate no pty; output the caller does not take is drained and discarded by
+`wait()`.
 
 Under `exec_attached`, IsolationSession allocates a pseudo-console and forwards
 stdin, so interactive shells render and resize. A pseudo-console has one output

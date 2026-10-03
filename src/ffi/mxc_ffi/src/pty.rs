@@ -16,10 +16,14 @@ use crate::{
 const INVALID_PTY_DIMENSIONS: &str = "PTY rows and columns must be between 1 and 32767";
 
 fn validate_pty_dimensions(rows: u16, cols: u16) -> Result<(), i32> {
-    if rows == 0 || cols == 0 || rows > i16::MAX as u16 || cols > i16::MAX as u16 {
-        return Err(MXC_STATUS_MALFORMED_REQUEST);
+    MxcPtySize {
+        rows,
+        cols,
+        pixel_width: 0,
+        pixel_height: 0,
     }
-    Ok(())
+    .validate()
+    .map_err(|_| MXC_STATUS_MALFORMED_REQUEST)
 }
 
 /// Spawn an exact-version one-shot JSON request attached to an MXC-owned PTY.
@@ -97,10 +101,11 @@ pub unsafe extern "C" fn mxc_spawn_pty_json(
 ///
 /// # Safety
 /// `handle` must be a live handle returned by [`mxc_spawn_pty_json`] or
-/// [`crate::mxc_state_aware_exec_pty`].
+/// [`crate::mxc_state_aware_exec_pty`], and this call must be serialized with
+/// every other operation on that handle.
 #[no_mangle]
 pub unsafe extern "C" fn mxc_sandbox_pty_resize(
-    handle: *const MxcSandbox,
+    handle: *mut MxcSandbox,
     rows: u16,
     cols: u16,
 ) -> i32 {

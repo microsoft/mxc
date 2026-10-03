@@ -252,9 +252,10 @@ One-shot calls carry `containerId` (when present); they do not carry `sandboxId`
 
 ## 6. TypeScript SDK
 
-The SDK adds five new functions, exported from `@microsoft/mxc-sdk/v1`
-alongside the existing v1 one-shot entry points. Each function corresponds to a
-lifecycle phase from §4. The
+The SDK adds five lifecycle functions plus
+`spawnInContainerWithPty`, exported from `@microsoft/mxc-sdk/v1` alongside the
+existing v1 one-shot entry points. Each lifecycle function corresponds to a
+phase from §4. The
 state-aware surface does not use `SandboxPolicy` — its cross-cutting fields live
 directly on the per-(backend, phase) Configs introduced below.
 
@@ -445,6 +446,13 @@ function execInSandboxAsync<C extends 'isolation_session' | 'wslc'>(
   options?: SandboxSpawnOptions,
 ): Promise<ExecResult>;
 
+function spawnInContainerWithPty(
+  sandboxId: SandboxId<'isolation_session'>,
+  config: IsolationSessionExecConfig,
+  size?: MxcPtySize,
+  options?: StateAwareStreamingOptions,
+): MxcPtyProcess;
+
 function stopSandbox<C extends StateAwareContainmentBackend>(
   sandboxId: SandboxId<C>,
   config?: StopConfigFor<C>,
@@ -463,6 +471,11 @@ For IsolationSession and WSLC, `execInSandbox` returns an owning
 IsolationSession also exposes stdin; WSLC currently exposes stdout/stderr only.
 `execInSandboxAsync` is a buffered convenience that accumulates output and
 resolves on exit.
+
+`spawnInContainerWithPty` is IsolationSession-only. It establishes the
+requested terminal dimensions before releasing the workload, then returns an
+owning `MxcPtyProcess` with merged output, caller-driven input, resize, wait,
+timeout, termination, and disposal.
 
 `provisionSandbox` takes `containment` as its first argument, binding the backend choice
 into the returned `SandboxId<C>`. Subsequent calls (`startSandbox`, `execInSandbox` /

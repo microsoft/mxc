@@ -267,7 +267,7 @@ impl LiveSandbox for PtySandbox {
     }
 
     fn stdout_closer(&self) -> Option<StreamCloser> {
-        None
+        self.inner.stdout_closer()
     }
 
     fn stderr_closer(&self) -> Option<StreamCloser> {

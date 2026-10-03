@@ -79,9 +79,24 @@ pub(super) fn build_process_options(
     let system_drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
     let process_path = format!(r"{}\Windows\System32\cmd.exe", system_drive);
 
+    let arguments = if interactive {
+        // Hold the caller's command behind one line of stdin. The PTY spawn
+        // path resizes the service-owned ConPTY, then writes that line before
+        // returning the handle, so user code cannot observe the service's
+        // default dimensions or run after a failed initial resize. `ver`
+        // restores a successful ERRORLEVEL after the intentionally blank
+        // `set /p` input without producing output.
+        format!(
+            r#"/d /q /c set /p "__mxc_pty_start_gate=" & ver >nul & {}"#,
+            request.script_code
+        )
+    } else {
+        format!("/c {}", request.script_code)
+    };
+
     ProcessOptions {
         process_path,
-        arguments: format!("/c {}", request.script_code),
+        arguments,
         timeout_ms: request.script_timeout,
         working_directory: request.working_directory.clone(),
         env_vars,
@@ -216,6 +231,20 @@ mod tests {
             opts.process_path
         );
         assert_eq!(opts.arguments, "/c echo hello");
+    }
+
+    #[test]
+    fn interactive_options_gate_the_command_until_the_initial_resize() {
+        let request = ExecutionRequest {
+            script_code: "echo hello".to_string(),
+            ..Default::default()
+        };
+        let opts = build_process_options(&request, true);
+
+        assert_eq!(
+            opts.arguments,
+            r#"/d /q /c set /p "__mxc_pty_start_gate=" & ver >nul & echo hello"#
+        );
     }
 
     #[test]

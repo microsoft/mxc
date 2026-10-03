@@ -8,6 +8,7 @@
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::state_aware_sdk::{
     lifecycle_sdk_input, ExecRequest, LifecycleResult, OperationOptions, ProvisionRequest,
@@ -247,6 +248,7 @@ pub struct MxcPtyProcess {
     process: SharedPtyProcess,
     reader_taken: Arc<AtomicBool>,
     writer_taken: Arc<AtomicBool>,
+    reader_closers: Arc<Mutex<Vec<StreamCloser>>>,
 }
 
 impl std::fmt::Debug for MxcPtyProcess {
@@ -259,6 +261,21 @@ impl std::fmt::Debug for MxcPtyProcess {
 }
 
 type SharedPtyProcess = Arc<Mutex<Box<dyn SandboxProcess>>>;
+
+#[derive(Clone)]
+struct PtyReaderCloserGroup(Arc<Mutex<Vec<StreamCloser>>>);
+
+impl InnerCloser for PtyReaderCloserGroup {
+    fn close(&self) {
+        let closers = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for closer in closers.iter() {
+            closer.close();
+        }
+    }
+}
 
 impl MxcPtyProcess {
     pub(crate) fn new(process: Box<dyn SandboxProcess>) -> Result<Self, Error> {
@@ -275,6 +292,7 @@ impl MxcPtyProcess {
             process,
             reader_taken,
             writer_taken,
+            reader_closers: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -294,49 +312,100 @@ impl MxcPtyProcess {
     }
 
     /// Non-blocking exit check.
-    pub fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+    pub fn try_wait(&self) -> std::io::Result<Option<i32>> {
         self.lock_process().try_wait()
     }
 
     /// Kill the sandboxed process tree.
-    pub fn kill(&mut self) -> std::io::Result<()> {
+    pub fn kill(&self) -> std::io::Result<()> {
         self.lock_process().kill()
     }
 
     /// Mark the process timed out and kill it using the backend's timeout path.
-    pub fn kill_for_timeout(&mut self) -> std::io::Result<()> {
+    pub fn kill_for_timeout(&self) -> std::io::Result<()> {
         self.lock_process().kill_for_timeout()
     }
 
     /// Wait for the sandboxed process to exit.
-    pub fn wait(&mut self) -> std::io::Result<WaitOutcome> {
+    ///
+    /// If the caller has not taken the PTY writer, this closes it first so an
+    /// interactive workload waiting for input can observe EOF. Untaken output
+    /// is drained while the workload runs, then cancelled after the foreground
+    /// process exits so a descendant retaining the PTY cannot hang this call.
+    pub fn wait(&self) -> std::io::Result<WaitOutcome> {
         if !self.writer_taken.load(Ordering::Acquire) {
             drop(self.take_writer()?);
         }
         let output_drain = if self.reader_taken.load(Ordering::Acquire) {
             None
         } else {
-            let mut reader = self.try_clone_reader()?;
-            Some(std::thread::spawn(move || {
-                let _ = std::io::copy(&mut reader, &mut std::io::sink());
-            }))
+            let (mut reader, closer) = self.clone_reader_with_closer()?;
+            Some((
+                std::thread::spawn(move || {
+                    let _ = std::io::copy(&mut reader, &mut std::io::sink());
+                }),
+                closer,
+            ))
         };
+
+        loop {
+            let terminal = match self.lock_process().try_wait() {
+                Ok(Some(_)) => true,
+                Ok(None) => false,
+                Err(error) if error.kind() == std::io::ErrorKind::TimedOut => true,
+                Err(error) => return Err(error),
+            };
+            if terminal {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // `try_wait` established that this is non-blocking now. Calling the
+        // backend's final wait performs its terminal bookkeeping and teardown
+        // without holding the process mutex across the workload's lifetime.
         let result = match self.lock_process().wait() {
             Ok(code) => Ok(WaitOutcome::Exited(code)),
             Err(error) if error.kind() == std::io::ErrorKind::TimedOut => Ok(WaitOutcome::TimedOut),
             Err(error) => Err(error),
         };
-        if let Some(drain) = output_drain {
-            let _ = drain.join();
+        if let Some((drain, closer)) = output_drain {
+            if let Some(closer) = closer {
+                closer.close();
+                let _ = drain.join();
+            } else if drain.is_finished() {
+                let _ = drain.join();
+            }
         }
         result
     }
 
     /// Clone a reader for the PTY's merged output stream.
     pub fn try_clone_reader(&self) -> std::io::Result<Box<dyn Read + Send>> {
-        let reader = self.lock_process().pty_clone_reader()?;
+        let (reader, closer) = self.clone_reader_with_closer()?;
+        if let Some(closer) = closer {
+            self.reader_closers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(closer);
+        }
         self.reader_taken.store(true, Ordering::Release);
         Ok(reader)
+    }
+
+    /// A closer that unblocks reads from cloned PTY output readers.
+    pub fn stdout_closer(&self) -> Option<StreamCloser> {
+        if self
+            .reader_closers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
+        {
+            return None;
+        }
+        Some(StreamCloser::new(Box::new(PtyReaderCloserGroup(
+            Arc::clone(&self.reader_closers),
+        ))))
     }
 
     /// Take the PTY input writer. This may succeed only once.
@@ -382,6 +451,13 @@ impl MxcPtyProcess {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+
+    fn clone_reader_with_closer(
+        &self,
+    ) -> std::io::Result<(Box<dyn Read + Send>, Option<StreamCloser>)> {
+        let (reader, closer) = self.lock_process().pty_clone_reader_with_closer()?;
+        Ok((reader, closer.map(StreamCloser::new)))
+    }
 }
 
 /// Dimensions of an [`MxcPtyProcess`].
@@ -394,7 +470,8 @@ pub struct MxcPtySize {
 }
 
 impl MxcPtySize {
-    pub(crate) fn validate(self) -> Result<(), Error> {
+    /// Validate dimensions against the supported PTY backend range.
+    pub fn validate(self) -> Result<(), Error> {
         wxc_common::sandbox_process::PtySize::from(self)
             .validate()
             .map_err(Error::from)
@@ -609,13 +686,16 @@ impl Sandbox {
 /// Closes one of a [`Sandbox`]'s streams, unblocking a read parked on it without
 /// killing the process. Obtained from [`Sandbox::stdout_closer`] /
 /// [`Sandbox::stderr_closer`].
+#[derive(Clone)]
 pub struct StreamCloser {
-    inner: Box<dyn InnerCloser>,
+    inner: Arc<dyn InnerCloser>,
 }
 
 impl StreamCloser {
     fn new(inner: Box<dyn InnerCloser>) -> Self {
-        Self { inner }
+        Self {
+            inner: Arc::from(inner),
+        }
     }
 
     /// Close the stream, making any read currently parked on it return.
@@ -627,6 +707,8 @@ impl StreamCloser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Condvar;
 
     struct FakeProcess {
         warnings: Vec<String>,
@@ -639,6 +721,94 @@ mod tests {
 
     struct FakePtyProcess {
         resized_to: Arc<Mutex<Vec<wxc_common::sandbox_process::PtySize>>>,
+    }
+
+    struct BlockingReader(Arc<(Mutex<bool>, Condvar)>);
+
+    impl Read for BlockingReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+            let (closed, wake) = &*self.0;
+            let mut closed = closed
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            while !*closed {
+                closed = wake
+                    .wait(closed)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+            Ok(0)
+        }
+    }
+
+    struct BlockingReaderCloser(Arc<(Mutex<bool>, Condvar)>);
+
+    impl InnerCloser for BlockingReaderCloser {
+        fn close(&self) {
+            let (closed, wake) = &*self.0;
+            *closed
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+            wake.notify_all();
+        }
+    }
+
+    struct KillablePtyProcess {
+        running: Arc<AtomicBool>,
+        reader_state: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl SandboxProcess for KillablePtyProcess {
+        fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
+            None
+        }
+
+        fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
+            None
+        }
+
+        fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
+            None
+        }
+
+        fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+            Ok((!self.running.load(Ordering::Acquire)).then_some(0))
+        }
+
+        fn id(&self) -> u32 {
+            1
+        }
+
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.running.store(false, Ordering::Release);
+            Ok(())
+        }
+
+        fn wait(&mut self) -> std::io::Result<i32> {
+            Ok(0)
+        }
+
+        fn is_pty(&self) -> bool {
+            true
+        }
+
+        fn pty_clone_reader(&self) -> std::io::Result<Box<dyn Read + Send>> {
+            Ok(Box::new(BlockingReader(Arc::clone(&self.reader_state))))
+        }
+
+        fn pty_clone_reader_with_closer(
+            &self,
+        ) -> std::io::Result<(Box<dyn Read + Send>, Option<Box<dyn InnerCloser>>)> {
+            Ok((
+                Box::new(BlockingReader(Arc::clone(&self.reader_state))),
+                Some(Box::new(BlockingReaderCloser(Arc::clone(
+                    &self.reader_state,
+                )))),
+            ))
+        }
+
+        fn pty_take_writer(&self) -> std::io::Result<Box<dyn Write + Send>> {
+            Ok(Box::new(std::io::sink()))
+        }
     }
 
     impl SandboxProcess for FakePtyProcess {
@@ -879,5 +1049,37 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .is_empty());
+    }
+
+    #[test]
+    fn pty_wait_can_be_killed_while_output_is_held_open() {
+        let running = Arc::new(AtomicBool::new(true));
+        let reader_state = Arc::new((Mutex::new(false), Condvar::new()));
+        let terminal = Arc::new(
+            MxcPtyProcess::new(Box::new(KillablePtyProcess {
+                running: Arc::clone(&running),
+                reader_state: Arc::clone(&reader_state),
+            }))
+            .expect("fake PTY process is accepted"),
+        );
+
+        let waiter = {
+            let terminal = Arc::clone(&terminal);
+            std::thread::spawn(move || terminal.wait())
+        };
+        std::thread::sleep(Duration::from_millis(25));
+        terminal.kill().expect("kill is not blocked by wait");
+
+        assert_eq!(
+            waiter.join().expect("wait thread does not panic").unwrap(),
+            WaitOutcome::Exited(0)
+        );
+        assert!(
+            *reader_state
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            "the automatic output drain must be cancelled after process completion"
+        );
     }
 }

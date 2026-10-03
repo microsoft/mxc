@@ -345,6 +345,7 @@ terminal.output.pipe(process.stdout);
 terminal.input.write('echo hello\r\n');
 terminal.resize({ rows: 40, columns: 120 });
 terminal.input.write(Buffer.from([0x03])); // Ctrl-C; any input bytes are accepted.
+terminal.input.write('exit\r\n');
 
 const result = await terminal.waitAsync();
 console.log(`exit=${result.exitCode} timedOut=${result.timedOut}`);

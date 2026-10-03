@@ -28,6 +28,12 @@ pub type OwnedPipe = std::os::fd::OwnedFd;
 #[cfg(windows)]
 pub type OwnedPipe = std::os::windows::io::OwnedHandle;
 
+/// A boxed reader for a pseudo-terminal's merged output.
+pub type PtyReader = Box<dyn Read + Send>;
+
+/// A pseudo-terminal reader paired with an optional out-of-band closer.
+pub type PtyReaderWithCloser = (PtyReader, Option<Box<dyn StreamCloser>>);
+
 /// Owned native endpoints for a sandbox process.
 ///
 /// Each populated endpoint is an OS pipe handle/file descriptor with the
@@ -169,11 +175,17 @@ pub trait SandboxProcess: Send {
     }
 
     /// Clone a reader for the pseudo-terminal's merged output stream.
-    fn pty_clone_reader(&self) -> std::io::Result<Box<dyn Read + Send>> {
+    fn pty_clone_reader(&self) -> std::io::Result<PtyReader> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "this sandbox process is not attached to a pseudo-terminal",
         ))
+    }
+
+    /// Clone a reader and its optional out-of-band closer for the
+    /// pseudo-terminal's merged output stream.
+    fn pty_clone_reader_with_closer(&self) -> std::io::Result<PtyReaderWithCloser> {
+        self.pty_clone_reader().map(|reader| (reader, None))
     }
 
     /// Take the pseudo-terminal input writer. This may succeed only once.
