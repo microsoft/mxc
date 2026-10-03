@@ -655,9 +655,9 @@ internal ETL even when retention was requested.
 
 ### Pseudo-terminal
 
-`MxcSandbox.SpawnWithPty(policy, command, size)` creates the terminal inside MXC
-and returns an `MxcPty` with merged output, resize, timeout-aware waiting, and
-process-tree kill semantics:
+`MxcSandbox.SpawnWithPty(policy, command, size)` selects IsolationSession,
+creates the terminal inside MXC, and returns an `MxcPty` with merged output,
+resize, timeout-aware waiting, and process-tree kill semantics:
 
 ```csharp
 var request = new SandboxRequest(

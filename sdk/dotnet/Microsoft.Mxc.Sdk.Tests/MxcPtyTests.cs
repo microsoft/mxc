@@ -39,4 +39,14 @@ public class MxcPtyTests
                 "echo hi",
                 new MxcPtySize(0, 80)));
     }
+
+    [Fact]
+    public void PolicyCommandOverload_TargetsIsolationSession()
+    {
+        var request = MxcSandbox.CreatePtyCompatibilityRequest(
+            new SandboxPolicy(),
+            "echo hi");
+
+        Assert.IsType<IsolationSessionContainment>(request.Containment);
+    }
 }

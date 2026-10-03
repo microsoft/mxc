@@ -605,6 +605,19 @@ impl IsolationPtyProcess {
         }
         Err(std::io::Error::other(message))
     }
+
+    fn join_waiter_if_finished(&mut self) {
+        if self
+            .waiter
+            .as_ref()
+            .is_some_and(std::thread::JoinHandle::is_finished)
+        {
+            let _ = self.join_waiter();
+        }
+        // An accepted terminate does not prove the process exited. Dropping
+        // an unfinished JoinHandle detaches it instead of making handle
+        // destruction wait forever on the waiter's infinite platform wait.
+    }
 }
 
 impl SandboxProcess for IsolationPtyProcess {
@@ -714,7 +727,7 @@ impl Drop for IsolationPtyProcess {
         if let Some(session) = self.session.as_mut() {
             session.reclaim("drop");
         } else if self.outcome.is_none() && self.process.terminate_process().is_ok() {
-            let _ = self.join_waiter();
+            self.join_waiter_if_finished();
         }
     }
 }

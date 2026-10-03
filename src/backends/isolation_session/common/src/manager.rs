@@ -965,24 +965,10 @@ impl StartedProcess {
     /// so waiting on the assumption that `Terminate` succeeded would wedge this
     /// call forever if it ever failed against a live process.
     ///
-    /// That bound covers *this call only*, and does not make teardown as a whole
-    /// bounded. The streaming adapter's `Drop` joins the waiter thread whenever
-    /// it believes the process is dead — which includes the case where this
-    /// function returned `Ok(())` for a `Terminate` the platform accepted but
-    /// that never took effect, since the bounded wait's result is discarded. A
-    /// process that survives the kill can then park that join by either of two
-    /// routes, so supplying a timeout does not bound it:
-    ///
-    /// - With no timeout, the waiter is still sitting in its leading
-    ///   `WaitForExit(timeout_ms)`, which is INFINITE for `0`.
-    /// - With a timeout, that call returns and the waiter proceeds into
-    ///   [`wait_with_graceful_shutdown`], which ends in `Terminate` followed by
-    ///   `WaitForExit(0)` — INFINITE again.
-    ///
-    /// Neither route is *certain* to stall: the ladder's tier 3 is a fresh
-    /// `Terminate` that may land where this one did not. The narrow claim is
-    /// only that nothing in this function bounds that wait — so if the process
-    /// does survive, it is the join that waits, not this call.
+    /// That bound covers *this call only*. A caller that also owns a waiter must
+    /// not infer completion from `Ok(())` and unconditionally join it. The PTY
+    /// streaming adapter joins only an already-finished waiter during drop and
+    /// otherwise detaches it, keeping handle destruction bounded.
     ///
     /// **What this does not tell you.** The bounded wait's result is discarded,
     /// so a `Terminate` the platform accepted but that left the process running

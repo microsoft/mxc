@@ -347,7 +347,7 @@ public static class MxcSandbox
     {
         ArgumentNullException.ThrowIfNull(policy);
         ArgumentNullException.ThrowIfNull(command);
-        return SpawnWithPty(CreateCompatibilityRequest(policy, command), size);
+        return SpawnWithPty(CreatePtyCompatibilityRequest(policy, command), size);
     }
 
     /// <summary>Spawn a complete request attached to an MXC-owned PTY.</summary>
@@ -403,6 +403,14 @@ public static class MxcSandbox
         SandboxPolicy policy,
         string command) =>
         new(policy, command);
+
+    internal static SandboxRequest CreatePtyCompatibilityRequest(
+        SandboxPolicy policy,
+        string command) =>
+        new(policy, command)
+        {
+            Containment = new IsolationSessionContainment(),
+        };
 
     private static byte[] ToNullTerminatedUtf8(string value)
     {
