@@ -22,7 +22,11 @@ for f in "$EXAMPLES"/*mac*.json; do
     if [ "$name" = "$REJECTED_BY_DESIGN" ]; then
         grep -qF "validation failed" <<<"$out" ||
             fail "$name must fail validation (it documents an unsupported config)" "$out"
-        pass "$name is rejected, as the example intends"
+        grep -qF "network.egress allow/deny rules are not supported" <<<"$out" ||
+            fail "$name must reach Seatbelt rule validation, not fail CIDR parsing" "$out"
+        ! grep -qF "this should not run" <<<"$out" ||
+            fail "$name ran its workload despite rejecting the rule" "$out"
+        pass "$name is rejected by Seatbelt rule validation"
     else
         grep -qF "validation passed" <<<"$out" ||
             fail "$name no longer passes validation" "$out"

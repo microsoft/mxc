@@ -255,7 +255,7 @@ export function resolveExecutableAndArgs(
     throw new Error('script is required. Set process.commandLine on the config or pass a script to spawnSandbox().');
   }
 
-  // Resolve aliases accepted by the selected historical contract once, and
+  // Resolve aliases accepted by the selected registered contract once, and
   // drive every containment check from the canonical value. The wire payload
   // remains unchanged so the matching exact Rust parser performs normalization.
   const rawContainment = config.containment;

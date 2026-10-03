@@ -7,13 +7,12 @@ requiring root privileges or a container runtime.
 
 > **Status:** Stable — the default Linux backend.
 
-> **Exact v0.9:** author `network.egress` / `network.ingress` and, for proxy
-> requests, `runtimeConfig.networkProxy`. Legacy `defaultPolicy`,
-> `enforcementMode`, host lists, `allowLocalNetwork`, and `network.proxy` are
-> no longer accepted in v0.9. The historical compatibility discussion below
-> describes retired contracts; it does not authorize those fields in v0.9.
-> The existing private-namespace prerequisites and backend
-> capability checks still apply. See [schema migration](../schema.md).
+> **Supported exact contracts (v0.9+):** author `network.egress` /
+> `network.ingress` and, for proxy requests, `runtimeConfig.networkProxy`.
+> Versions before `0.9.0-alpha` are rejected; changing only the version of an
+> old config does not migrate its policy. Legacy `defaultPolicy`,
+> `enforcementMode`, host lists, `allowLocalNetwork`, and `network.proxy`
+> are not accepted. See [schema migration](../schema.md).
 
 ## Prerequisites
 
@@ -42,20 +41,19 @@ requiring root privileges or a container runtime.
   so a changed PATH target cannot reuse an advisory result. The Node SDK caches
   the complete `getPlatformSupport()` result, including failures, for the module
   lifetime; restart the Node process after remediating the host.
-- **Schema 0.8 private-namespace modes:** `slirp4netns` installed and on PATH,
-  plus util-linux `unshare` (with `--map-current-user` and `--keep-caps`) and
-  `nsenter`, `iptables`, `ip6tables`, `iptables-restore`, and
+- **Network-enabled private-namespace modes (v0.9+):** `slirp4netns` installed
+  and on PATH, plus util-linux `unshare` (with `--map-current-user` and
+  `--keep-caps`), `nsenter`, `iptables`, `ip6tables`, `iptables-restore`, and
   `ip6tables-restore` for the in-namespace egress and ingress rules, a POSIX
   `sh` (the supervisor runs as `sh -c`), and the
   `nf_conntrack` kernel module loaded for the inbound chain's connection-state
   match (unprivileged Bubblewrap cannot load it on demand).
 
-  This covers **both** 0.8 modes that get a private network namespace —
-  `network.proxy` (proxy-only egress) *and* `network.enforcementMode:
-  "firewall"` with host lists — because `validate` runs the same dependency
-  probe for each, and both render the same two chains. None are required when
-  the request resolves to neither mode (no proxy and no enforced host lists),
-  or when a 0.6/0.7 policy uses the legacy proxy behavior.
+  This covers both proxy-only egress via `runtimeConfig.networkProxy` and
+  directional firewall enforcement (egress rules or `egress.default: "allow"`).
+  Both use the same dependency probe and install egress and ingress chains.
+  Ruleless `egress.default: "deny"` instead uses `--unshare-net` alone and
+  needs none of these additional network tools.
 
   > `ip6tables` is required to *deny* IPv6, not to carry it. slirp4netns is
   > launched without `--enable-ipv6`, so the sandbox namespace has no IPv6
@@ -76,19 +74,19 @@ requiring root privileges or a container runtime.
   # Alpine
   apk add slirp4netns util-linux iptables
   ```
-  `iptables` must resolve to the **`nf_tables` backend** (the default on
-  Debian 10+, Ubuntu 20.10+, RHEL 8+, and Alpine). The legacy backend opens
-  `/run/xtables.lock` before touching any table, and the rules are installed by
-  an unprivileged supervisor that keeps the caller's uid — so on a stock host,
-  where `/run` is root-owned, it cannot take that lock. `validate` refuses such
-  a host with a message naming the backend, rather than letting the supervisor
-  die at the first rule. If a host is pinned to legacy, switch it:
+  `iptables` should resolve to the **`nf_tables` backend** (the default on
+  Debian 10+, Ubuntu 20.10+, RHEL 8+, and Alpine). The `iptables-legacy`
+  backend opens `/run/xtables.lock` before touching any table. The rules are
+  installed by an unprivileged supervisor that keeps the caller's uid, so on
+  a stock host with root-owned `/run` it cannot take that lock. `validate`
+  refuses such a host with a message naming the backend rather than letting
+  the supervisor die at the first rule. If pinned to `iptables-legacy`, switch it:
   ```bash
   sudo update-alternatives --set iptables /usr/sbin/iptables-nft
   sudo update-alternatives --set ip6tables /usr/sbin/ip6tables-nft
   ```
-  (A legacy backend is still accepted where the lock *is* writable — for
-  example when running as root — since it works there.)
+  (`iptables-legacy` works only where the lock is writable, for example when
+  running as root. This is a tooling distinction, not a retired schema mode.)
   Both modes fail explicitly if any of these is unavailable; neither ever falls
   back to sharing the host network namespace or to running without egress
   rules. The host must also provide the util-linux `unshare` command with
@@ -220,10 +218,10 @@ block's value, while bash (RHEL) fabricates a shorter `/usr/local/bin:/usr/bin`
 plus `TERM=dumb`. So neither reads back as empty from inside the workload,
 whatever MXC passed.
 
-**Before 0.9** the child got only what `process.env` supplied — with no `PATH`,
-command resolution fell through to the shell's compiled-in default, which
-matches the value above on Debian and Ubuntu but omits the `sbin` directories
-on RHEL. `inheritDefaultEnv` is rejected below 0.9.
+> **Historical (retired pre-v0.9 contracts):** the child received only
+> `process.env`, with no default `PATH`. Those contracts are no longer
+> registered: a request declaring one fails as an unsupported version before
+> `inheritDefaultEnv` or any other process field is evaluated.
 
 ### Filesystem Policy
 
@@ -271,31 +269,30 @@ Example:
 
 ### Network Policy
 
-Bubblewrap supports two network modes:
+All supported exact requests use directional `network.egress` and
+`network.ingress`. Both ingress controls default to `deny` when omitted.
+The JSON objects below are network fragments to place in a v0.9+ request.
 
-**Full block** (`defaultPolicy: "block"`, no host lists, no `network.proxy`)
-— uses `--unshare-net` for complete network namespace isolation. The sandbox
-gets a private network stack with only its own loopback (bwrap brings `lo`
-up), so nothing outside the sandbox is reachable and nothing outside can
-reach in. Runs fully unprivileged.
+**Full block** (ruleless `egress.default: "deny"`, no runtime proxy) uses
+`--unshare-net` for complete network namespace isolation. The sandbox gets a
+private network stack with only its own loopback (bwrap brings `lo` up), so
+nothing outside the sandbox is reachable and nothing outside can reach in.
+This needs no root or `slirp4netns`.
 
 ```json
 {
   "network": {
-    "defaultPolicy": "block"
+    "egress": { "default": "deny" },
+    "ingress": { "default": "deny", "hostLoopback": "deny" }
   }
 }
 ```
 
-**Per-host filtering** (`allowedHosts`/`blockedHosts`) — the behavior
-depends on the schema version, because 0.8 replaced a path that did not
-actually filter.
-
-**Schema 0.8+ — enforced.** `enforcementMode: "firewall"` puts the sandbox in
-the same private, slirp-backed network namespace proxy mode uses, and programs
-the rules into *that* namespace from a supervisor holding `CAP_NET_ADMIN`
-inside an unprivileged user namespace. **No root required**, and the sandbox
-cannot undo the rules: it drops `CAP_NET_ADMIN` before the workload starts.
+**Address filtering** (`egress.allow` / `egress.deny`) puts the sandbox in a
+private, slirp-backed network namespace and programs its rules there from a
+supervisor holding `CAP_NET_ADMIN` inside an unprivileged user namespace.
+**No root required**; the sandbox drops `CAP_NET_ADMIN` before the workload
+starts, so it cannot undo the rules.
 
 Rule addresses must be **IP literals or CIDR blocks**; a DNS name is rejected
 at validation time rather than resolved on the caller's behalf. The backend
@@ -306,7 +303,7 @@ chain never authorized.
 **IPv6 rules are filtered, but IPv6 traffic has nowhere to go.** The two are
 separate concerns and only the second is missing. Filtering works: an IPv6 rule
 programs `ip6tables`, and the terminal verdict of the unmatched family follows
-`defaultPolicy`, so a v4-only allowlist under `block` does not leave IPv6 open.
+`egress.default`, so an IPv4-only allow rule under `deny` does not leave IPv6 open.
 What the sandbox lacks is IPv6 *connectivity* — slirp4netns is launched without
 `--enable-ipv6`, so the namespace has no IPv6 route at all (see #955). The
 consequence is one-sided: an IPv6 **block** is already satisfied, while an IPv6
@@ -316,103 +313,60 @@ rather than refusing them, since the posture fails closed.
 
 An IPv4-mapped address such as `::ffff:203.0.113.5` is programmed as IPv4:
 Linux puts a genuine IPv4 packet on the wire for one, so an `ip6tables` rule
-naming it would never match and a `blockedHosts` entry under `defaultPolicy:
-allow` would fail open. A mapped CIDR is translated the same way — the mapped
-range is the last 32 bits of `::ffff:0:0/96`, so a `/96 + n` prefix becomes a
-v4 `/n`.
+naming it would never match and a directional deny rule under
+`egress.default: "allow"` would fail open. A mapped CIDR is translated the
+same way — the mapped range is the last 32 bits of `::ffff:0:0/96`, so a
+`/96 + n` prefix becomes a v4 `/n`.
 
 An IPv6 block **shorter** than `/96` that contains `::ffff:0:0/96` is
 **rejected** rather than programmed. CIDR blocks nest or are disjoint, so such a
 block always swallows the mapped range whole, and neither available reading is
 safe to apply silently: leaving it on `ip6tables` unenforces the mapped half
 (the same fail-open the translation above exists to prevent), while projecting
-it onto IPv4 would always widen it to `0.0.0.0/0` — turning `blockedHosts:
-["::/0"]` from "block all IPv6" into "block all IPv4 as well". The rejection
+it onto IPv4 would always widen it to `0.0.0.0/0` — turning a deny rule for
+`::/0` from "block all IPv6" into "block all IPv4 as well". The rejection
 asks the caller to write the IPv4 side explicitly. Blocks that do not contain
 the mapped range, such as `2001:db8::/32`, are unaffected.
 
-> **Divergence from LXC.** LXC normalizes mapped literals and `/96`-or-longer
-> mapped CIDRs the same way, so those policies mean the same thing on both
-> backends. It does **not** yet reject the shorter straddling blocks — there,
-> such a rule stays on `ip6tables` and its mapped half goes unenforced. Until
-> LXC adopts the same check, a policy using one of those blocks is the one case
-> where the two backends differ.
-
-An explicit `blockedHosts` entry outranks any `allowedHosts` entry that covers
-it, including a broader CIDR: denies are installed ahead of allows in a
-first-match chain.
+An explicit `egress.deny` rule outranks a broader `egress.allow` rule: denies
+are installed ahead of allows in a first-match chain.
 
 ```json
 {
   "network": {
-    "defaultPolicy": "block",
-    "enforcementMode": "firewall",
-    "allowedHosts": ["10.0.2.2/32", "203.0.113.0/24"],
-    "blockedHosts": ["10.0.2.2"]
+    "egress": {
+      "default": "deny",
+      "allow": [{ "to": [{ "cidr": "203.0.113.0/24" }] }],
+      "deny": [{ "to": [{ "cidr": "203.0.113.4/32" }] }]
+    },
+    "ingress": { "default": "deny", "hostLoopback": "deny" }
   }
 }
 ```
 
-**Schema 0.7 and earlier — accepted but not enforced.** The legacy path shares
-the host network namespace and applies rules to the *host* via
-`NetworkIptablesManager`, which **requires root**. Unprivileged, the request
-fails closed rather than running unfiltered: `spawn_bwrap` returns the
-`apply_firewall_rules` error before `bwrap` is spawned, so no workload runs.
-The unenforced case is the *privileged* one — the rules install on the host's
-chains, which the sandbox does not traverse, so they filter nothing while
-appearing to succeed. This is retained unchanged for existing callers and is
-the reason enforcement is 0.8+ only. Names are accepted on this path and
-resolved to IPv4 only.
+**Open external egress** (`egress.default: "allow"` with no rules or proxy)
+also uses the private slirp-backed namespace. Its egress chain defaults to
+`ACCEPT`, but drops host-loopback traffic first. It never shares the host
+network namespace; ingress and host loopback still default to deny.
 
-> **Legacy path, IPv4 only.** On schema ≤ 0.7, host names are resolved to
-> IPv4 addresses only; AAAA records and IPv6 literals are silently dropped
-> because `iptables` (the IPv4 tool) cannot accept IPv6 destinations. A host
-> with only AAAA records is effectively unreachable. Moving to 0.8 programs
-> `ip6tables` as well, but does not make such a host reachable while the
-> sandbox namespace has no IPv6 (see #955); use proxy mode (below) instead.
+#### Ingress and host-loopback isolation
 
-**Full allow** (`defaultPolicy: "allow"`, no host lists) — the sandbox
-shares the host network namespace with no restrictions.
+The retired `allowLocalNetwork` field has no v0.9 spelling. Use
+`network.ingress.default` to express unsolicited inbound policy and
+`network.ingress.hostLoopback` for the bidirectional host-loopback path.
+Bubblewrap currently honors only `deny` for either control. An `allow` value
+is rejected before sandbox creation: slirp has no host-to-sandbox port
+forwarding, so no inbound-accepting posture could be delivered.
 
-#### `allowLocalNetwork` is not independently enforceable
-
-`network.allowLocalNetwork` controls whether the sandboxed process may
-`bind()`/`listen()` on local IPs and accept **inbound** connections. It says
-nothing about *outbound* reachability of loopback or RFC1918 addresses —
-that is governed by `defaultPolicy` / `allowedHosts` / `blockedHosts`.
-
-Bubblewrap has no inbound-only primitive. Unprivileged bwrap has no veth
-interface to scope iptables to, and seccomp cannot dereference the `sockaddr`
-passed to `bind()`, so an AF_INET-only filter is not expressible. The
-namespace choice alone decides the outcome:
-
-| `allowLocalNetwork` | Namespace | Result |
-|---------------------|-----------|--------|
-| `false` (default) | private (`--unshare-net`; isolated, plus 0.8 proxy and firewall modes) | Honored at the sandbox boundary — nothing outside can reach in, and on 0.8 the proxy and firewall modes additionally drop new inbound connections in an `MXC_INGRESS` chain (see below). `bind()`/`listen()` still succeed on the sandbox's own loopback, so its processes can talk to each other; that is already inside the caller's trust boundary |
-| `false` | shared with host | **Not honored** — the process can bind/listen on host-local addresses |
-| `true` | private (`--unshare-net`) | **Partially honored** — the listener is reachable only from inside the sandbox |
-| `true` | shared with host | Honored |
-
-Rows 2 and 3 are rejected on schema `0.9.0-alpha` and later — in the backend's
-validation, which every caller passes through, so a programmatic
-`ExecutionRequest` is refused just like a JSON config — and
-emit a
-`WARNING:` line to the runner log at preflight on earlier schemas rather than
-failing silently. Windows (AppContainer's `privateNetworkClientServer`
-capability) and macOS (Seatbelt's `(allow network-inbound (local ip))`)
-enforce the field at the syscall level; this divergence is Linux-specific.
-
-Row 2 is keyed on the value, not on whether the caller wrote the field.
-`false` is the schema's default *and* a deny, so an omitted `allowLocalNetwork`
-is still a request for inbound denial and is rejected the same way: a bare
-`defaultPolicy: "allow"` does not silently opt out of the deny it inherits.
-Callers who want the shared namespace acknowledge the exposure with
-`allowLocalNetwork: true` (row 4), the same acknowledgment IsolationSession
-requires for this field.
+The sandbox's own loopback remains usable by its processes for `bind()` and
+`listen()`; that does not open an inbound path from the host. Under slirp,
+host-loopback denial also blocks container-to-host traffic at `10.0.2.2`,
+ahead of any outbound allow rule. The only exception is the configured
+runtime proxy endpoint, which proxy-only egress opens on that gateway.
 
 #### Inbound is closed by the namespace, and by a chain
-On schema `0.9.0-alpha` and later, the modes that build a private network
-namespace (proxy and firewall-enforced) also install an `MXC_INGRESS` chain
+
+The v0.9+ proxy and firewall-enforced modes also install an `MXC_INGRESS` chain
 hooked into `INPUT`, for both families:
 
 ```
@@ -428,7 +382,7 @@ forwarding into the namespace, so there is no path for an inbound packet to
 arrive on. The chain is defense in depth against a future change that adds
 one, and the mechanism the GA networking spec expects a backend to apply
 `ingress.default` through. The terminal `DROP` is deliberately independent of
-`network.defaultPolicy`, which governs egress only — an open outbound posture
+`egress.default`, which governs outbound traffic only — an open outbound posture
 must not open inbound as a side effect.
 
 The `ESTABLISHED,RELATED` accept is not optional. A terminal `INPUT` drop
@@ -448,17 +402,13 @@ No RFC 4890 ICMPv6 exemptions are emitted. `slirp4netns` runs without
 `--enable-ipv6`, so the namespace has no IPv6 for them to govern; they must be
 added in the same change that enables it.
 
-Legacy schemas are unaffected. Below `0.9.0-alpha`, proxy mode resolves to the
-shared host network namespace, where no chain of any kind is installed.
-
 #### Directional policy (`network.egress` / `network.ingress`)
 
 Schema `0.9.0-alpha` uses an explicit `egress` and `ingress` section instead
 of the retired `defaultPolicy` / `allowedHosts` / `blockedHosts` fields. An
 exact v0.9 config carrying a legacy field fails parsing; a config declaring
 an earlier version is refused as an unsupported contract before its network
-section is read. Programmatic `ExecutionRequest` callers bypass the exact
-parser and still hit the backend's own pre-v0.9 directional-policy guard.
+section is read.
 
 ```json
 {
@@ -477,13 +427,12 @@ parser and still hit the backend's own pre-v0.9 directional-policy guard.
 }
 ```
 
-Egress lowers into the same private-namespace iptables chains the legacy
-firewall mode uses, so the enforcement properties are identical — supervisor
-holds `CAP_NET_ADMIN`, sandbox drops it, no root required, IP literals and
-CIDRs only. An `except` list on a rule is lowered by CIDR subtraction into the
-remaining covering blocks, so `allow 0.0.0.0/0 except 1.1.1.0/24` becomes a set
-of accepts that provably omit the carve-out rather than an accept followed by a
-hoped-for later deny.
+Egress lowers into the namespace-local iptables chains described above. The
+supervisor holds `CAP_NET_ADMIN`, the sandbox drops it, and no root is required.
+Addresses are IP literals or CIDRs only. An `except` list on a rule is lowered
+by CIDR subtraction into the remaining covering blocks, so
+`allow 0.0.0.0/0 except 1.1.1.0/24` becomes a set of accepts that provably
+omit the carve-out rather than an accept followed by a hoped-for later deny.
 
 **Protocol support.** `ports[].protocol` accepts `tcp`, `udp`, `icmp`, and
 `any`. What Bubblewrap actually enforces is bounded by its *transport*, not by
@@ -496,11 +445,11 @@ namespace, whether or not a rule names it.
 |---|---|---|
 | `tcp` | `-p tcp` | |
 | `udp` | `-p udp` | |
-| `icmp` | `-p icmp` (IPv4) / `-p icmpv6` (IPv6) | Expands by destination address family, per the 0.8 contract. |
+| `icmp` | `-p icmp` (IPv4) / `-p icmpv6` (IPv6) | Expands by destination address family. |
 | `any`, no `port` | no `-p` match at all | Matches every protocol, ICMP included. |
 | `any` with a `port` | `-p tcp` and `-p udp` | ICMP is omitted: it carries no port numbers for a port-scoped rule to name. |
 
-This meets the 0.8 floor — `any` covers at minimum TCP, UDP, and ICMPv4/6.
+The `any` selector covers at minimum TCP, UDP, and ICMPv4/6.
 ICMPv6 is satisfied vacuously: `slirp4netns` is launched without
 `--enable-ipv6`, so the namespace has no IPv6 route. The `ip6tables` rules
 render correctly, but nothing traverses them.
@@ -509,7 +458,7 @@ render correctly, but nothing traverses them.
 
 | Directional policy | Resolved mode |
 |---|---|
-| proxy configured | proxy-only (unchanged; the proxy arm wins) |
+| runtime proxy with ruleless `egress.default: "deny"` | proxy-only |
 | ruleless `egress.default: "deny"` | isolated (`--unshare-net`) |
 | anything else — rules present, or `egress.default: "allow"` | firewall-enforced (private namespace) |
 
@@ -523,11 +472,9 @@ and it could not be refused without also refusing every legitimate "allow all
 outbound" config. Choosing the private namespace keeps the inbound half true
 for the cost of a slirp hop.
 
-A consequence worth knowing: on 0.8, a config with **no `network` section at
-all** selects the directional shape with a synthesized default-deny. It renders
-identically to the legacy default because the contract resolves an omitted
-ingress control to `deny` — the same posture `NetworkPolicy::default()`
-carries. The tests pin that agreement rather than rely on it silently.
+A config with **no `network` section** also gets a synthesized directional
+default-deny policy. It runs isolated, with ingress and host loopback denied;
+omitting ingress never requests a shared host namespace.
 
 **What the backend refuses.** Bubblewrap declares support for
 `egress.default`, `egress` rules, `ingress.default`, `ingress.hostLoopback`,
@@ -540,24 +487,22 @@ and dropped on the floor:
 |---|---|
 | `ingress.default: "allow"` | slirp4netns installs no route into the namespace, and the schema carries no port list with which to forward one. Nothing would arrive, so "allow" would be a lie |
 | `ingress.hostLoopback: "allow"` | the inbound half needs the same port forwarding `ingress.default: "allow"` lacks. Granting only the outbound half would honor half a bidirectional field under its full name |
-| directional `egress` rules combined with a proxy | a proxy resolves to the proxy-only posture, whose chain opens the proxy endpoint alone. The rules would be silently discarded, so they are refused instead. This holds for `builtinTestServer` too: its exemption covers legacy host *lists*, which MXC applies itself, and must not extend to directional rules, which nothing applies |
-| a directional section in a retired contract | the parser rejects the unsupported version first; the backend keeps its own guard for programmatic callers that build an `ExecutionRequest` directly |
+| `egress.default: "allow"` or direct egress rules combined with a runtime proxy | proxy-only egress opens the proxy endpoint alone; a simultaneous open default or rule list would be silently discarded and is refused |
 
-**What the deny postures actually do.** `ingress.default` installs the
-`MXC_INGRESS` chain on `INPUT`. `ingress.hostLoopback` is bidirectional per the
-0.8 contract, so its deny also has to close container-to-host: under slirp that
-path is the gateway `10.0.2.2`, which maps onto the host's own loopback. That
-drop is lowered *ahead* of every caller rule, because the chain is first-match
-and a broad allow — a bare `0.0.0.0/0` included — would otherwise win and the
-deny would be decorative. An omitted `ingress` section enforces the same deny,
-since deny is the schema's default rather than an absence of policy. IPv4
-only — slirp gives the sandbox no IPv6 route to the host, so there is no V6
-gateway to close. The legacy shape gains no such rule.
+**What the deny postures actually do.** In proxy-only and firewall-enforced
+modes, `ingress.default` installs the `MXC_INGRESS` chain on `INPUT`. Ruleless
+egress deny instead isolates the namespace, leaving no external inbound path.
+`ingress.hostLoopback` is bidirectional, so its deny also closes
+container-to-host traffic under slirp at gateway `10.0.2.2`. That drop is
+lowered *ahead* of every caller rule: a broad allow, including `0.0.0.0/0`,
+would otherwise win. An omitted `ingress` section enforces the same deny,
+since deny is the schema's default rather than an absence of policy. This
+gateway drop is IPv4 only — slirp gives the sandbox no IPv6 route to the host.
 
 Proxy mode is the defined exception. The proxy is reached at the gateway
 `10.0.2.2:<port>`, which *is* host loopback, so its chain opens that single TCP
-endpoint and drops the rest of the gateway. That is the exception the 0.8
-contract sanctions: the endpoint named by `runtimeConfig.networkProxy` is
+endpoint and drops the rest of the gateway. The supported proxy-only policy
+permits this exception: the endpoint named by `runtimeConfig.networkProxy` is
 allowed independently of `ingress.hostLoopback`, and no other host-loopback path
 is opened. A proxy config that states — or defaults to — `deny` therefore gets
 the posture it writes, since the deny still covers every host-loopback path but
@@ -594,20 +539,6 @@ from the proxy, so an unreachable external host cannot falsely pass the test.
 `proxyPeerIdentity` stays undeclared: it is a ProcessContainer concept with no
 Bubblewrap equivalent, so shared validation refuses it here.
 
-Declaring the bit was necessary but not sufficient. The backend's
-`external_proxy_host_rules_rejection` guard — which stops an operator-supplied
-proxy from being combined with host lists MXC never forwards to it — also keyed
-off `defaultPolicy: "block"`. That is a *legacy-shape* field the directional
-path never writes, so it sits at its `Block` default on every directional
-request. Since the parser requires `egress.default: "deny"` with no direct
-rules for a runtime proxy, the guard refused every such config: the capability
-would have been declared but unusable. The guard now reads `defaultPolicy` only
-on the legacy shape, treating a request as directional when *either* directional
-section is present — the same discriminator `EgressPlan::for_request` and
-`ResolvedNetworkMode::from_request` use. Keying on `network_egress` alone was
-not enough: an ingress-only request still read the defaulted `Block` as a caller
-statement and was refused. Real host lists are still refused in either shape.
-
 Because the bits are a hand-written declaration with nothing deriving them from
 the fields the backend actually consumes, a bit that is simply never added is
 indistinguishable from one that was considered and refused — both surface as
@@ -634,16 +565,13 @@ Standard `process` fields work as expected:
 ## Network proxy (private namespace, unprivileged)
 
 Bubblewrap supports an **unprivileged, cooperative network proxy** that
-enforces `allowedHosts` / `blockedHosts` at the proxy layer instead of via
-host-level iptables. The workload runs in a private network namespace and
-reaches the proxy through rootless `slirp4netns` routing. This requires no root
-privileges.
-
-This private-network behavior applies to schema **0.8 and later**. Policies
-using schema 0.6 or 0.7 retain the existing shared-host-network proxy behavior
-for compatibility and do not require `slirp4netns`. An absent schema version is
-also treated as legacy. The runner never silently falls back: a 0.8 proxy
-request fails if its private namespace cannot be configured.
+routes cooperating clients through the endpoint named by
+`runtimeConfig.networkProxy`. Any hostname filtering belongs to that external
+proxy, not MXC host lists. The workload runs in a private network namespace
+and reaches the proxy through rootless `slirp4netns` routing. This requires
+no root privileges. All supported exact requests use this private-network
+behavior; a missing or pre-v0.9 version is rejected, not routed to the old
+shared-host-network behavior.
 
 ### How it works
 
@@ -662,16 +590,10 @@ request fails if its private namespace cannot be configured.
    proxy-mode execution on the host indefinitely. A successful probe is cached
    for the life of the process; failures are not, so installing the missing
    tool takes effect without a restart.
-1. When a proxy is requested, the runner routes the sandbox to it; the caller
-   starts it. `runtimeConfig.networkProxy` names it from schema 0.8 onward and
-   is the only spelling on 0.9; the parser accepts only a loopback endpoint
-   there. The legacy `network.proxy` field names it on 0.6–0.8 and also accepts
-   a hostname or routable endpoint, which is resolved on the host and pinned
-   into the sandbox's `/etc/hosts`; there `builtinTestServer: true`
-   additionally makes the runner launch the bundled `unix-test-proxy` on
-   loopback (testing-only, gated behind `--allow-testing-features`). Both
-   spellings normalize to the same `policy.network_proxy`, so 0.8 accepts
-   either and enforces them identically.
+1. The caller starts the proxy and names its loopback endpoint with
+   `runtimeConfig.networkProxy`. The parser admits `localhost`, `127.0.0.1`,
+   or `[::1]`; Bubblewrap rejects `[::1]` because its gateway reaches only
+   IPv4. Use a proxy listening on `127.0.0.1` or `localhost`.
 2. The runner creates a same-UID user-namespace supervisor, starts Bubblewrap
    with `--unshare-net`, and keeps the workload behind a startup barrier.
 3. The supervisor attaches `slirp4netns` to Bubblewrap's private network
@@ -684,11 +606,11 @@ request fails if its private namespace cannot be configured.
    (see [Inbound](#inbound-is-closed-by-the-namespace-and-by-a-chain)).
    Each family's whole table — both chains, their rules in
    order, the terminal verdicts and the `OUTPUT` / `INPUT` hooks — is applied
-   with `iptables-restore` rather than rule by rule, so the cost of a policy
-   does not grow with the caller's host lists. One restore is one bounded
-   netlink transaction, so a table too large for it is split across numbered
-   payload files against a byte budget and applied in order (`-n`, so each
-   later transaction appends). Both built-in hooks ride in the *last*
+   with `iptables-restore` rather than one `iptables` invocation per rule.
+   One restore is one bounded netlink transaction, so a table too large for
+   it is split across numbered payload files against a byte budget and
+   applied in order with `-n`, so each later transaction appends. Both
+   built-in hooks ride in the *last*
    transaction of a family, so a hook is never live over a half-built chain
    and a partial apply leaves the policy unhooked rather than half-enforced.
    The workload is released only after every transaction is
@@ -708,9 +630,10 @@ request fails if its private namespace cannot be configured.
    deliberately does **not** set `NO_PROXY`, because exempt destinations would
    bypass the configured proxy policy.
 5. Cooperative tools (curl, wget, Python `requests`, Node `https`, etc.)
-   honor the env vars and traffic flows through the proxy, which applies
-   the `allowedHosts` / `blockedHosts` lists. Non-cooperating clients are not
-   merely unrouted — their traffic is dropped by the egress chain.
+   honor the env vars and traffic flows through the external proxy, which
+   applies its own host restrictions if configured. Non-cooperating clients
+   are not merely unrouted — their direct traffic is dropped by the egress
+   chain.
 
 ### Losing the network provider mid-run
 
@@ -826,19 +749,10 @@ so a Node caller keeps the first answer it received.
 
 ### Caveats
 
-- **Host loopback moves to the gateway address (breaking change in 0.8+
-  proxy mode)**: the sandbox gets its own network namespace, so inside it
-  `127.0.0.1` now means *the sandbox itself*, not the host. A config that
-  reaches a host-local service by loopback address — a database on
-  `127.0.0.1:5432`, a metadata endpoint, a second proxy — silently stops
-  connecting to the host and starts connecting to nothing. Under the schema
-  0.6/0.7 legacy proxy path the sandbox shared the **host's own network
-  namespace**, so `127.0.0.1` did reach the host; that is the behavior
-  changing here.
-
-  The configured proxy remains reachable, but at slirp's gateway address
-  `10.0.2.2` instead — which is exactly how the runner rewrites a
-  `localhost` proxy endpoint so the sandbox can still find it. Other
+- **Host loopback is not sandbox loopback**: inside the private namespace
+  `127.0.0.1` means *the sandbox itself*, not the host. The configured proxy
+  remains reachable at slirp's gateway address `10.0.2.2`; the runner
+  rewrites its loopback endpoint so the sandbox can find it. Other
   host-local services do **not** come along: slirp itself runs without
   `--disable-host-loopback`, so the gateway can in principle carry traffic to
   any host-loopback port, but the egress chain admits only the single
@@ -854,7 +768,7 @@ so a Node caller keeps the first answer it received.
   `CapBnd`/`CapEff`/`CapPrm` all zero. The end-to-end test suite asserts
   those are zero, because that assumption is what makes the exposed
   descriptor inert.
-- **Cooperative routing, enforced egress (schema 0.8+)**: the runner injects
+- **Cooperative routing, enforced egress (v0.9+)**: the runner injects
   `HTTP_PROXY` / `HTTPS_PROXY` so cooperating clients route through the proxy,
   and additionally programs a default-DROP egress chain inside the sandbox's
   private network namespace. Clients that ignore the env vars (raw sockets,
@@ -862,85 +776,32 @@ so a Node caller keeps the first answer it received.
   and the proxy endpoint are permitted. DNS is deliberately **not** opened —
   the proxy resolves on the workload's behalf. IPv6 egress is denied outright.
 
-  Host-local proxy endpoints — `localhost`, `127.0.0.0/8` and the wildcards
-  `0.0.0.0` / `::` — are rewritten to `10.0.2.2`. `::1` is **rejected at
-  validation time**: a proxy bound only to the IPv6 loopback cannot accept the
-  IPv4 connection slirp's gateway produces, so translating it would hand the
-  sandbox an address nothing answers on. Bind such a proxy to `127.0.0.1` or to
-  a dual-stack wildcard instead.
-
-  On schema **0.6/0.7** the legacy behavior applies: the sandbox shares the
-  host network namespace, no egress rules are installed, and only the
-  cooperative env-var routing is in effect — a client that ignores
-  `HTTP_PROXY`/`HTTPS_PROXY` reaches the network directly. For strict
-  whole-network isolation on those versions, omit `network.proxy` so the
-  runner can apply `--unshare-net` instead.
-- **Hostname proxy endpoints are pinned, not resolved in the sandbox**: because
-  DNS is closed, a hostname in `network.proxy.url` cannot be resolved by the
-  workload. The runner resolves it **once on the host** before the sandbox
-  starts, opens the egress chain for that address, and pins
-  `<address> <hostname>` as the first line of a generated `/etc/hosts` that is
-  bind-mounted read-only over the sandbox's copy. The workload therefore sees
-  the URL exactly as configured, so `Host` headers and proxy-auth realms match.
-  Consequences worth knowing:
-  - The name is resolved **once**, at start. A proxy whose address changes
-    mid-run is not followed.
-  - Only the pinned address is opened in the egress chain, so a resolver that
-    bypasses `/etc/hosts` (for example a client that speaks DNS directly, which
-    is itself blocked) cannot reach a different address. The failure is closed.
-  - IP **literals** are rewritten rather than pinned, per the rules above. A
-    hostname that resolves to a loopback address is likewise pinned to the
-    gateway.
-  - `localhost` is always rewritten, never pinned. It is reserved to loopback
-    (RFC 6761) and a pin is a sandbox-wide mapping, so pinning it would
-    redirect the workload's own loopback traffic to the host.
-  - The generated `/etc/hosts` preserves the host's existing entries after the
-    pin line, so `localhost` and friends keep working. A `readwritePaths` or
-    `readonlyPaths` entry covering `/etc/hosts` is overridden by the pin mount,
-    with a warning — that narrows the caller's access rather than widening it.
-  - A **`deniedPaths`** entry covering `/etc/hosts` (directly or via an
-    ancestor such as `/etc`) is **rejected** instead. The pin is applied after
-    every policy mount, so honouring it would hand back a readable file
-    populated from the host's own `/etc/hosts` — the opposite of the requested
-    denial. Give the proxy an IP address instead, which needs no pin. A more
-    specific grant beneath the denial (for example denying `/etc` while listing
-    `/etc/hosts` under `readonlyPaths`) takes effect and is accepted.
-  - IPv6-only proxy hostnames are rejected, matching the IPv6 egress denial.
-- **Mutually exclusive with iptables enforcement**: setting
-  `network.proxy` together with `network.enforcementMode` of `"firewall"`
-  or `"both"` is rejected at config-parse time. Both postures build the same
-  private namespace, so the combination is ambiguous rather than impossible —
-  it is refused because there is no defined precedence between an endpoint pin
-  and a rule list, not because of any privilege requirement.
-- **External proxy delegates policy**: when `network.proxy` uses
-  `localhost: <port>` or `url: <url>` (not `builtinTestServer`), the
-  external proxy is responsible for any host filtering. The runner does
-  **not** forward `allowedHosts` / `blockedHosts` / `defaultPolicy: "block"`
-  to it, and config combinations that would silently weaken enforcement
-  are rejected at parse time.
-- **`builtinTestServer` is testing-only**: gated behind `--allow-testing-features`
-  and never to be used as a real production proxy. It has no auth, no
-  body-size limits, and minimal hop-by-hop header handling. Use a real
-  HTTP proxy for production deployments.
-- **HTTPS via CONNECT**: the proxy uses HTTP `CONNECT` tunnels for TLS, so
+  An endpoint on `127.0.0.1` or `localhost` is rewritten to the gateway.
+  Although the parser also recognizes `[::1]` as loopback, Bubblewrap
+  **rejects it before launch**: a proxy bound only to IPv6 loopback cannot
+  accept the gateway's IPv4 connection. Hostnames other than `localhost`,
+  additional `127.0.0.0/8` addresses, and wildcard addresses are not valid
+  `runtimeConfig.networkProxy` endpoints in an exact v0.9 request.
+- **Proxy-only, not direct filtering**: `runtimeConfig.networkProxy` requires
+  `egress.default: "deny"` and no `egress.allow` or `egress.deny` rules. The
+  parser rejects combinations that would discard direct rules or permit
+  bypassing the proxy.
+- **External proxy delegates host filtering**: MXC does not send hostname
+  lists to the proxy. Configure any destination allow/deny policy in the
+  external proxy itself; its own availability and behavior are the caller's
+  responsibility.
+- **HTTPS via CONNECT**: HTTP clients use `CONNECT` tunnels for TLS, so
   certificate validation continues to work end-to-end (the proxy does not
   see plaintext).
 
-### Common pitfalls when configuring `allowedHosts`
+### Choosing address or hostname restrictions
 
-The proxy applies `allowedHosts` and `blockedHosts` by **case-insensitive
-exact host match** — there is no subdomain wildcard and no IP-vs-hostname
-resolution.
-
-- `allowedHosts: ["github.com"]` does **not** match `api.github.com`. List
-  each subdomain explicitly (e.g. `["api.github.com", "objects.githubusercontent.com"]`).
-- `allowedHosts: ["api.github.com"]` does **not** match a CONNECT to a raw
-  IP literal such as `140.82.114.6:443`. If your workload bypasses DNS,
-  include the IPs.
-- `allowedHosts: ["localhost"]` does **not** match `127.0.0.1`; if you
-  need both, list both.
-- IPv6 literals are normalised: an allowlist entry of `"::1"` matches a
-  CONNECT to `[::1]:443`, but not the unrelated `[fe80::1]:443`.
+`network.egress.allow` and `network.egress.deny` filter IP addresses or CIDR
+blocks, not DNS names. Do not put a hostname in a `cidr` field: Bubblewrap
+cannot enforce an IP rule against the workload's changing DNS answers and
+rejects the request. If policy must inspect requested hostnames, use
+`runtimeConfig.networkProxy` with a separately configured external proxy.
+The exact v0.9 contract provides no MXC-managed host-list policy for that proxy.
 
 ## Comparison with LXC
 
@@ -948,9 +809,9 @@ resolution.
 |--------|-----|------------|
 | Privileges | Root required | Unprivileged (user namespaces) |
 | Rootfs | Downloads distro rootfs | Bind-mounts host filesystem |
-| Startup | Create → Start → Attach | Single `bwrap` exec; the 0.8 private-namespace modes (proxy and firewall enforcement) add a user/network-namespace supervisor, a `slirp4netns` instance and an egress rule set |
-| Network isolation | iptables + veth | `--unshare-net`, private netns + slirp4netns, or iptables |
-| Dependencies | `lxc-*` tools, templates | `bwrap`; the 0.8 private-namespace modes also need `slirp4netns`, util-linux `unshare` and `nsenter`, a POSIX `sh`, plus `iptables`, `ip6tables` and their `-restore` counterparts on the `nf_tables` backend |
+| Startup | Create → Start → Attach | Single `bwrap` exec; proxy-only and firewall-enforced modes add a user/network-namespace supervisor, `slirp4netns`, and namespace-local firewall chains |
+| Network isolation | iptables + veth | `--unshare-net` for ruleless deny; private netns + slirp4netns and namespace-local iptables for proxy or firewall-enforced policies |
+| Dependencies | `lxc-*` tools, templates | `bwrap`; proxy and firewall-enforced modes also need `slirp4netns`, util-linux `unshare` and `nsenter`, a POSIX `sh`, plus `iptables`, `ip6tables` and their `-restore` counterparts |
 | Lifecycle | Create/destroy containers | Process dies on exit; proxy mode's supervisor is reaped with it |
 
 **When to use Bubblewrap:**
@@ -984,13 +845,11 @@ Test configs are in `tests/configs/bubblewrap_*.json`.
   and `/usr/local` are invisible unless explicitly listed in
   `readonlyPaths` / `readwritePaths`. There is no separate rootfs — the
   visible paths are bind-mounted from the host.
-- **Network filtering** — per-host `allowedHosts`/`blockedHosts` is enforced
-  natively on schema 0.8+ via `network.enforcementMode: "firewall"`, with
-  **no privilege required** (rules are programmed inside the sandbox's own
-  namespace; addresses must be IP literals or CIDRs). The cooperative env-var
-  **network proxy** remains the option when you need name-based rules. On
-  schema ≤ 0.7 the firewall path targets the *host* and requires root; it is
-  retained for compatibility but does not filter unprivileged.
+- **Network filtering** — `network.egress` allows or denies numeric addresses
+  and CIDRs without root (rules live in the sandbox's own namespace). Allowed
+  IPv6 destinations remain unreachable until slirp supports IPv6 here.
+  `runtimeConfig.networkProxy` restricts direct egress to the configured
+  loopback proxy endpoint; hostname policy belongs to that external proxy.
 - **No state-aware lifecycle** — Bubblewrap implements `ScriptRunner` only
   (one-shot), not `StatefulSandboxBackend`
 - **Provider-loss detection is exit-based** — in the private-namespace modes a
