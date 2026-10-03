@@ -19,6 +19,7 @@ use std::io::{Read, Write};
 
 use crate::logger::Logger;
 use crate::models::{ExecutionRequest, FailurePhase, SandboxOutputMetadata, ScriptResponse};
+use crate::mxc_error::MxcError;
 use crate::script_runner::ScriptRunner;
 use crate::validator::{validate_common, validate_network_policy_support, NetworkPolicySupport};
 
@@ -476,7 +477,7 @@ pub fn wait_with_timeout(
     }
 }
 
-/// How a [`SandboxBackend`] wires the sandboxed child's standard streams.
+/// Dimensions of a pseudo-terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PtySize {
     pub rows: u16,
@@ -496,6 +497,19 @@ impl Default for PtySize {
     }
 }
 
+impl PtySize {
+    /// Reject dimensions that cannot create a usable terminal.
+    pub fn validate(self) -> Result<(), MxcError> {
+        if self.rows == 0 || self.cols == 0 {
+            return Err(MxcError::malformed_request(
+                "PTY rows and columns must be non-zero",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// How a [`SandboxBackend`] wires the sandboxed child's standard streams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StdioMode {
     /// stdin/stdout/stderr are fresh pipes the caller drives via the handle's
@@ -709,6 +723,28 @@ mod runner_tests {
         assert!(stdin.is_none());
         assert!(stdout.is_none());
         assert!(stderr.is_none());
+    }
+
+    #[test]
+    fn pty_size_rejects_zero_rows_or_columns() {
+        for size in [
+            PtySize {
+                rows: 0,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            PtySize {
+                rows: 24,
+                cols: 0,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+        ] {
+            let error = size.validate().expect_err("zero dimensions must fail");
+            assert_eq!(error.code, crate::mxc_error::MxcErrorCode::MalformedRequest);
+        }
+        assert!(PtySize::default().validate().is_ok());
     }
 
     #[test]

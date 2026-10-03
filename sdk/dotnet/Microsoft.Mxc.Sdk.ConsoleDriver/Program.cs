@@ -171,21 +171,22 @@ internal static class Program
     {
         using var consoleMode = ConsoleModeScope.EnterRaw();
         using var cancellation = new CancellationTokenSource();
-        var input = terminal.Input;
+        using var input = terminal.Input;
         var outputTask = terminal.Output.CopyToAsync(Console.OpenStandardOutput());
-        _ = Console.OpenStandardInput().CopyToAsync(input, cancellation.Token);
+        var inputTask = Console.OpenStandardInput().CopyToAsync(input, cancellation.Token);
         var resizeTask = TrackConsoleSizeAsync(terminal, cancellation.Token);
 
         try
         {
             var outcome = terminal.Wait();
-            input.Dispose();
             outputTask.GetAwaiter().GetResult();
             return outcome;
         }
         finally
         {
             cancellation.Cancel();
+            input.Dispose();
+            ObserveInputRelay(inputTask);
             try
             {
                 resizeTask.GetAwaiter().GetResult();
@@ -194,6 +195,23 @@ internal static class Program
             {
             }
         }
+    }
+
+    private static void ObserveInputRelay(Task inputTask)
+    {
+        _ = inputTask.ContinueWith(
+            static task =>
+            {
+                var error = task.Exception?.GetBaseException();
+                if (error is not (OperationCanceledException or ObjectDisposedException))
+                {
+                    Console.Error.WriteLine(
+                        $"[driver] WARNING: console input relay failed: {error?.Message}");
+                }
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 
     // Console has no resize event; poll so the sandboxed TUI can reflow when

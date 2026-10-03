@@ -144,7 +144,15 @@ fn parse_one_shot_json(
 
 fn spawn_execution_request_with_logger(
     request: &ExecutionRequest,
+    logger: Logger,
+) -> Result<Box<dyn SandboxProcess>, Error> {
+    spawn_execution_request_with_logger_and(request, logger, dispatch::spawn_runner)
+}
+
+fn spawn_execution_request_with_logger_and(
+    request: &ExecutionRequest,
     mut logger: Logger,
+    spawn: impl FnOnce(&ExecutionRequest, &mut Logger) -> Result<Box<dyn SandboxProcess>, MxcError>,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let telemetry_active = request
         .telemetry
@@ -158,7 +166,7 @@ fn spawn_execution_request_with_logger(
         .and_then(|config| config.requested_sandbox_kind);
     let containment = request.containment.clone();
     let started = std::time::Instant::now();
-    let process = match dispatch::spawn_runner(request, &mut logger) {
+    let process = match spawn(request, &mut logger) {
         Ok(process) => process,
         Err(error) => {
             // Preserve the actual error category so bounded telemetry
@@ -197,8 +205,11 @@ pub fn spawn_with_pty(
     request: &ExecutionRequest,
     size: wxc_common::sandbox_process::PtySize,
 ) -> Result<Box<dyn SandboxProcess>, Error> {
-    let mut logger = Logger::new(Mode::Buffer);
-    dispatch::spawn_pty_runner(request, &mut logger, size).map_err(Error::from)
+    spawn_execution_request_with_logger_and(
+        request,
+        Logger::new(Mode::Buffer),
+        |request, logger| dispatch::spawn_pty_runner(request, logger, size),
+    )
 }
 
 /// Spawn a raw exact-version one-shot JSON request attached to an MXC-owned PTY.
@@ -209,7 +220,9 @@ pub fn spawn_one_shot_pty_json(
 ) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let request = parse_one_shot_json(request_json, experimental, &mut logger)?;
-    dispatch::spawn_pty_runner(&request, &mut logger, size).map_err(Error::from)
+    spawn_execution_request_with_logger_and(&request, logger, |request, logger| {
+        dispatch::spawn_pty_runner(request, logger, size)
+    })
 }
 
 pub(crate) struct TelemetryRegistration {
@@ -1015,6 +1028,29 @@ mod telemetry_process_tests {
         assert_eq!(warning_calls.load(Ordering::SeqCst), 1);
         assert_eq!(warning_closer_calls.load(Ordering::SeqCst), 1);
         assert_eq!(warning_timeout_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn alternate_spawn_dispatch_preserves_buffered_warnings() {
+        let request = ExecutionRequest::default();
+        let process = spawn_execution_request_with_logger_and(
+            &request,
+            Logger::new(Mode::Buffer),
+            |_request, logger| {
+                logger.warning_line("PTY spawn warning");
+                Ok(Box::new(StubProcess {
+                    try_wait_result: TryWaitResult::Running,
+                    wait_result: Ok(0),
+                    kill_fails: false,
+                    finalized: None,
+                    metadata_read_before_finalization: None,
+                    output_metadata: None,
+                }))
+            },
+        )
+        .expect("alternate dispatcher should spawn");
+
+        assert_eq!(process.warnings(), ["PTY spawn warning"]);
     }
 
     #[test]

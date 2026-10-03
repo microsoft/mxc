@@ -390,6 +390,14 @@ pub struct MxcPtySize {
     pub pixel_height: u16,
 }
 
+impl MxcPtySize {
+    pub(crate) fn validate(self) -> Result<(), Error> {
+        wxc_common::sandbox_process::PtySize::from(self)
+            .validate()
+            .map_err(Error::from)
+    }
+}
+
 impl Default for MxcPtySize {
     fn default() -> Self {
         Self {

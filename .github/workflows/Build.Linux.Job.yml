@@ -145,7 +145,7 @@ jobs:
           }
           run_pinned "LXC discovery matrix" -p mxc_engine --lib linux_support
           run_pinned "LXC dispatch arm" -p mxc_engine --lib streaming_lxc_reaches_the_backend_on_linux
-          run_pinned "LXC FFI routing" -p mxc_ffi --test ffi extern_spawn_request_reaches_the_lxc_backend
+          run_pinned "LXC FFI routing" -p mxc_ffi --test ffi extern_spawn_json_reaches_the_lxc_backend
           run_pinned "SDK platform helpers" -p mxc-sdk --test sdk_helpers
 
       # Runs the Bubblewrap executor characterization tests. lxc-exec was built

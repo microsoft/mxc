@@ -220,6 +220,7 @@ pub mod v1 {
             size: MxcPtySize,
             options: OperationOptions,
         ) -> Result<MxcPty, Error> {
+            size.validate()?;
             let input = request
                 .into_sdk_input(sandbox_id, options.telemetry_opt_in)
                 .map_err(Error::from)?;
@@ -264,6 +265,7 @@ pub mod v1 {
 
     /// Spawn a sandboxed process attached to an MXC-owned pseudo-terminal.
     pub fn spawn_with_pty(request: SandboxRequest, size: MxcPtySize) -> Result<MxcPty, Error> {
+        size.validate()?;
         mxc_engine::spawn_with_pty(&request.inner, size.into()).and_then(MxcPty::new)
     }
 
@@ -319,6 +321,7 @@ pub fn spawn_with_pty_json(
     experimental: bool,
     size: MxcPtySize,
 ) -> Result<MxcPty, Error> {
+    size.validate()?;
     mxc_engine::spawn_one_shot_pty_json(request_json, experimental, size.into())
         .and_then(MxcPty::new)
 }
@@ -397,6 +400,7 @@ pub fn spawn_in_container_with_pty_json(
     size: MxcPtySize,
     experimental: bool,
 ) -> Result<MxcPty, Error> {
+    size.validate()?;
     mxc_engine::exec_state_aware_pty_json(request_json, experimental, size.into())
         .and_then(MxcPty::new)
 }

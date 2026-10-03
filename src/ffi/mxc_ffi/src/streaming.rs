@@ -101,7 +101,7 @@ impl MxcSandbox {
 
     pub(crate) fn new_pty(inner: MxcPty) -> Self {
         Self {
-            inner: Box::new(inner),
+            inner: Box::new(PtySandbox::new(inner)),
         }
     }
 
@@ -186,25 +186,80 @@ impl LiveSandbox for Sandbox {
     }
 }
 
-impl LiveSandbox for MxcPty {
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum PtyStdioAccess {
+    #[default]
+    Untouched,
+    Individual,
+    Native,
+}
+
+struct PtySandbox {
+    inner: MxcPty,
+    stdio_access: PtyStdioAccess,
+    stdin_taken: bool,
+    stdout_taken: bool,
+}
+
+impl PtySandbox {
+    fn new(inner: MxcPty) -> Self {
+        Self {
+            inner,
+            stdio_access: PtyStdioAccess::Untouched,
+            stdin_taken: false,
+            stdout_taken: false,
+        }
+    }
+}
+
+impl LiveSandbox for PtySandbox {
     fn warnings(&self) -> Vec<String> {
-        self.warnings()
+        self.inner.warnings()
     }
 
     fn output_metadata(&self) -> Option<SandboxOutputMetadata> {
-        self.output_metadata()
+        self.inner.output_metadata()
     }
 
     fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
-        self.take_native_stdio()
+        match self.stdio_access {
+            PtyStdioAccess::Individual => {
+                return Err(std::io::Error::other(
+                    "native PTY stdio must be taken before taking individual streams",
+                ));
+            }
+            PtyStdioAccess::Native => return Ok(None),
+            PtyStdioAccess::Untouched => {}
+        }
+        let stdio = self.inner.take_native_stdio()?;
+        if stdio.is_some() {
+            self.stdio_access = PtyStdioAccess::Native;
+        }
+        Ok(stdio)
     }
 
     fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
-        self.take_writer().ok()
+        if self.stdio_access == PtyStdioAccess::Native || self.stdin_taken {
+            return None;
+        }
+        let stdin = self.inner.take_writer().ok();
+        if stdin.is_some() {
+            self.stdin_taken = true;
+            self.stdio_access = PtyStdioAccess::Individual;
+        }
+        stdin
     }
 
     fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
-        self.try_clone_reader().ok()
+        if self.stdio_access == PtyStdioAccess::Native || self.stdout_taken {
+            return None;
+        }
+        let stdout = self.inner.try_clone_reader().ok();
+        if stdout.is_some() {
+            self.stdout_taken = true;
+            self.stdio_access = PtyStdioAccess::Individual;
+        }
+        stdout
     }
 
     fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
@@ -220,27 +275,27 @@ impl LiveSandbox for MxcPty {
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
-        self.try_wait()
+        self.inner.try_wait()
     }
 
     fn id(&self) -> u32 {
-        self.id()
+        self.inner.id()
     }
 
     fn kill(&mut self) -> std::io::Result<()> {
-        self.kill()
+        self.inner.kill()
     }
 
     fn kill_for_timeout(&mut self) -> std::io::Result<()> {
-        self.kill_for_timeout()
+        self.inner.kill_for_timeout()
     }
 
     fn wait(&mut self) -> std::io::Result<WaitOutcome> {
-        self.wait()
+        self.inner.wait()
     }
 
     fn resize_pty(&self, size: MxcPtySize) -> std::io::Result<()> {
-        self.resize(size)
+        self.inner.resize(size)
     }
 }
 

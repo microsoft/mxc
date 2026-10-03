@@ -371,8 +371,9 @@ pub fn exec_state_aware(
 /// Resolve `parsed`'s backend and run the `exec` phase with a caller-controlled PTY.
 pub fn exec_state_aware_pty(
     parsed: ParsedStateAwareRequest,
-    _size: PtySize,
+    size: PtySize,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    size.validate()?;
     let backend = resolve_backend(&parsed)?;
     crate::experimental::require_experimental_optin(
         &backend,
@@ -386,7 +387,7 @@ pub fn exec_state_aware_pty(
             wxc_common::state_aware_dispatch::dispatch_state_aware_exec_pty(
                 &mut runner,
                 bound,
-                _size,
+                size,
             )
         }
         #[cfg(not(all(target_os = "windows", feature = "isolation_session")))]

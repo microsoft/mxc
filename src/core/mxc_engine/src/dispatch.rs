@@ -90,6 +90,7 @@ pub fn spawn_pty_runner(
     logger: &mut Logger,
     size: PtySize,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    size.validate()?;
     ensure_host_supported()?;
     if request.dry_run {
         return Err(MxcError::malformed_request(
