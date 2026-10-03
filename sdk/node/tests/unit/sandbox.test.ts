@@ -495,48 +495,14 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
     }
   });
 
-  describe('builtinTestServer testing-features gate', () => {
-    it('forwards --allow-testing-features when the caller opts in via allowTestingFeatures', () => {
+  describe('supported runtime proxy', () => {
+    it('does not forward a testing-only flag for a caller-supplied endpoint', () => {
       const config: ContainerConfig = {
         version: '0.9.0-alpha',
         containment: 'process',
         process: { commandLine: 'echo hi' },
-        network: { proxy: { builtinTestServer: true } },
-      };
-      const { args } = resolveExecutableAndArgs(config, {
-        executablePath: fakeExe,
-        skipPlatformCheck: true,
-        allowTestingFeatures: true,
-      });
-      assert.ok(
-        args.includes('--allow-testing-features'),
-        'expected --allow-testing-features to be forwarded',
-      );
-    });
-
-    it('throws when builtinTestServer is used without allowTestingFeatures', () => {
-      const config: ContainerConfig = {
-        version: '0.9.0-alpha',
-        containment: 'process',
-        process: { commandLine: 'echo hi' },
-        network: { proxy: { builtinTestServer: true } },
-      };
-      assert.throws(
-        () =>
-          resolveExecutableAndArgs(config, {
-            executablePath: fakeExe,
-            skipPlatformCheck: true,
-          }),
-        { message: /allowTestingFeatures: true/ },
-      );
-    });
-
-    it('does not forward --allow-testing-features for a non-test proxy', () => {
-      const config: ContainerConfig = {
-        version: '0.9.0-alpha',
-        containment: 'process',
-        process: { commandLine: 'echo hi' },
-        network: { proxy: { url: 'http://localhost:8080' } },
+        network: { egress: { default: 'deny' } },
+        runtimeConfig: { networkProxy: 'http://127.0.0.1:8080' },
       };
       const { args } = resolveExecutableAndArgs(config, {
         executablePath: fakeExe,
@@ -544,7 +510,7 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
       });
       assert.ok(
         !args.includes('--allow-testing-features'),
-        'did not expect --allow-testing-features for a url proxy',
+        'did not expect --allow-testing-features for a runtime proxy',
       );
     });
   });

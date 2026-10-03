@@ -3,7 +3,7 @@
   "version": "0.9.0-alpha",
   "containment": "seatbelt",
   "process": {
-    "commandLine": "echo 'Testing network access (all hosts allowed)...' && echo '' && echo 'Test 1: Connecting to api.github.com...' && curl -s --max-time 5 https://api.github.com/zen && echo '' && echo '  SUCCESS' && echo '' && echo 'Test 2: Connecting to www.google.com...' && curl -s --max-time 5 -o /dev/null -w '  SUCCESS: HTTP %{http_code}' https://www.google.com && echo '' && echo '' && echo 'Network access test complete!' && echo 'Note: With defaultPolicy allow, all outbound network is permitted.'",
+    "commandLine": "set -e; echo 'Testing general outbound network access...' && echo '' && echo 'Test 1: Connecting to api.github.com...' && curl -fsS --max-time 5 https://api.github.com/zen && echo '' && echo '  SUCCESS' && echo '' && echo 'Test 2: Connecting to www.google.com...' && curl -fsS --max-time 5 -o /dev/null -w '  SUCCESS: HTTP %{http_code}' https://www.google.com && echo '' && echo '' && echo 'Network access test complete!' && echo 'With network.egress.default=allow, general outbound traffic is permitted; hostLoopback remains deny.'",
     "timeout": 30000
   },
   "filesystem": {

@@ -1128,12 +1128,8 @@ pub enum NetworkEnforcementCompatibility {
     Strict,
 }
 
-/// Backend `process.env` behavior after exact contract normalization.
-///
-/// Normalized from the contract version rather than read back from
-/// [`ExecutionRequest::source_contract`], which is external-JSON attribution
-/// and is cleared for typed SDK requests. A typed request built against an
-/// exact pre-0.9 contract keeps the pre-0.9 environment behavior.
+/// Backend `process.env` behavior for registered contracts and typed requests.
+/// Every supported request uses the default block.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DefaultEnvCompatibility {
