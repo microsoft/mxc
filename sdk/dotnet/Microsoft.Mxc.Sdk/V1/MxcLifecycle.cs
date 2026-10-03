@@ -176,6 +176,54 @@ public static class MxcLifecycle
     }
 
     /// <summary>
+    /// Run a command in a started sandbox and attach it to a caller-resized PTY.
+    /// </summary>
+    public static MxcPtyProcess SpawnInContainerWithPty(
+        ContainerId id,
+        ExecRequest request,
+        MxcPtySize? size = null)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var terminalSize = size ?? MxcPtySize.Default;
+        terminalSize.Validate(nameof(size));
+        var requestBuf = ToNullTerminatedUtf8(BuildExecEnvelope(id, request).ToJsonString());
+
+        unsafe
+        {
+            fixed (byte* requestPtr = requestBuf)
+            {
+                NativeSandbox* handle = null;
+                MxcErrorDetail error = default;
+                var status = NativeMethods.mxc_state_aware_exec_pty(
+                    requestPtr,
+                    ExperimentalOptInFor(id),
+                    terminalSize.Rows,
+                    terminalSize.Columns,
+                    &handle,
+                    &error);
+                if (status != (int)ErrorCode.Success)
+                {
+                    try
+                    {
+                        throw NativeError.ToException(
+                            status,
+                            error,
+                            "spawning process with PTY failed");
+                    }
+                    finally
+                    {
+                        NativeMethods.mxc_error_detail_free(&error);
+                    }
+                }
+
+                return new MxcPtyProcess(
+                    MxcSandboxHandle.FromRaw(handle),
+                    MxcProcess.NormalizeTimeout(request.TimeoutMs));
+            }
+        }
+    }
+
+    /// <summary>
     /// Run an exec request attached to this process's standard streams.
     /// Both stdin and stdout must be terminals.
     /// </summary>

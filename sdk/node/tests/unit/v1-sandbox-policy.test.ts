@@ -169,13 +169,17 @@ describe('v1 container request adapter', () => {
   });
 
   it('omits unsupported IsolationSession UI policy', () => {
-    const config = createConfigFromPolicy({}, 'isolation_session');
+    const config = createConfigFromRequest({
+      command: '',
+      containment: { type: 'isolation_session' },
+    });
     assert.strictEqual(config.ui, undefined);
     assert.throws(
-      () => createConfigFromPolicy(
-        { ui: { allowWindows: false } },
-        'isolation_session',
-      ),
+      () => createConfigFromRequest({
+        command: '',
+        containment: { type: 'isolation_session' },
+        ui: { allowWindows: false },
+      }),
       /IsolationSession does not enforce UI policy/,
     );
   });

@@ -38,33 +38,14 @@ type NativeFreeCompletion = (error: Error | null) => void;
 type NativeSpawnCompletion = (error: Error | null, status: number) => void;
 type NativeWaitCompletion = (error: Error | null, status: number) => void;
 
-const AbiSandbox = koffi.opaque('MxcSandbox');
+export const AbiSandbox = koffi.opaque('MxcSandbox');
 const AbiNativeStdioType = koffi.struct('MxcNodeNativeStdio', {
   stdin_handle: 'intptr_t',
   stdout_handle: 'intptr_t',
   stderr_handle: 'intptr_t',
 });
 
-export interface StreamingNativeFacade {
-  spawnSync(
-    request: string,
-    experimental: number,
-    outHandle: Pointer[],
-    error: AbiErrorDetail,
-  ): number;
-  spawn(
-    request: string,
-    experimental: number,
-    outHandle: Pointer[],
-    error: AbiErrorDetail,
-    completion: NativeSpawnCompletion,
-  ): void;
-  stateAwareExec(
-    request: string,
-    experimental: number,
-    outHandle: Pointer[],
-    error: AbiErrorDetail,
-  ): number;
+export interface LifecycleNativeFacade {
   id(handle: Pointer): number;
   takeNativeStdio(handle: Pointer, stdio: NativeStdioHandles): number;
   closeNativePipe(handle: NativeHandle): void;
@@ -87,6 +68,28 @@ export interface StreamingNativeFacade {
   free(handle: Pointer, completion: NativeFreeCompletion): void;
   freeError(error: AbiErrorDetail): void;
   freeString(value: Pointer): void;
+}
+
+export interface StreamingNativeFacade extends LifecycleNativeFacade {
+  spawnSync(
+    request: string,
+    experimental: number,
+    outHandle: Pointer[],
+    error: AbiErrorDetail,
+  ): number;
+  spawn(
+    request: string,
+    experimental: number,
+    outHandle: Pointer[],
+    error: AbiErrorDetail,
+    completion: NativeSpawnCompletion,
+  ): void;
+  stateAwareExec(
+    request: string,
+    experimental: number,
+    outHandle: Pointer[],
+    error: AbiErrorDetail,
+  ): number;
 }
 
 function bindStreamingNativeFacade(
@@ -254,7 +257,7 @@ let oneShotAsyncProcessFactory:
   | ((request: OneShotRequest, experimental: boolean) => Promise<MxcSandboxProcess>)
   | undefined;
 
-function getNative(): StreamingNativeFacade {
+export function getStreamingNative(): StreamingNativeFacade {
   return sharedNative ??= bindStreamingNativeFacade(loadMxcFfi().handle);
 }
 
@@ -263,7 +266,7 @@ function throwIfFailed(status: number, message: string): void {
 }
 
 function freeSandboxAsync(
-  native: StreamingNativeFacade,
+  native: LifecycleNativeFacade,
   handle: Pointer,
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
@@ -280,7 +283,7 @@ class KoffiLifecycleDriver implements NativeLifecycleDriver {
   private readonly pollTimedOut = [0];
 
   constructor(
-    private readonly native: StreamingNativeFacade,
+    private readonly native: LifecycleNativeFacade,
     private readonly handle: Pointer,
     readonly id: number,
     readonly standardInput: Writable | null,
@@ -390,14 +393,14 @@ class KoffiLifecycleDriver implements NativeLifecycleDriver {
 }
 
 function beginFailedSpawnCleanup(
-  native: StreamingNativeFacade,
+  native: LifecycleNativeFacade,
   handle: Pointer,
 ): void {
   void freeSandboxAsync(native, handle).catch(() => {});
 }
 
 function takeSpawnedHandle(
-  native: StreamingNativeFacade,
+  native: LifecycleNativeFacade,
   outHandle: Pointer[],
   error: AbiErrorDetail,
   status: number,
@@ -420,8 +423,8 @@ function takeSpawnedHandle(
   return handle;
 }
 
-function adoptSpawnedHandle(
-  native: StreamingNativeFacade,
+export function createNativeLifecycleDriver(
+  native: LifecycleNativeFacade,
   factory: NativeStreamFactory,
   handle: Pointer,
 ): NativeLifecycleDriver {
@@ -476,7 +479,7 @@ export async function createStreamingDriver(
       },
     );
   });
-  return adoptSpawnedHandle(
+  return createNativeLifecycleDriver(
     native,
     factory,
     takeSpawnedHandle(native, outHandle, error, status),
@@ -498,7 +501,7 @@ export function createStreamingDriverSync(
     outHandle,
     error,
   );
-  return adoptSpawnedHandle(
+  return createNativeLifecycleDriver(
     native,
     factory,
     takeSpawnedHandle(native, outHandle, error, status),
@@ -530,7 +533,7 @@ function spawnDriver(
   ensureSupportedNodeVersion();
   return createStreamingDriver(
     request,
-    getNative(),
+    getStreamingNative(),
     nodeStreamFactory,
     experimental,
   );
@@ -557,7 +560,7 @@ export function spawnBindingSandboxProcessSync(
   ensureSupportedNodeVersion();
   const driver = createStreamingDriverSync(
     request,
-    getNative(),
+    getStreamingNative(),
     nodeStreamFactory,
     experimental,
   );
@@ -594,7 +597,7 @@ export function createStateAwareStreamingDriver(
     outHandle,
     error,
   );
-  return adoptSpawnedHandle(
+  return createNativeLifecycleDriver(
     native,
     factory,
     takeSpawnedHandle(native, outHandle, error, status),
@@ -638,7 +641,7 @@ export function spawnStateAwareBindingSandboxProcess(
   }
 
   ensureSupportedNodeVersion();
-  const native = getNative();
+  const native = getStreamingNative();
   const driver = createStateAwareStreamingDriver(
     requestJson,
     experimental,

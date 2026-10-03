@@ -55,6 +55,10 @@ settings, and the selected backend's typed configuration. The SDK selects its
 exact V1 contract; callers do not provide a schema version or raw executor
 configuration.
 
+`spawnWithPty(request, size?)` starts a one-shot request with a caller-driven
+terminal and returns a `Promise<MxcPtyProcess>`. PTY support is currently
+available for IsolationSession requests.
+
 ## Existing containers
 
 The V1 lifecycle API provisions and controls supported persistent backends.
@@ -87,6 +91,9 @@ await deprovisionSandbox(containerId);
 relays execution through the host terminal and returns a `WaitOutcome`; both
 host stdin and stdout must be terminals. `spawnInContainer` and
 `runInContainer` are the corresponding existing-container operation names.
+`spawnInContainerWithPty(containerId, request, size?)` starts an
+IsolationSession exec with a caller-driven terminal and returns a
+`Promise<MxcPtyProcess>`.
 IsolationSession provision requires an explicit unrestricted directional
 network posture; WSLC network posture is fixed at provision. See the
 [IsolationSession](../../docs/isolation-session/state-aware-typescript.md) and
@@ -101,10 +108,12 @@ requirements.
 | Persistent container identity | `ContainerId` |
 | Existing-container workload | `ExecRequest` |
 | Live process with standard pipes | `MxcProcess` |
+| Live process with a terminal | `MxcPtyProcess` |
+| Terminal dimensions | `MxcPtySize` |
 | Captured execution | `Output` |
 | Terminal process outcome | `WaitOutcome` |
 
-PTY operations are not part of this V1 API. Network policy details are in the
+Network policy details are in the
 [networking guide](../../docs/sandbox-policy/0.8.0/networking/networking.md);
 host-specific behavior and supported capabilities are documented in the
 backend guides under [`docs/`](../../docs/).

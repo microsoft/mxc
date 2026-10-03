@@ -105,7 +105,7 @@ public interface IMxcProcess : IDisposable
 /// native handles and kill the child.
 /// </para>
 /// </remarks>
-public sealed class MxcProcess : IMxcProcess
+public class MxcProcess : IMxcProcess
 {
     // Poll cadence bounds for the try_wait-based wait loop: start short so a
     // quick child returns promptly, back off to a cap so a long-running child
@@ -672,6 +672,27 @@ public sealed class MxcProcess : IMxcProcess
             if (status != (int)ErrorCode.Success)
             {
                 throw new MxcException((ErrorCode)status, "killing the sandbox failed");
+            }
+        }
+    }
+
+    /// <summary>Resize a process attached to an MXC-owned pseudo-terminal.</summary>
+    protected void ResizePty(MxcPtySize size)
+    {
+        lock (_controlLock)
+        {
+            ThrowIfDisposed();
+            int status;
+            unsafe
+            {
+                status = NativeMethods.mxc_sandbox_pty_resize(
+                    _handle.Ptr,
+                    size.Rows,
+                    size.Columns);
+            }
+            if (status != (int)ErrorCode.Success)
+            {
+                throw new MxcException((ErrorCode)status, "resizing sandbox PTY failed");
             }
         }
     }

@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-namespace Microsoft.Mxc.Sdk;
+namespace Microsoft.Mxc.Sdk.V1;
 
 /// <summary>Dimensions of an MXC pseudo-terminal.</summary>
 public readonly record struct MxcPtySize(ushort Rows, ushort Columns)
@@ -24,7 +24,7 @@ public readonly record struct MxcPtySize(ushort Rows, ushort Columns)
 }
 
 /// <summary>A live sandbox process attached to a caller-driven pseudo-terminal.</summary>
-public sealed class MxcPtyProcess : MxcSandboxProcess
+public sealed class MxcPtyProcess : MxcProcess
 {
     internal MxcPtyProcess(MxcSandboxHandle handle, uint? timeoutMs)
         : base(handle, timeoutMs)

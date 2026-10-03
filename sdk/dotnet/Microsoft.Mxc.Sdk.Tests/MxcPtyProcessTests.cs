@@ -17,17 +17,17 @@ public class MxcPtyProcessTests
     }
 
     [Fact]
-    public void SpawnWithPty_NullPolicy_Throws()
+    public void SpawnWithPty_NullRequest_Throws()
     {
         Assert.Throws<ArgumentNullException>(
-            () => MxcSandbox.SpawnWithPty(null!, "echo hi"));
+            () => MxcSandbox.SpawnWithPty(null!));
     }
 
     [Fact]
-    public void SpawnWithPty_NullCommand_Throws()
+    public void ContainerRequest_NullCommand_Throws()
     {
         Assert.Throws<ArgumentNullException>(
-            () => MxcSandbox.SpawnWithPty(new SandboxPolicy(), null!));
+            () => new ContainerRequest(null!));
     }
 
     [Theory]
@@ -41,18 +41,7 @@ public class MxcPtyProcessTests
     {
         Assert.Throws<ArgumentOutOfRangeException>(
             () => MxcSandbox.SpawnWithPty(
-                new SandboxPolicy(),
-                "echo hi",
+                new ContainerRequest("echo hi"),
                 new MxcPtySize(rows, columns)));
-    }
-
-    [Fact]
-    public void PolicyCommandOverload_TargetsIsolationSession()
-    {
-        var request = MxcSandbox.CreatePtyCompatibilityRequest(
-            new SandboxPolicy(),
-            "echo hi");
-
-        Assert.IsType<IsolationSessionContainment>(request.Containment);
     }
 }

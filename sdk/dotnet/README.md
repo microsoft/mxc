@@ -31,6 +31,10 @@ network, and UI restrictions are authored directly on `ContainerRequest`,
 alongside the selected backend configuration. The SDK owns the exact wire
 contract; requests do not accept a caller-selected schema version.
 
+`MxcSandbox.SpawnWithPty(request, size?)` starts a one-shot request with a
+caller-controlled terminal and returns an `MxcPtyProcess`. PTY support is
+currently available for IsolationSession requests.
+
 ## Existing containers
 
 `MxcLifecycle` provides typed provision, start, exec, stop, and deprovision
@@ -62,6 +66,9 @@ support cancellation. Backend and phase-specific policy requirements are
 described in the
 [IsolationSession](../../docs/isolation-session/state-aware-rust.md) and
 [WSLC](../../docs/wsl/wslc-state-aware.md) guides.
+`MxcLifecycle.SpawnInContainerWithPty(id, request, size?)` starts an
+IsolationSession exec with a caller-controlled terminal and returns an
+`MxcPtyProcess`.
 
 ## Public V1 types
 
@@ -71,11 +78,12 @@ described in the
 | Persistent container identity | `ContainerId` |
 | Existing-container workload | `ExecRequest` |
 | Live process with standard pipes | `MxcProcess` |
+| Live process with a terminal | `MxcPtyProcess` |
+| Terminal dimensions | `MxcPtySize` |
 | Captured execution | `Output` |
 | Terminal process outcome | `WaitOutcome` |
 
-All types above are in `Microsoft.Mxc.Sdk.V1`. PTY operations are not part of
-this V1 API. See the
+All types above are in `Microsoft.Mxc.Sdk.V1`. See the
 [networking guide](../../docs/sandbox-policy/0.8.0/networking/networking.md)
 and [schema reference](../../docs/schema.md) for policy behavior.
 

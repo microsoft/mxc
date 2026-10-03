@@ -5,7 +5,8 @@ use std::ffi::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
-use mxc_sdk::{spawn_with_pty_json, MxcPtySize};
+use mxc_sdk::v1::MxcPtySize;
+use mxc_sdk::{spawn_in_container_with_pty_json, spawn_with_pty_json};
 
 use crate::streaming::{finish_handle, sdk_error_detail, MxcSandbox};
 use crate::{
@@ -45,9 +46,11 @@ pub unsafe extern "C" fn mxc_spawn_pty_json(
     out_error: *mut MxcErrorDetail,
 ) -> i32 {
     if !out_handle.is_null() {
+        // SAFETY: caller-guaranteed writable pointer-sized storage.
         unsafe { *out_handle = ptr::null_mut() };
     }
     if !out_error.is_null() {
+        // SAFETY: caller-guaranteed writable storage for one fresh detail.
         unsafe { ptr::write(out_error, MxcErrorDetail::none()) };
     }
     if out_handle.is_null() {
@@ -58,6 +61,7 @@ pub unsafe extern "C" fn mxc_spawn_pty_json(
         if let Err(status) = validate_pty_dimensions(rows, cols) {
             return Err((status, MxcErrorDetail::from_message(INVALID_PTY_DIMENSIONS)));
         }
+        // SAFETY: the caller guarantees a valid NUL-terminated UTF-8 pointer.
         let request_json = match unsafe { cstr_to_str(request_json_utf8) } {
             Some(value) => value,
             None if request_json_utf8.is_null() => {
@@ -94,6 +98,84 @@ pub unsafe extern "C" fn mxc_spawn_pty_json(
         ))
     });
 
+    // SAFETY: `out_handle` is non-null; `out_error` is null or writable.
+    unsafe { finish_handle(outcome, out_handle, out_error) }
+}
+
+/// Execute a state-aware request with a caller-controlled PTY.
+///
+/// `request_json_utf8` must be an `exec`-phase state-aware request for a
+/// started sandbox. `experimental` is nonzero to permit an experimental
+/// backend and is never read from the JSON.
+///
+/// # Safety
+/// - `request_json_utf8` must be null or valid NUL-terminated UTF-8.
+/// - `out_handle` must point to writable pointer storage.
+/// - `out_error`, when non-null, must point to writable [`MxcErrorDetail`]
+///   storage.
+#[no_mangle]
+pub unsafe extern "C" fn mxc_state_aware_exec_pty(
+    request_json_utf8: *const c_char,
+    experimental: i32,
+    rows: u16,
+    cols: u16,
+    out_handle: *mut *mut MxcSandbox,
+    out_error: *mut MxcErrorDetail,
+) -> i32 {
+    if !out_handle.is_null() {
+        // SAFETY: caller-guaranteed writable pointer-sized storage.
+        unsafe { *out_handle = ptr::null_mut() };
+    }
+    if !out_error.is_null() {
+        // SAFETY: caller-guaranteed writable storage for one fresh detail.
+        unsafe { ptr::write(out_error, MxcErrorDetail::none()) };
+    }
+    if out_handle.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        if let Err(status) = validate_pty_dimensions(rows, cols) {
+            return Err((status, MxcErrorDetail::from_message(INVALID_PTY_DIMENSIONS)));
+        }
+        // SAFETY: the caller guarantees a valid NUL-terminated UTF-8 pointer.
+        let request_json = match unsafe { cstr_to_str(request_json_utf8) } {
+            Some(value) => value,
+            None if request_json_utf8.is_null() => {
+                return Err((
+                    MXC_STATUS_NULL_ARGUMENT,
+                    MxcErrorDetail::from_message("request JSON pointer is null"),
+                ));
+            }
+            None => {
+                return Err((
+                    MXC_STATUS_INVALID_UTF8,
+                    MxcErrorDetail::from_message("request JSON is not UTF-8"),
+                ));
+            }
+        };
+        spawn_in_container_with_pty_json(
+            request_json,
+            MxcPtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            experimental != 0,
+        )
+        .map(MxcSandbox::new_pty)
+        .map_err(sdk_error_detail)
+    }))
+    .unwrap_or_else(|panic| {
+        crate::report_panic("mxc_state_aware_exec_pty", &*panic);
+        Err((
+            MXC_STATUS_PANIC,
+            MxcErrorDetail::from_message("the mxc engine panicked"),
+        ))
+    });
+
+    // SAFETY: `out_handle` is non-null; `out_error` is null or writable.
     unsafe { finish_handle(outcome, out_handle, out_error) }
 }
 
@@ -101,7 +183,7 @@ pub unsafe extern "C" fn mxc_spawn_pty_json(
 ///
 /// # Safety
 /// `handle` must be a live handle returned by [`mxc_spawn_pty_json`] or
-/// [`crate::mxc_state_aware_exec_pty`], and this call must be serialized with
+/// [`mxc_state_aware_exec_pty`], and this call must be serialized with
 /// every other operation on that handle.
 #[no_mangle]
 pub unsafe extern "C" fn mxc_sandbox_pty_resize(

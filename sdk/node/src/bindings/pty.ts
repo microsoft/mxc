@@ -18,6 +18,7 @@ import {
 } from './native-stdio.js';
 import type { OneShotRequest } from '../generated/v1_0_0/wire.js';
 import {
+  AbiSandbox,
   createNativeLifecycleDriver,
   getStreamingNative,
   type LifecycleNativeFacade,
@@ -26,8 +27,6 @@ import {
 type Pointer = unknown;
 type NativeLibraryHandle = MxcNativeLibrary['handle'];
 type NativeCompletion = (error: Error | null, status: number) => void;
-
-const AbiPtySandbox = koffi.opaque('MxcPtySandbox');
 
 export interface PtyNativeFacade {
   spawnPty(
@@ -52,7 +51,7 @@ export interface PtyNativeFacade {
 }
 
 function bindPtyNativeFacade(handle: NativeLibraryHandle): PtyNativeFacade {
-  const sandboxPointer = koffi.pointer(AbiPtySandbox);
+  const sandboxPointer = koffi.pointer(AbiSandbox);
   const spawn = bindNativeFunction<KoffiFunc<(
     request: string,
     experimental: number,
@@ -68,7 +67,7 @@ function bindPtyNativeFacade(handle: NativeLibraryHandle): PtyNativeFacade {
       'int32_t',
       'uint16_t',
       'uint16_t',
-      koffi.out(koffi.pointer(AbiPtySandbox, 2)),
+      koffi.out(koffi.pointer(AbiSandbox, 2)),
       koffi.out(koffi.pointer(AbiErrorDetailType)),
     ],
   });
@@ -87,7 +86,7 @@ function bindPtyNativeFacade(handle: NativeLibraryHandle): PtyNativeFacade {
       'int32_t',
       'uint16_t',
       'uint16_t',
-      koffi.out(koffi.pointer(AbiPtySandbox, 2)),
+      koffi.out(koffi.pointer(AbiSandbox, 2)),
       koffi.out(koffi.pointer(AbiErrorDetailType)),
     ],
   });

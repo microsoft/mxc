@@ -832,7 +832,6 @@ describe('execInSandbox', () => {
   it('forwards experimental authorization for live exec', async () => {
     const exec = installStateAwareExecBinding(
       () => new FakeStateAwareExecBinding(22, '', ''),
->>>>>>> 958643653 (Complete V1 SDK request and lifecycle API migration)
     );
     const proc = execInSandbox(
       'iso:abc' as SandboxId<'isolation_session'>,

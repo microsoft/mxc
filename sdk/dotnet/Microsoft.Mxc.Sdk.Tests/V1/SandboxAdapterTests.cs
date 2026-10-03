@@ -146,6 +146,11 @@ public class SandboxAdapterTests
 
         public IMxcProcess Spawn(ContainerRequest request) =>
             throw new NotSupportedException();
+
+        public MxcPtyProcess SpawnWithPty(
+            ContainerRequest request,
+            MxcPtySize? size = null) =>
+            throw new NotSupportedException();
     }
 
     private sealed class FakeSandboxProcess(string output) : IMxcProcess

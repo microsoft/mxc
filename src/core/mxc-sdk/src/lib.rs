@@ -9,9 +9,11 @@
 //!   its captured stdout/stderr and exit outcome in one call, or
 //! - hand it to [`v1::spawn`] for a live [`v1::MxcProcess`] handle you can
 //!   stream stdio through, feed stdin, and kill while it runs.
+//! - hand it to [`v1::spawn_with_pty`] for an [`v1::MxcPtyProcess`] with
+//!   merged terminal output and resize support.
 //!
 //! Either way the right containment backend is selected for the host and the
-//! process runs **without ever allocating a pty**.
+//! ordinary `run` and `spawn` paths allocate no PTY.
 //!
 //! ```no_run
 //! use mxc_sdk::v1::{self, WaitOutcome};
@@ -99,6 +101,7 @@
 //! |-------------|-------------------|--------------------|-------|
 //! | **capture** | [`v1::run`] | [`v1::run_in_container`] | captured stdout and stderr |
 //! | **handle**  | [`v1::spawn`] | [`v1::spawn_in_container`] or [`v1::exec_in_sandbox`] | separate live pipes |
+//! | **PTY**     | [`v1::spawn_with_pty`] | [`v1::container::spawn_in_container_with_pty`] | merged output, resize |
 //!
 //! [`v1::container::provision_sandbox`], [`v1::container::start_sandbox`],
 //! [`v1::container::stop_sandbox`], and
@@ -108,8 +111,9 @@
 //!
 //! ## Standard streams
 //!
-//! The V1 process APIs use ordinary pipes; PTY operations are not part of this
-//! V1 surface. [`v1::run`] captures both output streams. With
+//! The V1 `run` and `spawn` APIs use ordinary pipes; PTY allocation is explicit
+//! through [`v1::spawn_with_pty`] and
+//! [`v1::container::spawn_in_container_with_pty`]. [`v1::run`] captures both output streams. With
 //! [`v1::spawn`], [`v1::spawn_in_container`], or [`v1::exec_in_sandbox`], callers
 //! can take the streams from [`MxcProcess`] or let `wait` drain and discard any
 //! stream they did not take. WSLC does not expose stdin.
@@ -179,8 +183,8 @@ pub mod v1 {
     pub mod container {
         pub use crate::sandbox::{
             deprovision as deprovision_sandbox, exec_in_attached, provision as provision_sandbox,
-            start as start_sandbox, stop as stop_sandbox, validate_deprovision, validate_exec,
-            validate_provision, validate_start, validate_stop,
+            spawn_in_container_with_pty, start as start_sandbox, stop as stop_sandbox,
+            validate_deprovision, validate_exec, validate_provision, validate_start, validate_stop,
         };
     }
 
@@ -192,8 +196,8 @@ pub mod v1 {
         WslcSection,
     };
     pub use crate::sandbox::{
-        CaptureDenialsErrorOutput, CaptureDenialsOutput, MxcProcess, Output, SandboxOutputMetadata,
-        StreamCloser, WaitOutcome,
+        CaptureDenialsErrorOutput, CaptureDenialsOutput, MxcProcess, MxcPtyProcess, MxcPtySize,
+        Output, SandboxOutputMetadata, StreamCloser, WaitOutcome,
     };
     pub use crate::state_aware_sdk::{
         ContainerId, ExecRequest, IsolationSessionProvisionMetadata, LifecycleResult,
@@ -221,6 +225,16 @@ pub mod v1 {
     pub fn spawn(request: ContainerRequest) -> Result<MxcProcess, Error> {
         let prepared = crate::policy::prepare_request(&request)?;
         mxc_engine::spawn_execution_request(&prepared.inner).map(MxcProcess::new)
+    }
+
+    /// Spawn a one-shot [`ContainerRequest`] attached to a caller-controlled PTY.
+    pub fn spawn_with_pty(
+        request: ContainerRequest,
+        size: MxcPtySize,
+    ) -> Result<MxcPtyProcess, Error> {
+        size.validate()?;
+        let prepared = crate::policy::prepare_request(&request)?;
+        mxc_engine::spawn_with_pty(&prepared.inner, size.into()).and_then(MxcPtyProcess::new)
     }
 
     /// Run a one-shot [`ContainerRequest`] to completion and capture its output.
@@ -292,6 +306,18 @@ pub fn spawn_sandbox_json(request_json: &str, experimental: bool) -> Result<MxcP
     mxc_engine::spawn_one_shot_json(request_json, experimental).map(MxcProcess::new)
 }
 
+/// Spawn an exact-version JSON request attached to a caller-controlled PTY.
+#[doc(hidden)]
+pub fn spawn_with_pty_json(
+    request_json: &str,
+    experimental: bool,
+    size: v1::MxcPtySize,
+) -> Result<v1::MxcPtyProcess, Error> {
+    size.validate()?;
+    mxc_engine::spawn_one_shot_pty_json(request_json, experimental, size.into())
+        .and_then(v1::MxcPtyProcess::new)
+}
+
 /// Run a raw exact-version one-shot JSON request to completion, capturing its
 /// output. The JSON and `experimental` rules match [`spawn_sandbox_json`].
 pub fn run_json(request_json: &str, experimental: bool) -> Result<Output, Error> {
@@ -358,6 +384,18 @@ pub fn exec_sandbox(request_json: &str, experimental: bool) -> Result<MxcProcess
 /// Run a raw exact-JSON state-aware exec request as a live streaming sandbox.
 pub fn exec_sandbox_json(request_json: &str, experimental: bool) -> Result<MxcProcess, Error> {
     mxc_engine::exec_state_aware_json(request_json, experimental).map(MxcProcess::new)
+}
+
+/// Spawn a state-aware exec request with a caller-controlled PTY.
+#[doc(hidden)]
+pub fn spawn_in_container_with_pty_json(
+    request_json: &str,
+    size: v1::MxcPtySize,
+    experimental: bool,
+) -> Result<v1::MxcPtyProcess, Error> {
+    size.validate()?;
+    mxc_engine::exec_state_aware_pty_json(request_json, experimental, size.into())
+        .and_then(v1::MxcPtyProcess::new)
 }
 
 /// Run the `exec` phase of a state-aware request **attached to this process's

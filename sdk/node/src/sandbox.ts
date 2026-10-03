@@ -24,6 +24,8 @@ import {
   spawnBindingSandboxProcess,
   spawnBindingSandboxProcessSync,
 } from './bindings/streaming.js';
+import { spawnBindingSandboxWithPty } from './bindings/pty.js';
+import type { MxcPtyProcess, MxcPtySize } from './mxc-pty-process.js';
 import { SDK_CONTRACT_VERSION } from './contract-version.js';
 
 export { SDK_CONTRACT_VERSION };
@@ -57,6 +59,12 @@ function validateV1Request(
             'unsupported_containment',
             `Containment '${String(containment)}' is not available in the v1.0 high-level SDK. `
             + 'Use a supported V1 containment.',
+        );
+    }
+    if (containment === 'isolation_session' && request.ui !== undefined) {
+        throw new MxcError(
+            'malformed_request',
+            'IsolationSession does not enforce UI policy; omit request.ui.',
         );
     }
     if (request.network !== undefined) {
@@ -410,6 +418,34 @@ export async function spawnAsync(
   return spawnBindingSandboxProcess(
     oneShotRequest(request),
     options.experimental === true,
+  );
+}
+
+/** Spawn a one-shot request attached to an MXC-owned pseudo-terminal. */
+export function spawnWithPty(
+  request: ContainerRequest,
+  size: MxcPtySize = { rows: 24, columns: 80 },
+  options: MxcOptions = {},
+): Promise<MxcPtyProcess> {
+  validateOperationOptions('spawnWithPty', options, false);
+  if (
+    !Number.isInteger(size.rows) ||
+    !Number.isInteger(size.columns) ||
+    size.rows < 1 ||
+    size.rows > 32767 ||
+    size.columns < 1 ||
+    size.columns > 32767
+  ) {
+    throw new MxcError(
+      'malformed_request',
+      'PTY rows and columns must be integers between 1 and 32767',
+    );
+  }
+  return spawnBindingSandboxWithPty(
+    oneShotRequest(request),
+    options.experimental === true,
+    size.rows,
+    size.columns,
   );
 }
 

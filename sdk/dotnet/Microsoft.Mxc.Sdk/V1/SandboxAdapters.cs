@@ -30,6 +30,9 @@ public interface ISandboxRunner
 
     /// <summary>Spawn a complete request with live standard streams.</summary>
     IMxcProcess Spawn(ContainerRequest request);
+
+    /// <summary>Spawn a complete request attached to a caller-controlled PTY.</summary>
+    MxcPtyProcess SpawnWithPty(ContainerRequest request, MxcPtySize? size = null);
 }
 
 /// <summary>
@@ -64,6 +67,10 @@ public sealed class MxcSandboxRunner : ISandboxRunner
     /// <inheritdoc/>
     public IMxcProcess Spawn(ContainerRequest request) =>
         MxcSandbox.Spawn(request);
+
+    /// <inheritdoc/>
+    public MxcPtyProcess SpawnWithPty(ContainerRequest request, MxcPtySize? size = null) =>
+        MxcSandbox.SpawnWithPty(request, size);
 }
 
 /// <summary>
@@ -91,6 +98,14 @@ public interface ISandboxLifecycle
 
     /// <summary>Spawn an exec request with live standard streams.</summary>
     IMxcProcess SpawnInContainer(ContainerId id, ExecRequest request);
+
+    /// <summary>Spawn an exec request attached to a caller-controlled PTY.</summary>
+    MxcPtyProcess SpawnInContainerWithPty(
+        ContainerId id,
+        ExecRequest request,
+        MxcPtySize? size = null) =>
+        throw new NotSupportedException(
+            "This lifecycle implementation does not support PTY processes.");
 
     /// <summary>Validate an exec request without starting a process.</summary>
     void DryRunExecInContainer(ContainerId id, ExecRequest request);
@@ -163,6 +178,13 @@ public sealed class MxcSandboxLifecycle : ISandboxLifecycle
     /// <inheritdoc/>
     public IMxcProcess SpawnInContainer(ContainerId id, ExecRequest request) =>
         MxcLifecycle.SpawnInContainer(id, request);
+
+    /// <inheritdoc/>
+    public MxcPtyProcess SpawnInContainerWithPty(
+        ContainerId id,
+        ExecRequest request,
+        MxcPtySize? size = null) =>
+        MxcLifecycle.SpawnInContainerWithPty(id, request, size);
 
     /// <inheritdoc/>
     public void DryRunExecInContainer(ContainerId id, ExecRequest request) =>

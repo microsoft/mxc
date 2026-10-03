@@ -68,6 +68,8 @@ v1::container::deprovision_sandbox(&id, options)?;
 ```
 
 Use `spawn_in_container` or `exec_in_sandbox` for live piped exec.
+`spawn_in_container_with_pty` returns an `MxcPtyProcess` for a caller-driven
+terminal; PTY support is currently available for IsolationSession.
 `container::exec_in_attached` synchronously relays state-aware exec through the
 host terminal and returns its `WaitOutcome`; the host stdin and stdout must
 both be terminals. Lifecycle operations and state-aware exec are synchronous
@@ -83,11 +85,14 @@ in Rust. Backend support and phase-specific requirements are described in the
 | Persistent container identity | `v1::ContainerId` |
 | Existing-container workload | `v1::ExecRequest` |
 | Live process with standard pipes | `v1::MxcProcess` |
+| Live process with a terminal | `v1::MxcPtyProcess` |
+| Terminal dimensions | `v1::MxcPtySize` |
 | Captured execution | `v1::Output` |
 | Terminal process outcome | `v1::WaitOutcome` |
 
-The public API does not include terminal/PTY operations. For host discovery,
-use `mxc_sdk::platform_support` and `mxc_sdk::available_backends`. Errors are
+`v1::spawn_with_pty` provides the one-shot PTY entry point. PTY support is
+currently available for IsolationSession requests. For host discovery, use
+`mxc_sdk::platform_support` and `mxc_sdk::available_backends`. Errors are
 returned as `mxc_sdk::Error` with an `ErrorCode`.
 
 ## Build features and backend support

@@ -291,6 +291,51 @@ public static class MxcSandbox
         }
     }
 
+    /// <summary>Spawn a complete request attached to an MXC-owned PTY.</summary>
+    public static MxcPtyProcess SpawnWithPty(
+        ContainerRequest request,
+        MxcPtySize? size = null)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var terminalSize = size ?? MxcPtySize.Default;
+        terminalSize.Validate(nameof(size));
+        var requestBuf = ToNullTerminatedUtf8(SerializeRequest(request));
+
+        unsafe
+        {
+            fixed (byte* requestPtr = requestBuf)
+            {
+                NativeSandbox* handle = null;
+                MxcErrorDetail error = default;
+                var status = NativeMethods.mxc_spawn_pty_json(
+                    requestPtr,
+                    NoExperimentalOptIn,
+                    terminalSize.Rows,
+                    terminalSize.Columns,
+                    &handle,
+                    &error);
+                if (status != (int)ErrorCode.Success)
+                {
+                    try
+                    {
+                        throw NativeError.ToException(
+                            status,
+                            error,
+                            "spawning sandbox PTY failed");
+                    }
+                    finally
+                    {
+                        NativeMethods.mxc_error_detail_free(&error);
+                    }
+                }
+
+                return new MxcPtyProcess(
+                    MxcSandboxHandle.FromRaw(handle),
+                    request.TimeoutMs);
+            }
+        }
+    }
+
     private static byte[] ToNullTerminatedUtf8(string value)
     {
         var byteCount = Encoding.UTF8.GetByteCount(value);

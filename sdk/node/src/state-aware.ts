@@ -9,6 +9,8 @@ import {
   runBindingStateAwareRequestAsync,
 } from './bindings/state-aware.js';
 import { spawnStateAwareBindingSandboxProcess } from './bindings/streaming.js';
+import { execStateAwareBindingSandboxWithPty } from './bindings/pty.js';
+import type { MxcPtyProcess, MxcPtySize } from './mxc-pty-process.js';
 import {
   DeprovisionConfigFor,
   DeprovisionResult,
@@ -242,6 +244,36 @@ export function execInSandbox<C extends PipedExecBackend>(
     config,
     options,
     'execInSandbox',
+  );
+}
+
+/** Spawn an exec request in an existing container with an MXC-owned PTY. */
+export function spawnInContainerWithPty<C extends StateAwareContainmentBackend>(
+  sandboxId: ContainerId<C>,
+  config: ExecConfigFor<C>,
+  size: MxcPtySize = { rows: 24, columns: 80 },
+  options: MxcOptions = {},
+): Promise<MxcPtyProcess> {
+  assertStateAwareStreamingOptions('spawnInContainerWithPty', options);
+  if (
+    !Number.isInteger(size.rows) ||
+    !Number.isInteger(size.columns) ||
+    size.rows < 1 ||
+    size.rows > 32767 ||
+    size.columns < 1 ||
+    size.columns > 32767
+  ) {
+    throw new MxcError(
+      'malformed_request',
+      'PTY rows and columns must be integers between 1 and 32767',
+    );
+  }
+  return execStateAwareBindingSandboxWithPty(
+    JSON.stringify(buildExecEnvelope(sandboxId, config)),
+    options.experimental === true,
+    size.rows,
+    size.columns,
+    config.process.timeout,
   );
 }
 
