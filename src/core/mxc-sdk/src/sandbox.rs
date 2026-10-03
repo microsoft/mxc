@@ -243,16 +243,16 @@ pub struct Sandbox {
 ///
 /// The public wrapper keeps MXC's process-tree lifecycle and backend details
 /// behind a stable terminal-oriented API.
-pub struct MxcPty {
+pub struct MxcPtyProcess {
     process: SharedPtyProcess,
     reader_taken: Arc<AtomicBool>,
     writer_taken: Arc<AtomicBool>,
 }
 
-impl std::fmt::Debug for MxcPty {
+impl std::fmt::Debug for MxcPtyProcess {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("MxcPty")
+            .debug_struct("MxcPtyProcess")
             .field("id", &self.id())
             .finish_non_exhaustive()
     }
@@ -260,7 +260,7 @@ impl std::fmt::Debug for MxcPty {
 
 type SharedPtyProcess = Arc<Mutex<Box<dyn SandboxProcess>>>;
 
-impl MxcPty {
+impl MxcPtyProcess {
     pub(crate) fn new(process: Box<dyn SandboxProcess>) -> Result<Self, Error> {
         if !process.is_pty() {
             return Err(Error::new(
@@ -348,6 +348,9 @@ impl MxcPty {
 
     /// Resize the PTY.
     pub fn resize(&self, size: MxcPtySize) -> std::io::Result<()> {
+        size.validate().map_err(|error| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, error.message)
+        })?;
         self.lock_process().pty_resize(size.into())
     }
 
@@ -381,7 +384,7 @@ impl MxcPty {
     }
 }
 
-/// Dimensions of an [`MxcPty`].
+/// Dimensions of an [`MxcPtyProcess`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MxcPtySize {
     pub rows: u16,
@@ -634,6 +637,68 @@ mod tests {
 
     struct NativeOnlyFake;
 
+    struct FakePtyProcess {
+        resized_to: Arc<Mutex<Vec<wxc_common::sandbox_process::PtySize>>>,
+    }
+
+    impl SandboxProcess for FakePtyProcess {
+        fn warnings(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
+            None
+        }
+
+        fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
+            None
+        }
+
+        fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
+            None
+        }
+
+        fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+            Ok(None)
+        }
+
+        fn id(&self) -> u32 {
+            1
+        }
+
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn wait(&mut self) -> std::io::Result<i32> {
+            Ok(0)
+        }
+
+        fn is_pty(&self) -> bool {
+            true
+        }
+
+        fn pty_clone_reader(&self) -> std::io::Result<Box<dyn Read + Send>> {
+            Ok(Box::new(std::io::empty()))
+        }
+
+        fn pty_take_writer(&self) -> std::io::Result<Box<dyn Write + Send>> {
+            Ok(Box::new(std::io::sink()))
+        }
+
+        fn pty_resize(&self, size: wxc_common::sandbox_process::PtySize) -> std::io::Result<()> {
+            self.resized_to
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(size);
+            Ok(())
+        }
+
+        fn pty_size(&self) -> std::io::Result<wxc_common::sandbox_process::PtySize> {
+            Ok(wxc_common::sandbox_process::PtySize::default())
+        }
+    }
+
     impl SandboxProcess for NativeOnlyFake {
         fn warnings(&self) -> Vec<String> {
             Vec::new()
@@ -792,5 +857,27 @@ mod tests {
             .take_native_stdio()
             .expect("repeated native transfer is empty")
             .is_none());
+    }
+
+    #[test]
+    fn pty_resize_validates_before_delegating_to_the_backend() {
+        let resized_to = Arc::new(Mutex::new(Vec::new()));
+        let terminal = MxcPtyProcess::new(Box::new(FakePtyProcess {
+            resized_to: Arc::clone(&resized_to),
+        }))
+        .expect("fake PTY process is accepted");
+
+        let error = terminal
+            .resize(MxcPtySize {
+                rows: 0,
+                ..MxcPtySize::default()
+            })
+            .expect_err("invalid dimensions must fail");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(resized_to
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty());
     }
 }

@@ -66,7 +66,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
 use mxc_sdk::{
-    spawn_sandbox_json, MxcPty, MxcPtySize, Sandbox, SandboxOutputMetadata, StreamCloser,
+    spawn_sandbox_json, MxcPtyProcess, MxcPtySize, Sandbox, SandboxOutputMetadata, StreamCloser,
     WaitOutcome,
 };
 use wxc_common::sandbox_process::NativeStdio;
@@ -99,7 +99,7 @@ impl MxcSandbox {
         }
     }
 
-    pub(crate) fn new_pty(inner: MxcPty) -> Self {
+    pub(crate) fn new_pty(inner: MxcPtyProcess) -> Self {
         Self {
             inner: Box::new(PtySandbox::new(inner)),
         }
@@ -195,14 +195,14 @@ enum PtyStdioAccess {
 }
 
 struct PtySandbox {
-    inner: MxcPty,
+    inner: MxcPtyProcess,
     stdio_access: PtyStdioAccess,
     stdin_taken: bool,
     stdout_taken: bool,
 }
 
 impl PtySandbox {
-    fn new(inner: MxcPty) -> Self {
+    fn new(inner: MxcPtyProcess) -> Self {
         Self {
             inner,
             stdio_access: PtyStdioAccess::Untouched,

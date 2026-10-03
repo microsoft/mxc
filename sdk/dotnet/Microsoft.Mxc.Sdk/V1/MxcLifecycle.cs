@@ -181,7 +181,7 @@ public static class MxcLifecycle
     /// <summary>
     /// Spawn a process in a started container with a caller-controlled PTY.
     /// </summary>
-    public static MxcPty SpawnInContainerWithPty(
+    public static MxcPtyProcess SpawnInContainerWithPty(
         SandboxId id,
         string command,
         MxcPtySize? size = null,
@@ -189,12 +189,7 @@ public static class MxcLifecycle
     {
         ArgumentNullException.ThrowIfNull(command);
         var terminalSize = size ?? MxcPtySize.Default;
-        if (terminalSize.Rows == 0 || terminalSize.Columns == 0)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(size),
-                "PTY rows and columns must be non-zero.");
-        }
+        terminalSize.Validate(nameof(size));
 
         var requestJson = BuildExecEnvelope(id, command, options).ToJsonString();
         var requestBuf = ToNullTerminatedUtf8(requestJson);
@@ -225,7 +220,7 @@ public static class MxcLifecycle
                         NativeMethods.mxc_error_detail_free(&error);
                     }
                 }
-                return new MxcPty(
+                return new MxcPtyProcess(
                     MxcSandboxHandle.FromRaw(handle),
                     MxcSandboxProcess.NormalizeTimeout(options?.TimeoutMs));
             }

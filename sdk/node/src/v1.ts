@@ -44,9 +44,9 @@ export {
 } from './sandbox.js';
 
 export {
-  MxcPty,
+  MxcPtyProcess,
   type MxcPtySize,
-} from './mxc-pty.js';
+} from './mxc-pty-process.js';
 
 export {
   getAvailableToolsPolicy,

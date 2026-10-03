@@ -7,7 +7,7 @@ using Xunit;
 
 namespace Microsoft.Mxc.Sdk.Tests;
 
-public class MxcPtyTests
+public class MxcPtyProcessTests
 {
     [Fact]
     public void DefaultSize_IsStandardTerminalSize()
@@ -30,14 +30,20 @@ public class MxcPtyTests
             () => MxcSandbox.SpawnWithPty(new SandboxPolicy(), null!));
     }
 
-    [Fact]
-    public void SpawnWithPty_RejectsZeroDimensionsBeforeNativeCall()
+    [Theory]
+    [InlineData(0, 80)]
+    [InlineData(24, 0)]
+    [InlineData(32768, 80)]
+    [InlineData(24, 32768)]
+    public void SpawnWithPty_RejectsInvalidDimensionsBeforeNativeCall(
+        ushort rows,
+        ushort columns)
     {
         Assert.Throws<ArgumentOutOfRangeException>(
             () => MxcSandbox.SpawnWithPty(
                 new SandboxPolicy(),
                 "echo hi",
-                new MxcPtySize(0, 80)));
+                new MxcPtySize(rows, columns)));
     }
 
     [Fact]

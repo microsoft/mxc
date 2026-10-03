@@ -10,7 +10,7 @@
 //!   its captured stdout/stderr and exit outcome in one call, or
 //! - hand it to [`v1::spawn_sandbox`] for a live [`Sandbox`] handle you can
 //!   stream stdio through, feed stdin, and kill while it runs, or
-//! - hand it to [`v1::spawn_with_pty`] for an MXC-owned [`MxcPty`] with
+//! - hand it to [`v1::spawn_with_pty`] for an MXC-owned [`MxcPtyProcess`] with
 //!   merged terminal output and resize support.
 //!
 //! Either way the right containment backend is selected for the host and the
@@ -172,7 +172,7 @@ pub use mxc_engine::{
 pub use mxc_engine::{ProbeFacts, ProbeOutput, UiCapabilitySupport};
 
 pub use sandbox::{
-    CaptureDenialsErrorOutput, CaptureDenialsOutput, MxcPty, MxcPtySize, Output, Sandbox,
+    CaptureDenialsErrorOutput, CaptureDenialsOutput, MxcPtyProcess, MxcPtySize, Output, Sandbox,
     SandboxOutputMetadata, StreamCloser, WaitOutcome,
 };
 
@@ -211,7 +211,7 @@ pub mod v1 {
         };
 
         use crate::state_aware_sdk::{ExecRequest, OperationOptions, SandboxId};
-        use crate::{Error, MxcPty, MxcPtySize};
+        use crate::{Error, MxcPtyProcess, MxcPtySize};
 
         /// Spawn a process in an existing container with a caller-controlled PTY.
         pub fn spawn_in_container_with_pty(
@@ -219,13 +219,13 @@ pub mod v1 {
             request: ExecRequest,
             size: MxcPtySize,
             options: OperationOptions,
-        ) -> Result<MxcPty, Error> {
+        ) -> Result<MxcPtyProcess, Error> {
             size.validate()?;
             let input = request
                 .into_sdk_input(sandbox_id, options.telemetry_opt_in)
                 .map_err(Error::from)?;
             mxc_engine::exec_typed_state_aware_pty_request(input, options.experimental, size.into())
-                .and_then(MxcPty::new)
+                .and_then(MxcPtyProcess::new)
         }
     }
 
@@ -242,7 +242,7 @@ pub mod v1 {
         StateAwareExecBackendOptions, StateAwareProvision, ValidationResult,
     };
 
-    use crate::{Error, MxcPty, MxcPtySize, Output, Sandbox};
+    use crate::{Error, MxcPtyProcess, MxcPtySize, Output, Sandbox};
 
     /// Probe an optional ProcessContainer request without creating a sandbox.
     ///
@@ -264,9 +264,12 @@ pub mod v1 {
     }
 
     /// Spawn a sandboxed process attached to an MXC-owned pseudo-terminal.
-    pub fn spawn_with_pty(request: SandboxRequest, size: MxcPtySize) -> Result<MxcPty, Error> {
+    pub fn spawn_with_pty(
+        request: SandboxRequest,
+        size: MxcPtySize,
+    ) -> Result<MxcPtyProcess, Error> {
         size.validate()?;
-        mxc_engine::spawn_with_pty(&request.inner, size.into()).and_then(MxcPty::new)
+        mxc_engine::spawn_with_pty(&request.inner, size.into()).and_then(MxcPtyProcess::new)
     }
 
     /// Run a sandbox from a [`SandboxRequest`] **to completion**, capturing its
@@ -320,10 +323,10 @@ pub fn spawn_with_pty_json(
     request_json: &str,
     experimental: bool,
     size: MxcPtySize,
-) -> Result<MxcPty, Error> {
+) -> Result<MxcPtyProcess, Error> {
     size.validate()?;
     mxc_engine::spawn_one_shot_pty_json(request_json, experimental, size.into())
-        .and_then(MxcPty::new)
+        .and_then(MxcPtyProcess::new)
 }
 
 /// Run a raw exact-version one-shot JSON request to completion, capturing its
@@ -399,10 +402,10 @@ pub fn spawn_in_container_with_pty_json(
     request_json: &str,
     size: MxcPtySize,
     experimental: bool,
-) -> Result<MxcPty, Error> {
+) -> Result<MxcPtyProcess, Error> {
     size.validate()?;
     mxc_engine::exec_state_aware_pty_json(request_json, experimental, size.into())
-        .and_then(MxcPty::new)
+        .and_then(MxcPtyProcess::new)
 }
 
 /// Run the `exec` phase of a state-aware request **attached to this process's

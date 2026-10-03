@@ -340,7 +340,7 @@ public static class MxcSandbox
     /// Spawn <paramref name="command"/> attached to an MXC-owned
     /// pseudo-terminal.
     /// </summary>
-    public static MxcPty SpawnWithPty(
+    public static MxcPtyProcess SpawnWithPty(
         SandboxPolicy policy,
         string command,
         MxcPtySize? size = null)
@@ -351,18 +351,13 @@ public static class MxcSandbox
     }
 
     /// <summary>Spawn a complete request attached to an MXC-owned PTY.</summary>
-    public static MxcPty SpawnWithPty(
+    public static MxcPtyProcess SpawnWithPty(
         SandboxRequest request,
         MxcPtySize? size = null)
     {
         ArgumentNullException.ThrowIfNull(request);
         var terminalSize = size ?? MxcPtySize.Default;
-        if (terminalSize.Rows == 0 || terminalSize.Columns == 0)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(size),
-                "PTY rows and columns must be non-zero.");
-        }
+        terminalSize.Validate(nameof(size));
 
         var requestBuf = ToNullTerminatedUtf8(SerializeRequest(request));
         unsafe
@@ -392,7 +387,7 @@ public static class MxcSandbox
                         NativeMethods.mxc_error_detail_free(&error);
                     }
                 }
-                return new MxcPty(
+                return new MxcPtyProcess(
                     MxcSandboxHandle.FromRaw(handle),
                     request.Policy.TimeoutMs);
             }

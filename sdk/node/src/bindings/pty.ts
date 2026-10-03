@@ -3,7 +3,7 @@
 
 import koffi, { type KoffiFunc } from 'koffi';
 import { MxcError } from '../errors.js';
-import { MxcPty } from '../mxc-pty.js';
+import { MxcPtyProcess } from '../mxc-pty-process.js';
 import { loadMxcFfi, type MxcNativeLibrary } from '../native-library.js';
 import { bindNativeFunction } from './native-function.js';
 import {
@@ -141,7 +141,7 @@ export async function createPty(
   ptyNative: PtyNativeFacade,
   lifecycleNative: LifecycleNativeFacade,
   factory: NativeStreamFactory,
-): Promise<MxcPty> {
+): Promise<MxcPtyProcess> {
   const requestJson = JSON.stringify(request);
   return createPtyFromJson(
     request.process.timeout,
@@ -174,7 +174,7 @@ async function createPtyFromJson(
   ptyNative: PtyNativeFacade,
   lifecycleNative: LifecycleNativeFacade,
   factory: NativeStreamFactory,
-): Promise<MxcPty> {
+): Promise<MxcPtyProcess> {
   const outHandle: Pointer[] = [null];
   const error = {} as AbiErrorDetail;
   const status = await new Promise<number>((resolve, reject) => {
@@ -213,7 +213,7 @@ async function createPtyFromJson(
     );
   }
   try {
-    return new MxcPty(
+    return new MxcPtyProcess(
       driver,
       (size) => throwIfFailed(
         ptyNative.resize(handle, size.rows, size.columns),
@@ -234,7 +234,7 @@ export function execStateAwareBindingSandboxWithPty(
   rows: number,
   columns: number,
   timeoutMs?: number,
-): Promise<MxcPty> {
+): Promise<MxcPtyProcess> {
   const ptyNative = getPtyNative();
   return createPtyFromJson(
     timeoutMs,
@@ -260,7 +260,7 @@ function spawnBindingSandboxWithPtyNative(
   experimental: boolean,
   rows: number,
   columns: number,
-): Promise<MxcPty> {
+): Promise<MxcPtyProcess> {
   return createPty(
     request,
     experimental,
@@ -277,7 +277,7 @@ type SpawnPtyImplementation = (
   experimental: boolean,
   rows: number,
   columns: number,
-) => Promise<MxcPty>;
+) => Promise<MxcPtyProcess>;
 
 let spawnPtyImplementation = spawnBindingSandboxWithPtyNative;
 
@@ -293,6 +293,6 @@ export function spawnBindingSandboxWithPty(
   experimental: boolean,
   rows: number,
   columns: number,
-): Promise<MxcPty> {
+): Promise<MxcPtyProcess> {
   return spawnPtyImplementation(request, experimental, rows, columns);
 }

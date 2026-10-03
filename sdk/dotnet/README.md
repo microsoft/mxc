@@ -656,7 +656,7 @@ internal ETL even when retention was requested.
 ### Pseudo-terminal
 
 `MxcSandbox.SpawnWithPty(policy, command, size)` selects IsolationSession,
-creates the terminal inside MXC, and returns an `MxcPty` with merged output,
+creates the terminal inside MXC, and returns an `MxcPtyProcess` with merged output,
 resize, timeout-aware waiting, and process-tree kill semantics:
 
 ```csharp
@@ -683,12 +683,15 @@ using var terminal = MxcSandbox.SpawnWithPty(
 
 using var writer = new StreamWriter(terminal.Input) { AutoFlush = true };
 using var reader = new StreamReader(terminal.Output);
+Task<string> outputTask = reader.ReadToEndAsync();
 
 await writer.WriteAsync("echo hello\r\n");
 terminal.Resize(new MxcPtySize(Rows: 40, Columns: 120));
 terminal.Input.WriteByte(0x03); // Ctrl-C; any terminal input bytes are accepted.
+await writer.WriteAsync("exit\r\n");
 
 SandboxWaitResult result = await terminal.WaitAsync();
+Console.Write(await outputTask);
 Console.WriteLine($"exit={result.ExitCode} timedOut={result.TimedOut}");
 ```
 
@@ -700,7 +703,7 @@ backends are rejected before sandbox creation.
 For an already-started container, use the same terminal type:
 
 ```csharp
-using MxcPty terminal = MxcLifecycle.SpawnInContainerWithPty(
+using MxcPtyProcess terminal = MxcLifecycle.SpawnInContainerWithPty(
     sandboxId,
     "powershell.exe",
     new MxcPtySize(Rows: 30, Columns: 100));
@@ -991,11 +994,16 @@ writable input, resize, waiting, timeout, and termination. Backend support is
 determined by native dispatch:
 
 ```csharp
-using MxcPty terminal =
+using MxcPtyProcess terminal =
     MxcLifecycle.SpawnInContainerWithPty(id, "powershell.exe");
+using var writer = new StreamWriter(terminal.Input) { AutoFlush = true };
+using var reader = new StreamReader(terminal.Output);
+Task<string> outputTask = reader.ReadToEndAsync();
 terminal.Resize(new MxcPtySize(Rows: 40, Columns: 120));
-await terminal.Input.WriteAsync(new byte[] { 0x03 }); // Ctrl-C
+terminal.Input.WriteByte(0x03); // Ctrl-C
+await writer.WriteAsync("exit\r\n");
 SandboxWaitResult outcome = await terminal.WaitAsync();
+Console.Write(await outputTask);
 ```
 
 `ExecInSandboxAttached` relays the workload onto this process's stdio instead,

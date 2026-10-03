@@ -40,6 +40,15 @@ public class SandboxAdapterTests
     }
 
     [Fact]
+    public void LifecyclePtyCapabilityHasDefaultImplementation()
+    {
+        var method = typeof(ISandboxLifecycle).GetMethod(
+            nameof(ISandboxLifecycle.SpawnInContainerWithPty));
+
+        Assert.NotNull(method?.GetMethodBody());
+    }
+
+    [Fact]
     public void LifecycleAdapterDelegatesStaticValidation()
     {
         ISandboxLifecycle lifecycle = new MxcSandboxLifecycle();

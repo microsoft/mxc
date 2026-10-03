@@ -44,7 +44,7 @@ public interface ISandboxRunner
     ISandboxProcess Spawn(SandboxRequest request);
 
     /// <summary>Spawn a policy and command with a caller-controlled pseudo-terminal.</summary>
-    MxcPty SpawnWithPty(
+    MxcPtyProcess SpawnWithPty(
         SandboxPolicy policy,
         string command,
         MxcPtySize? size = null) =>
@@ -52,7 +52,7 @@ public interface ISandboxRunner
             "This sandbox runner does not implement PTY spawning.");
 
     /// <summary>Spawn a complete request with a caller-controlled pseudo-terminal.</summary>
-    MxcPty SpawnWithPty(
+    MxcPtyProcess SpawnWithPty(
         SandboxRequest request,
         MxcPtySize? size = null) =>
         throw new NotSupportedException(
@@ -108,14 +108,14 @@ public sealed class MxcSandboxRunner : ISandboxRunner
         MxcSandbox.Spawn(request);
 
     /// <inheritdoc/>
-    public MxcPty SpawnWithPty(
+    public MxcPtyProcess SpawnWithPty(
         SandboxPolicy policy,
         string command,
         MxcPtySize? size = null) =>
         MxcSandbox.SpawnWithPty(policy, command, size);
 
     /// <inheritdoc/>
-    public MxcPty SpawnWithPty(
+    public MxcPtyProcess SpawnWithPty(
         SandboxRequest request,
         MxcPtySize? size = null) =>
         MxcSandbox.SpawnWithPty(request, size);
@@ -151,11 +151,13 @@ public interface ISandboxLifecycle
         StateAwareExecOptions? options = null);
 
     /// <summary>Spawn a process in the container with a caller-controlled pseudo-terminal.</summary>
-    MxcPty SpawnInContainerWithPty(
+    MxcPtyProcess SpawnInContainerWithPty(
         SandboxId id,
         string command,
         MxcPtySize? size = null,
-        StateAwareExecOptions? options = null);
+        StateAwareExecOptions? options = null) =>
+        throw new NotSupportedException(
+            "This sandbox lifecycle does not implement PTY spawning.");
 
     /// <summary>Execute attached to this process's terminal.</summary>
     SandboxWaitResult ExecInSandboxAttached(
@@ -234,7 +236,7 @@ public sealed class MxcSandboxLifecycle : ISandboxLifecycle
         MxcLifecycle.ExecInSandbox(id, command, options);
 
     /// <inheritdoc/>
-    public MxcPty SpawnInContainerWithPty(
+    public MxcPtyProcess SpawnInContainerWithPty(
         SandboxId id,
         string command,
         MxcPtySize? size = null,

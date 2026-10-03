@@ -21,7 +21,7 @@ import {
 } from './bindings/run.js';
 import { SDK_CONTRACT_VERSION } from './contract-version.js';
 import { spawnBindingSandboxWithPty } from './bindings/pty.js';
-import { MxcPty } from './mxc-pty.js';
+import { MxcPtyProcess } from './mxc-pty-process.js';
 
 export { SDK_CONTRACT_VERSION };
 const V1_CONTAINMENTS = new Set<SandboxContainment>([
@@ -626,7 +626,7 @@ export function spawnSandbox(
  * Spawn a sandboxed process attached to an MXC-owned pseudo-terminal.
  *
  * Unlike {@link spawnSandbox}, this creates the PTY inside the native MXC
- * runtime and returns an {@link MxcPty} with reliable lifecycle, resize, and
+ * runtime and returns an {@link MxcPtyProcess} with reliable lifecycle, resize, and
  * process-tree kill operations. Terminal stderr is merged into the output
  * stream.
  */
@@ -635,7 +635,7 @@ export async function spawnWithPty(
   options: MxcPtySpawnOptions = {},
   workingDirectory?: string,
   env?: { [key: string]: string | undefined },
-): Promise<MxcPty> {
+): Promise<MxcPtyProcess> {
   const unsupportedOption = unsupportedInProcessRunOption(options);
   if (unsupportedOption !== undefined) {
     throw new MxcError(

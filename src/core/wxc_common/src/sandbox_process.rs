@@ -498,11 +498,17 @@ impl Default for PtySize {
 }
 
 impl PtySize {
-    /// Reject dimensions that cannot create a usable terminal.
+    /// Reject dimensions that cannot be represented by supported PTY backends.
     pub fn validate(self) -> Result<(), MxcError> {
-        if self.rows == 0 || self.cols == 0 {
+        const MAX_DIMENSION: u16 = i16::MAX as u16;
+
+        if self.rows == 0
+            || self.cols == 0
+            || self.rows > MAX_DIMENSION
+            || self.cols > MAX_DIMENSION
+        {
             return Err(MxcError::malformed_request(
-                "PTY rows and columns must be non-zero",
+                "PTY rows and columns must be between 1 and 32767",
             ));
         }
         Ok(())
@@ -726,7 +732,7 @@ mod runner_tests {
     }
 
     #[test]
-    fn pty_size_rejects_zero_rows_or_columns() {
+    fn pty_size_rejects_dimensions_outside_signed_16_bit_range() {
         for size in [
             PtySize {
                 rows: 0,
@@ -740,11 +746,33 @@ mod runner_tests {
                 pixel_width: 0,
                 pixel_height: 0,
             },
+            PtySize {
+                rows: i16::MAX as u16 + 1,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            PtySize {
+                rows: 24,
+                cols: i16::MAX as u16 + 1,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
         ] {
-            let error = size.validate().expect_err("zero dimensions must fail");
+            let error = size
+                .validate()
+                .expect_err("out-of-range dimensions must fail");
             assert_eq!(error.code, crate::mxc_error::MxcErrorCode::MalformedRequest);
         }
         assert!(PtySize::default().validate().is_ok());
+        assert!(PtySize {
+            rows: i16::MAX as u16,
+            cols: i16::MAX as u16,
+            pixel_width: 0,
+            pixel_height: 0,
+        }
+        .validate()
+        .is_ok());
     }
 
     #[test]

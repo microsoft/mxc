@@ -8,7 +8,7 @@ import * as v1Sdk from '../../src/v1.js';
 import { _setSpawnBindingSandboxWithPtyImplementation } from '../../src/bindings/pty.js';
 import { _setBindingRunAsyncImplementation } from '../../src/bindings/run.js';
 import type { OneShotRequest } from '../../src/generated/v1_0_0/wire.js';
-import type { MxcPty } from '../../src/mxc-pty.js';
+import type { MxcPtyProcess } from '../../src/mxc-pty-process.js';
 
 const { MxcError } = rootSdk;
 const { spawnSandboxAsync, spawnWithPty } = v1Sdk;
@@ -64,7 +64,7 @@ describe('in-process async run routing', () => {
         bindingRequest = request;
         bindingRows = rows;
         bindingColumns = columns;
-        return {} as MxcPty;
+        return {} as MxcPtyProcess;
       },
     );
 

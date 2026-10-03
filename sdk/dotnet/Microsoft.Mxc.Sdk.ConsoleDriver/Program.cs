@@ -167,7 +167,7 @@ internal static class Program
 
     // Attach the caller-controlled PTY to this process's console by relaying its
     // streams and forwarding console input, control characters, and resize events.
-    private static SandboxWaitResult AttachToCurrentConsole(MxcPty terminal)
+    private static SandboxWaitResult AttachToCurrentConsole(MxcPtyProcess terminal)
     {
         using var consoleMode = ConsoleModeScope.EnterRaw();
         using var cancellation = new CancellationTokenSource();
@@ -217,7 +217,7 @@ internal static class Program
     // Console has no resize event; poll so the sandboxed TUI can reflow when
     // the operator resizes this window.
     private static async Task TrackConsoleSizeAsync(
-        MxcPty terminal,
+        MxcPtyProcess terminal,
         CancellationToken cancellationToken)
     {
         var last = CurrentConsoleSize();

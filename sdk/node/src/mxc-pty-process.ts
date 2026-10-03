@@ -23,7 +23,7 @@ type ResizePty = (size: MxcPtySize) => void;
  * control characters and escape sequences, to {@link input}; close it to send
  * EOF, and call {@link resize} when the visible terminal dimensions change.
  */
-export class MxcPty extends MxcSandboxProcess {
+export class MxcPtyProcess extends MxcSandboxProcess {
   /** @internal */
   constructor(
     driver: NativeLifecycleDriver,

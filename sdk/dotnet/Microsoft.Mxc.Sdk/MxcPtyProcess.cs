@@ -8,12 +8,25 @@ public readonly record struct MxcPtySize(ushort Rows, ushort Columns)
 {
     /// <summary>The default 24-row by 80-column terminal.</summary>
     public static MxcPtySize Default { get; } = new(24, 80);
+
+    internal void Validate(string paramName)
+    {
+        if (Rows == 0
+            || Columns == 0
+            || Rows > short.MaxValue
+            || Columns > short.MaxValue)
+        {
+            throw new ArgumentOutOfRangeException(
+                paramName,
+                "PTY rows and columns must be between 1 and 32767.");
+        }
+    }
 }
 
 /// <summary>A live sandbox process attached to a caller-driven pseudo-terminal.</summary>
-public sealed class MxcPty : MxcSandboxProcess
+public sealed class MxcPtyProcess : MxcSandboxProcess
 {
-    internal MxcPty(MxcSandboxHandle handle, uint? timeoutMs)
+    internal MxcPtyProcess(MxcSandboxHandle handle, uint? timeoutMs)
         : base(handle, timeoutMs)
     {
     }
@@ -29,12 +42,7 @@ public sealed class MxcPty : MxcSandboxProcess
     /// <summary>Resize the child terminal.</summary>
     public void Resize(MxcPtySize size)
     {
-        if (size.Rows == 0 || size.Columns == 0)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(size),
-                "PTY rows and columns must be non-zero.");
-        }
+        size.Validate(nameof(size));
         ResizePty(size);
     }
 

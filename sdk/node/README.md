@@ -308,7 +308,7 @@ their existing behavior.
 
 ### 3. `spawnWithPty(config, ...)` — native PTY handle
 
-This API creates the pseudo-terminal inside MXC and returns an `MxcPty` with
+This API creates the pseudo-terminal inside MXC and returns an `MxcPtyProcess` with
 native input/output streams, resize, reliable exit status, timeout handling,
 and process-tree kill semantics. Unlike `spawnSandbox`, it does not wrap the
 executor binary in `node-pty`. The `ContainerConfig` selects the backend and
@@ -356,7 +356,7 @@ EOF. Write control characters and escape sequences to `input` like any other
 terminal bytes. IsolationSession supports this API; unsupported backends are
 rejected before sandbox creation.
 
-Use `spawnInContainerWithPty` to attach the same `MxcPty` abstraction to a command
+Use `spawnInContainerWithPty` to attach the same `MxcPtyProcess` abstraction to a command
 inside an already-started container:
 
 ```typescript
@@ -539,6 +539,7 @@ const terminal = await spawnInContainerWithPty(
 terminal.output.on('data', (chunk) => process.stdout.write(chunk));
 terminal.input.write(Buffer.from([0x03])); // Ctrl-C
 terminal.resize({ rows: 40, columns: 120 });
+terminal.input.write('exit\r\n');
 await terminal.waitAsync();
 
 await stopSandbox(sandboxId);
@@ -721,7 +722,7 @@ For backend-specific errors, see the per-backend guide linked from the [Choosing
 // Spawn — config-based (recommended)
 createConfigFromPolicy(policy, containment?, containerName?) → ContainerConfig
 spawnSandboxFromConfig(config, options?, workingDirectory?, env?) → IPty | ChildProcess
-spawnWithPty(config, options?, workingDirectory?, env?) → Promise<MxcPty>
+spawnWithPty(config, options?, workingDirectory?, env?) → Promise<MxcPtyProcess>
 
 // Spawn — convenience (process containment only)
 spawnSandbox(script, policy, options?, workingDirectory?, containerName?, env?) → IPty
