@@ -4,7 +4,7 @@
   "containerId": "CLI-Bubblewrap-Network-Block",
   "containment": "bubblewrap",
   "process": {
-    "commandLine": "wget -qO- --timeout=3 https://api.github.com/zen 2>&1 || echo 'Network correctly blocked'"
+    "commandLine": "bash -c 'set -u; command -v timeout >/dev/null || exit 1; echo SANDBOX_NETNS=$(readlink /proc/self/ns/net); timeout 5 bash -c \"exec 3<>/dev/tcp/{{TARGET_IP}}/{{TARGET_PORT}}\" >/dev/null 2>&1; result=$?; if [ \"$result\" = 0 ]; then echo NETWORK_LEAKED; exit 1; fi; if [ \"$result\" -ge 124 ]; then echo PROBE_FAILED; exit 1; fi; echo NETWORK_BLOCKED_OK'"
   },
   "network": {
     "egress": {
