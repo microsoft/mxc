@@ -19,10 +19,10 @@ production configs and the dev schema when working on experimental features:
 "$schema": "./schemas/dev/mxc-config.schema.1.1.0-alpha.json"
 ```
 
-### Schema 0.8 networking
+### Directional networking (supported contracts)
 
-Schema 0.8 uses explicit egress and ingress policy and moves the loopback proxy
-endpoint into runtime configuration:
+Supported contracts from `0.9.0-alpha` use explicit egress and ingress policy
+and put the loopback proxy endpoint in runtime configuration:
 
 ```json
 {
@@ -76,17 +76,16 @@ not the strict proxy-endpoint exception defined by the shared model-2 policy.
 }
 ```
 
-The legacy `defaultPolicy`, `enforcementMode`, `allowLocalNetwork`,
-`allowedHosts`, `blockedHosts`, and `network.proxy` fields remain supported by
-schema 0.6 and 0.7. During the additive schema 0.8 transition, requests may
-continue to use those legacy fields or use the directional fields above, but
-cannot mix both formats in one request.
+The `defaultPolicy`, `enforcementMode`, `allowLocalNetwork`, `allowedHosts`,
+`blockedHosts`, and `network.proxy` fields belonged to retired contracts.
+No supported exact contract accepts them. Migrate existing policies to
+directional fields and `runtimeConfig.networkProxy` rather than changing
+the version string alone.
 
-#### Legacy network host-list semantics
+#### Historical legacy network host-list semantics (retired)
 
-Legacy host lists refine `defaultPolicy`; they do not replace it. Shared
-validation rejects a list that cannot refine the selected default before the
-backend executes.
+In the retired contracts, host lists refined `defaultPolicy`; they did not
+replace it. This table describes historical behavior, not supported authoring:
 
 | `defaultPolicy` | `allowedHosts` | `blockedHosts` | Result |
 | --- | --- | --- | --- |
@@ -125,9 +124,9 @@ that actual posture through the standard directional network fields:
 
 All three directional values must be explicitly `allow`; omission defaults to
 deny. Legacy network fields, rules, mixed postures, and proxies are rejected.
-An absent or empty `network` object is rejected. The existing experimental
-execution opt-in remains required. Published v0.6/v0.7/v0.8 contracts are
-unchanged by this addition.
+An absent or empty `network` object is rejected. Exact v0.9 IsolationSession
+does not require an experimental execution opt-in. Earlier published contracts
+remain immutable history but are no longer accepted.
 Every complete request that carries a process requires a non-empty
 `process.commandLine`. The Windows native CLI may accept a template without
 that field when the command is supplied after `--`; `wxc-exec.exe` inserts or
@@ -170,45 +169,21 @@ that can be executed independently.
     },
 
     "network": {
-        "defaultPolicy": "block",          // "allow" or "block"
-        "enforcementMode": "firewall",     // "capabilities", "firewall", or "both"
-        "allowedHosts": ["203.0.113.0/24"],
-        "blockedHosts": ["203.0.113.7"],   // Denies outrank allows, including broader CIDRs
-                                           // Under bubblewrap at schema 0.8+ with
-                                           //  enforcementMode "firewall", entries must be IP
-                                           //  literals or CIDR blocks: DNS names are rejected at
-                                           //  validation time rather than resolved. Use proxy
-                                           //  mode for hostname-based control.
-        "proxy": { "localhost": 8080 }     // Loopback proxy port (processcontainer; bubblewrap; seatbelt)
-                                           // (use { "builtinTestServer": true } for the bundled
-                                           //  testing-only proxy; requires --allow-testing-features)
-                                           // WSLC and LXC support the cooperative proxy too, but
-                                           // only via { "url": "http://proxy.example:8080" }
-                                           // (own-netns: localhost/builtinTestServer are
-                                           //  unreachable, rejected)
-                                           // Seatbelt requires defaultPolicy "block": a proxy
-                                           //  alongside "allow" adds no enforcement and is rejected
-                                           // Under LXC the proxy is enforced: forwarded egress is
-                                           //  restricted to the proxy endpoint and nothing else, so
-                                           //  the allow/block host lists and DNS are not opened.
-                                           //  The chain hooks FORWARD, so traffic addressed to the
-                                           //  bridge gateway itself is delivered locally via INPUT
-                                           //  and is outside what this chain governs.
-                                           // Under Bubblewrap on schema 0.8+ the proxy is likewise
-                                           //  enforced, in the sandbox's own network namespace:
-                                           //  egress is dropped except the proxy endpoint, and DNS
-                                           //  is not opened. A url-form hostname is resolved on the
-                                           //  host and pinned into the sandbox's /etc/hosts, since
-                                           //  the sandbox has no resolver of its own. `localhost`,
-                                           //  127.0.0.0/8 and the wildcards 0.0.0.0 / :: are
-                                           //  rewritten to the slirp gateway; `::1` is rejected,
-                                           //  because an IPv6-loopback listener cannot accept the
-                                           //  IPv4 connection that gateway produces. Because the
-                                           //  pin outranks every filesystem mount, a `deniedPaths`
-                                           //  entry covering /etc/hosts is rejected rather than
-                                           //  silently overridden. On schema
-                                           //  0.6/0.7 Bubblewrap keeps the cooperative-only
-                                           //  behavior (no egress rules).
+        "egress": {
+            "default": "deny",
+            "allow": [{
+                "to": [{ "cidr": "203.0.113.0/24" }],
+                "ports": [{ "protocol": "tcp", "port": 443 }]
+            }],
+            "deny": [{
+                "to": [{ "cidr": "203.0.113.7/32" }],
+                "ports": [{ "protocol": "tcp", "port": 443 }]
+            }]
+        },
+        "ingress": {
+            "default": "deny",
+            "hostLoopback": "deny"
+        }
     },
 
     "ui": {
@@ -240,7 +215,7 @@ that can be executed independently.
         }
                                            // Omit outputPath for a managed JSON output file.
                                            // Native PSEC/V2 capture cannot combine with leastPrivilege
-                                           // or network.proxy. Hosts without that complete native set
+                                           // or runtimeConfig.networkProxy. Hosts without that complete native set
                                            // retain an eligible legacy containment tier and use guarded WPR.
                                            // If guarded-WPR prerequisites are unavailable, the request
                                            // fails before MXC creates the sandbox.
@@ -540,7 +515,6 @@ Registered contracts:
 | Config `version` | Status |
 |---|---|
 | `"0.9.0-alpha"` | Published; minimum supported |
-
 | `"1.0.0"` | Published; current stable |
 | `"1.1.0-alpha"` | Mutable development contract |
 

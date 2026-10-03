@@ -108,8 +108,9 @@ the development/testing configuration is:
 ```
 
 This identity-less host-loopback deployment cannot pin the proxy process's
-identity. For production ProcessContainer deployments, identify a packaged
-proxy through `processContainer.network.allowedProxyPeer` instead; see
+identity and requires native PSEC 1.1 ingress/host-loopback support; unsupported
+hosts reject the request. For production ProcessContainer deployments, identify
+a packaged proxy through `processContainer.network.allowedProxyPeer` instead; see
 [proxy deployment choices](process-container/networking.md#proxy-deployment-choices).
 Bubblewrap and Seatbelt also support a caller-managed loopback proxy, but
 their supported ingress policies differ. See their backend guides.
