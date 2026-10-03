@@ -51,7 +51,7 @@ var request = new ContainerRequest("echo hello")
         Capabilities = { "internetClient" },
     },
 };
-using (var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(request)))
+using (var doc = JsonDocument.Parse(MxcContainer.SerializeRequest(request)))
 {
     var root = doc.RootElement;
     Check(root.GetProperty("version").GetString() == "1.0.0", "SDK-owned exact request version");
@@ -74,7 +74,7 @@ var wslcRequest = new ContainerRequest("echo memory")
 {
     Containment = new WslcContainment { MemoryMb = ulong.MaxValue },
 };
-using (var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(wslcRequest)))
+using (var doc = JsonDocument.Parse(MxcContainer.SerializeRequest(wslcRequest)))
 {
     Check(doc.RootElement.GetProperty("wslc").GetProperty("memoryMb").GetUInt64()
         == ulong.MaxValue, "full unsigned WSLC memory bound");
@@ -110,7 +110,7 @@ Check(support!.AvailableMethods.Length == 1, "available methods parsed");
 const string metadataJson = """
 {"captureDenials":{"type":"captureDenials","outputPath":"C:\\out.json","exitCode":0,"totalDenials":3,"deniedResourcesTruncated":false},"captureDenialsError":{"message":"finalize failed","etlPath":"C:\\trace.etl"}}
 """;
-var metadata = MxcJson.Deserialize<SandboxOutputMetadata>(metadataJson);
+var metadata = MxcJson.Deserialize<OutputMetadata>(metadataJson);
 Check(metadata?.CaptureDenials?.OutputPath == "C:\\out.json", "output metadata parsed");
 Check(metadata!.CaptureDenials!.TotalDenials == 3, "denial count parsed");
 Check(metadata.CaptureDenialsError?.Message == "finalize failed", "capture denials error parsed");
@@ -223,7 +223,7 @@ const string probeJson = """
   }
 }
 """;
-var probe = MxcSandbox.ParseProbeOutput(probeJson);
+var probe = MxcContainer.ParseProbeOutput(probeJson);
 Check(probe.Tier == IsolationTier.AppContainerDacl, "probe tier parsed");
 Check(probe.NeedsDaclAugmentation == true, "probe dacl augmentation parsed");
 Check(probe.Probes.BaseContainerApiPresent, "probe facts parsed");

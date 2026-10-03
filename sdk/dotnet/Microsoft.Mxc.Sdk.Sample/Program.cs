@@ -50,7 +50,7 @@ Console.WriteLine($"Running: {command}");
 
 try
 {
-    var result = MxcSandbox.Run(request);
+    var result = MxcContainer.Run(request);
     Console.WriteLine($"exit code : {result.ExitCode}");
     Console.WriteLine($"timed out : {result.TimedOut}");
     Console.WriteLine($"stdout    : {result.Stdout.TrimEnd()}");
@@ -80,7 +80,7 @@ try
     // its stdout as it is produced, then wait for exit.
     Console.WriteLine();
     Console.WriteLine("Streaming the same command live:");
-    using (var proc = MxcSandbox.Spawn(request))
+    using (var proc = MxcContainer.Spawn(request))
     {
         var stdout = proc.StandardOutput;
         if (stdout is not null)

@@ -27,7 +27,7 @@ import { _setStateAwareBindingSandboxProcessFactory } from '../../src/bindings/s
 import { MxcError, type MxcErrorFields } from '../../src/errors.js';
 import { SandboxId } from '../../src/state-aware-types.js';
 import {
-  MxcSandboxProcess,
+  MxcProcess,
   type NativeLifecycleDriver,
   type NativeLifecycleStatus,
 } from '../../src/sandbox-process.js';
@@ -142,7 +142,7 @@ function installStateAwareExecBinding(
     experimental = allowExperimental;
     timeoutMs = timeout;
     binding = createBinding();
-    return new MxcSandboxProcess(binding, timeout);
+    return new MxcProcess(binding, timeout);
   });
   return {
     binding: () => {
@@ -789,7 +789,7 @@ describe('execInSandboxAsync', () => {
 });
 
 describe('execInSandbox', () => {
-  it('returns a live MxcSandboxProcess backed by the shared FFI controller', async () => {
+  it('returns a live MxcProcess backed by the shared FFI controller', async () => {
     const exec = installStateAwareExecBinding(
       () => new FakeStateAwareExecBinding(22, 'live\n', '', 0, { exitCode: 0, timedOut: false }, ['warning']),
     );

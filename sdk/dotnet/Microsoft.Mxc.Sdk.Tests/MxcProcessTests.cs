@@ -8,7 +8,7 @@ using Xunit;
 
 namespace Microsoft.Mxc.Sdk.Tests;
 
-public class MxcSandboxProcessTests
+public class MxcProcessTests
 {
     // Real spawn requires a host able to launch a sandboxed process (an
     // elevated, host-prepped Windows host, or a capable Linux/macOS host). CI
@@ -31,7 +31,7 @@ public class MxcSandboxProcessTests
     [Fact]
     public void Spawn_NullRequest_Throws()
     {
-        Assert.Throws<ArgumentNullException>(() => MxcSandbox.Spawn(null!));
+        Assert.Throws<ArgumentNullException>(() => MxcContainer.Spawn(null!));
     }
 
     [Fact]
@@ -61,7 +61,7 @@ public class MxcSandboxProcessTests
             },
         };
 
-        var ex = Assert.Throws<MxcException>(() => MxcSandbox.Spawn(request));
+        var ex = Assert.Throws<MxcException>(() => MxcContainer.Spawn(request));
         Assert.Equal(ErrorCode.MalformedRequest, ex.Code);
         Assert.False(string.IsNullOrEmpty(ex.Message));
     }
@@ -70,7 +70,7 @@ public class MxcSandboxProcessTests
     public void StandardOutputCloser_RequiresTakingTheStreamFirst()
     {
         Assert.SkipUnless(HostCanSpawn, "no host backend available");
-        using var proc = MxcSandbox.Spawn(new ContainerRequest(BlockerCommand));
+        using var proc = MxcContainer.Spawn(new ContainerRequest(BlockerCommand));
 
         Assert.Throws<InvalidOperationException>(() => proc.StandardOutputCloser);
     }
@@ -79,7 +79,7 @@ public class MxcSandboxProcessTests
     public async Task StandardOutputCloser_UnblocksReadWithoutKillingChild()
     {
         Assert.SkipUnless(HostCanSpawn, "no host backend available");
-        using var proc = MxcSandbox.Spawn(new ContainerRequest(BlockerCommand));
+        using var proc = MxcContainer.Spawn(new ContainerRequest(BlockerCommand));
         var stdout = proc.StandardOutput;
         var closer = proc.StandardOutputCloser;
         Assert.NotNull(stdout);
@@ -105,7 +105,7 @@ public class MxcSandboxProcessTests
     public void StreamingWarnings_AreAvailableImmediately()
     {
         Assert.SkipUnless(HostCanSpawn, "no host backend available");
-        using var proc = MxcSandbox.Spawn(new ContainerRequest(BlockerCommand));
+        using var proc = MxcContainer.Spawn(new ContainerRequest(BlockerCommand));
 
         Assert.Empty(proc.Warnings);
         proc.Kill();
@@ -120,7 +120,7 @@ public class MxcSandboxProcessTests
             ? @"C:\Windows\System32\cmd.exe /c echo mxc_stream_ok"
             : "echo mxc_stream_ok";
 
-        using var proc = MxcSandbox.Spawn(new ContainerRequest(command));
+        using var proc = MxcContainer.Spawn(new ContainerRequest(command));
 
         var stdout = proc.StandardOutput;
         Assert.NotNull(stdout);
@@ -141,7 +141,7 @@ public class MxcSandboxProcessTests
             ? @"C:\Windows\System32\cmd.exe /c echo mxc_async_ok"
             : "echo mxc_async_ok";
 
-        using var proc = MxcSandbox.Spawn(new ContainerRequest(command));
+        using var proc = MxcContainer.Spawn(new ContainerRequest(command));
         var (result, stdout, _) = await proc.WaitForExitWithOutputAsync(
             TestContext.Current.CancellationToken);
 
@@ -154,7 +154,7 @@ public class MxcSandboxProcessTests
     public async Task TryGetExitCode_ReportsRunningThenExited()
     {
         Assert.SkipUnless(HostCanSpawn, "no host backend available");
-        using var proc = MxcSandbox.Spawn(new ContainerRequest(BlockerCommand));
+        using var proc = MxcContainer.Spawn(new ContainerRequest(BlockerCommand));
         using var stdin = proc.StandardInput;
         Assert.NotNull(stdin);
 
@@ -184,7 +184,7 @@ public class MxcSandboxProcessTests
             ? @"C:\Windows\System32\cmd.exe /v:on /c set /p L= & echo GOT:!L!"
             : "cat";
 
-        using var proc = MxcSandbox.Spawn(new ContainerRequest(command));
+        using var proc = MxcContainer.Spawn(new ContainerRequest(command));
 
         var stdin = proc.StandardInput;
         Assert.NotNull(stdin);
@@ -217,7 +217,7 @@ public class MxcSandboxProcessTests
             ? @"C:\Windows\System32\cmd.exe /c echo a& echo b& echo c"
             : "printf 'a\\nb\\nc\\n'";
 
-        using var proc = MxcSandbox.Spawn(new ContainerRequest(command));
+        using var proc = MxcContainer.Spawn(new ContainerRequest(command));
         var result = proc.Wait();
 
         Assert.False(result.TimedOut);
@@ -232,7 +232,7 @@ public class MxcSandboxProcessTests
             ? @"C:\Windows\System32\cmd.exe /c echo bye"
             : "echo bye";
 
-        var proc = MxcSandbox.Spawn(new ContainerRequest(command));
+        var proc = MxcContainer.Spawn(new ContainerRequest(command));
         proc.Wait();
         proc.Dispose();
         proc.Dispose(); // second dispose must be a no-op, not a double-free
@@ -252,7 +252,7 @@ public class MxcSandboxProcessTests
             ? @"C:\Windows\System32\cmd.exe /c echo hi & ping -n 3 127.0.0.1 >nul"
             : "sh -c 'echo hi; sleep 2'";
 
-        var proc = MxcSandbox.Spawn(new ContainerRequest(command));
+        var proc = MxcContainer.Spawn(new ContainerRequest(command));
         var stdout = proc.StandardOutput!;
         Exception? readError = null;
         using var readStarted = new ManualResetEventSlim();
@@ -296,7 +296,7 @@ public class MxcSandboxProcessTests
     public void Kill_TerminatesRunningChild()
     {
         Assert.SkipUnless(HostCanSpawn, "no host backend available");
-        using var proc = MxcSandbox.Spawn(new ContainerRequest(BlockerCommand));
+        using var proc = MxcContainer.Spawn(new ContainerRequest(BlockerCommand));
         var stdin = proc.StandardInput; // hold stdin open so the child blocks
         Assert.NotNull(stdin);
 
@@ -313,7 +313,7 @@ public class MxcSandboxProcessTests
 
         // The poll-based Wait design exists so Kill stays responsive during a
         // WaitAsync from another thread; prove the await completes after Kill.
-        using var proc = MxcSandbox.Spawn(new ContainerRequest(BlockerCommand));
+        using var proc = MxcContainer.Spawn(new ContainerRequest(BlockerCommand));
         var stdin = proc.StandardInput; // hold stdin open so the child blocks
         Assert.NotNull(stdin);
 
@@ -337,7 +337,7 @@ public class MxcSandboxProcessTests
 
         // Cancelling WaitAsync abandons the wait (throwing) without killing the
         // child — the exact path that previously triggered the stream UAF.
-        using var proc = MxcSandbox.Spawn(new ContainerRequest(BlockerCommand));
+        using var proc = MxcContainer.Spawn(new ContainerRequest(BlockerCommand));
         var stdin = proc.StandardInput; // hold stdin open so the child blocks
         Assert.NotNull(stdin);
 
@@ -355,7 +355,7 @@ public class MxcSandboxProcessTests
         Assert.SkipUnless(HostCanSpawn, "no host backend available");
         // Write one line to stdout and one to stderr (both cmd builtins).
         var command = @"C:\Windows\System32\cmd.exe /c echo to-out& echo to-err 1>&2";
-        using var proc = MxcSandbox.Spawn(new ContainerRequest(command));
+        using var proc = MxcContainer.Spawn(new ContainerRequest(command));
 
         var (result, stdout, stderr) =
             await proc.WaitForExitWithOutputAsync(TestContext.Current.CancellationToken);
@@ -375,7 +375,7 @@ public class MxcSandboxProcessTests
         // pipe; WaitForExitWithOutputAsync must return both in full.
         var command =
             @"C:\Windows\System32\cmd.exe /c for /L %i in (1,1,12000) do @(echo out-%i& echo err-%i 1>&2)";
-        using var proc = MxcSandbox.Spawn(new ContainerRequest(command));
+        using var proc = MxcContainer.Spawn(new ContainerRequest(command));
 
         var (result, stdout, stderr) = await proc.WaitForExitWithOutputAsync(
             TestContext.Current.CancellationToken);
@@ -396,7 +396,7 @@ public class MxcSandboxProcessTests
         // try_wait never kills and spawn starts no native watchdog, so without
         // managed enforcement the blocked child would hang Wait() indefinitely.
         var request = new ContainerRequest(BlockerCommand) { TimeoutMs = 1000 };
-        using var proc = MxcSandbox.Spawn(request);
+        using var proc = MxcContainer.Spawn(request);
         var stdin = proc.StandardInput; // hold stdin open so the child blocks
         Assert.NotNull(stdin);
 
@@ -423,7 +423,7 @@ public class MxcSandboxProcessTests
         // that same stream back to the caller afterwards would race the drainer on
         // one native handle, so StandardOutput/Error must refuse it.
         var command = @"C:\Windows\System32\cmd.exe /c echo drained";
-        using var proc = MxcSandbox.Spawn(new ContainerRequest(command));
+        using var proc = MxcContainer.Spawn(new ContainerRequest(command));
 
         proc.Wait(); // drains stdout/stderr internally
         Assert.Throws<InvalidOperationException>(() => proc.StandardOutput);
@@ -440,7 +440,7 @@ public class MxcSandboxProcessTests
         // native reads return, then surfaces cancellation without killing the
         // child. Previously it awaited the reads before unblocking them and hung
         // forever, leaking the native child.
-        using var proc = MxcSandbox.Spawn(new ContainerRequest(BlockerCommand));
+        using var proc = MxcContainer.Spawn(new ContainerRequest(BlockerCommand));
         var stdin = proc.StandardInput; // hold stdin open so the child blocks
         Assert.NotNull(stdin);
 

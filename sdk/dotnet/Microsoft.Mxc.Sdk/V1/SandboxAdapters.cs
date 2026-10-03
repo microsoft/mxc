@@ -6,10 +6,10 @@ using Microsoft.Mxc.Sdk;
 namespace Microsoft.Mxc.Sdk.V1;
 
 /// <summary>
-/// Injectable one-shot sandbox operations. Use <see cref="MxcSandboxRunner.Default"/>
+/// Injectable one-shot sandbox operations. Use <see cref="MxcContainerRunner.Default"/>
 /// in production and substitute a fake or mock in unit tests.
 /// </summary>
-public interface ISandboxRunner
+public interface IContainerRunner
 {
     /// <summary>The loaded native MXC library version.</summary>
     string NativeVersion { get; }
@@ -36,12 +36,12 @@ public interface ISandboxRunner
 }
 
 /// <summary>
-/// Stateless <see cref="ISandboxRunner"/> adapter over <see cref="MxcSandbox"/>.
+/// Stateless <see cref="IContainerRunner"/> adapter over <see cref="MxcContainer"/>.
 /// </summary>
-public sealed class MxcSandboxRunner : ISandboxRunner
+public sealed class MxcContainerRunner : IContainerRunner
 {
     /// <summary>Shared production adapter.</summary>
-    public static MxcSandboxRunner Default { get; } = new();
+    public static MxcContainerRunner Default { get; } = new();
 
     /// <inheritdoc/>
     public string NativeVersion => Microsoft.Mxc.Sdk.MxcPlatform.NativeVersion;
@@ -56,29 +56,29 @@ public sealed class MxcSandboxRunner : ISandboxRunner
 
     /// <inheritdoc/>
     public Output Run(ContainerRequest request) =>
-        MxcSandbox.Run(request);
+        MxcContainer.Run(request);
 
     /// <inheritdoc/>
     public Task<Output> RunAsync(
         ContainerRequest request,
         CancellationToken cancellationToken = default) =>
-        MxcSandbox.RunAsync(request, cancellationToken);
+        MxcContainer.RunAsync(request, cancellationToken);
 
     /// <inheritdoc/>
     public IMxcProcess Spawn(ContainerRequest request) =>
-        MxcSandbox.Spawn(request);
+        MxcContainer.Spawn(request);
 
     /// <inheritdoc/>
     public MxcPtyProcess SpawnWithPty(ContainerRequest request, MxcPtySize? size = null) =>
-        MxcSandbox.SpawnWithPty(request, size);
+        MxcContainer.SpawnWithPty(request, size);
 }
 
 /// <summary>
 /// Injectable state-aware sandbox lifecycle operations. Use
-/// <see cref="MxcSandboxLifecycle.Default"/> in production and substitute a fake
+/// <see cref="MxcContainerLifecycle.Default"/> in production and substitute a fake
 /// or mock in unit tests.
 /// </summary>
-public interface ISandboxLifecycle
+public interface IContainerLifecycle
 {
     /// <summary>Provision a new sandbox.</summary>
     ProvisionResult ProvisionSandbox(
@@ -147,13 +147,13 @@ public interface ISandboxLifecycle
 }
 
 /// <summary>
-/// Stateless <see cref="ISandboxLifecycle"/> adapter over
+/// Stateless <see cref="IContainerLifecycle"/> adapter over
 /// <see cref="MxcLifecycle"/>.
 /// </summary>
-public sealed class MxcSandboxLifecycle : ISandboxLifecycle
+public sealed class MxcContainerLifecycle : IContainerLifecycle
 {
     /// <summary>Shared production adapter.</summary>
-    public static MxcSandboxLifecycle Default { get; } = new();
+    public static MxcContainerLifecycle Default { get; } = new();
 
     /// <inheritdoc/>
     public ProvisionResult ProvisionSandbox(

@@ -5,7 +5,7 @@ import type { Readable, Writable } from 'node:stream';
 import koffi, { type KoffiFunc } from 'koffi';
 import { MxcError } from '../errors.js';
 import {
-  MxcSandboxProcess,
+  MxcProcess,
   type NativeLifecycleDriver,
   type NativeLifecycleStatus,
 } from '../sandbox-process.js';
@@ -248,13 +248,13 @@ let stateAwareSandboxProcessFactory:
       requestJson: string,
       experimental: boolean,
       timeoutMs?: number,
-    ) => MxcSandboxProcess)
+    ) => MxcProcess)
   | undefined;
 let oneShotSyncProcessFactory:
-  | ((request: OneShotRequest, experimental: boolean) => MxcSandboxProcess)
+  | ((request: OneShotRequest, experimental: boolean) => MxcProcess)
   | undefined;
 let oneShotAsyncProcessFactory:
-  | ((request: OneShotRequest, experimental: boolean) => Promise<MxcSandboxProcess>)
+  | ((request: OneShotRequest, experimental: boolean) => Promise<MxcProcess>)
   | undefined;
 
 export function getStreamingNative(): StreamingNativeFacade {
@@ -542,7 +542,7 @@ function spawnDriver(
 export async function spawnBindingSandboxProcess(
   request: OneShotRequest,
   experimental = false,
-): Promise<MxcSandboxProcess> {
+): Promise<MxcProcess> {
   if (oneShotAsyncProcessFactory !== undefined) {
     return oneShotAsyncProcessFactory(request, experimental);
   }
@@ -553,7 +553,7 @@ export async function spawnBindingSandboxProcess(
 export function spawnBindingSandboxProcessSync(
   request: OneShotRequest,
   experimental = false,
-): MxcSandboxProcess {
+): MxcProcess {
   if (oneShotSyncProcessFactory !== undefined) {
     return oneShotSyncProcessFactory(request, experimental);
   }
@@ -572,11 +572,11 @@ export function _setBindingSandboxProcessFactories(
   syncFactory?: (
     request: OneShotRequest,
     experimental: boolean,
-  ) => MxcSandboxProcess,
+  ) => MxcProcess,
   asyncFactory?: (
     request: OneShotRequest,
     experimental: boolean,
-  ) => Promise<MxcSandboxProcess>,
+  ) => Promise<MxcProcess>,
 ): void {
   oneShotSyncProcessFactory = syncFactory;
   oneShotAsyncProcessFactory = asyncFactory;
@@ -607,9 +607,9 @@ export function createStateAwareStreamingDriver(
 function createSandboxProcess(
   driver: NativeLifecycleDriver,
   timeoutMs?: number,
-): MxcSandboxProcess {
+): MxcProcess {
   try {
-    return new MxcSandboxProcess(driver, timeoutMs);
+    return new MxcProcess(driver, timeoutMs);
   } catch (error) {
     destroyNativeStreams(driver);
     void driver.free().catch(() => {});
@@ -622,7 +622,7 @@ export function _setStateAwareBindingSandboxProcessFactory(
     requestJson: string,
     experimental: boolean,
     timeoutMs?: number,
-  ) => MxcSandboxProcess,
+  ) => MxcProcess,
 ): void {
   stateAwareSandboxProcessFactory = factory;
 }
@@ -631,7 +631,7 @@ export function spawnStateAwareBindingSandboxProcess(
   requestJson: string,
   experimental: boolean,
   timeoutMs?: number,
-): MxcSandboxProcess {
+): MxcProcess {
   if (stateAwareSandboxProcessFactory !== undefined) {
     return stateAwareSandboxProcessFactory(
       requestJson,

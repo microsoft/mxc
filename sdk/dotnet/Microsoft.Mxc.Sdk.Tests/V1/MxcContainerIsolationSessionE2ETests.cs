@@ -19,7 +19,7 @@ namespace Microsoft.Mxc.Sdk.Tests.V1;
 /// the part no Rust test can see.
 /// </remarks>
 [Collection("MxcLiveHost")]
-public class MxcSandboxIsolationSessionE2ETests
+public class MxcContainerIsolationSessionE2ETests
 {
     // The backend wraps the command in `cmd.exe /c` itself, so these are bare
     // shell commands. Adding another wrapper nests two shells and the outer one
@@ -47,7 +47,7 @@ public class MxcSandboxIsolationSessionE2ETests
     {
         IsolationSessionHost.Require();
 
-        var result = MxcSandbox.Run(Request("echo mxc_iso_run_ok & exit /b 3"));
+        var result = MxcContainer.Run(Request("echo mxc_iso_run_ok & exit /b 3"));
 
         Assert.False(result.TimedOut);
         Assert.Equal(3, result.ExitCode);
@@ -61,7 +61,7 @@ public class MxcSandboxIsolationSessionE2ETests
 
         // `/fo csv /nh` prints `"machine\account","SID"`. The SID is compared
         // because it is canonical, and no account is named in a failure message.
-        var result = MxcSandbox.Run(Request("whoami /user /fo csv /nh"));
+        var result = MxcContainer.Run(Request("whoami /user /fo csv /nh"));
 
         Assert.Equal(0, result.ExitCode);
         var sid = result.Stdout.Trim().Split(',').Last().Trim('"');
@@ -84,7 +84,7 @@ public class MxcSandboxIsolationSessionE2ETests
     {
         IsolationSessionHost.Require();
 
-        using var proc = MxcSandbox.Spawn(Request("echo mxc_iso_stream_ok"));
+        using var proc = MxcContainer.Spawn(Request("echo mxc_iso_stream_ok"));
 
         var stdout = proc.StandardOutput;
         Assert.NotNull(stdout);

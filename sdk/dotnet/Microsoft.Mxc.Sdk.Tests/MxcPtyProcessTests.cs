@@ -20,7 +20,7 @@ public class MxcPtyProcessTests
     public void SpawnWithPty_NullRequest_Throws()
     {
         Assert.Throws<ArgumentNullException>(
-            () => MxcSandbox.SpawnWithPty(null!));
+            () => MxcContainer.SpawnWithPty(null!));
     }
 
     [Fact]
@@ -40,7 +40,7 @@ public class MxcPtyProcessTests
         ushort columns)
     {
         Assert.Throws<ArgumentOutOfRangeException>(
-            () => MxcSandbox.SpawnWithPty(
+            () => MxcContainer.SpawnWithPty(
                 new ContainerRequest("echo hi"),
                 new MxcPtySize(rows, columns)));
     }

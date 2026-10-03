@@ -20,7 +20,7 @@ public sealed class FilesystemPolicyResult
 /// <summary>
 /// Discovers host paths commonly needed by sandboxed developer tools.
 /// </summary>
-public static class SandboxPolicyDiscovery
+public static class FilesystemPolicyDiscovery
 {
     private static readonly (string Name, bool IsPathList)[] KnownEnvironmentVariables =
     {

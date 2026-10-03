@@ -30,7 +30,7 @@ import {
 } from './state-aware-types.js';
 import type { MxcOptions } from './types.js';
 import type {
-  MxcSandboxProcess,
+  MxcProcess,
   SandboxWaitResult as WaitOutcome,
 } from './sandbox-process.js';
 import {
@@ -136,7 +136,7 @@ function spawnStateAwareExecProcess<C extends StateAwareContainmentBackend>(
   config: ExecConfigFor<C>,
   options: MxcOptions,
   apiName: string,
-): MxcSandboxProcess {
+): MxcProcess {
   assertStateAwareOptions(apiName, options);
   assertPipedExecBackend(apiName, sandboxId);
   return spawnStateAwareBindingSandboxProcess(
@@ -230,14 +230,14 @@ export async function startSandbox<C extends StateAwareContainmentBackend>(
 
 /**
  * Streams a script execution inside a started IsolationSession or WSLC sandbox over Node
- * pipes, returning an owning `MxcSandboxProcess` for waiting, termination,
+ * pipes, returning an owning `MxcProcess` for waiting, termination,
  * stream access, and disposal.
  */
 export function execInSandbox<C extends PipedExecBackend>(
   sandboxId: ContainerId<C>,
   config: ExecConfigFor<C>,
   options: MxcOptions = {},
-): MxcSandboxProcess {
+): MxcProcess {
   assertStateAwareStreamingOptions('execInSandbox', options);
   return spawnStateAwareExecProcess(
     sandboxId,
@@ -370,7 +370,7 @@ export function spawnInContainer<C extends PipedExecBackend>(
   containerId: ContainerId<C>,
   request: ExecRequest<C>,
   options: MxcOptions = {},
-): MxcSandboxProcess {
+): MxcProcess {
   return execInSandbox(containerId, request, options);
 }
 

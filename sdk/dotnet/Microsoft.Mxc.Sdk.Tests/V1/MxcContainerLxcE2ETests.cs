@@ -18,7 +18,7 @@ namespace Microsoft.Mxc.Sdk.Tests.V1;
 /// the part no Rust test can see.
 /// </remarks>
 [Collection("MxcLiveHost")]
-public class MxcSandboxLxcE2ETests
+public class MxcContainerLxcE2ETests
 {
     // A healthy run finishes in under a second, so this only trips on a wedged attach.
     private const int WaitBoundMs = 180_000;
@@ -48,7 +48,7 @@ public class MxcSandboxLxcE2ETests
     {
         LxcHost.Require();
 
-        var result = MxcSandbox.Run(
+        var result = MxcContainer.Run(
             Request("printf 'mxc_lxc_run_ok\\n'; exit 3", "mxc-dotnet-run"));
 
         Assert.False(result.TimedOut);
@@ -63,7 +63,7 @@ public class MxcSandboxLxcE2ETests
 
         // Blocking on stdin: the workload cannot reach its exit until this test
         // lets it.
-        using var proc = MxcSandbox.Spawn(
+        using var proc = MxcContainer.Spawn(
             Request(
                 "printf 'mxc_lxc_stream_ok\\n'; IFS= read -r _; printf 'mxc_lxc_done\\n'",
                 "mxc-dotnet-spawn"));

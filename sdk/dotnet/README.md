@@ -20,18 +20,18 @@ var request = new ContainerRequest("cmd /c echo hello")
     TimeoutMs = 30_000,
 };
 
-Output output = await MxcSandbox.RunAsync(request);
+Output output = await MxcContainer.RunAsync(request);
 Console.WriteLine($"exit={output.ExitCode} stdout={output.Stdout}");
 ```
 
-Use `MxcSandbox.Run` / `RunAsync` for captured output or `Spawn` for a live
+Use `MxcContainer.Run` / `RunAsync` for captured output or `Spawn` for a live
 `MxcProcess` with separate stdin, stdout, and stderr streams. `MxcProcess`
 provides wait, termination, and disposal operations. Shared filesystem,
 network, and UI restrictions are authored directly on `ContainerRequest`,
 alongside the selected backend configuration. The SDK owns the exact wire
 contract; requests do not accept a caller-selected schema version.
 
-`MxcSandbox.SpawnWithPty(request, size?)` starts a one-shot request with a
+`MxcContainer.SpawnWithPty(request, size?)` starts a one-shot request with a
 caller-controlled terminal and returns an `MxcPtyProcess`. PTY support is
 currently available for IsolationSession requests.
 

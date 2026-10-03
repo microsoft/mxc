@@ -11,7 +11,7 @@ import {
 } from '../../src/bindings/run.js';
 import { _setBindingSandboxProcessFactories } from '../../src/bindings/streaming.js';
 import {
-  MxcSandboxProcess,
+  MxcProcess,
   type NativeLifecycleDriver,
 } from '../../src/sandbox-process.js';
 import type { OneShotRequest } from '../../src/generated/v1_0_0/wire.js';
@@ -45,17 +45,17 @@ describe('public SDK namespace exports', () => {
     }
   });
 
-  it('does not expose replaced one-shot APIs or process wrappers', () => {
+  it('does not expose replaced one-shot APIs or legacy process wrappers', () => {
     for (const name of [
       'createConfigFromRequest',
       'spawnSandbox',
       'spawnSandboxAsync',
       'spawnSandboxFromConfig',
-      'MxcSandboxProcess',
     ] as const) {
       assert.strictEqual(Object.hasOwn(rootSdk, name), false, name);
       assert.strictEqual(Object.hasOwn(v1Sdk, name), false, name);
     }
+    assert.strictEqual(Object.hasOwn(v1Sdk, 'MxcSandboxProcess'), false);
 
     for (const name of ['getPlatformSupport', 'probeSandboxSupport', 'MxcError'] as const) {
       assert.strictEqual(typeof rootSdk[name], 'function', name);
@@ -150,7 +150,7 @@ describe('in-process asynchronous run routing', () => {
         killForTimeout: () => {},
         free: async () => {},
       };
-      return new MxcSandboxProcess(driver);
+      return new MxcProcess(driver);
     };
     _setBindingSandboxProcessFactories(
       (request, experimental) => {

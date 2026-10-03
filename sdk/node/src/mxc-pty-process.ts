@@ -3,7 +3,7 @@
 
 import type { Readable, Writable } from 'node:stream';
 import {
-  MxcSandboxProcess,
+  MxcProcess,
   type LifecycleScheduler,
   type NativeLifecycleDriver,
 } from './sandbox-process.js';
@@ -23,7 +23,7 @@ type ResizePty = (size: MxcPtySize) => void;
  * control characters and escape sequences, to {@link input}; close it to send
  * EOF, and call {@link resize} when the visible terminal dimensions change.
  */
-export class MxcPtyProcess extends MxcSandboxProcess {
+export class MxcPtyProcess extends MxcProcess {
   /** @internal */
   constructor(
     driver: NativeLifecycleDriver,

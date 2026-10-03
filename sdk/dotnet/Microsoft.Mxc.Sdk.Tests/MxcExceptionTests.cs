@@ -97,7 +97,7 @@ public class MxcExceptionTests
     {
         var request = InvalidCidrRequest();
 
-        var ex = Assert.Throws<MxcException>(() => MxcSandbox.Run(request));
+        var ex = Assert.Throws<MxcException>(() => MxcContainer.Run(request));
 
         Assert.Equal(ErrorCode.MalformedRequest, ex.Code);
         Assert.False(string.IsNullOrEmpty(ex.Message));
@@ -114,7 +114,7 @@ public class MxcExceptionTests
         // reaches the caller by that route too.
         var request = InvalidCidrRequest();
 
-        var ex = Assert.Throws<MxcException>(() => MxcSandbox.Spawn(request));
+        var ex = Assert.Throws<MxcException>(() => MxcContainer.Spawn(request));
 
         Assert.Equal(ErrorCode.MalformedRequest, ex.Code);
         Assert.False(string.IsNullOrEmpty(ex.Message));

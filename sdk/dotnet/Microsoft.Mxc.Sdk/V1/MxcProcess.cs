@@ -46,7 +46,7 @@ public interface IMxcProcess : IDisposable
     IReadOnlyList<string> Warnings { get; }
 
     /// <summary>Structured feature output available after terminal completion.</summary>
-    SandboxOutputMetadata? OutputMetadata { get; }
+    OutputMetadata? OutputMetadata { get; }
 
     /// <summary>Wait for the child to exit.</summary>
     WaitOutcome Wait();
@@ -66,7 +66,7 @@ public interface IMxcProcess : IDisposable
 }
 
 /// <summary>
-/// A live process spawned by <see cref="MxcSandbox.Spawn(ContainerRequest)"/>.
+/// A live process spawned by <see cref="MxcContainer.Spawn(ContainerRequest)"/>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -292,7 +292,7 @@ public class MxcProcess : IMxcProcess
     /// Structured outputs produced by optional sandbox features. Metadata is
     /// available after a terminal wait completes; before then this is null.
     /// </summary>
-    public SandboxOutputMetadata? OutputMetadata
+    public OutputMetadata? OutputMetadata
     {
         get
         {
@@ -318,7 +318,7 @@ public class MxcProcess : IMxcProcess
                         var text = Marshal.PtrToStringUTF8((IntPtr)json);
                         return string.IsNullOrEmpty(text)
                             ? null
-                            : MxcJson.Deserialize<SandboxOutputMetadata>(text);
+                            : MxcJson.Deserialize<OutputMetadata>(text);
                     }
                     finally
                     {

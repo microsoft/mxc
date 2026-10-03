@@ -6,7 +6,7 @@ using System.Text.Json.Serialization;
 namespace Microsoft.Mxc.Sdk;
 
 /// <summary>Structured outputs produced by optional sandbox features.</summary>
-public sealed class SandboxOutputMetadata
+public sealed class OutputMetadata
 {
     /// <summary>Location and summary of a captureDenials output document.</summary>
     [JsonPropertyName("captureDenials")]

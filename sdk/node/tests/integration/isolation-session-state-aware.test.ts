@@ -137,7 +137,7 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
     }
   });
 
-  it('streams exec through MxcSandboxProcess', async () => {
+  it('streams exec through MxcProcess', async () => {
     const provisionResult = await provisionSandbox(
       'isolation_session',
       { network: isolationSessionNetwork },

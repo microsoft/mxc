@@ -98,7 +98,7 @@ public sealed class MxcTelemetryTests : IDisposable
         };
 
         using var doc = System.Text.Json.JsonDocument.Parse(
-            MxcSandbox.SerializeRequest(request));
+            MxcContainer.SerializeRequest(request));
 
         Assert.True(doc.RootElement.GetProperty("telemetry").GetProperty("enabled").GetBoolean());
     }

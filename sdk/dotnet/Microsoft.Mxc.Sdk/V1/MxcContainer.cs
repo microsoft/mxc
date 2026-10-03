@@ -15,11 +15,11 @@ namespace Microsoft.Mxc.Sdk.V1;
 /// <c>mxc_ffi</c> library and runs or spawns a complete
 /// <see cref="ContainerRequest"/>.
 /// </summary>
-public static class MxcSandbox
+public static class MxcContainer
 {
     private const int NoExperimentalOptIn = 0;
 
-    static MxcSandbox()
+    static MxcContainer()
     {
         NativeLibraryResolver.Initialize();
     }
@@ -33,7 +33,7 @@ public static class MxcSandbox
     /// <remarks>
     /// This diagnostic does not create a sandbox. It calls the packaged
     /// <c>mxc_ffi</c> library in process. It is intentionally not part of
-    /// <see cref="ISandboxRunner"/>, preserving compatibility for existing
+    /// <see cref="IContainerRunner"/>, preserving compatibility for existing
     /// interface implementations.
     /// </remarks>
     public static ProbeOutput Probe(ContainerRequest? request = null)
@@ -364,10 +364,10 @@ public static class MxcSandbox
     private static unsafe string? PtrToString(byte* p) =>
         p is null ? null : Marshal.PtrToStringUTF8((IntPtr)p);
 
-    private static SandboxOutputMetadata? DeserializeOutputMetadata(string? json) =>
+    private static OutputMetadata? DeserializeOutputMetadata(string? json) =>
         string.IsNullOrEmpty(json)
             ? null
-            : MxcJson.Deserialize<SandboxOutputMetadata>(json);
+            : MxcJson.Deserialize<OutputMetadata>(json);
 
     private static IReadOnlyList<string> DeserializeWarnings(string? json) =>
         string.IsNullOrEmpty(json)

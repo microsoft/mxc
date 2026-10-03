@@ -7,7 +7,7 @@ namespace Microsoft.Mxc.Sdk.V1;
 
 /// <summary>
 /// The result of running a sandbox to completion via
-/// <see cref="MxcSandbox.Run(ContainerRequest)"/>.
+/// <see cref="MxcContainer.Run(ContainerRequest)"/>.
 /// </summary>
 public sealed class Output
 {
@@ -24,7 +24,7 @@ public sealed class Output
     public string Stderr { get; init; } = string.Empty;
 
     /// <summary>Structured outputs produced by optional sandbox features.</summary>
-    public SandboxOutputMetadata? OutputMetadata { get; init; }
+    public OutputMetadata? OutputMetadata { get; init; }
 
     /// <summary>
     /// Security warnings raised during the run, empty when there were none.

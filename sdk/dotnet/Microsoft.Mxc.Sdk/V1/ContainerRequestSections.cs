@@ -28,8 +28,8 @@ public enum CaptureDenialsMode
 
     /// <summary>
     /// Allow and record the access. This relaxes containment for the run and emits a warning.
-    /// <see cref="MxcSandbox.Run(ContainerRequest)"/>,
-    /// <see cref="MxcSandbox.RunAsync(ContainerRequest, CancellationToken)"/>, and
+    /// <see cref="MxcContainer.Run(ContainerRequest)"/>,
+    /// <see cref="MxcContainer.RunAsync(ContainerRequest, CancellationToken)"/>, and
     /// <see cref="MxcProcess.Warnings"/> expose that warning.
     /// </summary>
     Allow,
@@ -37,7 +37,7 @@ public enum CaptureDenialsMode
 
 /// <summary>
 /// Windows ProcessContainer denial-capture settings. The presence of this section enables
-/// capture and reports the resulting document through <see cref="SandboxOutputMetadata"/>.
+/// capture and reports the resulting document through <see cref="OutputMetadata"/>.
 /// </summary>
 public sealed class CaptureDenialsPolicy
 {

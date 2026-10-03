@@ -13,17 +13,17 @@ public class SandboxAdapterTests
     [Fact]
     public void DefaultAdaptersImplementInjectableContracts()
     {
-        ISandboxRunner runner = MxcSandboxRunner.Default;
-        ISandboxLifecycle lifecycle = MxcSandboxLifecycle.Default;
+        IContainerRunner runner = MxcContainerRunner.Default;
+        IContainerLifecycle lifecycle = MxcContainerLifecycle.Default;
 
-        Assert.Same(MxcSandboxRunner.Default, runner);
-        Assert.Same(MxcSandboxLifecycle.Default, lifecycle);
+        Assert.Same(MxcContainerRunner.Default, runner);
+        Assert.Same(MxcContainerLifecycle.Default, lifecycle);
     }
 
     [Fact]
     public void RunnerAdapterDelegatesStaticArgumentValidation()
     {
-        ISandboxRunner runner = new MxcSandboxRunner();
+        IContainerRunner runner = new MxcContainerRunner();
 
         Assert.Throws<ArgumentNullException>(
             () => runner.Run((ContainerRequest)null!));
@@ -34,7 +34,7 @@ public class SandboxAdapterTests
     [Fact]
     public void ExistingRunnerImplementationsRemainSourceCompatible()
     {
-        ISandboxRunner runner = new ExistingRunnerFake();
+        IContainerRunner runner = new ExistingRunnerFake();
 
         Assert.Equal("fake", runner.NativeVersion);
     }
@@ -42,8 +42,8 @@ public class SandboxAdapterTests
     [Fact]
     public void LifecyclePtyCapabilityHasDefaultImplementation()
     {
-        var method = typeof(ISandboxLifecycle).GetMethod(
-            nameof(ISandboxLifecycle.SpawnInContainerWithPty));
+        var method = typeof(IContainerLifecycle).GetMethod(
+            nameof(IContainerLifecycle.SpawnInContainerWithPty));
 
         Assert.NotNull(method?.GetMethodBody());
     }
@@ -51,7 +51,7 @@ public class SandboxAdapterTests
     [Fact]
     public void LifecycleAdapterDelegatesStaticValidation()
     {
-        ISandboxLifecycle lifecycle = new MxcSandboxLifecycle();
+        IContainerLifecycle lifecycle = new MxcContainerLifecycle();
 
         var exception = Assert.Throws<MxcException>(
             () => lifecycle.DryRunStopSandbox(new ContainerId("missing-prefix")));
@@ -60,8 +60,8 @@ public class SandboxAdapterTests
     }
 
     [Theory]
-    [InlineData(typeof(MxcSandbox), typeof(ISandboxRunner))]
-    [InlineData(typeof(MxcLifecycle), typeof(ISandboxLifecycle))]
+    [InlineData(typeof(MxcContainer), typeof(IContainerRunner))]
+    [InlineData(typeof(MxcLifecycle), typeof(IContainerLifecycle))]
     public void InjectableContractsMirrorStaticFacadeMethods(
         Type staticFacade,
         Type contract)
@@ -70,7 +70,7 @@ public class SandboxAdapterTests
         foreach (var facadeMethod in staticFacade
             .GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly)
             .Where(method => !method.IsSpecialName)
-            .Where(method => staticFacade != typeof(MxcSandbox) || method.Name != nameof(MxcSandbox.Probe)))
+            .Where(method => staticFacade != typeof(MxcContainer) || method.Name != nameof(MxcContainer.Probe)))
         {
             var parameterTypes = facadeMethod.GetParameters()
                 .Select(parameter => parameter.ParameterType)
@@ -128,7 +128,7 @@ public class SandboxAdapterTests
         Assert.Null(method);
     }
 
-    private sealed class ExistingRunnerFake : ISandboxRunner
+    private sealed class ExistingRunnerFake : IContainerRunner
     {
         public string NativeVersion => "fake";
 
@@ -167,7 +167,7 @@ public class SandboxAdapterTests
             new FakeSandboxStreamCloser(() => OutputCloseRequested = true);
         public IMxcStreamCloser? StandardErrorCloser => null;
         public IReadOnlyList<string> Warnings => Array.Empty<string>();
-        public SandboxOutputMetadata? OutputMetadata => null;
+        public OutputMetadata? OutputMetadata => null;
 
         public WaitOutcome Wait() => new() { ExitCode = 0 };
 

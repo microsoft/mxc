@@ -7,7 +7,7 @@ using Xunit;
 
 namespace Microsoft.Mxc.Sdk.Tests.V1;
 
-public class SandboxPolicyDiscoveryTests
+public class FilesystemPolicyDiscoveryTests
 {
     [Fact]
     public void GetAvailableToolsPolicy_DeduplicatesAndSkipsMissingDirectories()
@@ -25,7 +25,7 @@ public class SandboxPolicyDiscoveryTests
                 ["DOTNET_ROOT"] = directory,
             };
 
-            var result = SandboxPolicyDiscovery.GetAvailableToolsPolicy(environment);
+            var result = FilesystemPolicyDiscovery.GetAvailableToolsPolicy(environment);
 
             Assert.Single(result.ReadonlyPaths);
             Assert.Equal(Path.GetFullPath(directory), result.ReadonlyPaths[0]);
@@ -44,7 +44,7 @@ public class SandboxPolicyDiscoveryTests
             ? Environment.GetEnvironmentVariable("WINDIR") ?? @"C:\Windows"
             : "/usr/bin";
 
-        var result = SandboxPolicyDiscovery.GetAvailableToolsPolicy(
+        var result = FilesystemPolicyDiscovery.GetAvailableToolsPolicy(
             new Dictionary<string, string?> { ["PATH"] = criticalPath });
 
         Assert.DoesNotContain(
@@ -72,7 +72,7 @@ public class SandboxPolicyDiscoveryTests
                 ["USERPROFILE"] = directory,
             };
 
-            var result = SandboxPolicyDiscovery.GetAvailableToolsPolicy(environment);
+            var result = FilesystemPolicyDiscovery.GetAvailableToolsPolicy(environment);
 
             Assert.Contains(Path.GetFullPath(directory), result.ReadonlyPaths);
             Assert.DoesNotContain(
@@ -122,7 +122,7 @@ public class SandboxPolicyDiscoveryTests
                 };
             }
 
-            var result = SandboxPolicyDiscovery.GetUserProfilePolicy(environment);
+            var result = FilesystemPolicyDiscovery.GetUserProfilePolicy(environment);
 
             Assert.Contains(expected, result.ReadonlyPaths);
             Assert.Empty(result.ReadwritePaths);
@@ -140,7 +140,7 @@ public class SandboxPolicyDiscoveryTests
         try
         {
             var variable = OperatingSystem.IsWindows() ? "TEMP" : "TMPDIR";
-            var result = SandboxPolicyDiscovery.GetTemporaryFilesPolicy(
+            var result = FilesystemPolicyDiscovery.GetTemporaryFilesPolicy(
                 new Dictionary<string, string?> { [variable] = directory });
 
             Assert.Empty(result.ReadonlyPaths);
@@ -160,7 +160,7 @@ public class SandboxPolicyDiscoveryTests
             Path.GetTempPath(),
             $"mxc-missing-{Guid.NewGuid():N}");
 
-        var result = SandboxPolicyDiscovery.GetTemporaryFilesPolicy(
+        var result = FilesystemPolicyDiscovery.GetTemporaryFilesPolicy(
             new Dictionary<string, string?> { [variable] = missing });
 
         Assert.Empty(result.ReadonlyPaths);

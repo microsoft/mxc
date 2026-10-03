@@ -9,12 +9,12 @@ using Microsoft.Mxc.Sdk;
 using Microsoft.Mxc.Sdk.Native;
 using Microsoft.Mxc.Sdk.V1;
 using Microsoft.Mxc.Sdk.Tests;
-using MxcSandbox = Microsoft.Mxc.Sdk.V1.MxcSandbox;
+using MxcContainer = Microsoft.Mxc.Sdk.V1.MxcContainer;
 using Xunit;
 
 namespace Microsoft.Mxc.Sdk.Tests.V1;
 
-public class MxcSandboxTests
+public class MxcContainerTests
 {
     private const string CompleteProbeJson = """
         {
@@ -55,7 +55,7 @@ public class MxcSandboxTests
     {
         var json = CreateCompleteProbeJson();
         mutate(json);
-        Assert.Throws<JsonException>(() => MxcSandbox.ParseProbeOutput(json.ToJsonString()));
+        Assert.Throws<JsonException>(() => MxcContainer.ParseProbeOutput(json.ToJsonString()));
     }
 
     private static void AssertNoExplicitNulls(JsonElement element, string path = "$")
@@ -93,8 +93,8 @@ public class MxcSandboxTests
         {
             OutputJson = CompleteProbeJson,
         };
-        var previous = MxcSandbox.RequestProbeInterop;
-        MxcSandbox.RequestProbeInterop = native;
+        var previous = MxcContainer.RequestProbeInterop;
+        MxcContainer.RequestProbeInterop = native;
 
         try
         {
@@ -102,11 +102,11 @@ public class MxcSandboxTests
             {
                 ContainerName = "dotnet-exact-probe",
             };
-            var output = MxcSandbox.Probe(request);
+            var output = MxcContainer.Probe(request);
 
             Assert.Equal(IsolationTier.AppContainerDacl, output.Tier);
             Assert.True(output.Probes.BaseContainerApiPresent);
-            Assert.Equal(MxcSandbox.SerializeRequest(request), native.RequestJson);
+            Assert.Equal(MxcContainer.SerializeRequest(request), native.RequestJson);
             using var document = JsonDocument.Parse(native.RequestJson!);
             Assert.Equal(
                 "process",
@@ -123,7 +123,7 @@ public class MxcSandboxTests
         }
         finally
         {
-            MxcSandbox.RequestProbeInterop = previous;
+            MxcContainer.RequestProbeInterop = previous;
         }
     }
 
@@ -134,12 +134,12 @@ public class MxcSandboxTests
         {
             OutputJson = CompleteProbeJson,
         };
-        var previous = MxcSandbox.RequestProbeInterop;
-        MxcSandbox.RequestProbeInterop = native;
+        var previous = MxcContainer.RequestProbeInterop;
+        MxcContainer.RequestProbeInterop = native;
 
         try
         {
-            var output = MxcSandbox.Probe();
+            var output = MxcContainer.Probe();
 
             Assert.Equal(IsolationTier.AppContainerDacl, output.Tier);
             Assert.Null(native.RequestJson);
@@ -148,7 +148,7 @@ public class MxcSandboxTests
         }
         finally
         {
-            MxcSandbox.RequestProbeInterop = previous;
+            MxcContainer.RequestProbeInterop = previous;
         }
     }
 
@@ -166,13 +166,13 @@ public class MxcSandboxTests
             ErrorNativeCode = "0x80070005",
             ErrorRemediation = "check policy",
         };
-        var previous = MxcSandbox.RequestProbeInterop;
-        MxcSandbox.RequestProbeInterop = native;
+        var previous = MxcContainer.RequestProbeInterop;
+        MxcContainer.RequestProbeInterop = native;
 
         try
         {
             var error = Assert.Throws<MxcException>(
-                () => MxcSandbox.Probe(new ContainerRequest("cmd /c exit 0")));
+                () => MxcContainer.Probe(new ContainerRequest("cmd /c exit 0")));
             Assert.Equal(code, error.Code);
             Assert.Contains("probe exploded", error.Message);
             Assert.Equal("ProcessModel.Probe", error.Operation);
@@ -182,7 +182,7 @@ public class MxcSandboxTests
         }
         finally
         {
-            MxcSandbox.RequestProbeInterop = previous;
+            MxcContainer.RequestProbeInterop = previous;
         }
     }
 
@@ -190,19 +190,19 @@ public class MxcSandboxTests
     public void Probe_SurfacesMalformedOutput()
     {
         using var native = new FakeRequestProbeInterop { OutputJson = "not json" };
-        var previous = MxcSandbox.RequestProbeInterop;
-        MxcSandbox.RequestProbeInterop = native;
+        var previous = MxcContainer.RequestProbeInterop;
+        MxcContainer.RequestProbeInterop = native;
 
         try
         {
             Assert.Throws<JsonException>(
-                () => MxcSandbox.Probe(new ContainerRequest("cmd /c exit 0")));
+                () => MxcContainer.Probe(new ContainerRequest("cmd /c exit 0")));
             Assert.True(native.OutputFreed);
             Assert.True(native.ErrorFreed);
         }
         finally
         {
-            MxcSandbox.RequestProbeInterop = previous;
+            MxcContainer.RequestProbeInterop = previous;
         }
     }
 
@@ -214,18 +214,18 @@ public class MxcSandboxTests
             IsSupportedOnCurrentPlatform = false,
             OutputJson = CompleteProbeJson,
         };
-        var previous = MxcSandbox.RequestProbeInterop;
-        MxcSandbox.RequestProbeInterop = native;
+        var previous = MxcContainer.RequestProbeInterop;
+        MxcContainer.RequestProbeInterop = native;
 
         try
         {
-            var error = Assert.Throws<MxcException>(() => MxcSandbox.Probe());
+            var error = Assert.Throws<MxcException>(() => MxcContainer.Probe());
             Assert.Equal(ErrorCode.UnsupportedContainment, error.Code);
             Assert.Equal(0, native.ProbeCalls);
         }
         finally
         {
-            MxcSandbox.RequestProbeInterop = previous;
+            MxcContainer.RequestProbeInterop = previous;
         }
     }
 
@@ -308,7 +308,7 @@ public class MxcSandboxTests
         json.Remove("needsDaclAugmentation");
         json["error"] = "tier detection failed";
 
-        var output = MxcSandbox.ParseProbeOutput(json.ToJsonString());
+        var output = MxcContainer.ParseProbeOutput(json.ToJsonString());
 
         Assert.Null(output.Tier);
         Assert.Null(output.NeedsDaclAugmentation);
@@ -333,8 +333,8 @@ public class MxcSandboxTests
             Status = (int)ErrorCode.UnsupportedContainment,
             ErrorMessage = "request-aware probe supports ProcessContainer only; got wslc",
         };
-        var previous = MxcSandbox.RequestProbeInterop;
-        MxcSandbox.RequestProbeInterop = native;
+        var previous = MxcContainer.RequestProbeInterop;
+        MxcContainer.RequestProbeInterop = native;
         var request = new ContainerRequest("echo hi")
         {
             Containment = new WslcContainment(),
@@ -342,7 +342,7 @@ public class MxcSandboxTests
 
         try
         {
-            var error = Assert.Throws<MxcException>(() => MxcSandbox.Probe(request));
+            var error = Assert.Throws<MxcException>(() => MxcContainer.Probe(request));
             Assert.Equal(ErrorCode.UnsupportedContainment, error.Code);
             Assert.Contains("got wslc", error.Message);
             Assert.Equal(1, native.ProbeCalls);
@@ -354,7 +354,7 @@ public class MxcSandboxTests
         }
         finally
         {
-            MxcSandbox.RequestProbeInterop = previous;
+            MxcContainer.RequestProbeInterop = previous;
         }
     }
 
@@ -373,7 +373,7 @@ public class MxcSandboxTests
                 },
             },
         };
-        using var document = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
+        using var document = JsonDocument.Parse(MxcContainer.SerializeRequest(request));
         var root = document.RootElement;
         var network = root.GetProperty("network");
         Assert.Equal(
@@ -539,7 +539,7 @@ public class MxcSandboxTests
     public void Run_NullRequest_Throws()
     {
         Assert.Throws<ArgumentNullException>(
-            () => MxcSandbox.Run((ContainerRequest)null!));
+            () => MxcContainer.Run((ContainerRequest)null!));
     }
 
     [Fact]
@@ -578,7 +578,7 @@ public class MxcSandboxTests
     }
 
     [Fact]
-    public void SandboxOutputMetadata_DeserializesCaptureFailure()
+    public void OutputMetadata_DeserializesCaptureFailure()
     {
         const string json = """
             {
@@ -589,7 +589,7 @@ public class MxcSandboxTests
             }
             """;
 
-        var metadata = JsonSerializer.Deserialize<SandboxOutputMetadata>(json);
+        var metadata = JsonSerializer.Deserialize<OutputMetadata>(json);
 
         var error = metadata?.CaptureDenialsError;
         Assert.NotNull(error);

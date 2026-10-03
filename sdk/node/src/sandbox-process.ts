@@ -77,7 +77,7 @@ function isExpectedStdinClosure(error: unknown): boolean {
  * any untaken output internally, and subsequent access to that stream throws.
  * Output metadata is populated only after terminal settling completes.
  */
-export class MxcSandboxProcess {
+export class MxcProcess {
   /**
    * OS process ID for process-based backends.
    *

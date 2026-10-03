@@ -43,7 +43,7 @@ export {
   run,
   runAsync,
 } from './sandbox.js';
-export { MxcSandboxProcess as MxcProcess } from './sandbox-process.js';
+export { MxcProcess } from './sandbox-process.js';
 export type { SandboxWaitResult as WaitOutcome } from './sandbox-process.js';
 export { MxcPtyProcess } from './mxc-pty-process.js';
 export type { MxcPtySize } from './mxc-pty-process.js';
