@@ -27,14 +27,14 @@ a 0.8.x patch**. Package versions are bumped in a dedicated release PR (see
   managed policy deadline, so calling it directly granted the workload a second
   full timeout budget (see "Fixed" below). Use `Wait()` / `WaitAsync()`, which
   enforce the deadline.
-- `StartSandboxOptions` is replaced by `StateAwarePhaseOptions`, which every
+- `StartSandboxOptions` is replaced by `LifecycleOptions`, which every
   non-provision phase now shares.
 
 ### Changed (breaking)
 
 - `MxcLifecycle.ProvisionSandbox` takes the backend as a required leading
-  `StateAwareContainment` argument, and its options parameter widened from
-  `ProvisionSandboxOptions` to the abstract `StateAwareProvisionOptions`.
+  `LifecycleBackend` argument, and its options parameter widened from
+  `ProvisionSandboxOptions` to the abstract `ProvisionOptions`.
   `ProvisionSandboxOptions` still exists and now derives from that base, so
   object initializers are unchanged — add the containment argument:
 
@@ -43,7 +43,7 @@ a 0.8.x patch**. Package versions are bumped in a dedicated release PR (see
   MxcLifecycle.ProvisionSandbox(new ProvisionSandboxOptions { … });
   // 0.9.0
   MxcLifecycle.ProvisionSandbox(
-      StateAwareContainment.IsolationSession,
+      LifecycleBackend.IsolationSession,
       new ProvisionSandboxOptions { … });
   ```
 
@@ -53,7 +53,7 @@ a 0.8.x patch**. Package versions are bumped in a dedicated release PR (see
   method signature, assemblies compiled against 0.8.0 must be recompiled
   rather than dropped in place.
 - Non-exec phases reject `StateAwareExecOptions` instead of ignoring exec-only
-  fields. Use `StateAwarePhaseOptions`.
+  fields. Use `LifecycleOptions`.
 
 ### Deprecated
 

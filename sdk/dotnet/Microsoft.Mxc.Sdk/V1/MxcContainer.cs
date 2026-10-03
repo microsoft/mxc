@@ -200,7 +200,7 @@ public static class MxcContainer
     }
 
     /// <summary>Run a complete one-shot request to completion.</summary>
-    public static Output Run(ContainerRequest request)
+    public static ExecutionOutput Run(ContainerRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
 
@@ -222,7 +222,7 @@ public static class MxcContainer
                         throw NativeError.ToException(status, result.error, "unknown error");
                     }
 
-                    return new Output
+                    return new ExecutionOutput
                     {
                         ExitCode = result.exit_code,
                         TimedOut = result.timed_out != 0,
@@ -243,7 +243,7 @@ public static class MxcContainer
     }
 
     /// <summary>Asynchronous wrapper over <see cref="Run(ContainerRequest)"/>.</summary>
-    public static Task<Output> RunAsync(
+    public static Task<ExecutionOutput> RunAsync(
         ContainerRequest request,
         CancellationToken cancellationToken = default)
     {

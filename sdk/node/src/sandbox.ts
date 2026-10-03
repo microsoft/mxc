@@ -7,7 +7,7 @@ import {
     ContainerRequest,
     ContainerConfig,
     SandboxContainment,
-    Output,
+    ExecutionOutput,
     type MxcOptions,
     UnsupportedV1NetworkFields,
 } from './types.js';
@@ -386,8 +386,8 @@ function validateOperationOptions(
   }
 }
 
-function toOutput(result: BindingRunResult): Output {
-  const output: Output = {
+function toExecutionOutput(result: BindingRunResult): ExecutionOutput {
+  const output: ExecutionOutput = {
     stdout: result.stdout,
     stderr: bufferedStderr(result),
     exitCode: result.exitCode,
@@ -453,9 +453,9 @@ export function spawnWithPty(
 export function run(
   request: ContainerRequest,
   options: MxcOptions = {},
-): Output {
+): ExecutionOutput {
   validateOperationOptions('run', options, false);
-  return toOutput(runOneShotJson(
+  return toExecutionOutput(runOneShotJson(
     oneShotRequest(request),
     options.experimental === true,
   ));
@@ -465,9 +465,9 @@ export function run(
 export async function runAsync(
   request: ContainerRequest,
   options: MxcOptions = {},
-): Promise<Output> {
+): Promise<ExecutionOutput> {
   validateOperationOptions('runAsync', options, false);
-  return toOutput(await runOneShotJsonAsync(
+  return toExecutionOutput(await runOneShotJsonAsync(
     oneShotRequest(request),
     options.experimental === true,
   ));

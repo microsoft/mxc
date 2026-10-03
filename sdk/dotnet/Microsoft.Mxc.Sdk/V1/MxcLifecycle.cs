@@ -24,7 +24,7 @@ public static class MxcLifecycle
     }
 
     /// <summary>Exact contract owned by this v1 SDK.</summary>
-    public const string StateAwareVersion = SchemaVersions.SdkContract;
+    public const string SdkContractVersion = SchemaVersions.SdkContract;
 
     /// <summary>IsolationSession containment wire key.</summary>
     public const string IsolationSessionContainment = "isolation_session";
@@ -38,8 +38,8 @@ public static class MxcLifecycle
     /// <summary>Provision a new sandbox.</summary>
     /// <exception cref="MxcException">Provisioning failed.</exception>
     public static ProvisionResult ProvisionSandbox(
-        StateAwareContainment containment,
-        StateAwareProvisionOptions? options = null)
+        LifecycleBackend containment,
+        ProvisionOptions? options = null)
     {
         var result = RunEnvelopePhase(BuildProvisionEnvelope(containment, options), dryRun: false)
             ?? throw new MxcException(
@@ -56,7 +56,7 @@ public static class MxcLifecycle
             ContainerId = new ContainerId(sandboxId),
             MetadataJson = metadataJson,
             IsolationSessionMetadata =
-                containment == StateAwareContainment.IsolationSession
+                containment == LifecycleBackend.IsolationSession
                 && metadataJson is not null
                     ? MxcJson.Deserialize<IsolationSessionProvisionMetadata>(metadataJson)
                     : null,
@@ -67,15 +67,15 @@ public static class MxcLifecycle
     /// Parse and validate a provision request without allocating a sandbox.
     /// </summary>
     public static void DryRunProvisionSandbox(
-        StateAwareContainment containment,
-        StateAwareProvisionOptions? options = null)
+        LifecycleBackend containment,
+        ProvisionOptions? options = null)
     {
         RunEnvelopePhase(BuildProvisionEnvelope(containment, options), dryRun: true);
     }
 
     internal static JsonObject BuildProvisionEnvelope(
-        StateAwareContainment containment,
-        StateAwareProvisionOptions? options)
+        LifecycleBackend containment,
+        ProvisionOptions? options)
     {
         ValidateProvisionOptions(containment, options);
         var backend = ContainmentKey(containment);
@@ -116,20 +116,20 @@ public static class MxcLifecycle
     }
 
     /// <summary>Start a provisioned sandbox.</summary>
-    public static void StartSandbox(ContainerId id, StateAwarePhaseOptions? options = null)
+    public static void StartSandbox(ContainerId id, LifecycleOptions? options = null)
     {
         RunEnvelopePhase(BuildStartEnvelope(id, options), dryRun: false);
     }
 
     /// <summary>Validate a start request without starting the sandbox.</summary>
-    public static void DryRunStartSandbox(ContainerId id, StateAwarePhaseOptions? options = null)
+    public static void DryRunStartSandbox(ContainerId id, LifecycleOptions? options = null)
     {
         RunEnvelopePhase(BuildStartEnvelope(id, options), dryRun: true);
     }
 
     internal static JsonObject BuildStartEnvelope(
         ContainerId id,
-        StateAwarePhaseOptions? options = null)
+        LifecycleOptions? options = null)
     {
         ValidateNonExecOptions("start", options);
         var envelope = BuildIdEnvelope("start", id);
@@ -224,47 +224,6 @@ public static class MxcLifecycle
     }
 
     /// <summary>
-    /// Run an exec request attached to this process's standard streams.
-    /// Both stdin and stdout must be terminals.
-    /// </summary>
-    public static WaitOutcome ExecInSandboxAttached(ContainerId id, ExecRequest request)
-    {
-        ArgumentNullException.ThrowIfNull(request);
-        var requestBuf = ToNullTerminatedUtf8(BuildExecEnvelope(id, request).ToJsonString());
-
-        unsafe
-        {
-            fixed (byte* requestPtr = requestBuf)
-            {
-                MxcExecOutcome outcome = default;
-                MxcErrorDetail error = default;
-                var status = NativeMethods.mxc_exec_state_aware_attached_json(
-                    requestPtr,
-                    ExperimentalOptInFor(id),
-                    &outcome,
-                    &error);
-                try
-                {
-                    if (status != (int)ErrorCode.Success)
-                    {
-                        throw NativeError.ToException(status, error, "unknown error");
-                    }
-
-                    return new WaitOutcome
-                    {
-                        ExitCode = outcome.exit_code,
-                        TimedOut = outcome.timed_out != 0,
-                    };
-                }
-                finally
-                {
-                    NativeMethods.mxc_error_detail_free(&error);
-                }
-            }
-        }
-    }
-
-    /// <summary>
     /// Validate an exec request without starting a process.
     /// </summary>
     public static void DryRunExecInContainer(
@@ -312,7 +271,7 @@ public static class MxcLifecycle
     }
 
     /// <summary>Run an exec request to completion and capture its output.</summary>
-    public static async Task<Output> RunInContainerAsync(
+    public static async Task<ExecutionOutput> RunInContainerAsync(
         ContainerId id,
         ExecRequest request,
         CancellationToken cancellationToken = default)
@@ -328,7 +287,7 @@ public static class MxcLifecycle
             var (result, stdout, stderr) = await proc
                 .WaitForExitWithOutputAsync(cancellationToken)
                 .ConfigureAwait(false);
-            return new Output
+            return new ExecutionOutput
             {
                 ExitCode = result.ExitCode,
                 TimedOut = result.TimedOut,
@@ -345,7 +304,7 @@ public static class MxcLifecycle
     }
 
     /// <summary>Run an <see cref="ExecRequest"/> synchronously and capture its output.</summary>
-    public static Output RunInContainer(ContainerId id, ExecRequest request) =>
+    public static ExecutionOutput RunInContainer(ContainerId id, ExecRequest request) =>
         RunInContainerAsync(id, request).GetAwaiter().GetResult();
 
     /// <summary>Run a state-aware exec request as a live pipe-backed process.</summary>
@@ -353,11 +312,48 @@ public static class MxcLifecycle
         SpawnInContainer(id, request);
 
     /// <summary>Run a state-aware exec request asynchronously and capture its output.</summary>
-    public static Task<Output> ExecInSandboxAsync(
+    public static Task<ExecutionOutput> ExecInSandboxAsync(
         ContainerId id,
         ExecRequest request,
         CancellationToken cancellationToken = default) =>
         RunInContainerAsync(id, request, cancellationToken);
+
+    private static WaitOutcome ExecInSandboxAttached(ContainerId id, ExecRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var requestBuf = ToNullTerminatedUtf8(BuildExecEnvelope(id, request).ToJsonString());
+
+        unsafe
+        {
+            fixed (byte* requestPtr = requestBuf)
+            {
+                MxcExecOutcome outcome = default;
+                MxcErrorDetail error = default;
+                var status = NativeMethods.mxc_exec_state_aware_attached_json(
+                    requestPtr,
+                    ExperimentalOptInFor(id),
+                    &outcome,
+                    &error);
+                try
+                {
+                    if (status != (int)ErrorCode.Success)
+                    {
+                        throw NativeError.ToException(status, error, "unknown error");
+                    }
+
+                    return new WaitOutcome
+                    {
+                        ExitCode = outcome.exit_code,
+                        TimedOut = outcome.timed_out != 0,
+                    };
+                }
+                finally
+                {
+                    NativeMethods.mxc_error_detail_free(&error);
+                }
+            }
+        }
+    }
 
     // Runs a synchronous blocking call on a background thread so it can be
     // awaited with cancellation. If the caller cancels while the operation is
@@ -399,20 +395,20 @@ public static class MxcLifecycle
     }
 
     /// <summary>Stop a running sandbox.</summary>
-    public static void StopSandbox(ContainerId id, StateAwarePhaseOptions? options = null)
+    public static void StopSandbox(ContainerId id, LifecycleOptions? options = null)
     {
         RunEnvelopePhase(BuildStopEnvelope(id, options), dryRun: false);
     }
 
     /// <summary>Validate a stop request without stopping the sandbox.</summary>
-    public static void DryRunStopSandbox(ContainerId id, StateAwarePhaseOptions? options = null)
+    public static void DryRunStopSandbox(ContainerId id, LifecycleOptions? options = null)
     {
         RunEnvelopePhase(BuildStopEnvelope(id, options), dryRun: true);
     }
 
     internal static JsonObject BuildStopEnvelope(
         ContainerId id,
-        StateAwarePhaseOptions? options = null)
+        LifecycleOptions? options = null)
     {
         ValidateNonExecOptions("stop", options);
         var envelope = BuildIdEnvelope("stop", id);
@@ -423,7 +419,7 @@ public static class MxcLifecycle
     /// <summary>Destroy a sandbox and release its resources.</summary>
     public static void DeprovisionSandbox(
         ContainerId id,
-        StateAwarePhaseOptions? options = null)
+        LifecycleOptions? options = null)
     {
         RunEnvelopePhase(BuildDeprovisionEnvelope(id, options), dryRun: false);
     }
@@ -431,14 +427,14 @@ public static class MxcLifecycle
     /// <summary>Validate a deprovision request without destroying the sandbox.</summary>
     public static void DryRunDeprovisionSandbox(
         ContainerId id,
-        StateAwarePhaseOptions? options = null)
+        LifecycleOptions? options = null)
     {
         RunEnvelopePhase(BuildDeprovisionEnvelope(id, options), dryRun: true);
     }
 
     internal static JsonObject BuildDeprovisionEnvelope(
         ContainerId id,
-        StateAwarePhaseOptions? options = null)
+        LifecycleOptions? options = null)
     {
         ValidateNonExecOptions("deprovision", options);
         var envelope = BuildIdEnvelope("deprovision", id);
@@ -448,13 +444,13 @@ public static class MxcLifecycle
 
     private static void ValidateNonExecOptions(
         string phase,
-        StateAwarePhaseOptions? options)
+        LifecycleOptions? options)
     {
         if (options is ExecRequest)
         {
             throw new ArgumentException(
                 $"{nameof(ExecRequest)} cannot configure the {phase} phase; "
-                    + $"use {nameof(StateAwarePhaseOptions)}.",
+                    + $"use {nameof(LifecycleOptions)}.",
                 nameof(options));
         }
     }
@@ -486,25 +482,25 @@ public static class MxcLifecycle
         }
     }
 
-    private static string ContainmentKey(StateAwareContainment containment) => containment switch
+    private static string ContainmentKey(LifecycleBackend containment) => containment switch
     {
-        StateAwareContainment.IsolationSession => IsolationSessionContainment,
-        StateAwareContainment.Wslc => WslcContainment,
+        LifecycleBackend.IsolationSession => IsolationSessionContainment,
+        LifecycleBackend.Wslc => WslcContainment,
         _ => throw new MxcException(
             ErrorCode.UnsupportedContainment,
             $"unknown state-aware containment '{containment}'"),
     };
 
     private static void ValidateProvisionOptions(
-        StateAwareContainment containment,
-        StateAwareProvisionOptions? options)
+        LifecycleBackend containment,
+        ProvisionOptions? options)
     {
         var valid = (containment, options) switch
         {
-            (StateAwareContainment.IsolationSession, null) => false,
+            (LifecycleBackend.IsolationSession, null) => false,
             (_, null) => true,
-            (StateAwareContainment.IsolationSession, IsolationSessionProvisionOptions) => true,
-            (StateAwareContainment.Wslc, WslcProvisionOptions) => true,
+            (LifecycleBackend.IsolationSession, IsolationSessionProvisionOptions) => true,
+            (LifecycleBackend.Wslc, WslcProvisionOptions) => true,
             _ => false,
         };
         if (!valid)
@@ -541,7 +537,7 @@ public static class MxcLifecycle
         var containment = ContainmentForId(id);
         var runtimeConfig = options?.RuntimeConfig;
         if (runtimeConfig is not null
-            && containment != StateAwareContainment.Wslc)
+            && containment != LifecycleBackend.Wslc)
         {
             throw new ArgumentException(
                 "runtimeConfig requires a wslc: container id",
@@ -559,12 +555,12 @@ public static class MxcLifecycle
         }
     }
 
-    private static void ValidateDirectionalNetwork(StateAwareNetworkPolicy network)
+    private static void ValidateDirectionalNetwork(LifecycleNetworkPolicy network)
     {
         ArgumentNullException.ThrowIfNull(network);
     }
 
-    private static StateAwareContainment ContainmentForId(ContainerId id)
+    private static LifecycleBackend ContainmentForId(ContainerId id)
     {
         // Mirrors the native `parse_sandbox_id_prefix`, which folds a missing
         // `:` and an empty prefix into one MalformedId: both are structural,
@@ -582,8 +578,8 @@ public static class MxcLifecycle
 
         return value![..separator] switch
         {
-            "iso" => StateAwareContainment.IsolationSession,
-            "wslc" => StateAwareContainment.Wslc,
+            "iso" => LifecycleBackend.IsolationSession,
+            "wslc" => LifecycleBackend.Wslc,
             "wsb" => throw new MxcException(
                 ErrorCode.UnsupportedContainment,
                 "Windows Sandbox container ids with the 'wsb:' prefix require "
@@ -598,8 +594,8 @@ public static class MxcLifecycle
 
     private static void SetCrossCuttingPolicies(
         JsonObject envelope,
-        StateAwareFilesystemPolicy? filesystem,
-        StateAwareNetworkPolicy? network)
+        LifecycleFilesystemPolicy? filesystem,
+        LifecycleNetworkPolicy? network)
     {
         if (filesystem is not null)
         {

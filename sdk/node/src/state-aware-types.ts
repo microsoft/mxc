@@ -7,20 +7,20 @@ import {
   DirectionalNetworkConfig,
   RuntimeConfig,
   ProcessConfig,
-  Output,
+  ExecutionOutput,
   TelemetryConfig,
 } from './types.js';
 
 /**
- * Lifecycle phase in a state-aware sandbox request.
+ * Lifecycle phase in a lifecycle sandbox request.
  */
 export type Phase = 'provision' | 'start' | 'exec' | 'stop' | 'deprovision';
 
 /**
- * Subset of `ContainmentBackend` whose backends participate in the state-aware
+ * Subset of `ContainmentBackend` whose backends participate in the lifecycle
  * lifecycle. Extended as more backends opt in.
  */
-export type StateAwareContainmentBackend = Extract<
+export type LifecycleBackend = Extract<
   ContainmentBackend,
   'isolation_session' | 'wslc'
 >;
@@ -32,16 +32,16 @@ export type StateAwareContainmentBackend = Extract<
  * callers from passing a bare string, or a `SandboxId` from one backend
  * where one for a different backend is expected.
  */
-export type ContainerId<C extends StateAwareContainmentBackend = StateAwareContainmentBackend> =
+export type ContainerId<C extends LifecycleBackend = LifecycleBackend> =
   string & { readonly __mxcBrand: 'ContainerId'; readonly __mxcBackend: C };
 
 /** @internal Compatibility name used by lifecycle implementation modules. */
-export type SandboxId<C extends StateAwareContainmentBackend> = ContainerId<C>;
+export type SandboxId<C extends LifecycleBackend> = ContainerId<C>;
 
-/** SDK-owned exact contract used by all typed state-aware requests. */
-export const STATE_AWARE_VERSION = '1.0.0' as const;
+/** SDK-owned exact contract used by all typed lifecycle requests. */
+export { SDK_CONTRACT_VERSION } from './contract-version.js';
 
-interface StateAwareConfig {
+interface LifecycleConfig {
   /** Optional telemetry request for this phase. */
   telemetry?: TelemetryConfig;
 }
@@ -51,7 +51,7 @@ interface StateAwareConfig {
 // what the backend honors per the policy honor matrix and currently
 // implements. TypeScript rejects passing fields outside this set.
 
-export interface IsolationSessionProvisionConfig extends StateAwareConfig {
+export interface IsolationSessionProvisionConfig extends LifecycleConfig {
   /**
    * Required unrestricted network posture. All three directional axes must be
    * explicitly `allow`; rules, proxies, mixed postures, and legacy fields are
@@ -93,15 +93,15 @@ export interface IsolationSessionNetworkConfig {
   };
 }
 
-export type IsolationSessionStartConfig = StateAwareConfig;
+export type IsolationSessionStartConfig = LifecycleConfig;
 
-export interface IsolationSessionExecConfig extends StateAwareConfig {
+export interface IsolationSessionExecConfig extends LifecycleConfig {
   process: ProcessConfig;
 }
 
-export type IsolationSessionStopConfig = StateAwareConfig;
+export type IsolationSessionStopConfig = LifecycleConfig;
 
-export type IsolationSessionDeprovisionConfig = StateAwareConfig;
+export type IsolationSessionDeprovisionConfig = LifecycleConfig;
 
 /**
  * IsolationSession's provision-phase metadata surfaced to the caller: the
@@ -122,7 +122,7 @@ export interface IsolationSessionProvisionMetadata {
 // provision and frozen for the sandbox's lifetime; a cooperative env-var proxy
 // may be injected per-exec.
 
-export interface WslcProvisionConfig extends StateAwareConfig {
+export interface WslcProvisionConfig extends LifecycleConfig {
   /**
    * Filesystem policy applied at provision and frozen for the life of the
    * sandbox. `readwritePaths` / `readonlyPaths` become container volume mounts
@@ -154,9 +154,9 @@ export interface WslcProvisionConfig extends StateAwareConfig {
   imageTarPath?: string;
 }
 
-export type WslcStartConfig = StateAwareConfig;
+export type WslcStartConfig = LifecycleConfig;
 
-export interface WslcExecConfig extends StateAwareConfig {
+export interface WslcExecConfig extends LifecycleConfig {
   process: ProcessConfig;
   /**
    * Per-exec runtime values. `networkProxy` injects a
@@ -168,34 +168,34 @@ export interface WslcExecConfig extends StateAwareConfig {
   runtimeConfig?: RuntimeConfig;
 }
 
-export type WslcStopConfig = StateAwareConfig;
+export type WslcStopConfig = LifecycleConfig;
 
-export type WslcDeprovisionConfig = StateAwareConfig;
+export type WslcDeprovisionConfig = LifecycleConfig;
 
 /**
- * The five per-phase Config slots every state-aware backend must declare.
+ * The five per-phase Config slots every lifecycle backend must declare.
  * `object` (not `Record<string, unknown>`) is the slot base: interfaces have
  * no implicit index signature, so a `Record<string, unknown>` base would
  * reject the interface-typed phase configs.
  */
-type StateAwarePhaseConfigs = Record<Phase, object>;
+type LifecyclePhaseConfigs = Record<Phase, object>;
 
 /**
  * Identity helper that constrains the registry literal to declare an entry for
- * **every** `StateAwareContainmentBackend`. Adding a backend to the union
+ * **every** `LifecycleBackend`. Adding a backend to the union
  * without a registry entry below is a compile error here (the literal no
- * longer satisfies `Record<StateAwareContainmentBackend, …>`), rather than
+ * longer satisfies `Record<LifecycleBackend, …>`), rather than
  * silently widening `ConfigsForBackend` to the slot base / `never`.
  */
-type DefineStateAwareConfigRegistry<
-  T extends Record<StateAwareContainmentBackend, StateAwarePhaseConfigs>,
+type DefineLifecycleConfigRegistry<
+  T extends Record<LifecycleBackend, LifecyclePhaseConfigs>,
 > = T;
 
 /**
  * Closed per-backend per-phase Config registry. Keyed by backend; each entry
  * names the concrete Config interface for each phase.
  */
-type StateAwareConfigRegistry = DefineStateAwareConfigRegistry<{
+type LifecycleConfigRegistry = DefineLifecycleConfigRegistry<{
   isolation_session: {
     provision: IsolationSessionProvisionConfig;
     start: IsolationSessionStartConfig;
@@ -215,17 +215,17 @@ type StateAwareConfigRegistry = DefineStateAwareConfigRegistry<{
 /** Compile-time guard: catches a backend with no registry entry. */
 type Assert<T extends true> = T;
 type _RegistryCoversAllBackends = Assert<
-  [StateAwareContainmentBackend] extends [keyof StateAwareConfigRegistry] ? true : false
+  [LifecycleBackend] extends [keyof LifecycleConfigRegistry] ? true : false
 >;
 
 /**
  * Per-backend per-phase typed Config bundle. Selects the correct Config
  * bundle for the backend type parameter.
  */
-export type ConfigsForBackend<C extends StateAwareContainmentBackend> =
-  StateAwareConfigRegistry[C];
+export type ConfigsForBackend<C extends LifecycleBackend> =
+  LifecycleConfigRegistry[C];
 
-export type ProvisionConfigFor<C extends StateAwareContainmentBackend> =
+export type ProvisionConfigFor<C extends LifecycleBackend> =
   ConfigsForBackend<C>['provision'];
 
 /**
@@ -247,7 +247,7 @@ export type HasNoRequiredMembers<T> = Record<string, never> extends T ? true : f
  *
  * The `[C] extends [never]` shape is deliberate and is the whole point of this
  * type. `C` is not always a single literal — a caller holding a variable typed
- * as the full `StateAwareContainmentBackend` union instantiates it with that
+ * as the full `LifecycleBackend` union instantiates it with that
  * union. Asking `HasNoRequiredMembers` about the *union* of configs answers
  * "yes" as soon as any one member is all-optional, because `{}` is assignable
  * to that member — which would make the config optional for every backend,
@@ -261,30 +261,30 @@ export type HasNoRequiredMembers<T> = Record<string, never> extends T ? true : f
  * not enforce. IsolationSession depends on it because its unrestricted
  * `network` posture is mandatory.
  */
-export type EveryBackendConfigIsOptional<C extends StateAwareContainmentBackend> =
+export type EveryBackendConfigIsOptional<C extends LifecycleBackend> =
   [C extends unknown ? (HasNoRequiredMembers<ProvisionConfigFor<C>> extends true ? never : C) : never] extends [never]
     ? true
     : false;
-export type StartConfigFor<C extends StateAwareContainmentBackend> =
+export type StartConfigFor<C extends LifecycleBackend> =
   ConfigsForBackend<C>['start'];
-export type ExecConfigFor<C extends StateAwareContainmentBackend> =
+export type ExecConfigFor<C extends LifecycleBackend> =
   ConfigsForBackend<C>['exec'];
 
-export type ExecRequest<C extends StateAwareContainmentBackend> =
+export type ExecRequest<C extends LifecycleBackend> =
   ExecConfigFor<C>;
-export type StopConfigFor<C extends StateAwareContainmentBackend> =
+export type StopConfigFor<C extends LifecycleBackend> =
   ConfigsForBackend<C>['stop'];
-export type DeprovisionConfigFor<C extends StateAwareContainmentBackend> =
+export type DeprovisionConfigFor<C extends LifecycleBackend> =
   ConfigsForBackend<C>['deprovision'];
 
 /**
  * Identity helper that constrains the metadata registry literal to declare an
- * entry for **every** `StateAwareContainmentBackend`. A future backend added to
+ * entry for **every** `LifecycleBackend`. A future backend added to
  * the union without a metadata entry below is a compile error here, symmetric
- * to `DefineStateAwareConfigRegistry`.
+ * to `DefineLifecycleConfigRegistry`.
  */
-type DefineStateAwareMetadataRegistry<
-  T extends Record<StateAwareContainmentBackend, object>,
+type DefineContainerMetadataRegistry<
+  T extends Record<LifecycleBackend, object>,
 > = T;
 
 /**
@@ -293,7 +293,7 @@ type DefineStateAwareMetadataRegistry<
  * all use `Record<never, never>` (so every `*MetadataFor<C>` resolves to
  * `undefined`). Keyed by backend; every backend must declare an entry.
  */
-export type StateAwareMetadata = DefineStateAwareMetadataRegistry<{
+export type ContainerMetadata = DefineContainerMetadataRegistry<{
   isolation_session: {
     provision?: IsolationSessionProvisionMetadata;
     // IsolationSession returns no metadata for start, stop, or deprovision.
@@ -302,39 +302,39 @@ export type StateAwareMetadata = DefineStateAwareMetadataRegistry<{
   // id). `Record<never, never>` has `keyof = never`, so every
   // `*MetadataFor<'wslc'>` resolves to `undefined`.
   wslc: Record<never, never>;
-  // Future state-aware-capable backends add typed entries here.
+  // Future lifecycle-capable backends add typed entries here.
 }>;
 
 /** Compile-time guard: catches a backend with no metadata registry entry. */
 type _MetadataRegistryCoversAllBackends = Assert<
-  [StateAwareContainmentBackend] extends [keyof StateAwareMetadata] ? true : false
+  [LifecycleBackend] extends [keyof ContainerMetadata] ? true : false
 >;
 
-type MetadataForPhase<C extends StateAwareContainmentBackend, Phase extends string> =
-  Phase extends keyof StateAwareMetadata[C]
-    ? StateAwareMetadata[C][Phase]
+type MetadataForPhase<C extends LifecycleBackend, Phase extends string> =
+  Phase extends keyof ContainerMetadata[C]
+    ? ContainerMetadata[C][Phase]
     : undefined;
 
-export type ProvisionMetadataFor<C extends StateAwareContainmentBackend> = MetadataForPhase<C, 'provision'>;
-export type StartMetadataFor<C extends StateAwareContainmentBackend> = MetadataForPhase<C, 'start'>;
-export type StopMetadataFor<C extends StateAwareContainmentBackend> = MetadataForPhase<C, 'stop'>;
-export type DeprovisionMetadataFor<C extends StateAwareContainmentBackend> = MetadataForPhase<C, 'deprovision'>;
+export type ProvisionMetadataFor<C extends LifecycleBackend> = MetadataForPhase<C, 'provision'>;
+export type StartMetadataFor<C extends LifecycleBackend> = MetadataForPhase<C, 'start'>;
+export type StopMetadataFor<C extends LifecycleBackend> = MetadataForPhase<C, 'stop'>;
+export type DeprovisionMetadataFor<C extends LifecycleBackend> = MetadataForPhase<C, 'deprovision'>;
 
-export interface ProvisionResult<C extends StateAwareContainmentBackend> {
+export interface ProvisionResult<C extends LifecycleBackend> {
   containerId: ContainerId<C>;
   metadata?: ProvisionMetadataFor<C>;
 }
 
-export interface StartResult<C extends StateAwareContainmentBackend> {
+export interface StartResult<C extends LifecycleBackend> {
   metadata?: StartMetadataFor<C>;
 }
 
-export interface StopResult<C extends StateAwareContainmentBackend> {
+export interface StopResult<C extends LifecycleBackend> {
   metadata?: StopMetadataFor<C>;
 }
 
-export interface DeprovisionResult<C extends StateAwareContainmentBackend> {
+export interface DeprovisionResult<C extends LifecycleBackend> {
   metadata?: DeprovisionMetadataFor<C>;
 }
 
-export type ExecResult = Output;
+export type ExecResult = ExecutionOutput;

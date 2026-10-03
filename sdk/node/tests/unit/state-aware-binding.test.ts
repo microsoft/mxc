@@ -4,11 +4,8 @@
 import assert from 'node:assert';
 import { describe, it } from 'node:test';
 import {
-  runBindingStateAwareAttachedRequestWithNative,
   runBindingStateAwareRequestWithNative,
   type BindingStateAwareRequest,
-  type StateAwareAttachedNativeFacade,
-  type StateAwareAttachedOutcome,
   type StateAwareNativeFacade,
   type StateAwareNativeResult,
 } from '../../src/bindings/state-aware.js';
@@ -39,29 +36,6 @@ class FakeStateAwareNative implements StateAwareNativeFacade {
   }
 
   free(): void {
-    this.freeCount += 1;
-  }
-}
-
-class FakeStateAwareAttachedNative implements StateAwareAttachedNativeFacade {
-  readonly calls: Array<{ request: string; experimental: number }> = [];
-  nativeStatus = 0;
-  freeCount = 0;
-  outcome: StateAwareAttachedOutcome = { timed_out: 0, exit_code: 7 };
-
-  execAttached(
-    request: string,
-    experimental: number,
-    outcome: StateAwareAttachedOutcome,
-    _error: AbiErrorDetail,
-  ): number {
-    this.calls.push({ request, experimental });
-    outcome.timed_out = this.outcome.timed_out;
-    outcome.exit_code = this.outcome.exit_code;
-    return this.nativeStatus;
-  }
-
-  freeError(): void {
     this.freeCount += 1;
   }
 }
@@ -123,43 +97,5 @@ describe('state-aware native binding ownership', () => {
       /callback failed/,
     );
     assert.strictEqual(native.freeCount, 0);
-  });
-});
-
-describe('state-aware attached native binding ownership', () => {
-  it('forwards the request and maps the terminal outcome', () => {
-    const native = new FakeStateAwareAttachedNative();
-    native.outcome = { timed_out: 1, exit_code: 0 };
-
-    assert.deepStrictEqual(
-      runBindingStateAwareAttachedRequestWithNative(
-        '{"phase":"exec"}',
-        true,
-        native,
-      ),
-      { exitCode: 0, timedOut: true },
-    );
-    assert.deepStrictEqual(native.calls, [{
-      request: '{"phase":"exec"}',
-      experimental: 1,
-    }]);
-    assert.strictEqual(native.freeCount, 1);
-  });
-
-  it('decodes native failures and frees error detail', () => {
-    const native = new FakeStateAwareAttachedNative();
-    native.nativeStatus = 12;
-
-    assert.throws(
-      () => runBindingStateAwareAttachedRequestWithNative(
-        '{"phase":"exec"}',
-        false,
-        native,
-      ),
-      (error: unknown) =>
-        error instanceof MxcError &&
-        error.code === 'backend_error',
-    );
-    assert.strictEqual(native.freeCount, 1);
   });
 });

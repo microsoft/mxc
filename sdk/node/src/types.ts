@@ -521,7 +521,7 @@ export interface MxcOptions {
 }
 
 /** Backend-specific configuration selected by a V1 container request. */
-export type ContainerBackendConfig =
+export type Containment =
   | { type: 'process' }
   | { type: 'processcontainer'; config?: ProcessContainerConfig }
   | { type: 'wslc'; config?: WslcConfig }
@@ -560,7 +560,7 @@ export interface ContainerRequest {
   /** Execution timeout in milliseconds. Omitted = no timeout. */
   timeoutMs?: number;
   /** Backend configuration; defaults to the host's native process backend. */
-  containment?: ContainerBackendConfig;
+  containment?: Containment;
   /** Optional caller-selected container name. */
   containerName?: string;
   /** Optional working directory inside the sandbox. */
@@ -572,7 +572,7 @@ export interface ContainerRequest {
 }
 
 /** Captured output and terminal outcome of a completed workload. */
-export interface Output {
+export interface ExecutionOutput {
   stdout: string;
   stderr: string;
   exitCode: number;

@@ -21,10 +21,10 @@ public interface IContainerRunner
     PlatformSupport GetPlatformSupport();
 
     /// <summary>Run a complete request to completion.</summary>
-    Output Run(ContainerRequest request);
+    ExecutionOutput Run(ContainerRequest request);
 
     /// <summary>Run a complete request asynchronously.</summary>
-    Task<Output> RunAsync(
+    Task<ExecutionOutput> RunAsync(
         ContainerRequest request,
         CancellationToken cancellationToken = default);
 
@@ -55,11 +55,11 @@ public sealed class MxcContainerRunner : IContainerRunner
         Microsoft.Mxc.Sdk.MxcPlatform.GetPlatformSupport();
 
     /// <inheritdoc/>
-    public Output Run(ContainerRequest request) =>
+    public ExecutionOutput Run(ContainerRequest request) =>
         MxcContainer.Run(request);
 
     /// <inheritdoc/>
-    public Task<Output> RunAsync(
+    public Task<ExecutionOutput> RunAsync(
         ContainerRequest request,
         CancellationToken cancellationToken = default) =>
         MxcContainer.RunAsync(request, cancellationToken);
@@ -82,19 +82,19 @@ public interface IContainerLifecycle
 {
     /// <summary>Provision a new sandbox.</summary>
     ProvisionResult ProvisionSandbox(
-        StateAwareContainment containment,
-        StateAwareProvisionOptions? options = null);
+        LifecycleBackend containment,
+        ProvisionOptions? options = null);
 
     /// <summary>Validate a provision request without allocating a sandbox.</summary>
     void DryRunProvisionSandbox(
-        StateAwareContainment containment,
-        StateAwareProvisionOptions? options = null);
+        LifecycleBackend containment,
+        ProvisionOptions? options = null);
 
     /// <summary>Start a provisioned sandbox.</summary>
-    void StartSandbox(ContainerId id, StateAwarePhaseOptions? options = null);
+    void StartSandbox(ContainerId id, LifecycleOptions? options = null);
 
     /// <summary>Validate a start request without starting the sandbox.</summary>
-    void DryRunStartSandbox(ContainerId id, StateAwarePhaseOptions? options = null);
+    void DryRunStartSandbox(ContainerId id, LifecycleOptions? options = null);
 
     /// <summary>Spawn an exec request with live standard streams.</summary>
     IMxcProcess SpawnInContainer(ContainerId id, ExecRequest request);
@@ -111,10 +111,10 @@ public interface IContainerLifecycle
     void DryRunExecInContainer(ContainerId id, ExecRequest request);
 
     /// <summary>Run an exec request to completion and capture output.</summary>
-    Output RunInContainer(ContainerId id, ExecRequest request);
+    ExecutionOutput RunInContainer(ContainerId id, ExecRequest request);
 
     /// <summary>Run an exec request asynchronously and capture output.</summary>
-    Task<Output> RunInContainerAsync(
+    Task<ExecutionOutput> RunInContainerAsync(
         ContainerId id,
         ExecRequest request,
         CancellationToken cancellationToken = default);
@@ -122,28 +122,25 @@ public interface IContainerLifecycle
     /// <summary>Run state-aware exec with live standard streams.</summary>
     IMxcProcess ExecInSandbox(ContainerId id, ExecRequest request);
 
-    /// <summary>Run state-aware exec attached to this process's terminal.</summary>
-    WaitOutcome ExecInSandboxAttached(ContainerId id, ExecRequest request);
-
     /// <summary>Run state-aware exec asynchronously and capture output.</summary>
-    Task<Output> ExecInSandboxAsync(
+    Task<ExecutionOutput> ExecInSandboxAsync(
         ContainerId id,
         ExecRequest request,
         CancellationToken cancellationToken = default);
 
     /// <summary>Stop a running sandbox.</summary>
-    void StopSandbox(ContainerId id, StateAwarePhaseOptions? options = null);
+    void StopSandbox(ContainerId id, LifecycleOptions? options = null);
 
     /// <summary>Validate a stop request without stopping the sandbox.</summary>
-    void DryRunStopSandbox(ContainerId id, StateAwarePhaseOptions? options = null);
+    void DryRunStopSandbox(ContainerId id, LifecycleOptions? options = null);
 
     /// <summary>Destroy a sandbox and release its resources.</summary>
-    void DeprovisionSandbox(ContainerId id, StateAwarePhaseOptions? options = null);
+    void DeprovisionSandbox(ContainerId id, LifecycleOptions? options = null);
 
     /// <summary>Validate a deprovision request without destroying the sandbox.</summary>
     void DryRunDeprovisionSandbox(
         ContainerId id,
-        StateAwarePhaseOptions? options = null);
+        LifecycleOptions? options = null);
 }
 
 /// <summary>
@@ -157,22 +154,22 @@ public sealed class MxcContainerLifecycle : IContainerLifecycle
 
     /// <inheritdoc/>
     public ProvisionResult ProvisionSandbox(
-        StateAwareContainment containment,
-        StateAwareProvisionOptions? options = null) =>
+        LifecycleBackend containment,
+        ProvisionOptions? options = null) =>
         MxcLifecycle.ProvisionSandbox(containment, options);
 
     /// <inheritdoc/>
     public void DryRunProvisionSandbox(
-        StateAwareContainment containment,
-        StateAwareProvisionOptions? options = null) =>
+        LifecycleBackend containment,
+        ProvisionOptions? options = null) =>
         MxcLifecycle.DryRunProvisionSandbox(containment, options);
 
     /// <inheritdoc/>
-    public void StartSandbox(ContainerId id, StateAwarePhaseOptions? options = null) =>
+    public void StartSandbox(ContainerId id, LifecycleOptions? options = null) =>
         MxcLifecycle.StartSandbox(id, options);
 
     /// <inheritdoc/>
-    public void DryRunStartSandbox(ContainerId id, StateAwarePhaseOptions? options = null) =>
+    public void DryRunStartSandbox(ContainerId id, LifecycleOptions? options = null) =>
         MxcLifecycle.DryRunStartSandbox(id, options);
 
     /// <inheritdoc/>
@@ -191,11 +188,11 @@ public sealed class MxcContainerLifecycle : IContainerLifecycle
         MxcLifecycle.DryRunExecInContainer(id, request);
 
     /// <inheritdoc/>
-    public Output RunInContainer(ContainerId id, ExecRequest request) =>
+    public ExecutionOutput RunInContainer(ContainerId id, ExecRequest request) =>
         MxcLifecycle.RunInContainer(id, request);
 
     /// <inheritdoc/>
-    public Task<Output> RunInContainerAsync(
+    public Task<ExecutionOutput> RunInContainerAsync(
         ContainerId id,
         ExecRequest request,
         CancellationToken cancellationToken = default) =>
@@ -206,33 +203,29 @@ public sealed class MxcContainerLifecycle : IContainerLifecycle
         MxcLifecycle.ExecInSandbox(id, request);
 
     /// <inheritdoc/>
-    public WaitOutcome ExecInSandboxAttached(ContainerId id, ExecRequest request) =>
-        MxcLifecycle.ExecInSandboxAttached(id, request);
-
-    /// <inheritdoc/>
-    public Task<Output> ExecInSandboxAsync(
+    public Task<ExecutionOutput> ExecInSandboxAsync(
         ContainerId id,
         ExecRequest request,
         CancellationToken cancellationToken = default) =>
         MxcLifecycle.ExecInSandboxAsync(id, request, cancellationToken);
 
     /// <inheritdoc/>
-    public void StopSandbox(ContainerId id, StateAwarePhaseOptions? options = null) =>
+    public void StopSandbox(ContainerId id, LifecycleOptions? options = null) =>
         MxcLifecycle.StopSandbox(id, options);
 
     /// <inheritdoc/>
-    public void DryRunStopSandbox(ContainerId id, StateAwarePhaseOptions? options = null) =>
+    public void DryRunStopSandbox(ContainerId id, LifecycleOptions? options = null) =>
         MxcLifecycle.DryRunStopSandbox(id, options);
 
     /// <inheritdoc/>
     public void DeprovisionSandbox(
         ContainerId id,
-        StateAwarePhaseOptions? options = null) =>
+        LifecycleOptions? options = null) =>
         MxcLifecycle.DeprovisionSandbox(id, options);
 
     /// <inheritdoc/>
     public void DryRunDeprovisionSandbox(
         ContainerId id,
-        StateAwarePhaseOptions? options = null) =>
+        LifecycleOptions? options = null) =>
         MxcLifecycle.DryRunDeprovisionSandbox(id, options);
 }

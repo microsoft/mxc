@@ -383,7 +383,7 @@ public sealed class ExactOneShotRequestWriterTests
             && injection.GetBoolean(),
     };
 
-    private static IContainerBackendConfig Containment(JsonElement containment)
+    private static IContainment Containment(JsonElement containment)
     {
         var kind = containment.GetProperty("kind").GetString();
         return kind switch

@@ -16,8 +16,10 @@
 //!   document and returns an opaque live handle.
 //! - **State-aware lifecycle** (`state_aware` module) —
 //!   [`mxc_run_state_aware_json`] drives the envelope phases (provision /
-//!   start / stop / deprovision), and [`mxc_exec_state_aware_json`] runs the
-//!   exec phase as a live streaming handle (reusing the streaming externs).
+//!   start / stop / deprovision), [`mxc_exec_state_aware_json`] runs the exec
+//!   phase as a live streaming handle (reusing the streaming externs), and
+//!   [`mxc_exec_state_aware_attached_json`] provides the private managed SDK
+//!   attached-exec path.
 //!
 //! ## Ingress rule
 //!
@@ -72,7 +74,7 @@ use std::panic::catch_unwind;
 use std::ptr;
 use std::sync::OnceLock;
 
-use mxc_sdk::v1::{Output, WaitOutcome};
+use mxc_sdk::v1::{ExecutionOutput, WaitOutcome};
 use mxc_sdk::{available_backends, platform_support, run_json, Error, ErrorCode};
 #[cfg(target_os = "windows")]
 use mxc_sdk::{v1::probe, ProbeOutput};
@@ -402,7 +404,7 @@ fn run_json_inner(request_json_utf8: *const c_char, experimental: bool) -> MxcRu
     execute_output(run_json(request_json, experimental))
 }
 
-fn execute_output(output: Result<Output, Error>) -> MxcRunResult {
+fn execute_output(output: Result<ExecutionOutput, Error>) -> MxcRunResult {
     match output {
         Ok(output) => {
             let (exit_code, timed_out) = match output.outcome {

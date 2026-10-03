@@ -313,7 +313,7 @@ internal static class ExactOneShotRequestWriter
             }).ToList(),
     };
 
-    private static string Containment(IContainerBackendConfig containment) => containment switch
+    private static string Containment(IContainment containment) => containment switch
     {
         ProcessContainment => Wire.OneShotContainment.Process,
         ProcessContainerContainment => Wire.OneShotContainment.Processcontainer,

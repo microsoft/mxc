@@ -9,7 +9,7 @@ namespace Microsoft.Mxc.Sdk.V1;
 /// The result of running a sandbox to completion via
 /// <see cref="MxcContainer.Run(ContainerRequest)"/>.
 /// </summary>
-public sealed class Output
+public sealed class ExecutionOutput
 {
     /// <summary>The process exit code (valid when <see cref="TimedOut"/> is false).</summary>
     public int ExitCode { get; init; }

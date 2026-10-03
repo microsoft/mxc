@@ -44,7 +44,7 @@ public sealed class ContainerRequest
 
     /// <summary>The selected backend and its backend-specific configuration.</summary>
     [JsonPropertyName("containment")]
-    public IContainerBackendConfig Containment { get; set; } = new ProcessContainment();
+    public IContainment Containment { get; set; } = new ProcessContainment();
 
     /// <summary>
     /// An optional caller-selected container name. Only null mints a name;
@@ -100,23 +100,23 @@ public sealed class ContainerRequest
 [JsonDerivedType(typeof(BubblewrapContainment), "bubblewrap")]
 [JsonDerivedType(typeof(WslcContainment), "wslc")]
 [JsonDerivedType(typeof(IsolationSessionContainment), "isolationSession")]
-public interface IContainerBackendConfig;
+public interface IContainment;
 
 /// <summary>
 /// The host's native process-isolation backend: ProcessContainer on Windows,
 /// Bubblewrap on Linux, and Seatbelt on macOS.
 /// </summary>
-public sealed class ProcessContainment : IContainerBackendConfig;
+public sealed class ProcessContainment : IContainment;
 
 /// <summary>
 /// Windows IsolationSession backend, which runs the workload under
 /// an isolated agent user account.
 /// </summary>
 /// <remarks>The native library must be built with IsolationSession support.</remarks>
-public sealed class IsolationSessionContainment : IContainerBackendConfig;
+public sealed class IsolationSessionContainment : IContainment;
 
 /// <summary>Explicit macOS Seatbelt configuration.</summary>
-public sealed class SeatbeltContainment : IContainerBackendConfig
+public sealed class SeatbeltContainment : IContainment
 {
     /// <summary>Replace the generated sandbox profile entirely.</summary>
     [JsonPropertyName("profileOverride")]
@@ -140,7 +140,7 @@ public sealed class SeatbeltContainment : IContainerBackendConfig
 }
 
 /// <summary>Explicit Linux LXC configuration.</summary>
-public sealed class LxcContainment : IContainerBackendConfig
+public sealed class LxcContainment : IContainment
 {
     /// <summary>Linux distribution for the container root filesystem.</summary>
     [JsonPropertyName("distribution")]
@@ -152,10 +152,10 @@ public sealed class LxcContainment : IContainerBackendConfig
 }
 
 /// <summary>Explicit Linux Bubblewrap configuration.</summary>
-public sealed class BubblewrapContainment : IContainerBackendConfig;
+public sealed class BubblewrapContainment : IContainment;
 
 /// <summary>Explicit Windows ProcessContainer configuration.</summary>
-public sealed class ProcessContainerContainment : IContainerBackendConfig
+public sealed class ProcessContainerContainment : IContainment
 {
     /// <summary>Enable least-privilege process creation.</summary>
     [JsonPropertyName("leastPrivilege")]
@@ -260,7 +260,7 @@ public sealed class ProcessContainerNetworkPolicy
 }
 
 /// <summary>WSL Container backend configuration.</summary>
-public sealed class WslcContainment : IContainerBackendConfig
+public sealed class WslcContainment : IContainment
 {
     /// <summary>Container image reference.</summary>
     [JsonPropertyName("image")]

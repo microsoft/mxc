@@ -37,7 +37,7 @@ internal sealed class CamelCaseJsonStringEnumConverter<TEnum>
 // Public request/policy surface.
 [JsonSerializable(typeof(Generated.OneShotRequest))]
 [JsonSerializable(typeof(ContainerRequest))]
-[JsonSerializable(typeof(IContainerBackendConfig))]
+[JsonSerializable(typeof(IContainment))]
 [JsonSerializable(typeof(ProcessContainment))]
 [JsonSerializable(typeof(ProcessContainerContainment))]
 [JsonSerializable(typeof(SeatbeltContainment))]
@@ -63,8 +63,8 @@ internal sealed class CamelCaseJsonStringEnumConverter<TEnum>
 [JsonSerializable(typeof(NetworkPeerPolicy))]
 [JsonSerializable(typeof(NetworkPortPolicy))]
 // State-aware lifecycle cross-cutting sections.
-[JsonSerializable(typeof(StateAwareNetworkPolicy))]
-[JsonSerializable(typeof(StateAwareFilesystemPolicy))]
+[JsonSerializable(typeof(LifecycleNetworkPolicy))]
+[JsonSerializable(typeof(LifecycleFilesystemPolicy))]
 // Native discovery, output, and provision metadata.
 [JsonSerializable(typeof(NativeAvailableBackend[]))]
 [JsonSerializable(typeof(NativePlatformSupport))]
@@ -79,8 +79,8 @@ internal sealed class CamelCaseJsonStringEnumConverter<TEnum>
 [JsonSerializable(typeof(Dictionary<string, string>))]
 [JsonSerializable(typeof(bool))]
 [JsonSerializable(typeof(bool?))]
-[JsonSerializable(typeof(StateAwareNetworkDefault))]
-[JsonSerializable(typeof(StateAwareNetworkDefault?))]
+[JsonSerializable(typeof(LifecycleNetworkDefault))]
+[JsonSerializable(typeof(LifecycleNetworkDefault?))]
 internal sealed partial class MxcJsonContext : JsonSerializerContext
 {
 }
@@ -132,7 +132,7 @@ internal static class MxcJson
         options.Converters.Add(new CamelCaseJsonStringEnumConverter<ClipboardPolicy>());
         options.Converters.Add(new CamelCaseJsonStringEnumConverter<ProcessContainerUiIsolation>());
         options.Converters.Add(new CamelCaseJsonStringEnumConverter<ProcessContainerSystemSettings>());
-        options.Converters.Add(new CamelCaseJsonStringEnumConverter<StateAwareNetworkDefault>());
+        options.Converters.Add(new CamelCaseJsonStringEnumConverter<LifecycleNetworkDefault>());
     }
 
     /// <summary>

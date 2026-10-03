@@ -136,10 +136,10 @@ public class SandboxAdapterTests
 
         public PlatformSupport GetPlatformSupport() => new();
 
-        public Output Run(ContainerRequest request) =>
+        public ExecutionOutput Run(ContainerRequest request) =>
             throw new NotSupportedException();
 
-        public Task<Output> RunAsync(
+        public Task<ExecutionOutput> RunAsync(
             ContainerRequest request,
             CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();

@@ -41,14 +41,14 @@ const outcome = await processHandle.waitAsync();
 processHandle.dispose();
 ```
 
-`run` / `runAsync` capture stdout and stderr in an `Output`. `spawn` /
+`run` / `runAsync` capture stdout and stderr in an `ExecutionOutput`. `spawn` /
 `spawnAsync` return an `MxcProcess` with standard pipes, wait, termination, and
 disposal operations. Access output streams before awaiting completion; any
 untaken streams are drained internally to avoid pipe-buffer deadlocks.
 Each operation accepts an optional `MxcOptions` argument containing
 `experimental` and `dryRun` booleans. `experimental` is forwarded to the native
-runtime. `dryRun: true` is supported by state-aware operations that return a
-completed response, but rejected by one-shot and live-process operations.
+runtime. `dryRun: true` is supported by lifecycle operations that return a
+completed response, but rejected by run-to-completion and live-process operations.
 
 `ContainerRequest` holds the command, cross-backend filesystem, network, and UI
 settings, and the selected backend's typed configuration. The SDK selects its
@@ -87,9 +87,7 @@ await deprovisionSandbox(containerId);
 ```
 
 `execInSandbox` returns a live pipe-backed `MxcProcess`;
-`execInSandboxAsync` captures output. `execInSandboxAttached` synchronously
-relays execution through the host terminal and returns a `WaitOutcome`; both
-host stdin and stdout must be terminals. `spawnInContainer` and
+`execInSandboxAsync` captures output. `spawnInContainer` and
 `runInContainer` are the corresponding existing-container operation names.
 `spawnInContainerWithPty(containerId, request, size?)` starts an
 IsolationSession exec with a caller-driven terminal and returns a
@@ -110,7 +108,7 @@ requirements.
 | Live process with standard pipes | `MxcProcess` |
 | Live process with a terminal | `MxcPtyProcess` |
 | Terminal dimensions | `MxcPtySize` |
-| Captured execution | `Output` |
+| Captured execution | `ExecutionOutput` |
 | Terminal process outcome | `WaitOutcome` |
 
 Network policy details are in the
@@ -122,7 +120,7 @@ backend guides under [`docs/`](../../docs/).
 
 Native errors are surfaced as `MxcError` with a typed error code and optional
 operation, native status, and remediation. Security and operational warnings
-are returned in `Output.warnings` and `MxcProcess.warnings`.
+are returned in `ExecutionOutput.warnings` and `MxcProcess.warnings`.
 
 Telemetry is disabled unless requested per operation and remains subject to
 MXC's persisted user consent and administrative policy. The package root

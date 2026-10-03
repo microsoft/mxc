@@ -32,11 +32,6 @@ const AbiStateAwareResultType = koffi.struct('MxcNodeStateAwareResult', {
   error: AbiErrorDetailType,
 });
 
-const AbiExecOutcomeType = koffi.struct('MxcNodeExecOutcome', {
-  timed_out: 'int32_t',
-  exit_code: 'int32_t',
-});
-
 type StateAwareFunction = (
   request: string,
   dryRun: number,
@@ -44,14 +39,6 @@ type StateAwareFunction = (
   result: StateAwareNativeResult,
 ) => number;
 type FreeFunction = (result: StateAwareNativeResult) => void;
-type AttachedExecFunction = (
-  request: string,
-  experimental: number,
-  outcome: StateAwareAttachedOutcome,
-  error: AbiErrorDetail,
-) => number;
-type FreeErrorFunction = (error: AbiErrorDetail) => void;
-
 type StateAwareCompletion = (error: Error | null, status: number) => void;
 
 export interface StateAwareNativeFacade {
@@ -63,21 +50,6 @@ export interface StateAwareNativeFacade {
     completion: StateAwareCompletion,
   ): void;
   free(result: StateAwareNativeResult): void;
-}
-
-export interface StateAwareAttachedOutcome {
-  timed_out: number;
-  exit_code: number;
-}
-
-export interface StateAwareAttachedNativeFacade {
-  execAttached(
-    request: string,
-    experimental: number,
-    outcome: StateAwareAttachedOutcome,
-    error: AbiErrorDetail,
-  ): number;
-  freeError(error: AbiErrorDetail): void;
 }
 
 function bindStateAwareNativeFacade(
@@ -104,27 +76,6 @@ function bindStateAwareNativeFacade(
     },
     free,
   };
-}
-
-function bindStateAwareAttachedNativeFacade(
-  native: ReturnType<typeof loadMxcFfi>,
-): StateAwareAttachedNativeFacade {
-  const execAttached = bindNativeFunction<AttachedExecFunction>(native.handle, {
-    symbol: 'mxc_exec_state_aware_attached_json',
-    result: 'int32_t',
-    parameters: [
-      'const char *',
-      'int32_t',
-      koffi.out(koffi.pointer(AbiExecOutcomeType)),
-      koffi.out(koffi.pointer(AbiErrorDetailType)),
-    ],
-  });
-  const freeError = bindNativeFunction<FreeErrorFunction>(native.handle, {
-    symbol: 'mxc_error_detail_free',
-    result: 'void',
-    parameters: [koffi.pointer(AbiErrorDetailType)],
-  });
-  return { execAttached, freeError };
 }
 
 function createStateAwareResult(): StateAwareNativeResult {
@@ -183,55 +134,6 @@ export async function runBindingStateAwareRequestWithNative(
   }
 }
 
-export function runBindingStateAwareAttachedRequestWithNative(
-  requestJson: string,
-  experimental: boolean,
-  native: StateAwareAttachedNativeFacade,
-): { exitCode: number; timedOut: boolean } {
-  const outcome: StateAwareAttachedOutcome = { timed_out: 0, exit_code: 0 };
-  const error: AbiErrorDetail = {
-    message: null,
-    operation: null,
-    nativeCode: null,
-    remediation: null,
-  };
-  let callCompleted = false;
-  try {
-    const status = native.execAttached(
-      requestJson,
-      experimental ? 1 : 0,
-      outcome,
-      error,
-    );
-    callCompleted = true;
-    if (status !== 0) {
-      throw nativeStatusError(status, error, 'state-aware attached exec failed');
-    }
-    return {
-      exitCode: outcome.exit_code,
-      timedOut: outcome.timed_out !== 0,
-    };
-  } finally {
-    if (callCompleted) native.freeError(error);
-  }
-}
-
-function runBindingStateAwareAttachedRequestNative(
-  requestJson: string,
-  experimental: boolean,
-): { exitCode: number; timedOut: boolean } {
-  const native = loadMxcFfi();
-  try {
-    return runBindingStateAwareAttachedRequestWithNative(
-      requestJson,
-      experimental,
-      bindStateAwareAttachedNativeFacade(native),
-    );
-  } finally {
-    native.handle.unload();
-  }
-}
-
 async function runBindingStateAwareRequestAsyncNative(
   request: BindingStateAwareRequest,
 ): Promise<string> {
@@ -250,13 +152,7 @@ type AsyncStateAwareImplementation = (
   request: BindingStateAwareRequest,
 ) => Promise<string>;
 
-type AttachedStateAwareImplementation = (
-  requestJson: string,
-  experimental: boolean,
-) => { exitCode: number; timedOut: boolean };
-
 let asyncStateAwareImplementation = runBindingStateAwareRequestAsyncNative;
-let attachedStateAwareImplementation = runBindingStateAwareAttachedRequestNative;
 
 /** @internal Replaces the async native call for one process's unit tests. */
 export function _setBindingStateAwareAsyncImplementation(
@@ -264,29 +160,6 @@ export function _setBindingStateAwareAsyncImplementation(
 ): void {
   asyncStateAwareImplementation =
     implementation ?? runBindingStateAwareRequestAsyncNative;
-}
-
-/** @internal Replaces the attached native call for deterministic unit tests. */
-export function _setBindingStateAwareAttachedImplementation(
-  implementation?: AttachedStateAwareImplementation,
-): void {
-  attachedStateAwareImplementation =
-    implementation ?? runBindingStateAwareAttachedRequestNative;
-}
-
-export function runBindingStateAwareAttachedRequest(
-  requestJson: string,
-  experimental: boolean,
-): { exitCode: number; timedOut: boolean } {
-  try {
-    return attachedStateAwareImplementation(requestJson, experimental);
-  } catch (error: unknown) {
-    if (error instanceof MxcError) throw error;
-    throw new MxcError(
-      'backend_error',
-      error instanceof Error ? error.message : String(error),
-    );
-  }
 }
 
 export function runBindingStateAwareRequestAsync(

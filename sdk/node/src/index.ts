@@ -30,7 +30,7 @@
  *     network: { egress: { default: 'allow' } },
  *     command: 'python -c "print(\'Hello from sandbox\')"',
  *   });
- *   console.log('Output:', output.stdout);
+ *   console.log('Execution output:', output.stdout);
  *   console.log('Exit code:', output.exitCode);
  * }
  * ```

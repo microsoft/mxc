@@ -9,7 +9,7 @@ namespace Microsoft.Mxc.Sdk.V1;
 /// The containment backend a sandbox is provisioned under. Selected at
 /// provision; later phases resolve it from the <see cref="ContainerId"/>.
 /// </summary>
-public enum StateAwareContainment
+public enum LifecycleBackend
 {
     /// <summary>Windows IsolationSession.</summary>
     IsolationSession,
@@ -19,7 +19,7 @@ public enum StateAwareContainment
 }
 
 /// <summary>The default action for traffic with no matching rule.</summary>
-public enum StateAwareNetworkDefault
+public enum LifecycleNetworkDefault
 {
     /// <summary>Deny traffic by default.</summary>
     Block,
@@ -34,7 +34,7 @@ public enum StateAwareNetworkDefault
 /// The v1 high-level SDK exposes directional policy only.
 /// </summary>
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
-public sealed class StateAwareNetworkPolicy
+public sealed class LifecycleNetworkPolicy
 {
     /// <summary>Directional outbound posture for WSLC provision.</summary>
     public NetworkEgressPolicy? Egress { get; set; }
@@ -45,7 +45,7 @@ public sealed class StateAwareNetworkPolicy
 
 /// <summary>Filesystem posture sent on a state-aware lifecycle request.</summary>
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
-public sealed class StateAwareFilesystemPolicy
+public sealed class LifecycleFilesystemPolicy
 {
     /// <summary>Paths the sandbox can read and write.</summary>
     public List<string> ReadwritePaths { get; set; } = new();
@@ -58,7 +58,7 @@ public sealed class StateAwareFilesystemPolicy
 }
 
 /// <summary>Base class for backend-specific provision options.</summary>
-public abstract class StateAwareProvisionOptions
+public abstract class ProvisionOptions
 {
     internal string? Version { get; set; }
 
@@ -71,19 +71,19 @@ public abstract class StateAwareProvisionOptions
 
 /// <summary>IsolationSession provision options.</summary>
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
-public sealed class IsolationSessionProvisionOptions : StateAwareProvisionOptions
+public sealed class IsolationSessionProvisionOptions : ProvisionOptions
 {
     /// <summary>
     /// Creates options with the unrestricted directional network posture
     /// required by IsolationSession.
     /// </summary>
-    public IsolationSessionProvisionOptions(StateAwareNetworkPolicy network)
+    public IsolationSessionProvisionOptions(LifecycleNetworkPolicy network)
     {
         Network = network ?? throw new ArgumentNullException(nameof(network));
     }
 
     /// <summary>Required directional all-allow network posture.</summary>
-    public StateAwareNetworkPolicy Network { get; set; }
+    public LifecycleNetworkPolicy Network { get; set; }
 
     /// <summary>Optional packaged-app PFN or unpackaged-app identifier.</summary>
     public string? AppId { get; set; }
@@ -91,10 +91,10 @@ public sealed class IsolationSessionProvisionOptions : StateAwareProvisionOption
 
 /// <summary>WSLC provision options.</summary>
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
-public sealed class WslcProvisionOptions : StateAwareProvisionOptions
+public sealed class WslcProvisionOptions : ProvisionOptions
 {
     /// <summary>Host paths to mount into the container.</summary>
-    public StateAwareFilesystemPolicy? Filesystem { get; set; }
+    public LifecycleFilesystemPolicy? Filesystem { get; set; }
 
     /// <summary>
     /// Container network mode. Egress default, ingress default, and host loopback
@@ -102,7 +102,7 @@ public sealed class WslcProvisionOptions : StateAwareProvisionOptions
     /// unrestricted bridged networking. Mixed postures and filtering rules
     /// cannot be enforced.
     /// </summary>
-    public StateAwareNetworkPolicy? Network { get; set; }
+    public LifecycleNetworkPolicy? Network { get; set; }
 
     /// <summary>Container image reference, such as <c>alpine:latest</c>.</summary>
     public string? Image { get; set; }
@@ -113,7 +113,7 @@ public sealed class WslcProvisionOptions : StateAwareProvisionOptions
 
 /// <summary>Options shared by start, stop, and deprovision phases.</summary>
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
-public class StateAwarePhaseOptions
+public class LifecycleOptions
 {
     internal string? Version { get; set; }
 
@@ -125,7 +125,7 @@ public class StateAwarePhaseOptions
 }
 
 /// <summary>A workload and its process settings for an existing container.</summary>
-public sealed class ExecRequest : StateAwarePhaseOptions
+public sealed class ExecRequest : LifecycleOptions
 {
     /// <summary>Create an exec request for <paramref name="commandLine"/>.</summary>
     public ExecRequest(string commandLine)

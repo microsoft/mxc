@@ -92,8 +92,8 @@ internal static class Program
         try
         {
             var provisioned = MxcLifecycle.ProvisionSandbox(
-                StateAwareContainment.IsolationSession,
-                new IsolationSessionProvisionOptions(new StateAwareNetworkPolicy
+                LifecycleBackend.IsolationSession,
+                new IsolationSessionProvisionOptions(new LifecycleNetworkPolicy
                 {
                     Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
                     Ingress = new NetworkIngressPolicy

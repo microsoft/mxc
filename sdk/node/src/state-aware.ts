@@ -5,7 +5,6 @@ import { Readable } from 'node:stream';
 import { diagLog } from './diagnostic.js';
 import { MxcError } from './errors.js';
 import {
-  runBindingStateAwareAttachedRequest,
   runBindingStateAwareRequestAsync,
 } from './bindings/state-aware.js';
 import { spawnStateAwareBindingSandboxProcess } from './bindings/streaming.js';
@@ -24,14 +23,13 @@ import {
   ContainerId,
   StartConfigFor,
   StartResult,
-  StateAwareContainmentBackend,
+  LifecycleBackend,
   StopConfigFor,
   StopResult,
 } from './state-aware-types.js';
 import type { MxcOptions } from './types.js';
 import type {
   MxcProcess,
-  SandboxWaitResult as WaitOutcome,
 } from './sandbox-process.js';
 import {
   backendForSandboxId,
@@ -45,7 +43,7 @@ import {
  * {@link EveryBackendConfigIsOptional} for why the check is written over the
  * backend union rather than over the union of configs.
  */
-export type ProvisionArgs<C extends StateAwareContainmentBackend> =
+export type ProvisionArgs<C extends LifecycleBackend> =
   EveryBackendConfigIsOptional<C> extends true
     ? [config?: ProvisionConfigFor<C>, options?: MxcOptions]
     : [config: ProvisionConfigFor<C>, options?: MxcOptions];
@@ -53,7 +51,7 @@ export type ProvisionArgs<C extends StateAwareContainmentBackend> =
 const PIPED_EXEC_BACKENDS = [
   'isolation_session',
   'wslc',
-] as const satisfies readonly StateAwareContainmentBackend[];
+] as const satisfies readonly LifecycleBackend[];
 type PipedExecBackend = typeof PIPED_EXEC_BACKENDS[number];
 
 function assertStateAwareOptions(
@@ -81,10 +79,10 @@ function assertStateAwareOptions(
 
 function assertPipedExecBackend(
   apiName: string,
-  sandboxId: ContainerId<StateAwareContainmentBackend>,
+  sandboxId: ContainerId<LifecycleBackend>,
 ): void {
   const backend = backendForSandboxId(sandboxId);
-  const supportedBackends: readonly StateAwareContainmentBackend[] = PIPED_EXEC_BACKENDS;
+  const supportedBackends: readonly LifecycleBackend[] = PIPED_EXEC_BACKENDS;
   if (!supportedBackends.includes(backend)) {
     throw new MxcError(
       'unsupported_containment',
@@ -119,7 +117,7 @@ async function nonExecBindingCall<T>(
   return parseNonExecResponse<T>(await runStateAwareEnvelopeRequest(apiName, envelope, options));
 }
 
-function buildExecEnvelope<C extends StateAwareContainmentBackend>(
+function buildExecEnvelope<C extends LifecycleBackend>(
   sandboxId: ContainerId<C>,
   config: ExecConfigFor<C>,
 ): Record<string, unknown> {
@@ -131,7 +129,7 @@ function buildExecEnvelope<C extends StateAwareContainmentBackend>(
   });
 }
 
-function spawnStateAwareExecProcess<C extends StateAwareContainmentBackend>(
+function spawnStateAwareExecProcess<C extends LifecycleBackend>(
   sandboxId: ContainerId<C>,
   config: ExecConfigFor<C>,
   options: MxcOptions,
@@ -185,7 +183,7 @@ function collectStream(stream: Readable | null): Promise<string> {
  * explicit unrestricted `network` posture is mandatory. Later phases reject
  * supplied network policy because the posture is fixed at provision.
  */
-export async function provisionSandbox<C extends StateAwareContainmentBackend>(
+export async function provisionSandbox<C extends LifecycleBackend>(
   containment: C,
   ...rest: ProvisionArgs<C>
 ): Promise<ProvisionResult<C>> {
@@ -213,7 +211,7 @@ export async function provisionSandbox<C extends StateAwareContainmentBackend>(
  * Starts a previously provisioned sandbox. The backend is inferred from
  * the `sandboxId` prefix.
  */
-export async function startSandbox<C extends StateAwareContainmentBackend>(
+export async function startSandbox<C extends LifecycleBackend>(
   sandboxId: ContainerId<C>,
   config?: StartConfigFor<C>,
   options: MxcOptions = {},
@@ -248,7 +246,7 @@ export function execInSandbox<C extends PipedExecBackend>(
 }
 
 /** Spawn an exec request in an existing container with an MXC-owned PTY. */
-export function spawnInContainerWithPty<C extends StateAwareContainmentBackend>(
+export function spawnInContainerWithPty<C extends LifecycleBackend>(
   sandboxId: ContainerId<C>,
   config: ExecConfigFor<C>,
   size: MxcPtySize = { rows: 24, columns: 80 },
@@ -274,30 +272,6 @@ export function spawnInContainerWithPty<C extends StateAwareContainmentBackend>(
     size.rows,
     size.columns,
     config.process.timeout,
-  );
-}
-
-/**
- * Run an exec request attached to this process's standard streams.
- *
- * The host process's stdin and stdout must both be terminals. The backend
- * relays the workload through those handles and blocks until it exits.
- */
-export function execInSandboxAttached<C extends StateAwareContainmentBackend>(
-  sandboxId: ContainerId<C>,
-  config: ExecConfigFor<C>,
-  options: MxcOptions = {},
-): WaitOutcome {
-  assertStateAwareOptions('execInSandboxAttached', options);
-  if (options.dryRun === true) {
-    throw new MxcError(
-      'malformed_request',
-      'execInSandboxAttached does not support dryRun because it runs an attached workload',
-    );
-  }
-  return runBindingStateAwareAttachedRequest(
-    JSON.stringify(buildExecEnvelope(sandboxId, config)),
-    options.experimental === true,
   );
 }
 
@@ -387,7 +361,7 @@ export function runInContainer<C extends PipedExecBackend>(
  * Stops a started sandbox without releasing its provision-side resources.
  * The same sandbox can be started again via `startSandbox`.
  */
-export async function stopSandbox<C extends StateAwareContainmentBackend>(
+export async function stopSandbox<C extends LifecycleBackend>(
   sandboxId: ContainerId<C>,
   config?: StopConfigFor<C>,
   options: MxcOptions = {},
@@ -406,7 +380,7 @@ export async function stopSandbox<C extends StateAwareContainmentBackend>(
  * Releases all backend resources associated with a provisioned sandbox.
  * The id becomes invalid after this call returns successfully.
  */
-export async function deprovisionSandbox<C extends StateAwareContainmentBackend>(
+export async function deprovisionSandbox<C extends LifecycleBackend>(
   sandboxId: ContainerId<C>,
   config?: DeprovisionConfigFor<C>,
   options: MxcOptions = {},

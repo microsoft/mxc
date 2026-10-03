@@ -109,21 +109,19 @@ fn a_single_threaded_apartment_drives_the_full_lifecycle() {
     std::thread::spawn(move || {
         enter_sta();
         let started = provision_and_start();
-        let captured = exec_capture_stdout(
-            &started.container_id,
-            "cmd.exe /c echo sta-lifecycle-marker",
-        );
+        let captured =
+            exec_capture_stdout(&started.sandbox_id, "cmd.exe /c echo sta-lifecycle-marker");
 
         let stop = format!(
             r#"{{"version":"0.9.0-alpha","phase":"stop","sandboxId":"{}"}}"#,
-            started.container_id
+            started.sandbox_id
         );
-        mxc_sdk::run_state_aware_json(&stop, false, true).expect("stop must succeed");
+        mxc_sdk::run_lifecycle_json(&stop, false, true).expect("stop must succeed");
         let deprovision = format!(
             r#"{{"version":"0.9.0-alpha","phase":"deprovision","sandboxId":"{}"}}"#,
-            started.container_id
+            started.sandbox_id
         );
-        mxc_sdk::run_state_aware_json(&deprovision, false, true).expect("deprovision must succeed");
+        mxc_sdk::run_lifecycle_json(&deprovision, false, true).expect("deprovision must succeed");
         started.teardown.defuse();
         let _ = tx.send(captured);
     });
@@ -650,10 +648,10 @@ impl Drop for Teardown {
             return;
         }
         let stop = format!(r#"{{"version":"0.9.0-alpha","phase":"stop","sandboxId":"{id}"}}"#);
-        let _ = mxc_sdk::run_state_aware_json(&stop, false, true);
+        let _ = mxc_sdk::run_lifecycle_json(&stop, false, true);
         let deprovision =
             format!(r#"{{"version":"0.9.0-alpha","phase":"deprovision","sandboxId":"{id}"}}"#);
-        if let Err(e) = mxc_sdk::run_state_aware_json(&deprovision, false, true) {
+        if let Err(e) = mxc_sdk::run_lifecycle_json(&deprovision, false, true) {
             eprintln!("WARNING: deprovision of {id} failed, the agent account may leak: {e:?}");
         }
     }
@@ -665,7 +663,7 @@ fn state_aware_lifecycle_runs_end_to_end() {
 
     let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
         "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#;
-    let response = mxc_sdk::run_state_aware_json(provision, false, true)
+    let response = mxc_sdk::run_lifecycle_json(provision, false, true)
         .expect("provision must succeed on a supported host");
     let parsed: serde_json::Value =
         serde_json::from_str(&response).expect("provision response must be JSON");
@@ -686,7 +684,7 @@ fn state_aware_lifecycle_runs_end_to_end() {
 
     let start =
         format!(r#"{{"version":"0.9.0-alpha","phase":"start","sandboxId":"{sandbox_id}"}}"#);
-    mxc_sdk::run_state_aware_json(&start, false, true).expect("start must succeed");
+    mxc_sdk::run_lifecycle_json(&start, false, true).expect("start must succeed");
 
     let captured = exec_capture_stdout(&sandbox_id, "cmd.exe /c echo state-aware-marker");
 
@@ -709,7 +707,7 @@ fn provision_and_start() -> Started {
     let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
         "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#;
     let response =
-        mxc_sdk::run_state_aware_json(provision, false, true).expect("provision must succeed");
+        mxc_sdk::run_lifecycle_json(provision, false, true).expect("provision must succeed");
     let parsed: serde_json::Value =
         serde_json::from_str(&response).expect("provision response must be JSON");
     let sandbox_id = match parsed["result"]["sandboxId"].as_str() {
@@ -732,7 +730,7 @@ fn provision_and_start() -> Started {
 
     let start =
         format!(r#"{{"version":"0.9.0-alpha","phase":"start","sandboxId":"{sandbox_id}"}}"#);
-    mxc_sdk::run_state_aware_json(&start, false, true).expect("start must succeed");
+    mxc_sdk::run_lifecycle_json(&start, false, true).expect("start must succeed");
     Started {
         sandbox_id,
         agent_user_name,
@@ -781,7 +779,7 @@ fn exec_runs_as_the_isolated_agent_user() {
     skip_unless_supported!();
     let started = provision_and_start();
 
-    let captured = exec_capture_stdout(&started.container_id, "cmd.exe /c whoami");
+    let captured = exec_capture_stdout(&started.sandbox_id, "cmd.exe /c whoami");
 
     assert_eq!(
         account_of(&captured),
@@ -814,7 +812,7 @@ fn the_workspace_is_shared_with_the_agent_and_removed_on_deprovision() {
         r#"cmd.exe /c type "{ws}\from-caller.txt" > "{ws}\from-agent.txt" & whoami >> "{ws}\from-agent.txt""#,
         ws = started.workspace
     );
-    exec_capture_stdout(&started.container_id, &command);
+    exec_capture_stdout(&started.sandbox_id, &command);
 
     let produced = std::fs::read_to_string(workspace.join("from-agent.txt"))
         .expect("the agent must be able to write into the workspace");
@@ -830,35 +828,19 @@ fn the_workspace_is_shared_with_the_agent_and_removed_on_deprovision() {
 
     let stop = format!(
         r#"{{"version":"0.9.0-alpha","phase":"stop","sandboxId":"{}"}}"#,
-        started.container_id
+        started.sandbox_id
     );
-    mxc_sdk::run_state_aware_json(&stop, false, true).expect("stop must succeed");
+    mxc_sdk::run_lifecycle_json(&stop, false, true).expect("stop must succeed");
     let deprovision = format!(
         r#"{{"version":"0.9.0-alpha","phase":"deprovision","sandboxId":"{}"}}"#,
-        started.container_id
+        started.sandbox_id
     );
-    mxc_sdk::run_state_aware_json(&deprovision, false, true).expect("deprovision must succeed");
+    mxc_sdk::run_lifecycle_json(&deprovision, false, true).expect("deprovision must succeed");
     started.teardown.defuse();
 
     assert!(
         !workspace.exists(),
         "deprovision returned but the workspace is still present: {workspace:?}"
-    );
-}
-
-#[test]
-fn exec_attached_rejects_a_non_exec_phase() {
-    // `provision` is a real phase, so this exercises the guard rather than the
-    // parser's unknown-phase rejection.
-    let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
-        "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#;
-    let err = mxc_sdk::exec_attached(provision, true)
-        .expect_err("an attached exec must reject a non-exec phase");
-    assert_eq!(err.code, ErrorCode::MalformedRequest);
-    assert!(
-        err.message.contains("exec phase"),
-        "the refusal should name the phase requirement, got: {}",
-        err.message
     );
 }
 
@@ -870,7 +852,7 @@ fn state_aware_exec_propagates_a_non_zero_exit_code() {
     let exec = format!(
         r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"{}",
             "process":{{"commandLine":"cmd.exe /c exit 42","timeout":30000}}}}"#,
-        started.container_id
+        started.sandbox_id
     );
     let mut sandbox = mxc_sdk::exec_sandbox(&exec, true).expect("exec must return a handle");
     let outcome = sandbox.wait().expect("waiting on the exec must succeed");
@@ -892,7 +874,7 @@ fn state_aware_exec_can_be_killed() {
     let exec = format!(
         r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"{}",
             "process":{{"commandLine":"cmd.exe /c ping -n 300 127.0.0.1","timeout":600000}}}}"#,
-        started.container_id
+        started.sandbox_id
     );
     let mut sandbox = mxc_sdk::exec_sandbox(&exec, true).expect("exec must return a handle");
 
@@ -931,7 +913,7 @@ fn a_workload_reading_stdin_to_eof_terminates_when_the_writer_drops() {
     let exec = format!(
         r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"{}",
             "process":{{"commandLine":"cmd.exe /c more","timeout":60000}}}}"#,
-        started.container_id
+        started.sandbox_id
     );
     let mut sandbox = mxc_sdk::exec_sandbox(&exec, true).expect("exec must return a handle");
 
@@ -971,7 +953,7 @@ fn a_backgrounded_descendant_does_not_hold_the_exec_open() {
     let exec = format!(
         r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"{}",
             "process":{{"commandLine":"cmd.exe /c start /b ping -n 31 127.0.0.1 > nul & echo done","timeout":120000}}}}"#,
-        started.container_id
+        started.sandbox_id
     );
     let mut sandbox = mxc_sdk::exec_sandbox(&exec, true).expect("exec must return a handle");
 

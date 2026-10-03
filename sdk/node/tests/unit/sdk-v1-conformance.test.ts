@@ -9,7 +9,7 @@ import { prepareOneShotRequest } from '../../src/bindings/one-shot.js';
 import { MxcError } from '../../src/errors.js';
 import { createConfigFromRequest } from '../../src/sandbox.js';
 import type {
-  ContainerBackendConfig,
+  Containment,
   ContainerRequest,
   RuntimeConfig,
 } from '../../src/types.js';
@@ -67,7 +67,7 @@ function cloneRequestSections(
   return cloned;
 }
 
-function containment(fixture: SdkV1Fixture['containment']): ContainerBackendConfig {
+function containment(fixture: SdkV1Fixture['containment']): Containment {
   switch (fixture.kind) {
     case 'processContainer':
       return {

@@ -13,7 +13,7 @@
  */
 
 export {
-  ContainerBackendConfig,
+  Containment,
   ContainerRequest,
   MxcOptions,
   ProcessContainerConfig,
@@ -33,7 +33,7 @@ export {
   SeatbeltConfig,
   WslcConfig,
   TelemetryConfig,
-  Output,
+  ExecutionOutput,
 } from './types.js';
 
 export {
@@ -58,8 +58,8 @@ export {
 
 export {
   Phase,
-  STATE_AWARE_VERSION,
-  StateAwareContainmentBackend,
+  SDK_CONTRACT_VERSION,
+  LifecycleBackend,
   ContainerId,
   ExecRequest,
   IsolationSessionNetworkConfig,
@@ -80,7 +80,7 @@ export {
   ExecConfigFor,
   StopConfigFor,
   DeprovisionConfigFor,
-  StateAwareMetadata,
+  ContainerMetadata,
   ProvisionMetadataFor,
   StartMetadataFor,
   StopMetadataFor,
@@ -97,7 +97,6 @@ export {
   runInContainer,
   provisionSandbox,
   startSandbox,
-  execInSandboxAttached,
   execInSandbox,
   spawnInContainerWithPty,
   execInSandboxAsync,

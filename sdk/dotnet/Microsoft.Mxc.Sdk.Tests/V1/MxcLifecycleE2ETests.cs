@@ -76,9 +76,9 @@ public class MxcLifecycleE2ETests
     private static Started ProvisionAndStart()
     {
         var provisioned = MxcLifecycle.ProvisionSandbox(
-            StateAwareContainment.IsolationSession,
+            LifecycleBackend.IsolationSession,
             new IsolationSessionProvisionOptions(
-                new StateAwareNetworkPolicy
+                new LifecycleNetworkPolicy
                 {
                     Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
                     Ingress = new NetworkIngressPolicy

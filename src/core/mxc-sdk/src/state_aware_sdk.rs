@@ -25,7 +25,7 @@ use crate::Error;
 /// Backend selected by a typed state-aware provision request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum StateAwareProvision {
+enum ProvisionContainment {
     /// Windows IsolationSession with an optional application identifier.
     IsolationSession { app_id: Option<String> },
     /// WSL Container with optional image selection.
@@ -35,7 +35,7 @@ pub enum StateAwareProvision {
     },
 }
 
-impl StateAwareProvision {
+impl ProvisionContainment {
     fn runtime_operation(&self) -> RuntimeOperation {
         RuntimeOperation::Provision(match self {
             Self::IsolationSession { app_id } => {
@@ -109,7 +109,7 @@ impl fmt::Display for ContainerId {
 /// Typed state-aware provision request.
 #[derive(Debug, Clone)]
 pub struct ProvisionRequest {
-    provision: StateAwareProvision,
+    provision: ProvisionContainment,
     filesystem: Option<FilesystemSection>,
     network: Option<NetworkSection>,
 }
@@ -134,7 +134,7 @@ impl ProvisionRequest {
             ..Default::default()
         };
         Self {
-            provision: StateAwareProvision::IsolationSession { app_id },
+            provision: ProvisionContainment::IsolationSession { app_id },
             filesystem: None,
             network: Some(network),
         }
@@ -146,7 +146,7 @@ impl ProvisionRequest {
     /// configuration is omitted and the backend owns its defaults.
     pub fn wslc(image: Option<String>, image_tar_path: Option<String>) -> Self {
         Self {
-            provision: StateAwareProvision::Wslc {
+            provision: ProvisionContainment::Wslc {
                 image,
                 image_tar_path,
             },
@@ -173,7 +173,7 @@ impl ProvisionRequest {
     ) -> Result<SdkStateAwareInput, MxcError> {
         let version = ContractVersion::V1_0_0;
         match &self.provision {
-            StateAwareProvision::IsolationSession { .. } if self.filesystem.is_some() => {
+            ProvisionContainment::IsolationSession { .. } if self.filesystem.is_some() => {
                 return Err(MxcError::malformed_request(
                     "IsolationSession state-aware provision does not accept filesystem policy",
                 ));
@@ -213,13 +213,13 @@ pub struct ExecRequest {
     environment: Option<Vec<String>>,
     inherit_default_env: Option<bool>,
     timeout_ms: Option<u32>,
-    backend_options: Option<StateAwareExecBackendOptions>,
+    backend_options: Option<ExecBackendOptions>,
 }
 
 /// Backend-specific options for a typed state-aware exec request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum StateAwareExecBackendOptions {
+pub enum ExecBackendOptions {
     /// WSLc cooperative proxy configuration.
     Wslc { network_proxy: String },
 }
@@ -267,7 +267,7 @@ impl ExecRequest {
     /// Set options interpreted by the backend selected from the sandbox ID.
     ///
     /// A backend rejects options it cannot enforce.
-    pub fn set_backend_options(&mut self, options: StateAwareExecBackendOptions) -> &mut Self {
+    pub fn set_backend_options(&mut self, options: ExecBackendOptions) -> &mut Self {
         self.backend_options = Some(options);
         self
     }
@@ -292,7 +292,7 @@ impl ExecRequest {
             timeout: self.timeout_ms,
         });
         input.runtime_config = self.backend_options.map(|options| match options {
-            StateAwareExecBackendOptions::Wslc { network_proxy } => SdkRuntimeConfigInput {
+            ExecBackendOptions::Wslc { network_proxy } => SdkRuntimeConfigInput {
                 network_proxy: Some(network_proxy),
             },
         });
@@ -844,7 +844,7 @@ mod tests {
         );
 
         let mut proxy_exec = ExecRequest::new("echo proxied");
-        proxy_exec.set_backend_options(StateAwareExecBackendOptions::Wslc {
+        proxy_exec.set_backend_options(ExecBackendOptions::Wslc {
             network_proxy: "http://127.0.0.1:8080".to_string(),
         });
         assert_exec_matches_exact(

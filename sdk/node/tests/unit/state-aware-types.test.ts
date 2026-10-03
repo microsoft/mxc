@@ -13,8 +13,8 @@ import {
   ProvisionResult,
   SandboxId,
   StartMetadataFor,
-  STATE_AWARE_VERSION,
-  StateAwareContainmentBackend,
+  SDK_CONTRACT_VERSION,
+  LifecycleBackend,
   StopConfigFor,
   WslcProvisionConfig,
   WslcStartConfig,
@@ -46,16 +46,16 @@ describe('SandboxId<C> brand', () => {
   });
 });
 
-describe('STATE_AWARE_VERSION', () => {
+describe('SDK_CONTRACT_VERSION', () => {
   it('targets the SDK-owned stable v1 contract', () => {
-    assert.strictEqual(STATE_AWARE_VERSION, '1.0.0');
+    assert.strictEqual(SDK_CONTRACT_VERSION, '1.0.0');
   });
 });
 
-describe('StateAwareContainmentBackend', () => {
+describe('LifecycleBackend', () => {
   it('excludes Windows Sandbox from the typed high-level lifecycle', async () => {
     // @ts-expect-error — Windows Sandbox lifecycle is raw exact 1.1 only.
-    const unsupported: StateAwareContainmentBackend = 'windows_sandbox';
+    const unsupported: LifecycleBackend = 'windows_sandbox';
     const { provisionSandbox } = await import('../../src/state-aware.js');
     // @ts-expect-error — Windows Sandbox is not a high-level lifecycle backend.
     const provision = () => provisionSandbox('windows_sandbox');
@@ -134,7 +134,7 @@ describe('IsolationSessionProvisionConfig', () => {
     // every backend, silently re-opening the hole the test above closes.
     // A union backend must behave like its strictest member.
     const { provisionSandbox } = await import('../../src/state-aware.js');
-    const wide = 'isolation_session' as StateAwareContainmentBackend;
+    const wide = 'isolation_session' as LifecycleBackend;
 
     // @ts-expect-error — the union includes a backend that requires a config.
     const widened = () => provisionSandbox(wide);

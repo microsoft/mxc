@@ -28,8 +28,8 @@ println!("{}", String::from_utf8_lossy(&output.stdout));
 ```
 
 `spawn` returns an `MxcProcess` with separate standard streams, wait and
-termination methods. `run` captures stdout and stderr and returns an `Output`
-with its `WaitOutcome`, warnings, and optional output metadata. Both use the
+termination methods. `run` captures stdout and stderr and returns an
+`ExecutionOutput` with its `WaitOutcome`, warnings, and optional output metadata. Both use the
 same in-process native engine; neither launches an MXC executor binary.
 
 Set the request's typed `Containment` when a specific backend is required.
@@ -70,10 +70,8 @@ v1::container::deprovision_sandbox(&id, options)?;
 Use `spawn_in_container` or `exec_in_sandbox` for live piped exec.
 `spawn_in_container_with_pty` returns an `MxcPtyProcess` for a caller-driven
 terminal; PTY support is currently available for IsolationSession.
-`container::exec_in_attached` synchronously relays state-aware exec through the
-host terminal and returns its `WaitOutcome`; the host stdin and stdout must
-both be terminals. Lifecycle operations and state-aware exec are synchronous
-in Rust. Backend support and phase-specific requirements are described in the
+Attached state-aware exec is not exposed by the Rust SDK. Lifecycle operations
+and state-aware exec are synchronous in Rust. Backend support and phase-specific requirements are described in the
 [IsolationSession](../../../docs/isolation-session/state-aware-rust.md) and
 [WSLC](../../../docs/wsl/wslc-state-aware.md) guides.
 
@@ -87,7 +85,7 @@ in Rust. Backend support and phase-specific requirements are described in the
 | Live process with standard pipes | `v1::MxcProcess` |
 | Live process with a terminal | `v1::MxcPtyProcess` |
 | Terminal dimensions | `v1::MxcPtySize` |
-| Captured execution | `v1::Output` |
+| Captured execution | `v1::ExecutionOutput` |
 | Terminal process outcome | `v1::WaitOutcome` |
 
 `v1::spawn_with_pty` provides the one-shot PTY entry point. PTY support is

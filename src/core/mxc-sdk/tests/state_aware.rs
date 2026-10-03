@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 //! Host-independent tests for the `mxc-sdk` state-aware lifecycle surface
-//! (`run_state_aware_json` / `exec_sandbox`).
+//! (`run_lifecycle_json` / `exec_sandbox`).
 //!
 //! These exercise request parsing, phase routing, and error mapping without a
 //! live host backend. All three state-aware backends — IsolationSession, WSLc
@@ -21,9 +21,9 @@
 
 use mxc_sdk::v1::{
     container, spawn_in_container, ContainerId, ExecRequest, LifecycleResult, MxcProcess,
-    OperationOptions, ProvisionRequest, ProvisionResult, ValidationResult, WaitOutcome,
+    OperationOptions, ProvisionRequest, ProvisionResult, ValidationResult,
 };
-use mxc_sdk::{exec_sandbox, exec_sandbox_json, run_state_aware_json, Error, ErrorCode};
+use mxc_sdk::{exec_sandbox, exec_sandbox_json, run_lifecycle_json, Error, ErrorCode};
 
 #[test]
 fn typed_lifecycle_api_is_operation_specific() {
@@ -45,8 +45,6 @@ fn typed_lifecycle_api_is_operation_specific() {
         container::validate_deprovision;
     let _: fn(&ContainerId, ExecRequest, OperationOptions) -> Result<MxcProcess, Error> =
         spawn_in_container;
-    let _: fn(&ContainerId, ExecRequest, OperationOptions) -> Result<WaitOutcome, Error> =
-        container::exec_in_attached;
     let _: fn(&ContainerId, ExecRequest, OperationOptions) -> Result<ValidationResult, Error> =
         container::validate_exec;
 }
@@ -89,28 +87,28 @@ fn explicit_raw_exec_alias_preserves_existing_behavior() {
 }
 
 #[test]
-fn run_state_aware_json_rejects_one_shot_config() {
+fn run_lifecycle_json_rejects_one_shot_config() {
     // No `phase` field => one-shot config, not a lifecycle request.
     let json = r#"{"version":"0.8.0-alpha","process":{"commandLine":"echo hi"}}"#;
-    let err = run_state_aware_json(json, false, false).expect_err("one-shot must be rejected");
+    let err = run_lifecycle_json(json, false, false).expect_err("one-shot must be rejected");
     assert_eq!(err.code, ErrorCode::MalformedRequest);
 }
 
 #[test]
-fn run_state_aware_json_rejects_non_dry_run_exec() {
+fn run_lifecycle_json_rejects_non_dry_run_exec() {
     // A non-dry-run exec streams; it must be routed through exec_sandbox, not
     // the envelope entry point.
     let json = r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"isolationsession:abc","process":{"commandLine":"echo hi"}}"#;
     let err =
-        run_state_aware_json(json, false, false).expect_err("non-dry-run exec must be rejected");
+        run_lifecycle_json(json, false, false).expect_err("non-dry-run exec must be rejected");
     assert_eq!(err.code, ErrorCode::MalformedRequest);
     assert!(err.message.contains("exec"));
 }
 
 #[test]
-fn run_state_aware_json_malformed_json_is_malformed_request() {
+fn run_lifecycle_json_malformed_json_is_malformed_request() {
     let err =
-        run_state_aware_json("{ not json", false, false).expect_err("bad JSON must be rejected");
+        run_lifecycle_json("{ not json", false, false).expect_err("bad JSON must be rejected");
     assert_eq!(err.code, ErrorCode::MalformedRequest);
 }
 
@@ -128,7 +126,7 @@ fn exact_provision_payload_diagnostics_survive_the_sdk_boundary() {
              \"_comment\":\"typed payload diagnostic\",\n  \
              \"isolationSession\":{{\"provision\":{{{fields}}}}}\n}}"
         );
-        let error = run_state_aware_json(&json, true, true).unwrap_err();
+        let error = run_lifecycle_json(&json, true, true).unwrap_err();
         assert_eq!(error.code, ErrorCode::MalformedRequest, "{fields}");
         assert!(error.message.contains("isolationSession.provision"));
         assert!(error.message.contains("line "));
@@ -152,7 +150,7 @@ fn typed_provision_payload_is_validated_without_running_a_lifecycle() {
             }},
         })
         .to_string();
-        let result = run_state_aware_json(&json, true, true).unwrap();
+        let result = run_lifecycle_json(&json, true, true).unwrap();
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&result).unwrap(),
             serde_json::json!({"result": {}})
@@ -168,7 +166,7 @@ fn typed_provision_payload_is_validated_without_running_a_lifecycle() {
         }},
     })
     .to_string();
-    let error = run_state_aware_json(&json, true, true).unwrap_err();
+    let error = run_lifecycle_json(&json, true, true).unwrap_err();
     assert_eq!(error.code, ErrorCode::PolicyValidation);
     assert_eq!(
         error.message,
@@ -208,7 +206,7 @@ fn exec_sandbox_rejects_one_shot_config() {
 #[test]
 fn unregistered_backend_prefix_is_unsupported_containment() {
     let json = r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"nosuchbackend:abc123"}"#;
-    let err = run_state_aware_json(json, false, false)
+    let err = run_lifecycle_json(json, false, false)
         .expect_err("an unregistered sandbox-id prefix has no backend");
     assert_eq!(err.code, ErrorCode::UnsupportedContainment);
 }
@@ -219,7 +217,7 @@ fn unregistered_backend_prefix_is_unsupported_containment() {
 #[test]
 fn experimental_backend_is_refused_without_the_optin() {
     let json = r#"{"version":"1.1.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
-    let err = run_state_aware_json(json, true, false)
+    let err = run_lifecycle_json(json, true, false)
         .expect_err("an experimental backend without the opt-in must be refused");
     assert_eq!(err.code, ErrorCode::BackendUnavailable);
     assert!(
@@ -240,7 +238,7 @@ fn experimental_backend_is_refused_without_the_optin() {
 #[test]
 fn the_optin_admits_an_experimental_backend() {
     let json = r#"{"version":"1.1.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
-    if let Err(err) = run_state_aware_json(json, true, true) {
+    if let Err(err) = run_lifecycle_json(json, true, true) {
         assert_ne!(
             err.code,
             ErrorCode::BackendUnavailable,
@@ -256,7 +254,7 @@ fn the_optin_admits_an_experimental_backend() {
 #[test]
 fn the_refusal_carries_no_api_call_detail() {
     let json = r#"{"version":"1.1.0-alpha","phase":"provision","containment":"windows_sandbox"}"#;
-    let err = run_state_aware_json(json, true, false).expect_err("must be refused");
+    let err = run_lifecycle_json(json, true, false).expect_err("must be refused");
     assert_eq!(err.operation, None);
     assert_eq!(err.native_code, None);
     assert_eq!(err.remediation, None);

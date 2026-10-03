@@ -24,9 +24,9 @@ import {
   provisionSandbox,
   runAsync,
   type ContainerId,
-  type ContainerBackendConfig,
+  type Containment,
   type ContainerRequest,
-  type StateAwareContainmentBackend,
+  type LifecycleBackend,
 } from '@microsoft/mxc-sdk/v1';
 
 export type ContainerRequestTestSettings =
@@ -45,12 +45,12 @@ export function runConfigForTest(
   options: { experimental?: boolean } = {},
 ) {
   const request: OneShotRequest = prepareOneShotRequest(config);
-  return runOneShotJsonAsync(request, options.experimental ? 1 : 0);
+  return runOneShotJsonAsync(request, options.experimental === true);
 }
 
 export function createConfigForTest(
   request: ContainerRequestTestSettings,
-  containment?: ContainerBackendConfig['type'],
+  containment?: Containment['type'],
   containerName?: string,
 ): ContainerConfig {
   return createConfigFromRequest({
@@ -277,7 +277,7 @@ export async function runOrSkipIfBackendUnavailable<T>(
 }
 
 /** Deprovision a sandbox best-effort, swallowing errors so cleanup never masks the original failure. */
-export async function safeDeprovision<C extends StateAwareContainmentBackend>(
+export async function safeDeprovision<C extends LifecycleBackend>(
   sandboxId: ContainerId<C>,
 ): Promise<void> {
   try {
@@ -295,7 +295,7 @@ export async function safeDeprovision<C extends StateAwareContainmentBackend>(
  * genuine failures aren't masked as "skipped." Intended for one-shot probing at
  * module load — pair the result with `describe`'s `{ skip }` option.
  */
-export async function probeStateAwareRuntime<C extends StateAwareContainmentBackend>(
+export async function probeStateAwareRuntime<C extends LifecycleBackend>(
   containment: C,
 ): Promise<string | undefined> {
   try {
@@ -317,14 +317,14 @@ export async function probeStateAwareRuntime<C extends StateAwareContainmentBack
     // compile error here instead of a wrong config at runtime.
     const sandboxId = await (async () => {
       // Widen once into a local of the concrete union, then switch on that.
-      // Switching on `containment as StateAwareContainmentBackend` would not
+      // Switching on `containment as LifecycleBackend` would not
       // narrow inside the arms — an assertion expression is not a narrowable
       // reference — which would in turn force the default arm to cast, and
       // `x as never` compiles unconditionally, leaving the guard unable to
       // ever fire. Binding the local first makes the narrowing real, so the
       // default arm genuinely reduces to `never` and adding a backend to the
       // union becomes a compile error here.
-      const backend: StateAwareContainmentBackend = containment;
+      const backend: LifecycleBackend = containment;
       switch (backend) {
         case 'isolation_session': {
           const result = await provisionSandbox(

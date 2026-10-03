@@ -1585,6 +1585,7 @@ dependencies = [
  "mxc_engine",
  "serde",
  "serde_json",
+ "windows",
  "wxc_common",
 ]
 

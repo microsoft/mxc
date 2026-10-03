@@ -4,13 +4,13 @@
 import { mxcErrorFromCode, mxcErrorFromEnvelope, WireError } from './errors.js';
 import {
   Phase,
-  STATE_AWARE_VERSION,
-  StateAwareContainmentBackend,
+  SDK_CONTRACT_VERSION,
+  LifecycleBackend,
 } from './state-aware-types.js';
 import { TelemetryConfig } from './types.js';
 
 export {
-  STATE_AWARE_VERSION,
+  SDK_CONTRACT_VERSION,
 };
 
 // Wire-format cross-cutting fields that live at the envelope's top level.
@@ -26,13 +26,13 @@ export const ISOLATION_SESSION_ID_PREFIX = 'iso';
 export const WSLC_ID_PREFIX = 'wslc';
 export const WINDOWS_SANDBOX_ID_PREFIX = 'wsb';
 
-// Exhaustive backend→prefix map. Typed `Record<StateAwareContainmentBackend,
+// Exhaustive backend→prefix map. Typed `Record<LifecycleBackend,
 // string>` so adding a backend to the union without registering a prefix here
 // is a compile error — the same exhaustiveness guarantee the config, metadata,
 // and default-version registries carry. Without it a new backend would compile
 // with no prefix and fail every non-provision call at runtime with
 // `malformed_id`.
-export const BACKEND_TO_PREFIX: Record<StateAwareContainmentBackend, string> = {
+export const BACKEND_TO_PREFIX: Record<LifecycleBackend, string> = {
   isolation_session: ISOLATION_SESSION_ID_PREFIX,
   wslc: WSLC_ID_PREFIX,
 };
@@ -40,8 +40,8 @@ export const BACKEND_TO_PREFIX: Record<StateAwareContainmentBackend, string> = {
 // Reverse lookup (prefix → backend), derived from the exhaustive map above so
 // the two can never drift. Used to route a sandboxId's leading prefix segment
 // to its wire-format backend key.
-export const PREFIX_TO_BACKEND: Record<string, StateAwareContainmentBackend> = Object.fromEntries(
-  (Object.entries(BACKEND_TO_PREFIX) as [StateAwareContainmentBackend, string][]).map(
+export const PREFIX_TO_BACKEND: Record<string, LifecycleBackend> = Object.fromEntries(
+  (Object.entries(BACKEND_TO_PREFIX) as [LifecycleBackend, string][]).map(
     ([backend, prefix]) => [prefix, backend],
   ),
 );
@@ -52,7 +52,7 @@ export const PREFIX_TO_BACKEND: Record<string, StateAwareContainmentBackend> = O
  * when the id has no recognised prefix, and `code: 'unsupported_containment'`
  * for a Windows Sandbox (`wsb:`) id, which the stable API does not accept.
  */
-export function backendForSandboxId(sandboxId: string): StateAwareContainmentBackend {
+export function backendForSandboxId(sandboxId: string): LifecycleBackend {
   const colon = sandboxId.indexOf(':');
   if (colon < 0) {
     throw mxcErrorFromCode('malformed_id', `sandboxId must carry a backend prefix: ${sandboxId}`);
@@ -75,8 +75,8 @@ export function backendForSandboxId(sandboxId: string): StateAwareContainmentBac
 
 export interface BuildEnvelopeArgs {
   phase: Phase;
-  backendKey: StateAwareContainmentBackend;
-  containment?: StateAwareContainmentBackend; // provision only
+  backendKey: LifecycleBackend;
+  containment?: LifecycleBackend; // provision only
   sandboxId?: string;                        // non-provision only
   config?: Record<string, unknown>;
 }
@@ -104,10 +104,10 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
     throw mxcErrorFromCode(
       'malformed_request',
       `State-aware high-level requests do not accept a caller-selected version; ` +
-      `the v1 SDK targets exact contract ${STATE_AWARE_VERSION}.`,
+      `the v1 SDK targets exact contract ${SDK_CONTRACT_VERSION}.`,
     );
   }
-  const version = STATE_AWARE_VERSION;
+  const version = SDK_CONTRACT_VERSION;
 
   const fail = (message: string): never => {
     throw mxcErrorFromCode('malformed_request', message);

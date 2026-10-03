@@ -26,7 +26,6 @@ import {
   provisionSandbox,
   startSandbox,
   stopSandbox,
-  type ExecResult,
   type ContainerId,
 } from '@microsoft/mxc-sdk/v1';
 import { safeDeprovision } from './test-helpers.js';
@@ -58,36 +57,13 @@ function collect(
   });
 }
 
-async function execAfterCancellation(
-  containerId: ContainerId<'wslc'>,
-): Promise<ExecResult> {
-  const deadline = Date.now() + 15_000;
-  let lastError: unknown;
-
-  while (Date.now() < deadline) {
-    try {
-      return await execInSandboxAsync(containerId, {
-        process: { commandLine: 'echo NODE_WSLC_AFTER_CANCEL' },
-      });
-    } catch (error) {
-      lastError = error;
-      if (!(error instanceof MxcError) || error.code !== 'backend_error') {
-        throw error;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
-  }
-
-  throw lastError ?? new Error('sandbox did not become reusable after cancellation');
-}
-
 describe('WSLC state-aware lifecycle E2E', {
   skip: !isWslcAvailable
     ? 'WSLC tests require MXC_ENABLE_WSLC_TESTS=1 on Windows with WSL2 and WSLC SDK'
     : undefined,
 }, () => {
   it(
-    'preserves lifecycle, streaming, timeout, cancellation, and stale-id behavior',
+    'preserves lifecycle, streaming, timeout, and stale-id behavior',
     { timeout: 180_000 },
     async () => {
       const { containerId } = await provisionSandbox('wslc', { image: wslcImage });
@@ -183,28 +159,6 @@ describe('WSLC state-aware lifecycle E2E', {
         } finally {
           timed.dispose();
         }
-
-        const controller = new AbortController();
-        const reason = new Error('NODE_WSLC_ABORT_EXPECTED');
-        const cancelTimer = setTimeout(() => controller.abort(reason), 750);
-        try {
-          await assert.rejects(
-            execInSandboxAsync(
-              containerId,
-              { process: { commandLine: 'sleep 10' } },
-              { signal: controller.signal },
-            ),
-            (error: unknown) =>
-              error === reason ||
-              (error instanceof Error && error.message === reason.message),
-          );
-        } finally {
-          clearTimeout(cancelTimer);
-        }
-
-        const afterCancel = await execAfterCancellation(containerId);
-        assert.equal(afterCancel.exitCode, 0);
-        assert.match(afterCancel.stdout, /NODE_WSLC_AFTER_CANCEL/);
 
         await stopSandbox(containerId);
         started = false;

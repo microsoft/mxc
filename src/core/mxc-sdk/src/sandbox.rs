@@ -179,8 +179,11 @@ pub fn validate_exec(
         .map_err(Error::from)
 }
 
-/// Run a state-aware exec request attached to this process's standard streams.
-pub fn exec_in_attached(
+#[expect(
+    dead_code,
+    reason = "Attached exec is reserved but not exposed by the SDK yet"
+)]
+fn exec_in_attached(
     container_id: &ContainerId,
     request: ExecRequest,
     options: OperationOptions,
@@ -232,7 +235,7 @@ pub enum WaitOutcome {
 /// The captured result of running a [`MxcProcess`] to completion via
 /// [`wait_with_output`](MxcProcess::wait_with_output).
 #[derive(Debug, Clone)]
-pub struct Output {
+pub struct ExecutionOutput {
     /// How the process finished.
     pub outcome: WaitOutcome,
     /// Policy and operational warnings from the sandbox, such as security
@@ -398,9 +401,9 @@ impl MxcProcess {
     /// stream to EOF before the other can). Consumes the handle.
     ///
     /// `Err` is reserved for an actual OS / wait failure; a timeout is reported
-    /// as [`Output`] with `outcome: WaitOutcome::TimedOut` and whatever each
+    /// as [`ExecutionOutput`] with `outcome: WaitOutcome::TimedOut` and whatever each
     /// stream produced.
-    pub fn wait_with_output(mut self) -> std::io::Result<Output> {
+    pub fn wait_with_output(mut self) -> std::io::Result<ExecutionOutput> {
         fn capture(stream: Option<Box<dyn Read + Send>>) -> std::thread::JoinHandle<Vec<u8>> {
             std::thread::spawn(move || {
                 let mut buf = Vec::new();
@@ -420,7 +423,7 @@ impl MxcProcess {
         // its failures here.
         let warnings = self.inner.warnings();
         let output_metadata = self.inner.output_metadata().cloned();
-        Ok(Output {
+        Ok(ExecutionOutput {
             outcome,
             warnings,
             stdout: stdout.join().unwrap_or_default(),

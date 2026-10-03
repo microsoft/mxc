@@ -20,7 +20,7 @@ var request = new ContainerRequest("cmd /c echo hello")
     TimeoutMs = 30_000,
 };
 
-Output output = await MxcContainer.RunAsync(request);
+ExecutionOutput output = await MxcContainer.RunAsync(request);
 Console.WriteLine($"exit={output.ExitCode} stdout={output.Stdout}");
 ```
 
@@ -45,12 +45,12 @@ subsequent operations rather than parsing it.
 using Microsoft.Mxc.Sdk.V1;
 
 var provisioned = MxcLifecycle.ProvisionSandbox(
-    StateAwareContainment.Wslc,
+    LifecycleBackend.Wslc,
     new WslcProvisionOptions { Image = "alpine:latest" });
 ContainerId id = provisioned.ContainerId;
 
 MxcLifecycle.StartSandbox(id);
-Output output = await MxcLifecycle.ExecInSandboxAsync(
+ExecutionOutput output = await MxcLifecycle.ExecInSandboxAsync(
     id,
     new ExecRequest("echo hello"));
 Console.WriteLine(output.Stdout);
@@ -58,9 +58,7 @@ MxcLifecycle.StopSandbox(id);
 MxcLifecycle.DeprovisionSandbox(id);
 ```
 
-Use `ExecInSandbox` or `SpawnInContainer` for live piped execution.
-`ExecInSandboxAttached` runs synchronously on the host's terminal and returns
-a `WaitOutcome`; both host stdin and stdout must be terminals. The
+Use `ExecInSandbox` or `SpawnInContainer` for live piped execution. The
 asynchronous methods are convenience wrappers over native operations and
 support cancellation. Backend and phase-specific policy requirements are
 described in the
@@ -80,7 +78,7 @@ IsolationSession exec with a caller-controlled terminal and returns an
 | Live process with standard pipes | `MxcProcess` |
 | Live process with a terminal | `MxcPtyProcess` |
 | Terminal dimensions | `MxcPtySize` |
-| Captured execution | `Output` |
+| Captured execution | `ExecutionOutput` |
 | Terminal process outcome | `WaitOutcome` |
 
 All types above are in `Microsoft.Mxc.Sdk.V1`. See the
@@ -91,7 +89,7 @@ and [schema reference](../../docs/schema.md) for policy behavior.
 
 Native failures are surfaced as `MxcException`; inspect `Code`, `Operation`,
 `NativeCode`, and `Remediation` when available. Security and operational
-warnings are available on `Output.Warnings` and `MxcProcess.Warnings`.
+warnings are available on `ExecutionOutput.Warnings` and `MxcProcess.Warnings`.
 
 `MxcPlatform.GetPlatformSupport()` reports whether the SDK can launch a
 sandbox on the current host. `MxcPlatform.GetAvailableBackends()` reports

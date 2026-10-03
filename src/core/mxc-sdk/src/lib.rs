@@ -119,7 +119,7 @@
 //! stream they did not take. WSLC does not expose stdin.
 //!
 //! Policy and operational warnings are available through [`MxcProcess::warnings`]
-//! and [`Output::warnings`]. These include security warnings, network rules
+//! and [`ExecutionOutput::warnings`]. These include security warnings, network rules
 //! that cannot carry traffic, and operational warnings such as unavailable
 //! telemetry routing.
 //!
@@ -144,7 +144,7 @@ pub use mxc_engine::{
 #[cfg(target_os = "windows")]
 pub use mxc_engine::{ProbeFacts, ProbeOutput, UiCapabilitySupport};
 
-use sandbox::{MxcProcess, Output, WaitOutcome};
+use sandbox::{ExecutionOutput, MxcProcess, WaitOutcome};
 
 /// V1 contract-mapped request and typed lifecycle APIs.
 ///
@@ -161,6 +161,14 @@ use sandbox::{MxcProcess, Output, WaitOutcome};
 ///
 /// ```compile_fail
 /// use mxc_sdk::v1::sandbox;
+/// ```
+///
+/// ```compile_fail
+/// use mxc_sdk::v1::container::exec_in_attached;
+/// ```
+///
+/// ```compile_fail
+/// use mxc_sdk::exec_attached;
 /// ```
 pub mod v1 {
     /// Backend-specific V1 configuration sections.
@@ -182,7 +190,7 @@ pub mod v1 {
     /// V1 typed state-aware lifecycle entry points.
     pub mod container {
         pub use crate::sandbox::{
-            deprovision as deprovision_sandbox, exec_in_attached, provision as provision_sandbox,
+            deprovision as deprovision_sandbox, provision as provision_sandbox,
             spawn_in_container_with_pty, start as start_sandbox, stop as stop_sandbox,
             validate_deprovision, validate_exec, validate_provision, validate_start, validate_stop,
         };
@@ -196,13 +204,13 @@ pub mod v1 {
         WslcSection,
     };
     pub use crate::sandbox::{
-        CaptureDenialsErrorOutput, CaptureDenialsOutput, MxcProcess, MxcPtyProcess, MxcPtySize,
-        Output, SandboxOutputMetadata, StreamCloser, WaitOutcome,
+        CaptureDenialsErrorOutput, CaptureDenialsOutput, ExecutionOutput, MxcProcess,
+        MxcPtyProcess, MxcPtySize, SandboxOutputMetadata, StreamCloser, WaitOutcome,
     };
     pub use crate::state_aware_sdk::{
-        ContainerId, ExecRequest, IsolationSessionProvisionMetadata, LifecycleResult,
-        OperationOptions, ProvisionMetadata, ProvisionRequest, ProvisionResult,
-        StateAwareExecBackendOptions, StateAwareProvision, ValidationResult,
+        ContainerId, ExecBackendOptions, ExecRequest, IsolationSessionProvisionMetadata,
+        LifecycleResult, OperationOptions, ProvisionMetadata, ProvisionRequest, ProvisionResult,
+        ValidationResult,
     };
 
     use crate::Error;
@@ -247,7 +255,7 @@ pub mod v1 {
     ///
     /// `Err` is returned when the backend can't be selected/spawned (an
     /// [`Error`]), or when waiting on the child fails at the OS level.
-    pub fn run(request: ContainerRequest) -> Result<Output, Error> {
+    pub fn run(request: ContainerRequest) -> Result<ExecutionOutput, Error> {
         crate::wait_with_output(spawn(request)?)
     }
 
@@ -277,7 +285,7 @@ pub mod v1 {
         container_id: &ContainerId,
         request: ExecRequest,
         options: OperationOptions,
-    ) -> Result<Output, Error> {
+    ) -> Result<ExecutionOutput, Error> {
         crate::wait_with_output(spawn_in_container(container_id, request, options)?)
     }
 
@@ -320,11 +328,11 @@ pub fn spawn_with_pty_json(
 
 /// Run a raw exact-version one-shot JSON request to completion, capturing its
 /// output. The JSON and `experimental` rules match [`spawn_sandbox_json`].
-pub fn run_json(request_json: &str, experimental: bool) -> Result<Output, Error> {
+pub fn run_json(request_json: &str, experimental: bool) -> Result<ExecutionOutput, Error> {
     wait_with_output(spawn_sandbox_json(request_json, experimental)?)
 }
 
-fn wait_with_output(sandbox: MxcProcess) -> Result<Output, Error> {
+fn wait_with_output(sandbox: MxcProcess) -> Result<ExecutionOutput, Error> {
     sandbox.wait_with_output().map_err(|e| {
         Error::new(
             ErrorCode::BackendError,
@@ -333,13 +341,12 @@ fn wait_with_output(sandbox: MxcProcess) -> Result<Output, Error> {
     })
 }
 
-/// Run a **state-aware lifecycle** request (as a JSON string) and return the
+/// Run a lifecycle request (as a JSON string) and return the
 /// response-envelope JSON string.
 ///
 /// Handles the envelope phases — `provision`, `start`, `stop`, `deprovision` —
 /// and a dry run of any phase. A non-dry-run `exec` produces no envelope, so it
 /// is rejected here; run it through an exec entry point instead:
-/// [`exec_attached`] to attach the workload to this process's stdio, or
 /// [`exec_sandbox`] to drive the pipes yourself.
 ///
 /// The request JSON is the same wire format the executor accepts (an object with
@@ -352,7 +359,7 @@ fn wait_with_output(sandbox: MxcProcess) -> Result<Output, Error> {
 /// is done, and is ignored for production backends.
 /// It is an API parameter rather than a field in the request JSON so that a
 /// config cannot grant itself experimental access.
-pub fn run_state_aware_json(
+pub fn run_lifecycle_json(
     request_json: &str,
     dry_run: bool,
     experimental: bool,
@@ -360,19 +367,19 @@ pub fn run_state_aware_json(
     mxc_engine::run_state_aware_json(request_json, dry_run, experimental)
 }
 
-/// Run the `exec` phase of a state-aware request (as a JSON string) as a **live
+/// Run the `exec` phase of a lifecycle request (as a JSON string) as a **live
 /// streaming** process, returning a [`MxcProcess`] handle for output streaming,
 /// waiting, and termination — exactly like [`v1::spawn`]. Backends
 /// that expose process input also make [`MxcProcess::take_stdin`] available.
 ///
-/// The request JSON must be an `exec`-phase state-aware request (with a
+/// The request JSON must be an `exec`-phase lifecycle request (with a
 /// `sandboxId` identifying a started sandbox). No pty is allocated.
 ///
 /// IsolationSession and WSLC serve this with the crate's corresponding
 /// `isolation_session` or `wslc` feature. WSLC returns separate stdout/stderr
 /// pipes but no stdin. Windows MxcProcess cannot hand back pipes and refuses.
 /// `experimental` opts in to experimental backends, as for
-/// [`run_state_aware_json`].
+/// [`run_lifecycle_json`].
 ///
 /// [`MxcProcess::kill`] reaches only the foreground process here; a descendant the
 /// workload backgrounded is reclaimed when the sandbox is stopped and
@@ -398,7 +405,7 @@ pub fn spawn_in_container_with_pty_json(
         .and_then(v1::MxcPtyProcess::new)
 }
 
-/// Run the `exec` phase of a state-aware request **attached to this process's
+/// Run the `exec` phase of a lifecycle request **attached to this process's
 /// stdio**, blocking until the sandboxed process exits.
 ///
 /// The backend relays the workload's output onto this process's stdout and
@@ -414,14 +421,18 @@ pub fn spawn_in_container_with_pty_json(
 /// distinct [`WaitOutcome::TimedOut`] result.
 ///
 /// `experimental` opts in to the experimental backends, as for
-/// [`run_state_aware_json`].
-pub fn exec_attached(request_json: &str, experimental: bool) -> Result<WaitOutcome, Error> {
+/// [`run_lifecycle_json`].
+#[expect(
+    dead_code,
+    reason = "Attached exec is reserved but not exposed by the SDK yet"
+)]
+fn exec_attached(request_json: &str, experimental: bool) -> Result<WaitOutcome, Error> {
     exec_attached_json(request_json, experimental)
 }
 
 /// Run a raw exact-JSON state-aware exec request attached to this process's
 /// stdio.
-pub fn exec_attached_json(request_json: &str, experimental: bool) -> Result<WaitOutcome, Error> {
+fn exec_attached_json(request_json: &str, experimental: bool) -> Result<WaitOutcome, Error> {
     use wxc_common::state_aware_backend::ExecOutcome;
     mxc_engine::exec_state_aware_attached(request_json, experimental).map(|outcome| match outcome {
         ExecOutcome::Exited(code) => WaitOutcome::Exited(code),

@@ -44,13 +44,13 @@
 import { test } from 'node:test';
 
 import type {
-  ContainerBackendConfig as V1ContainerBackendConfig,
+  Containment as V1Containment,
   ContainerId as V1ContainerId,
   ContainerRequest,
-  Output,
+  ExecutionOutput,
 } from '../../src/v1.js';
 import type {
-  ContainerBackendConfig as InternalContainerBackendConfig,
+  Containment as InternalContainment,
 } from '../../src/types.js';
 import type {
   ContainerId as InternalContainerId,
@@ -132,7 +132,7 @@ import type {
 // --- enum / union conformance ---------------------------------------------
 
 type _V1BackendConfigExport = AssertTrue<
-  Equivalent<V1ContainerBackendConfig, InternalContainerBackendConfig>
+  Equivalent<V1Containment, InternalContainment>
 >;
 type _V1IdExport = AssertTrue<
   Equivalent<
@@ -147,9 +147,9 @@ type _ContainerRequestNetwork = AssertTrue<
   Assignable<ContainerRequest['network'], DirectionalNetworkConfig | undefined>
 >;
 type _ContainerRequestContainment = AssertTrue<
-  Assignable<ContainerRequest['containment'], V1ContainerBackendConfig | undefined>
+  Assignable<ContainerRequest['containment'], V1Containment | undefined>
 >;
-type _OutputExitCode = AssertTrue<Assignable<Output['exitCode'], number>>;
+type _ExecutionOutputExitCode = AssertTrue<Assignable<ExecutionOutput['exitCode'], number>>;
 
 // Clipboard policy must be value-for-value identical to the wire enum.
 type _Clipboard = AssertTrue<Equivalent<PublicClipboardPolicy, WireClipboardPolicy>>;

@@ -122,7 +122,7 @@ Check(warnings is { Length: 2 }, "warnings array parsed");
 
 // 7. Round-trip a state-aware network policy: exercises the non-null section
 //    converter on the state-aware directional model.
-var stateNetwork = MxcJson.Deserialize<StateAwareNetworkPolicy>(
+var stateNetwork = MxcJson.Deserialize<LifecycleNetworkPolicy>(
     """{"egress":{"default":"allow"},"ingress":{"default":"deny"}}""");
 Check(stateNetwork?.Egress?.Default == NetworkAction.Allow, "state-aware network parsed");
 JsonNode? stateNode = MxcJson.SerializeToNode(stateNetwork!, MxcJson.Options);
@@ -135,11 +135,11 @@ Check(stateNode?["egress"]?["default"]?.GetValue<string>() == "allow", "state-aw
 //    runtime config - under reflection-disabled execution, which the
 //    run-to-completion path above does not cover.
 var provisionEnvelope = MxcLifecycle.BuildProvisionEnvelope(
-    StateAwareContainment.Wslc,
+    LifecycleBackend.Wslc,
     new WslcProvisionOptions
     {
-        Filesystem = new StateAwareFilesystemPolicy { ReadwritePaths = { "C:\\work" } },
-        Network = new StateAwareNetworkPolicy
+        Filesystem = new LifecycleFilesystemPolicy { ReadwritePaths = { "C:\\work" } },
+        Network = new LifecycleNetworkPolicy
         {
             Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
             Ingress = new NetworkIngressPolicy
@@ -176,7 +176,7 @@ Check(execEnvelope["runtimeConfig"]?["networkProxy"]?.GetValue<string>() == "htt
 // An id-only phase (start/stop/deprovision share this envelope shape).
 var startEnvelope = MxcLifecycle.BuildStartEnvelope(
     new ContainerId("iso:smoke-test"),
-    new StateAwarePhaseOptions { Telemetry = new TelemetrySettings { Enabled = true } });
+    new LifecycleOptions { Telemetry = new TelemetrySettings { Enabled = true } });
 Check(startEnvelope["phase"]?.GetValue<string>() == "start", "start phase");
 Check(startEnvelope["sandboxId"]?.GetValue<string>() == "iso:smoke-test", "start sandbox id");
 Check(startEnvelope["telemetry"]?["enabled"]?.GetValue<bool>() == true, "start telemetry serialized");

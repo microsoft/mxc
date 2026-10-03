@@ -110,7 +110,7 @@ public class MxcLifecycleTests
     public void StopSandbox_MalformedIdWithVersionOverride_ThrowsMalformedId()
     {
         var id = new ContainerId("no-prefix");
-        var options = new StateAwarePhaseOptions { Version = "0.8.0-alpha" };
+        var options = new LifecycleOptions { Version = "0.8.0-alpha" };
 
         var ex = Assert.Throws<MxcException>(
             () => MxcLifecycle.StopSandbox(id, options));
@@ -159,7 +159,7 @@ public class MxcLifecycleTests
         };
         var options = new WslcProvisionOptions
         {
-            Network = new StateAwareNetworkPolicy
+            Network = new LifecycleNetworkPolicy
             {
                 Egress = new NetworkEgressPolicy { Default = NetworkAction.Deny },
                 Ingress = new NetworkIngressPolicy
@@ -173,7 +173,7 @@ public class MxcLifecycleTests
         var json = JsonSerializer.Serialize(options, jsonOptions);
         var roundTripped = JsonSerializer.Deserialize<WslcProvisionOptions>(json, jsonOptions)!;
         var envelope = MxcLifecycle.BuildProvisionEnvelope(
-            StateAwareContainment.Wslc,
+            LifecycleBackend.Wslc,
             roundTripped);
 
         Assert.DoesNotContain("defaultPolicy", json, StringComparison.Ordinal);
@@ -191,14 +191,14 @@ public class MxcLifecycleTests
     [Fact]
     public void BuildProvisionEnvelope_RejectsNetworkResetToNull()
     {
-        var options = new IsolationSessionProvisionOptions(new StateAwareNetworkPolicy())
+        var options = new IsolationSessionProvisionOptions(new LifecycleNetworkPolicy())
         {
             Network = null!,
         };
 
         var error = Assert.Throws<ArgumentNullException>(
             () => MxcLifecycle.BuildProvisionEnvelope(
-                StateAwareContainment.IsolationSession,
+                LifecycleBackend.IsolationSession,
                 options));
         Assert.Equal("network", error.ParamName);
     }
@@ -208,7 +208,7 @@ public class MxcLifecycleTests
     {
         var constructor = Assert.Single(typeof(IsolationSessionProvisionOptions).GetConstructors());
         Assert.Equal(
-            typeof(StateAwareNetworkPolicy),
+            typeof(LifecycleNetworkPolicy),
             Assert.Single(constructor.GetParameters()).ParameterType);
         Assert.NotNull(typeof(IsolationSessionProvisionOptions).GetProperty("Network"));
     }
@@ -230,15 +230,16 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void ExecInSandboxAttached_IsExposedAsATerminalOutcomeOperation()
+    public void ExecInSandboxAttached_RemainsPrivateAndUnused()
     {
-        var method = typeof(MxcLifecycle).GetMethod(nameof(MxcLifecycle.ExecInSandboxAttached));
-
+        var method = typeof(MxcLifecycle).GetMethod(
+            "ExecInSandboxAttached",
+            System.Reflection.BindingFlags.NonPublic
+                | System.Reflection.BindingFlags.Static);
         Assert.NotNull(method);
+        Assert.True(method!.IsPrivate);
         Assert.Equal(typeof(WaitOutcome), method.ReturnType);
-        Assert.Equal(
-            new[] { typeof(ContainerId), typeof(ExecRequest) },
-            method.GetParameters().Select(parameter => parameter.ParameterType).ToArray());
+        Assert.Null(typeof(IContainerLifecycle).GetMethod("ExecInSandboxAttached"));
     }
 
     [Fact]
@@ -268,8 +269,8 @@ public class MxcLifecycleTests
         // specify them. Post-provision backends reject mode fields by presence.
         var json = MxcLifecycle
             .BuildProvisionEnvelope(
-                StateAwareContainment.Wslc,
-                new WslcProvisionOptions { Network = new StateAwareNetworkPolicy() })
+                LifecycleBackend.Wslc,
+                new WslcProvisionOptions { Network = new LifecycleNetworkPolicy() })
             .ToJsonString();
         using var doc = JsonDocument.Parse(json);
 
@@ -284,7 +285,7 @@ public class MxcLifecycleTests
     {
         Assert.Throws<ArgumentException>(
             () => MxcLifecycle.BuildProvisionEnvelope(
-                StateAwareContainment.IsolationSession,
+                LifecycleBackend.IsolationSession,
                 null));
     }
 
@@ -339,9 +340,9 @@ public class MxcLifecycleTests
     [Fact]
     public void StateAwareTypes_KeepNetworkAndAcknowledgmentOutOfLaterPhases()
     {
-        Assert.Null(typeof(StateAwarePhaseOptions).GetProperty("Network"));
-        Assert.Null(typeof(StateAwarePhaseOptions).GetProperty("RuntimeConfig"));
-        Assert.Null(typeof(StateAwarePhaseOptions).GetProperty("AcknowledgeUnrestrictedNetwork"));
+        Assert.Null(typeof(LifecycleOptions).GetProperty("Network"));
+        Assert.Null(typeof(LifecycleOptions).GetProperty("RuntimeConfig"));
+        Assert.Null(typeof(LifecycleOptions).GetProperty("AcknowledgeUnrestrictedNetwork"));
         Assert.NotNull(typeof(ExecRequest).GetProperty("RuntimeConfig"));
         Assert.Null(typeof(ExecRequest).GetProperty("Network"));
     }
@@ -389,7 +390,7 @@ public class MxcLifecycleTests
     public void WslcBuildSwitch_MatchesNativeAvailabilityAndStagesRuntimeUnit()
     {
         Action dryRun = () => MxcLifecycle.DryRunProvisionSandbox(
-            StateAwareContainment.Wslc,
+            LifecycleBackend.Wslc,
             new WslcProvisionOptions { Image = "alpine:latest" });
 
 #if MXC_WITH_WSLC
@@ -408,7 +409,7 @@ public class MxcLifecycleTests
     {
         IsolationSessionProvisionOptions[] forms =
         [
-            new IsolationSessionProvisionOptions(new StateAwareNetworkPolicy
+            new IsolationSessionProvisionOptions(new LifecycleNetworkPolicy
             {
                 Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
                 Ingress = new NetworkIngressPolicy
@@ -421,7 +422,7 @@ public class MxcLifecycleTests
         foreach (var options in forms)
         {
             Action dryRun = () => MxcLifecycle.DryRunProvisionSandbox(
-                StateAwareContainment.IsolationSession,
+                LifecycleBackend.IsolationSession,
                 options);
 
 #if MXC_WITH_ISOLATION_SESSION
@@ -437,7 +438,7 @@ public class MxcLifecycleTests
     [Fact]
     public void BuildStartEnvelope_RelaysStableTelemetryWithoutCorrelationVector()
     {
-        var options = new StateAwarePhaseOptions
+        var options = new LifecycleOptions
         {
             Telemetry = new TelemetrySettings { Enabled = true },
         };
@@ -471,7 +472,7 @@ public class MxcLifecycleTests
     public void ExecRequest_IsRejectedByNonExecPhases()
     {
         Assert.True(
-            typeof(StateAwarePhaseOptions).IsAssignableFrom(
+            typeof(LifecycleOptions).IsAssignableFrom(
                 typeof(ExecRequest)));
 
         var id = new ContainerId("iso:abc");
@@ -485,17 +486,17 @@ public class MxcLifecycleTests
                  })
         {
             var ex = Assert.Throws<ArgumentException>(build);
-            Assert.Contains(nameof(StateAwarePhaseOptions), ex.Message, StringComparison.Ordinal);
+            Assert.Contains(nameof(LifecycleOptions), ex.Message, StringComparison.Ordinal);
         }
     }
 
     [Fact]
     public void RunInContainerAsync_PreservesCancellationTokenAsThirdParameter()
     {
-        static Task<Output> InvokeWithDefaultLiteral(ContainerId id, string command) =>
+        static Task<ExecutionOutput> InvokeWithDefaultLiteral(ContainerId id, string command) =>
             MxcLifecycle.RunInContainerAsync(id, new ExecRequest(command), default);
 
-        Assert.NotNull((Func<ContainerId, string, Task<Output>>)InvokeWithDefaultLiteral);
+        Assert.NotNull((Func<ContainerId, string, Task<ExecutionOutput>>)InvokeWithDefaultLiteral);
     }
 
     [Fact]

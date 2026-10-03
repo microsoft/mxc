@@ -18,7 +18,7 @@ public class MxcLifecycleContractTests
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
     };
 
-    private static StateAwareNetworkPolicy IsolationNetwork() => new()
+    private static LifecycleNetworkPolicy IsolationNetwork() => new()
     {
         Egress = new NetworkEgressPolicy { Default = NetworkAction.Allow },
         Ingress = new NetworkIngressPolicy
@@ -46,7 +46,7 @@ public class MxcLifecycleContractTests
     public void StateAwareOptions_RejectExplicitNullNetworkSections(string field)
     {
         var error = Assert.Throws<JsonException>(() =>
-            JsonSerializer.Deserialize<StateAwareNetworkPolicy>(
+            JsonSerializer.Deserialize<LifecycleNetworkPolicy>(
                 $$$"""{"{{{field}}}":null}""",
                 MxcJson.Options));
         Assert.Contains("cannot be null", error.Message);
@@ -62,7 +62,7 @@ public class MxcLifecycleContractTests
         Assert.Null(options.Network?.Egress);
         Assert.Null(options.Network?.Ingress);
 
-        var envelope = MxcLifecycle.BuildProvisionEnvelope(StateAwareContainment.Wslc, options);
+        var envelope = MxcLifecycle.BuildProvisionEnvelope(LifecycleBackend.Wslc, options);
         Assert.Equal(options.Network is not null, envelope.ContainsKey("network"));
         if (envelope.TryGetPropertyValue("network", out var network))
         {
@@ -74,7 +74,7 @@ public class MxcLifecycleContractTests
     [Fact]
     public void StateAwareOptions_ProgrammaticNullNetworkSectionsAreOmitted()
     {
-        var network = new StateAwareNetworkPolicy
+        var network = new LifecycleNetworkPolicy
         {
             Egress = new NetworkEgressPolicy(),
             Ingress = new NetworkIngressPolicy(),
@@ -83,7 +83,7 @@ public class MxcLifecycleContractTests
         network.Ingress = null;
 
         var envelope = MxcLifecycle.BuildProvisionEnvelope(
-            StateAwareContainment.Wslc,
+            LifecycleBackend.Wslc,
             new WslcProvisionOptions { Network = network });
         Assert.Empty(envelope["network"]!.AsObject());
     }
@@ -101,7 +101,7 @@ public class MxcLifecycleContractTests
         Assert.Equal(NetworkAction.Deny, options.Network?.Ingress?.Default);
         Assert.Equal(NetworkAction.Deny, options.Network?.Ingress?.HostLoopback);
 
-        var envelope = MxcLifecycle.BuildProvisionEnvelope(StateAwareContainment.Wslc, options);
+        var envelope = MxcLifecycle.BuildProvisionEnvelope(LifecycleBackend.Wslc, options);
         Assert.Equal("deny", envelope["network"]?["egress"]?["default"]?.GetValue<string>());
         Assert.Equal("deny", envelope["network"]?["ingress"]?["default"]?.GetValue<string>());
         Assert.Equal("deny", envelope["network"]?["ingress"]?["hostLoopback"]?.GetValue<string>());
@@ -111,7 +111,7 @@ public class MxcLifecycleContractTests
     public void ProvisionEnvelopeTargetsSdkOwnedV1Contract()
     {
         var envelope = MxcLifecycle.BuildProvisionEnvelope(
-            StateAwareContainment.IsolationSession,
+            LifecycleBackend.IsolationSession,
             new IsolationSessionProvisionOptions(IsolationNetwork()));
 
         Assert.Equal("1.0.0", envelope["version"]?.GetValue<string>());
@@ -123,10 +123,10 @@ public class MxcLifecycleContractTests
     public void WslcProvisionPreservesDirectionalPolicy()
     {
         var envelope = MxcLifecycle.BuildProvisionEnvelope(
-            StateAwareContainment.Wslc,
+            LifecycleBackend.Wslc,
             new WslcProvisionOptions
             {
-                Network = new StateAwareNetworkPolicy
+                Network = new LifecycleNetworkPolicy
                 {
                     Egress = new NetworkEgressPolicy { Default = NetworkAction.Deny },
                     Ingress = new NetworkIngressPolicy
@@ -188,7 +188,7 @@ public class MxcLifecycleContractTests
 
         Assert.Throws<ArgumentException>(() =>
             MxcLifecycle.BuildProvisionEnvelope(
-                StateAwareContainment.IsolationSession,
+                LifecycleBackend.IsolationSession,
                 new IsolationSessionProvisionOptions(invalid)));
     }
 
@@ -212,7 +212,7 @@ public class MxcLifecycleContractTests
     {
         Assert.DoesNotContain(
             "WindowsSandbox",
-            Enum.GetNames<StateAwareContainment>());
+            Enum.GetNames<LifecycleBackend>());
         Assert.Null(
             typeof(MxcLifecycle).Assembly.GetType(
                 "Microsoft.Mxc.Sdk.WindowsSandboxProvisionOptions"));

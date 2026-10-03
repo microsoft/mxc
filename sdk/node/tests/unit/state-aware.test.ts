@@ -6,7 +6,6 @@ import assert from 'node:assert';
 import { PassThrough } from 'node:stream';
 import {
   deprovisionSandbox,
-  execInSandboxAttached,
   execInSandbox,
   execInSandboxAsync,
   spawnInContainerWithPty,
@@ -20,7 +19,6 @@ import {
 } from '../../src/state-aware-helper.js';
 import {
   _setBindingStateAwareAsyncImplementation,
-  _setBindingStateAwareAttachedImplementation,
   type BindingStateAwareRequest,
 } from '../../src/bindings/state-aware.js';
 import { _setStateAwareBindingSandboxProcessFactory } from '../../src/bindings/streaming.js';
@@ -173,7 +171,6 @@ function readStreamText(stream: NodeJS.ReadableStream | null): Promise<string> {
 }
 
 afterEach(() => _setBindingStateAwareAsyncImplementation());
-afterEach(() => _setBindingStateAwareAttachedImplementation());
 afterEach(() => _setStateAwareBindingSandboxProcessFactory());
 
 describe('buildStateAwareEnvelope', () => {
@@ -863,47 +860,6 @@ describe('execInSandbox', () => {
       (err: unknown) => err instanceof MxcError
         && err.code === 'malformed_request'
         && /does not support option 'signal'/.test(err.message),
-    );
-  });
-});
-
-describe('execInSandboxAttached', () => {
-  it('sends a typed exec envelope and returns the attached outcome', () => {
-    let actualRequest = '';
-    let actualExperimental = false;
-    _setBindingStateAwareAttachedImplementation((requestJson, experimental) => {
-      actualRequest = requestJson;
-      actualExperimental = experimental;
-      return { exitCode: 42, timedOut: false };
-    });
-
-    const outcome = execInSandboxAttached(
-      'iso:abc' as SandboxId<'isolation_session'>,
-      { process: { commandLine: 'cmd.exe /c exit 42' } },
-      { experimental: true },
-    );
-
-    assert.deepStrictEqual(outcome, { exitCode: 42, timedOut: false });
-    assert.strictEqual(actualExperimental, true);
-    assert.deepStrictEqual(JSON.parse(actualRequest), {
-      version: '1.0.0',
-      phase: 'exec',
-      sandboxId: 'iso:abc',
-      process: { commandLine: 'cmd.exe /c exit 42' },
-    });
-  });
-
-  it('rejects dryRun before dispatching an attached workload', () => {
-    assert.throws(
-      () => execInSandboxAttached(
-        'iso:abc' as SandboxId<'isolation_session'>,
-        { process: { commandLine: 'echo never runs' } },
-        { dryRun: true },
-      ),
-      (error: unknown) =>
-        error instanceof MxcError &&
-        error.code === 'malformed_request' &&
-        error.message.includes('does not support dryRun'),
     );
   });
 });
