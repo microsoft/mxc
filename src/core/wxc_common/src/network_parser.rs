@@ -6,30 +6,13 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use crate::error::WxcError;
 use crate::models::{
     unbracket_host, ContainerPolicy, ContainmentBackend, NetworkAction, NetworkCidr,
-    NetworkEgressPolicy, NetworkEnforcementCompatibility, NetworkIngressPolicy, NetworkPeer,
-    NetworkPort, NetworkProtocol, NetworkRule, ProxyAddress, ProxyConfig,
+    NetworkEgressPolicy, NetworkIngressPolicy, NetworkPeer, NetworkPort, NetworkProtocol,
+    NetworkRule, ProxyAddress, ProxyConfig,
 };
 use crate::wire;
 
-fn has_legacy_fields(network: &wire::Network) -> bool {
-    network.default_policy.is_some()
-        || network.enforcement_mode.is_some()
-        || network.allow_local_network.is_some()
-        || network.allowed_hosts.is_some()
-        || network.blocked_hosts.is_some()
-        || network.proxy.is_some()
-}
-
 fn has_directional_policy_fields(network: &wire::Network) -> bool {
     network.egress.is_some() || network.ingress.is_some()
-}
-
-fn has_runtime_fields(runtime: &wire::RuntimeConfig) -> bool {
-    runtime.network_proxy.is_some()
-}
-
-fn has_process_container_network_fields(network: &wire::ProcessContainerNetwork) -> bool {
-    network.allowed_proxy_peer.is_some()
 }
 
 #[derive(Debug)]
@@ -37,32 +20,6 @@ pub(crate) struct NetworkSections {
     pub network: Option<wire::Network>,
     pub runtime: Option<wire::RuntimeConfig>,
     pub process_container: Option<wire::ProcessContainerNetwork>,
-}
-
-#[derive(Debug)]
-pub(crate) struct NetworkMetadata {
-    /// Whether the proxy used the host-loopback shorthand.
-    pub proxy_used_localhost: bool,
-}
-
-enum NetworkFormat {
-    Legacy,
-    Directional,
-}
-
-/// Any address in `127.0.0.0/8`, plus `::1` and `localhost`.
-///
-/// Use this to *reject* a host (LXC treats all of `127/8` as the container's
-/// own namespace loopback). Breadth is fail-safe here: a wider match rejects
-/// more. To *admit* a host, use [`host_is_canonical_loopback`].
-pub(crate) fn host_is_any_loopback(host: &str) -> bool {
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-    unbracket_host(host)
-        .parse::<IpAddr>()
-        .map(|ip| ip.is_loopback())
-        .unwrap_or(false)
 }
 
 /// Only `127.0.0.1` and `::1`, plus `localhost`; bracketed or not, any case.
@@ -153,105 +110,6 @@ fn convert_wire_proxy_at(proxy: wire::Proxy, path: &str) -> Result<ProxyConfig, 
     )))
 }
 
-pub(crate) fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
-    convert_wire_proxy_at(proxy, "network.proxy")
-}
-
-fn select_network_format(
-    compatibility: NetworkEnforcementCompatibility,
-    sections: &NetworkSections,
-) -> Result<NetworkFormat, WxcError> {
-    let has_legacy = sections.network.as_ref().is_some_and(has_legacy_fields);
-    let has_directional_policy = sections
-        .network
-        .as_ref()
-        .is_some_and(has_directional_policy_fields);
-    let has_runtime_config = sections.runtime.as_ref().is_some_and(has_runtime_fields);
-    let has_process_container_network = sections
-        .process_container
-        .as_ref()
-        .is_some_and(has_process_container_network_fields);
-    let has_directional =
-        has_directional_policy || has_runtime_config || has_process_container_network;
-    let _compatibility = compatibility;
-
-    if has_legacy && has_directional {
-        return Err(WxcError::ConfigParse(
-            "network configuration cannot mix defaultPolicy, enforcementMode, \
-             allowLocalNetwork, allowedHosts, blockedHosts, or proxy with egress, ingress, \
-             runtimeConfig, or processContainer.network"
-                .to_string(),
-        ));
-    }
-
-    if has_legacy {
-        Ok(NetworkFormat::Legacy)
-    } else {
-        Ok(NetworkFormat::Directional)
-    }
-}
-
-/// Parses the selected network format into the shared backend-facing policy.
-///
-/// Returns metadata when backend-specific validation is still required.
-pub(crate) fn parse_network_policy(
-    policy: &mut ContainerPolicy,
-    compatibility: NetworkEnforcementCompatibility,
-    sections: NetworkSections,
-    containment: &ContainmentBackend,
-) -> Result<Option<NetworkMetadata>, WxcError> {
-    match select_network_format(compatibility, &sections)? {
-        NetworkFormat::Legacy => apply_legacy_network(policy, sections.network),
-        NetworkFormat::Directional => {
-            apply_directional_network(policy, sections, containment)?;
-            Ok(None)
-        }
-    }
-}
-
-fn apply_legacy_network(
-    policy: &mut ContainerPolicy,
-    network: Option<wire::Network>,
-) -> Result<Option<NetworkMetadata>, WxcError> {
-    policy.network_specified = network.is_some();
-    let Some(network) = network else {
-        return Ok(None);
-    };
-
-    policy.network_mode_specified = network.default_policy.is_some()
-        || network.enforcement_mode.is_some()
-        || network.allow_local_network.is_some()
-        || network.allowed_hosts.is_some()
-        || network.blocked_hosts.is_some();
-
-    let proxy_used_localhost = network
-        .proxy
-        .as_ref()
-        .is_some_and(|proxy| proxy.localhost.is_some());
-    if let Some(proxy) = network.proxy {
-        policy.network_proxy = convert_wire_proxy(proxy)?;
-    }
-    if let Some(default) = network.default_policy {
-        policy.default_network_policy = default.into();
-    }
-    if let Some(mode) = network.enforcement_mode {
-        policy.network_enforcement_mode = mode.into();
-    }
-    if let Some(allow) = network.allow_local_network {
-        policy.allow_local_network = allow;
-    }
-    if let Some(hosts) = network.allowed_hosts {
-        policy.allowed_hosts = hosts;
-    }
-    if let Some(hosts) = network.blocked_hosts {
-        policy.blocked_hosts = hosts;
-    }
-
-    Ok(Some(NetworkMetadata {
-        proxy_used_localhost,
-    }))
-}
-
 fn convert_egress(egress: Option<wire::NetworkEgress>) -> Result<NetworkEgressPolicy, WxcError> {
     let egress = egress.unwrap_or(wire::NetworkEgress {
         default: None,
@@ -284,7 +142,8 @@ fn convert_ingress(ingress: Option<wire::NetworkIngress>) -> NetworkIngressPolic
     }
 }
 
-fn apply_directional_network(
+/// Parses directional network input into the shared backend-facing policy.
+pub(crate) fn parse_network_policy(
     policy: &mut ContainerPolicy,
     sections: NetworkSections,
     containment: &ContainmentBackend,
@@ -632,7 +491,6 @@ mod proxy_policy_tests {
         let mut policy = ContainerPolicy::default();
         parse_network_policy(
             &mut policy,
-            NetworkEnforcementCompatibility::Strict,
             directional_sections("http://proxy.example:8080"),
             &ContainmentBackend::Wslc,
         )
@@ -653,7 +511,6 @@ mod proxy_policy_tests {
         let mut policy = ContainerPolicy::default();
         let error = parse_network_policy(
             &mut policy,
-            NetworkEnforcementCompatibility::Strict,
             directional_sections("http://proxy.example:8080"),
             &ContainmentBackend::ProcessContainer,
         )
@@ -663,7 +520,6 @@ mod proxy_policy_tests {
         let mut policy = ContainerPolicy::default();
         let error = parse_network_policy(
             &mut policy,
-            NetworkEnforcementCompatibility::Strict,
             directional_sections("http://127.0.0.1:8080"),
             &ContainmentBackend::ProcessContainer,
         )
@@ -692,10 +548,6 @@ mod proxy_policy_tests {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "network_parser_loopback_spec_tests.rs"]
-mod loopback_spec_tests;
 
 #[cfg(test)]
 #[path = "network_parser_ingress_default_tests.rs"]
