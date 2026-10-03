@@ -3,7 +3,7 @@
   "containerId": "CLI-LXC-NetworkRestricted",
   "containment": "lxc",
   "process": {
-    "commandLine": "wget -qO- https://api.github.com/zen || echo 'Network blocked as expected'"
+    "commandLine": "sh -c \"nc -z -w 5 140.82.114.6 443 && echo 'Allowed destination reachable' || { echo 'Allowed destination unreachable'; exit 1; }\""
   },
   "lifecycle": {
     "destroyOnExit": true
@@ -19,9 +19,10 @@
         {
           "to": [
             {
-              "cidr": "api.github.com"
+              "cidr": "140.82.114.6/32"
             }
-          ]
+          ],
+          "ports": [{ "protocol": "tcp", "port": 443 }]
         }
       ]
     }

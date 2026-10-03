@@ -3,7 +3,8 @@
 #
 # Proves roadmap item 19 / AB#62830559 accepts boundary-valid CIDR
 # destinations while using the default-block firewall path. The boundary values
-# pinned here are IPv4/IPv6 /0, IPv4 /32, IPv6 /128 and non-zero host-bit CIDRs.
+# pinned here are IPv4/IPv6 /0, network-aligned /20 and /32 prefixes,
+# and single-address IPv4 /32 and IPv6 /128 prefixes.
 #
 # This fixture asserts boundary prefixes are accepted and programmed, not
 # effective reachability; the GA egress test covers deny precedence.
@@ -36,9 +37,9 @@ CONFIG="$REPO_DIR/tests/configs/lxc_network_cidr_boundary.json"
 EXPECTED_ALLOWED_HOSTS=(
     "0.0.0.0/0"
     "::/0"
-    "140.82.112.5/20"
+    "140.82.112.0/20"
     "140.82.112.5/32"
-    "2606:50c0:8000::153/32"
+    "2606:50c0::/32"
 )
 EXPECTED_BLOCKED_HOSTS=(
     "198.51.100.42/32"
@@ -91,7 +92,19 @@ assert_firewall_chain_cleaned_up() {
 }
 
 load_config_hosts() {
-    python3 -c 'import json, sys; e=json.load(open(sys.argv[1]))["network"]["egress"]; assert e["default"] == "deny"; [print(label + "\t" + dest["cidr"]) for label in ("allow", "deny") for rule in e[label] for dest in rule["to"]]' "$CONFIG"
+    python3 - "$CONFIG" <<'PY'
+import ipaddress
+import json
+import sys
+
+egress = json.load(open(sys.argv[1]))["network"]["egress"]
+assert egress["default"] == "deny"
+for label in ("allow", "deny"):
+    for rule in egress[label]:
+        for dest in rule["to"]:
+            ipaddress.ip_network(dest["cidr"], strict=True)
+            print(label + "\t" + dest["cidr"])
+PY
 }
 
 contains_host() {
@@ -106,7 +119,7 @@ contains_host() {
     return 1
 }
 
-CONFIG_HOST_TEXT="$(load_config_hosts)" || fail "could not read the directional rules."
+CONFIG_HOST_TEXT="$(load_config_hosts)" || fail "directional rules contain an invalid or non-network-aligned CIDR."
 mapfile -t CONFIG_HOST_LINES <<<"$CONFIG_HOST_TEXT"
 CONFIG_ALLOWED_HOSTS=()
 CONFIG_BLOCKED_HOSTS=()
@@ -173,9 +186,9 @@ done
 # logging is unchanged.
 assert_programmed_rule iptables "0.0.0.0/0" ACCEPT
 assert_programmed_rule ip6tables "::/0" ACCEPT
-assert_programmed_rule iptables "140.82.112.5/20" ACCEPT
+assert_programmed_rule iptables "140.82.112.0/20" ACCEPT
 assert_programmed_rule iptables "140.82.112.5/32" ACCEPT
-assert_programmed_rule ip6tables "2606:50c0:8000::153/32" ACCEPT
+assert_programmed_rule ip6tables "2606:50c0::/32" ACCEPT
 assert_programmed_rule iptables "198.51.100.42/32" DROP
 assert_programmed_rule ip6tables "2001:db8::5/128" DROP
 

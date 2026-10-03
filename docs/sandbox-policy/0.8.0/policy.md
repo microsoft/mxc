@@ -1,5 +1,8 @@
 # MXC Sandbox Policy Spec v0.8.0
 
+> Historical design reference: schema 0.8 is retired. Use the
+> [current schema and migration guide](../../schema.md) for supported requests.
+
 ## SandboxPolicy
 
 `SandboxPolicy` is MXC's cross-platform JSON authoring contract. It expresses
@@ -11,7 +14,7 @@ may not yet expose every field. When supported, those APIs produce the
 
 ```json
 {
-  "version": "0.9.0-alpha",
+  "version": "0.8.0-alpha",
   "network": {
     "egress": {
       "default": "deny",

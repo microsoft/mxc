@@ -1536,6 +1536,9 @@ mod tests {
 
     #[test]
     fn legacy_network_fields_are_rejected_by_the_exact_0_9_parser() {
+        use wxc_common::config_parser::ParseError;
+        use wxc_common::error::WxcError;
+
         let mut logger = Logger::new(Mode::Buffer);
         let error = wxc_common::config_parser::load_mxc_request_from_json(
             r#"{
@@ -1547,9 +1550,12 @@ mod tests {
             &mut logger,
         )
         .expect_err("a retired network field cannot be accepted by the exact 0.9 contract");
+        let ParseError::OneShot(WxcError::ConfigParse(message)) = error else {
+            panic!("expected a one-shot config parse rejection, got: {error:?}");
+        };
         assert!(
-            error.to_string().contains("defaultPolicy"),
-            "the error should identify the retired field: {error}"
+            message.contains("defaultPolicy"),
+            "the error should identify the retired field: {message}"
         );
     }
 

@@ -24,11 +24,11 @@ PY
     status=$?
     set -e
     [ "$status" -ne 0 ] || { echo "FAIL: $version was accepted."; exit 1; }
-    if ! grep -Fiq "$version" <<<"$output" || ! grep -Eiq 'version|contract' <<<"$output"; then
-        echo "FAIL: $version failed without identifying the retired contract: $output"
+    if ! grep -Fq "Configuration parse error: Unsupported contract version. Registered versions are:" <<<"$output"; then
+        echo "FAIL: $version did not fail with an unsupported-contract error: $output"
         exit 1
     fi
-    if grep -Eq 'MXC_WORKLOAD_RAN|MXC_NET_(ALLOWED|BLOCKED)|Container created successfully' <<<"$output"; then
+    if grep -Eq 'MXC_WORKLOAD_RAN|MXC_NET_(ALLOWED|BLOCKED)|Creating LXC container|Container created successfully' <<<"$output"; then
         echo "FAIL: $version created or executed a sandbox."
         exit 1
     fi

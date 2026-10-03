@@ -1,7 +1,7 @@
 #!/bin/bash
-# LXC invalid CIDR network filtering test
+# LXC invalid CIDR request-parsing test
 #
-# Invalid CIDRs are rejected during request parsing, before any sandbox is created.
+# Invalid CIDRs are rejected during request parsing without installing a chain.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,11 +24,17 @@ skip() {
 
 CONFIG="$REPO_DIR/tests/configs/lxc_network_invalid_cidr.json"
 command -v python3 >/dev/null 2>&1 || skip "python3 is not installed."
+[ "$(id -u)" -eq 0 ] || skip "requires root to verify no firewall chains were installed."
+command -v iptables >/dev/null 2>&1 || skip "iptables is not installed."
+command -v ip6tables >/dev/null 2>&1 || skip "ip6tables is not installed."
 
 fail() {
     echo "FAIL: $1"
     exit 1
 }
+
+# shellcheck source=lib/chain_name.sh
+. "$SCRIPT_DIR/lib/chain_name.sh"
 
 python3 - "$CONFIG" <<'PY' || fail "invalid CIDR fixtures drifted."
 import json, sys
@@ -49,6 +55,8 @@ data["network"]["egress"]["allow"] = data["network"]["egress"]["allow"][int(sys.
 print(base64.b64encode(json.dumps(data).encode()).decode())
 PY
 )" || fail "could not build invalid CIDR case $index."
+    before_v4="$(mxc_chains iptables)" || fail "could not snapshot IPv4 MXC chains."
+    before_v6="$(mxc_chains ip6tables)" || fail "could not snapshot IPv6 MXC chains."
     set +e
     output="$("$LXC_EXEC" --config-base64 "$encoded" 2>&1)"
     status=$?
@@ -56,8 +64,9 @@ PY
     [ "$status" -ne 0 ] || fail "invalid CIDR case $index was accepted."
     grep -Fq "network.egress.allow[0].to[0].cidr must be a valid network CIDR" <<<"$output" \
         || fail "invalid CIDR case $index failed for the wrong reason: $output"
-    if grep -Fq "Container created successfully" <<<"$output"; then
-        fail "invalid CIDR case $index created a container."
-    fi
+    after_v4="$(mxc_chains iptables)" || fail "could not enumerate IPv4 MXC chains after rejection."
+    after_v6="$(mxc_chains ip6tables)" || fail "could not enumerate IPv6 MXC chains after rejection."
+    [ "$after_v4" = "$before_v4" ] || fail "invalid CIDR case $index left a new IPv4 MXC chain."
+    [ "$after_v6" = "$before_v6" ] || fail "invalid CIDR case $index left a new IPv6 MXC chain."
 done
-echo "PASS: all three invalid CIDRs were rejected before container creation."
+echo "PASS: all three invalid CIDRs were rejected without leaving firewall chains."
