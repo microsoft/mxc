@@ -96,7 +96,8 @@ pub unsafe extern "C" fn mxc_spawn_pty_json(
 /// Resize a PTY-backed sandbox handle.
 ///
 /// # Safety
-/// `handle` must be a live handle returned by [`mxc_spawn_pty_json`].
+/// `handle` must be a live handle returned by [`mxc_spawn_pty_json`] or
+/// [`crate::mxc_state_aware_exec_pty`].
 #[no_mangle]
 pub unsafe extern "C" fn mxc_sandbox_pty_resize(
     handle: *const MxcSandbox,

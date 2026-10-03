@@ -989,6 +989,39 @@ impl StartedProcess {
         let _ = self.process.WaitForExit(TERMINATE_WAIT_MS);
         Ok(())
     }
+
+    /// Force-terminate and confirm within a bounded wait that the process is gone.
+    ///
+    /// Setup-failure paths cannot return a public process handle, so unlike
+    /// [`Self::terminate`] they must not report success merely because the
+    /// terminate request was accepted.
+    fn terminate_and_confirm(&self) -> Result<(), IsolationSessionError> {
+        let termination_error = self.process.Terminate().err();
+        if let Some(error) = &termination_error {
+            self.record_kill_failed(error.code().0);
+        }
+        let waited = self
+            .process
+            .WaitForExit(TERMINATE_WAIT_MS)
+            .map_err(|error| transport_err(op::RUN_PROCESS, "WaitForExit failed", &error))?;
+        let exit_code =
+            if waited == WAIT_FOR_EXIT_TIMEOUT {
+                Some(self.process.ExitCode().map_err(|error| {
+                    transport_err(op::RUN_PROCESS, "get ExitCode failed", &error)
+                })?)
+            } else {
+                None
+            };
+        if termination_is_confirmed(waited, exit_code) {
+            return Ok(());
+        }
+        if let Some(error) = termination_error {
+            return Err(transport_err(op::RUN_PROCESS, "Terminate failed", &error));
+        }
+        Err(lifecycle_err(
+            "the sandboxed process was still running after the bounded terminate wait",
+        ))
+    }
 }
 
 /// Owns the relay threads and the workload for the span of `create_process`.
@@ -1154,6 +1187,10 @@ impl ClosingProcess {
     pub(super) fn terminate_process(&self) -> Result<(), IsolationSessionError> {
         owned_thread::call(&self.impersonation, || self.terminate())
     }
+
+    pub(super) fn terminate_and_confirm_process(&self) -> Result<(), IsolationSessionError> {
+        owned_thread::call(&self.impersonation, || self.terminate_and_confirm())
+    }
 }
 
 impl std::ops::Deref for ClosingProcess {
@@ -1193,6 +1230,10 @@ const WAIT_FOR_EXIT_TIMEOUT: i32 = -1;
 /// reporting success anyway. Bounded so a failed `Terminate` cannot wedge that
 /// call; generous enough that a normal kill is observed synchronously.
 const TERMINATE_WAIT_MS: u32 = 5_000;
+
+fn termination_is_confirmed(waited: i32, exit_code: Option<i32>) -> bool {
+    waited != WAIT_FOR_EXIT_TIMEOUT || exit_code.is_some_and(|code| code != STILL_ACTIVE)
+}
 
 /// What [`StartedProcess::wait`] should do once its wait has returned.
 ///
@@ -1315,6 +1356,19 @@ fn wait_with_graceful_shutdown(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_termination_requires_confirmation_after_a_timeout_sentinel() {
+        assert!(termination_is_confirmed(0, None));
+        assert!(termination_is_confirmed(
+            WAIT_FOR_EXIT_TIMEOUT,
+            Some(WAIT_FOR_EXIT_TIMEOUT)
+        ));
+        assert!(!termination_is_confirmed(
+            WAIT_FOR_EXIT_TIMEOUT,
+            Some(STILL_ACTIVE)
+        ));
+    }
 
     #[test]
     fn teardown_status_distinguishes_failure_success_and_skipped() {

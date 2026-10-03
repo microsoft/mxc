@@ -151,7 +151,12 @@ pub fn spawn_one_shot_pty(
         ));
     }
 
-    let (process, waiter) = match start_pty_process(&session.manager, request, size) {
+    let (process, waiter) = match start_pty_process(
+        &session.manager,
+        request,
+        size,
+        PtySetupFailureCleanup::ReclaimSession,
+    ) {
         Ok(started) => started,
         Err(mut error) => {
             session.reclaim("exec");
@@ -180,7 +185,12 @@ pub(super) fn spawn_existing_session_pty(
     request: &ExecutionRequest,
     size: PtySize,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
-    let (process, waiter) = start_pty_process(&manager, request, size)?;
+    let (process, waiter) = start_pty_process(
+        &manager,
+        request,
+        size,
+        PtySetupFailureCleanup::ConfirmTermination,
+    )?;
     Ok(Box::new(IsolationPtyProcess {
         session: None,
         process,
@@ -195,10 +205,17 @@ pub(super) fn spawn_existing_session_pty(
 type PtyProcessWaiter = JoinHandle<Result<ExecOutcome, MxcError>>;
 type StartedPtyProcess = (Arc<ClosingProcess>, PtyProcessWaiter);
 
+#[derive(Clone, Copy)]
+enum PtySetupFailureCleanup {
+    ReclaimSession,
+    ConfirmTermination,
+}
+
 fn start_pty_process(
     manager: &IsolationSessionManager,
     request: &ExecutionRequest,
     size: PtySize,
+    cleanup: PtySetupFailureCleanup,
 ) -> Result<StartedPtyProcess, MxcError> {
     let options = build_process_options(request, true);
     let timeout_ms = options.timeout_ms;
@@ -207,8 +224,11 @@ fn start_pty_process(
         .pty_process(&options, None)
         .map_err(super::error::map_lifecycle_error)?;
     if let Err(error) = process.resize_console(size.cols, size.rows) {
-        let _ = process.terminate_process();
-        return Err(super::error::map_lifecycle_error(error));
+        return Err(with_pty_setup_cleanup(
+            super::error::map_lifecycle_error(error),
+            &process,
+            cleanup,
+        ));
     }
 
     let waiter_process = Arc::clone(&process);
@@ -220,12 +240,31 @@ fn start_pty_process(
                 .map_err(super::error::map_lifecycle_error)
         })
         .map_err(|error| {
-            let _ = process.terminate_process();
-            MxcError::backend_error(format!(
-                "failed to start the IsolationSession PTY waiter: {error}"
-            ))
+            with_pty_setup_cleanup(
+                MxcError::backend_error(format!(
+                    "failed to start the IsolationSession PTY waiter: {error}"
+                )),
+                &process,
+                cleanup,
+            )
         })?;
     Ok((process, waiter))
+}
+
+fn with_pty_setup_cleanup(
+    mut error: MxcError,
+    process: &ClosingProcess,
+    cleanup: PtySetupFailureCleanup,
+) -> MxcError {
+    if matches!(cleanup, PtySetupFailureCleanup::ConfirmTermination) {
+        if let Err(cleanup_error) = process.terminate_and_confirm_process() {
+            error.message.push_str(&format!(
+                " (cleanup: failed to confirm the started PTY workload stopped: \
+                 {cleanup_error})"
+            ));
+        }
+    }
+    error
 }
 
 fn spawn_piped(
