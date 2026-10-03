@@ -1707,10 +1707,10 @@ mod tests {
         assert_eq!(directional_network_rejection(&request), None);
     }
 
-    /// The gate must not fire on the legacy shape, which has no directional
-    /// sections at all -- that path is what GHCP runs on.
+    /// A programmatic request with no directional sections does not reach
+    /// the directional gate. Exact v0.9 JSON cannot supply these legacy fields.
     #[test]
-    fn a_legacy_request_is_untouched_by_the_directional_gate() {
+    fn a_programmatic_request_without_directional_fields_bypasses_the_directional_gate() {
         let mut request = base_request();
         request.network_enforcement_compatibility = NetworkEnforcementCompatibility::Strict;
         request.policy.default_network_policy = NetworkPolicy::Allow;
@@ -1718,58 +1718,47 @@ mod tests {
         assert_eq!(directional_network_rejection(&request), None);
     }
 
-    /// `ResolvedNetworkMode` is now the only implementation of the namespace
-    /// choice — the parser's re-derived twin is gone — so the mode matrix is
-    /// pinned against explicit expectations rather than against a second copy
-    /// that could drift with it.
+    /// Pin the strict mode resolver's namespace choice against explicit
+    /// expectations. These are programmatic policies, not v0.9 JSON: the
+    /// runner separately rejects combinations it cannot enforce.
     #[test]
-    fn the_resolved_mode_matches_the_namespace_it_claims_across_the_matrix() {
-        for compatibility in [
-            NetworkEnforcementCompatibility::Strict,
-            NetworkEnforcementCompatibility::Strict,
-        ] {
-            let strict = compatibility == NetworkEnforcementCompatibility::Strict;
-            for proxy in [false, true] {
-                for mode in [
-                    NetworkEnforcementMode::Capabilities,
-                    NetworkEnforcementMode::Firewall,
-                    NetworkEnforcementMode::Both,
-                ] {
-                    for policy in [NetworkPolicy::Allow, NetworkPolicy::Block] {
-                        for hosts in [false, true] {
-                            let mut r = base_request();
-                            r.network_enforcement_compatibility = compatibility;
-                            r.policy.network_proxy.builtin_test_server = proxy;
-                            r.policy.network_enforcement_mode = mode.clone();
-                            r.policy.default_network_policy = policy.clone();
-                            r.policy.allowed_hosts = if hosts {
-                                vec!["10.0.0.1".into()]
-                            } else {
-                                vec![]
-                            };
+    fn strict_programmatic_network_modes_use_the_expected_namespace_across_the_matrix() {
+        for proxy in [false, true] {
+            for mode in [
+                NetworkEnforcementMode::Capabilities,
+                NetworkEnforcementMode::Firewall,
+                NetworkEnforcementMode::Both,
+            ] {
+                for policy in [NetworkPolicy::Allow, NetworkPolicy::Block] {
+                    for hosts in [false, true] {
+                        let mut r = base_request();
+                        r.network_enforcement_compatibility =
+                            NetworkEnforcementCompatibility::Strict;
+                        r.policy.network_proxy.builtin_test_server = proxy;
+                        r.policy.network_enforcement_mode = mode.clone();
+                        r.policy.default_network_policy = policy.clone();
+                        r.policy.allowed_hosts = if hosts {
+                            vec!["10.0.0.1".into()]
+                        } else {
+                            vec![]
+                        };
 
-                            // Private namespaces: proxy-only and firewall-
-                            // enforced are both 0.8-only, so either shape is
-                            // private exactly when the schema is strict. Plus
-                            // Isolated, the only pre-0.8 mode that unshares.
-                            let uses_firewall = matches!(
-                                mode,
-                                NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
-                            );
-                            let expected = if proxy || (uses_firewall && hosts) {
-                                strict
-                            } else {
-                                policy == NetworkPolicy::Block && !hosts
-                            };
+                        // A proxy or enforceable firewall rule needs a private
+                        // namespace; ruleless block is isolated without slirp.
+                        let uses_firewall = matches!(
+                            mode,
+                            NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
+                        );
+                        let expected = proxy
+                            || (uses_firewall && hosts)
+                            || (policy == NetworkPolicy::Block && !hosts);
 
-                            let resolved = ResolvedNetworkMode::from_request(&r, proxy);
-                            assert_eq!(
-                                resolved.uses_private_netns(),
-                                expected,
-                                "compatibility={compatibility:?} proxy={proxy} mode={mode:?} \
-                                 policy={policy:?} hosts={hosts}"
-                            );
-                        }
+                        let resolved = ResolvedNetworkMode::from_request(&r, proxy);
+                        assert_eq!(
+                            resolved.uses_private_netns(),
+                            expected,
+                            "proxy={proxy} mode={mode:?} policy={policy:?} hosts={hosts}"
+                        );
                     }
                 }
             }
