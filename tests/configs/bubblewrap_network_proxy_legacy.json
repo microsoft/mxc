@@ -8,7 +8,7 @@
   },
   "network": {
     "egress": {
-      "default": "allow"
+      "default": "deny"
     }
   },
   "runtimeConfig": {

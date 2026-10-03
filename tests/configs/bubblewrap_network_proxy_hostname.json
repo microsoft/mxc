@@ -8,10 +8,10 @@
   },
   "network": {
     "egress": {
-      "default": "allow"
+      "default": "deny"
     }
   },
   "runtimeConfig": {
-    "networkProxy": "http://{{PROXY_HOST}}:{{PROXY_PORT}}"
+    "networkProxy": "http://proxy.example.com:{{PROXY_PORT}}"
   }
 }

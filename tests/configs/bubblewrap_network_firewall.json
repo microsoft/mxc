@@ -4,7 +4,10 @@
   "containerId": "CLI-Bubblewrap-Network-Firewall",
   "containment": "bubblewrap",
   "process": {
-    "commandLine": "bash -c 'set -u; echo SANDBOX_NETNS=$(readlink /proc/self/ns/net); echo LEGACY_FIREWALL_OK'"
+    "commandLine": "bash -c 'set -u; echo SANDBOX_NETNS=$(readlink /proc/self/ns/net); if ! timeout 8 bash -c \"exec 3<>/dev/tcp/9.9.9.9/443\" >/dev/null 2>&1; then echo ALLOWED_DEST_UNREACHABLE; exit 1; fi; echo ALLOWED_DEST_OK; timeout 8 bash -c \"exec 3<>/dev/tcp/1.1.1.1/443\" >/dev/null 2>&1; if [ $? = 0 ]; then echo DENY_OVERRIDDEN_BY_ALLOW; exit 1; fi; echo DENY_WINS_OK; capeff=$(grep \"^CapEff\" /proc/self/status | cut -f2); if [ $((0x$capeff & 0x1000)) -ne 0 ]; then echo CAP_NET_ADMIN_RETAINED; exit 1; fi; echo CAP_NET_ADMIN_DROPPED_OK; if ! command -v iptables >/dev/null 2>&1; then echo NO_IPTABLES_BINARY; exit 1; fi; terr=$(iptables -F MXC_EGRESS 2>&1); trc=$?; if [ \"$trc\" = 0 ]; then echo \"TAMPER_FLUSH_SUCCEEDED: $terr\"; exit 1; fi; echo TAMPER_REFUSED_OK; timeout 8 bash -c \"exec 3<>/dev/tcp/1.1.1.1/443\" >/dev/null 2>&1; if [ $? = 0 ]; then echo TAMPER_DISABLED_EGRESS; exit 1; fi; echo TAMPER_INEFFECTIVE_OK'",
+    "env": [
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    ]
   },
   "network": {
     "egress": {
@@ -13,7 +16,14 @@
         {
           "to": [
             {
-              "cidr": "api.github.com"
+              "cidr": "1.1.1.0/24"
+            }
+          ]
+        },
+        {
+          "to": [
+            {
+              "cidr": "9.9.9.9/32"
             }
           ]
         }
@@ -22,11 +32,15 @@
         {
           "to": [
             {
-              "cidr": "evil.example.com"
+              "cidr": "1.1.1.1/32"
             }
           ]
         }
       ]
+    },
+    "ingress": {
+      "default": "deny",
+      "hostLoopback": "deny"
     }
   }
 }

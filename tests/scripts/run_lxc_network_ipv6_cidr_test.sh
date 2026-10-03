@@ -1,8 +1,8 @@
 #!/bin/bash
 # LXC IPv6 + CIDR network filtering test
 #
-# Exercises tests/configs/lxc_network_ipv6_cidr.json, whose allow/block lists
-# carry IPv4 CIDRs, IPv6 CIDRs, and IPv6 literals. The assertions are on the
+# Exercises tests/configs/lxc_network_ipv6_cidr.json, whose directional rules
+# carry IPv4 and IPv6 CIDRs, including single-address prefixes. Assertions are on
 # firewall setup rather than on whether the container reaches the network:
 # reachability depends on the host's uplink, but rule programming does not.
 #
@@ -32,16 +32,17 @@ skip() {
 command -v iptables >/dev/null 2>&1 || skip "iptables is not installed."
 command -v ip6tables >/dev/null 2>&1 || skip "ip6tables is not installed."
 command -v lxc-create >/dev/null 2>&1 || skip "LXC (lxc-create) is not installed."
+command -v python3 >/dev/null 2>&1 || skip "python3 is not installed."
 [ -f "$LXC_EXEC" ] || skip "lxc-exec binary not built; run build.sh first."
 
 CONFIG="$REPO_DIR/tests/configs/lxc_network_ipv6_cidr.json"
 EXPECTED_HOSTS=(
     "140.82.112.0/20"
     "2606:50c0::/32"
-    "2606:50c0:8000::153"
+    "2606:50c0:8000::153/128"
     "10.0.0.0/8"
     "2001:db8::/32"
-    "fe80::1"
+    "fe80::1/128"
 )
 
 fail() {
@@ -91,26 +92,20 @@ assert_firewall_chain_cleaned_up() {
 }
 
 load_config_hosts() {
-    if command -v python3 >/dev/null 2>&1; then
-        python3 -c 'import json, sys; data=json.load(open(sys.argv[1], encoding="utf-8")); net=data["network"]; print("\n".join(net.get("allowedHosts", []) + net.get("blockedHosts", [])))' "$CONFIG"
-    else
-        awk '
-            /"allowedHosts"[[:space:]]*:/ { in_hosts=1; next }
-            /"blockedHosts"[[:space:]]*:/ { in_hosts=1; next }
-            in_hosts && /]/ { in_hosts=0; next }
-            in_hosts { print }
-        ' "$CONFIG" | sed -n 's/^[[:space:]]*"\([^"]*\)".*/\1/p'
-    fi
+    python3 -c 'import json, sys; e=json.load(open(sys.argv[1]))["network"]["egress"]; assert e["default"] == "deny"; [print(label + "\t" + dest["cidr"]) for label in ("allow", "deny") for rule in e[label] for dest in rule["to"]]' "$CONFIG"
 }
 
-mapfile -t CONFIG_HOSTS < <(load_config_hosts)
+CONFIG_HOST_LINES="$(load_config_hosts)" || fail "could not read the directional rules."
+mapfile -t CONFIG_HOSTS <<<"$CONFIG_HOST_LINES"
 if [ "${#CONFIG_HOSTS[@]}" -ne "${#EXPECTED_HOSTS[@]}" ]; then
     fail "config host count ${#CONFIG_HOSTS[@]} does not match expected count ${#EXPECTED_HOSTS[@]}."
 fi
-for expected in "${EXPECTED_HOSTS[@]}"; do
+for i in "${!EXPECTED_HOSTS[@]}"; do
+    expected="${EXPECTED_HOSTS[$i]}"
+    if [ "$i" -lt 3 ]; then label=allow; else label=deny; fi
     found=0
     for actual in "${CONFIG_HOSTS[@]}"; do
-        if [ "$actual" = "$expected" ]; then
+        if [ "$actual" = "$label"$'\t'"$expected" ]; then
             found=1
             break
         fi
@@ -131,8 +126,7 @@ echo "$OUTPUT"
 
 derive_chain_name "$OUTPUT"
 
-# Every allow/block entry must survive resolution. An unparsed CIDR or IPv6
-# literal is reported here instead of silently dropping a rule.
+# Every directional destination must survive validation and rule programming.
 for host in "${EXPECTED_HOSTS[@]}"; do
     if echo "$OUTPUT" | grep -Fq "Warning: could not resolve host '$host'"; then
         fail "host '$host' was not resolved."
@@ -145,10 +139,10 @@ done
 # deleting destination-rule emission fails this test.
 assert_programmed_rule iptables "140.82.112.0/20" ACCEPT
 assert_programmed_rule ip6tables "2606:50c0::/32" ACCEPT
-assert_programmed_rule ip6tables "2606:50c0:8000::153" ACCEPT
+assert_programmed_rule ip6tables "2606:50c0:8000::153/128" ACCEPT
 assert_programmed_rule iptables "10.0.0.0/8" DROP
 assert_programmed_rule ip6tables "2001:db8::/32" DROP
-assert_programmed_rule ip6tables "fe80::1" DROP
+assert_programmed_rule ip6tables "fe80::1/128" DROP
 
 # A rejected rule aborts setup.
 if echo "$OUTPUT" | grep -qE "^(ip6?tables) .* failed:|Firewall setup failed:"; then
@@ -177,5 +171,5 @@ fi
 
 assert_firewall_chain_cleaned_up
 
-echo "PASS: IPv6 and CIDR entries were resolved and programmed."
+echo "PASS: IPv6 and CIDR entries were validated and programmed."
 echo "LXC IPv6/CIDR network filtering test complete."

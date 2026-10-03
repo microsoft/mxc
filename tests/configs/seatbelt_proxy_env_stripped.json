@@ -15,6 +15,6 @@
     }
   },
   "runtimeConfig": {
-    "networkProxy": "http://127.0.0.1:8080"
+    "networkProxy": "http://127.0.0.1:{{PROXY_PORT}}"
   }
 }

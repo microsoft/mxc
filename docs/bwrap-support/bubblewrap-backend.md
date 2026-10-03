@@ -10,9 +10,9 @@ requiring root privileges or a container runtime.
 > **Exact v0.9:** author `network.egress` / `network.ingress` and, for proxy
 > requests, `runtimeConfig.networkProxy`. Legacy `defaultPolicy`,
 > `enforcementMode`, host lists, `allowLocalNetwork`, and `network.proxy` are
-> no longer accepted in v0.9. The legacy examples and compatibility discussion
-> below apply to their declared older contracts; they do not authorize those
-> fields in v0.9. The existing private-namespace prerequisites and backend
+> no longer accepted in v0.9. The historical compatibility discussion below
+> describes retired contracts; it does not authorize those fields in v0.9.
+> The existing private-namespace prerequisites and backend
 > capability checks still apply. See [schema migration](../schema.md).
 
 ## Prerequisites
@@ -453,21 +453,12 @@ shared host network namespace, where no chain of any kind is installed.
 
 #### Directional policy (`network.egress` / `network.ingress`)
 
-Schema `0.9.0-alpha` adds a directional network shape that replaces the
-`defaultPolicy` / `allowedHosts` / `blockedHosts` triple with an explicit
-`egress` and `ingress` section. The two shapes are **mutually exclusive**: a
-config that mixes legacy and directional fields is a parse error, and one that
-uses directional fields on a pre-0.8 schema is refused at deserialization —
-the declared version selects a closed contract with no directional fields, so
-the error names the unknown field at `network.egress`. Callers that build an
-`ExecutionRequest` programmatically skip the parser and hit the backend's own
-twin of this check, which reports `Bubblewrap: network.egress/network.ingress
-require schema 0.9.0-alpha or later.`
-
-A config carrying *any* legacy field takes the legacy path described above and
-is byte-identical to what it was before directional support existed. This
-matters: the proxy-mode callers on 0.6/0.7 are unaffected by anything in this
-section.
+Schema `0.9.0-alpha` uses an explicit `egress` and `ingress` section instead
+of the retired `defaultPolicy` / `allowedHosts` / `blockedHosts` fields. An
+exact v0.9 config carrying a legacy field fails parsing; a config declaring
+an earlier version is refused as an unsupported contract before its network
+section is read. Programmatic `ExecutionRequest` callers bypass the exact
+parser and still hit the backend's own pre-v0.9 directional-policy guard.
 
 ```json
 {
@@ -550,7 +541,7 @@ and dropped on the floor:
 | `ingress.default: "allow"` | slirp4netns installs no route into the namespace, and the schema carries no port list with which to forward one. Nothing would arrive, so "allow" would be a lie |
 | `ingress.hostLoopback: "allow"` | the inbound half needs the same port forwarding `ingress.default: "allow"` lacks. Granting only the outbound half would honor half a bidirectional field under its full name |
 | directional `egress` rules combined with a proxy | a proxy resolves to the proxy-only posture, whose chain opens the proxy endpoint alone. The rules would be silently discarded, so they are refused instead. This holds for `builtinTestServer` too: its exemption covers legacy host *lists*, which MXC applies itself, and must not extend to directional rules, which nothing applies |
-| any directional section before 0.8 | the parser refuses it first; the backend keeps its own twin of the check for programmatic callers that build an `ExecutionRequest` directly and never pass through the parser |
+| a directional section in a retired contract | the parser rejects the unsupported version first; the backend keeps its own guard for programmatic callers that build an `ExecutionRequest` directly |
 
 **What the deny postures actually do.** `ingress.default` installs the
 `MXC_INGRESS` chain on `INPUT`. `ingress.hostLoopback` is bidirectional per the
@@ -592,14 +583,13 @@ is over-declared and fails there. Reverting the host-loopback drop reproduces
 the original bug as a test failure.
 
 `runtimeProxy` is declared. The parser normalizes
-`runtimeConfig.networkProxy` into the same `policy.network_proxy` the legacy
-`network.proxy` field feeds, pinned to a loopback endpoint and accepted only
-alongside `egress.default: "deny"` with no direct rules. That is exactly the
-proxy-only posture this backend already enforces, so the 0.8 spelling reaches
-the identical enforcement as the 0.7 one rather than a second implementation.
-An end-to-end test runs both spellings against the same workload and compares
-their verdicts to each other, anchored to an expected result so that two
-identically-broken spellings cannot agree their way to a pass.
+`runtimeConfig.networkProxy` into `policy.network_proxy`, pinned to a loopback
+endpoint and accepted only alongside `egress.default: "deny"` with no direct
+rules. That is the proxy-only posture this backend enforces. The end-to-end
+test runs the supported proxy configuration with ingress denial both omitted
+and explicit, checks each against expected proxy-only verdicts, and compares
+the two. A direct-egress probe targets a live listener on a different port
+from the proxy, so an unreachable external host cannot falsely pass the test.
 
 `proxyPeerIdentity` stays undeclared: it is a ProcessContainer concept with no
 Bubblewrap equivalent, so shared validation refuses it here.
@@ -775,42 +765,10 @@ an exit is detected; see [Limitations](#limitations).
 A proxy request is the proxy-only posture, so `egress.default` must be `deny`
 with no `allow` / `deny` rules; the chain opens the proxy endpoint alone.
 
-### Example (legacy, ≤0.8): builtin test proxy with allowlist
-
-```json
-{
-  "version": "0.9.0-alpha",
-  "platform": "linux",
-  "containment": "bubblewrap",
-  "process": {
-    "commandLine": "curl -fsSL https://api.github.com/zen && echo OK"
-  },
-  "network": {
-    "defaultPolicy": "block",
-    "proxy": { "builtinTestServer": true },
-    "allowedHosts": ["api.github.com"]
-  }
-}
-```
-
-### Example (legacy, ≤0.8): external proxy on loopback
-
-```json
-{
-  "version": "0.9.0-alpha",
-  "containment": "bubblewrap",
-  "process": { "commandLine": "curl -fsSL https://example.com" },
-  "network": {
-    "proxy": { "localhost": 8080 }
-  }
-}
-```
-
-> Both legacy examples declare `0.9.0-alpha` deliberately: the
-> private-namespace and egress-enforcement behavior described above is selected
-> by the schema version, so the same config on `0.6`/`0.7` runs the legacy
-> shared-host-network proxy path instead. `network.proxy`, `allowedHosts`, and
-> `blockedHosts` are not accepted on v0.9.
+Exact contracts before v0.9 are retired. Legacy `network.proxy` and host-list
+configurations cannot be expressed by declaring v0.9; use
+`runtimeConfig.networkProxy` with a ruleless, deny-default directional egress
+policy as shown above. The external proxy enforces any host filtering itself.
 
 ### Checking host support before you run
 

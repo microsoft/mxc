@@ -20,7 +20,7 @@
         {
           "to": [
             {
-              "cidr": "allowed.mxc.test"
+              "cidr": "198.51.100.2/32"
             }
           ]
         }

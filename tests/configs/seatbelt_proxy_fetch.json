@@ -7,20 +7,9 @@
     "timeout": 30000
   },
   "network": {
-    "egress": {
-      "default": "deny",
-      "allow": [
-        {
-          "to": [
-            {
-              "cidr": "mxc-test.invalid"
-            }
-          ]
-        }
-      ]
-    }
+    "egress": { "default": "deny" }
   },
   "runtimeConfig": {
-    "networkProxy": "http://127.0.0.1:8080"
+    "networkProxy": "http://127.0.0.1:{{PROXY_PORT}}"
   }
 }

@@ -1,7 +1,7 @@
 {
   "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
   "version": "0.9.0-alpha",
-  "containerId": "CLI-LXC-Network-Dualstack-Hostname",
+  "containerId": "CLI-LXC-Network-Dualstack-CIDR",
   "containment": "lxc",
   "process": {
     "commandLine": "wget -qO- https://dns.google/"
@@ -20,35 +20,35 @@
         {
           "to": [
             {
-              "cidr": "localhost"
+              "cidr": "127.0.0.1/32"
             }
           ]
         },
         {
           "to": [
             {
-              "cidr": "dns.google"
+              "cidr": "1.1.1.1/32"
             }
           ]
         },
         {
           "to": [
             {
-              "cidr": "one.one.one.one"
+              "cidr": "2606:4700:4700::1111/128"
             }
           ]
         },
         {
           "to": [
             {
-              "cidr": "8.8.8.8"
+              "cidr": "8.8.8.8/32"
             }
           ]
         },
         {
           "to": [
             {
-              "cidr": "2001:4860:4860::8888"
+              "cidr": "2001:4860:4860::8888/128"
             }
           ]
         }

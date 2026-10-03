@@ -3,7 +3,7 @@
   "containerId": "CLI-LXC-Network-Test",
   "containment": "lxc",
   "process": {
-    "commandLine": "wget -qO- --timeout=10 http://198.51.100.18:443/"
+    "commandLine": "sh -c \"wget -qO- --timeout=5 http://198.51.100.18:443/ >/dev/null 2>&1 && echo MXC_NET_ALLOWED || echo MXC_NET_ALLOW_FAILED; wget -qO- --timeout=5 http://198.51.100.19:443/ >/dev/null 2>&1 && echo MXC_NET_LEAK || echo MXC_NET_BLOCKED\""
   },
   "lifecycle": {
     "destroyOnExit": true
@@ -19,7 +19,7 @@
         {
           "to": [
             {
-              "cidr": "allowed.nettest.mxc.test"
+              "cidr": "198.51.100.18/32"
             }
           ]
         }
@@ -28,7 +28,7 @@
         {
           "to": [
             {
-              "cidr": "blocked.nettest.mxc.test"
+              "cidr": "198.51.100.19/32"
             }
           ]
         }

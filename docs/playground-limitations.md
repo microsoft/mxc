@@ -154,16 +154,12 @@ to the SDK.
 
 | Policy Version | Schema | Backend | Status |
 |---------------|--------|---------|--------|
-| 0.9.0-alpha | Stable (minimum supported) | ProcessContainer (BaseContainer when the host supports it, else AppContainer) | Production |
-| 0.9.0-alpha | Stable | ProcessContainer (capability-resolved) | Production |
-| 0.9.0-alpha | Stable | ProcessContainer (capability-resolved) | Production |
-| 0.9.0-alpha | Stable | ProcessContainer (capability-resolved), IsolationSession, WSLC | Production |
+| 0.9.0-alpha | Stable (minimum supported) | ProcessContainer (capability-resolved), IsolationSession, WSLC | Production |
 | 1.0.0 | Stable (current) | ProcessContainer (capability-resolved), IsolationSession, WSLC | Production |
 | 1.1.0-alpha | Dev | ProcessContainer and development backends | Development |
 
 The SDK and Rust parser accept only the exact registered versions
-`0.9.0-alpha`, `0.9.0-alpha`, `0.9.0-alpha`, `0.9.0-alpha`, and
-`1.0.0`, and `1.1.0-alpha`; an unregistered spelling such as `0.6.1-alpha` is
-rejected.
+`0.9.0-alpha`, `1.0.0`, and `1.1.0-alpha`; earlier alpha contracts and
+unregistered spellings such as `0.6.1-alpha` are rejected.
 The schema version does not select the Windows ProcessContainer tier —
 BaseContainer versus AppContainer is resolved at runtime by host capability.

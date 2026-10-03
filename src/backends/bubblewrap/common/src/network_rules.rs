@@ -1457,16 +1457,7 @@ mod tests {
         assert_eq!(v6(&plan), egress(&[], "ACCEPT"));
     }
 
-    /// A legacy config keeps the chain it has today, all the way through the
-    /// real parser.
-    ///
-    /// Schema 0.8 accepts either the legacy network shape or the directional
-    /// one, and consumers still on the legacy shape must be unaffected by the
-    /// directional work. This goes through `load_mxc_request_from_json` rather
-    /// than building a policy by hand because the bug it guards is in the
-    /// *parser's* output: the legacy path also sets `network_mode_specified`,
-    /// so a dispatcher keyed on that flag routes legacy configs into the
-    /// directional builder. Only a parser-driven test sees that.
+    /// Check the selected planner path through a real supported config.
     fn plan_for_config(json: &str) -> EgressPlan {
         let mut logger = Logger::new(Mode::Buffer);
         let parsed = wxc_common::config_parser::load_mxc_request_from_json(json, &mut logger)
@@ -1478,47 +1469,55 @@ mod tests {
     }
 
     #[test]
-    fn a_legacy_config_keeps_its_chain_at_schema_0_8() {
+    fn a_directional_allow_config_drops_its_denylist() {
         let plan = plan_for_config(
             r#"{
                 "version": "0.9.0-alpha",
                 "containment": "bubblewrap",
                 "process": {"commandLine": "echo hi"},
                 "network": {
-                    "defaultPolicy": "allow",
-                    "enforcementMode": "firewall",
-                    "blockedHosts": ["192.0.2.0/24"]
+                    "egress": {
+                        "default": "allow",
+                        "deny": [{"to": [{"cidr": "192.0.2.0/24"}]}]
+                    },
+                    "ingress": {"default": "deny", "hostLoopback": "deny"}
                 }
             }"#,
         );
 
-        assert_eq!(v4(&plan), egress(&["-d 192.0.2.0/24 -j DROP"], "ACCEPT"));
+        assert_eq!(
+            v4(&plan),
+            directional_egress(&["-d 192.0.2.0/24 -j DROP"], "ACCEPT")
+        );
         assert_eq!(v6(&plan), egress(&[], "ACCEPT"));
     }
 
     #[test]
-    fn a_legacy_config_keeps_its_chain_at_schema_0_7() {
+    fn a_directional_deny_config_accepts_its_allowlist() {
         let plan = plan_for_config(
             r#"{
                 "version": "0.9.0-alpha",
                 "containment": "bubblewrap",
                 "process": {"commandLine": "echo hi"},
                 "network": {
-                    "defaultPolicy": "block",
-                    "enforcementMode": "firewall",
-                    "allowedHosts": ["10.0.0.0/8"]
+                    "egress": {
+                        "default": "deny",
+                        "allow": [{"to": [{"cidr": "10.0.0.0/8"}]}]
+                    },
+                    "ingress": {"default": "deny", "hostLoopback": "deny"}
                 }
             }"#,
         );
 
-        assert_eq!(v4(&plan), egress(&["-d 10.0.0.0/8 -j ACCEPT"], "DROP"));
+        assert_eq!(
+            v4(&plan),
+            directional_egress(&["-d 10.0.0.0/8 -j ACCEPT"], "DROP")
+        );
         assert_eq!(v6(&plan), egress(&[], "DROP"));
     }
 
-    /// The directional shape reaches the directional builder, again through the
-    /// parser, so the two arms are proven to be selected by real configs.
     #[test]
-    fn a_directional_config_closes_both_families_at_schema_0_8() {
+    fn a_directional_config_closes_both_families_at_schema_0_9() {
         let plan = plan_for_config(
             r#"{
                 "version": "0.9.0-alpha",
@@ -1533,6 +1532,25 @@ mod tests {
 
         assert_eq!(v4(&plan), directional_egress(&[], "DROP"));
         assert_eq!(v6(&plan), egress(&[], "DROP"));
+    }
+
+    #[test]
+    fn legacy_network_fields_are_rejected_by_the_exact_0_9_parser() {
+        let mut logger = Logger::new(Mode::Buffer);
+        let error = wxc_common::config_parser::load_mxc_request_from_json(
+            r#"{
+                "version": "0.9.0-alpha",
+                "containment": "bubblewrap",
+                "process": {"commandLine": "echo SHOULD_NOT_RUN"},
+                "network": {"defaultPolicy": "allow"}
+            }"#,
+            &mut logger,
+        )
+        .expect_err("a retired network field cannot be accepted by the exact 0.9 contract");
+        assert!(
+            error.to_string().contains("defaultPolicy"),
+            "the error should identify the retired field: {error}"
+        );
     }
 
     /// A policy that selected the directional shape, as the parser marks it.

@@ -3,24 +3,13 @@
   "version": "0.9.0-alpha",
   "containment": "seatbelt",
   "process": {
-    "commandLine": "curl -fsS --max-time 20 http://mxc-blocked.invalid/ > /dev/null 2>&1 && echo DENIED_HOST_REACHED || echo DENIED_HOST_BLOCKED",
+    "commandLine": "set -e; curl -fsS --max-time 20 http://mxc-test.invalid/ | grep -q MXC_TEST_ORIGIN_OK; echo PROXY_FETCH_OK; if curl -fsS --max-time 20 http://mxc-blocked.invalid/ > /dev/null 2>&1; then echo DENIED_HOST_REACHED; exit 1; else echo DENIED_HOST_BLOCKED; fi",
     "timeout": 30000
   },
   "network": {
-    "egress": {
-      "default": "deny",
-      "allow": [
-        {
-          "to": [
-            {
-              "cidr": "mxc-test.invalid"
-            }
-          ]
-        }
-      ]
-    }
+    "egress": { "default": "deny" }
   },
   "runtimeConfig": {
-    "networkProxy": "http://127.0.0.1:8080"
+    "networkProxy": "http://127.0.0.1:{{PROXY_PORT}}"
   }
 }

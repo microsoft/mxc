@@ -90,7 +90,6 @@ $AreaScripts = [ordered]@{
     'NetworkHostLoopback'      = 'run_processcontainer_network_loopback_test.ps1'
     'NetworkProxy'             = 'run_processcontainer_network_proxy_test.ps1'
     'NetworkRejections'        = 'run_processcontainer_network_rejections_test.ps1'
-    'NetworkLegacy07'          = 'run_processcontainer_network_legacy07_test.ps1'
     'PathAliasing'             = 'run_processcontainer_path_aliasing_test.ps1'
     'ProcessPlumbing'          = 'run_processcontainer_process_plumbing_test.ps1'
 }
