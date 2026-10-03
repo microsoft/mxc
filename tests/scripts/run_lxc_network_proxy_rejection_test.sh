@@ -10,13 +10,17 @@ LXC_EXEC="$REPO_DIR/src/target/release/lxc-exec"
 command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 is not installed."; exit 77; }
 
 check_proxy() {
-    local config="$1" expected_url="$2" expected_reason="$3" output status
-    python3 - "$config" "$expected_url" <<'PY' || { echo "FAIL: proxy rejection fixture drifted."; exit 1; }
+    local config="$1" expected_url="$2" expected_reason="$3" expected_userinfo="${4:-}" output status
+    python3 - "$config" "$expected_url" "$expected_userinfo" <<'PY' || { echo "FAIL: proxy rejection fixture drifted."; exit 1; }
 import json, sys
 data = json.load(open(sys.argv[1]))
+expected_url = sys.argv[2]
+if sys.argv[3]:
+    assert "://" in expected_url
+    expected_url = expected_url.replace("://", "://" + sys.argv[3] + "@", 1)
 assert data["version"] == "0.9.0-alpha"
 assert data["containment"] == "lxc"
-assert data["runtimeConfig"]["networkProxy"] == sys.argv[2]
+assert data["runtimeConfig"]["networkProxy"] == expected_url
 assert data["network"]["egress"]["default"] == "deny"
 PY
     set +e
@@ -45,4 +49,4 @@ check_proxy "$REPO_DIR/tests/configs/lxc_network_proxy.json" \
 check_proxy "$REPO_DIR/tests/configs/lxc_network_proxy_hostname.json" \
     "http://proxy.mxc.test:3128" "runtimeConfig.networkProxy must use localhost"
 check_proxy "$REPO_DIR/tests/configs/lxc_network_proxy_credentials_rejected.json" \
-    "http://alice:hunter2@127.0.0.1:3128" "runtimeConfig.networkProxy"
+    "http://127.0.0.1:3128" "runtimeConfig.networkProxy" "alice:hunter2"

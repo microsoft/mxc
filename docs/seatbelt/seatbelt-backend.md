@@ -55,10 +55,9 @@ That denies all network access. To open it up, see
 > (`egress` / `ingress` / `runtimeConfig.networkProxy`) throughout. It is the
 > only supported network shape for accepted Seatbelt configs.
 
-Seatbelt's capability limits are the same on 0.9 as on 0.8: in particular,
-`ingress.hostLoopback: "allow"` under `ingress.default: "deny"` is still
-rejected, and an omitted host-loopback field remains deny rather than
-inheriting ingress allow.
+For supported contracts, `ingress.hostLoopback: "allow"` under
+`ingress.default: "deny"` is rejected. An omitted host-loopback field
+remains deny rather than inheriting ingress allow.
 
 ## What Seatbelt can and can't enforce
 
@@ -178,11 +177,11 @@ Seatbelt declares support for
 **not** `EGRESS_RULES` (per-CIDR/port rules) and not `PROXY_PEER_IDENTITY`.
 Anything it hasn't declared is rejected up front.
 
-### Fields (schema 0.8 and later)
+### Fields (supported schema 0.9+)
 
-This is the cross-backend directional shape, introduced in
-[0.8 networking](../sandbox-policy/0.8.0/networking/networking.md) and the only
-network shape `0.9.0-alpha` accepts.
+This is the cross-backend directional shape accepted by the registered exact
+contracts. The original [0.8 networking design](../sandbox-policy/0.8.0/networking/networking.md)
+is historical; schema 0.8 is no longer accepted.
 
 > **Omitting `network` entirely denies all IP networking.** Every field below
 > defaults to `deny`, so a config with no `network` block behaves exactly like
@@ -312,22 +311,21 @@ them doesn't *escape* — it just doesn't get anywhere. macOS has no
 WinHTTP-style per-process OS proxy policy, so MXC can't force the routing the
 way Windows can.
 
-**What the profile does not control is where the proxy then connects.** MXC only
-configures the destination policy of a proxy it launches itself
-(`builtinTestServer`, testing-only, requires `--allow-testing-features`, and the
-only form where `allowedHosts` / `blockedHosts` are enforced). An externally
-supplied proxy is never told about your host lists and applies whatever policy
-it was independently configured with.
+**What the profile does not control is where the proxy then connects.** A
+caller-managed proxy applies its own destination policy; MXC does not supply
+one. Configure hostname allow/block lists on that proxy, not in the sandbox
+request. `egress.allow` / `egress.deny` describe direct traffic and cannot be
+combined with `runtimeConfig.networkProxy`.
 
 > **Caveat:** Seatbelt's `localhost` token means "this machine at any address,"
 > so the reachability rule also covers the host's non-loopback addresses **on
 > that same port number**. It cannot be narrowed — a literal `127.0.0.1` is a
 > profile syntax error.
 
-### Legacy 0.7 network fields
+### Migrating retired 0.7 network fields
 
-Retired with the pre-0.9 contracts. Use the directional shape above for new work. **A config must
-use one shape or the other — mixing them is rejected.**
+Pre-0.9 contracts fail at version dispatch; none of these fields is accepted
+in a supported request. Translate stored policies before declaring v0.9+:
 
 | Legacy (0.7) | Directional equivalent | Notes |
 |---|---|---|
@@ -335,9 +333,8 @@ use one shape or the other — mixing them is rejected.**
 | `defaultPolicy: "allow"` | `egress.default: "allow"` | Identical profile output |
 | `allowLocalNetwork: true` | `ingress.default: "allow"` | Identical profile output |
 | `network.proxy.localhost` / loopback `network.proxy.url` | `runtimeConfig.networkProxy` | |
-| `allowedHosts` | *(no equivalent)* | With `"allow"`: rejected by shared legacy-network validation because an allowlist cannot narrow an allow default. With `"block"`: shared-valid, but Seatbelt rejects it unless `builtinTestServer` supplies the enforcement path |
-| `blockedHosts` | *(no equivalent)* | **Rejected** always |
-| *(no equivalent)* | `ingress.hostLoopback` | New in 0.8 — legacy configs never emit a host-loopback rule |
+| `allowedHosts` / `blockedHosts` | *(no direct equivalent)* | Seatbelt has no per-host filter. Configure hostname restrictions on a caller-managed proxy instead. |
+| *(no equivalent)* | `ingress.hostLoopback` | Legacy configs never expressed host-loopback direction explicitly. |
 
 The last row is the one migration hazard: 0.7 has no `hostLoopback` concept, so
 `defaultPolicy: "allow"` leaves loopback **open**. Translating that to
@@ -619,23 +616,18 @@ inbound grant by peer. See [the trap](#the-hostloopback-trap).
 
 #### Network
 
-Field names below are the directional shape; the legacy 0.7 equivalent is noted
-where the rule applies to both.
+Field names below are the supported directional shape. Retired contracts are
+rejected before Seatbelt validation.
 
 | Config | Why it's rejected | Do this instead |
 |---|---|---|
 | `egress.allow` / `egress.deny` (non-empty) | No CIDR/port/protocol filtering primitive | Use `egress.default` alone |
 | `ingress.hostLoopback: "allow"` + `ingress.default: "deny"` | The inbound half is not expressible, so the promised host-to-container grant could not be made; see [the trap](#the-hostloopback-trap) | Set both to `"allow"` |
-| `runtimeConfig.networkProxy` + `egress.default: "allow"`<br>*(legacy: `network.proxy` + `defaultPolicy: "allow"`)* | Outbound is already open, so the proxy enforces nothing and traffic could silently bypass it | `egress.default: "deny"` + the proxy |
-| `runtimeConfig.networkProxy` with a non-loopback host<br>*(directional only — rejected by the shared parser, whatever `egress.default` says)* | The runtime proxy endpoint must be loopback | Use `localhost`, `127.0.0.1`, or `[::1]` |
-| Remote (non-loopback) `network.proxy` + `defaultPolicy: "block"`<br>*(legacy only — the directional field never gets this far, see the row above)* | Seatbelt can't express reachability to a remote host, so the proxy would be unreachable and *nothing* could connect | Loopback proxy, or `builtinTestServer` |
-| Proxy + `enforcementMode: "firewall"` or `"both"` | macOS has no packet-filter layer to enforce with | Drop `enforcementMode` — profile enforcement is implied |
+| `runtimeConfig.networkProxy` + `egress.default: "allow"` | Outbound is already open, so traffic could bypass the proxy | `egress.default: "deny"` + the proxy |
+| `runtimeConfig.networkProxy` + non-empty direct `egress.allow` / `egress.deny` | Direct rules and proxy-only mode are alternatives | Remove direct rules and enforce destination policy at the proxy |
+| `runtimeConfig.networkProxy` with a non-loopback host | The runtime proxy endpoint must be loopback | Use `localhost`, `127.0.0.1`, or `[::1]` |
 | `processContainer.network.allowedProxyPeer` | Peer identity pinning isn't supported | Remove it |
-| `egress`/`ingress` on schema `< 0.9.0-alpha` | Fields don't exist yet | Set `"version": "0.9.0-alpha"` |
-| Legacy fields on schema `0.9.0-alpha` | The 0.9 contract has no legacy network fields | Use `egress`/`ingress` + `runtimeConfig.networkProxy` |
-| Directional fields **and** legacy fields in one config | Ambiguous | Pick one shape |
-| `blockedHosts` *(legacy only)* | No per-host filtering primitive | `egress.default: "deny"` to deny everything |
-| `allowedHosts` + `defaultPolicy: "block"` *(legacy only)* | Could only degrade to allow-all (the inverse of your request) or deny-all | Loopback proxy under deny, or `builtinTestServer` for tests |
+| `defaultPolicy`, host lists, `network.proxy`, or `enforcementMode` | No supported exact contract defines them | Migrate to directional policy and a caller-managed runtime proxy where needed |
 
 #### Filesystem
 
@@ -654,8 +646,7 @@ deliberate: the alternative is a rule that matches nothing, which for
 |---|---|
 | `guiAccess: true` with `ui.disable: true`, or with no `ui` section | The GUI rules are only emitted when UI is enabled, so the request would otherwise be dropped without a word |
 | `guiAccess: true` with piped stdio (SDK streaming) | GUI mode needs inherited stdio and a real terminal |
-| `launchMethod: "open"` with piped stdio *(0.7/0.8 only)* | Launches Terminal.app; there are no pipes to stream |
-| `launchMethod` on schema `0.9.0-alpha` | The field is not in the 0.9 contract |
+| `launchMethod` in a supported contract | The field is retired and rejected at exact parsing |
 
 ## Limitations
 

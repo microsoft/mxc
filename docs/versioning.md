@@ -226,11 +226,10 @@ configuration JSON.
 
 Runtime behavior is selected from explicit normalized semantics rather than by
 comparing contract-version strings. In particular,
-`NetworkEnforcementCompatibility::LegacyCompatible` preserves the accepted
-v0.6/v0.7 network behavior for both JSON and direct typed SDK inputs, while
-`Strict` applies to v0.8 and later inputs. Direct typed SDK construction clears
-only source-contract attribution; it retains the compatibility selected by the
-exact version adapter.
+`NetworkEnforcementCompatibility::Strict` is the only mode for registered
+exact contracts and direct typed SDK requests. Retired pre-v0.9 contracts
+cannot select legacy enforcement behavior. Direct typed SDK construction
+clears only source-contract attribution; it does not weaken validation.
 
 ### IsolationSession directional networking
 
