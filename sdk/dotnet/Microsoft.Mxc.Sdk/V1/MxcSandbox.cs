@@ -13,7 +13,7 @@ namespace Microsoft.Mxc.Sdk.V1;
 /// <summary>
 /// V1 entry point for running MXC sandboxes from C#. Wraps the native
 /// <c>mxc_ffi</c> library and runs or spawns a complete
-/// <see cref="SandboxRequest"/>.
+/// <see cref="ContainerRequest"/>.
 /// </summary>
 public static class MxcSandbox
 {
@@ -36,7 +36,7 @@ public static class MxcSandbox
     /// <see cref="ISandboxRunner"/>, preserving compatibility for existing
     /// interface implementations.
     /// </remarks>
-    public static ProbeOutput Probe(SandboxRequest? request = null)
+    public static ProbeOutput Probe(ContainerRequest? request = null)
     {
         var requestJson = request is null ? null : SerializeRequest(request);
         if (!RequestProbeInterop.IsSupportedOnCurrentPlatform)
@@ -199,24 +199,8 @@ public static class MxcSandbox
         };
     }
 
-    /// <summary>
-    /// Run <paramref name="command"/> in a sandbox described by
-    /// <paramref name="policy"/>, to completion, capturing its output.
-    /// </summary>
-    /// <param name="policy">What to restrict.</param>
-    /// <param name="command">The command line to run (the <c>process.commandLine</c> equivalent).</param>
-    /// <returns>The captured stdout/stderr and exit outcome.</returns>
-    /// <exception cref="ArgumentNullException">A required argument was null.</exception>
-    /// <exception cref="MxcException">The sandbox could not be built or run.</exception>
-    public static RunResult Run(SandboxPolicy policy, string command)
-    {
-        ArgumentNullException.ThrowIfNull(policy);
-        ArgumentNullException.ThrowIfNull(command);
-        return Run(CreateCompatibilityRequest(policy, command));
-    }
-
     /// <summary>Run a complete one-shot request to completion.</summary>
-    public static RunResult Run(SandboxRequest request)
+    public static Output Run(ContainerRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
 
@@ -238,7 +222,7 @@ public static class MxcSandbox
                         throw NativeError.ToException(status, result.error, "unknown error");
                     }
 
-                    return new RunResult
+                    return new Output
                     {
                         ExitCode = result.exit_code,
                         TimedOut = result.timed_out != 0,
@@ -258,45 +242,17 @@ public static class MxcSandbox
         }
     }
 
-    /// <summary>
-    /// Asynchronous wrapper over <see cref="Run(SandboxPolicy, string)"/>. The
-    /// native call is blocking, so this offloads it to the thread pool.
-    /// </summary>
-    public static Task<RunResult> RunAsync(SandboxPolicy policy, string command, CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(policy);
-        ArgumentNullException.ThrowIfNull(command);
-        return Task.Run(() => Run(policy, command), cancellationToken);
-    }
-
-    /// <summary>Asynchronous wrapper over <see cref="Run(SandboxRequest)"/>.</summary>
-    public static Task<RunResult> RunAsync(
-        SandboxRequest request,
+    /// <summary>Asynchronous wrapper over <see cref="Run(ContainerRequest)"/>.</summary>
+    public static Task<Output> RunAsync(
+        ContainerRequest request,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
         return Task.Run(() => Run(request), cancellationToken);
     }
 
-    /// <summary>
-    /// Spawn <paramref name="command"/> in a sandbox described by
-    /// <paramref name="policy"/> and return a live <see cref="MxcSandboxProcess"/>
-    /// you can stream stdio through, wait on, and kill while it runs.
-    /// </summary>
-    /// <param name="policy">What to restrict.</param>
-    /// <param name="command">The command line to run (the <c>process.commandLine</c> equivalent).</param>
-    /// <returns>A live process handle. Dispose it to release native resources (killing the child if still running).</returns>
-    /// <exception cref="ArgumentNullException">A required argument was null.</exception>
-    /// <exception cref="MxcException">The sandbox could not be built or spawned.</exception>
-    public static MxcSandboxProcess Spawn(SandboxPolicy policy, string command)
-    {
-        ArgumentNullException.ThrowIfNull(policy);
-        ArgumentNullException.ThrowIfNull(command);
-        return Spawn(CreateCompatibilityRequest(policy, command));
-    }
-
     /// <summary>Spawn a complete one-shot request and return its live process handle.</summary>
-    public static MxcSandboxProcess Spawn(SandboxRequest request)
+    public static MxcProcess Spawn(ContainerRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
 
@@ -328,84 +284,12 @@ public static class MxcSandbox
                         NativeMethods.mxc_error_detail_free(&error);
                     }
                 }
-
-                return new MxcSandboxProcess(
+                return new MxcProcess(
                     MxcSandboxHandle.FromRaw(handle),
                     request.Policy.TimeoutMs);
             }
         }
     }
-
-    /// <summary>
-    /// Spawn <paramref name="command"/> attached to an MXC-owned
-    /// pseudo-terminal.
-    /// </summary>
-    public static MxcPtyProcess SpawnWithPty(
-        SandboxPolicy policy,
-        string command,
-        MxcPtySize? size = null)
-    {
-        ArgumentNullException.ThrowIfNull(policy);
-        ArgumentNullException.ThrowIfNull(command);
-        return SpawnWithPty(CreatePtyCompatibilityRequest(policy, command), size);
-    }
-
-    /// <summary>Spawn a complete request attached to an MXC-owned PTY.</summary>
-    public static MxcPtyProcess SpawnWithPty(
-        SandboxRequest request,
-        MxcPtySize? size = null)
-    {
-        ArgumentNullException.ThrowIfNull(request);
-        var terminalSize = size ?? MxcPtySize.Default;
-        terminalSize.Validate(nameof(size));
-
-        var requestBuf = ToNullTerminatedUtf8(SerializeRequest(request));
-        unsafe
-        {
-            fixed (byte* requestPtr = requestBuf)
-            {
-                NativeSandbox* handle = null;
-                MxcErrorDetail error = default;
-                var status = NativeMethods.mxc_spawn_pty_json(
-                    requestPtr,
-                    NoExperimentalOptIn,
-                    terminalSize.Rows,
-                    terminalSize.Columns,
-                    &handle,
-                    &error);
-                if (status != (int)ErrorCode.Success)
-                {
-                    try
-                    {
-                        throw NativeError.ToException(
-                            status,
-                            error,
-                            "spawning sandbox PTY failed");
-                    }
-                    finally
-                    {
-                        NativeMethods.mxc_error_detail_free(&error);
-                    }
-                }
-                return new MxcPtyProcess(
-                    MxcSandboxHandle.FromRaw(handle),
-                    request.Policy.TimeoutMs);
-            }
-        }
-    }
-
-    private static SandboxRequest CreateCompatibilityRequest(
-        SandboxPolicy policy,
-        string command) =>
-        new(policy, command);
-
-    internal static SandboxRequest CreatePtyCompatibilityRequest(
-        SandboxPolicy policy,
-        string command) =>
-        new(policy, command)
-        {
-            Containment = new IsolationSessionContainment(),
-        };
 
     private static byte[] ToNullTerminatedUtf8(string value)
     {
@@ -416,13 +300,13 @@ public static class MxcSandbox
         return buffer;
     }
 
-    internal static string SerializePolicy(SandboxPolicy policy)
+    internal static string SerializePolicy(ContainerPolicy policy)
     {
         ArgumentNullException.ThrowIfNull(policy);
         return MxcJson.Serialize(policy, MxcJson.Options);
     }
 
-    internal static string SerializeRequest(SandboxRequest request)
+    internal static string SerializeRequest(ContainerRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
         return ExactOneShotRequestWriter.Serialize(request);

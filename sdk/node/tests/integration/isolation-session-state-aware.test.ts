@@ -94,7 +94,7 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
         },
       },
     );
-    const sandboxId = provisionResult.sandboxId;
+    const sandboxId = provisionResult.containerId;
     assert.ok(
       sandboxId.startsWith('iso:'),
       `Expected sandboxId to start with 'iso:', got '${sandboxId}'`,
@@ -142,7 +142,7 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
       'isolation_session',
       { network: isolationSessionNetwork },
     );
-    const sandboxId = provisionResult.sandboxId;
+    const sandboxId = provisionResult.containerId;
 
     try {
       await startSandbox(sandboxId, {});
@@ -172,7 +172,7 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
       'isolation_session',
       { network: isolationSessionNetwork },
     );
-    const sandboxId = provisionResult.sandboxId;
+    const sandboxId = provisionResult.containerId;
     const workspace = provisionResult.metadata?.ephemeralWorkspacePath;
     assert.ok(
       workspace && workspace.length > 0,
@@ -233,7 +233,7 @@ describe('IsolationSession state-aware lifecycle E2E', { skip: skipReason }, () 
       'isolation_session',
       { network: isolationSessionNetwork },
     );
-    const sandboxId = provisionResult.sandboxId;
+    const sandboxId = provisionResult.containerId;
 
     try {
       await startSandbox(sandboxId, {});

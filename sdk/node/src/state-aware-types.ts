@@ -7,6 +7,7 @@ import {
   DirectionalNetworkConfig,
   RuntimeConfig,
   ProcessConfig,
+  Output,
   TelemetryConfig,
 } from './types.js';
 
@@ -31,8 +32,11 @@ export type StateAwareContainmentBackend = Extract<
  * callers from passing a bare string, or a `SandboxId` from one backend
  * where one for a different backend is expected.
  */
-export type SandboxId<C extends StateAwareContainmentBackend> =
-  string & { readonly __mxcBrand: 'SandboxId'; readonly __mxcBackend: C };
+export type ContainerId<C extends StateAwareContainmentBackend = StateAwareContainmentBackend> =
+  string & { readonly __mxcBrand: 'ContainerId'; readonly __mxcBackend: C };
+
+/** @internal Compatibility name used by lifecycle implementation modules. */
+export type SandboxId<C extends StateAwareContainmentBackend> = ContainerId<C>;
 
 /** SDK-owned exact contract used by all typed state-aware requests. */
 export const STATE_AWARE_VERSION = '1.0.0' as const;
@@ -265,6 +269,9 @@ export type StartConfigFor<C extends StateAwareContainmentBackend> =
   ConfigsForBackend<C>['start'];
 export type ExecConfigFor<C extends StateAwareContainmentBackend> =
   ConfigsForBackend<C>['exec'];
+
+export type ExecRequest<C extends StateAwareContainmentBackend> =
+  ExecConfigFor<C>;
 export type StopConfigFor<C extends StateAwareContainmentBackend> =
   ConfigsForBackend<C>['stop'];
 export type DeprovisionConfigFor<C extends StateAwareContainmentBackend> =
@@ -314,7 +321,7 @@ export type StopMetadataFor<C extends StateAwareContainmentBackend> = MetadataFo
 export type DeprovisionMetadataFor<C extends StateAwareContainmentBackend> = MetadataForPhase<C, 'deprovision'>;
 
 export interface ProvisionResult<C extends StateAwareContainmentBackend> {
-  sandboxId: SandboxId<C>;
+  containerId: ContainerId<C>;
   metadata?: ProvisionMetadataFor<C>;
 }
 
@@ -330,8 +337,4 @@ export interface DeprovisionResult<C extends StateAwareContainmentBackend> {
   metadata?: DeprovisionMetadataFor<C>;
 }
 
-export interface ExecResult {
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-}
+export type ExecResult = Output;

@@ -165,7 +165,7 @@ export type ClipboardPolicy = "none" | "read" | "write" | "all";
 
 /**
  * Cross-platform UI configuration in ContainerConfig.
- * Mapped from SandboxPolicy.ui by createConfigFromPolicy.
+ * Mapped from ContainerPolicy.ui by the V1 request adapter.
  */
 export interface UiConfig {
   /** Whether UI is disabled (no visible windows). Maps from !policy.ui.allowWindows. */
@@ -513,13 +513,12 @@ export function legacyConfigAliasUnsupportedReason(config: ContainerConfig): str
 }
 
 /**
- * The main sandbox policy configuration interface for external consumers
- * to define sandboxed execution environments.
+ * Cross-platform restrictions applied by a V1 container request.
  *
- * Policy describes *what* the caller wants restricted. Cross-platform.
- * No OS-specific content. Omitted fields = most restrictive (default-deny).
+ * Policy describes what the caller wants restricted. Omitted fields use the
+ * backend's default-deny posture where supported.
  */
-export type SandboxPolicy = {
+export type ContainerPolicy = {
   /** Filesystem access restrictions */
   filesystem?: {
       /** Paths that are granted read and write access */
@@ -550,6 +549,47 @@ export type SandboxPolicy = {
   };
   /** Execution timeout in milliseconds. Omitted = no timeout. */
   timeoutMs?: number;
+}
+
+/** Backend-specific settings carried by a V1 container request. */
+export type ContainerContainment =
+  | { type: 'process' }
+  | { type: 'processcontainer'; config?: ProcessContainerConfig }
+  | { type: 'wslc'; config?: WslcConfig }
+  | { type: 'lxc'; config?: LxcConfig }
+  | { type: 'seatbelt'; config?: SeatbeltConfig }
+  | { type: 'isolation_session' }
+  | { type: 'bubblewrap' };
+
+/**
+ * Complete one-shot request. The SDK selects its exact wire contract; callers
+ * provide policy and workload intent rather than a raw versioned config.
+ */
+export interface ContainerRequest {
+  /** Restrictions applied to the workload. */
+  policy: ContainerPolicy;
+  /** Command line to execute. */
+  command: string;
+  /** Backend intent, defaulting to the host's native process containment. */
+  containment?: ContainerContainment;
+  /** Optional caller-selected container name. */
+  containerName?: string;
+  /** Optional working directory inside the sandbox. */
+  workingDirectory?: string;
+  /** Optional child environment. Omission uses the backend default. */
+  environment?: { [key: string]: string | undefined };
+  /** Layer `environment` over the backend's default environment. */
+  inheritDefaultEnvironment?: boolean;
+}
+
+/** Captured output and terminal outcome of a completed workload. */
+export interface Output {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  timedOut: boolean;
+  warnings: string[];
+  outputMetadata?: unknown;
 }
 
 /**

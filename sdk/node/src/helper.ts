@@ -15,9 +15,18 @@ import {
   legacyConfigAliasUnsupportedReason,
 } from './types.js';
 import { findWxcExecutable, findLxcExecutable, findSeatbeltExecutable, getPlatformSupport } from './platform.js';
-import { SandboxSpawnOptions } from './sandbox.js';
 import { diagLog } from './diagnostic.js';
 import { mxcErrorFromCode } from './errors.js';
+
+interface SandboxSpawnOptions {
+  debug?: boolean;
+  experimental?: boolean;
+  allowTestingFeatures?: boolean;
+  executablePath?: string;
+  skipPlatformCheck?: boolean;
+  dryRun?: boolean;
+  logDir?: string;
+}
 
 /** SDK version read from package.json at module load time. */
 export const SDK_VERSION: string = (() => {

@@ -32,9 +32,9 @@ public sealed class ExactOneShotRequestWriterTests
     public void Writer_MintsContainerIdForUnnamedRequests()
     {
         var first = ExactOneShotRequestWriter.Serialize(
-            new SandboxRequest(new SandboxPolicy(), "echo first"));
+            new ContainerRequest(new ContainerPolicy(), "echo first"));
         var second = ExactOneShotRequestWriter.Serialize(
-            new SandboxRequest(new SandboxPolicy(), "echo second"));
+            new ContainerRequest(new ContainerPolicy(), "echo second"));
 
         using var firstDocument = JsonDocument.Parse(first);
         using var secondDocument = JsonDocument.Parse(second);
@@ -52,7 +52,7 @@ public sealed class ExactOneShotRequestWriterTests
     [InlineData("user-selected")]
     public void Writer_PreservesSuppliedContainerNames(string name)
     {
-        var request = new SandboxRequest(new SandboxPolicy(), "echo id")
+        var request = new ContainerRequest(new ContainerPolicy(), "echo id")
         {
             ContainerName = name,
         };
@@ -72,7 +72,7 @@ public sealed class ExactOneShotRequestWriterTests
             ["A"] = "last",
         };
         environment["PATH"] = "updated";
-        var request = new SandboxRequest(new SandboxPolicy(), "echo env")
+        var request = new ContainerRequest(new ContainerPolicy(), "echo env")
         {
             Environment = environment,
         };
@@ -87,9 +87,9 @@ public sealed class ExactOneShotRequestWriterTests
     public void Writer_RespectsDictionaryComparerThroughLegacyCaptureMigration()
     {
 #pragma warning disable MXC0001
-        var policy = new SandboxPolicy { CaptureDenials = new CaptureDenialsPolicy() };
+        var policy = new ContainerPolicy { CaptureDenials = new CaptureDenialsPolicy() };
 #pragma warning restore MXC0001
-        var request = new SandboxRequest(policy, "echo env")
+        var request = new ContainerRequest(policy, "echo env")
         {
             Environment = new Dictionary<string, string>(StringComparer.Ordinal)
             {
@@ -113,7 +113,7 @@ public sealed class ExactOneShotRequestWriterTests
             ["Other"] = "middle",
         };
         environment["KEY"] = "last";
-        var request = new SandboxRequest(new SandboxPolicy(), "echo env")
+        var request = new ContainerRequest(new ContainerPolicy(), "echo env")
         {
             Environment = environment,
         };
@@ -129,7 +129,7 @@ public sealed class ExactOneShotRequestWriterTests
     [InlineData("BAD=KEY")]
     public void Writer_RejectsMalformedEnvironmentKeys(string key)
     {
-        var request = new SandboxRequest(new SandboxPolicy(), "echo env")
+        var request = new ContainerRequest(new ContainerPolicy(), "echo env")
         {
             Environment = new Dictionary<string, string> { [key] = "" },
         };
@@ -146,7 +146,7 @@ public sealed class ExactOneShotRequestWriterTests
     [InlineData(ulong.MaxValue)]
     public void Writer_PreservesFullUnsignedWslcMemoryMb(ulong memoryMb)
     {
-        var request = new SandboxRequest(new SandboxPolicy(), "echo memory")
+        var request = new ContainerRequest(new ContainerPolicy(), "echo memory")
         {
             Containment = new WslcContainment { MemoryMb = memoryMb },
         };
@@ -158,27 +158,9 @@ public sealed class ExactOneShotRequestWriterTests
     }
 
     [Fact]
-    public void Writer_RejectsExperimentalOptInBeforeAliasMigration()
-    {
-#pragma warning disable MXC0001
-        var request = new SandboxRequest(
-            new SandboxPolicy { CaptureDenials = new CaptureDenialsPolicy() }, "echo")
-        {
-            Experimental = true,
-            Containment = new WslcContainment(),
-        };
-#pragma warning restore MXC0001
-
-        var error = Assert.Throws<ArgumentException>(
-            () => ExactOneShotRequestWriter.Serialize(request));
-        Assert.Equal("request", error.ParamName);
-        Assert.Contains("Stable V1", error.Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void Writer_IgnoresInheritDefaultEnvironmentWithoutEnvironment()
     {
-        var request = new SandboxRequest(new SandboxPolicy(), "echo env")
+        var request = new ContainerRequest(new ContainerPolicy(), "echo env")
         {
             InheritDefaultEnvironment = true,
         };
@@ -193,8 +175,8 @@ public sealed class ExactOneShotRequestWriterTests
     [Fact]
     public void Writer_RejectsUndefinedNetworkAction()
     {
-        var request = new SandboxRequest(
-            new SandboxPolicy
+        var request = new ContainerRequest(
+            new ContainerPolicy
             {
                 Network = new NetworkPolicy
                 {
@@ -219,7 +201,7 @@ public sealed class ExactOneShotRequestWriterTests
     [Fact]
     public void Writer_RejectsCommaSeparatedProcessContainerCapability()
     {
-        var request = new SandboxRequest(new SandboxPolicy(), "echo invalid")
+        var request = new ContainerRequest(new ContainerPolicy(), "echo invalid")
         {
             Containment = new ProcessContainerContainment
             {
@@ -241,8 +223,8 @@ public sealed class ExactOneShotRequestWriterTests
     public void Writer_MigratesLegacyCaptureDenialsToProcessContainer()
     {
 #pragma warning disable MXC0001
-        var request = new SandboxRequest(
-            new SandboxPolicy
+        var request = new ContainerRequest(
+            new ContainerPolicy
             {
                 CaptureDenials = new CaptureDenialsPolicy
                 {
@@ -266,7 +248,7 @@ public sealed class ExactOneShotRequestWriterTests
         Assert.False(root.TryGetProperty("captureDenials", out _));
     }
 
-    private static SandboxRequest RequestFromFixture(string json)
+    private static ContainerRequest RequestFromFixture(string json)
     {
         using var document = JsonDocument.Parse(json);
         var root = document.RootElement;
@@ -277,7 +259,7 @@ public sealed class ExactOneShotRequestWriterTests
             policy.Telemetry = new TelemetrySettings { Enabled = true };
         }
 
-        var request = new SandboxRequest(policy, root.GetProperty("command").GetString()!)
+        var request = new ContainerRequest(policy, root.GetProperty("command").GetString()!)
         {
             Containment = Containment(root.GetProperty("containment")),
             ContainerName = root.TryGetProperty("containerName", out var containerName)
@@ -301,9 +283,9 @@ public sealed class ExactOneShotRequestWriterTests
         return request;
     }
 
-    private static SandboxPolicy Policy(JsonElement policy)
+    private static ContainerPolicy Policy(JsonElement policy)
     {
-        var result = new SandboxPolicy();
+        var result = new ContainerPolicy();
         if (policy.TryGetProperty("filesystem", out var filesystem))
         {
             result.Filesystem = Filesystem(filesystem);

@@ -92,7 +92,7 @@ public sealed class MxcTelemetryTests : IDisposable
     [Fact]
     public void SandboxPolicy_TelemetrySerializesCanonically()
     {
-        var policy = new SandboxPolicy
+        var policy = new ContainerPolicy
         {
             Telemetry = new TelemetrySettings { Enabled = true },
         };

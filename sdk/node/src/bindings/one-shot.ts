@@ -74,8 +74,7 @@ function validateStableConfig(config: ContainerConfig): void {
   if (config.version !== SDK_CONTRACT_VERSION) {
     malformed(
       `the in-process Node binding accepts only the SDK-owned ` +
-      `${SDK_CONTRACT_VERSION} contract; use spawnSandboxFromConfig for raw ` +
-      `exact-version configs`,
+      `${SDK_CONTRACT_VERSION} contract`,
     );
   }
   if ('appContainer' in config) {

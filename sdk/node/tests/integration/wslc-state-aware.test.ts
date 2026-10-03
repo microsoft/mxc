@@ -27,7 +27,7 @@ import {
   startSandbox,
   stopSandbox,
   type ExecResult,
-  type SandboxId,
+  type ContainerId,
 } from '@microsoft/mxc-sdk/v1';
 import { safeDeprovision } from './test-helpers.js';
 
@@ -59,14 +59,14 @@ function collect(
 }
 
 async function execAfterCancellation(
-  sandboxId: SandboxId<'wslc'>,
+  containerId: ContainerId<'wslc'>,
 ): Promise<ExecResult> {
   const deadline = Date.now() + 15_000;
   let lastError: unknown;
 
   while (Date.now() < deadline) {
     try {
-      return await execInSandboxAsync(sandboxId, {
+      return await execInSandboxAsync(containerId, {
         process: { commandLine: 'echo NODE_WSLC_AFTER_CANCEL' },
       });
     } catch (error) {
@@ -90,31 +90,31 @@ describe('WSLC state-aware lifecycle E2E', {
     'preserves lifecycle, streaming, timeout, cancellation, and stale-id behavior',
     { timeout: 180_000 },
     async () => {
-      const { sandboxId } = await provisionSandbox('wslc', { image: wslcImage });
+      const { containerId } = await provisionSandbox('wslc', { image: wslcImage });
       let started = false;
       let provisioned = true;
 
       try {
-        assert.match(sandboxId, /^wslc:[0-9a-f]{32}$/);
-        await startSandbox(sandboxId);
+        assert.match(containerId, /^wslc:[0-9a-f]{32}$/);
+        await startSandbox(containerId);
         started = true;
 
         const marker = `NODE_WSLC_WARM_${Date.now()}`;
-        const writeResult = await execInSandboxAsync(sandboxId, {
+        const writeResult = await execInSandboxAsync(containerId, {
           process: {
             commandLine: `printf '${marker}' > /tmp/mxc-node-wslc-marker`,
           },
         });
         assert.equal(writeResult.exitCode, 0);
 
-        const readResult = await execInSandboxAsync(sandboxId, {
+        const readResult = await execInSandboxAsync(containerId, {
           process: { commandLine: 'cat /tmp/mxc-node-wslc-marker' },
         });
         assert.equal(readResult.exitCode, 0);
         assert.equal(readResult.stdout, marker);
         assert.equal(readResult.stderr, '');
 
-        const buffered = await execInSandboxAsync(sandboxId, {
+        const buffered = await execInSandboxAsync(containerId, {
           process: {
             commandLine:
               "printf 'NODE_WSLC_STDOUT\\n'; printf 'NODE_WSLC_STDERR\\n' >&2; exit 7",
@@ -125,7 +125,7 @@ describe('WSLC state-aware lifecycle E2E', {
         assert.match(buffered.stderr, /NODE_WSLC_STDERR/);
 
         let firstChunkAt: number | undefined;
-        const streamed = execInSandbox(sandboxId, {
+        const streamed = execInSandbox(containerId, {
           process: {
             commandLine:
               'echo NODE_WSLC_STREAM_FIRST; sleep 2; ' +
@@ -169,7 +169,7 @@ describe('WSLC state-aware lifecycle E2E', {
         }
 
         const timeoutStart = performance.now();
-        const timed = execInSandbox(sandboxId, {
+        const timed = execInSandbox(containerId, {
           process: { commandLine: 'sleep 10', timeout: 750 },
         });
         try {
@@ -190,7 +190,7 @@ describe('WSLC state-aware lifecycle E2E', {
         try {
           await assert.rejects(
             execInSandboxAsync(
-              sandboxId,
+              containerId,
               { process: { commandLine: 'sleep 10' } },
               { signal: controller.signal },
             ),
@@ -202,30 +202,30 @@ describe('WSLC state-aware lifecycle E2E', {
           clearTimeout(cancelTimer);
         }
 
-        const afterCancel = await execAfterCancellation(sandboxId);
+        const afterCancel = await execAfterCancellation(containerId);
         assert.equal(afterCancel.exitCode, 0);
         assert.match(afterCancel.stdout, /NODE_WSLC_AFTER_CANCEL/);
 
-        await stopSandbox(sandboxId);
+        await stopSandbox(containerId);
         started = false;
-        await deprovisionSandbox(sandboxId);
+        await deprovisionSandbox(containerId);
         provisioned = false;
 
         await assert.rejects(
-          () => startSandbox(sandboxId),
+          () => startSandbox(containerId),
           (error: unknown) =>
             error instanceof MxcError && error.code === 'not_provisioned',
         );
       } finally {
         if (started) {
           try {
-            await stopSandbox(sandboxId);
+            await stopSandbox(containerId);
           } catch (error) {
-            console.error(`Cleanup stop failed for ${sandboxId}: ${error}`);
+            console.error(`Cleanup stop failed for ${containerId}: ${error}`);
           }
         }
         if (provisioned) {
-          await safeDeprovision(sandboxId);
+          await safeDeprovision(containerId);
         }
       }
     },

@@ -8,7 +8,7 @@
 
 #![cfg(all(target_os = "windows", feature = "isolation_session"))]
 
-use mxc_sdk::v1::policy::{FilesystemSection, NetworkSection, SandboxPolicy};
+use mxc_sdk::v1::policy::{ContainerPolicy, FilesystemSection, NetworkSection};
 use mxc_sdk::v1::{
     build_request_with_containment, Containment, NetworkAction, NetworkEgressSection,
     NetworkIngressSection,
@@ -17,14 +17,14 @@ use mxc_sdk::ErrorCode;
 
 /// The public one-shot API reaches IsolationSession with its required
 /// directional all-allow network posture.
-fn iso_policy() -> SandboxPolicy {
+fn iso_policy() -> ContainerPolicy {
     iso_policy_with_deadline(None)
 }
 
 /// The same policy with a workload deadline, for a test whose workload waits on
 /// the harness: if the handshake never lands, the deadline is what ends the run
 /// instead of the test waiting on a process that will not exit.
-fn iso_policy_with_deadline(timeout_ms: Option<u32>) -> SandboxPolicy {
+fn iso_policy_with_deadline(timeout_ms: Option<u32>) -> ContainerPolicy {
     let mut egress = NetworkEgressSection::default();
     egress.default = Some(NetworkAction::Allow);
     let mut ingress = NetworkIngressSection::default();
@@ -34,7 +34,7 @@ fn iso_policy_with_deadline(timeout_ms: Option<u32>) -> SandboxPolicy {
     network.egress = Some(egress);
     network.ingress = Some(ingress);
 
-    let mut policy = SandboxPolicy::default();
+    let mut policy = ContainerPolicy::default();
     policy.network = Some(network);
     policy.timeout_ms = timeout_ms;
     policy
@@ -114,17 +114,19 @@ fn a_single_threaded_apartment_drives_the_full_lifecycle() {
     std::thread::spawn(move || {
         enter_sta();
         let started = provision_and_start();
-        let captured =
-            exec_capture_stdout(&started.sandbox_id, "cmd.exe /c echo sta-lifecycle-marker");
+        let captured = exec_capture_stdout(
+            &started.container_id,
+            "cmd.exe /c echo sta-lifecycle-marker",
+        );
 
         let stop = format!(
             r#"{{"version":"0.9.0-alpha","phase":"stop","sandboxId":"{}"}}"#,
-            started.sandbox_id
+            started.container_id
         );
         mxc_sdk::run_state_aware_json(&stop, false, true).expect("stop must succeed");
         let deprovision = format!(
             r#"{{"version":"0.9.0-alpha","phase":"deprovision","sandboxId":"{}"}}"#,
-            started.sandbox_id
+            started.container_id
         );
         mxc_sdk::run_state_aware_json(&deprovision, false, true).expect("deprovision must succeed");
         started.teardown.defuse();
@@ -164,7 +166,7 @@ fn one_shot_refuses_an_unhonorable_policy_as_policy_validation() {
     )
     .expect("building the request must succeed");
 
-    let err = match mxc_sdk::v1::spawn_sandbox(request) {
+    let err = match mxc_sdk::v1::spawn(request) {
         Ok(_) => panic!("the policy must be refused"),
         Err(e) => e,
     };
@@ -186,7 +188,7 @@ fn one_shot_refuses_an_environment_it_cannot_launch_as_policy_validation() {
     .expect("building the request must succeed");
     request.set_env([("FOO", "bar")]);
 
-    let err = match mxc_sdk::v1::spawn_sandbox(request) {
+    let err = match mxc_sdk::v1::spawn(request) {
         Ok(_) => panic!("the environment must be refused"),
         Err(e) => e,
     };
@@ -210,7 +212,7 @@ fn one_shot_run_captures_output() {
     .expect("building the request must succeed");
 
     let output = mxc_sdk::v1::run(request).expect("one-shot run must reach the backend");
-    assert_eq!(output.outcome, mxc_sdk::WaitOutcome::Exited(0));
+    assert_eq!(output.outcome, mxc_sdk::v1::WaitOutcome::Exited(0));
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("marker-oneshot"),
         "the workload's stdout must reach the caller, got: {:?}",
@@ -232,7 +234,7 @@ fn one_shot_run_propagates_a_nonzero_exit() {
     .expect("building the request must succeed");
 
     let output = mxc_sdk::v1::run(request).expect("one-shot run must reach the backend");
-    assert_eq!(output.outcome, mxc_sdk::WaitOutcome::Exited(7));
+    assert_eq!(output.outcome, mxc_sdk::v1::WaitOutcome::Exited(7));
 }
 
 /// What a held sibling established. Kept apart so a failure names which one
@@ -323,7 +325,7 @@ fn concurrent_one_shot_runs_stay_isolated() {
                 .expect("building the request must succeed");
 
                 let mut sandbox =
-                    mxc_sdk::v1::spawn_sandbox(request).expect("spawn must reach the backend");
+                    mxc_sdk::v1::spawn(request).expect("spawn must reach the backend");
                 let mut stdin = sandbox.take_stdin();
                 let stdout = sandbox.take_stdout().expect("stdout");
 
@@ -473,7 +475,7 @@ fn concurrent_one_shot_runs_stay_isolated() {
     let mut accounts = Vec::new();
     for thread in threads {
         let (marker, outcome, stdout, held) = thread.join().expect("a run thread must not panic");
-        if outcome != mxc_sdk::WaitOutcome::Exited(0) {
+        if outcome != mxc_sdk::v1::WaitOutcome::Exited(0) {
             failures.push(format!("{marker}: outcome was {outcome:?}"));
         }
         if !stdout.contains(&marker) {
@@ -535,7 +537,7 @@ fn one_shot_finished_on_an_sta_thread_still_tears_down() {
     )
     .expect("building the request must succeed");
 
-    let mut sandbox = mxc_sdk::v1::spawn_sandbox(request).expect("spawn must reach the backend");
+    let mut sandbox = mxc_sdk::v1::spawn(request).expect("spawn must reach the backend");
 
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -561,7 +563,7 @@ fn one_shot_killed_on_an_sta_thread_impersonating_at_identification_level_stops_
     )
     .expect("building the request must succeed");
 
-    let mut sandbox = mxc_sdk::v1::spawn_sandbox(request).expect("spawn must reach the backend");
+    let mut sandbox = mxc_sdk::v1::spawn(request).expect("spawn must reach the backend");
 
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -593,7 +595,7 @@ fn an_abandoned_one_shot_handle_completes_teardown() {
     )
     .expect("building the request must succeed");
 
-    let sandbox = mxc_sdk::v1::spawn_sandbox(request).expect("spawn must reach the backend");
+    let sandbox = mxc_sdk::v1::spawn(request).expect("spawn must reach the backend");
 
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -624,7 +626,7 @@ fn one_shot_kill_stops_the_workload() {
     )
     .expect("building the request must succeed");
 
-    let mut sandbox = mxc_sdk::v1::spawn_sandbox(request).expect("spawn must reach the backend");
+    let mut sandbox = mxc_sdk::v1::spawn(request).expect("spawn must reach the backend");
     let stdout = sandbox.take_stdout().expect("stdout must be available");
 
     let (tx, rx) = std::sync::mpsc::channel();
@@ -836,7 +838,7 @@ fn exec_runs_as_the_isolated_agent_user() {
     skip_unless_supported!();
     let started = provision_and_start();
 
-    let captured = exec_capture_stdout(&started.sandbox_id, "cmd.exe /c whoami");
+    let captured = exec_capture_stdout(&started.container_id, "cmd.exe /c whoami");
 
     assert_eq!(
         account_of(&captured),
@@ -869,7 +871,7 @@ fn the_workspace_is_shared_with_the_agent_and_removed_on_deprovision() {
         r#"cmd.exe /c type "{ws}\from-caller.txt" > "{ws}\from-agent.txt" & whoami >> "{ws}\from-agent.txt""#,
         ws = started.workspace
     );
-    exec_capture_stdout(&started.sandbox_id, &command);
+    exec_capture_stdout(&started.container_id, &command);
 
     let produced = std::fs::read_to_string(workspace.join("from-agent.txt"))
         .expect("the agent must be able to write into the workspace");
@@ -885,12 +887,12 @@ fn the_workspace_is_shared_with_the_agent_and_removed_on_deprovision() {
 
     let stop = format!(
         r#"{{"version":"0.9.0-alpha","phase":"stop","sandboxId":"{}"}}"#,
-        started.sandbox_id
+        started.container_id
     );
     mxc_sdk::run_state_aware_json(&stop, false, true).expect("stop must succeed");
     let deprovision = format!(
         r#"{{"version":"0.9.0-alpha","phase":"deprovision","sandboxId":"{}"}}"#,
-        started.sandbox_id
+        started.container_id
     );
     mxc_sdk::run_state_aware_json(&deprovision, false, true).expect("deprovision must succeed");
     started.teardown.defuse();
@@ -925,14 +927,14 @@ fn state_aware_exec_propagates_a_non_zero_exit_code() {
     let exec = format!(
         r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"{}",
             "process":{{"commandLine":"cmd.exe /c exit 42","timeout":30000}}}}"#,
-        started.sandbox_id
+        started.container_id
     );
     let mut sandbox = mxc_sdk::exec_sandbox(&exec, true).expect("exec must return a handle");
     let outcome = sandbox.wait().expect("waiting on the exec must succeed");
 
     assert_eq!(
         outcome,
-        mxc_sdk::WaitOutcome::Exited(42),
+        mxc_sdk::v1::WaitOutcome::Exited(42),
         "the sandboxed process's exit code must reach the caller unchanged"
     );
 }
@@ -947,7 +949,7 @@ fn state_aware_exec_can_be_killed() {
     let exec = format!(
         r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"{}",
             "process":{{"commandLine":"cmd.exe /c ping -n 300 127.0.0.1","timeout":600000}}}}"#,
-        started.sandbox_id
+        started.container_id
     );
     let mut sandbox = mxc_sdk::exec_sandbox(&exec, true).expect("exec must return a handle");
 
@@ -986,7 +988,7 @@ fn a_workload_reading_stdin_to_eof_terminates_when_the_writer_drops() {
     let exec = format!(
         r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"{}",
             "process":{{"commandLine":"cmd.exe /c more","timeout":60000}}}}"#,
-        started.sandbox_id
+        started.container_id
     );
     let mut sandbox = mxc_sdk::exec_sandbox(&exec, true).expect("exec must return a handle");
 
@@ -1008,7 +1010,7 @@ fn a_workload_reading_stdin_to_eof_terminates_when_the_writer_drops() {
     );
     assert_eq!(
         outcome,
-        mxc_sdk::WaitOutcome::Exited(0),
+        mxc_sdk::v1::WaitOutcome::Exited(0),
         "the workload should exit cleanly once stdin reaches EOF"
     );
 }
@@ -1026,7 +1028,7 @@ fn a_backgrounded_descendant_does_not_hold_the_exec_open() {
     let exec = format!(
         r#"{{"version":"0.9.0-alpha","phase":"exec","sandboxId":"{}",
             "process":{{"commandLine":"cmd.exe /c start /b ping -n 31 127.0.0.1 > nul & echo done","timeout":120000}}}}"#,
-        started.sandbox_id
+        started.container_id
     );
     let mut sandbox = mxc_sdk::exec_sandbox(&exec, true).expect("exec must return a handle");
 

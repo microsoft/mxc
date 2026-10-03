@@ -36,8 +36,8 @@ internal sealed class CamelCaseJsonStringEnumConverter<TEnum>
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 // Public request/policy surface.
 [JsonSerializable(typeof(Generated.OneShotRequest))]
-[JsonSerializable(typeof(SandboxRequest))]
-[JsonSerializable(typeof(SandboxPolicy))]
+[JsonSerializable(typeof(ContainerRequest))]
+[JsonSerializable(typeof(ContainerPolicy))]
 [JsonSerializable(typeof(SandboxContainment))]
 [JsonSerializable(typeof(ProcessContainment))]
 [JsonSerializable(typeof(ProcessContainerContainment))]

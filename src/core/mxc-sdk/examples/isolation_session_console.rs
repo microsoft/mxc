@@ -25,7 +25,7 @@
 //!
 //! Must run at a real interactive console.
 
-use mxc_sdk::WaitOutcome;
+use mxc_sdk::v1::WaitOutcome;
 
 /// Provision mints a real OS account, so an early return or a panic would
 /// otherwise leave one behind on the host.

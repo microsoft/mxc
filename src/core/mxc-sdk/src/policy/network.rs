@@ -3,7 +3,7 @@
 
 //! Network policy authoring types.
 
-/// Network section of a [`SandboxPolicy`](super::SandboxPolicy).
+/// Network section of a [`ContainerPolicy`](super::ContainerPolicy).
 ///
 /// The v1 high-level SDK exposes directional policy only. Exact legacy
 /// configuration remains available through the raw configuration parser.

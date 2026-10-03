@@ -11,12 +11,12 @@ import { createConfigFromPolicy } from '../../src/sandbox.js';
 import type {
   ContainerConfig,
   SandboxContainment,
-  SandboxPolicy,
+  ContainerPolicy,
 } from '../../src/types.js';
 
-type FixturePolicy = SandboxPolicy & {
-  network?: SandboxPolicy['network'] & {
-    runtimeConfig?: SandboxPolicy['runtimeConfig'];
+type FixturePolicy = ContainerPolicy & {
+  network?: ContainerPolicy['network'] & {
+    runtimeConfig?: ContainerPolicy['runtimeConfig'];
   };
 };
 
@@ -55,7 +55,7 @@ function readJson<T>(file: string): T {
   return JSON.parse(readFileSync(file, 'utf8')) as T;
 }
 
-function clonePolicy(policy: FixturePolicy | undefined): SandboxPolicy {
+function clonePolicy(policy: FixturePolicy | undefined): ContainerPolicy {
   const cloned = JSON.parse(JSON.stringify(policy ?? {})) as FixturePolicy;
   if (cloned.network?.runtimeConfig !== undefined) {
     cloned.runtimeConfig = cloned.network.runtimeConfig;

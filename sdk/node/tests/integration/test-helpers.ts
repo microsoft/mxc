@@ -11,13 +11,20 @@ import semver from 'semver';
 import { createRequire } from 'node:module';
 import * as sdkNamespace from '@microsoft/mxc-sdk';
 import * as sdkV1Namespace from '@microsoft/mxc-sdk/v1';
+import type { OneShotRequest } from '../../dist/generated/v1_0_0/wire.js';
+import { runOneShotJsonAsync } from '../../dist/bindings/run.js';
+import { prepareOneShotRequest } from '../../dist/bindings/one-shot.js';
+import { createConfigFromPolicy } from '../../dist/sandbox.js';
+import type { ContainerConfig } from '../../dist/types.js';
 import {
   MxcError,
 } from '@microsoft/mxc-sdk';
 import {
   deprovisionSandbox,
   provisionSandbox,
-  type SandboxId,
+  runAsync,
+  type ContainerId,
+  type ContainerPolicy,
   type StateAwareContainmentBackend,
 } from '@microsoft/mxc-sdk/v1';
 
@@ -27,7 +34,46 @@ export const isolationSessionNetwork = {
 } as const;
 
 const require = createRequire(import.meta.url);
-export const sdk = { ...sdkNamespace, ...sdkV1Namespace };
+
+/** Test-only exact-config path for backend contract tests; always calls mxc_ffi. */
+export function runConfigForTest(
+  config: ContainerConfig,
+  options: { experimental?: boolean } = {},
+) {
+  const request: OneShotRequest = prepareOneShotRequest(config);
+  return runOneShotJsonAsync(request, options.experimental ? 1 : 0);
+}
+
+export function createConfigForTest(
+  policy: ContainerPolicy,
+  containment?: Parameters<typeof createConfigFromPolicy>[1],
+  containerName?: string,
+): ContainerConfig {
+  return createConfigFromPolicy(policy, containment, containerName);
+}
+
+/** Exercise the public V1 buffered API for stable-policy integration tests. */
+export function runPolicyForTest(
+  command: string,
+  policy: ContainerPolicy,
+  _options: Record<string, never> = {},
+  workingDirectory?: string,
+  containerName?: string,
+) {
+  return runAsync({
+    policy,
+    command,
+    ...(workingDirectory === undefined ? {} : { workingDirectory }),
+    ...(containerName === undefined ? {} : { containerName }),
+  });
+}
+
+export const sdk = {
+  ...sdkNamespace,
+  ...sdkV1Namespace,
+  createConfigForTest,
+  runPolicyForTest,
+};
 
 // Schema versions
 
@@ -120,15 +166,6 @@ export function platformName(): string {
  * runner on every supported host, so a failing dry-run from the test harness
  * is a real regression, not an expected outcome.
  */
-export function assertDryRunResult(
-  stdout: string,
-  exitCode: number,
-  version: string,
-): void {
-  assert.strictEqual(exitCode, 0, `[${version}] Expected exit 0 but got ${exitCode}`);
-  assert.ok(stdout.includes('Dry run completed. Result: validation passed'), `[${version}] ${stdout}`);
-}
-
 // Environment / skip helpers
 
 const skipOsDependentTests= process.env.MXC_SKIP_OS_BUILD_DEPENDENT_TESTS === '1';
@@ -156,15 +193,6 @@ export const isLinuxBubblewrap = (() => {
   }
   return false;
 })();
-
-// When MXC_DEBUG=true, integration tests pass { debug: true } to spawn options
-// so wxc-exec / lxc-exec emit verbose output. Enable via pipeline parameter or locally.
-const debugMode = process.env.MXC_DEBUG === 'true';
-const experimentalMode = os.platform() === 'darwin';
-export const debugSpawnOptions = {
-  ...(debugMode ? { debug: true } : {}),
-  ...(experimentalMode ? { experimental: true } : {}),
-};
 
 // Network test endpoint reachable from both CI (Azure DevOps agents block
 // external traffic but allow Azure Artifacts feeds) and local builds.
@@ -241,7 +269,7 @@ export async function runOrSkipIfBackendUnavailable<T>(
 
 /** Deprovision a sandbox best-effort, swallowing errors so cleanup never masks the original failure. */
 export async function safeDeprovision<C extends StateAwareContainmentBackend>(
-  sandboxId: SandboxId<C>,
+  sandboxId: ContainerId<C>,
 ): Promise<void> {
   try {
     await deprovisionSandbox(sandboxId);
@@ -294,11 +322,11 @@ export async function probeStateAwareRuntime<C extends StateAwareContainmentBack
             'isolation_session',
             { network: isolationSessionNetwork },
           );
-          return result.sandboxId;
+          return result.containerId;
         }
         case 'wslc': {
           const result = await provisionSandbox('wslc');
-          return result.sandboxId;
+          return result.containerId;
         }
         default: {
           const unhandled: never = backend;
@@ -341,7 +369,7 @@ export async function probeStateAwareRuntime<C extends StateAwareContainmentBack
  * there is no generic form to write here.
  */
 export async function probeIsolationSessionFeature(): Promise<string | undefined> {
-  let provisioned: SandboxId<'isolation_session'>;
+  let provisioned: ContainerId<'isolation_session'>;
   try {
     const result = await provisionSandbox(
       'isolation_session',
@@ -350,7 +378,7 @@ export async function probeIsolationSessionFeature(): Promise<string | undefined
         appId: 'x'.repeat(257),
       },
     );
-    provisioned = result.sandboxId;
+    provisioned = result.containerId;
   } catch (err) {
     const skipReason = isolationSessionFeatureSkipReason(err);
     if (skipReason !== undefined) return skipReason;
@@ -376,39 +404,6 @@ export function createTempDir(prefix: string = 'mxc-test'): string {
   const dir = path.join(tmpBase, `${prefix}-${Date.now()}`);
   fs.mkdirSync(dir);
   return dir;
-}
-
-// Async spawn from a pre-built ContainerConfig. Mirrors the SDK's own
-// spawnSandboxAsync (sandbox.ts) -- it exists because the SDK doesn't expose
-// an async wrapper around spawnSandboxFromConfig, and tests that need a
-// specific backend build the config directly.
-//
-// Notes (kept in lockstep with spawnSandboxAsync):
-//  - stdout/stderr are merged: wxc-exec runs under node-pty (a single PTY),
-//    so the OS combines both streams. stderr: '' is structural padding.
-//  - No per-call timeout: node:test enforces test-level timeouts and the
-//    config's process.timeout is enforced by the native runner.
-//  - IPty has no onError event. Synchronous spawn failures are caught below;
-//    post-spawn failures surface as a non-zero exitCode via onExit.
-export function spawnFromConfigAsync(
-  config: sdkNamespace.ContainerConfig,
-  options: sdkNamespace.SandboxSpawnOptions = {},
-  workingDirectory?: string,
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  return new Promise((resolve, reject) => {
-    try {
-      const ptyProcess = sdkNamespace.spawnSandboxFromConfig(config, options, workingDirectory);
-      let output = '';
-      ptyProcess.onData((data: string) => {
-        output += data;
-      });
-      ptyProcess.onExit((event: { exitCode: number; signal?: number }) => {
-        resolve({ stdout: output, stderr: '', exitCode: event.exitCode });
-      });
-    } catch (err) {
-      reject(err);
-    }
-  });
 }
 
 // Python helpers
@@ -441,9 +436,10 @@ export const pythonSkipReason: string | undefined = _python.command ? undefined 
  * Merge host tool paths into a policy so the container can find installed tools.
  * Adds the Python prefix as a readwrite path when needed for DLL loading.
  */
-export function withToolPaths(policy: Record<string, any>): Record<string, any> {
+export function withToolPaths(policy: ContainerPolicy): ContainerPolicy {
   const toolsPolicy = sdk.getAvailableToolsPolicy(process.env);
-  const merged = { ...policy, filesystem: { ...policy.filesystem } };
+  const filesystem = { ...policy.filesystem };
+  const merged: ContainerPolicy = { ...policy, filesystem };
 
   const extraReadwrite: string[] = [];
   if (_python.prefix) {
@@ -451,14 +447,14 @@ export function withToolPaths(policy: Record<string, any>): Record<string, any> 
   }
 
   if (toolsPolicy.readonlyPaths.length > 0) {
-    merged.filesystem.readonlyPaths = [
-      ...(merged.filesystem.readonlyPaths ?? []),
+    filesystem.readonlyPaths = [
+      ...(filesystem.readonlyPaths ?? []),
       ...toolsPolicy.readonlyPaths,
     ];
   }
   if (toolsPolicy.readwritePaths.length > 0 || extraReadwrite.length > 0) {
-    merged.filesystem.readwritePaths = [
-      ...(merged.filesystem.readwritePaths ?? []),
+    filesystem.readwritePaths = [
+      ...(filesystem.readwritePaths ?? []),
       ...toolsPolicy.readwritePaths,
       ...extraReadwrite,
     ];

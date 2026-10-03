@@ -3,7 +3,7 @@
  *
  * These functions enumerate the host environment to discover tool paths,
  * user profile locations, and temporary storage — returning policy fragments
- * that callers can merge into a {@link SandboxPolicy}.
+ * that callers can merge into a {@link ContainerPolicy}.
  */
 
 import * as fs from 'fs';
@@ -18,7 +18,7 @@ import { randomBytes } from 'crypto';
 
 /**
  * A composable fragment of filesystem policy.
- * Callers merge one or more fragments into {@link SandboxPolicy.filesystem}.
+ * Callers merge one or more fragments into {@link ContainerPolicy.filesystem}.
  */
 export interface FilesystemPolicyResult {
     /** Paths that should be granted read-only access inside the container */

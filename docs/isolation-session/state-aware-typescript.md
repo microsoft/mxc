@@ -1,8 +1,8 @@
 # MXC IsolationSession Backend — State-Aware (TypeScript)
 
 This document describes the IsolationSession backend's TypeScript SDK surface under
-the state-aware lifecycle API ([design](../state-aware-lifecycle/mxc-state-aware-sandbox-api.md)).
-It is the SDK companion to the [Rust spec](state-aware-rust.md).
+the state-aware lifecycle API. It is the SDK companion to the
+[Rust backend guide](state-aware-rust.md).
 The Rust doc covers runtime semantics (validation, error mapping, idempotence,
 concurrency); this doc covers SDK API surface, types, and consumer usage patterns.
 
@@ -22,8 +22,8 @@ concurrency); this doc covers SDK API surface, types, and consumer usage pattern
   concurrency, and error mapping.
 - The wire-format envelope — see the
   [main design doc](../state-aware-lifecycle/mxc-state-aware-sandbox-api.md) §7.
-- Cross-backend lifecycle, method signatures, and the typed `MxcError` —
-  see the main design doc §4, §6, §8.
+- Cross-backend lifecycle and error handling — see the SDK documentation and
+  [Rust backend guide](state-aware-rust.md).
 
 ## Per-phase Configs and Metadata
 
@@ -57,12 +57,12 @@ for raw exact APIs.
 
 | Field | Type | Description |
 |---|---|---|
-| `agentUserName` | string | OS-assigned account name, also carried inside the `SandboxId` where it is the addressing key for later phases. |
+| `agentUserName` | string | OS-assigned account name, also carried inside the `ContainerId` where it is the addressing key for later phases. |
 | `agentUserSid` | string | SID of the agent user. Diagnostic only. |
 | `ephemeralWorkspacePath` | string | A directory shared between the caller and this isolated user for staging files into the session. Each isolated user sees only its own workspace; the caller can access every concurrent sandbox's workspace. Deleted when the sandbox is deprovisioned. Does not change the working directory. |
 
 `appId` is deliberately **not** echoed in the metadata — the caller supplied the
-value, so returning it would be redundant surface. The `SandboxId` remains
+value, so returning it would be redundant surface. The `ContainerId` remains
 **opaque** to callers: the payload is an MXC implementation detail, and nothing
 in the SDK parses past the `iso:` prefix.
 
@@ -97,7 +97,7 @@ import {
   deprovisionSandbox,
 } from '@microsoft/mxc-sdk/v1';
 
-const { sandboxId } = await provisionSandbox(
+const { containerId } = await provisionSandbox(
   'isolation_session',
   // Required. The container's network cannot be filtered or denied, so
   // provision explicitly describes all three axes as unrestricted.
@@ -109,15 +109,15 @@ const { sandboxId } = await provisionSandbox(
   },
 );
 
-await startSandbox(sandboxId);
+await startSandbox(containerId);
 const r = await execInSandboxAsync(
-  sandboxId,
+  containerId,
   { process: { commandLine: 'echo hi' } },
 );
 console.log(r.stdout); // "hi"
 
-await stopSandbox(sandboxId);
-await deprovisionSandbox(sandboxId);
+await stopSandbox(containerId);
+await deprovisionSandbox(containerId);
 ```
 
 ## Test helpers
@@ -128,7 +128,7 @@ integration tests on hosts that may lack the runtime:
 - `runOrSkipIfBackendUnavailable<T>(t, label, fn)` — wraps a call and converts
   `backend_unavailable` / `unsupported_phase` `MxcError`s into `t.skip()`. Other
   errors propagate.
-- `safeDeprovision<C>(sandboxId)` — best-effort deprovision; swallows errors so
+- `safeDeprovision<C>(containerId)` — best-effort deprovision; swallows errors so
   cleanup never masks the original failure.
 - `probeStateAwareRuntime<C>(containment)` — module-load probe. Returns a skip-reason
   string or `undefined`. Pair with `describe`'s `{ skip }` option for module-level

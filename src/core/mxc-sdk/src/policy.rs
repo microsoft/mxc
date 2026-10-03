@@ -7,7 +7,7 @@
 //! - [`available_tools_policy`], [`user_profile_policy`], and
 //!   [`temporary_files_policy`] enumerate the host environment to discover
 //!   tool/SDK/profile/temp directories as filesystem-policy fragments.
-//! - [`SandboxPolicy`] describes cross-platform restrictions, and
+//! - [`ContainerPolicy`] describes cross-platform restrictions, and
 //!   [`build_request`] maps it to an [`ExecutionRequest`] for Seatbelt,
 //!   Bubblewrap, and ProcessContainer.
 
@@ -35,7 +35,7 @@ use wxc_common::models::{ExecutionRequest, TelemetryConfig};
 // ---------------------------------------------------------------------------
 
 /// A composable fragment of filesystem policy. Callers merge one or more into
-/// a [`SandboxPolicy`]'s filesystem section.
+/// a [`ContainerPolicy`]'s filesystem section.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FilesystemPolicyResult {
     /// Paths to grant read-only access inside the sandbox.
@@ -423,7 +423,7 @@ pub fn temporary_files_policy(env: Option<&[(String, String)]>) -> FilesystemPol
 }
 
 // ---------------------------------------------------------------------------
-// SandboxPolicy -> ExecutionRequest
+// ContainerPolicy -> ExecutionRequest
 // ---------------------------------------------------------------------------
 
 /// Clipboard access level, mirroring the SDK `ClipboardPolicy`
@@ -441,7 +441,7 @@ pub enum ClipboardPolicy {
     All,
 }
 
-/// Filesystem section of a [`SandboxPolicy`].
+/// Filesystem section of a [`ContainerPolicy`].
 #[derive(Debug, Clone, Default)]
 pub struct FilesystemSection {
     pub readwrite_paths: Vec<String>,
@@ -451,7 +451,7 @@ pub struct FilesystemSection {
     pub clear_policy_on_exit: Option<bool>,
 }
 
-/// UI section of a [`SandboxPolicy`]. All flags default to denied.
+/// UI section of a [`ContainerPolicy`]. All flags default to denied.
 #[derive(Debug, Clone, Default)]
 pub struct UiSection {
     pub allow_windows: bool,
@@ -563,27 +563,27 @@ impl Default for WslcSection {
 }
 
 /// Cross-platform sandbox policy — the Rust analogue of the SDK
-/// `SandboxPolicy`. Describes *what* to restrict; omitted fields are
+/// `ContainerPolicy`. Describes *what* to restrict; omitted fields are
 /// most-restrictive (default-deny).
 ///
 /// Telemetry is intentionally not a policy field. It is invocation
 /// instrumentation rather than a sandbox restriction, matching the global
 /// sandbox-policy design. Build the request first, then use
-/// [`SandboxRequest::set_telemetry_opt_in`] to opt that invocation in.
+/// [`ContainerRequest::set_telemetry_opt_in`] to opt that invocation in.
 ///
 /// This is an authoring type, not a JSON contract. SDK builders construct exact
 /// contract values; raw JSON APIs parse documents under their declared version.
 ///
 /// ```compile_fail
-/// let _: mxc_engine::policy::SandboxPolicy = serde_json::from_str("{}").unwrap();
+/// let _: mxc_engine::policy::ContainerPolicy = serde_json::from_str("{}").unwrap();
 /// ```
 ///
 /// ```compile_fail
-/// serde_json::to_string(&mxc_engine::policy::SandboxPolicy::default()).unwrap();
+/// serde_json::to_string(&mxc_engine::policy::ContainerPolicy::default()).unwrap();
 /// ```
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
-pub struct SandboxPolicy {
+pub struct ContainerPolicy {
     pub filesystem: Option<FilesystemSection>,
     pub network: Option<NetworkSection>,
     pub ui: Option<UiSection>,
@@ -591,21 +591,21 @@ pub struct SandboxPolicy {
     pub timeout_ms: Option<u32>,
 }
 
-/// A spawnable sandbox request, built from a [`SandboxPolicy`] and a command by
+/// A spawnable sandbox request, built from a [`ContainerPolicy`] and a command by
 /// [`build_request`]. Optionally adjust the working directory or environment,
-/// then hand it to [`spawn_sandbox`](crate::v1::spawn_sandbox).
+/// then hand it to [`spawn`](crate::v1::spawn).
 ///
 /// This is the SDK's own request type; the internal execution model it maps to
 /// is an implementation detail callers don't depend on.
 #[derive(Debug, Clone)]
-pub struct SandboxRequest {
+pub struct ContainerRequest {
     /// The internal execution model. `pub(crate)` so the SDK's own modules and
     /// unit tests can map/inspect it, while it stays out of the public API.
     pub(crate) inner: ExecutionRequest,
     requested_sandbox_kind: &'static str,
 }
 
-impl SandboxRequest {
+impl ContainerRequest {
     /// Override the working directory the sandboxed child starts in. Left unset,
     /// it defaults to the policy's resolution.
     pub fn set_working_directory(&mut self, working_directory: impl Into<String>) -> &mut Self {
@@ -774,12 +774,12 @@ impl SandboxRequest {
     }
 }
 
-/// Build a [`SandboxRequest`] from a [`SandboxPolicy`], resolving the host's
+/// Build a [`ContainerRequest`] from a [`ContainerPolicy`], resolving the host's
 /// containment backend — the Rust port of the SDK's `createConfigFromPolicy`.
 ///
 /// The `script` becomes the request's command line, so the returned request is
 /// complete and needs no post-build patching before streaming it via
-/// [`crate::v1::spawn_sandbox`]. An empty script is rejected.
+/// [`crate::v1::spawn`]. An empty script is rejected.
 ///
 /// Maps the V1 high-level policy into the SDK-owned v1 contract,
 /// then adapts that contract through the shared semantic validation path.
@@ -787,14 +787,14 @@ impl SandboxRequest {
 /// Targets the host's native process containment; use
 /// [`build_request_with_containment`] to select a specific backend.
 pub fn build_request(
-    policy: &SandboxPolicy,
+    policy: &ContainerPolicy,
     script: &str,
     container_name: Option<&str>,
-) -> Result<SandboxRequest, crate::Error> {
+) -> Result<ContainerRequest, crate::Error> {
     build_request_with_containment(policy, &Containment::Process, script, container_name)
 }
 
-/// Build a [`SandboxRequest`] for an explicitly chosen [`Containment`] backend
+/// Build a [`ContainerRequest`] for an explicitly chosen [`Containment`] backend
 /// — the Rust port of `createConfigFromPolicy(policy, containment, name)`.
 ///
 /// Same mapping and validation as [`build_request`]; the containment argument
@@ -802,20 +802,20 @@ pub fn build_request(
 ///
 /// ```no_run
 /// use mxc_sdk::v1::{
-///     build_request_with_containment, Containment, SandboxPolicy, WslcSection,
+///     build_request_with_containment, Containment, ContainerPolicy, WslcSection,
 /// };
 ///
-/// let policy = SandboxPolicy::default();
+/// let policy = ContainerPolicy::default();
 /// let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
 /// let request = build_request_with_containment(&policy, &Containment::Wslc(wslc), "python3 -c 'print(1)'", None)?;
 /// # Ok::<(), mxc_sdk::Error>(())
 /// ```
 pub fn build_request_with_containment(
-    policy: &SandboxPolicy,
+    policy: &ContainerPolicy,
     containment: &Containment,
     script: &str,
     container_name: Option<&str>,
-) -> Result<SandboxRequest, crate::Error> {
+) -> Result<ContainerRequest, crate::Error> {
     exact::build_request(policy, containment, script, container_name)
 }
 
@@ -885,7 +885,7 @@ mod tests {
     }
     #[test]
     fn v1_policy_builder_accepts_wslc() {
-        let policy = SandboxPolicy {
+        let policy = ContainerPolicy {
             filesystem: None,
             network: None,
             ui: None,
@@ -904,7 +904,7 @@ mod tests {
 
     #[test]
     fn v1_policy_builder_enforces_capability_construction_rules() {
-        let policy = SandboxPolicy {
+        let policy = ContainerPolicy {
             filesystem: None,
             network: None,
             ui: None,
@@ -933,7 +933,7 @@ mod tests {
     // that is the only thing that distinguishes the two states downstream.
     #[test]
     fn exact_builder_preserves_absent_ui() {
-        let policy = super::SandboxPolicy::default();
+        let policy = super::ContainerPolicy::default();
         assert!(policy.ui.is_none(), "precondition: no ui supplied");
 
         let request =
@@ -949,7 +949,7 @@ mod tests {
     fn exact_builder_preserves_explicit_ui() {
         // An explicitly-supplied lockdown `ui` — value-identical to the old
         // synthesized block, which is exactly why presence is what matters.
-        let policy = super::SandboxPolicy {
+        let policy = super::ContainerPolicy {
             ui: Some(super::UiSection::default()),
             ..Default::default()
         };
@@ -1014,13 +1014,13 @@ mod tests {
     }
 
     use super::{
-        build_request, CaptureDenials, CaptureDenialsMode, NetworkAction, NetworkEgressSection,
-        NetworkIngressSection, NetworkSection, RuntimeConfigSection, SandboxPolicy,
+        build_request, CaptureDenials, CaptureDenialsMode, ContainerPolicy, NetworkAction,
+        NetworkEgressSection, NetworkIngressSection, NetworkSection, RuntimeConfigSection,
     };
 
     #[test]
     fn build_request_maps_filesystem_and_timeout() {
-        let policy = SandboxPolicy {
+        let policy = ContainerPolicy {
             filesystem: Some(super::FilesystemSection {
                 readwrite_paths: vec!["/tmp".to_string()],
                 readonly_paths: vec![],
@@ -1033,7 +1033,7 @@ mod tests {
         };
 
         // Inspect the internal model the SDK maps to — a unit concern; the public
-        // API only hands back the opaque `SandboxRequest`.
+        // API only hands back the opaque `ContainerRequest`.
         let request = build_request(&policy, TEST_COMMAND, Some("test-container"))
             .expect("build_request should succeed");
         assert_eq!(request.inner.script_timeout, 5000);
@@ -1048,7 +1048,7 @@ mod tests {
 
     #[test]
     fn build_request_maps_enumerate_paths_for_v1() {
-        let policy = SandboxPolicy {
+        let policy = ContainerPolicy {
             filesystem: None,
             network: None,
             ui: None,
@@ -1072,7 +1072,7 @@ mod tests {
         // The structured `(key, value)` setter mirrors the SDK env channel
         // (`injectEnvIntoConfig`): each pair becomes a `KEY=VALUE` wire entry, in
         // iteration order so a later duplicate key wins downstream.
-        let policy = SandboxPolicy {
+        let policy = ContainerPolicy {
             filesystem: None,
             network: None,
             ui: None,
@@ -1089,13 +1089,13 @@ mod tests {
 
     /// The request's environment as an owned value, so tests can compare it
     /// against a literal without borrowing a temporary.
-    fn env_of(request: &super::SandboxRequest) -> Option<Vec<String>> {
+    fn env_of(request: &super::ContainerRequest) -> Option<Vec<String>> {
         request.env().map(<[String]>::to_vec)
     }
 
     #[test]
     fn set_env_replaces_rather_than_merging() {
-        let policy = SandboxPolicy {
+        let policy = ContainerPolicy {
             filesystem: None,
             network: None,
             ui: None,
@@ -1130,7 +1130,7 @@ mod tests {
 
     #[test]
     fn inherit_default_env_flags_the_request_and_keeps_the_extras() {
-        let policy = SandboxPolicy {
+        let policy = ContainerPolicy {
             filesystem: None,
             network: None,
             ui: None,
@@ -1181,7 +1181,7 @@ mod tests {
             (P::Write, Wire::Write),
             (P::All, Wire::All),
         ] {
-            let policy = SandboxPolicy {
+            let policy = ContainerPolicy {
                 filesystem: None,
                 network: None,
                 ui: Some(super::UiSection {
@@ -1202,7 +1202,7 @@ mod tests {
 
     #[test]
     fn request_builders_reject_an_empty_script() {
-        let policy = SandboxPolicy::default();
+        let policy = ContainerPolicy::default();
 
         let errors = [
             (
@@ -1232,7 +1232,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn seatbelt_extra_mach_lookups_and_keychain_round_trip() {
-        let policy = SandboxPolicy {
+        let policy = ContainerPolicy {
             filesystem: None,
             network: None,
             ui: None,
@@ -1262,7 +1262,7 @@ mod tests {
     fn explicit_seatbelt_configuration_reaches_the_request() {
         use crate::configs::Seatbelt;
 
-        let policy = SandboxPolicy {
+        let policy = ContainerPolicy {
             filesystem: None,
             network: None,
             ui: None,
@@ -1500,14 +1500,14 @@ mod tests {
     use super::{build_request_with_containment, Containment, ProcessContainer, WslcSection};
     use wxc_common::models::ContainmentBackend;
 
-    fn minimal_policy() -> SandboxPolicy {
-        SandboxPolicy::default()
+    fn minimal_policy() -> ContainerPolicy {
+        ContainerPolicy::default()
     }
 
-    fn policy_with_network(network: NetworkSection) -> SandboxPolicy {
-        SandboxPolicy {
+    fn policy_with_network(network: NetworkSection) -> ContainerPolicy {
+        ContainerPolicy {
             network: Some(network),
-            ..SandboxPolicy::default()
+            ..ContainerPolicy::default()
         }
     }
 

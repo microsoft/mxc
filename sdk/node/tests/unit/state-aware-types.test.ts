@@ -320,7 +320,7 @@ describe('SandboxId<C> brand is compile-time only; prefix is the runtime routing
 describe('ProvisionResult<C>', () => {
   it('carries backend-typed metadata for isolation_session', () => {
     const result: ProvisionResult<'isolation_session'> = {
-      sandboxId: 'iso:abcd' as SandboxId<'isolation_session'>,
+      containerId: 'iso:abcd' as SandboxId<'isolation_session'>,
       metadata: {
         agentUserName: 'iso\\agent',
         agentUserSid: 'S-1-5-21-1001',
@@ -412,7 +412,7 @@ describe('Wslc metadata resolves to undefined for every phase', () => {
     assert.strictEqual(startMeta, undefined);
 
     const result: ProvisionResult<'wslc'> = {
-      sandboxId: 'wslc:abcd' as SandboxId<'wslc'>,
+      containerId: 'wslc:abcd' as SandboxId<'wslc'>,
     };
     assert.strictEqual(result.metadata, undefined);
 

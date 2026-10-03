@@ -9,9 +9,8 @@ import { describe, it } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import type { Readable, Writable } from 'node:stream';
 import semver from 'semver';
-import type { ContainerConfig } from '@microsoft/mxc-sdk';
+import type { ContainerConfig } from '../../dist/types.js';
 import {
-  debugSpawnOptions,
   getSdkPackageRoot,
   isLinuxBubblewrap,
   isLinuxRoot,
@@ -113,7 +112,7 @@ describe(`Internal native streaming (schema ${schemaVersion})`, { skip: skipReas
     const policy = {
       ...(os.platform() === 'win32' ? { ui: { allowWindows: true } } : {}),
     };
-    const config = sdk.createConfigFromPolicy(policy);
+    const config = sdk.createConfigForTest(policy);
     config.process!.commandLine = command;
     const request = oneShotModule.prepareOneShotRequest(config);
     const sandbox = await streamingModule.spawnBindingSandboxProcess(request);
@@ -176,7 +175,7 @@ describe(`Internal native streaming (schema ${schemaVersion})`, { skip: skipReas
     const policy = {
       ...(os.platform() === 'win32' ? { ui: { allowWindows: true } } : {}),
     };
-    const config = sdk.createConfigFromPolicy(policy);
+    const config = sdk.createConfigForTest(policy);
     config.process!.commandLine = command;
     const request = oneShotModule.prepareOneShotRequest(config);
     const sandbox = await streamingModule.spawnBindingSandboxProcess(request);
@@ -229,7 +228,7 @@ describe(`Internal native streaming over LXC (schema ${schemaVersion})`, {
     // the container starts with no interface, so this does not wait out a DHCP
     // lease it would never use. A policy naming no network at all would default
     // to `enforcementMode: 'capabilities'`, which LXC refuses outright.
-    const config = sdk.createConfigFromPolicy(
+    const config = sdk.createConfigForTest(
       {
         network: {
           egress: { default: 'deny' },

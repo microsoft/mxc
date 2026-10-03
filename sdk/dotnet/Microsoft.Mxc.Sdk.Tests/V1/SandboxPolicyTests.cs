@@ -12,15 +12,15 @@ namespace Microsoft.Mxc.Sdk.Tests.V1;
 public class SandboxPolicyTests
 {
     [Theory]
-    [InlineData(typeof(SandboxPolicy), "Microsoft.Mxc.Sdk.V1")]
-    [InlineData(typeof(SandboxRequest), "Microsoft.Mxc.Sdk.V1")]
+    [InlineData(typeof(ContainerPolicy), "Microsoft.Mxc.Sdk.V1")]
+    [InlineData(typeof(ContainerRequest), "Microsoft.Mxc.Sdk.V1")]
     [InlineData(typeof(MxcSandbox), "Microsoft.Mxc.Sdk.V1")]
     [InlineData(typeof(MxcLifecycle), "Microsoft.Mxc.Sdk.V1")]
-    [InlineData(typeof(SandboxId), "Microsoft.Mxc.Sdk.V1")]
+    [InlineData(typeof(ContainerId), "Microsoft.Mxc.Sdk.V1")]
     [InlineData(typeof(MxcPlatform), "Microsoft.Mxc.Sdk")]
-    [InlineData(typeof(MxcSandboxProcess), "Microsoft.Mxc.Sdk")]
-    [InlineData(typeof(RunResult), "Microsoft.Mxc.Sdk")]
-    [InlineData(typeof(SandboxWaitResult), "Microsoft.Mxc.Sdk")]
+    [InlineData(typeof(MxcProcess), "Microsoft.Mxc.Sdk.V1")]
+    [InlineData(typeof(Output), "Microsoft.Mxc.Sdk.V1")]
+    [InlineData(typeof(WaitOutcome), "Microsoft.Mxc.Sdk.V1")]
     [InlineData(typeof(ProbeOutput), "Microsoft.Mxc.Sdk")]
     [InlineData(typeof(ProbeFacts), "Microsoft.Mxc.Sdk")]
     [InlineData(typeof(UiCapabilitySupport), "Microsoft.Mxc.Sdk")]
@@ -34,15 +34,15 @@ public class SandboxPolicyTests
     }
 
     [Theory]
-    [InlineData(nameof(SandboxPolicy))]
-    [InlineData(nameof(SandboxRequest))]
+    [InlineData(nameof(ContainerPolicy))]
+    [InlineData(nameof(ContainerRequest))]
     [InlineData(nameof(MxcSandbox))]
     [InlineData(nameof(MxcLifecycle))]
-    [InlineData(nameof(SandboxId))]
+    [InlineData(nameof(ContainerId))]
     public void RootNamespace_DoesNotExportV1AuthoringAliases(string typeName)
     {
         Assert.DoesNotContain(
-            typeof(SandboxPolicy).Assembly.GetExportedTypes(),
+            typeof(ContainerPolicy).Assembly.GetExportedTypes(),
             type => type.FullName == $"Microsoft.Mxc.Sdk.{typeName}");
     }
 
@@ -50,7 +50,7 @@ public class SandboxPolicyTests
     public void SandboxPolicy_RejectsRemovedVersionDuringDeserialization()
     {
         Assert.Throws<JsonException>(() =>
-            JsonSerializer.Deserialize<SandboxPolicy>(
+            JsonSerializer.Deserialize<ContainerPolicy>(
                 """{"version":"0.9.0-alpha"}"""));
     }
 
@@ -60,7 +60,7 @@ public class SandboxPolicyTests
     public void SandboxPolicy_RejectsUnknownNetworkDuringDeserialization(string field)
     {
         var error = Assert.Throws<JsonException>(() =>
-            JsonSerializer.Deserialize<SandboxPolicy>(
+            JsonSerializer.Deserialize<ContainerPolicy>(
                 $$$"""{"network":{"{{{field}}}":true}}"""));
         Assert.Contains(field, error.Message);
     }
@@ -71,7 +71,7 @@ public class SandboxPolicyTests
     public void SandboxPolicy_RejectsExplicitNullNetworkSections(string field)
     {
         var error = Assert.Throws<JsonException>(() =>
-            JsonSerializer.Deserialize<SandboxPolicy>(
+            JsonSerializer.Deserialize<ContainerPolicy>(
                 $$$"""{"network":{"{{{field}}}":null}}""",
                 MxcJson.Options));
         Assert.Contains("cannot be null", error.Message);
@@ -82,7 +82,7 @@ public class SandboxPolicyTests
     [InlineData("""{"network":{}}""")]
     public void SandboxPolicy_AllowsOmittedNetworkSections(string json)
     {
-        var policy = JsonSerializer.Deserialize<SandboxPolicy>(json);
+        var policy = JsonSerializer.Deserialize<ContainerPolicy>(json);
         Assert.NotNull(policy);
         Assert.Null(policy.Network?.Egress);
         Assert.Null(policy.Network?.Ingress);
@@ -107,7 +107,7 @@ public class SandboxPolicyTests
         };
         network.Egress = null;
         network.Ingress = null;
-        var policy = new SandboxPolicy { Network = network };
+        var policy = new ContainerPolicy { Network = network };
 
         using var document = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
         Assert.Empty(document.RootElement.GetProperty("network").EnumerateObject());
@@ -120,7 +120,7 @@ public class SandboxPolicyTests
         {
             Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
         };
-        var policy = JsonSerializer.Deserialize<SandboxPolicy>(
+        var policy = JsonSerializer.Deserialize<ContainerPolicy>(
             """
             {"network":{"egress":{"default":"deny"},"ingress":{"hostLoopback":"allow"}}}
             """,
@@ -138,7 +138,7 @@ public class SandboxPolicyTests
     [Fact]
     public void SandboxPolicy_IsVersionFreeAndDirectional()
     {
-        var policy = new SandboxPolicy
+        var policy = new ContainerPolicy
         {
             Network = new NetworkPolicy
             {
@@ -169,8 +169,8 @@ public class SandboxPolicyTests
     [Fact]
     public void SandboxRequest_UsesExactSdkContract()
     {
-        var request = new SandboxRequest(
-            new SandboxPolicy { TimeoutMs = 5000 },
+        var request = new ContainerRequest(
+            new ContainerPolicy { TimeoutMs = 5000 },
             "echo test");
 
         using var document = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
@@ -183,8 +183,8 @@ public class SandboxPolicyTests
     [Fact]
     public void SandboxRequest_SerializesCompleteV1Policy()
     {
-        var request = new SandboxRequest(
-            new SandboxPolicy
+        var request = new ContainerRequest(
+            new ContainerPolicy
             {
                 Filesystem = new FilesystemPolicy
                 {
@@ -255,7 +255,7 @@ public class SandboxPolicyTests
     public void SandboxRequest_MigratesCaptureDenialsToContainment()
     {
 #pragma warning disable MXC0001
-        var policy = new SandboxPolicy
+        var policy = new ContainerPolicy
         {
             CaptureDenials = new CaptureDenialsPolicy
             {
@@ -263,7 +263,7 @@ public class SandboxPolicyTests
             },
         };
 #pragma warning restore MXC0001
-        var request = new SandboxRequest(policy, "echo test");
+        var request = new ContainerRequest(policy, "echo test");
 
         using var document = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
         Assert.True(
@@ -276,10 +276,12 @@ public class SandboxPolicyTests
     [Fact]
     public void RunAndSpawnRejectNullArguments()
     {
-        Assert.Throws<ArgumentNullException>(() => MxcSandbox.Run(null!, "echo"));
-        Assert.Throws<ArgumentNullException>(() => MxcSandbox.Run(new SandboxPolicy(), null!));
-        Assert.Throws<ArgumentNullException>(() => MxcSandbox.Spawn(null!, "echo"));
-        Assert.Throws<ArgumentNullException>(() => MxcSandbox.Spawn(new SandboxPolicy(), null!));
+        Assert.Throws<ArgumentNullException>(() => MxcSandbox.Run(null!));
+        Assert.Throws<ArgumentNullException>(() => MxcSandbox.Spawn(null!));
+        Assert.Throws<ArgumentNullException>(
+            () => new ContainerRequest(null!, "echo"));
+        Assert.Throws<ArgumentNullException>(
+            () => new ContainerRequest(new ContainerPolicy(), null!));
     }
 
     [Fact]

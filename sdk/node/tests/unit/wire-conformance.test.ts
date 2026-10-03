@@ -44,23 +44,22 @@
 import { test } from 'node:test';
 
 import type {
-  ContainerConfig as RootContainerConfig,
-} from '../../src/index.js';
-import type {
-  SandboxPolicy as V1SandboxPolicy,
-  SandboxId as V1SandboxId,
+  ContainerPolicy as V1ContainerPolicy,
+  ContainerId as V1ContainerId,
+  ContainerRequest,
+  Output,
 } from '../../src/v1.js';
 import type {
-  SandboxPolicy as InternalSandboxPolicy,
+  ContainerPolicy as InternalContainerPolicy,
 } from '../../src/types.js';
 import type {
-  SandboxId as InternalSandboxId,
+  ContainerId as InternalContainerId,
 } from '../../src/state-aware-types.js';
 
-// @ts-expect-error Policy authoring belongs to V1, not the root entry point.
-import type { SandboxPolicy as RootPolicyAlias } from '../../src/index.js';
+// @ts-expect-error Typed request authoring belongs to V1, not the root entry point.
+import type { ContainerRequest as RootContainerRequest } from '../../src/index.js';
 // @ts-expect-error Typed lifecycle identities belong to V1, not the root.
-import type { SandboxId as RootIdAlias } from '../../src/index.js';
+import type { ContainerId as RootContainerId } from '../../src/index.js';
 
 import type {
   ProcessConfig,
@@ -132,14 +131,17 @@ import type {
 
 // --- enum / union conformance ---------------------------------------------
 
-type _RootConfigExport = AssertTrue<Equivalent<RootContainerConfig, ContainerConfig>>;
-type _V1PolicyExport = AssertTrue<Equivalent<V1SandboxPolicy, InternalSandboxPolicy>>;
+type _V1PolicyExport = AssertTrue<Equivalent<V1ContainerPolicy, InternalContainerPolicy>>;
 type _V1IdExport = AssertTrue<
   Equivalent<
-    V1SandboxId<'isolation_session' | 'wslc'>,
-    InternalSandboxId<'isolation_session' | 'wslc'>
+    V1ContainerId<'isolation_session' | 'wslc'>,
+    InternalContainerId<'isolation_session' | 'wslc'>
   >
 >;
+type _ContainerRequestPolicy = AssertTrue<
+  Assignable<ContainerRequest['policy'], V1ContainerPolicy>
+>;
+type _OutputExitCode = AssertTrue<Assignable<Output['exitCode'], number>>;
 
 // Clipboard policy must be value-for-value identical to the wire enum.
 type _Clipboard = AssertTrue<Equivalent<PublicClipboardPolicy, WireClipboardPolicy>>;
@@ -313,7 +315,7 @@ type _RootWireKeys = AssertTrue<
 
 // Reference the assertion aliases so they read as intentionally load-bearing.
 export type WireConformanceAssertions = [
-  _RootConfigExport, _V1PolicyExport, _V1IdExport,
+  _V1PolicyExport, _V1IdExport,
   _Clipboard, _Containment,
   _NetworkEgressDefault, _NetworkIngressDefault, _NetworkIngressHostLoopback,
   _NetworkPortProtocol, _BaseProcessUiIsolation, _PortProtocol,

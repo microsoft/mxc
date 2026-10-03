@@ -97,7 +97,7 @@ function decodeRunResult(status: number, result: AbiRunResult): BindingRunResult
   };
 }
 
-export function runOneShotJson(request: OneShotRequest): BindingRunResult {
+function runOneShotJsonNative(request: OneShotRequest): BindingRunResult {
   const native = loadMxcFfi();
   try {
     const { run, free } = bindRunFunctions(native);
@@ -115,8 +115,24 @@ export function runOneShotJson(request: OneShotRequest): BindingRunResult {
   }
 }
 
+type SyncRunImplementation = (request: OneShotRequest) => BindingRunResult;
+
+let syncRunImplementation = runOneShotJsonNative;
+
+/** @internal Replaces the synchronous native call for one process's unit tests. */
+export function _setBindingRunImplementation(
+  implementation?: SyncRunImplementation,
+): void {
+  syncRunImplementation = implementation ?? runOneShotJsonNative;
+}
+
+export function runOneShotJson(request: OneShotRequest): BindingRunResult {
+  return syncRunImplementation(request);
+}
+
 async function runOneShotJsonAsyncNative(
   request: OneShotRequest,
+  experimental = 0,
 ): Promise<BindingRunResult> {
   const native = loadMxcFfi();
   try {
@@ -126,7 +142,7 @@ async function runOneShotJsonAsyncNative(
     try {
       const requestJson = JSON.stringify(request);
       const status = await new Promise<number>((resolve, reject) => {
-        run.async(requestJson, 0, result, (error, nativeStatus) => {
+        run.async(requestJson, experimental, result, (error, nativeStatus) => {
           if (error !== null) {
             reject(error);
             return;
@@ -146,6 +162,7 @@ async function runOneShotJsonAsyncNative(
 
 type AsyncRunImplementation = (
   request: OneShotRequest,
+  experimental?: number,
 ) => Promise<BindingRunResult>;
 
 let asyncRunImplementation = runOneShotJsonAsyncNative;
@@ -159,8 +176,9 @@ export function _setBindingRunAsyncImplementation(
 
 export function runOneShotJsonAsync(
   request: OneShotRequest,
+  experimental = 0,
 ): Promise<BindingRunResult> {
-  return asyncRunImplementation(request).catch((error: unknown) => {
+  return asyncRunImplementation(request, experimental).catch((error: unknown) => {
     if (error instanceof MxcError) throw error;
     throw new MxcError(
       'backend_error',

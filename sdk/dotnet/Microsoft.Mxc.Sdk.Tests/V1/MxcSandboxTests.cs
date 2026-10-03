@@ -98,8 +98,8 @@ public class MxcSandboxTests
 
         try
         {
-            var request = new SandboxRequest(
-                new SandboxPolicy(),
+            var request = new ContainerRequest(
+                new ContainerPolicy(),
                 "cmd /c exit 0")
             {
                 ContainerName = "dotnet-exact-probe",
@@ -154,43 +154,6 @@ public class MxcSandboxTests
         }
     }
 
-    [Fact]
-    public void StableTypedEntrypoints_RejectExperimentalOptInBeforeNativeCall()
-    {
-        using var native = new FakeRequestProbeInterop
-        {
-            OutputJson = CompleteProbeJson,
-        };
-        var previous = MxcSandbox.RequestProbeInterop;
-        MxcSandbox.RequestProbeInterop = native;
-
-        try
-        {
-#pragma warning disable MXC0001
-            var request = new SandboxRequest(new SandboxPolicy(), "echo")
-            {
-                Experimental = true,
-            };
-#pragma warning restore MXC0001
-            foreach (var action in new Action[]
-                     {
-                         () => MxcSandbox.Run(request),
-                         () => MxcSandbox.Spawn(request),
-                         () => MxcSandbox.Probe(request),
-                     })
-            {
-                var error = Assert.Throws<ArgumentException>(action);
-                Assert.Equal("request", error.ParamName);
-                Assert.Contains("Stable V1", error.Message, StringComparison.Ordinal);
-            }
-            Assert.Equal(0, native.ProbeCalls);
-        }
-        finally
-        {
-            MxcSandbox.RequestProbeInterop = previous;
-        }
-    }
-
     [Theory]
     [InlineData(ErrorCode.MalformedRequest)]
     [InlineData(ErrorCode.UnsupportedContainment)]
@@ -211,8 +174,8 @@ public class MxcSandboxTests
         try
         {
             var error = Assert.Throws<MxcException>(() => MxcSandbox.Probe(
-                new SandboxRequest(
-                    new SandboxPolicy(),
+                new ContainerRequest(
+                    new ContainerPolicy(),
                     "cmd /c exit 0")));
             Assert.Equal(code, error.Code);
             Assert.Contains("probe exploded", error.Message);
@@ -237,8 +200,8 @@ public class MxcSandboxTests
         try
         {
             Assert.Throws<JsonException>(() => MxcSandbox.Probe(
-                new SandboxRequest(
-                    new SandboxPolicy(),
+                new ContainerRequest(
+                    new ContainerPolicy(),
                     "cmd /c exit 0")));
             Assert.True(native.OutputFreed);
             Assert.True(native.ErrorFreed);
@@ -378,8 +341,8 @@ public class MxcSandboxTests
         };
         var previous = MxcSandbox.RequestProbeInterop;
         MxcSandbox.RequestProbeInterop = native;
-        var request = new SandboxRequest(
-            new SandboxPolicy(),
+        var request = new ContainerRequest(
+            new ContainerPolicy(),
             "echo hi")
         {
             Containment = new WslcContainment(),
@@ -406,7 +369,7 @@ public class MxcSandboxTests
     [Fact]
     public void Serialization_V09PreservesDirectionalAndRuntimeAuthoring()
     {
-        var policy = new SandboxPolicy { Version = "0.9.0-alpha" };
+        var policy = new ContainerPolicy { Version = "0.9.0-alpha" };
         using var absent = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
         Assert.False(absent.RootElement.TryGetProperty("network", out _));
         policy.Network = new NetworkPolicy();
@@ -578,26 +541,27 @@ public class MxcSandboxTests
     }
 
     [Fact]
-    public void Run_NullPolicy_Throws()
+    public void Run_NullRequest_Throws()
     {
-        Assert.Throws<ArgumentNullException>(() => MxcSandbox.Run(null!, "echo hi"));
+        Assert.Throws<ArgumentNullException>(
+            () => MxcSandbox.Run((ContainerRequest)null!));
     }
 
     [Fact]
-    public void Run_NullCommand_Throws()
+    public void ContainerRequest_NullCommand_Throws()
     {
-        var policy = new SandboxPolicy { Version = "0.7.0-alpha" };
-        Assert.Throws<ArgumentNullException>(() => MxcSandbox.Run(policy, null!));
+        Assert.Throws<ArgumentNullException>(
+            () => new ContainerRequest(new ContainerPolicy(), null!));
     }
 
     [Fact]
     public void SandboxPolicy_SerializesEnumeratePaths()
     {
-        var policy = new SandboxPolicy
+        var policy = new ContainerPolicy
         {
             Version = "0.9.0-alpha",
         };
-        var request = new SandboxRequest(policy, "echo parity")
+        var request = new ContainerRequest(policy, "echo parity")
         {
             Containment = new ProcessContainerContainment
             {
@@ -622,8 +586,8 @@ public class MxcSandboxTests
     [Fact]
     public void SandboxRequest_NestsCaptureDenialsUnderProcessContainer()
     {
-        var request = new SandboxRequest(
-            new SandboxPolicy { Version = "0.8.0-alpha" },
+        var request = new ContainerRequest(
+            new ContainerPolicy { Version = "0.8.0-alpha" },
             "echo hi")
         {
             Containment = new ProcessContainerContainment
@@ -651,7 +615,7 @@ public class MxcSandboxTests
             Mode = CaptureDenialsMode.Allow,
             RetainEtl = true,
         };
-        var request = new SandboxRequest(
+        var request = new ContainerRequest(
             CreateLegacyCaptureDenialsPolicy(captureDenials),
             "echo hi");
         var originalContainment = request.Containment;
@@ -673,7 +637,7 @@ public class MxcSandboxTests
     [Fact]
     public void SandboxRequest_RejectsConflictingLegacyCaptureDenials()
     {
-        var request = new SandboxRequest(
+        var request = new ContainerRequest(
             CreateLegacyCaptureDenialsPolicy(
                 new CaptureDenialsPolicy { Mode = CaptureDenialsMode.Block }),
             "echo hi")
@@ -701,7 +665,7 @@ public class MxcSandboxTests
             OutputPath = @"C:\logs\denials.json",
             RetainEtl = true,
         };
-        var request = new SandboxRequest(
+        var request = new ContainerRequest(
             CreateLegacyCaptureDenialsPolicy(captureDenials),
             "echo hi")
         {
@@ -728,7 +692,7 @@ public class MxcSandboxTests
     [Fact]
     public void SandboxRequest_RejectsLegacyCaptureDenialsForWslc()
     {
-        var request = new SandboxRequest(
+        var request = new ContainerRequest(
             CreateLegacyCaptureDenialsPolicy(new CaptureDenialsPolicy()),
             "echo hi")
         {
@@ -747,8 +711,8 @@ public class MxcSandboxTests
     [Fact]
     public void SandboxRequest_SerializesExecutionSettings()
     {
-        var request = new SandboxRequest(
-            new SandboxPolicy { Version = "0.8.0-alpha" },
+        var request = new ContainerRequest(
+            new ContainerPolicy { Version = "0.8.0-alpha" },
             "echo hi")
         {
             ContainerName = "test-container",
@@ -778,15 +742,15 @@ public class MxcSandboxTests
     [Fact]
     public void SandboxRequest_DistinguishesOmittedAndExplicitlyEmptyEnvironment()
     {
-        var omitted = new SandboxRequest(
-            new SandboxPolicy { Version = "0.8.0-alpha" },
+        var omitted = new ContainerRequest(
+            new ContainerPolicy { Version = "0.8.0-alpha" },
             "echo hi");
         using var omittedDoc = JsonDocument.Parse(MxcSandbox.SerializeRequest(omitted));
         Assert.False(omittedDoc.RootElement.GetProperty("process").TryGetProperty("env", out _));
         Assert.False(omittedDoc.RootElement.GetProperty("process").TryGetProperty("inheritDefaultEnv", out _));
 
-        var explicitlyEmpty = new SandboxRequest(
-            new SandboxPolicy { Version = "0.8.0-alpha" },
+        var explicitlyEmpty = new ContainerRequest(
+            new ContainerPolicy { Version = "0.8.0-alpha" },
             "echo hi")
         {
             Environment = new(),
@@ -801,8 +765,8 @@ public class MxcSandboxTests
     [Fact]
     public void SandboxRequest_SerializesCompleteProcessContainerOptions()
     {
-        var request = new SandboxRequest(
-            new SandboxPolicy { Version = "0.8.0-alpha" },
+        var request = new ContainerRequest(
+            new ContainerPolicy { Version = "0.8.0-alpha" },
             "echo hi")
         {
             Containment = new ProcessContainerContainment
@@ -848,8 +812,8 @@ public class MxcSandboxTests
     [Fact]
     public void SandboxRequest_SerializesWslcOptions()
     {
-        var request = new SandboxRequest(
-            new SandboxPolicy { Version = "0.8.0-alpha" },
+        var request = new ContainerRequest(
+            new ContainerPolicy { Version = "0.8.0-alpha" },
             "python3 -c 'print(42)'")
         {
             Containment = new WslcContainment
@@ -881,8 +845,8 @@ public class MxcSandboxTests
     [Fact]
     public void SandboxRequest_SerializesSeatbeltOptions()
     {
-        var request = new SandboxRequest(
-            new SandboxPolicy { Version = "0.8.0-alpha" },
+        var request = new ContainerRequest(
+            new ContainerPolicy { Version = "0.8.0-alpha" },
             "echo hi")
         {
             Containment = new SeatbeltContainment
@@ -911,8 +875,8 @@ public class MxcSandboxTests
     [Fact]
     public void SandboxRequest_SerializesLxcOptions()
     {
-        var request = new SandboxRequest(
-            new SandboxPolicy { Version = "0.8.0-alpha" },
+        var request = new ContainerRequest(
+            new ContainerPolicy { Version = "0.8.0-alpha" },
             "echo hi")
         {
             Containment = new LxcContainment
@@ -933,8 +897,8 @@ public class MxcSandboxTests
     [Fact]
     public void SandboxRequest_SerializesBubblewrapContainment()
     {
-        var request = new SandboxRequest(
-            new SandboxPolicy { Version = "0.8.0-alpha" },
+        var request = new ContainerRequest(
+            new ContainerPolicy { Version = "0.8.0-alpha" },
             "echo hi")
         {
             Containment = new BubblewrapContainment(),
@@ -950,8 +914,8 @@ public class MxcSandboxTests
     [Fact]
     public void SandboxRequest_SerializesIsolationSessionContainment()
     {
-        var request = new SandboxRequest(
-            new SandboxPolicy { Version = "0.9.0-alpha" },
+        var request = new ContainerRequest(
+            new ContainerPolicy { Version = "0.9.0-alpha" },
             @"cmd.exe /c echo hi")
         {
             Containment = new IsolationSessionContainment(),
@@ -972,8 +936,8 @@ public class MxcSandboxTests
     [Fact]
     public void SandboxRequest_IsolationSessionDoesNotEnableExperimentalMode()
     {
-        var request = new SandboxRequest(
-            new SandboxPolicy { Version = "0.9.0-alpha" },
+        var request = new ContainerRequest(
+            new ContainerPolicy { Version = "0.9.0-alpha" },
             @"cmd.exe /c echo hi")
         {
             Containment = new IsolationSessionContainment(),
@@ -986,7 +950,7 @@ public class MxcSandboxTests
     [Fact]
     public void SandboxPolicy_SerializesDirectionalNetworking()
     {
-        var policy = new SandboxPolicy
+        var policy = new ContainerPolicy
         {
             Version = "0.8.0-alpha",
             Network = new NetworkPolicy
@@ -1045,7 +1009,7 @@ public class MxcSandboxTests
     [Fact]
     public void SandboxPolicy_OmitsCaptureDenialsWhenNotConfigured()
     {
-        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        var policy = new ContainerPolicy { Version = "0.8.0-alpha" };
         using var doc = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
 
         Assert.False(doc.RootElement.TryGetProperty("captureDenials", out _));
@@ -1056,7 +1020,7 @@ public class MxcSandboxTests
     [InlineData(false)]
     public void SandboxPolicy_TelemetrySerializesCanonicalNestedShape(bool enabled)
     {
-        var policy = new SandboxPolicy
+        var policy = new ContainerPolicy
         {
             Version = "0.9.0-alpha",
             Telemetry = new TelemetrySettings { Enabled = enabled },
@@ -1069,7 +1033,7 @@ public class MxcSandboxTests
         Assert.Equal(enabled, root.GetProperty("telemetry").GetProperty("enabled").GetBoolean());
         Assert.False(root.TryGetProperty("telemetryEnabled", out _));
 
-        var roundTrip = JsonSerializer.Deserialize<SandboxPolicy>(json);
+        var roundTrip = JsonSerializer.Deserialize<ContainerPolicy>(json);
         Assert.NotNull(roundTrip);
         Assert.Equal(enabled, roundTrip.Telemetry?.Enabled);
     }
@@ -1077,7 +1041,7 @@ public class MxcSandboxTests
     [Fact]
     public void SandboxPolicy_OmittedTelemetrySerializesNoTelemetryField()
     {
-        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        var policy = new ContainerPolicy { Version = "0.8.0-alpha" };
 
         using var document = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
         var root = document.RootElement;
@@ -1088,7 +1052,7 @@ public class MxcSandboxTests
     [Fact]
     public void SandboxPolicy_DefaultTelemetrySettingsSerializeDisabled()
     {
-        var policy = new SandboxPolicy
+        var policy = new ContainerPolicy
         {
             Version = "0.9.0-alpha",
             Telemetry = new TelemetrySettings(),
@@ -1108,7 +1072,7 @@ public class MxcSandboxTests
     {
         const string json = """{"captureDenials":{"mode":"block"}}""";
 
-        var policy = JsonSerializer.Deserialize<SandboxPolicy>(
+        var policy = JsonSerializer.Deserialize<ContainerPolicy>(
             json,
             new JsonSerializerOptions
             {
@@ -1133,12 +1097,6 @@ public class MxcSandboxTests
     {
         Assert.Throws<ArgumentOutOfRangeException>(
             () => new WslcPortMapping(windowsPort, containerPort));
-    }
-
-    [Fact]
-    public void Run_NullRequest_Throws()
-    {
-        Assert.Throws<ArgumentNullException>(() => MxcSandbox.Run((SandboxRequest)null!));
     }
 
     [Fact]
@@ -1185,7 +1143,7 @@ public class MxcSandboxTests
     public void SandboxPolicy_CaptureDenialsIsObsoleteWithMigrationGuidance()
     {
 #pragma warning disable MXC0001 // Verifies the obsolete migration contract.
-        var property = typeof(SandboxPolicy).GetProperty(nameof(SandboxPolicy.CaptureDenials));
+        var property = typeof(ContainerPolicy).GetProperty(nameof(ContainerPolicy.CaptureDenials));
 #pragma warning restore MXC0001
         var obsolete = property?.GetCustomAttributes(typeof(ObsoleteAttribute), inherit: false)
             .Cast<ObsoleteAttribute>()
@@ -1204,7 +1162,7 @@ public class MxcSandboxTests
         // The policy property is serializable so legacy JSON round-trips, so the
         // request path must be what keeps it off the wire — the native contract
         // rejects `policy.captureDenials`.
-        var request = new SandboxRequest(
+        var request = new ContainerRequest(
             CreateLegacyCaptureDenialsPolicy(new CaptureDenialsPolicy()),
             "echo hi");
 
@@ -1227,7 +1185,7 @@ public class MxcSandboxTests
             new CaptureDenialsPolicy(),
             "0.9.0-alpha");
         policy.Telemetry = new TelemetrySettings { Enabled = true };
-        var request = new SandboxRequest(policy, "echo hi");
+        var request = new ContainerRequest(policy, "echo hi");
 
         using var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
         var root = doc.RootElement;
@@ -1327,18 +1285,18 @@ public class MxcSandboxTests
         }
     }
 
-    private static SandboxPolicy CreateLegacyCaptureDenialsPolicy(
+    private static ContainerPolicy CreateLegacyCaptureDenialsPolicy(
         CaptureDenialsPolicy captureDenials,
         string version = "0.8.0-alpha")
     {
-        var policy = new SandboxPolicy { Version = version };
+        var policy = new ContainerPolicy { Version = version };
 #pragma warning disable MXC0001 // Exercises compatibility migration.
         policy.CaptureDenials = captureDenials;
 #pragma warning restore MXC0001
         return policy;
     }
 
-    private static CaptureDenialsPolicy? GetLegacyCaptureDenials(SandboxPolicy policy)
+    private static CaptureDenialsPolicy? GetLegacyCaptureDenials(ContainerPolicy policy)
     {
 #pragma warning disable MXC0001 // Verifies compatibility deserialization.
         return policy.CaptureDenials;

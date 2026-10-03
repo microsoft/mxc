@@ -31,9 +31,9 @@ public class MxcLifecycleE2ETests
     /// </summary>
     private sealed class Teardown : IDisposable
     {
-        private SandboxId? _id;
+        private ContainerId? _id;
 
-        public Teardown(SandboxId id) => _id = id;
+        public Teardown(ContainerId id) => _id = id;
 
         /// <summary>
         /// Gives up ownership once the test has deprovisioned itself.
@@ -71,7 +71,7 @@ public class MxcLifecycleE2ETests
     }
 
     private sealed record Started(
-        SandboxId Id, string AgentUserName, string WorkspacePath, Teardown Teardown);
+        ContainerId Id, string AgentUserName, string WorkspacePath, Teardown Teardown);
 
     private static Started ProvisionAndStart()
     {
@@ -93,7 +93,7 @@ public class MxcLifecycleE2ETests
 
         // Nothing asserts the id's shape: it is contractually opaque, and the
         // later phases accepting it is the proof.
-        var teardown = new Teardown(provisioned.SandboxId);
+        var teardown = new Teardown(provisioned.ContainerId);
         try
         {
             var metadata = provisioned.IsolationSessionMetadata;
@@ -107,8 +107,8 @@ public class MxcLifecycleE2ETests
                 string.IsNullOrEmpty(workspace),
                 $"provision metadata carried no ephemeralWorkspacePath: {provisioned.MetadataJson}");
 
-            MxcLifecycle.StartSandbox(provisioned.SandboxId);
-            return new Started(provisioned.SandboxId, agentUserName!, workspace!, teardown);
+            MxcLifecycle.StartSandbox(provisioned.ContainerId);
+            return new Started(provisioned.ContainerId, agentUserName!, workspace!, teardown);
         }
         catch
         {
@@ -118,9 +118,9 @@ public class MxcLifecycleE2ETests
     }
 
     /// <summary>Runs a command to completion and returns its stdout.</summary>
-    private static async Task<string> ExecCapture(SandboxId id, string command)
+    private static async Task<string> ExecCapture(ContainerId id, string command)
     {
-        var run = await MxcLifecycle.ExecInSandboxAsync(id, command);
+        var run = await MxcLifecycle.RunInContainerAsync(id, new ExecRequest(command));
         return run.Stdout;
     }
 
@@ -143,9 +143,9 @@ public class MxcLifecycleE2ETests
         var started = ProvisionAndStart();
         using (started.Teardown)
         {
-            var run = await MxcLifecycle.ExecInSandboxAsync(
+            var run = await MxcLifecycle.RunInContainerAsync(
             started.Id,
-            $"{Cmd} /c whoami",
+            new ExecRequest($"{Cmd} /c whoami"),
             TestContext.Current.CancellationToken);
 
             Assert.Equal(0, run.ExitCode);
@@ -163,7 +163,9 @@ public class MxcLifecycleE2ETests
         var started = ProvisionAndStart();
         using (started.Teardown)
         {
-            using var proc = MxcLifecycle.ExecInSandbox(started.Id, $"{Cmd} /c exit 42");
+            using var proc = MxcLifecycle.SpawnInContainer(
+                started.Id,
+                new ExecRequest($"{Cmd} /c exit 42"));
             var result = proc.Wait();
 
             Assert.False(result.TimedOut);
@@ -181,10 +183,12 @@ public class MxcLifecycleE2ETests
         var started = ProvisionAndStart();
         using (started.Teardown)
         {
-            using var proc = MxcLifecycle.ExecInSandbox(
+            using var proc = MxcLifecycle.SpawnInContainer(
                 started.Id,
-                $"{Cmd} /c ping -n 6 127.0.0.1 >nul",
-                new StateAwareExecOptions { TimeoutMs = 100 });
+                new ExecRequest($"{Cmd} /c ping -n 6 127.0.0.1 >nul")
+                {
+                    TimeoutMs = 100,
+                });
             var result = proc.Wait();
 
             Assert.True(result.TimedOut);

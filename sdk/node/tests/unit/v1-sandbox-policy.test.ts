@@ -10,7 +10,7 @@ import {
 } from '../../src/sandbox.js';
 import { prepareOneShotRequest } from '../../src/bindings/one-shot.js';
 import { SDK_CONTRACT_VERSION } from '../../src/contract-version.js';
-import type { SandboxPolicy } from '../../src/types.js';
+import type { ContainerPolicy } from '../../src/types.js';
 
 describe('v1 high-level policy', () => {
   it('owns exact contract 1.0.0', () => {
@@ -23,8 +23,8 @@ describe('v1 high-level policy', () => {
 
   it('rejects caller-selected exact versions with raw-config guidance', () => {
     assert.throws(
-      () => createConfigFromPolicy({ version: '0.9.0-alpha' } as SandboxPolicy),
-      /no longer accepts a caller-selected version.*ContainerConfig/,
+      () => createConfigFromPolicy({ version: '0.9.0-alpha' } as ContainerPolicy),
+      /no longer accepts a caller-selected version/,
     );
   });
 
@@ -42,7 +42,7 @@ describe('v1 high-level policy', () => {
       assert.throws(
         () => createConfigFromPolicy({
           network: { [field]: field === 'proxy' ? null : false },
-        } as SandboxPolicy),
+        } as ContainerPolicy),
         new RegExp(`network\\.${field}.*not part of the v1 API`),
       );
     });
@@ -160,7 +160,7 @@ describe('v1 high-level policy', () => {
   });
 
   it('limits enumeratePaths to Windows ProcessContainer', () => {
-    const policy: SandboxPolicy = {
+    const policy: ContainerPolicy = {
       processContainer: {
         filesystem: { enumeratePaths: ['C:\\tools'] },
       },

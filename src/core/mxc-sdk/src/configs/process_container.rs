@@ -141,8 +141,8 @@ pub enum ProcessContainerUiIsolation {
 mod tests {
     use super::*;
     use crate::policy::{
-        build_request_with_containment, Containment, NetworkAction, NetworkEgressSection,
-        NetworkIngressSection, NetworkSection, RuntimeConfigSection, SandboxPolicy,
+        build_request_with_containment, ContainerPolicy, Containment, NetworkAction,
+        NetworkEgressSection, NetworkIngressSection, NetworkSection, RuntimeConfigSection,
     };
     use wxc_common::models::{
         CaptureDenialsMode as RuntimeCaptureDenialsMode, ContainmentBackend,
@@ -151,10 +151,10 @@ mod tests {
 
     const TEST_COMMAND: &str = "echo hello";
 
-    fn policy_with_network(network: Option<NetworkSection>) -> SandboxPolicy {
-        SandboxPolicy {
+    fn policy_with_network(network: Option<NetworkSection>) -> ContainerPolicy {
+        ContainerPolicy {
             network,
-            ..SandboxPolicy::default()
+            ..ContainerPolicy::default()
         }
     }
 

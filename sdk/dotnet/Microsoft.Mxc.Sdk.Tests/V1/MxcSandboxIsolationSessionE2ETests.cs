@@ -24,9 +24,9 @@ public class MxcSandboxIsolationSessionE2ETests
     // The backend wraps the command in `cmd.exe /c` itself, so these are bare
     // shell commands. Adding another wrapper nests two shells and the outer one
     // consumes the `&`, which silently changes what runs.
-    private static SandboxRequest Request(string command) =>
+    private static ContainerRequest Request(string command) =>
         new(
-            new SandboxPolicy
+            new ContainerPolicy
             {
                 // The backend cannot restrict the container's network, so it
                 // requires the explicit directional all-allow posture and refuses

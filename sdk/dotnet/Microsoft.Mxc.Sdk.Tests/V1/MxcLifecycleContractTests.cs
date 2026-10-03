@@ -149,9 +149,8 @@ public class MxcLifecycleContractTests
     public void ExecEnvelopeTargetsV1AndKeepsRuntimeProxySeparate()
     {
         var envelope = MxcLifecycle.BuildExecEnvelope(
-            new SandboxId("wslc:sample"),
-            "echo test",
-            new WslcExecOptions
+            new ContainerId("wslc:sample"),
+            new ExecRequest("echo test")
             {
                 RuntimeConfig = new NetworkRuntimeConfig
                 {
@@ -169,7 +168,7 @@ public class MxcLifecycleContractTests
     [Fact]
     public void EveryIdPhaseTargetsV1()
     {
-        var id = new SandboxId("iso:sample");
+        var id = new ContainerId("iso:sample");
         foreach (JsonObject envelope in new[]
         {
             MxcLifecycle.BuildStartEnvelope(id),
@@ -198,9 +197,8 @@ public class MxcLifecycleContractTests
     {
         Assert.Throws<ArgumentException>(() =>
             MxcLifecycle.BuildExecEnvelope(
-                new SandboxId("wslc:sample"),
-                "echo test",
-                new WslcExecOptions
+                new ContainerId("wslc:sample"),
+                new ExecRequest("echo test")
                 {
                     RuntimeConfig = new NetworkRuntimeConfig
                     {

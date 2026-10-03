@@ -97,7 +97,8 @@ public class MxcExceptionTests
     {
         var policy = InvalidCidrPolicy();
 
-        var ex = Assert.Throws<MxcException>(() => MxcSandbox.Run(policy, "echo hi"));
+        var ex = Assert.Throws<MxcException>(
+            () => MxcSandbox.Run(new ContainerRequest(policy, "echo hi")));
 
         Assert.Equal(ErrorCode.MalformedRequest, ex.Code);
         Assert.False(string.IsNullOrEmpty(ex.Message));
@@ -114,14 +115,15 @@ public class MxcExceptionTests
         // reaches the caller by that route too.
         var policy = InvalidCidrPolicy();
 
-        var ex = Assert.Throws<MxcException>(() => MxcSandbox.Spawn(policy, "echo hi"));
+        var ex = Assert.Throws<MxcException>(
+            () => MxcSandbox.Spawn(new ContainerRequest(policy, "echo hi")));
 
         Assert.Equal(ErrorCode.MalformedRequest, ex.Code);
         Assert.False(string.IsNullOrEmpty(ex.Message));
         Assert.Null(ex.Operation);
     }
 
-    private static SandboxPolicy InvalidCidrPolicy() => new()
+    private static ContainerPolicy InvalidCidrPolicy() => new()
     {
         Network = new NetworkPolicy
         {

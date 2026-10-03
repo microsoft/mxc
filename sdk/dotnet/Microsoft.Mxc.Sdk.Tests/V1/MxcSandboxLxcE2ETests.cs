@@ -23,9 +23,9 @@ public class MxcSandboxLxcE2ETests
     // A healthy run finishes in under a second, so this only trips on a wedged attach.
     private const int WaitBoundMs = 180_000;
 
-    private static SandboxRequest Request(string command, string containerName) =>
+    private static ContainerRequest Request(string command, string containerName) =>
         new(
-            new SandboxPolicy
+            new ContainerPolicy
             {
                 TimeoutMs = WaitBoundMs,
 

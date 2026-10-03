@@ -1,18 +1,20 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-namespace Microsoft.Mxc.Sdk;
+using Microsoft.Mxc.Sdk;
+
+namespace Microsoft.Mxc.Sdk.V1;
 
 /// <summary>
 /// The result of running a sandbox to completion via
-/// <see cref="V1.MxcSandbox.Run(V1.SandboxPolicy, string)"/>.
+/// <see cref="MxcSandbox.Run(ContainerRequest)"/>.
 /// </summary>
-public sealed class RunResult
+public sealed class Output
 {
     /// <summary>The process exit code (valid when <see cref="TimedOut"/> is false).</summary>
     public int ExitCode { get; init; }
 
-    /// <summary>True if the run hit its <see cref="V1.SandboxPolicy.TimeoutMs"/> and was killed.</summary>
+    /// <summary>True if the run hit its <see cref="ContainerPolicy.TimeoutMs"/> and was killed.</summary>
     public bool TimedOut { get; init; }
 
     /// <summary>Everything the sandboxed process wrote to stdout.</summary>

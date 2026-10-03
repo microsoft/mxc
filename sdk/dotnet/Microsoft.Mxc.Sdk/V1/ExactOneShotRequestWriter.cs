@@ -10,24 +10,15 @@ internal static class ExactOneShotRequestWriter
 {
     internal static readonly JsonSerializerOptions JsonOptions = MxcJson.Options;
 
-    internal static string Serialize(SandboxRequest request)
+    internal static string Serialize(ContainerRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
         return MxcJson.Serialize(ToWire(request), JsonOptions);
     }
 
-    internal static Wire.OneShotRequest ToWire(SandboxRequest request)
+    internal static Wire.OneShotRequest ToWire(ContainerRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-#pragma warning disable MXC0001 // Reject the obsolete option before any normalization or native call.
-        if (request.Experimental)
-#pragma warning restore MXC0001
-        {
-            throw new ArgumentException(
-                "Stable V1 requests cannot opt in to experimental features; "
-                    + "use a raw exact development-contract request with explicit authorization.",
-                nameof(request));
-        }
         var normalized = NormalizeCompatibilityAliases(request);
         var policy = normalized.Policy;
 
@@ -86,7 +77,7 @@ internal static class ExactOneShotRequestWriter
 
     private static string MintContainerId() => $"dotnet-{Guid.NewGuid():N}";
 
-    private static Wire.Process Process(SandboxRequest request)
+    private static Wire.Process Process(ContainerRequest request)
     {
         var process = new Wire.Process
         {
@@ -427,7 +418,7 @@ internal static class ExactOneShotRequestWriter
         where TEnum : struct, Enum =>
         new(path, value, $"{typeof(TEnum).Name} value '{Convert.ToInt64(value)}' is not supported.");
 
-    private static SandboxRequest NormalizeCompatibilityAliases(SandboxRequest request)
+    private static ContainerRequest NormalizeCompatibilityAliases(ContainerRequest request)
     {
 #pragma warning disable MXC0001 // Compatibility migration for the obsolete policy field.
         var legacyCaptureDenials = request.Policy.CaptureDenials;
@@ -446,14 +437,14 @@ internal static class ExactOneShotRequestWriter
             ProcessContainerContainment processContainer =>
                 CloneProcessContainer(processContainer, legacyCaptureDenials),
             _ => throw new ArgumentException(
-                $"{nameof(SandboxPolicy)}.CaptureDenials cannot be used with "
+                $"{nameof(ContainerPolicy)}.CaptureDenials cannot be used with "
                     + $"{request.Containment.GetType().Name}; set "
                     + $"{nameof(ProcessContainerContainment)}."
                     + $"{nameof(ProcessContainerContainment.CaptureDenials)} instead.",
                 nameof(request)),
         };
 
-        return new SandboxRequest(request.Policy.WithoutLegacyCaptureDenials(), request.Command)
+        return new ContainerRequest(request.Policy.WithoutLegacyCaptureDenials(), request.Command)
         {
             Containment = containment,
             ContainerName = request.ContainerName,
@@ -474,7 +465,7 @@ internal static class ExactOneShotRequestWriter
             && !CaptureDenialsEqual(containment.CaptureDenials, legacyCaptureDenials))
         {
             throw new ArgumentException(
-                $"{nameof(SandboxPolicy)}.CaptureDenials conflicts with "
+                $"{nameof(ContainerPolicy)}.CaptureDenials conflicts with "
                     + $"{nameof(ProcessContainerContainment)}."
                     + $"{nameof(ProcessContainerContainment.CaptureDenials)}.",
                 "request");

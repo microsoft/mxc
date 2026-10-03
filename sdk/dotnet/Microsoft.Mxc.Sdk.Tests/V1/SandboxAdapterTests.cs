@@ -26,9 +26,9 @@ public class SandboxAdapterTests
         ISandboxRunner runner = new MxcSandboxRunner();
 
         Assert.Throws<ArgumentNullException>(
-            () => runner.Run((SandboxRequest)null!));
+            () => runner.Run((ContainerRequest)null!));
         Assert.Throws<ArgumentNullException>(
-            () => runner.Spawn((SandboxPolicy)null!, "echo hi"));
+            () => runner.Spawn((ContainerRequest)null!));
     }
 
     [Fact]
@@ -54,7 +54,7 @@ public class SandboxAdapterTests
         ISandboxLifecycle lifecycle = new MxcSandboxLifecycle();
 
         var exception = Assert.Throws<MxcException>(
-            () => lifecycle.DryRunStopSandbox(new SandboxId("missing-prefix")));
+            () => lifecycle.DryRunStopSandbox(new ContainerId("missing-prefix")));
 
         Assert.Equal(ErrorCode.MalformedId, exception.Code);
     }
@@ -103,7 +103,7 @@ public class SandboxAdapterTests
     public async Task SandboxProcessContractSupportsInMemoryFakes()
     {
         using var fake = new FakeSandboxProcess("fake output");
-        ISandboxProcess process = fake;
+        IMxcProcess process = fake;
 
         using var reader = new StreamReader(process.StandardOutput!);
         using var closer = process.StandardOutputCloser;
@@ -121,7 +121,7 @@ public class SandboxAdapterTests
     [Fact]
     public void BlockingNativeWaitIsNotPublic()
     {
-        var method = typeof(MxcSandboxProcess).GetMethod(
+        var method = typeof(MxcProcess).GetMethod(
             "WaitBlocking",
             BindingFlags.Public | BindingFlags.Instance);
 
@@ -136,31 +136,19 @@ public class SandboxAdapterTests
 
         public PlatformSupport GetPlatformSupport() => new();
 
-        public RunResult Run(SandboxPolicy policy, string command) =>
+        public Output Run(ContainerRequest request) =>
             throw new NotSupportedException();
 
-        public RunResult Run(SandboxRequest request) =>
-            throw new NotSupportedException();
-
-        public Task<RunResult> RunAsync(
-            SandboxPolicy policy,
-            string command,
+        public Task<Output> RunAsync(
+            ContainerRequest request,
             CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
 
-        public Task<RunResult> RunAsync(
-            SandboxRequest request,
-            CancellationToken cancellationToken = default) =>
-            throw new NotSupportedException();
-
-        public ISandboxProcess Spawn(SandboxPolicy policy, string command) =>
-            throw new NotSupportedException();
-
-        public ISandboxProcess Spawn(SandboxRequest request) =>
+        public IMxcProcess Spawn(ContainerRequest request) =>
             throw new NotSupportedException();
     }
 
-    private sealed class FakeSandboxProcess(string output) : ISandboxProcess
+    private sealed class FakeSandboxProcess(string output) : IMxcProcess
     {
         private readonly MemoryStream _stdout =
             new(System.Text.Encoding.UTF8.GetBytes(output));
@@ -170,15 +158,15 @@ public class SandboxAdapterTests
         public Stream? StandardOutput => _stdout;
         public Stream? StandardError => Stream.Null;
         public bool OutputCloseRequested { get; private set; }
-        public ISandboxStreamCloser? StandardOutputCloser =>
+        public IMxcStreamCloser? StandardOutputCloser =>
             new FakeSandboxStreamCloser(() => OutputCloseRequested = true);
-        public ISandboxStreamCloser? StandardErrorCloser => null;
+        public IMxcStreamCloser? StandardErrorCloser => null;
         public IReadOnlyList<string> Warnings => Array.Empty<string>();
         public SandboxOutputMetadata? OutputMetadata => null;
 
-        public SandboxWaitResult Wait() => new() { ExitCode = 0 };
+        public WaitOutcome Wait() => new() { ExitCode = 0 };
 
-        public Task<SandboxWaitResult> WaitAsync(
+        public Task<WaitOutcome> WaitAsync(
             CancellationToken cancellationToken = default) =>
             Task.FromResult(Wait());
 
@@ -188,7 +176,7 @@ public class SandboxAdapterTests
             return true;
         }
 
-        public Task<(SandboxWaitResult Result, byte[] Stdout, byte[] Stderr)>
+        public Task<(WaitOutcome Result, byte[] Stdout, byte[] Stderr)>
             WaitForExitWithOutputAsync(CancellationToken cancellationToken = default) =>
             Task.FromResult((Wait(), _stdout.ToArray(), Array.Empty<byte>()));
 
@@ -199,7 +187,7 @@ public class SandboxAdapterTests
         public void Dispose() => _stdout.Dispose();
     }
 
-    private sealed class FakeSandboxStreamCloser(Action close) : ISandboxStreamCloser
+    private sealed class FakeSandboxStreamCloser(Action close) : IMxcStreamCloser
     {
         public void Close() => close();
 

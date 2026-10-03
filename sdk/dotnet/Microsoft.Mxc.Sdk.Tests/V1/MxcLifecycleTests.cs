@@ -22,7 +22,7 @@ public class MxcLifecycleTests
         // feature was compiled in and whether or not the host has the service --
         // and it provisions nothing.
         var ex = Assert.Throws<MxcException>(
-            () => MxcLifecycle.StartSandbox(new SandboxId("iso:0123456789abcdef")));
+            () => MxcLifecycle.StartSandbox(new ContainerId("iso:0123456789abcdef")));
 
         Assert.False(
             ex.Code == ErrorCode.BackendUnavailable
@@ -35,7 +35,7 @@ public class MxcLifecycleTests
     {
         var ex = Assert.Throws<MxcException>(
             () => MxcLifecycle.StartSandbox(
-                new SandboxId("wslc:0123456789abcdef0123456789abcdef")));
+                new ContainerId("wslc:0123456789abcdef0123456789abcdef")));
 
         Assert.False(
             ex.Code == ErrorCode.BackendUnavailable
@@ -49,16 +49,18 @@ public class MxcLifecycleTests
         // A non-provision phase resolves the backend from the id prefix; an
         // unknown prefix is unsupported_containment, independent of host and
         // build features.
-        var id = new SandboxId("bogus:12345");
+        var id = new ContainerId("bogus:12345");
         var ex = Assert.Throws<MxcException>(() => MxcLifecycle.StartSandbox(id));
         Assert.Equal(ErrorCode.UnsupportedContainment, ex.Code);
     }
 
     [Fact]
-    public void ExecInSandbox_RejectsWindowsSandboxIds()
+    public void SpawnInContainer_RejectsWindowsSandboxIds()
     {
         var ex = Assert.Throws<MxcException>(
-            () => MxcLifecycle.ExecInSandbox(new SandboxId("wsb:0a1b2c3d"), "echo hi"));
+            () => MxcLifecycle.SpawnInContainer(
+                new ContainerId("wsb:0a1b2c3d"),
+                new ExecRequest("echo hi")));
 
         Assert.Equal(ErrorCode.UnsupportedContainment, ex.Code);
         Assert.Contains("raw exact 1.1.0-alpha state-aware executor route", ex.Message, StringComparison.Ordinal);
@@ -70,7 +72,7 @@ public class MxcLifecycleTests
     public void StartSandbox_RejectsWindowsSandboxIds()
     {
         var ex = Assert.Throws<MxcException>(
-            () => MxcLifecycle.StartSandbox(new SandboxId("wsb:0a1b2c3d")));
+            () => MxcLifecycle.StartSandbox(new ContainerId("wsb:0a1b2c3d")));
 
         Assert.Equal(ErrorCode.UnsupportedContainment, ex.Code);
         Assert.Contains("raw exact 1.1.0-alpha state-aware executor route", ex.Message, StringComparison.Ordinal);
@@ -81,12 +83,12 @@ public class MxcLifecycleTests
     [Fact]
     public void OtherIdPhases_RejectWindowsSandboxIdsWithRawExactRoute()
     {
-        var id = new SandboxId("wsb:0a1b2c3d");
+        var id = new ContainerId("wsb:0a1b2c3d");
         foreach (var action in new Action[]
                  {
                      () => MxcLifecycle.StopSandbox(id),
                      () => MxcLifecycle.DeprovisionSandbox(id),
-                     () => MxcLifecycle.DryRunExecInSandbox(id, "echo hi"),
+                     () => MxcLifecycle.DryRunExecInContainer(id, new ExecRequest("echo hi")),
                  })
         {
             var ex = Assert.Throws<MxcException>(action);
@@ -96,28 +98,10 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void ExecInSandboxAttached_WithoutATerminal_ThrowsMalformedRequest()
-    {
-        // Crosses mxc_exec_state_aware_attached_json itself, which the envelope tests
-        // cannot: it is a separate entry point. That gate short-circuits ahead of
-        // backend dispatch, which is also why this test cannot pin the
-        // experimental opt-in.
-        Assert.SkipUnless(
-            Console.IsOutputRedirected && Console.IsInputRedirected,
-            "a console host satisfies the terminal gate, so the call would "
-                + "dispatch a real attached exec rather than be refused by it");
-
-        var ex = Assert.Throws<MxcException>(
-            () => MxcLifecycle.ExecInSandboxAttached(
-                new SandboxId("iso:0123456789abcdef"), "echo hi"));
-        Assert.Equal(ErrorCode.MalformedRequest, ex.Code);
-    }
-
-    [Fact]
     public void StopSandbox_MalformedId_ThrowsMalformedId()
     {
         // No backend prefix at all is a malformed id.
-        var id = new SandboxId("no-prefix");
+        var id = new ContainerId("no-prefix");
         var ex = Assert.Throws<MxcException>(() => MxcLifecycle.StopSandbox(id));
         Assert.Equal(ErrorCode.MalformedId, ex.Code);
     }
@@ -125,7 +109,7 @@ public class MxcLifecycleTests
     [Fact]
     public void StopSandbox_MalformedIdWithVersionOverride_ThrowsMalformedId()
     {
-        var id = new SandboxId("no-prefix");
+        var id = new ContainerId("no-prefix");
         var options = new StateAwarePhaseOptions { Version = "0.8.0-alpha" };
 
         var ex = Assert.Throws<MxcException>(
@@ -140,7 +124,7 @@ public class MxcLifecycleTests
         // ":payload" clears the ctor's null/empty check and has a colon, but an
         // empty prefix is structural rather than an unregistered backend. The
         // native parse_sandbox_id_prefix pins the same split.
-        var id = new SandboxId(":payload");
+        var id = new ContainerId(":payload");
         var ex = Assert.Throws<MxcException>(() => MxcLifecycle.StopSandbox(id));
         Assert.Equal(ErrorCode.MalformedId, ex.Code);
     }
@@ -148,7 +132,7 @@ public class MxcLifecycleTests
     [Fact]
     public void StopSandbox_DefaultId_ThrowsMalformedId()
     {
-        // default(SandboxId) is legal and leaves Value null; it must surface a
+        // default(ContainerId) is legal and leaves Value null; it must surface a
         // typed error rather than a NullReferenceException.
         var ex = Assert.Throws<MxcException>(
             () => MxcLifecycle.StopSandbox(default));
@@ -160,7 +144,7 @@ public class MxcLifecycleTests
     {
         // A non-empty prefix is well-formed, so it stays UnsupportedContainment
         // and does not get folded into MalformedId by the guard above.
-        var id = new SandboxId("nope:payload");
+        var id = new ContainerId("nope:payload");
         var ex = Assert.Throws<MxcException>(() => MxcLifecycle.StopSandbox(id));
         Assert.Equal(ErrorCode.UnsupportedContainment, ex.Code);
     }
@@ -230,62 +214,27 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void BuildProvisionEnvelope_CompatibilityOmissionDoesNotCreateAcknowledgment()
+    public void SpawnInContainer_UnregisteredPrefix_ThrowsUnsupportedContainment()
     {
-        var options = new ProvisionSandboxOptions();
-        Assert.Throws<ArgumentException>(
-            () => MxcLifecycle.BuildProvisionEnvelope(
-                StateAwareContainment.IsolationSession,
-                options));
-    }
-
-    [Fact]
-    public void ExecInSandbox_UnregisteredPrefix_ThrowsUnsupportedContainment()
-    {
-        var id = new SandboxId("bogus:12345");
-        var ex = Assert.Throws<MxcException>(() => MxcLifecycle.ExecInSandbox(id, "echo hi"));
+        var id = new ContainerId("bogus:12345");
+        var ex = Assert.Throws<MxcException>(
+            () => MxcLifecycle.SpawnInContainer(id, new ExecRequest("echo hi")));
         Assert.Equal(ErrorCode.UnsupportedContainment, ex.Code);
     }
 
     [Fact]
-    public void ExecInSandbox_NullCommand_Throws()
+    public void SpawnInContainer_NullRequest_Throws()
     {
-        var id = new SandboxId("iso:12345");
-        Assert.Throws<ArgumentNullException>(() => MxcLifecycle.ExecInSandbox(id, null!));
-    }
-
-    [Fact]
-    public void SpawnInContainerWithPty_NullCommand_Throws()
-    {
-        var id = new SandboxId("iso:12345");
-        Assert.Throws<ArgumentNullException>(
-            () => MxcLifecycle.SpawnInContainerWithPty(id, null!));
-    }
-
-    [Fact]
-    public void SpawnInContainerWithPty_RejectsZeroDimensionsBeforeNativeCall()
-    {
-        var id = new SandboxId("iso:12345");
-        Assert.Throws<ArgumentOutOfRangeException>(
-            () => MxcLifecycle.SpawnInContainerWithPty(
-                id,
-                "cmd.exe",
-                new MxcPtySize(0, 80)));
-    }
-
-    [Fact]
-    public void ExecInSandboxAttached_NullCommand_Throws()
-    {
-        var id = new SandboxId("iso:12345");
-        Assert.Throws<ArgumentNullException>(() => MxcLifecycle.ExecInSandboxAttached(id, null!));
+        var id = new ContainerId("iso:12345");
+        Assert.Throws<ArgumentNullException>(() => MxcLifecycle.SpawnInContainer(id, null!));
     }
 
     [Fact]
     public void SandboxId_RoundTripsAndCompares()
     {
-        var a = new SandboxId("iso:abc");
-        var b = new SandboxId("iso:abc");
-        var c = new SandboxId("iso:xyz");
+        var a = new ContainerId("iso:abc");
+        var b = new ContainerId("iso:abc");
+        var c = new ContainerId("iso:xyz");
         Assert.Equal(a, b);
         Assert.NotEqual(a, c);
         Assert.Equal("iso:abc", a.Value);
@@ -296,8 +245,8 @@ public class MxcLifecycleTests
     [Fact]
     public void SandboxId_EmptyValue_Throws()
     {
-        Assert.Throws<ArgumentException>(() => new SandboxId(""));
-        Assert.Throws<ArgumentException>(() => new SandboxId(null!));
+        Assert.Throws<ArgumentException>(() => new ContainerId(""));
+        Assert.Throws<ArgumentException>(() => new ContainerId(null!));
     }
 
     [Fact]
@@ -331,7 +280,9 @@ public class MxcLifecycleTests
     public void BuildExecEnvelope_CarriesSandboxIdAndCommandLine()
     {
         var json = MxcLifecycle
-            .BuildExecEnvelope(new SandboxId("iso:abc"), "cmd /c echo hi")
+            .BuildExecEnvelope(
+                new ContainerId("iso:abc"),
+                new ExecRequest("cmd /c echo hi"))
             .ToJsonString();
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
@@ -344,13 +295,18 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void BuildExecEnvelope_RejectsWslcOptionsForAnotherBackend()
+    public void BuildExecEnvelope_RejectsRuntimeConfigForAnotherBackend()
     {
         Assert.Throws<ArgumentException>(
             () => MxcLifecycle.BuildExecEnvelope(
-                new SandboxId("iso:abc"),
-                "echo hi",
-                new WslcExecOptions()));
+                new ContainerId("iso:abc"),
+                new ExecRequest("echo hi")
+                {
+                    RuntimeConfig = new NetworkRuntimeConfig
+                    {
+                        NetworkProxy = "http://proxy.example:8080",
+                    },
+                }));
     }
 
     [Theory]
@@ -361,9 +317,8 @@ public class MxcLifecycleTests
     public void BuildExecEnvelope_RejectsInvalidRuntimeProxy(string url)
     {
         Assert.Throws<ArgumentException>(() => MxcLifecycle.BuildExecEnvelope(
-            new SandboxId("wslc:0123456789abcdef0123456789abcdef"),
-            "echo test",
-            new WslcExecOptions
+            new ContainerId("wslc:0123456789abcdef0123456789abcdef"),
+            new ExecRequest("echo test")
             {
                 RuntimeConfig = new NetworkRuntimeConfig { NetworkProxy = url },
             }));
@@ -372,12 +327,11 @@ public class MxcLifecycleTests
     [Fact]
     public void StateAwareTypes_KeepNetworkAndAcknowledgmentOutOfLaterPhases()
     {
-        foreach (var type in new[] { typeof(StateAwarePhaseOptions), typeof(StateAwareExecOptions) })
-        {
-            Assert.Null(type.GetProperty("Network"));
-            Assert.Null(type.GetProperty("RuntimeConfig"));
-            Assert.Null(type.GetProperty("AcknowledgeUnrestrictedNetwork"));
-        }
+        Assert.Null(typeof(StateAwarePhaseOptions).GetProperty("Network"));
+        Assert.Null(typeof(StateAwarePhaseOptions).GetProperty("RuntimeConfig"));
+        Assert.Null(typeof(StateAwarePhaseOptions).GetProperty("AcknowledgeUnrestrictedNetwork"));
+        Assert.NotNull(typeof(ExecRequest).GetProperty("RuntimeConfig"));
+        Assert.Null(typeof(ExecRequest).GetProperty("Network"));
     }
 
     [Theory]
@@ -386,8 +340,8 @@ public class MxcLifecycleTests
     [InlineData("wsb:01234567")]
     public void BuildNonExecEnvelopes_RejectProxyCarriedThroughBaseOptions(string value)
     {
-        var id = new SandboxId(value);
-        var options = new WslcExecOptions
+        var id = new ContainerId(value);
+        var options = new ExecRequest("echo hi")
         {
             RuntimeConfig = new NetworkRuntimeConfig { NetworkProxy = "http://proxy.example:8080" },
         };
@@ -411,7 +365,7 @@ public class MxcLifecycleTests
             new[]
             {
                 "DryRunDeprovisionSandbox",
-                "DryRunExecInSandbox",
+                "DryRunExecInContainer",
                 "DryRunProvisionSandbox",
                 "DryRunStartSandbox",
                 "DryRunStopSandbox",
@@ -476,7 +430,7 @@ public class MxcLifecycleTests
             Telemetry = new TelemetrySettings { Enabled = true },
         };
         var root = MxcLifecycle
-            .BuildStartEnvelope(new SandboxId("iso:abc"), options);
+            .BuildStartEnvelope(new ContainerId("iso:abc"), options);
 
         Assert.False(root.ContainsKey("correlationVector"));
         Assert.True(root["telemetry"]?["enabled"]?.GetValue<bool>());
@@ -487,13 +441,12 @@ public class MxcLifecycleTests
     [Fact]
     public void BuildExecEnvelope_RelaysStableTelemetryWithoutCorrelationVector()
     {
-        var options = new StateAwareExecOptions
+        var options = new ExecRequest("echo hi")
         {
             Telemetry = new TelemetrySettings { Enabled = true },
         };
         var root = MxcLifecycle.BuildExecEnvelope(
-            new SandboxId("iso:abc"),
-            "echo hi",
+            new ContainerId("iso:abc"),
             options);
 
         Assert.False(root.ContainsKey("correlationVector"));
@@ -503,17 +456,14 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void ExecOptions_RemainAssignableButAreRejectedByNonExecPhases()
+    public void ExecRequest_IsRejectedByNonExecPhases()
     {
         Assert.True(
             typeof(StateAwarePhaseOptions).IsAssignableFrom(
-                typeof(StateAwareExecOptions)));
-        Assert.True(
-            typeof(StateAwarePhaseOptions).IsAssignableFrom(
-                typeof(WslcExecOptions)));
+                typeof(ExecRequest)));
 
-        var id = new SandboxId("iso:abc");
-        var options = new StateAwareExecOptions { WorkingDirectory = "C:\\" };
+        var id = new ContainerId("iso:abc");
+        var options = new ExecRequest("echo hi") { WorkingDirectory = "C:\\" };
 
         foreach (var build in new Action[]
                  {
@@ -528,12 +478,12 @@ public class MxcLifecycleTests
     }
 
     [Fact]
-    public void ExecInSandboxAsync_PreservesCancellationTokenAsThirdParameter()
+    public void RunInContainerAsync_PreservesCancellationTokenAsThirdParameter()
     {
-        static Task<RunResult> InvokeWithDefaultLiteral(SandboxId id, string command) =>
-            MxcLifecycle.ExecInSandboxAsync(id, command, default);
+        static Task<Output> InvokeWithDefaultLiteral(ContainerId id, string command) =>
+            MxcLifecycle.RunInContainerAsync(id, new ExecRequest(command), default);
 
-        Assert.NotNull((Func<SandboxId, string, Task<RunResult>>)InvokeWithDefaultLiteral);
+        Assert.NotNull((Func<ContainerId, string, Task<Output>>)InvokeWithDefaultLiteral);
     }
 
     [Fact]

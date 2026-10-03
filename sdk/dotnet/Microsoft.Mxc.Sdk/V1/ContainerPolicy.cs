@@ -6,12 +6,12 @@ using System.Text.Json.Serialization;
 namespace Microsoft.Mxc.Sdk.V1;
 
 /// <summary>
-/// A cross-platform sandbox policy — describes <em>what</em> to restrict.
+/// A cross-platform container policy — describes <em>what</em> to restrict.
 /// Omitted sections are most-restrictive (default-deny). Serializes to the
 /// camelCase JSON the native layer expects.
 /// </summary>
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
-public sealed class SandboxPolicy
+public sealed class ContainerPolicy
 {
     [JsonIgnore]
     internal string Version { get; set; } = string.Empty;
@@ -30,8 +30,9 @@ public sealed class SandboxPolicy
 
     /// <summary>
     /// Windows ProcessContainer denial capture used by the compatibility
-    /// <see cref="MxcSandbox.Run(SandboxPolicy, string)"/> and
-    /// <see cref="MxcSandbox.Spawn(SandboxPolicy, string)"/> overloads.
+    /// <see cref="ProcessContainerContainment.CaptureDenials"/> setting.
+    /// Configure it on the request containment when possible; request
+    /// serialization migrates this legacy policy value when compatible.
     /// New code should set
     /// <see cref="ProcessContainerContainment.CaptureDenials"/> explicitly.
     /// </summary>
@@ -64,9 +65,9 @@ public sealed class SandboxPolicy
     [JsonPropertyName("telemetry")]
     public TelemetrySettings? Telemetry { get; set; }
 
-    internal SandboxPolicy WithoutLegacyCaptureDenials()
+    internal ContainerPolicy WithoutLegacyCaptureDenials()
     {
-        var clone = (SandboxPolicy)MemberwiseClone();
+        var clone = (ContainerPolicy)MemberwiseClone();
 #pragma warning disable MXC0001 // Clears the compatibility alias on the clone only.
         clone.CaptureDenials = null;
 #pragma warning restore MXC0001
@@ -74,7 +75,7 @@ public sealed class SandboxPolicy
     }
 }
 
-/// <summary>Telemetry section of a <see cref="SandboxPolicy"/>.</summary>
+/// <summary>Telemetry section of a <see cref="ContainerPolicy"/>.</summary>
 public sealed class TelemetrySettings
 {
     /// <summary>
@@ -97,9 +98,9 @@ public enum CaptureDenialsMode
 
     /// <summary>
     /// Allow and record the access. This relaxes containment for the run and emits a warning.
-    /// <see cref="MxcSandbox.Run(SandboxPolicy, string)"/>,
-    /// <see cref="MxcSandbox.RunAsync(SandboxPolicy, string, CancellationToken)"/>, and
-    /// <see cref="MxcSandboxProcess.Warnings"/> expose that warning.
+    /// <see cref="MxcSandbox.Run(ContainerRequest)"/>,
+    /// <see cref="MxcSandbox.RunAsync(ContainerRequest, CancellationToken)"/>, and
+    /// <see cref="MxcProcess.Warnings"/> expose that warning.
     /// </summary>
     Allow,
 }
@@ -133,7 +134,7 @@ public sealed class CaptureDenialsPolicy
     public bool RetainEtl { get; set; }
 }
 
-/// <summary>Filesystem section of a <see cref="SandboxPolicy"/>.</summary>
+/// <summary>Filesystem section of a <see cref="ContainerPolicy"/>.</summary>
 public sealed class FilesystemPolicy
 {
     /// <summary>Paths granted read-write access inside the sandbox.</summary>
@@ -301,7 +302,7 @@ public enum ClipboardPolicy
     All,
 }
 
-/// <summary>UI section of a <see cref="SandboxPolicy"/>. All flags default to denied.</summary>
+/// <summary>UI section of a <see cref="ContainerPolicy"/>. All flags default to denied.</summary>
 public sealed class UiPolicy
 {
     /// <summary>Allow the sandboxed process to create windows.</summary>

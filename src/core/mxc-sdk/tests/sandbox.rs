@@ -5,20 +5,20 @@
 //!
 //! Seatbelt-specific cases run only on macOS. The library exposes only the
 //! streaming API, so "run to completion" here means build a request via
-//! [`mxc_sdk::v1::build_request`], `mxc_sdk::v1::spawn_sandbox`, read the (untaken)
-//! stdout/stderr, then [`wait`](mxc_sdk::Sandbox::wait) for the exit code —
+//! [`mxc_sdk::v1::build_request`], `mxc_sdk::v1::spawn`, read the (untaken)
+//! stdout/stderr, then [`wait`](mxc_sdk::v1::MxcProcess::wait) for the exit code —
 //! the same path the consumer drives.
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-use mxc_sdk::v1::{build_request, spawn_sandbox, SandboxPolicy, SandboxRequest};
+use mxc_sdk::v1::WaitOutcome;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-use mxc_sdk::WaitOutcome;
+use mxc_sdk::v1::{build_request, spawn, ContainerPolicy, ContainerRequest};
 
 /// A Seatbelt request exposing `/tmp` read-write, with the given command and
 /// timeout (ms; `0` == run until exit).
 #[cfg(target_os = "macos")]
-fn seatbelt_request(command: &str, timeout_ms: u32) -> SandboxRequest {
-    let mut policy = SandboxPolicy::default();
+fn seatbelt_request(command: &str, timeout_ms: u32) -> ContainerRequest {
+    let mut policy = ContainerPolicy::default();
     policy.filesystem = Some(mxc_sdk::v1::policy::FilesystemSection {
         readwrite_paths: vec!["/tmp".to_string()],
         readonly_paths: vec![],
@@ -31,8 +31,8 @@ fn seatbelt_request(command: &str, timeout_ms: u32) -> SandboxRequest {
 
 /// A Windows ProcessContainer request exposing `C:\Windows\Temp` read-write.
 #[cfg(target_os = "windows")]
-fn process_container_request(command: &str, timeout_ms: u32) -> SandboxRequest {
-    let mut policy = SandboxPolicy::default();
+fn process_container_request(command: &str, timeout_ms: u32) -> ContainerRequest {
+    let mut policy = ContainerPolicy::default();
     policy.filesystem = Some(mxc_sdk::v1::policy::FilesystemSection {
         readwrite_paths: vec!["C:\\Windows\\Temp".to_string()],
         readonly_paths: vec![],
@@ -56,7 +56,7 @@ struct RunOutcome {
 /// Spawn a request, read its stdout/stderr concurrently, and wait for exit —
 /// the streaming-API equivalent of running to completion.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn spawn_and_wait(request: SandboxRequest) -> Result<RunOutcome, mxc_sdk::Error> {
+fn spawn_and_wait(request: ContainerRequest) -> Result<RunOutcome, mxc_sdk::Error> {
     use std::io::Read;
 
     fn read_thread(
@@ -71,7 +71,7 @@ fn spawn_and_wait(request: SandboxRequest) -> Result<RunOutcome, mxc_sdk::Error>
         })
     }
 
-    let mut proc = spawn_sandbox(request)?;
+    let mut proc = spawn(request)?;
     let out_thread = read_thread(proc.take_stdout());
     let err_thread = read_thread(proc.take_stderr());
     let (exit_code, timed_out) = match proc.wait() {

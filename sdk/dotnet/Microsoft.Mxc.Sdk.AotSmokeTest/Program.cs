@@ -31,7 +31,7 @@ Check(!JsonSerializer.IsReflectionEnabledByDefault, "reflection fallback is disa
 //    filesystem, and UI sections, exercising the camelCase enum converters.
 //    The v1 high-level SDK is version-free (it owns its contract internally),
 //    so no "version" field is emitted.
-var devPolicy = new SandboxPolicy
+var devPolicy = new ContainerPolicy
 {
     TimeoutMs = 5000,
     Filesystem = new FilesystemPolicy
@@ -61,7 +61,7 @@ using (var doc = JsonDocument.Parse(MxcSandbox.SerializePolicy(devPolicy)))
 }
 
 // 2. Serialize a full exact request with ProcessContainer-specific policy.
-var request = new SandboxRequest(devPolicy, "echo hello")
+var request = new ContainerRequest(devPolicy, "echo hello")
 {
     Containment = new ProcessContainerContainment
     {
@@ -86,7 +86,7 @@ using (var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(request)))
 }
 
 // The generated exact wire type must preserve the full unsigned WSLC bound.
-var wslcRequest = new SandboxRequest(new SandboxPolicy(), "echo memory")
+var wslcRequest = new ContainerRequest(new ContainerPolicy(), "echo memory")
 {
     Containment = new WslcContainment { MemoryMb = ulong.MaxValue },
 };
@@ -94,22 +94,6 @@ using (var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(wslcRequest)))
 {
     Check(doc.RootElement.GetProperty("wslc").GetProperty("memoryMb").GetUInt64()
         == ulong.MaxValue, "full unsigned WSLC memory bound");
-}
-
-#pragma warning disable MXC0001
-var experimentalRequest = new SandboxRequest(new SandboxPolicy(), "echo unsupported")
-{
-    Experimental = true,
-};
-#pragma warning restore MXC0001
-try
-{
-    _ = MxcSandbox.SerializeRequest(experimentalRequest);
-    throw new InvalidOperationException("Stable experimental opt-in was silently accepted.");
-}
-catch (ArgumentException ex) when (ex.ParamName == "request")
-{
-    // Expected: stable typed requests cannot authorize development features.
 }
 
 // 3. Deserialize a native backend probe array - including an entry that omits
@@ -191,9 +175,8 @@ Check(provisionEnvelope["network"]?["egress"]?["default"]?.GetValue<string>() ==
 Check(provisionEnvelope["telemetry"]?["enabled"]?.GetValue<bool>() == true, "provision telemetry serialized");
 
 var execEnvelope = MxcLifecycle.BuildExecEnvelope(
-    new SandboxId("wslc:smoke-test"),
-    "echo hello",
-    new WslcExecOptions
+    new ContainerId("wslc:smoke-test"),
+    new ExecRequest("echo hello")
     {
         Environment = new List<string> { "FOO=bar" },
         RuntimeConfig = new NetworkRuntimeConfig { NetworkProxy = "http://127.0.0.1:8080" },
@@ -208,7 +191,7 @@ Check(execEnvelope["runtimeConfig"]?["networkProxy"]?.GetValue<string>() == "htt
 
 // An id-only phase (start/stop/deprovision share this envelope shape).
 var startEnvelope = MxcLifecycle.BuildStartEnvelope(
-    new SandboxId("iso:smoke-test"),
+    new ContainerId("iso:smoke-test"),
     new StateAwarePhaseOptions { Telemetry = new TelemetrySettings { Enabled = true } });
 Check(startEnvelope["phase"]?.GetValue<string>() == "start", "start phase");
 Check(startEnvelope["sandboxId"]?.GetValue<string>() == "iso:smoke-test", "start sandbox id");

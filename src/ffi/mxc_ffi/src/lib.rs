@@ -72,9 +72,8 @@ use std::panic::catch_unwind;
 use std::ptr;
 use std::sync::OnceLock;
 
-use mxc_sdk::{
-    available_backends, platform_support, run_json, Error, ErrorCode, Output, WaitOutcome,
-};
+use mxc_sdk::v1::{Output, WaitOutcome};
+use mxc_sdk::{available_backends, platform_support, run_json, Error, ErrorCode};
 #[cfg(target_os = "windows")]
 use mxc_sdk::{v1::probe, ProbeOutput};
 

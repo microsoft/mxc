@@ -2,12 +2,12 @@
 // Licensed under the MIT License.
 
 //! Tests for the ported SDK helpers: policy discovery, platform support, and
-//! the SandboxPolicy -> SandboxRequest builder.
+//! the ContainerPolicy -> ContainerRequest builder.
 
 use mxc_sdk::platform_support;
 use mxc_sdk::v1::{
     available_tools_policy, build_request, temporary_files_policy, user_profile_policy,
-    SandboxPolicy,
+    ContainerPolicy,
 };
 #[cfg(target_os = "windows")]
 use mxc_sdk::v1::{build_request_with_containment, Containment, WslcSection};
@@ -15,9 +15,9 @@ use mxc_sdk::v1::{build_request_with_containment, Containment, WslcSection};
 use mxc_sdk::ErrorCode;
 
 #[cfg(target_os = "macos")]
-use mxc_sdk::v1::spawn_sandbox;
+use mxc_sdk::v1::spawn;
 #[cfg(target_os = "macos")]
-use mxc_sdk::WaitOutcome;
+use mxc_sdk::v1::WaitOutcome;
 
 fn env_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
     pairs
@@ -140,7 +140,7 @@ fn rust_sdk_builds_directional_networking() {
     network.egress = Some(egress);
     network.ingress = Some(ingress);
 
-    let mut policy = SandboxPolicy::default();
+    let mut policy = ContainerPolicy::default();
     policy.network = Some(network);
 
     build_request(&policy, "echo hello", None)
@@ -168,7 +168,7 @@ fn rust_sdk_builds_directional_process_container_networking_and_capture() {
     network.ingress = Some(ingress);
     network.runtime_config = Some(runtime_config);
 
-    let mut policy = SandboxPolicy::default();
+    let mut policy = ContainerPolicy::default();
     policy.network = Some(network);
     let mut process_network = ProcessContainerNetwork::default();
     process_network.allowed_proxy_peer = Some("Contoso.Proxy_123".to_string());
@@ -188,7 +188,7 @@ fn rust_sdk_builds_directional_process_container_networking_and_capture() {
 #[cfg(target_os = "macos")]
 #[test]
 fn build_request_then_run_seatbelt() {
-    let mut policy = SandboxPolicy::default();
+    let mut policy = ContainerPolicy::default();
     policy.filesystem = Some(mxc_sdk::v1::policy::FilesystemSection {
         readwrite_paths: vec!["/tmp".to_string()],
         readonly_paths: vec![],
@@ -200,7 +200,7 @@ fn build_request_then_run_seatbelt() {
     let request = build_request(&policy, "echo built-from-policy", None)
         .expect("build_request should succeed");
 
-    let mut proc = spawn_sandbox(request).expect("spawn should succeed");
+    let mut proc = spawn(request).expect("spawn should succeed");
     let mut out = String::new();
     if let Some(mut stdout) = proc.take_stdout() {
         let _ = std::io::Read::read_to_string(&mut stdout, &mut out);
@@ -301,10 +301,10 @@ fn platform_support_windows_omits_wslc_when_not_compiled_in() {
 #[test]
 fn request_probe_accepts_default_and_typed_requests() {
     let _: fn(
-        Option<&mxc_sdk::v1::SandboxRequest>,
+        Option<&mxc_sdk::v1::ContainerRequest>,
     ) -> Result<mxc_sdk::ProbeOutput, mxc_sdk::Error> = mxc_sdk::v1::probe;
 
-    let policy = SandboxPolicy::default();
+    let policy = ContainerPolicy::default();
     let request = build_request(&policy, "cmd /c exit 0", None)
         .expect("default ProcessContainer request should build");
 
@@ -319,7 +319,7 @@ fn request_probe_accepts_default_and_typed_requests() {
 #[cfg(target_os = "windows")]
 #[test]
 fn request_probe_rejects_non_process_container_requests() {
-    let policy = SandboxPolicy::default();
+    let policy = ContainerPolicy::default();
     let request = build_request_with_containment(
         &policy,
         &Containment::Wslc(WslcSection::default()),

@@ -1,27 +1,31 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import pty from 'node-pty';
 import * as os from 'os';
-import { spawn, ChildProcess } from 'child_process';
-import { randomBytes } from "crypto";
+import { randomBytes } from 'node:crypto';
 import {
-    SandboxPolicy,
+    ContainerContainment,
+    ContainerPolicy,
+    ContainerRequest,
     ContainerConfig,
     SandboxContainment,
+    Output,
     UnsupportedV1NetworkFields,
 } from './types.js';
-import { prepareSpawn, diagLogVersion, applyLinuxNetworkPolicy } from './helper.js';
+import { applyLinuxNetworkPolicy } from './helper.js';
 import { diagLog } from './diagnostic.js';
 import { MxcError } from './errors.js';
 import { prepareOneShotRequest } from './bindings/one-shot.js';
 import {
+  runOneShotJson,
   runOneShotJsonAsync,
   type BindingRunResult,
 } from './bindings/run.js';
+import {
+  spawnBindingSandboxProcess,
+  spawnBindingSandboxProcessSync,
+} from './bindings/streaming.js';
 import { SDK_CONTRACT_VERSION } from './contract-version.js';
-import { spawnBindingSandboxWithPty } from './bindings/pty.js';
-import { MxcPtyProcess } from './mxc-pty-process.js';
 
 export { SDK_CONTRACT_VERSION };
 const V1_CONTAINMENTS = new Set<SandboxContainment>([
@@ -39,31 +43,28 @@ function generateRandomContainerName(): string {
     return randomBytes(16).toString("hex");
 }
 
-function validateV1Policy(policy: SandboxPolicy, containment: SandboxContainment): void {
+function validateV1Policy(policy: ContainerPolicy, containment: SandboxContainment): void {
     if ('version' in policy) {
-        throw new Error(
-            'SandboxPolicy no longer accepts a caller-selected version; '
-            + 'the v1 SDK targets exact contract 1.0.0. '
-            + 'Use ContainerConfig for raw exact-version configuration.',
-        );
+          throw new MxcError(
+              'malformed_request',
+              'ContainerPolicy no longer accepts a caller-selected version; '
+              + 'the v1 SDK targets exact contract 1.0.0. '
+              + 'The v1 API selects its exact wire contract.',
+          );
     }
     if (!V1_CONTAINMENTS.has(containment)) {
-        throw new Error(
+        throw new MxcError(
+            'unsupported_containment',
             `Containment '${String(containment)}' is not available in the v1.0 high-level SDK. `
-            + 'Use an exact-version ContainerConfig for development-only containment.',
-        );
-    }
-    if (containment === 'isolation_session' && policy.ui !== undefined) {
-        throw new Error(
-            'IsolationSession does not enforce UI policy; omit policy.ui or '
-            + 'use a backend that enforces the requested UI restrictions.',
+            + 'Use a supported V1 containment.',
         );
     }
     if (policy.network !== undefined) {
         for (const field of UnsupportedV1NetworkFields) {
             if (field in policy.network) {
-                throw new Error(
-                    `SandboxPolicy.network.${field} is not part of the v1 API; `
+                throw new MxcError(
+                    'malformed_request',
+                    `ContainerPolicy.network.${field} is not part of the v1 API; `
                     + 'use directional network.egress/network.ingress and '
                     + 'runtimeConfig.networkProxy.',
                 );
@@ -79,7 +80,7 @@ function validateV1Policy(policy: SandboxPolicy, containment: SandboxContainment
  */
 function buildWslcContainerConfig(
     config: ContainerConfig,
-    policy: SandboxPolicy,
+    policy: ContainerPolicy,
     containerId: string,
 ): ContainerConfig {
     config.containment = 'wslc';
@@ -146,7 +147,7 @@ function buildDarwinProcessConfig(
  */
 function buildProcessBaseContainerConfig(
     config: ContainerConfig,
-    policy: SandboxPolicy,
+    policy: ContainerPolicy,
 ): ContainerConfig {
     const capabilities: string[] = [];
     const allowsInternet =
@@ -181,38 +182,21 @@ function buildProcessBaseContainerConfig(
 }
 
 /**
- * Creates a ContainerConfig from a SandboxPolicy and optional containment type.
+ * Builds the internal request config from a V1 policy and containment type.
  *
- * This is the primary API for translating user-facing security intent (SandboxPolicy)
- * into a backend-specific configuration (ContainerConfig). The returned config
- * can be modified before passing to spawnSandboxFromConfig().
+ * This adapter translates user-facing security intent into the exact request
+ * consumed by the in-process binding.
  *
  * @param policy - The sandbox policy expressing security intent
  * @param containment - Containment backend type (default: "process")
  * @param containerName - Optional container name; auto-generated if omitted
- * @returns A fully populated ContainerConfig ready for modification or spawning
- *
- * @example
- * ```typescript
- * const policy: SandboxPolicy = {
- *   network: { egress: { default: 'allow' } },
- *   ui: { allowWindows: true, clipboard: 'read' },
- * };
- *
- * // Simple: use defaults
- * const config = createConfigFromPolicy(policy);
- *
- * // Advanced: tweak backend-specific settings
- * const processContainerConfig = createConfigFromPolicy(policy, "processcontainer");
- * processContainerConfig.processContainer!.ui!.isolation = "atoms";
- * ```
+ * @returns An internal config consumed by the exact-contract adapter.
  */
-export function createConfigFromPolicy(
-    policy: SandboxPolicy,
+function createContainerConfig(
+    policy: ContainerPolicy,
     containment: SandboxContainment = "process",
     containerName?: string,
 ): ContainerConfig {
-    diagLogVersion();
     validateV1Policy(policy, containment);
     const platform = os.platform();
     const enumeratePaths = policy.processContainer?.filesystem?.enumeratePaths;
@@ -329,6 +313,8 @@ export function createConfigFromPolicy(
     throw new Error(`Containment type '${containment}' is not yet supported.`);
 }
 
+export const createConfigFromPolicy = createContainerConfig;
+
 /**
  * Builds a sandbox payload JSON object from the sandbox policy.
  * @param script The command line script to execute
@@ -340,12 +326,12 @@ export function createConfigFromPolicy(
  */
 export function buildSandboxPayload(
     script: string,
-    policy: SandboxPolicy,
+    policy: ContainerPolicy,
     workingDirectory?: string,
     containerName?: string,
     containment: SandboxContainment = "process",
 ): ContainerConfig {
-    const config = createConfigFromPolicy(policy, containment, containerName);
+    const config = createContainerConfig(policy, containment, containerName);
 
     config.process!.commandLine = script;
     config.process!.cwd = workingDirectory;
@@ -353,131 +339,11 @@ export function buildSandboxPayload(
     return config;
 }
 
-/**
- * Options for spawning a sandboxed process
- */
-export interface SandboxSpawnOptions {
-  /**
-   * Enable debug output from wxc-exec
-   */
-  debug?: boolean;
-
-  /**
-   * Authorize experimental backends when using the raw executor-backed
-   * `spawnSandboxFromConfig` API. Stable V1 in-process and state-aware
-   * operations reject `true`.
-   */
-  experimental?: boolean;
-
-  /**
-   * Allow testing-only, deliberately-permissive features that must never run
-   * in production — currently `network.proxy.builtinTestServer` (a bundled
-   * test HTTP proxy with no auth, no body limits, minimal hop-by-hop header
-   * handling). This is a distinct axis from {@link experimental}: a policy
-   * that requests such a feature is rejected unless this is explicitly set,
-   * keeping the gate fail-closed at the SDK boundary (it maps to the native
-   * `--allow-testing-features` flag).
-   */
-  allowTestingFeatures?: boolean;
-
-  /**
-   * Start from the backend's default environment and layer the supplied
-   * environment variables on top of it, rather than replacing it
-   * (default false).
-   *
-   * Without this, an environment you supply is used verbatim — which on the
-   * Windows process container means a sparse environment is missing the
-   * variables Windows requires to be present, and the launch fails. Use this
-   * to express "the usual environment, plus these": the default is the user's
-   * profile block, which only the OS can produce.
-   *
-   * This is a different, smaller set than the calling process's `process.env`,
-   * which you can still pass explicitly as the `env` argument if you want your
-   * own variables handed to the child.
-   *
-   * Maps to `process.inheritDefaultEnv` in the JSON config.
-   */
-  inheritDefaultEnv?: boolean;
-
-  /**
-   * Explicit path to the wxc-exec (or lxc-exec) binary.
-   * When set, the SDK uses this path directly instead of searching.
-   * Useful for packaged apps (e.g., Electron) where the binary
-   * is bundled in a known location.
-   */
-  executablePath?: string;
-
-  /**
-   * Skip platform support check. Use when you know the platform
-   * is compatible and want to bypass build version validation.
-   */
-  skipPlatformCheck?: boolean;
-
-  /**
-   * PTY options to pass to node-pty (only used by spawnSandbox)
-   */
-  ptyOptions?: pty.IPtyForkOptions;
-
-  /**
-   * Dry run mode: parse and validate config without executing.
-   * The native binary validates the config then exits.
-   */
-  dryRun?: boolean;
-
-  /**
-   * Directory for diagnostic log files
-   */
-  logDir?: string;
-
-  /**
-   * When false, uses child_process.spawn instead of node-pty.
-   * Provides reliable exit codes and separate stdout/stderr streams.
-   * Defaults to true (uses PTY).
-   */
-  usePty?: boolean;
-
-  /**
-   * Optional cancellation signal for promise-returning state-aware lifecycle
-   * functions, including `execInSandboxAsync`. Live `execInSandbox` uses
-   * `StateAwareStreamingOptions`; call `kill()` on its returned process.
-   *
-   * Cancellation is best-effort: cancelling a call may leave
-   * any backend-side state (e.g. a partially-provisioned IsolationSession)
-   * wherever it landed. Callers may need a follow-up `deprovisionSandbox`
-   * (or its equivalent) to clean up an orphaned sandbox after an abort.
-   */
-  signal?: AbortSignal;
-}
-
-/** Options for an MXC-owned pseudo-terminal spawn. */
-export interface MxcPtySpawnOptions extends SandboxSpawnOptions {
-  /** Initial terminal row count. Defaults to 24. */
-  rows?: number;
-
-  /** Initial terminal column count. Defaults to 80. */
-  columns?: number;
-}
-
-function unsupportedInProcessRunOption(options: SandboxSpawnOptions): string | undefined {
-  if (options.debug === true) return 'debug';
-  if (options.allowTestingFeatures === true) return 'allowTestingFeatures';
-  if (options.skipPlatformCheck === true) return 'skipPlatformCheck';
-  if (options.executablePath !== undefined) return 'executablePath';
-  if (options.ptyOptions !== undefined) return 'ptyOptions';
-  if (options.dryRun === true) return 'dryRun';
-  if (options.logDir !== undefined) return 'logDir';
-  if (options.usePty === true) return 'usePty';
-  if (options.experimental === true) return 'experimental';
-  if (options.signal !== undefined) return 'signal';
-  return undefined;
-}
-
 function appendDiagnosticLine(output: string, line: string): string {
   const prefix = output.length === 0 || output.endsWith('\n') ? output : `${output}\n`;
   return `${prefix}${line}\n`;
 }
 
-// Preserve diagnostics that the executor CLI previously emitted on stderr.
 function bufferedStderr(result: BindingRunResult): string {
   let stderr = result.stderr;
   for (const warning of result.warnings) {
@@ -497,305 +363,92 @@ function bufferedStderr(result: BindingRunResult): string {
   return stderr;
 }
 
-/**
- * Inject environment variables into the config's `process.env` field as
- * `KEY=VALUE` strings.  This is the explicit channel for passing env vars
- * to the sandboxed child -- the parent process environment is NOT inherited
- * by the sandbox (security: prevents secret leakage).
- */
-function injectEnvIntoConfig(
-  config: ContainerConfig,
-  env: { [key: string]: string | undefined },
-): void {
-  if (!config.process) {
-    config.process = { commandLine: '' };
+function containerConfig(request: ContainerRequest): ContainerConfig {
+  if (request === null || typeof request !== 'object') {
+    throw new MxcError('malformed_request', 'container request must be an object');
   }
-  const entries: string[] = config.process.env ? [...config.process.env] : [];
-  for (const [key, value] of Object.entries(env)) {
-    if (value !== undefined) {
-      entries.push(`${key}=${value}`);
+  if (typeof request.command !== 'string' || request.command.length === 0) {
+    throw new MxcError('malformed_request', 'container request command must be a non-empty string');
+  }
+  if (request.policy === null || typeof request.policy !== 'object') {
+    throw new MxcError('malformed_request', 'container request policy must be an object');
+  }
+
+  const selected = request.containment ?? { type: 'process' as const };
+  const config = createContainerConfig(
+    request.policy,
+    selected.type,
+    request.containerName,
+  );
+  config.process!.commandLine = request.command;
+
+  switch (selected.type) {
+    case 'process':
+    case 'isolation_session':
+    case 'bubblewrap':
+      break;
+    case 'processcontainer':
+      config.processContainer = { ...config.processContainer, ...selected.config };
+      break;
+    case 'wslc':
+      config.wslc = { ...config.wslc, ...selected.config };
+      break;
+    case 'lxc':
+      config.lxc = { ...config.lxc, ...selected.config };
+      break;
+    case 'seatbelt':
+      config.seatbelt = { ...config.seatbelt, ...selected.config };
+      break;
+    default: {
+      const unreachable: never = selected;
+      throw new MxcError(
+        'malformed_request',
+        `unsupported containment '${String(unreachable)}'`,
+      );
     }
   }
-  config.process.env = entries;
+  return config;
 }
 
-/**
- * Apply {@link SandboxSpawnOptions.inheritDefaultEnv} to the config, so the
- * environment is layered on the backend's default rather than replacing it.
- * An option left unset does not clobber a value the caller already put in the
- * config; an explicit boolean overrides it.
- */
-function applyInheritDefaultEnv(config: ContainerConfig, options: SandboxSpawnOptions): void {
-  if (options.inheritDefaultEnv === undefined) {
-    return;
-  }
-  if (!options.inheritDefaultEnv) {
-    if (config.process) {
-      delete config.process.inheritDefaultEnv;
-    }
-    return;
-  }
-  if (!config.process) {
-    config.process = { commandLine: '' };
-  }
-  config.process.inheritDefaultEnv = true;
-}
-
-/**
- * Internal helper: resolves the executor binary path and spawns a PTY process.
- */
-function spawnWithConfig(
-  config: ContainerConfig,
-  options: SandboxSpawnOptions,
-  workingDirectory?: string,
-  env?: { [key: string]: string | undefined },
-): pty.IPty {
-  // Inject env vars into config.process.env so they are passed explicitly to
-  // the sandboxed child via the JSON config (not via process inheritance).
-  if (env) {
-    injectEnvIntoConfig(config, env);
-  }
-  applyInheritDefaultEnv(config, options);
-
-  const { executablePath, args, logger, startTime } = prepareSpawn(config, options);
-
-  try {
-    const ptyOpts: pty.IPtyForkOptions = {
-      name: "xterm-color",
-      cols: 120,
-      rows: 80,
-      ...options.ptyOptions,
-      cwd: workingDirectory || process.cwd(),
-    };
-
-    diagLog(`spawnWithConfig: spawning PTY process, cwd=${ptyOpts.cwd}`);
-
-    const ptyProcess = pty.spawn(executablePath, args, ptyOpts);
-
-    ptyProcess.onExit((event) => {
-      logger?.log('info', 'mxc.spawn.exit', {
-        exitCode: event.exitCode,
-        durationMs: Date.now() - startTime,
-      });
-      logger?.close();
-    });
-
-    return ptyProcess;
-  } catch (err) {
-    logger?.close();
-    throw err;
-  }
-}
-
-/**
- * Spawn a sandboxed process using wxc-exec with a PTY (node-pty) for
- * interactive terminal I/O (colors, input forwarding).
- *
- * @param script The command line script to execute
- * @param policy The sandbox policy
- * @param options - Spawn options
- * @param workingDirectory Optional working directory path
- * @param containerName Optional container name; if not provided, a random name will be generated
- * @param env Optional environment variables
- * @returns IPty object for interacting with the sandboxed process
- * @throws Error if platform is not supported or wxc-exec is not found
- *
- * @example
- * ```typescript
- * const script = 'python -c "import sys; print(sys.version)"';
- * const policy: SandboxPolicy = {};
- *
- * const ptyProcess = spawnSandbox(script, policy);
- * ptyProcess.onData((data) => console.log(data));
- * ptyProcess.onExit((e) => console.log('Exit code:', e.exitCode));
- * ```
- */
-export function spawnSandbox(
-  script: string,
-  policy: SandboxPolicy,
-  options: SandboxSpawnOptions = {},
-  workingDirectory?: string,
-  containerName?: string,
-  env?: { [key: string]: string | undefined },
-): pty.IPty {
-  const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
-  return spawnWithConfig(config, options, workingDirectory, env);
-}
-
-/**
- * Spawn a sandboxed process attached to an MXC-owned pseudo-terminal.
- *
- * Unlike {@link spawnSandbox}, this creates the PTY inside the native MXC
- * runtime and returns an {@link MxcPtyProcess} with reliable lifecycle, resize, and
- * process-tree kill operations. Terminal stderr is merged into the output
- * stream.
- */
-export async function spawnWithPty(
-  config: ContainerConfig,
-  options: MxcPtySpawnOptions = {},
-  workingDirectory?: string,
-  env?: { [key: string]: string | undefined },
-): Promise<MxcPtyProcess> {
-  const unsupportedOption = unsupportedInProcessRunOption(options);
-  if (unsupportedOption !== undefined) {
-    throw new MxcError(
-      'malformed_request',
-      `spawnWithPty does not support executor-only option '${unsupportedOption}'`,
-    );
-  }
-  const rows = options.rows ?? 24;
-  const columns = options.columns ?? 80;
-  if (
-    !Number.isInteger(rows) ||
-    !Number.isInteger(columns) ||
-    rows < 1 ||
-    rows > 32767 ||
-    columns < 1 ||
-    columns > 32767
-  ) {
-    throw new MxcError(
-      'malformed_request',
-      'PTY rows and columns must be integers between 1 and 32767',
-    );
-  }
-
-  const request = prepareOneShotRequest(config, {
-    workingDirectory,
-    env,
-    inheritDefaultEnv: options.inheritDefaultEnv,
+function oneShotRequest(request: ContainerRequest) {
+  const config = containerConfig(request);
+  return prepareOneShotRequest(config, {
+    workingDirectory: request.workingDirectory,
+    env: request.environment,
+    inheritDefaultEnv: request.inheritDefaultEnvironment,
   });
-  return spawnBindingSandboxWithPty(request, options.experimental ?? false, rows, columns);
 }
 
-/**
- * Spawn a sandboxed process from a pre-built ContainerConfig.
- *
- * Use with `createConfigFromPolicy()` when you need to modify
- * backend-specific settings before spawning. The config must have
- * `process.commandLine` already set.
- *
- * @param config The container configuration (from createConfigFromPolicy)
- * @param options - Spawn options
- * @param workingDirectory Optional working directory path
- * @returns IPty when usePty is true or unset; ChildProcess when usePty is false
- *
- * @example
- * ```typescript
- * const config = createConfigFromPolicy(policy, "processcontainer");
- * config.process!.commandLine = 'echo hello';
- * config.processContainer!.ui!.isolation = "atoms";
- *
- * // PTY mode (default) — returns IPty:
- * const ptyProcess = spawnSandboxFromConfig(config);
- *
- * // Non-PTY mode — returns ChildProcess with reliable exit codes:
- * const child = spawnSandboxFromConfig(config, { usePty: false });
- * child.stdout?.on('data', (data) => console.log(data.toString()));
- * ```
- */
-export function spawnSandboxFromConfig(
-  config: ContainerConfig,
-  options: SandboxSpawnOptions & { usePty: false },
-  workingDirectory?: string,
-  env?: { [key: string]: string | undefined }
-): ChildProcess;
-export function spawnSandboxFromConfig(
-  config: ContainerConfig,
-  options?: SandboxSpawnOptions,
-  workingDirectory?: string,
-  env?: { [key: string]: string | undefined }
-): pty.IPty;
-export function spawnSandboxFromConfig(
-  config: ContainerConfig,
-  options: SandboxSpawnOptions = {},
-  workingDirectory?: string,
-  env?: { [key: string]: string | undefined }
-): pty.IPty | ChildProcess {
-  if (options.usePty === false) {
-    // Inject env vars into config.process.env so they are passed explicitly to
-    // the sandboxed child via the JSON config (not via process inheritance).
-    if (env) {
-      injectEnvIntoConfig(config, env);
-    }
-    applyInheritDefaultEnv(config, options);
-
-    const { executablePath, args, logger, startTime } = prepareSpawn(config, options);
-    try {
-      const child = spawn(executablePath, args, {
-        cwd: workingDirectory || process.cwd(),
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-      child.on('close', (code) => {
-        logger?.log('info', 'mxc.spawn.exit', {
-          exitCode: code ?? -1,
-          durationMs: Date.now() - startTime,
-        });
-        logger?.close();
-      });
-      child.on('error', () => {
-        logger?.close();
-      });
-      return child;
-    } catch (err) {
-      logger?.close();
-      throw err;
-    }
-  }
-
-  diagLogVersion();
-  return spawnWithConfig(config, options, workingDirectory, env);
-}
-
-/**
- * Spawn a sandboxed process and return a promise that resolves with output.
- * Runs non-interactive workloads through the native runtime.
- *
- * @param script The command line script to execute
- * @param policy The sandbox policy
- * @param options - Spawn options
- * @param workingDirectory Optional working directory path
- * @param containerName Optional container name; if not provided, a random name will be generated
- *
- * @returns Promise that resolves with stdout/stderr and exit code
- *
- * @example
- * ```typescript
- * const policy: SandboxPolicy = {
- *   filesystem: { readwritePaths: ['/workspace'] },
- * };
- *
- * const result = await spawnSandboxAsync('echo hello', policy);
- * console.log('Output:', result.stdout);
- * console.log('Exit code:', result.exitCode);
- * ```
- */
-export async function spawnSandboxAsync(
-  script: string,
-  policy: SandboxPolicy,
-  options: SandboxSpawnOptions = {},
-  workingDirectory?: string,
-  containerName?: string,
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const unsupportedOption = unsupportedInProcessRunOption(options);
-  if (unsupportedOption !== undefined) {
-    throw new MxcError(
-      'malformed_request',
-      `spawnSandboxAsync does not support executor-only option '${unsupportedOption}'`,
-    );
-  }
-  const config = buildSandboxPayload(script, policy, workingDirectory, containerName);
-  const request = prepareOneShotRequest(config, {
-    inheritDefaultEnv: options.inheritDefaultEnv,
-  });
-  const result = await runOneShotJsonAsync(request);
-  if (result.timedOut) {
-    throw new MxcError('backend_error', 'sandbox execution timed out', {
-      timedOut: true,
-    });
-  }
-  return {
+function toOutput(result: BindingRunResult): Output {
+  const output: Output = {
     stdout: result.stdout,
     stderr: bufferedStderr(result),
     exitCode: result.exitCode,
+    timedOut: result.timedOut,
+    warnings: result.warnings,
   };
+  if (result.outputMetadata !== undefined) {
+    output.outputMetadata = result.outputMetadata;
+  }
+  return output;
+}
+
+/** Spawn a one-shot request and return its live pipe-backed process. */
+export function spawn(request: ContainerRequest) {
+  return spawnBindingSandboxProcessSync(oneShotRequest(request));
+}
+
+/** Asynchronously spawn a one-shot request and return its live process. */
+export async function spawnAsync(request: ContainerRequest) {
+  return spawnBindingSandboxProcess(oneShotRequest(request));
+}
+
+/** Run a one-shot request synchronously and capture its output. */
+export function run(request: ContainerRequest): Output {
+  return toOutput(runOneShotJson(oneShotRequest(request)));
+}
+
+/** Run a one-shot request asynchronously and capture its output. */
+export async function runAsync(request: ContainerRequest): Promise<Output> {
+  return toOutput(await runOneShotJsonAsync(oneShotRequest(request)));
 }

@@ -4,14 +4,15 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using Microsoft.Mxc.Sdk;
 using Microsoft.Mxc.Sdk.Native;
 
-namespace Microsoft.Mxc.Sdk;
+namespace Microsoft.Mxc.Sdk.V1;
 
 /// <summary>
 /// Injectable handle that interrupts reads from one sandbox output stream.
 /// </summary>
-public interface ISandboxStreamCloser : IDisposable
+public interface IMxcStreamCloser : IDisposable
 {
     /// <summary>Close the associated reader.</summary>
     void Close();
@@ -21,7 +22,7 @@ public interface ISandboxStreamCloser : IDisposable
 /// Injectable abstraction for a live sandboxed process. Implement this
 /// interface in tests to provide in-memory streams and deterministic outcomes.
 /// </summary>
-public interface ISandboxProcess : IDisposable
+public interface IMxcProcess : IDisposable
 {
     /// <summary>The child process identifier, or zero when unavailable.</summary>
     uint Id { get; }
@@ -36,10 +37,10 @@ public interface ISandboxProcess : IDisposable
     Stream? StandardError { get; }
 
     /// <summary>A handle that can interrupt standard-output reads.</summary>
-    ISandboxStreamCloser? StandardOutputCloser { get; }
+    IMxcStreamCloser? StandardOutputCloser { get; }
 
     /// <summary>A handle that can interrupt standard-error reads.</summary>
-    ISandboxStreamCloser? StandardErrorCloser { get; }
+    IMxcStreamCloser? StandardErrorCloser { get; }
 
     /// <summary>Security warnings from this sandbox.</summary>
     IReadOnlyList<string> Warnings { get; }
@@ -48,16 +49,16 @@ public interface ISandboxProcess : IDisposable
     SandboxOutputMetadata? OutputMetadata { get; }
 
     /// <summary>Wait for the child to exit.</summary>
-    SandboxWaitResult Wait();
+    WaitOutcome Wait();
 
     /// <summary>Wait asynchronously for the child to exit.</summary>
-    Task<SandboxWaitResult> WaitAsync(CancellationToken cancellationToken = default);
+    Task<WaitOutcome> WaitAsync(CancellationToken cancellationToken = default);
 
     /// <summary>Check whether the child has exited without blocking.</summary>
     bool TryGetExitCode(out int exitCode);
 
     /// <summary>Wait while capturing standard output and error.</summary>
-    Task<(SandboxWaitResult Result, byte[] Stdout, byte[] Stderr)> WaitForExitWithOutputAsync(
+    Task<(WaitOutcome Result, byte[] Stdout, byte[] Stderr)> WaitForExitWithOutputAsync(
         CancellationToken cancellationToken = default);
 
     /// <summary>Kill the child and its process tree.</summary>
@@ -65,7 +66,7 @@ public interface ISandboxProcess : IDisposable
 }
 
 /// <summary>
-/// A live sandboxed process spawned by <see cref="V1.MxcSandbox.Spawn(V1.SandboxPolicy, string)"/>.
+/// A live process spawned by <see cref="MxcSandbox.Spawn(ContainerRequest)"/>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -104,7 +105,7 @@ public interface ISandboxProcess : IDisposable
 /// native handles and kill the child.
 /// </para>
 /// </remarks>
-public class MxcSandboxProcess : ISandboxProcess
+public sealed class MxcProcess : IMxcProcess
 {
     // Poll cadence bounds for the try_wait-based wait loop: start short so a
     // quick child returns promptly, back off to a cap so a long-running child
@@ -135,16 +136,15 @@ public class MxcSandboxProcess : ISandboxProcess
     private ReadStreamState _stderrState;
 
     private readonly List<Task> _drainTasks = new();
-    private readonly List<SandboxStreamCloser> _drainClosers = new();
 
     // The policy timeout (if any) and a monotonic start stamp. The polling wait
     // path enforces this deadline itself: mxc_sandbox_try_wait never kills, and
-    // spawn starts no native watchdog, so without this SandboxPolicy.TimeoutMs
+    // spawn starts no native watchdog, so without this ContainerPolicy.TimeoutMs
     // would be silently ignored on Wait()/WaitAsync().
     private readonly uint? _timeoutMs;
     private readonly long _startTimestamp = Stopwatch.GetTimestamp();
 
-    internal MxcSandboxProcess(MxcSandboxHandle handle, uint? timeoutMs = null)
+    internal MxcProcess(MxcSandboxHandle handle, uint? timeoutMs = null)
     {
         _handle = handle;
         _timeoutMs = NormalizeTimeout(timeoutMs);
@@ -158,7 +158,7 @@ public class MxcSandboxProcess : ISandboxProcess
     /// </summary>
     /// <remarks>
     /// Returns <c>0</c> for a process obtained from
-    /// <see cref="V1.MxcLifecycle.ExecInSandbox"/>: a state-aware exec is driven by
+    /// <see cref="V1.MxcLifecycle.SpawnInContainer"/>: a state-aware exec is driven by
     /// the backend behind its own waiter/terminator and exposes no OS process id.
     /// </remarks>
     public uint Id
@@ -226,7 +226,7 @@ public class MxcSandboxProcess : ISandboxProcess
     /// stdout reads. Dispose the returned closer after use; each property access
     /// returns an independent handle.
     /// </remarks>
-    public SandboxStreamCloser? StandardOutputCloser =>
+    public MxcStreamCloser? StandardOutputCloser =>
         GetReadCloser(stdout: true);
 
     /// <summary>
@@ -238,13 +238,13 @@ public class MxcSandboxProcess : ISandboxProcess
     /// when the backend cannot interrupt stderr reads. Dispose the returned
     /// closer after use; each property access returns an independent handle.
     /// </remarks>
-    public SandboxStreamCloser? StandardErrorCloser =>
+    public MxcStreamCloser? StandardErrorCloser =>
         GetReadCloser(stdout: false);
 
-    ISandboxStreamCloser? ISandboxProcess.StandardOutputCloser =>
+    IMxcStreamCloser? IMxcProcess.StandardOutputCloser =>
         StandardOutputCloser;
 
-    ISandboxStreamCloser? ISandboxProcess.StandardErrorCloser =>
+    IMxcStreamCloser? IMxcProcess.StandardErrorCloser =>
         StandardErrorCloser;
 
     /// <summary>
@@ -361,7 +361,7 @@ public class MxcSandboxProcess : ISandboxProcess
         }
     }
 
-    private SandboxStreamCloser? GetReadCloser(bool stdout)
+    private MxcStreamCloser? GetReadCloser(bool stdout)
     {
         lock (_controlLock)
         {
@@ -377,36 +377,34 @@ public class MxcSandboxProcess : ISandboxProcess
             {
                 return null;
             }
-            return CreateReadCloser(stdout);
+            unsafe
+            {
+                var closer = stdout
+                    ? NativeMethods.mxc_sandbox_stdout_closer(_handle.Ptr)
+                    : NativeMethods.mxc_sandbox_stderr_closer(_handle.Ptr);
+                return closer is null
+                    ? null
+                    : new MxcStreamCloser(MxcStreamCloserHandle.FromRaw(closer));
+            }
         }
-    }
-
-    private unsafe SandboxStreamCloser? CreateReadCloser(bool stdout)
-    {
-        var closer = stdout
-            ? NativeMethods.mxc_sandbox_stdout_closer(_handle.Ptr)
-            : NativeMethods.mxc_sandbox_stderr_closer(_handle.Ptr);
-        return closer is null
-            ? null
-            : new SandboxStreamCloser(MxcStreamCloserHandle.FromRaw(closer));
     }
 
     /// <summary>
     /// Block until the child exits (honouring
-    /// <see cref="V1.SandboxPolicy.TimeoutMs"/> or
-    /// <see cref="V1.StateAwareExecOptions.TimeoutMs"/>), draining any standard
+    /// <see cref="V1.ContainerPolicy.TimeoutMs"/> or
+    /// <see cref="ExecRequest.TimeoutMs"/>), draining any standard
     /// stream you did not take so the child cannot block on a full pipe.
     /// </summary>
     /// <returns>The exit code, or a timed-out result.</returns>
     /// <exception cref="MxcException">A wait error occurred.</exception>
-    public SandboxWaitResult Wait() => WaitCore(CancellationToken.None);
+    public WaitOutcome Wait() => WaitCore(CancellationToken.None);
 
     /// <summary>
     /// Awaitable form of <see cref="Wait"/>. Honours <paramref name="cancellationToken"/>
     /// by abandoning the wait (it does <b>not</b> kill the child — call
     /// <see cref="Kill"/> or <see cref="Dispose"/> for that).
     /// </summary>
-    public Task<SandboxWaitResult> WaitAsync(CancellationToken cancellationToken = default) =>
+    public Task<WaitOutcome> WaitAsync(CancellationToken cancellationToken = default) =>
         Task.Run(() => WaitCore(cancellationToken), cancellationToken);
 
     /// <summary>
@@ -462,7 +460,7 @@ public class MxcSandboxProcess : ISandboxProcess
         }
     }
 
-    private SandboxWaitResult WaitCore(CancellationToken cancellationToken)
+    private WaitOutcome WaitCore(CancellationToken cancellationToken)
     {
         EnsureDrainUntaken();
 
@@ -506,7 +504,7 @@ public class MxcSandboxProcess : ISandboxProcess
     // native wait reaps an already-dead process immediately instead of starting
     // a fresh timeout_ms countdown, then report the timeout that the native call
     // can no longer observe (it sees a killed process, not an expired budget).
-    private SandboxWaitResult WaitAfterDeadline()
+    private WaitOutcome WaitAfterDeadline()
     {
         // A child that exited in the window between the poll above and here ran
         // to completion, so surface its real status rather than a timeout.
@@ -519,18 +517,16 @@ public class MxcSandboxProcess : ISandboxProcess
         // no-ops a kill once the child has been reaped.
         Kill();
         var result = WaitBlocking();
-        return new SandboxWaitResult { ExitCode = result.ExitCode, TimedOut = true };
+        return new WaitOutcome { ExitCode = result.ExitCode, TimedOut = true };
     }
 
     // Called only after try_wait reports exit or the managed deadline expired
     // and the tree was killed. It holds the control lock across the native wait
     // and must not be public: callers need Wait/WaitAsync so concurrent Kill and
     // Dispose stay responsive.
-    private SandboxWaitResult WaitBlocking()
+    private WaitOutcome WaitBlocking()
     {
         EnsureDrainUntaken();
-        SandboxWaitResult result;
-        List<SandboxStreamCloser> drainClosers;
         lock (_controlLock)
         {
             ThrowIfDisposed();
@@ -545,11 +541,8 @@ public class MxcSandboxProcess : ISandboxProcess
             {
                 throw new MxcException((ErrorCode)status, "waiting on the sandbox failed");
             }
-            result = new SandboxWaitResult { ExitCode = exit, TimedOut = timedOut != 0 };
-            drainClosers = TakeDrainClosers();
+            return new WaitOutcome { ExitCode = exit, TimedOut = timedOut != 0 };
         }
-        CloseAndDisposeQuietly(drainClosers);
-        return result;
     }
 
     /// <summary>
@@ -558,7 +551,7 @@ public class MxcSandboxProcess : ISandboxProcess
     /// output-heavy child cannot deadlock. The deadlock-free counterpart of
     /// taking the streams and waiting by hand.
     /// </summary>
-    public async Task<(SandboxWaitResult Result, byte[] Stdout, byte[] Stderr)> WaitForExitWithOutputAsync(
+    public async Task<(WaitOutcome Result, byte[] Stdout, byte[] Stderr)> WaitForExitWithOutputAsync(
         CancellationToken cancellationToken = default)
     {
         var outStream = StandardOutput;
@@ -574,13 +567,6 @@ public class MxcSandboxProcess : ISandboxProcess
         try
         {
             var result = await WaitAsync(cancellationToken).ConfigureAwait(false);
-            var readsClosed =
-                CloseQuietly(outCloser, outStream is not null) &
-                CloseQuietly(errCloser, errStream is not null);
-            if (!readsClosed)
-            {
-                KillQuietly();
-            }
             var stdout = await stdoutTask.ConfigureAwait(false);
             var stderr = await stderrTask.ConfigureAwait(false);
             return (result, stdout, stderr);
@@ -614,7 +600,7 @@ public class MxcSandboxProcess : ISandboxProcess
         }
     }
 
-    private static bool CloseQuietly(SandboxStreamCloser? closer, bool required)
+    private static bool CloseQuietly(MxcStreamCloser? closer, bool required)
     {
         if (closer is null)
         {
@@ -690,27 +676,6 @@ public class MxcSandboxProcess : ISandboxProcess
         }
     }
 
-    internal void ResizePty(MxcPtySize size)
-    {
-        lock (_controlLock)
-        {
-            ThrowIfDisposed();
-            unsafe
-            {
-                var status = NativeMethods.mxc_sandbox_pty_resize(
-                    _handle.Ptr,
-                    size.Rows,
-                    size.Columns);
-                if (status != (int)ErrorCode.Success)
-                {
-                    throw new MxcException(
-                        (ErrorCode)status,
-                        "resizing sandbox PTY failed");
-                }
-            }
-        }
-    }
-
     // Start background readers that drain any standard stream the caller did not
     // take, so a full pipe can never wedge the child while we wait — mirroring
     // the Rust Sandbox::wait drain-untaken behaviour. Idempotent.
@@ -745,11 +710,6 @@ public class MxcSandboxProcess : ISandboxProcess
             slot = new MxcReadPipeStream(MxcReadStreamHandle.FromRaw(s));
         }
         state = ReadStreamState.Draining;
-        var closer = CreateReadCloser(stdout);
-        if (closer is not null)
-        {
-            _drainClosers.Add(closer);
-        }
         var stream = slot;
         _drainTasks.Add(Task.Run(() =>
         {
@@ -765,27 +725,11 @@ public class MxcSandboxProcess : ISandboxProcess
         }));
     }
 
-    private List<SandboxStreamCloser> TakeDrainClosers()
-    {
-        var closers = new List<SandboxStreamCloser>(_drainClosers);
-        _drainClosers.Clear();
-        return closers;
-    }
-
-    private static void CloseAndDisposeQuietly(IEnumerable<SandboxStreamCloser> closers)
-    {
-        foreach (var closer in closers)
-        {
-            _ = CloseQuietly(closer, required: false);
-            closer.Dispose();
-        }
-    }
-
     private void ThrowIfDisposed()
     {
         if (_disposed)
         {
-            throw new ObjectDisposedException(nameof(MxcSandboxProcess));
+            throw new ObjectDisposedException(nameof(MxcProcess));
         }
     }
 
@@ -793,7 +737,6 @@ public class MxcSandboxProcess : ISandboxProcess
     public void Dispose()
     {
         List<Task> drains;
-        List<SandboxStreamCloser> drainClosers;
         lock (_controlLock)
         {
             if (_disposed)
@@ -804,16 +747,12 @@ public class MxcSandboxProcess : ISandboxProcess
             // Snapshot the drain tasks under the lock; no new ones start once
             // _disposed is set (EnsureDrainUntaken throws).
             drains = new List<Task>(_drainTasks);
-            drainClosers = TakeDrainClosers();
         }
 
-        // A descendant may retain a PTY output handle after the foreground
-        // process exits, so interrupt internal readers before waiting for them.
-        CloseAndDisposeQuietly(drainClosers);
-
-        // Free the sandbox handle: mxc_sandbox_free kills a still-running child
-        // tree and closes ordinary pipe write ends. No control op can be
-        // running: they hold _controlLock, which we just took to set _disposed.
+        // Free the sandbox handle first: mxc_sandbox_free kills the child tree,
+        // closing the child's stdout/stderr write ends so any blocked reader or
+        // drain task gets EOF and unblocks. (No control op can be running: they
+        // hold _controlLock, which we just took to set _disposed.)
         _handle.Dispose();
 
         // Now the drain/read tasks observe EOF and finish; wait for them before
@@ -839,11 +778,11 @@ public class MxcSandboxProcess : ISandboxProcess
 /// Independently closes a sandbox output reader, making a blocking read return
 /// EOF without terminating the sandboxed process.
 /// </summary>
-public sealed class SandboxStreamCloser : ISandboxStreamCloser
+public sealed class MxcStreamCloser : IMxcStreamCloser
 {
     private readonly MxcStreamCloserHandle _handle;
 
-    internal SandboxStreamCloser(MxcStreamCloserHandle handle) => _handle = handle;
+    internal MxcStreamCloser(MxcStreamCloserHandle handle) => _handle = handle;
 
     /// <summary>
     /// Close the associated reader. Idempotent and safe to call concurrently

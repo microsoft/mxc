@@ -497,7 +497,7 @@ describe('provisionSandbox', () => {
         appId: 'example.app.id',
       },
     );
-    assert.strictEqual(result.sandboxId, 'iso:reg-abc:prov-1');
+    assert.strictEqual(result.containerId, 'iso:reg-abc:prov-1');
     assert.strictEqual(result.metadata?.agentUserName, 'agent\\u1');
     assert.strictEqual(result.metadata?.agentUserSid, 'S-1-5-21-1001');
     assert.strictEqual(result.metadata?.ephemeralWorkspacePath, 'C:\\ProgramData\\ws');
@@ -531,7 +531,7 @@ describe('provisionSandbox', () => {
     await assert.rejects(
       () => provisionSandbox('isolation_session', ACK, {
         executablePath: 'wxc-exec.exe',
-      }),
+      } as never),
       (err: unknown) => err instanceof MxcError && err.message.includes("does not support option 'executablePath'"),
     );
   });
@@ -669,6 +669,8 @@ describe('execInSandboxAsync', () => {
       stdout: 'stable\n',
       stderr: '',
       exitCode: 0,
+      timedOut: false,
+      warnings: [],
     });
   });
 
@@ -681,7 +683,13 @@ describe('execInSandboxAsync', () => {
       id,
       { process: { commandLine: 'echo hello', timeout: 250 } },
     );
-    assert.deepStrictEqual(result, { stdout: 'hello\n', stderr: '', exitCode: 0 });
+    assert.deepStrictEqual(result, {
+      stdout: 'hello\n',
+      stderr: '',
+      exitCode: 0,
+      timedOut: false,
+      warnings: [],
+    });
     assert.deepStrictEqual(exec.request().process, { commandLine: 'echo hello', timeout: 250 });
     assert.strictEqual(exec.request().correlationVector, undefined);
     assert.strictEqual(exec.timeout(), 250);
@@ -697,7 +705,13 @@ describe('execInSandboxAsync', () => {
       id,
       { process: { commandLine: 'fail' } },
     );
-    assert.deepStrictEqual(result, { stdout: 'oops\n', stderr: 'err\n', exitCode: 7 });
+    assert.deepStrictEqual(result, {
+      stdout: 'oops\n',
+      stderr: 'err\n',
+      exitCode: 7,
+      timedOut: false,
+      warnings: [],
+    });
   });
 
   it('throws the typed MxcError on dispatch failure before a process is returned', async () => {
@@ -730,6 +744,8 @@ describe('execInSandboxAsync', () => {
       stdout: '{"result":{"validated":true}}',
       stderr: '',
       exitCode: 0,
+      timedOut: false,
+      warnings: [],
     });
     assert.strictEqual(requestEnvelope(request()).phase, 'exec');
   });
@@ -1050,7 +1066,7 @@ describe('wslc state-aware lifecycle', () => {
           },
         },
       );
-      assert.strictEqual(result.sandboxId, 'wslc:0123abcd');
+      assert.strictEqual(result.containerId, 'wslc:0123abcd');
       const envelope = requestEnvelope(request());
       assert.strictEqual(envelope.phase, 'provision');
       assert.strictEqual(envelope.containment, 'wslc');
@@ -1080,6 +1096,8 @@ describe('wslc state-aware lifecycle', () => {
         stdout: 'hello-from-wslc\n',
         stderr: '',
         exitCode: 0,
+        timedOut: false,
+        warnings: [],
       });
       assert.strictEqual(exec.request().phase, 'exec');
       assert.strictEqual(exec.request().sandboxId, 'wslc:0123abcd');

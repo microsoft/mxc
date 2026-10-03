@@ -9,7 +9,7 @@ use wxc_common::mxc_error::MxcError;
 
 use crate::configs::{Lxc, ProcessContainer, Seatbelt};
 
-use super::{Containment, SandboxPolicy, SandboxRequest};
+use super::{ContainerPolicy, ContainerRequest, Containment};
 
 macro_rules! optional {
     ($module:ident, $value:expr) => {
@@ -23,7 +23,7 @@ macro_rules! optional {
 mod v1_0;
 
 struct PreparedInput<'a> {
-    policy: &'a SandboxPolicy,
+    policy: &'a ContainerPolicy,
     containment: &'a Containment,
     script: &'a str,
     container_id: String,
@@ -65,11 +65,11 @@ fn container_id(container_name: Option<&str>) -> String {
 }
 
 pub(super) fn build_request(
-    policy: &SandboxPolicy,
+    policy: &ContainerPolicy,
     containment: &Containment,
     script: &str,
     container_name: Option<&str>,
-) -> Result<SandboxRequest, crate::Error> {
+) -> Result<ContainerRequest, crate::Error> {
     if script.is_empty() {
         return Err(error("script parameter is required").into());
     }
@@ -86,7 +86,7 @@ pub(super) fn build_request(
             MxcError::malformed_request(format!("failed to build request: {error}"))
         })?;
     inner.source_contract = None;
-    Ok(SandboxRequest {
+    Ok(ContainerRequest {
         inner,
         requested_sandbox_kind: containment.telemetry_kind(),
     })
@@ -112,7 +112,7 @@ mod tests {
     }
 
     fn assert_blank_proxy_peer_uses_shared_validation(peer: &str) {
-        let policy = SandboxPolicy::default();
+        let policy = ContainerPolicy::default();
         let containment = process_container_with_proxy_peer(peer);
         let prepared = PreparedInput {
             policy: &policy,
@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn preserves_nonempty_allowed_proxy_peer() {
-        let policy = SandboxPolicy {
+        let policy = ContainerPolicy {
             network: Some(NetworkSection {
                 egress: Some(NetworkEgressSection {
                     default: Some(NetworkAction::Deny),

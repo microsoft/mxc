@@ -12,8 +12,8 @@
 
 #![cfg(target_os = "linux")]
 
-use mxc_sdk::v1::{build_request, spawn_sandbox, SandboxPolicy, SandboxRequest};
-use mxc_sdk::WaitOutcome;
+use mxc_sdk::v1::WaitOutcome;
+use mxc_sdk::v1::{build_request, spawn, ContainerPolicy, ContainerRequest};
 
 /// Whether `bwrap` is usable. Reuses the backend's own probe so this gate
 /// cannot drift from the real version check.
@@ -29,8 +29,8 @@ fn bwrap_available() -> bool {
 
 /// A Bubblewrap streaming request (`/tmp` read-write) with the given command
 /// and timeout (ms; `0` == run until exit).
-fn bwrap_request(command: &str, timeout_ms: u32) -> SandboxRequest {
-    let mut policy = SandboxPolicy::default();
+fn bwrap_request(command: &str, timeout_ms: u32) -> ContainerRequest {
+    let mut policy = ContainerPolicy::default();
     policy.filesystem = Some(mxc_sdk::v1::policy::FilesystemSection {
         readwrite_paths: vec!["/tmp".to_string()],
         readonly_paths: vec![],
@@ -56,7 +56,7 @@ fn streaming_bubblewrap_bidirectional_stdio() {
     }
     use std::io::{Read, Write};
 
-    let mut proc = spawn_sandbox(bwrap_request("cat", 0)).expect("spawn");
+    let mut proc = spawn(bwrap_request("cat", 0)).expect("spawn");
 
     let mut stdin = proc.take_stdin().expect("stdin available");
     let mut stdout = proc.take_stdout().expect("stdout available");
@@ -84,7 +84,7 @@ fn streaming_bubblewrap_wait_with_output_captures_both_streams() {
 
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let proc = spawn_sandbox(bwrap_request(&script, 30_000)).expect("spawn");
+        let proc = spawn(bwrap_request(&script, 30_000)).expect("spawn");
         let _ = tx.send(proc.wait_with_output());
     });
 
@@ -114,7 +114,7 @@ fn streaming_bubblewrap_stderr_is_readable_live() {
     }
     use std::io::Read;
 
-    let mut proc = spawn_sandbox(bwrap_request("echo diagnostic 1>&2", 0)).expect("spawn");
+    let mut proc = spawn(bwrap_request("echo diagnostic 1>&2", 0)).expect("spawn");
 
     let mut stderr = proc.take_stderr().expect("stderr available");
     let mut err = String::new();
@@ -132,7 +132,7 @@ fn streaming_bubblewrap_wait_reports_the_workloads_exit_code() {
         return;
     }
     for code in [0, 1, 42] {
-        let mut proc = spawn_sandbox(bwrap_request(&format!("exit {code}"), 0)).expect("spawn");
+        let mut proc = spawn(bwrap_request(&format!("exit {code}"), 0)).expect("spawn");
         assert_eq!(
             proc.wait().expect("wait"),
             WaitOutcome::Exited(code),
@@ -147,7 +147,7 @@ fn streaming_bubblewrap_id_exposes_a_real_pid() {
     if !bwrap_available() {
         return;
     }
-    let mut proc = spawn_sandbox(bwrap_request("sleep 30", 0)).expect("spawn");
+    let mut proc = spawn(bwrap_request("sleep 30", 0)).expect("spawn");
 
     let pid = proc.id();
     assert!(pid > 0, "id() should expose a real pid, got {pid}");
@@ -165,7 +165,7 @@ fn streaming_bubblewrap_kill_reaps_the_child() {
     if !bwrap_available() {
         return;
     }
-    let mut proc = spawn_sandbox(bwrap_request("sleep 30", 0)).expect("spawn");
+    let mut proc = spawn(bwrap_request("sleep 30", 0)).expect("spawn");
     let pid = proc.id();
 
     assert!(
@@ -196,7 +196,7 @@ fn streaming_bubblewrap_timeout_reports_timed_out() {
     if !bwrap_available() {
         return;
     }
-    let mut proc = spawn_sandbox(bwrap_request("sleep 30", 1000)).expect("spawn");
+    let mut proc = spawn(bwrap_request("sleep 30", 1000)).expect("spawn");
 
     let start = std::time::Instant::now();
     assert_eq!(
@@ -220,7 +220,7 @@ fn streaming_bubblewrap_reports_no_output_metadata() {
     if !bwrap_available() {
         return;
     }
-    let mut proc = spawn_sandbox(bwrap_request("true", 0)).expect("spawn");
+    let mut proc = spawn(bwrap_request("true", 0)).expect("spawn");
     assert_eq!(proc.wait().expect("wait"), WaitOutcome::Exited(0));
     assert!(
         proc.output_metadata().is_none(),

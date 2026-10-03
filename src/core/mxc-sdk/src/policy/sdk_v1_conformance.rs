@@ -5,7 +5,7 @@
 //!
 //! `input/<name>.json` describes an SDK-neutral policy invocation. This module
 //! converts it to authoring types and calls [`build_request_with_containment`],
-//! the request constructor exported by the Rust SDK, to get a `SandboxRequest`.
+//! the request constructor exported by the Rust SDK, to get a `ContainerRequest`.
 //! Its exact-contract adapter produces the internal [`ExecutionRequest`].
 //!
 //! `expected/<name>.json` is an independently hand-authored exact `1.0.0` JSON
@@ -16,7 +16,7 @@
 //! must fail exact parsing with their recorded error code and diagnostic.
 //!
 //! The parent policy module includes this module only under `#[cfg(test)]`.
-//! It lives beside the implementation to inspect the private `SandboxRequest`
+//! It lives beside the implementation to inspect the private `ContainerRequest`
 //! internals without exposing them through the public SDK API.
 
 use std::collections::BTreeMap;
@@ -30,10 +30,10 @@ use wxc_common::state_aware_request::MxcRequest;
 use crate::configs::{Lxc, ProcessContainer, ProcessContainerNetwork, Seatbelt};
 
 use super::{
-    build_request_with_containment, ClipboardPolicy, Containment, FilesystemSection, NetworkAction,
-    NetworkEgressSection, NetworkIngressSection, NetworkPeerSection, NetworkPortSection,
-    NetworkProtocol, NetworkRuleSection, NetworkSection, RuntimeConfigSection, SandboxPolicy,
-    UiSection, WslcSection,
+    build_request_with_containment, ClipboardPolicy, ContainerPolicy, Containment,
+    FilesystemSection, NetworkAction, NetworkEgressSection, NetworkIngressSection,
+    NetworkPeerSection, NetworkPortSection, NetworkProtocol, NetworkRuleSection, NetworkSection,
+    RuntimeConfigSection, UiSection, WslcSection,
 };
 
 #[derive(Deserialize)]
@@ -255,8 +255,8 @@ fn rules(rules: Option<Vec<RuleInput>>) -> Option<Vec<NetworkRuleSection>> {
 }
 
 impl PolicyInput {
-    fn into_policy(self) -> SandboxPolicy {
-        SandboxPolicy {
+    fn into_policy(self) -> ContainerPolicy {
+        ContainerPolicy {
             filesystem: self.filesystem.map(|filesystem| FilesystemSection {
                 readwrite_paths: filesystem.readwrite_paths,
                 readonly_paths: filesystem.readonly_paths,
@@ -526,7 +526,7 @@ fn invalid_documents_are_rejected() {
 /// default container instead.
 #[test]
 fn unnamed_requests_mint_a_distinct_container_id() {
-    let policy = SandboxPolicy::default();
+    let policy = ContainerPolicy::default();
     let first = build_request_with_containment(&policy, &Containment::Process, "echo", None)
         .unwrap()
         .inner

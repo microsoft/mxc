@@ -7,7 +7,7 @@ namespace Microsoft.Mxc.Sdk.V1;
 
 /// <summary>
 /// The containment backend a sandbox is provisioned under. Selected at
-/// provision; later phases resolve it from the <see cref="SandboxId"/>.
+/// provision; later phases resolve it from the <see cref="ContainerId"/>.
 /// </summary>
 public enum StateAwareContainment
 {
@@ -111,27 +111,6 @@ public sealed class WslcProvisionOptions : StateAwareProvisionOptions
     public string? ImageTarPath { get; set; }
 }
 
-/// <summary>
-/// Compatibility options for the original IsolationSession-only API. New code
-/// must use <see cref="IsolationSessionProvisionOptions"/>. This type raises a
-/// schema-0.9 migration error; no network data is silently ignored.
-/// </summary>
-[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
-public sealed class ProvisionSandboxOptions : StateAwareProvisionOptions
-{
-    /// <summary>IsolationSession network acknowledgement.</summary>
-    public StateAwareNetworkPolicy? Network { get; set; }
-
-    /// <summary>
-    /// Legacy filesystem field. IsolationSession rejects it because that
-    /// backend cannot share host paths.
-    /// </summary>
-    public StateAwareFilesystemPolicy? Filesystem { get; set; }
-
-    /// <summary>Optional packaged-app PFN or unpackaged-app identifier.</summary>
-    public string? AppId { get; set; }
-}
-
 /// <summary>Options shared by start, stop, and deprovision phases.</summary>
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public class StateAwarePhaseOptions
@@ -145,11 +124,20 @@ public class StateAwarePhaseOptions
     public TelemetrySettings? Telemetry { get; set; }
 }
 
-/// <summary>Process and schema options for a state-aware exec phase.</summary>
-[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
-public class StateAwareExecOptions : StateAwarePhaseOptions
+/// <summary>A workload and its process settings for an existing container.</summary>
+public sealed class ExecRequest : StateAwarePhaseOptions
 {
-    /// <summary>Working directory inside the sandbox.</summary>
+    /// <summary>Create an exec request for <paramref name="commandLine"/>.</summary>
+    public ExecRequest(string commandLine)
+    {
+        ArgumentNullException.ThrowIfNull(commandLine);
+        CommandLine = commandLine;
+    }
+
+    /// <summary>The command line to run in the existing container.</summary>
+    public string CommandLine { get; }
+
+    /// <summary>Working directory inside the container.</summary>
     public string? WorkingDirectory { get; set; }
 
     /// <summary>Environment variables encoded as <c>KEY=VALUE</c> strings.</summary>
@@ -168,13 +156,8 @@ public class StateAwareExecOptions : StateAwarePhaseOptions
 
     /// <summary>Wall-clock timeout in milliseconds. Zero means no timeout.</summary>
     public uint? TimeoutMs { get; set; }
-}
 
-/// <summary>WSLC exec options, including its per-exec proxy override.</summary>
-[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
-public sealed class WslcExecOptions : StateAwareExecOptions
-{
-    /// <summary>Runtime values emitted at the envelope top level, without network posture.</summary>
+    /// <summary>WSLC cooperative proxy settings for this exec.</summary>
     public NetworkRuntimeConfig? RuntimeConfig { get; set; }
 }
 
@@ -182,7 +165,7 @@ public sealed class WslcExecOptions : StateAwareExecOptions
 public sealed class ProvisionResult
 {
     /// <summary>The freshly minted sandbox id.</summary>
-    public SandboxId SandboxId { get; init; }
+    public ContainerId ContainerId { get; init; }
 
     /// <summary>Backend-typed provision metadata as raw JSON.</summary>
     public string? MetadataJson { get; init; }

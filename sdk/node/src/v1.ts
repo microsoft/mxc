@@ -13,8 +13,9 @@
  */
 
 export {
-  SandboxPolicy,
-  SandboxContainment,
+  ContainerPolicy,
+  ContainerRequest,
+  ContainerContainment,
   ProcessContainerConfig,
   NetworkAction,
   NetworkProtocol,
@@ -32,21 +33,17 @@ export {
   SeatbeltConfig,
   WslcConfig,
   TelemetryConfig,
+  Output,
 } from './types.js';
 
 export {
-  createConfigFromPolicy,
-  spawnSandbox,
-  spawnWithPty,
-  spawnSandboxAsync,
-  buildSandboxPayload,
-  type MxcPtySpawnOptions,
+  spawn,
+  spawnAsync,
+  run,
+  runAsync,
 } from './sandbox.js';
-
-export {
-  MxcPtyProcess,
-  type MxcPtySize,
-} from './mxc-pty-process.js';
+export { MxcSandboxProcess as MxcProcess } from './sandbox-process.js';
+export type { SandboxWaitResult as WaitOutcome } from './sandbox-process.js';
 
 export {
   getAvailableToolsPolicy,
@@ -60,7 +57,8 @@ export {
   Phase,
   STATE_AWARE_VERSION,
   StateAwareContainmentBackend,
-  SandboxId,
+  ContainerId,
+  ExecRequest,
   IsolationSessionNetworkConfig,
   IsolationSessionProvisionConfig,
   IsolationSessionStartConfig,
@@ -93,10 +91,11 @@ export {
 
 export {
   type StateAwareStreamingOptions,
+  spawnInContainer,
+  runInContainer,
   provisionSandbox,
   startSandbox,
   execInSandbox,
-  spawnInContainerWithPty,
   execInSandboxAsync,
   stopSandbox,
   deprovisionSandbox,

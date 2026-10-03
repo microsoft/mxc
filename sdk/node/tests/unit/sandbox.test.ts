@@ -3,19 +3,19 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { buildSandboxPayload, createConfigFromPolicy, spawnSandbox, spawnSandboxFromConfig } from '../../src/sandbox.js';
+import { buildSandboxPayload, createConfigFromPolicy } from '../../src/sandbox.js';
 import { resolveExecutableAndArgs } from '../../src/helper.js';
 import {
   _resetPlatformSupportCache,
   _setBwrapVersionRunner,
   _setLxcAvailabilityProbe,
 } from '../../src/platform.js';
-import { ContainerConfig, SandboxPolicy, SandboxingMethod } from '../../src/types.js';
+import { ContainerConfig, ContainerPolicy, SandboxingMethod } from '../../src/types.js';
 import { MxcError } from '../../src/errors.js';
 import { platformSkip } from './test-helpers.js';
 
 describe('buildSandboxPayload', () => {
-  const defaultPolicy: SandboxPolicy = {};
+  const defaultPolicy: ContainerPolicy = {};
 
   describe('Windows', () => {
     let originalPlatform: PropertyDescriptor | undefined;
@@ -77,7 +77,7 @@ describe('buildSandboxPayload', () => {
 });
 
 describe('createConfigFromPolicy', () => {
-  const defaultPolicy: SandboxPolicy = {};
+  const defaultPolicy: ContainerPolicy = {};
 
   it('should produce a locked-down v1 config for an empty policy', () => {
     const config = createConfigFromPolicy(defaultPolicy);

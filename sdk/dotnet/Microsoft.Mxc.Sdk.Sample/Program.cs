@@ -18,7 +18,7 @@ var command = args.Length > 0
     ? string.Join(' ', args)
     : (OperatingSystem.IsWindows() ? "cmd /c echo hello from MXC" : "echo hello from MXC");
 
-var policy = new SandboxPolicy
+var policy = new ContainerPolicy
 {
     Filesystem = new FilesystemPolicy
     {
@@ -47,7 +47,7 @@ if (OperatingSystem.IsWindows()
 }
 
 Console.WriteLine($"Running: {command}");
-var request = new SandboxRequest(policy, command) { Containment = containment };
+var request = new ContainerRequest(policy, command) { Containment = containment };
 
 try
 {
@@ -129,18 +129,20 @@ try
                     HostLoopback = NetworkAction.Allow,
                 },
             }));
-        Console.WriteLine($"  provisioned: {provisioned.SandboxId}");
+        Console.WriteLine($"  provisioned: {provisioned.ContainerId}");
         try
         {
-            MxcLifecycle.StartSandbox(provisioned.SandboxId);
-            var lifecycleRun = await MxcLifecycle.ExecInSandboxAsync(provisioned.SandboxId, command);
+            MxcLifecycle.StartSandbox(provisioned.ContainerId);
+            var lifecycleRun = await MxcLifecycle.RunInContainerAsync(
+                provisioned.ContainerId,
+                new ExecRequest(command));
             Console.WriteLine($"  exec exit={lifecycleRun.ExitCode} stdout={lifecycleRun.Stdout.TrimEnd()}");
         }
         finally
         {
             try
             {
-                MxcLifecycle.StopSandbox(provisioned.SandboxId);
+                MxcLifecycle.StopSandbox(provisioned.ContainerId);
             }
             catch (MxcException)
             {
@@ -148,7 +150,7 @@ try
             }
             try
             {
-                MxcLifecycle.DeprovisionSandbox(provisioned.SandboxId);
+                MxcLifecycle.DeprovisionSandbox(provisioned.ContainerId);
             }
             catch (MxcException ex)
             {

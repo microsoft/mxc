@@ -14,27 +14,28 @@
  *
  * V1 policy APIs live in `@microsoft/mxc-sdk/v1` and use directional
  * `network.egress` / `network.ingress`; explicit legacy network inputs produce
- * migration errors. Raw exact-version configuration remains available through
- * this root entrypoint's `spawnSandboxFromConfig`.
+ * migration errors. The versioned V1 request and execution APIs are available
+ * from `@microsoft/mxc-sdk/v1`.
  * WSLC state-aware exec uses top-level `runtimeConfig.networkProxy` without
  * restating network posture. IsolationSession provision requires
  * directional egress, ingress, and host-loopback defaults set to `allow`.
  *
  * @example
  * ```typescript
- * import { getPlatformSupport, spawnSandboxFromConfig } from '@microsoft/mxc-sdk';
- * import { createConfigFromPolicy, SandboxPolicy } from '@microsoft/mxc-sdk/v1';
+ * import { getPlatformSupport } from '@microsoft/mxc-sdk';
+ * import { ContainerPolicy, runAsync } from '@microsoft/mxc-sdk/v1';
  *
  * if (getPlatformSupport().isSupported) {
- *   const policy: SandboxPolicy = {
+ *   const policy: ContainerPolicy = {
  *     network: { egress: { default: 'allow' } },
  *   };
  *
- *   const config = createConfigFromPolicy(policy);
- *   config.process!.commandLine = 'python -c "print(\'Hello from sandbox\')"';
- *   const ptyProcess = spawnSandboxFromConfig(config);
- *   ptyProcess.onData((data) => console.log(data));
- *   ptyProcess.onExit((event) => console.log('Exit code:', event.exitCode));
+ *   const output = await runAsync({
+ *     policy,
+ *     command: 'python -c "print(\'Hello from sandbox\')"',
+ *   });
+ *   console.log('Output:', output.stdout);
+ *   console.log('Exit code:', output.exitCode);
  * }
  * ```
  *
@@ -43,31 +44,7 @@
 
 // Export types
 export {
-  SandboxingMethod,
   IsolationTier,
-  ContainmentType,
-  ContainmentTypes,
-  ContainmentBackend,
-  ExperimentalBackends,
-  ContainerConfig,
-  ProcessConfig,
-  LifecycleConfig,
-  ProcessContainerConfig,
-  FilesystemConfig,
-  NetworkConfig,
-  NetworkAction,
-  NetworkProtocol,
-  NetworkPeerConfig,
-  NetworkPortConfig,
-  NetworkRuleConfig,
-  NetworkEgressConfig,
-  NetworkIngressConfig,
-  DirectionalNetworkConfig,
-  RuntimeConfig,
-  WslcConfig,
-  HyperlightConfig,
-  LxcConfig,
-  SeatbeltConfig,
   PlatformSupport,
   UiCapabilitySupport,
   ProbeOutput,
@@ -84,12 +61,6 @@ export {
   probeSandboxSupport,
 } from './probe.js';
 
-// Export sandbox spawning functions
-export {
-  spawnSandboxFromConfig,
-  SandboxSpawnOptions,
-} from './sandbox.js';
-
 // Export typed wire-format errors.
 //
 // `WireError` and `mxcErrorFromEnvelope` are deliberately NOT re-exported:
@@ -104,8 +75,6 @@ export {
   MxcErrorFields,
   mxcErrorFromCode,
 } from './errors.js';
-
-export { MxcSandboxProcess } from './sandbox-process.js';
 
 // Export telemetry consent functions and types
 export {

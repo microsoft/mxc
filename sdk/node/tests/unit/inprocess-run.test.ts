@@ -5,77 +5,89 @@ import assert from 'node:assert';
 import { afterEach, describe, it } from 'node:test';
 import * as rootSdk from '../../src/index.js';
 import * as v1Sdk from '../../src/v1.js';
-import { _setSpawnBindingSandboxWithPtyImplementation } from '../../src/bindings/pty.js';
-import { _setBindingRunAsyncImplementation } from '../../src/bindings/run.js';
+import {
+  _setBindingRunAsyncImplementation,
+  _setBindingRunImplementation,
+} from '../../src/bindings/run.js';
+import { _setBindingSandboxProcessFactories } from '../../src/bindings/streaming.js';
+import {
+  MxcSandboxProcess,
+  type NativeLifecycleDriver,
+} from '../../src/sandbox-process.js';
 import type { OneShotRequest } from '../../src/generated/v1_0_0/wire.js';
-import type { MxcPtyProcess } from '../../src/mxc-pty-process.js';
 
 const { MxcError } = rootSdk;
-const { spawnSandboxAsync, spawnWithPty } = v1Sdk;
+const { run, runAsync, spawn, spawnAsync } = v1Sdk;
 
 afterEach(() => {
+  _setBindingRunImplementation();
   _setBindingRunAsyncImplementation();
-  _setSpawnBindingSandboxWithPtyImplementation();
+  _setBindingSandboxProcessFactories();
 });
 
 describe('public SDK namespace exports', () => {
-  it('keeps typed authoring and lifecycle functions in V1', () => {
+  it('keeps V1 operations and types in the versioned entry point', () => {
     for (const name of [
-      'createConfigFromPolicy',
-      'spawnSandbox',
-      'spawnSandboxAsync',
-      'buildSandboxPayload',
-      'getAvailableToolsPolicy',
-      'getUserProfilePolicy',
-      'getTemporaryFilesPolicy',
+      'spawn',
+      'spawnAsync',
+      'run',
+      'runAsync',
       'provisionSandbox',
       'startSandbox',
       'execInSandbox',
       'execInSandboxAsync',
       'stopSandbox',
       'deprovisionSandbox',
+      'MxcProcess',
     ] as const) {
       assert.strictEqual(typeof v1Sdk[name], 'function', name);
       assert.strictEqual(Object.hasOwn(rootSdk, name), false, name);
     }
   });
 
-  it('keeps raw config, discovery, errors, and process handles at the root', () => {
+  it('does not expose replaced one-shot APIs or process wrappers', () => {
     for (const name of [
+      'createConfigFromPolicy',
+      'spawnSandbox',
+      'spawnSandboxAsync',
       'spawnSandboxFromConfig',
-      'getPlatformSupport',
-      'probeSandboxSupport',
-      'MxcError',
       'MxcSandboxProcess',
     ] as const) {
+      assert.strictEqual(Object.hasOwn(rootSdk, name), false, name);
+      assert.strictEqual(Object.hasOwn(v1Sdk, name), false, name);
+    }
+
+    for (const name of ['getPlatformSupport', 'probeSandboxSupport', 'MxcError'] as const) {
       assert.strictEqual(typeof rootSdk[name], 'function', name);
       assert.strictEqual(Object.hasOwn(v1Sdk, name), false, name);
     }
   });
 });
 
-describe('in-process async run routing', () => {
-  it('routes PTY containment through the SDK-owned exact request', async () => {
+describe('in-process asynchronous run routing', () => {
+  it('uses the SDK-owned exact v1 one-shot request synchronously', () => {
     let bindingRequest: OneShotRequest | undefined;
-    let bindingRows = 0;
-    let bindingColumns = 0;
-    _setSpawnBindingSandboxWithPtyImplementation(
-      async (request, _experimental, rows, columns) => {
-        bindingRequest = request;
-        bindingRows = rows;
-        bindingColumns = columns;
-        return {} as MxcPtyProcess;
-      },
-    );
+    _setBindingRunImplementation((request) => {
+      bindingRequest = request;
+      return {
+        stdout: 'sync output',
+        stderr: '',
+        exitCode: 0,
+        timedOut: false,
+        warnings: [],
+      };
+    });
 
-    const config = v1Sdk.createConfigFromPolicy({}, 'isolation_session');
-    config.process!.commandLine = 'cmd.exe';
-    await spawnWithPty(config, { rows: 30, columns: 100 });
+    const result = run({
+      policy: {},
+      command: 'echo sync',
+      containerName: 'sync-sample',
+    });
 
-    assert.strictEqual(bindingRequest?.containment, 'isolation_session');
-    assert.strictEqual(bindingRequest?.ui, undefined);
-    assert.strictEqual(bindingRows, 30);
-    assert.strictEqual(bindingColumns, 100);
+    assert.strictEqual(result.stdout, 'sync output');
+    assert.strictEqual(bindingRequest?.version, '1.0.0');
+    assert.strictEqual(bindingRequest?.process.commandLine, 'echo sync');
+    assert.strictEqual(bindingRequest?.containerId, 'sync-sample');
   });
 
   it('uses the SDK-owned exact v1 one-shot request', async () => {
@@ -91,39 +103,84 @@ describe('in-process async run routing', () => {
       };
     });
 
-    const result = await spawnSandboxAsync(
-      'echo hello',
-      {},
-      { inheritDefaultEnv: true },
-      'C:\\work',
-      'sample',
-    );
+    it('routes spawn and spawnAsync through the native process bindings', async () => {
+      let syncRequest: OneShotRequest | undefined;
+      let asyncRequest: OneShotRequest | undefined;
+      const createProcess = () => {
+        const driver: NativeLifecycleDriver = {
+          id: 17,
+          standardInput: null,
+          standardOutput: null,
+          standardError: null,
+          poll: () => ({ exitCode: 0, running: false, timedOut: false }),
+          wait: async () => ({ exitCode: 0, timedOut: false }),
+          warnings: () => [],
+          outputMetadata: () => undefined,
+          kill: () => {},
+          killForTimeout: () => {},
+          free: async () => {},
+        };
+        return new MxcSandboxProcess(driver);
+      };
+      _setBindingSandboxProcessFactories(
+        (request) => {
+          syncRequest = request;
+          return createProcess();
+        },
+        async (request) => {
+          asyncRequest = request;
+          return createProcess();
+        },
+      );
 
-    assert.deepStrictEqual(result, { stdout: 'out', stderr: 'err', exitCode: 7 });
+      const syncProcess = spawn({ policy: {}, command: 'echo sync spawn' });
+      const asyncProcess = await spawnAsync({ policy: {}, command: 'echo async spawn' });
+
+      assert.ok(syncProcess instanceof v1Sdk.MxcProcess);
+      assert.ok(asyncProcess instanceof v1Sdk.MxcProcess);
+      assert.strictEqual(syncRequest?.process.commandLine, 'echo sync spawn');
+      assert.strictEqual(syncRequest?.version, '1.0.0');
+      assert.strictEqual(asyncRequest?.process.commandLine, 'echo async spawn');
+      assert.strictEqual(asyncRequest?.version, '1.0.0');
+      await Promise.all([syncProcess.waitAsync(), asyncProcess.waitAsync()]);
+    });
+
+    const result = await runAsync({
+      policy: {},
+      command: 'echo hello',
+      workingDirectory: 'C:\\work',
+      environment: { SAMPLE: 'value' },
+      inheritDefaultEnvironment: true,
+      containerName: 'sample',
+    });
+
+    assert.deepStrictEqual(result, {
+      stdout: 'out',
+      stderr: 'err',
+      exitCode: 7,
+      timedOut: false,
+      warnings: [],
+    });
     assert.strictEqual(bindingRequest?.version, '1.0.0');
     assert.strictEqual(bindingRequest?.process.commandLine, 'echo hello');
     assert.strictEqual(bindingRequest?.containerId, 'sample');
     assert.strictEqual(bindingRequest?.process.cwd, 'C:\\work');
+    assert.deepStrictEqual(bindingRequest?.process.env, ['SAMPLE=value']);
     assert.strictEqual(bindingRequest?.process.inheritDefaultEnv, true);
   });
 
-  it('rejects executor-only options instead of falling back', async () => {
-    for (const options of [
-      { usePty: true },
-      { dryRun: true },
-      { skipPlatformCheck: true },
-      { executablePath: 'wxc-exec.exe' },
-      { signal: new AbortController().signal },
-      { experimental: true },
-    ]) {
-      await assert.rejects(
-        spawnSandboxAsync('echo hello', {}, options),
-        /does not support executor-only option/,
-      );
-    }
+  it('rejects invalid requests at the SDK boundary', async () => {
+    await assert.rejects(
+      runAsync({ policy: {}, command: '' }),
+      /command must be a non-empty string/,
+    );
+    await assert.rejects(
+      runAsync({ policy: null as never, command: 'echo hello' }),
+      /policy must be an object/,
+    );
   });
 
-  it('surfaces buffered diagnostics', async () => {
+  it('preserves buffered diagnostics and metadata', async () => {
     _setBindingRunAsyncImplementation(async () => ({
       stdout: '',
       stderr: 'native stderr',
@@ -135,13 +192,15 @@ describe('in-process async run routing', () => {
       },
     }));
 
-    const result = await spawnSandboxAsync('echo hello', {});
+    const result = await runAsync({ policy: {}, command: 'echo hello' });
     assert.match(result.stderr, /native stderr/);
-    assert.match(result.stderr, /policy was relaxed/);
-    assert.match(result.stderr, /denials\.json/);
+    assert.deepStrictEqual(result.warnings, ['policy was relaxed']);
+    assert.deepStrictEqual(result.outputMetadata, {
+      captureDenials: { kind: 'captureDenials', outputPath: 'denials.json' },
+    });
   });
 
-  it('maps native timeouts to the public error', async () => {
+  it('preserves timeout results and typed native errors', async () => {
     _setBindingRunAsyncImplementation(async () => ({
       stdout: '',
       stderr: '',
@@ -150,26 +209,20 @@ describe('in-process async run routing', () => {
       warnings: [],
     }));
 
-    await assert.rejects(
-      spawnSandboxAsync('echo hello', {}),
-      (error: unknown) =>
-        error instanceof MxcError
-        && error.code === 'backend_error'
-        && error.details?.timedOut === true,
-    );
-  });
+    const timedOut = await runAsync({ policy: {}, command: 'echo hello' });
+    assert.strictEqual(timedOut.timedOut, true);
+    assert.strictEqual(timedOut.exitCode, -1);
 
-  it('preserves typed native errors', async () => {
     _setBindingRunAsyncImplementation(async () => {
-      throw new MxcError('unsupported_containment', 'LXC is executor-only');
+      throw new MxcError('unsupported_containment', 'backend unavailable');
     });
 
     await assert.rejects(
-      spawnSandboxAsync('echo hello', {}),
+      runAsync({ policy: {}, command: 'echo hello' }),
       (error: unknown) =>
         error instanceof MxcError
         && error.code === 'unsupported_containment'
-        && error.message === 'LXC is executor-only',
+        && error.message === 'backend unavailable',
     );
   });
 
@@ -179,7 +232,7 @@ describe('in-process async run routing', () => {
     });
 
     await assert.rejects(
-      spawnSandboxAsync('echo hello', {}),
+      runAsync({ policy: {}, command: 'echo hello' }),
       (error: unknown) =>
         error instanceof MxcError
         && error.code === 'backend_error'

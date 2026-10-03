@@ -6,7 +6,7 @@
 //!
 //! These exercise request parsing, phase routing, and error mapping without a
 //! live host backend. All three state-aware backends — IsolationSession, WSLc
-//! and Windows Sandbox — are Windows-only, and IsolationSession additionally
+//! and Windows MxcProcess — are Windows-only, and IsolationSession additionally
 //! needs the OS-side IsoSessionOps service, so the real lifecycle paths are
 //! exercised by the executor E2E suites instead.
 //!
@@ -15,17 +15,15 @@
 //! `tests/isolation_session.rs`, which is gated on a host running the OS-side
 //! service. So the assertions here deliberately stop at the facade's contract:
 //! parse, reject one-shot, reject non-dry-run exec, surface unsupported_phase
-//! for a backend without a state-aware impl, and honour the Windows Sandbox
+//! for a backend without a state-aware impl, and honour the Windows MxcProcess
 //! experimental opt-in — which stays host-independent because the gate runs
 //! before backend dispatch.
 
 use mxc_sdk::v1::{
-    container, ExecRequest, LifecycleResult, OperationOptions, ProvisionRequest, ProvisionResult,
-    SandboxId, ValidationResult,
+    container, spawn_in_container, ContainerId, ExecRequest, LifecycleResult, MxcProcess,
+    OperationOptions, ProvisionRequest, ProvisionResult, ValidationResult, WaitOutcome,
 };
-use mxc_sdk::{
-    exec_sandbox, exec_sandbox_json, run_state_aware_json, Error, ErrorCode, Sandbox, WaitOutcome,
-};
+use mxc_sdk::{exec_sandbox, exec_sandbox_json, run_state_aware_json, Error, ErrorCode};
 
 #[test]
 fn typed_lifecycle_api_is_operation_specific() {
@@ -33,21 +31,21 @@ fn typed_lifecycle_api_is_operation_specific() {
         container::provision;
     let _: fn(ProvisionRequest, OperationOptions) -> Result<ValidationResult, Error> =
         container::validate_provision;
-    let _: fn(&SandboxId, OperationOptions) -> Result<LifecycleResult, Error> = container::start;
-    let _: fn(&SandboxId, OperationOptions) -> Result<ValidationResult, Error> =
+    let _: fn(&ContainerId, OperationOptions) -> Result<LifecycleResult, Error> = container::start;
+    let _: fn(&ContainerId, OperationOptions) -> Result<ValidationResult, Error> =
         container::validate_start;
-    let _: fn(&SandboxId, OperationOptions) -> Result<LifecycleResult, Error> = container::stop;
-    let _: fn(&SandboxId, OperationOptions) -> Result<ValidationResult, Error> =
+    let _: fn(&ContainerId, OperationOptions) -> Result<LifecycleResult, Error> = container::stop;
+    let _: fn(&ContainerId, OperationOptions) -> Result<ValidationResult, Error> =
         container::validate_stop;
-    let _: fn(&SandboxId, OperationOptions) -> Result<LifecycleResult, Error> =
+    let _: fn(&ContainerId, OperationOptions) -> Result<LifecycleResult, Error> =
         container::deprovision;
-    let _: fn(&SandboxId, OperationOptions) -> Result<ValidationResult, Error> =
+    let _: fn(&ContainerId, OperationOptions) -> Result<ValidationResult, Error> =
         container::validate_deprovision;
-    let _: fn(&SandboxId, ExecRequest, OperationOptions) -> Result<Sandbox, Error> =
-        container::exec;
-    let _: fn(&SandboxId, ExecRequest, OperationOptions) -> Result<WaitOutcome, Error> =
+    let _: fn(&ContainerId, ExecRequest, OperationOptions) -> Result<MxcProcess, Error> =
+        spawn_in_container;
+    let _: fn(&ContainerId, ExecRequest, OperationOptions) -> Result<WaitOutcome, Error> =
         container::exec_attached;
-    let _: fn(&SandboxId, ExecRequest, OperationOptions) -> Result<ValidationResult, Error> =
+    let _: fn(&ContainerId, ExecRequest, OperationOptions) -> Result<ValidationResult, Error> =
         container::validate_exec;
 }
 
@@ -60,7 +58,7 @@ fn typed_state_aware_requests_have_no_caller_schema_version() {
 
 #[test]
 fn typed_lifecycle_routes_by_sandbox_id() {
-    let sandbox_id = SandboxId::parse("nosuchbackend:abc123").unwrap();
+    let sandbox_id = ContainerId::parse("nosuchbackend:abc123").unwrap();
     let error = container::validate_start(&sandbox_id, OperationOptions::default()).unwrap_err();
     assert_eq!(error.code, ErrorCode::UnsupportedContainment);
 }
@@ -68,7 +66,7 @@ fn typed_lifecycle_routes_by_sandbox_id() {
 #[test]
 fn sandbox_id_rejects_values_that_cannot_cross_the_ffi_boundary() {
     for value in ["", "iso:valid\0suffix"] {
-        let error = SandboxId::parse(value).unwrap_err();
+        let error = ContainerId::parse(value).unwrap_err();
         assert_eq!(error.code, ErrorCode::MalformedId);
     }
 }
@@ -181,7 +179,7 @@ fn typed_provision_payload_is_validated_without_running_a_lifecycle() {
 #[test]
 fn exec_sandbox_rejects_non_exec_phase() {
     let json = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session"}"#;
-    // `Sandbox` is not `Debug`, so match rather than `expect_err`.
+    // `MxcProcess` is not `Debug`, so match rather than `expect_err`.
     match exec_sandbox(json, false) {
         Ok(_) => panic!("a provision request is not an exec"),
         Err(err) => assert_eq!(err.code, ErrorCode::MalformedRequest),
@@ -267,7 +265,7 @@ fn the_refusal_carries_no_api_call_detail() {
 ///
 /// Both are needed: they take separate paths to the same gate, so a change that
 /// hardcoded the flag in only one of them would leave the other's tests green.
-/// A `wsb:` id routes to Windows Sandbox, which has no streaming-exec arm — so
+/// A `wsb:` id routes to Windows MxcProcess, which has no streaming-exec arm — so
 /// once past the gate it lands on `unsupported_phase`, and the two outcomes are
 /// distinguishable without a host, a feature, or any backend work. (A `wslc:`
 /// id would not discriminate: its feature-off arm also answers

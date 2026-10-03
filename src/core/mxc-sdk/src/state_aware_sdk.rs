@@ -65,9 +65,9 @@ impl StateAwareProvision {
 
 /// Opaque identity returned for a provisioned state-aware sandbox.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SandboxId(String);
+pub struct ContainerId(String);
 
-impl SandboxId {
+impl ContainerId {
     /// Parse a sandbox identity previously returned by MXC.
     pub fn parse(value: impl Into<String>) -> Result<Self, Error> {
         Self::try_new(value.into()).map_err(Error::from)
@@ -94,13 +94,13 @@ impl SandboxId {
     }
 }
 
-impl AsRef<str> for SandboxId {
+impl AsRef<str> for ContainerId {
     fn as_ref(&self) -> &str {
         self.as_str()
     }
 }
 
-impl fmt::Display for SandboxId {
+impl fmt::Display for ContainerId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
     }
@@ -192,7 +192,7 @@ impl ProvisionRequest {
 }
 
 pub(crate) fn lifecycle_sdk_input(
-    sandbox_id: &SandboxId,
+    sandbox_id: &ContainerId,
     telemetry_opt_in: Option<bool>,
     operation: fn(String) -> RuntimeOperation,
 ) -> Result<SdkStateAwareInput, MxcError> {
@@ -274,7 +274,7 @@ impl ExecRequest {
 
     pub(crate) fn into_sdk_input(
         self,
-        sandbox_id: &SandboxId,
+        sandbox_id: &ContainerId,
         telemetry_opt_in: Option<bool>,
     ) -> Result<SdkStateAwareInput, MxcError> {
         let mut input = SdkStateAwareInput::new(
@@ -344,7 +344,7 @@ pub enum ProvisionMetadata {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ProvisionResult {
-    pub sandbox_id: SandboxId,
+    pub container_id: ContainerId,
     pub metadata: Option<ProvisionMetadata>,
     pub warnings: Vec<String>,
 }
@@ -396,7 +396,7 @@ impl StateAwareResult {
             MxcError::backend_error("typed provision completed without returning a sandbox ID")
         })?;
         Ok(ProvisionResult {
-            sandbox_id: SandboxId::from_backend(sandbox_id)?,
+            container_id: ContainerId::from_backend(sandbox_id)?,
             metadata: self.metadata,
             warnings: self.warnings,
         })
@@ -605,7 +605,7 @@ mod tests {
         operation: fn(String) -> RuntimeOperation,
         options: OperationOptions,
     ) {
-        let id = SandboxId::parse(sandbox_id).unwrap();
+        let id = ContainerId::parse(sandbox_id).unwrap();
         let input = lifecycle_sdk_input(&id, options.telemetry_opt_in, operation).unwrap();
         assert_matches_exact(json, input);
     }
@@ -616,7 +616,7 @@ mod tests {
         request: ExecRequest,
         options: OperationOptions,
     ) {
-        let id = SandboxId::parse(sandbox_id).unwrap();
+        let id = ContainerId::parse(sandbox_id).unwrap();
         let input = request
             .into_sdk_input(&id, options.telemetry_opt_in)
             .unwrap();

@@ -53,6 +53,16 @@ class FakeNative implements StreamingNativeFacade {
   stateAwareRequest: string | undefined;
   stateAwareExperimental: number | undefined;
 
+  spawnSync(
+    _request: string,
+    _experimental: number,
+    outHandle: unknown[],
+    _error: unknown,
+  ): number {
+    outHandle[0] = this.handle;
+    return this.spawnStatus;
+  }
+
   spawn(
     request: string,
     experimental: number,

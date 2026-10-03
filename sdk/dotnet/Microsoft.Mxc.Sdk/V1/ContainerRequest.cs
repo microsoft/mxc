@@ -6,13 +6,13 @@ using System.Text.Json.Serialization;
 namespace Microsoft.Mxc.Sdk.V1;
 
 /// <summary>
-/// A complete one-shot sandbox request. This is the managed counterpart of the
+/// A complete one-shot container request. This is the managed counterpart of the
 /// Rust SDK's request built by <c>build_request_with_containment</c>.
 /// </summary>
-public sealed class SandboxRequest
+public sealed class ContainerRequest
 {
     /// <summary>Create a request for <paramref name="command"/> under <paramref name="policy"/>.</summary>
-    public SandboxRequest(SandboxPolicy policy, string command)
+    public ContainerRequest(ContainerPolicy policy, string command)
     {
         ArgumentNullException.ThrowIfNull(policy);
         ArgumentNullException.ThrowIfNull(command);
@@ -22,7 +22,7 @@ public sealed class SandboxRequest
 
     /// <summary>The cross-platform restrictions applied to the sandbox.</summary>
     [JsonPropertyName("policy")]
-    public SandboxPolicy Policy { get; }
+    public ContainerPolicy Policy { get; }
 
     /// <summary>The command line to run.</summary>
     [JsonPropertyName("command")]
@@ -75,21 +75,9 @@ public sealed class SandboxRequest
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool InheritDefaultEnvironment { get; set; }
 
-    /// <summary>
-    /// Obsolete opt-in unsupported by the stable V1 typed request. Setting this
-    /// to true causes Run, Spawn, and Probe to reject the request before calling
-    /// native code. Use a raw exact development-contract request with explicit
-    /// experimental authorization for development-only features.
-    /// </summary>
-    [Obsolete(
-        "Stable V1 typed requests do not support experimental opt-in; use a raw exact development-contract request.",
-        DiagnosticId = "MXC0001")]
-    [JsonPropertyName("experimental")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public bool Experimental { get; set; }
 }
 
-/// <summary>A containment backend selected by a <see cref="SandboxRequest"/>.</summary>
+/// <summary>A containment backend selected by a <see cref="ContainerRequest"/>.</summary>
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "type")]
 [JsonDerivedType(typeof(ProcessContainment), "process")]
 [JsonDerivedType(typeof(ProcessContainerContainment), "processContainer")]
