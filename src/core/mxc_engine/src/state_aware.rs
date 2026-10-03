@@ -988,7 +988,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_operation_options_preserve_telemetry_preference() {
+    fn sdk_input_normalization_preserves_telemetry_preference() {
         for enabled in [true, false] {
             let telemetry_opt_in = Some(enabled);
             let inputs = [
@@ -1011,7 +1011,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_requests_match_exact_json_without_source_attribution() {
+    fn sdk_input_normalization_matches_exact_json_without_source_attribution() {
         assert_typed_matches_exact(
             r#"{
                 "version":"1.0.0",

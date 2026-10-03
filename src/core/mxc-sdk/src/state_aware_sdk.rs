@@ -540,7 +540,88 @@ fn map_protocol(value: NetworkProtocol) -> SdkNetworkProtocol {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::policy::NetworkEgressSection;
+    use wxc_common::config_parser::{
+        load_mxc_request_from_json, normalize_sdk_state_aware_request,
+    };
+    use wxc_common::logger::{Logger, Mode};
     use wxc_common::mxc_error::MxcErrorCode;
+    use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest};
+
+    type LifecyclePhase = (&'static str, fn(String) -> RuntimeOperation);
+
+    fn lifecycle_phases() -> [LifecyclePhase; 3] {
+        [
+            ("start", |sandbox_id| RuntimeOperation::Start { sandbox_id }),
+            ("stop", |sandbox_id| RuntimeOperation::Stop { sandbox_id }),
+            ("deprovision", |sandbox_id| RuntimeOperation::Deprovision {
+                sandbox_id,
+            }),
+        ]
+    }
+
+    fn request_intent(request: &ParsedStateAwareRequest) -> serde_json::Value {
+        let mut value = serde_json::to_value(request.request()).unwrap();
+        value.as_object_mut().unwrap().remove("source_contract");
+        value
+    }
+
+    fn assert_matches_exact(json: &str, input: SdkStateAwareInput) {
+        let exact = match load_mxc_request_from_json(json, &mut Logger::new(Mode::Buffer)).unwrap()
+        {
+            MxcRequest::StateAware(request) => request,
+            MxcRequest::OneShot(_) => panic!("expected a state-aware exact request"),
+        };
+        let typed =
+            normalize_sdk_state_aware_request(input, &mut Logger::new(Mode::Buffer)).unwrap();
+
+        assert_eq!(typed.operation(), exact.operation());
+        assert!(
+            exact.request().source_contract.is_some(),
+            "exact JSON must retain contract attribution"
+        );
+        assert_eq!(
+            typed.request().source_contract,
+            None,
+            "typed SDK input has no external contract source"
+        );
+        assert_eq!(request_intent(&typed), request_intent(&exact));
+    }
+
+    fn assert_provision_matches_exact(
+        json: &str,
+        request: ProvisionRequest,
+        options: OperationOptions,
+    ) {
+        assert_matches_exact(
+            json,
+            request.into_sdk_input(options.telemetry_opt_in).unwrap(),
+        );
+    }
+
+    fn assert_lifecycle_matches_exact(
+        json: &str,
+        sandbox_id: &str,
+        operation: fn(String) -> RuntimeOperation,
+        options: OperationOptions,
+    ) {
+        let id = SandboxId::parse(sandbox_id).unwrap();
+        let input = lifecycle_sdk_input(&id, options.telemetry_opt_in, operation).unwrap();
+        assert_matches_exact(json, input);
+    }
+
+    fn assert_exec_matches_exact(
+        json: &str,
+        sandbox_id: &str,
+        request: ExecRequest,
+        options: OperationOptions,
+    ) {
+        let id = SandboxId::parse(sandbox_id).unwrap();
+        let input = request
+            .into_sdk_input(&id, options.telemetry_opt_in)
+            .unwrap();
+        assert_matches_exact(json, input);
+    }
 
     #[test]
     fn typed_provision_rejects_clear_policy_on_exit() {
@@ -557,6 +638,257 @@ mod tests {
                 error.message.contains("clearPolicyOnExit"),
                 "got: {}",
                 error.message
+            );
+        }
+    }
+
+    #[test]
+    fn sdk_lifecycle_parity_provision_matches_exact_json() {
+        let options = OperationOptions::default();
+        assert_provision_matches_exact(
+            r#"{
+                "version":"1.0.0",
+                "phase":"provision",
+                "containment":"isolation_session",
+                "network":{
+                    "egress":{"default":"allow"},
+                    "ingress":{"default":"allow","hostLoopback":"allow"}
+                },
+                "isolationSession":{"provision":{"appId":"example"}}
+            }"#,
+            ProvisionRequest::isolation_session(Some("example".to_string())),
+            options,
+        );
+        assert_provision_matches_exact(
+            r#"{
+                "version":"1.0.0",
+                "phase":"provision",
+                "containment":"isolation_session",
+                "network":{
+                    "egress":{"default":"allow"},
+                    "ingress":{"default":"allow","hostLoopback":"allow"}
+                }
+            }"#,
+            ProvisionRequest::isolation_session(None),
+            options,
+        );
+        assert_provision_matches_exact(
+            r#"{
+                "version":"1.0.0",
+                "phase":"provision",
+                "containment":"isolation_session",
+                "network":{
+                    "egress":{"default":"allow"},
+                    "ingress":{"default":"allow","hostLoopback":"allow"}
+                },
+                "isolationSession":{"provision":{"appId":""}}
+            }"#,
+            ProvisionRequest::isolation_session(Some(String::new())),
+            options,
+        );
+        assert_provision_matches_exact(
+            r#"{
+                "version":"1.0.0",
+                "phase":"provision",
+                "containment":"wslc",
+                "wslc":{"provision":{"image":"python:3.12","imageTarPath":"image.tar"}}
+            }"#,
+            ProvisionRequest::wslc(
+                Some("python:3.12".to_string()),
+                Some("image.tar".to_string()),
+            ),
+            options,
+        );
+        assert_provision_matches_exact(
+            r#"{"version":"1.0.0","phase":"provision","containment":"wslc"}"#,
+            ProvisionRequest::wslc(None, None),
+            options,
+        );
+        assert_provision_matches_exact(
+            r#"{
+                "version":"1.0.0",
+                "phase":"provision",
+                "containment":"wslc",
+                "wslc":{"provision":{"image":"","imageTarPath":""}}
+            }"#,
+            ProvisionRequest::wslc(Some(String::new()), Some(String::new())),
+            options,
+        );
+
+        let mut filesystem = ProvisionRequest::wslc(Some("python:3.12".to_string()), None);
+        filesystem.set_filesystem(FilesystemSection {
+            readwrite_paths: vec!["/tmp/readwrite".to_string()],
+            readonly_paths: vec!["/tmp/readonly".to_string()],
+            denied_paths: vec!["/tmp/denied".to_string()],
+            ..Default::default()
+        });
+        assert_provision_matches_exact(
+            r#"{
+                "version":"1.0.0",
+                "phase":"provision",
+                "containment":"wslc",
+                "wslc":{"provision":{"image":"python:3.12"}},
+                "filesystem":{
+                    "readwritePaths":["/tmp/readwrite"],
+                    "readonlyPaths":["/tmp/readonly"],
+                    "deniedPaths":["/tmp/denied"]
+                }
+            }"#,
+            filesystem,
+            options,
+        );
+
+        let mut peer = NetworkPeerSection::new("10.0.0.0/8");
+        peer.except = Some(vec!["10.1.0.0/16".to_string()]);
+        let mut network = ProvisionRequest::wslc(Some("python:3.12".to_string()), None);
+        network.set_network(NetworkSection {
+            egress: Some(NetworkEgressSection {
+                default: Some(NetworkAction::Deny),
+                allow: Some(vec![NetworkRuleSection {
+                    to: Some(vec![peer]),
+                    ports: Some(vec![NetworkPortSection {
+                        protocol: Some(NetworkProtocol::Tcp),
+                        port: Some(80),
+                        end_port: Some(81),
+                    }]),
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert_provision_matches_exact(
+            r#"{
+                "version":"1.0.0",
+                "phase":"provision",
+                "containment":"wslc",
+                "wslc":{"provision":{"image":"python:3.12"}},
+                "network":{
+                    "egress":{
+                        "default":"deny",
+                        "allow":[{
+                            "to":[{
+                                "cidr":"10.0.0.0/8",
+                                "except":["10.1.0.0/16"]
+                            }],
+                            "ports":[{
+                                "protocol":"tcp",
+                                "port":80,
+                                "endPort":81
+                            }]
+                        }]
+                    }
+                }
+            }"#,
+            network,
+            options,
+        );
+
+        let mut empty_network = ProvisionRequest::wslc(Some("python:3.12".to_string()), None);
+        empty_network.set_network(NetworkSection::default());
+        assert_provision_matches_exact(
+            r#"{
+                "version":"1.0.0",
+                "phase":"provision",
+                "containment":"wslc",
+                "wslc":{"provision":{"image":"python:3.12"}},
+                "network":{}
+            }"#,
+            empty_network,
+            options,
+        );
+    }
+
+    #[test]
+    fn sdk_lifecycle_parity_exec_and_lifecycle_match_exact_json() {
+        let options = OperationOptions::default();
+        for (phase, operation) in lifecycle_phases() {
+            let json = format!(r#"{{"version":"1.0.0","phase":"{phase}","sandboxId":"iso:abc"}}"#);
+            assert_lifecycle_matches_exact(&json, "iso:abc", operation, options);
+        }
+
+        let mut exec = ExecRequest::new("echo configured");
+        exec.set_working_directory("C:\\work")
+            .set_environment([("A", "one"), ("B", "two")])
+            .inherit_default_env(false)
+            .set_timeout(1234);
+        assert_exec_matches_exact(
+            r#"{
+                "version":"1.0.0",
+                "phase":"exec",
+                "sandboxId":"iso:abc",
+                "process":{
+                    "commandLine":"echo configured",
+                    "cwd":"C:\\work",
+                    "env":["A=one","B=two"],
+                    "inheritDefaultEnv":false,
+                    "timeout":1234
+                }
+            }"#,
+            "iso:abc",
+            exec,
+            options,
+        );
+
+        let mut empty_environment = ExecRequest::new("echo empty");
+        empty_environment.set_environment(std::iter::empty::<(&str, &str)>());
+        assert_exec_matches_exact(
+            r#"{
+                "version":"1.0.0",
+                "phase":"exec",
+                "sandboxId":"iso:abc",
+                "process":{"commandLine":"echo empty","env":[]}
+            }"#,
+            "iso:abc",
+            empty_environment,
+            options,
+        );
+
+        let mut proxy_exec = ExecRequest::new("echo proxied");
+        proxy_exec.set_backend_options(StateAwareExecBackendOptions::Wslc {
+            network_proxy: "http://127.0.0.1:8080".to_string(),
+        });
+        assert_exec_matches_exact(
+            r#"{
+                "version":"1.0.0",
+                "phase":"exec",
+                "sandboxId":"wslc:abc",
+                "process":{"commandLine":"echo proxied"},
+                "runtimeConfig":{"networkProxy":"http://127.0.0.1:8080"}
+            }"#,
+            "wslc:abc",
+            proxy_exec,
+            options,
+        );
+    }
+
+    #[test]
+    fn sdk_lifecycle_parity_operation_options_preserve_telemetry() {
+        for enabled in [false, true] {
+            let options = OperationOptions::new(false).with_telemetry_opt_in(enabled);
+            let provision_json = format!(
+                r#"{{"version":"1.0.0","phase":"provision","containment":"wslc","telemetry":{{"enabled":{enabled}}}}}"#
+            );
+            assert_provision_matches_exact(
+                &provision_json,
+                ProvisionRequest::wslc(None, None),
+                options,
+            );
+
+            for (phase, operation) in lifecycle_phases() {
+                let json = format!(
+                    r#"{{"version":"1.0.0","phase":"{phase}","sandboxId":"wslc:abc","telemetry":{{"enabled":{enabled}}}}}"#
+                );
+                assert_lifecycle_matches_exact(&json, "wslc:abc", operation, options);
+            }
+
+            let exec_json = format!(
+                r#"{{"version":"1.0.0","phase":"exec","sandboxId":"wslc:abc","process":{{"commandLine":"echo hello"}},"telemetry":{{"enabled":{enabled}}}}}"#
+            );
+            assert_exec_matches_exact(
+                &exec_json,
+                "wslc:abc",
+                ExecRequest::new("echo hello"),
+                options,
             );
         }
     }
