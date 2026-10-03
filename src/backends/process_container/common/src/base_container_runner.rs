@@ -8,19 +8,16 @@
 
 use std::ffi::c_void;
 use std::fmt::Write;
-use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use learning_mode_core::DenialAnalyzer;
 use learning_mode_windows::{EtlDenialAnalyzer, LEARNING_MODE_API_SET};
 use windows::Win32::Foundation::{
-    CloseHandle, GetLastError, SetHandleInformation, ERROR_CALL_NOT_IMPLEMENTED, E_NOTIMPL, HANDLE,
-    HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT,
-};
-use windows::Win32::System::Console::{
-    GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    CloseHandle, GetLastError, ERROR_CALL_NOT_IMPLEMENTED, E_NOTIMPL, HANDLE, WAIT_OBJECT_0,
+    WAIT_TIMEOUT,
 };
 use windows::Win32::System::Threading::{
     CreateProcessW, GetExitCodeProcess, TerminateProcess, WaitForSingleObject,
@@ -45,11 +42,13 @@ use crate::launch_diagnostics::{
 };
 use crate::native_capture::CaptureSession;
 use crate::proxy_coordinator::ProxyCoordinator;
+use crate::pseudo_console::{close_after_termination, PseudoConsole};
 use crate::secenv::{
     self, ProcessSecurityEnvironment, SecurityEnvironmentStartupInfo, SecurityEnvironmentSupport,
     SecurityEnvironmentVersion, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
     SECURITY_ENVIRONMENT_API_SET,
 };
+use crate::stdio::ChildStdioSetup;
 use wxc_common::api_set::is_api_set_implemented;
 use wxc_common::audit::{
     sanitize_identity, AuditEvent, AuditEventName, KillMethod, TeardownSkipReason, TeardownStatus,
@@ -62,13 +61,12 @@ use wxc_common::models::{
     FailurePhase, ProxyAddress, SandboxOutputMetadata, ScriptResponse,
 };
 use wxc_common::process_util::{
-    create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
-    SendOwnedHandle,
+    InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter, SendOwnedHandle,
 };
 use wxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, duplicate_and_take_native_stdio, spawn_discard,
-    take_boxed_read, take_boxed_write, NativeStdio, SandboxBackend, SandboxProcess, StdioMode,
-    StreamCloser,
+    take_boxed_read, take_boxed_write, NativeStdio, PtySize, SandboxBackend, SandboxProcess,
+    StdioMode, StreamCloser,
 };
 use wxc_common::script_runner::get_timeout_milliseconds;
 use wxc_common::string_util;
@@ -390,7 +388,7 @@ impl BaseContainerRunner {
         &mut self,
         request: &ExecutionRequest,
         logger: &mut Logger,
-        capture: bool,
+        stdio: StdioMode,
     ) -> Result<BaseChild, ScriptResponse> {
         let _ = writeln!(
             logger,
@@ -532,11 +530,13 @@ impl BaseContainerRunner {
         // In capture mode (`StdioMode::Pipes`) we always take the pipe
         // path and wire the child to capture pipes that the streaming handle
         // reads from.
-        let pipe_mode =
-            capture || !std::io::stdout().is_terminal() || !std::io::stderr().is_terminal();
+        let mut stdio_setup = ChildStdioSetup::new(stdio).map_err(|error| {
+            ScriptResponse::error(&format!("failed to configure child stdio: {error}"))
+        })?;
+        let uses_pipe_handles = stdio_setup.uses_pipe_handles();
 
-        if pipe_mode {
-            if capture {
+        if uses_pipe_handles {
+            if stdio_setup.captures_output() {
                 let _ = writeln!(
                     logger,
                     "STDIO mode: capture (piping child output to the streaming handle)"
@@ -549,118 +549,18 @@ impl BaseContainerRunner {
             }
         }
 
-        // --- Retrieve / create std handles (pipe mode only) ---
-        let mut h_stdin = HANDLE::default();
-        let mut h_stdout = HANDLE::default();
-        let mut h_stderr = HANDLE::default();
-
-        // Capture pipe read-ends (parent side) kept alive until after the wait;
-        // child-side ends kept alive until after process creation.
-        let mut capture_reads: Option<(OwnedHandle, OwnedHandle)> = None;
-        let mut capture_child_ends: Vec<OwnedHandle> = Vec::new();
-        // Parent's stdin write-end; in capture mode it is handed to the caller
-        // so they can write to the child.
-        let mut captured_stdin_write: Option<OwnedHandle> = None;
-
-        if pipe_mode {
-            if capture {
-                let (stdin_read, stdin_write) = match create_std_pipes(false) {
-                    Ok(p) => p,
-                    Err(e) => return Err(ScriptResponse::error(&format!("stdin pipe: {e}"))),
-                };
-                let (stdout_read, stdout_write) = match create_std_pipes(true) {
-                    Ok(p) => p,
-                    Err(e) => return Err(ScriptResponse::error(&format!("stdout pipe: {e}"))),
-                };
-                let (stderr_read, stderr_write) = match create_std_pipes(true) {
-                    Ok(p) => p,
-                    Err(e) => return Err(ScriptResponse::error(&format!("stderr pipe: {e}"))),
-                };
-
-                h_stdin = stdin_read.get();
-                h_stdout = stdout_write.get();
-                h_stderr = stderr_write.get();
-
-                capture_child_ends.push(stdin_read);
-                capture_child_ends.push(stdout_write);
-                capture_child_ends.push(stderr_write);
-                captured_stdin_write = Some(stdin_write);
-                capture_reads = Some((stdout_read, stderr_read));
-            } else {
-                h_stdin = match unsafe { GetStdHandle(STD_INPUT_HANDLE) } {
-                    Ok(h) => h,
-                    Err(e) => {
-                        return Err(ScriptResponse::error(&format!("GetStdHandle(STDIN): {e}")))
-                    }
-                };
-                h_stdout = match unsafe { GetStdHandle(STD_OUTPUT_HANDLE) } {
-                    Ok(h) => h,
-                    Err(e) => {
-                        return Err(ScriptResponse::error(&format!("GetStdHandle(STDOUT): {e}")))
-                    }
-                };
-                h_stderr = match unsafe { GetStdHandle(STD_ERROR_HANDLE) } {
-                    Ok(h) => h,
-                    Err(e) => {
-                        return Err(ScriptResponse::error(&format!("GetStdHandle(STDERR): {e}")))
-                    }
-                };
-
-                if h_stdin.is_invalid() || h_stdin == HANDLE::default() {
-                    return Err(ScriptResponse::error(
-                        "GetStdHandle(STDIN) returned null/invalid handle",
-                    ));
-                }
-                if h_stdout.is_invalid() || h_stdout == HANDLE::default() {
-                    return Err(ScriptResponse::error(
-                        "GetStdHandle(STDOUT) returned null/invalid handle",
-                    ));
-                }
-                if h_stderr.is_invalid() || h_stderr == HANDLE::default() {
-                    return Err(ScriptResponse::error(
-                        "GetStdHandle(STDERR) returned null/invalid handle",
-                    ));
-                }
-
-                // Ensure the handles are inheritable.
-                unsafe {
-                    if let Err(e) =
-                        SetHandleInformation(h_stdin, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
-                    {
-                        return Err(ScriptResponse::error(&format!(
-                            "SetHandleInformation(STDIN): {e}"
-                        )));
-                    }
-                    if let Err(e) =
-                        SetHandleInformation(h_stdout, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
-                    {
-                        return Err(ScriptResponse::error(&format!(
-                            "SetHandleInformation(STDOUT): {e}"
-                        )));
-                    }
-                    if let Err(e) =
-                        SetHandleInformation(h_stderr, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
-                    {
-                        return Err(ScriptResponse::error(&format!(
-                            "SetHandleInformation(STDERR): {e}"
-                        )));
-                    }
-                }
-            }
-        }
-
         // STARTUPINFOW -- in pipe mode, pass parent handles via STARTF_USESTDHANDLES
         // so child output streams directly to the SDK caller.
         let si = STARTUPINFOW {
             cb: std::mem::size_of::<STARTUPINFOW>() as u32,
-            dwFlags: if pipe_mode {
+            dwFlags: if uses_pipe_handles {
                 STARTF_USESTDHANDLES
             } else {
                 Default::default()
             },
-            hStdInput: h_stdin,
-            hStdOutput: h_stdout,
-            hStdError: h_stderr,
+            hStdInput: stdio_setup.stdin,
+            hStdOutput: stdio_setup.stdout,
+            hStdError: stdio_setup.stderr,
             ..unsafe { std::mem::zeroed() }
         };
         #[allow(unused_assignments)]
@@ -684,7 +584,11 @@ impl BaseContainerRunner {
         // stdio is piped (no console is shared). In console-sharing mode (ConPTY)
         // the child inherits the parent's live console for interactive I/O, so
         // CREATE_NO_WINDOW must not be set there.
-        let no_window_flag = if pipe_mode { CREATE_NO_WINDOW.0 } else { 0 };
+        let no_window_flag = if uses_pipe_handles {
+            CREATE_NO_WINDOW.0
+        } else {
+            0
+        };
         // Create the child suspended so its main thread cannot spawn any
         // descendant before we've assigned it to the job object below.
         let creation_flags = CREATE_SUSPENDED.0
@@ -768,10 +672,11 @@ impl BaseContainerRunner {
         }
 
         pi = unsafe { std::mem::zeroed() };
-        let inherited_handles = if pipe_mode {
-            vec![h_stdin, h_stdout, h_stderr]
+        let inherited_pipe_handles = stdio_setup.child_inherited_pipe_handles();
+        let inherited_handles = if uses_pipe_handles {
+            &inherited_pipe_handles[..]
         } else {
-            Vec::new()
+            &[]
         };
         let environment_handle = capture_session
             .as_ref()
@@ -782,44 +687,52 @@ impl BaseContainerRunner {
                     .map(ProcessSecurityEnvironment::raw)
             })
             .expect("PSEC environment owner is initialized before launch");
-        let extended_startup =
-            match SecurityEnvironmentStartupInfo::new(si, environment_handle, &inherited_handles) {
-                Ok(startup) => startup,
-                Err(primary) => {
-                    let cleanup_error = capture_session
-                        .take()
-                        .map(|session| session.finish(None))
-                        .unwrap_or(Ok(()))
-                        .err();
-                    let mut msg =
-                        format!("failed to attach the process security environment: {primary}");
-                    if let Some(cleanup_error) = &cleanup_error {
-                        let _ = write!(
+        let extended_startup = match SecurityEnvironmentStartupInfo::new(
+            si,
+            environment_handle,
+            inherited_handles,
+            stdio_setup
+                .pseudo_console
+                .as_ref()
+                .map(PseudoConsole::attribute_value),
+        ) {
+            Ok(startup) => startup,
+            Err(primary) => {
+                let cleanup_error = capture_session
+                    .take()
+                    .map(|session| session.finish(None))
+                    .unwrap_or(Ok(()))
+                    .err();
+                let mut msg =
+                    format!("failed to attach the process security environment: {primary}");
+                if let Some(cleanup_error) = &cleanup_error {
+                    let _ = write!(
                         msg,
                         "; additionally failed to discard the learning-mode trace: {cleanup_error}"
                     );
-                    }
-                    let _ = writeln!(logger, "Error: {msg}");
-                    let failure_phase = if primary.is_api_unavailable()
-                        || cleanup_error.as_ref().is_some_and(
-                            learning_mode_windows::LearningModeError::is_api_unavailable,
-                        ) {
-                        FailurePhase::BackendUnavailable
-                    } else {
-                        FailurePhase::LaunchFailed
-                    };
-                    if capture_denials.is_some() {
-                        self.cleanup_capture_begin_failure(logger);
-                    }
-                    return Err(ScriptResponse {
-                        exit_code: -1,
-                        error_message: msg.clone(),
-                        standard_err: msg,
-                        failure_phase,
-                        ..Default::default()
-                    });
                 }
-            };
+                let _ = writeln!(logger, "Error: {msg}");
+                let failure_phase = if primary.is_api_unavailable()
+                    || cleanup_error
+                        .as_ref()
+                        .is_some_and(learning_mode_windows::LearningModeError::is_api_unavailable)
+                {
+                    FailurePhase::BackendUnavailable
+                } else {
+                    FailurePhase::LaunchFailed
+                };
+                if capture_denials.is_some() {
+                    self.cleanup_capture_begin_failure(logger);
+                }
+                return Err(ScriptResponse {
+                    exit_code: -1,
+                    error_message: msg.clone(),
+                    standard_err: msg,
+                    failure_phase,
+                    ..Default::default()
+                });
+            }
+        };
         let environment = (!current_env_ptr.is_null()).then_some(current_env_ptr);
         let result = unsafe {
             CreateProcessW(
@@ -915,9 +828,9 @@ impl BaseContainerRunner {
 
         // Child has inherited the pipe handles; close the parent's child-side
         // ends so the read-ends observe EOF when the child exits.
-        capture_child_ends.clear();
+        stdio_setup.finish_launch();
 
-        let (stdout_read, stderr_read) = match capture_reads {
+        let (stdout_read, stderr_read) = match stdio_setup.capture_reads.take() {
             Some((out, err)) => (Some(out), Some(err)),
             None => (None, None),
         };
@@ -1085,9 +998,10 @@ impl BaseContainerRunner {
             thread: OwnedHandle::new(pi.hThread),
             pid: pi.dwProcessId,
             job: Some(job),
-            stdin_write: captured_stdin_write,
+            stdin_write: stdio_setup.stdin_write.take(),
             stdout_read,
             stderr_read,
+            pseudo_console: stdio_setup.pseudo_console.take(),
             timeout_ms: get_timeout_milliseconds(request.script_timeout),
             preserve_policy: request.lifecycle.preserve_policy,
             identity,
@@ -1119,6 +1033,7 @@ struct BaseChild {
     stdin_write: Option<OwnedHandle>,
     stdout_read: Option<OwnedHandle>,
     stderr_read: Option<OwnedHandle>,
+    pseudo_console: Option<PseudoConsole>,
     timeout_ms: u32,
     preserve_policy: bool,
     identity: String,
@@ -1193,14 +1108,12 @@ impl SandboxBackend for BaseContainerRunner {
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
         use wxc_common::validator::validate_common;
 
-        crate::validate_process_container_stdio(stdio)?;
         validate_common(request)?;
         self.validate(request)?;
 
         // Pipes → capture pipes the caller drives; Inherit → the child inherits
         // the binary's own std handles / console (a TTY when the binary has one).
-        let capture = stdio == StdioMode::Pipes;
-        let child = self.spawn_base(request, logger, capture)?;
+        let child = self.spawn_base(request, logger, stdio)?;
         Ok(Box::new(BaseContainerSandboxProcess::from_child(
             child, logger,
         )))
@@ -1232,7 +1145,9 @@ struct BaseContainerSandboxProcess {
     /// closers can mint a [`StreamCloser`] even after the stream is taken.
     stdout_canceller: Option<PipeReadCanceller>,
     stderr_canceller: Option<PipeReadCanceller>,
+    pseudo_console: Option<PseudoConsole>,
     timeout_ms: u32,
+    started_at: Instant,
     // Retained here, in addition to the optional engine telemetry wrapper, so
     // callers still receive timeout classification when telemetry is disabled.
     timeout_requested: bool,
@@ -1286,7 +1201,9 @@ impl BaseContainerSandboxProcess {
             stderr,
             stdout_canceller,
             stderr_canceller,
+            pseudo_console: child.pseudo_console.take(),
             timeout_ms: child.timeout_ms,
+            started_at: Instant::now(),
             timeout_requested: false,
             preserve_policy: child.preserve_policy,
             identity: sanitize_identity(&std::mem::take(&mut child.identity)).to_string(),
@@ -1734,6 +1651,9 @@ impl SandboxProcess for BaseContainerSandboxProcess {
     }
 
     fn take_native_stdio(&mut self) -> std::io::Result<Option<NativeStdio>> {
+        if let Some(pty) = &self.pseudo_console {
+            return pty.take_native_stdio();
+        }
         let stdio = duplicate_and_take_native_stdio(
             &mut self.stdin,
             &mut self.stdout,
@@ -1747,6 +1667,38 @@ impl SandboxProcess for BaseContainerSandboxProcess {
             self.stderr_canceller.take();
         }
         Ok(stdio)
+    }
+
+    fn is_pty(&self) -> bool {
+        self.pseudo_console.is_some()
+    }
+
+    fn pty_clone_reader(&self) -> std::io::Result<Box<dyn std::io::Read + Send>> {
+        self.pseudo_console
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("sandbox process has no PTY"))?
+            .clone_reader()
+    }
+
+    fn pty_take_writer(&self) -> std::io::Result<Box<dyn std::io::Write + Send>> {
+        self.pseudo_console
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("sandbox process has no PTY"))?
+            .take_writer()
+    }
+
+    fn pty_resize(&self, size: PtySize) -> std::io::Result<()> {
+        self.pseudo_console
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("sandbox process has no PTY"))?
+            .resize(size)
+    }
+
+    fn pty_size(&self) -> std::io::Result<PtySize> {
+        self.pseudo_console
+            .as_ref()
+            .map(PseudoConsole::size)
+            .ok_or_else(|| std::io::Error::other("sandbox process has no PTY"))
     }
 
     fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
@@ -1788,6 +1740,13 @@ impl SandboxProcess for BaseContainerSandboxProcess {
                     Ok(Some(code as i32))
                 }
             }
+            WAIT_TIMEOUT if crate::process_timeout_elapsed(self.started_at, self.timeout_ms) => {
+                self.kill_for_timeout()?;
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "sandbox execution timed out",
+                ))
+            }
             WAIT_TIMEOUT => Ok(None),
             _ => Err(std::io::Error::other("WaitForSingleObject failed")),
         }
@@ -1809,6 +1768,13 @@ impl SandboxProcess for BaseContainerSandboxProcess {
     }
 
     fn wait(&mut self) -> std::io::Result<i32> {
+        let pty_output_thread = self
+            .pseudo_console
+            .as_ref()
+            .map(PseudoConsole::prepare_wait)
+            .transpose()?
+            .flatten();
+
         // Close our copy of any not-taken stdin so the child sees EOF and can
         // exit reliably (an interactive command would otherwise block waiting
         // for input).
@@ -1854,6 +1820,9 @@ impl SandboxProcess for BaseContainerSandboxProcess {
         // the pipe drains — and killing the tree closes the descendant's pipe
         // write-ends, so the drains can finish.
         let termination_result = self.terminate_and_reap();
+        // Closing the ConPTY after the process tree is gone closes its output
+        // side so a caller-owned reader observes EOF.
+        close_after_termination(&mut self.pseudo_console, pty_output_thread)?;
         cancel_and_join_discard(stdout_thread, &self.stdout_canceller);
         cancel_and_join_discard(stderr_thread, &self.stderr_canceller);
         termination_result?;
@@ -1867,6 +1836,21 @@ impl SandboxProcess for BaseContainerSandboxProcess {
 
 impl Drop for BaseContainerSandboxProcess {
     fn drop(&mut self) {
+        let pty_output_thread = match self
+            .pseudo_console
+            .as_ref()
+            .map(PseudoConsole::prepare_wait)
+            .transpose()
+        {
+            Ok(thread) => thread.flatten(),
+            Err(error) => {
+                write_stderr_line_best_effort(format_args!(
+                    "failed to prepare PTY output drain during drop: {error}"
+                ));
+                None
+            }
+        };
+
         // Kill and reap before tearing down proxy / sandbox state, so an
         // abandoned-but-running sandbox cannot outlive its enforcement (or
         // leak as an orphan).
@@ -1874,7 +1858,13 @@ impl Drop for BaseContainerSandboxProcess {
             write_stderr_line_best_effort(format_args!(
                 "failed to terminate sandbox process tree during drop: {error}"
             ));
+            let _ = close_after_termination(&mut self.pseudo_console, pty_output_thread);
             return;
+        }
+        if let Err(error) = close_after_termination(&mut self.pseudo_console, pty_output_thread) {
+            write_stderr_line_best_effort(format_args!(
+                "failed to finish PTY output drain during drop: {error}"
+            ));
         }
         // A dropped handle has no observer for output metadata, so retaining
         // its ETL would leave a sensitive artifact with no discoverable owner.

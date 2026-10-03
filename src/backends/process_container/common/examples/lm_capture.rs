@@ -148,8 +148,9 @@ mod windows_impl {
         let mut startup_info: STARTUPINFOW = unsafe { std::mem::zeroed() };
         startup_info.cb = u32::try_from(std::mem::size_of::<STARTUPINFOW>())
             .map_err(|_| "STARTUPINFOW size overflow".to_string())?;
-        let extended_startup = SecurityEnvironmentStartupInfo::new(startup_info, environment, &[])
-            .map_err(|error| error.to_string())?;
+        let extended_startup =
+            SecurityEnvironmentStartupInfo::new(startup_info, environment, &[], None)
+                .map_err(|error| error.to_string())?;
         let mut process_information: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
 
         // SAFETY: `cmd` is mutable and null-terminated; `extended_startup`

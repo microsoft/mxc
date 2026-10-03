@@ -44,9 +44,13 @@ pub mod process_mitigation;
 #[cfg(target_os = "windows")]
 pub mod proxy_coordinator;
 #[cfg(target_os = "windows")]
+mod pseudo_console;
+#[cfg(target_os = "windows")]
 pub mod sandbox_tracking;
 #[cfg(target_os = "windows")]
 mod secenv;
+#[cfg(target_os = "windows")]
+mod stdio;
 #[cfg(target_os = "windows")]
 pub use native_capture::CaptureSession;
 #[cfg(target_os = "windows")]
@@ -58,15 +62,9 @@ pub use secenv::{
 };
 
 #[cfg(target_os = "windows")]
-pub(crate) fn validate_process_container_stdio(
-    stdio: wxc_common::sandbox_process::StdioMode,
-) -> Result<(), wxc_common::models::ScriptResponse> {
-    if matches!(stdio, wxc_common::sandbox_process::StdioMode::Pty(_)) {
-        return Err(wxc_common::models::ScriptResponse::rejected(
-            "ProcessContainer does not support caller-controlled PTY spawning",
-        ));
-    }
-    Ok(())
+pub(crate) fn process_timeout_elapsed(started_at: std::time::Instant, timeout_ms: u32) -> bool {
+    timeout_ms != u32::MAX
+        && started_at.elapsed() >= std::time::Duration::from_millis(u64::from(timeout_ms))
 }
 
 /// Working-directory resolution for both Windows launch paths. Deliberately
@@ -85,14 +83,20 @@ pub(crate) mod test_env;
 
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
-    use wxc_common::sandbox_process::{PtySize, StdioMode};
+    use std::time::{Duration, Instant};
 
     #[test]
-    fn process_container_rejects_pty_stdio() {
-        assert!(
-            super::validate_process_container_stdio(StdioMode::Pty(PtySize::default())).is_err()
-        );
-        assert!(super::validate_process_container_stdio(StdioMode::Pipes).is_ok());
-        assert!(super::validate_process_container_stdio(StdioMode::Inherit).is_ok());
+    fn finite_process_timeout_expires_after_deadline() {
+        let started_at = Instant::now() - Duration::from_millis(10);
+
+        assert!(super::process_timeout_elapsed(started_at, 5));
+        assert!(!super::process_timeout_elapsed(started_at, 50));
+    }
+
+    #[test]
+    fn infinite_process_timeout_never_expires() {
+        let started_at = Instant::now() - Duration::from_secs(1);
+
+        assert!(!super::process_timeout_elapsed(started_at, u32::MAX));
     }
 }

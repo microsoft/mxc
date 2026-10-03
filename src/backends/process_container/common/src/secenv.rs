@@ -41,7 +41,8 @@ use windows::Win32::System::LibraryLoader::{
 };
 use windows::Win32::System::Threading::{
     DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, UpdateProcThreadAttribute,
-    LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTUPINFOEXW, STARTUPINFOW,
+    LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTUPINFOEXW, STARTUPINFOW,
 };
 use windows_core::{HRESULT, PCSTR, PCWSTR};
 use wxc_common::api_set::is_api_set_implemented;
@@ -190,8 +191,10 @@ impl SecurityEnvironmentStartupInfo {
         mut startup_info: STARTUPINFOW,
         environment: HANDLE,
         inherited_handles: &[HANDLE],
+        pseudo_console: Option<*const c_void>,
     ) -> Result<Self, LearningModeError> {
-        let attribute_count = 1 + u32::from(!inherited_handles.is_empty());
+        let attribute_count =
+            1 + u32::from(!inherited_handles.is_empty()) + u32::from(pseudo_console.is_some());
         let mut byte_count = 0usize;
         // SAFETY: the documented sizing call uses a null list and writes only
         // the required byte count.
@@ -199,7 +202,19 @@ impl SecurityEnvironmentStartupInfo {
             InitializeProcThreadAttributeList(None, attribute_count, None, &mut byte_count)
         };
         let sizing_error = last_error();
-        if sizing_result.is_ok() || sizing_error != ERROR_INSUFFICIENT_BUFFER.0 || byte_count == 0 {
+        if sizing_result.is_ok() {
+            return Err(LearningModeError::ApiCall {
+                function: "InitializeProcThreadAttributeList(size)",
+                code: sizing_error,
+            });
+        }
+        if sizing_error != ERROR_INSUFFICIENT_BUFFER.0 {
+            return Err(LearningModeError::ApiCall {
+                function: "InitializeProcThreadAttributeList(size)",
+                code: sizing_error,
+            });
+        }
+        if byte_count == 0 {
             return Err(LearningModeError::ApiCall {
                 function: "InitializeProcThreadAttributeList(size)",
                 code: sizing_error,
@@ -272,6 +287,29 @@ impl SecurityEnvironmentStartupInfo {
                 function: "UpdateProcThreadAttribute(HANDLE_LIST)",
                 code,
             });
+        }
+
+        if let Some(pseudo_console) = pseudo_console {
+            if unsafe {
+                UpdateProcThreadAttribute(
+                    attribute_list,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
+                    Some(pseudo_console),
+                    std::mem::size_of::<windows::Win32::System::Console::HPCON>(),
+                    None,
+                    None,
+                )
+            }
+            .is_err()
+            {
+                let code = last_error();
+                unsafe { DeleteProcThreadAttributeList(attribute_list) };
+                return Err(LearningModeError::ApiCall {
+                    function: "UpdateProcThreadAttribute(PSEUDOCONSOLE)",
+                    code,
+                });
+            }
         }
 
         startup_info.cb = u32::try_from(std::mem::size_of::<STARTUPINFOEXW>()).map_err(|_| {
@@ -842,7 +880,7 @@ mod tests {
         };
         let environment = HANDLE(std::ptr::dangling_mut::<c_void>());
 
-        match SecurityEnvironmentStartupInfo::new(startup_info, environment, &[]) {
+        match SecurityEnvironmentStartupInfo::new(startup_info, environment, &[], None) {
             Ok(extended) => {
                 assert_eq!(
                     extended.startup_info().StartupInfo.cb as usize,

@@ -78,6 +78,29 @@ describe('in-process async run routing', () => {
     assert.strictEqual(bindingColumns, 100);
   });
 
+  it('routes ProcessContainer PTY requests and terminal size to the native binding', async () => {
+    let bindingRequest: OneShotRequest | undefined;
+    let bindingRows = 0;
+    let bindingColumns = 0;
+    _setSpawnBindingSandboxWithPtyImplementation(
+      async (request, _experimental, rows, columns) => {
+        bindingRequest = request;
+        bindingRows = rows;
+        bindingColumns = columns;
+        return {} as MxcPtyProcess;
+      },
+    );
+
+    const config = v1Sdk.createConfigFromPolicy({}, 'processcontainer');
+    config.process!.commandLine = 'cmd.exe /c echo pty';
+    await spawnWithPty(config, { rows: 42, columns: 132 });
+
+    assert.strictEqual(bindingRequest?.containment, 'processcontainer');
+    assert.strictEqual(bindingRequest?.process.commandLine, 'cmd.exe /c echo pty');
+    assert.strictEqual(bindingRows, 42);
+    assert.strictEqual(bindingColumns, 132);
+  });
+
   it('uses the SDK-owned exact v1 one-shot request', async () => {
     let bindingRequest: OneShotRequest | undefined;
     _setBindingRunAsyncImplementation(async (request) => {

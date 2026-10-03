@@ -355,11 +355,8 @@ public static class MxcSandbox
         SandboxRequest request,
         MxcPtySize? size = null)
     {
-        ArgumentNullException.ThrowIfNull(request);
-        var terminalSize = size ?? MxcPtySize.Default;
-        terminalSize.Validate(nameof(size));
-
-        var requestBuf = ToNullTerminatedUtf8(SerializeRequest(request));
+        var prepared = PreparePtySpawn(request, size);
+        var requestBuf = ToNullTerminatedUtf8(prepared.RequestJson);
         unsafe
         {
             fixed (byte* requestPtr = requestBuf)
@@ -369,8 +366,8 @@ public static class MxcSandbox
                 var status = NativeMethods.mxc_spawn_pty_json(
                     requestPtr,
                     NoExperimentalOptIn,
-                    terminalSize.Rows,
-                    terminalSize.Columns,
+                    prepared.Size.Rows,
+                    prepared.Size.Columns,
                     &handle,
                     &error);
                 if (status != (int)ErrorCode.Success)
@@ -392,6 +389,16 @@ public static class MxcSandbox
                     request.Policy.TimeoutMs);
             }
         }
+    }
+
+    internal static (string RequestJson, MxcPtySize Size) PreparePtySpawn(
+        SandboxRequest request,
+        MxcPtySize? size)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var terminalSize = size ?? MxcPtySize.Default;
+        terminalSize.Validate(nameof(size));
+        return (SerializeRequest(request), terminalSize);
     }
 
     private static SandboxRequest CreateCompatibilityRequest(

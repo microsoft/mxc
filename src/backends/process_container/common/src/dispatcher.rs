@@ -760,6 +760,26 @@ impl SandboxProcess for DaclGuardedProcess {
         self.inner.take_native_stdio()
     }
 
+    fn is_pty(&self) -> bool {
+        self.inner.is_pty()
+    }
+
+    fn pty_clone_reader(&self) -> std::io::Result<Box<dyn std::io::Read + Send>> {
+        self.inner.pty_clone_reader()
+    }
+
+    fn pty_take_writer(&self) -> std::io::Result<Box<dyn std::io::Write + Send>> {
+        self.inner.pty_take_writer()
+    }
+
+    fn pty_resize(&self, size: wxc_common::sandbox_process::PtySize) -> std::io::Result<()> {
+        self.inner.pty_resize(size)
+    }
+
+    fn pty_size(&self) -> std::io::Result<wxc_common::sandbox_process::PtySize> {
+        self.inner.pty_size()
+    }
+
     fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
         self.inner.take_stdout()
     }
@@ -1422,6 +1442,7 @@ mod tests {
         struct FakeProcess {
             stdin_taken: bool,
             native_stdio_calls: Arc<AtomicUsize>,
+            pty_resize_calls: Arc<AtomicUsize>,
             killed: bool,
             output_metadata: wxc_common::models::SandboxOutputMetadata,
         }
@@ -1438,6 +1459,30 @@ mod tests {
             ) -> std::io::Result<Option<wxc_common::sandbox_process::NativeStdio>> {
                 self.native_stdio_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(None)
+            }
+            fn is_pty(&self) -> bool {
+                true
+            }
+            fn pty_clone_reader(&self) -> std::io::Result<Box<dyn Read + Send>> {
+                Ok(Box::new(std::io::Cursor::new(Vec::<u8>::new())))
+            }
+            fn pty_take_writer(&self) -> std::io::Result<Box<dyn Write + Send>> {
+                Ok(Box::new(std::io::sink()))
+            }
+            fn pty_resize(
+                &self,
+                _size: wxc_common::sandbox_process::PtySize,
+            ) -> std::io::Result<()> {
+                self.pty_resize_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            fn pty_size(&self) -> std::io::Result<wxc_common::sandbox_process::PtySize> {
+                Ok(wxc_common::sandbox_process::PtySize {
+                    rows: 31,
+                    cols: 101,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
             }
             fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
                 None
@@ -1468,9 +1513,11 @@ mod tests {
         // test only exercises delegation, not real host-ACE mutation.
         let dacl_manager = DaclManager::new().expect("dacl mgr");
         let native_stdio_calls = Arc::new(AtomicUsize::new(0));
+        let pty_resize_calls = Arc::new(AtomicUsize::new(0));
         let mut guarded = DaclGuardedProcess {
             inner: Box::new(FakeProcess {
                 native_stdio_calls: Arc::clone(&native_stdio_calls),
+                pty_resize_calls: Arc::clone(&pty_resize_calls),
                 ..FakeProcess::default()
             }),
             _dacl_manager: dacl_manager,
@@ -1488,6 +1535,33 @@ mod tests {
             "take_native_stdio() must delegate"
         );
         assert_eq!(native_stdio_calls.load(Ordering::SeqCst), 1);
+        assert!(guarded.is_pty(), "is_pty() must delegate");
+        assert!(
+            guarded.pty_clone_reader().is_ok(),
+            "pty_clone_reader() must delegate"
+        );
+        assert!(
+            guarded.pty_take_writer().is_ok(),
+            "pty_take_writer() must delegate"
+        );
+        guarded
+            .pty_resize(wxc_common::sandbox_process::PtySize {
+                rows: 40,
+                cols: 120,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("pty_resize() must delegate");
+        assert_eq!(pty_resize_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            guarded.pty_size().expect("pty_size() must delegate"),
+            wxc_common::sandbox_process::PtySize {
+                rows: 31,
+                cols: 101,
+                pixel_width: 0,
+                pixel_height: 0,
+            }
+        );
         assert!(guarded.kill().is_err(), "kill() must delegate");
         assert!(
             guarded.kill_for_timeout().is_ok(),

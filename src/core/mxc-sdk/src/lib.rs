@@ -129,9 +129,10 @@
 //! process-input API.
 //!
 //! [`v1::spawn_with_pty`] allocates a caller-driven PTY for supported one-shot
-//! backends. [`v1::container::spawn_in_container_with_pty`] does the same for a
-//! process in an existing IsolationSession container. Unsupported backends
-//! reject the request before creating a sandbox.
+//! backends, including Windows ProcessContainer and IsolationSession.
+//! [`v1::container::spawn_in_container_with_pty`] does the same for a process in
+//! an existing IsolationSession container. Unsupported backends reject the
+//! request before creating a sandbox.
 //!
 //! Under an attached exec, IsolationSession allocates a pseudo-console and
 //! forwards stdin, so interactive shells render and resize. A pseudo-console

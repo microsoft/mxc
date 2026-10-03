@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Text.Json;
 using Microsoft.Mxc.Sdk;
 using Microsoft.Mxc.Sdk.V1;
 using Xunit;
@@ -54,5 +55,34 @@ public class MxcPtyProcessTests
             "echo hi");
 
         Assert.IsType<IsolationSessionContainment>(request.Containment);
+    }
+
+    [Fact]
+    public void ProcessContainerRequest_PreservesContainmentAndTerminalSize()
+    {
+        var request = new SandboxRequest(
+            new SandboxPolicy(),
+            "cmd.exe /c echo pty")
+        {
+            Containment = new ProcessContainerContainment
+            {
+                LeastPrivilege = true,
+            },
+        };
+
+        var prepared = MxcSandbox.PreparePtySpawn(
+            request,
+            new MxcPtySize(42, 132));
+        using var document = JsonDocument.Parse(prepared.RequestJson);
+        var root = document.RootElement;
+
+        Assert.Equal("processcontainer", root.GetProperty("containment").GetString());
+        Assert.Equal(
+            "cmd.exe /c echo pty",
+            root.GetProperty("process").GetProperty("commandLine").GetString());
+        Assert.True(
+            root.GetProperty("processContainer").GetProperty("leastPrivilege").GetBoolean());
+        Assert.Equal((ushort)42, prepared.Size.Rows);
+        Assert.Equal((ushort)132, prepared.Size.Columns);
     }
 }
