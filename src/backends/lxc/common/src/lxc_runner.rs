@@ -1080,14 +1080,14 @@ impl PreparedSandbox {
 pub const LXC_CAPABILITIES_MODE_UNSUPPORTED: &str =
     "LXC: network.enforcementMode='capabilities' (the default) selects Windows AppContainer \
      capability SIDs, which LXC has no mechanism for. Accepting it would enforce the policy by \
-     some means other than the one named. Set network.enforcementMode to 'firewall' or 'both', \
-     or state the policy in the 0.8 network.egress / network.ingress form, which carries no \
-     enforcement mode.";
+     some means other than the one named. Use the supported network.egress / network.ingress \
+     fields instead; no registered LXC contract accepts network.enforcementMode.";
 
 pub const LXC_RUNTIME_PROXY_UNSUPPORTED: &str =
     "LXC: runtimeConfig.networkProxy is not supported. It must name a loopback endpoint, which \
-     inside the container's own network namespace is the container rather than the host. On \
-     schema 0.6-0.8, use network.proxy.url with an address routable from inside the container.";
+     inside the container's own network namespace is the container rather than the host. LXC \
+     has no proxy surface in any supported contract. Select a backend that can enforce a \
+     loopback proxy, or remove the proxy request.";
 
 pub const LXC_INHERIT_STDIO_UNSUPPORTED: &str =
     "LXC: inherited stdio is not available from the in-process sandbox API. LXC gives a workload \
@@ -2787,6 +2787,13 @@ mod tests {
             response.error_message.contains("LXC"),
             "the refusal must name the backend that refused, or the caller cannot tell which \
              part of the request to change, got: {}",
+            response.error_message
+        );
+        assert!(
+            response.error_message.contains("no proxy surface")
+                && response.error_message.contains("Select a backend")
+                && !response.error_message.contains("network.proxy.url"),
+            "the refusal must recommend a supported alternative, got: {}",
             response.error_message
         );
     }
