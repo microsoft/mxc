@@ -101,7 +101,7 @@ Entries below describe historical release APIs, not the current V1 surface.
   the implicit `allow` default must now set `defaultPolicy: 'allow'`
   explicitly (or accept the deny default and grant specific hosts via
   `allowedHosts`).
-- The new `0.9.0-alpha` schema documents the new default; `0.5.0-alpha` and
+- The new `0.6.0-alpha` schema documents the new default; `0.5.0-alpha` and
   the stable `0.4.0-alpha` schemas are unchanged, but the Rust parser still
   applies deny-by-default to them at the trust boundary.
 

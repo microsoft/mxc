@@ -1,6 +1,6 @@
 {
   "version": "0.9.0-alpha",
-  "containerId": "CLI-HelloWorld-v060",
+  "containerId": "CLI-HelloWorld-v090",
   "containment": "processcontainer",
   "process": {
     "commandLine": "python -c \"import sys; print('Hello from MXC 0.9.0-alpha!'); print(f'Python version: {sys.version}')\""

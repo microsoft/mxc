@@ -43,17 +43,17 @@ For a more comprehensive list of examples, look in the examples\ directory.
 }
 ```
 
-### Schema 0.8 Directional Network Policy
+### Directional Network Policy (schema 0.9+)
 
-Schema 0.8 adds a directional format with explicit egress CIDR, protocol, and
-port rules plus separate ingress defaults:
+Supported contracts use explicit egress CIDR, protocol, and port rules plus
+separate ingress defaults:
 
 ```json
 {
   "version": "0.9.0-alpha",
   "containment": "process",
   "process": {
-    "commandLine": "echo schema 0.8 directional network example"
+    "commandLine": "echo directional network example"
   },
   "network": {
     "egress": {
@@ -81,59 +81,44 @@ for network modes and backend support.
 
 ### Network Proxy
 
-Route sandboxed traffic through a localhost proxy via the legacy `network.proxy`
-field. Supported by **ProcessContainer** (Windows), **Bubblewrap** (Linux), and
-**Seatbelt** (macOS) — see each backend's doc for enforcement specifics. Two
-mutually exclusive modes are available:
-
-**External proxy** — connect to an already-running localhost proxy:
+Supported contracts name a **running** localhost proxy using
+`runtimeConfig.networkProxy`. Egress must default to deny, with no direct
+allow or deny rules. For an unpackaged host proxy on **ProcessContainer**,
+the development/testing configuration is:
 
 ```json
 {
-  "script": "python -c \"import urllib.request; print(urllib.request.urlopen('https://api.github.com').status)\"",
-  "timeout": 30000,
+  "version": "1.0.0",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "python -c \"import urllib.request; print(urllib.request.urlopen('https://api.github.com').status)\"",
+    "timeout": 30000
+  },
   "processContainer": {
-    "name": "CLI-Proxy",
     "capabilities": ["internetClient"]
   },
   "network": {
-    "proxy": { "localhost": 8080 }
+    "egress": { "default": "deny" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://127.0.0.1:8080"
   }
 }
 ```
 
-**Builtin test server** — the executor launches its own minimal HTTP CONNECT
-proxy on an OS-assigned port (for integration testing only, not production):
+This identity-less host-loopback deployment cannot pin the proxy process's
+identity. For production ProcessContainer deployments, identify a packaged
+proxy through `processContainer.network.allowedProxyPeer` instead; see
+[proxy deployment choices](process-container/networking.md#proxy-deployment-choices).
+Bubblewrap and Seatbelt also support a caller-managed loopback proxy, but
+their supported ingress policies differ. See their backend guides.
 
-```json
-{
-  "script": "python -c \"import urllib.request; print(urllib.request.urlopen('https://api.github.com').status)\"",
-  "timeout": 30000,
-  "processContainer": {
-    "name": "CLI-BuiltinProxy",
-    "capabilities": ["internetClient"]
-  },
-  "network": {
-    "proxy": { "builtinTestServer": true }
-  }
-}
-```
+#### `egress` / `ingress` / `runtimeConfig.networkProxy`
 
-When `builtinTestServer` is `true`, it must be the only key in the `proxy`
-object. Because it activates a deliberately-permissive, testing-only proxy
-(no auth, no body limits), it is **not** enabled by default: pass the
-`--allow-testing-features` flag to `wxc-exec`/`lxc-exec`/`mxc-exec-mac`. This
-is a separate axis from `--experimental` (which selects experimental backends
-and features). The MXC SDK exposes the same gate as the `allowTestingFeatures`
-spawn option, which must be set to `true` for a policy that uses
-`builtinTestServer`.
-
-#### Schema 0.8 shape: `egress` / `ingress` / `runtimeConfig.networkProxy`
-
-Starting at `"version": "0.9.0-alpha"`, the `egress`/`ingress`/`runtimeConfig.networkProxy`
-shape replaces the legacy `defaultPolicy`/`allowedHosts`/`blockedHosts`/`network.proxy`
-fields above — a config must use one shape or the other, never both. This is
-the official, cross-backend schema (see
+Every supported contract (`0.9.0-alpha` or later) accepts the directional
+shape and rejects the retired `defaultPolicy`, host-list, and `network.proxy`
+fields. This is the cross-backend schema (see
 [`docs/sandbox-policy/0.8.0/networking/networking.md`](sandbox-policy/0.8.0/networking/networking.md)
 for the full design and per-backend enforcement matrix), not a
 backend-specific format: it's parsed the same way regardless of
@@ -143,10 +128,8 @@ given field rejects a config that sets it.
 
 Note that `EGRESS_RULES` is what carries per-CIDR/port rules; a backend
 without it accepts only `egress.default`. On Seatbelt,
-`runtimeConfig.networkProxy` covers only the
-loopback-proxy case (`network.proxy.localhost` / loopback `network.proxy.url`);
-there is no schema-0.8 equivalent for a remote proxy URL or
-`builtinTestServer`. See
+`runtimeConfig.networkProxy` covers only loopback endpoints; there is no
+supported equivalent for a remote proxy URL or `builtinTestServer`. See
 [`docs/sandbox-policy/0.8.0/networking/schema-updates.md`](sandbox-policy/0.8.0/networking/schema-updates.md)
 for the full field mapping and [`tests/examples/31_mac_network_0_8.json`](../tests/examples/31_mac_network_0_8.json)
 for a complete example:
