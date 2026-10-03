@@ -9,6 +9,16 @@ it fans out to the reusable `Build.Windows.Job.yml`, `Build.Linux.Job.yml`, and
 x64/arm64, Linux x64/arm64, and macOS arm64 hosts, then runs the lint,
 versioning, and SDK jobs.
 
+### Linux LXC dispatch coverage
+
+The primary Linux build runs pinned LXC discovery, engine dispatch, exact-JSON
+FFI routing, and SDK-helper tests on x64 and arm64. These routing tests need
+neither LXC nor root: the backend rejects their invalid configuration before
+creating a container. The FFI pin selects
+`extern_spawn_json_reaches_the_lxc_backend`, which exercises `mxc_spawn_json`.
+Keep the workflow selector aligned when renaming the test; the step fails if a
+pin runs no passing tests, even when Cargo exits successfully.
+
 ### LXC (`lxc-e2e.yml`)
 
 A separate workflow, because the primary Linux lane does not install LXC and
