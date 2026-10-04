@@ -1288,6 +1288,7 @@ impl LxcScriptRunner {
             timeout: prepared.timeout,
             started,
             timed_out: false,
+            termination_error: None,
             prepared,
             cleanup_policy: self.cleanup_policy,
             destroy_on_exit: self.destroy_on_exit,
@@ -1324,6 +1325,7 @@ struct LxcChild {
     timeout: Option<Duration>,
     started: Instant,
     timed_out: bool,
+    termination_error: Option<String>,
     prepared: PreparedSandbox,
     cleanup_policy: bool,
     destroy_on_exit: bool,
@@ -1497,6 +1499,9 @@ impl SandboxProcess for LxcSandboxProcess {
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+        if let Some(error) = self.inner.termination_error.as_ref() {
+            return Err(std::io::Error::other(error.clone()));
+        }
         if self.inner.timed_out {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
@@ -1511,17 +1516,18 @@ impl SandboxProcess for LxcSandboxProcess {
             .timeout
             .is_some_and(|timeout| self.inner.started.elapsed() >= timeout)
         {
+            if let Err(error) = self.kill_for_timeout() {
+                let error = format!(
+                    "LXC: script timed out, and the container could not be stopped, so the \
+                     workload may still be running: {error}"
+                );
+                self.inner.termination_error = Some(error.clone());
+                return Err(std::io::Error::other(error));
+            }
             self.inner.timed_out = true;
-            let terminated = self.kill_for_timeout();
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                match terminated {
-                    Ok(()) => "LXC: script timed out".to_string(),
-                    Err(error) => format!(
-                        "LXC: script timed out, and the container could not be stopped, so the \
-                         workload may still be running: {error}"
-                    ),
-                },
+                "LXC: script timed out",
             ));
         }
         Ok(None)
@@ -1545,7 +1551,6 @@ impl SandboxProcess for LxcSandboxProcess {
     fn kill_for_timeout(&mut self) -> std::io::Result<()> {
         const REAP_TIMEOUT: Duration = Duration::from_secs(5);
 
-        self.inner.timed_out = true;
         self.kill()?;
         match wait_with_timeout(&mut self.inner.child, Some(REAP_TIMEOUT)) {
             Ok(_) => Ok(()),
@@ -1569,19 +1574,30 @@ impl SandboxProcess for LxcSandboxProcess {
         // responsibility).
         let stdout_thread = spawn_discard(self.inner.stdout.take());
         let stderr_thread = spawn_discard(self.inner.stderr.take());
-        let (pty_thread, pty_canceller) = match self.inner.pty.as_ref() {
-            Some(pty) => match pty.take_unclaimed_reader()? {
-                Some((reader, canceller)) => (spawn_discard(Some(reader)), Some(canceller)),
-                None => (None, None),
+        let (pty_thread, pty_canceller, pty_setup_error) = match self.inner.pty.as_ref() {
+            Some(pty) => match pty.take_unclaimed_reader() {
+                Ok(Some((reader, canceller))) => {
+                    (spawn_discard(Some(reader)), Some(canceller), None)
+                }
+                Ok(None) => (None, None, None),
+                Err(error) => (None, None, Some(error)),
             },
-            None => (None, None),
+            None => (None, None, None),
         };
 
         let remaining_timeout = self
             .inner
             .timeout
             .map(|timeout| timeout.saturating_sub(self.inner.started.elapsed()));
-        let result = if self.inner.timed_out {
+        let result = if let Some(error) = pty_setup_error {
+            let _ = self.kill();
+            let _ = wait_with_timeout(&mut self.inner.child, Some(Duration::from_secs(5)));
+            Err(std::io::Error::other(format!(
+                "LXC: failed to prepare PTY output draining: {error}"
+            )))
+        } else if let Some(error) = self.inner.termination_error.as_ref() {
+            Err(std::io::Error::other(error.clone()))
+        } else if self.inner.timed_out {
             Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "LXC: script timed out",
@@ -1590,21 +1606,23 @@ impl SandboxProcess for LxcSandboxProcess {
             match wait_with_timeout(&mut self.inner.child, remaining_timeout) {
                 Ok(status) => Ok(status.code().unwrap_or(-1)),
                 Err(WaitError::Timeout) => {
-                    self.inner.timed_out = true;
                     // Stopping the container releases the pipe write ends a
                     // backgrounded descendant would otherwise hold past the
                     // deadline, so the drains below can finish.
-                    let terminated = self.kill_for_timeout();
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        match terminated {
-                            Ok(()) => "LXC: script timed out".to_string(),
-                            Err(e) => format!(
-                                "LXC: script timed out, and the container could not be stopped, \
-                             so the workload may still be running: {e}"
-                            ),
-                        },
-                    ))
+                    if let Err(error) = self.kill_for_timeout() {
+                        let error = format!(
+                            "LXC: script timed out, and the container could not be stopped, so \
+                             the workload may still be running: {error}"
+                        );
+                        self.inner.termination_error = Some(error.clone());
+                        Err(std::io::Error::other(error))
+                    } else {
+                        self.inner.timed_out = true;
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "LXC: script timed out",
+                        ))
+                    }
                 }
                 Err(WaitError::Io(error)) => {
                     // The workload may still be running, and teardown is about to

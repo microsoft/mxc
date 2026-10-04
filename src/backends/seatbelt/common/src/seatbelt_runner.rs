@@ -415,6 +415,7 @@ fn spawn_exec(
         timeout: timeout_from(request),
         started,
         timed_out: false,
+        termination_error: None,
         group: new_session || new_group || stdio != StdioMode::Inherit,
         session_id,
         cleanup: Vec::new(),
@@ -572,6 +573,7 @@ fn spawn_open(
         timeout: timeout_from(request),
         started,
         timed_out: false,
+        termination_error: None,
         group: false,
         session_id: None,
         cleanup: vec![profile_path, helper_path, command_path],
@@ -601,6 +603,7 @@ struct SeatbeltSandboxProcess {
     timeout: Option<Duration>,
     started: Instant,
     timed_out: bool,
+    termination_error: Option<String>,
     /// The child leads its own process group, so termination can signal that
     /// group without touching the host process group.
     group: bool,
@@ -736,6 +739,9 @@ impl SandboxProcess for SeatbeltSandboxProcess {
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+        if let Some(error) = self.termination_error.as_ref() {
+            return Err(std::io::Error::other(error.clone()));
+        }
         if self.timed_out {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
@@ -749,12 +755,14 @@ impl SandboxProcess for SeatbeltSandboxProcess {
             .timeout
             .is_some_and(|timeout| self.started.elapsed() >= timeout)
         {
-            self.timed_out = true;
-            self.kill_for_timeout().map_err(|error| {
-                std::io::Error::other(format!(
+            if let Err(error) = self.kill_for_timeout() {
+                let error = format!(
                     "Seatbelt: process timed out, but its session could not be terminated: {error}"
-                ))
-            })?;
+                );
+                self.termination_error = Some(error.clone());
+                return Err(std::io::Error::other(error));
+            }
+            self.timed_out = true;
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "Seatbelt: process timed out",
@@ -792,7 +800,6 @@ impl SandboxProcess for SeatbeltSandboxProcess {
     fn kill_for_timeout(&mut self) -> std::io::Result<()> {
         const REAP_TIMEOUT: Duration = Duration::from_secs(5);
 
-        self.timed_out = true;
         if let Some(session_id) = self.session_id {
             return terminate_session_and_reap(&mut self.child, session_id, REAP_TIMEOUT);
         }
@@ -820,18 +827,29 @@ impl SandboxProcess for SeatbeltSandboxProcess {
         // responsibility).
         let stdout_thread = spawn_discard(self.stdout.take());
         let stderr_thread = spawn_discard(self.stderr.take());
-        let (pty_thread, pty_canceller) = match self.pty.as_ref() {
-            Some(pty) => match pty.take_unclaimed_reader()? {
-                Some((reader, canceller)) => (spawn_discard(Some(reader)), Some(canceller)),
-                None => (None, None),
+        let (pty_thread, pty_canceller, pty_setup_error) = match self.pty.as_ref() {
+            Some(pty) => match pty.take_unclaimed_reader() {
+                Ok(Some((reader, canceller))) => {
+                    (spawn_discard(Some(reader)), Some(canceller), None)
+                }
+                Ok(None) => (None, None, None),
+                Err(error) => (None, None, Some(error)),
             },
-            None => (None, None),
+            None => (None, None, None),
         };
 
         let remaining_timeout = self
             .timeout
             .map(|timeout| timeout.saturating_sub(self.started.elapsed()));
-        let result = if self.timed_out {
+        let result = if let Some(error) = pty_setup_error {
+            let _ = self.kill();
+            let _ = wait_with_timeout(&mut self.child, Some(Duration::from_secs(5)));
+            Err(std::io::Error::other(format!(
+                "Seatbelt: failed to prepare PTY output draining: {error}"
+            )))
+        } else if let Some(error) = self.termination_error.as_ref() {
+            Err(std::io::Error::other(error.clone()))
+        } else if self.timed_out {
             Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "Seatbelt: process timed out",
@@ -840,20 +858,18 @@ impl SandboxProcess for SeatbeltSandboxProcess {
             match wait_with_timeout(&mut self.child, remaining_timeout) {
                 Ok(status) => Ok(status.code().unwrap_or(-1)),
                 Err(WaitError::Timeout) => {
-                    self.timed_out = true;
-                    self.kill_for_timeout().map_or_else(
-                        |error| {
-                            Err(std::io::Error::other(format!(
-                                "Seatbelt: process timed out, but teardown failed: {error}"
-                            )))
-                        },
-                        |()| {
-                            Err(std::io::Error::new(
-                                std::io::ErrorKind::TimedOut,
-                                "Seatbelt: process timed out",
-                            ))
-                        },
-                    )
+                    if let Err(error) = self.kill_for_timeout() {
+                        let error =
+                            format!("Seatbelt: process timed out, but teardown failed: {error}");
+                        self.termination_error = Some(error.clone());
+                        Err(std::io::Error::other(error))
+                    } else {
+                        self.timed_out = true;
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "Seatbelt: process timed out",
+                        ))
+                    }
                 }
                 Err(WaitError::Io(error)) => {
                     // The child may still be running: kill+reap it (don't orphan

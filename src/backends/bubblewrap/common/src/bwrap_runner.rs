@@ -744,6 +744,7 @@ impl BubblewrapScriptRunner {
             timeout,
             started,
             timed_out: false,
+            termination_error: None,
         })
     }
 }
@@ -773,6 +774,7 @@ struct BwrapChild {
     timeout: Option<Duration>,
     started: Instant,
     timed_out: bool,
+    termination_error: Option<String>,
 }
 
 impl BwrapChild {
@@ -990,6 +992,9 @@ impl SandboxProcess for BubblewrapSandboxProcess {
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+        if let Some(error) = self.inner.termination_error.as_ref() {
+            return Err(std::io::Error::other(error.clone()));
+        }
         if self.inner.timed_out {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
@@ -1004,17 +1009,18 @@ impl SandboxProcess for BubblewrapSandboxProcess {
             .timeout
             .is_some_and(|timeout| self.inner.started.elapsed() >= timeout)
         {
+            if let Err(error) = self.kill_for_timeout() {
+                let error = format!(
+                    "Bubblewrap: script timed out, and the process group could not be terminated: \
+                     {error}"
+                );
+                self.inner.termination_error = Some(error.clone());
+                return Err(std::io::Error::other(error));
+            }
             self.inner.timed_out = true;
-            let terminated = self.kill_for_timeout();
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                match terminated {
-                    Ok(()) => "Bubblewrap: script timed out".to_string(),
-                    Err(error) => format!(
-                        "Bubblewrap: script timed out, and the process group could not be \
-                         terminated: {error}"
-                    ),
-                },
+                "Bubblewrap: script timed out",
             ));
         }
         Ok(None)
@@ -1048,7 +1054,6 @@ impl SandboxProcess for BubblewrapSandboxProcess {
     fn kill_for_timeout(&mut self) -> std::io::Result<()> {
         const REAP_TIMEOUT: Duration = Duration::from_secs(5);
 
-        self.inner.timed_out = true;
         self.kill()?;
         let mut child = self.inner.lock_child();
         match wait_with_timeout(&mut child, Some(REAP_TIMEOUT)) {
@@ -1073,15 +1078,29 @@ impl SandboxProcess for BubblewrapSandboxProcess {
         // responsibility).
         let stdout_thread = spawn_discard(self.inner.stdout.take());
         let stderr_thread = spawn_discard(self.inner.stderr.take());
-        let (pty_thread, pty_canceller) = match self.inner.pty.as_ref() {
-            Some(pty) => match pty.take_unclaimed_reader()? {
-                Some((reader, canceller)) => (spawn_discard(Some(reader)), Some(canceller)),
-                None => (None, None),
+        let (pty_thread, pty_canceller, pty_setup_error) = match self.inner.pty.as_ref() {
+            Some(pty) => match pty.take_unclaimed_reader() {
+                Ok(Some((reader, canceller))) => {
+                    (spawn_discard(Some(reader)), Some(canceller), None)
+                }
+                Ok(None) => (None, None, None),
+                Err(error) => (None, None, Some(error)),
             },
-            None => (None, None),
+            None => (None, None, None),
         };
 
-        let result = if self.inner.timed_out {
+        let result = if let Some(error) = pty_setup_error {
+            let _ = self.kill();
+            {
+                let mut child = self.inner.lock_child();
+                let _ = wait_with_timeout(&mut child, Some(Duration::from_secs(5)));
+            }
+            Err(std::io::Error::other(format!(
+                "Bubblewrap: failed to prepare PTY output draining: {error}"
+            )))
+        } else if let Some(error) = self.inner.termination_error.as_ref() {
+            Err(std::io::Error::other(error.clone()))
+        } else if self.inner.timed_out {
             Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "Bubblewrap: script timed out",
@@ -1095,17 +1114,22 @@ impl SandboxProcess for BubblewrapSandboxProcess {
                     Err(std::io::Error::other(self.lost_provider_message()))
                 }
                 BwrapOutcome::Timeout => {
-                    self.inner.timed_out = true;
                     // Tree-kill so descendants die too and release any stdout/stderr
                     // pipe write-ends (else the drain threads below could block).
                     // `kill()` group-kills in Pipes mode; in Inherit mode it kills
                     // bwrap, which `--die-with-parent` turns into a full teardown.
-                    let _ = self.kill();
-                    let _ = self.inner.lock_child().wait();
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "Bubblewrap: script timed out",
-                    ))
+                    if let Err(error) = self.kill_for_timeout() {
+                        let error =
+                            format!("Bubblewrap: script timed out, and teardown failed: {error}");
+                        self.inner.termination_error = Some(error.clone());
+                        Err(std::io::Error::other(error))
+                    } else {
+                        self.inner.timed_out = true;
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "Bubblewrap: script timed out",
+                        ))
+                    }
                 }
                 BwrapOutcome::Io(error) => {
                     // The child may still be alive; kill+reap it before
