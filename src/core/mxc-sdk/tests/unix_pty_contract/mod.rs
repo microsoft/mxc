@@ -109,11 +109,16 @@ pub fn assert_native_stdio(request: SandboxRequest) {
         .expect("write partial native input");
     drop(input);
 
-    assert_eq!(terminal.wait().expect("wait"), WaitOutcome::Exited(0));
+    let outcome = terminal.wait().expect("wait");
     let mut text = String::new();
     output
         .read_to_string(&mut text)
         .expect("read native output");
+    assert_eq!(
+        outcome,
+        WaitOutcome::Exited(0),
+        "native PTY output before termination: {text:?}"
+    );
     assert!(
         text.contains("native-stdout:hello"),
         "stdout missing from native PTY output: {text:?}"

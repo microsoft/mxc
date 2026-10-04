@@ -1128,18 +1128,18 @@ fn create_cloexec_fifo() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::
     if unsafe { libc::mkfifo(path.fifo.as_ptr(), 0o600) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
-    let flags = libc::O_NONBLOCK | libc::O_CLOEXEC;
+    let anchor_flags = libc::O_NONBLOCK | libc::O_CLOEXEC;
     // Keep both sides present while opening the final endpoints. Darwin can
     // retain hangup readiness when a FIFO reader is opened before any writer.
     // SAFETY: opening the private FIFO atomically applies CLOEXEC.
-    let anchor = unsafe { libc::open(path.fifo.as_ptr(), libc::O_RDWR | flags) };
+    let anchor = unsafe { libc::open(path.fifo.as_ptr(), libc::O_RDWR | anchor_flags) };
     if anchor < 0 {
         return Err(std::io::Error::last_os_error());
     }
     // SAFETY: `open` returned a new owned descriptor.
     let anchor = unsafe { std::os::fd::OwnedFd::from_raw_fd(anchor) };
     // SAFETY: opening the FIFO read endpoint atomically applies CLOEXEC.
-    let read = unsafe { libc::open(path.fifo.as_ptr(), libc::O_RDONLY | flags) };
+    let read = unsafe { libc::open(path.fifo.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
     if read < 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -1147,7 +1147,7 @@ fn create_cloexec_fifo() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::
     let read = unsafe { std::os::fd::OwnedFd::from_raw_fd(read) };
     // SAFETY: the read endpoint is already open, so opening the nonblocking
     // write endpoint succeeds without waiting for another process.
-    let write = unsafe { libc::open(path.fifo.as_ptr(), libc::O_WRONLY | flags) };
+    let write = unsafe { libc::open(path.fifo.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
     if write < 0 {
         return Err(std::io::Error::last_os_error());
     }
