@@ -3,6 +3,7 @@
 
 using Microsoft.Mxc.Sdk;
 using Microsoft.Mxc.Sdk.V1;
+using Microsoft.Mxc.Sdk.V1.Policy;
 using Xunit;
 
 namespace Microsoft.Mxc.Sdk.Tests.V1;
@@ -16,6 +17,8 @@ public sealed class V1ApiSurfaceTests
         Assert.Equal("Microsoft.Mxc.Sdk.V1", typeof(MxcContainer).Namespace);
         Assert.Equal("Microsoft.Mxc.Sdk.V1", typeof(MxcProcess).Namespace);
         Assert.Equal("Microsoft.Mxc.Sdk.V1", typeof(MxcPlatform).Namespace);
+        Assert.Equal("Microsoft.Mxc.Sdk.V1.Policy", typeof(Filesystem).Namespace);
+        Assert.Equal("Microsoft.Mxc.Sdk.V1.Policy", typeof(FilesystemPolicyResult).Namespace);
     }
 
     [Fact]
@@ -24,7 +27,11 @@ public sealed class V1ApiSurfaceTests
         var exportedTypes = typeof(ContainerRequest).Assembly.GetExportedTypes();
         Assert.All(
             exportedTypes,
-            type => Assert.Equal("Microsoft.Mxc.Sdk.V1", type.Namespace));
+            type => Assert.Equal(
+                type == typeof(Filesystem) || type == typeof(FilesystemPolicyResult)
+                    ? "Microsoft.Mxc.Sdk.V1.Policy"
+                    : "Microsoft.Mxc.Sdk.V1",
+                type.Namespace));
 
         Assert.Contains(typeof(ContainerRequest), exportedTypes);
         Assert.Contains(typeof(MxcContainer), exportedTypes);

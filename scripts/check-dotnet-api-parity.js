@@ -288,8 +288,14 @@ compare(
 );
 compare(
   "process-container exact fields",
-  managedJsonFields(managedRequest, "ProcessContainer"),
+  managedJsonFields(generatedWire, "ProcessContainer"),
   schemaProperties(exactV1, "ProcessContainer")
+);
+compare(
+  "process-container authoring fields",
+  managedJsonFields(managedRequest, "ProcessContainer"),
+  // The request writer fixes this native-only field to the SDK default.
+  schemaProperties(exactV1, "ProcessContainer").filter((field) => field !== "leastPrivilege")
 );
 compare(
   "process-container UI exact fields",
