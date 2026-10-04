@@ -1057,7 +1057,11 @@ impl SandboxProcess for BubblewrapSandboxProcess {
         self.kill()?;
         let mut child = self.inner.lock_child();
         match wait_with_timeout(&mut child, Some(REAP_TIMEOUT)) {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                drop(child);
+                self.inner.timed_out = true;
+                Ok(())
+            }
             Err(WaitError::Timeout) => Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "Bubblewrap: killed process did not become reapable within 5 seconds",

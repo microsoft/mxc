@@ -863,18 +863,22 @@ impl SandboxProcess for SeatbeltSandboxProcess {
     fn kill_for_timeout(&mut self) -> std::io::Result<()> {
         const REAP_TIMEOUT: Duration = Duration::from_secs(5);
 
-        if let Some(session_id) = self.session_id {
-            return terminate_session_and_reap(&mut self.child, session_id, REAP_TIMEOUT);
-        }
-        self.kill()?;
-        match wait_with_timeout(&mut self.child, Some(REAP_TIMEOUT)) {
-            Ok(_) => Ok(()),
-            Err(WaitError::Timeout) => Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "Seatbelt: killed process did not become reapable within 5 seconds",
-            )),
-            Err(WaitError::Io(error)) => Err(error),
-        }
+        let result = if let Some(session_id) = self.session_id {
+            terminate_session_and_reap(&mut self.child, session_id, REAP_TIMEOUT)
+        } else {
+            self.kill()?;
+            match wait_with_timeout(&mut self.child, Some(REAP_TIMEOUT)) {
+                Ok(_) => Ok(()),
+                Err(WaitError::Timeout) => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Seatbelt: killed process did not become reapable within 5 seconds",
+                )),
+                Err(WaitError::Io(error)) => Err(error),
+            }
+        };
+        result?;
+        self.timed_out = true;
+        Ok(())
     }
 
     fn wait(&mut self) -> std::io::Result<i32> {

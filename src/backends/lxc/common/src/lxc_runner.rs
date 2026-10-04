@@ -1553,7 +1553,10 @@ impl SandboxProcess for LxcSandboxProcess {
 
         self.kill()?;
         match wait_with_timeout(&mut self.inner.child, Some(REAP_TIMEOUT)) {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                self.inner.timed_out = true;
+                Ok(())
+            }
             Err(WaitError::Timeout) => Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "LXC: killed attach process did not become reapable within 5 seconds",
