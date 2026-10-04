@@ -1078,25 +1078,83 @@ fn create_pipe() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)
     }
     #[cfg(target_os = "macos")]
     {
-        let (read, write) = nix::unistd::pipe().map_err(std::io::Error::from)?;
-        set_cloexec(read.as_raw_fd())?;
-        set_cloexec(write.as_raw_fd())?;
-        Ok((read, write))
+        create_cloexec_fifo()
     }
 }
 
 #[cfg(target_os = "macos")]
-fn set_cloexec(fd: std::os::fd::RawFd) -> std::io::Result<()> {
-    // SAFETY: `fd` is a valid open descriptor; these commands only update its flags.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    if flags < 0 {
+fn create_cloexec_fifo() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
+    use std::ffi::{CStr, CString};
+    use std::os::fd::FromRawFd;
+
+    struct FifoPath {
+        directory: CString,
+        fifo: CString,
+        created: bool,
+    }
+
+    impl Drop for FifoPath {
+        fn drop(&mut self) {
+            if self.created {
+                // SAFETY: both paths remain valid NUL-terminated strings.
+                unsafe {
+                    libc::unlink(self.fifo.as_ptr());
+                    libc::rmdir(self.directory.as_ptr());
+                }
+            }
+        }
+    }
+
+    let mut template = b"/tmp/mxc-pty-pipe.XXXXXX\0".to_vec();
+    // SAFETY: `template` is writable and ends with six X bytes plus NUL as
+    // required by `mkdtemp`.
+    let directory = unsafe { libc::mkdtemp(template.as_mut_ptr().cast()) };
+    if directory.is_null() {
         return Err(std::io::Error::last_os_error());
     }
-    // SAFETY: `fd` remains valid and `F_SETFD` only updates descriptor flags.
-    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+    // SAFETY: successful `mkdtemp` returns a NUL-terminated pointer into
+    // `template`, which remains alive for this conversion.
+    let directory = unsafe { CStr::from_ptr(directory) }.to_owned();
+    let mut fifo = directory.as_bytes().to_vec();
+    fifo.extend_from_slice(b"/pipe");
+    let fifo = CString::new(fifo).expect("temporary FIFO path contains no NUL");
+    let mut path = FifoPath {
+        directory,
+        fifo,
+        created: true,
+    };
+
+    // SAFETY: `path.fifo` is a valid path in a private mode-0700 directory.
+    if unsafe { libc::mkfifo(path.fifo.as_ptr(), 0o600) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
-    Ok(())
+    let flags = libc::O_NONBLOCK | libc::O_CLOEXEC;
+    // SAFETY: opening the FIFO read endpoint atomically applies CLOEXEC.
+    let read = unsafe { libc::open(path.fifo.as_ptr(), libc::O_RDONLY | flags) };
+    if read < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `open` returned a new owned descriptor.
+    let read = unsafe { std::os::fd::OwnedFd::from_raw_fd(read) };
+    // SAFETY: the read endpoint is already open, so opening the nonblocking
+    // write endpoint succeeds without waiting for another process.
+    let write = unsafe { libc::open(path.fifo.as_ptr(), libc::O_WRONLY | flags) };
+    if write < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `open` returned a new owned descriptor.
+    let write = unsafe { std::os::fd::OwnedFd::from_raw_fd(write) };
+
+    // SAFETY: open descriptors retain the FIFO after its directory entry is removed.
+    if unsafe { libc::unlink(path.fifo.as_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: the private directory is empty after unlinking the FIFO.
+    if unsafe { libc::rmdir(path.directory.as_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    path.created = false;
+    Ok((read, write))
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
