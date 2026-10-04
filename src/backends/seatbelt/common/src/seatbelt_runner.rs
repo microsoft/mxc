@@ -49,7 +49,33 @@ use crate::profile_builder::build_profile_with_proxy;
 #[link(name = "proc")]
 unsafe extern "C" {
     fn proc_listallpids(buffer: *mut libc::c_void, buffersize: libc::c_int) -> libc::c_int;
+    fn proc_pidinfo(
+        pid: libc::c_int,
+        flavor: libc::c_int,
+        arg: u64,
+        buffer: *mut libc::c_void,
+        buffersize: libc::c_int,
+    ) -> libc::c_int;
+    fn proc_signal_with_audittoken(token: *mut AuditToken, signal: libc::c_int) -> libc::c_int;
 }
+
+#[repr(C)]
+struct AuditToken {
+    val: [u32; 8],
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct ProcUniqueIdentifierInfo {
+    uuid: [u8; 16],
+    unique_id: u64,
+    parent_unique_id: u64,
+    id_version: i32,
+    original_parent_id_version: i32,
+    reserved: [u64; 2],
+}
+
+const PROC_PID_UNIQUE_IDENTIFIER_INFO: libc::c_int = 17;
 
 /// Env var keys the cooperative proxy manages. When a proxy is active these
 /// are stripped from the caller-supplied environment so sandboxed code cannot
@@ -105,22 +131,59 @@ fn kill_session_members(session_id: libc::pid_t) -> std::io::Result<()> {
             if pid <= 0 || pid == current_pid {
                 continue;
             }
+            let Some(mut token) = process_audit_token(pid)? else {
+                continue;
+            };
+            // The token is captured first. If the PID exits before this query,
+            // a replacement's different session is rejected; if it exits after
+            // the query, the token's pid-version prevents signaling a replacement.
             // SAFETY: `getsid` only queries the process identified by `pid`.
             if unsafe { libc::getsid(pid) } != session_id {
                 continue;
             }
-            // SAFETY: every matched process belongs to the child-owned session.
-            if unsafe { libc::kill(pid, libc::SIGKILL) } == 0 {
-                continue;
-            }
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::ESRCH) && first_error.is_none() {
-                first_error = Some(error);
+            // SAFETY: libproc validates the token's PID version atomically with
+            // process lookup before signaling.
+            let error = unsafe { proc_signal_with_audittoken(&mut token, libc::SIGKILL) };
+            if error != 0 && error != libc::ESRCH && first_error.is_none() {
+                first_error = Some(std::io::Error::from_raw_os_error(error));
             }
         }
         std::thread::yield_now();
     }
     first_error.map_or(Ok(()), Err)
+}
+
+fn process_audit_token(pid: libc::pid_t) -> std::io::Result<Option<AuditToken>> {
+    let mut info = ProcUniqueIdentifierInfo::default();
+    let size = libc::c_int::try_from(std::mem::size_of_val(&info))
+        .map_err(|_| std::io::Error::other("macOS process identity is too large"))?;
+    // SAFETY: `info` is writable for `size` bytes and libproc only fills the
+    // requested identity record for `pid`.
+    let copied = unsafe {
+        proc_pidinfo(
+            pid,
+            PROC_PID_UNIQUE_IDENTIFIER_INFO,
+            0,
+            std::ptr::from_mut(&mut info).cast::<libc::c_void>(),
+            size,
+        )
+    };
+    if copied == 0 {
+        let error = std::io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(libc::ESRCH) => Ok(None),
+            _ => Err(error),
+        };
+    }
+    if copied != size {
+        return Err(std::io::Error::other(format!(
+            "macOS returned a truncated process identity for pid {pid}"
+        )));
+    }
+    let mut token = AuditToken { val: [0; 8] };
+    token.val[5] = pid as u32;
+    token.val[7] = info.id_version as u32;
+    Ok(Some(token))
 }
 
 fn list_all_pids() -> std::io::Result<Vec<libc::pid_t>> {
