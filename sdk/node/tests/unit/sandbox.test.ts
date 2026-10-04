@@ -129,7 +129,6 @@ describe('createConfigFromRequest', () => {
         });
         assert.strictEqual(config.containment, 'processcontainer');
         assert.deepStrictEqual(config.processContainer, {
-          leastPrivilege: false,
           capabilities: [],
           ui: {
             isolation: 'container',

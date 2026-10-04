@@ -2,7 +2,34 @@
 
 Public entrypoint: `Microsoft.Mxc.Sdk.V1`. [Types](types.md) | [Overview](README.md)
 
-Signatures describe the supported consumer API and omit implementation bodies and serialization attributes. Raw Rust JSON bridges are listed separately from typed requests; native wire compatibility is unchanged.
+Signatures describe the typed consumer API and omit implementation bodies.
+Callers do not supply JSON or a schema version.
+
+## Choosing a launch operation
+
+| Output | Create and run a container (`MxcContainer`) | Run in an existing container (`MxcLifecycle`) | Result |
+|---|---|---|---|
+| Capture stdout and stderr | `Run` / `RunAsync` | `RunInContainer` / `RunInContainerAsync` | `ExecutionResult` |
+| Live standard pipes | `Spawn` / `SpawnAsync` | `SpawnInContainer` / `SpawnInContainerAsync` | `MxcProcess` |
+| Interactive terminal | `SpawnWithPty` | `SpawnInContainerWithPty` | `MxcPtyProcess` |
+
+Creation takes `ContainerRequest` and operation options. Existing-container
+execution takes the `ContainerId` returned by provision, `ExecutionRequest`,
+and operation options. PTY support is IsolationSession-only. Terminal handles
+give the caller explicit input, output, resize, and process ownership; there
+is no separate public attached-console or raw-JSON launch API.
+
+## Discovery and validation
+
+| Operation | Use it to |
+|---|---|
+| `MxcPlatform.GetPlatformSupport` | Check whether the SDK can launch on this host and which backends it supports. |
+| `MxcPlatform.GetAvailableBackends` | Discover native host-available backends, capabilities, tiers, and warnings. Availability is advisory; not every reported backend has a V1 creation API. |
+| `MxcContainer.Probe` (Windows) | Evaluate an optional ProcessContainer request, including the isolation tier and request-specific compatibility diagnostics, without creating a container. |
+| `MxcLifecycle.Validate*` | Perform native dry-run validation for a typed lifecycle operation without provisioning, starting, executing, stopping, or deprovisioning a container. |
+
+Validation returns `ValidationResult` with warnings, not execution output.
+It does not guarantee that a later operation will succeed on a changed host.
 
 ## `Microsoft.Mxc.Sdk.V1.ContainerId` — operator_declaration
 
@@ -22,18 +49,17 @@ public static bool operator !=(ContainerId left, ContainerId right);
 ```
 
 
-## `Microsoft.Mxc.Sdk.V1.FilesystemPolicies` — GetAvailableToolsPolicy
+## `Microsoft.Mxc.Sdk.V1.Policy.Filesystem` — GetAvailableToolsPolicy
 
 Discover existing tool and SDK directories from PATH and well-known environment variables.
 
 ```csharp
 public static FilesystemPolicyResult GetAvailableToolsPolicy(
-    IReadOnlyDictionary<string, string?>? environment = null,
-    ToolsPolicyOptions? options = null);
+    IReadOnlyDictionary<string, string?>? environment = null);
 ```
 
 
-## `Microsoft.Mxc.Sdk.V1.FilesystemPolicies` — GetUserProfilePolicy
+## `Microsoft.Mxc.Sdk.V1.Policy.Filesystem` — GetUserProfilePolicy
 
 Discover standard per-user application directories that should be granted read-only access.
 
@@ -43,7 +69,7 @@ public static FilesystemPolicyResult GetUserProfilePolicy(
 ```
 
 
-## `Microsoft.Mxc.Sdk.V1.FilesystemPolicies` — GetTemporaryFilesPolicy
+## `Microsoft.Mxc.Sdk.V1.Policy.Filesystem` — GetTemporaryFilesPolicy
 
 Discover the host temporary directory as a read-write policy fragment.
 

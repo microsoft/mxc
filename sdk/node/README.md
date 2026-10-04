@@ -256,7 +256,9 @@ through V1 creation. Discovery is advisory, and launch-time validation still
 applies. Native failures and malformed discovery results throw rather than
 reporting an unsupported host.
 
-Filesystem discovery helpers take an optional `environment` map; omission uses
+Filesystem discovery helpers and their result/options types are grouped under
+`policy.filesystem` from `@microsoft/mxc-sdk/v1`. They take an optional
+`environment` map; omission uses
 `process.env`, and `{}` stays empty. `getAvailableToolsPolicy` also accepts
 `ToolsPolicyOptions`; set `containerType: 'processcontainer'` to exclude
 directories with ALL APPLICATION PACKAGES access on Windows. ACL inspection

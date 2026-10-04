@@ -35,7 +35,7 @@ use wxc_common::models::{ExecutionRequest, TelemetryConfig};
 // ---------------------------------------------------------------------------
 
 /// A composable fragment of filesystem policy. Callers merge one or more into
-/// a [`ContainerPolicy`]'s filesystem section.
+/// a [`ContainerRequest`]'s filesystem section.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FilesystemPolicyResult {
     /// Paths to grant read-only access inside the sandbox.
@@ -540,7 +540,7 @@ pub enum ClipboardPolicy {
     All,
 }
 
-/// Filesystem section of a [`ContainerPolicy`].
+/// Filesystem section of a [`ContainerRequest`].
 #[derive(Debug, Clone, Default)]
 pub struct FilesystemPolicy {
     pub readwrite_paths: Vec<String>,
@@ -550,7 +550,7 @@ pub struct FilesystemPolicy {
     pub clear_policy_on_exit: Option<bool>,
 }
 
-/// UI section of a [`ContainerPolicy`]. All flags default to denied.
+/// UI section of a [`ContainerRequest`]. All flags default to denied.
 #[derive(Debug, Clone)]
 pub struct UiPolicy {
     pub disable: bool,
@@ -568,9 +568,7 @@ impl Default for UiPolicy {
     }
 }
 
-/// The containment backend [`build_request_with_containment`] targets — the
-/// Rust analogue of the SDK's `ContainmentType | ContainmentBackend` argument
-/// to `createConfigFromPolicy`.
+/// The containment backend selected by a [`ContainerRequest`].
 ///
 /// Only the backends this library can actually run are listed; select a
 /// concrete backend when you specifically need it, and prefer

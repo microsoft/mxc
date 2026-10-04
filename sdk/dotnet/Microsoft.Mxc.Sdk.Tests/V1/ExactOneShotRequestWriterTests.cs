@@ -74,6 +74,7 @@ public sealed class ExactOneShotRequestWriterTests
         Assert.Null(typeof(ContainerRequest).GetProperty("Experimental"));
         Assert.Null(typeof(ContainerRequest).GetProperty("Version"));
         Assert.Null(typeof(ContainerRequest).GetProperty("Telemetry"));
+        Assert.Null(typeof(Containment.ProcessContainer).GetProperty("LeastPrivilege"));
     }
 
     public static IEnumerable<object[]> SdkV1Cases =>
@@ -468,9 +469,6 @@ public sealed class ExactOneShotRequestWriterTests
 
     private static Containment.ProcessContainer ProcessContainer(JsonElement containment) => new()
     {
-        LeastPrivilege =
-            containment.TryGetProperty("leastPrivilege", out var leastPrivilege)
-            && leastPrivilege.GetBoolean(),
         LearningMode =
             containment.TryGetProperty("learningMode", out var learningMode)
             && learningMode.GetBoolean(),

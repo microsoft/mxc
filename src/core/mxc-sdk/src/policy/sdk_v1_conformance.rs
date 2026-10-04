@@ -61,8 +61,6 @@ enum ContainmentInput {
     #[serde(rename_all = "camelCase")]
     ProcessContainer {
         #[serde(default)]
-        least_privilege: bool,
-        #[serde(default)]
         learning_mode: bool,
         #[serde(default)]
         capabilities: Vec<String>,
@@ -303,12 +301,10 @@ impl ContainmentInput {
         match self {
             Self::Process => Containment::Process,
             Self::ProcessContainer {
-                least_privilege,
                 learning_mode,
                 capabilities,
                 allowed_proxy_peer,
             } => Containment::ProcessContainer(ProcessContainerConfig {
-                least_privilege,
                 learning_mode,
                 capabilities,
                 network: allowed_proxy_peer.map(|peer| ProcessContainerNetwork {

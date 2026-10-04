@@ -1,8 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Host-independent tests for the `mxc-sdk` lifecycle surface
-//! (`run_lifecycle_json` / `execute_lifecycle`).
+//! Host-independent tests for typed lifecycle APIs and internal binding adapters.
 //!
 //! These exercise request parsing, phase routing, and error mapping without a
 //! live host backend. The lifecycle backends — IsolationSession, WSLc
@@ -11,7 +10,7 @@
 //! exercised by the executor E2E suites instead.
 //!
 //! Those suites drive the `ExecStdio::Relayed` path. The
-//! `ExecStdio::Piped` path [`execute_lifecycle`] uses is covered end-to-end by
+//! `ExecStdio::Piped` path [`execute_lifecycle_json`] uses is covered end-to-end by
 //! `tests/isolation_session.rs`, which is gated on a host running the OS-side
 //! service. So the assertions here deliberately stop at the facade's contract:
 //! parse, reject one-shot, reject non-dry-run exec, surface unsupported_phase
@@ -19,14 +18,13 @@
 //! experimental opt-in — which stays host-independent because the gate runs
 //! before backend dispatch.
 
+use mxc_sdk::__ffi::{execute_lifecycle_json, run_lifecycle_json};
 use mxc_sdk::v1::{
-    container, spawn_in_container, ContainerId, DeprovisionOptions, ExecutionRequest,
-    LifecycleResult, MxcProcess, ProvisionOptions, ProvisionRequest, ProvisionResult,
+    container, ContainerId, DeprovisionOptions, ExecutionRequest, ExecutionResult, LifecycleResult,
+    MxcProcess, ProvisionOptions, ProvisionRequest, ProvisionResult, RunInContainerOptions,
     SpawnInContainerOptions, StartOptions, StopOptions, ValidationResult,
 };
-use mxc_sdk::v1::{
-    execute_lifecycle, execute_lifecycle_json, run_lifecycle_json, Error, ErrorCode,
-};
+use mxc_sdk::v1::{Error, ErrorCode};
 
 #[test]
 fn typed_lifecycle_api_is_operation_specific() {
@@ -50,7 +48,12 @@ fn typed_lifecycle_api_is_operation_specific() {
         &ContainerId,
         ExecutionRequest,
         SpawnInContainerOptions,
-    ) -> Result<MxcProcess, Error> = spawn_in_container;
+    ) -> Result<MxcProcess, Error> = container::spawn_in_container;
+    let _: fn(
+        &ContainerId,
+        ExecutionRequest,
+        RunInContainerOptions,
+    ) -> Result<ExecutionResult, Error> = container::run_in_container;
     let _: fn(
         &ContainerId,
         ExecutionRequest,
@@ -81,21 +84,6 @@ fn sandbox_id_rejects_values_that_cannot_cross_the_ffi_boundary() {
 }
 
 #[test]
-fn explicit_raw_exec_alias_preserves_existing_behavior() {
-    let json = r#"{"version":"0.8.0-alpha","process":{"commandLine":"echo hi"}}"#;
-    let legacy = match execute_lifecycle(json, false) {
-        Ok(_) => panic!("one-shot must be rejected"),
-        Err(error) => error,
-    };
-    let explicit = match execute_lifecycle_json(json, false) {
-        Ok(_) => panic!("one-shot must be rejected"),
-        Err(error) => error,
-    };
-    assert_eq!(legacy.code, explicit.code);
-    assert_eq!(legacy.message, explicit.message);
-}
-
-#[test]
 fn run_lifecycle_json_rejects_one_shot_config() {
     // No `phase` field => one-shot config, not a lifecycle request.
     let json = r#"{"version":"0.8.0-alpha","process":{"commandLine":"echo hi"}}"#;
@@ -105,7 +93,7 @@ fn run_lifecycle_json_rejects_one_shot_config() {
 
 #[test]
 fn run_lifecycle_json_rejects_non_dry_run_exec() {
-    // A non-dry-run exec streams; it must be routed through execute_lifecycle, not
+    // A non-dry-run exec streams; it must be routed through execute_lifecycle_json, not
     // the envelope entry point.
     let json = r#"{"version":"0.9.0-alpha","phase":"exec","sandboxId":"isolationsession:abc","process":{"commandLine":"echo hi"}}"#;
     let err =
@@ -189,7 +177,7 @@ fn typed_provision_payload_is_validated_without_running_a_lifecycle() {
 fn execute_lifecycle_rejects_non_exec_phase() {
     let json = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session"}"#;
     // `MxcProcess` is not `Debug`, so match rather than `expect_err`.
-    match execute_lifecycle(json, false) {
+    match execute_lifecycle_json(json, false) {
         Ok(_) => panic!("a provision request is not an exec"),
         Err(err) => assert_eq!(err.code, ErrorCode::MalformedRequest),
     }
@@ -198,7 +186,7 @@ fn execute_lifecycle_rejects_non_exec_phase() {
 #[test]
 fn execute_lifecycle_rejects_container_request() {
     let json = r#"{"version":"0.8.0-alpha","process":{"commandLine":"echo hi"}}"#;
-    match execute_lifecycle(json, false) {
+    match execute_lifecycle_json(json, false) {
         Ok(_) => panic!("one-shot must be rejected"),
         Err(err) => assert_eq!(err.code, ErrorCode::MalformedRequest),
     }
@@ -283,12 +271,12 @@ fn the_refusal_carries_no_api_call_detail() {
 fn exec_honours_the_optin_on_its_own_path() {
     let json = r#"{"version":"1.1.0-alpha","phase":"exec","sandboxId":"wsb:0a1b2c3d","process":{"commandLine":"echo hi"}}"#;
 
-    match execute_lifecycle(json, false) {
+    match execute_lifecycle_json(json, false) {
         Ok(_) => panic!("without the opt-in the gate must refuse"),
         Err(err) => assert_eq!(err.code, ErrorCode::BackendUnavailable),
     }
 
-    match execute_lifecycle(json, true) {
+    match execute_lifecycle_json(json, true) {
         Ok(_) => panic!("windows_sandbox serves no streaming exec"),
         Err(err) => assert_ne!(
             err.code,

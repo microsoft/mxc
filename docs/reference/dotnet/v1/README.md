@@ -1,6 +1,8 @@
 # .NET V1 reference
 
-All public SDK operations and types are available through `Microsoft.Mxc.Sdk.V1`. Discovery, probes, telemetry, and policy helpers use the same versioned boundary.
+All public SDK operations and types are available under `Microsoft.Mxc.Sdk.V1`.
+Filesystem discovery helpers use `Microsoft.Mxc.Sdk.V1.Policy.Filesystem`.
+Discovery, probes, telemetry, and policy helpers use the same versioned boundary.
 
 - [Operation signatures](api.md)
 - [Types and fields](types.md)

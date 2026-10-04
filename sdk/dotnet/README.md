@@ -238,13 +238,12 @@ leaves telemetry disabled; `new TelemetryConfig { Enabled = false }`
 explicitly disables it. Opt-in is still gated by MXC's persisted user consent
 and administrative policy.
 
-Filesystem discovery helpers take an optional `environment` dictionary;
-`null` snapshots the process environment and an empty dictionary remains
-empty. `GetAvailableToolsPolicy` also takes `ToolsPolicyOptions`; set
-`ContainerType = ToolsPolicyContainerType.ProcessContainer` to exclude
-directories with ALL APPLICATION PACKAGES access on Windows. ACL inspection
-is bounded to five seconds per directory; failures retain the directory and
-emit a diagnostic warning. `GetUserProfilePolicy` uses the supplied environment,
+Filesystem discovery helpers are on `Microsoft.Mxc.Sdk.V1.Policy.Filesystem`
+and return `FilesystemPolicyResult` from the same namespace. They take an
+optional `environment` dictionary; `null` snapshots the process environment
+and an empty dictionary remains empty. `GetAvailableToolsPolicy` discovers
+existing tool directories and excludes system-critical paths; it does not
+inspect ACLs. `GetUserProfilePolicy` uses the supplied environment,
 and `GetTemporaryFilesPolicy` returns existing temporary storage without creating
 directories.
 

@@ -208,7 +208,7 @@ internal static class ExactOneShotRequestWriter
     {
         var wire = new Wire.ProcessContainer
         {
-            LeastPrivilege = containment.LeastPrivilege,
+            LeastPrivilege = false,
             Capabilities = ValidatedCapabilities(containment.Capabilities),
             CaptureDenials = CaptureDenials(containment.CaptureDenials),
             Filesystem = containment.Filesystem is null

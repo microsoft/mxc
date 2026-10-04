@@ -70,8 +70,6 @@ internal sealed class CamelCaseJsonStringEnumConverter<TEnum>
 [JsonSerializable(typeof(UiPolicy))]
 [JsonSerializable(typeof(CaptureDenialsPolicy))]
 [JsonSerializable(typeof(TelemetryConfig))]
-[JsonSerializable(typeof(ToolsPolicyOptions))]
-[JsonSerializable(typeof(ToolsPolicyContainerType))]
 // Directional network sub-objects (egress/ingress resolved through the
 // non-null section converter).
 [JsonSerializable(typeof(NetworkEgressPolicy))]

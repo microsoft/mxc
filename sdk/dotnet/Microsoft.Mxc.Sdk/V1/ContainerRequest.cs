@@ -109,10 +109,6 @@ public abstract class Containment
     /// <summary>Explicit Windows ProcessContainer configuration.</summary>
     public sealed class ProcessContainer : Containment
     {
-        /// <summary>Enable least-privilege process creation.</summary>
-        [JsonPropertyName("leastPrivilege")]
-        public bool LeastPrivilege { get; set; }
-
         /// <summary>Enable deny-and-record AppContainer learning mode.</summary>
         [JsonPropertyName("learningMode")]
         public bool LearningMode { get; set; }

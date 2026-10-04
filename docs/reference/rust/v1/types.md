@@ -259,7 +259,7 @@ pub struct FilesystemPolicy {
 ```
 
 
-## `mxc_sdk::v1::FilesystemPolicyResult`, `mxc_sdk::v1::policy::FilesystemPolicyResult`
+## `mxc_sdk::v1::policy::filesystem::FilesystemPolicyResult`
 
 A composable fragment of filesystem policy.
 
@@ -297,7 +297,8 @@ pub struct LifecycleResult {
 
 ## `mxc_sdk::v1::MxcProcess`
 
-A live container process, returned by spawn and execute_lifecycle.
+A live container process, returned by `v1::spawn` and
+`v1::container::spawn_in_container`.
 
 ```rust
 pub struct MxcProcess {
@@ -597,7 +598,7 @@ pub struct TelemetryConfig {
 }
 ```
 
-## `mxc_sdk::v1::ToolsPolicyOptions`
+## `mxc_sdk::v1::policy::filesystem::ToolsPolicyOptions`
 
 Optional tool-policy filtering controls.
 
@@ -903,7 +904,6 @@ ProcessContainer settings.
 
 ```rust
 pub struct ProcessContainerConfig {
-  pub least_privilege: bool,
   pub learning_mode: bool,
   pub capabilities: Vec<String>,
   pub capture_denials: Option<CaptureDenials>,

@@ -6,7 +6,7 @@
 //! Where [`mxc_run_json`](crate::mxc_run_json) runs a sandbox to completion
 //! and captures its output, this surface hands the caller a live,
 //! opaque handle it can feed stdin, read stdout/stderr from, wait on, and kill
-//! while the child runs — mirroring [`mxc_sdk::v1::spawn_container_json`] /
+//! while the child runs — mirroring [`mxc_sdk::__ffi::spawn_container_json`] /
 //! [`mxc_sdk::v1::MxcProcess`].
 //!
 //! ## Handles & ownership
@@ -65,7 +65,7 @@ use std::io::{Read, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
-use mxc_sdk::v1::spawn_container_json;
+use mxc_sdk::__ffi::spawn_container_json;
 use mxc_sdk::v1::{MxcProcess, MxcPtyProcess, MxcPtySize, StreamCloser, WaitResult};
 use wxc_common::models::SandboxOutputMetadata;
 use wxc_common::sandbox_process::NativeStdio;

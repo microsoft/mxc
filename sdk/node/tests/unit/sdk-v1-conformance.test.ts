@@ -21,7 +21,6 @@ interface SdkV1Fixture {
     kind: string;
     distribution?: string;
     release?: string;
-    leastPrivilege?: boolean;
     learningMode?: boolean;
     capabilities?: string[];
     allowedProxyPeer?: string;
@@ -62,7 +61,6 @@ function containment(fixture: SdkV1Fixture['containment']): Containment {
       return {
         type: 'processcontainer',
         config: {
-          leastPrivilege: fixture.leastPrivilege,
           learningMode: fixture.learningMode,
           capabilities: fixture.capabilities,
           network: fixture.allowedProxyPeer === undefined

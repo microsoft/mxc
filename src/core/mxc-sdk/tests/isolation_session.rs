@@ -118,12 +118,12 @@ fn a_single_threaded_apartment_drives_the_full_lifecycle() {
             r#"{{"version":"0.9.0-alpha","phase":"stop","sandboxId":"{}"}}"#,
             started.sandbox_id
         );
-        mxc_sdk::v1::run_lifecycle_json(&stop, false, true).expect("stop must succeed");
+        mxc_sdk::__ffi::run_lifecycle_json(&stop, false, true).expect("stop must succeed");
         let deprovision = format!(
             r#"{{"version":"0.9.0-alpha","phase":"deprovision","sandboxId":"{}"}}"#,
             started.sandbox_id
         );
-        mxc_sdk::v1::run_lifecycle_json(&deprovision, false, true)
+        mxc_sdk::__ffi::run_lifecycle_json(&deprovision, false, true)
             .expect("deprovision must succeed");
         started.teardown.defuse();
         let _ = tx.send(captured);
@@ -648,8 +648,7 @@ struct Teardown(String);
 #[test]
 fn typed_lifecycle_returns_metadata_and_warnings() {
     use mxc_sdk::v1::{
-        container, spawn_in_container, ExecutionRequest, ProvisionMetadata, ProvisionRequest,
-        WaitResult,
+        container, ExecutionRequest, ProvisionMetadata, ProvisionRequest, WaitResult,
     };
 
     skip_unless_supported!();
@@ -674,7 +673,7 @@ fn typed_lifecycle_returns_metadata_and_warnings() {
     let started = container::start_container(&provisioned.container_id, Default::default())
         .expect("typed start");
     assert!(started.warnings.is_empty(), "{:?}", started.warnings);
-    let process = spawn_in_container(
+    let process = container::spawn_in_container(
         &provisioned.container_id,
         ExecutionRequest::new("echo typed-lifecycle-ok"),
         Default::default(),
@@ -715,10 +714,10 @@ impl Drop for Teardown {
             return;
         }
         let stop = format!(r#"{{"version":"0.9.0-alpha","phase":"stop","sandboxId":"{id}"}}"#);
-        let _ = mxc_sdk::v1::run_lifecycle_json(&stop, false, true);
+        let _ = mxc_sdk::__ffi::run_lifecycle_json(&stop, false, true);
         let deprovision =
             format!(r#"{{"version":"0.9.0-alpha","phase":"deprovision","sandboxId":"{id}"}}"#);
-        if let Err(e) = mxc_sdk::v1::run_lifecycle_json(&deprovision, false, true) {
+        if let Err(e) = mxc_sdk::__ffi::run_lifecycle_json(&deprovision, false, true) {
             eprintln!("WARNING: deprovision of {id} failed, the agent account may leak: {e:?}");
         }
     }
@@ -730,7 +729,7 @@ fn state_aware_lifecycle_runs_end_to_end() {
 
     let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
         "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#;
-    let response = mxc_sdk::v1::run_lifecycle_json(provision, false, true)
+    let response = mxc_sdk::__ffi::run_lifecycle_json(provision, false, true)
         .expect("provision must succeed on a supported host");
     let parsed: serde_json::Value =
         serde_json::from_str(&response).expect("provision response must be JSON");
@@ -751,7 +750,7 @@ fn state_aware_lifecycle_runs_end_to_end() {
 
     let start =
         format!(r#"{{"version":"0.9.0-alpha","phase":"start","sandboxId":"{sandbox_id}"}}"#);
-    mxc_sdk::v1::run_lifecycle_json(&start, false, true).expect("start must succeed");
+    mxc_sdk::__ffi::run_lifecycle_json(&start, false, true).expect("start must succeed");
 
     let captured = exec_capture_stdout(&sandbox_id, "cmd.exe /c echo state-aware-marker");
 
@@ -774,7 +773,7 @@ fn provision_and_start() -> Started {
     let provision = r#"{"version":"0.9.0-alpha","phase":"provision","containment":"isolation_session",
         "network":{"egress":{"default":"allow"},"ingress":{"default":"allow","hostLoopback":"allow"}}}"#;
     let response =
-        mxc_sdk::v1::run_lifecycle_json(provision, false, true).expect("provision must succeed");
+        mxc_sdk::__ffi::run_lifecycle_json(provision, false, true).expect("provision must succeed");
     let parsed: serde_json::Value =
         serde_json::from_str(&response).expect("provision response must be JSON");
     let sandbox_id = match parsed["result"]["sandboxId"].as_str() {
@@ -797,7 +796,7 @@ fn provision_and_start() -> Started {
 
     let start =
         format!(r#"{{"version":"0.9.0-alpha","phase":"start","sandboxId":"{sandbox_id}"}}"#);
-    mxc_sdk::v1::run_lifecycle_json(&start, false, true).expect("start must succeed");
+    mxc_sdk::__ffi::run_lifecycle_json(&start, false, true).expect("start must succeed");
     Started {
         sandbox_id,
         agent_user_name,
@@ -816,7 +815,7 @@ fn exec_capture_stdout(sandbox_id: &str, command: &str) -> String {
     .to_string();
 
     let mut sandbox =
-        mxc_sdk::v1::execute_lifecycle(&request, true).expect("exec must return a handle");
+        mxc_sdk::__ffi::execute_lifecycle_json(&request, true).expect("exec must return a handle");
     let stdout = sandbox.take_stdout().expect("exec must expose stdout");
     let reader = std::thread::spawn(move || {
         use std::io::Read;
@@ -898,12 +897,13 @@ fn the_workspace_is_shared_with_the_agent_and_removed_on_deprovision() {
         r#"{{"version":"0.9.0-alpha","phase":"stop","sandboxId":"{}"}}"#,
         started.sandbox_id
     );
-    mxc_sdk::v1::run_lifecycle_json(&stop, false, true).expect("stop must succeed");
+    mxc_sdk::__ffi::run_lifecycle_json(&stop, false, true).expect("stop must succeed");
     let deprovision = format!(
         r#"{{"version":"0.9.0-alpha","phase":"deprovision","sandboxId":"{}"}}"#,
         started.sandbox_id
     );
-    mxc_sdk::v1::run_lifecycle_json(&deprovision, false, true).expect("deprovision must succeed");
+    mxc_sdk::__ffi::run_lifecycle_json(&deprovision, false, true)
+        .expect("deprovision must succeed");
     started.teardown.defuse();
 
     assert!(
@@ -923,7 +923,7 @@ fn state_aware_exec_propagates_a_non_zero_exit_code() {
         started.sandbox_id
     );
     let mut sandbox =
-        mxc_sdk::v1::execute_lifecycle(&exec, true).expect("exec must return a handle");
+        mxc_sdk::__ffi::execute_lifecycle_json(&exec, true).expect("exec must return a handle");
     let outcome = sandbox.wait().expect("waiting on the exec must succeed");
 
     assert_eq!(
@@ -946,7 +946,7 @@ fn state_aware_exec_can_be_killed() {
         started.sandbox_id
     );
     let mut sandbox =
-        mxc_sdk::v1::execute_lifecycle(&exec, true).expect("exec must return a handle");
+        mxc_sdk::__ffi::execute_lifecycle_json(&exec, true).expect("exec must return a handle");
 
     // Killing a process that has not started yet would prove nothing.
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -986,7 +986,7 @@ fn a_workload_reading_stdin_to_eof_terminates_when_the_writer_drops() {
         started.sandbox_id
     );
     let mut sandbox =
-        mxc_sdk::v1::execute_lifecycle(&exec, true).expect("exec must return a handle");
+        mxc_sdk::__ffi::execute_lifecycle_json(&exec, true).expect("exec must return a handle");
 
     {
         use std::io::Write;
@@ -1027,7 +1027,7 @@ fn a_backgrounded_descendant_does_not_hold_the_exec_open() {
         started.sandbox_id
     );
     let mut sandbox =
-        mxc_sdk::v1::execute_lifecycle(&exec, true).expect("exec must return a handle");
+        mxc_sdk::__ffi::execute_lifecycle_json(&exec, true).expect("exec must return a handle");
 
     let began = std::time::Instant::now();
     let outcome = sandbox.wait().expect("waiting on the exec must succeed");

@@ -327,7 +327,7 @@ export interface FilesystemConfig {
 ```
 
 
-## `@microsoft/mxc-sdk/v1::FilesystemPolicyResult`
+## `@microsoft/mxc-sdk/v1::policy.filesystem.FilesystemPolicyResult`
 
 A composable fragment of filesystem policy.
 
@@ -606,7 +606,6 @@ ProcessContainer configuration for the Windows process-level backend.
 ```typescript
 export interface ProcessContainerConfig {
   name?: string;
-  leastPrivilege?: boolean;
   learningMode?: boolean;
   capabilities?: string[];
   captureDenials?: {
@@ -954,7 +953,7 @@ export type TelemetryPolicyState = (typeof TELEMETRY_POLICY_STATES)[number];
 ```
 
 
-## `@microsoft/mxc-sdk/v1::ToolsPolicyOptions`
+## `@microsoft/mxc-sdk/v1::policy.filesystem.ToolsPolicyOptions`
 
 Options for getAvailableToolsPolicy.
 

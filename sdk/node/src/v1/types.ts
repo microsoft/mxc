@@ -195,16 +195,14 @@ export interface BaseProcessUiConfig {
  * ProcessContainer configuration for the Windows process-level backend.
  *
  * `processcontainer` is the abstraction layer; the runner picks between
- * the legacy AppContainer implementation (which honors `capabilities`,
- * `leastPrivilege`) and the newer BaseContainer implementation (which
+ * the legacy AppContainer implementation (which honors `capabilities`)
+ * and the newer BaseContainer implementation (which
  * honors `ui`) at run time based on the host OS and the `--experimental`
  * flag.
  */
 export interface ProcessContainerConfig {
   /** AppContainer profile name (default: "CLI"). Deprecated: use containerId instead. */
   name?: string;
-  /** Use least privilege mode with PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT (default: false) */
-  leastPrivilege?: boolean;
   /**
    * Enable deny-and-record learning mode. Failed access checks are logged while
    * accesses remain denied and containment remains enforced.

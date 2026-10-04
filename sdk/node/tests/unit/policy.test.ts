@@ -3,11 +3,14 @@
 
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert';
-import { getAvailableToolsPolicy, getUserProfilePolicy, getTemporaryFilesPolicy } from '../../src/v1/policy.js';
+import { policy } from '../../src/v1/index.js';
+
 import { execFileSync } from 'node:child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+
+const { getAvailableToolsPolicy, getUserProfilePolicy, getTemporaryFilesPolicy } = policy.filesystem;
 
 // TODO: Investigate why Object.defineProperty(process, 'platform', ...) does not
 // take effect on Linux ADO pipeline runners (Node.js v20.19.x). These tests mock

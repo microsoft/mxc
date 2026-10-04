@@ -1,5 +1,5 @@
 /**
- * Policy discovery APIs for building container filesystem policy.
+ * Host filesystem-policy discovery helpers.
  *
  * These functions enumerate the host environment to discover tool paths,
  * user profile locations, and temporary storage — returning policy fragments

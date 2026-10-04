@@ -101,22 +101,21 @@
 //!
 //! |             | container request | existing container | Stdio |
 //! |-------------|-------------------|--------------------|-------|
-//! | **capture** | [`v1::run`] | [`v1::run_in_container`] | captured stdout and stderr |
-//! | **handle**  | [`v1::spawn`] | [`v1::spawn_in_container`] | separate live pipes |
+//! | **capture** | [`v1::run`] | [`v1::container::run_in_container`] | captured stdout and stderr |
+//! | **handle**  | [`v1::spawn`] | [`v1::container::spawn_in_container`] | separate live pipes |
 //! | **PTY**     | [`v1::spawn_with_pty`] | [`v1::container::spawn_in_container_with_pty`] | merged output, resize |
 //!
 //! [`v1::container::provision_container`], [`v1::container::start_container`],
 //! [`v1::container::stop_container`], and
 //! [`v1::container::deprovision_container`] drive the lifecycle with typed Rust
-//! requests. Raw exact-JSON entry points remain available separately for
-//! callers that need direct wire-contract access.
+//! requests. All SDK execution APIs take typed requests.
 //!
 //! ## Standard streams
 //!
 //! The V1 `run` and `spawn` APIs use ordinary pipes; PTY allocation is explicit
 //! through [`v1::spawn_with_pty`] and
 //! [`v1::container::spawn_in_container_with_pty`]. [`v1::run`] captures both output streams. With
-//! [`v1::spawn`] or [`v1::spawn_in_container`], callers
+//! [`v1::spawn`] or [`v1::container::spawn_in_container`], callers
 //! can take the streams from [`MxcProcess`] or let `wait` drain and discard any
 //! stream they did not take. WSLC does not expose stdin.
 //!
@@ -140,36 +139,21 @@ mod state_aware_sdk;
 
 mod telemetry;
 
+#[cfg(doctest)]
+mod api_tests;
+
 #[cfg(target_os = "windows")]
 use mxc_engine::ProbeOutput;
 use mxc_engine::{Error, ErrorCode};
 
-use sandbox::{ExecutionResult, MxcProcess, WaitResult};
+use sandbox::{ExecutionResult, MxcProcess};
 
 /// V1 contract-mapped request and typed lifecycle APIs.
 ///
-/// These types and entry points target the latest published v1 exact contract
-/// owned by this SDK. Callers do not supply a schema version on this path; use
-/// the V1 raw exact-JSON functions when a request must declare its own
-/// contract version.
+/// These types and entry points target the latest published V1 contract
+/// owned by this SDK. Callers supply typed requests rather than JSON or a
+/// schema version.
 ///
-/// The legacy root probe and lifecycle module paths are not exported:
-///
-/// ```compile_fail
-/// use mxc_sdk::probe;
-/// ```
-///
-/// ```compile_fail
-/// use mxc_sdk::sandbox;
-/// ```
-///
-/// ```compile_fail
-/// use mxc_sdk::v1::container::exec_in_attached;
-/// ```
-///
-/// ```compile_fail
-/// use mxc_sdk::v1::exec_attached;
-/// ```
 pub mod v1 {
     pub use crate::options::{
         DeprovisionOptions, ProvisionOptions, RunInContainerOptions, RunOptions,
@@ -188,11 +172,6 @@ pub mod v1 {
         pub use crate::telemetry::*;
     }
 
-    pub use crate::raw::{
-        execute_lifecycle, execute_lifecycle_json, run_json, run_lifecycle_json,
-        spawn_container_json, spawn_in_container_with_pty_json, spawn_with_pty_json,
-    };
-
     /// Backend-specific V1 configuration sections.
     pub mod configs {
         pub use crate::configs::{
@@ -204,31 +183,56 @@ pub mod v1 {
 
     /// V1 policy authoring types.
     pub mod policy {
+        /// Host filesystem-policy discovery helpers and their options.
+        pub mod filesystem {
+            pub use crate::policy::{
+                available_tools_policy, temporary_files_policy, user_profile_policy,
+                FilesystemPolicyResult, ToolsPolicyContainerType, ToolsPolicyOptions,
+            };
+        }
+
         pub use crate::policy::{
-            available_tools_policy, temporary_files_policy, user_profile_policy, ClipboardPolicy,
-            Containment, FilesystemPolicy, FilesystemPolicyResult, NetworkAction,
-            NetworkEgressPolicy, NetworkIngressPolicy, NetworkPeerPolicy, NetworkPolicy,
-            NetworkPortPolicy, NetworkProtocol, NetworkRulePolicy, NetworkRuntimeConfig,
-            ToolsPolicyContainerType, ToolsPolicyOptions, UiPolicy,
+            ClipboardPolicy, Containment, FilesystemPolicy, NetworkAction, NetworkEgressPolicy,
+            NetworkIngressPolicy, NetworkPeerPolicy, NetworkPolicy, NetworkPortPolicy,
+            NetworkProtocol, NetworkRulePolicy, NetworkRuntimeConfig, UiPolicy,
         };
     }
 
     /// V1 typed lifecycle entry points.
     pub mod container {
+        use super::{
+            ContainerId, Error, ExecutionRequest, ExecutionResult, RunInContainerOptions,
+            SpawnInContainerOptions,
+        };
+
         pub use crate::sandbox::{
             deprovision as deprovision_container, provision as provision_container,
-            spawn_in_container_with_pty, start as start_container, stop as stop_container,
-            validate_deprovision, validate_process, validate_provision, validate_start,
-            validate_stop,
+            spawn_in_container, spawn_in_container_with_pty, start as start_container,
+            stop as stop_container, validate_deprovision, validate_process, validate_provision,
+            validate_start, validate_stop,
         };
+
+        /// Run a workload in an existing container to completion and capture output.
+        pub fn run_in_container(
+            container_id: &ContainerId,
+            request: ExecutionRequest,
+            options: RunInContainerOptions,
+        ) -> Result<ExecutionResult, Error> {
+            crate::wait_with_output(spawn_in_container(
+                container_id,
+                request,
+                SpawnInContainerOptions {
+                    experimental: options.experimental,
+                    telemetry: options.telemetry,
+                },
+            )?)
+        }
     }
 
     pub use crate::policy::{
-        available_tools_policy, temporary_files_policy, user_profile_policy, ClipboardPolicy,
-        ContainerRequest, Containment, FilesystemPolicy, FilesystemPolicyResult, NetworkAction,
+        ClipboardPolicy, ContainerRequest, Containment, FilesystemPolicy, NetworkAction,
         NetworkEgressPolicy, NetworkIngressPolicy, NetworkPeerPolicy, NetworkPolicy,
-        NetworkPortPolicy, NetworkProtocol, NetworkRulePolicy, NetworkRuntimeConfig,
-        ToolsPolicyContainerType, ToolsPolicyOptions, UiPolicy,
+        NetworkPortPolicy, NetworkProtocol, NetworkRulePolicy, NetworkRuntimeConfig, UiPolicy,
     };
     pub use crate::sandbox::{
         CaptureDenialsError, CaptureDenialsResult, ExecutionMetadata, ExecutionResult, MxcProcess,
@@ -299,31 +303,6 @@ pub mod v1 {
         )?)
     }
 
-    /// Spawn a workload in an existing container and return its live process.
-    pub fn spawn_in_container(
-        container_id: &ContainerId,
-        request: ExecutionRequest,
-        options: SpawnInContainerOptions,
-    ) -> Result<MxcProcess, Error> {
-        crate::sandbox::spawn_in_container(container_id, request, options)
-    }
-
-    /// Run a workload in an existing container to completion and capture output.
-    pub fn run_in_container(
-        container_id: &ContainerId,
-        request: ExecutionRequest,
-        options: RunInContainerOptions,
-    ) -> Result<ExecutionResult, Error> {
-        crate::wait_with_output(spawn_in_container(
-            container_id,
-            request,
-            SpawnInContainerOptions {
-                experimental: options.experimental,
-                telemetry: options.telemetry,
-            },
-        )?)
-    }
-
     #[cfg(all(test, target_os = "windows"))]
     mod tests {
         use super::*;
@@ -337,8 +316,11 @@ pub mod v1 {
     }
 }
 
-mod raw {
+/// Internal adapters for the C ABI and native contract tests, not SDK authoring APIs.
+#[doc(hidden)]
+pub mod __ffi {
     use super::*;
+    use crate::sandbox::WaitResult;
 
     /// Spawn a raw exact-version JSON container request as a live process.
     ///
@@ -373,22 +355,13 @@ mod raw {
         wait_with_output(spawn_container_json(request_json, experimental)?)
     }
 
-    pub(super) fn wait_with_output(sandbox: MxcProcess) -> Result<ExecutionResult, Error> {
-        sandbox.wait_with_output().map_err(|e| {
-            Error::new(
-                ErrorCode::BackendError,
-                format!("waiting for the sandbox to complete failed: {e}"),
-            )
-        })
-    }
-
     /// Run a lifecycle request (as a JSON string) and return the
     /// response-envelope JSON string.
     ///
     /// Handles the envelope phases â€” `provision`, `start`, `stop`, `deprovision` â€”
     /// and a dry run of any phase. A non-dry-run execution produces no envelope, so
     /// it is rejected here; use an execution entry point instead:
-    /// [`execute_lifecycle`] to drive the pipes yourself.
+    /// [`execute_lifecycle_json`] to drive the pipes yourself.
     ///
     /// The request JSON is the same wire format the executor accepts (an object with
     /// a `phase` field). Errors (malformed request, unsupported phase, backend
@@ -425,11 +398,6 @@ mod raw {
     /// [`MxcProcess::kill`] reaches only the foreground process here; a descendant the
     /// workload backgrounded is reclaimed when the container is stopped and
     /// deprovisioned.
-    pub fn execute_lifecycle(request_json: &str, experimental: bool) -> Result<MxcProcess, Error> {
-        execute_lifecycle_json(request_json, experimental)
-    }
-
-    /// Execute a raw lifecycle JSON request as a live streaming process.
     pub fn execute_lifecycle_json(
         request_json: &str,
         experimental: bool,
@@ -449,23 +417,7 @@ mod raw {
             .and_then(v1::MxcPtyProcess::new)
     }
 
-    /// Execute a lifecycle request **attached to this process's stdio**, blocking
-    /// until the container process exits.
-    ///
-    /// The backend relays the workload's output onto this process's stdout and
-    /// stderr; see *Pty allocation* for which backends also forward stdin and
-    /// allocate a pseudo-console.
-    ///
-    /// **This process's stdout and stdin must both be terminals**, or the call is
-    /// refused with [`ErrorCode::MalformedRequest`] and nothing is run.
-    ///
-    /// Attached execution has no process handle on which to report a typed timeout.
-    /// A backend-native timeout that cannot be represented as an exit code is
-    /// returned as an [`Error`]. Use [`execute_lifecycle`] when timeout must remain a
-    /// distinct [`WaitResult::TimedOut`] result.
-    ///
-    /// `experimental` opts in to the experimental backends, as for
-    /// [`run_lifecycle_json`].
+    /// Execute a lifecycle request attached to this process's stdio.
     #[expect(
         dead_code,
         reason = "Attached exec is reserved but not exposed by the SDK yet"
@@ -474,8 +426,7 @@ mod raw {
         exec_attached_json(request_json, experimental)
     }
 
-    /// Run a raw exact-JSON lifecycle execution request attached to this process's
-    /// stdio.
+    /// Run an exact-JSON lifecycle execution request attached to this process's stdio.
     fn exec_attached_json(request_json: &str, experimental: bool) -> Result<WaitResult, Error> {
         use wxc_common::state_aware_backend::ExecOutcome;
         mxc_engine::exec_state_aware_attached(request_json, experimental).map(|outcome| {
@@ -487,4 +438,11 @@ mod raw {
     }
 }
 
-use raw::wait_with_output;
+fn wait_with_output(sandbox: MxcProcess) -> Result<ExecutionResult, Error> {
+    sandbox.wait_with_output().map_err(|e| {
+        Error::new(
+            ErrorCode::BackendError,
+            format!("waiting for the sandbox to complete failed: {e}"),
+        )
+    })
+}

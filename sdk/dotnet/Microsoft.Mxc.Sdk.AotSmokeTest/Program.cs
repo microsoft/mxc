@@ -36,9 +36,6 @@ static void CheckRoundTrip<T>(T value, Func<T, bool> check, string name)
 var initialPtySize = new MxcPtySize(40, 120);
 CheckRoundTrip(new TelemetryConfig(), x => x.Enabled is null, "omitted telemetry enabled");
 CheckRoundTrip(new TelemetryConfig { Enabled = false }, x => x.Enabled == false, "explicit disabled telemetry");
-CheckRoundTrip(new ToolsPolicyOptions { ContainerType = ToolsPolicyContainerType.ProcessContainer },
-    x => x.ContainerType == ToolsPolicyContainerType.ProcessContainer, "tool-policy options");
-CheckRoundTrip(new ToolsPolicyOptions(), x => x.ContainerType is null, "omitted tool-policy filter");
 foreach (var enabled in new bool?[] { null, true, false })
 {
     var telemetry = enabled.HasValue ? new TelemetryConfig { Enabled = enabled.Value } : null;
@@ -87,7 +84,6 @@ var request = new ContainerRequest("echo hello")
     Ui = new UiPolicy { Disable = false, Clipboard = ClipboardPolicy.Read },
     Containment = new Containment.ProcessContainer
     {
-        LeastPrivilege = true,
         Capabilities = { "internetClient" },
     },
 };
@@ -104,8 +100,11 @@ using (var doc = JsonDocument.Parse(MxcJson.Serialize(request, MxcJson.Options))
     Check(root.GetProperty("ui").GetProperty("clipboard").GetString() == "read", "clipboard enum");
 
     var restored = MxcJson.Deserialize<ContainerRequest>(root.GetRawText());
-    Check(restored?.Containment is Containment.ProcessContainer { LeastPrivilege: true },
+    Check(restored?.Containment is Containment.ProcessContainer processContainer
+        && processContainer.Capabilities.Contains("internetClient"),
         "request containment round-trips without reflection");
+    Check(!root.GetProperty("containment").TryGetProperty("leastPrivilege", out _),
+        "authoring request has no least-privilege option");
 }
 
 using (var doc = JsonDocument.Parse(MxcContainer.SerializeRequest(request)))
@@ -124,14 +123,14 @@ using (var doc = JsonDocument.Parse(MxcContainer.SerializeRequest(request)))
     Check(root.GetProperty("process").GetProperty("timeout").GetUInt32() == 5000,
         "request timeout");
     Check(root.GetProperty("containment").GetString() == "processcontainer", "exact containment discriminator");
-    Check(root.GetProperty("processContainer").GetProperty("leastPrivilege").GetBoolean(),
-        "exact backend policy");
+    Check(!root.GetProperty("processContainer").GetProperty("leastPrivilege").GetBoolean(),
+        "exact backend policy retains the SDK default");
 }
 
 Containment[] containments =
 [
     new Containment.Process(),
-    new Containment.ProcessContainer { LeastPrivilege = true },
+    new Containment.ProcessContainer(),
     new Containment.Bubblewrap(),
     new Containment.Lxc { Distribution = "ubuntu", Release = "24.04" },
     new Containment.Seatbelt { GuiAccess = true },

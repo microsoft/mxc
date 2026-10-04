@@ -232,9 +232,7 @@ pub(super) fn build(input: &PreparedInput<'_>) -> Result<contract::OneShotReques
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(error)?;
             Ok(contract::ProcessContainer {
-                least_privilege: contract::OptionalField::present(
-                    process_container.least_privilege,
-                ),
+                least_privilege: contract::OptionalField::present(false),
                 learning_mode: optional!(contract, process_container.learning_mode.then_some(true)),
                 capabilities: contract::OptionalField::present(capabilities),
                 capture_denials: optional!(

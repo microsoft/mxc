@@ -4,11 +4,12 @@
 //! Tests for SDK helpers and V1 request authoring.
 
 use mxc_sdk::v1::platform_support;
+use mxc_sdk::v1::policy::filesystem::{
+    available_tools_policy, temporary_files_policy, user_profile_policy,
+};
+use mxc_sdk::v1::ContainerRequest;
 #[cfg(target_os = "windows")]
 use mxc_sdk::v1::ErrorCode;
-use mxc_sdk::v1::{
-    available_tools_policy, temporary_files_policy, user_profile_policy, ContainerRequest,
-};
 #[cfg(target_os = "windows")]
 use mxc_sdk::v1::{configs::WslcConfig, Containment};
 
@@ -154,7 +155,7 @@ fn user_profile_policy_uses_supplied_environment() {
 #[cfg(target_os = "windows")]
 #[test]
 fn tool_options_filter_all_application_packages_without_changing_default() {
-    use mxc_sdk::v1::{ToolsPolicyContainerType, ToolsPolicyOptions};
+    use mxc_sdk::v1::policy::filesystem::{ToolsPolicyContainerType, ToolsPolicyOptions};
     let directory = std::env::temp_dir().join(format!("mxc-tools-{} & paths", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
     let grant = std::process::Command::new("icacls.exe")

@@ -40,8 +40,6 @@ pub struct CaptureDenials {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ProcessContainerConfig {
-    /// Enable least-privilege process creation.
-    pub least_privilege: bool,
     /// Enable deny-and-record AppContainer learning mode.
     pub learning_mode: bool,
     /// Additional AppContainer capability names.
@@ -59,7 +57,6 @@ pub struct ProcessContainerConfig {
 impl Default for ProcessContainerConfig {
     fn default() -> Self {
         Self {
-            least_privilege: false,
             learning_mode: false,
             capabilities: Vec::new(),
             capture_denials: None,
@@ -165,7 +162,6 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let process_container = ProcessContainerConfig {
-            least_privilege: true,
             learning_mode: true,
             capabilities: vec!["registryRead".to_string()],
             capture_denials: Some(CaptureDenials {
@@ -200,7 +196,7 @@ mod tests {
             NetworkEnforcementCompatibility::Strict
         );
         assert_eq!(inner.containment, ContainmentBackend::ProcessContainer);
-        assert!(inner.policy.least_privilege_mode);
+        assert!(!inner.policy.least_privilege_mode);
         assert!(inner
             .policy
             .capabilities

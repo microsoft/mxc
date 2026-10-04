@@ -2,7 +2,37 @@
 
 Public entrypoint: `mxc_sdk::v1`. [Types](types.md) | [Overview](README.md)
 
-Signatures describe the supported consumer API and omit implementation bodies and serialization attributes. Raw Rust JSON bridges are listed separately from typed requests; native wire compatibility is unchanged.
+Signatures describe the typed consumer API and omit implementation bodies.
+Callers do not supply JSON or a schema version.
+JSON request adapters are not part of the supported V1 API.
+Attached execution is not exposed by the V1 SDK.
+
+## Choosing a launch operation
+
+| Output | Create and run a container | Run in an existing container | Result |
+|---|---|---|---|
+| Capture stdout and stderr | `v1::run` | `v1::container::run_in_container` | `ExecutionResult` |
+| Live standard pipes | `v1::spawn` | `v1::container::spawn_in_container` | `MxcProcess` |
+| Interactive terminal | `v1::spawn_with_pty` | `v1::container::spawn_in_container_with_pty` | `MxcPtyProcess` |
+
+Creation takes `ContainerRequest` and operation options. Existing-container
+execution takes the `ContainerId` returned by provision, `ExecutionRequest`,
+and operation options. PTY support is IsolationSession-only. A PTY gives the
+caller explicit input, output, resize, and process ownership instead of
+attaching the workload to the host process's global console streams.
+
+## Discovery and validation
+
+| Operation | Use it to |
+|---|---|
+| `platform_support` | Check whether the SDK can launch on this host and which backends it supports. |
+| `available_backends` | Discover native host-available backends, capabilities, tiers, and warnings. Availability is advisory; not every reported backend has a V1 creation API. |
+| `probe` (Windows) | Evaluate an optional ProcessContainer request, including the isolation tier and request-specific compatibility diagnostics, without creating a container. |
+| `container::validate_*` | Perform native dry-run validation for a typed lifecycle operation without provisioning, starting, executing, stopping, or deprovisioning a container. |
+
+Validation checks request structure, policy, and backend support. It returns
+`ValidationResult` with warnings, not execution output, and does not guarantee
+that a later operation will succeed on a changed host.
 
 ## `mxc_sdk::v1::available_backends`
 
@@ -13,7 +43,7 @@ pub fn available_backends() -> Vec<AvailableBackend>;
 ```
 
 
-## `mxc_sdk::v1::available_tools_policy`, `mxc_sdk::v1::policy::available_tools_policy`
+## `mxc_sdk::v1::policy::filesystem::available_tools_policy`
 
 Discover tool and SDK directories from environment (defaults to the process environment) as read-only policy paths.
 
@@ -138,27 +168,6 @@ options: StopOptions,
 ```
 
 
-## `mxc_sdk::v1::execute_lifecycle`
-
-Execute a lifecycle request (as a JSON string) as a **live streaming** process, returning a [MxcProcess] handle for output streaming, waiting, and termination — exactly like [v1::spawn].
-
-```rust
-pub fn execute_lifecycle(request_json: &str, experimental: bool) -> Result<MxcProcess, Error>;
-```
-
-
-## `mxc_sdk::v1::execute_lifecycle_json`
-
-Execute a raw lifecycle JSON request as a live streaming process.
-
-```rust
-pub fn execute_lifecycle_json(
-request_json: &str,
-experimental: bool,
-) -> Result<MxcProcess, Error>;
-```
-
-
 ## `mxc_sdk::v1::platform_support`
 
 Detect MXC support on the current host.
@@ -186,7 +195,7 @@ pub fn run(request: ContainerRequest, options: RunOptions) -> Result<ExecutionRe
 ```
 
 
-## `mxc_sdk::v1::run_in_container`
+## `mxc_sdk::v1::container::run_in_container`
 
 Run a workload in an existing container to completion and capture output.
 
@@ -199,28 +208,6 @@ options: RunInContainerOptions,
 ```
 
 
-## `mxc_sdk::v1::run_json`
-
-Run a raw exact-version JSON container request to completion and capture its output.
-
-```rust
-pub fn run_json(request_json: &str, experimental: bool) -> Result<ExecutionResult, Error>;
-```
-
-
-## `mxc_sdk::v1::run_lifecycle_json`
-
-Run a lifecycle request (as a JSON string) and return the response-envelope JSON string.
-
-```rust
-pub fn run_lifecycle_json(
-request_json: &str,
-dry_run: bool,
-experimental: bool,
-) -> Result<String, Error>;
-```
-
-
 ## `mxc_sdk::v1::spawn`
 
 Spawn a [ContainerRequest] and return its live process.
@@ -230,19 +217,7 @@ pub fn spawn(request: ContainerRequest, options: SpawnOptions) -> Result<MxcProc
 ```
 
 
-## `mxc_sdk::v1::spawn_container_json`
-
-Spawn a raw exact-version JSON container request as a live process.
-
-```rust
-pub fn spawn_container_json(
-request_json: &str,
-experimental: bool,
-) -> Result<MxcProcess, Error>;
-```
-
-
-## `mxc_sdk::v1::spawn_in_container`
+## `mxc_sdk::v1::container::spawn_in_container`
 
 Spawn a workload in an existing container and return its live process.
 
@@ -255,19 +230,6 @@ options: SpawnInContainerOptions,
 ```
 
 
-## `mxc_sdk::v1::spawn_in_container_with_pty_json`
-
-Spawn a lifecycle execution request with a caller-controlled PTY.
-
-```rust
-pub fn spawn_in_container_with_pty_json(
-request_json: &str,
-size: v1::MxcPtySize,
-experimental: bool,
-) -> Result<v1::MxcPtyProcess, Error>;
-```
-
-
 ## `mxc_sdk::v1::spawn_with_pty`
 
 Spawn a [ContainerRequest] attached to a caller-controlled PTY.
@@ -277,19 +239,6 @@ pub fn spawn_with_pty(
 request: ContainerRequest,
 options: SpawnWithPtyOptions,
 ) -> Result<MxcPtyProcess, Error>;
-```
-
-
-## `mxc_sdk::v1::spawn_with_pty_json`
-
-Spawn an exact-version JSON request attached to a caller-controlled PTY.
-
-```rust
-pub fn spawn_with_pty_json(
-request_json: &str,
-experimental: bool,
-size: v1::MxcPtySize,
-) -> Result<v1::MxcPtyProcess, Error>;
 ```
 
 
@@ -376,7 +325,7 @@ pub fn withdraw_consent() -> Result<ConsentActionOutcome, ConsentError>;
 ```
 
 
-## `mxc_sdk::v1::temporary_files_policy`, `mxc_sdk::v1::policy::temporary_files_policy`
+## `mxc_sdk::v1::policy::filesystem::temporary_files_policy`
 
 Read-write policy for the host temporary directory.
 
@@ -385,7 +334,7 @@ pub fn temporary_files_policy(environment: Option<&[(String, String)]>) -> Files
 ```
 
 
-## `mxc_sdk::v1::user_profile_policy`, `mxc_sdk::v1::policy::user_profile_policy`
+## `mxc_sdk::v1::policy::filesystem::user_profile_policy`
 
 Read-only policy for standard user-profile application data locations.
 

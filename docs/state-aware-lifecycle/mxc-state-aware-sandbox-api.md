@@ -356,8 +356,9 @@ native engine. Persistent execution uses an already-provisioned identity and
 
 ### 6.5 Policy discovery
 
-`getAvailableToolsPolicy`, `getUserProfilePolicy`, and
-`getTemporaryFilesPolicy` are V1 filesystem-policy helpers. Their fragments
+`policy.filesystem.getAvailableToolsPolicy`,
+`policy.filesystem.getUserProfilePolicy`, and
+`policy.filesystem.getTemporaryFilesPolicy` are V1 filesystem-policy helpers. Their fragments
 compose into supported request filesystem fields. Native enforcement remains
 backend-specific.
 

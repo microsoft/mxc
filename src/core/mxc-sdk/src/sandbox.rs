@@ -210,7 +210,7 @@ pub enum WaitResult {
     /// The process exited with this code. On Unix a process terminated by a
     /// signal (rather than exiting normally) surfaces as `Exited(-1)`.
     Exited(i32),
-    /// The request's `scriptTimeout` elapsed while the process was running, and
+    /// The request's timeout elapsed while the process was running, and
     /// the process is no longer running.
     ///
     /// **Deadline spent, and the process is gone.** Whether it was killed or
@@ -224,12 +224,10 @@ pub enum WaitResult {
     /// confirms that process, and a descendant the workload backgrounded is
     /// reclaimed when the container is stopped and deprovisioned rather than here.
     ///
-    /// That lifecycle route is reachable from this crate once the caller
-    /// passes the `experimental` opt-in to
-    /// [`execute_lifecycle`](crate::execute_lifecycle) and the backend is compiled in via
-    /// this crate's `isolation_session` feature, which forwards to the engine.
-    /// Both refusals are
-    /// [`ErrorCode::BackendUnavailable`](crate::ErrorCode::BackendUnavailable).
+    /// That lifecycle route is reachable through
+    /// [`spawn_in_container`](crate::v1::container::spawn_in_container) when the
+    /// backend is compiled in via this crate's `isolation_session` feature.
+    /// IsolationSession requires no runtime experimental opt-in.
     TimedOut,
 }
 
@@ -252,7 +250,7 @@ pub struct ExecutionResult {
 }
 
 /// A live container process, returned by [`spawn`](crate::v1::spawn)
-/// and [`execute_lifecycle`](crate::execute_lifecycle).
+/// and [`spawn_in_container`](crate::v1::container::spawn_in_container).
 ///
 /// Stream the child's stdio with the `take_*` accessors, wait for it, or kill
 /// it. No pty is allocated â€” the streams are ordinary pipes. Any stdout/stderr

@@ -240,7 +240,6 @@ public sealed class ProcessContainer : Containment
 {
     public ProcessContainer();
 
-    public bool LeastPrivilege { get; set; }
     public bool LearningMode { get; set; }
 
     public List<string> Capabilities { get; set; } = new();
@@ -398,12 +397,12 @@ public sealed class FilesystemPolicy
 ```
 
 
-## `Microsoft.Mxc.Sdk.V1.FilesystemPolicies`
+## `Microsoft.Mxc.Sdk.V1.Policy.Filesystem`
 
 Discovers host paths commonly needed by contained developer tools.
 
 ```csharp
-public static class FilesystemPolicies
+public static class Filesystem
 {
     public static FilesystemPolicyResult GetAvailableToolsPolicy(
         IReadOnlyDictionary<string, string?>? environment = null);
@@ -417,7 +416,7 @@ public static class FilesystemPolicies
 ```
 
 
-## `Microsoft.Mxc.Sdk.V1.FilesystemPolicyResult`
+## `Microsoft.Mxc.Sdk.V1.Policy.FilesystemPolicyResult`
 
 A composable filesystem-policy fragment discovered from the host.
 
@@ -1459,24 +1458,6 @@ public sealed class TelemetryConfig
     public bool? Enabled { get; set; }
 }
 ```
-
-## `Microsoft.Mxc.Sdk.V1.ToolsPolicyOptions`
-
-Optional tool-policy filtering controls.
-
-```csharp
-public sealed class ToolsPolicyOptions
-{
-    public ToolsPolicyOptions();
-    public ToolsPolicyContainerType? ContainerType { get; set; }
-}
-
-public enum ToolsPolicyContainerType
-{
-    ProcessContainer,
-}
-```
-
 
 ## `Microsoft.Mxc.Sdk.V1.UiCapabilitySupport`
 

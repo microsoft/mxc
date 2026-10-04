@@ -11,49 +11,47 @@ certify backend availability.
 | .NET | [V1](dotnet/v1/README.md) | `Microsoft.Mxc.Sdk.V1` |
 | Node | [V1](node/v1/README.md) | `@microsoft/mxc-sdk/v1` |
 
-## Common contract
+## Choosing an operation
 
-- Creation takes `ContainerRequest` followed by operation-specific options.
-- Provision takes `ProvisionRequest` followed by `ProvisionOptions`.
-- Provision results expose an optional `metadata`/`Metadata` value through
-  `ProvisionMetadata`. Rust uses an enum, .NET a closed hierarchy, and Node a
-  backend-inferred `ProvisionMetadata<C>` type. IsolationSession metadata is
-  `IsolationSessionProvisionMetadata`; WSLC currently returns none.
-- Provision results also expose policy and operational warnings. IsolationSession
-  provision metadata requires agent user name, agent user SID, and ephemeral
-  workspace path when the metadata object is present.
-- Start, stop, and deprovision take the opaque `ContainerId` followed by their
-  operation-specific options, and return `LifecycleResult` with warnings.
-- Execution in an existing container takes `ContainerId`, `ExecutionRequest`,
-  then operation-specific options.
-- Validation returns `ValidationResult` with policy and operational warnings,
-  without executing the requested operation.
-- Captured results and live process handles expose optional `ExecutionMetadata`,
-  including `CaptureDenialsResult` and `CaptureDenialsError` when produced.
-- Runtime-only network values use `NetworkRuntimeConfig`; the native JSON field
-  remains `runtimeConfig`.
-- Invocation telemetry uses `TelemetryConfig` on operation options. Its optional
-  `enabled`/`Enabled` value preserves omission and explicit `false`; emission
-  remains subject to persisted MXC consent and administrative restrictions.
-- All filesystem helpers accept an optional `environment` input. Omission reads
-  the process environment; an explicitly empty collection does not. Tool
-  discovery also accepts `ToolsPolicyOptions` for Windows ProcessContainer
-  ALL APPLICATION PACKAGES filtering. Failed ACL inspections retain the
-  directory and emit a diagnostic warning.
-- Initial PTY dimensions belong to the PTY operation's options. Later resizing
-  is an operation on the returned terminal process.
-- Containment is a closed SDK-owned choice, defaulting to generic Process
-  intent. Backend configuration payloads use consistent `*Config` names where
-  configuration types are separate from containment choices.
-- Preserve environment omission versus an explicitly empty environment,
-  native policy validation, error propagation, and process ownership.
+| Task | Input | Result |
+|---|---|---|
+| Create and run a container | `ContainerRequest`, operation options | Captured `ExecutionResult` or a live process |
+| Provision a persistent container | `ProvisionRequest`, `ProvisionOptions` | `ProvisionResult` with `ContainerId` and optional metadata |
+| Start, stop, or deprovision | `ContainerId`, operation options | `LifecycleResult` |
+| Run in an existing container | `ContainerId`, `ExecutionRequest`, operation options | Captured `ExecutionResult` or a live process |
+| Validate a lifecycle operation | The operation's typed inputs | `ValidationResult`, without performing the operation |
 
-Language-appropriate casing, constructors, enums, and discriminated unions are
-intentional. Rust is synchronous; .NET and Node expose asynchronous operations.
-Node captured execution in an existing container has synchronous and asynchronous
-forms for IsolationSession and WSLC. .NET cancellation tokens are trailing parameters.
+Choose captured output, live standard pipes, or an interactive terminal using
+the launch tables for [Rust](rust/v1/api.md#choosing-a-launch-operation),
+[.NET](dotnet/v1/api.md#choosing-a-launch-operation), and
+[Node](node/v1/api.md#choosing-a-launch-operation). Requests describe the workload
+and policy; operation options control invocation behavior. PTY options include
+the initial size; resize is a method on the returned terminal process.
 
-## Keeping references current
+## Results and policy
+
+Results and live handles expose warnings and optional execution metadata.
+Provision metadata is backend-specific; each language's type reference lists
+the supported fields.
+
+Containment selects the backend. Shared restrictions live on the request;
+backend-specific authoring uses `*Config` types. Omitted environment input
+uses backend defaults, whereas an explicitly empty environment is preserved.
+Filesystem discovery helpers follow the same distinction for their host
+environment input. Native validation decides which policies the backend can
+enforce.
+
+Invocation telemetry belongs to operation options and is always subject to
+persisted MXC consent and administrative restrictions.
+
+## Language conventions
+
+Rust execution is synchronous. .NET and Node also expose asynchronous
+operations; their signature pages identify which have synchronous
+counterparts. .NET cancellation tokens are trailing parameters. Casing,
+constructors, enums, and discriminated unions follow each language's conventions.
+
+## Contributor guidance: keeping references current
 
 Update the affected signature and type pages whenever a public SDK API changes.
 Review the corresponding APIs in all three SDKs, including options, defaults,

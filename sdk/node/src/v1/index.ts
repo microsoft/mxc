@@ -66,13 +66,7 @@ export type { WaitResult } from './container-process.js';
 export { MxcPtyProcess } from './mxc-pty-process.js';
 export type { MxcPtySize } from './mxc-pty-process.js';
 
-export {
-  getAvailableToolsPolicy,
-  getUserProfilePolicy,
-  getTemporaryFilesPolicy,
-  FilesystemPolicyResult,
-  ToolsPolicyOptions,
-} from './policy.js';
+export * as policy from './policy/index.js';
 
 export {
   SDK_CONTRACT_VERSION,

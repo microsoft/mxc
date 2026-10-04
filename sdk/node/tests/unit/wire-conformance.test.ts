@@ -65,6 +65,11 @@ import type {
   ContainerId as InternalContainerId,
 } from '../../src/v1/lifecycle-types.js';
 
+// @ts-expect-error Filesystem discovery is grouped under policy.filesystem.
+import type { getAvailableToolsPolicy, getUserProfilePolicy, getTemporaryFilesPolicy } from '../../src/v1/index.js';
+// @ts-expect-error Discovery result/options types belong to policy.filesystem.
+import type { FilesystemPolicyResult, ToolsPolicyOptions } from '../../src/v1/index.js';
+
 // @ts-expect-error Typed request authoring belongs to V1, not the root entry point.
 import type { ContainerRequest as RootContainerRequest } from '../../src/index.js';
 // @ts-expect-error Typed lifecycle identities belong to V1, not the root.
@@ -343,8 +348,9 @@ type _WslcV09WireKeys = AssertTrue<Equivalent<OnlyInWire<WslcConfig, WireV09Wslc
 type _PortMappingWireKeys = AssertTrue<Equivalent<OnlyInWire<PublicPortMapping, WirePortMapping>, never>>;
 type _LxcWireKeys = AssertTrue<Equivalent<OnlyInWire<RawV1LxcConfig, WireLxc>, never>>;
 
+// The binding fixes this native field to false; it is not an authoring option.
 type _ProcessContainerWireKeys = AssertTrue<
-  Equivalent<OnlyInWire<ProcessContainerConfig, WireProcessContainer>, never>
+  Equivalent<OnlyInWire<ProcessContainerConfig, WireProcessContainer>, 'leastPrivilege'>
 >;
 
 type _SeatbeltWireKeys = AssertTrue<

@@ -1,8 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-using Microsoft.Mxc.Sdk;
-using Microsoft.Mxc.Sdk.V1;
+using Microsoft.Mxc.Sdk.V1.Policy;
 using Xunit;
 
 namespace Microsoft.Mxc.Sdk.Tests.V1;
@@ -17,7 +16,7 @@ public class FilesystemPoliciesTests
             ?? Environment.GetEnvironmentVariable("windir") ?? @"C:\Windows";
         foreach (var windir in new string?[] { null, "", @"C:\SpoofedWindows" })
         {
-            var result = FilesystemPolicies.GetAvailableToolsPolicy(
+            var result = Filesystem.GetAvailableToolsPolicy(
                 new Dictionary<string, string?> { ["PATH"] = hostWindows, ["WINDIR"] = windir });
             Assert.Empty(result.ReadonlyPaths);
         }
@@ -27,12 +26,12 @@ public class FilesystemPoliciesTests
     public void ExplicitlyEmptyEnvironment_DoesNotDiscoverHostToolsOrProfile()
     {
         var environment = new Dictionary<string, string?>();
-        Assert.Empty(FilesystemPolicies.GetAvailableToolsPolicy(environment).ReadonlyPaths);
-        Assert.Empty(FilesystemPolicies.GetUserProfilePolicy(environment).ReadonlyPaths);
+        Assert.Empty(Filesystem.GetAvailableToolsPolicy(environment).ReadonlyPaths);
+        Assert.Empty(Filesystem.GetUserProfilePolicy(environment).ReadonlyPaths);
     }
 
     [Fact]
-    public void ToolsPolicyOptions_FilterAllApplicationPackagesWithoutChangingDefault()
+    public void GetAvailableToolsPolicy_RetainsDirectoriesWithAllApplicationPackagesAccess()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -52,9 +51,7 @@ public class FilesystemPoliciesTests
                 System.Security.AccessControl.AccessControlType.Allow));
             System.IO.FileSystemAclExtensions.SetAccessControl(new DirectoryInfo(directory), access);
             var environment = new Dictionary<string, string?> { ["PATH"] = directory };
-            Assert.Contains(directory, FilesystemPolicies.GetAvailableToolsPolicy(environment).ReadonlyPaths);
-            Assert.Empty(FilesystemPolicies.GetAvailableToolsPolicy(environment,
-                new ToolsPolicyOptions { ContainerType = ToolsPolicyContainerType.ProcessContainer }).ReadonlyPaths);
+            Assert.Contains(directory, Filesystem.GetAvailableToolsPolicy(environment).ReadonlyPaths);
         }
         finally
         {
@@ -78,7 +75,7 @@ public class FilesystemPoliciesTests
                 ["DOTNET_ROOT"] = directory,
             };
 
-            var result = FilesystemPolicies.GetAvailableToolsPolicy(environment);
+            var result = Filesystem.GetAvailableToolsPolicy(environment);
 
             Assert.Single(result.ReadonlyPaths);
             Assert.Equal(Path.GetFullPath(directory), result.ReadonlyPaths[0]);
@@ -97,7 +94,7 @@ public class FilesystemPoliciesTests
             ? Environment.GetEnvironmentVariable("WINDIR") ?? @"C:\Windows"
             : "/usr/bin";
 
-        var result = FilesystemPolicies.GetAvailableToolsPolicy(
+        var result = Filesystem.GetAvailableToolsPolicy(
             new Dictionary<string, string?> { ["PATH"] = criticalPath });
 
         Assert.DoesNotContain(
@@ -125,7 +122,7 @@ public class FilesystemPoliciesTests
                 ["USERPROFILE"] = directory,
             };
 
-            var result = FilesystemPolicies.GetAvailableToolsPolicy(environment);
+            var result = Filesystem.GetAvailableToolsPolicy(environment);
 
             Assert.Contains(Path.GetFullPath(directory), result.ReadonlyPaths);
             Assert.DoesNotContain(
@@ -175,7 +172,7 @@ public class FilesystemPoliciesTests
                 };
             }
 
-            var result = FilesystemPolicies.GetUserProfilePolicy(environment);
+            var result = Filesystem.GetUserProfilePolicy(environment);
 
             Assert.Contains(expected, result.ReadonlyPaths);
             Assert.Empty(result.ReadwritePaths);
@@ -193,7 +190,7 @@ public class FilesystemPoliciesTests
         try
         {
             var variable = OperatingSystem.IsWindows() ? "TEMP" : "TMPDIR";
-            var result = FilesystemPolicies.GetTemporaryFilesPolicy(
+            var result = Filesystem.GetTemporaryFilesPolicy(
                 new Dictionary<string, string?> { [variable] = directory });
 
             Assert.Empty(result.ReadonlyPaths);
@@ -213,7 +210,7 @@ public class FilesystemPoliciesTests
             Path.GetTempPath(),
             $"mxc-missing-{Guid.NewGuid():N}");
 
-        var result = FilesystemPolicies.GetTemporaryFilesPolicy(
+        var result = Filesystem.GetTemporaryFilesPolicy(
             new Dictionary<string, string?> { [variable] = missing });
 
         Assert.Empty(result.ReadonlyPaths);

@@ -3,10 +3,9 @@
 
 //! Network policy authoring types.
 
-/// Network section of a [`ContainerPolicy`](super::ContainerPolicy).
+/// Network section of a [`ContainerRequest`](crate::v1::ContainerRequest).
 ///
-/// The v1 high-level SDK exposes directional policy only. Exact legacy
-/// configuration remains available through the raw configuration parser.
+/// The V1 SDK exposes directional policy only.
 #[derive(Debug, Clone, Default)]
 pub struct NetworkPolicy {
     /// Outbound network policy.

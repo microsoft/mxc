@@ -81,7 +81,7 @@ let provisioned = v1::container::provision_container(
 let id = provisioned.container_id;
 
 v1::container::start_container(&id, Default::default())?;
-let output = v1::run_in_container(
+let output = v1::container::run_in_container(
     &id,
     ExecutionRequest {
         network: Some(mxc_sdk::v1::ProcessNetworkPolicy {
@@ -99,8 +99,8 @@ v1::container::deprovision_container(&id, Default::default())?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Use `spawn_in_container` for live piped execution.
-`spawn_in_container_with_pty` returns an `MxcPtyProcess` for a caller-driven
+Use `v1::container::spawn_in_container` for live piped execution.
+`v1::container::spawn_in_container_with_pty` returns an `MxcPtyProcess` for a caller-driven
 terminal; PTY support is currently available for IsolationSession.
 Attached execution is not exposed by the Rust SDK. Lifecycle operations and
 existing-container execution are synchronous in Rust. Backend support and phase-specific requirements are described in the
@@ -136,8 +136,9 @@ PTY support is available only for IsolationSession on supported Windows hosts.
 For host discovery, use
 `mxc_sdk::v1::platform_support` and `mxc_sdk::v1::available_backends`. Errors are
 returned as `mxc_sdk::v1::Error` with an `ErrorCode`.
-Telemetry and policy helpers are also under `v1`; the crate root exposes only
-that versioned module.
+Telemetry and policy helpers are also under `v1`. The
+[launch-choice table](../../../docs/reference/rust/v1/api.md#choosing-a-launch-operation)
+compares captured, piped, and terminal execution.
 
 ## Build features and backend support
 
@@ -153,7 +154,8 @@ leaves telemetry disabled; `TelemetryConfig { enabled: Some(false) }`
 explicitly disables it. Opt-in remains
 subject to MXC's persisted user consent and administrative policy.
 
-Filesystem discovery helpers take `environment: Option<&[(String, String)]>`;
+Filesystem discovery helpers and their result/options types live under
+`mxc_sdk::v1::policy::filesystem`. They take `environment: Option<&[(String, String)]>`;
 `None` snapshots the process environment and `Some(&[])` is explicitly empty.
 `available_tools_policy` additionally takes `ToolsPolicyOptions`; use
 `Default::default()` for ordinary discovery or

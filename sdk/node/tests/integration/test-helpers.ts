@@ -449,7 +449,7 @@ export const pythonSkipReason: string | undefined = _python.command ? undefined 
 export function withToolPaths(
   request: ContainerRequestTestSettings,
 ): ContainerRequestTestSettings {
-  const toolsPolicy = sdk.getAvailableToolsPolicy(process.env);
+  const toolsPolicy = sdk.policy.filesystem.getAvailableToolsPolicy(process.env);
   const filesystem = { ...request.filesystem };
   const merged: ContainerRequestTestSettings = { ...request, filesystem };
 

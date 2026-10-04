@@ -76,6 +76,14 @@ function validateV1Request(
             + 'Use a supported V1 containment.',
         );
     }
+    if (request.containment?.type === 'processcontainer'
+        && request.containment.config !== undefined
+        && 'leastPrivilege' in request.containment.config) {
+        throw new MxcError(
+            'malformed_request',
+            'containment.config.leastPrivilege is not part of the V1 authoring API.',
+        );
+    }
     if (containment === 'isolation_session' && request.ui !== undefined) {
         throw new MxcError(
             'malformed_request',
@@ -183,7 +191,6 @@ function buildProcessBaseContainerConfig(
     }
 
     config.processContainer = {
-        leastPrivilege: false,
         capabilities,
         ui: {
             isolation: "container",

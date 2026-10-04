@@ -2,7 +2,34 @@
 
 Public entrypoint: `@microsoft/mxc-sdk/v1`. [Types](types.md) | [Overview](README.md)
 
-Signatures describe the supported consumer API and omit implementation bodies and serialization attributes. Raw Rust JSON bridges are listed separately from typed requests; native wire compatibility is unchanged.
+Signatures describe the typed consumer API and omit implementation bodies.
+Callers do not supply JSON or a schema version.
+
+## Choosing a launch operation
+
+| Output | Create and run a container | Run in an existing container | Result |
+|---|---|---|---|
+| Capture stdout and stderr | `run` / `runAsync` | `runInContainer` / `runInContainerAsync` | `ExecutionResult` |
+| Live standard pipes | `spawn` / `spawnAsync` | `spawnInContainer` / `spawnInContainerAsync` | `MxcProcess` |
+| Interactive terminal | `spawnWithPty` | `spawnInContainerWithPty` | `MxcPtyProcess` |
+
+Creation takes `ContainerRequest` and operation options. Existing-container
+execution takes the `ContainerId` returned by provision, `ExecutionRequest`,
+and operation options. PTY operations are asynchronous and IsolationSession-only.
+Terminal handles give the caller explicit input, output, resize, and process
+ownership; there is no separate attached-console or raw-JSON launch API.
+
+## Discovery and validation
+
+| Operation | Use it to |
+|---|---|
+| `getPlatformSupport` | Check whether the SDK can launch on this host and which backends it supports. |
+| `getAvailableBackends` | Discover native host-available backends, capabilities, tiers, and warnings. Availability is advisory; not every reported backend has a V1 creation API. |
+| `probe` (Windows) | Evaluate an optional ProcessContainer request, including the isolation tier and request-specific compatibility diagnostics, without creating a container. |
+| `validate*` | Perform native dry-run validation for a typed lifecycle operation without provisioning, starting, executing, stopping, or deprovisioning a container. |
+
+Validation returns `ValidationResult` with warnings, not execution output.
+It does not guarantee that a later operation will succeed on a changed host.
 
 ## `@microsoft/mxc-sdk/v1::deprovisionContainer`
 
@@ -13,7 +40,7 @@ export async function deprovisionContainer<C extends LifecycleContainmentKind>(c
 ```
 
 
-## `@microsoft/mxc-sdk/v1::getAvailableToolsPolicy`
+## `@microsoft/mxc-sdk/v1::policy.filesystem.getAvailableToolsPolicy`
 
 Discover tool and SDK directories from the environment and return them as policy paths.
 
@@ -44,7 +71,7 @@ export function getAvailableBackends(): AvailableBackend[];
 ```
 
 
-## `@microsoft/mxc-sdk/v1::getTemporaryFilesPolicy`
+## `@microsoft/mxc-sdk/v1::policy.filesystem.getTemporaryFilesPolicy`
 
 Return the existing host temporary directory as read-write policy; no directories are created.
 
@@ -55,7 +82,7 @@ export function getTemporaryFilesPolicy(environment?: {
 ```
 
 
-## `@microsoft/mxc-sdk/v1::getUserProfilePolicy`
+## `@microsoft/mxc-sdk/v1::policy.filesystem.getUserProfilePolicy`
 
 Build read-only policy for standard user profile application data locations.
 

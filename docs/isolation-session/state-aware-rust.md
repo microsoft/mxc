@@ -14,7 +14,7 @@ concurrency story, and error mapping.
 - The Rust layer of state-aware IsolationSession in `wxc-exec.exe`, behind
   the `--features isolation_session` Cargo feature. The published v0.9
   surface requires no runtime experimental opt-in.
-- The exact state-aware phase contracts. Raw SDK and FFI JSON carries the
+- The state-aware phase contracts. Executor and FFI JSON carries the
   top-level `phase` discriminator and `sandboxId`; direct `wxc-exec.exe`
   calls supply those routing values through `--operation` and
   `--container-id`.
@@ -34,22 +34,16 @@ container terminology:
 |---|---|---|
 | provision | `wxc-exec --operation provision --config …` | `mxc_sdk::v1::container::provision_container` |
 | start | `wxc-exec --operation start --container-id <id> --config …` | `mxc_sdk::v1::container::start_container` |
-| exec | `wxc-exec --operation exec --container-id <id> --config …` | `mxc_sdk::v1::spawn_in_container` or `mxc_sdk::v1::run_in_container` |
+| exec | `wxc-exec --operation exec --container-id <id> --config …` | `mxc_sdk::v1::container::spawn_in_container` or `mxc_sdk::v1::container::run_in_container` |
 | stop | `wxc-exec --operation stop --container-id <id> --config …` | `mxc_sdk::v1::container::stop_container` |
 | deprovision | `wxc-exec --operation deprovision --container-id <id> --config …` | `mxc_sdk::v1::container::deprovision_container` |
 
-The Rust SDK does not expose attached exec. The attached native entry point
-`mxc_exec_state_aware_attached_json` remains an FFI symbol, not a public Rust
-SDK operation. The .NET SDK's attached implementation is likewise private;
-callers use its public `MxcLifecycle` lifecycle and streaming operations
-instead.
-
-For callers that need raw exact lifecycle JSON, the public Rust V1 entry points
-are `mxc_sdk::v1::run_lifecycle_json` and `mxc_sdk::v1::execute_lifecycle`.
-The C ABI retains `mxc_run_state_aware_json` and `mxc_exec_state_aware_json`;
-the attached `mxc_exec_state_aware_attached_json` symbol is also unchanged.
-These raw paths retain `phase` and `sandboxId` in JSON; only direct executor
-calls move routing to CLI arguments.
+For interactive execution, use
+`mxc_sdk::v1::container::spawn_in_container_with_pty`. Its terminal handle
+lets the caller own input, output, resizing, and termination without binding
+the workload to the host application's global console streams. All Rust SDK
+launch operations take typed requests; see the
+[launch-choice table](../reference/rust/v1/api.md#choosing-a-launch-operation).
 
 Backend runtime requirements:
 
@@ -385,7 +379,7 @@ whole section for every backend. See the matrix notes above.
 
 ### Fields valid in state-aware only
 
-These are fields in the raw exact SDK/FFI envelope. Direct `wxc-exec` calls
+These are fields in the native JSON request. Direct `wxc-exec` calls
 remove `phase` and `sandboxId` from the JSON payload and pass them as
 `--operation` and `--container-id`.
 

@@ -2,10 +2,8 @@
 // Licensed under the MIT License.
 
 using System.Collections;
-using System.ComponentModel;
-using System.Diagnostics;
 
-namespace Microsoft.Mxc.Sdk.V1;
+namespace Microsoft.Mxc.Sdk.V1.Policy;
 
 /// <summary>
 /// A composable filesystem-policy fragment discovered from the host.
@@ -19,24 +17,10 @@ public sealed class FilesystemPolicyResult
     public IReadOnlyList<string> ReadwritePaths { get; init; } = Array.Empty<string>();
 }
 
-/// <summary>Container types with additional tool-policy filtering.</summary>
-public enum ToolsPolicyContainerType
-{
-    /// <summary>Filter Windows ALL APPLICATION PACKAGES grants.</summary>
-    ProcessContainer,
-}
-
-/// <summary>Optional tool-policy filtering controls.</summary>
-public sealed class ToolsPolicyOptions
-{
-    /// <summary>Exclude directories already accessible to this container type.</summary>
-    public ToolsPolicyContainerType? ContainerType { get; set; }
-}
-
 /// <summary>
 /// Discovers host paths commonly needed by sandboxed developer tools.
 /// </summary>
-public static class FilesystemPolicies
+public static class Filesystem
 {
     private static readonly (string Name, bool IsPathList)[] KnownEnvironmentVariables =
     {
@@ -69,13 +53,8 @@ public static class FilesystemPolicies
     /// Environment to inspect, or <see langword="null"/> to snapshot the
     /// current process environment.
     /// </param>
-    /// <param name="options">
-    /// ProcessContainer filtering excludes ALL APPLICATION PACKAGES grants on
-    /// Windows. Failed ACL inspections retain the directory and emit a diagnostic warning.
-    /// </param>
     public static FilesystemPolicyResult GetAvailableToolsPolicy(
-        IReadOnlyDictionary<string, string?>? environment = null,
-        ToolsPolicyOptions? options = null)
+        IReadOnlyDictionary<string, string?>? environment = null)
     {
         var env = environment ?? SnapshotEnvironment();
         var pathDirectories = SplitPathList(GetEnvironmentValue(env, "PATH")
@@ -104,8 +83,6 @@ public static class FilesystemPolicies
         var readonlyPaths = DeduplicatePaths(collected)
             .Where(Directory.Exists)
             .Where(path => !IsSystemCriticalPath(path))
-            .Where(path => options?.ContainerType != ToolsPolicyContainerType.ProcessContainer
-                || !HasAllApplicationPackagesAccess(path))
             .ToList();
         var readwritePaths = new List<string>();
 
@@ -268,54 +245,6 @@ public static class FilesystemPolicies
             }
         }
         return result;
-    }
-
-    private static bool HasAllApplicationPackagesAccess(string path)
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            return false;
-        }
-
-        var startInfo = new ProcessStartInfo(
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "icacls.exe"))
-        {
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-        };
-        startInfo.ArgumentList.Add(path);
-        try
-        {
-            using var process = Process.Start(startInfo)
-                ?? throw new InvalidOperationException("could not start icacls");
-            var outputTask = process.StandardOutput.ReadToEndAsync();
-            var errorTask = process.StandardError.ReadToEndAsync();
-            if (!process.WaitForExit(5000))
-            {
-                process.Kill(entireProcessTree: true);
-                process.WaitForExit();
-                Trace.TraceWarning("Tool-policy ACL inspection timed out; retaining directory.");
-                return false;
-            }
-            var output = outputTask.GetAwaiter().GetResult();
-            errorTask.GetAwaiter().GetResult();
-            if (process.ExitCode != 0)
-            {
-                Trace.TraceWarning(
-                    $"Tool-policy ACL inspection failed ({process.ExitCode}); retaining directory.");
-                return false;
-            }
-            return output.Contains("ALL APPLICATION PACKAGES", StringComparison.Ordinal)
-                || output.Contains("S-1-15-2-1", StringComparison.Ordinal);
-        }
-        catch (Exception exception) when (
-            exception is Win32Exception or IOException or InvalidOperationException)
-        {
-            Trace.TraceWarning($"Tool-policy ACL inspection failed; retaining directory: {exception.Message}");
-            return false;
-        }
     }
 
     private static bool IsSystemCriticalPath(string path)

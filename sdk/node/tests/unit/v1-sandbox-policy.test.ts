@@ -31,6 +31,18 @@ describe('v1 container request adapter', () => {
     );
   });
 
+  it('rejects the removed ProcessContainer least-privilege option', () => {
+    for (const leastPrivilege of [true, false, undefined]) {
+      assert.throws(
+        () => createConfigFromRequest({
+          command: 'echo hello',
+          containment: { type: 'processcontainer', config: { leastPrivilege } },
+        } as never),
+        /containment\.config\.leastPrivilege is not part of the V1 authoring API/,
+      );
+    }
+  });
+
   it('owns exact contract 1.0.0', () => {
     const config = createConfigFromRequest({ command: '' });
     assert.strictEqual(factoryContractVersion, SDK_CONTRACT_VERSION);

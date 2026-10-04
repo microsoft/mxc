@@ -21,8 +21,8 @@ and helpers live under `mxc_sdk::v1`, `Microsoft.Mxc.Sdk.V1`, or
 | Live standard pipes | `spawn` | `MxcContainer.Spawn` / `SpawnAsync` | `spawn` / `spawnAsync` |
 | Provision | `container::provision_container` | `MxcLifecycle.ProvisionContainer` | `provisionContainer` |
 | Start | `container::start_container` | `MxcLifecycle.StartContainer` | `startContainer` |
-| Existing-container capture | `run_in_container` | `RunInContainer` / `RunInContainerAsync` | `runInContainer` / `runInContainerAsync` |
-| Existing-container streaming | `spawn_in_container` | `SpawnInContainer` / `SpawnInContainerAsync` | `spawnInContainer` / `spawnInContainerAsync` |
+| Existing-container capture | `container::run_in_container` | `RunInContainer` / `RunInContainerAsync` | `runInContainer` / `runInContainerAsync` |
+| Existing-container streaming | `container::spawn_in_container` | `SpawnInContainer` / `SpawnInContainerAsync` | `spawnInContainer` / `spawnInContainerAsync` |
 | Stop | `container::stop_container` | `MxcLifecycle.StopContainer` | `stopContainer` |
 | Deprovision | `container::deprovision_container` | `MxcLifecycle.DeprovisionContainer` | `deprovisionContainer` |
 
@@ -40,9 +40,11 @@ Rust enum variants, SDK-owned .NET subclasses, and Node discriminated unions.
 Creation defaults to generic `Process` intent.
 
 Explicit PTY APIs return SDK-owned terminal process handles with interactive
-input, resize, wait, termination, and disposal. Native attached execution is
-preserved but is not publicly exposed by the Rust/.NET SDKs and is not
-provided by Node.
+input, resize, wait, termination, and disposal. Use these for interactive
+workloads instead of attaching a workload to the host application's console.
+See the launch-choice tables for [Rust](../reference/rust/v1/api.md#choosing-a-launch-operation),
+[.NET](../reference/dotnet/v1/api.md#choosing-a-launch-operation), and
+[Node](../reference/node/v1/api.md#choosing-a-launch-operation).
 
 Explicit validation APIs perform native dry-run validation and return no
 execution result. Backend policy and feature support remain native-engine
@@ -59,25 +61,20 @@ override restrictive administrative policy.
 | `stop` | Running | Provisioned | Optional metadata |
 | `deprovision` | Provisioned | Not provisioned | Optional metadata |
 
-SDK identities are opaque `ContainerId` values. The native persistent wire
-envelope retains `sandboxId`; it differs from creation's caller-selected
-`containerId` label. Provision carries containment, while later wire phases
-route using the persistent identity. Public SDK names do not change wire
-fields or native ABI names.
+Provision returns an opaque `ContainerId`. Keep that value and pass it unchanged
+to start, execution, stop, and deprovision. Do not parse or construct it from
+the optional, caller-selected label on a creation request.
 
-## Native architecture and contracts
+Backend-specific policy, idempotence, concurrency, cleanup, and error mapping
+are documented in the backend guides. SDKs surface structured errors and
+warnings rather than converting failures into successful-looking output.
 
-`mxc_engine` owns backend routing. Exact registered wire roots are selected
-by version, phase, and provision containment, then adapted through private
-`CommonRequestIR` normalization and checked backend binding. High-level SDKs
-own their exact V1 contract; raw exact JSON is a separately named native
-compatibility lane.
+## Contributor and native integration details
 
-Persistent backends implement `StatefulSandboxBackend`. Common typed
-operations and results retain lifecycle semantics; backend-specific policy,
-idempotence, concurrency, cleanup, and error mapping are documented in the
-backend guides. SDKs surface structured errors and warnings rather than
-converting failures into successful-looking output.
+The [full design](./mxc-state-aware-sandbox-api.md) documents engine dispatch,
+backend interfaces, and native JSON contracts for contributors and direct
+executor/FFI integrations. These implementation details are not required to
+author typed SDK requests.
 
 ## References
 

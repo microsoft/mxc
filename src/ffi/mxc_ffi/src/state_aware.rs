@@ -1,10 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! State-aware lifecycle C ABI over the MXC public Rust SDK.
+//! State-aware lifecycle C ABI over the native engine and binding adapters.
 //!
-//! Entry points mirror the SDK's [`mxc_sdk::v1::run_lifecycle_json`],
-//! [`mxc_engine::exec_state_aware_attached`] and [`mxc_sdk::v1::execute_lifecycle`]:
+//! Entry points mirror the SDK's [`mxc_sdk::__ffi::run_lifecycle_json`],
+//! [`mxc_engine::exec_state_aware_attached`] and [`mxc_sdk::__ffi::execute_lifecycle_json`]:
 //!
 //! - [`mxc_run_state_aware_json`] drives the **envelope phases** (`provision` /
 //!   `start` / `stop` / `deprovision`, and a dry run of any phase): JSON
@@ -34,10 +34,11 @@ use std::ffi::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
-use mxc_sdk::v1::{
-    execute_lifecycle, run_lifecycle_json as run_state_aware_json,
-    spawn_in_container_with_pty_json, MxcPtySize,
+use mxc_sdk::__ffi::{
+    execute_lifecycle_json, run_lifecycle_json as run_state_aware_json,
+    spawn_in_container_with_pty_json,
 };
+use mxc_sdk::v1::MxcPtySize;
 
 use mxc_engine::exec_state_aware_attached as exec_attached;
 use wxc_common::state_aware_backend::ExecOutcome as WaitOutcome;
@@ -265,7 +266,7 @@ pub unsafe extern "C" fn mxc_exec_state_aware_json(
                 ))
             }
         };
-        execute_lifecycle(request_json, experimental != 0).map_err(|e| {
+        execute_lifecycle_json(request_json, experimental != 0).map_err(|e| {
             (
                 status_from_error_code(e.code),
                 MxcErrorDetail::from_error(&e),
@@ -323,16 +324,16 @@ pub unsafe extern "C" fn mxc_run_state_aware_exec_json(
                 )
             }
         };
-        crate::execute_output(execute_lifecycle(request_json, experimental != 0).and_then(
-            |process| {
+        crate::execute_output(
+            execute_lifecycle_json(request_json, experimental != 0).and_then(|process| {
                 process.wait_with_output().map_err(|error| {
                     mxc_sdk::v1::Error::new(
                         crate::ErrorCode::BackendError,
                         format!("waiting for the sandbox to complete failed: {error}"),
                     )
                 })
-            },
-        ))
+            }),
+        )
     })
     .unwrap_or_else(|panic| {
         crate::report_panic("mxc_run_state_aware_exec_json", &*panic);

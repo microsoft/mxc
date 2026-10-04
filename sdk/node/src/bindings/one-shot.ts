@@ -275,7 +275,7 @@ function processContainer(config: ContainerConfig): ProcessContainer | undefined
   const directionalNetwork = config.network?.egress !== undefined
     || config.network?.ingress !== undefined;
   const output: ProcessContainer = {
-    leastPrivilege: source?.leastPrivilege ?? false,
+    leastPrivilege: false,
     capabilities: directionalNetwork
       ? (source?.capabilities ?? []).filter(
         (capability) =>
