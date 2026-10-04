@@ -344,7 +344,7 @@ impl LivePty {
         use std::os::fd::AsRawFd;
         use std::process::Stdio;
 
-        use nix::pty::{openpty, Winsize};
+        use nix::pty::Winsize;
 
         let winsize = (size.rows != 0 && size.cols != 0).then_some(Winsize {
             ws_row: size.rows,
@@ -352,24 +352,18 @@ impl LivePty {
             ws_xpixel: size.pixel_width,
             ws_ypixel: size.pixel_height,
         });
-        let pair = openpty(winsize.as_ref(), None).map_err(std::io::Error::from)?;
+        let (master, slave) = open_pty(winsize.as_ref())?;
         let eof = if forward_eof {
-            PtyEof::Forwarded(terminal_discipline(&pair.slave)?)
+            PtyEof::Forwarded(terminal_discipline(&slave)?)
         } else {
             PtyEof::CurrentCanonical
         };
 
-        use nix::fcntl::{fcntl, FcntlArg, FdFlag};
-        for fd in [pair.master.as_raw_fd(), pair.slave.as_raw_fd()] {
-            let bits = fcntl(fd, FcntlArg::F_GETFD).map_err(std::io::Error::from)?;
-            let flags = FdFlag::from_bits_truncate(bits) | FdFlag::FD_CLOEXEC;
-            fcntl(fd, FcntlArg::F_SETFD(flags)).map_err(std::io::Error::from)?;
-        }
-        set_nonblocking(pair.master.as_raw_fd())?;
+        set_nonblocking(master.as_raw_fd())?;
 
-        let secondary_in: Stdio = pair.slave.try_clone()?.into();
-        let secondary_out: Stdio = pair.slave.try_clone()?.into();
-        let secondary_err: Stdio = pair.slave.into();
+        let secondary_in: Stdio = slave.try_clone()?.into();
+        let secondary_out: Stdio = slave.try_clone()?.into();
+        let secondary_err: Stdio = slave.into();
         command
             .stdin(secondary_in)
             .stdout(secondary_out)
@@ -391,7 +385,7 @@ impl LivePty {
             });
         }
 
-        let primary: std::fs::File = pair.master.into();
+        let primary: std::fs::File = master.into();
         let writer = primary.try_clone()?;
         Ok(Self {
             primary,
@@ -486,11 +480,21 @@ impl LivePty {
             ));
         }
 
+        let (output_setup_sender, output_setup_receiver) = std::sync::mpsc::sync_channel(1);
         let output_thread = std::thread::Builder::new()
             .name("mxc-pty-output-bridge".to_string())
             .spawn({
                 let output_shutdown = output_shutdown.clone();
                 move || {
+                    match block_sigpipe() {
+                        Ok(()) => {
+                            let _ = output_setup_sender.send(Ok(()));
+                        }
+                        Err(error) => {
+                            let _ = output_setup_sender.send(Err(error));
+                            return;
+                        }
+                    }
                     let mut reader = output_reader;
                     let mut writer = File::from(output_write_fd);
                     let mut buffer = [0_u8; 8192];
@@ -507,6 +511,23 @@ impl LivePty {
                     }
                 }
             })?;
+        match output_setup_receiver.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                output_canceller.close();
+                output_shutdown.cancel();
+                let _ = output_thread.join();
+                return Err(error);
+            }
+            Err(_) => {
+                output_canceller.close();
+                output_shutdown.cancel();
+                let _ = output_thread.join();
+                return Err(std::io::Error::other(
+                    "PTY output bridge exited before configuring SIGPIPE",
+                ));
+            }
+        }
         let input_thread = match std::thread::Builder::new()
             .name("mxc-pty-input-bridge".to_string())
             .spawn({
@@ -623,7 +644,6 @@ impl LivePty {
     pub fn take_unclaimed_reader(
         &self,
     ) -> std::io::Result<Option<(Box<dyn Read + Send>, PtyReadCanceller)>> {
-        let (reader, canceller) = self.new_reader()?;
         let mut access = self
             .access
             .lock()
@@ -631,6 +651,7 @@ impl LivePty {
         if access.reader_claimed {
             return Ok(None);
         }
+        let (reader, canceller) = self.new_reader()?;
         access.reader_claimed = true;
         Ok(Some((Box::new(reader), canceller)))
     }
@@ -680,17 +701,20 @@ struct PtyWriter {
     eof: PtyEof,
     eof_sent: bool,
     canonical_line: Vec<u8>,
+    canonical_limit: usize,
     literal_next: bool,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 impl PtyWriter {
     fn new(writer: std::fs::File, eof: PtyEof) -> Self {
+        let canonical_limit = canonical_line_limit(&writer);
         Self {
             writer: Some(writer),
             eof,
             eof_sent: false,
             canonical_line: Vec::new(),
+            canonical_limit,
             literal_next: false,
         }
     }
@@ -717,7 +741,7 @@ impl PtyWriter {
             .writer
             .as_mut()
             .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::BrokenPipe))?;
-        write_all_until_shutdown(writer, &[eof, eof][..count], shutdown)?;
+        write_all_until_shutdown(writer, &[eof, eof, eof][..count], shutdown)?;
         writer.flush()
     }
 
@@ -733,7 +757,7 @@ impl PtyWriter {
             .writer
             .as_mut()
             .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::BrokenPipe))?;
-        write_all_until_deadline(writer, &[eof, eof][..count], EOF_WRITE_TIMEOUT)?;
+        write_all_until_deadline(writer, &[eof, eof, eof][..count], EOF_WRITE_TIMEOUT)?;
         writer.flush()
     }
 
@@ -746,7 +770,14 @@ impl PtyWriter {
             PtyEof::CurrentCanonical => self.writer.as_ref().and_then(terminal_eof_byte),
             PtyEof::Forwarded(discipline) => Some(discipline.eof),
         }?;
-        Some((eof, if self.canonical_line.is_empty() { 1 } else { 2 }))
+        let count = if self.literal_next {
+            3
+        } else if self.canonical_line.is_empty() {
+            1
+        } else {
+            2
+        };
+        Some((eof, count))
     }
 
     fn abandon_eof(&mut self) {
@@ -783,7 +814,9 @@ impl PtyWriter {
 
             if self.literal_next {
                 self.literal_next = false;
-                self.canonical_line.push(byte);
+                if self.canonical_line.len() < self.canonical_limit {
+                    self.canonical_line.push(byte);
+                }
                 continue;
             }
             if discipline.extended && control_matches(byte, discipline.literal_next) {
@@ -822,11 +855,24 @@ impl PtyWriter {
                 self.canonical_line.clear();
                 continue;
             }
-            if !control_matches(byte, discipline.eof) {
+            if !control_matches(byte, discipline.eof)
+                && self.canonical_line.len() < self.canonical_limit
+            {
                 self.canonical_line.push(byte);
             }
         }
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn canonical_line_limit(writer: &std::fs::File) -> usize {
+    // SAFETY: `writer` owns a live terminal descriptor and `fpathconf` only
+    // queries its canonical input limit.
+    let limit = unsafe { libc::fpathconf(writer.as_raw_fd(), libc::_PC_MAX_CANON) };
+    usize::try_from(limit)
+        .ok()
+        .filter(|limit| *limit > 0)
+        .unwrap_or(4096)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -980,16 +1026,84 @@ fn control_matches(byte: u8, control: u8) -> bool {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn create_pipe() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
-    use nix::fcntl::{fcntl, FcntlArg, FdFlag};
+fn open_pty(
+    winsize: Option<&nix::pty::Winsize>,
+) -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
+    use std::os::fd::{FromRawFd, IntoRawFd};
+    use std::path::Path;
 
-    let (read, write) = nix::unistd::pipe().map_err(std::io::Error::from)?;
-    for fd in [&read, &write] {
-        let bits = fcntl(fd.as_raw_fd(), FcntlArg::F_GETFD).map_err(std::io::Error::from)?;
-        let flags = FdFlag::from_bits_truncate(bits) | FdFlag::FD_CLOEXEC;
-        fcntl(fd.as_raw_fd(), FcntlArg::F_SETFD(flags)).map_err(std::io::Error::from)?;
+    use nix::fcntl::{open, OFlag};
+    use nix::pty::{grantpt, posix_openpt, unlockpt};
+    use nix::sys::stat::Mode;
+
+    let flags = OFlag::O_RDWR | OFlag::O_NOCTTY | OFlag::O_CLOEXEC;
+    let master = posix_openpt(flags).map_err(std::io::Error::from)?;
+    grantpt(&master).map_err(std::io::Error::from)?;
+    unlockpt(&master).map_err(std::io::Error::from)?;
+
+    #[cfg(target_os = "linux")]
+    let slave_name = nix::pty::ptsname_r(&master).map_err(std::io::Error::from)?;
+    #[cfg(target_os = "macos")]
+    let slave_name = {
+        static PTSNAME_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = PTSNAME_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // SAFETY: `ptsname`'s process-global storage is serialized by
+        // `PTSNAME_LOCK`, and `master` remains open for the call.
+        unsafe { nix::pty::ptsname(&master) }.map_err(std::io::Error::from)?
+    };
+
+    let slave_fd =
+        open(Path::new(&slave_name), flags, Mode::empty()).map_err(std::io::Error::from)?;
+    // SAFETY: `open` returned a new owned descriptor.
+    let slave = unsafe { std::os::fd::OwnedFd::from_raw_fd(slave_fd) };
+    if let Some(winsize) = winsize {
+        // SAFETY: `slave` is a live PTY secondary and `winsize` points to a
+        // valid `winsize` value for the duration of the ioctl.
+        if unsafe { libc::ioctl(slave.as_raw_fd(), libc::TIOCSWINSZ as _, winsize) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
     }
-    Ok((read, write))
+    // SAFETY: converting transfers the descriptor out of `PtyMaster` exactly once.
+    let master = unsafe { std::os::fd::OwnedFd::from_raw_fd(master.into_raw_fd()) };
+    Ok((master, slave))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn create_pipe() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
+    #[cfg(target_os = "linux")]
+    {
+        nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC).map_err(std::io::Error::from)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let (read, write) = nix::unistd::pipe().map_err(std::io::Error::from)?;
+        set_cloexec(read.as_raw_fd())?;
+        set_cloexec(write.as_raw_fd())?;
+        Ok((read, write))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn set_cloexec(fd: std::os::fd::RawFd) -> std::io::Result<()> {
+    // SAFETY: `fd` is a valid open descriptor; these commands only update its flags.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `fd` remains valid and `F_SETFD` only updates descriptor flags.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn block_sigpipe() -> std::io::Result<()> {
+    let mut signals = nix::sys::signal::SigSet::empty();
+    signals.add(nix::sys::signal::Signal::SIGPIPE);
+    signals.thread_block().map_err(std::io::Error::from)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1339,14 +1453,8 @@ pub fn run_with_pty(_command: Command, _options: PtyOptions) -> Result<PtyOutcom
 mod tests {
     use super::*;
 
-    // Serialize tests that call `run_with_pty`. The leak regression test
-    // uses `lsof -p $$` in the child to enumerate inherited fds; if other
-    // tests fork in parallel between this test's `openpty` and CLOEXEC
-    // fixup, those concurrent children inherit pre-CLOEXEC fds and the
-    // lsof in *our* child will sometimes see them too. Production code
-    // never runs `run_with_pty` from multiple threads (each mxc-exec-mac
-    // is a one-shot CLI invocation), so serializing the tests faithfully
-    // mirrors real usage rather than masking a real race.
+    // Serialize tests that spawn children and inspect process-wide descriptor
+    // state so concurrent cases cannot make those assertions nondeterministic.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     static RUN_WITH_PTY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -1592,6 +1700,43 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
+    fn boxed_writer_closes_after_pending_literal_next() {
+        assert_canonical_eof_after_input("stty -echo", b"abc\x16", false);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_writer_closes_after_pending_literal_next() {
+        assert_canonical_eof_after_input("stty -echo", b"abc\x16", true);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn canonical_tracking_is_bounded() {
+        let (master, _slave) = open_pty(None).expect("open PTY");
+        let file: std::fs::File = master.into();
+        let discipline = PtyDiscipline {
+            canonical: true,
+            extended: true,
+            strip_high_bit: false,
+            ignore_cr: false,
+            cr_to_nl: true,
+            nl_to_cr: false,
+            eof: 4,
+            eol: 0,
+            eol2: 0,
+            erase: 127,
+            kill: 21,
+            word_erase: 23,
+            literal_next: 22,
+        };
+        let mut writer = PtyWriter::new(file, PtyEof::Forwarded(discipline));
+        writer.track_canonical_input(&vec![b'x'; writer.canonical_limit + 1024]);
+        assert_eq!(writer.canonical_line.len(), writer.canonical_limit);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
     fn writer_blocks_until_nonblocking_primary_accepts_large_input() {
         let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut command = Command::new("/bin/sh");
@@ -1783,6 +1928,23 @@ mod tests {
         input_thread.join().expect("input thread");
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_bridge_survives_closed_output_consumer() {
+        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg("printf output-after-close");
+        let terminal = LivePty::attach(&mut command, PtySize::default(), &[]).expect("attach PTY");
+        let mut child = command.spawn().expect("spawn child");
+        drop(command);
+        let stdio = terminal.take_native_stdio().expect("take native stdio");
+        drop(stdio.stdin);
+        drop(stdio.stdout);
+
+        assert!(child.wait().expect("wait child").success());
+        terminal.finish_native_bridge();
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn native_bridge_cancels_full_output_pipe() {
@@ -1855,49 +2017,44 @@ mod tests {
         assert!(matches!(outcome, PtyOutcome::TimedOut));
     }
 
-    /// Documents the libc invariant motivating the FD_CLOEXEC fixup
-    /// inside `run_with_pty`. If a future libc starts defaulting to
-    /// `FD_CLOEXEC` on `openpty(3)`, this test skips with a message —
-    /// libc has caught up and the fixup in `run_with_pty` can be
-    /// deleted.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn openpty_default_lacks_cloexec() {
-        // openpty returns non-CLOEXEC fds, so taking the lock keeps the
-        // same fork-race guarantees as the leak regression test below.
-        let _guard = RUN_WITH_PTY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        use std::os::unix::io::AsRawFd;
-
+    fn allocated_pty_descriptors_are_cloexec() {
         use nix::fcntl::{fcntl, FcntlArg, FdFlag};
-        use nix::pty::openpty;
 
-        let pair = openpty(None, None).expect("openpty");
+        let (master, slave) = open_pty(None).expect("open PTY");
         for (label, fd) in [
-            ("primary", pair.master.as_raw_fd()),
-            ("secondary", pair.slave.as_raw_fd()),
+            ("primary", master.as_raw_fd()),
+            ("secondary", slave.as_raw_fd()),
         ] {
             let bits = fcntl(fd, FcntlArg::F_GETFD).expect("F_GETFD");
             let flags = FdFlag::from_bits_truncate(bits);
-            if flags.contains(FdFlag::FD_CLOEXEC) {
-                eprintln!(
-                    "skipping: openpty {label} now defaults to CLOEXEC; the fcntl fixup in run_with_pty can be removed"
-                );
-                return;
-            }
+            assert!(flags.contains(FdFlag::FD_CLOEXEC), "{label} lacked CLOEXEC");
         }
     }
 
-    /// Regression: macOS' `openpty(3)` returns the primary and secondary fds
-    /// *without* `FD_CLOEXEC`. If we don't set it ourselves, the child
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn native_bridge_descriptors_are_cloexec() {
+        use nix::fcntl::{fcntl, FcntlArg, FdFlag};
+
+        let (read, write) = create_pipe().expect("create pipe");
+        for (label, fd) in [("read", read.as_raw_fd()), ("write", write.as_raw_fd())] {
+            let bits = fcntl(fd, FcntlArg::F_GETFD).expect("F_GETFD");
+            let flags = FdFlag::from_bits_truncate(bits);
+            assert!(flags.contains(FdFlag::FD_CLOEXEC), "{label} lacked CLOEXEC");
+        }
+    }
+
+    /// Regression: PTY descriptors must be created with `FD_CLOEXEC`; otherwise, a child
     /// inherits the primary fd across `exec` — the secondary never hangs up
     /// when the parent dies and the sandboxed shell becomes immortal,
     /// leaking a pty pair per spawn until the host hits
     /// `kern.tty.ptmx_max` (default 511 on macOS). The original secondary fd
     /// (consumed into `secondary_err: Stdio`) also leaks: Rust's spawn
     /// `dup2`s it onto fd 2 without closing the source, so the original
-    /// fd number stays open as a second secondary reference unless CLOEXEC
-    /// trims it at `execve` time.
+    /// fd number stays open as a second secondary reference unless CLOEXEC trims it at
+    /// `execve` time.
     ///
     /// The parent inspects the blocked child's descriptor table so the probe
     /// cannot create transient shell descriptors and mistake them for leaks.
