@@ -310,7 +310,7 @@ function Invoke-IsolationSessionSuites {
             Get-LibtestFailure (Invoke-LoggedNative -FilePath $helperTests -ArgumentList '--test-threads=1' -LogName 'isolation-session-rust-helpers.log')
         }
         'C#' = {
-            $classes = 'MxcSandboxIsolationSessionE2ETests', 'MxcLifecycleE2ETests'
+            $classes = 'MxcContainerIsolationSessionE2ETests', 'MxcLifecycleE2ETests'
             $resultXml = Join-Path $env:TEMP 'isolation-session-dotnet.xml'
             $run = Invoke-LoggedNative -FilePath $dotnetTests -LogName 'isolation-session-dotnet.log' -ArgumentList @(
                 $classes | ForEach-Object { '-class', "*.$_" }

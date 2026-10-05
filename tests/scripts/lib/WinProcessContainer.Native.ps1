@@ -105,6 +105,9 @@ namespace Mxc {
 }
 
 function Set-UiProbeClipboardSeed {
+    # The probe seeds the clipboard it can actually see. This host-side seed
+    # additionally covers the one case the probe cannot seed for itself: a
+    # shared clipboard with JOB_OBJECT_UILIMIT_WRITECLIPBOARD set.
     $token = "MXC_UI_PROBE_READ_$([guid]::NewGuid().ToString('N'))"
     Set-Clipboard -Value $token
 }

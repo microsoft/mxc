@@ -175,6 +175,10 @@ would reject; `wxc-exec --probe` reports what a host can enforce.
 | `injection` — INJECTION (`0x200`, ≥ 26100) | ❌ | ✅ | ✅ | ✅ |
 | `disable` — `disallowWin32kSystemCalls` mitigation | ✅ | ✅ | ✅ | ✅ |
 
+✅ here means the host can set the flag, not that the permissive value grants
+the operation. Omitting a limit never enables anything; see
+[UI policy schema](UIPolicy_Schema.md).
+
 The single UI differentiator for 23H2 is **`injection`**
 (`JOB_OBJECT_UILIMIT_INJECTION`), which the kernel accepts only on build 26100
 and later (`MIN_BUILD_FOR_INJECTION_LIMIT`) and is therefore unavailable on

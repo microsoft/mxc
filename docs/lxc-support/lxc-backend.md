@@ -232,8 +232,9 @@ and every SDK built on `mxc_spawn_json` / `mxc_run_json` reach it
 in-process. The handle serves live stdin, stdout, and stderr, plus `wait` and
 `kill`.
 
-**Pipes, not a pty.** `isatty()` is false inside the container, and
-`StdioMode::Inherit` is refused. Run `lxc-exec` for a terminal.
+Ordinary streaming uses pipes, so `isatty()` is false. `spawn_with_pty` returns
+a caller-controlled terminal with merged output, writable input, resize, wait, and
+kill. `StdioMode::Inherit` remains unsupported.
 
 **`kill()` stops the container,** not just the workload: the workload runs under
 container init, where nothing aimed at the host `lxc-attach` process reaches it.
@@ -348,9 +349,9 @@ The zone query should answer the zone you assigned.
   host that provides one.
 - **No proxied egress.** See [Proxy](#proxy).
 - **No state-aware lifecycle.** LXC implements `ScriptRunner` (one-shot) and
-  `SandboxBackend` (streaming over pipes), not `StatefulSandboxBackend`. A
+  `SandboxBackend` (streaming over pipes or a caller-controlled PTY), not
+  `StatefulSandboxBackend`. A
   state-aware request is rejected.
-- **Streaming gives pipes, not a terminal.** The `SandboxBackend` path wires
-  stdin, stdout, and stderr to pipes and refuses `StdioMode::Inherit`, so the
-  workload sees `isatty() == false`; the `lxc-exec` binary keeps its pty. See
-  [Streaming](#streaming).
+- **Inherited stdio is unavailable.** Use ordinary pipe streaming or
+  `spawn_with_pty`; the in-process API never takes over the host application's
+  own terminal. See [Streaming](#streaming).

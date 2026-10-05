@@ -69,24 +69,37 @@ function Phase-LeastPrivilege {
 
     # Documented in docs/schema.md: "Native PSEC/V2 capture cannot combine
     # with leastPrivilege or network.proxy. Hosts without that complete native
-    # set retain an eligible legacy containment tier and use guarded WPR."
+    # set retain an eligible legacy containment tier and use guarded WPR. If
+    # guarded-WPR prerequisites are unavailable, the request fails before MXC
+    # creates the sandbox."
     #
-    # So the combination is a tier constraint, not a rejection: the run should
-    # still be accepted and fall back. Asserting a rejection here would encode
-    # the opposite of the documented behavior.
+    # So the combination is never a validation error; which outcome applies
+    # depends on the host, and both arms are asserted positively so neither
+    # passes on a run that simply fell over.
     $cfg = New-Config -Name 'priv-lpac-capture' -CommandLine $Script:PrivCmd -ReadWrite @($rw) `
         -LeastPrivilege $true -CaptureDenialsMode 'block'
     $log = Join-Path $ScratchRoot 'logs\priv-lpac-capture.log'
     $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log -TimeoutSec 60
     $logText = Read-Log $log
-    $rejected = Test-WasRejected -Run $r -Log $logText
     # Test-WasRejected is false for backend_error, runner_unavailable and any
     # unexplained launch failure, so negating it alone proves no fallback ran.
+    $rejected = Test-WasRejected -Run $r -Log $logText
     $ran = [bool]("$($r.Stdout)" -match $Script:PrivMarker)
-    Record-Result -Phase 'P15a' -Name 'leastPrivilege + captureDenials falls back rather than being rejected' `
-        -Pass ((-not $rejected) -and $ran) `
-        -Detail ("exit=$($r.ExitCode); rejectedAtValidation=$rejected; workloadRan=$ran; " +
-                 'documented as a tier constraint (guarded WPR fallback), not a validation error')
+    if ($Script:Caps.GuardedCaptureAvailable) {
+        Record-Result -Phase 'P15a' -Name 'leastPrivilege + captureDenials falls back to guarded WPR rather than being rejected' `
+            -Pass ((-not $rejected) -and $ran) `
+            -Detail ("exit=$($r.ExitCode); rejectedAtValidation=$rejected; workloadRan=$ran; " +
+                     'guarded WPR is available on this host, so the documented tier constraint applies')
+    } else {
+        # Matching the dispatcher's own wording distinguishes the documented
+        # fail-closed from any other launch failure, which looks identical.
+        $all = "$logText`n$($r.Stderr)"
+        $m = [regex]::Match($all, '(?is)captureDenials.{0,160}?(is unavailable|does not support denial capture)')
+        Record-Result -Phase 'P15a' -Name 'leastPrivilege + captureDenials fails before sandbox creation when guarded WPR is unavailable' `
+            -Pass ($m.Success -and -not $ran) `
+            -Detail ("exit=$($r.ExitCode); workloadRan=$ran; " +
+                     "reason=$(if ($m.Success) { $m.Value -replace '\s+', ' ' } else { '<no capture-unavailable error found>' })")
+    }
 }
 
 

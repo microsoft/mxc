@@ -24,7 +24,7 @@
 use crate::mxc_common::logger::Logger;
 use crate::mxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use crate::mxc_common::mxc_error::MxcError;
-use crate::mxc_common::sandbox_process::{PtySize, SandboxProcess};
+use crate::mxc_common::sandbox_process::{PtySize, SandboxProcess, StdioMode};
 
 /// `Err` when the host OS has no MXC sandbox backend. Checked before backend
 /// selection so an unsupported platform reports a clear message rather than a
@@ -100,6 +100,13 @@ pub fn spawn_pty_runner(
     crate::mxc_engine::run::log_policy_hash(request, logger);
     match &request.containment {
         ContainmentBackend::IsolationSession => spawn_isolation_session_pty(request, logger, size),
+        ContainmentBackend::Bubblewrap => {
+            spawn_bubblewrap_with_stdio(request, logger, StdioMode::Pty(size))
+        }
+        ContainmentBackend::Seatbelt => {
+            spawn_seatbelt_with_stdio(request, logger, StdioMode::Pty(size))
+        }
+        ContainmentBackend::Lxc => spawn_lxc_with_stdio(request, logger, StdioMode::Pty(size)),
         other => Err(MxcError::unsupported_containment(format!(
             "the mxc engine does not yet support PTY spawning for the '{}' backend",
             other.wire_name()
@@ -136,10 +143,19 @@ fn spawn_bubblewrap(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
-    use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
+    spawn_bubblewrap_with_stdio(request, logger, StdioMode::Pipes)
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_bubblewrap_with_stdio(
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+    stdio: StdioMode,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    use crate::mxc_common::sandbox_process::SandboxBackend;
     let mut runner = crate::bwrap_common::bwrap_runner::BubblewrapScriptRunner::new();
     runner
-        .spawn(request, logger, StdioMode::Pipes)
+        .spawn(request, logger, stdio)
         .map_err(map_spawn_error)
 }
 
@@ -153,21 +169,40 @@ fn spawn_bubblewrap(
     ))
 }
 
-/// Serves piped stdio. `lxc-exec` keeps the pty path, which cannot hand back a
-/// handle, so the two never share a launch.
+#[cfg(not(target_os = "linux"))]
+fn spawn_bubblewrap_with_stdio(
+    _request: &ExecutionRequest,
+    _logger: &mut Logger,
+    _stdio: StdioMode,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    Err(MxcError::unsupported_containment(
+        "Bubblewrap is only available on Linux",
+    ))
+}
+
+/// Serves piped stdio and caller-owned PTYs through the in-process LXC handle.
 #[cfg(target_os = "linux")]
 fn spawn_lxc(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
-    use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
+    spawn_lxc_with_stdio(request, logger, StdioMode::Pipes)
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_lxc_with_stdio(
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+    stdio: StdioMode,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    use crate::mxc_common::sandbox_process::SandboxBackend;
     let mut runner = crate::lxc_common::lxc_runner::LxcScriptRunner::new(
         &request.lxc_config,
         &request.container_id,
         &request.lifecycle,
     );
     runner
-        .spawn(request, logger, StdioMode::Pipes)
+        .spawn(request, logger, stdio)
         .map_err(map_spawn_error)
 }
 
@@ -181,15 +216,35 @@ fn spawn_lxc(
     ))
 }
 
+#[cfg(not(target_os = "linux"))]
+fn spawn_lxc_with_stdio(
+    _request: &ExecutionRequest,
+    _logger: &mut Logger,
+    _stdio: StdioMode,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    Err(MxcError::unsupported_containment(
+        "LXC is only available on Linux",
+    ))
+}
+
 #[cfg(target_os = "macos")]
 fn spawn_seatbelt(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
-    use crate::mxc_common::sandbox_process::{SandboxBackend, StdioMode};
+    spawn_seatbelt_with_stdio(request, logger, StdioMode::Pipes)
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_seatbelt_with_stdio(
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+    stdio: StdioMode,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    use crate::mxc_common::sandbox_process::SandboxBackend;
     let mut runner = crate::seatbelt_common::seatbelt_runner::SeatbeltScriptRunner::new();
     runner
-        .spawn(request, logger, StdioMode::Pipes)
+        .spawn(request, logger, stdio)
         .map_err(map_spawn_error)
 }
 
@@ -197,6 +252,17 @@ fn spawn_seatbelt(
 fn spawn_seatbelt(
     _request: &ExecutionRequest,
     _logger: &mut Logger,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    Err(MxcError::unsupported_containment(
+        "Seatbelt is only available on macOS",
+    ))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn spawn_seatbelt_with_stdio(
+    _request: &ExecutionRequest,
+    _logger: &mut Logger,
+    _stdio: StdioMode,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     Err(MxcError::unsupported_containment(
         "Seatbelt is only available on macOS",
@@ -473,7 +539,7 @@ mod tests {
     #[test]
     fn pty_spawn_rejects_unsupported_containment_before_launch() {
         let mut request = minimal_request();
-        request.containment = ContainmentBackend::Lxc;
+        request.containment = ContainmentBackend::Vm;
         let mut logger = Logger::new(Mode::Buffer);
         let err = match spawn_pty_runner(
             &request,
@@ -485,11 +551,11 @@ mod tests {
                 pixel_height: 0,
             },
         ) {
-            Ok(_) => panic!("LXC PTY spawn must be rejected"),
+            Ok(_) => panic!("VM PTY spawn must be rejected"),
             Err(error) => error,
         };
         assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
-        assert!(err.message.contains("lxc"), "got: {}", err.message);
+        assert!(err.message.contains("vm"), "got: {}", err.message);
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]

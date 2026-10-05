@@ -148,6 +148,8 @@ struct WndClassExW {
 }
 
 const CF_UNICODETEXT: u32 = 13;
+/// Text the read probe puts on the clipboard under test before reading it back.
+const SEED_CLIPBOARD_TEXT: &str = "MXC_UI_PROBE_READ_SEED";
 const GMEM_MOVEABLE: u32 = 0x0002;
 const SPI_SETMOUSESPEED: u32 = 0x0071;
 const SPIF_SENDCHANGE: u32 = 0x0002;
@@ -368,10 +370,157 @@ fn probe_globalatoms(args: &ProbeArgs) {
     }
 }
 
+/// Puts `CF_UNICODETEXT` on whatever clipboard the *calling* process sees and
+/// returns the owner window, which the caller must keep alive until it has read
+/// the data back and then destroy.
+///
+/// The clipboard is per-window-station, so a seed placed by the harness is not
+/// necessarily on the one a contained process reads. Seeding from inside is the
+/// only way to guarantee the format is present on the clipboard under test.
+///
+/// The owner outlives the seed deliberately: this process pumps no messages, so
+/// destroying it early leaves `WM_RENDERALLFORMATS` unhandled and the data can
+/// go unreadable while the format list still advertises it.
+///
+/// This travels the write path, so `JOB_OBJECT_UILIMIT_WRITECLIPBOARD` blocks
+/// it; callers report that rather than treating it as fatal.
+fn seed_unicode_clipboard(user32: Hmodule) -> Result<Hwnd, String> {
+    type OpenClipboardFn = unsafe extern "system" fn(Hwnd) -> Bool;
+    type CloseClipboardFn = unsafe extern "system" fn() -> Bool;
+    type EmptyClipboardFn = unsafe extern "system" fn() -> Bool;
+    type SetClipboardDataFn = unsafe extern "system" fn(u32, Hglobal) -> Hglobal;
+    #[allow(clippy::type_complexity)]
+    type CreateWindowExWFn = unsafe extern "system" fn(
+        u32,
+        *const u16,
+        *const u16,
+        u32,
+        i32,
+        i32,
+        i32,
+        i32,
+        Hwnd,
+        *mut c_void,
+        Hmodule,
+        *mut c_void,
+    ) -> Hwnd;
+    type DestroyWindowFn = unsafe extern "system" fn(Hwnd) -> Bool;
+
+    let resolve = |name: &str| get_proc(user32, name).ok_or(format!("{name} not resolvable"));
+    let open =
+        unsafe { std::mem::transmute::<FarProc, OpenClipboardFn>(resolve("OpenClipboard")?) };
+    let empty =
+        unsafe { std::mem::transmute::<FarProc, EmptyClipboardFn>(resolve("EmptyClipboard")?) };
+    let set_data =
+        unsafe { std::mem::transmute::<FarProc, SetClipboardDataFn>(resolve("SetClipboardData")?) };
+    let create_window =
+        unsafe { std::mem::transmute::<FarProc, CreateWindowExWFn>(resolve("CreateWindowExW")?) };
+    let destroy_window =
+        unsafe { std::mem::transmute::<FarProc, DestroyWindowFn>(resolve("DestroyWindow")?) };
+    let close =
+        unsafe { std::mem::transmute::<FarProc, CloseClipboardFn>(resolve("CloseClipboard")?) };
+
+    // SetClipboardData requires an owner window the calling thread owns.
+    let class_name = to_wide("STATIC");
+    let window_name = to_wide("MxcUiClipboardSeed");
+    let owner = unsafe {
+        create_window(
+            0,
+            class_name.as_ptr(),
+            window_name.as_ptr(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            -3isize as Hwnd,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if owner.is_null() {
+        return Err(format!("CreateWindowExW failed gle={}", unsafe {
+            GetLastError()
+        }));
+    }
+
+    // Closes the clipboard and tears the owner down; only the failure paths
+    // take it, since a successful seed must outlive this call.
+    let fail = |reason: String| -> Result<Hwnd, String> {
+        unsafe {
+            let _ = close();
+            let _ = destroy_window(owner);
+        }
+        Err(reason)
+    };
+
+    unsafe {
+        SetLastError(0);
+    }
+    if unsafe { open(owner) } == 0 {
+        let error = unsafe { GetLastError() };
+        unsafe {
+            let _ = destroy_window(owner);
+        }
+        return Err(format!("OpenClipboard failed gle={error}"));
+    }
+
+    let text = to_wide(SEED_CLIPBOARD_TEXT);
+    let byte_count = text.len() * std::mem::size_of::<u16>();
+    let memory = unsafe { GlobalAlloc(GMEM_MOVEABLE, byte_count) };
+    if memory.is_null() {
+        return fail(format!("GlobalAlloc failed gle={}", unsafe {
+            GetLastError()
+        }));
+    }
+    let buffer = unsafe { GlobalLock(memory) };
+    if buffer.is_null() {
+        let error = unsafe { GetLastError() };
+        unsafe {
+            let _ = GlobalFree(memory);
+        }
+        return fail(format!("GlobalLock failed gle={error}"));
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(text.as_ptr() as *const u8, buffer as *mut u8, byte_count);
+        let _ = GlobalUnlock(memory);
+    }
+
+    unsafe {
+        SetLastError(0);
+    }
+    if unsafe { empty() } == 0 {
+        let error = unsafe { GetLastError() };
+        unsafe {
+            let _ = GlobalFree(memory);
+        }
+        return fail(format!("EmptyClipboard failed gle={error}"));
+    }
+
+    unsafe {
+        SetLastError(0);
+    }
+    if unsafe { set_data(CF_UNICODETEXT, memory) }.is_null() {
+        let error = unsafe { GetLastError() };
+        unsafe {
+            let _ = GlobalFree(memory);
+        }
+        return fail(format!("SetClipboardData failed gle={error}"));
+    }
+    unsafe {
+        let _ = close();
+    }
+    Ok(owner)
+}
+
 fn probe_readclipboard(user32: Hmodule) {
     type OpenClipboardFn = unsafe extern "system" fn(Hwnd) -> Bool;
     type CloseClipboardFn = unsafe extern "system" fn() -> Bool;
     type GetClipboardDataFn = unsafe extern "system" fn(u32) -> Hglobal;
+    type IsClipboardFormatAvailableFn = unsafe extern "system" fn(u32) -> Bool;
+    type CountClipboardFormatsFn = unsafe extern "system" fn() -> i32;
+    type DestroyWindowFn = unsafe extern "system" fn(Hwnd) -> Bool;
 
     let open = match get_proc(user32, "OpenClipboard") {
         Some(p) => unsafe { std::mem::transmute::<FarProc, OpenClipboardFn>(p) },
@@ -381,14 +530,36 @@ fn probe_readclipboard(user32: Hmodule) {
             return;
         }
     };
-    let close = get_proc(user32, "CloseClipboard")
-        .map(|p| unsafe { std::mem::transmute::<FarProc, CloseClipboardFn>(p) });
+    let close = match get_proc(user32, "CloseClipboard") {
+        Some(p) => unsafe { std::mem::transmute::<FarProc, CloseClipboardFn>(p) },
+        None => {
+            emit_diag("READCLIPBOARD", "CloseClipboard not resolvable");
+            emit_fail("READCLIPBOARD");
+            return;
+        }
+    };
     let get_data = match get_proc(user32, "GetClipboardData") {
         Some(p) => unsafe { std::mem::transmute::<FarProc, GetClipboardDataFn>(p) },
         None => {
             emit_diag("READCLIPBOARD", "GetClipboardData not resolvable");
             emit_fail("READCLIPBOARD");
             return;
+        }
+    };
+    let is_available = get_proc(user32, "IsClipboardFormatAvailable")
+        .map(|p| unsafe { std::mem::transmute::<FarProc, IsClipboardFormatAvailableFn>(p) });
+    let count_formats = get_proc(user32, "CountClipboardFormats")
+        .map(|p| unsafe { std::mem::transmute::<FarProc, CountClipboardFormatsFn>(p) });
+    let destroy_window = get_proc(user32, "DestroyWindow")
+        .map(|p| unsafe { std::mem::transmute::<FarProc, DestroyWindowFn>(p) });
+
+    // The seed's owner window stays alive until the read has completed.
+    let seed = seed_unicode_clipboard(user32);
+    let release_seed = || {
+        if let (Ok(owner), Some(destroy)) = (&seed, destroy_window) {
+            unsafe {
+                let _ = destroy(*owner);
+            }
         }
     };
 
@@ -398,6 +569,7 @@ fn probe_readclipboard(user32: Hmodule) {
     let opened = unsafe { open(std::ptr::null_mut()) };
     let open_error = unsafe { GetLastError() };
     if opened == 0 {
+        release_seed();
         emit_diag(
             "READCLIPBOARD",
             &format!("OpenClipboard failed gle={open_error}"),
@@ -405,30 +577,98 @@ fn probe_readclipboard(user32: Hmodule) {
         emit_inconclusive("READCLIPBOARD");
         return;
     }
+    // Sampled before the fetch so "is the format even here" is answered
+    // independently of why the fetch failed.
+    let advertised = is_available.map(|f| unsafe { f(CF_UNICODETEXT) } != 0);
+    let format_count = count_formats.map(|f| unsafe { f() });
     unsafe {
         SetLastError(0);
     }
     let data = unsafe { get_data(CF_UNICODETEXT) };
     let error = unsafe { GetLastError() };
-    if let Some(close) = close {
-        unsafe {
-            let _ = close();
+    // The handle belongs to the clipboard and is only valid until CloseClipboard.
+    let readback = if data.is_null() {
+        None
+    } else {
+        let locked = unsafe { GlobalLock(data) };
+        if locked.is_null() {
+            Some(Err(format!("GlobalLock failed gle={}", unsafe {
+                GetLastError()
+            })))
+        } else {
+            let mut units: Vec<u16> = Vec::new();
+            unsafe {
+                let mut cursor = locked as *const u16;
+                while *cursor != 0 && units.len() < 4096 {
+                    units.push(*cursor);
+                    cursor = cursor.add(1);
+                }
+                let _ = GlobalUnlock(data);
+            }
+            Some(Ok(String::from_utf16_lossy(&units)))
         }
+    };
+    unsafe {
+        let _ = close();
     }
-    if !data.is_null() {
-        emit_diag("READCLIPBOARD", "GetClipboardData returned clipboard text");
+    release_seed();
+    if let Some(readback) = readback {
+        // Never echo clipboard contents: on a shared window station they can
+        // be the host user's.
+        match readback {
+            Ok(text) if text == SEED_CLIPBOARD_TEXT => {
+                emit_diag("READCLIPBOARD", "GetClipboardData returned the seeded text")
+            }
+            Ok(text) => emit_diag(
+                "READCLIPBOARD",
+                &format!(
+                    "GetClipboardData returned {} chars that are not the seed",
+                    text.chars().count()
+                ),
+            ),
+            Err(reason) => emit_diag(
+                "READCLIPBOARD",
+                &format!("GetClipboardData returned a handle but {reason}"),
+            ),
+        }
         emit_fail("READCLIPBOARD");
-    } else if error == ERROR_ACCESS_DENIED {
+        return;
+    }
+    if error == ERROR_ACCESS_DENIED {
         emit_pass("READCLIPBOARD");
+        return;
+    }
+
+    let seed_state = match &seed {
+        Ok(_) => "seeded in-process".to_string(),
+        Err(reason) => format!("in-process seed failed: {reason}"),
+    };
+    let counted = match format_count {
+        Some(n) => n.to_string(),
+        None => "?".to_string(),
+    };
+    if advertised == Some(true) {
+        emit_diag(
+            "READCLIPBOARD",
+            &format!(
+                "CF_UNICODETEXT is advertised but the data handle is not readable (gle={error}); \
+                 formats={counted}; {seed_state}"
+            ),
+        );
     } else {
         emit_diag(
             "READCLIPBOARD",
             &format!(
-                "GetClipboardData returned NULL with gle={error}; seed Unicode text before probing"
+                "no CF_UNICODETEXT on the clipboard this process sees (gle={error}); \
+                 formats={counted}; {seed_state}"
             ),
         );
-        emit_inconclusive("READCLIPBOARD");
     }
+    // JOB_OBJECT_UILIMIT_READCLIPBOARD denies with ERROR_ACCESS_DENIED, which
+    // the clipboard=none cases exercise as a standing control. Any other error
+    // means the limit did not refuse this call, even where nothing readable was
+    // present to complete the round trip.
+    emit_fail("READCLIPBOARD");
 }
 
 fn probe_writeclipboard(user32: Hmodule) {
@@ -477,8 +717,14 @@ fn probe_writeclipboard(user32: Hmodule) {
             return;
         }
     };
-    let close = get_proc(user32, "CloseClipboard")
-        .map(|p| unsafe { std::mem::transmute::<FarProc, CloseClipboardFn>(p) });
+    let close = match get_proc(user32, "CloseClipboard") {
+        Some(p) => unsafe { std::mem::transmute::<FarProc, CloseClipboardFn>(p) },
+        None => {
+            emit_diag("WRITECLIPBOARD", "CloseClipboard not resolvable");
+            emit_fail("WRITECLIPBOARD");
+            return;
+        }
+    };
     let create_window = match get_proc(user32, "CreateWindowExW") {
         Some(p) => unsafe { std::mem::transmute::<FarProc, CreateWindowExWFn>(p) },
         None => {
@@ -545,12 +791,8 @@ fn probe_writeclipboard(user32: Hmodule) {
     let memory = unsafe { GlobalAlloc(GMEM_MOVEABLE, byte_count) };
     if memory.is_null() {
         let error = unsafe { GetLastError() };
-        if let Some(close) = close {
-            unsafe {
-                let _ = close();
-            }
-        }
         unsafe {
+            let _ = close();
             let _ = destroy_window(owner);
         }
         emit_diag("WRITECLIPBOARD", &format!("GlobalAlloc failed gle={error}"));
@@ -560,12 +802,8 @@ fn probe_writeclipboard(user32: Hmodule) {
     let buffer = unsafe { GlobalLock(memory) };
     if buffer.is_null() {
         let error = unsafe { GetLastError() };
-        if let Some(close) = close {
-            unsafe {
-                let _ = close();
-            }
-        }
         unsafe {
+            let _ = close();
             let _ = GlobalFree(memory);
             let _ = destroy_window(owner);
         }
@@ -581,12 +819,8 @@ fn probe_writeclipboard(user32: Hmodule) {
     let emptied = unsafe { empty() };
     if emptied == 0 {
         let error = unsafe { GetLastError() };
-        if let Some(close) = close {
-            unsafe {
-                let _ = close();
-            }
-        }
         unsafe {
+            let _ = close();
             let _ = GlobalFree(memory);
             let _ = destroy_window(owner);
         }
@@ -607,12 +841,8 @@ fn probe_writeclipboard(user32: Hmodule) {
     }
     let set_ok = unsafe { set_data(CF_UNICODETEXT, memory) };
     let error = unsafe { GetLastError() };
-    if let Some(close) = close {
-        unsafe {
-            let _ = close();
-        }
-    }
     unsafe {
+        let _ = close();
         let _ = destroy_window(owner);
     }
     if !set_ok.is_null() {

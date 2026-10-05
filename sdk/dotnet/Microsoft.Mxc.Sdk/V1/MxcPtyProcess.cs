@@ -34,7 +34,10 @@ public sealed class MxcPtyProcess : MxcProcess
     {
     }
 
-    /// <summary>Writable terminal input. Closing it sends EOF.</summary>
+    /// <summary>
+    /// Writable terminal input. Closing it requests terminal EOF in canonical mode;
+    /// raw-mode programs must define their own completion protocol.
+    /// </summary>
     public Stream Input =>
         StandardInput ?? throw MissingStream("input");
 

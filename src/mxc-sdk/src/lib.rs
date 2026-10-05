@@ -44,8 +44,8 @@
 //! | IsolationSession | Windows | [`v1::Containment::IsolationSession`] |
 //!
 //! LXC is reachable only by naming it: [`v1::Containment::Process`] resolves to
-//! Bubblewrap on Linux. It needs root, and it streams over pipes, so the
-//! workload sees no TTY, unlike the `lxc-exec` binary, which allocates a pty.
+//! Bubblewrap on Linux. It needs root. Ordinary streaming uses pipes, while
+//! [`v1::spawn_with_pty`] allocates a caller-controlled terminal.
 //!
 //! WSLC requires the crate's `wslc` build feature, and IsolationSession
 //! requires the `isolation_session` build feature. WSLC's container has no
@@ -118,6 +118,13 @@
 //! [`v1::spawn`] or [`v1::container::spawn_in_container`], callers
 //! can take the streams from [`MxcProcess`] or let `wait` drain and discard any
 //! stream they did not take. WSLC does not expose stdin.
+//!
+//! [`v1::spawn_with_pty`] allocates a caller-controlled PTY for supported one-shot
+//! backends, including IsolationSession, Bubblewrap, LXC, and Seatbelt direct
+//! execution.
+//! [`v1::container::spawn_in_container_with_pty`] does the same for a process in
+//! an existing IsolationSession container. Unsupported backends reject the
+//! request before creating a sandbox.
 //!
 //! Policy and operational warnings are available through [`MxcProcess::warnings`]
 //! and [`ExecutionResult::warnings`]. These include security warnings, network rules

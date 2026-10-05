@@ -126,6 +126,28 @@ cd src
 cargo test --workspace       # Rust unit tests
 ```
 
+### Unix PTY SDK integration tests
+
+The caller-controlled PTY contract is directly runnable on a matching host:
+
+```bash
+# Linux with Bubblewrap installed
+cd src
+cargo test -p mxc-sdk --test streaming_bubblewrap bubblewrap_pty -- --nocapture
+
+# Linux with LXC installed; run as root
+sudo --preserve-env=PATH,HOME "$(command -v cargo)" \
+  test -p mxc-sdk --test streaming_lxc lxc_pty -- --nocapture
+
+# macOS
+cd src
+cargo test -p mxc-sdk --test streaming seatbelt_pty -- --nocapture
+```
+
+The local Bubblewrap and LXC tests report a prerequisite skip when their backend
+is unavailable. Provisioned CI hosts run the same tests in backend-specific
+lanes; strict mode turns a missing prerequisite into a failure.
+
 ## Running executor E2E via Cargo
 
 The `wxc_e2e_tests` crate runs executor E2E tests directly against

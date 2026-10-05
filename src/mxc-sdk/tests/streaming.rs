@@ -9,8 +9,11 @@
 
 #![cfg(target_os = "macos")]
 
-use mxc_sdk::v1::WaitResult;
-use mxc_sdk::v1::{spawn, ContainerRequest, FilesystemPolicy};
+mod unix_pty_contract;
+
+use mxc_sdk::v1::{
+    spawn, spawn_with_pty, ContainerRequest, FilesystemPolicy, SpawnWithPtyOptions, WaitResult,
+};
 
 /// A Seatbelt streaming request (`/tmp` read-write) with the given command and
 /// timeout (ms; `0` == run until exit, required for interactive/long cases).
@@ -57,6 +60,38 @@ fn streaming_double_take_returns_none() {
 
     proc.kill().expect("kill");
     let _ = proc.wait();
+}
+
+#[test]
+fn seatbelt_pty_supports_io_resize_and_merged_output() {
+    unix_pty_contract::assert_round_trip(seatbelt_request(
+        unix_pty_contract::ROUND_TRIP_COMMAND,
+        30_000,
+    ));
+}
+
+#[test]
+fn seatbelt_pty_enforces_script_timeout() {
+    unix_pty_contract::assert_timeout(
+        seatbelt_request(unix_pty_contract::TIMEOUT_COMMAND, 1_000),
+        std::time::Duration::from_secs(15),
+    );
+}
+
+#[test]
+fn seatbelt_pty_preserves_explicit_timeout_kill() {
+    unix_pty_contract::assert_explicit_timeout_kill(seatbelt_request(
+        unix_pty_contract::TIMEOUT_COMMAND,
+        30_000,
+    ));
+}
+
+#[test]
+fn seatbelt_pty_transfers_native_stdio() {
+    unix_pty_contract::assert_native_stdio(seatbelt_request(
+        unix_pty_contract::NATIVE_STDIO_COMMAND,
+        30_000,
+    ));
 }
 
 #[cfg(target_os = "macos")]
@@ -299,6 +334,194 @@ fn pid_alive(pid: u32) -> bool {
     // ESRCH => no such process (dead). Any other errno (e.g. EPERM: the pid
     // exists but we may not signal it) means it is still alive.
     std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+#[cfg(target_os = "macos")]
+fn assert_pty_job_control_tree_is_killed(timeout_ms: u32, explicit_kill: bool) {
+    use std::io::{BufRead, BufReader};
+
+    let terminal = spawn_with_pty(
+        seatbelt_request(
+            "exec /bin/bash -c 'set -m; trap \"\" HUP; sleep 300 & echo CHILD=$!; wait'",
+            timeout_ms,
+        ),
+        SpawnWithPtyOptions::default(),
+    )
+    .expect("spawn PTY job-control shell");
+    let reader = terminal.try_clone_reader().expect("PTY reader");
+    let closer = terminal.stdout_closer().expect("PTY reader closer");
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let reader_thread = std::thread::spawn(move || {
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        let mut readiness_sent = false;
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => {
+                    if !readiness_sent {
+                        let _ = sender.send(Err("PTY output ended before CHILD=<pid>".to_string()));
+                    }
+                    return;
+                }
+                Ok(_) => {
+                    if !readiness_sent {
+                        if let Some(value) = line.trim().strip_prefix("CHILD=") {
+                            let _ = sender.send(
+                                value
+                                    .parse::<u32>()
+                                    .map_err(|error| format!("invalid descendant pid: {error}")),
+                            );
+                            readiness_sent = true;
+                        }
+                    }
+                }
+                Err(error) => {
+                    if !readiness_sent {
+                        let _ = sender.send(Err(format!("failed to read descendant pid: {error}")));
+                    }
+                    return;
+                }
+            }
+        }
+    });
+    let descendant = match receiver.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(Ok(descendant)) => descendant,
+        Ok(Err(error)) => {
+            closer.close();
+            let _ = terminal.kill();
+            reader_thread.join().expect("PTY reader thread");
+            panic!("{error}");
+        }
+        Err(error) => {
+            closer.close();
+            let _ = terminal.kill();
+            reader_thread.join().expect("PTY reader thread");
+            panic!("timed out waiting for PTY job-control readiness: {error}");
+        }
+    };
+    // SAFETY: `getpgid` only queries the process identified by `descendant`.
+    let descendant_group = unsafe { libc::getpgid(descendant as libc::pid_t) };
+    assert!(descendant_group > 0, "descendant process group");
+    assert_ne!(
+        descendant_group as u32,
+        terminal.id(),
+        "job control must place the descendant outside the shell's process group"
+    );
+    let terminal = std::sync::Arc::new(terminal);
+    let leader = terminal.id();
+    let waiter = {
+        let terminal = std::sync::Arc::clone(&terminal);
+        std::thread::spawn(move || {
+            if explicit_kill {
+                terminal.kill().expect("kill PTY session");
+            }
+            terminal.wait()
+        })
+    };
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = sender.send(waiter.join());
+    });
+    let outcome = match receiver.recv_timeout(std::time::Duration::from_secs(20)) {
+        Ok(Ok(Ok(outcome))) => outcome,
+        Ok(Ok(Err(error))) => {
+            closer.close();
+            reader_thread.join().expect("PTY reader thread");
+            panic!("PTY termination failed: {error}");
+        }
+        Ok(Err(_)) => {
+            closer.close();
+            let _ = terminal.kill();
+            reader_thread.join().expect("PTY reader thread");
+            panic!("PTY termination thread panicked");
+        }
+        Err(error) => {
+            closer.close();
+            // SAFETY: these are the two process IDs created and observed by this test.
+            unsafe {
+                libc::kill(descendant as libc::pid_t, libc::SIGKILL);
+                libc::kill(leader as libc::pid_t, libc::SIGKILL);
+            }
+            reader_thread.join().expect("PTY reader thread");
+            panic!("PTY termination did not complete within 20 seconds: {error}");
+        }
+    };
+    closer.close();
+    reader_thread.join().expect("PTY reader thread");
+    if explicit_kill {
+        assert_ne!(outcome, WaitResult::Exited(0));
+    } else {
+        assert_eq!(outcome, WaitResult::TimedOut);
+    }
+
+    for _ in 0..60 {
+        if !pid_alive(leader) && !pid_alive(descendant) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!(
+        "PTY termination left processes alive: leader={leader} alive={}, descendant={descendant} \
+         alive={}",
+        pid_alive(leader),
+        pid_alive(descendant)
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn seatbelt_pty_kill_terminates_job_control_groups() {
+    assert_pty_job_control_tree_is_killed(0, true);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn seatbelt_pty_timeout_terminates_job_control_groups() {
+    assert_pty_job_control_tree_is_killed(1_000, false);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn seatbelt_pty_kill_sweeps_session_after_leader_exit() {
+    use std::io::{BufRead, BufReader};
+
+    let terminal = spawn_with_pty(
+        seatbelt_request(
+            "exec /bin/bash -c 'set -m; trap \"\" HUP; sleep 300 & echo CHILD=$!; exit 0'",
+            0,
+        ),
+        SpawnWithPtyOptions::default(),
+    )
+    .expect("spawn PTY job-control shell");
+    let mut reader = BufReader::new(terminal.try_clone_reader().expect("PTY reader"));
+    let mut line = String::new();
+    let descendant = loop {
+        line.clear();
+        reader.read_line(&mut line).expect("read descendant pid");
+        if let Some(value) = line.trim().strip_prefix("CHILD=") {
+            break value.parse::<u32>().expect("descendant pid");
+        }
+    };
+    for _ in 0..100 {
+        if terminal.try_wait().expect("poll leader").is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        terminal.try_wait().expect("confirm leader exit").is_some(),
+        "PTY leader did not exit"
+    );
+
+    terminal.kill().expect("sweep surviving PTY session");
+    for _ in 0..60 {
+        if !pid_alive(descendant) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("job-control descendant {descendant} survived leader exit and kill");
 }
 
 #[cfg(target_os = "macos")]
