@@ -154,6 +154,7 @@ mod tests {
             access_type: AccessType::Read,
             pid: 100,
             filetime: 200,
+            details: None,
         }
     }
 
