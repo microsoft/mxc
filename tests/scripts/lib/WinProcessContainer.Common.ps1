@@ -357,6 +357,21 @@ function Get-HostCapabilities {
         $p.probes.uiCapabilities.PSObject.Properties['canBlockInputInjection']) {
         $canInject = [bool]$p.probes.uiCapabilities.canBlockInputInjection
     }
+    # The two independent captureDenials providers. Probed from the debug
+    # binary because guarded capture resolves plm.exe next to the loaded
+    # module, so the release sidecar's trust result does not answer for the
+    # binary these tests actually run.
+    $pd = Invoke-Probe -Wxc $WxcDebug -Phase 'P0' -Name 'host-capabilities (capture providers)'
+    $nativeCapture = $false
+    $guardedCapture = $false
+    if ($pd -and $pd.PSObject.Properties['probes']) {
+        if ($pd.probes.PSObject.Properties['nativeCaptureAvailable']) {
+            $nativeCapture = [bool]$pd.probes.nativeCaptureAvailable
+        }
+        if ($pd.probes.PSObject.Properties['guardedCaptureAvailable']) {
+            $guardedCapture = [bool]$pd.probes.guardedCaptureAvailable
+        }
+    }
     return [pscustomobject]@{
         BaselineTier                   = $tier
         BaseContainerUsable            = ($tier -eq 'base-container')
@@ -380,6 +395,14 @@ function Get-HostCapabilities {
         # EnumeratePathsUnsupported). So it is available only where the host
         # both selects base-container and advertises the capability.
         SupportsEnumeratePaths         = (($tier -eq 'base-container') -and $enumBit)
+        # Native PSEC/V2 capture is reachable only on base-container; every
+        # AppContainer tier needs the guarded WPR fallback. Where neither
+        # provider is present a captureDenials request fails before MXC
+        # creates the sandbox (docs/schema.md), so the behavioral assertions
+        # that need a capture session to exist have nothing to observe.
+        NativeCaptureAvailable         = $nativeCapture
+        GuardedCaptureAvailable        = $guardedCapture
+        CaptureDenialsUsable           = ((($tier -eq 'base-container') -and $nativeCapture) -or $guardedCapture)
     }
 }
 
@@ -1228,10 +1251,11 @@ function Initialize-WpcContext {
     }
 
     if ($Fresh) {
-        Write-Host ("Host capabilities: expectedTier={0} baseContainerUsable={1} apiPresent={2} bfscfgPresent={3} bfsCompiledIn={4} supportsDeniedPaths={5} supportsEnumeratePaths={6}" -f `
+        Write-Host ("Host capabilities: expectedTier={0} baseContainerUsable={1} apiPresent={2} bfscfgPresent={3} bfsCompiledIn={4} supportsDeniedPaths={5} supportsEnumeratePaths={6} captureDenialsUsable={7} (native={8} guarded={9})" -f `
             $Script:Caps.BaselineTier, $Script:Caps.BaseContainerUsable, $Script:Caps.BaseContainerApiPresent, `
             $Script:Caps.BfscfgPresent, $Script:Caps.BfsCompiledIn, $Script:Caps.SupportsDeniedPaths, `
-            $Script:Caps.SupportsEnumeratePaths) -ForegroundColor Cyan
+            $Script:Caps.SupportsEnumeratePaths, $Script:Caps.CaptureDenialsUsable, `
+            $Script:Caps.NativeCaptureAvailable, $Script:Caps.GuardedCaptureAvailable) -ForegroundColor Cyan
     }
 }
 

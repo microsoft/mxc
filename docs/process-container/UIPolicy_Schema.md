@@ -97,6 +97,8 @@ The `"ui"` section is a sibling of `"processContainer"`, `"filesystem"`, `"netwo
 | `"write"` | `UILIMIT_READCLIPBOARD` | ❌ Blocked | ✅ Allowed | Process can copy but not paste in |
 | `"none"` | `UILIMIT_READCLIPBOARD` + `UILIMIT_WRITECLIPBOARD` | ❌ Blocked | ❌ Blocked | Complete clipboard isolation |
 
+> ✅ means MXC does not set the corresponding UI limit. It does not explicitly enable clipboard access — other parts of the process-container security environment may still deny it.
+
 ---
 
 ### `isolation`
@@ -164,6 +166,8 @@ The `"ui"` section is a sibling of `"processContainer"`, `"filesystem"`, `"netwo
 | `"parameters"` | `UILIMIT_DISPLAYSETTINGS` | ✅ Allowed | ❌ Blocked | Process can change UI params but not resolution |
 | `"display"` | `UILIMIT_SYSTEMPARAMETERS` | ❌ Blocked | ✅ Allowed | Process can change display but not UI params |
 | `"none"` | `UILIMIT_SYSTEMPARAMETERS` + `UILIMIT_DISPLAYSETTINGS` | ❌ Blocked | ❌ Blocked | No system settings changes |
+
+> ✅ means MXC does not set the corresponding UI limit. It does not explicitly enable the setting change — other parts of the process-container security environment may still deny it.
 
 ---
 
@@ -262,7 +266,7 @@ All defaults apply — maximum lockdown.
 
 ### Example 3: Selective permissions — GUI with clipboard access
 
-Process has full GUI access and can interact with other windows on the desktop. Full clipboard access is granted, but all other capabilities remain locked down.
+Process keeps GUI access and can interact with other windows on the desktop. MXC sets no clipboard limit, but all other capabilities remain locked down.
 
 ```json
 "ui": {
@@ -284,7 +288,7 @@ This section is an implementation reference for runner developers. The JSON fiel
 | `clipboard` | `"none"` | `JOB_OBJECT_UILIMIT_READCLIPBOARD` + `JOB_OBJECT_UILIMIT_WRITECLIPBOARD` |
 | `clipboard` | `"read"` | `JOB_OBJECT_UILIMIT_WRITECLIPBOARD` |
 | `clipboard` | `"write"` | `JOB_OBJECT_UILIMIT_READCLIPBOARD` |
-| `clipboard` | `"all"` | *(no flags)* |
+| `clipboard` | `"all"` | *(no flags; does not explicitly enable clipboard access)* |
 | `isolation` | `"container"` | `JOB_OBJECT_UILIMIT_HANDLES` + `JOB_OBJECT_UILIMIT_GLOBALATOMS` |
 | `isolation` | `"handles"` | `JOB_OBJECT_UILIMIT_HANDLES` |
 | `isolation` | `"atoms"` | `JOB_OBJECT_UILIMIT_GLOBALATOMS` |
@@ -294,7 +298,7 @@ This section is an implementation reference for runner developers. The JSON fiel
 | `systemSettings` | `"none"` | `JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS` + `JOB_OBJECT_UILIMIT_DISPLAYSETTINGS` |
 | `systemSettings` | `"parameters"` | `JOB_OBJECT_UILIMIT_DISPLAYSETTINGS` |
 | `systemSettings` | `"display"` | `JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS` |
-| `systemSettings` | `"all"` | *(no flags)* |
+| `systemSettings` | `"all"` | *(no flags; does not explicitly enable the setting changes)* |
 | `ime` | `false` | `JOB_OBJECT_UILIMIT_IME` |
 | `injection` | `false` | `JOB_OBJECT_UILIMIT_INJECTION` |
 

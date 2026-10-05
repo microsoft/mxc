@@ -153,6 +153,11 @@ function Phase-CaptureDenialsModes {
     # warning". The warning is the user-visible half of that contract, and a
     # silent relaxation of deny-by-default is exactly the regression worth
     # catching. Asserted only when the run got far enough to emit it.
+    if (-not $Script:Caps.CaptureDenialsUsable) {
+        Record-Result -Phase 'P14b' -Name 'captureDenials mode=allow emits a security warning' -Status 'skip' `
+            -Detail 'no capture provider on this host, so the request fails before a capture session exists to warn about'
+        return
+    }
     $cfg = New-Config -Name 'cd-allow-warning' -CommandLine $cmd -ReadWrite @($rw) `
         -CaptureDenialsMode 'allow'
     $log = Join-Path $ScratchRoot 'logs\cd-allow-warning.log'
@@ -176,6 +181,17 @@ function Phase-CaptureDenialsModes {
 # rather than passing vacuously on two equal empty strings.
 function Phase-CaptureDenialsStampedPath {
     Section 'Phase 14c: captureDenials per-run output path'
+
+    if (-not $Script:Caps.CaptureDenialsUsable) {
+        foreach ($name in @(
+            'the actual denials output path is reported on stderr',
+            'the reported path is not the verbatim requested path (a per-run id is stamped in)',
+            'two runs of the same config report different output paths')) {
+            Record-Result -Phase 'P14c' -Name $name -Status 'skip' `
+                -Detail 'no capture provider on this host, so the request fails before an output path is resolved'
+        }
+        return
+    }
 
     $rw = Join-Path $ScratchRoot 'rw'
     $requested = Join-Path $ScratchRoot 'rw\stamped.json'
