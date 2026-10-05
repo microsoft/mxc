@@ -219,7 +219,7 @@ function Invoke-UiPolicyCase {
                     -Detail "expected=$want; the probe could not seed the clipboard, so the read path was not exercised$diagPart; full=$summaryV"
                 continue
             }
-            if ($diag -notmatch 'returned clipboard text') {
+            if ($diag -notmatch 'returned the seeded text') {
                 Record-Result -Phase $Phase -Name $name -Pass $false `
                     -Detail "expected=$want with a readable round trip; the limit did not refuse the call but the seeded text did not come back$diagPart; full=$summaryV"
                 continue

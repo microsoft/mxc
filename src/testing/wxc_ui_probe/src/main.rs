@@ -586,12 +586,51 @@ fn probe_readclipboard(user32: Hmodule) {
     }
     let data = unsafe { get_data(CF_UNICODETEXT) };
     let error = unsafe { GetLastError() };
+    // The handle belongs to the clipboard and is only valid until CloseClipboard.
+    let readback = if data.is_null() {
+        None
+    } else {
+        let locked = unsafe { GlobalLock(data) };
+        if locked.is_null() {
+            Some(Err(format!("GlobalLock failed gle={}", unsafe {
+                GetLastError()
+            })))
+        } else {
+            let mut units: Vec<u16> = Vec::new();
+            unsafe {
+                let mut cursor = locked as *const u16;
+                while *cursor != 0 && units.len() < 4096 {
+                    units.push(*cursor);
+                    cursor = cursor.add(1);
+                }
+                let _ = GlobalUnlock(data);
+            }
+            Some(Ok(String::from_utf16_lossy(&units)))
+        }
+    };
     unsafe {
         let _ = close();
     }
     release_seed();
-    if !data.is_null() {
-        emit_diag("READCLIPBOARD", "GetClipboardData returned clipboard text");
+    if let Some(readback) = readback {
+        // Never echo clipboard contents: on a shared window station they can
+        // be the host user's.
+        match readback {
+            Ok(text) if text == SEED_CLIPBOARD_TEXT => {
+                emit_diag("READCLIPBOARD", "GetClipboardData returned the seeded text")
+            }
+            Ok(text) => emit_diag(
+                "READCLIPBOARD",
+                &format!(
+                    "GetClipboardData returned {} chars that are not the seed",
+                    text.chars().count()
+                ),
+            ),
+            Err(reason) => emit_diag(
+                "READCLIPBOARD",
+                &format!("GetClipboardData returned a handle but {reason}"),
+            ),
+        }
         emit_fail("READCLIPBOARD");
         return;
     }
