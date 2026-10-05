@@ -2015,7 +2015,7 @@ mod tests {
     fn repository_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
-            .nth(3)
+            .nth(2)
             .unwrap()
             .to_path_buf()
     }
