@@ -5,10 +5,17 @@
 //! **Learning Mode trace API** exported by `processmodel.dll`.
 //!
 //! Supported Windows builds expose a privileged, per-client learning-mode
-//! ETW trace behind three official flat C exports in `processmodel.dll`:
+//! ETW trace behind flat C exports in `processmodel.dll`. MXC prefers the
+//! option-aware start export and falls back to the legacy access-only start:
 //!
 //! ```c
-//! HRESULT StartLearningModeTrace(HPROCESS_SECURITY_ENVIRONMENT environment, HLEARNINGMODE_TRACE* trace);
+//! HRESULT StartLearningModeTraceWithOptions(
+//!     HPROCESS_SECURITY_ENVIRONMENT environment,
+//!     LEARNING_MODE_TRACE_SOURCE_OPTIONS options,
+//!     HLEARNINGMODE_TRACE* trace);
+//! HRESULT StartLearningModeTrace(
+//!     HPROCESS_SECURITY_ENVIRONMENT environment,
+//!     HLEARNINGMODE_TRACE* trace);
 //! HRESULT StopLearningModeTrace(HLEARNINGMODE_TRACE trace, PCWSTR outputEtlPath);
 //! void CloseLearningModeTrace(HLEARNINGMODE_TRACE trace);
 //! ```
