@@ -242,9 +242,10 @@ Mode ETL through the manifested
 `NetworkDecisionV1`, with schema version `1`. The OS Learning Mode broker owns
 the WFP subscription, runtime-filter lookup, subject scoping, event
 normalization, queue draining, and ETW flush before the trace is sealed.
-MXC requests both `ACCESS` and `NETWORK` sources when it starts native capture;
-a failed combined start fails the trace rather than retrying with partial
-access-only collection. MXC does not coordinate with WFP directly.
+When option-aware native capture is selected, MXC requests both `ACCESS` and
+`NETWORK` sources. A failed combined start fails the trace rather than retrying
+with partial access-only collection. Legacy native capture remains access-only.
+MXC does not coordinate with WFP directly.
 
 MXC currently recognizes two normalized source domains:
 
@@ -285,10 +286,40 @@ package, user, and application identities remain available to the decoder for
 validation and diagnostics. `filetime` is the original WFP event timestamp
 carried in the normalized payload, not the later ETW emission time.
 
-This source is available only through native managed broker capture. The
-guarded-WPR fallback filters ETW by exact workload process generations, while
-the normalized network event's ETW header identifies the broker process, so
-guarded-WPR analysis intentionally excludes it.
+The current caller-facing network details contract is:
+
+```json
+{
+  "resource": "tcp://203.0.113.10:443",
+  "resourceType": "network",
+  "accessType": "unknown",
+  "pid": 0,
+  "filetime": "132847890123512345",
+  "details": {
+    "kind": "network",
+    "source": "processContainerNetworkPolicy",
+    "reason": "directDefaultDeny",
+    "direction": "outbound",
+    "protocol": 6,
+    "remoteAddress": "203.0.113.10",
+    "remotePort": 443,
+    "applicationId": "\\Device\\HarddiskVolume3\\app.exe",
+    "filterId": "9001"
+  }
+}
+```
+
+`source` is currently `processContainerNetworkPolicy`; the internal Tessera
+component name is not exposed in the public JSON. The actionable reason is
+`directDefaultDeny`. Direction is `outbound`, `inbound`, or `unknown`.
+`filterId` is a decimal string so JavaScript consumers retain all 64 bits.
+Optional protocol, local endpoint, remote port, and application fields are
+omitted when the event does not supply them.
+
+This source is available only through option-aware native managed broker
+capture. The guarded-WPR fallback filters ETW by exact workload process
+generations, while the normalized network event's ETW header identifies the
+broker process, so guarded-WPR analysis intentionally excludes it.
 
 ### Verbose logging event signatures
 
