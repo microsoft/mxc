@@ -206,14 +206,6 @@ function Invoke-UiPolicyCase {
         $expectToken = if ($want -eq 'blocked') { 'PASS' } else { 'FAIL' }
         $diag = if ($r.Stdout -match "(?m)^$tag=DIAG\s+(?<d>.+?)\s*$") { $matches['d'] } else { '' }
         $diagPart = if ($diag) { "; diag=$diag" } else { '' }
-        if ($got -eq $expectToken -and $want -eq 'allowed' -and $diag -match 'CF_UNICODETEXT') {
-            # The read probe reports "allowed" when the limit did not refuse the
-            # call, which proves the mapping but not the read path. Say so
-            # rather than rendering it as a verified round trip.
-            Record-Result -Phase $Phase -Name $name -Status 'warn' `
-                -Detail "the $tag limit did not refuse the call, but no readable text confirmed the path$diagPart; full=$summaryV"
-            continue
-        }
         Record-Result -Phase $Phase -Name $name -Pass ($got -eq $expectToken) `
             -Detail "expected=$want; got=$gotV$diagPart; full=$summaryV"
     }
