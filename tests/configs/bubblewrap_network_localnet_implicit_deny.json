@@ -1,0 +1,14 @@
+{
+  "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
+  "version": "0.9.0-alpha",
+  "containerId": "CLI-Bubblewrap-LocalNet-Implicit-Deny",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "bash -c 'set -u; echo SANDBOX_NETNS=$(readlink /proc/self/ns/net); echo LOCALNET_IMPLICIT_DENY_OK'"
+  },
+  "network": {
+    "egress": {
+      "default": "deny"
+    }
+  }
+}

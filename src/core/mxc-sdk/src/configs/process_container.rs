@@ -364,20 +364,20 @@ mod tests {
     }
 
     #[test]
-    fn legacy_process_container_omits_v0_8_defaults() {
-        let contract: mxc_config_contract::published::v0_7_0_alpha::Request =
+    fn process_container_defaults_do_not_enable_capture_denials() {
+        let contract: mxc_config_contract::published::v0_9_0_alpha::OneShotRequest =
             serde_json::from_value(serde_json::json!({
-                "version": "0.7.0-alpha",
+                "version": "0.9.0-alpha",
                 "containment": "processcontainer",
                 "process": { "commandLine": TEST_COMMAND },
             }))
-            .expect("schema 0.7 request should parse");
+            .expect("schema 0.9 request should parse");
         let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
         let request = wxc_common::config_parser::load_one_shot_request_from_contract(
-            wxc_common::config_parser::ExactOneShotContract::V0_7(Box::new(contract)),
+            wxc_common::config_parser::ExactOneShotContract::V0_9(Box::new(contract)),
             &mut logger,
         )
-        .expect("default ProcessContainer should remain valid for schema 0.7");
+        .expect("default ProcessContainer should remain valid for schema 0.9");
 
         assert!(request.policy.capture_denials.is_none());
         assert!(!request

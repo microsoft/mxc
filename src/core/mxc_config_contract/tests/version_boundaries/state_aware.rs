@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use mxc_config_contract::published::v0_8_0_alpha::Request as V08Request;
 use mxc_config_contract::published::v0_9_0_alpha::{parse_request, ProvisionRequest, Request};
 
 #[derive(Clone, Copy)]
@@ -125,17 +124,10 @@ const CASES: &[StateAwareCase] = &[
 ];
 
 #[test]
-fn state_aware_roots_are_introduced_in_v09() {
+fn state_aware_roots_are_registered_in_v09() {
     for case in CASES {
         serde_json::from_str::<serde_json::Value>(case.json)
             .unwrap_or_else(|error| panic!("{} used malformed JSON: {error}", case.name));
-
-        let v08_json = case.json.replace("0.9.0-alpha", "0.8.0-alpha");
-        assert!(
-            serde_json::from_str::<V08Request>(&v08_json).is_err(),
-            "published 0.8 accepted the {} request",
-            case.name
-        );
 
         let request = parse_request(case.json)
             .unwrap_or_else(|error| panic!("published 0.9 rejected {}: {error}", case.name));

@@ -642,7 +642,7 @@ mod tests {
         log_process_event("opaque", 42, ProcessEvent::TimedOut(1000));
         log_process_event("opaque", 42, ProcessEvent::KillFailed("terminate", 5));
         log_enforcement_degraded("opaque", "base_container", true, "reason", "dacl_augmented");
-        log_policy_hash("opaque", "sha256:abc", "0.8.0-alpha");
+        log_policy_hash("opaque", "sha256:abc", "0.9.0-alpha");
         log_network_policy_applied("opaque", "proxy", "deny", 8080);
         log_sandbox_torn_down("opaque", "success", "released");
         log_config_rejected(
@@ -773,7 +773,7 @@ mod tests {
             .contains(&("policy_hash".to_owned(), "sha256:abc".to_owned())));
         assert!(policy_hash
             .fields
-            .contains(&("config_schema_version".to_owned(), "0.8.0-alpha".to_owned())));
+            .contains(&("config_schema_version".to_owned(), "0.9.0-alpha".to_owned())));
 
         // Validate SandboxNetworkPolicyApplied payload
         let network = events
@@ -851,7 +851,7 @@ mod tests {
 
         log_process_event("opaque", 42, ProcessEvent::Exited(0));
         log_enforcement_degraded("opaque", "base_container", true, "reason", "dacl_augmented");
-        log_policy_hash("opaque", "sha256:abc", "0.8.0-alpha");
+        log_policy_hash("opaque", "sha256:abc", "0.9.0-alpha");
         log_network_policy_applied("opaque", "proxy", "deny", 8080);
         log_sandbox_torn_down("opaque", "success", "released");
         log_config_rejected(

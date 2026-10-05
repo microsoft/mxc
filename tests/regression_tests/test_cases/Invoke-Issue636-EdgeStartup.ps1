@@ -23,7 +23,7 @@ New-Item -ItemType Directory -Force -Path $scratch | Out-Null
 # Config
 $configJson = @"
 {
-    "version": "0.7.0-alpha",
+    "version": "0.9.0-alpha",
     "containment": "processcontainer",
     "process": {
         "cwd": $($edgeRoot | ConvertTo-Json -Compress),

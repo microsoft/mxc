@@ -93,8 +93,9 @@ function validateStableConfig(config: ContainerConfig): void {
     for (const field of UnsupportedV1NetworkFields) {
       if (field in config.network) {
         malformed(
-          `network.${field} is not supported by the stable 1.0.0 in-process API; ` +
-          'use a raw exact historical config for that network policy',
+          `network.${field} is not supported by any registered exact contract; ` +
+          'migrate to network.egress/network.ingress, runtimeConfig.networkProxy, ' +
+          'or lifecycle.preservePolicy as appropriate',
         );
       }
     }

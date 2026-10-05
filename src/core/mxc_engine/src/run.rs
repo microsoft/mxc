@@ -147,7 +147,7 @@ mod attribution_tests {
         let mut logger = Logger::new(Mode::Buffer);
         let parsed = wxc_common::config_parser::load_mxc_request_from_json(
             r#"{
-                "version": "0.7.0-alpha",
+                "version": "0.9.0-alpha",
                 "process": {"commandLine": "echo exact"}
             }"#,
             &mut logger,
@@ -156,10 +156,10 @@ mod attribution_tests {
         let MxcRequest::OneShot(exact) = parsed else {
             panic!("expected one-shot request");
         };
-        assert_eq!(config_schema_version(&exact), "0.7.0-alpha");
+        assert_eq!(config_schema_version(&exact), "0.9.0-alpha");
         assert_eq!(
             exact.network_enforcement_compatibility,
-            NetworkEnforcementCompatibility::LegacyCompatible
+            NetworkEnforcementCompatibility::Strict
         );
 
         let direct = ExecutionRequest {

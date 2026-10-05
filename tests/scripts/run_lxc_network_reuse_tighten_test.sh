@@ -11,10 +11,8 @@
 # below therefore restarts the container rather than reconfiguring it in place,
 # and the init PID check after it is what holds that behavior down.
 #
-# No other script covers this. The proxy reuse script next door reuses a
-# container but changes only the proxy pin, never the reachability the
-# container is left holding, and every other network fixture destroys its
-# container on exit.
+# No other script covers this tightening case: the other network fixtures
+# destroy their containers on exit or exercise a different reuse transition.
 #
 # The first run is the positive control. If it cannot reach the destination,
 # a second run that also cannot reach it proves nothing, so that case fails

@@ -8,12 +8,11 @@ use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
     CaptureDenialsConfig, CaptureDenialsMode, ContainerPolicy, ContainmentBackend,
-    ExecutionRequest, HyperlightConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode,
-    NetworkPolicy, PortMapping, SeatbeltConfig, TelemetryConfig, TestFeatureConfig, UiPolicy,
-    WindowsSandboxConfig, WslcConfig,
+    ExecutionRequest, HyperlightConfig, LifecycleConfig, LxcConfig, PortMapping, SeatbeltConfig,
+    TelemetryConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
-use crate::network_parser::{host_is_any_loopback, parse_network_policy, NetworkSections};
+use crate::network_parser::{parse_network_policy, NetworkSections};
 use crate::state_aware_input::StateAwareInput;
 use crate::state_aware_operation::{StateAwareOperation, StateAwareProvision};
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
@@ -112,9 +111,6 @@ pub struct LoadOptions<'a> {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ExactOneShotContract {
-    V0_6(Box<mxc_config_contract::published::v0_6_0_alpha::Request>),
-    V0_7(Box<mxc_config_contract::published::v0_7_0_alpha::Request>),
-    V0_8(Box<mxc_config_contract::published::v0_8_0_alpha::Request>),
     V0_9(Box<mxc_config_contract::published::v0_9_0_alpha::OneShotRequest>),
     V1_0(Box<mxc_config_contract::published::v1_0_0::OneShotRequest>),
     Dev(Box<mxc_config_contract::dev::OneShotRequest>),
@@ -130,15 +126,6 @@ pub fn load_one_shot_request_from_contract(
     logger: &mut Logger,
 ) -> Result<ExecutionRequest, WxcError> {
     let config = match request {
-        ExactOneShotContract::V0_6(request) => {
-            crate::config_contract_adapters::v0_6::into_common_request_ir(*request)
-        }
-        ExactOneShotContract::V0_7(request) => {
-            crate::config_contract_adapters::v0_7::into_common_request_ir(*request)
-        }
-        ExactOneShotContract::V0_8(request) => {
-            crate::config_contract_adapters::v0_8::into_common_request_ir(*request)
-        }
         ExactOneShotContract::V0_9(request) => {
             mxc_config_contract::published::v0_9_0_alpha::validate_one_shot_request(&request)
                 .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
@@ -156,7 +143,7 @@ pub fn load_one_shot_request_from_contract(
         }
     };
 
-    let result = normalize_common_request_ir(config, logger, true, false);
+    let result = normalize_common_request_ir(config, logger, true);
     log_one_shot_error(logger, &result);
     result
 }
@@ -185,21 +172,6 @@ fn exact_version_error(error: VersionProbeError) -> ParseError {
             )))
         }
     }
-}
-
-fn parse_exact_published_one_shot<T>(
-    json: &str,
-    logger: &mut Logger,
-    adapt: fn(T) -> crate::common_request_ir::CommonRequestIR,
-) -> Result<MxcRequest, ParseError>
-where
-    T: serde::de::DeserializeOwned,
-{
-    let request = config_deserialize::from_str(json)
-        .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
-    normalize_common_request_ir(adapt(request), logger, true, false)
-        .map(MxcRequest::OneShot)
-        .map_err(ParseError::OneShot)
 }
 
 fn exact_phase_error(error: mxc_config_contract::dev::PhaseProbeError) -> ParseError {
@@ -385,7 +357,7 @@ fn parse_exact_v0_9(json: &str, logger: &mut Logger) -> Result<MxcRequest, Parse
 
     match adapted {
         crate::config_contract_adapters::v0_9::AdaptedConfigRequest::OneShot(config) => {
-            normalize_common_request_ir(config, logger, true, false)
+            normalize_common_request_ir(config, logger, true)
                 .map(MxcRequest::OneShot)
                 .map_err(ParseError::OneShot)
         }
@@ -478,7 +450,7 @@ fn parse_exact_v1_0(json: &str, logger: &mut Logger) -> Result<MxcRequest, Parse
 
     match adapted {
         crate::config_contract_adapters::v1_0::AdaptedConfigRequest::OneShot(config) => {
-            normalize_common_request_ir(config, logger, true, false)
+            normalize_common_request_ir(config, logger, true)
                 .map(MxcRequest::OneShot)
                 .map_err(ParseError::OneShot)
         }
@@ -546,7 +518,7 @@ fn parse_exact_development(json: &str, logger: &mut Logger) -> Result<MxcRequest
 
     match adapted {
         crate::config_contract_adapters::dev::AdaptedConfigRequest::OneShot(config) => {
-            normalize_common_request_ir(config, logger, true, false)
+            normalize_common_request_ir(config, logger, true)
                 .map(MxcRequest::OneShot)
                 .map_err(ParseError::OneShot)
         }
@@ -562,21 +534,6 @@ fn parse_exact_development(json: &str, logger: &mut Logger) -> Result<MxcRequest
 
 fn parse_exact_mxc_request_json(json: &str, logger: &mut Logger) -> Result<MxcRequest, ParseError> {
     match probe_version(json).map_err(exact_version_error)? {
-        ContractVersion::V0_6_0Alpha => parse_exact_published_one_shot(
-            json,
-            logger,
-            crate::config_contract_adapters::v0_6::into_common_request_ir,
-        ),
-        ContractVersion::V0_7_0Alpha => parse_exact_published_one_shot(
-            json,
-            logger,
-            crate::config_contract_adapters::v0_7::into_common_request_ir,
-        ),
-        ContractVersion::V0_8_0Alpha => parse_exact_published_one_shot(
-            json,
-            logger,
-            crate::config_contract_adapters::v0_8::into_common_request_ir,
-        ),
         ContractVersion::V0_9_0Alpha => parse_exact_v0_9(json, logger),
         ContractVersion::V1_0_0 => parse_exact_v1_0(json, logger),
         ContractVersion::V1_1_0Alpha => parse_exact_development(json, logger),
@@ -858,9 +815,6 @@ fn apply_cli_command(json: &str, argv: &[String]) -> Result<(String, Option<Stri
             };
             phase
         }
-        ContractVersion::V0_6_0Alpha
-        | ContractVersion::V0_7_0Alpha
-        | ContractVersion::V0_8_0Alpha => None,
     };
 
     let Some(command_source) = crate::splice::CommandSource::parse(json) else {
@@ -1304,15 +1258,10 @@ fn validate_capture_denials_output_path(path: &str, logger: &mut Logger) -> Resu
     }
 }
 
-// `state_aware_wslc_exec` identifies the state-aware exec exception: network
-// mode was fixed at provision, so a proxy-only exec inherits that mode rather
-// than restating `defaultPolicy`. Backend phase validation still rejects every
-// post-provision network-mode or host-filtering field.
 fn normalize_common_request_ir(
     cfg: crate::common_request_ir::CommonRequestIR,
     logger: &mut Logger,
     require_process: bool,
-    state_aware_wslc_exec: bool,
 ) -> Result<ExecutionRequest, WxcError> {
     let _ignored_metadata = (&cfg.schema, &cfg.comment);
 
@@ -1546,9 +1495,8 @@ fn normalize_common_request_ir(
         }
     }
 
-    let parsed_network = parse_network_policy(
+    parse_network_policy(
         &mut policy,
-        network_enforcement_compatibility,
         NetworkSections {
             network: cfg.network,
             runtime: cfg.runtime_config,
@@ -1556,265 +1504,6 @@ fn normalize_common_request_ir(
         },
         &containment,
     )?;
-
-    if let Some(legacy) = parsed_network {
-        if policy.network_proxy.is_enabled() {
-            let proxy_used_localhost = legacy.proxy_used_localhost;
-            let proxy_config = &policy.network_proxy;
-            if proxy_config.is_enabled()
-                && containment != ContainmentBackend::ProcessContainer
-                && containment != ContainmentBackend::Bubblewrap
-                && containment != ContainmentBackend::Lxc
-                && containment != ContainmentBackend::Seatbelt
-                && containment != ContainmentBackend::Wslc
-            {
-                let msg = "Network proxy is only supported with the 'processcontainer', \
-                           'bubblewrap', 'lxc', 'seatbelt', or 'wslc' containment backends";
-                logger.log_line(msg);
-                return Err(WxcError::ConfigParse(msg.to_string()));
-            }
-
-            if containment == ContainmentBackend::Lxc && proxy_config.builtin_test_server {
-                let msg = "LXC: network.proxy.builtinTestServer is not supported; \
-                           use network.proxy.url";
-                logger.log_line(msg);
-                return Err(WxcError::ConfigParse(msg.to_string()));
-            }
-
-            // `network.proxy.localhost` maps to 127.0.0.1, which inside an LXC
-            // network namespace is the container's own loopback rather than the
-            // host. The injected HTTP(S)_PROXY would be unreachable and the
-            // iptables proxy-allow rule would never match, so require a routable
-            // host via `network.proxy.url` instead.
-            if containment == ContainmentBackend::Lxc && proxy_used_localhost {
-                let msg = "LXC: network.proxy.localhost is not reachable from the \
-                           container network namespace (127.0.0.1 is the container \
-                           loopback); use network.proxy.url with a host routable from \
-                           inside the container";
-                logger.log_line(msg);
-                return Err(WxcError::ConfigParse(msg.to_string()));
-            }
-
-            // WSLc containers run in their own network namespace, so an
-            // MXC-run host-loopback proxy is unreachable. Accept only the
-            // caller-supplied `url` form (which carries `original_url`); reject
-            // the `localhost` / `builtinTestServer` forms.
-            if containment == ContainmentBackend::Wslc && proxy_config.is_enabled() {
-                let is_url_form = proxy_config
-                    .address
-                    .as_ref()
-                    .is_some_and(|addr| addr.original_url.is_some());
-                if !is_url_form {
-                    let msg = "WSLc: network.proxy must use the 'url' form pointing at a \
-                               routable proxy (e.g. \"url\": \"http://proxy.example:8080\"). \
-                               The 'localhost' and 'builtinTestServer' forms are not supported \
-                               because a WSLc container runs in its own network namespace and \
-                               cannot reach a host-loopback proxy.";
-                    logger.log_line(msg);
-                    return Err(WxcError::ConfigParse(msg.to_string()));
-                }
-            }
-
-            // Under LXC a loopback-literal proxy host names the container's own
-            // network-namespace loopback rather than the host, so it can never
-            // be the proxy: the chain opens egress to the proxy endpoint across
-            // the veth and the address is pinned into the container's
-            // /etc/hosts, both of which assume a routable host.
-            //
-            // WSLc is deliberately excluded. Its supported topology puts the
-            // proxy *inside* the container -- `tests/configs/wslc_network_proxy.json`
-            // runs one on 127.0.0.1:8888 -- because loopback is the only address
-            // both the client and a self-hosted proxy can reach. The forms that
-            // name a host-run proxy, `localhost` and `builtinTestServer`, are
-            // already rejected for WSLc just above; that check is the one doing
-            // the work there, and this one would only break the case WSLc
-            // supports.
-            if containment == ContainmentBackend::Lxc {
-                if let Some(host) = proxy_config.address.as_ref().map(|addr| addr.host()) {
-                    if host_is_any_loopback(host) {
-                        let msg = "network.proxy.url host is a loopback address \
-                                   (127.0.0.0/8, ::1, or localhost), which names the \
-                                   container's own network-namespace loopback rather than \
-                                   the host; use a proxy host routable from inside the \
-                                   container";
-                        logger.log_line(msg);
-                        return Err(WxcError::ConfigParse(msg.to_string()));
-                    }
-                }
-            }
-        }
-
-        // WSLc routes egress through the cooperative proxy but does not forward
-        // host lists to it, and a 'block' default (the WSLc default) yields no
-        // outbound networking / a drop-floor that can't even reach the proxy.
-        // Require an 'allow' default with no host lists so the proxy is reachable.
-        if containment == ContainmentBackend::Wslc
-            && policy.network_proxy.is_enabled()
-            && !state_aware_wslc_exec
-            && (policy.default_network_policy == NetworkPolicy::Block
-                || !policy.allowed_hosts.is_empty()
-                || !policy.blocked_hosts.is_empty())
-        {
-            let msg = "WSLc: network.proxy requires network.defaultPolicy='allow' and no \
-                       allowedHosts/blockedHosts. A WSLc container reaches the proxy only \
-                       with outbound networking enabled, and host lists are enforced by the \
-                       proxy, not forwarded to it.";
-            logger.log_line(msg);
-            return Err(WxcError::ConfigParse(msg.to_string()));
-        }
-
-        // WSLc cannot enforce per-host egress filtering: containers lack
-        // CAP_NET_ADMIN (so in-container iptables aborts at exec), and WSLc
-        // cannot expose VM-level enforcement without breaking other security
-        // guarantees (e.g. MDE). Reject up front; the backend's validate_runner
-        // enforces the same for requests that bypass this parser. Bare defaults
-        // with no host lists (full cutoff / full NAT) are enforceable, left as-is.
-        if containment == ContainmentBackend::Wslc {
-            if policy.needs_host_filtering() {
-                let msg = "WSLc: per-host egress filtering (allowedHosts with \
-                           defaultPolicy='block', or blockedHosts with \
-                           defaultPolicy='allow') is not supported. A WSLc container has \
-                           no CAP_NET_ADMIN for in-container iptables, and VM-level \
-                           enforcement is not available without breaking other security \
-                           guarantees (e.g. MDE). Use network.proxy (defaultPolicy='allow') \
-                           for cooperative host filtering, or remove the host lists.";
-                logger.log_line(msg);
-                return Err(WxcError::ConfigParse(msg.to_string()));
-            }
-
-            // WSLc cannot honor a blanket inbound-listen grant. The runner only
-            // wires explicit host->container port forwards (wslc
-            // portMappings) into the WSL2 VM's NAT; it never consults
-            // allowLocalNetwork. Reject `true` and point at portMappings.
-            // (`false` is the default and a no-op.)
-            if policy.allow_local_network {
-                let msg = "WSLc: network.allowLocalNetwork=true is not supported. A WSLc \
-                           container runs in the NAT'd WSL2 VM and MXC does not honor a \
-                           blanket inbound-listen grant; expose specific ports with \
-                           wslc.portMappings instead.";
-                logger.log_line(msg);
-                return Err(WxcError::ConfigParse(msg.to_string()));
-            }
-        }
-
-        // Bubblewrap is unprivileged by design; iptables-based enforcement
-        // (firewall / both) requires CAP_NET_ADMIN, which defeats the backend's
-        // privilege story. Reject the combination explicitly.
-        if containment == ContainmentBackend::Bubblewrap
-            && policy.network_proxy.is_enabled()
-            && matches!(
-                policy.network_enforcement_mode,
-                NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
-            )
-        {
-            let msg = "Bubblewrap: network.proxy cannot be combined with \
-                       network.enforcementMode='firewall' or 'both'. The cooperative \
-                       env-var proxy enforces hosts at the proxy layer; iptables-based \
-                       enforcement requires privilege and is mutually exclusive.";
-            return Err(WxcError::ConfigParse(msg.to_string()));
-        }
-
-        // LXC is the inverse of the guard above: it *does* have a
-        // privileged packet-filter layer, and that layer is the only thing that
-        // makes the proxy an exception rather than a suggestion. Under the
-        // default `Capabilities` mode `apply_firewall_rules` installs nothing,
-        // so the runner would inject HTTP(S)_PROXY while leaving direct egress
-        // wide open -- a config that reads as deny-all-except-proxy and
-        // enforces neither half. Reject it rather than auto-promoting, so the
-        // user's stated enforcement is never silently rewritten.
-        if containment == ContainmentBackend::Lxc
-            && policy.network_proxy.is_enabled()
-            && !matches!(
-                policy.network_enforcement_mode,
-                NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
-            )
-        {
-            let msg = "LXC: network.proxy requires network.enforcementMode='firewall' \
-                       or 'both'. Under the default 'capabilities' mode no iptables \
-                       rules are installed, so the proxy environment variables would be \
-                       injected while direct egress stayed unrestricted -- any client \
-                       that ignores HTTP_PROXY would bypass the proxy entirely.";
-            logger.log_line(msg);
-            return Err(WxcError::ConfigParse(msg.to_string()));
-        }
-
-        // A proxy URL may carry `user:pass@` userinfo, and neither LXC nor
-        // Bubblewrap keeps that value out of process argv: LXC turns each env
-        // entry into an `lxc-attach --set-var=KEY=VALUE` argument, and
-        // Bubblewrap serializes it into a `bwrap --setenv KEY VALUE` argument
-        // (bwrap_command.rs). argv is world-readable through /proc/<pid>/cmdline
-        // for the command's lifetime, and neither helper offers an argv-free way
-        // to pass a variable, so refuse the credential rather than leak it.
-        if matches!(
-            containment,
-            ContainmentBackend::Lxc | ContainmentBackend::Bubblewrap
-        ) && policy
-            .network_proxy
-            .address
-            .as_ref()
-            .map(|address| address.to_url())
-            .is_some_and(|url| crate::proxy_env::proxy_url_has_credentials(&url))
-        {
-            // Built from the redacted form so the rejection cannot become the
-            // leak it is rejecting.
-            let msg = format!(
-                "network.proxy.url must not carry credentials ('{}'). LXC and Bubblewrap \
-                 pass the proxy URL to the sandbox helper as a command-line argument \
-                 (lxc-attach --set-var, bwrap --setenv), and process arguments are \
-                 world-readable through /proc/<pid>/cmdline, so the password would be \
-                 visible to every local user while the command runs. Use a proxy that does \
-                 not require inline credentials, or supply them to the proxy itself rather \
-                 than through the URL.",
-                policy
-                    .network_proxy
-                    .address
-                    .as_ref()
-                    .map(|address| crate::proxy_env::redact_proxy_url(&address.to_url()))
-                    .unwrap_or_default()
-            );
-            logger.log_line(&msg);
-            return Err(WxcError::ConfigParse(msg));
-        }
-
-        // External proxy (`url` / `localhost`) enforces its own policy — the
-        // runner does NOT forward host lists to it. Reject configs that combine
-        // an external proxy with host lists or a restrictive default, otherwise
-        // users get silently weaker enforcement.
-        if containment == ContainmentBackend::Bubblewrap
-            && policy.network_proxy.is_enabled()
-            && !policy.network_proxy.builtin_test_server
-            && (!policy.allowed_hosts.is_empty()
-                || !policy.blocked_hosts.is_empty()
-                || policy.default_network_policy == NetworkPolicy::Block)
-        {
-            let msg = "Bubblewrap: an external network.proxy (url/localhost) cannot be \
-                       combined with allowedHosts, blockedHosts, or defaultPolicy='block'. \
-                       The external proxy is expected to enforce its own host policy; \
-                       MXC does not forward host lists to it. Use \
-                       'network.proxy.builtinTestServer: true' (testing only) for \
-                       MXC-enforced host filtering, or remove the host policy.";
-            return Err(WxcError::ConfigParse(msg.to_string()));
-        }
-
-        // Cooperative-model warning: builtin test proxy + defaultPolicy 'block'
-        // with no allowlist denies well-behaved HTTP clients at the proxy, but
-        // raw-socket clients still reach the host network.
-        if containment == ContainmentBackend::Bubblewrap
-            && policy.network_proxy.is_enabled()
-            && policy.default_network_policy == NetworkPolicy::Block
-            && policy.allowed_hosts.is_empty()
-            && policy.blocked_hosts.is_empty()
-        {
-            logger.warning_line(
-                "WARNING: Bubblewrap network.proxy with defaultPolicy='block' is \
-                 cooperative. HTTP_PROXY-aware clients (curl, requests, etc.) are \
-                 denied at the proxy, but raw-socket clients that ignore HTTP_PROXY \
-                 bypass the proxy and reach the host network. For strict isolation \
-                 of all clients, remove network.proxy so --unshare-net applies; for \
-                 host-list enforcement, add allowedHosts (cooperative tools only).",
-            );
-        }
-    }
 
     // Lifecycle section
     let lifecycle = match cfg.lifecycle {
@@ -2013,13 +1702,7 @@ fn normalize_state_aware_common(
         context.sandbox_id.and_then(state_aware_containment_from_id)
     };
     let require_process = context.phase == Phase::Exec;
-    let state_aware_wslc_exec = require_process
-        && common
-            .containment
-            .as_ref()
-            .is_some_and(|value| map_wire_containment(Some(value)) == ContainmentBackend::Wslc);
-    let mut request =
-        normalize_common_request_ir(common, logger, require_process, state_aware_wslc_exec)?;
+    let mut request = normalize_common_request_ir(common, logger, require_process)?;
     if context.phase != Phase::Provision && !network_supplied {
         request.policy.network_egress = None;
         request.policy.network_ingress = None;
@@ -2032,7 +1715,7 @@ mod tests {
     use super::*;
     use crate::encoding::base64_encode;
     use crate::logger::Mode;
-    use crate::models::{NetworkAction, ProxyAddress};
+    use crate::models::{NetworkAction, NetworkPolicy, ProxyAddress};
     use crate::mxc_error::MxcErrorCode;
     use std::path::{Path, PathBuf};
 
@@ -2075,7 +1758,7 @@ mod tests {
     #[test]
     fn private_exact_parser_path_compiles_and_accepts_a_published_request() {
         let json = r#"{
-            "version": "0.6.0-alpha",
+            "version": "0.9.0-alpha",
             "process": {"commandLine": "echo hello"}
         }"#;
 
@@ -2219,9 +1902,6 @@ mod tests {
     #[test]
     fn exact_parser_preserves_source_aware_typed_diagnostics() {
         for (version, state_aware) in [
-            ("0.6.0-alpha", false),
-            ("0.7.0-alpha", false),
-            ("0.8.0-alpha", false),
             ("0.9.0-alpha", false),
             ("0.9.0-alpha", true),
             ("1.0.0", false),
@@ -2252,7 +1932,7 @@ mod tests {
     #[test]
     fn load_mxc_request_uses_exact_dispatch_for_file_and_base64_inputs() {
         let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "process": {"commandLine": "echo hello"},
             "experimental": {}
         }"#;
@@ -2272,11 +1952,11 @@ mod tests {
     }
 
     #[test]
-    fn exact_parser_accepts_every_published_one_shot_version() {
+    fn exact_parser_accepts_every_registered_one_shot_version() {
         for (version, command) in [
-            ("0.6.0-alpha", "echo v06"),
-            ("0.7.0-alpha", "echo v07"),
-            ("0.8.0-alpha", "echo v08"),
+            ("0.9.0-alpha", "echo v09"),
+            ("1.0.0", "echo v10"),
+            ("1.1.0-alpha", "echo dev"),
         ] {
             let json = format!(
                 r#"{{
@@ -2302,25 +1982,16 @@ mod tests {
 
     #[test]
     fn exact_published_parser_preserves_compatibility_alias_equivalence() {
-        for (
-            case,
-            version,
-            canonical_containment,
-            canonical_fields,
-            alias_containment,
-            alias_fields,
-        ) in [
+        for (case, canonical_containment, canonical_fields, alias_containment, alias_fields) in [
             (
-                "v0.6 ProcessContainer containment",
-                "0.6.0-alpha",
+                "v0.9 ProcessContainer containment",
                 "processcontainer",
                 "",
                 "appcontainer",
                 "",
             ),
             (
-                "v0.6 ProcessContainer section",
-                "0.6.0-alpha",
+                "v0.9 ProcessContainer section",
                 "processcontainer",
                 r#",
                     "processContainer": {
@@ -2335,86 +2006,14 @@ mod tests {
                     }"#,
             ),
             (
-                "v0.7 ProcessContainer containment",
-                "0.7.0-alpha",
-                "processcontainer",
-                "",
-                "appcontainer",
-                "",
-            ),
-            (
-                "v0.7 ProcessContainer section",
-                "0.7.0-alpha",
-                "processcontainer",
-                r#",
-                    "processContainer": {
-                        "leastPrivilege": true,
-                        "capabilities": ["internetClient"]
-                    }"#,
-                "processcontainer",
-                r#",
-                    "appContainer": {
-                        "leastPrivilege": true,
-                        "capabilities": ["internetClient"]
-                    }"#,
-            ),
-            (
-                "v0.7 Seatbelt containment",
-                "0.7.0-alpha",
+                "v0.9 Seatbelt containment",
                 "seatbelt",
                 "",
                 "macos_sandbox",
                 "",
             ),
             (
-                "v0.7 Seatbelt section",
-                "0.7.0-alpha",
-                "seatbelt",
-                r#",
-                    "seatbelt": {
-                        "guiAccess": true
-                    }"#,
-                "seatbelt",
-                r#",
-                    "macos_sandbox": {
-                        "guiAccess": true
-                    }"#,
-            ),
-            (
-                "v0.8 ProcessContainer containment",
-                "0.8.0-alpha",
-                "processcontainer",
-                "",
-                "appcontainer",
-                "",
-            ),
-            (
-                "v0.8 ProcessContainer section",
-                "0.8.0-alpha",
-                "processcontainer",
-                r#",
-                    "processContainer": {
-                        "leastPrivilege": true,
-                        "capabilities": ["internetClient"]
-                    }"#,
-                "processcontainer",
-                r#",
-                    "appContainer": {
-                        "leastPrivilege": true,
-                        "capabilities": ["internetClient"]
-                    }"#,
-            ),
-            (
-                "v0.8 Seatbelt containment",
-                "0.8.0-alpha",
-                "seatbelt",
-                "",
-                "macos_sandbox",
-                "",
-            ),
-            (
-                "v0.8 Seatbelt section",
-                "0.8.0-alpha",
+                "v0.9 Seatbelt section",
                 "seatbelt",
                 r#",
                     "seatbelt": {
@@ -2429,20 +2028,25 @@ mod tests {
         ] {
             let canonical_json = format!(
                 r#"{{
-                    "version": "{version}",
+                    "version": "0.9.0-alpha",
                     "containment": "{canonical_containment}",
                     "process": {{"commandLine": "echo hello"}}{canonical_fields}
                 }}"#
             );
             let alias_json = format!(
                 r#"{{
-                    "version": "{version}",
+                    "version": "0.9.0-alpha",
                     "containment": "{alias_containment}",
                     "process": {{"commandLine": "echo hello"}}{alias_fields}
                 }}"#
             );
 
-            assert_exact_published_requests_equivalent(case, version, &canonical_json, &alias_json);
+            assert_exact_published_requests_equivalent(
+                case,
+                "0.9.0-alpha",
+                &canonical_json,
+                &alias_json,
+            );
         }
     }
 
@@ -2505,43 +2109,21 @@ mod tests {
     }
 
     #[test]
-    fn exact_parser_does_not_fallback_to_later_contracts() {
-        for (case, json, expected_message) in [
-            (
-                "v0.6 rejects a v0.7 annotation",
-                r#"{
-                    "version": "0.6.0-alpha",
-                    "_comment": "introduced in v0.7",
-                    "process": {"commandLine": "echo hello"}
-                }"#,
-                "unknown field `_comment`",
-            ),
-            (
-                "v0.7 rejects v0.8 directional networking",
-                r#"{
-                    "version": "0.7.0-alpha",
-                    "process": {"commandLine": "echo hello"},
-                    "network": {"egress": {"default": "deny"}}
-                }"#,
-                "unknown field `egress`",
-            ),
-            (
-                "v0.8 rejects the v0.9 experimental block",
-                r#"{
-                    "version": "0.8.0-alpha",
-                    "process": {"commandLine": "echo hello"},
-                    "experimental": {}
-                }"#,
-                "unknown field `experimental`",
-            ),
-        ] {
-            let error = parse_exact_for_test(json).unwrap_err();
-            assert!(matches!(error, ParseError::OneShot(_)), "{case}: {error:?}");
-            assert!(
-                error.message().contains(expected_message),
-                "{case}: expected {expected_message:?}, got {}",
-                error.message()
+    fn exact_parser_rejects_removed_contract_versions_without_fallback() {
+        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha"] {
+            let json = format!(
+                r#"{{
+                    "version": "{version}",
+                    "process": {{"commandLine": "echo hello"}}
+                }}"#
             );
+
+            let error = parse_exact_for_test(&json).unwrap_err();
+            assert!(
+                matches!(error, ParseError::Version(_)),
+                "{version}: {error:?}"
+            );
+            assert!(error.message().contains("Unsupported contract version"));
         }
     }
 
@@ -2747,7 +2329,7 @@ mod tests {
             ),
             (
                 "duplicate",
-                r#"{"version":"0.8.0-alpha","version":"0.9.0-alpha","process":{"commandLine":"echo hello"}}"#,
+                r#"{"version":"0.9.0-alpha","version":"1.0.0","process":{"commandLine":"echo hello"}}"#,
             ),
             (
                 "unsupported",
@@ -2849,33 +2431,33 @@ mod tests {
     fn exact_parser_routes_contract_failures_by_request_kind() {
         for (case, json, state_aware) in [
             (
-                "published experimental field",
-                r#"{"version":"0.6.0-alpha","process":{"commandLine":"echo hello"},"experimental":{}}"#,
+                "published unknown experimental field",
+                r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hello"},"experimental":{}}"#,
                 false,
             ),
             (
-                "v0.7 directional network field",
-                r#"{"version":"0.7.0-alpha","process":{"commandLine":"echo hello"},"network":{"egress":{"default":"deny"}}}"#,
+                "published malformed network field",
+                r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hello"},"network":{"egress":{"default":"drop"}}}"#,
                 false,
             ),
             (
-                "published state-aware field",
-                r#"{"version":"0.8.0-alpha","phase":"start","sandboxId":"iso:abcd1234"}"#,
-                false,
-            ),
-            (
-                "development one-shot unknown field",
-                r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hello"},"unknown":true}"#,
-                false,
-            ),
-            (
-                "development state-aware unknown field",
+                "published state-aware unknown field",
                 r#"{"version":"0.9.0-alpha","phase":"start","sandboxId":"iso:abcd1234","unknown":true}"#,
                 true,
             ),
             (
+                "development one-shot unknown field",
+                r#"{"version":"1.1.0-alpha","process":{"commandLine":"echo hello"},"unknown":true}"#,
+                false,
+            ),
+            (
+                "development state-aware unknown field",
+                r#"{"version":"1.1.0-alpha","phase":"start","sandboxId":"iso:abcd1234","unknown":true}"#,
+                true,
+            ),
+            (
                 "development unknown phase",
-                r#"{"version":"0.9.0-alpha","phase":"teleport"}"#,
+                r#"{"version":"1.1.0-alpha","phase":"teleport"}"#,
                 true,
             ),
         ] {
@@ -2895,15 +2477,34 @@ mod tests {
     }
 
     #[test]
+    fn supported_one_shot_contracts_reject_legacy_network_fields() {
+        for version in ["0.9.0-alpha", "1.0.0", "1.1.0-alpha"] {
+            for (field, value) in [
+                ("defaultPolicy", r#""allow""#),
+                ("enforcementMode", r#""firewall""#),
+                ("allowLocalNetwork", "true"),
+                ("allowedHosts", r#"["example.com"]"#),
+                ("blockedHosts", r#"["example.com"]"#),
+                ("proxy", r#"{"url":"http://127.0.0.1:8080"}"#),
+            ] {
+                let json = format!(
+                    r#"{{"version":"{version}","process":{{"commandLine":"echo hi"}},"network":{{"{field}":{value}}}}}"#
+                );
+                let error = parse_exact_for_test(&json).unwrap_err();
+                assert!(matches!(error, ParseError::OneShot(_)), "{json}: {error:?}");
+                assert!(
+                    error
+                        .message()
+                        .contains(&format!("unknown field `{field}`")),
+                    "{json}: {error:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn exact_one_shot_parser_preserves_typed_error_path_and_location() {
-        for version in [
-            "0.6.0-alpha",
-            "0.7.0-alpha",
-            "0.8.0-alpha",
-            "0.9.0-alpha",
-            "1.0.0",
-            "1.1.0-alpha",
-        ] {
+        for version in ["0.9.0-alpha", "1.0.0", "1.1.0-alpha"] {
             let json = format!(
                 "{{\n  \"version\": \"{version}\",\n  \"process\": {{\n    \"commandLine\": \"echo hello\",\n    \"cwd\": 42\n  }}\n}}"
             );
@@ -3155,45 +2756,6 @@ mod tests {
 
     #[test]
     fn exact_contract_bridge_accepts_every_registered_one_shot_version() {
-        let v0_6 = serde_json::from_str::<mxc_config_contract::published::v0_6_0_alpha::Request>(
-            r#"{
-                    "version": "0.6.0-alpha",
-                    "process": {"commandLine": "echo hello"}
-                }"#,
-        )
-        .unwrap();
-        assert_exact_contract_bridge(
-            ExactOneShotContract::V0_6(Box::new(v0_6)),
-            ContractVersion::V0_6_0Alpha,
-            crate::models::NetworkEnforcementCompatibility::LegacyCompatible,
-        );
-
-        let v0_7 = serde_json::from_str::<mxc_config_contract::published::v0_7_0_alpha::Request>(
-            r#"{
-                    "version": "0.7.0-alpha",
-                    "process": {"commandLine": "echo hello"}
-                }"#,
-        )
-        .unwrap();
-        assert_exact_contract_bridge(
-            ExactOneShotContract::V0_7(Box::new(v0_7)),
-            ContractVersion::V0_7_0Alpha,
-            crate::models::NetworkEnforcementCompatibility::LegacyCompatible,
-        );
-
-        let v0_8 = serde_json::from_str::<mxc_config_contract::published::v0_8_0_alpha::Request>(
-            r#"{
-                    "version": "0.8.0-alpha",
-                    "process": {"commandLine": "echo hello"}
-                }"#,
-        )
-        .unwrap();
-        assert_exact_contract_bridge(
-            ExactOneShotContract::V0_8(Box::new(v0_8)),
-            ContractVersion::V0_8_0Alpha,
-            crate::models::NetworkEnforcementCompatibility::Strict,
-        );
-
         let v0_9 =
             serde_json::from_str::<mxc_config_contract::published::v0_9_0_alpha::OneShotRequest>(
                 r#"{
@@ -3238,33 +2800,33 @@ mod tests {
     #[test]
     fn exact_contract_bridge_runs_shared_semantic_validation() {
         let request =
-            serde_json::from_str::<mxc_config_contract::published::v0_7_0_alpha::Request>(
+            serde_json::from_str::<mxc_config_contract::published::v0_9_0_alpha::OneShotRequest>(
                 r#"{
-                    "version": "0.7.0-alpha",
-                    "containment": "processcontainer",
+                    "version": "0.9.0-alpha",
+                    "containment": "bubblewrap",
                     "process": {"commandLine": "echo hello"},
-                    "processContainer": {
-                        "capabilities": [
-                            "internetClient,privateNetworkClientServer"
-                        ]
-                    }
+                    "network": {
+                        "egress": {"default": "allow"},
+                        "ingress": {"default": "allow", "hostLoopback": "allow"}
+                    },
+                    "runtimeConfig": {"networkProxy": "http://127.0.0.1:8080"}
                 }"#,
             )
             .unwrap();
         let mut logger = test_logger();
 
         let error = load_one_shot_request_from_contract(
-            ExactOneShotContract::V0_7(Box::new(request)),
+            ExactOneShotContract::V0_9(Box::new(request)),
             &mut logger,
         )
         .unwrap_err();
 
         assert!(
-            error.to_string().contains("must not contain a comma"),
+            error.to_string().contains("egress.default='deny'"),
             "unexpected semantic error: {error}"
         );
         assert!(
-            logger.get_buffer().contains("must not contain a comma"),
+            logger.get_buffer().contains("egress.default='deny'"),
             "semantic failure should be logged"
         );
     }
@@ -3954,18 +3516,6 @@ mod tests {
     }
 
     #[test]
-    fn cli_command_does_not_reclassify_a_published_contract_as_state_aware() {
-        let json = r#"{"version":"0.8.0-alpha","phase":"start","sandboxId":"iso:abcd1234"}"#;
-
-        let without_cli = load_mxc(json).unwrap_err();
-        let with_cli = load_mxc_with_cli(json, &argv(&["echo", "hi"])).unwrap_err();
-
-        assert!(matches!(without_cli, ParseError::OneShot(_)));
-        assert!(matches!(with_cli, ParseError::OneShot(_)));
-        assert_eq!(with_cli.message(), without_cli.message());
-    }
-
-    #[test]
     fn apply_cli_command_surfaces_an_unregistered_sandbox_id_prefix() {
         for version in ["0.9.0-alpha", "1.0.0", "1.1.0-alpha"] {
             let json =
@@ -4073,19 +3623,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn state_aware_request_rejects_published_contract_version() {
-        let error = load_mxc(
-            r#"{
-                "version": "0.8.0-alpha",
-                "phase": "start",
-                "sandboxId": "iso:abcd1234",
-                "telemetry": {"enabled": true}
-            }"#,
-        )
-        .unwrap_err();
-        assert!(matches!(error, ParseError::OneShot(_)), "got {error:?}");
-    }
     #[test]
     fn state_aware_malformed_telemetry_is_rejected() {
         // A present-but-malformed telemetry block is a client error rejected at
@@ -4402,9 +3939,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_v08_parses_additive_network_policy() {
+    fn schema_v09_parses_additive_network_policy() {
         let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "containment": "processcontainer",
             "process": {"commandLine": "echo hi"},
             "network": {
@@ -4422,13 +3959,13 @@ mod tests {
             MxcRequest::OneShot(request) => request,
             _ => panic!("expected one-shot request"),
         };
-        let egress = request.policy.network_egress.expect("0.8 egress");
+        let egress = request.policy.network_egress.expect("0.9 egress");
         assert_eq!(egress.default, NetworkAction::Deny);
         assert_eq!(egress.allow.len(), 1);
         assert_eq!(egress.allow[0].to[0].cidr.prefix_length, 20);
         assert_eq!(egress.allow[0].ports[0].port, Some(443));
         assert_eq!(
-            request.policy.network_ingress.expect("0.8 ingress").default,
+            request.policy.network_ingress.expect("0.9 ingress").default,
             NetworkAction::Allow
         );
         assert!(!request.policy.allow_local_network);
@@ -4437,9 +3974,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_v08_runtime_proxy_does_not_mark_network_posture_supplied() {
+    fn schema_v09_runtime_proxy_does_not_mark_network_posture_supplied() {
         let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "containment": "bubblewrap",
             "process": {"commandLine": "echo hi"},
             "runtimeConfig": {"networkProxy": "http://127.0.0.1:8080"}
@@ -4475,15 +4012,12 @@ mod tests {
     }
 
     fn proxy_peer_contract_versions() -> impl Iterator<Item = &'static str> {
-        supported_versions()
-            .iter()
-            .skip_while(|version| **version != ContractVersion::V0_8_0Alpha)
-            .map(|version| version.as_str())
+        supported_versions().iter().map(|version| version.as_str())
     }
 
     #[test]
-    fn schema_v08_parses_runtime_proxy_and_peer() {
-        let json = process_container_proxy_json("0.8.0-alpha", "Contoso.Proxy_123");
+    fn schema_v09_parses_runtime_proxy_and_peer() {
+        let json = process_container_proxy_json("0.9.0-alpha", "Contoso.Proxy_123");
         let request = match load_mxc(&json).unwrap() {
             MxcRequest::OneShot(request) => request,
             _ => panic!("expected one-shot request"),
@@ -4504,9 +4038,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_v08_parses_identityless_processcontainer_proxy() {
+    fn schema_v09_parses_identityless_processcontainer_proxy() {
         let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "containment": "processcontainer",
             "process": {"commandLine": "echo hi"},
             "network": {
@@ -4560,9 +4094,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_v08_rejects_runtime_proxy_with_direct_egress() {
+    fn schema_v09_rejects_runtime_proxy_with_direct_egress() {
         let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "containment": "bubblewrap",
             "process": {"commandLine": "echo hi"},
             "network": {
@@ -4579,14 +4113,14 @@ mod tests {
     }
 
     #[test]
-    fn schema_v08_rejects_runtime_proxy_with_direct_rules() {
+    fn schema_v09_rejects_runtime_proxy_with_direct_rules() {
         for rules in [
             r#""allow": [{"to": [{"cidr": "192.0.2.0/24"}]}]"#,
             r#""deny": [{"to": [{"cidr": "192.0.2.0/24"}]}]"#,
         ] {
             let json = format!(
                 r#"{{
-                    "version": "0.8.0-alpha",
+                    "version": "0.9.0-alpha",
                     "containment": "bubblewrap",
                     "process": {{"commandLine": "echo hi"}},
                     "network": {{
@@ -4605,7 +4139,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_v08_rejects_invalid_processcontainer_proxy_postures() {
+    fn schema_v09_rejects_invalid_processcontainer_proxy_postures() {
         for (peer, ingress, expected) in [
             (
                 "",
@@ -4630,7 +4164,7 @@ mod tests {
             };
             let json = format!(
                 r#"{{
-                    "version": "0.8.0-alpha",
+                    "version": "0.9.0-alpha",
                     "containment": "processcontainer",
                     "process": {{"commandLine": "echo hi"}},
                     "network": {{
@@ -4650,9 +4184,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_v08_rejects_proxy_peer_without_runtime_proxy() {
+    fn schema_v09_rejects_proxy_peer_without_runtime_proxy() {
         let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "containment": "processcontainer",
             "process": {"commandLine": "echo hi"},
             "processContainer": {
@@ -4667,104 +4201,11 @@ mod tests {
     }
 
     #[test]
-    fn schema_v08_parses_legacy_network_fields() {
-        let json = r#"{
-            "version": "0.8.0-alpha",
-            "process": {"commandLine": "echo hi"},
-            "network": {"defaultPolicy": "allow"}
-        }"#;
-        let request = match load_mxc(json).unwrap() {
-            MxcRequest::OneShot(request) => request,
-            _ => panic!("expected one-shot request"),
-        };
-        assert_eq!(request.policy.default_network_policy, NetworkPolicy::Allow);
-        assert!(request.policy.network_egress.is_none());
-    }
-
-    #[test]
-    fn schema_v08_rejects_mixed_network_formats() {
-        for extra in [
-            r#""egress": {"default": "deny"}"#,
-            r#""ingress": {"default": "deny"}"#,
-        ] {
-            let json = format!(
-                r#"{{
-                    "version": "0.8.0-alpha",
-                    "process": {{"commandLine": "echo hi"}},
-                    "network": {{"defaultPolicy": "allow", {extra}}}
-                }}"#
-            );
-            let error = match load_mxc(&json) {
-                Err(ParseError::OneShot(error)) => error.to_string(),
-                other => panic!("expected one-shot rejection, got: {other:?}"),
-            };
-            assert!(error.contains("cannot mix"));
-        }
-    }
-
-    #[test]
-    fn schema_v08_rejects_legacy_network_with_runtime_proxy() {
-        let json = r#"{
-            "version": "0.8.0-alpha",
-            "process": {"commandLine": "echo hi"},
-            "network": {"defaultPolicy": "allow"},
-            "runtimeConfig": {"networkProxy": "http://127.0.0.1:8080"}
-        }"#;
-        let error = match load_mxc(json) {
-            Err(ParseError::OneShot(error)) => error.to_string(),
-            other => panic!("expected one-shot rejection, got: {other:?}"),
-        };
-        assert!(error.contains("cannot mix"));
-    }
-
-    #[test]
-    fn schema_v08_allows_legacy_network_with_empty_directional_sections() {
-        let json = r#"{
-            "version": "0.8.0-alpha",
-            "process": {"commandLine": "echo hi"},
-            "containment": "processcontainer",
-            "network": {"defaultPolicy": "allow"},
-            "runtimeConfig": {},
-            "processContainer": {"network": {}}
-        }"#;
-        let request = match load_mxc(json).expect("empty sections do not select directional format")
-        {
-            MxcRequest::OneShot(request) => request,
-            _ => panic!("expected one-shot request"),
-        };
-        assert_eq!(request.policy.default_network_policy, NetworkPolicy::Allow);
-        assert!(request.policy.network_egress.is_none());
-    }
-
-    #[test]
-    fn schema_v07_rejects_v08_network_fields() {
-        for extra in [
-            r#""network": {"egress": {"default": "deny"}}"#,
-            r#""network": {"egress": null}"#,
-            r#""runtimeConfig": {}"#,
-            r#""runtimeConfig": null"#,
-            r#""processContainer": {"network": {}}"#,
-            r#""processContainer": {"network": null}"#,
-            r#""processContainer": {"network": {"allowedProxyPeer": ""}}"#,
-        ] {
-            let json = format!(
-                r#"{{
-                    "version": "0.7.0-alpha",
-                    "process": {{"commandLine": "echo hi"}},
-                    "containment": "processcontainer",
-                    {extra}
-                }}"#
-            );
-            assert!(load_mxc(&json).is_err());
-        }
-    }
-
-    #[test]
-    fn schema_v08_rejects_remote_runtime_proxy() {
+    fn schema_v09_rejects_remote_runtime_proxy() {
         for proxy in ["http://proxy.example:8080", "http://127.1.2.3:8080"] {
             let json = format!(
                 r#"{{
-                    "version": "0.8.0-alpha",
+                    "version": "0.9.0-alpha",
                     "process": {{"commandLine": "echo hi"}},
                     "runtimeConfig": {{"networkProxy": "{proxy}"}}
                 }}"#
@@ -4774,9 +4215,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_v08_runtime_proxy_errors_name_runtime_field() {
+    fn schema_v09_runtime_proxy_errors_name_runtime_field() {
         let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "process": {"commandLine": "echo hi"},
             "runtimeConfig": {"networkProxy": "http://localhost"}
         }"#;
@@ -4789,7 +4230,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_v08_rejects_invalid_cidr_and_port_range() {
+    fn schema_v09_rejects_invalid_cidr_and_port_range() {
         for network in [
             r#"{"egress": {"allow": [{"to": [{"cidr": "example.com"}]}]}}"#,
             r#"{"egress": {"allow": [{"to": [{
@@ -4801,7 +4242,7 @@ mod tests {
         ] {
             let json = format!(
                 r#"{{
-                    "version": "0.8.0-alpha",
+                    "version": "0.9.0-alpha",
                     "process": {{"commandLine": "echo hi"}},
                     "network": {network}
                 }}"#
@@ -4811,11 +4252,11 @@ mod tests {
     }
 
     #[test]
-    fn schema_v08_rejects_explicitly_empty_rule_selectors() {
+    fn schema_v09_rejects_explicitly_empty_rule_selectors() {
         for (selector, expected_path) in [("\"to\": []", ".to"), ("\"ports\": []", ".ports")] {
             let json = format!(
                 r#"{{
-                    "version": "0.8.0-alpha",
+                    "version": "0.9.0-alpha",
                     "process": {{"commandLine": "echo hi"}},
                     "network": {{"egress": {{"allow": [{{{selector}}}]}}}}
                 }}"#
@@ -4830,9 +4271,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_v08_invalid_cidr_error_has_path_and_reason() {
+    fn schema_v09_invalid_cidr_error_has_path_and_reason() {
         let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "process": {"commandLine": "echo hi"},
             "network": {
                 "egress": {
@@ -4851,9 +4292,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_v08_rejects_explicit_zero_port() {
+    fn schema_v09_rejects_explicit_zero_port() {
         let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "process": {"commandLine": "echo hi"},
             "network": {
                 "egress": {
@@ -4872,7 +4313,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_v08_rejects_invalid_end_port_forms() {
+    fn schema_v09_rejects_invalid_end_port_forms() {
         for (port, expected) in [
             (
                 r#"{"protocol": "tcp", "port": 1, "endPort": 0}"#,
@@ -4882,7 +4323,7 @@ mod tests {
         ] {
             let json = format!(
                 r#"{{
-                    "version": "0.8.0-alpha",
+                    "version": "0.9.0-alpha",
                     "process": {{"commandLine": "echo hi"}},
                     "network": {{
                         "egress": {{"allow": [{{"ports": [{port}]}}]}}
@@ -4896,26 +4337,6 @@ mod tests {
             assert!(error.contains("network.egress.allow[0].ports[0].endPort"));
             assert!(error.contains(expected), "got: {error}");
         }
-    }
-
-    #[test]
-    fn malformed_contract_version_precedes_directional_field_gate() {
-        let json = r#"{
-            "version": "0.8x",
-            "process": {"commandLine": "echo hi"},
-            "network": {"egress": {"default": "deny"}}
-        }"#;
-        let error = match load_mxc(json) {
-            Err(ParseError::Version(error)) => error.to_string(),
-            other => panic!("expected version rejection, got: {other:?}"),
-        };
-
-        assert!(error.contains("Unsupported contract version"));
-        for version in supported_versions() {
-            assert!(error.contains(version.as_str()), "got: {error}");
-        }
-        assert!(!error.contains("0.8x"));
-        assert!(!error.contains("require schema version 0.8"));
     }
 
     #[test]
@@ -5037,92 +4458,6 @@ mod tests {
     }
 
     #[test]
-    fn exact_loaders_accept_seatbelt_launch_method_before_v0_9() {
-        for version in ["0.7.0-alpha", "0.8.0-alpha"] {
-            let json = format!(
-                r#"{{"version":"{version}","containment":"seatbelt","process":{{"commandLine":"echo hi"}},"seatbelt":{{"launchMethod":"open"}}}}"#
-            );
-
-            let request = load_mxc_request_from_json(&json, &mut test_logger())
-                .unwrap_or_else(|error| panic!("{version} should still accept it: {error:?}"));
-            let MxcRequest::OneShot(request) = request else {
-                panic!("{version} should parse as one-shot");
-            };
-            assert!(matches!(
-                request
-                    .seatbelt
-                    .expect("seatbelt should be populated")
-                    .launch_method,
-                crate::models::LaunchMethod::Open
-            ));
-        }
-    }
-
-    #[test]
-    fn exact_loaders_reject_telemetry_before_v0_9() {
-        let json = r#"{"version":"0.8.0-alpha","process":{"commandLine":"echo hi"},"telemetry":{"enabled":true}}"#;
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("pre-v09-telemetry.json");
-        fs::write(&path, json).unwrap();
-        let encoded = base64_encode(json.as_bytes());
-        for error in [
-            load_mxc_request(path.to_str().unwrap(), &mut test_logger(), false).unwrap_err(),
-            load_mxc_request(&encoded, &mut test_logger(), true).unwrap_err(),
-            load_mxc_request_from_json(json, &mut test_logger()).unwrap_err(),
-        ] {
-            assert!(matches!(error, ParseError::OneShot(_)), "got {error:?}");
-            assert!(
-                error.message().contains("unknown field `telemetry`"),
-                "got {error:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn inherit_default_env_rejects_pre_09_and_absent_versions() {
-        for version in ["0.6.0-alpha", "0.8.0-alpha"] {
-            let json = format!(
-                r#"{{"version":"{version}","process":{{"commandLine":"echo hi","inheritDefaultEnv":true}}}}"#
-            );
-
-            let error = load_mxc_request_from_json(&json, &mut test_logger()).unwrap_err();
-            assert!(matches!(error, ParseError::OneShot(_)), "got {error:?}");
-            assert!(
-                error
-                    .message()
-                    .contains("unknown field `inheritDefaultEnv`"),
-                "got {error:?}"
-            );
-        }
-        let absent = r#"{"process":{"commandLine":"echo hi","inheritDefaultEnv":true}}"#;
-        let error = load_mxc_request_from_json(absent, &mut test_logger()).unwrap_err();
-        assert!(matches!(error, ParseError::Version(_)), "got {error:?}");
-
-        let state_aware = r#"{
-            "version": "0.8.0-alpha",
-            "phase": "exec",
-            "sandboxId": "wslc:0123456789abcdef0123456789abcdef",
-            "process": {
-                "commandLine": "echo hi",
-                "inheritDefaultEnv": true
-            }
-        }"#;
-        // Under authoritative exact dispatch the declared version selects a
-        // published contract, which defines neither `phase` nor
-        // `process.inheritDefaultEnv`. The lifecycle discriminator is therefore
-        // rejected as an unknown field on the published one-shot root before the
-        // field gate is ever reached.
-        let mut logger = test_logger();
-        let error = load_mxc_request_from_json(state_aware, &mut logger).unwrap_err();
-        assert!(
-            error
-                .message()
-                .contains("Invalid configuration at `phase`: unknown field `phase`"),
-            "got {error:?}"
-        );
-    }
-
-    #[test]
     fn inherit_default_env_accepts_09_for_one_shot_and_state_aware() {
         let one_shot = r#"{
             "version": "0.9.0-alpha",
@@ -5156,9 +4491,9 @@ mod tests {
     #[test]
     fn exact_contracts_reject_experimental_telemetry() {
         for (version, telemetry) in [
-            ("0.7.0-alpha", r#"{"enabled":true}"#),
-            ("0.8.0-alpha", "null"),
             ("0.9.0-alpha", r#"{"enabled":true}"#),
+            ("1.0.0", "null"),
+            ("1.1.0-alpha", r#"{"enabled":true}"#),
         ] {
             let json = format!(
                 r#"{{

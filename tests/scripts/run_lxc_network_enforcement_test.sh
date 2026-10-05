@@ -114,26 +114,15 @@ PEER_HOST_IP="198.51.100.1"
 PEER_IP="198.51.100.2"
 PEER_PREFIX="29"
 PEER_PORT="443"
-# lxc-exec resolves this name on the host when it builds the rule, so the pin
-# below goes in the host's /etc/hosts and not the container's.
-PEER_HOSTNAME="allowed.mxc.test"
-
 PEER_LISTENER_PID=""
 PEER_LISTENER_LOG="$(mktemp)"
 IP_FORWARD_WAS=""
-HOSTS_BACKUP=""
 teardown_peer() {
     if [ -n "$PEER_LISTENER_PID" ]; then
         kill "$PEER_LISTENER_PID" >/dev/null 2>&1 || true
     fi
     ip netns del "$PEER_NETNS" >/dev/null 2>&1 || true
     ip link del "$PEER_HOST_VETH" >/dev/null 2>&1 || true
-    # Restoring the whole file, rather than filtering out the added line,
-    # cannot drop an unrelated entry the box needs.
-    if [ -n "$HOSTS_BACKUP" ] && [ -f "$HOSTS_BACKUP" ]; then
-        cat "$HOSTS_BACKUP" > /etc/hosts
-        rm -f "$HOSTS_BACKUP"
-    fi
     if [ -n "$IP_FORWARD_WAS" ]; then
         sysctl -w net.ipv4.ip_forward="$IP_FORWARD_WAS" >/dev/null 2>&1 || true
     fi
@@ -168,10 +157,6 @@ IP_FORWARD_WAS="$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || true)"
 sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 \
     || skip "could not enable IPv4 forwarding."
 
-HOSTS_BACKUP="$(mktemp)"
-cat /etc/hosts > "$HOSTS_BACKUP"
-printf '%s %s\n' "$PEER_IP" "$PEER_HOSTNAME" >> /etc/hosts
-
 # The firewall matches the port and not the payload, so plain HTTP on tcp/443
 # is enough.  A reply proves the SYN reached the peer.
 ip netns exec "$PEER_NETNS" python3 -m http.server "$PEER_PORT" --bind "$PEER_IP" \
@@ -191,8 +176,13 @@ for cfg in "$DENY_CONFIG" "$ALLOW_CONFIG"; do
     grep -Fq "$PEER_IP" "$cfg" \
         || fail "fixture ${cfg##*/} no longer targets the peer $PEER_IP; script and fixture drifted."
 done
-grep -Fq "$PEER_HOSTNAME" "$ALLOW_CONFIG" \
-    || fail "fixture ${ALLOW_CONFIG##*/} no longer allows $PEER_HOSTNAME; script and fixture drifted."
+python3 - "$ALLOW_CONFIG" "$PEER_IP/32" <<'PY' \
+    || fail "the allow fixture no longer permits the peer under default deny."
+import json, sys
+egress = json.load(open(sys.argv[1]))["network"]["egress"]
+assert egress["default"] == "deny"
+assert any({"cidr": sys.argv[2]} in rule["to"] for rule in egress["allow"])
+PY
 
 echo "Running LXC network policy enforcement test..."
 
@@ -206,13 +196,13 @@ DENY_OUTPUT=$("$LXC_EXEC" --debug "$DENY_CONFIG" 2>&1 || true)
 echo "$DENY_OUTPUT"
 
 if echo "$DENY_OUTPUT" | grep -Fq "MXC_NET_ALLOWED"; then
-    fail "egress succeeded under a default-block policy with no allowed hosts. The chain is not filtering this container's traffic."
+    fail "egress succeeded under a default-deny policy with no allow rules. The chain is not filtering this container's traffic."
 fi
 if ! echo "$DENY_OUTPUT" | grep -Fq "MXC_NET_BLOCKED"; then
     fail "the deny case produced no verdict at all; the container command did not run."
 fi
 if echo "$DENY_OUTPUT" | grep -Fq "MXC_LOOPBACK_BLOCKED"; then
-    fail "the container could not reach its own loopback. 0.8 allows intra-container loopback on every backend holding a private one, and the egress chain hangs off OUTPUT, where an '-i lo' exemption installs cleanly and matches nothing."
+    fail "the container could not reach its own loopback. Intra-container loopback must remain reachable under default deny."
 fi
 if ! echo "$DENY_OUTPUT" | grep -Fq "MXC_LOOPBACK_OK"; then
     fail "the deny case returned no loopback verdict; the in-container listener did not run."

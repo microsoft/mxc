@@ -1123,28 +1123,17 @@ pub struct ExecutionRequest {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum NetworkEnforcementCompatibility {
-    /// Preserve compatibility behavior required by exact v0.6 and v0.7 JSON.
-    LegacyCompatible,
-    /// Enforce the current network posture without legacy leniency.
+    /// Enforce the current network posture.
     #[default]
     Strict,
 }
 
-/// Backend `process.env` behavior after exact contract normalization.
-///
-/// Normalized from the contract version rather than read back from
-/// [`ExecutionRequest::source_contract`], which is external-JSON attribution
-/// and is cleared for typed SDK requests. A typed request built against an
-/// exact pre-0.9 contract keeps the pre-0.9 environment behavior.
+/// Backend `process.env` behavior for registered contracts and typed requests.
+/// Every supported request uses the default block.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DefaultEnvCompatibility {
-    /// Preserve behavior required by exact v0.6, v0.7, and v0.8 JSON: the
-    /// caller's entries pass through untouched, and each backend's own
-    /// baseline is the only default.
-    LegacyCompatible,
-    /// Supply the default block introduced by v0.9, which also makes the four
-    /// states of `process.env` distinct.
+    /// Supply the default block and keep the four states of `process.env` distinct.
     #[default]
     DefaultBlock,
 }
@@ -1165,7 +1154,6 @@ impl NetworkEnforcementCompatibility {
     /// Stable diagnostic spelling for policy identity and tests.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::LegacyCompatible => "legacy-compatible",
             Self::Strict => "strict",
         }
     }

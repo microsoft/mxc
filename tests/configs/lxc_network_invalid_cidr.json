@@ -1,6 +1,6 @@
 {
-  "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
-  "version": "0.8.0-alpha",
+  "$schema": "../../schemas/stable/mxc-config.schema.0.9.0-alpha.json",
+  "version": "0.9.0-alpha",
   "containerId": "CLI-LXC-Network-Invalid-CIDR",
   "containment": "lxc",
   "process": {
@@ -14,13 +14,31 @@
     "release": "3.23"
   },
   "network": {
-    "defaultPolicy": "block",
-    "enforcementMode": "firewall",
-    "allowedHosts": [
-      "140.82.112.0/33",
-      "2606:50c0::/129",
-      "140.82.112.0/not-a-prefix"
-    ],
-    "blockedHosts": []
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [
+            {
+              "cidr": "140.82.112.0/33"
+            }
+          ]
+        },
+        {
+          "to": [
+            {
+              "cidr": "2606:50c0::/129"
+            }
+          ]
+        },
+        {
+          "to": [
+            {
+              "cidr": "140.82.112.0/not-a-prefix"
+            }
+          ]
+        }
+      ]
+    }
   }
 }

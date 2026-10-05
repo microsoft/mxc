@@ -215,17 +215,6 @@ fn microvm_network_blocked() {
     );
 }
 
-fn processcontainer_proxy() {
-    let config = test_configs_dir().join("processcontainer_proxy_builtin_test.json");
-    if !config.exists() {
-        println!("SKIPPED: proxy config not found: {}", config.display());
-        return;
-    }
-
-    let result = run_test_driver(&config, &["--debug", "--proxy"]);
-    assert_success(&result);
-}
-
 /// Drives `processContainer.captureDenials` end to end and asserts the
 /// output-file contract: after the child exits, MXC writes a single JSON
 /// denials document (`{ "denials": [...], "summary": {...} }`) to the
@@ -662,15 +651,6 @@ fn test_microvm_suite() {
         return;
     }
     with_test_lock(microvm_suite);
-}
-
-#[test]
-#[ignore] // Requires velocity key 61714527 (BFS deadlock fix) enabled and elevation
-fn test_processcontainer_proxy() {
-    if !cached_has_test_driver() {
-        return;
-    }
-    with_test_lock(processcontainer_proxy);
 }
 
 #[test]

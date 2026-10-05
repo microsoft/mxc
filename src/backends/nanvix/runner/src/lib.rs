@@ -1269,57 +1269,46 @@ mod tests {
     }
 
     #[test]
-    fn legacy_launch_arguments_preserve_network_defaults_and_host_filters() {
-        for compatibility in [
-            wxc_common::models::NetworkEnforcementCompatibility::LegacyCompatible,
-            wxc_common::models::NetworkEnforcementCompatibility::Strict,
+    fn command_arguments_preserve_network_defaults_and_host_filters() {
+        for (default, allow, block, expected_prefix) in [
+            (NetworkPolicy::Block, vec![], vec![], vec![]),
+            (
+                NetworkPolicy::Allow,
+                vec![],
+                vec![],
+                vec!["-allow-host-networking"],
+            ),
+            (
+                NetworkPolicy::Block,
+                vec!["192.0.2.1"],
+                vec![],
+                vec!["-allow-host-networking", "-allow-host", "192.0.2.1"],
+            ),
+            (
+                NetworkPolicy::Allow,
+                vec![],
+                vec!["192.0.2.0/24"],
+                vec!["-allow-host-networking", "-block-host", "192.0.2.0/24"],
+            ),
         ] {
-            for (default, allow, block, expected_prefix) in [
-                (NetworkPolicy::Block, vec![], vec![], vec![]),
-                (
-                    NetworkPolicy::Allow,
-                    vec![],
-                    vec![],
-                    vec!["-allow-host-networking"],
-                ),
-                (
-                    NetworkPolicy::Block,
-                    vec!["192.0.2.1"],
-                    vec![],
-                    vec!["-allow-host-networking", "-allow-host", "192.0.2.1"],
-                ),
-                (
-                    NetworkPolicy::Allow,
-                    vec![],
-                    vec!["192.0.2.0/24"],
-                    vec!["-allow-host-networking", "-block-host", "192.0.2.0/24"],
-                ),
-            ] {
-                let request = ExecutionRequest {
-                    network_enforcement_compatibility: compatibility,
-                    policy: ContainerPolicy {
-                        default_network_policy: default,
-                        allowed_hosts: allow.into_iter().map(str::to_owned).collect(),
-                        blocked_hosts: block.into_iter().map(str::to_owned).collect(),
-                        ..Default::default()
-                    },
+            let request = ExecutionRequest {
+                policy: ContainerPolicy {
+                    default_network_policy: default,
+                    allowed_hosts: allow.into_iter().map(str::to_owned).collect(),
+                    blocked_hosts: block.into_iter().map(str::to_owned).collect(),
                     ..Default::default()
-                };
-                let resolved = NanVixScriptRunner::resolve_host_lists(&request).unwrap();
-                let arguments =
-                    command_arguments(&request, &resolved.allow, &resolved.block).unwrap();
-                let expected: Vec<String> =
-                    expected_prefix.into_iter().map(str::to_owned).collect();
-                assert!(
-                    arguments.starts_with(&expected),
-                    "{compatibility:?}: {arguments:?}"
-                );
-                assert_eq!(
-                    arguments.iter().any(|arg| arg == "-allow-host-networking"),
-                    !expected.is_empty(),
-                    "{compatibility:?}: {arguments:?}"
-                );
-            }
+                },
+                ..Default::default()
+            };
+            let resolved = NanVixScriptRunner::resolve_host_lists(&request).unwrap();
+            let arguments = command_arguments(&request, &resolved.allow, &resolved.block).unwrap();
+            let expected: Vec<String> = expected_prefix.into_iter().map(str::to_owned).collect();
+            assert!(arguments.starts_with(&expected), "{arguments:?}");
+            assert_eq!(
+                arguments.iter().any(|arg| arg == "-allow-host-networking"),
+                !expected.is_empty(),
+                "{arguments:?}"
+            );
         }
     }
 

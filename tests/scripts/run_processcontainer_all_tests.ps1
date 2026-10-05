@@ -11,10 +11,10 @@
 # `tier2_bfs` Cargo feature and Assert-BfsSafety refuses a binary built with it,
 # because bfscfg.exe hard-locks the bfs.sys minifilter on 25H2.
 #
-# Configs are authored at 0.8.0-alpha; only the legacy network fields stay at
-# 0.7.0-alpha. Network areas assert the DOCUMENTED contract (docs/process-
-# container/networking.md, docs/sandbox-policy/0.8.0/networking/networking.md),
-# so an assertion that outruns the backend fails by design.
+# Generated positive configs target published stable 1.0.0. Raw rejection
+# cases select their exact version. Network areas assert the supported
+# directional contract (docs/process-container/networking.md); unsupported
+# policy fails.
 #
 # Prerequisites fail, they do not skip: a -RequireTier mismatch, an unreachable
 # egress anchor (-SkipNetwork opts out), or a child recording zero assertions.
@@ -90,7 +90,6 @@ $AreaScripts = [ordered]@{
     'NetworkHostLoopback'      = 'run_processcontainer_network_loopback_test.ps1'
     'NetworkProxy'             = 'run_processcontainer_network_proxy_test.ps1'
     'NetworkRejections'        = 'run_processcontainer_network_rejections_test.ps1'
-    'NetworkLegacy07'          = 'run_processcontainer_network_legacy07_test.ps1'
     'PathAliasing'             = 'run_processcontainer_path_aliasing_test.ps1'
     'ProcessPlumbing'          = 'run_processcontainer_process_plumbing_test.ps1'
 }

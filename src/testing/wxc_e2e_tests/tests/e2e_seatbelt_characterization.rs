@@ -28,7 +28,7 @@ use std::time::Duration;
 use serde_json::json;
 use wxc_e2e_tests::{has_platform_exec, run_platform_config_value};
 
-const SCHEMA_VERSION: &str = "0.7.0-alpha";
+const SCHEMA_VERSION: &str = "0.9.0-alpha";
 
 /// Build a one-shot config that omits `containment` so the binary selects its
 /// OS-native backend (Seatbelt on macOS). `cwd`/`env`/`timeout` are optional.
@@ -143,10 +143,8 @@ fn seatbelt_applies_requested_env() {
     );
 }
 
-/// A configured `network.proxy` injects `HTTP_PROXY` / `HTTPS_PROXY` into the
-/// sandboxed child (the cooperative env-var proxy model, matching Bubblewrap).
-/// Uses the external `url` variant so no bundled proxy or `--allow-testing-features`
-/// flag is required — this characterizes the env-injection wiring end-to-end.
+/// A configured runtime proxy injects `HTTP_PROXY` / `HTTPS_PROXY` into the
+/// sandboxed child. No proxy listener is needed to check env injection.
 #[test]
 fn seatbelt_injects_proxy_env_from_network_proxy() {
     if !has_platform_exec() {
@@ -157,9 +155,9 @@ fn seatbelt_injects_proxy_env_from_network_proxy() {
         "printf 'P=[%s] S=[%s]\\n' \"$HTTP_PROXY\" \"$HTTPS_PROXY\"",
     );
     cfg["network"] = json!({
-        "defaultPolicy": "block",
-        "proxy": { "url": "http://127.0.0.1:8080" }
+        "egress": { "default": "deny" }
     });
+    cfg["runtimeConfig"] = json!({ "networkProxy": "http://127.0.0.1:8080" });
     let result = run_platform_config_value("seatbelt proxy env", &cfg, &[], None);
     assert_eq!(result.code, Some(0), "stderr: {}", result.stderr);
     assert!(
@@ -425,7 +423,7 @@ fn egress_probe(loopback_port: u16) -> String {
 /// control.
 fn directional_config(label: &str, port: u16, default: &str) -> serde_json::Value {
     let mut cfg = json!({
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "containerId": format!("char-seatbelt-{label}"),
         "process": { "commandLine": egress_probe(port) },
         "network": { "egress": { "default": default } }
@@ -442,7 +440,7 @@ fn directional_config(label: &str, port: u16, default: &str) -> serde_json::Valu
 /// open, so the only thing under test is the host-loopback posture.
 fn host_loopback_config(label: &str, port: u16, action: &str) -> serde_json::Value {
     json!({
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "containerId": format!("char-seatbelt-{label}"),
         "process": { "commandLine": egress_probe(port) },
         "network": {
@@ -450,20 +448,6 @@ fn host_loopback_config(label: &str, port: u16, action: &str) -> serde_json::Val
             "ingress": { "default": action, "hostLoopback": action }
         }
     })
-}
-
-/// Legacy (0.7) twin of [`directional_config`].
-fn legacy_config(label: &str, port: u16, default_policy: &str) -> serde_json::Value {
-    let mut cfg = config(label, &egress_probe(port));
-    cfg["network"] = if default_policy == "block" {
-        json!({
-            "defaultPolicy": "block",
-            "proxy": { "url": format!("http://127.0.0.1:{port}") }
-        })
-    } else {
-        json!({ "defaultPolicy": "allow" })
-    };
-    cfg
 }
 
 /// Run the allow-policy twin and report whether the deny target was actually
@@ -516,7 +500,7 @@ fn assert_denies_direct_egress(label: &str, cfg: &serde_json::Value) {
     );
 }
 
-/// Schema 0.8 `network.egress.default: "deny"` restricts egress to the loopback
+/// Schema 0.9 `network.egress.default: "deny"` restricts egress to the loopback
 /// runtime proxy. This is the enforcement half of
 /// `tests/examples/31_mac_network_0_8.json`, which CI cannot run because
 /// it expects an externally supplied proxy.
@@ -528,29 +512,33 @@ fn seatbelt_directional_deny_blocks_direct_egress() {
     let endpoint = LoopbackEndpoint::start();
 
     let allow = directional_config("dir-allow", endpoint.port, "allow");
-    if !deny_target_reachable_when_allowed("seatbelt 0.8 egress allow", &allow) {
+    if !deny_target_reachable_when_allowed("seatbelt 0.9 egress allow", &allow) {
         return;
     }
 
     let deny = directional_config("dir-deny", endpoint.port, "deny");
-    assert_denies_direct_egress("seatbelt 0.8 egress deny", &deny);
+    assert_denies_direct_egress("seatbelt 0.9 egress deny", &deny);
 }
 
-/// The legacy twin: 0.8 must not have changed what `defaultPolicy` callers get.
+/// The retired legacy network shape must fail before launching the workload.
 #[test]
-fn seatbelt_legacy_block_blocks_direct_egress() {
+fn seatbelt_rejects_legacy_network_fields_before_launch() {
     if !has_platform_exec() {
         return;
     }
-    let endpoint = LoopbackEndpoint::start();
-
-    let allow = legacy_config("legacy-allow", endpoint.port, "allow");
-    if !deny_target_reachable_when_allowed("seatbelt 0.7 defaultPolicy allow", &allow) {
-        return;
-    }
-
-    let block = legacy_config("legacy-block", endpoint.port, "block");
-    assert_denies_direct_egress("seatbelt 0.7 defaultPolicy block", &block);
+    let mut cfg = config("legacy-network", "echo LEGACY_WORKLOAD_RAN");
+    cfg["network"] = json!({ "defaultPolicy": "allow" });
+    let result = run_platform_config_value("seatbelt legacy network", &cfg, &[], None);
+    let output = result.combined_output();
+    assert_eq!(
+        result.code,
+        Some(1),
+        "expected rejection. Output:\n{output}"
+    );
+    assert!(
+        output.contains("network.defaultPolicy") && !output.contains("LEGACY_WORKLOAD_RAN"),
+        "legacy network fields must be rejected before execution. Output:\n{output}"
+    );
 }
 
 /// `network.ingress.hostLoopback: "deny"` must close the host's own loopback

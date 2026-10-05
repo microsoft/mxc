@@ -268,8 +268,8 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
         : ['microvm', 'vm', 'hyperlight', 'windows_sandbox'].includes(containment)
         ? '1.1.0-alpha'
         : ['seatbelt', 'macos_sandbox'].includes(containment)
-          ? '0.7.0-alpha'
-          : '0.6.0-alpha';
+          ? '0.9.0-alpha'
+          : '0.9.0-alpha';
     return {
       version,
       containment: containment as ContainerConfig['containment'],
@@ -495,48 +495,22 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
     }
   });
 
-  describe('builtinTestServer testing-features gate', () => {
-    it('forwards --allow-testing-features when the caller opts in via allowTestingFeatures', () => {
-      const config: ContainerConfig = {
-        version: '0.6.0-alpha',
-        containment: 'process',
-        process: { commandLine: 'echo hi' },
-        network: { proxy: { builtinTestServer: true } },
+  describe('supported runtime proxy', () => {
+    it('rejects the retired testing-feature option at compile time', () => {
+      const invalid = () => {
+        // @ts-expect-error The helper no longer accepts the retired testing-only switch.
+        resolveExecutableAndArgs(makeConfig('process'), { allowTestingFeatures: true });
       };
-      const { args } = resolveExecutableAndArgs(config, {
-        executablePath: fakeExe,
-        skipPlatformCheck: true,
-        allowTestingFeatures: true,
-      });
-      assert.ok(
-        args.includes('--allow-testing-features'),
-        'expected --allow-testing-features to be forwarded',
-      );
+      assert.strictEqual(typeof invalid, 'function');
     });
 
-    it('throws when builtinTestServer is used without allowTestingFeatures', () => {
+    it('does not forward a testing-only flag for a caller-supplied endpoint', () => {
       const config: ContainerConfig = {
-        version: '0.6.0-alpha',
+        version: '0.9.0-alpha',
         containment: 'process',
         process: { commandLine: 'echo hi' },
-        network: { proxy: { builtinTestServer: true } },
-      };
-      assert.throws(
-        () =>
-          resolveExecutableAndArgs(config, {
-            executablePath: fakeExe,
-            skipPlatformCheck: true,
-          }),
-        { message: /allowTestingFeatures: true/ },
-      );
-    });
-
-    it('does not forward --allow-testing-features for a non-test proxy', () => {
-      const config: ContainerConfig = {
-        version: '0.6.0-alpha',
-        containment: 'process',
-        process: { commandLine: 'echo hi' },
-        network: { proxy: { url: 'http://localhost:8080' } },
+        network: { egress: { default: 'deny' } },
+        runtimeConfig: { networkProxy: 'http://127.0.0.1:8080' },
       };
       const { args } = resolveExecutableAndArgs(config, {
         executablePath: fakeExe,
@@ -544,7 +518,7 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
       });
       assert.ok(
         !args.includes('--allow-testing-features'),
-        'did not expect --allow-testing-features for a url proxy',
+        'did not expect --allow-testing-features for a runtime proxy',
       );
     });
   });

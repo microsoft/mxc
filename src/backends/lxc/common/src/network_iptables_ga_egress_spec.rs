@@ -808,57 +808,9 @@ fn a_legacy_policy_still_opens_dns() {
 }
 
 #[test]
-fn a_legacy_block_with_allowed_hosts_opens_dns() {
-    let policy = policy_from_json(
-        r#"{"version": "0.7.0-alpha",
-            "process": {"commandLine": "echo hi"},
-            "network": {"defaultPolicy": "block", "enforcementMode": "firewall",
-                        "allowedHosts": ["example.com"]}}"#,
-    );
-    let rules = appended_ipv4_chain_rules("parsed-legacy", &policy);
-
-    assert!(
-        opens_base_dns_exemption(&rules),
-        "input=0.7 defaultPolicy=block allowedHosts=[example.com]; expected the port 53 accept; output={rules:?}"
-    );
-}
-
-#[test]
-fn a_legacy_block_with_no_allowed_hosts_does_not_open_dns() {
-    let policy = policy_from_json(
-        r#"{"version": "0.7.0-alpha",
-            "process": {"commandLine": "echo hi"},
-            "network": {"defaultPolicy": "block", "enforcementMode": "firewall",
-                        "blockedHosts": ["example.com"]}}"#,
-    );
-    let rules = appended_ipv4_chain_rules("legacy-block-no-allow", &policy);
-
-    assert!(
-        !opens_base_dns_exemption(&rules),
-        "input=0.7 defaultPolicy=block with no allowedHosts; expected no port 53 accept; output={rules:?}"
-    );
-}
-
-#[test]
-fn a_legacy_allow_with_blocked_hosts_does_not_open_dns() {
-    let policy = policy_from_json(
-        r#"{"version": "0.7.0-alpha",
-            "process": {"commandLine": "echo hi"},
-            "network": {"defaultPolicy": "allow", "enforcementMode": "firewall",
-                        "blockedHosts": ["example.com"]}}"#,
-    );
-    let rules = appended_ipv4_chain_rules("legacy-allow-blocked", &policy);
-
-    assert!(
-        !opens_base_dns_exemption(&rules),
-        "input=0.7 defaultPolicy=allow blockedHosts=[example.com]; expected no port 53 accept; output={rules:?}"
-    );
-}
-
-#[test]
 fn a_parsed_directional_request_drops_the_dns_exemption() {
     let policy = policy_from_json(
-        r#"{"version": "0.8.0-alpha",
+        r#"{"version": "0.9.0-alpha",
             "process": {"commandLine": "echo hi"},
             "network": {"egress": {"default": "deny",
                                    "allow": [{"to": [{"cidr": "192.0.2.0/24"}]}]}}}"#,
@@ -874,7 +826,7 @@ fn a_parsed_directional_request_drops_the_dns_exemption() {
 #[test]
 fn a_parsed_v08_request_without_a_network_section_drops_the_dns_exemption() {
     let policy = policy_from_json(
-        r#"{"version": "0.8.0-alpha",
+        r#"{"version": "0.9.0-alpha",
             "process": {"commandLine": "echo hi"}}"#,
     );
 

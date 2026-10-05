@@ -7,11 +7,8 @@
 # `process.inheritDefaultEnv`, `telemetry.enabled` and the
 # `containment: "process"` intent alias.
 #
-# The key assertion is the `inheritDefaultEnv` version gate. docs/schema.md
-# (updated 2026-09-10) marks the field `0.9.0-alpha+`, and the stable surface
-# uses deny_unknown_fields, so at 0.8 it must be REJECTED. A silently dropped
-# field is the worst outcome for a caller: the config looks accepted and the
-# environment is wrong. Phase 13b pins both sides.
+# Phase 13b checks both the supported v0.9 field and its behavior. A retired
+# v0.8 request must fail at version dispatch, before any workload starts.
 #
 # Runs standalone, or under run_processcontainer_all_tests.ps1.
 
@@ -77,13 +74,11 @@ function Phase-Lifecycle {
 }
 
 
-# Phase 13b -- process.inheritDefaultEnv and the 0.9 version gate
+# Phase 13b -- process.inheritDefaultEnv and the supported contract floor
 #
-# Documented as 0.9.0-alpha+. The stable surface is closed, so on 0.8 the
-# field must be rejected outright. The pair of assertions matters more than
-# either alone: "rejected at 0.8" is only meaningful next to "accepted at
-# 0.9", which proves the rejection is the version gate and not a typo in the
-# fixture.
+# Supported on 0.9.0-alpha and later. Retired versions fail before the
+# parser inspects individual fields; the positive cases below check that
+# the supported field is accepted and layers the environment correctly.
 function Phase-InheritDefaultEnv {
     Section 'Phase 13b: process.inheritDefaultEnv (0.9.0-alpha+)'
 
@@ -97,15 +92,14 @@ function Phase-InheritDefaultEnv {
     $log = Join-Path $ScratchRoot 'logs\lc-inherit-0800.log'
     $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log -TimeoutSec 30
     $logText = Read-Log $log
-    # The config echo contains the field name verbatim, so match the runner's
-    # own output only -- otherwise "the error names the field" is satisfied by
-    # the config being read back and proves nothing.
+    # The old contract is refused at version dispatch, before field parsing.
+    # A workload failure or a config echo is not evidence of this rejection.
     $all = Remove-ConfigEcho "$logText`n$($r.Stderr)"
-    $namedField = [bool]($all -match '(?i)inheritDefaultEnv')
-    Record-Result -Phase 'P13b' -Name 'inheritDefaultEnv is rejected on schema 0.8.0-alpha' `
-        -Pass ((Test-WasRejected -Run $r -Log $logText) -and $namedField) `
-        -Detail ("exit=$($r.ExitCode); errorNamesTheField=$namedField; " +
-                 'documented 0.9.0-alpha+, and the stable surface is closed, so 0.8 must reject rather than ignore')
+    $unsupported = [bool]($all -match 'Unsupported contract version')
+    $ran = [bool]("$($r.Stdout)" -match 'MINE=\[yes\]')
+    Record-Result -Phase 'P13b' -Name 'retired schema 0.8 is rejected before inheritDefaultEnv runs' `
+        -Pass ((Test-WasRejected -Run $r -Log $logText) -and $unsupported -and (-not $ran)) `
+        -Detail "exit=$($r.ExitCode); unsupportedVersion=$unsupported; workloadRan=$ran"
 
     $versionCases = @(
         @{ Name = 'inheritDefaultEnv=true is accepted on schema 0.9.0-alpha';  Inherit = $true }
@@ -238,38 +232,31 @@ function Phase-IntentTelemetryVersion {
                      'acceptance only -- the kill-switch can subtract from consent but never grant it')
     }
 
-    # docs/schema.md marks telemetry as 0.9.0-alpha+, so emitting it on an
-    # earlier version must be refused outright. Silently ignoring it would be
-    # the damaging outcome: a caller asking for telemetry on 0.8 would believe
-    # the request took effect.
-    #
-    # The error must name the field. A run that failed for an unrelated reason
-    # would otherwise satisfy a bare "was rejected" check and prove nothing.
-    # 0.8's closed contract has no `telemetry` member, so the refusal arrives as
-    # an unknown-field parse error rather than a bespoke version-gate message;
-    # both spellings attribute the refusal to the field and both are accepted.
+    # A retired version must fail at dispatch before telemetry policy or the
+    # workload runs; the positive v0.9 cases above cover the supported field.
     $cfg = New-Config -Name 'lc-telemetry-0800' -CommandLine $Script:LifecycleCmd -ReadWrite @($rw) `
         -TelemetryEnabled $true -SchemaVersion '0.8.0-alpha'
     $log = Join-Path $ScratchRoot 'logs\lc-telemetry-0800.log'
     $r = Invoke-Wxc -Wxc $WxcDebug -ConfigPath $cfg -LogPath $log -TimeoutSec 30
     $logText = Read-Log $log
-    $gated = [bool]((Remove-ConfigEcho "$logText`n$($r.Stderr)") -match
-        '(?i)(unknown field .{0,2}telemetry|telemetry.{0,60}schema version)')
-    Record-Result -Phase 'P13d' -Name 'telemetry is rejected on schema 0.8.0-alpha (0.9.0-alpha+ only)' `
-        -Pass ((Test-WasRejected -Run $r -Log $logText) -and $gated) `
-        -Detail "exit=$($r.ExitCode); errorNamesTelemetry=$gated"
+    $unsupported = [bool]((Remove-ConfigEcho "$logText`n$($r.Stderr)") -match
+        'Unsupported contract version')
+    $ran = [bool]("$($r.Stdout)" -match $Script:LifecycleMarker)
+    Record-Result -Phase 'P13d' -Name 'retired schema 0.8 is rejected before telemetry runs' `
+        -Pass ((Test-WasRejected -Run $r -Log $logText) -and $unsupported -and (-not $ran)) `
+        -Detail "exit=$($r.ExitCode); unsupportedVersion=$unsupported; workloadRan=$ran"
 
     # Every exact registered version in schemas/schema-version.json must be
     # accepted. Versions outside that closed set must be rejected, including
     # neighbors below the minimum and above the development contract.
     $versions = @(
-        @{ V = '0.6.0-alpha'; Accept = $true;  Why = 'min supported' }
-        @{ V = '0.7.0-alpha'; Accept = $true;  Why = 'registered stable' }
-        @{ V = '0.8.0-alpha'; Accept = $true;  Why = 'registered stable' }
-        @{ V = '0.9.0-alpha'; Accept = $true;  Why = 'registered stable' }
-        @{ V = '0.10.0-alpha'; Accept = $false; Why = 'retired development contract' }
+        @{ V = '0.9.0-alpha'; Accept = $true;  Why = 'min supported' }
         @{ V = '1.0.0';       Accept = $true;  Why = 'latest stable' }
         @{ V = '1.1.0-alpha'; Accept = $true;  Why = 'development contract' }
+        @{ V = '0.6.0-alpha'; Accept = $false; Why = 'retired contract' }
+        @{ V = '0.7.0-alpha'; Accept = $false; Why = 'retired contract' }
+        @{ V = '0.8.0-alpha'; Accept = $false; Why = 'retired contract' }
+        @{ V = '0.10.0-alpha'; Accept = $false; Why = 'unregistered contract' }
         @{ V = '0.5.0-alpha'; Accept = $false; Why = 'below min supported' }
         @{ V = '1.2.0-alpha'; Accept = $false; Why = 'above development contract' }
         @{ V = 'not-a-version'; Accept = $false; Why = 'unparseable' }

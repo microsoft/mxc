@@ -28,6 +28,14 @@ Entries below describe historical release APIs, not the current V1 surface.
 
 ## [0.9.0]
 
+### Changed (breaking)
+
+- Raised the raw exact-contract support floor to `0.9.0-alpha`; raw configs
+  declaring earlier published alpha contracts are now rejected as unsupported.
+- Removed `SandboxSpawnOptions.allowTestingFeatures` and its CLI forwarding.
+  The `network.proxy.builtinTestServer` wire form it enabled was retired;
+  use a caller-managed `runtimeConfig.networkProxy` with directional policy.
+
 ### Added
 
 - Stable IsolationSession and WSLC one-shot and state-aware backends under the

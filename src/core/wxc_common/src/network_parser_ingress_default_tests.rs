@@ -39,7 +39,6 @@ fn parse(ingress: Option<wire::NetworkIngress>, network_present: bool) -> Networ
     let mut policy = ContainerPolicy::default();
     parse_network_policy(
         &mut policy,
-        NetworkEnforcementCompatibility::Strict,
         sections(ingress, network_present),
         &ContainmentBackend::Lxc,
     )

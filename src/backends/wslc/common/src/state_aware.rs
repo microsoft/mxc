@@ -1156,14 +1156,6 @@ mod tests {
                 scope: EnvScope::Merge,
                 entries: &[("FOO", "bar")],
             },
-            Case {
-                label: "a legacy contract keeps the image environment",
-                compatibility: DefaultEnvCompatibility::LegacyCompatible,
-                env: Some(vec!["FOO=bar"]),
-                inherit_default_env: false,
-                scope: EnvScope::Merge,
-                entries: &[("FOO", "bar")],
-            },
         ];
 
         for case in cases {
