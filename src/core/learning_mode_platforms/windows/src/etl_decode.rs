@@ -1072,7 +1072,7 @@ mod tests {
     use super::*;
     use learning_mode_core::{
         AccessType, DenialDetails, NetworkDenialDetails, NetworkDenialReason, NetworkDenialSource,
-        NetworkDirection, NetworkPolicyModel, NetworkPolicyRuleKind, ResourceType,
+        NetworkDirection, ResourceType,
     };
 
     const SCOPED_PID: u32 = 42;
@@ -1703,7 +1703,7 @@ mod tests {
             ("EffectiveDecision", "1"),
             ("OriginalTimestamp", "500"),
             ("FilterId", "9001"),
-            ("Direction", "0x3901"),
+            ("Direction", "0"),
         ];
         let app_isolation = common
             .into_iter()
@@ -1713,10 +1713,6 @@ mod tests {
                 ("FieldFlags", "64"),
                 ("SublayerGuid", "{FFE221C3-92A8-4564-A59F-DAFB70756020}"),
                 ("CapabilityId", "0"),
-                ("TagVersion", "0"),
-                ("PolicyModel", "0"),
-                ("RuleKind", "0"),
-                ("RuleOrdinal", "0"),
             ])
             .collect::<Vec<_>>();
         let tessera = common
@@ -1724,17 +1720,13 @@ mod tests {
             .chain([
                 ("SourceDomain", "2"),
                 ("Reason", "100"),
-                ("FieldFlags", "179"),
+                ("FieldFlags", "51"),
                 ("ProviderGuid", "{2F8C6D14-3B7E-4A59-9C08-1D4E7A6B2F30}"),
                 ("SublayerGuid", "{7B1E9A2C-9D4F-4C8A-B321-5E6D2F8A1C44}"),
                 ("ApplicationId", r"\Device\HarddiskVolume3\app.exe"),
                 ("Protocol", "6"),
                 ("RemoteAddress", "203.0.113.10"),
                 ("RemotePort", "443"),
-                ("TagVersion", "1"),
-                ("PolicyModel", "1"),
-                ("RuleKind", "1"),
-                ("RuleOrdinal", "0"),
             ])
             .collect::<Vec<_>>();
         let explicit_deny = common
@@ -1742,13 +1734,9 @@ mod tests {
             .chain([
                 ("SourceDomain", "2"),
                 ("Reason", "101"),
-                ("FieldFlags", "128"),
+                ("FieldFlags", "0"),
                 ("ProviderGuid", "{2F8C6D14-3B7E-4A59-9C08-1D4E7A6B2F30}"),
                 ("SublayerGuid", "{7B1E9A2C-9D4F-4C8A-B321-5E6D2F8A1C44}"),
-                ("TagVersion", "1"),
-                ("PolicyModel", "1"),
-                ("RuleKind", "2"),
-                ("RuleOrdinal", "4"),
             ])
             .collect::<Vec<_>>();
 
@@ -1778,10 +1766,6 @@ mod tests {
                 remote_port: Some(443),
                 application_id: Some(r"\Device\HarddiskVolume3\app.exe".to_string()),
                 filter_id: 9001,
-                policy_tag_version: 1,
-                policy_model: NetworkPolicyModel::Direct,
-                policy_rule_kind: NetworkPolicyRuleKind::DefaultBaseline,
-                policy_rule_ordinal: Some(0),
             }))
         );
         assert!(analysis.verbose_logging.signatures.iter().any(|aggregate| {
@@ -1801,36 +1785,24 @@ mod tests {
             ("EffectiveDecision", "1"),
             ("OriginalTimestamp", "500"),
             ("FilterId", "9001"),
-            ("Direction", "0x3901"),
+            ("Direction", "0"),
             ("ProviderGuid", "{2F8C6D14-3B7E-4A59-9C08-1D4E7A6B2F30}"),
             ("SublayerGuid", "{7B1E9A2C-9D4F-4C8A-B321-5E6D2F8A1C44}"),
             ("RemoteAddress", "203.0.113.10"),
         ];
         let unknown_reason = common
             .into_iter()
-            .chain([
-                ("Reason", "65535"),
-                ("FieldFlags", "16"),
-                ("TagVersion", "0"),
-                ("PolicyModel", "0"),
-                ("RuleKind", "0"),
-                ("RuleOrdinal", "0"),
-            ])
+            .chain([("Reason", "65535"), ("FieldFlags", "16")])
             .collect::<Vec<_>>();
-        let partial_attribution = common
+        let mut malformed = common
             .into_iter()
-            .chain([
-                ("Reason", "100"),
-                ("FieldFlags", "144"),
-                ("TagVersion", "1"),
-                ("PolicyModel", "1"),
-                ("RuleOrdinal", "0"),
-            ])
+            .chain([("Reason", "100"), ("FieldFlags", "16")])
             .collect::<Vec<_>>();
+        malformed.retain(|(name, _)| *name != "Direction");
 
         let analysis = resources_from_events(&[
             network_event(777, 600, &unknown_reason),
-            network_event(777, 601, &partial_attribution),
+            network_event(777, 601, &malformed),
         ]);
 
         assert!(analysis.denials.is_empty());
@@ -1864,17 +1836,13 @@ mod tests {
                 ("NormalDecision", "1"),
                 ("EffectiveDecision", "1"),
                 ("Reason", "100"),
-                ("FieldFlags", "144"),
+                ("FieldFlags", "16"),
                 ("OriginalTimestamp", "150"),
                 ("FilterId", "9001"),
-                ("Direction", "0x3901"),
+                ("Direction", "0"),
                 ("ProviderGuid", "{2F8C6D14-3B7E-4A59-9C08-1D4E7A6B2F30}"),
                 ("SublayerGuid", "{7B1E9A2C-9D4F-4C8A-B321-5E6D2F8A1C44}"),
                 ("RemoteAddress", "203.0.113.10"),
-                ("TagVersion", "1"),
-                ("PolicyModel", "1"),
-                ("RuleKind", "1"),
-                ("RuleOrdinal", "0"),
             ],
         );
         let lifetimes = [ProcessLifetime {

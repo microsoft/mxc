@@ -3170,6 +3170,60 @@ mod tests {
     }
 
     #[test]
+    fn capture_denials_directional_default_deny_reaches_tessera_network_policy() {
+        let mut request = ExecutionRequest::default();
+        request.policy.capture_denials = Some(Default::default());
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy {
+            default: NetworkAction::Deny,
+            ..Default::default()
+        });
+
+        let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
+        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+        let egress = spec
+            .network_policy()
+            .and_then(|policy| policy.egress())
+            .expect("PSEC must carry the Tessera egress policy");
+
+        assert_eq!(spec.capabilities(), Some("internetClient"));
+        assert_eq!(egress.default_action(), psec_layout::FilterAction::deny);
+    }
+
+    #[test]
+    fn capture_denials_proxy_preserves_proxy_capability_posture() {
+        let mut request = ExecutionRequest::default();
+        request.policy.capture_denials = Some(Default::default());
+        request.policy.runtime_network_proxy_specified = true;
+        request.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+            builtin_test_server: false,
+        };
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy {
+            default: NetworkAction::Deny,
+            ..Default::default()
+        });
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: NetworkAction::Allow,
+            host_loopback: NetworkAction::Allow,
+        });
+
+        let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
+        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+
+        assert_eq!(
+            spec.capabilities(),
+            Some("privateNetworkClientServer,networkLoopback")
+        );
+        assert!(spec
+            .capabilities()
+            .is_none_or(|capabilities| !capabilities.contains("internetClient")));
+        assert!(spec
+            .network_policy()
+            .and_then(|network| network.proxy())
+            .is_some());
+    }
+
+    #[test]
     fn build_process_security_environment_spec_ignores_empty_capability() {
         let mut request = ExecutionRequest::default();
         request.policy.capabilities = vec![String::new()];

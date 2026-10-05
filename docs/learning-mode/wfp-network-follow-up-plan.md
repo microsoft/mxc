@@ -21,52 +21,33 @@ VM validation used an outbound TCP connection to `1.1.1.1:445`. The managed
 ETL contained one `NetworkDecisionV1` event with the expected package, endpoint,
 protocol, direction, Tessera provider, and Tessera sublayer.
 
-## Completed OS.2020 contract: Tessera filter tags
+## Completed OS.2020 contract: Tessera denial reasons
 
-The ProcessModel/Tessera network-filtering code sets
-`FWPM_FILTER0.rawContext` when each filter is installed:
-
-```text
-bits 63-48: magic        0x4D58
-bits 47-40: version      1
-bits 39-32: policy model
-bits 31-24: rule kind
-bits 23-0:  rule ordinal
-```
-
-Policy models:
+ProcessModel stores a two-byte `WfpFilterReason` header followed by the exact
+user SID in `FWPM_FILTER0.providerData` when
+`Feature_Tessera_WfpPolicyTagging` is enabled. AppInfo validates that private
+format and copies only a valid non-`None` reason into the existing
+`NetworkDecisionV1.Reason` field:
 
 ```text
-1 = direct
-2 = proxy
+0   = no actionable denial reason
+100 = direct default deny
+101 = explicit deny rule
+102 = allow-rule exclusion
+103 = proxy-containment baseline
 ```
 
-Rule kinds:
+Malformed, unsupported, disabled-feature, and `None` metadata leave the public
+reason at `65535` (unknown/unavailable). MXC does not parse WFP provider data.
 
-```text
-1 = default-deny baseline
-2 = explicit deny
-3 = allow-rule exclusion
-4 = proxy-containment baseline
-```
-
-AppInfo appends `TagVersion`, `PolicyModel`, `RuleKind`, and `RuleOrdinal` to
-`NetworkDecisionV1`, producing a 28-property payload with event ID and version
-`1`. All four properties are required. `FieldFlags & 0x80` declares their
-values semantically valid; MXC ignores emitted zeroes when the bit is clear and
-does not reject future trailing properties.
-
-Reasons `100`-`103` map to the four version-1 model/rule-kind combinations
-above. `RuleOrdinal` uses the low 24 bits: `0x000000`-`0x00fffffe` identify the
-zero-based source rule, and `0x00ffffff` means unavailable. Missing appended
-properties are malformed payloads. Unsupported or mismatched attribution never
-discards the base network event; MXC retains it in verbose diagnostics as
-`unsupportedNetworkPolicyAttribution`. Reason `65535` remains
-`unknownNetworkReason`.
+The unshipped detailed attribution fields were removed. `NetworkDecisionV1`
+retains its original event ID/version `1` and 24-field shape, ending with
+`CapabilityId`. MXC maps reasons `100`-`103` directly and does not require
+`TagVersion`, `PolicyModel`, `RuleKind`, or `RuleOrdinal`.
 
 ## Remaining MXC work: schema 0.8 policy regeneration
 
-Once a tagged direct default-deny event becomes a canonical network denial,
+Once a direct default-deny event becomes a canonical network denial,
 MXC can report it through `captureDenials`. The compatibility adjusted-config
 generator does not yet consume it:
 
@@ -97,8 +78,8 @@ legacy file/capability event format:
 
 For a direct default-deny TCP connection to `1.1.1.1:445`:
 
-1. The managed ETL contains `Reason=100`, `TagVersion=1`, `PolicyModel=1`, and
-   `RuleKind=1`, with `FieldFlags & 0x80` set.
+1. The managed ETL contains `Reason=100` in the original 24-field
+   `NetworkDecisionV1` payload.
 2. MXC emits a canonical network denial for `tcp://1.1.1.1:445`.
 3. Policy regeneration adds an egress allow selector equivalent to:
 

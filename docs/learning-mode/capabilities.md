@@ -244,33 +244,23 @@ MXC currently recognizes two normalized source domains:
 - App Isolation missing-capability decisions map capability IDs `0`, `1`, and
   `2` to `internetClient`, `internetClientServer`, and
   `privateNetworkClientServer`.
-- Tessera direct-network default-deny decisions carrying the version-1
-  ProcessModel filter tag map a complete remote endpoint to a `network`
-  resource such as `tcp://203.0.113.10:443` or
+- Tessera direct-network default-deny decisions map a complete remote endpoint
+  to a `network` resource such as `tcp://203.0.113.10:443` or
   `udp://[2001:db8::1]:53`.
 
-`NetworkDecisionV1` uses event ID and event version `1` with 28 properties.
-`TagVersion`, `PolicyModel`, `RuleKind`, and `RuleOrdinal` follow
-`CapabilityId`. MXC requires those four properties but does not reject future
-trailing properties.
+`NetworkDecisionV1` retains its original 24-property event ID/version `1`
+schema. Tessera attribution is carried only in the existing `Reason` field:
 
-`FieldFlags & 0x80` declares all four appended attribution properties valid.
-When that bit is clear, MXC ignores their physically emitted zero values. When
-it is set, all four properties must be present and form one of these version-1
-combinations:
+| Reason | Meaning |
+|---:|---|
+| `100` | Direct default deny |
+| `101` | Authored explicit deny |
+| `102` | Exclusion from an allow rule |
+| `103` | Proxy-containment baseline |
 
-| Reason | Policy model | Rule kind | Meaning |
-|---|---:|---:|---|
-| `100` | `1` (direct) | `1` (default baseline) | Direct default deny |
-| `101` | `1` (direct) | `2` (explicit deny) | Authored explicit deny |
-| `102` | `1` (direct) | `3` (allow exclusion) | Exclusion from an allow rule |
-| `103` | `2` (proxy) | `4` (proxy-containment baseline) | Proxy containment |
-
-`RuleOrdinal` is zero-based in the range `0x000000`-`0x00fffffe`;
-`0x00ffffff` means unavailable. Actionable records expose the Rust fields
-`policy_tag_version`, `policy_model`, `policy_rule_kind`, and
-`policy_rule_ordinal` (camel-cased in JSON). The unavailable ordinal is omitted
-rather than represented as the sentinel.
+The internal WFP provider-data format used to produce the reason is not part of
+the ETW contract. MXC does not parse provider data or require additional policy
+model, rule-kind, or rule-ordinal fields.
 
 Tessera explicit denies, allow exclusions, and proxy-containment decisions are
 intentional authored policy rather than missing grants. They are retained in
@@ -278,10 +268,7 @@ the verbose logging artifact but are not emitted as policy recommendations;
 recommending a direct allow for proxy containment could bypass the proxy.
 Malformed events, unknown reasons, identity mismatches, and incomplete
 endpoints are also verbose-only.
-Reason `65535` remains `unknownNetworkReason`. Missing appended properties are
-a malformed payload. A stable reason `100`-`103` with unsupported or mismatched
-attribution is retained as `unsupportedNetworkPolicyAttribution`; the base
-network event and sanitized properties remain in verbose diagnostics.
+Reason `65535` remains `unknownNetworkReason`.
 
 Actionable network records include an additive `details` object with
 `kind: "network"` and the normalized source, reason, direction, protocol,

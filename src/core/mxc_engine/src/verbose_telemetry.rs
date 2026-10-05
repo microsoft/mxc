@@ -159,6 +159,9 @@ fn canonical_provider_guid(provider: VerboseLoggingProvider) -> &'static str {
         VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode => {
             "{811A1DDB-2E69-5F25-ADC0-4B186170E760}"
         }
+        VerboseLoggingProvider::LearningModeNetworkDecision => {
+            "{71237669-21C3-4101-BD2F-FF38945D725A}"
+        }
     }
 }
 
@@ -369,5 +372,13 @@ mod tests {
             canonical_provider_guid(VerboseLoggingProvider::KernelGeneral)
         );
         assert!(projected.signatures[0].signature.properties.is_empty());
+    }
+
+    #[test]
+    fn network_provider_uses_the_canonical_guid() {
+        assert_eq!(
+            canonical_provider_guid(VerboseLoggingProvider::LearningModeNetworkDecision),
+            "{71237669-21C3-4101-BD2F-FF38945D725A}"
+        );
     }
 }
