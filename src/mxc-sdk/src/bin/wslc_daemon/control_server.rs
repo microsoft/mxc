@@ -48,8 +48,8 @@ use mxc_sdk::wslc_common::daemon_protocol::{
 
 use crate::session_manager::{ExecStream, SessionHandle, WorkerError};
 
-/// The WSLc SDK worker is apartment-affine and executes one command at a time.
-/// Refuse additional execs instead of admitting a queue that cannot run.
+/// Exec streams admitted at once. A further request is refused rather than
+/// queued behind a workload of unknown duration.
 const MAX_CONCURRENT_EXECS: usize = 1;
 
 /// Capacity reserved for cancellation and lifecycle requests while all exec
