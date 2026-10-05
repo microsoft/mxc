@@ -4,11 +4,8 @@
 //! Build-time helpers for staging NanVix micro-VM binaries next to the
 //! consuming executable.
 //!
-//! This crate is **build-only**: it is consumed exclusively as a
-//! `[build-dependencies]` entry by the `nanvix_binaries`, `wxc`, and `lxc`
-//! build scripts and is never linked into the shipping runtime binary. The
-//! file-staging logic lives here (rather than in the runtime `nanvix_common`
-//! crate) so it adds no weight to mainline code.
+//! This module is **build-only**: `mxc-sdk/build.rs` uses it to stage artifacts
+//! and it is never linked into the shipping runtime binary.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -212,14 +209,11 @@ pub fn emit_rerun_for_copied_artifacts(src_dir: &Path) {
 /// Stage NanVix artifacts from `nanvix_bin_dir` next to the executable being
 /// built and emit the appropriate `cargo:rerun-*` triggers.
 ///
-/// Intended to be called from a consumer (`wxc` / `lxc`) build script. The
-/// target directory is derived from `OUT_DIR` (the binary lands in
-/// `target/<profile>/`), and snapshot trust is read from the
-/// `DEP_NANVIX_BINARIES_PREFETCHED` link var the `nanvix_binaries` build script
-/// exports (defaulting to trusted when absent). Panics on a snapshot integrity
-/// failure — acceptable in the build path, where leaving an unverified
-/// warm-start image next to the executable must abort the build.
-pub fn stage_artifacts_next_to_exe(nanvix_bin_dir: &Path) {
+/// The target directory is derived from `OUT_DIR` (the binary lands in
+/// `target/<profile>/`). Panics on a snapshot integrity failure — acceptable
+/// in the build path, where leaving an unverified warm-start image next to the
+/// executable must abort the build.
+pub fn stage_artifacts_next_to_exe(nanvix_bin_dir: &Path, trust_snapshots: bool) {
     // Cargo puts the output binary in OUT_DIR/../../.. (target/<profile>/).
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
     let target_dir = Path::new(&out_dir)
@@ -228,22 +222,12 @@ pub fn stage_artifacts_next_to_exe(nanvix_bin_dir: &Path) {
         .and_then(|p| p.parent())
         .expect("could not determine target dir from OUT_DIR");
 
-    // WHP snapshots from a prefetched (externally supplied) directory are not
-    // covered by checksums.json, so they must not be trusted/copied. Default to
-    // trusting (online build) when the flag is absent.
-    let trust_snapshots = std::env::var("DEP_NANVIX_BINARIES_PREFETCHED")
-        .map(|v| v != "1")
-        .unwrap_or(true);
-
     copy_artifacts_to_target(nanvix_bin_dir, target_dir, trust_snapshots)
         .expect("nanvix: failed to stage artifacts next to the executable");
 
-    // Re-run when the source path changes (detected via nanvix_binaries
-    // rebuild) and when the source artifacts themselves change in place (e.g.
-    // an offline NANVIX_BIN prefetch dir updated at the same path).
+    // Re-run when source artifacts change in place, such as an offline
+    // NANVIX_BIN prefetch directory updated at the same path.
     emit_rerun_for_copied_artifacts(nanvix_bin_dir);
-    println!("cargo:rerun-if-env-changed=DEP_NANVIX_BINARIES_BIN_DIR");
-    println!("cargo:rerun-if-env-changed=DEP_NANVIX_BINARIES_PREFETCHED");
 }
 
 #[cfg(test)]

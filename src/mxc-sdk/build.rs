@@ -28,7 +28,9 @@ mod nanvix_common;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     build_isolation_session_bindings::run();
     build_mxc_telemetry::run();
-    build_nanvix_binaries::run();
+    if let Some((bin_dir, use_prefetched_binaries)) = build_nanvix_binaries::run() {
+        nanvix_build_common::stage_artifacts_next_to_exe(&bin_dir, !use_prefetched_binaries);
+    }
     build_wslc_common::run();
     build_wxc_common::run()?;
     build_mxc_build_common::embed_version_info_for_binary(

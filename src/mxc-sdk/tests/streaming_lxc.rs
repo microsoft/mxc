@@ -141,16 +141,17 @@ fn lxc_request(command: &str, name: &str, timeout_ms: u32) -> mxc_sdk::v1::Conta
 /// selects Windows AppContainer capability SIDs; LXC has no mechanism for that
 /// and refuses the request before it reaches a container.
 fn isolated_network() -> NetworkPolicy {
-    let mut egress = NetworkEgressPolicy::default();
-    egress.default = Some(NetworkAction::Deny);
-    let mut ingress = NetworkIngressPolicy::default();
-    ingress.default = Some(NetworkAction::Deny);
-    ingress.host_loopback = Some(NetworkAction::Deny);
-
-    let mut network = NetworkPolicy::default();
-    network.egress = Some(egress);
-    network.ingress = Some(ingress);
-    network
+    NetworkPolicy {
+        egress: Some(NetworkEgressPolicy {
+            default: Some(NetworkAction::Deny),
+            ..Default::default()
+        }),
+        ingress: Some(NetworkIngressPolicy {
+            default: Some(NetworkAction::Deny),
+            host_loopback: Some(NetworkAction::Deny),
+        }),
+        ..Default::default()
+    }
 }
 
 fn lxc_request_with_network(
@@ -549,10 +550,13 @@ fn streaming_lxc_tears_down_a_networked_container() {
 
     // Outbound access puts the container on the bridge and installs egress
     // chains, so this is the case whose teardown has firewall rules to remove.
-    let mut egress = NetworkEgressPolicy::default();
-    egress.default = Some(NetworkAction::Allow);
-    let mut network = NetworkPolicy::default();
-    network.egress = Some(egress);
+    let network = NetworkPolicy {
+        egress: Some(NetworkEgressPolicy {
+            default: Some(NetworkAction::Allow),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
     let mut proc = spawn(
         lxc_request_with_network("printf 'NETWORKED\\n'", &name, LIVE_TIMEOUT_MS, network),
         Default::default(),

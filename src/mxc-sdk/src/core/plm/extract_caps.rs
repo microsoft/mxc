@@ -507,10 +507,12 @@ impl CapabilityIndex {
         }
     }
 
+    #[cfg(any(target_os = "windows", test))]
     fn insert_package_sid(&mut self, sid: Vec<u8>, name: &'static str) {
         self.by_sid.insert(sid, (name, false));
     }
 
+    #[cfg(any(target_os = "windows", test))]
     fn insert_group_sid(&mut self, sid: Vec<u8>, name: &'static str) {
         // App-package SID wins on conflict (it's the canonical form);
         // only insert the group SID when no entry exists.
@@ -540,7 +542,7 @@ impl CapabilityIndex {
     /// matched via group SID)` triples. Lets the Windows FFI tests
     /// validate what the OS actually handed back without reintroducing
     /// an intermediate table on the production path.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "windows"))]
     pub(crate) fn iter_sids(&self) -> impl Iterator<Item = (&[u8], &'static str, bool)> {
         self.by_sid
             .iter()

@@ -73,11 +73,14 @@ use std::ptr;
 use std::sync::OnceLock;
 
 use mxc_sdk::__ffi::run_json;
+#[cfg(target_os = "windows")]
+use mxc_sdk::mxc_engine;
 use mxc_sdk::v1::{available_backends, platform_support, Error, ErrorCode};
 #[cfg(target_os = "windows")]
 use mxc_sdk::v1::{probe, ProbeOutput};
 use mxc_sdk::v1::{ExecutionResult, WaitResult};
-use mxc_sdk::{mxc_engine, wxc_common};
+#[cfg(any(target_os = "windows", test))]
+use mxc_sdk::wxc_common;
 
 mod error_detail;
 mod pty;

@@ -1250,7 +1250,7 @@ fn main() {
             // process exit. It owns the COM init contract documented on
             // `init_and_load_sdk`.
             let result = unsafe {
-                wslc_common::image::setup_pull_image(
+                mxc_sdk::wslc_common::image::setup_pull_image(
                     image,
                     cli.storage_path.as_deref(),
                     &mut logger,

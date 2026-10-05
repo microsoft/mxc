@@ -3,9 +3,9 @@
 
 //! Shared constants and configuration types for NanVix micro-VM binaries.
 //!
-//! This crate is the single source of truth for binary filenames, release
-//! configuration, and checksum data. It is consumed as a `[build-dependency]`
-//! by `nanvix_binaries` (download) and `wxc` (copy to output dir).
+//! This module is the single source of truth for binary filenames, release
+//! configuration, and checksum data used by the consolidated `mxc-sdk` build
+//! script and runtime.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -19,6 +19,10 @@ pub const REQUIRED_BINARIES: &[&str] = &["nanvixd.exe", "nanvix_rootfs.img", "py
 /// All required NanVix binary filenames (flat, next to lxc-exec) — Linux.
 #[cfg(target_os = "linux")]
 pub const REQUIRED_BINARIES: &[&str] = &["nanvixd.elf", "nanvix_rootfs.img", "python3.initrd"];
+
+/// No NanVix runtime binaries are staged for unsupported targets.
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+pub const REQUIRED_BINARIES: &[&str] = &[];
 
 /// NanVix daemon binary name (platform-conditional).
 #[cfg(target_os = "windows")]

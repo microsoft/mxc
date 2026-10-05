@@ -26,8 +26,10 @@ const WATCHDOG: Duration = Duration::from_secs(90);
 
 static STEP: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 /// Lets the watchdog tear down a sandbox the wedged main thread cannot reach.
+#[cfg(all(target_os = "windows", feature = "isolation_session"))]
 static SANDBOX: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
+#[cfg(all(target_os = "windows", feature = "isolation_session"))]
 fn checkpoint(name: &str) {
     *STEP.lock().unwrap() = name.to_string();
     let now = std::time::SystemTime::now()

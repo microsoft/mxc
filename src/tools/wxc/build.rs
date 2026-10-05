@@ -1,33 +1,16 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Build script for wxc — embeds Windows VersionInfo and copies NanVix binaries.
+//! Build script for wxc — embeds Windows VersionInfo.
 
 #[path = "../../mxc-sdk/build/build_mxc_build_common.rs"]
 mod mxc_build_common;
-#[cfg(feature = "microvm")]
-#[allow(
-    dead_code,
-    reason = "the executor build uses only the artifact-staging subset of this shared module"
-)]
-#[path = "../../mxc-sdk/build/build_nanvix_build_common.rs"]
-mod nanvix_build_common;
-#[cfg(feature = "microvm")]
-#[allow(
-    dead_code,
-    reason = "the executor build uses only the constants required by artifact staging"
-)]
-#[path = "../../mxc-sdk/src/backends/nanvix/common/mod.rs"]
-mod nanvix_common;
 
 fn main() {
     mxc_build_common::embed_version_info("MXC sandbox executor", "wxc-exec.exe");
 
     #[cfg(windows)]
     check_test_prerequisites();
-
-    #[cfg(all(windows, feature = "microvm"))]
-    copy_nanvix_binaries();
 
     // Delay-load winhvplatform.dll so WHP-less hosts don't crash before main().
     // CARGO_CFG_TARGET_* (not #[cfg]) because build.rs cfg gates are host, not target.
@@ -94,22 +77,4 @@ fn check_test_prerequisites() {
             "cargo:warning=Fix: Run scripts\\setup-test-prereqs.ps1 (elevated) or install PowerShell 7"
         );
     }
-}
-
-#[cfg(all(windows, feature = "microvm"))]
-fn copy_nanvix_binaries() {
-    use std::path::Path;
-
-    let nanvix_bin_dir = match std::env::var("DEP_NANVIX_BINARIES_BIN_DIR") {
-        Ok(dir) => dir,
-        Err(_) => {
-            eprintln!("wxc build.rs: DEP_NANVIX_BINARIES_BIN_DIR not set, skipping copy");
-            return;
-        }
-    };
-
-    // Stage the artifacts next to the executable and emit rerun triggers. All
-    // of the staging logic (target-dir derivation, snapshot trust, copy/purge,
-    // rerun emission) lives in the build-only `nanvix_build_common` crate.
-    nanvix_build_common::stage_artifacts_next_to_exe(Path::new(&nanvix_bin_dir));
 }

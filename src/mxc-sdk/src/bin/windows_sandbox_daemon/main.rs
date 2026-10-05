@@ -1,10 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Host-side holder for one state-aware Windows Sandbox VM.
-//!
-//! Owns the VM, guest connection, daemon record, and IPC server from `start`
-//! until explicit `stop`/`deprovision`.
+// Host-side holder for one state-aware Windows Sandbox VM.
+//
+// Owns the VM, guest connection, daemon record, and IPC server from `start`
+// until explicit `stop`/`deprovision`.
 
 mod control_server;
 

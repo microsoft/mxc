@@ -149,21 +149,24 @@ pub use backend_modules::isolation_session::common as isolation_session_common;
 #[doc(hidden)]
 pub use backend_modules::lxc::common as lxc_common;
 #[doc(hidden)]
-#[cfg(feature = "microvm")]
+#[cfg(all(feature = "microvm", any(target_os = "windows", target_os = "linux")))]
 pub use backend_modules::nanvix::binaries as nanvix_binaries;
 #[doc(hidden)]
-#[cfg(feature = "microvm")]
+#[cfg(all(feature = "microvm", any(target_os = "windows", target_os = "linux")))]
 pub use backend_modules::nanvix::common as nanvix_common;
 #[doc(hidden)]
-#[cfg(feature = "microvm")]
+#[cfg(all(feature = "microvm", any(target_os = "windows", target_os = "linux")))]
 pub use backend_modules::nanvix::runner as nanvix_runner;
 #[doc(hidden)]
+#[cfg(target_os = "windows")]
 pub use backend_modules::process_container::common as process_container_common;
 #[doc(hidden)]
 pub use backend_modules::seatbelt::common as seatbelt_common;
 #[doc(hidden)]
+#[cfg(target_os = "windows")]
 pub use backend_modules::windows_sandbox::common as windows_sandbox_common;
 #[doc(hidden)]
+#[cfg(target_os = "windows")]
 pub use backend_modules::windows_sandbox::lifecycle as windows_sandbox_lifecycle;
 #[doc(hidden)]
 #[cfg(all(target_os = "windows", feature = "wslc"))]

@@ -42,16 +42,15 @@ jobs:
       # unix_test_proxy and mxc_ffi ship alongside mxc-exec-mac.
       - name: Build
         run: cargo build --locked --release --target aarch64-apple-darwin
-             -p mxc_darwin -p seatbelt_common -p wxc_common -p wxc_e2e_tests
-             -p unix_test_proxy -p mxc_ffi
+             -p mxc_darwin -p mxc-sdk -p unix_test_proxy -p mxc_ffi
 
-      # wxc_e2e_tests includes the Seatbelt executor characterization tests.
+      # mxc-sdk includes the Seatbelt executor characterization tests.
       # mxc-exec-mac (built above via -p mxc_darwin) is what they drive; the
       # tests skip via has_platform_exec() if it is missing. sandbox-exec needs
       # no elevation, so they run in this standard macOS job.
       - name: Test
         run: cargo test --locked --release --target aarch64-apple-darwin
-             -p mxc_darwin -p seatbelt_common -p wxc_common -p wxc_e2e_tests
+             -p mxc_darwin -p mxc-sdk
 
       - name: Test state-aware SDK boundaries
         shell: bash

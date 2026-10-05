@@ -7,6 +7,7 @@ description = "Importable library for starting MXC sandboxes in-process, with st
 repository = "https://github.com/microsoft/mxc"
 readme = "README.md"
 build = "build.rs"
+autobins = false
 
 [lib]
 name = "mxc_sdk"
@@ -14,11 +15,11 @@ path = "src/lib.rs"
 
 [[bin]]
 name = "wxc-windows-sandbox-daemon"
-path = "src/bin/windows_sandbox_daemon/main.rs"
+path = "src/bin/windows_sandbox_daemon/portable_main.rs"
 
 [[bin]]
 name = "wxc-windows-sandbox-guest"
-path = "src/bin/windows_sandbox_guest/main.rs"
+path = "src/bin/windows_sandbox_guest/portable_main.rs"
 
 [[bin]]
 name = "wxc-wslc-daemon"
@@ -61,6 +62,7 @@ sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tar = { version = "0.4", optional = true }
 unicode-general-category.workspace = true
 url.workspace = true
 uuid.workspace = true
@@ -84,7 +86,6 @@ tokio = { workspace = true, features = ["test-util"] }
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 flate2 = { version = "1", optional = true }
 hyperlight-unikraft = { version = "=0.17.0", default-features = false, optional = true }
-tar = { version = "0.4", optional = true }
 ureq = { version = "3", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]

@@ -64,17 +64,17 @@ jobs:
         parameters:
           targetTriple: $(targetTriple)
           workingDirectory: $(workingDirectory)
-          # macOS-only crate set; the rest of the workspace has Windows-only
-          # crates that do not compile on macOS. unix_test_proxy and mxc_ffi
-          # ship next to mxc-exec-mac.
-          cargoPackages: mxc_darwin,seatbelt_common,wxc_common,unix_test_proxy,mxc_ffi
+          # macOS-compatible crate set; backend and shared runtime modules are
+          # consolidated in mxc-sdk. unix_test_proxy and mxc_ffi ship next to
+          # mxc-exec-mac.
+          cargoPackages: mxc_darwin,mxc-sdk,unix_test_proxy,mxc_ffi
 
     - ${{ else }}:
       - template: Rust.Build.Steps.Unofficial.yml@self
         parameters:
           targetTriple: $(targetTriple)
           workingDirectory: $(workingDirectory)
-          cargoArgs: -p mxc_darwin -p seatbelt_common -p wxc_common -p unix_test_proxy -p mxc_ffi
+          cargoArgs: -p mxc_darwin -p mxc-sdk -p unix_test_proxy -p mxc_ffi
 
     - script: |
         set -euo pipefail

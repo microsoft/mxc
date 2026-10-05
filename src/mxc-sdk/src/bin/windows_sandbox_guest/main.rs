@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Windows Sandbox guest agent.
+// Windows Sandbox guest agent.
 
 mod executor;
 mod firewall;

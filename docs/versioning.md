@@ -290,7 +290,7 @@ mutable exact contract. JSON location, publication eligibility, and runtime
 authorization are separate concerns. This gives editors full autocomplete and
 validation without requiring a later field move when a feature graduates.
 The engine-owned backend registry in
-`src/core/mxc_engine/src/backend_registry.rs` records which backend selections
+`src/mxc-sdk/src/core/mxc_engine/backend_registry.rs` records which backend selections
 require runtime experimental authorization. Contract publication does not
 implicitly change that classification. The flag does not enable otherwise
 invalid fields or bypass backend enforcement.

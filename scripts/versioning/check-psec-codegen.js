@@ -45,9 +45,9 @@ const provenancePath = join(
 const moduleDir = join(
   repoRoot,
   "src",
-  "core",
   "mxc-sdk",
   "src",
+  "core",
   "process_security_environment_spec"
 );
 const committedSrcDir = moduleDir;
@@ -269,9 +269,17 @@ function collectRel(dir) {
   return out.sort();
 }
 
+function collectGeneratedRel(dir) {
+  return collectRel(dir).filter(
+    (rel) =>
+      rel === "mod.rs" ||
+      rel.startsWith("process_security_environment_layout/")
+  );
+}
+
 function diffTrees(committed, generated) {
-  const a = collectRel(committed);
-  const b = collectRel(generated);
+  const a = collectGeneratedRel(committed);
+  const b = collectGeneratedRel(generated);
   const setA = new Set(a);
   const setB = new Set(b);
   const onlyCommitted = a.filter((x) => !setB.has(x));
@@ -335,7 +343,7 @@ function isMarkedGenerated(text) {
 if (!fs.existsSync(committedSrcDir)) {
   fail(`generated source directory not found: ${committedSrcDir}`);
 }
-const committedFiles = collectRel(committedSrcDir);
+const committedFiles = collectGeneratedRel(committedSrcDir);
 if (committedFiles.length === 0) {
   fail(`no generated files found under ${committedSrcDir}`);
 }

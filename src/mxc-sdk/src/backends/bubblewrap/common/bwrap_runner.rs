@@ -6,7 +6,7 @@
 //!
 //! Bubblewrap uses Linux user namespaces to create an unprivileged sandbox.
 //! The runner translates `ExecutionRequest` policy fields into `bwrap` CLI
-//! arguments via [`crate::bwrap_command::build_args`], then spawns `bwrap`
+//! arguments via [`crate::bwrap_common::bwrap_command::build_args`], then spawns `bwrap`
 //! with stdout/stderr capture and optional timeout enforcement.
 //!
 //! For per-host network filtering (`allowedHosts`/`blockedHosts`) the runner
@@ -48,7 +48,7 @@ use crate::wxc_common::validator::{
     validate_common, validate_network_policy_support, NetworkPolicySupport,
 };
 
-use crate::{
+use crate::bwrap_common::{
     bwrap_command::{self, ResolvedNetworkMode},
     bwrap_version, network_rules,
     provider_monitor::ProviderMonitor,
@@ -1191,7 +1191,9 @@ mod tests {
     fn every_declared_inbound_feature_has_a_backend_refusal_behind_it() {
         use crate::wxc_common::models::{NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy};
 
-        use crate::bwrap_command::{BWRAP_HOST_LOOPBACK_ALLOW, BWRAP_INGRESS_DEFAULT_ALLOW};
+        use crate::bwrap_common::bwrap_command::{
+            BWRAP_HOST_LOOPBACK_ALLOW, BWRAP_INGRESS_DEFAULT_ALLOW,
+        };
 
         let runner = BubblewrapScriptRunner::new();
         let support = runner.network_policy_support();
@@ -1254,7 +1256,9 @@ mod tests {
             NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkRule,
         };
 
-        use crate::network_rules::{render_filter_payloads, EgressPlan, IngressPlan, RuleFamily};
+        use crate::bwrap_common::network_rules::{
+            render_filter_payloads, EgressPlan, IngressPlan, RuleFamily,
+        };
 
         // A directional posture makes the gates that key off it fire. Both
         // sections are always set, because that is the only shape the parser
@@ -1368,15 +1372,17 @@ mod tests {
             // The claim the bit makes is that a `runtimeConfig.networkProxy`
             // lands on the proxy machinery this backend already enforces:
             // the env injection, and no refusal on the way there.
-            if crate::bwrap_command::external_proxy_host_rules_rejection(request).is_some() {
+            if crate::bwrap_common::bwrap_command::external_proxy_host_rules_rejection(request)
+                .is_some()
+            {
                 return Err(
                     "the runtime-proxy shape is refused before it reaches the proxy".into(),
                 );
             }
             must_differ(
                 "the proxy address",
-                crate::bwrap_command::build_args(request, Some(&address)),
-                crate::bwrap_command::build_args(request, None),
+                crate::bwrap_common::bwrap_command::build_args(request, Some(&address)),
+                crate::bwrap_common::bwrap_command::build_args(request, None),
             )
         };
 

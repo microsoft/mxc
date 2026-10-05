@@ -43,7 +43,7 @@ use crate::nanvix_common::{
     github_download_url, load_checksums, load_json, ReleaseConfig, RepoConfig,
 };
 
-pub(crate) fn run() {
+pub(crate) fn run() -> Option<(PathBuf, bool)> {
     // The build script's output (`NANVIX_BIN_DIR` and whether the download /
     // verify path runs) depends on the `microvm` feature, surfaced here as the
     // `CARGO_FEATURE_MICROVM` env var. Declare it as a rerun trigger so toggling
@@ -56,7 +56,7 @@ pub(crate) fn run() {
     // when the micro-VM backend is actually being built. Gate it behind this
     // crate's `microvm` feature so that a default `cargo build` (which still
     // compiles this crate as a workspace member) performs no network or hashing
-    // work. `wxc` and `lxc` enable `nanvix_binaries/microvm` through their own
+    // work. The thin executors enable `mxc-sdk/microvm` through their own
     // `microvm` features.
     //
     // `NANVIX_BIN_DIR` must still be emitted in every configuration because
@@ -65,7 +65,7 @@ pub(crate) fn run() {
         let out_dir = std::env::var("OUT_DIR").unwrap();
         println!("cargo:rustc-env=NANVIX_BIN_DIR={}", out_dir);
         println!("cargo:rerun-if-changed=build.rs");
-        return;
+        return None;
     }
 
     // Check the TARGET platform (not host). NanVix binaries are only needed when
@@ -75,7 +75,7 @@ pub(crate) fn run() {
         let out_dir = std::env::var("OUT_DIR").unwrap();
         println!("cargo:rustc-env=NANVIX_BIN_DIR={}", out_dir);
         println!("cargo:rerun-if-changed=build.rs");
-        return;
+        return None;
     }
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
@@ -205,21 +205,13 @@ pub(crate) fn run() {
     }
 
     println!("cargo:rustc-env=NANVIX_BIN_DIR={}", bin_dir.display());
-    println!("cargo:BIN_DIR={}", bin_dir.display());
-    // Propagate whether these binaries came from an externally supplied
-    // (prefetched) directory. Consumers read this as
-    // `DEP_NANVIX_BINARIES_PREFETCHED` and must not trust prefetched WHP
-    // snapshots (they are not covered by checksums.json).
-    println!(
-        "cargo:PREFETCHED={}",
-        if use_prefetched_binaries { "1" } else { "0" }
-    );
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=build/nanvix_binaries/versions.json");
     println!("cargo:rerun-if-changed=build/nanvix_binaries/checksums.json");
     println!("cargo:rerun-if-env-changed=GITHUB_TOKEN");
     println!("cargo:rerun-if-env-changed=GH_TOKEN");
     println!("cargo:rerun-if-env-changed=NANVIX_BIN");
+    Some((bin_dir, use_prefetched_binaries))
 }
 
 // -- Download logic ----------------------------------------------------------
