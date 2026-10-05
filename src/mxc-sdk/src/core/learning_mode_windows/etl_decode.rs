@@ -2417,7 +2417,7 @@ mod tests {
         assert_eq!(
             analysis.denials[1].details,
             Some(DenialDetails::Network(NetworkDenialDetails {
-                source: NetworkDenialSource::Tessera,
+                source: NetworkDenialSource::ProcessContainerNetworkPolicy,
                 reason: NetworkDenialReason::DirectDefaultDeny,
                 direction: NetworkDirection::Outbound,
                 protocol: Some(6),
