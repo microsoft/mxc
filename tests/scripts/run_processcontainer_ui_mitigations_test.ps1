@@ -95,7 +95,7 @@ function Phase-UiMitigationMatrix {
             # A missing tag still fails: the probe was asked for it and produced
             # nothing at all.
             if ($got -eq 'INCONCLUSIVE') {
-                $diag = if ($rA.Stdout -match "(?m)^$tag=DIAG\s+(?<d>.+?)\s*$") { $matches['d'] } else { '<no diag>' }
+                $diag = if ($rA.Stdout -match "(?m)^$([regex]::Escape($tag))=DIAG\s+(?<d>.+?)\s*$") { $matches['d'] } else { '<no diag>' }
                 Record-Result -Phase 'P4b' -Name "scenarioA: $tag" -Status 'skip' `
                     -Detail "expected=blocked; the probe could not exercise $tag on this host; diag=$diag; full=$fullV"
                 continue

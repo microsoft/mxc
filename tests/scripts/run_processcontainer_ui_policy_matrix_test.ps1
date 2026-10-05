@@ -172,7 +172,7 @@ function Invoke-UiPolicyCase {
         }
 
         if ($got -eq 'INCONCLUSIVE') {
-            $diag = if ($r.Stdout -match "(?m)^$tag=DIAG\s+(?<d>.+?)\s*$") { $matches['d'] } else { '<no diag>' }
+            $diag = if ($r.Stdout -match "(?m)^$([regex]::Escape($tag))=DIAG\s+(?<d>.+?)\s*$") { $matches['d'] } else { '<no diag>' }
             # ui.disable=true engages the Win32k mitigation, which stops user32
             # from loading. Losing the GUI subsystem outright is strictly
             # stronger than the individual limit, so it satisfies "blocked".
@@ -204,7 +204,7 @@ function Invoke-UiPolicyCase {
         }
 
         $expectToken = if ($want -eq 'blocked') { 'PASS' } else { 'FAIL' }
-        $diag = if ($r.Stdout -match "(?m)^$tag=DIAG\s+(?<d>.+?)\s*$") { $matches['d'] } else { '' }
+        $diag = if ($r.Stdout -match "(?m)^$([regex]::Escape($tag))=DIAG\s+(?<d>.+?)\s*$") { $matches['d'] } else { '' }
         $diagPart = if ($diag) { "; diag=$diag" } else { '' }
         Record-Result -Phase $Phase -Name $name -Pass ($got -eq $expectToken) `
             -Detail "expected=$want; got=$gotV$diagPart; full=$summaryV"
