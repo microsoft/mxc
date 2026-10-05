@@ -138,7 +138,9 @@ export function createNodePtyProcess(
   );
 }
 
-async function spawnProcessContainerWithPtyNative(
+// Work around the in-process PTY binding's lack of ProcessContainer support by
+// launching the same exact one-shot request through wxc-exec under node-pty.
+async function spawnWithWxcExecutablePty(
   request: OneShotRequest,
   experimental: boolean,
   rows: number,
@@ -189,10 +191,9 @@ async function spawnProcessContainerWithPtyNative(
   }
 }
 
-type SpawnProcessContainerPtyImplementation =
-  typeof spawnProcessContainerWithPtyNative;
+type SpawnExecutablePtyImplementation = typeof spawnWithWxcExecutablePty;
 
-let implementation = spawnProcessContainerWithPtyNative;
+let implementation = spawnWithWxcExecutablePty;
 
 /** @internal Replaces node-pty dependencies for unit tests. */
 export function _setProcessContainerPtyDependencies(
@@ -205,9 +206,9 @@ export function _setProcessContainerPtyDependencies(
 
 /** @internal Replaces ProcessContainer PTY creation for unit tests. */
 export function _setSpawnProcessContainerWithPtyImplementation(
-  replacement?: SpawnProcessContainerPtyImplementation,
+  replacement?: SpawnExecutablePtyImplementation,
 ): void {
-  implementation = replacement ?? spawnProcessContainerWithPtyNative;
+  implementation = replacement ?? spawnWithWxcExecutablePty;
 }
 
 export function spawnProcessContainerWithPty(
