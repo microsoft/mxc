@@ -141,15 +141,11 @@ pub fn spawn_one_shot_pty(
     ScriptRunner::validate_runner(&IsolationSessionRunner::new(), request)
         .map_err(OneShotSpawnFailure::Refused)?;
 
-    let (provisioned, manager) = IsolationSessionManager::add_user(None)
+    let (_provisioned, manager) = IsolationSessionManager::add_user(None)
         .map_err(super::error::map_lifecycle_error)
         .map_err(OneShotSpawnFailure::Launch)?;
-    let _ = writeln!(
-        logger,
-        "Isolation Session: agent user = {}",
-        provisioned.agent_user_name
-    );
-    let mut session = OwnedSession::new(manager, provisioned.agent_user_name);
+    let _ = writeln!(logger, "Isolation Session: agent user provisioned");
+    let mut session = OwnedSession::new(manager);
     if let Err(error) = session.manager.start_session() {
         session.reclaim("start");
         return Err(OneShotSpawnFailure::Launch(
@@ -304,16 +300,12 @@ fn spawn_piped(
 
     // The manager comes from `add_user` rather than a separate `new()` — see
     // its doc for why a second activation can strand the account it just minted.
-    let (provisioned, manager) = IsolationSessionManager::add_user(None)?;
-    let _ = writeln!(
-        logger,
-        "Isolation Session: agent user = {}",
-        provisioned.agent_user_name
-    );
+    let (_provisioned, manager) = IsolationSessionManager::add_user(None)?;
+    let _ = writeln!(logger, "Isolation Session: agent user provisioned");
 
     // From here the account exists, so every failure reclaims it rather than
     // abandoning it.
-    let mut session = OwnedSession::new(manager, provisioned.agent_user_name);
+    let mut session = OwnedSession::new(manager);
 
     if let Err(e) = session.manager.start_session() {
         session.reclaim("start");
@@ -366,7 +358,6 @@ fn with_cleanup_failures(err: IsolationSessionError, warnings: &[String]) -> Iso
 /// A provisioned session, and the one place that gives it back.
 struct OwnedSession {
     manager: IsolationSessionManager,
-    agent_user_name: String,
     /// `Some` once the account is gone, which is also what disarms the retry.
     outcome: Option<TeardownOutcome>,
     /// Set once the session has been stopped, so the retry that the account
@@ -382,10 +373,9 @@ struct OwnedSession {
 }
 
 impl OwnedSession {
-    fn new(manager: IsolationSessionManager, agent_user_name: String) -> Self {
+    fn new(manager: IsolationSessionManager) -> Self {
         Self {
             manager,
-            agent_user_name,
             outcome: None,
             stopped: false,
             stop_error: None,
@@ -431,7 +421,6 @@ impl OwnedSession {
         }
         log_sandbox_torn_down(
             &mut Logger::inherit_thread_diagnostic_sink(),
-            &self.agent_user_name,
             phase,
             outcome,
         );

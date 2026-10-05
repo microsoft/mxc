@@ -65,7 +65,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::ptr;
+use std::ptr::{self, NonNull};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1554,10 +1554,15 @@ pub fn scan_explicit_aces_for_sid(
     for i in 0..info.AceCount {
         let mut ace_ptr: *mut c_void = ptr::null_mut();
         let gace = unsafe { GetAce(existing_dacl, i, &mut ace_ptr) };
-        if gace.is_err() || ace_ptr.is_null() {
+        if gace.is_err() {
             continue;
         }
-        let header = unsafe { &*(ace_ptr as *const ACE_HEADER) };
+        let Some(ace_ptr) = NonNull::new(ace_ptr) else {
+            continue;
+        };
+        // SAFETY: GetAce succeeded and returned a non-null pointer to an ACE
+        // whose header remains valid while the ACL lives.
+        let header = unsafe { ace_ptr.cast::<ACE_HEADER>().as_ref() };
         if (header.AceFlags & inherited_bit) != 0 {
             continue;
         }
@@ -1568,9 +1573,10 @@ pub fn scan_explicit_aces_for_sid(
         };
         // ACCESS_ALLOWED_ACE and ACCESS_DENIED_ACE share layout up to
         // and including SidStart.
-        let mask_and_sid = ace_ptr as *const ACCESS_ALLOWED_ACE;
-        let ace_mask = unsafe { (*mask_and_sid).Mask };
-        let ace_sid = PSID(unsafe { &(*mask_and_sid).SidStart } as *const _ as *mut c_void);
+        // SAFETY: The checked ACE type guarantees that shared prefix.
+        let mask_and_sid = unsafe { ace_ptr.cast::<ACCESS_ALLOWED_ACE>().as_ref() };
+        let ace_mask = mask_and_sid.Mask;
+        let ace_sid = PSID(&mask_and_sid.SidStart as *const _ as *mut c_void);
         if unsafe { EqualSid(ace_sid, sid.as_psid()).is_ok() } {
             prior.push(PriorAce {
                 ace_type,
@@ -1667,18 +1673,24 @@ pub fn compute_appcontainer_effective_access(path: &Path) -> Result<u32, DaclErr
     let mut denied: u32 = 0;
     for i in 0..info.AceCount {
         let mut ace_ptr: *mut c_void = ptr::null_mut();
-        if unsafe { GetAce(dacl, i, &mut ace_ptr) }.is_err() || ace_ptr.is_null() {
+        if unsafe { GetAce(dacl, i, &mut ace_ptr) }.is_err() {
             continue;
         }
-        let header = unsafe { &*(ace_ptr as *const ACE_HEADER) };
+        let Some(ace_ptr) = NonNull::new(ace_ptr) else {
+            continue;
+        };
+        // SAFETY: GetAce succeeded and returned a non-null pointer to an ACE
+        // whose header remains valid while the ACL lives.
+        let header = unsafe { ace_ptr.cast::<ACE_HEADER>().as_ref() };
         let ace_type = match header.AceType {
             0x00 => AceType::Allow,
             0x01 => AceType::Deny,
             _ => continue, // ignore object/compound/audit ACEs
         };
-        let mask_and_sid = ace_ptr as *const ACCESS_ALLOWED_ACE;
-        let ace_mask = unsafe { (*mask_and_sid).Mask };
-        let ace_sid = PSID(unsafe { &(*mask_and_sid).SidStart } as *const _ as *mut c_void);
+        // SAFETY: Allow and deny ACEs share this prefix through SidStart.
+        let mask_and_sid = unsafe { ace_ptr.cast::<ACCESS_ALLOWED_ACE>().as_ref() };
+        let ace_mask = mask_and_sid.Mask;
+        let ace_sid = PSID(&mask_and_sid.SidStart as *const _ as *mut c_void);
         let matches = well_known
             .iter()
             .any(|s| unsafe { EqualSid(ace_sid, s.as_psid()).is_ok() });
@@ -1826,21 +1838,27 @@ pub fn null_device_appcontainer_grants() -> Option<bool> {
     let mut granted = [false; 2];
     for i in 0..info.AceCount {
         let mut ace_ptr: *mut c_void = ptr::null_mut();
-        if unsafe { GetAce(dacl, i, &mut ace_ptr) }.is_err() || ace_ptr.is_null() {
+        if unsafe { GetAce(dacl, i, &mut ace_ptr) }.is_err() {
             continue;
         }
-        let header = unsafe { &*(ace_ptr as *const ACE_HEADER) };
+        let Some(ace_ptr) = NonNull::new(ace_ptr) else {
+            continue;
+        };
+        // SAFETY: GetAce succeeded and returned a non-null pointer to an ACE
+        // whose header remains valid while the ACL lives.
+        let header = unsafe { ace_ptr.cast::<ACE_HEADER>().as_ref() };
         // ACCESS_ALLOWED_ACE_TYPE only; deny / audit / object ACEs are
         // not "grants" and are ignored.
         if header.AceType != 0x00 {
             continue;
         }
-        let allowed = ace_ptr as *const ACCESS_ALLOWED_ACE;
-        let mask = unsafe { (*allowed).Mask };
+        // SAFETY: The checked ACE type is ACCESS_ALLOWED_ACE.
+        let allowed = unsafe { ace_ptr.cast::<ACCESS_ALLOWED_ACE>().as_ref() };
+        let mask = allowed.Mask;
         if mask == 0 {
             continue;
         }
-        let ace_sid = PSID(unsafe { &(*allowed).SidStart } as *const _ as *mut c_void);
+        let ace_sid = PSID(&allowed.SidStart as *const _ as *mut c_void);
         for (idx, want) in sids.iter().enumerate() {
             if unsafe { EqualSid(ace_sid, want.as_psid()).is_ok() } {
                 granted[idx] = true;
@@ -1995,25 +2013,32 @@ fn replace_explicit_aces_for_sid_inner(
         let inherited_bit = INHERITED_ACE.0 as u8;
         for i in 0..info.AceCount {
             let mut ace_ptr: *mut c_void = ptr::null_mut();
-            if unsafe { GetAce(existing_dacl, i, &mut ace_ptr) }.is_err() || ace_ptr.is_null() {
+            if unsafe { GetAce(existing_dacl, i, &mut ace_ptr) }.is_err() {
                 continue;
             }
-            let header = unsafe { &*(ace_ptr as *const ACE_HEADER) };
+            let Some(ace_ptr) = NonNull::new(ace_ptr) else {
+                continue;
+            };
+            // SAFETY: GetAce succeeded and returned a non-null pointer to an
+            // ACE whose header remains valid while the ACL lives.
+            let header = unsafe { ace_ptr.cast::<ACE_HEADER>().as_ref() };
             let inherited = (header.AceFlags & inherited_bit) != 0;
             let mut drop_it = false;
             if !inherited && (header.AceType == 0x00 || header.AceType == 0x01) {
                 // ACCESS_ALLOWED_ACE and ACCESS_DENIED_ACE share the
                 // mask/SID layout. The SID immediately follows the
                 // mask via the `SidStart` inline field.
-                let ace_struct = ace_ptr as *const ACCESS_ALLOWED_ACE;
-                let ace_sid = PSID(unsafe { &(*ace_struct).SidStart } as *const _ as *mut c_void);
+                // SAFETY: The checked ACE type guarantees the shared
+                // ACCESS_ALLOWED_ACE prefix through SidStart.
+                let ace_struct = unsafe { ace_ptr.cast::<ACCESS_ALLOWED_ACE>().as_ref() };
+                let ace_sid = PSID(&ace_struct.SidStart as *const _ as *mut c_void);
                 if unsafe { EqualSid(ace_sid, sid.as_psid()).is_ok() } {
                     drop_it = true;
                 }
             }
             if !drop_it {
                 entries.push(Entry::Kept {
-                    ptr: ace_ptr,
+                    ptr: ace_ptr.as_ptr(),
                     size: header.AceSize as u32,
                     bucket: canonical_bucket(header.AceType, inherited),
                     order: next_order,
@@ -2624,10 +2649,15 @@ mod tests {
             let inherited_bit = INHERITED_ACE.0 as u8;
             for i in 0..info.AceCount {
                 let mut ace_ptr: *mut c_void = ptr::null_mut();
-                if unsafe { GetAce(dacl, i, &mut ace_ptr) }.is_err() || ace_ptr.is_null() {
+                if unsafe { GetAce(dacl, i, &mut ace_ptr) }.is_err() {
                     continue;
                 }
-                let header = unsafe { &*(ace_ptr as *const ACE_HEADER) };
+                let Some(ace_ptr) = NonNull::new(ace_ptr) else {
+                    continue;
+                };
+                // SAFETY: GetAce succeeded and returned a non-null pointer to
+                // an ACE whose header remains valid while the ACL lives.
+                let header = unsafe { ace_ptr.cast::<ACE_HEADER>().as_ref() };
                 let inherited = (header.AceFlags & inherited_bit) != 0;
                 out.push((header.AceType, inherited));
             }

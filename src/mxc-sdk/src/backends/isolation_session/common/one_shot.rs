@@ -97,14 +97,10 @@ impl ScriptRunner for IsolationSessionRunner {
         // `appId`. Passing `None` selects the default registration, which the
         // in-proc client resolves to the calling process's PFN when packaged
         // (or leaves empty when unpackaged).
-        let (identity, manager) = match IsolationSessionManager::add_user(None) {
-            Ok((provisioned, manager)) => {
-                let _ = writeln!(
-                    logger,
-                    "Isolation Session: agent user = {}",
-                    provisioned.agent_user_name
-                );
-                (provisioned.agent_user_name, manager)
+        let manager = match IsolationSessionManager::add_user(None) {
+            Ok((_provisioned, manager)) => {
+                let _ = writeln!(logger, "Isolation Session: agent user provisioned");
+                manager
             }
             Err(e) => return e.into(),
         };
@@ -116,7 +112,6 @@ impl ScriptRunner for IsolationSessionRunner {
             let deprovisioned = manager.deprovision_agent_user().is_ok();
             log_sandbox_torn_down(
                 logger,
-                &identity,
                 "one_shot",
                 TeardownOutcome {
                     session_stopped: Some(stopped),
@@ -133,7 +128,6 @@ impl ScriptRunner for IsolationSessionRunner {
                 let deprovisioned = manager.deprovision_agent_user().is_ok();
                 log_sandbox_torn_down(
                     logger,
-                    &identity,
                     "one_shot",
                     TeardownOutcome {
                         session_stopped: Some(stopped),
@@ -159,7 +153,7 @@ impl ScriptRunner for IsolationSessionRunner {
                 let _ = writeln!(logger, "Warning: deprovision_agent_user failed: {}", e);
             }
         }
-        log_sandbox_torn_down(logger, &identity, "one_shot", outcome);
+        log_sandbox_torn_down(logger, "one_shot", outcome);
 
         // Output already streamed live to wxc-exec's stdio via relay
         // threads in `create_process` — captured fields intentionally

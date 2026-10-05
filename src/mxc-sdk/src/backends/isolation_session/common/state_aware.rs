@@ -157,7 +157,6 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         let stopped = manager.stop_session();
         log_sandbox_torn_down(
             &mut Logger::inherit_thread_diagnostic_sink(),
-            &agent_user_name,
             "stop",
             TeardownOutcome {
                 session_stopped: Some(stopped.is_ok()),
@@ -181,7 +180,6 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         let deprovisioned = manager.deprovision_agent_user();
         log_sandbox_torn_down(
             &mut Logger::inherit_thread_diagnostic_sink(),
-            &agent_user_name,
             "deprovision",
             TeardownOutcome {
                 agent_user_deprovisioned: Some(deprovisioned.is_ok()),

@@ -848,11 +848,9 @@ fn exec_runs_as_the_isolated_agent_user() {
 
     let captured = exec_capture_stdout(&started.sandbox_id, "cmd.exe /c whoami");
 
-    assert_eq!(
-        account_of(&captured),
-        started.agent_user_name.to_lowercase(),
-        "the workload ran as {captured:?}, not as agent user {:?}",
-        started.agent_user_name
+    assert!(
+        account_of(&captured) == started.agent_user_name.to_lowercase(),
+        "the workload did not run as the provisioned agent user"
     );
 }
 

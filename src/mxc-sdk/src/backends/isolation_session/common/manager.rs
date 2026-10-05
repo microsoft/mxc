@@ -39,6 +39,9 @@ use super::pipe_relay::{
 };
 use super::process_options::{build_iso_process_options, ProcessOptions};
 
+// The OS account name is lifecycle addressing data, not diagnostic identity.
+const AGENT_IDENTITY_MARKER: &str = "isolation-session-agent";
+
 /// Keeps the process's MTA alive for as long as the lifecycle's WinRT objects,
 /// which outlive the call that created them.
 /// `CoIncrementMTAUsage` holds a reference releasable from any thread;
@@ -384,9 +387,7 @@ impl IsolationSessionManager {
             stdout,
             stderr,
             stdin,
-            identity: crate::mxc_common::policy_identity::redact_identity(
-                &self.agent_user_name.to_string(),
-            ),
+            identity: AGENT_IDENTITY_MARKER,
             audit_logger: std::sync::Mutex::new(
                 logger
                     .map(Logger::clone_diagnostic_sink)
@@ -700,18 +701,12 @@ impl TeardownOutcome {
     }
 }
 
-pub fn log_sandbox_torn_down(
-    logger: &mut Logger,
-    identity: &str,
-    phase: &str,
-    outcome: TeardownOutcome,
-) {
+pub fn log_sandbox_torn_down(logger: &mut Logger, phase: &str, outcome: TeardownOutcome) {
     if !logger.has_diagnostic_sink() && !crate::mxc_common::telemetry::is_active() {
         return;
     }
-    let identity = crate::mxc_common::policy_identity::redact_identity(identity);
     crate::mxc_common::telemetry::log_sandbox_torn_down(
-        &identity,
+        AGENT_IDENTITY_MARKER,
         outcome.status().as_str(),
         &format!(
             "session_stopped={},agent_user_deprovisioned={}",
@@ -721,7 +716,7 @@ pub fn log_sandbox_torn_down(
     );
     let record = AuditEvent::new(AuditEventName::SandboxTornDown)
         .str("backend", "isolation_session")
-        .str("identity", &identity)
+        .str("identity", AGENT_IDENTITY_MARKER)
         .str("phase", phase)
         .str("status", outcome.status().as_str())
         .bool("session_stopped", outcome.session_stopped == Some(true))
@@ -748,7 +743,7 @@ pub(super) struct StartedProcess {
     pub(super) stdout: u64,
     pub(super) stderr: u64,
     pub(super) stdin: u64,
-    identity: String,
+    identity: &'static str,
     audit_logger: std::sync::Mutex<Logger>,
 }
 
@@ -756,13 +751,13 @@ impl StartedProcess {
     fn audit(&self, name: AuditEventName) -> AuditEvent {
         AuditEvent::new(name)
             .str("backend", "isolation_session")
-            .str("identity", &self.identity)
+            .str("identity", self.identity)
             .u64("pid", 0)
     }
 
     fn record_exited(&self, exit_code: i32) {
         crate::mxc_common::telemetry::log_process_event(
-            &self.identity,
+            self.identity,
             0,
             crate::mxc_common::telemetry::ProcessEvent::Exited(exit_code),
         );
@@ -776,7 +771,7 @@ impl StartedProcess {
 
     fn record_timed_out(&self, timeout_ms: u32) {
         crate::mxc_common::telemetry::log_process_event(
-            &self.identity,
+            self.identity,
             0,
             crate::mxc_common::telemetry::ProcessEvent::TimedOut(timeout_ms as u64),
         );
@@ -790,7 +785,7 @@ impl StartedProcess {
 
     fn record_kill_failed(&self, error_code: i32) {
         crate::mxc_common::telemetry::log_process_event(
-            &self.identity,
+            self.identity,
             0,
             crate::mxc_common::telemetry::ProcessEvent::KillFailed(
                 KillMethod::TerminateProcess.as_str(),
@@ -1407,7 +1402,7 @@ mod tests {
         };
         let event = AuditEvent::new(AuditEventName::SandboxTornDown)
             .str("backend", "isolation_session")
-            .str("identity", "iso:0123456789abcdef")
+            .str("identity", AGENT_IDENTITY_MARKER)
             .str("phase", "deprovision")
             .str("status", outcome.status().as_str())
             .bool("agent_user_deprovisioned", false);
