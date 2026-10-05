@@ -207,7 +207,8 @@ impl LearningModeApi {
     /// - [`LearningModeError::ApiSetUnavailable`] if Windows does not implement
     ///   the Learning Mode trace API-set contract.
     /// - [`LearningModeError::DllLoad`] if `processmodel.dll` cannot be loaded.
-    /// - [`LearningModeError::ExportMissing`] if any export is absent. Requiring
+    /// - [`LearningModeError::ExportMissing`] if neither compatible start export
+    ///   is available, or if Stop/Close is absent. Requiring
     ///   `CloseLearningModeTrace` rejects builds that expose the incompatible
     ///   earlier two-export ABI.
     pub fn load() -> Result<Self, LearningModeError> {
@@ -583,10 +584,15 @@ mod tests {
 
     #[test]
     fn export_selection_prefers_option_aware_start_without_requiring_legacy() {
-        let api = select_from_exports(&[START_WITH_OPTIONS_NAME, STOP_NAME, CLOSE_NAME])
-            .expect("the preferred ABI should not require the legacy start export");
+        for available in [
+            vec![START_WITH_OPTIONS_NAME, STOP_NAME, CLOSE_NAME],
+            vec![START_WITH_OPTIONS_NAME, START_NAME, STOP_NAME, CLOSE_NAME],
+        ] {
+            let api = select_from_exports(&available)
+                .expect("the preferred ABI should work with or without legacy start");
 
-        assert_eq!(api.start.name(), "StartLearningModeTraceWithOptions");
+            assert_eq!(api.start.name(), "StartLearningModeTraceWithOptions");
+        }
     }
 
     #[test]
@@ -608,6 +614,8 @@ mod tests {
                 vec![START_WITH_OPTIONS_NAME, STOP_NAME],
                 "CloseLearningModeTrace",
             ),
+            (vec![START_NAME, CLOSE_NAME], "StopLearningModeTrace"),
+            (vec![START_NAME, STOP_NAME], "CloseLearningModeTrace"),
             (vec![STOP_NAME, CLOSE_NAME], "StartLearningModeTrace"),
         ] {
             let error = select_from_exports(&available).expect_err("ABI must be incomplete");
