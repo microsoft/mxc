@@ -8,12 +8,11 @@ use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
     CaptureDenialsConfig, CaptureDenialsMode, ContainerPolicy, ContainmentBackend,
-    ExecutionRequest, HyperlightConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode,
-    NetworkPolicy, PortMapping, SeatbeltConfig, TelemetryConfig, TestFeatureConfig, UiPolicy,
-    WindowsSandboxConfig, WslcConfig,
+    ExecutionRequest, HyperlightConfig, LifecycleConfig, LxcConfig, PortMapping, SeatbeltConfig,
+    TelemetryConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
-use crate::network_parser::{host_is_any_loopback, parse_network_policy, NetworkSections};
+use crate::network_parser::{parse_network_policy, NetworkSections};
 use crate::state_aware_input::StateAwareInput;
 use crate::state_aware_operation::{StateAwareOperation, StateAwareProvision};
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
@@ -144,7 +143,7 @@ pub fn load_one_shot_request_from_contract(
         }
     };
 
-    let result = normalize_common_request_ir(config, logger, true, false);
+    let result = normalize_common_request_ir(config, logger, true);
     log_one_shot_error(logger, &result);
     result
 }
@@ -358,7 +357,7 @@ fn parse_exact_v0_9(json: &str, logger: &mut Logger) -> Result<MxcRequest, Parse
 
     match adapted {
         crate::config_contract_adapters::v0_9::AdaptedConfigRequest::OneShot(config) => {
-            normalize_common_request_ir(config, logger, true, false)
+            normalize_common_request_ir(config, logger, true)
                 .map(MxcRequest::OneShot)
                 .map_err(ParseError::OneShot)
         }
@@ -451,7 +450,7 @@ fn parse_exact_v1_0(json: &str, logger: &mut Logger) -> Result<MxcRequest, Parse
 
     match adapted {
         crate::config_contract_adapters::v1_0::AdaptedConfigRequest::OneShot(config) => {
-            normalize_common_request_ir(config, logger, true, false)
+            normalize_common_request_ir(config, logger, true)
                 .map(MxcRequest::OneShot)
                 .map_err(ParseError::OneShot)
         }
@@ -519,7 +518,7 @@ fn parse_exact_development(json: &str, logger: &mut Logger) -> Result<MxcRequest
 
     match adapted {
         crate::config_contract_adapters::dev::AdaptedConfigRequest::OneShot(config) => {
-            normalize_common_request_ir(config, logger, true, false)
+            normalize_common_request_ir(config, logger, true)
                 .map(MxcRequest::OneShot)
                 .map_err(ParseError::OneShot)
         }
@@ -1259,15 +1258,10 @@ fn validate_capture_denials_output_path(path: &str, logger: &mut Logger) -> Resu
     }
 }
 
-// `state_aware_wslc_exec` identifies the state-aware exec exception: network
-// mode was fixed at provision, so a proxy-only exec inherits that mode rather
-// than restating `defaultPolicy`. Backend phase validation still rejects every
-// post-provision network-mode or host-filtering field.
 fn normalize_common_request_ir(
     cfg: crate::common_request_ir::CommonRequestIR,
     logger: &mut Logger,
     require_process: bool,
-    state_aware_wslc_exec: bool,
 ) -> Result<ExecutionRequest, WxcError> {
     let _ignored_metadata = (&cfg.schema, &cfg.comment);
 
@@ -1501,9 +1495,8 @@ fn normalize_common_request_ir(
         }
     }
 
-    let parsed_network = parse_network_policy(
+    parse_network_policy(
         &mut policy,
-        network_enforcement_compatibility,
         NetworkSections {
             network: cfg.network,
             runtime: cfg.runtime_config,
@@ -1511,265 +1504,6 @@ fn normalize_common_request_ir(
         },
         &containment,
     )?;
-
-    if let Some(legacy) = parsed_network {
-        if policy.network_proxy.is_enabled() {
-            let proxy_used_localhost = legacy.proxy_used_localhost;
-            let proxy_config = &policy.network_proxy;
-            if proxy_config.is_enabled()
-                && containment != ContainmentBackend::ProcessContainer
-                && containment != ContainmentBackend::Bubblewrap
-                && containment != ContainmentBackend::Lxc
-                && containment != ContainmentBackend::Seatbelt
-                && containment != ContainmentBackend::Wslc
-            {
-                let msg = "Network proxy is only supported with the 'processcontainer', \
-                           'bubblewrap', 'lxc', 'seatbelt', or 'wslc' containment backends";
-                logger.log_line(msg);
-                return Err(WxcError::ConfigParse(msg.to_string()));
-            }
-
-            if containment == ContainmentBackend::Lxc && proxy_config.builtin_test_server {
-                let msg = "LXC: network.proxy.builtinTestServer is not supported; \
-                           use network.proxy.url";
-                logger.log_line(msg);
-                return Err(WxcError::ConfigParse(msg.to_string()));
-            }
-
-            // `network.proxy.localhost` maps to 127.0.0.1, which inside an LXC
-            // network namespace is the container's own loopback rather than the
-            // host. The injected HTTP(S)_PROXY would be unreachable and the
-            // iptables proxy-allow rule would never match, so require a routable
-            // host via `network.proxy.url` instead.
-            if containment == ContainmentBackend::Lxc && proxy_used_localhost {
-                let msg = "LXC: network.proxy.localhost is not reachable from the \
-                           container network namespace (127.0.0.1 is the container \
-                           loopback); use network.proxy.url with a host routable from \
-                           inside the container";
-                logger.log_line(msg);
-                return Err(WxcError::ConfigParse(msg.to_string()));
-            }
-
-            // WSLc containers run in their own network namespace, so an
-            // MXC-run host-loopback proxy is unreachable. Accept only the
-            // caller-supplied `url` form (which carries `original_url`); reject
-            // the `localhost` / `builtinTestServer` forms.
-            if containment == ContainmentBackend::Wslc && proxy_config.is_enabled() {
-                let is_url_form = proxy_config
-                    .address
-                    .as_ref()
-                    .is_some_and(|addr| addr.original_url.is_some());
-                if !is_url_form {
-                    let msg = "WSLc: network.proxy must use the 'url' form pointing at a \
-                               routable proxy (e.g. \"url\": \"http://proxy.example:8080\"). \
-                               The 'localhost' and 'builtinTestServer' forms are not supported \
-                               because a WSLc container runs in its own network namespace and \
-                               cannot reach a host-loopback proxy.";
-                    logger.log_line(msg);
-                    return Err(WxcError::ConfigParse(msg.to_string()));
-                }
-            }
-
-            // Under LXC a loopback-literal proxy host names the container's own
-            // network-namespace loopback rather than the host, so it can never
-            // be the proxy: the chain opens egress to the proxy endpoint across
-            // the veth and the address is pinned into the container's
-            // /etc/hosts, both of which assume a routable host.
-            //
-            // WSLc is deliberately excluded. Its supported topology puts the
-            // proxy *inside* the container -- `tests/configs/wslc_network_proxy.json`
-            // runs one on 127.0.0.1:8888 -- because loopback is the only address
-            // both the client and a self-hosted proxy can reach. The forms that
-            // name a host-run proxy, `localhost` and `builtinTestServer`, are
-            // already rejected for WSLc just above; that check is the one doing
-            // the work there, and this one would only break the case WSLc
-            // supports.
-            if containment == ContainmentBackend::Lxc {
-                if let Some(host) = proxy_config.address.as_ref().map(|addr| addr.host()) {
-                    if host_is_any_loopback(host) {
-                        let msg = "network.proxy.url host is a loopback address \
-                                   (127.0.0.0/8, ::1, or localhost), which names the \
-                                   container's own network-namespace loopback rather than \
-                                   the host; use a proxy host routable from inside the \
-                                   container";
-                        logger.log_line(msg);
-                        return Err(WxcError::ConfigParse(msg.to_string()));
-                    }
-                }
-            }
-        }
-
-        // WSLc routes egress through the cooperative proxy but does not forward
-        // host lists to it, and a 'block' default (the WSLc default) yields no
-        // outbound networking / a drop-floor that can't even reach the proxy.
-        // Require an 'allow' default with no host lists so the proxy is reachable.
-        if containment == ContainmentBackend::Wslc
-            && policy.network_proxy.is_enabled()
-            && !state_aware_wslc_exec
-            && (policy.default_network_policy == NetworkPolicy::Block
-                || !policy.allowed_hosts.is_empty()
-                || !policy.blocked_hosts.is_empty())
-        {
-            let msg = "WSLc: network.proxy requires network.defaultPolicy='allow' and no \
-                       allowedHosts/blockedHosts. A WSLc container reaches the proxy only \
-                       with outbound networking enabled, and host lists are enforced by the \
-                       proxy, not forwarded to it.";
-            logger.log_line(msg);
-            return Err(WxcError::ConfigParse(msg.to_string()));
-        }
-
-        // WSLc cannot enforce per-host egress filtering: containers lack
-        // CAP_NET_ADMIN (so in-container iptables aborts at exec), and WSLc
-        // cannot expose VM-level enforcement without breaking other security
-        // guarantees (e.g. MDE). Reject up front; the backend's validate_runner
-        // enforces the same for requests that bypass this parser. Bare defaults
-        // with no host lists (full cutoff / full NAT) are enforceable, left as-is.
-        if containment == ContainmentBackend::Wslc {
-            if policy.needs_host_filtering() {
-                let msg = "WSLc: per-host egress filtering (allowedHosts with \
-                           defaultPolicy='block', or blockedHosts with \
-                           defaultPolicy='allow') is not supported. A WSLc container has \
-                           no CAP_NET_ADMIN for in-container iptables, and VM-level \
-                           enforcement is not available without breaking other security \
-                           guarantees (e.g. MDE). Use network.proxy (defaultPolicy='allow') \
-                           for cooperative host filtering, or remove the host lists.";
-                logger.log_line(msg);
-                return Err(WxcError::ConfigParse(msg.to_string()));
-            }
-
-            // WSLc cannot honor a blanket inbound-listen grant. The runner only
-            // wires explicit host->container port forwards (wslc
-            // portMappings) into the WSL2 VM's NAT; it never consults
-            // allowLocalNetwork. Reject `true` and point at portMappings.
-            // (`false` is the default and a no-op.)
-            if policy.allow_local_network {
-                let msg = "WSLc: network.allowLocalNetwork=true is not supported. A WSLc \
-                           container runs in the NAT'd WSL2 VM and MXC does not honor a \
-                           blanket inbound-listen grant; expose specific ports with \
-                           wslc.portMappings instead.";
-                logger.log_line(msg);
-                return Err(WxcError::ConfigParse(msg.to_string()));
-            }
-        }
-
-        // Bubblewrap is unprivileged by design; iptables-based enforcement
-        // (firewall / both) requires CAP_NET_ADMIN, which defeats the backend's
-        // privilege story. Reject the combination explicitly.
-        if containment == ContainmentBackend::Bubblewrap
-            && policy.network_proxy.is_enabled()
-            && matches!(
-                policy.network_enforcement_mode,
-                NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
-            )
-        {
-            let msg = "Bubblewrap: network.proxy cannot be combined with \
-                       network.enforcementMode='firewall' or 'both'. The cooperative \
-                       env-var proxy enforces hosts at the proxy layer; iptables-based \
-                       enforcement requires privilege and is mutually exclusive.";
-            return Err(WxcError::ConfigParse(msg.to_string()));
-        }
-
-        // LXC is the inverse of the guard above: it *does* have a
-        // privileged packet-filter layer, and that layer is the only thing that
-        // makes the proxy an exception rather than a suggestion. Under the
-        // default `Capabilities` mode `apply_firewall_rules` installs nothing,
-        // so the runner would inject HTTP(S)_PROXY while leaving direct egress
-        // wide open -- a config that reads as deny-all-except-proxy and
-        // enforces neither half. Reject it rather than auto-promoting, so the
-        // user's stated enforcement is never silently rewritten.
-        if containment == ContainmentBackend::Lxc
-            && policy.network_proxy.is_enabled()
-            && !matches!(
-                policy.network_enforcement_mode,
-                NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
-            )
-        {
-            let msg = "LXC: network.proxy requires network.enforcementMode='firewall' \
-                       or 'both'. Under the default 'capabilities' mode no iptables \
-                       rules are installed, so the proxy environment variables would be \
-                       injected while direct egress stayed unrestricted -- any client \
-                       that ignores HTTP_PROXY would bypass the proxy entirely.";
-            logger.log_line(msg);
-            return Err(WxcError::ConfigParse(msg.to_string()));
-        }
-
-        // A proxy URL may carry `user:pass@` userinfo, and neither LXC nor
-        // Bubblewrap keeps that value out of process argv: LXC turns each env
-        // entry into an `lxc-attach --set-var=KEY=VALUE` argument, and
-        // Bubblewrap serializes it into a `bwrap --setenv KEY VALUE` argument
-        // (bwrap_command.rs). argv is world-readable through /proc/<pid>/cmdline
-        // for the command's lifetime, and neither helper offers an argv-free way
-        // to pass a variable, so refuse the credential rather than leak it.
-        if matches!(
-            containment,
-            ContainmentBackend::Lxc | ContainmentBackend::Bubblewrap
-        ) && policy
-            .network_proxy
-            .address
-            .as_ref()
-            .map(|address| address.to_url())
-            .is_some_and(|url| crate::proxy_env::proxy_url_has_credentials(&url))
-        {
-            // Built from the redacted form so the rejection cannot become the
-            // leak it is rejecting.
-            let msg = format!(
-                "network.proxy.url must not carry credentials ('{}'). LXC and Bubblewrap \
-                 pass the proxy URL to the sandbox helper as a command-line argument \
-                 (lxc-attach --set-var, bwrap --setenv), and process arguments are \
-                 world-readable through /proc/<pid>/cmdline, so the password would be \
-                 visible to every local user while the command runs. Use a proxy that does \
-                 not require inline credentials, or supply them to the proxy itself rather \
-                 than through the URL.",
-                policy
-                    .network_proxy
-                    .address
-                    .as_ref()
-                    .map(|address| crate::proxy_env::redact_proxy_url(&address.to_url()))
-                    .unwrap_or_default()
-            );
-            logger.log_line(&msg);
-            return Err(WxcError::ConfigParse(msg));
-        }
-
-        // External proxy (`url` / `localhost`) enforces its own policy — the
-        // runner does NOT forward host lists to it. Reject configs that combine
-        // an external proxy with host lists or a restrictive default, otherwise
-        // users get silently weaker enforcement.
-        if containment == ContainmentBackend::Bubblewrap
-            && policy.network_proxy.is_enabled()
-            && !policy.network_proxy.builtin_test_server
-            && (!policy.allowed_hosts.is_empty()
-                || !policy.blocked_hosts.is_empty()
-                || policy.default_network_policy == NetworkPolicy::Block)
-        {
-            let msg = "Bubblewrap: an external network.proxy (url/localhost) cannot be \
-                       combined with allowedHosts, blockedHosts, or defaultPolicy='block'. \
-                       The external proxy is expected to enforce its own host policy; \
-                       MXC does not forward host lists to it. Use \
-                       'network.proxy.builtinTestServer: true' (testing only) for \
-                       MXC-enforced host filtering, or remove the host policy.";
-            return Err(WxcError::ConfigParse(msg.to_string()));
-        }
-
-        // Cooperative-model warning: builtin test proxy + defaultPolicy 'block'
-        // with no allowlist denies well-behaved HTTP clients at the proxy, but
-        // raw-socket clients still reach the host network.
-        if containment == ContainmentBackend::Bubblewrap
-            && policy.network_proxy.is_enabled()
-            && policy.default_network_policy == NetworkPolicy::Block
-            && policy.allowed_hosts.is_empty()
-            && policy.blocked_hosts.is_empty()
-        {
-            logger.warning_line(
-                "WARNING: Bubblewrap network.proxy with defaultPolicy='block' is \
-                 cooperative. HTTP_PROXY-aware clients (curl, requests, etc.) are \
-                 denied at the proxy, but raw-socket clients that ignore HTTP_PROXY \
-                 bypass the proxy and reach the host network. For strict isolation \
-                 of all clients, remove network.proxy so --unshare-net applies; for \
-                 host-list enforcement, add allowedHosts (cooperative tools only).",
-            );
-        }
-    }
 
     // Lifecycle section
     let lifecycle = match cfg.lifecycle {
@@ -1968,13 +1702,7 @@ fn normalize_state_aware_common(
         context.sandbox_id.and_then(state_aware_containment_from_id)
     };
     let require_process = context.phase == Phase::Exec;
-    let state_aware_wslc_exec = require_process
-        && common
-            .containment
-            .as_ref()
-            .is_some_and(|value| map_wire_containment(Some(value)) == ContainmentBackend::Wslc);
-    let mut request =
-        normalize_common_request_ir(common, logger, require_process, state_aware_wslc_exec)?;
+    let mut request = normalize_common_request_ir(common, logger, require_process)?;
     if context.phase != Phase::Provision && !network_supplied {
         request.policy.network_egress = None;
         request.policy.network_ingress = None;
@@ -1987,7 +1715,7 @@ mod tests {
     use super::*;
     use crate::encoding::base64_encode;
     use crate::logger::Mode;
-    use crate::models::{NetworkAction, ProxyAddress};
+    use crate::models::{NetworkAction, NetworkPolicy, ProxyAddress};
     use crate::mxc_error::MxcErrorCode;
     use std::path::{Path, PathBuf};
 
@@ -2743,6 +2471,32 @@ mod tests {
                 assert!(
                     matches!(error, ParseError::OneShot(_)),
                     "{case}: got {error:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn supported_one_shot_contracts_reject_legacy_network_fields() {
+        for version in ["0.9.0-alpha", "1.0.0", "1.1.0-alpha"] {
+            for (field, value) in [
+                ("defaultPolicy", r#""allow""#),
+                ("enforcementMode", r#""firewall""#),
+                ("allowLocalNetwork", "true"),
+                ("allowedHosts", r#"["example.com"]"#),
+                ("blockedHosts", r#"["example.com"]"#),
+                ("proxy", r#"{"url":"http://127.0.0.1:8080"}"#),
+            ] {
+                let json = format!(
+                    r#"{{"version":"{version}","process":{{"commandLine":"echo hi"}},"network":{{"{field}":{value}}}}}"#
+                );
+                let error = parse_exact_for_test(&json).unwrap_err();
+                assert!(matches!(error, ParseError::OneShot(_)), "{json}: {error:?}");
+                assert!(
+                    error
+                        .message()
+                        .contains(&format!("unknown field `{field}`")),
+                    "{json}: {error:?}"
                 );
             }
         }
