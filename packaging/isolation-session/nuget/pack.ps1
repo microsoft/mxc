@@ -55,15 +55,20 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
 $releaseInfoScript = Join-Path (Split-Path $PSScriptRoot -Parent) 'common\Get-IsoSessionReleaseInfo.ps1'
-$sdkGenerationInfoPath = Join-Path (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path `
+$sdkGenerationInfoPath = Join-Path $repoRoot `
     'external\windows-sdk\isolation-session\GENERATION_INFO.toml'
+$licensePath = Join-Path $repoRoot 'LICENSE.md'
 
 if (-not (Test-Path -LiteralPath $releaseInfoScript -PathType Leaf)) {
     throw "Release helper not found: '$releaseInfoScript'."
 }
 if (-not (Test-Path -LiteralPath $sdkGenerationInfoPath -PathType Leaf)) {
     throw "SDK generation provenance file not found: '$sdkGenerationInfoPath'."
+}
+if (-not (Test-Path -LiteralPath $licensePath -PathType Leaf)) {
+    throw "Package license file not found: '$licensePath'."
 }
 if (-not (Test-Path -LiteralPath $RuntimeManifestPath -PathType Leaf)) {
     throw "Completed runtime manifest not found: '$RuntimeManifestPath'."
@@ -206,6 +211,7 @@ $x64AppDllBytes = Get-RequiredFileBytes -Path $x64AppDllPath -Label 'x64 runtime
 [void](Get-RequiredFileBytes -Path $arm64AppDllPath -Label 'arm64 runtime')
 $winmdBytes = Get-RequiredFileBytes -Path $winmdPath -Label 'primary WinMD'
 $previewWinmdBytes = Get-RequiredFileBytes -Path $previewWinmdPath -Label 'preview WinMD'
+$licenseBytes = Get-RequiredFileBytes -Path $licensePath -Label 'package license'
 $runtimeManifestBytes = Get-RequiredFileBytes -Path $RuntimeManifestPath -Label 'completed runtime manifest'
 $runtimeManifestContent = [System.Text.Encoding]::UTF8.GetString($runtimeManifestBytes)
 
@@ -296,6 +302,7 @@ $nuspec = @"
     <authors>Microsoft</authors>
     <owners>Microsoft</owners>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <license type="file">LICENSE.md</license>
     <description>Pipeline-generated SDK for Windows.AI.IsolationSession. Contains both WinMD metadata files plus the signed x64 IsoSessionApp activation shim and completed runtime manifest consumed by MXC.</description>
     <summary>Windows.AI.IsolationSession SDK metadata and pipeline-completed MXC activation assets.</summary>
     <tags>Windows IsolationSession WinRT WinMD MXC AgenticRuntime sdk</tags>
@@ -345,6 +352,7 @@ if (Test-Path -LiteralPath $outNupkg -PathType Leaf) {
 $zip = [System.IO.Compression.ZipFile]::Open($outNupkg, [System.IO.Compression.ZipArchiveMode]::Create)
 try {
     Add-TextEntry -Archive $zip -EntryName 'README.md' -Text $readme
+    Add-BytesEntry -Archive $zip -EntryName 'LICENSE.md' -Bytes $licenseBytes
     Add-BytesEntry -Archive $zip -EntryName 'metadata/windows.ai.isolationsession.winmd' -Bytes $winmdBytes
     Add-BytesEntry -Archive $zip -EntryName 'metadata/windows.ai.isolationsession.preview.winmd' -Bytes $previewWinmdBytes
     Add-TextEntry -Archive $zip -EntryName 'metadata/GENERATION_INFO.toml' -Text $generationInfo
@@ -369,6 +377,7 @@ try {
         'runtime/IsoSessionApp.dll',
         'runtime/IsoSession.manifest',
         'README.md',
+        'LICENSE.md',
         '_rels/.rels',
         '[Content_Types].xml',
         "$($releaseInfo.packageId).nuspec"
@@ -384,6 +393,9 @@ try {
     }
     if ($nuspecText -notmatch [regex]::Escape("<version>$($releaseInfo.nugetVersion)</version>")) {
         throw 'Generated nuspec version does not match the canonical NuGet version.'
+    }
+    if ($nuspecText -notmatch '<license type="file">LICENSE\.md</license>') {
+        throw 'Generated nuspec does not declare the packaged license file.'
     }
 
     $packagedRuntimeManifest = Get-ZipEntryText -Archive $verify -EntryName 'runtime/IsoSession.manifest'
